@@ -73,7 +73,7 @@ ComponentGroupLayout::create(const std::vector<std::vector<size_t>>& component_l
 
 bool ComponentGroup::finalizeLayout(std::vector<int> component_indices, const std::vector<Component>& components) {
     if (layout_.has_value()) {
-        RTP_LLM_LOG_ERROR("ComponentGroup::finalizeLayout: group %d layout is already sealed", component_group_id);
+        RTP_LLM_LOG_ERROR("group %d layout is already sealed", component_group_id);
         return false;
     }
 
@@ -84,7 +84,7 @@ bool ComponentGroup::finalizeLayout(std::vector<int> component_indices, const st
     component_layer_bytes.reserve(component_indices.size());
     for (int component_index : component_indices) {
         if (component_index < 0 || static_cast<size_t>(component_index) >= components.size()) {
-            RTP_LLM_LOG_ERROR("ComponentGroup::finalizeLayout: invalid component_index=%d group=%d registry_size=%zu",
+            RTP_LLM_LOG_ERROR("invalid component_index=%d group=%d registry_size=%zu",
                               component_index,
                               component_group_id,
                               components.size());
@@ -92,21 +92,21 @@ bool ComponentGroup::finalizeLayout(std::vector<int> component_indices, const st
         }
         const Component& component = components[static_cast<size_t>(component_index)];
         if (component.component_group_id != component_group_id) {
-            RTP_LLM_LOG_ERROR("ComponentGroup::finalizeLayout: component[%d] belongs to group %d, expected %d",
+            RTP_LLM_LOG_ERROR("component[%d] belongs to group %d, expected %d",
                               component_index,
                               component.component_group_id,
                               component_group_id);
             return false;
         }
         if (component.tag.empty() || !tags.insert(component.tag).second) {
-            RTP_LLM_LOG_ERROR("ComponentGroup::finalizeLayout: component[%d] has empty or duplicate tag=%s",
+            RTP_LLM_LOG_ERROR("component[%d] has empty or duplicate tag=%s",
                               component_index,
                               component.tag.c_str());
             return false;
         }
         if (component.model_layer_ids.size() != component.layer_bytes.size()) {
             RTP_LLM_LOG_ERROR(
-                "ComponentGroup::finalizeLayout: component[%d] layer id count %zu != layer bytes count %zu",
+                "component[%d] layer id count %zu != layer bytes count %zu",
                 component_index,
                 component.model_layer_ids.size(),
                 component.layer_bytes.size());
@@ -117,14 +117,14 @@ bool ComponentGroup::finalizeLayout(std::vector<int> component_indices, const st
     }
 
     if (!tags_.empty() && tags_ != component_tags) {
-        RTP_LLM_LOG_ERROR("ComponentGroup::finalizeLayout: group %d device tag order does not match membership",
+        RTP_LLM_LOG_ERROR("group %d device tag order does not match membership",
                           component_group_id);
         return false;
     }
 
     auto layout = ComponentGroupLayout::create(component_layer_bytes);
     if (!layout.has_value()) {
-        RTP_LLM_LOG_ERROR("ComponentGroup::finalizeLayout: schema validation failed for group %d", component_group_id);
+        RTP_LLM_LOG_ERROR("schema validation failed for group %d", component_group_id);
         return false;
     }
     // Commit membership and layout together; neither is observable on failure.

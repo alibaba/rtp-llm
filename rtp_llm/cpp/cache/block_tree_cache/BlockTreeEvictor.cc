@@ -30,13 +30,13 @@ bool BlockTreeEvictor::init(EvictionPolicy device_policy, EvictionPolicy host_po
     for (size_t group_index = 0; group_index < component_groups_.size(); ++group_index) {
         const auto& group = component_groups_[group_index];
         if (group == nullptr) {
-            RTP_LLM_LOG_ERROR("BlockTreeEvictor::init: component group must not be null");
+            RTP_LLM_LOG_ERROR("component group must not be null");
             heaps_.clear();
             return false;
         }
         const int gid = group->component_group_id;
         if (gid < 0 || static_cast<size_t>(gid) >= component_groups_.size()) {
-            RTP_LLM_LOG_ERROR("BlockTreeEvictor::init: invalid component_group_id=%d, group_count=%zu",
+            RTP_LLM_LOG_ERROR("invalid component_group_id=%d, group_count=%zu",
                               gid,
                               component_groups_.size());
             heaps_.clear();
@@ -44,13 +44,13 @@ bool BlockTreeEvictor::init(EvictionPolicy device_policy, EvictionPolicy host_po
         }
         if (static_cast<size_t>(gid) != group_index) {
             RTP_LLM_LOG_ERROR(
-                "BlockTreeEvictor::init: component_group_id=%d must equal vector index=%zu", gid, group_index);
+                "component_group_id=%d must equal vector index=%zu", gid, group_index);
             heaps_.clear();
             return false;
         }
         auto& tier_heaps = heaps_[static_cast<size_t>(gid)];
         if (tier_heaps.device || tier_heaps.host || tier_heaps.disk) {
-            RTP_LLM_LOG_ERROR("BlockTreeEvictor::init: duplicate component_group_id=%d", gid);
+            RTP_LLM_LOG_ERROR("duplicate component_group_id=%d", gid);
             heaps_.clear();
             return false;
         }
@@ -359,7 +359,7 @@ std::optional<EvictionMove> BlockTreeEvictor::chooseVictim(Tier tier) {
             continue;
         }
 
-        RTP_LLM_LOG_DEBUG("BlockTreeEvictor::chooseVictim: selected candidate, "
+        RTP_LLM_LOG_DEBUG("selected candidate, "
                           "group[%d] type=%s tier=%s target=%s node_key=%ld",
                           eviction_move->component_group_id,
                           cacheGroupTypeName(group->group_type),
@@ -394,7 +394,7 @@ BlockTreeEvictor::chooseWatermarkVictims(ComponentGroup& group, Tier tier, doubl
         return victims;
     }
 
-    RTP_LLM_LOG_INFO("BlockTreeEvictor::chooseWatermarkVictims: tier=%s group[%d] "
+    RTP_LLM_LOG_INFO("tier=%s group[%d] "
                      "excess=%zu (ratio=%.2f), evicting",
                      tierName(tier),
                      group.component_group_id,
@@ -435,7 +435,7 @@ std::optional<BlockTreeEvictor::EvictionPlan> BlockTreeEvictor::buildPlan(Evicti
         const bool had_source = !cascade_move.source_blocks.empty();
         if (!prepareMove(cascade_move)) {
             if (had_source) {
-                RTP_LLM_LOG_WARNING("BlockTreeEvictor::buildPlan: cascade move rejected "
+                RTP_LLM_LOG_WARNING("cascade move rejected "
                                     "group[%d] tier %s->%s node_key=%ld, skipping",
                                     cascade_group_id,
                                     tierName(cascade_move.source_tier),
@@ -457,7 +457,7 @@ BlockTreeEvictor::CopyResultSet BlockTreeEvictor::performCopy(const EvictionPlan
     if (plan.primary.target_tier != Tier::NONE) {
         results.primary_success = executeTierCopy(plan.primary);
         if (!results.primary_success) {
-            RTP_LLM_LOG_WARNING("BlockTreeEvictor::performCopy: primary copy FAILED "
+            RTP_LLM_LOG_WARNING("primary copy FAILED "
                                 "group[%d] node_key=%ld %s->%s",
                                 plan.primary.component_group_id,
                                 plan.primary.node ? plan.primary.node->cache_key : 0,
@@ -466,7 +466,7 @@ BlockTreeEvictor::CopyResultSet BlockTreeEvictor::performCopy(const EvictionPlan
             results.cascade_success.assign(plan.cascade_moves.size(), false);
             return results;
         } else {
-            RTP_LLM_LOG_DEBUG("BlockTreeEvictor::performCopy: primary copy OK "
+            RTP_LLM_LOG_DEBUG("primary copy OK "
                               "group[%d] node_key=%ld %s->%s",
                               plan.primary.component_group_id,
                               plan.primary.node ? plan.primary.node->cache_key : 0,
@@ -484,14 +484,14 @@ BlockTreeEvictor::CopyResultSet BlockTreeEvictor::performCopy(const EvictionPlan
         results.cascade_success.push_back(copy_ok);
 
         if (!copy_ok) {
-            RTP_LLM_LOG_WARNING("BlockTreeEvictor::performCopy: cascade copy FAILED "
+            RTP_LLM_LOG_WARNING("cascade copy FAILED "
                                 "group[%d] node_key=%ld %s->%s",
                                 cascade_move.component_group_id,
                                 cascade_move.node ? cascade_move.node->cache_key : 0,
                                 tierName(cascade_move.source_tier),
                                 tierName(cascade_move.target_tier));
         } else if (cascade_move.target_tier != Tier::NONE) {
-            RTP_LLM_LOG_DEBUG("BlockTreeEvictor::performCopy: cascade copy OK "
+            RTP_LLM_LOG_DEBUG("cascade copy OK "
                               "group[%d] node_key=%ld %s->%s",
                               cascade_move.component_group_id,
                               cascade_move.node ? cascade_move.node->cache_key : 0,
@@ -515,7 +515,7 @@ void BlockTreeEvictor::complete(BlockTree& tree, const EvictionPlan& plan, const
     auto primary_gid = static_cast<size_t>(plan.primary.component_group_id);
     if (primary_gid < component_groups_.size() && primary_gid < plan.primary.node->group_slots.size()) {
         auto& group = component_groups_[primary_gid];
-        RTP_LLM_LOG_DEBUG("BlockTreeEvictor::complete: primary group[%d] node_key=%ld source=%s target=%s",
+        RTP_LLM_LOG_DEBUG("primary group[%d] node_key=%ld source=%s target=%s",
                           plan.primary.component_group_id,
                           plan.primary.node->cache_key,
                           tierName(plan.primary.source_tier),
@@ -540,7 +540,7 @@ void BlockTreeEvictor::complete(BlockTree& tree, const EvictionPlan& plan, const
         }
 
         auto& group = component_groups_[gid];
-        RTP_LLM_LOG_DEBUG("BlockTreeEvictor::complete: cascade group[%d] node_key=%ld source=%s target=%s",
+        RTP_LLM_LOG_DEBUG("cascade group[%d] node_key=%ld source=%s target=%s",
                           cascade_move.component_group_id,
                           cascade_move.node->cache_key,
                           tierName(cascade_move.source_tier),
@@ -557,7 +557,7 @@ void BlockTreeEvictor::complete(BlockTree& tree, const EvictionPlan& plan, const
 bool BlockTreeEvictor::applyMoveCompletion(ComponentGroupPtr& group, const EvictionMove& move) {
     auto& slot = move.node->group_slots[static_cast<size_t>(move.component_group_id)];
     if (slot.transfer_state != SlotTransferState::DEMOTING) {
-        RTP_LLM_LOG_WARNING("BlockTreeEvictor::applyMoveCompletion: state mismatch, group=%d node_key=%ld",
+        RTP_LLM_LOG_WARNING("state mismatch, group=%d node_key=%ld",
                             move.component_group_id,
                             move.node->cache_key);
         releaseTargetBlocks(move);
@@ -604,12 +604,12 @@ void BlockTreeEvictor::writeRemoteThrough(const std::shared_ptr<StorageBackend>&
     items.emplace_back(std::move(key), std::vector<char>{});
     if (!items.back().second.empty()) {
         storage_backend->batchWrite(items);
-        RTP_LLM_LOG_DEBUG("BlockTreeEvictor::writeRemoteThrough: remote write-through "
+        RTP_LLM_LOG_DEBUG("remote write-through "
                           "group[%d] node_key=%ld",
                           component_group_id,
                           cache_key);
     } else {
-        RTP_LLM_LOG_WARNING("BlockTreeEvictor::writeRemoteThrough: remote write-through SKIPPED "
+        RTP_LLM_LOG_WARNING("remote write-through SKIPPED "
                             "(no data serialization yet) group[%d] node_key=%ld",
                             component_group_id,
                             cache_key);
@@ -682,7 +682,7 @@ bool BlockTreeEvictor::finishLoadBack(TreeNode* node, int group_id, Tier source,
     auto& group         = component_groups_[gid];
     auto& slot          = node->group_slots[gid];
     if (group == nullptr || slot.transfer_state != SlotTransferState::LOADING_BACK) {
-        RTP_LLM_LOG_WARNING("BlockTreeEvictor::finishLoadBack: state mismatch, group=%d node_key=%ld state=%d",
+        RTP_LLM_LOG_WARNING("state mismatch, group=%d node_key=%ld state=%d",
                             group_id,
                             node->cache_key,
                             static_cast<int>(slot.transfer_state));
@@ -832,7 +832,7 @@ bool BlockTreeEvictor::restoreSource(const EvictionMove& eviction_move) {
     }
     GroupSlot& slot = eviction_move.node->group_slots[gid];
     if (slot.transfer_state != SlotTransferState::DEMOTING) {
-        RTP_LLM_LOG_WARNING("BlockTreeEvictor::restoreSource: state mismatch, group=%d node_key=%ld",
+        RTP_LLM_LOG_WARNING("state mismatch, group=%d node_key=%ld",
                             eviction_move.component_group_id,
                             eviction_move.node->cache_key);
         return false;
@@ -858,7 +858,7 @@ void BlockTreeEvictor::releaseTargetBlocks(const EvictionMove& eviction_move) {
 
 void BlockTreeEvictor::finalizeEviction(BlockTree& tree, TreeNode* node) {
     if (shouldDeleteNode(tree, node)) {
-        RTP_LLM_LOG_DEBUG("BlockTreeEvictor::finalizeEviction: deleting empty node key=%ld", node->cache_key);
+        RTP_LLM_LOG_DEBUG("deleting empty node key=%ld", node->cache_key);
         TreeNode* parent = node->parent;
         onNodeAboutToRemove(node);  // drop from all heaps before the pointer dies
         tree.removeNode(node);

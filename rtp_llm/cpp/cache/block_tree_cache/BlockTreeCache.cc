@@ -143,30 +143,30 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>         tree,
 
 bool BlockTreeCache::init() {
     if (initialized_) {
-        RTP_LLM_LOG_ERROR("BlockTreeCache::init: cache is already initialized");
+        RTP_LLM_LOG_ERROR("cache is already initialized");
         return false;
     }
     if (transfer_dispatcher_ == nullptr || task_pool_ == nullptr) {
-        RTP_LLM_LOG_ERROR("BlockTreeCache::init: transfer dispatcher and task pool must be initialized");
+        RTP_LLM_LOG_ERROR("transfer dispatcher and task pool must be initialized");
         return false;
     }
     if (!validateConfiguration()) {
-        RTP_LLM_LOG_ERROR("BlockTreeCache::init: invalid configuration");
+        RTP_LLM_LOG_ERROR("invalid configuration");
         return false;
     }
     if (!initDeviceGroupTags()) {
         return false;
     }
     if (!evictor_.init(config_.device_eviction_policy, config_.host_eviction_policy, config_.disk_eviction_policy)) {
-        RTP_LLM_LOG_ERROR("BlockTreeCache::init: failed to initialize BlockTreeEvictor");
+        RTP_LLM_LOG_ERROR("failed to initialize BlockTreeEvictor");
         return false;
     }
     if (!task_pool_->start()) {
-        RTP_LLM_LOG_ERROR("BlockTreeCache::init: failed to start task pool, size=%d",
+        RTP_LLM_LOG_ERROR("failed to start task pool, size=%d",
                           config_.eviction_thread_pool_size);
         return false;
     }
-    RTP_LLM_LOG_INFO("BlockTreeCache: initialized with %zu component groups, %zu components, "
+    RTP_LLM_LOG_INFO("initialized with %zu component groups, %zu components, "
                      "pool_threads=%d, storage_backend=%s, "
                      "device=%s, host=%s, disk=%s, remote=%s",
                      component_groups_.size(),
@@ -178,7 +178,7 @@ bool BlockTreeCache::init() {
                      config_.enable_disk_cache ? "on" : "off",
                      config_.enable_remote_cache ? "on" : "off");
     for (const ComponentGroupPtr& component_group : component_groups_) {
-        RTP_LLM_LOG_INFO("BlockTreeCache:   group[%d] type=%s host_pool=%s disk_pool=%s",
+        RTP_LLM_LOG_INFO("  group[%d] type=%s host_pool=%s disk_pool=%s",
                          component_group->component_group_id,
                          cacheGroupTypeName(component_group->group_type),
                          component_group->hostPool() ? "enabled" : "null",
@@ -192,11 +192,11 @@ bool BlockTreeCache::initDeviceGroupTags() {
     device_group_tags_.clear();
     device_group_tags_.resize(component_groups_.size());
     if (per_tag_mapping_.empty() || per_tag_tags_.empty()) {
-        RTP_LLM_LOG_ERROR("BlockTreeCache::initDeviceGroupTags: declarative mapping registry must not be empty");
+        RTP_LLM_LOG_ERROR("declarative mapping registry must not be empty");
         return false;
     }
     if (per_tag_tags_.size() != per_tag_mapping_.size()) {
-        RTP_LLM_LOG_ERROR("BlockTreeCache::initDeviceGroupTags: tag/mapping size mismatch, tags=%zu mappings=%zu",
+        RTP_LLM_LOG_ERROR("tag/mapping size mismatch, tags=%zu mappings=%zu",
                           per_tag_tags_.size(),
                           per_tag_mapping_.size());
         return false;
@@ -205,7 +205,7 @@ bool BlockTreeCache::initDeviceGroupTags() {
         const ComponentGroupPtr& component_group = component_groups_[group_id];
         if (component_group == nullptr || component_group->component_group_id != static_cast<int>(group_id)
             || component_group->devicePoolCount() == 0) {
-            RTP_LLM_LOG_ERROR("BlockTreeCache::initDeviceGroupTags: invalid component group, group=%zu", group_id);
+            RTP_LLM_LOG_ERROR("invalid component group, group=%zu", group_id);
             return false;
         }
         device_group_tags_[group_id].assign(component_group->devicePoolCount(), {});
@@ -215,14 +215,14 @@ bool BlockTreeCache::initDeviceGroupTags() {
         const PerTagMapping& mapping = per_tag_mapping_[tag_index];
         if (mapping.component_group_id == -1) {
             if (mapping.local_pool_index != -1) {
-                RTP_LLM_LOG_ERROR("BlockTreeCache::initDeviceGroupTags: invalid non-reusable mapping, tag=%s",
+                RTP_LLM_LOG_ERROR("invalid non-reusable mapping, tag=%s",
                                   per_tag_tags_[tag_index].c_str());
                 return false;
             }
             continue;
         }
         if (mapping.component_group_id < 0 || mapping.local_pool_index < 0) {
-            RTP_LLM_LOG_ERROR("BlockTreeCache::initDeviceGroupTags: negative mapping index, tag=%s",
+            RTP_LLM_LOG_ERROR("negative mapping index, tag=%s",
                               per_tag_tags_[tag_index].c_str());
             return false;
         }
@@ -230,7 +230,7 @@ bool BlockTreeCache::initDeviceGroupTags() {
         const size_t local_pool_id = static_cast<size_t>(mapping.local_pool_index);
         if (group_id >= device_group_tags_.size() || local_pool_id >= device_group_tags_[group_id].size()
             || !device_group_tags_[group_id][local_pool_id].empty() || per_tag_tags_[tag_index].empty()) {
-            RTP_LLM_LOG_ERROR("BlockTreeCache::initDeviceGroupTags: invalid mapping, tag=%s group=%zu local=%zu",
+            RTP_LLM_LOG_ERROR("invalid mapping, tag=%s group=%zu local=%zu",
                               per_tag_tags_[tag_index].c_str(),
                               group_id,
                               local_pool_id);
@@ -244,11 +244,11 @@ bool BlockTreeCache::initDeviceGroupTags() {
         if (std::any_of(device_group_tags.begin(), device_group_tags.end(), [](const std::string& tag) {
                 return tag.empty();
             })) {
-            RTP_LLM_LOG_ERROR("BlockTreeCache::initDeviceGroupTags: incomplete mapping, group=%zu", group_id);
+            RTP_LLM_LOG_ERROR("incomplete mapping, group=%zu", group_id);
             return false;
         }
         if (device_group_tags != component_groups_[group_id]->tags()) {
-            RTP_LLM_LOG_ERROR("BlockTreeCache::initDeviceGroupTags: component group tag mapping mismatch, group=%zu",
+            RTP_LLM_LOG_ERROR("component group tag mapping mismatch, group=%zu",
                               group_id);
             return false;
         }
@@ -258,31 +258,31 @@ bool BlockTreeCache::initDeviceGroupTags() {
 
 bool BlockTreeCache::validateConfiguration() const {
     if (tree_ == nullptr || components_ == nullptr) {
-        RTP_LLM_LOG_ERROR("BlockTreeCache: tree and component registry must be initialized");
+        RTP_LLM_LOG_ERROR("tree and component registry must be initialized");
         return false;
     }
     if (component_groups_.empty() && !components_->empty()) {
-        RTP_LLM_LOG_ERROR("BlockTreeCache: empty component groups require an empty component registry");
+        RTP_LLM_LOG_ERROR("empty component groups require an empty component registry");
         return false;
     }
     if (config_.enable_disk_cache && !config_.enable_memory_cache) {
-        RTP_LLM_LOG_ERROR("BlockTreeCache: disk cache requires memory cache");
+        RTP_LLM_LOG_ERROR("disk cache requires memory cache");
         return false;
     }
     if (config_.enable_load_back && !config_.enable_memory_cache) {
-        RTP_LLM_LOG_ERROR("BlockTreeCache: load back requires memory cache");
+        RTP_LLM_LOG_ERROR("load back requires memory cache");
         return false;
     }
 
     for (size_t group_index = 0; group_index < component_groups_.size(); ++group_index) {
         const ComponentGroupPtr& group = component_groups_[group_index];
         if (group == nullptr || group->component_group_id != static_cast<int>(group_index)) {
-            RTP_LLM_LOG_ERROR("BlockTreeCache: component group must be non-null and indexed by id, index=%zu",
+            RTP_LLM_LOG_ERROR("component group must be non-null and indexed by id, index=%zu",
                               group_index);
             return false;
         }
         if (!group->hasLayout()) {
-            RTP_LLM_LOG_ERROR("BlockTreeCache: component group %zu has no finalized layout", group_index);
+            RTP_LLM_LOG_ERROR("component group %zu has no finalized layout", group_index);
             return false;
         }
 
@@ -290,7 +290,7 @@ bool BlockTreeCache::validateConfiguration() const {
         const auto& layout     = group->layout();
         if (membership.empty() || membership.size() != layout.componentCount()
             || membership.size() != group->devicePoolCount()) {
-            RTP_LLM_LOG_ERROR("BlockTreeCache: group %zu membership/layout/pool counts differ: %zu/%zu/%zu",
+            RTP_LLM_LOG_ERROR("group %zu membership/layout/pool counts differ: %zu/%zu/%zu",
                               group_index,
                               membership.size(),
                               layout.componentCount(),
@@ -305,7 +305,7 @@ bool BlockTreeCache::validateConfiguration() const {
             const int component_index = membership[component_position];
             if (component_index < 0 || static_cast<size_t>(component_index) >= components_->size()) {
                 RTP_LLM_LOG_ERROR(
-                    "BlockTreeCache: group %zu has invalid component index %d", group_index, component_index);
+                    "group %zu has invalid component index %d", group_index, component_index);
                 return false;
             }
             const Component& component = (*components_)[static_cast<size_t>(component_index)];
@@ -313,7 +313,7 @@ bool BlockTreeCache::validateConfiguration() const {
                 || component.component_group_id != static_cast<int>(group_index) || component.tag.empty()
                 || !tags.insert(component.tag).second || component.layerCount() == 0
                 || component.model_layer_ids.size() != component.layerCount()) {
-                RTP_LLM_LOG_ERROR("BlockTreeCache: invalid component binding index=%d group=%zu pool_position=%zu",
+                RTP_LLM_LOG_ERROR("invalid component binding index=%d group=%zu pool_position=%zu",
                                   component_index,
                                   group_index,
                                   component_position);
@@ -321,7 +321,7 @@ bool BlockTreeCache::validateConfiguration() const {
             }
             for (size_t layer_index = 0; layer_index < component.layerCount(); ++layer_index) {
                 if (slice_index >= layout.slices().size()) {
-                    RTP_LLM_LOG_ERROR("BlockTreeCache: group %zu layout has too few slices", group_index);
+                    RTP_LLM_LOG_ERROR("group %zu layout has too few slices", group_index);
                     return false;
                 }
                 const auto&  slice = layout.slices()[slice_index++];
@@ -329,7 +329,7 @@ bool BlockTreeCache::validateConfiguration() const {
                 if (bytes == 0 || bytes > std::numeric_limits<size_t>::max() - expected_offset
                     || slice.component_idx != component_position || slice.layer_idx != layer_index
                     || slice.offset_bytes != expected_offset) {
-                    RTP_LLM_LOG_ERROR("BlockTreeCache: group %zu layout drift at component=%zu layer=%zu",
+                    RTP_LLM_LOG_ERROR("group %zu layout drift at component=%zu layer=%zu",
                                       group_index,
                                       component_position,
                                       layer_index);
@@ -339,29 +339,29 @@ bool BlockTreeCache::validateConfiguration() const {
             }
         }
         if (slice_index != layout.slices().size() || expected_offset != layout.payloadBytes()) {
-            RTP_LLM_LOG_ERROR("BlockTreeCache: group %zu layout slice count or payload drift", group_index);
+            RTP_LLM_LOG_ERROR("group %zu layout slice count or payload drift", group_index);
             return false;
         }
 
         const auto host_pool = group->hostPool();
         const auto disk_pool = group->diskPool();
         if (config_.enable_memory_cache && host_pool == nullptr) {
-            RTP_LLM_LOG_ERROR("BlockTreeCache: memory cache group %zu has no host pool", group_index);
+            RTP_LLM_LOG_ERROR("memory cache group %zu has no host pool", group_index);
             return false;
         }
         if (config_.enable_disk_cache && disk_pool == nullptr) {
-            RTP_LLM_LOG_ERROR("BlockTreeCache: disk cache group %zu has no disk pool", group_index);
+            RTP_LLM_LOG_ERROR("disk cache group %zu has no disk pool", group_index);
             return false;
         }
         if (host_pool != nullptr && host_pool->payloadBytes() != layout.payloadBytes()) {
-            RTP_LLM_LOG_ERROR("BlockTreeCache: group %zu host/layout payload mismatch: %zu/%zu",
+            RTP_LLM_LOG_ERROR("group %zu host/layout payload mismatch: %zu/%zu",
                               group_index,
                               host_pool->payloadBytes(),
                               layout.payloadBytes());
             return false;
         }
         if (disk_pool != nullptr && disk_pool->payloadBytes() != layout.payloadBytes()) {
-            RTP_LLM_LOG_ERROR("BlockTreeCache: group %zu disk/layout payload mismatch: %zu/%zu",
+            RTP_LLM_LOG_ERROR("group %zu disk/layout payload mismatch: %zu/%zu",
                               group_index,
                               disk_pool->payloadBytes(),
                               layout.payloadBytes());
@@ -372,13 +372,13 @@ bool BlockTreeCache::validateConfiguration() const {
 }
 
 BlockTreeCache::~BlockTreeCache() {
-    RTP_LLM_LOG_INFO("BlockTreeCache: destroying, closing load-back tickets...");
+    RTP_LLM_LOG_INFO("destroying, closing load-back tickets...");
     load_back_ticket_registry_->shutdown();
     if (!initialized_) {
-        RTP_LLM_LOG_INFO("BlockTreeCache: destroyed");
+        RTP_LLM_LOG_INFO("destroyed");
         return;
     }
-    RTP_LLM_LOG_INFO("BlockTreeCache: load-back tickets closed, waiting for pending tasks...");
+    RTP_LLM_LOG_INFO("load-back tickets closed, waiting for pending tasks...");
     waitForPendingTasks();
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -391,7 +391,7 @@ BlockTreeCache::~BlockTreeCache() {
     if (initialized_) {
         drainTreeHolds();
     }
-    RTP_LLM_LOG_INFO("BlockTreeCache: destroyed");
+    RTP_LLM_LOG_INFO("destroyed");
 }
 
 void BlockTreeCache::drainTreeHolds() {
@@ -465,14 +465,14 @@ TransferStatus BlockTreeCache::executeTransfer(const TransferDescriptor& descrip
 BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
     BlockTreeMatchResult result;
     if (cache_keys.empty()) {
-        RTP_LLM_LOG_DEBUG("BlockTreeCache::match: empty cache_keys, returning empty result");
+        RTP_LLM_LOG_DEBUG("empty cache_keys, returning empty result");
         return result;
     }
 
     std::lock_guard<std::mutex> lock(mutex_);
     BlockTreeFindResult         tree_find_result = tree_->findNode(cache_keys);
     if (tree_find_result.matched_node == nullptr) {
-        RTP_LLM_LOG_DEBUG("BlockTreeCache::match: no match found for %zu cache_keys", cache_keys.size());
+        RTP_LLM_LOG_DEBUG("no match found for %zu cache_keys", cache_keys.size());
         return result;
     }
 
@@ -538,7 +538,7 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
         }
     }
 
-    RTP_LLM_LOG_DEBUG("BlockTreeCache::match: matched %zu blocks, cache_keys=%zu, tree_nodes=%zu",
+    RTP_LLM_LOG_DEBUG("matched %zu blocks, cache_keys=%zu, tree_nodes=%zu",
                       result.matched_blocks,
                       cache_keys.size(),
                       tree_->nodeCount());
@@ -547,7 +547,7 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
 
 bool BlockTreeCache::isNodeStructurallyMatchable(const TreeNode* node) const {
     if (node == nullptr || node->group_slots.size() != component_groups_.size()) {
-        RTP_LLM_LOG_WARNING("BlockTreeCache::match: malformed group slot count, node_key=%ld expected=%zu actual=%zu",
+        RTP_LLM_LOG_WARNING("malformed group slot count, node_key=%ld expected=%zu actual=%zu",
                             node == nullptr ? 0 : node->cache_key,
                             component_groups_.size(),
                             node == nullptr ? 0 : node->group_slots.size());
@@ -567,7 +567,7 @@ bool BlockTreeCache::isNodeStructurallyMatchable(const TreeNode* node) const {
         const bool       has_device_storage  = slot.has_value(Tier::DEVICE);
         const bool       has_complete_device = group->hasCompleteDeviceValue(slot);
         if (has_device_storage != has_complete_device) {
-            RTP_LLM_LOG_WARNING("BlockTreeCache::match: partial DEVICE slot, node_key=%ld group_id=%d",
+            RTP_LLM_LOG_WARNING("partial DEVICE slot, node_key=%ld group_id=%d",
                                 node->cache_key,
                                 group->component_group_id);
             return false;
@@ -577,7 +577,7 @@ bool BlockTreeCache::isNodeStructurallyMatchable(const TreeNode* node) const {
                                        + static_cast<int>(slot.has_value(Tier::HOST))
                                        + static_cast<int>(slot.has_value(Tier::DISK));
         if (serving_tier_count > 1) {
-            RTP_LLM_LOG_WARNING("BlockTreeCache::match: multiple serving tiers, node_key=%ld group_id=%d",
+            RTP_LLM_LOG_WARNING("multiple serving tiers, node_key=%ld group_id=%d",
                                 node->cache_key,
                                 group->component_group_id);
             return false;
@@ -610,13 +610,13 @@ void BlockTreeCache::insertImpl(TreeNode*                                  paren
 
     if (slots.size() != cache_keys.size()) {
         RTP_LLM_LOG_WARNING(
-            "BlockTreeCache::insert: key/slot size mismatch, keys=%zu slots=%zu", cache_keys.size(), slots.size());
+            "key/slot size mismatch, keys=%zu slots=%zu", cache_keys.size(), slots.size());
         return;
     }
     std::vector<std::vector<GroupSlot>> sanitized_slots = slots;
     for (size_t i = 0; i < slots.size(); ++i) {
         if (slots[i].size() != component_groups_.size()) {
-            RTP_LLM_LOG_WARNING("BlockTreeCache::insert: component slot mismatch, index=%zu expected=%zu actual=%zu",
+            RTP_LLM_LOG_WARNING("component slot mismatch, index=%zu expected=%zu actual=%zu",
                                 i,
                                 component_groups_.size(),
                                 slots[i].size());
@@ -630,7 +630,7 @@ void BlockTreeCache::insertImpl(TreeNode*                                  paren
             const bool  allowed_sparse_absence = allow_sparse_slots && group != nullptr
                                                 && group->group_type != CacheGroupType::FULL && structurally_absent;
             if (group == nullptr) {
-                RTP_LLM_LOG_WARNING("BlockTreeCache::insert: null component group, index=%zu component=%zu",
+                RTP_LLM_LOG_WARNING("null component group, index=%zu component=%zu",
                                     i,
                                     component_group_index);
                 return;
@@ -641,7 +641,7 @@ void BlockTreeCache::insertImpl(TreeNode*                                  paren
 
             if (slot.has_value(Tier::DEVICE)) {
                 RTP_LLM_LOG_WARNING(
-                    "BlockTreeCache::insert: partial DEVICE input rejected, "
+                    "partial DEVICE input rejected, "
                     "key=%ld component=%zu expected=%zu actual=%zu",
                     cache_keys[i],
                     component_group_index,
@@ -696,7 +696,7 @@ void BlockTreeCache::insertImpl(TreeNode*                                  paren
         auto&      group  = component_groups_[gid];
         GroupSlot& slot   = adopted.node->group_slots[gid];
         if (!group->hasCompleteDeviceValue(slot)) {
-            RTP_LLM_LOG_WARNING("BlockTreeCache::insert: incomplete adopted slot event, key=%ld group=%d",
+            RTP_LLM_LOG_WARNING("incomplete adopted slot event, key=%ld group=%d",
                                 adopted.node->cache_key,
                                 adopted.component_group_id);
             continue;
@@ -714,7 +714,7 @@ void BlockTreeCache::insertImpl(TreeNode*                                  paren
     // Stamp and refresh only newly created nodes and exact adopted components.
     evictor_.onInsertCommitted(insert_result);
     ++mutation_version_;
-    RTP_LLM_LOG_DEBUG("BlockTreeCache::insert: created=%zu adopted=%zu tree_nodes=%zu",
+    RTP_LLM_LOG_DEBUG("created=%zu adopted=%zu tree_nodes=%zu",
                       insert_result.inserted_nodes.size(),
                       insert_result.adopted_slots.size(),
                       tree_->nodeCount());
@@ -762,7 +762,7 @@ int BlockTreeCache::evictForTag(const std::string& tag, size_t num_blocks) {
         const size_t current_free = device_pools[local_pool_index]->freeBlocksNum();
         reclaimed                 = current_free > initial_free ? current_free - initial_free : 0;
     }
-    RTP_LLM_LOG_DEBUG("BlockTreeCache::evictForTag: tag=%s component_group[%d] reclaimed %zu/%zu device blocks",
+    RTP_LLM_LOG_DEBUG("tag=%s component_group[%d] reclaimed %zu/%zu device blocks",
                       tag.c_str(),
                       mapping.component_group_id,
                       reclaimed,
@@ -858,7 +858,7 @@ void BlockTreeCache::onBlocksReleased() {
 bool BlockTreeCache::cancelLoadBack(const std::shared_ptr<AsyncContext>& context) {
     auto load_back_context = std::dynamic_pointer_cast<LoadBackAsyncContext>(context);
     if (!load_back_context) {
-        RTP_LLM_LOG_WARNING("BlockTreeCache::cancelLoadBack: context is not owned by BlockTreeCache");
+        RTP_LLM_LOG_WARNING("context is not owned by BlockTreeCache");
         return false;
     }
     std::lock_guard<std::mutex> lock(mutex_);
@@ -875,7 +875,7 @@ void BlockTreeCache::prepareMatchedBlocks(const std::vector<TreeNode*>&         
     }
     if (candidate_logically_valid.size() != logical_matched_block_count) {
         RTP_LLM_LOG_WARNING(
-            "BlockTreeCache::prepareMatchedBlocks: candidate validity size mismatch, path=%zu valid=%zu",
+            "candidate validity size mismatch, path=%zu valid=%zu",
             logical_matched_block_count,
             candidate_logically_valid.size());
         return;
@@ -998,7 +998,7 @@ void BlockTreeCache::prepareMatchedLoadBackItem(TreeNode*                       
 
     if (device_group_tags.empty()
         || !validateDeviceGroupTagsForComponentGroup(component_group->component_group_id, device_group_tags)) {
-        RTP_LLM_LOG_WARNING("BlockTreeCache::prepareMatchedLoadBackItem: boundary=producer "
+        RTP_LLM_LOG_WARNING("boundary=producer "
                             "failure=invalid_device_group_mapping component_group_id=%d expected=%zu actual=%zu",
                             component_group->component_group_id,
                             component_group->devicePoolCount(),
@@ -1023,7 +1023,7 @@ void BlockTreeCache::prepareMatchedLoadBackItem(TreeNode*                       
         result.load_back_blocks++;
     }
 
-    RTP_LLM_LOG_DEBUG("BlockTreeCache::match: planned logical settlement from %s group[%d] node_key=%ld",
+    RTP_LLM_LOG_DEBUG("planned logical settlement from %s group[%d] node_key=%ld",
                       tierName(source_tier),
                       component_group->component_group_id,
                       path_node->cache_key);
@@ -1033,12 +1033,12 @@ bool BlockTreeCache::validateDeviceGroupTagsForComponentGroup(int               
                                                               const std::vector<std::string>& device_group_tags) const {
     if (!initialized_ || component_group_id < 0
         || static_cast<size_t>(component_group_id) >= device_group_tags_.size()) {
-        RTP_LLM_LOG_WARNING("BlockTreeCache: invalid component group mapping request, group=%d", component_group_id);
+        RTP_LLM_LOG_WARNING("invalid component group mapping request, group=%d", component_group_id);
         return false;
     }
     const std::vector<std::string>& expected = device_group_tags_[static_cast<size_t>(component_group_id)];
     if (device_group_tags != expected) {
-        RTP_LLM_LOG_WARNING("BlockTreeCache: device group tag mapping mismatch, group=%d expected=%zu actual=%zu",
+        RTP_LLM_LOG_WARNING("device group tag mapping mismatch, group=%d expected=%zu actual=%zu",
                             component_group_id,
                             expected.size(),
                             device_group_tags.size());
@@ -1134,7 +1134,7 @@ std::shared_ptr<AsyncContext> BlockTreeCache::commitLoadBack(const LoadBackTicke
         }
         if (!evictor_.beginLoadBack(item.node, item.group_id, item.source_tier)) {
             rollback_guard.run();
-            RTP_LLM_LOG_WARNING("BlockTreeCache::commitLoadBack: pending-to-loading transition failed, "
+            RTP_LLM_LOG_WARNING("pending-to-loading transition failed, "
                                 "rolled back all %zu load_back items",
                                 items.size());
             return nullptr;
@@ -1197,13 +1197,13 @@ void BlockTreeCache::abortLoadBackUnsafe(const LoadBackTicket::PendingLoadBackIt
         if (item.source_tier != Tier::DEVICE) {
             if (fully_prepared || partially_prepared) {
                 if (!evictor_.finishLoadBack(item.node, item.group_id, item.source_tier, false)) {
-                    RTP_LLM_LOG_WARNING("BlockTreeCache::abortLoadBack: loading state mismatch, group=%d source=%s",
+                    RTP_LLM_LOG_WARNING("loading state mismatch, group=%d source=%s",
                                         item.group_id,
                                         tierName(item.source_tier));
                 }
             } else {
                 if (!evictor_.abortPendingLoadBack(item.node, item.group_id, item.source_tier, item.source_blocks)) {
-                    RTP_LLM_LOG_WARNING("BlockTreeCache::abortLoadBack: reservation state mismatch, "
+                    RTP_LLM_LOG_WARNING("reservation state mismatch, "
                                         "group=%d source=%s",
                                         item.group_id,
                                         tierName(item.source_tier));
@@ -1249,32 +1249,32 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
         LoadBackItem& item = items[item_index];
         if (item.group_id < 0 || static_cast<size_t>(item.group_id) >= component_groups_.size()
             || component_groups_[static_cast<size_t>(item.group_id)] == nullptr) {
-            RTP_LLM_LOG_WARNING("BlockTreeCache::performLoadBack: invalid group id, group=%d", item.group_id);
+            RTP_LLM_LOG_WARNING("invalid group id, group=%d", item.group_id);
             prepared = false;
             continue;
         }
 
         ComponentGroupPtr& group = component_groups_[static_cast<size_t>(item.group_id)];
         if (item.target_device_blocks.empty()) {
-            RTP_LLM_LOG_WARNING("BlockTreeCache::performLoadBack: invalid item, group=%d", item.group_id);
+            RTP_LLM_LOG_WARNING("invalid item, group=%d", item.group_id);
             prepared = false;
             continue;
         }
         if (item.source_tier == Tier::DEVICE) {
             if (item.source_blocks.empty() || item.source_blocks != item.target_device_blocks) {
-                RTP_LLM_LOG_WARNING("BlockTreeCache::performLoadBack: resident identity changed, group=%d",
+                RTP_LLM_LOG_WARNING("resident identity changed, group=%d",
                                     item.group_id);
                 prepared = false;
             }
             continue;
         }
         if (item.node == nullptr) {
-            RTP_LLM_LOG_WARNING("BlockTreeCache::performLoadBack: invalid copy item node, group=%d", item.group_id);
+            RTP_LLM_LOG_WARNING("invalid copy item node, group=%d", item.group_id);
             prepared = false;
             continue;
         }
         if ((item.source_tier != Tier::HOST && item.source_tier != Tier::DISK) || item.source_blocks.size() != 1) {
-            RTP_LLM_LOG_WARNING("BlockTreeCache::performLoadBack: invalid copy item, group=%d source=%s",
+            RTP_LLM_LOG_WARNING("invalid copy item, group=%d source=%s",
                                 item.group_id,
                                 tierName(item.source_tier));
             prepared = false;
@@ -1299,7 +1299,7 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
         }
 
         if (isNullBlockIdx(source_host_block)) {
-            RTP_LLM_LOG_WARNING("BlockTreeCache::performLoadBack: failed to prepare source, group=%d source=%s",
+            RTP_LLM_LOG_WARNING("failed to prepare source, group=%d source=%s",
                                 item.group_id,
                                 tierName(item.source_tier));
             prepared = false;
@@ -1360,7 +1360,7 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
                 if (item.group_id < 0 || gid >= component_groups_.size() || component_groups_[gid] == nullptr
                     || item.node == nullptr || gid >= item.node->group_slots.size()
                     || item.node->group_slots[gid].transfer_state != SlotTransferState::LOADING_BACK) {
-                    RTP_LLM_LOG_WARNING("BlockTreeCache::performLoadBack: completion state mismatch, group=%d",
+                    RTP_LLM_LOG_WARNING("completion state mismatch, group=%d",
                                         item.group_id);
                     settlement_success = false;
                     break;
@@ -1397,7 +1397,7 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
                 target_installed[item_index] = true;
                 tree_data_mutated             = true;
                 if (!evictor_.finishLoadBack(item.node, item.group_id, item.source_tier, true)) {
-                    RTP_LLM_LOG_ERROR("BlockTreeCache::performLoadBack: exact-state transition failed after preflight, "
+                    RTP_LLM_LOG_ERROR("exact-state transition failed after preflight, "
                                       "group=%d",
                                       item.group_id);
                     settlement_success = false;
@@ -1468,7 +1468,7 @@ void BlockTreeCache::settleInFlightDeviceReleaseCreditsLocked(const std::vector<
     for (const DeviceReleaseCredit& credit : release_credits) {
         const auto it = in_flight_device_release_credits_.find(credit.pool);
         if (it == in_flight_device_release_credits_.end() || it->second == 0) {
-            RTP_LLM_LOG_ERROR("BlockTreeCache: missing in-flight DEVICE release credit while settling pool=%p block=%d",
+            RTP_LLM_LOG_ERROR("missing in-flight DEVICE release credit while settling pool=%p block=%d",
                               static_cast<void*>(credit.pool.get()),
                               credit.block);
             continue;
@@ -1584,9 +1584,9 @@ void BlockTreeCache::performEvictionCopy(const BlockTreeEvictor::EvictionPlan&  
                 std::lock_guard<std::mutex> lock(mutex_);
                 settleInFlightDeviceReleaseCreditsLocked(release_credits);
             } catch (const std::exception& error) {
-                RTP_LLM_LOG_ERROR("BlockTreeCache: DEVICE release-credit settlement failed: %s", error.what());
+                RTP_LLM_LOG_ERROR("DEVICE release-credit settlement failed: %s", error.what());
             } catch (...) {
-                RTP_LLM_LOG_ERROR("BlockTreeCache: DEVICE release-credit settlement failed with unknown exception");
+                RTP_LLM_LOG_ERROR("DEVICE release-credit settlement failed with unknown exception");
             }
         };
         ScopeRollback<decltype(credit_settlement_action)> credit_settlement_guard(std::move(credit_settlement_action));
@@ -1610,26 +1610,26 @@ void BlockTreeCache::performEvictionCopy(const BlockTreeEvictor::EvictionPlan&  
                 completion_succeeded = true;
                 plan_terminalized    = true;
             } catch (const std::exception& error) {
-                RTP_LLM_LOG_ERROR("BlockTreeCache: eviction completion failed; rolling back accepted plan: %s",
+                RTP_LLM_LOG_ERROR("eviction completion failed; rolling back accepted plan: %s",
                                   error.what());
                 try {
                     evictor_.rollbackPreparedPlan(plan);
                     plan_terminalized = true;
                 } catch (const std::exception& rollback_error) {
-                    RTP_LLM_LOG_ERROR("BlockTreeCache: accepted eviction rollback failed: %s", rollback_error.what());
+                    RTP_LLM_LOG_ERROR("accepted eviction rollback failed: %s", rollback_error.what());
                 } catch (...) {
-                    RTP_LLM_LOG_ERROR("BlockTreeCache: accepted eviction rollback failed with unknown exception");
+                    RTP_LLM_LOG_ERROR("accepted eviction rollback failed with unknown exception");
                 }
             } catch (...) {
-                RTP_LLM_LOG_ERROR("BlockTreeCache: eviction completion failed with unknown exception; rolling back "
+                RTP_LLM_LOG_ERROR("eviction completion failed with unknown exception; rolling back "
                                   "accepted plan");
                 try {
                     evictor_.rollbackPreparedPlan(plan);
                     plan_terminalized = true;
                 } catch (const std::exception& rollback_error) {
-                    RTP_LLM_LOG_ERROR("BlockTreeCache: accepted eviction rollback failed: %s", rollback_error.what());
+                    RTP_LLM_LOG_ERROR("accepted eviction rollback failed: %s", rollback_error.what());
                 } catch (...) {
-                    RTP_LLM_LOG_ERROR("BlockTreeCache: accepted eviction rollback failed with unknown exception");
+                    RTP_LLM_LOG_ERROR("accepted eviction rollback failed with unknown exception");
                 }
             }
 
@@ -1639,9 +1639,9 @@ void BlockTreeCache::performEvictionCopy(const BlockTreeEvictor::EvictionPlan&  
             try {
                 settleInFlightDeviceReleaseCreditsLocked(release_credits);
             } catch (const std::exception& error) {
-                RTP_LLM_LOG_ERROR("BlockTreeCache: DEVICE release-credit settlement failed: %s", error.what());
+                RTP_LLM_LOG_ERROR("DEVICE release-credit settlement failed: %s", error.what());
             } catch (...) {
-                RTP_LLM_LOG_ERROR("BlockTreeCache: DEVICE release-credit settlement failed with unknown exception");
+                RTP_LLM_LOG_ERROR("DEVICE release-credit settlement failed with unknown exception");
             }
 
             const bool mutated = plan_terminalized && completion_succeeded
@@ -1663,15 +1663,15 @@ void BlockTreeCache::performEvictionCopy(const BlockTreeEvictor::EvictionPlan&  
                 try {
                     checkWatermark();
                 } catch (const std::exception& error) {
-                    RTP_LLM_LOG_ERROR("BlockTreeCache: post-eviction watermark check failed: %s", error.what());
+                    RTP_LLM_LOG_ERROR("post-eviction watermark check failed: %s", error.what());
                 } catch (...) {
-                    RTP_LLM_LOG_ERROR("BlockTreeCache: post-eviction watermark check failed with unknown exception");
+                    RTP_LLM_LOG_ERROR("post-eviction watermark check failed with unknown exception");
                 }
             }
         } catch (const std::exception& error) {
-            RTP_LLM_LOG_ERROR("BlockTreeCache: eviction terminalization lock/follow-up failed: %s", error.what());
+            RTP_LLM_LOG_ERROR("eviction terminalization lock/follow-up failed: %s", error.what());
         } catch (...) {
-            RTP_LLM_LOG_ERROR("BlockTreeCache: eviction terminalization lock/follow-up failed with unknown exception");
+            RTP_LLM_LOG_ERROR("eviction terminalization lock/follow-up failed with unknown exception");
         }
         metrics_reporter_.reportEvictionFinished(plan, copy_results, component_groups_);
 
@@ -1684,9 +1684,9 @@ void BlockTreeCache::performEvictionCopy(const BlockTreeEvictor::EvictionPlan&  
             try {
                 evictor_.writeRemoteThrough(storage_backend_, remote_cache_key, remote_group_id);
             } catch (const std::exception& error) {
-                RTP_LLM_LOG_ERROR("BlockTreeCache: remote eviction write-through failed: %s", error.what());
+                RTP_LLM_LOG_ERROR("remote eviction write-through failed: %s", error.what());
             } catch (...) {
-                RTP_LLM_LOG_ERROR("BlockTreeCache: remote eviction write-through failed with unknown exception");
+                RTP_LLM_LOG_ERROR("remote eviction write-through failed with unknown exception");
             }
         }
     };
@@ -1705,9 +1705,9 @@ void BlockTreeCache::performEvictionCopy(const BlockTreeEvictor::EvictionPlan&  
             copy_results.cascade_success.assign(plan.cascade_moves.size(), transfer_success);
         }
     } catch (const std::exception& error) {
-        RTP_LLM_LOG_ERROR("BlockTreeCache: eviction copy failed with exception: %s", error.what());
+        RTP_LLM_LOG_ERROR("eviction copy failed with exception: %s", error.what());
     } catch (...) {
-        RTP_LLM_LOG_ERROR("BlockTreeCache: eviction copy failed with unknown exception");
+        RTP_LLM_LOG_ERROR("eviction copy failed with unknown exception");
     }
 }
 

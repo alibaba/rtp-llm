@@ -121,7 +121,7 @@ bool HostBlockPool::init() {
     markHostBlockPoolDontDump(cfg.pool_name.c_str(), base_ptr_, total_bytes);
 
     static constexpr double kBytesPerMB = 1024.0 * 1024.0;
-    RTP_LLM_LOG_INFO("HostBlockPool backing selected: pool_name=%s payload_bytes=%zu stride_bytes=%zu "
+    RTP_LLM_LOG_INFO("backing selected: pool_name=%s payload_bytes=%zu stride_bytes=%zu "
                      "physical_block_count=%zu total_size=%zu bytes total_size_mb=%.2f is_pinned=%d ptr=%p",
                      cfg.pool_name.c_str(),
                      cfg.payload_bytes,

@@ -45,7 +45,7 @@ BlockTreeFindResult BlockTree::findNode(const CacheKeysType& cache_keys) const {
         }
         TreeNode* candidate = it->second;
         if (candidate == nullptr || !isNodeMatchReady(*candidate)) {
-            RTP_LLM_LOG_DEBUG("BlockTree::findNode: stop matching at depth=%zu, cache_key=%ld, reason=%s",
+            RTP_LLM_LOG_DEBUG("stop matching at depth=%zu, cache_key=%ld, reason=%s",
                               i,
                               cache_keys[i],
                               candidate == nullptr ? "null candidate" : "node not match ready");
@@ -62,7 +62,7 @@ BlockTreeFindResult BlockTree::findNode(const CacheKeysType& cache_keys) const {
 
 bool BlockTree::isNodeMatchReady(const TreeNode& node) const {
     if (node.group_slots.size() != static_cast<size_t>(group_slot_count_)) {
-        RTP_LLM_LOG_WARNING("BlockTree::findNode: malformed group slot count, node_key=%ld expected=%d actual=%zu",
+        RTP_LLM_LOG_WARNING("malformed group slot count, node_key=%ld expected=%d actual=%zu",
                             node.cache_key,
                             group_slot_count_,
                             node.group_slots.size());
@@ -93,12 +93,12 @@ BlockTreeInsertResult BlockTree::insertNode(TreeNode*                           
         if (it != current->children.end()) {
             TreeNode* existing_node = it->second;
             if (existing_node == nullptr) {
-                RTP_LLM_LOG_WARNING("BlockTree::insertNode: null child, key=%ld", key);
+                RTP_LLM_LOG_WARNING("null child, key=%ld", key);
                 break;
             }
             current = existing_node;
             if (current->group_slots.size() != static_cast<size_t>(group_slot_count_)) {
-                RTP_LLM_LOG_WARNING("BlockTree::insertNode: malformed existing node, key=%ld expected=%d actual=%zu",
+                RTP_LLM_LOG_WARNING("malformed existing node, key=%ld expected=%d actual=%zu",
                                     key,
                                     group_slot_count_,
                                     current->group_slots.size());
@@ -112,7 +112,7 @@ BlockTreeInsertResult BlockTree::insertNode(TreeNode*                           
                 continue;
             }
             if (slots[i].size() != static_cast<size_t>(group_slot_count_)) {
-                RTP_LLM_LOG_WARNING("BlockTree::insertNode: malformed input slots, key=%ld expected=%d actual=%zu",
+                RTP_LLM_LOG_WARNING("malformed input slots, key=%ld expected=%d actual=%zu",
                                     key,
                                     group_slot_count_,
                                     slots[i].size());
@@ -145,7 +145,7 @@ BlockTreeInsertResult BlockTree::insertNode(TreeNode*                           
             if (slots[i].size() == static_cast<size_t>(group_slot_count_)) {
                 current->group_slots = slots[i];
             } else if (!slots[i].empty()) {
-                RTP_LLM_LOG_WARNING("BlockTree::insertNode: malformed slot count, key=%ld expected=%d actual=%zu",
+                RTP_LLM_LOG_WARNING("malformed slot count, key=%ld expected=%d actual=%zu",
                                     key,
                                     group_slot_count_,
                                     slots[i].size());
@@ -166,7 +166,7 @@ void BlockTree::removeNode(TreeNode* node) {
     RTP_LLM_CHECK_WITH_INFO(node->children.empty(), "BlockTree::removeNode called on node with children");
 
     RTP_LLM_LOG_DEBUG(
-        "BlockTree::removeNode: removing node key=%ld, pool_size=%zu", node->cache_key, node_pool_.size());
+        "removing node key=%ld, pool_size=%zu", node->cache_key, node_pool_.size());
 
     // Remove from parent's children map
     TreeNode* parent = node->parent;
@@ -215,7 +215,7 @@ TreeNode* BlockTree::removeEmptyAncestors(TreeNode* start_node, const std::vecto
         removed_count++;
     }
     if (removed_count > 0) {
-        RTP_LLM_LOG_DEBUG("BlockTree::removeEmptyAncestors: removed %d empty ancestors", removed_count);
+        RTP_LLM_LOG_DEBUG("removed %d empty ancestors", removed_count);
     }
     return current;
 }

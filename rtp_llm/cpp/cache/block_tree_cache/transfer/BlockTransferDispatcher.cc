@@ -14,7 +14,7 @@ BlockTransferDispatcher::BlockTransferDispatcher(std::shared_ptr<PerRankBlockTra
 
 TransferStatus BlockTransferDispatcher::executePerRank(const TransferDescriptor& descriptor) const {
     if (per_rank_engine_ == nullptr) {
-        RTP_LLM_LOG_WARNING("BlockTransferDispatcher: per-rank engine is not initialized");
+        RTP_LLM_LOG_WARNING("per-rank engine is not initialized");
         return TransferStatus::INVALID_ARGS;
     }
     return per_rank_engine_->submit(descriptor).status();

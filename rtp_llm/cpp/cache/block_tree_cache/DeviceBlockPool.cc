@@ -116,7 +116,7 @@ void DeviceBlockPool::initializeCacheBuffer() {
     const bool              is_cuda     = cache_aligned_buffer_.is_cuda();
     const bool              is_pinned   = !is_cuda && cache_aligned_buffer_.is_pinned();
     static constexpr double kBytesPerMB = 1024.0 * 1024.0;
-    RTP_LLM_LOG_INFO("block_tree_cache::DeviceBlockPool backing selected: pool_name=%s "
+    RTP_LLM_LOG_INFO("backing selected: pool_name=%s "
                      "actual_backing=%s is_cuda=%d is_pinned=%d ptr=%p total_size=%zu bytes total_size_mb=%.2f "
                      "memory_layouts=%zu",
                      cfg.pool_name.c_str(),
@@ -226,7 +226,7 @@ void DeviceBlockPool::processMemoryLayout(size_t               layout_idx,
     initializeLayoutStrategy(layout_idx, layout_cfg, kv_cache_tensor, kv_scale_tensor);
     processLayerTensors(layout_idx, layout_cfg, global_layer_begin);
 
-    RTP_LLM_LOG_INFO("block_tree_cache::DeviceBlockPool MemoryLayout[%zu] initialized: pool_name=%s layer_num=%u "
+    RTP_LLM_LOG_INFO("MemoryLayout[%zu] initialized: pool_name=%s layer_num=%u "
                      "block_num=%u kv_off=%zu kv_bytes=%zu scale_off=%zu scale_bytes=%zu",
                      layout_idx,
                      config().pool_name.c_str(),
@@ -295,7 +295,7 @@ bool DeviceBlockPool::init() {
 
     markInitialized();
 
-    RTP_LLM_LOG_INFO("block_tree_cache::DeviceBlockPool init success: pool_name=%s memory_layouts=%zu total_layers=%zu "
+    RTP_LLM_LOG_INFO("init success: pool_name=%s memory_layouts=%zu total_layers=%zu "
                      "total_size=%zu bytes physical_block_count=%zu",
                      cfg.pool_name.c_str(),
                      cfg.memory_layouts.size(),
