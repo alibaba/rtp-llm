@@ -5,6 +5,7 @@
 #include <condition_variable>
 #include <functional>
 #include <mutex>
+#include <stdexcept>
 #include <string>
 #include <thread>
 #include <utility>
@@ -43,12 +44,15 @@ public:
     PausablePerRankBlockTransferEngine(const std::vector<ComponentGroupPtr>& groups,
                                        const std::vector<Component>&         components,
                                        TransferStatus                        result,
-                                       bool                                  pause_enabled = true):
+                                       bool                                  pause_enabled  = true,
+                                       size_t                                throw_on_submit = 0):
         PerRankBlockTransferEngine(groups, std::make_shared<const std::vector<Component>>(components)),
         pause_enabled_(pause_enabled),
+        throw_on_submit_(throw_on_submit),
         result_(result) {}
 
     TransferHandle submit(const TransferDescriptor& descriptor) override {
+        size_t submit_index = 0;
         {
             std::unique_lock<std::mutex> lock(mutex_);
             if (!pause_enabled_) {
@@ -56,10 +60,14 @@ public:
                 return PerRankBlockTransferEngine::submit(descriptor);
             }
             ++submit_count_;
+            submit_index = submit_count_;
             descriptors_.push_back(descriptor);
             entered_ = true;
             cv_.notify_all();
             cv_.wait(lock, [this] { return released_; });
+        }
+        if (submit_index == throw_on_submit_) {
+            throw std::runtime_error("injected transfer failure");
         }
         if (result_ != TransferStatus::OK) {
             return TransferHandle::completed(result_);
@@ -75,6 +83,15 @@ public:
         ASSERT_EQ(submit_count_, 0u);
         ASSERT_TRUE(descriptors_.empty());
         pause_enabled_ = true;
+    }
+
+    void setThrowOnSubmit(size_t submit_index) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        ASSERT_FALSE(pause_enabled_);
+        ASSERT_FALSE(entered_);
+        ASSERT_FALSE(released_);
+        ASSERT_EQ(submit_count_, 0u);
+        throw_on_submit_ = submit_index;
     }
 
     void waitUntilEntered() {
@@ -107,6 +124,7 @@ private:
     mutable std::mutex              mutex_;
     std::condition_variable         cv_;
     bool                            pause_enabled_{true};
+    size_t                          throw_on_submit_{0};
     bool                            entered_{false};
     bool                            released_{false};
     size_t                          submit_count_{0};
@@ -1285,6 +1303,323 @@ TEST_P(BlockTreeCacheLowerTierTest, CancelPausedLoadBackPreservesSourceAndDiscar
     environment->expectFullyReclaimed();
 }
 
+TEST_P(BlockTreeCacheLowerTierTest, CancelCompletionRaceSettlesExactlyOnce) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+
+    FullSWAEnvironmentOptions options;
+    options.path_length = 1;
+    auto environment    = FullSWAEnvironment::create(options);
+    ASSERT_NE(environment, nullptr);
+    auto pausable_per_rank_transfer_engine = std::make_shared<PausablePerRankBlockTransferEngine>(
+        environment->groups, environment->components, TransferStatus::OK, /*pause_enabled=*/false);
+    BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache,
+                                                                 pausable_per_rank_transfer_engine);
+    environment->insertRequestPath();
+    environment->releaseRequestRefs();
+    demoteTo(*environment, GetParam());
+
+    const std::vector<GroupSlot> slots_before = environment->slotsForPathNode(0);
+    BlockTreeMatchResult         result       = environment->cache->match(environment->keys);
+    ASSERT_NE(result.load_back_ticket, nullptr);
+    ASSERT_FALSE(result.load_back_ticket->empty());
+
+    struct SourceRef {
+        IBlockPool*  pool;
+        BlockIdxType block;
+    };
+    std::vector<SourceRef>                                   source_refs;
+    std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> target_blocks;
+    for (LoadBackTicket::PendingLoadBackItem& item : result.load_back_ticket->items()) {
+        IBlockPool* source_pool = GetParam() == Tier::HOST ?
+                                      static_cast<IBlockPool*>(environment->host_pools[item.group_id].get()) :
+                                      static_cast<IBlockPool*>(environment->disk_pools[item.group_id].get());
+        ASSERT_EQ(item.source_blocks.size(), 1u);
+        EXPECT_EQ(source_pool->refCount(item.source_blocks.front()), 2u);
+        source_refs.push_back({source_pool, item.source_blocks.front()});
+
+        item.target_device_blocks.clear();
+        for (const std::string& tag : item.device_group_tags) {
+            DeviceBlockPoolPtr pool = devicePoolForTag(*environment, tag);
+            ASSERT_NE(pool, nullptr);
+            BlockIdList blocks = pool->malloc(1).value();
+            ASSERT_EQ(blocks.size(), 1u);
+            pool->incRef(blocks, BlockRefType::REQUEST);
+            item.target_device_blocks.push_back(blocks.front());
+            target_blocks.emplace_back(std::move(pool), blocks.front());
+        }
+    }
+
+    pausable_per_rank_transfer_engine->enablePause();
+    std::shared_ptr<AsyncContext> context = result.load_back_ticket->commit();
+    ASSERT_NE(context, nullptr);
+    pausable_per_rank_transfer_engine->waitUntilEntered();
+
+    ThreadCompletion race_start;
+    bool             cancellation_won = false;
+    std::thread cancel_thread([&] {
+        race_start.waitUntilEntered();
+        cancellation_won = environment->cache->cancelLoadBack(context);
+    });
+    race_start.markEntered();
+    pausable_per_rank_transfer_engine->release();
+
+    context->waitDone();
+    cancel_thread.join();
+    environment->cache->waitForPendingTasks();
+
+    ASSERT_TRUE(context->done());
+    EXPECT_EQ(cancellation_won, !context->success());
+    EXPECT_FALSE(environment->cache->cancelLoadBack(context));
+    const std::vector<GroupSlot> slots_after = environment->slotsForPathNode(0);
+    ASSERT_EQ(slots_after.size(), slots_before.size());
+    if (context->success()) {
+        EXPECT_TRUE(environment->allSlotsAtTier(Tier::DEVICE));
+        for (const SourceRef& source : source_refs) {
+            EXPECT_FALSE(source.pool->isAllocated(source.block));
+        }
+        for (const auto& [pool, block] : target_blocks) {
+            EXPECT_EQ(pool->refCount(block), 2u);
+        }
+    } else {
+        for (size_t group_id = 0; group_id < slots_after.size(); ++group_id) {
+            EXPECT_EQ(slots_after[group_id].device_blocks, slots_before[group_id].device_blocks);
+            EXPECT_EQ(slots_after[group_id].host_block, slots_before[group_id].host_block);
+            EXPECT_EQ(slots_after[group_id].disk_slot, slots_before[group_id].disk_slot);
+            EXPECT_EQ(slots_after[group_id].transfer_state, SlotTransferState::IDLE);
+        }
+        for (const SourceRef& source : source_refs) {
+            EXPECT_EQ(source.pool->refCount(source.block), 1u);
+        }
+        for (const auto& [pool, block] : target_blocks) {
+            EXPECT_EQ(pool->refCount(block), 1u);
+        }
+    }
+
+    result.load_back_ticket.reset();
+    environment->reclaimAll();
+    for (const auto& [pool, block] : target_blocks) {
+        pool->decRef(block, BlockRefType::REQUEST);
+    }
+    environment->cache->onBlocksReleased();
+    environment->reclaimAll();
+    environment->expectFullyReclaimed();
+}
+
+TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesLoadBackAndRestoresCandidates) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+
+    auto environment                       = FullSWAEnvironment::create();
+    auto pausable_per_rank_transfer_engine = std::make_shared<PausablePerRankBlockTransferEngine>(
+        environment->groups,
+        environment->components,
+        TransferStatus::OK,
+        /*pause_enabled=*/false,
+        /*throw_on_submit=*/1);
+    BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache,
+                                                                 pausable_per_rank_transfer_engine);
+    environment->insertRequestPath();
+    environment->releaseRequestRefs();
+    demoteTo(*environment, GetParam());
+    environment->expectPayloads();
+
+    std::vector<std::vector<GroupSlot>> slots_before;
+    slots_before.reserve(environment->keys.size());
+    for (size_t path_index = 0; path_index < environment->keys.size(); ++path_index) {
+        slots_before.push_back(environment->slotsForPathNode(path_index));
+    }
+    const CacheStats candidates_before = environment->cache->getStats();
+    const std::vector<size_t> host_free_before = {
+        environment->host_pools[0]->freeBlocksNum(), environment->host_pools[1]->freeBlocksNum()};
+
+    BlockTreeMatchResult result = environment->cache->match(environment->keys);
+    ASSERT_NE(result.load_back_ticket, nullptr);
+    ASSERT_FALSE(result.load_back_ticket->empty());
+
+    struct SourceRef {
+        IBlockPool*  pool;
+        BlockIdxType block;
+    };
+    std::vector<SourceRef>                                   source_refs;
+    std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> target_blocks;
+    for (LoadBackTicket::PendingLoadBackItem& item : result.load_back_ticket->items()) {
+        ASSERT_EQ(item.source_tier, GetParam());
+        IBlockPool* source_pool = GetParam() == Tier::HOST ?
+                                      static_cast<IBlockPool*>(environment->host_pools[item.group_id].get()) :
+                                      static_cast<IBlockPool*>(environment->disk_pools[item.group_id].get());
+        for (const BlockIdxType block : item.source_blocks) {
+            ASSERT_NE(block, NULL_BLOCK_IDX);
+            EXPECT_EQ(source_pool->refCount(block), 2u);
+            source_refs.push_back(SourceRef{source_pool, block});
+        }
+
+        item.target_device_blocks.clear();
+        for (const std::string& tag : item.device_group_tags) {
+            DeviceBlockPoolPtr pool = devicePoolForTag(*environment, tag);
+            ASSERT_NE(pool, nullptr);
+            BlockIdList targets = pool->malloc(1).value();
+            ASSERT_EQ(targets.size(), 1u);
+            pool->incRef(targets, BlockRefType::REQUEST);
+            item.target_device_blocks.push_back(targets.front());
+            target_blocks.emplace_back(std::move(pool), targets.front());
+        }
+    }
+    ASSERT_FALSE(source_refs.empty());
+    ASSERT_FALSE(target_blocks.empty());
+
+    pausable_per_rank_transfer_engine->enablePause();
+    std::shared_ptr<AsyncContext> context = result.load_back_ticket->commit();
+    ASSERT_NE(context, nullptr);
+    pausable_per_rank_transfer_engine->waitUntilEntered();
+    EXPECT_FALSE(context->done());
+    for (const auto& [pool, block] : target_blocks) {
+        EXPECT_EQ(pool->refCount(block), 2u);
+    }
+
+    pausable_per_rank_transfer_engine->release();
+    environment->cache->waitForPendingTasks();
+
+    ASSERT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_FALSE(environment->cache->cancelLoadBack(context));
+    EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(), 1u);
+    EXPECT_EQ(environment->host_pools[0]->freeBlocksNum(), host_free_before[0]);
+    EXPECT_EQ(environment->host_pools[1]->freeBlocksNum(), host_free_before[1]);
+    if (GetParam() == Tier::HOST) {
+        EXPECT_EQ(environment->cache->getStats().host_heap_total_size, candidates_before.host_heap_total_size);
+    } else {
+        EXPECT_EQ(environment->cache->getStats().disk_heap_total_size, candidates_before.disk_heap_total_size);
+    }
+    for (size_t path_index = 0; path_index < environment->keys.size(); ++path_index) {
+        const std::vector<GroupSlot> slots_after = environment->slotsForPathNode(path_index);
+        ASSERT_EQ(slots_after.size(), slots_before[path_index].size());
+        for (size_t group_id = 0; group_id < slots_after.size(); ++group_id) {
+            EXPECT_EQ(slots_after[group_id].device_blocks, slots_before[path_index][group_id].device_blocks);
+            EXPECT_EQ(slots_after[group_id].host_block, slots_before[path_index][group_id].host_block);
+            EXPECT_EQ(slots_after[group_id].disk_slot, slots_before[path_index][group_id].disk_slot);
+            EXPECT_EQ(slots_after[group_id].transfer_state, SlotTransferState::IDLE);
+        }
+    }
+    for (const SourceRef& source : source_refs) {
+        EXPECT_EQ(source.pool->refCount(source.block), 1u);
+    }
+    for (const auto& [pool, block] : target_blocks) {
+        EXPECT_EQ(pool->refCount(block), 1u);
+    }
+    environment->expectPayloads();
+
+    BlockTreeMatchResult retry = environment->cache->match(environment->keys);
+    ASSERT_NE(retry.load_back_ticket, nullptr);
+    retry.load_back_ticket.reset();
+
+    result.load_back_ticket.reset();
+    environment->reclaimAll();
+    for (const auto& [pool, block] : target_blocks) {
+        pool->decRef(block, BlockRefType::REQUEST);
+    }
+    environment->cache->onBlocksReleased();
+    environment->reclaimAll();
+    environment->expectFullyReclaimed();
+}
+
+TEST_F(BlockTreeCacheIntegrationTest, DiskLoadBackHostToDeviceExceptionReleasesStagingAndRestoresSource) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+
+    FullSWAEnvironmentOptions options;
+    options.path_length = 1;
+    auto environment    = FullSWAEnvironment::create(options);
+    ASSERT_NE(environment, nullptr);
+    auto pausable_per_rank_transfer_engine = std::make_shared<PausablePerRankBlockTransferEngine>(
+        environment->groups, environment->components, TransferStatus::OK, /*pause_enabled=*/false);
+    BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache,
+                                                                 pausable_per_rank_transfer_engine);
+    environment->insertRequestPath();
+    environment->releaseRequestRefs();
+    demoteTo(*environment, Tier::DISK);
+    environment->expectPayloads();
+
+    const std::vector<GroupSlot> slots_before = environment->slotsForPathNode(0);
+    const std::vector<size_t> host_free_before = {
+        environment->host_pools[0]->freeBlocksNum(), environment->host_pools[1]->freeBlocksNum()};
+    BlockTreeMatchResult result = environment->cache->match(environment->keys);
+    ASSERT_NE(result.load_back_ticket, nullptr);
+    ASSERT_FALSE(result.load_back_ticket->empty());
+    const size_t disk_to_host_submit_count = result.load_back_ticket->items().size();
+    ASSERT_GT(disk_to_host_submit_count, 0u);
+
+    pausable_per_rank_transfer_engine->setThrowOnSubmit(disk_to_host_submit_count + 1);
+
+    struct SourceRef {
+        IBlockPool*  pool;
+        BlockIdxType block;
+    };
+    std::vector<SourceRef>                                   source_refs;
+    std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> target_blocks;
+    for (LoadBackTicket::PendingLoadBackItem& item : result.load_back_ticket->items()) {
+        ASSERT_EQ(item.source_tier, Tier::DISK);
+        ASSERT_EQ(item.source_blocks.size(), 1u);
+        IBlockPool* source_pool = environment->disk_pools[item.group_id].get();
+        EXPECT_EQ(source_pool->refCount(item.source_blocks.front()), 2u);
+        source_refs.push_back({source_pool, item.source_blocks.front()});
+
+        item.target_device_blocks.clear();
+        for (const std::string& tag : item.device_group_tags) {
+            DeviceBlockPoolPtr pool = devicePoolForTag(*environment, tag);
+            ASSERT_NE(pool, nullptr);
+            BlockIdList blocks = pool->malloc(1).value();
+            ASSERT_EQ(blocks.size(), 1u);
+            pool->incRef(blocks, BlockRefType::REQUEST);
+            item.target_device_blocks.push_back(blocks.front());
+            target_blocks.emplace_back(std::move(pool), blocks.front());
+        }
+    }
+
+    pausable_per_rank_transfer_engine->enablePause();
+    std::shared_ptr<AsyncContext> context = result.load_back_ticket->commit();
+    ASSERT_NE(context, nullptr);
+    pausable_per_rank_transfer_engine->waitUntilEntered();
+    pausable_per_rank_transfer_engine->release();
+    environment->cache->waitForPendingTasks();
+
+    ASSERT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(), disk_to_host_submit_count + 1);
+    EXPECT_EQ(environment->host_pools[0]->freeBlocksNum(), host_free_before[0]);
+    EXPECT_EQ(environment->host_pools[1]->freeBlocksNum(), host_free_before[1]);
+    const std::vector<GroupSlot> slots_after = environment->slotsForPathNode(0);
+    ASSERT_EQ(slots_after.size(), slots_before.size());
+    for (size_t group_id = 0; group_id < slots_after.size(); ++group_id) {
+        EXPECT_EQ(slots_after[group_id].device_blocks, slots_before[group_id].device_blocks);
+        EXPECT_EQ(slots_after[group_id].host_block, slots_before[group_id].host_block);
+        EXPECT_EQ(slots_after[group_id].disk_slot, slots_before[group_id].disk_slot);
+        EXPECT_EQ(slots_after[group_id].transfer_state, SlotTransferState::IDLE);
+    }
+    for (const SourceRef& source : source_refs) {
+        EXPECT_EQ(source.pool->refCount(source.block), 1u);
+    }
+    for (const auto& [pool, block] : target_blocks) {
+        EXPECT_EQ(pool->refCount(block), 1u);
+    }
+    environment->expectPayloads();
+
+    BlockTreeMatchResult retry = environment->cache->match(environment->keys);
+    ASSERT_NE(retry.load_back_ticket, nullptr);
+    retry.load_back_ticket.reset();
+    result.load_back_ticket.reset();
+    environment->reclaimAll();
+    for (const auto& [pool, block] : target_blocks) {
+        pool->decRef(block, BlockRefType::REQUEST);
+    }
+    environment->cache->onBlocksReleased();
+    environment->reclaimAll();
+    environment->expectFullyReclaimed();
+}
+
 class BlockTreeCacheLoadBackDisabledTest: public ::testing::TestWithParam<DisabledLoadBackTierLayout> {};
 
 TEST_P(BlockTreeCacheLoadBackDisabledTest, LoadBackDisabled_DoesNotReportLowerTierHit) {
@@ -1420,7 +1755,6 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadBackExplicitAbortImmediatelyRest
             continue;
         }
         ASSERT_EQ(item.device_group_tags.size(), item.source_blocks.size());
-        item.node = nullptr;
         for (size_t local_pool_index = 0; local_pool_index < item.source_blocks.size(); ++local_pool_index) {
             DeviceBlockPoolPtr pool = devicePoolForTag(*environment, item.device_group_tags[local_pool_index]);
             ASSERT_NE(pool, nullptr);
@@ -1437,10 +1771,12 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadBackExplicitAbortImmediatelyRest
     }
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
     environment->expectPayloads();
+    const size_t device_candidates_before_abort = environment->cache->getStats().device_heap_total_size;
 
     std::shared_ptr<LoadBackTicket> ticket = std::move(result.load_back_ticket);
     ticket.reset();
-    EXPECT_EQ(environment->cache->getStats().device_heap_total_size, 1u);
+    const size_t device_candidates_after_abort = environment->cache->getStats().device_heap_total_size;
+    EXPECT_GT(device_candidates_after_abort, device_candidates_before_abort);
     EXPECT_EQ(environment->cache->getStats().tree_node_count, tree_nodes_before);
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
     for (const auto& [pool, block] : device_sources) {
@@ -1449,7 +1785,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadBackExplicitAbortImmediatelyRest
     environment->expectPayloads();
 
     ticket.reset();
-    EXPECT_EQ(environment->cache->getStats().device_heap_total_size, 1u);
+    EXPECT_EQ(environment->cache->getStats().device_heap_total_size, device_candidates_after_abort);
     EXPECT_EQ(environment->cache->evictForTag("tag_0", 2), 2);
     for (const auto& [pool, block] : device_sources) {
         EXPECT_FALSE(pool->isAllocated(block));
@@ -1480,7 +1816,6 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadBackAsyncCompletionRefreshesBefo
         item.target_device_blocks.clear();
         if (item.source_tier == Tier::DEVICE) {
             ASSERT_EQ(item.device_group_tags.size(), item.source_blocks.size());
-            item.node                 = nullptr;
             item.target_device_blocks = item.source_blocks;
             for (size_t local_pool_index = 0; local_pool_index < item.source_blocks.size(); ++local_pool_index) {
                 DeviceBlockPoolPtr pool = devicePoolForTag(*environment, item.device_group_tags[local_pool_index]);

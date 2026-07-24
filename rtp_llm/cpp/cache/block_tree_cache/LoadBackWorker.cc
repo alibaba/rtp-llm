@@ -1,5 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/LoadBackWorker.h"
 
+#include <exception>
+
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -82,8 +84,11 @@ LoadBackWorker::PrepareStatus LoadBackWorker::prepareTransferItem(Task& task, si
         RTP_LLM_LOG_WARNING("invalid group id, group=%d", item.group_id);
         return PrepareStatus::FAILED;
     }
-    if (item.target_device_blocks.empty()) {
-        RTP_LLM_LOG_WARNING("invalid item, group=%d", item.group_id);
+    if (item.target_device_blocks.size() != group->devicePoolCount()) {
+        RTP_LLM_LOG_WARNING("target block count mismatch, group=%d expected=%zu actual=%zu",
+                            item.group_id,
+                            group->devicePoolCount(),
+                            item.target_device_blocks.size());
         return PrepareStatus::FAILED;
     }
     if (item.source_tier == Tier::DEVICE) {
@@ -151,11 +156,16 @@ bool LoadBackWorker::runTransfer(Task&                          task,
     }
 
     bool copy_success = prepared;
-    if (copy_success) {
-        copy_success = transfer_dispatcher.executeMultiRank(task.disk_to_host_descriptors, disk_timeout_ms);
-    }
-    if (copy_success) {
-        copy_success = transfer_dispatcher.executeMultiRank(task.host_to_device_descriptors, host_timeout_ms);
+    try {
+        if (copy_success) {
+            copy_success = transfer_dispatcher.executeMultiRank(task.disk_to_host_descriptors, disk_timeout_ms);
+        }
+        if (copy_success) {
+            copy_success = transfer_dispatcher.executeMultiRank(task.host_to_device_descriptors, host_timeout_ms);
+        }
+    } catch (const std::exception& error) {
+        copy_success = false;
+        RTP_LLM_LOG_ERROR("load-back execution failed with exception: %s", error.what());
     }
     if (host_transfer_blocks > 0) {
         metrics_reporter.reportTransferFinished(
