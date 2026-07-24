@@ -325,6 +325,7 @@ struct SpeculativeExecutionConfig {
     int64_t         gen_num_per_cycle             = 1;
     bool            force_stream_sample           = false;
     bool            force_score_context_attention = true;
+    int             fp8_kv_cache                  = -1;
     std::string     quantization                  = "";
     std::string     checkpoint_path               = "";
     std::string     to_string() const;

@@ -1351,6 +1351,7 @@ class MSAAttention(nn.Module):
     _trtllm_workspace: Dict[torch.device, torch.Tensor] = {}
     _cp_shared_meta: Optional[Dict[str, Any]] = None
     _paged_decode_shared_meta: Optional[Dict[str, Any]] = None
+    _target_verify_shared_meta: Optional[Dict[str, Any]] = None
 
     @classmethod
     def _get_trtllm_workspace(cls, device: torch.device):
@@ -1729,42 +1730,65 @@ class MSAAttention(nn.Module):
     def _paged_decode_addressing(
         self, attn_inputs: PyAttentionInputs, device: torch.device
     ):
-        seq = attn_inputs.sequence_lengths
-        phys_block_table = self._physical_block_table(attn_inputs)
-        cache_key = (
-            int(seq.data_ptr()),
-            tuple(seq.shape),
-            str(seq.device),
-            int(self.page_size),
-        )
-
         # Sparse layers execute in increasing layer order within one decode step.
         cache = MSAAttention._paged_decode_shared_meta
-        if (
-            cache is not None
-            and cache.get("key") == cache_key
-            and cache.get("layer_idx", -1) < self.layer_idx
-        ):
+        if cache is not None and cache["layer_idx"] < self.layer_idx:
             cache["layer_idx"] = self.layer_idx
-            return (
-                cache["kv_lens"],
-                cache["seq_lens"],
-                cache["positions"],
-                phys_block_table,
-            )
+            return cache["addressing"]
 
+        seq = attn_inputs.sequence_lengths
+        phys_block_table = self._physical_block_table(attn_inputs)
         prefix_i64 = seq.to(device=device, dtype=torch.int64)
         kv_lens = prefix_i64 + 1
         seq_lens = kv_lens.to(torch.int32)
         positions = prefix_i64.to(torch.int32)
+        addressing = (kv_lens, seq_lens, positions, phys_block_table)
         MSAAttention._paged_decode_shared_meta = {
-            "key": cache_key,
             "layer_idx": self.layer_idx,
-            "kv_lens": kv_lens,
-            "seq_lens": seq_lens,
-            "positions": positions,
+            "addressing": addressing,
         }
-        return kv_lens, seq_lens, positions, phys_block_table
+        return addressing
+
+    def _target_verify_addressing(
+        self,
+        attn_inputs: PyAttentionInputs,
+        total_tokens: int,
+        device: torch.device,
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        # Sparse layers execute in increasing layer order within one target
+        # forward. The MSA request block table, positions, and validity metadata
+        # are shared across those layers, so expand them once in the first sparse
+        # layer. A new target forward rolls the layer index back and rebuilds.
+        cache = MSAAttention._target_verify_shared_meta
+        if cache is not None and cache["layer_idx"] < self.layer_idx:
+            cache["layer_idx"] = self.layer_idx
+            return cache["addressing"]
+
+        prefix_lengths = attn_inputs.prefix_lengths
+        input_lengths = attn_inputs.input_lengths
+        request_block_table = self._physical_block_table(attn_inputs)
+        batch_size = int(prefix_lengths.numel())
+        phys_block_table = _repeat_request_block_table_for_verify_tokens(
+            request_block_table, batch_size, total_tokens
+        )
+        positions, seq_lens, valid_token_mask = _build_target_verify_token_metadata(
+            prefix_lengths,
+            input_lengths,
+            total_tokens,
+            device,
+        )
+        addressing = (
+            request_block_table,
+            phys_block_table,
+            positions,
+            seq_lens,
+            valid_token_mask,
+        )
+        MSAAttention._target_verify_shared_meta = {
+            "layer_idx": self.layer_idx,
+            "addressing": addressing,
+        }
+        return addressing
 
     @staticmethod
     def _cuda_graph_forward_active() -> bool:
@@ -3346,20 +3370,21 @@ class MSAAttention(nn.Module):
         input_shape = hidden_states.shape[:-1]
         total_tokens = int(hidden_states.shape[0])
         device = hidden_states.device
-        batch_size = int(attn_inputs.prefix_lengths.numel())
-        request_block_table = self._physical_block_table(attn_inputs)
-        phys_block_table = _repeat_request_block_table_for_verify_tokens(
-            request_block_table, batch_size, total_tokens
-        )
 
         # The shared target-verify contract remains request-row based. Expand it
         # only inside MiniMax-M3 MSA, immediately before the sparse operator.
-        positions, seq_lens, valid_token_mask = _build_target_verify_token_metadata(
-            attn_inputs.prefix_lengths,
-            attn_inputs.input_lengths,
+        (
+            request_block_table,
+            phys_block_table,
+            positions,
+            seq_lens,
+            valid_token_mask,
+        ) = self._target_verify_addressing(
+            attn_inputs,
             total_tokens,
             device,
         )
+        request_batch_size = int(request_block_table.shape[0])
 
         if self._should_use_mxfp8_fused_qkv_idx_decode(x_fp8, x_scale):
             paged_kv_base = self._paged_kv_base_view(kv_cache)
@@ -3445,8 +3470,8 @@ class MSAAttention(nn.Module):
             phys_block_table=phys_block_table,
             paged_idx_k=paged_idx_k,
             score_block_table=request_block_table,
-            score_seq_lens=seq_lens.view(batch_size, -1)[:, -1],
-            decode_query_len=total_tokens // batch_size,
+            score_seq_lens=seq_lens.view(request_batch_size, -1)[:, -1],
+            decode_query_len=total_tokens // request_batch_size,
         )
         o = torch.where(valid_token_mask[:, None, None], o, torch.zeros_like(o))
 

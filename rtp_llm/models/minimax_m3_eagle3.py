@@ -14,7 +14,7 @@ from rtp_llm.model_loader.model_weight_info import (
     ModelWeightInfo,
 )
 from rtp_llm.model_loader.weight_module import AtomicWeight
-from rtp_llm.models.qwen_v2 import QWenV2
+from rtp_llm.models.llama import Llama
 from rtp_llm.ops import SpeculativeType
 from rtp_llm.utils.model_weight import (
     CkptWeightInfo,
@@ -194,7 +194,7 @@ class MiniMaxM3Eagle3WeightInfo(ModelDeployWeightInfo):
         )
 
 
-class MiniMaxM3Eagle3(QWenV2):
+class MiniMaxM3Eagle3(Llama):
     _NUM_AUX_HIDDEN_STATES = 3
 
     @classmethod
@@ -210,7 +210,12 @@ class MiniMaxM3Eagle3(QWenV2):
         config = ModelConfig()
         config.ckpt_path = ckpt_path
         config.attn_config.rope_config.style = 1
-        QWenV2._from_config_json(config, config_json)
+        Llama.from_huggingface(config, config_json)
+        config.max_seq_len = int(
+            config_json.get("max_position_embeddings", config.max_seq_len)
+        )
+        config.config_dtype = config_json.get("torch_dtype")
+        config.headwise_config = config_json.get("headwise_config")
 
         if config.num_layers != 1:
             raise ValueError(

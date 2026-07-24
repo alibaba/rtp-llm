@@ -1,5 +1,6 @@
 import functools
 import json
+import logging
 import os
 from typing import List
 
@@ -22,6 +23,7 @@ from rtp_llm.utils.model_weight import (
     concat_1,
     identity,
     transpose,
+    yarn_get_mscale,
     zeros,
 )
 
@@ -54,43 +56,6 @@ def _merge_qkv_weight(ts: List[torch.Tensor]) -> torch.Tensor:
 def _merge_qkv_bias(ts: List[torch.Tensor]) -> torch.Tensor:
     q, k, v = ts
     return torch.concat([q, k, v], dim=0).contiguous()
-
-
-def _external_lm_head_candidates(ckpt_path: str) -> List[str]:
-    ckpt_dir = os.path.abspath(ckpt_path)
-    return [
-        os.path.join(ckpt_dir, "lm_head.pt"),
-        os.path.join(ckpt_dir, "assets", "lm_head.pt"),
-        os.path.join(os.path.dirname(ckpt_dir), "assets", "lm_head.pt"),
-    ]
-
-
-def _external_lm_head_path(ckpt_path: str) -> str:
-    candidates = _external_lm_head_candidates(ckpt_path)
-    for path in candidates:
-        if os.path.exists(path):
-            return path
-    return candidates[0]
-
-
-def _load_external_lm_head(
-    _unused_tensors: List[torch.Tensor], ckpt_path: str
-) -> torch.Tensor:
-    path = _external_lm_head_path(ckpt_path)
-    if not os.path.exists(path):
-        raise FileNotFoundError(
-            "MiniMax-M3 EAGLE1 HASS checkpoint requires external lm_head, "
-            "searched: " + ", ".join(_external_lm_head_candidates(ckpt_path))
-        )
-    try:
-        weight = torch.load(path, map_location="cpu", weights_only=True)
-    except TypeError:
-        weight = torch.load(path, map_location="cpu")
-    if not isinstance(weight, torch.Tensor) or weight.dim() != 2:
-        raise ValueError(
-            "MiniMax-M3 EAGLE1 lm_head must be a 2-D tensor, " f"got {type(weight)}"
-        )
-    return weight.contiguous()
 
 
 class MiniMaxM3Eagle1WeightInfo(ModelDeployWeightInfo):
@@ -130,13 +95,6 @@ class MiniMaxM3Eagle1WeightInfo(ModelDeployWeightInfo):
                 W.final_ln_beta,
                 [],
                 functools.partial(zeros, shape=[self._hidden_size]),
-            ),
-            AtomicWeight(
-                W.lm_head,
-                [],
-                functools.partial(
-                    _load_external_lm_head, ckpt_path=self.model_config.ckpt_path
-                ),
             ),
         ]
         layer_weights = [
@@ -221,18 +179,68 @@ class MiniMaxM3Eagle1WeightInfo(ModelDeployWeightInfo):
 
 
 class MiniMaxM3Eagle1(QWenV2):
+    def _load(self, device: str):
+        super()._load(device)
+
+        from rtp_llm.models.minimax_m3 import _get_target_lm_head
+
+        target_lm_head = _get_target_lm_head(device)
+        draft_placeholder = self.weight.get_global_weight(W.lm_head)
+        if (
+            target_lm_head.dtype != draft_placeholder.dtype
+            or target_lm_head.device != draft_placeholder.device
+        ):
+            raise RuntimeError(
+                "MiniMax-M3 EAGLE1 target lm_head and draft weights must have "
+                "matching dtype and device; "
+                f"target={tuple(target_lm_head.shape)}/{target_lm_head.dtype}/"
+                f"{target_lm_head.device}, "
+                f"draft={tuple(draft_placeholder.shape)}/{draft_placeholder.dtype}/"
+                f"{draft_placeholder.device}"
+            )
+        self.weight.set_global_weight(W.lm_head, target_lm_head)
+        logging.info(
+            "MiniMax-M3 EAGLE1 reuses target lm_head on %s "
+            "(target_data_ptr=%d, discarded_placeholder_data_ptr=%d)",
+            device,
+            target_lm_head.data_ptr(),
+            draft_placeholder.data_ptr(),
+        )
+
     @classmethod
     def _create_config(cls, ckpt_path: str) -> PyModelConfig:
         config = PyModelConfig()
         config.ckpt_path = ckpt_path
         config.attn_config.rope_config.dim = 128
         config.attn_config.rope_config.style = 1
+        # Keep the draft output head in checkpoint-native BF16. The framework
+        # default upcasts lm_head to FP32, which dispatches a slow full-vocab
+        # SIMT GEMM during both draft decode and draft refresh.
+        config.enable_fp32_lm_head = False
         config_path = os.path.join(ckpt_path, "config.json")
         if not os.path.exists(config_path):
             raise Exception("MiniMax-M3 EAGLE1 parameter from unknown source")
         with open(config_path) as reader:
             config_json = json.loads(reader.read())
         QWenV2._from_config_json(config, config_json)
+        rope_scaling = config_json.get("rope_scaling")
+        if rope_scaling is not None:
+            rope_type = rope_scaling.get("type", rope_scaling.get("rope_type"))
+            if rope_type != "yarn":
+                raise ValueError(
+                    "MiniMax-M3 EAGLE1 only supports YaRN rope_scaling, "
+                    f"got {rope_type}"
+                )
+            config.attn_config.rope_config.style = 5
+            config.attn_config.rope_config.scale = rope_scaling["factor"]
+            config.attn_config.rope_config.factor1 = rope_scaling.get("beta_slow", 1)
+            config.attn_config.rope_config.factor2 = rope_scaling.get("beta_fast", 32)
+            config.attn_config.rope_config.max_pos = rope_scaling[
+                "original_max_position_embeddings"
+            ]
+            config.attn_config.rope_config.mscale = yarn_get_mscale(
+                config.attn_config.rope_config.scale
+            )
         if config.num_layers != 1:
             raise ValueError(
                 "MiniMax-M3 EAGLE1 checkpoint must define exactly one draft layer, "

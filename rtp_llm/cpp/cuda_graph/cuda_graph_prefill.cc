@@ -13,11 +13,12 @@ void CudaGraphRunner::capturePrefill() {
         int seq_len = capture_range_[i];
         RTP_LLM_LOG_INFO("capture range for seq len: %d", seq_len);
         PyModelInputs inputs;
-        const bool    draft_prefill_graph_mode    = is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
-        const bool    draft_prefill_full_capacity = draft_prefill_graph_mode && hc_mult_ > 1;
-        const int     active_bs = draft_prefill_graph_mode ? (seq_len + num_tokens_per_bs_ - 1) / num_tokens_per_bs_ :
-                                                             static_cast<int>(max_bs_);
-        const int     capture_batch_size =
+        const bool    draft_prefill_graph_mode = is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
+        const bool    draft_prefill_full_capacity =
+            draft_prefill_graph_mode && draft_prefill_requires_full_token_capacity_;
+        const int active_bs = draft_prefill_graph_mode ? (seq_len + num_tokens_per_bs_ - 1) / num_tokens_per_bs_ :
+                                                         static_cast<int>(max_bs_);
+        const int capture_batch_size =
             (draft_prefill_graph_mode && !draft_prefill_full_capacity) ? active_bs : static_cast<int>(max_bs_);
         // for attention, it always run the max_bs, so when we run `forward`, the real batch size is not sure
         // we will transfer a `batch size tensor(int)` for `copy kernel`.
@@ -35,8 +36,8 @@ void CudaGraphRunner::capturePrefill() {
             inputs.attention_inputs.input_lengths[0] = seq_len;
         } else {
             // Draft model prefill: distribute seq_len tokens across batches (max num_tokens_per_bs_ each).
-            // GLM5/flat MTP captures only active batches for each seq_len graph so FlashInfer MLA prefill
-            // sees the same effective batch shape as eager. DSv4 full-capacity capture still uses max_bs_.
+            // Compact draft prefill captures only active requests so attention sees the same
+            // token and batch shape as eager. Fixed-capacity models explicitly keep max_bs_.
             int active_bs  = (seq_len + num_tokens_per_bs_ - 1) / num_tokens_per_bs_;
             int prefix_len = max_seq_len_ > num_tokens_per_bs_ ? max_seq_len_ - num_tokens_per_bs_ : 0;
 
@@ -69,8 +70,14 @@ void CudaGraphRunner::capturePrefill() {
         }
 
         inputs.attention_inputs.context_total_kv_length = seq_len;
-        inputs.attention_inputs.prefill_cuda_graph_copy_params =
-            capture_mem_hold_.py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params;
+        if (draft_prefill_graph_mode && !draft_prefill_full_capacity) {
+            // Each compact draft-prefill graph has an exact token and batch shape.
+            // Running the max-batch copy path would expand Q beyond cu_seqlens[-1].
+            inputs.attention_inputs.prefill_cuda_graph_copy_params.reset();
+        } else {
+            inputs.attention_inputs.prefill_cuda_graph_copy_params =
+                capture_mem_hold_.py_model_inputs_.attention_inputs.prefill_cuda_graph_copy_params;
+        }
         if (inputs.bert_embedding_inputs.position_encoding.numel() > 0) {
             inputs.bert_embedding_inputs.combo_position_ids =
                 inputs.bert_embedding_inputs.combo_position_ids.slice(0, 0, seq_len);
@@ -81,8 +88,8 @@ void CudaGraphRunner::capturePrefill() {
         graph_instances_[seq_len].mem_hold_ = createCaptureMemoryHold(inputs, capture_tokens_count);
         graph_instances_[seq_len].mem_hold_.attn_pyobj_ =
             py_attn_pyobj_method_(graph_instances_[seq_len].mem_hold_.py_model_inputs_, true);
-        // DSv4 MTP full-capacity capture returns [max_bs*num_tokens_per_bs, dim].
-        // GLM5 MTP and embedding prefill return [seq_len, dim].
+        // Fixed-capacity draft models return [max_bs*num_tokens_per_bs, dim];
+        // compact draft and embedding prefill return [seq_len, dim].
         if (!draft_prefill_full_capacity) {
             graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_ =
                 graph_instances_[seq_len].mem_hold_.decoder_layer_hidden_states_.slice(0, 0, seq_len);
@@ -95,18 +102,33 @@ void CudaGraphRunner::capturePrefill() {
 }
 
 std::vector<int> CudaGraphRunner::getPrefillSequenceLengthsToCapture() {
-    // Draft model prefill (num_tokens_per_bs_ != max_seq_len_): capture at multiples of num_tokens_per_bs_
+    // Reuse decode buckets instead of retaining one FlashInfer workspace for
+    // every draft-prefill batch size. Compact draft models replay exact
+    // buckets only; non-bucket batches fall back to eager execution. Models
+    // that explicitly keep full token capacity may pad to the next bucket.
+    // Always include max_bs_ so the configured concurrency is capturable.
     if (num_tokens_per_bs_ != max_seq_len_) {
-        std::vector<int> result;
-        for (int i = 1; i <= max_bs_; ++i) {
-            result.push_back(i * num_tokens_per_bs_);
+        std::vector<int> capture_batch_sizes;
+        capture_batch_sizes.reserve(decode_capture_batch_sizes_.size() + 1);
+        for (const int batch_size : decode_capture_batch_sizes_) {
+            if (batch_size > 0 && batch_size <= max_bs_) {
+                capture_batch_sizes.push_back(batch_size);
+            }
         }
-        RTP_LLM_LOG_INFO(
-            "Draft model prefill: capture seq_lens at %d intervals, %zu total (max_bs=%d, num_tokens_per_bs=%d)",
-            num_tokens_per_bs_,
-            result.size(),
-            max_bs_,
-            num_tokens_per_bs_);
+        capture_batch_sizes.push_back(max_bs_);
+        std::sort(capture_batch_sizes.begin(), capture_batch_sizes.end());
+        capture_batch_sizes.erase(std::unique(capture_batch_sizes.begin(), capture_batch_sizes.end()),
+                                  capture_batch_sizes.end());
+
+        std::vector<int> result;
+        result.reserve(capture_batch_sizes.size());
+        for (const int batch_size : capture_batch_sizes) {
+            result.push_back(batch_size * num_tokens_per_bs_);
+        }
+        RTP_LLM_LOG_INFO("Draft model prefill: capture %zu batch buckets (max_bs=%d, num_tokens_per_bs=%d)",
+                         result.size(),
+                         max_bs_,
+                         num_tokens_per_bs_);
         return result;
     }
 
