@@ -123,6 +123,18 @@ class MlaAttention(nn.Module):
             cp_params=fmha_impl.cp_params,
         )
 
+    def _apply_output_gate(
+        self, attn_output: torch.Tensor, hidden_states: torch.Tensor
+    ) -> torch.Tensor:
+        """Hook applied to the attention context after reshape and before o_proj.
+
+        Identity by default (standard MLA has no output gate). Subclasses that
+        need a per-element output gate (e.g. Kimi-K3's sigmoid gate) override
+        this. It runs before o_proj + TP all_reduce, so any gate weight sharded
+        along the head/output-feature axis stays element-wise correct per rank.
+        """
+        return attn_output
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -178,6 +190,7 @@ class MlaAttention(nn.Module):
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
             )
+        attn_output = self._apply_output_gate(attn_output, hidden_states)
         attn_output = self.o_proj(attn_output)
         if self.parallelism_config.get_attn_tp_size() > 1:
             attn_output = all_reduce(attn_output, group=Group.TP)
