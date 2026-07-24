@@ -161,14 +161,66 @@ def sp_id(
     return t
 
 
+# KDA fused qkv: [hidden, q+k+v] -> per-section TP split on dim=1.
+def split_kda_qkv(
+    t: torch.Tensor, load_config: LoadConfig, linear_config: LinearAttnConfig
+) -> torch.Tensor:
+    q_size = linear_config.linear_num_key_heads * linear_config.linear_key_head_dim
+    k_size = linear_config.linear_num_key_heads * linear_config.linear_key_head_dim
+    v_size = linear_config.linear_num_value_heads * linear_config.linear_value_head_dim
+    q, k, v = torch.split(t, [q_size, k_size, v_size], dim=1)
+    q = q.split(q.shape[1] // load_config.tp_size, dim=1)[
+        load_config.tp_rank
+    ].contiguous()
+    k = k.split(k.shape[1] // load_config.tp_size, dim=1)[
+        load_config.tp_rank
+    ].contiguous()
+    v = v.split(v.shape[1] // load_config.tp_size, dim=1)[
+        load_config.tp_rank
+    ].contiguous()
+    return torch.cat([q, k, v], dim=1)
+
+
+# KDA split: TP split on dim=1 (b_proj, LoRA up projections, full-rank gate).
+def split_kda_tp_dim1(
+    t: torch.Tensor, load_config: LoadConfig, linear_config: LinearAttnConfig
+) -> torch.Tensor:
+    return t.split(t.shape[1] // load_config.tp_size, dim=1)[
+        load_config.tp_rank
+    ].contiguous()
+
+
+# KDA dt_bias layout [num_heads * head_dim] -> [local_heads * head_dim].
+def split_kda_dt_bias(
+    t: torch.Tensor, load_config: LoadConfig, linear_config: LinearAttnConfig
+) -> torch.Tensor:
+    num_heads = linear_config.linear_num_value_heads
+    head_dim = linear_config.linear_key_head_dim
+    local_heads = num_heads // load_config.tp_size
+    t = t.reshape(num_heads, head_dim)
+    start = local_heads * load_config.tp_rank
+    return t[start : start + local_heads].reshape(-1)
+
+
 _linear_attn_split_stratey = {
     W.linear_attn_qkvz_w: split_qkvz,
     W.linear_attn_ba_w: split_ba,
-    W.linear_attn_alog: split_head_linear,
-    W.linear_attn_dt_b: split_head_linear,
+    W.linear_attn_alog: split_head_linear,  # GDN/KDA shared: [num_heads]
+    W.linear_attn_dt_b: split_head_linear,  # GDN-only: [num_heads]
     W.linear_attn_conv1d_w: split_conv1d,
     W.linear_attn_out_w: split_out_linear,
     W.linear_attn_norm_w: sp_id,
+    # KDA (Kimi Delta Attention) fused weights.
+    W.linear_attn_qkv_w: split_kda_qkv,
+    W.linear_attn_b_w: split_kda_tp_dim1,
+    W.linear_attn_f_a_w: sp_id,  # forget-gate LoRA down: rank not sharded
+    W.linear_attn_f_b_w: split_kda_tp_dim1,
+    # Reserved for the kimi_linear low-rank output gate; K3's manifest loads the
+    # full-rank g_w below instead, so these two have no K3 load path yet.
+    W.linear_attn_g_a_w: sp_id,  # output-gate LoRA down: rank not sharded
+    W.linear_attn_g_b_w: split_kda_tp_dim1,
+    W.linear_attn_g_w: split_kda_tp_dim1,  # K3 full-rank output gate
+    W.linear_attn_dt_b_kda: split_kda_dt_bias,  # KDA-only: [num_heads * head_dim]
 }
 
 
