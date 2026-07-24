@@ -75,9 +75,41 @@ class Tau2BenchComparer(BaseComparer):
         logging.info(f"[TAU2] PASS: OVERALL score={score} >= threshold={threshold}")
 
     def _pip_install(self, args: List[str]) -> None:
-        cmd = [sys.executable, "-m", "pip", "install", "--quiet"] + args
+        deps_dir = self._get_python_deps_dir()
+        cmd = [
+            sys.executable,
+            "-m",
+            "pip",
+            "install",
+            "--quiet",
+            "--target",
+            deps_dir,
+        ] + args
         logging.info(f"[TAU2] pip install: {' '.join(cmd)}")
         subprocess.run(cmd, check=True)
+        if deps_dir not in sys.path:
+            sys.path.insert(0, deps_dir)
+
+    def _get_python_deps_dir(self) -> str:
+        deps_dir = getattr(self, "_tau2_python_deps_dir", None)
+        if deps_dir is None:
+            deps_dir = tempfile.mkdtemp(
+                prefix="tau2-python-deps-",
+                dir=os.environ.get("TEST_TMPDIR"),
+            )
+            self._tau2_python_deps_dir = deps_dir
+        return deps_dir
+
+    def _get_python_env(self) -> dict:
+        env = os.environ.copy()
+        deps_dir = self._get_python_deps_dir()
+        current_pythonpath = env.get("PYTHONPATH")
+        env["PYTHONPATH"] = (
+            deps_dir
+            if not current_pythonpath
+            else deps_dir + os.pathsep + current_pythonpath
+        )
+        return env
 
     def _install_evalscope(self) -> None:
         pinned_spec = f"evalscope=={EVALSCOPE_PINNED_VERSION}"
@@ -245,6 +277,7 @@ class Tau2BenchComparer(BaseComparer):
             proc = subprocess.Popen(
                 cmd,
                 cwd=extract_root,
+                env=self._get_python_env(),
                 stdout=subprocess.PIPE,
                 stderr=subprocess.STDOUT,
                 bufsize=1,

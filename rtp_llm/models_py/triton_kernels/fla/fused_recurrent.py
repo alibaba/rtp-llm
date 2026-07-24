@@ -44,8 +44,8 @@ def fused_recurrent_gated_delta_rule_fwd_kernel(
     sequence_lengths,
     max_block_size: tl.int32,
     scale,
-    N: tl.constexpr,  # num of sequences
-    T: tl.constexpr,  # num of tokens
+    N,  # num of sequences
+    T,  # num of tokens
     B: tl.constexpr,
     H: tl.constexpr,
     HV: tl.constexpr,
