@@ -249,3 +249,89 @@ jobs:
         # git checkout origin/yuzho/ci_workflows -- .github/workflows/create_pr.yaml
         # git commit -a -m '[CI][AMD] add workflows'
         git push --set-upstream origin feat/dsv4_on_dev_xjn --force
+
+  sync-debug-qwen35-repeat-rootcause-20260722:
+    runs-on: cpu-only
+    permissions:
+      contents: write
+      actions: write
+
+    steps:
+    - name: Checkout repository
+      uses: actions/checkout@v4
+      with:
+        token: ${{ secrets.PUSH_TO_MAIN }}
+        fetch-depth: 10
+
+    - name: Configure Git
+      run: |
+        git config --global user.name "yuzho-amd"
+        git config --global user.email "yuzho@amd.com"
+
+    - name: Add upstream remote
+      run: |
+        git remote add upstream https://github.com/alibaba/rtp-llm.git || true
+        git remote -v
+
+    - name: Check if origin has debug/qwen35-repeat-rootcause-20260722 branch
+      id: check_debug_qwen35
+      run: |
+        if git ls-remote --heads origin debug/qwen35-repeat-rootcause-20260722 | grep -q 'refs/heads/debug/qwen35-repeat-rootcause-20260722$'; then
+          echo "exists=true" >> $GITHUB_OUTPUT
+        else
+          echo "exists=false" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Fetch and checkout debug/qwen35-repeat-rootcause-20260722 if exists
+      if: steps.check_debug_qwen35.outputs.exists == 'true'
+      run: |
+        git fetch origin debug/qwen35-repeat-rootcause-20260722
+        git checkout debug/qwen35-repeat-rootcause-20260722
+        git reset --hard origin/debug/qwen35-repeat-rootcause-20260722
+
+    - name: Create and checkout debug/qwen35-repeat-rootcause-20260722 if not exists
+      if: steps.check_debug_qwen35.outputs.exists == 'false'
+      run: |
+        git checkout -b debug/qwen35-repeat-rootcause-20260722
+
+    - name: Check if sync is needed for debug/qwen35-repeat-rootcause-20260722
+      id: check_sync_debug_qwen35
+      run: |
+        git fetch upstream debug/qwen35-repeat-rootcause-20260722
+        UPSTREAM_COMMIT=$(git rev-parse upstream/debug/qwen35-repeat-rootcause-20260722)
+        CURRENT_COMMIT=$(git rev-parse HEAD)
+        echo "UPSTREAM_COMMIT: $UPSTREAM_COMMIT"
+
+        if [ "$CURRENT_COMMIT" = "$UPSTREAM_COMMIT" ]; then
+          echo "Already synced with upstream/debug/qwen35-repeat-rootcause-20260722"
+          echo "needs_sync=false" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+
+        PARENT_COMMIT=$(git rev-parse --verify HEAD^ 2>/dev/null || echo "")
+        echo "PARENT_COMMIT: $PARENT_COMMIT"
+        if [ "$PARENT_COMMIT" = "$UPSTREAM_COMMIT" ]; then
+          COMMIT_MSG=$(git log -1 --pretty=%B)
+          if echo "$COMMIT_MSG" | grep -q "\[CI\]\[AMD\] add workflows"; then
+            echo "Already synced with upstream/debug/qwen35-repeat-rootcause-20260722 (has CI commit)"
+            echo "needs_sync=false" >> $GITHUB_OUTPUT
+            exit 0
+          fi
+        fi
+
+        echo "Need to sync with upstream/debug/qwen35-repeat-rootcause-20260722"
+        echo "needs_sync=true" >> $GITHUB_OUTPUT
+
+    - name: Sync debug/qwen35-repeat-rootcause-20260722 with upstream and add AMD workflows
+      if: steps.check_sync_debug_qwen35.outputs.needs_sync == 'true'
+      run: |
+        git fetch upstream debug/qwen35-repeat-rootcause-20260722
+        git reset --hard upstream/debug/qwen35-repeat-rootcause-20260722
+        # rm -rf .github/workflows/*.yaml
+        # rm -rf .github/workflows/*.yml
+        # git fetch origin yuzho/ci_workflows
+        # git checkout origin/yuzho/ci_workflows -- .github/workflows/sync.yaml
+        # git checkout origin/yuzho/ci_workflows -- .github/workflows/run_tests.yaml
+        # git checkout origin/yuzho/ci_workflows -- .github/workflows/create_pr.yaml
+        # git commit -a -m '[CI][AMD] add workflows'
+        git push --set-upstream origin debug/qwen35-repeat-rootcause-20260722 --force
