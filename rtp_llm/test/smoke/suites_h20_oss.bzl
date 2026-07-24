@@ -452,6 +452,22 @@ def h20_oss_suites():
         ],
     )
 
+    # H20 DSpark (Qwen3-32B sft target + 5L block-diffusion draft).  One case,
+    # full-tail CUDA graph path (draft graph captures lm_head + Markov +
+    # softmax); greedy golden, deterministic kernels via envs.
+    native.test_suite(
+        name = "smoke_h20_dspark",
+        tests = [
+            smoke_test(
+                name="dspark_qwen3_cudagraph",
+                task_info="data/model/qwen3_dspark/q_r_dspark_cudagraph.json",
+                smoke_args="--act_type BF16 --max_seq_len 8192 --warm_up 0 --load_method scratch --concurrency_limit 4 --enable_cuda_graph 1 --sp_type dspark --sp_model_type qwen_3_dspark --sp_checkpoint_path /mnt/nas1/smoke/dspark_qwen3_draft_5l --sp_act_type bf16 --tp_size 1 --world_size 1 --dp_size 1",
+                envs=["DETERMINISTIC_GEMM=1", "DETERMINISTIC_ATTN=1", "ENABLE_STABLE_SCATTER_ADD=ON"],
+                gpu_type=["H20"],
+            ),
+        ],
+    )
+
     # H20 VL / Multimodal (Qwen3-VL, Qwen3-VL-MoE, etc.)
     native.test_suite(
         name = "smoke_h20_vl",

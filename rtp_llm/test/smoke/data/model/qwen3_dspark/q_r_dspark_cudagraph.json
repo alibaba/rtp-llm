@@ -1,0 +1,42 @@
+{
+    "model_type": "qwen_3",
+    "model_path": "/mnt/nas1/smoke/dspark_qwen3_32b_sft",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "The capital of France is Paris.",
+                "top_k": 1,
+                "temperature": 0,
+                "top_p": 0,
+                "generate_config": {
+                    "max_new_tokens": 64,
+                    "top_k": 1,
+                    "temperature": 0,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": "  Given a list of cities, output the one with the highest population.  Assume all cities are in France.  If there is a tie, output all tied cities in alphabetical order, each on a separate line.  Cities not in France should be ignored.  The input will be a list of city names,",
+                "finished": true
+            }
+        },
+        {
+            "query": {
+                "prompt": "import numpy as np\n\ndef softmax(x):\n",
+                "top_k": 1,
+                "temperature": 0,
+                "top_p": 0,
+                "generate_config": {
+                    "max_new_tokens": 64,
+                    "top_k": 1,
+                    "temperature": 0,
+                    "top_p": 0
+                }
+            },
+            "result": {
+                "response": "    \"\"\"Compute the softmax function for each row of the input x.\n\n    It is crucial that this function is optimized for speed because\n    it will be used frequently in training.\n\n    Arguments:\n    x -- A D-dimensional vector or matrix with shape (m, n).\n\n    Return:\n    x -- You are allowed",
+                "finished": true
+            }
+        }
+    ]
+}
