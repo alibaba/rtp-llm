@@ -126,7 +126,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
 
         // Calculate cache match results for each engine
         Map<String, Integer> cacheMatchResults = getCacheMatchResults(balanceContext, roleType, group);
-        long candidateMaxHitTokens = reportCandidateRoutingCacheMatchMetrics(
+        long candidateMaxHitTokens = calculateCandidateMaxHitTokens(
                 availableWorkers, cacheMatchResults, balanceContext.getRequest());
 
         List<ScoredWorker> scoredWorkers = scoreWorkers(availableWorkers, cacheMatchResults, seqLen);
@@ -235,7 +235,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         WorkerStatus workerStatus = selectedWorker.worker();
 
         logWorkerSelection(selectedWorker, roleType);
-        reportCacheHitMetrics(roleType, workerStatus.getIp(), selectedWorker.hitCacheTokens(), seqLen);
+        reportCacheHitMetrics(roleType, selectedWorker.hitCacheTokens(), seqLen);
         reportSelectedRoutingCacheMatchMetrics(
                 roleType, workerStatus, cacheMatchResults, balanceContext.getRequest(), candidateMaxHitTokens);
 
@@ -265,34 +265,28 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * Report cache hit metrics
      *
      * @param roleType Worker role type
-     * @param ip Worker IP address
      * @param hitCacheTokens Number of cached tokens hit
      * @param seqLen Sequence length
      */
-    private void reportCacheHitMetrics(RoleType roleType, String ip, long hitCacheTokens, long seqLen) {
+    private void reportCacheHitMetrics(RoleType roleType, long hitCacheTokens, long seqLen) {
         double hitRate = seqLen > 0 ? hitCacheTokens / (double) seqLen : 0.0;
-        engineHealthReporter.reportCacheHitMetrics(roleType, ip, hitCacheTokens, hitRate);
+        engineHealthReporter.reportCacheHitMetrics(roleType, hitCacheTokens, hitRate);
     }
 
-    private long reportCandidateRoutingCacheMatchMetrics(List<WorkerStatus> availableWorkers,
-                                                         Map<String, Integer> cacheMatchResults,
-                                                         Request request) {
+    private long calculateCandidateMaxHitTokens(List<WorkerStatus> availableWorkers,
+                                                Map<String, Integer> cacheMatchResults,
+                                                Request request) {
         if (MapUtils.isEmpty(cacheMatchResults) || request == null || request.getSeqLen() <= 0L) {
             return 0L;
         }
 
-        Map<String, WorkerStatus> workerStatusByIpPort = availableWorkers.stream()
-                .collect(Collectors.toMap(WorkerStatus::getIpPort, workerStatus -> workerStatus, (left, right) -> left));
-        long candidateMaxHitTokens = 0L;
-        for (Map.Entry<String, Integer> entry : cacheMatchResults.entrySet()) {
-            String engineIpPort = entry.getKey();
-            long hitTokens = calculateRoutingCacheMatchTokens(
-                    entry.getValue(),
-                    request,
-                    workerStatusByIpPort.get(engineIpPort));
-            candidateMaxHitTokens = Math.max(candidateMaxHitTokens, hitTokens);
-        }
-        return candidateMaxHitTokens;
+        return availableWorkers.stream()
+                .mapToLong(workerStatus -> calculateRoutingCacheMatchTokens(
+                        cacheMatchResults.get(workerStatus.getIpPort()),
+                        request,
+                        workerStatus))
+                .max()
+                .orElse(0L);
     }
 
     private void reportSelectedRoutingCacheMatchMetrics(RoleType roleType,
@@ -310,12 +304,10 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 selectedWorker);
         engineHealthReporter.reportRoutingSelectedCacheMatchMetrics(
                 roleType,
-                selectedWorker.getIp(),
                 hitTokens,
                 request.getSeqLen());
         engineHealthReporter.reportRoutingCandidateMaxCacheMatchMetrics(
                 roleType,
-                selectedWorker.getIp(),
                 candidateMaxHitTokens);
     }
 

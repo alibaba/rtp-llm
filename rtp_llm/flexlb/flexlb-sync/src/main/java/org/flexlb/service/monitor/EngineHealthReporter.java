@@ -181,39 +181,36 @@ public class EngineHealthReporter {
         monitor.report(ENGINE_NUMBER_SERVICE_DISCOVERY_RESULT, metricTags, result);
     }
 
-    public void reportStatusCheckRemoteInfo(String modelName, String engineIp, String role, Long startTime) {
+    public void reportStatusCheckRemoteInfo(String modelName, String role, Long startTime) {
         FlexMetricTags metricTags = FlexMetricTags.of(
                 "model", modelName,
-                "engineIp", engineIp,
                 "role", role);
         monitor.report(ENGINE_STATUS_VISITOR_RT, metricTags, (double) System.nanoTime() / 1000 - startTime);
         monitor.report(ENGINE_STATUS_VISITOR_SUCCESS_QPS, metricTags, 1.0);
     }
 
-    public void reportCacheStatusCheckRemoteInfo(String modelName, String engineIp, String role, Long startTime) {
+    public void reportCacheStatusCheckRemoteInfo(String modelName, String role, Long startTime) {
         FlexMetricTags metricTags = FlexMetricTags.of(
                 "model", modelName,
-                "engineIp", engineIp,
                 "role", role);
         monitor.report(CACHE_STATUS_CHECK_VISITOR_RT, metricTags, (double) System.nanoTime() / 1000 - startTime);
         monitor.report(CACHE_STATUS_CHECK_VISITOR_SUCCESS_QPS, metricTags, 1.0);
     }
 
-    public void reportStatusCheckerFail(String modelName, BalanceStatusEnum errorEnum, String ip, RoleType role) {
+    public void reportStatusCheckerFail(String modelName, BalanceStatusEnum errorEnum, RoleType role) {
         FlexMetricTags metricTags = FlexMetricTags.of(
                 "model", modelName,
                 "code", String.valueOf(errorEnum.getCode()),
-                "engineIp", ip == null ? "" : ip,
                 "role", role == null ? "" : role.getCode()
         );
         monitor.report(ENGINE_STATUS_CHECK_FAIL, metricTags, 1.0);
     }
 
-    public void reportCacheStatusCheckerFail(String modelName, String engineIp, BalanceStatusEnum errorEnum) {
+    public void reportCacheStatusCheckerFail(String modelName, BalanceStatusEnum errorEnum, RoleType role) {
         FlexMetricTags metricTags = FlexMetricTags.of(
                 "model", modelName,
-                "engineIp", engineIp,
-                "code", String.valueOf(errorEnum.getCode()));
+                "code", String.valueOf(errorEnum.getCode()),
+                "role", role == null ? "" : role.getCode());
         monitor.report(CACHE_STATUS_CHECK_FAIL, metricTags, 1.0);
     }
 
@@ -224,7 +221,6 @@ public class EngineHealthReporter {
 
         FlexMetricTags metricTags = FlexMetricTags.of(
                 "model", modelName,
-                "code", "0",
                 "engineIp", workerStatus.getIp(),
                 "role", workerStatus.getRole());
 
@@ -255,7 +251,6 @@ public class EngineHealthReporter {
         if (cacheLastUpdateTime > 0) {
             FlexMetricTags metricTags = FlexMetricTags.of(
                     "model", modelName,
-                    "code", "0",
                     "engineIp", workerStatus.getIp(),
                     "role", workerStatus.getRole());
             monitor.report(CACHE_STATUS_CHECK_SUCCESS_PERIOD, metricTags, (double) System.nanoTime() / 1000 - cacheLastUpdateTime);
@@ -263,12 +258,15 @@ public class EngineHealthReporter {
         if (workerStatus.getCacheStatus() != null) {
             long blockSize = workerStatus.getCacheStatus().getBlockSize();
             long cacheKeySize = workerStatus.getCacheStatus().getCacheKeySize();
-            FlexMetricTags metricTags = FlexMetricTags.of(
+            FlexMetricTags roleMetricTags = FlexMetricTags.of(
+                    "model", modelName,
+                    "role", workerStatus.getRole());
+            FlexMetricTags engineMetricTags = FlexMetricTags.of(
                     "model", modelName,
                     "engineIp", workerStatus.getIp(),
                     "role", workerStatus.getRole());
-            monitor.report(CACHE_BLOCK_SIZE, metricTags, blockSize);
-            monitor.report(CACHE_KEY_SIZE, metricTags, cacheKeySize);
+            monitor.report(CACHE_BLOCK_SIZE, roleMetricTags, blockSize);
+            monitor.report(CACHE_KEY_SIZE, engineMetricTags, cacheKeySize);
         }
 
         long usedKvCacheTokens = workerStatus.getUsedKvCacheTokens().get();
@@ -282,7 +280,9 @@ public class EngineHealthReporter {
 
         monitor.report(CACHE_USED_KV_CACHE_TOKENS, kvCacheMetricTags, usedKvCacheTokens);
         monitor.report(CACHE_AVAILABLE_KV_CACHE_TOKENS, kvCacheMetricTags, availableKvCacheTokens);
-        monitor.report(CACHE_TOTAL_KV_CACHE_TOKENS, kvCacheMetricTags, totalKvCacheTokens);
+        monitor.report(CACHE_TOTAL_KV_CACHE_TOKENS,
+                FlexMetricTags.of("model", modelName, "role", workerStatus.getRole()),
+                totalKvCacheTokens);
         if (totalKvCacheTokens > 0) {
             double usedRatio = (usedKvCacheTokens * 1.0 / totalKvCacheTokens) * 100;
             monitor.report(CACHE_USED_KV_CACHE_RATIO, kvCacheMetricTags, usedRatio);
@@ -299,17 +299,15 @@ public class EngineHealthReporter {
         monitor.report(ENGINE_BALANCING_MASTER_ALL_QPS, metricTags, 1.0);
         monitor.report(ENGINE_BALANCING_MASTER_SCHEDULE_RT, metricTags, System.currentTimeMillis() - ctx.getStartTime());
 
-        // Report server status selection results (distinguished by roleType and ip)
+        // Report server selection results aggregated by role and outcome.
         if (ctx.getResponse() != null && CollectionUtils.isNotEmpty(ctx.getResponse().getServerStatus())) {
             boolean isSuccess = ctx.getResponse().isSuccess();
             int code = ctx.getResponse().getCode();
 
             for (ServerStatus serverStatus : ctx.getResponse().getServerStatus()) {
-                if (serverStatus.getRole() != null && serverStatus.getServerIp() != null) {
-                    // Report specific server selection QPS
+                if (serverStatus.getRole() != null) {
                     FlexMetricTags serverSelectionTags = FlexMetricTags.of(
                             "role", serverStatus.getRole().name(),
-                            "engineIp", serverStatus.getServerIp(),
                             "success", String.valueOf(isSuccess),
                             "code", String.valueOf(code)
                     );
@@ -369,22 +367,19 @@ public class EngineHealthReporter {
         monitor.report(org.flexlb.constant.MetricConstant.ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO, FlexMetricTags.of(metricMap), totalPendingTask);
     }
 
-    public void reportCacheHitMetrics(RoleType roleType, String engineIp, long hitTokens, double hitRatio) {
-        cacheMetricsReporter.reportCacheHitMetrics(roleType, engineIp, hitTokens, hitRatio);
+    public void reportCacheHitMetrics(RoleType roleType, long hitTokens, double hitRatio) {
+        cacheMetricsReporter.reportCacheHitMetrics(roleType, hitTokens, hitRatio);
     }
 
     public void reportRoutingSelectedCacheMatchMetrics(RoleType roleType,
-                                                       String engineIp,
                                                        long hitTokens,
                                                        long totalTokens) {
-        cacheMetricsReporter.reportRoutingSelectedCacheMatchMetrics(roleType, engineIp, hitTokens, totalTokens);
+        cacheMetricsReporter.reportRoutingSelectedCacheMatchMetrics(roleType, hitTokens, totalTokens);
     }
 
     public void reportRoutingCandidateMaxCacheMatchMetrics(RoleType roleType,
-                                                           String selectedEngineIp,
                                                            long hitTokens) {
-        cacheMetricsReporter.reportRoutingCandidateMaxCacheMatchMetrics(
-                roleType, selectedEngineIp, hitTokens);
+        cacheMetricsReporter.reportRoutingCandidateMaxCacheMatchMetrics(roleType, hitTokens);
     }
 
     public void reportArriveDelayTime(BalanceContext ctx) {
