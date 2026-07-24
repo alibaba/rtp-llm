@@ -1,0 +1,16 @@
+# bazel 桶：由 bazel 侧（arch_select.bzl torch_deps/flashinfer_deps/@repo）提供的包。
+# 作用：① 喂 update_locks.sh 的 --no-emit-package（不进 pip lock，即使被传递依赖拉到也丢弃）
+#      ② 喂 gen_wheel_requires.py（仍写进 wheel METADATA Requires-Dist）
+# 判据：带 +cuXXX/+rocm/+git 等 local version 的 bazel 构建产物；普通 PyPI 包（flashinfer-python/tensorrt-libs/
+#      sqlglot/fast-hadamard-transform/fastsafetensors）不在此，应进 lock。
+# 版本 = 唯一事实源；门禁核对它与 arch_select 的 repo 版本一致。
+# 验证状态：cuda12_9 旧 lock 很旧，补锁新增 17；下列判为 bazel 提供，其余(flashinfer-*/tensorrt-libs/sqlglot/
+# fast-hadamard/fastsafetensors/fsspec)判为 pip 包应进 lock。**分类待 owner 确认**。
+torch==2.8.0+cu129
+torchvision==0.23.0+cu129
+flash-attn==2.8.3+cu12torch2.8cxx11abitrue
+flash-attn-3==3.0.0b1
+deep-ep==1.2.1.10+d7d7b48
+deep-gemm==2.1.1+local
+flash-mla==1.0.0+ca58fed
+rtp-kernel==0.1.0+125c29e5.20260423102158

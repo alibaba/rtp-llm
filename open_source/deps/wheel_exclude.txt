@@ -1,0 +1,11 @@
+# wheel 打包时需从 requirements_base.txt 排除的包（构建/调试/内部工具 + 按 arch 单独提供的包）
+# gen_wheel_requires.py 读取此清单，其余 base 包自动进 wheel。改这里不改 wheel_requires.txt。
+pybind11_stubgen
+pyodps
+pyOpenSSL
+# 下面这些由 wheel_requires_platform_*.txt 按 arch 提供，base 里带 x86 marker 仅供 test
+av
+decord
+# xft 系列当前已注释/不发布
+xfastertransformer_devel
+xfastertransformer_devel_icx

@@ -1,0 +1,4 @@
+# wheel 需要、但 requirements_base.txt(test 依赖闭包)里没有的运行时包。
+# 仅这里手写 wheel 特有增量；通用运行时依赖一律加到 requirements_base.txt。
+pyarrow==14.0.0
+apache-tvm-ffi

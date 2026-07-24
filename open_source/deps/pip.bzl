@@ -1,9 +1,10 @@
 load("@rules_python//python:pip.bzl", "pip_parse")
 
+# 此列表 fan-out 到每个 whl_library spoke：任何改动使全部 hub 失效、触发全量重下。
+# 视为冻结；--cache-dir=~/.cache/pip 是 pip 默认值、--verbose 为噪音，均已移除。
 PIP_EXTRA_ARGS = [
-    "--cache-dir=~/.cache/pip",
     "--extra-index-url=https://mirrors.aliyun.com/pypi/simple/",
-    "--verbose",
+    "--extra-index-url=https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/",
 ]
 
 def pip_deps():
