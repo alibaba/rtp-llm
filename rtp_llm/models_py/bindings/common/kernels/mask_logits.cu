@@ -92,11 +92,15 @@ __global__ void packed_mask_logits(T* __restrict__ logits_batch,
     const int word_idx = vocab_idx / 32;
     bool      allowed  = false;
     if (word_idx < bitmask_words) {
-        const uint32_t word = static_cast<uint32_t>(packed_allow_mask[compact_row * bitmask_row_stride + word_idx]);
+        const int64_t mask_offset =
+            static_cast<int64_t>(compact_row) * static_cast<int64_t>(bitmask_row_stride) + word_idx;
+        const uint32_t word = static_cast<uint32_t>(packed_allow_mask[mask_offset]);
         allowed             = (word & (1u << (vocab_idx % 32))) != 0u;
     }
     if (!allowed) {
-        logits_batch[logits_row * logits_row_stride + vocab_idx] = NegativeInfinity<T>();
+        const int64_t logits_offset =
+            static_cast<int64_t>(logits_row) * static_cast<int64_t>(logits_row_stride) + vocab_idx;
+        logits_batch[logits_offset] = NegativeInfinity<T>();
     }
 }
 #endif

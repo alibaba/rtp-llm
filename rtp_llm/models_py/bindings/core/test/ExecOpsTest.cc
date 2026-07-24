@@ -410,6 +410,60 @@ TEST_F(ExecOpsTest, testRuntimeApplyPackedMaskLogitsSupportsSingleRowIdentityMap
     }
 }
 
+TEST_F(ExecOpsTest, testRuntimeApplyPackedMaskLogitsSkipsOutOfRangeRows) {
+    constexpr int64_t vocab_size = 4;
+    auto              logits = torch::ones({3, vocab_size}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
+    auto              packed_allow_mask = torch::zeros({3, 1}, torch::kInt32);
+    auto              row_indices       = torch::tensor({-1, 1, 3}, torch::kInt32);
+#if USING_CUDA
+    packed_allow_mask = packed_allow_mask.to(torch::kCUDA);
+    row_indices       = row_indices.to(torch::kCUDA);
+#endif
+
+    ASSERT_NO_THROW(runtimeApplyPackedMaskLogits(logits, packed_allow_mask, row_indices, vocab_size));
+    runtimeSyncAndCheck();
+
+    auto result = logits.cpu().to(torch::kFloat32).contiguous();
+    for (int64_t token = 0; token < vocab_size; ++token) {
+        EXPECT_FLOAT_EQ(result[0][token].item<float>(), 1.0f);
+        EXPECT_TRUE(std::isinf(result[1][token].item<float>()));
+        EXPECT_LT(result[1][token].item<float>(), 0.0f);
+        EXPECT_FLOAT_EQ(result[2][token].item<float>(), 1.0f);
+    }
+}
+
+TEST_F(ExecOpsTest, testRuntimeApplyPackedMaskLogitsCopiesBackToNonContiguousInput) {
+    constexpr int64_t vocab_size = 4;
+    auto backing = torch::ones({2, vocab_size + 2}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
+    auto logits  = backing.narrow(/*dim=*/1, /*start=*/1, /*length=*/vocab_size);
+    ASSERT_FALSE(logits.is_contiguous());
+    ASSERT_EQ(logits.stride(0), vocab_size + 2);
+
+    auto packed_allow_mask = torch::tensor({1, 8}, torch::kInt32).reshape({2, 1});
+#if USING_CUDA
+    packed_allow_mask = packed_allow_mask.to(torch::kCUDA);
+#endif
+
+    ASSERT_NO_THROW(runtimeApplyPackedMaskLogits(logits, packed_allow_mask, vocab_size));
+    runtimeSyncAndCheck();
+
+    auto result = backing.cpu().to(torch::kFloat32).contiguous();
+    for (int64_t row = 0; row < result.size(0); ++row) {
+        EXPECT_FLOAT_EQ(result[row][0].item<float>(), 1.0f);
+        EXPECT_FLOAT_EQ(result[row][vocab_size + 1].item<float>(), 1.0f);
+        for (int64_t token = 0; token < vocab_size; ++token) {
+            const bool allowed = (row == 0 && token == 0) || (row == 1 && token == 3);
+            const auto value   = result[row][token + 1].item<float>();
+            if (allowed) {
+                EXPECT_FLOAT_EQ(value, 1.0f);
+            } else {
+                EXPECT_TRUE(std::isinf(value));
+                EXPECT_LT(value, 0.0f);
+            }
+        }
+    }
+}
+
 TEST_F(ExecOpsTest, testWriteCacheStoreMlaBf16PhysicalViewUsesExplicitStride) {
     // Four physical blocks, each containing four kernel blocks. The old shape heuristic treated the leading
     // dimension as kernel-block count and inflated the physical stride by 4x.
