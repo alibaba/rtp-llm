@@ -17,6 +17,7 @@ exec_ops_test_deps = [
 ] + torch_deps()
 
 cache_store_test_filter = "ExecOpsTest.testWriteCacheStore*:ExecOpsTest.testLoadContextFailureDebugInfo*"
+packed_mask_logits_test_filter = "ExecOpsTest.testRuntimeApplyPackedMaskLogits*"
 
 cc_test(
     name = "exec_ops_test",
@@ -36,6 +37,18 @@ cc_test(
     deps = exec_ops_test_deps,
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
+)
+
+# The public runtime entry selects the shared non-CUDA CPU fallback at compile
+# time. ROCm CI is the available non-CUDA build that exercises that branch.
+cc_test(
+    name = "packed_mask_logits_cpu_fallback_test",
+    srcs = ["ExecOpsTest.cc"],
+    args = ["--gtest_filter=" + packed_mask_logits_test_filter],
+    deps = exec_ops_test_deps,
+    copts = test_copts,
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
 )
 
 cc_test(

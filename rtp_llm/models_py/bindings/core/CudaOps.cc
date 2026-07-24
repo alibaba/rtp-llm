@@ -34,6 +34,13 @@ namespace rtp_llm {
 
 namespace {
 
+torch::Tensor contiguousCpuTensor(const torch::Tensor& tensor) {
+    if (tensor.device().is_cpu() && tensor.is_contiguous()) {
+        return tensor;
+    }
+    return tensor.cpu().contiguous();
+}
+
 void validatePackedMaskLogitsInputs(const torch::Tensor& logits,
                                     const torch::Tensor& packed_allow_mask,
                                     const torch::Tensor& row_indices,
@@ -160,9 +167,9 @@ void applyPackedMaskLogitsCpuFallback(const torch::Tensor& logits,
     // current logits and mask; it never replays the generated prefix. Blocking
     // copies keep the temporary CPU tensors alive until masked logits reach the
     // caller's device.
-    auto logits_cpu = logits.cpu().contiguous();
-    auto mask_cpu   = packed_allow_mask.cpu().contiguous();
-    auto rows_cpu   = row_indices.defined() ? row_indices.cpu().contiguous() : torch::Tensor{};
+    auto logits_cpu = contiguousCpuTensor(logits);
+    auto mask_cpu   = contiguousCpuTensor(packed_allow_mask);
+    auto rows_cpu   = row_indices.defined() ? contiguousCpuTensor(row_indices) : torch::Tensor{};
 
     const int64_t logits_rows    = logits_cpu.dim() == 1 ? 1 : logits_cpu.size(0);
     const int64_t logits_columns = logits_cpu.dim() == 1 ? logits_cpu.size(0) : logits_cpu.size(1);
@@ -179,7 +186,7 @@ void applyPackedMaskLogitsCpuFallback(const torch::Tensor& logits,
                 if (logits_row < 0 || logits_row >= logits_rows) {
                     continue;
                 }
-                const auto* mask_row = mask_data + compact_row * bitmask_words;
+                const auto* mask_row        = mask_data + compact_row * bitmask_words;
                 auto*       logits_row_data = logits_data + logits_row * logits_columns;
                 for (size_t token = 0; token < vocab_size; ++token) {
                     const uint32_t word = static_cast<uint32_t>(mask_row[token / 32]);
@@ -190,7 +197,9 @@ void applyPackedMaskLogitsCpuFallback(const torch::Tensor& logits,
             }
         });
 
-    logits.copy_(logits_cpu, /*non_blocking=*/false);
+    if (logits.data_ptr() != logits_cpu.data_ptr()) {
+        logits.copy_(logits_cpu, /*non_blocking=*/false);
+    }
 }
 
 }  // namespace

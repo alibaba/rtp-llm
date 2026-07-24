@@ -54,10 +54,12 @@ std::optional<ErrorInfo> validateMtpCompatibility(const std::vector<BaseLogitsPr
     return std::nullopt;
 }
 
-void applySpecVerifyResult(SpecLogitsVerifyRunner::LaunchResult&  verify_result,
-                           const SamplerOutput&                   target_sampler_output,
-                           speculative::SpeculativeSamplerOutput& output,
-                           int64_t                                propose_step) {
+}  // namespace
+
+void MtpExecutor::applySpecVerifyResult(SpecLogitsVerifyRunner::LaunchResult&  verify_result,
+                                        const SamplerOutput&                   target_sampler_output,
+                                        speculative::SpeculativeSamplerOutput& output,
+                                        int64_t                                propose_step) {
     output.processor_errors = std::move(verify_result.processor_errors);
     if (!verify_result.spec_cap_cpu.defined()) {
         return;
@@ -105,8 +107,6 @@ void applySpecVerifyResult(SpecLogitsVerifyRunner::LaunchResult&  verify_result,
         }
     }
 }
-
-}  // namespace
 
 bool MtpExecutor::isTpRank0() const {
     return tp_rank_ == 0;

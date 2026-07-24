@@ -34,11 +34,12 @@ public:
     };
 
     struct LaunchResult {
-        torch::Tensor                         packed_allow_mask_gpu;   // [active_rows, ceil(V/32)] int32
-        torch::Tensor                         logits_row_indices_gpu;  // [active_rows] int32
+        torch::Tensor                         packed_allow_mask_gpu;   // CUDA-only [active_rows, ceil(V/32)] int32
+        torch::Tensor                         logits_row_indices_gpu;  // CUDA-only [active_rows] int32
         bool                                  has_active_processor = false;
         std::vector<std::optional<ErrorInfo>> processor_errors;
-        // Keep pinned H2D sources alive until the caller has consumed the GPU views.
+        // CUDA keeps these pinned H2D sources alive; non-CUDA fallback consumes
+        // them directly and avoids an upload followed by an immediate readback.
         torch::Tensor packed_allow_mask_cpu_lifetime;
         torch::Tensor logits_row_indices_cpu_lifetime;
         torch::Tensor spec_cap_cpu;
@@ -50,10 +51,7 @@ public:
     SpecLogitsVerifyRunner& operator=(const SpecLogitsVerifyRunner&) = delete;
 
     LaunchResult run(const LaunchTask& task);
-    static void  applyMaskToLogits(torch::Tensor&       logits,
-                                   const torch::Tensor& packed_allow_mask_gpu,
-                                   const torch::Tensor& logits_row_indices_gpu,
-                                   size_t               vocab_size);
+    static void  applyMaskToLogits(torch::Tensor& logits, const LaunchResult& result, size_t vocab_size);
 
 private:
     struct VerifyShape {

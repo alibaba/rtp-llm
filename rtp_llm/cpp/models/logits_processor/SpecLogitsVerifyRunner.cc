@@ -34,14 +34,18 @@ bool has2DCapacity(const torch::Tensor& tensor, int64_t rows, int64_t cols) {
 
 }  // namespace
 
-void SpecLogitsVerifyRunner::applyMaskToLogits(torch::Tensor&       logits,
-                                               const torch::Tensor& packed_allow_mask_gpu,
-                                               const torch::Tensor& logits_row_indices_gpu,
-                                               size_t               vocab_size) {
-    if (!packed_allow_mask_gpu.defined()) {
+void SpecLogitsVerifyRunner::applyMaskToLogits(torch::Tensor& logits, const LaunchResult& result, size_t vocab_size) {
+#if USING_CUDA
+    const auto& packed_allow_mask  = result.packed_allow_mask_gpu;
+    const auto& logits_row_indices = result.logits_row_indices_gpu;
+#else
+    const auto& packed_allow_mask  = result.packed_allow_mask_cpu_lifetime;
+    const auto& logits_row_indices = result.logits_row_indices_cpu_lifetime;
+#endif
+    if (!packed_allow_mask.defined()) {
         return;
     }
-    runtimeApplyPackedMaskLogits(logits, packed_allow_mask_gpu, logits_row_indices_gpu, vocab_size);
+    runtimeApplyPackedMaskLogits(logits, packed_allow_mask, logits_row_indices, vocab_size);
 }
 
 SpecLogitsVerifyRunner::ActiveStreamLayout
@@ -73,7 +77,6 @@ void SpecLogitsVerifyRunner::ensureBuffersFit(const VerifyShape& shape) {
 
     auto cpu_i32    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
     auto pinned_i32 = cpu_i32.pinned_memory(true);
-    auto device_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
 
     if (!has2DCapacity(draft_tokens_cpu_, B, P)) {
         draft_tokens_cpu_ = torch::empty({B, P}, pinned_i32);
@@ -84,15 +87,18 @@ void SpecLogitsVerifyRunner::ensureBuffersFit(const VerifyShape& shape) {
     if (!has2DCapacity(merged_bitmask_cpu_, rows, W)) {
         merged_bitmask_cpu_ = torch::empty({rows, W}, pinned_i32);
     }
-    if (!has2DCapacity(merged_bitmask_gpu_, rows, W)) {
-        merged_bitmask_gpu_ = torch::empty({rows, W}, device_i32);
-    }
     if (!has1DCapacity(logits_row_indices_cpu_, rows)) {
         logits_row_indices_cpu_ = torch::empty({rows}, pinned_i32);
+    }
+#if USING_CUDA
+    auto device_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    if (!has2DCapacity(merged_bitmask_gpu_, rows, W)) {
+        merged_bitmask_gpu_ = torch::empty({rows, W}, device_i32);
     }
     if (!has1DCapacity(logits_row_indices_gpu_, rows)) {
         logits_row_indices_gpu_ = torch::empty({rows}, device_i32);
     }
+#endif
     if (!has1DCapacity(spec_cap_cpu_, B)) {
         spec_cap_cpu_ = torch::empty({B}, pinned_i32);
     }
@@ -178,16 +184,18 @@ SpecLogitsVerifyRunner::MergeProcessorMasksResult SpecLogitsVerifyRunner::mergeP
 SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::makeResult(const VerifyShape& shape) {
     auto packed_mask_cpu = merged_bitmask_cpu_.narrow(0, 0, static_cast<int64_t>(shape.compact_rows))
                                .narrow(1, 0, static_cast<int64_t>(shape.bitmask_words));
+    auto row_indices_cpu = logits_row_indices_cpu_.narrow(0, 0, static_cast<int64_t>(shape.compact_rows));
+
+    LaunchResult result;
+#if USING_CUDA
     auto packed_mask_gpu = merged_bitmask_gpu_.narrow(0, 0, static_cast<int64_t>(shape.compact_rows))
                                .narrow(1, 0, static_cast<int64_t>(shape.bitmask_words));
-    auto row_indices_cpu = logits_row_indices_cpu_.narrow(0, 0, static_cast<int64_t>(shape.compact_rows));
     auto row_indices_gpu = logits_row_indices_gpu_.narrow(0, 0, static_cast<int64_t>(shape.compact_rows));
     packed_mask_gpu.copy_(packed_mask_cpu, /*non_blocking=*/true);
     row_indices_gpu.copy_(row_indices_cpu, /*non_blocking=*/true);
-
-    LaunchResult result;
-    result.packed_allow_mask_gpu           = std::move(packed_mask_gpu);
-    result.logits_row_indices_gpu          = std::move(row_indices_gpu);
+    result.packed_allow_mask_gpu  = std::move(packed_mask_gpu);
+    result.logits_row_indices_gpu = std::move(row_indices_gpu);
+#endif
     result.has_active_processor            = true;
     result.packed_allow_mask_cpu_lifetime  = std::move(packed_mask_cpu);
     result.logits_row_indices_cpu_lifetime = std::move(row_indices_cpu);

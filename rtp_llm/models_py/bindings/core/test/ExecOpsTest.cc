@@ -357,20 +357,25 @@ TEST_F(ExecOpsTest, testRuntimeMaskLogits) {
 }
 
 TEST_F(ExecOpsTest, testRuntimeApplyPackedMaskLogitsUsesCompactRowMapping) {
-    constexpr int64_t vocab_size = 35;
-    auto              packed_allow_mask =
-        torch::tensor({1, 4, 2, 2}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA)).reshape({2, 2});
-    auto row_indices = torch::tensor({1, 3}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
+    constexpr int64_t vocab_size        = 35;
+    constexpr int64_t logits_columns    = 40;
+    auto              packed_allow_mask = torch::tensor({1, 4, 2, 2}, torch::kInt32).reshape({2, 2});
+    auto              row_indices       = torch::tensor({1, 3}, torch::kInt32);
+#if USING_CUDA
+    packed_allow_mask = packed_allow_mask.to(torch::kCUDA);
+    row_indices       = row_indices.to(torch::kCUDA);
+#endif
 
     for (const auto dtype : {torch::kFloat32, torch::kFloat16, torch::kBFloat16}) {
-        auto logits = torch::ones({4, vocab_size}, torch::TensorOptions(dtype).device(torch::kCUDA));
+        auto logits = torch::ones({4, logits_columns}, torch::TensorOptions(dtype).device(torch::kCUDA));
         ASSERT_NO_THROW(runtimeApplyPackedMaskLogits(logits, packed_allow_mask, row_indices, vocab_size));
         runtimeSyncAndCheck();
 
         auto result = logits.to(torch::kFloat32).cpu().contiguous();
         for (int64_t row = 0; row < result.size(0); ++row) {
-            for (int64_t token = 0; token < vocab_size; ++token) {
-                const bool allowed = row == 0 || row == 2 || (row == 1 && (token == 0 || token == 34))
+            for (int64_t token = 0; token < result.size(1); ++token) {
+                const bool allowed = row == 0 || row == 2 || token >= vocab_size
+                                     || (row == 1 && (token == 0 || token == 34))
                                      || (row == 3 && (token == 1 || token == 33));
                 if (allowed) {
                     EXPECT_FLOAT_EQ(result[row][token].item<float>(), 1.0f);
@@ -386,8 +391,10 @@ TEST_F(ExecOpsTest, testRuntimeApplyPackedMaskLogitsUsesCompactRowMapping) {
 TEST_F(ExecOpsTest, testRuntimeApplyPackedMaskLogitsSupportsSingleRowIdentityMapping) {
     constexpr int64_t vocab_size = 35;
     auto              logits = torch::ones({vocab_size}, torch::TensorOptions(torch::kFloat32).device(torch::kCUDA));
-    auto              packed_allow_mask =
-        torch::tensor({1, 4}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA)).reshape({1, 2});
+    auto              packed_allow_mask = torch::tensor({1, 4}, torch::kInt32).reshape({1, 2});
+#if USING_CUDA
+    packed_allow_mask = packed_allow_mask.to(torch::kCUDA);
+#endif
 
     ASSERT_NO_THROW(runtimeApplyPackedMaskLogits(logits, packed_allow_mask, vocab_size));
     runtimeSyncAndCheck();

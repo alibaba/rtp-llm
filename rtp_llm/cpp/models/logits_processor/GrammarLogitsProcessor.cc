@@ -384,15 +384,19 @@ private:
                 return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "grammar packed mask state is missing its CPU source");
             }
             if (logits.is_cuda()) {
+#if USING_CUDA
                 const int64_t words = state.packed_allow_mask_cpu.size(1);
                 if (!reusable_bitmask_gpu_.defined() || reusable_bitmask_gpu_.device() != logits.device()
                     || reusable_bitmask_gpu_.size(1) < words) {
-                    reusable_bitmask_gpu_ = torch::empty(
-                        {1, words}, torch::TensorOptions().dtype(torch::kInt32).device(logits.device()));
+                    reusable_bitmask_gpu_ =
+                        torch::empty({1, words}, torch::TensorOptions().dtype(torch::kInt32).device(logits.device()));
                 }
                 auto packed_allow_mask_gpu = reusable_bitmask_gpu_.narrow(1, 0, words);
                 packed_allow_mask_gpu.copy_(state.packed_allow_mask_cpu, /*non_blocking=*/true);
                 runtimeApplyPackedMaskLogits(logits, packed_allow_mask_gpu, mask_vocab_size);
+#else
+                runtimeApplyPackedMaskLogits(logits, state.packed_allow_mask_cpu, mask_vocab_size);
+#endif
             } else {
                 auto error = applyPackedAllowMaskCpu(logits, state.packed_allow_mask_cpu, mask_vocab_size);
                 if (error.hasError()) {
