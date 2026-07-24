@@ -287,6 +287,9 @@ class Qwen3VLNewLoaderTest(unittest.TestCase):
         self.assertTrue(
             any("identify a dense model" in message for message in logs.output)
         )
+        self.assertTrue(
+            any("model_type='qwen3_vl'" in message for message in logs.output)
+        )
 
     def test_ep_rejects_zero_experts_when_moe_markers_are_enabled(self):
         config = _language_config()
@@ -294,7 +297,21 @@ class Qwen3VLNewLoaderTest(unittest.TestCase):
         config.moe_style = 1
         with tempfile.TemporaryDirectory() as model_path:
             save_file(_language_weights(), f"{model_path}/model.safetensors")
-            with self.assertRaisesRegex(ValueError, "MoE markers.*zero experts"):
+            with self.assertRaisesRegex(ValueError, "MoE model.*zero experts"):
+                NewModelLoader(
+                    model_config=config,
+                    load_config=_load_config(ep_size=2),
+                    model_path=model_path,
+                ).load()
+
+    def test_ep_rejects_known_moe_model_type_with_zero_experts(self):
+        config = _language_config()
+        config.model_type = "qwen3_vl_moe"
+        with tempfile.TemporaryDirectory() as model_path:
+            save_file(_language_weights(), f"{model_path}/model.safetensors")
+            with self.assertRaisesRegex(
+                ValueError, "model_type='qwen3_vl_moe'.*zero experts"
+            ):
                 NewModelLoader(
                     model_config=config,
                     load_config=_load_config(ep_size=2),
@@ -400,7 +417,7 @@ class Qwen3VLNewLoaderTest(unittest.TestCase):
         fmha_impl = types.SimpleNamespace(fmha_params=None)
 
         with mock.patch(
-            "rtp_llm.models_py.new_models.qwen3_vl.model."
+            "rtp_llm.models_py.new_models.qwen3_vl.multimodal."
             "reshape_extra_input_to_deepstack",
             return_value=deepstack,
         ), mock.patch(
