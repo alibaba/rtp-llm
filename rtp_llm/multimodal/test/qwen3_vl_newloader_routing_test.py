@@ -248,7 +248,7 @@ class Qwen3VLNewLoaderRoutingTest(unittest.TestCase):
             )
         legacy_init.assert_called_once_with()
 
-    def test_batched_multi_image_deepstack_roundtrip_matches_single_image(self):
+    def test_batched_image_video_deepstack_roundtrip_matches_single_item(self):
         class FakeVisual:
             dtype = torch.float32
             device = torch.device("cpu")
@@ -269,7 +269,7 @@ class Qwen3VLNewLoaderRoutingTest(unittest.TestCase):
         embedding = Qwen3_VLImageEmbedding.__new__(Qwen3_VLImageEmbedding)
         embedding.visual = FakeVisual()
         embedding.spatial_merge_size = 1
-        data_list = [
+        image_data = [
             (
                 torch.tensor([[1.0], [2.0]]),
                 torch.tensor([[1, 1, 2]], dtype=torch.int64),
@@ -279,29 +279,46 @@ class Qwen3VLNewLoaderRoutingTest(unittest.TestCase):
                 torch.tensor([[1, 1, 3]], dtype=torch.int64),
             ),
         ]
-
-        batched = embedding.batched_embedding(
-            data_list, [MMUrlType.IMAGE, MMUrlType.IMAGE]
+        video_data = (
+            torch.tensor([[6.0], [7.0], [8.0], [9.0]]),
+            torch.tensor([[2, 1, 2]], dtype=torch.int64),
         )
-        singles = [embedding.embedding(data) for data in data_list]
-        for actual, expected in zip(batched, singles):
-            torch.testing.assert_close(actual[0], expected[0])
-            torch.testing.assert_close(actual[1], expected[1])
-            torch.testing.assert_close(actual[2], expected[2])
 
-        restored = reshape_extra_input_to_deepstack(
-            [item[2] for item in batched],
-            [item[0] for item in batched],
+        cases = (
+            ("images", image_data, [MMUrlType.IMAGE, MMUrlType.IMAGE]),
+            ("video", [video_data], [MMUrlType.VIDEO]),
+            (
+                "mixed",
+                [image_data[0], video_data],
+                [MMUrlType.IMAGE, MMUrlType.VIDEO],
+            ),
         )
-        for expected, deepstack in zip(singles, restored):
-            torch.testing.assert_close(
-                deepstack,
-                expected[2].reshape(2, expected[0].size(0), expected[0].size(1)),
-            )
+        for name, data_list, mm_types in cases:
+            with self.subTest(name=name):
+                batched = embedding.batched_embedding(data_list, mm_types)
+                singles = [embedding.embedding(data) for data in data_list]
+                for actual, expected in zip(batched, singles):
+                    torch.testing.assert_close(actual[0], expected[0])
+                    torch.testing.assert_close(actual[1], expected[1])
+                    torch.testing.assert_close(actual[2], expected[2])
+
+                restored = reshape_extra_input_to_deepstack(
+                    [item[2] for item in batched],
+                    [item[0] for item in batched],
+                )
+                for expected, deepstack in zip(singles, restored):
+                    torch.testing.assert_close(
+                        deepstack,
+                        expected[2].reshape(
+                            2, expected[0].size(0), expected[0].size(1)
+                        ),
+                    )
 
         self.assertEqual(embedding.batched_embedding([], []), [])
         with self.assertRaisesRegex(ValueError, "data_list has 2 entries"):
-            embedding.batched_embedding(data_list, [MMUrlType.IMAGE])
+            embedding.batched_embedding(image_data, [MMUrlType.IMAGE])
+        with self.assertRaisesRegex(ValueError, "unsupported mm_types"):
+            embedding.batched_embedding([image_data[0]], [MMUrlType.AUDIO])
 
     def test_deepstack_transport_rejects_malformed_inputs(self):
         feature = torch.zeros(2, 3)

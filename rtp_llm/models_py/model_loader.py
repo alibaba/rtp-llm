@@ -344,9 +344,10 @@ class NewModelLoader:
                 f"model_config num_experts must be non-negative, got {num_experts}"
             )
         if num_experts == 0:
-            logger.debug(
-                "Expert checkpoint filtering is disabled because the model "
-                "reports zero experts"
+            logger.warning(
+                "EP size %d is configured, but model_config reports zero experts; "
+                "treating the model as dense and disabling expert checkpoint filtering",
+                self.load_config.ep_size,
             )
             return None
         return _ExpertRangeFilter(

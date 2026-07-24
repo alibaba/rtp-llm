@@ -271,14 +271,20 @@ class Qwen3VLNewLoaderTest(unittest.TestCase):
     def test_dense_language_ignores_runtime_ep_topology(self):
         with tempfile.TemporaryDirectory() as model_path:
             save_file(_language_weights(), f"{model_path}/model.safetensors")
-            model = NewModelLoader(
-                model_config=_language_config(),
-                load_config=_load_config(ep_size=2),
-                model_path=model_path,
-            ).load()
+            with self.assertLogs(
+                "rtp_llm.models_py.model_loader", level="WARNING"
+            ) as logs:
+                model = NewModelLoader(
+                    model_config=_language_config(),
+                    load_config=_load_config(ep_size=2),
+                    model_path=model_path,
+                ).load()
 
         self.assertIsInstance(model, Qwen3VLForCausalLM)
         torch.testing.assert_close(model.lm_head.weight, model.embed_tokens.weight)
+        self.assertTrue(
+            any("treating the model as dense" in message for message in logs.output)
+        )
 
     def test_language_forward_handles_text_only_input(self):
         class IdentityLayer(torch.nn.Module):

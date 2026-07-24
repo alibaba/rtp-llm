@@ -38,11 +38,13 @@ except Exception as e:
         f"initialize flash_attn failed, exception {e}, using sdpa attention in qwen2.5 vl vit"
     )
 
-ensure_torch_library_wrap_triton()
-
 
 class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
     def __init__(self, mm_related_params: VitParameters, visual=None):
+        # Some supported Torch releases do not expose wrap_triton. Initialize
+        # that process-wide compatibility only when Qwen3-VL vision is created,
+        # rather than as an import-time side effect.
+        ensure_torch_library_wrap_triton()
         self.mm_processor = AutoProcessor.from_pretrained(
             mm_related_params.config["ckpt_path"]
         )
@@ -215,12 +217,16 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
             )
         if not data_list:
             return []
-        if not all(mm_type == MMUrlType.IMAGE for mm_type in mm_types):
-            return super().batched_embedding(data_list, mm_types, **kwargs)
+        supported_types = {MMUrlType.DEFAULT, MMUrlType.IMAGE, MMUrlType.VIDEO}
+        for index, mm_type in enumerate(mm_types):
+            if mm_type not in supported_types:
+                raise ValueError(
+                    f"unsupported mm_types[{index}] for Qwen3-VL batching: {mm_type}"
+                )
         res_list = []
         pixel_values_list = []
         grid_thw_list = []
-        for data, mm_type in zip(data_list, mm_types):
+        for data in data_list:
             pixel_values_list.append(data[0])
             grid_thw_list.append(data[1])
         pixel_values = (

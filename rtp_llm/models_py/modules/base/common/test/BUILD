@@ -20,3 +20,9 @@ py_test (
     env = test_envs,
     exec_properties = {'gpu':'H20'},
 )
+
+py_test(
+    name = "multimodal_embedding_prefix_cache_test",
+    srcs = ["multimodal_embedding_prefix_cache_test.py"],
+    deps = py_test_deps,
+)

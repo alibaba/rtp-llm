@@ -1483,6 +1483,27 @@ class TestAiterPrefillImplMropeRealOp(unittest.TestCase):
         self.assertFalse(torch.equal(first_q, replay_q))
         torch.testing.assert_close(replay_q, expected_q, atol=1e-2, rtol=1e-2)
 
+    def test_prepare_in_place_rejects_invalid_mrope_position_ids(self):
+        cfg = _make_mrope_attn_configs(4, 2, 128, dtype=self.dtype)
+        capture_inputs = _make_rope_prefill_inputs([2], self.device, self.dtype)
+        capture_inputs.combo_position_ids = torch.tensor(
+            [[0, 0, 0], [1, 1, 1]],
+            dtype=torch.int32,
+            device=self.device,
+        ).flatten()
+        impl = AiterPrefillImplAsm(cfg, capture_inputs)
+
+        replay_inputs = _make_rope_prefill_inputs([2], self.device, self.dtype)
+        replay_inputs.combo_position_ids = torch.tensor(
+            [[0, 0, 0], [1, 1, 1]],
+            dtype=torch.float32,
+            device=self.device,
+        ).flatten()
+        with self.assertRaisesRegex(
+            RuntimeError, "prepare_in_place: combo_position_ids must be int32"
+        ):
+            impl.rope_params.prepare_in_place(replay_inputs)
+
     def test_mrope_missing_position_ids_fails_during_prepare(self):
         cfg = _make_mrope_attn_configs(4, 2, 128, dtype=self.dtype)
         attn_inputs = _make_rope_prefill_inputs([2], self.device, self.dtype)

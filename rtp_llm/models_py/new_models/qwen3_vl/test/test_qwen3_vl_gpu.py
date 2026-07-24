@@ -7,6 +7,7 @@ from safetensors.torch import save_file
 
 from rtp_llm.models_py.model_loader import NewLoaderConfig
 from rtp_llm.models_py.new_models.qwen3_vl.vision import (
+    Qwen3VisionRotaryEmbedding,
     Qwen3VLForVisionEmbedding,
     _resolve_flash_attn_varlen,
     load_qwen3_vl_vision,
@@ -94,6 +95,15 @@ def _reference_interpolated_position_embeddings(visual, grid_values):
 
 
 class Qwen3VLVisionGpuTest(unittest.TestCase):
+    def test_rotary_uses_runtime_device_numerics_after_cpu_construction(self):
+        cpu_constructed = Qwen3VisionRotaryEmbedding(32).to("cuda:0")
+        with torch.device("cuda:0"):
+            device_constructed = Qwen3VisionRotaryEmbedding(32)
+
+        actual = cpu_constructed(128)
+        expected = device_constructed(128)
+        self.assertTrue(torch.equal(actual, expected))
+
     def test_bf16_position_interpolation_matches_reference_addition_order(self):
         if not torch.cuda.is_available():
             self.skipTest("A CUDA or ROCm accelerator is required")

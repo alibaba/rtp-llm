@@ -168,14 +168,34 @@ class Qwen3VisionPatchEmbed(RtpModule):
 class Qwen3VisionRotaryEmbedding(nn.Module):
     def __init__(self, dim: int, theta: float = 10000.0):
         super().__init__()
+        self.dim = dim
+        self.theta = theta
         inv_freq = 1.0 / (theta ** (torch.arange(0, dim, 2).float() / dim))
         self.register_buffer("inv_freq", inv_freq, persistent=False)
 
     def forward(self, seqlen: int) -> torch.Tensor:
+        # Match Transformers' device-context construction. CPU and accelerator
+        # pow implementations can differ by one ULP (notably on ROCm), so a
+        # buffer computed on CPU and later moved is not numerically equivalent
+        # to constructing the legacy vision module on its runtime device.
+        inv_freq = 1.0 / (
+            self.theta
+            ** (
+                torch.arange(
+                    0,
+                    self.dim,
+                    2,
+                    device=self.inv_freq.device,
+                    dtype=torch.float,
+                )
+                / self.dim
+            )
+        )
+        inv_freq = inv_freq.to(self.inv_freq.dtype)
         positions = torch.arange(
             seqlen, device=self.inv_freq.device, dtype=self.inv_freq.dtype
         )
-        return torch.outer(positions, self.inv_freq)
+        return torch.outer(positions, inv_freq)
 
 
 def _rotate_half(tensor: torch.Tensor) -> torch.Tensor:
