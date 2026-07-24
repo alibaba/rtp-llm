@@ -1,10 +1,7 @@
 package org.flexlb.sync.status;
 
-import lombok.Data;
-import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.stereotype.Component;
@@ -13,18 +10,14 @@ import java.util.LinkedHashMap;
 import java.util.Map;
 import java.util.function.BiConsumer;
 
-@Slf4j
-@Data
 @Component
 public class EngineWorkerStatus {
 
     public static final ModelWorkerStatus MODEL_ROLE_WORKER_STATUS = new ModelWorkerStatus();
 
-    public final ModelMetaConfig modelMetaConfig;
     private final EndpointRegistry endpointRegistry;
 
-    public EngineWorkerStatus(ModelMetaConfig modelMetaConfig, EndpointRegistry endpointRegistry) {
-        this.modelMetaConfig = modelMetaConfig;
+    public EngineWorkerStatus(EndpointRegistry endpointRegistry) {
         this.endpointRegistry = endpointRegistry;
     }
 

@@ -1,6 +1,5 @@
 package org.flexlb.httpserver;
 
-import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.service.grace.strategy.HealthCheckHooker;
 import org.flexlb.service.grace.strategy.QueryWarmerHooker;
@@ -16,7 +15,6 @@ import static org.springframework.web.reactive.function.server.RouterFunctions.r
 
 @Component
 @Slf4j
-@Data
 public class HealthCheckServer {
 
     /**

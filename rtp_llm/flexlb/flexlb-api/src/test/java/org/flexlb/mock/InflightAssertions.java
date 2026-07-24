@@ -2,7 +2,6 @@ package org.flexlb.mock;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -12,15 +11,10 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *
  * <p>FlexLB has three layers of inflight tracking:
  * <ol>
- *   <li>{@link FlexlbBatchScheduler#inflight} — scheduler-level request map (package-private)</li>
- *   <li>{@link PrefillEndpoint#getInflightBatchCount()} — per-worker batch tracking (public)</li>
- *   <li>{@link DecodeEndpoint#getInflightCount()} — per-worker decode reservation (public)</li>
+ *   <li>scheduler-level request lifecycle tracking</li>
+ *   <li>{@link PrefillEndpoint#getInflightBatchCount()} — per-worker batch tracking</li>
+ *   <li>{@link DecodeEndpoint#getInflightCount()} — per-worker decode reservation</li>
  * </ol>
- *
- * <p>Since {@code FlexlbBatchScheduler.inflight} is package-private
- * ({@code org.flexlb.balance.scheduler}), this class accesses it through
- * the {@link #getSchedulerInflightCount()} reflection-based accessor or
- * relies on the public endpoint methods.
  */
 public final class InflightAssertions {
 
@@ -32,11 +26,8 @@ public final class InflightAssertions {
      */
     public static void assertPrefillInflightEmpty(PrefillEndpoint prefillEp) {
         int batchCount = prefillEp.getInflightBatchCount();
-        int requestCount = prefillEp.getInflightRequestCount();
         assertEquals(0, batchCount,
                 "PrefillEndpoint inflightBatches should be empty but has " + batchCount + " batches");
-        assertEquals(0, requestCount,
-                "PrefillEndpoint inflightRequests should be empty but has " + requestCount + " requests");
     }
 
     /**

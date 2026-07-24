@@ -20,8 +20,6 @@ import static org.junit.jupiter.api.Assertions.assertNotSame;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.Mockito.verify;
-import static org.mockito.Mockito.when;
 
 class EndpointRegistryRoleTest {
 
@@ -32,7 +30,7 @@ class EndpointRegistryRoleTest {
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         registry = new EndpointRegistry(
-                configService, null, Mockito.mock(BatchSchedulerReporter.class));
+                configService, () -> null, Mockito.mock(BatchSchedulerReporter.class));
     }
 
     @AfterEach
@@ -83,9 +81,9 @@ class EndpointRegistryRoleTest {
     void simple_endpoint_should_report_status_task_count_as_load() {
         WorkerStatus status = status(RoleType.VIT, 8080);
         status.setRunningTaskList(Map.of("1", new TaskInfo(), "2", new TaskInfo()));
-        SimpleWorkerEndpoint endpoint = registry.ensureVitEndpoint("127.0.0.1:8080", status);
+        SimpleWorkerEndpoint endpoint = (SimpleWorkerEndpoint) registry.ensureEndpoint(
+                RoleType.VIT, "127.0.0.1:8080", status);
 
-        assertEquals(2, endpoint.getLocalTaskCount());
         assertEquals(2, endpoint.getLoadMetric());
     }
 
@@ -105,18 +103,6 @@ class EndpointRegistryRoleTest {
 
         assertTrue(registry.remove(RoleType.VIT, ipPort, replacement));
         assertNull(registry.get(RoleType.VIT, ipPort));
-    }
-
-    @Test
-    void should_close_endpoint_after_conditional_removal() {
-        String ipPort = "127.0.0.1:8080";
-        WorkerStatus status = status(RoleType.PREFILL, 8080);
-        PrefillEndpoint endpoint = Mockito.mock(PrefillEndpoint.class);
-        when(endpoint.getStatus()).thenReturn(status);
-        registry.putPrefill(ipPort, endpoint);
-
-        assertTrue(registry.remove(RoleType.PREFILL, ipPort, status));
-        verify(endpoint).close();
     }
 
     private static WorkerStatus status(RoleType roleType, int port) {

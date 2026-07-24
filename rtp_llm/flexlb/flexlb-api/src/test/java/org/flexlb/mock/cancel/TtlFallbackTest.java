@@ -3,8 +3,8 @@ package org.flexlb.mock.cancel;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.mock.FlexLBMockTestBase;
-import org.flexlb.mock.MockWorkerBehavior;
 import org.flexlb.mock.InflightAssertions;
+import org.flexlb.mock.MockWorkerBehavior;
 import org.junit.jupiter.api.Test;
 
 import java.util.concurrent.CompletableFuture;
@@ -42,7 +42,6 @@ class TtlFallbackTest extends FlexLBMockTestBase {
         cfg.setFlexlbBatchWindowMs(300);
         cfg.setCostSloMs(50_000L);
         cfg.setCostSloRiskMarginMs(50L);
-        cfg.setFlexlbBatchFillThreshold(1.0);
         cfg.setFlexlbBatchEnqueueDeadlineMs(2_000L);  // shorter deadline for cancel timeout
         cfg.setFlexlbInflightTtlMs(500L);  // very short TTL
         return cfg;
