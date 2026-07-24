@@ -11,10 +11,7 @@ from rtp_llm.models.qwen3_next.qwen3_next_weight import (
     Qwen35DenseWeight,
     Qwen35MoeWeight,
 )
-from rtp_llm.ops import (
-    KVCacheSpecType,
-    HybridAttentionType,
-)
+from rtp_llm.ops import HybridAttentionType, KVCacheSpecType
 
 
 class Qwen3NextBase(BaseModel):
@@ -114,6 +111,9 @@ class Qwen3NextBase(BaseModel):
     def _parse_hybrid_attention_config(cls, config_json: dict, config: ModelConfig):
         attention_step = config_json["full_attention_interval"]
         config.hybrid_attention_config.enable_hybrid_attention = True
+        # route to HybridPoolConfigCreator (per-group pools, max stride) to bypass
+        # the full>=linear block-size assertion this model's geometry violates
+        config.hybrid_attention_config.enable_independent_kv_cache_pools = True
         hybrid_layer_types: List[HybridAttentionType] = []
         for i in range(config.num_layers):
             if (i + 1) % attention_step == 0:
@@ -233,10 +233,10 @@ class Qwen35Moe(Qwen3NextBase):
         moe_config = self.moe_config
         max_generate_batch_size = self.max_generate_batch_size
 
-        from rtp_llm.models_py.utils.arch import is_cuda
+        from rtp_llm.models_py.utils.arch import is_cuda, is_hip
 
-        if not is_cuda():
-            raise RuntimeError("Qwen3Next is only supported in cuda arch")
+        if not (is_cuda() or is_hip()):
+            raise RuntimeError("Qwen3Next is only supported in cuda/rocm arch")
         from rtp_llm.models_py.model_desc.qwen3_next import Qwen35Model
 
         self.py_model = Qwen35Model(

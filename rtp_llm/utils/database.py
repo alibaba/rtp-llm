@@ -4,7 +4,7 @@ import os
 import re
 import time
 from pathlib import Path
-from typing import Any, Dict, Generator, List, Optional
+from typing import Any, Dict, Generator, List, Optional, Tuple
 
 import torch
 from tqdm.auto import tqdm
@@ -209,6 +209,17 @@ class CkptDatabase(BaseDatabase):
         if ckpt_file is not None:
             return [ckpt_file.load_tensor(name, data_type)]
         return []
+
+    def load_tensor_slice(
+        self,
+        name: str,
+        tensor_slice: Tuple[slice, ...],
+        data_type: torch.dtype = torch.float16,
+    ) -> torch.Tensor:
+        return self._tensor_index[name].load_tensor_slice(name, tensor_slice, data_type)
+
+    def get_tensor_shape(self, name: str) -> torch.Size:
+        return self._tensor_index[name].get_tensor_shape(name)
 
     def has_tensor(self, name: str) -> bool:
         return name in self._tensor_index

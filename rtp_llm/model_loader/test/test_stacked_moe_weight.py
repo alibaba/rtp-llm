@@ -18,7 +18,11 @@ from rtp_llm.model_loader.ffn_weight import (
     MoeWeight,
     iter_stacked_moe_weights,
 )
-from rtp_llm.model_loader.tensor_source import StackSplitTensorSource, TensorSource
+from rtp_llm.model_loader.tensor_source import (
+    DatabaseTensorSource,
+    StackSplitTensorSource,
+    TensorSource,
+)
 from rtp_llm.utils.model_weight import CkptWeightInfo, W, identity
 
 
@@ -38,6 +42,21 @@ class FakeTensorSource(TensorSource):
 
     def get_database(self):
         return None
+
+
+class FakeSliceDatabase:
+    is_safetensor = True
+
+    def __init__(self, tensors: Dict[str, torch.Tensor]):
+        self.tensors = tensors
+        self.requests = []
+
+    def get_tensor_shape(self, name: str):
+        return self.tensors[name].shape
+
+    def load_tensor_slice(self, name, tensor_slice, data_type):
+        self.requests.append((name, tensor_slice))
+        return self.tensors[name][tensor_slice].to(data_type)
 
 
 class TestStackSplitTensorSource(unittest.TestCase):
@@ -409,6 +428,86 @@ class TestGpuPreallocate(unittest.TestCase):
         # Should still produce correct result via fallback
         self.assertEqual(result[W.moe_w2].shape[0], num_experts)
         self.assertEqual(result[W.moe_w2].device.type, "cpu")
+
+    def _load_pure_tp(self, weight, tensors):
+        load_config = MagicMock(tp_size=2, tp_rank=1)
+        database = FakeSliceDatabase(tensors)
+        raw = weight._load_raw_tensor_pure_tp(
+            DatabaseTensorSource(database),
+            0,
+            "cpu",
+            load_config,
+            weight.weights,
+            list(range(weight.config.expert_num)),
+            torch.float32,
+        )
+        return raw, load_config, database
+
+    def test_stack_moe_w1_preshards_pure_tp(self):
+        from rtp_llm.utils.model_weight import stack_moe_w1
+
+        tensors = {}
+        for expert_id in range(2):
+            up = torch.arange(32, dtype=torch.float32).reshape(8, 4)
+            tensors[f"layers.0.up.{expert_id}"] = up + expert_id * 100
+            tensors[f"layers.0.gate.{expert_id}"] = up + expert_id * 100 + 1000
+        weight = MoeAtomicWeight(
+            W.moe_w1,
+            [
+                CkptWeightInfo("layers.{i}.up.{expert_id}"),
+                CkptWeightInfo("layers.{i}.gate.{expert_id}"),
+            ],
+            stack_moe_w1,
+            config=MoeConfig(expert_num=2),
+        )
+
+        raw, load_config, database = self._load_pure_tp(weight, tensors)
+        result = weight._split(raw, load_config)[W.moe_w1]
+        expected = torch.stack(
+            [
+                torch.cat(
+                    [tensors[f"layers.0.up.{i}"][4:], tensors[f"layers.0.gate.{i}"][4:]]
+                )
+                for i in range(2)
+            ]
+        )
+
+        torch.testing.assert_close(result, expected)
+        self.assertEqual(len(database.requests), 4)
+        self.assertTrue(
+            all(request[1][0] == slice(4, 8) for request in database.requests)
+        )
+
+    def test_stack_moe_w2_preshards_through_composite(self):
+        from rtp_llm.model_loader.weight_module import CompositeWeight
+        from rtp_llm.utils.model_weight import stack_
+
+        class TestCompositeWeight(CompositeWeight):
+            @classmethod
+            def support(cls, quant_config, src_weight_info):
+                return False
+
+        tensors = {
+            f"layers.0.w2.{i}": torch.arange(32, dtype=torch.float32).reshape(4, 8)
+            + i * 100
+            for i in range(2)
+        }
+        weight = MoeAtomicWeight(
+            W.moe_w2,
+            [CkptWeightInfo("layers.{i}.w2.{expert_id}")],
+            stack_,
+            config=MoeConfig(expert_num=2),
+        )
+        raw, load_config, database = self._load_pure_tp(weight, tensors)
+        composite = TestCompositeWeight({weight.name: weight}, name="quant_moe_w2")
+        result = composite._split(raw, load_config)[W.moe_w2]
+        expected = torch.stack([tensors[f"layers.0.w2.{i}"][:, 4:] for i in range(2)])
+
+        torch.testing.assert_close(result, expected)
+        self.assertEqual(len(database.requests), 2)
+        self.assertTrue(
+            all(request[1][1] == slice(4, 8) for request in database.requests)
+        )
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA not available")
     def test_stack_moe_w1_1d_scale_fallback(self):
