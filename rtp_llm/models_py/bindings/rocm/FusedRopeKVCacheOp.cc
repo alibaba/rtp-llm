@@ -13,10 +13,19 @@
 namespace rtp_llm {
 
 static at::ScalarType get_fp8_dtype() {
-    hipDeviceProp_t prop;
-    int             device_id = 0;
-    hipGetDevice(&device_id);
-    hipGetDeviceProperties(&prop, device_id);
+    int              device_id     = 0;
+    const hipError_t device_status = hipGetDevice(&device_id);
+    TORCH_CHECK(device_status == hipSuccess,
+                "hipGetDevice failed while selecting the FP8 dtype: ",
+                hipGetErrorString(device_status));
+
+    hipDeviceProp_t  prop{};
+    const hipError_t props_status = hipGetDeviceProperties(&prop, device_id);
+    TORCH_CHECK(props_status == hipSuccess,
+                "hipGetDeviceProperties failed for device ",
+                device_id,
+                " while selecting the FP8 dtype: ",
+                hipGetErrorString(props_status));
     std::string arch(prop.gcnArchName);
     if (arch.find("gfx950") != std::string::npos) {
         return torch::kFloat8_e4m3fn;
@@ -339,10 +348,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
         position_ids = params->position_ids.data_ptr<int>();
     }
 
-    auto    rope_cache = getRopeCacheOnce(attn_configs_.rope_config, attn_configs_.max_seq_len, false);
-    float2* rope_cache_ptr =
-        rope_cache.used && rope_cache.data.defined() ? static_cast<float2*>(rope_cache.data.data_ptr()) : nullptr;
-
+    // Prefill intentionally computes RoPE sin/cos inline in double precision
+    // (nullptr cache) to match the V1 numerical baseline and avoid greedy-token
+    // drift. Decode keeps the precomputed float cache because it is a per-token
+    // hot path and is covered by dedicated decode numerical tests.
     if (use_asm()) {
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(
             torchDTypeToDataType(qkv.dtype()),

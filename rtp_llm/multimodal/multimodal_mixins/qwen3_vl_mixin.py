@@ -283,14 +283,4 @@ class Qwen3_VLMixin(Qwen2_5_VLMixin):
         return Qwen3_VLImageEmbedding(mm_related_params).visual
 
 
-class Qwen3_VLMoeLegacyMixin(Qwen3_VLMixin):
-    def _init_multimodal(self):
-        if self.use_new_loader:
-            raise ValueError(
-                "qwen3_vl_moe is not supported by the new loader in this change"
-            )
-        super()._init_multimodal()
-
-
-register_multimodal_mixin(["qwen3_vl"], Qwen3_VLMixin)
-register_multimodal_mixin(["qwen3_vl_moe"], Qwen3_VLMoeLegacyMixin)
+register_multimodal_mixin(["qwen3_vl", "qwen3_vl_moe"], Qwen3_VLMixin)

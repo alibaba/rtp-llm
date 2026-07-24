@@ -577,7 +577,22 @@ def h20_oss_suites():
             smoke_test(
                 name="qwen3_vl_moe",
                 task_info="data/model/qwen_vl/q_r_3_moe.json",
-                smoke_args = "--act_type BF16 --use_local 1 --enable_xqa off",
+                smoke_args = "--act_type BF16 --use_local 1 --enable_xqa off --tp_size 2",
+                envs = ["USE_NEW_LOADER=0", "LOAD_METHOD=scratch"],
+                gpu_type=["H20"],
+                data=native.glob(['data/model/llava/*']),
+            ),
+            smoke_test(
+                name="qwen3_vl_moe_newloader",
+                task_info="data/model/qwen_vl/q_r_3_moe.json",
+                smoke_args = {
+                    "llm": "--act_type BF16 --use_local 1 --enable_xqa off --tp_size 2",
+                    "vit": "--act_type BF16 --use_local 1 --use_local_preprocess 1"
+                },
+                envs = {
+                    "llm": ["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
+                    "vit": ["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
+                },
                 gpu_type=["H20"],
                 data=native.glob(['data/model/llava/*']),
             ),

@@ -344,6 +344,11 @@ class NewModelLoader:
                 f"model_config num_experts must be non-negative, got {num_experts}"
             )
         if num_experts == 0:
+            model_type = (
+                self.model_config.get("model_type", "")
+                if isinstance(self.model_config, dict)
+                else getattr(self.model_config, "model_type", "")
+            )
             moe_top_k = (
                 self.model_config.get(
                     "moe_k", self.model_config.get("num_experts_per_tok", 0)
@@ -365,17 +370,19 @@ class NewModelLoader:
                     raise ValueError(
                         f"model_config {name} must be non-negative, got {value}"
                     )
-            if moe_top_k > 0 or moe_style > 0:
+            if "moe" in str(model_type).lower() or moe_top_k > 0 or moe_style > 0:
                 raise ValueError(
-                    "EP is configured for a model with MoE markers "
-                    f"(moe_k={moe_top_k}, moe_style={moe_style}), but "
+                    "EP is configured for a MoE model "
+                    f"(model_type={model_type!r}, moe_k={moe_top_k}, "
+                    f"moe_style={moe_style}), but "
                     "model_config reports zero experts"
                 )
             logger.warning(
                 "EP size %d is configured, but model_config reports zero experts; "
-                "the zero moe_k/moe_style markers identify a dense model, so expert "
-                "checkpoint filtering is disabled",
+                "model_type=%r and zero moe_k/moe_style markers identify a dense "
+                "model, so expert checkpoint filtering is disabled",
                 self.load_config.ep_size,
+                model_type,
             )
             return None
         return _ExpertRangeFilter(
