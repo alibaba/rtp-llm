@@ -31,12 +31,34 @@ _M3_MSA_FUSED_CSR = os.environ.get("M3_MSA_FUSED_CSR", "1") == "1"
 # fixed-size chunks (CSR/schedule rebuilt per chunk, causal alignment preserved
 # via per-chunk seqused_k) so the workspace is bounded by the chunk size.
 # Disabled by default; chunk size defaults to 16K queries.
-_M3_SPARSE_ATTN_CHUNK_ENABLE = (
-    os.environ.get("M3_SPARSE_ATTN_CHUNK_ENABLE", "0") == "1"
-)
-_M3_SPARSE_ATTN_CHUNK_SIZE = int(
-    os.environ.get("M3_SPARSE_ATTN_CHUNK_SIZE", "16384")
-)
+_M3_SPARSE_ATTN_CHUNK_ENABLE = os.environ.get("M3_SPARSE_ATTN_CHUNK_ENABLE", "0") == "1"
+_M3_SPARSE_ATTN_CHUNK_SIZE = int(os.environ.get("M3_SPARSE_ATTN_CHUNK_SIZE", "16384"))
+
+# One-time reusable workspace for the chunked step3 (M3_SPARSE_ATTN_CHUNK_ENABLE).
+# Mirrors the megamoe symm-mem buffer pattern (mega_buf._MEGA_BUF_CACHE): a single
+# flat CUDA uint8 tensor is allocated on first use, cached at module level per
+# device, grown only when a later plan needs more bytes, and reused across every
+# chunk / sparse layer / prefill step. Without it, sparse_atten_func +
+# SparseK2qCsrBuilderSm100 re-allocate the temporaries below on every chunk of
+# every layer. Layout (sizes computed by fmha_sm100, offsets 256B-aligned):
+#   [0, fwd_bytes)  sparse_atten_func intra-call temporaries
+#       O_partial   [topk, chunk_q, Hq, dim] bf16 -- dominant term, e.g.
+#                   topk=16, chunk_q=16384, Hq=64, dim=128 -> 4 GiB
+#       LSE_partial [topk, chunk_q, Hq] fp32     -- ~64 MiB at the same shape
+#       fwd_bytes = interface.sparse_fwd_workspace_bytes(...) (256B-aligned)
+#   [fwd_bytes, fwd_bytes + csr_words*4)  CSR builder pipeline scratch, int32
+#       row_counts [Hkv, total_rows] + row_map [1, max_kv_blocks]
+#       + row_coords [total_rows, 2] + tile_counts [G_total, Hkv, total_rows],
+#       csr_words = build_k2q_csr.k2q_csr_workspace_words(...) (a few MiB)
+_M3_CHUNK_WS_CACHE: dict = {}  # torch.device -> flat uint8 workspace
+
+
+def _get_or_create_chunk_ws(nbytes: int, device: torch.device) -> torch.Tensor:
+    ws = _M3_CHUNK_WS_CACHE.get(device)
+    if ws is None or ws.numel() < nbytes:
+        ws = torch.empty(nbytes, dtype=torch.uint8, device=device)
+        _M3_CHUNK_WS_CACHE[device] = ws
+    return ws
 
 
 def _patch_fmha_sm100_cxx_standard():
@@ -659,8 +681,35 @@ def _sparse_attn_chunked(
             gq0 += q_len
         builder = SparseK2qCsrBuilderSm100()
         builder._ensure_loaded()
-        meta = dict(chunks=chunks, builder=builder)
+        # Reusable-workspace sizing (see _M3_CHUNK_WS_CACHE): fwd segment covers
+        # the largest chunk; csr segment covers the largest per-chunk scratch.
+        # emit_schedule=True is a superset of the non-schedule size (adds only
+        # row_coords), so the same buffer serves both usable_SM_count modes.
+        from interface import sparse_fwd_workspace_bytes
+        from src.sm100.build_k2q_csr import k2q_csr_workspace_words
+
+        max_csz = max(c["csz"] for c in chunks)
+        ws_fwd_bytes = sparse_fwd_workspace_bytes(
+            topk, max_csz, num_q_heads, head_dim=head_dim
+        )
+        ws_csr_words = max(
+            k2q_csr_workspace_words(
+                num_kv_heads, c["total_rows"], 1, c["total_rows"], c["csz"], True
+            )
+            for c in chunks
+        )
+        meta = dict(
+            chunks=chunks,
+            builder=builder,
+            ws_fwd_bytes=ws_fwd_bytes,
+            ws_csr_words=ws_csr_words,
+        )
         p["_chunk_meta"] = meta
+
+    fwd_bytes, csr_words = meta["ws_fwd_bytes"], meta["ws_csr_words"]
+    ws = _get_or_create_chunk_ws(fwd_bytes + csr_words * 4, dev)
+    ws_fwd = ws[:fwd_bytes]
+    ws_csr = ws[fwd_bytes : fwd_bytes + csr_words * 4].view(torch.int32)
 
     out = torch.empty(total_q, num_q_heads, head_dim, dtype=torch.bfloat16, device=dev)
     for c in meta["chunks"]:
@@ -681,10 +730,14 @@ def _sparse_attn_chunked(
             total_rows=c["total_rows"],
             qhead_per_kv=qhead_per_kv,
             return_schedule=usable_sm <= 0,
+            workspace=ws_csr,
         )
         row_ptr, q_ind = ret[0], ret[1]
         sched = ret[2] if len(ret) == 3 else None
-        out_c = sparse_atten_func(
+        # out= makes the K2 combine kernel write the chunk result directly
+        # into the persistent output (dim-0 slice is contiguous), removing a
+        # [csz, Hq, dim] DtoD copy (~83us / 256MB per 16K-q chunk).
+        sparse_atten_func(
             q[g0:g1],
             k_paged_f,
             v_paged_f,
@@ -703,10 +756,9 @@ def _sparse_attn_chunked(
             seqused_k=c["seqused"],
             schedule=sched,
             usable_SM_count=usable_sm,
+            workspace=ws_fwd,
+            out=out[g0:g1],
         )
-        if isinstance(out_c, tuple):
-            out_c = out_c[0]
-        out[g0:g1].copy_(out_c)
     return out
 
 
