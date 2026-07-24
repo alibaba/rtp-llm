@@ -1,5 +1,6 @@
 package org.flexlb.balance.scheduler;
 
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -30,6 +31,8 @@ class QueueManagerTest {
     private RoutingQueueReporter metrics;
     @Mock
     private ConfigService configService;
+    @Mock
+    private EndpointRegistry endpointRegistry;
 
     private QueueManager queueManager;
 
@@ -38,7 +41,7 @@ class QueueManagerTest {
         FlexlbConfig config = new FlexlbConfig();
         config.setMaxQueueSize(10);
         when(configService.loadBalanceConfig()).thenReturn(config);
-        queueManager = new QueueManager(metrics, configService);
+        queueManager = new QueueManager(metrics, configService, endpointRegistry);
     }
 
     @Test
@@ -71,7 +74,7 @@ class QueueManagerTest {
 
     @Test
     void takeRequest_shouldReturnNullWhenEmpty() {
-        BalanceContext result = queueManager.takeRequest(false, 0);
+        BalanceContext result = queueManager.takeRequest(0);
         assertNull(result);
     }
 
@@ -80,7 +83,7 @@ class QueueManagerTest {
         BalanceContext ctx = createContext(1L);
         queueManager.tryRouteAsync(ctx);
 
-        BalanceContext taken = queueManager.takeRequest(false, 0);
+        BalanceContext taken = queueManager.takeRequest(0);
         assertNotNull(taken);
         assertEquals(1L, taken.getRequestId());
     }
@@ -94,7 +97,7 @@ class QueueManagerTest {
         BalanceContext valid = createContext(2L);
         queueManager.tryRouteAsync(valid);
 
-        BalanceContext taken = queueManager.takeRequest(false, 0);
+        BalanceContext taken = queueManager.takeRequest(0);
         assertNotNull(taken);
         assertEquals(2L, taken.getRequestId());
     }
@@ -109,7 +112,7 @@ class QueueManagerTest {
         retried.setEnqueueTime(System.currentTimeMillis());
         queueManager.offerToHead(retried);
 
-        BalanceContext taken = queueManager.takeRequest(false, 0);
+        BalanceContext taken = queueManager.takeRequest(0);
         assertNotNull(taken);
         assertEquals(2L, taken.getRequestId());
     }

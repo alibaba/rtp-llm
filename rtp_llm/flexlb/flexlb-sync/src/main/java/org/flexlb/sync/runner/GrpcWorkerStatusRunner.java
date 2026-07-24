@@ -4,9 +4,8 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.master.WorkerStatusResponse;
-import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.grpc.EngineStatusConverter;
@@ -18,7 +17,6 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.Executor;
 
@@ -78,7 +76,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     public void run() {
         boolean asyncInitiated = false;
         try {
-            logger.info("GrpcWorkerStatusRunner run for {}", ipPort);
+            logger.debug("GrpcWorkerStatusRunner run for {}", ipPort);
             long startTime = System.nanoTime() / 1000;
 
             long latestFinishedTaskVersion = workerStatus.getLatestFinishedTaskVersion().get();
@@ -149,46 +147,48 @@ public class GrpcWorkerStatusRunner implements Runnable {
             if (versionAdvanced) {
                 // 1. WorkerStatusResponse directly updates WorkerStatus
                 workerStatus.updateFromResponse(newWorkerStatus);
-
-                if (endpointRegistry != null) {
-                    if (workerStatus.isAlive()) {
-                        ep = endpointRegistry.ensureEndpoint(roleType, ipPort, workerStatus);
-                    } else {
-                        endpointRegistry.remove(roleType, ipPort, workerStatus);
-                        ep = null;
-                    }
-                }
-
-                // 2. Notify EP (calibration) — passes both updated status and raw response
-                if (ep != null) {
-                    ep.onWorkerStatusUpdate(workerStatus, newWorkerStatus);
-                }
-
-                // 3. Notify scheduler (cleanup finished requests)
-                if (batchScheduler != null) {
-                    batchScheduler.onWorkerStatusUpdate(workerStatus, newWorkerStatus);
-                }
-
-                Long latestFinishedVersion = newWorkerStatus.getLatestFinishedVersion();
-
-                // 4. Advance latestFinishedVersion only after calibrate has processed finished tasks.
-                // If this is done outside the version guard, a skipped calibrate (version not
-                // advanced) would still consume the incremental version, causing the engine to
-                // filter out those finished tasks on the next poll — leaking inflight entries.
-                if (latestFinishedVersion != null
-                        && latestFinishedVersion > workerStatus.getLatestFinishedTaskVersion().get()) {
-                    workerStatus.getLatestFinishedTaskVersion().set(latestFinishedVersion);
-                }
             } else {
                 workerStatus.refreshStatusHeartbeat(newWorkerStatus.isAlive());
-                if (endpointRegistry != null) {
-                    if (workerStatus.isAlive()) {
-                        ep = endpointRegistry.ensureEndpoint(roleType, ipPort, workerStatus);
-                    } else {
-                        endpointRegistry.remove(roleType, ipPort, workerStatus);
-                        ep = null;
-                    }
+                // Do NOT call updateFromResponse — avoid stale data overwriting WorkerStatus
+                // when the version has not advanced.
+                if (currentVersion > responseVersion) {
+                    logger.warn("Version regression for {}, role={}: current={}, response={}",
+                            ipPort, roleType, currentVersion, responseVersion);
+                } else {
+                    logger.debug("Version stall for {}, role={}: current={}", ipPort, roleType, currentVersion);
                 }
+            }
+
+            // ===== Shared path (eliminates endpoint-ensure duplication in original if/else) =====
+            // 1. Ensure endpoint
+            if (endpointRegistry != null) {
+                if (workerStatus.isAlive()) {
+                    ep = endpointRegistry.ensureEndpoint(roleType, ipPort, workerStatus);
+                } else {
+                    endpointRegistry.remove(roleType, ipPort, workerStatus);
+                    ep = null;
+                }
+            }
+
+            // 2. Notify EP (calibration) — passes both updated status and raw response
+            if (ep != null) {
+                ep.onWorkerStatusUpdate(workerStatus, newWorkerStatus);
+            }
+
+            // 3. Notify scheduler (cleanup finished requests)
+            if (batchScheduler != null) {
+                batchScheduler.onWorkerStatusUpdate(newWorkerStatus);
+            }
+
+            Long latestFinishedVersion = newWorkerStatus.getLatestFinishedVersion();
+
+            // 4. Advance latestFinishedVersion only after calibrate has processed finished tasks.
+            // If this is done outside the version guard, a skipped calibrate (version not
+            // advanced) would still consume the incremental version, causing the engine to
+            // filter out those finished tasks on the next poll — leaking inflight entries.
+            if (latestFinishedVersion != null
+                    && latestFinishedVersion > workerStatus.getLatestFinishedTaskVersion().get()) {
+                workerStatus.getLatestFinishedTaskVersion().set(latestFinishedVersion);
             }
 
             engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus, ep,
@@ -204,7 +204,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     }
 
     private void logWorkerStatusUpdate(long startTime, WorkerStatus workerStatus) {
-        logger.info("gRPC Worker Status - {}, role:{}, alive:{}, concurrency:{}, "
+        logger.debug("gRPC Worker Status - {}, role:{}, alive:{}, concurrency:{}, "
                         + "step_latency_ms:{}, iterate_count:{}, "
                         + "dp_rank:{}, dp_size:{}, tp_size:{}, "
                         + "avail_kv_tokens:{}, used_kv_tokens:{}, "
@@ -239,7 +239,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     }
 
     private void log(String msg) {
-        logger.info("[gRPC][{}][{}][{}][{}][{}μs]: {}",
+        logger.debug("[gRPC][{}][{}][{}][{}][{}μs]: {}",
                 id,
                 site,
                 ipPort,

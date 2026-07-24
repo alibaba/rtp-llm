@@ -2,6 +2,7 @@ import asyncio
 import json
 from typing import Any
 from unittest import TestCase, main
+from unittest.mock import patch
 
 from pydantic import BaseModel
 
@@ -98,6 +99,19 @@ class FrontendServerTest(TestCase):
         self.assertTrue(self.frontend_server.check_health())
         visitor = self.frontend_server._frontend_worker.backend_rpc_server_visitor
         self.assertEqual(visitor.refresh_calls, [False])
+
+    def test_compute_absolute_deadline_preserves_unlimited_timeout(self):
+        config = self.frontend_server.py_env_configs.master_config
+        with patch("rtp_llm.frontend.frontend_server.time.time", return_value=1000):
+            self.assertEqual(
+                self.frontend_server._compute_absolute_deadline_ms(250), 1000250
+            )
+            config.master_default_timeout_ms = 0
+            self.assertEqual(self.frontend_server._compute_absolute_deadline_ms(0), 0)
+            config.master_default_timeout_ms = -1
+            self.assertEqual(
+                self.frontend_server._compute_absolute_deadline_ms(None), 0
+            )
 
 
 main()

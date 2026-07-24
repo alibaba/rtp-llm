@@ -50,10 +50,10 @@ class ConcurrentCancelDispatchTest extends FlexLBMockTestBase {
         FlexlbConfig cfg = new FlexlbConfig();
         cfg.setFlexlbBatchEnabled(true);
         cfg.setFlexlbBatchSizeMax(1);        // each request dispatches independently
+        cfg.setFlexlbBatchFixedMaxInflightBatches(0); // isolate cancel/dispatch race from backpressure
         cfg.setFlexlbBatchWindowMs(300);
         cfg.setCostSloMs(50_000L);
         cfg.setCostSloRiskMarginMs(50L);
-        cfg.setFlexlbBatchFillThreshold(1.0);
         cfg.setFlexlbBatchEnqueueDeadlineMs(5_000L);
         cfg.setFlexlbInflightTtlMs(300_000L);
         return cfg;

@@ -10,6 +10,7 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 
 class MicrometerFlexMonitorTest {
 
@@ -42,6 +43,24 @@ class MicrometerFlexMonitorTest {
             assertEquals(prepared, reported);
             assertEquals(1L, reported.count());
             assertEquals(12.0D, reported.totalTime(TimeUnit.MILLISECONDS), 0.001D);
+        } finally {
+            monitor.close();
+            registry.close();
+        }
+    }
+
+    @Test
+    void timerPublishesPercentilesWithoutHistogramBuckets() {
+        SimpleMeterRegistry registry = new SimpleMeterRegistry();
+        MicrometerFlexMonitor monitor = new MicrometerFlexMonitor(registry);
+        try {
+            monitor.register("test.timer", FlexMetricType.TIMER);
+            monitor.report("test.timer", null, 5.0D);
+
+            assertNotNull(registry.find("flexlb.test.timer").timer());
+            assertNotNull(registry.find("flexlb.test.timer.percentile").tag("phi", "0.5").gauge());
+            assertNotNull(registry.find("flexlb.test.timer.percentile").tag("phi", "0.99").gauge());
+            assertNull(registry.find("flexlb.test.timer.histogram").gauge());
         } finally {
             monitor.close();
             registry.close();

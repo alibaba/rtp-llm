@@ -87,6 +87,24 @@ public class MetricConstant {
     public static final String DECODE_INFLIGHT_KV_RESERVED_TOKENS = "app.flexlb.decode.inflight.kv.reserved.tokens";
 
     /**
+     * FlexLB scheduler inflight hard KV cache reserved tokens per decode worker (hard reservation that cannot be reclaimed)
+     */
+    public static final String DECODE_INFLIGHT_HARD_KV_RESERVED_TOKENS =
+            "app.flexlb.decode.inflight.hard.kv.reserved.tokens";
+
+    /**
+     * FlexLB scheduler inflight max age (ms) — age of the oldest inflight entry, tagged by role and engineIp.
+     */
+    public static final String INFLIGHT_MAX_AGE_MS =
+            "app.flexlb.inflight.max.age.ms";
+
+    /**
+     * FlexLB scheduler inflight TTL expired count — number of inflight requests
+     * cleaned up by the TTL cleanup task. Reported as QPS, tagged by role.
+     */
+    public static final String INFLIGHT_TTL_EXPIRED_QPS = "app.flexlb.inflight.ttl.expired.qps";
+
+    /**
      * Batch predicted execution time (formula estimate) in milliseconds
      */
     public static final String BATCH_PREDICTED_TIME_MS = "app.flexlb.batch.predicted.time.ms";
@@ -140,9 +158,16 @@ public class MetricConstant {
      * in the per-engine WorkerBatcher queue.
      * <p>Reported by BatchSchedulerReporter with role and engineIp tags.
      * Independent metric name to avoid tag schema conflict with {@link #ROUTING_QUEUE_LENGTH}
-     * (which uses type=batchQueue tag for backward compatibility).
+     * (which is now exclusively owned by RoutingQueueReporter with type=mainQueue tag).
      */
     public static final String BATCHER_QUEUE_SIZE = "app.flexlb.batcher.queue.size";
+
+    /**
+     * Independent metric name for batcher queue wait time, to avoid tag schema conflict with
+     * {@link #ROUTING_QUEUE_WAIT_TIME_MS} (direct path, GAUGE with empty tags).
+     * Batch path uses TIMER with per-engine tags (role/engineIp/engineIpPort).
+     */
+    public static final String BATCHER_QUEUE_WAIT_TIME_MS = "app.flexlb.batcher.queue.wait.time.ms";
 
     /**
      * Engine finished task list size
@@ -240,30 +265,6 @@ public class MetricConstant {
      * Aggregated theory cache-hit token ratio. Tagged by window=all.
      */
     public static final String CACHE_THEORY_HIT_RATIO = "app.cache.theory.hit.ratio";
-
-    /**
-     * Per-engine candidate routing cache-match hit tokens. Tagged by role, engineIp.
-     */
-    public static final String CACHE_ROUTING_CANDIDATE_MATCH_HIT_TOKENS =
-            "app.cache.routing.candidate.match.hit.tokens";
-
-    /**
-     * Per-engine candidate routing cache-match input tokens. Tagged by role, engineIp.
-     */
-    public static final String CACHE_ROUTING_CANDIDATE_MATCH_TOTAL_TOKENS =
-            "app.cache.routing.candidate.match.total.tokens";
-
-    /**
-     * Selected-engine routing cache-match hit tokens. Tagged by role, engineIp.
-     */
-    public static final String CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS =
-            "app.cache.routing.selected.match.hit.tokens";
-
-    /**
-     * Selected-engine routing cache-match input tokens. Tagged by role, engineIp.
-     */
-    public static final String CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS =
-            "app.cache.routing.selected.match.total.tokens";
 
     /**
      * Cache request total count
@@ -427,13 +428,6 @@ public class MetricConstant {
      * Worker permit capacity
      */
     public static final String WORKER_PERMIT_CAPACITY = "app.worker.permit.capacity";
-
-    /**
-     * Request arrival delay at Netty (difference between client requestTimeSeconds and server startTime, in milliseconds).
-     * <p>Deprecated: superseded by {@link #REQUEST_NETWORK_DELAY_MS} and {@link #GRPC_SERVER_PROCESS_MS}.
-     * Retained for backward compatibility — no longer reported.
-     */
-    public static final String REQUEST_ARRIVAL_DELAY_MS = "app.request.arrival.delay.ms";
 
     /**
      * Network transfer delay: time from client requestTimeMs to gRPC server entry, in milliseconds.

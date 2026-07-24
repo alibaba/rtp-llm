@@ -11,7 +11,6 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
@@ -24,7 +23,6 @@ import org.springframework.stereotype.Component;
 import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.ThreadLocalRandom;
 
 @Component("costBasedDecodeStrategy")
@@ -44,13 +42,12 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.COST_BASED_DECODE, this);
     }
 
-    private record WeightedWorker(DecodeEndpoint endpoint, long normalizedCacheUsed, double weight) {
-    }
-
     @Override
     public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
         Request request = balanceContext.getRequest();
         long seqLen = request.getSeqLen();
+        long maxNewTokens = request.getMaxNewTokens();
+        long expectedKvTokens = seqLen + maxNewTokens;
         FlexlbConfig config = balanceContext.getConfig();
 
         EndpointFilterResult filterResult = getAvailableEndpoints(roleType, group, config.getResourceMeasureIndicator(roleType));
@@ -67,8 +64,20 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         DecodeEndpoint selectedEndpoint = weightedRandomSelection(survivors);
 
         if (selectedEndpoint != null) {
-            long prefixLength = calcPrefixMatchLength(selectedEndpoint.getStatus().getCacheStatus(), balanceContext.getRequest().getBlockCacheKeys());
-            return buildServerStatus(selectedEndpoint, seqLen, prefixLength, roleType, balanceContext.getRequestId(), balanceContext.getScheduleMode());
+            ServerStatus result = buildServerStatus(selectedEndpoint, seqLen, expectedKvTokens,
+                    roleType, balanceContext.getRequestId(), balanceContext.getScheduleMode());
+            // Record the release callback so cancel() can release directly without
+            // going through FlexlbBatchScheduler. Only set for DECODE role in
+            // DIRECT/QUEUE mode; PREFILL has its own cancel mechanism (cancelPrefill
+            // gRPC), and BATCH cancel goes through FlexlbBatchScheduler.cancel().
+            if (result.isSuccess() && roleType == RoleType.DECODE
+                    && (balanceContext.getScheduleMode() == ScheduleModeEnum.DIRECT
+                        || balanceContext.getScheduleMode() == ScheduleModeEnum.QUEUE)) {
+                final DecodeEndpoint ep = selectedEndpoint;
+                final long rid = balanceContext.getRequestId();
+                balanceContext.setDecodeReleaseCallback(() -> ep.release(rid));
+            }
+            return result;
         }
 
         Map<String, Integer> merged = new java.util.HashMap<>(filterResult.rejections());
@@ -163,27 +172,6 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         return new FilterResult(survivors, rejections);
     }
 
-    private long calcPrefixMatchLength(CacheStatus cacheStatus, List<Long> promptCacheKeys) {
-
-        if (cacheStatus == null || promptCacheKeys == null) {
-            return 0;
-        }
-        long blockSize = cacheStatus.getBlockSize();
-        Set<Long> cachePrefixHash = cacheStatus.getCachedKeys();
-        if (cachePrefixHash == null) {
-            return 0;
-        }
-
-        for (int index = 0; index < promptCacheKeys.size(); index++) {
-            long hash = promptCacheKeys.get(index);
-            if (!cachePrefixHash.contains(hash)) {
-                return blockSize * index;
-            }
-        }
-
-        return blockSize * promptCacheKeys.size();
-    }
-
     private DecodeEndpoint weightedRandomSelection(List<DecodeEndpoint> candidateEndpoints) {
         if (candidateEndpoints.isEmpty()) {
             return null;
@@ -203,16 +191,27 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         double totalWeight = 0;
         boolean allSameUsage = true;
         long firstCacheUsed = cacheUsed[0];
+        // First pass: compute exponents and find the max (for numerical stability)
+        double[] exponents = new double[n];
+        double maxExponent = Double.NEGATIVE_INFINITY;
         for (int i = 0; i < n; i++) {
             if (cacheUsed[i] != firstCacheUsed) {
                 allSameUsage = false;
             }
             double normalizedValue = cacheUsed[i] - avgCacheUsed;
-            weights[i] = Math.exp(-decayFactor * normalizedValue);
+            exponents[i] = -decayFactor * normalizedValue;
+            maxExponent = Math.max(maxExponent, exponents[i]);
+        }
+        // Second pass: subtract maxExponent before exp (softmax max-subtraction trick).
+        // All exponents become <= 0, so weights fall in (0, 1] and totalWeight <= n,
+        // which cannot overflow. Sampling probabilities are unchanged since
+        // exp(x - c) = exp(x) / exp(c) is a uniform scaling.
+        for (int i = 0; i < n; i++) {
+            weights[i] = Math.exp(exponents[i] - maxExponent);
             totalWeight += weights[i];
         }
 
-        if (allSameUsage || totalWeight <= 0) {
+        if (allSameUsage || !Double.isFinite(totalWeight) || totalWeight <= 0) {
             // 所有 endpoint 使用率相同，随机选一个
             return candidateEndpoints.get(ThreadLocalRandom.current().nextInt(n));
         }
@@ -237,15 +236,25 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         return candidateEndpoints.get(minIdx);
     }
 
-    private ServerStatus buildServerStatus(DecodeEndpoint optimalEndpoint, long seqLen, long prefixLength, RoleType roleType, long requestId, ScheduleModeEnum scheduleMode) {
+    private ServerStatus buildServerStatus(DecodeEndpoint optimalEndpoint, long seqLen,
+                                           long expectedKvTokens, RoleType roleType,
+                                           long requestId, ScheduleModeEnum scheduleMode) {
         ServerStatus result = new ServerStatus();
         try {
-            // DIRECT/QUEUE: no lifecycle tracking after routing — skip reserve entirely.
-            boolean skipReserve = scheduleMode == ScheduleModeEnum.DIRECT
-                    || scheduleMode == ScheduleModeEnum.QUEUE;
-            if (!skipReserve) {
-                optimalEndpoint.reserve(requestId, seqLen);
+            // All schedule modes (BATCH, DIRECT, QUEUE) reserve decode KV to prevent
+            // oversubscription. DIRECT/QUEUE reservations are released via
+            // calibrate() / TTL eviction / explicit cancel.
+            //
+            // Cap expectedKvTokens to the endpoint's total KV capacity. When
+            // maxNewTokens is very large (e.g. 8192), the raw sum seqLen +
+            // maxNewTokens may exceed the physical KV limit, causing
+            // inflightKvReserved() to be artificially inflated and scoring
+            // to become overly conservative.
+            long totalKv = optimalEndpoint.realKvTotal();
+            if (totalKv > 0 && expectedKvTokens > totalKv) {
+                expectedKvTokens = totalKv;
             }
+            optimalEndpoint.reserve(requestId, seqLen, expectedKvTokens);
 
             result.setSuccess(true);
             result.setRole(roleType);

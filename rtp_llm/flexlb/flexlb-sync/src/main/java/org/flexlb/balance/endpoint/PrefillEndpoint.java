@@ -31,10 +31,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
-    private volatile PrefillTimePredictor predictor;
+    private final PrefillTimePredictor predictor;
     private final ConcurrentHashMap<Long, BatchInflight> inflightBatches = new ConcurrentHashMap<>();
     private final AtomicInteger inflightRequestCount = new AtomicInteger(0);
-    private volatile WorkerBatcher batcher;
+    private final WorkerBatcher batcher;
     private final InflightEvictor<Long, BatchInflight> batchEvictor;
     private final BatchSchedulerReporter reporter;
 
@@ -52,13 +52,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
     public PrefillEndpoint(WorkerStatus status, FlexlbConfig config,
                            BatchDecisionHandler handler,
                            BatchSchedulerReporter reporter) {
-        this(status, config, handler, reporter, true);
-    }
-
-    PrefillEndpoint(WorkerStatus status, FlexlbConfig config,
-                    BatchDecisionHandler handler,
-                    BatchSchedulerReporter reporter,
-                    boolean startBatcher) {
         super(status);
         this.reporter = reporter;
         this.predictor = createPredictor(config);
@@ -67,9 +60,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
             inflightRequestCount.addAndGet(-batch.requests().size());
             cachedWaitTimeExpireAtMs = 0;
         });
-        if (startBatcher) {
-            this.batcher.start();
-        }
+        this.batcher.start();
     }
 
     private WorkerBatcher createBatcher(FlexlbConfig config, BatchDecisionHandler handler,
@@ -90,20 +81,19 @@ public class PrefillEndpoint extends WorkerEndpoint {
         }
     }
 
-    public int getBatcherQueueSize() {
-        return batcher.queueSize();
-    }
-
-    public long getBatcherHeadSortKey() {
-        return batcher.headSortKey();
-    }
-
-    public long getBatcherHeadWaitMs() {
-        return batcher.headWaitMs();
-    }
-
     public long batcherWaitMs() {
-        return batcher.headWaitMs();
+        return batcher.queueWaitMs();
+    }
+
+    /**
+     * Estimate prefill time for the batch that a new request would join.
+     * Uses batch-level prediction when queue has items in the same batch,
+     * falls back to single-request estimateMs when the new request would
+     * start a fresh batch (empty queue or remaining == 0).
+     */
+    public long estimateBatchPrefillMs(long seqLen, long cacheHit) {
+        List<BatchItem> batchItems = batcher.peekBatchItems();
+        return (long) predictor.predictBatchMs(batchItems, seqLen, cacheHit);
     }
 
     private static PrefillTimePredictor createPredictor(FlexlbConfig cfg) {
@@ -114,7 +104,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     public void commitBatch(long batchId, long predictMs, List<BatchItem> requests) {
-        BatchInflight newBatch = new BatchInflight(batchId, predictMs, requests);
+        BatchInflight newBatch = new BatchInflight(predictMs, requests);
         BatchInflight prev = inflightBatches.putIfAbsent(batchId, newBatch);
         if (prev != null) {
             // batchId already exists — subtract the old request count before overwriting,
@@ -137,10 +127,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /**
      * Handle partial batch failure: remove failed requests from a batch and recompute prediction.
      *
-     * @return the new BatchInflight if survivors remain, null if the entire batch was removed
      */
-    public BatchInflight repackBatch(long batchId, Set<Long> failedRequestIds) {
-        BatchInflight result = inflightBatches.computeIfPresent(batchId, (id, old) -> {
+    public void repackBatch(long batchId, Set<Long> failedRequestIds) {
+        inflightBatches.computeIfPresent(batchId, (id, old) -> {
             List<BatchItem> survivors = old.requests().stream()
                     .filter(r -> !failedRequestIds.contains(r.requestId()))
                     .toList();
@@ -149,13 +138,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 cachedWaitTimeExpireAtMs = 0;
                 return null; // removes entry from map
             }
-            long newPredMs = predictor != null ? (long) predictor.predictBatchMs(survivors) : 0;
+            long newPredMs = (long) predictor.predictBatchMs(survivors);
             BatchInflight repacked = old.repack(newPredMs, survivors);
             inflightRequestCount.addAndGet(-(old.requests().size() - survivors.size()));
             cachedWaitTimeExpireAtMs = 0;
             return repacked;
         });
-        return result;
     }
 
     @Override
@@ -168,16 +156,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
     /**
      * Full calibration against worker status report.
      */
-    public void calibrate(Map<String, TaskInfo> finishedTaskInfo, Map<String, TaskInfo> runningTaskInfo) {
-        if (predictor == null) {
-            return;
-        }
+    private void calibrate(Map<String, TaskInfo> finishedTaskInfo, Map<String, TaskInfo> runningTaskInfo) {
         long statusMs = System.currentTimeMillis();
 
         int finishedSize = finishedTaskInfo != null ? finishedTaskInfo.size() : 0;
         int runningSize = runningTaskInfo != null ? runningTaskInfo.size() : 0;
         if (finishedSize > 0 || !inflightBatches.isEmpty()) {
-            logger.info("Prefill calibrate: finishedTasks={}, runningTasks={}, inflightBatches={}",
+            logger.debug("Prefill calibrate: finishedTasks={}, runningTasks={}, inflightBatches={}",
                     finishedSize, runningSize, inflightBatches.size());
         }
 
@@ -195,7 +180,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 if (batchId < 0) {
                     BatchInflight removed = inflightBatches.remove(task.getRequestId());
                     if (removed == null) {
-                        logger.warn("Prefill calibrate: finished non-batch request reqId={} not in inflight", task.getRequestId());
+                        logger.debug("Prefill calibrate: finished non-batch request reqId={} not in inflight", task.getRequestId());
                     } else {
                         inflightRequestCount.addAndGet(-removed.requests().size());
                         cachedWaitTimeExpireAtMs = 0;
@@ -322,7 +307,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     continue;
                 }
                 if (!inflightBatches.containsKey(batchId)) {
-                    logger.warn("Prefill calibrate: running request reqId={} batchId={} not in inflight",
+                    logger.debug("Prefill calibrate: running request reqId={} batchId={} not in inflight",
                             task.getRequestId(), batchId);
                 }
             }
@@ -337,7 +322,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * waiting queue (e.g. traffic not tracked by the current master).
      */
     public long realPendingCount() {
-        return getInflightRequestCount() + batcher.queueSize() + engineWaitingQueryLen;
+        return inflightRequestCount.get() + batcher.queueSize() + engineWaitingQueryLen;
     }
 
     // ==================== Wait Time ====================
@@ -352,10 +337,6 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     public int getInflightBatchCount() {
         return inflightBatches.size();
-    }
-
-    public int getInflightRequestCount() {
-        return inflightRequestCount.get();
     }
 
     /**
@@ -373,17 +354,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
         return realWaitTimeMs();
     }
 
-    @Override
-    public int getLocalTaskCount() {
-        return getInflightRequestCount();
-    }
-
     public PrefillTimePredictor getPredictor() {
         return predictor;
-    }
-
-    ConcurrentHashMap<Long, BatchInflight> getInflightBatches() {
-        return inflightBatches;
     }
 
     // ==================== Metrics ====================
@@ -393,10 +365,12 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * Called periodically by {@link org.flexlb.balance.scheduler.FlexlbBatchScheduler}.
      */
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
-        reporter.reportBatcherQueueDepth(RoleType.PREFILL.name(), getIp(), ipPort(), getBatcherQueueSize());
-        reporter.reportBatcherQueueSize(RoleType.PREFILL.name(), getIp(), ipPort(), getBatcherQueueSize());
+        int queueSize = batcher.queueSize();
+        reporter.reportBatcherQueueSize(RoleType.PREFILL.name(), getIp(), ipPort(), queueSize);
         reporter.reportInflightBatchCount(RoleType.PREFILL.name(), getIp(), ipPort(), getInflightBatchCount());
-        reporter.reportInflightRequestCount(RoleType.PREFILL.name(), getIp(), ipPort(), getInflightRequestCount());
+        reporter.reportInflightRequestCount(RoleType.PREFILL.name(), getIp(), ipPort(), inflightRequestCount.get());
+        reporter.reportInflightMaxAgeMs(RoleType.PREFILL.name(), getIp(), ipPort(),
+                InflightEvictor.maxAgeMs(inflightBatches, System.currentTimeMillis()));
     }
 
     /**
@@ -427,14 +401,11 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 batchId, predictedMs, actualMs, gapMs, batch.requests().size(), getIp());
 
         // Feed the actual-vs-predicted timing back into the predictor for future learning.
-        batch.setActualTimeMs(actualMs);
         predictor.learn(batch.requests(), predictedMs, actualMs);
 
-        if (reporter != null) {
-            reporter.reportBatchPredictedTimeMs(RoleType.PREFILL.name(), getIp(), ipPort(), predictedMs);
-            reporter.reportBatchActualTimeMs(RoleType.PREFILL.name(), getIp(), ipPort(), actualMs);
-            reporter.reportBatchPredictGapMs(RoleType.PREFILL.name(), getIp(), ipPort(), gapMs);
-        }
+        reporter.reportBatchPredictedTimeMs(RoleType.PREFILL.name(), getIp(), ipPort(), predictedMs);
+        reporter.reportBatchActualTimeMs(RoleType.PREFILL.name(), getIp(), ipPort(), actualMs);
+        reporter.reportBatchPredictGapMs(RoleType.PREFILL.name(), getIp(), ipPort(), gapMs);
     }
 
     private long estimateWaitingTimeMs(long nowMs) {

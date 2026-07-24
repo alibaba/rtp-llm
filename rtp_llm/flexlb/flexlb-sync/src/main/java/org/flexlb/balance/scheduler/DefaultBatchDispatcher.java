@@ -16,7 +16,6 @@ import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
 import org.flexlb.util.Logger;
-
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
 
@@ -27,7 +26,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CompletionException;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
@@ -151,21 +149,70 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
 
     private void doDispatchInternal(List<BatchItem> items, PrefillEndpoint prefillEp,
                                     long batchId, long predMs, String reason, DispatchCallback callback) {
+        // Filter out items that reached a terminal state before dispatch
+        List<BatchItem> active = new ArrayList<>();
+        for (BatchItem item : items) {
+            if (!item.future().isDone()) {
+                active.add(item);
+            } else {
+                Logger.debug("Skipping completed item in dispatch: request_id={}, batch_id={}",
+                        item.requestId(), batchId);
+                callback.onFailure(item, new IllegalStateException("request completed before EnqueueBatch was sent"));
+            }
+        }
+
+        if (active.isEmpty()) {
+            Logger.debug("All items completed before dispatch, batch_id={}", batchId);
+            prefillEp.releaseBatch(batchId);
+            return;
+        }
+
         // 1. Build gRPC request
         EngineRpcService.EnqueueBatchRequestPB request;
         try {
-            request = buildBatchRequest(batchId, items);
+            request = buildBatchRequest(batchId, active);
         } catch (Exception e) {
             Logger.error("Failed to build FlexLB batch request batchId: {}", batchId, e);
-            failItems(items, prefillEp, batchId, "Batch request build failed: " + e.getMessage(), callback);
+            failItems(active, prefillEp, batchId, "Batch request build failed: " + e.getMessage(), callback);
             return;
         }
 
         // 2. Log dispatch
-        logDispatch(batchId, items, prefillEp, predMs, reason);
+        logDispatch(batchId, active, prefillEp, predMs, reason);
 
-        // 3. Send gRPC (async)
-        long deadlineMs = configService.loadBalanceConfig().getFlexlbBatchEnqueueDeadlineMs();
+        // 3. Compute EnqueueBatch deadline from absolute_deadline_ms if set.
+        // Uses the minimum absolute deadline across all items in the batch.
+        long configDeadlineMs = configService.loadBalanceConfig().getFlexlbBatchEnqueueDeadlineMs();
+        long minAbsoluteDeadline = Long.MAX_VALUE;
+        for (BatchItem item : active) {
+            if (item.absoluteDeadlineMs() > 0) {
+                minAbsoluteDeadline = Math.min(minAbsoluteDeadline, item.absoluteDeadlineMs());
+            }
+        }
+
+        long deadlineMs;
+        if (minAbsoluteDeadline != Long.MAX_VALUE) {
+            long remaining = minAbsoluteDeadline - System.currentTimeMillis();
+            if (remaining <= 0) {
+                // Absolute deadline already passed — don't dispatch, mark as timed out
+                Logger.warn("EnqueueBatch skipped: absolute deadline already passed, "
+                        + "batchId={}, minAbsoluteDeadline={}, now={}",
+                        batchId, minAbsoluteDeadline, System.currentTimeMillis());
+                prefillEp.releaseBatch(batchId);
+                RuntimeException timeoutError = new RuntimeException(
+                        "EnqueueBatch deadline already exceeded (absolute deadline passed)");
+                for (BatchItem item : active) {
+                    callback.onTimeout(item, timeoutError);
+                }
+                return;
+            }
+            deadlineMs = Math.min(remaining, configDeadlineMs);
+        } else {
+            // Fallback: absolute_deadline_ms not set, use original config deadline
+            deadlineMs = configDeadlineMs;
+        }
+
+        // 4. Send gRPC (async)
         grpcClient.batchEnqueueAsync(prefillEp.getIp(), prefillEp.getGrpcPort(), request, deadlineMs)
                 .whenCompleteAsync((response, ex) -> {
                     try {
@@ -175,22 +222,22 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
                                     batchId, prefillEp.getIp(), prefillEp.getGrpcPort(), cause.getMessage());
                             if (Status.fromThrowable(cause).getCode() == Status.Code.DEADLINE_EXCEEDED) {
                                 prefillEp.releaseBatch(batchId);
-                                for (BatchItem item : items) {
+                                for (BatchItem item : active) {
                                     callback.onTimeout(item, cause);
                                 }
                             } else {
-                                failItems(items, prefillEp, batchId,
+                                failItems(active, prefillEp, batchId,
                                         "gRPC dispatch failed: " + cause.getMessage(), callback);
                             }
                         } else if (response == null) {
-                            failItems(items, prefillEp, batchId, "EnqueueBatch returned null response", callback);
+                            failItems(active, prefillEp, batchId, "EnqueueBatch returned null response", callback);
                         } else {
-                            handleResponse(batchId, items, response, callback);
+                            handleResponse(batchId, active, response, callback);
                         }
                     } catch (Throwable t) {
                         // Safety net: ensure callbacks are always invoked even for unexpected errors
                         Logger.error("Unexpected error in EnqueueBatch callback batchId={}", batchId, t);
-                        failItems(items, prefillEp, batchId,
+                        failItems(active, prefillEp, batchId,
                                 "Unexpected callback error: " + t.getMessage(), callback);
                     }
                 }, dispatchExecutor);
@@ -340,7 +387,7 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         BatchItem head = items.get(0);
         long now = System.currentTimeMillis();
         long waitMs = now - head.enqueuedAtMs();
-        long budgetMs = head.deadlineMs() - now;
+        long budgetMs = head.sortKey() - now;
 
         Logger.info("flexlb_batch_dispatch batch_id={} batch_size={} total_tokens={} total_hit={} "
                         + "pred_ms={} reason={} wait_ms={} budget_ms={} "

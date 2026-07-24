@@ -21,7 +21,11 @@ from typing import Any, AsyncIterator, Callable, Iterator, Optional
 
 import torch
 
-from rtp_llm.config.exceptions import ExceptionCategory, ExceptionType, FtRuntimeException
+from rtp_llm.config.exceptions import (
+    ExceptionCategory,
+    ExceptionType,
+    FtRuntimeException,
+)
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
@@ -111,14 +115,25 @@ _DASH_ERROR_SPEC_BY_EXCEPTION_CATEGORY = {
 
 
 def stream_log_tag(
-    *, request_id_numeric: int, trace_id: str, phase: Optional[int] = None
+    *,
+    request_id_numeric: int,
+    trace_id: str,
+    phase: Optional[int] = None,
+    source_request_id: Optional[str] = None,
+    source_role: Optional[str] = None,
 ) -> str:
     """Align with C++ ``GenerateStream::streamLogTag()`` for log correlation.
 
     ``phase`` is appended only when set, so phase-1 logs stay byte-identical to the
-    pre-refactor format and grep patterns keep working.
+    pre-refactor format and grep patterns keep working. ``source_request_id`` and
+    ``source_role`` are appended only when non-empty, identifying the original
+    request ID and source role for cross-component log correlation.
     """
     base = f"request_id={request_id_numeric} trace_id={trace_id}"
+    if source_request_id:
+        base += f" source_request_id={source_request_id}"
+    if source_role:
+        base += f" source_role={source_role}"
     return f"{base} phase={phase}" if phase is not None else base
 
 
@@ -402,15 +417,20 @@ def _phase2_max_new_tokens_for_completion_alias(
     sampling: SamplingParams,
     generate_think_token_num: Optional[int],
 ) -> int:
-    max_new_tokens = int(sampling.max_new_tokens)
-    if (
-        sampling.max_total_tokens is not None
-        and sampling.max_total_tokens > 0
-        and generate_think_token_num is not None
-    ):
+    """Remaining phase-2 budget when ``max_completion_tokens`` set the alias.
+
+    Callers only invoke this when ``max_new_tokens_from_completion_alias`` is
+    True, where ``sampling.max_new_tokens`` is a *total* generation budget
+    (phase-1 thinking tokens included). Phase-2 therefore gets what is left
+    after deducting phase-1 think tokens; a ``max_tokens`` total cap
+    (``max_total_tokens``) applies on top via ``min``.
+    """
+    think_token_num = int(generate_think_token_num or 0)
+    max_new_tokens = max(0, int(sampling.max_new_tokens) - think_token_num)
+    if sampling.max_total_tokens is not None and sampling.max_total_tokens > 0:
         max_new_tokens = min(
             max_new_tokens,
-            max(0, int(sampling.max_total_tokens) - int(generate_think_token_num)),
+            max(0, int(sampling.max_total_tokens) - think_token_num),
         )
     return max_new_tokens
 
@@ -527,7 +547,19 @@ async def iter_real_model_stream_infer(
     sets ``stop_words_list`` on the request.
     """
     trace_str = str(request.id)
-    tag = stream_log_tag(request_id_numeric=rtp_llm_request_id, trace_id=trace_str)
+    _log_headers = dict(other.request_headers or {})
+    _log_headers.update(_headers_from_invocation_metadata(invocation_metadata))
+    # Match the trace_id fallback chain in _make_generate_input so that
+    # source_request_id and the log-tag trace_id stay consistent with C++.
+    trace_id = str(trace_str or extract_trace_id(_log_headers) or "")
+    _source_request_id = extract_correlation_request_id(_log_headers) or trace_id
+    _source_role = "dash"
+    tag = stream_log_tag(
+        request_id_numeric=rtp_llm_request_id,
+        trace_id=trace_id,
+        source_request_id=_source_request_id,
+        source_role=_source_role,
+    )
     runtime = think_runtime if think_runtime is not None else _ThinkRuntime()
     logging.debug(
         "[DashScGrpc] [%s] real infer start: model_name=%s input_len=%s sampling=%s",
@@ -911,7 +943,11 @@ async def iter_real_model_stream_infer(
                 else rtp_llm_request_id
             )
             phase2_tag = stream_log_tag(
-                request_id_numeric=phase2_request_id, trace_id=trace_str, phase=2
+                request_id_numeric=phase2_request_id,
+                trace_id=trace_id,
+                phase=2,
+                source_request_id=_source_request_id,
+                source_role=_source_role,
             )
             phase2_generate_input = _make_generate_input(
                 request_id=phase2_request_id,

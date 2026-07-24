@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
-import lombok.Getter;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.QueueSnapshot;
@@ -37,7 +38,6 @@ import java.util.concurrent.atomic.AtomicLong;
  * @author saichen.sm
  * @since 2025/12/22
  */
-@Getter
 @Component
 public class QueueManager {
 
@@ -46,13 +46,18 @@ public class QueueManager {
 
     private final RoutingQueueReporter metrics;
 
+    private final EndpointRegistry endpointRegistry;
+
     private final AtomicLong sequenceGenerator = new AtomicLong(0);
 
     // Request queue
     private final BlockingDeque<BalanceContext> queue;
 
-    public QueueManager(RoutingQueueReporter routingQueueReporter, ConfigService configService) {
+    public QueueManager(RoutingQueueReporter routingQueueReporter,
+                        ConfigService configService,
+                        EndpointRegistry endpointRegistry) {
         this.metrics = routingQueueReporter;
+        this.endpointRegistry = endpointRegistry;
         this.queue = new LinkedBlockingDeque<>(configService.loadBalanceConfig().getMaxQueueSize());
     }
 
@@ -103,15 +108,63 @@ public class QueueManager {
         }
     }
 
+    public int queueSize() {
+        return queue.size();
+    }
+
     /**
-     * Take request from queue (blocking/non-blocking)
+     * Cancel a QUEUE-mode request: complete future exceptionally and release
+     * decode KV reservation.
      *
-     * @param isBlock          Whether to block and wait
-     * @param blockTimeoutMs   Block timeout in milliseconds
-     * @return Request context, null if queue is empty
+     * <p>First completes the pending {@link CompletableFuture} exceptionally so
+     * that the waiting caller unblocks immediately, then releases the decode KV
+     * reservation via the callback recorded in {@link BalanceContext} by
+     * CostBasedDecodeStrategy.select(). When the callback is not yet set (narrow
+     * race window between reserve() and setCallback()), falls back to iterating
+     * all decode endpoints — {@code ConcurrentHashMap.remove()} inside release()
+     * is idempotent, so this is safe regardless of timing.
+     *
+     * @param ctx the balance context of the request to cancel
      */
-    public BalanceContext takeRequest(boolean isBlock, long blockTimeoutMs) {
-        return takeValidRequest(queue, isBlock, blockTimeoutMs);
+    public void cancel(BalanceContext ctx) {
+        CompletableFuture<Response> future = ctx.getFuture();
+        if (future != null) {
+            future.completeExceptionally(new CancellationException("Request cancelled by client"));
+        }
+        Runnable releaseCallback = ctx.getDecodeReleaseCallback();
+        if (releaseCallback != null) {
+            releaseCallback.run();
+        } else {
+            long rid = ctx.getRequestId();
+            for (DecodeEndpoint ep : endpointRegistry.getDecodeEndpoints().values()) {
+                ep.release(rid);
+            }
+        }
+    }
+
+    /**
+     * Cancel a request by ID when no BalanceContext is available (fallback for
+     * cancelByRequestId).
+     *
+     * <p>Since the mode is unknown, this brute-force releases across all
+     * decode endpoints. {@code ConcurrentHashMap.remove()} is idempotent,
+     * so this is safe even if the reservation was already released.
+     *
+     * @param requestId the request ID to cancel
+     */
+    public void cancelByRequestId(long requestId) {
+        for (DecodeEndpoint ep : endpointRegistry.getDecodeEndpoints().values()) {
+            ep.release(requestId);
+        }
+    }
+
+    /**
+     * Take request from the queue, waiting up to {@code blockTimeoutMs}.
+     *
+     * @return request context, or null when no request arrives before the timeout
+     */
+    public BalanceContext takeRequest(long blockTimeoutMs) {
+        return takeValidRequest(queue, blockTimeoutMs);
     }
 
     /**
@@ -122,10 +175,10 @@ public class QueueManager {
      * @param sourceQueue Source queue
      * @return Request context, null if queue is empty
      */
-    private BalanceContext takeValidRequest(BlockingQueue<BalanceContext> sourceQueue, boolean isBlock, long blockTimeoutMs) {
+    private BalanceContext takeValidRequest(BlockingQueue<BalanceContext> sourceQueue, long blockTimeoutMs) {
         try {
             while (true) {
-                BalanceContext ctx = isBlock ? sourceQueue.poll(blockTimeoutMs, TimeUnit.MILLISECONDS) : sourceQueue.poll();
+                BalanceContext ctx = sourceQueue.poll(blockTimeoutMs, TimeUnit.MILLISECONDS);
                 if (ctx == null) {
                     return null;
                 }

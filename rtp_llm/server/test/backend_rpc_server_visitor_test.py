@@ -64,17 +64,41 @@ class _FakeMasterClient:
         self.calls = []
 
     async def get_backend_role_addrs(
-        self, block_cache_keys, input, request_id, input_pb_bytes=None
+        self,
+        block_cache_keys,
+        cache_key_block_size,
+        input,
+        request_id,
+        input_pb=None,
     ):
         self.calls.append(
             {
                 "block_cache_keys": block_cache_keys,
+                "cache_key_block_size": cache_key_block_size,
                 "input": input,
                 "request_id": request_id,
-                "input_pb_bytes": input_pb_bytes,
+                "input_pb": input_pb,
             }
         )
         return FlexlbResponse.ok(["prefill-role"], enqueued_by_master=True)
+
+
+class _FakeRoleAddr:
+    def __init__(self, role, ip):
+        self.role = role
+        self.ip = ip
+
+
+class _FallbackHostService:
+    def __init__(self):
+        self.requested_roles = []
+
+    def get_master_addr(self):
+        return "master:1234"
+
+    def get_backend_role_addrs(self, roles):
+        self.requested_roles.append(roles)
+        return [_FakeRoleAddr("PREFILL", "vipserver-prefill")]
 
 
 class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
@@ -110,6 +134,8 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
     async def test_get_master_route_addrs_passes_pb_and_marks_master_enqueue(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
         visitor.seq_size_per_block = 16
+        visitor._page_rr_route_cache_keys = False
+        visitor._page_rr_cp_size = 1
         visitor.master_client = _FakeMasterClient()
         visitor._route_cache_keys = lambda keys: keys
         visitor._report_recent_cache_key_metrics = lambda keys: None
@@ -131,10 +157,31 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(input.generate_config.role_addrs, ["prefill-role"])
         self.assertTrue(input.enqueued_by_master)
         self.assertEqual(visitor.master_client.calls[0]["block_cache_keys"], [11, 22])
+        self.assertEqual(visitor.master_client.calls[0]["cache_key_block_size"], 16)
         self.assertEqual(visitor.master_client.calls[0]["request_id"], 456)
         self.assertEqual(
-            visitor.master_client.calls[0]["input_pb_bytes"], b"serialized-input"
+            visitor.master_client.calls[0]["input_pb"].SerializeToString(),
+            b"serialized-input",
         )
+
+    async def test_connection_failure_falls_back_to_vipserver(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.master_config = None
+        visitor.host_service = _FallbackHostService()
+        visitor.backend_role_list = ["PREFILL"]
+
+        async def get_master_route_addrs(_input):
+            return FlexlbResponse.connection_failed_response()
+
+        visitor.get_master_route_addrs = get_master_route_addrs
+        input = _FakeInput()
+
+        with patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor"):
+            await visitor.route_ips(input)
+
+        self.assertEqual(visitor.host_service.requested_roles, [["PREFILL"]])
+        self.assertEqual(len(input.generate_config.role_addrs), 1)
+        self.assertEqual(input.generate_config.role_addrs[0].ip, "vipserver-prefill")
 
     async def test_route_ips_preserves_master_route_error_code_on_route_error(self):
         visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
@@ -163,9 +210,11 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
 class _RetryingModelRpcClient:
     def __init__(self):
         self.attempts = 0
+        self.request_ids = []
 
-    async def enqueue(self, _input):
+    async def enqueue(self, input):
         self.attempts += 1
+        self.request_ids.append(input.request_id)
         attempt = self.attempts
         if attempt == 1:
             yield "partial-output-from-failed-attempt"
@@ -188,9 +237,11 @@ class _AlwaysFailingModelRpcClient:
     def __init__(self, error):
         self.error = error
         self.attempts = 0
+        self.request_ids = []
 
-    async def enqueue(self, _input):
+    async def enqueue(self, input):
         self.attempts += 1
+        self.request_ids.append(input.request_id)
         yield "partial-output-from-failed-attempt"
         raise self.error
 
@@ -215,6 +266,8 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(outputs, ["successful-output"])
         self.assertEqual(client.attempts, 2)
+        self.assertEqual(client.request_ids[0], 123)
+        self.assertNotEqual(client.request_ids[1], 123)
 
     async def test_non_streaming_replays_successful_outputs_in_order(self):
         client = _SuccessfulModelRpcClient(["first-output", "second-output"])
@@ -241,6 +294,7 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(outputs, [])
         self.assertEqual(client.attempts, 2)
+        self.assertEqual(len(set(client.request_ids)), 2)
 
     async def test_non_streaming_non_retryable_error_does_not_retry(self):
         client = _AlwaysFailingModelRpcClient(ValueError("bad output"))

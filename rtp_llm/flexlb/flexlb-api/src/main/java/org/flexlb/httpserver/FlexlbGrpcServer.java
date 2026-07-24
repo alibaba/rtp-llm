@@ -11,6 +11,7 @@ import io.netty.channel.nio.NioEventLoopGroup;
 import io.netty.channel.socket.nio.NioServerSocketChannel;
 import io.netty.util.concurrent.DefaultThreadFactory;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.constant.MetricConstant;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
 import org.flexlb.util.Logger;
@@ -22,11 +23,11 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
 import java.io.IOException;
-import java.util.concurrent.atomic.AtomicLong;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionHandler;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicLong;
 
 @Component
 public class FlexlbGrpcServer {
@@ -39,15 +40,6 @@ public class FlexlbGrpcServer {
     static final int FLEXLB_GRPC_PORT_OFFSET = 2;
     private static final int DEFAULT_HTTP_PORT = 7001;
 
-    // Default executor sizes — overridable via environment variables
-    private static final int DEFAULT_EXECUTOR_CORE_SIZE = 1000;
-    private static final int DEFAULT_EXECUTOR_MAX_SIZE = 1000;
-    // NOTE: Changed from 0 (unbounded, Integer.MAX_VALUE) to 10000 (bounded).
-    // This is intentional — the bounded queue enables AbortPolicy to fire under load,
-    // returning UNAVAILABLE to clients instead of unbounded queue growth leading to OOM.
-    // Deployments can override via FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE env variable.
-    private static final int DEFAULT_EXECUTOR_QUEUE_SIZE = 10000;
-
     /**
      * Metric prefix — matches {@code MicrometerFlexMonitor.METRIC_PREFIX} so that
      * metrics registered directly via {@link MeterRegistry} follow the same
@@ -57,6 +49,7 @@ public class FlexlbGrpcServer {
 
     private final FlexlbServiceImpl flexlbServiceImpl;
     private final ConfigService configService;
+    private final FlexlbConfig flexlbConfig;
     private final Environment environment;
     private final EventLoopGroup grpcServerEventLoopGroup;
     private final MeterRegistry meterRegistry;
@@ -75,6 +68,7 @@ public class FlexlbGrpcServer {
                             GrpcServerTimingInterceptor grpcServerTimingInterceptor) {
         this.flexlbServiceImpl = flexlbServiceImpl;
         this.configService = configService;
+        this.flexlbConfig = configService.loadBalanceConfig();
         this.environment = environment;
         this.grpcServerEventLoopGroup = grpcServerEventLoopGroup;
         this.meterRegistry = meterRegistry;
@@ -93,13 +87,10 @@ public class FlexlbGrpcServer {
         int httpPort = Integer.parseInt(portStr);
         int port = httpPort + FLEXLB_GRPC_PORT_OFFSET;
 
-        // Configurable executor sizes via environment variables
-        int coreSize = environment.getProperty(
-                "FLEXLB_GRPC_EXECUTOR_CORE_SIZE", Integer.class, DEFAULT_EXECUTOR_CORE_SIZE);
-        int maxSize = environment.getProperty(
-                "FLEXLB_GRPC_EXECUTOR_MAX_SIZE", Integer.class, DEFAULT_EXECUTOR_MAX_SIZE);
-        int queueSize = environment.getProperty(
-                "FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE", Integer.class, DEFAULT_EXECUTOR_QUEUE_SIZE);
+        // Read executor sizes from FlexlbConfig (unified config system)
+        int coreSize = flexlbConfig.getFlexlbGrpcExecutorCoreSize();
+        int maxSize = flexlbConfig.getFlexlbGrpcExecutorMaxSize();
+        int queueSize = flexlbConfig.getFlexlbGrpcExecutorQueueSize();
 
         Logger.info("FlexLB gRPC executor config: coreSize={}, maxSize={}, queueSize={}",
                 coreSize, maxSize, queueSize);
@@ -122,17 +113,14 @@ public class FlexlbGrpcServer {
                 .bossEventLoopGroup(bossGroup)
                 .workerEventLoopGroup(grpcServerEventLoopGroup)
                 .executor(grpcExecutor)
-                .addService(ServerInterceptors.intercept(flexlbServiceImpl, grpcServerTimingInterceptor))
+                .addService(ServerInterceptors.intercept(flexlbServiceImpl,
+                        grpcServerTimingInterceptor))
                 .maxInboundMessageSize(16 * 1024 * 1024)
                 .flowControlWindow(4 * 1024 * 1024)
                 .build()
                 .start();
 
         Logger.info("FlexLB gRPC server started on port {}", port);
-    }
-
-    int getBoundPort() {
-        return server == null ? -1 : server.getPort();
     }
 
     /**

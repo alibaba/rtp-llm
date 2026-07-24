@@ -13,7 +13,6 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
-
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
@@ -95,16 +94,24 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
 
         int selectedIndex = -1;
         if (minScore != Long.MAX_VALUE) {
-            long tieThreshold = 0;
             if (config.isScoreTieRandomEnabled()) {
-                tieThreshold = Math.max((long) (minScore * config.getScoreTieThresholdPct()), config.getScoreTieThresholdMs());
-            }
-            long scoreCutoff = minScore + tieThreshold;
-            int tiedCount = 0;
-            for (int i = 0; i < survivors.size(); i++) {
-                if (survivors.score(i) <= scoreCutoff
-                        && ThreadLocalRandom.current().nextInt(++tiedCount) == 0) {
-                    selectedIndex = i;
+                // Enabled: reservoir sampling among candidates within threshold
+                long tieThreshold = Math.max((long) (minScore * config.getScoreTieThresholdPct()), config.getScoreTieThresholdMs());
+                long scoreCutoff = minScore + tieThreshold;
+                int tiedCount = 0;
+                for (int i = 0; i < survivors.size(); i++) {
+                    if (survivors.score(i) <= scoreCutoff
+                            && ThreadLocalRandom.current().nextInt(++tiedCount) == 0) {
+                        selectedIndex = i;
+                    }
+                }
+            } else {
+                // Disabled: deterministically select the first minimum-score candidate
+                for (int i = 0; i < survivors.size(); i++) {
+                    if (survivors.score(i) == minScore) {
+                        selectedIndex = i;
+                        break;
+                    }
                 }
             }
         }
@@ -121,7 +128,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         long bestCacheHit = survivors.cacheHit(selectedIndex);
         reportCacheHitMetrics(roleType, best.getIp(), best.ipPort(), bestCacheHit, seqLen);
 
-        return buildServerStatus(best, roleType, requestId, minScore, config, balanceContext, bestCacheHit);
+        return buildServerStatus(best, roleType, requestId, minScore, config, bestCacheHit);
     }
 
     private record EndpointFilterResult(CandidateSet endpoints, Map<String, Integer> rejections) {}
@@ -209,7 +216,6 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         int eligibleSize = eligible.size();
         CandidateSet feasible = eligible;
         Map<String, Integer> rejections = new java.util.HashMap<>();
-        FormulaEstimateMemo formulaEstimateMemo = new FormulaEstimateMemo(seqLen);
         long sumWaitMs = 0;
         long sumPendingCount = 0;
 
@@ -217,18 +223,13 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         int feasibleCount = 0;
         for (int i = 0; i < eligibleSize; i++) {
             PrefillEndpoint ep = eligible.endpoint(i);
-            PrefillTimePredictor predictor = ep.getPredictor();
-            if (predictor == null) {
-                rejections.merge("PREDICTOR_MISSING", 1, Integer::sum);
-                continue;
-            }
 
             long cacheHit = calculateCacheHit(ep, cacheMatchResults, seqLen);
-            long singlePrefillMs = formulaEstimateMemo.estimate(predictor, cacheHit);
+            long prefillMs = ep.estimateBatchPrefillMs(seqLen, cacheHit);
 
             long endpointWaitMs = ep.realWaitTimeMs();
 
-            if (sloFilterEnabled && endpointWaitMs + singlePrefillMs > sloMs - sloRiskMarginMs) {
+            if (sloFilterEnabled && endpointWaitMs + prefillMs > sloMs - sloRiskMarginMs) {
                 rejections.merge("SLO_VIOLATION", 1, Integer::sum);
                 continue;
             }
@@ -236,7 +237,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
             long pendingCount = ep.realPendingCount();
             long batcherWaitMs = ep.batcherWaitMs();
             feasible.setCandidate(feasibleCount++, ep, cacheHit,
-                    singlePrefillMs + endpointWaitMs + batcherWaitMs,
+                    prefillMs + endpointWaitMs + batcherWaitMs,
                     endpointWaitMs, pendingCount);
             sumWaitMs += endpointWaitMs;
             sumPendingCount += pendingCount;
@@ -318,48 +319,6 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         return new EndpointFilterResult(result, rejections);
     }
 
-    private static final class FormulaEstimateMemo {
-        private static final int MAX_CACHE_HITS = 16;
-
-        private final long seqLen;
-        private String formulaKey;
-        private long[] estimates;
-        private int estimateCount;
-
-        private FormulaEstimateMemo(long seqLen) {
-            this.seqLen = seqLen;
-        }
-
-        private long estimate(PrefillTimePredictor predictor, long cacheHit) {
-            if (!(predictor instanceof FormulaPredictor formulaPredictor)) {
-                return predictor.estimateMs(seqLen, cacheHit);
-            }
-            String key = formulaPredictor.immutableFormulaKey();
-            if (key == null) {
-                return predictor.estimateMs(seqLen, cacheHit);
-            }
-            if (formulaKey == null) {
-                formulaKey = key;
-                estimates = new long[MAX_CACHE_HITS * 2];
-            } else if (!formulaKey.equals(key)) {
-                return predictor.estimateMs(seqLen, cacheHit);
-            }
-            for (int i = 0; i < estimateCount; i++) {
-                int offset = i * 2;
-                if (estimates[offset] == cacheHit) {
-                    return estimates[offset + 1];
-                }
-            }
-            long estimate = predictor.estimateMs(seqLen, cacheHit);
-            if (estimateCount < MAX_CACHE_HITS) {
-                int offset = estimateCount++ * 2;
-                estimates[offset] = cacheHit;
-                estimates[offset + 1] = estimate;
-            }
-            return estimate;
-        }
-    }
-
     private Map<String, Integer> getCacheMatchResults(BalanceContext balanceContext, RoleType roleType, String group) {
         List<Long> blockCacheKeys = balanceContext.getRequest().getBlockCacheKeys();
         return cacheAwareService.findMatchingEngines(blockCacheKeys, roleType, group);
@@ -388,11 +347,10 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
     }
 
     private ServerStatus buildServerStatus(PrefillEndpoint ep, RoleType roleType, long requestId, long score,
-                                            FlexlbConfig config, BalanceContext balanceContext,
-                                            long bestCacheHit) {
+                                            FlexlbConfig config, long bestCacheHit) {
         // Non-batch path: reserve prefill inflight for load-aware scoring.
         // Batch path uses FlexlbBatchScheduler.commitBatch() instead — skip here to avoid double-counting.
-        if (isNonBatchPath(config, balanceContext)) {
+        if (isNonBatchPath(config)) {
             ep.commitBatch(requestId, score, Collections.emptyList());
         }
 
@@ -419,7 +377,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
      * <p>When batch is enabled, FlexlbBatchScheduler handles all inflight tracking;
      * placeholders are only needed when batch is fully off ({@code flexlbBatchEnabled=false}).
      */
-    private static boolean isNonBatchPath(FlexlbConfig config, BalanceContext ctx) {
+    private static boolean isNonBatchPath(FlexlbConfig config) {
         return !config.isFlexlbBatchEnabled();
     }
 }

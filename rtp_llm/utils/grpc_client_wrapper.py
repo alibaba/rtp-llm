@@ -33,6 +33,7 @@ class GrpcClientWrapper:
             self.channel = grpc.aio.insecure_channel(
                 self.address,
                 options=[
+                    ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
                     ("grpc.max_metadata_size", 1024 * 1024 * 1024),
                 ],
             )
@@ -44,6 +45,7 @@ class GrpcClientWrapper:
             self._dp_channels[address] = grpc.aio.insecure_channel(
                 address,
                 options=[
+                    ("grpc.max_receive_message_length", 1024 * 1024 * 1024),
                     ("grpc.max_metadata_size", 1024 * 1024 * 1024),
                 ],
             )

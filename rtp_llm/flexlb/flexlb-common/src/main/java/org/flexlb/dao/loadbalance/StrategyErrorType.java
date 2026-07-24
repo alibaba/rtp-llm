@@ -5,6 +5,15 @@ import lombok.Getter;
 import java.util.HashMap;
 import java.util.Map;
 
+/**
+ * Error types for load-balance strategy results.
+ *
+ * <p>Ordinal safety: this enum does NOT implement {@link java.io.Serializable} and is never
+ * serialized by ordinal. All persistence and wire transfer use the stable {@code errorCode}
+ * (int) via {@link #fromErrorCode(int)} or the enum {@code name()} via standard JSON
+ * serialization. Removing or reordering enum constants is therefore safe — existing
+ * error-code values remain stable across versions.
+ */
 @Getter
 public enum StrategyErrorType {
 
@@ -18,13 +27,13 @@ public enum StrategyErrorType {
     NO_PDFUSION_WORKER(8404, true),
     NO_VIT_WORKER(8405, true),
     NO_FRONTEND_WORKER(8407, true),
+    DUPLICATE_REQUEST(460, false),
     INVALID_REQUEST(8406, false),
 
     // queue error
     QUEUE_FULL(8502, false),
     QUEUE_TIMEOUT(8503, false),
     REQUEST_CANCELLED(8504, false),
-
     // batch dispatch error
     BATCH_DISPATCH_FAILED(8510, true),
     BATCH_SLO_EXPIRED(8511, false),

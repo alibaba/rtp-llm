@@ -3,7 +3,7 @@ import json
 import logging
 import threading
 import time
-from typing import Any, Callable, Dict, Union
+from typing import Any, Callable, Dict, Optional, Union
 
 from fastapi import Request
 from fastapi import Request as RawRequest
@@ -11,6 +11,8 @@ from fastapi.responses import ORJSONResponse, StreamingResponse
 from pydantic import BaseModel
 
 from rtp_llm.access_logger.access_logger import AccessLogger
+from rtp_llm.config.exceptions import ExceptionCategory, FtRuntimeException
+from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.model_config import (
     update_stop_words_from_env,
@@ -145,6 +147,22 @@ class FrontendServer(object):
         else:
             loop.create_task(self.close())
 
+    def _compute_absolute_deadline_ms(self, timeout_ms: Optional[int]) -> int:
+        """Compute absolute deadline (epoch ms) from per-request or default timeout.
+
+        Args:
+            timeout_ms: per-request timeout_ms from generate_config (>0 means set).
+        Returns:
+            absolute_deadline_ms = now + total_timeout_ms
+        """
+        master_default = self.py_env_configs.master_config.master_default_timeout_ms
+        total_timeout_ms = (
+            timeout_ms if timeout_ms and timeout_ms > 0 else master_default
+        )
+        if total_timeout_ms <= 0:
+            return 0
+        return int(time.time() * 1000) + total_timeout_ms
+
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
         start_time = time.time()
         try:
@@ -260,6 +278,17 @@ class FrontendServer(object):
                 sequence,
             )
             request_headers = extract_request_headers(raw_request.headers)
+
+            # Compute absolute_deadline_ms and inject into generate_config for
+            # end-to-end deadline propagation across Schedule/FetchResponse stages.
+            gc_dict = req.get("generate_config")
+            if not isinstance(gc_dict, dict):
+                gc_dict = {}
+            gc_timeout_ms = gc_dict.get("timeout_ms", 0)
+            absolute_deadline_ms = self._compute_absolute_deadline_ms(gc_timeout_ms)
+            gc_dict["absolute_deadline_ms"] = absolute_deadline_ms
+            req["generate_config"] = gc_dict
+
             logging.info(
                 "request_arrival: trace_id=%s request_id=%s model=%s prompt_len=%d",
                 req.get("trace_id", "-"),
@@ -309,6 +338,15 @@ class FrontendServer(object):
             self.server_id,
             sequence,
         )
+
+        # Compute absolute_deadline_ms and set on extra_configs for end-to-end
+        # deadline propagation across Schedule/FetchResponse stages.
+        gc = request.extra_configs
+        if gc is None:
+            gc = GenerateConfig()
+            request.extra_configs = gc
+        gc_timeout_ms = gc.timeout_ms if gc.timeout_ms else 0
+        gc.absolute_deadline_ms = self._compute_absolute_deadline_ms(gc_timeout_ms)
 
         def generate_call():
             assert self._openai_endpoint != None
@@ -369,8 +407,17 @@ class FrontendServer(object):
                 },
             )
 
-        rep = ORJSONResponse(exception_json, status_code=500)
+        rep = ORJSONResponse(exception_json, status_code=self._exception_status_code(e))
         return rep
+
+    @staticmethod
+    def _exception_status_code(e: BaseException) -> int:
+        if (
+            isinstance(e, FtRuntimeException)
+            and e.exception_type.category == ExceptionCategory.BAD_REQUEST
+        ):
+            return 400
+        return 500
 
     async def _call_generate_with_report(
         self, generate_call: Callable[[], CompleteResponseAsyncGenerator]

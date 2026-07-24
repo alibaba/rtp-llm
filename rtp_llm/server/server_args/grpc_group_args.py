@@ -18,6 +18,8 @@ def _default_model_grpc_config_json() -> str:
                 "grpc.max_metadata_size": b,
             },
             "server_config": {
+                "grpc.max_receive_message_length": b,
+                "grpc.max_send_message_length": b,
                 "grpc.max_metadata_size": b,
                 "grpc.max_concurrent_streams": 100000,
                 "grpc.max_connection_idle_ms": 600000,

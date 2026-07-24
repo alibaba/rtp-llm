@@ -9,6 +9,7 @@ import io.grpc.ManagedChannel;
 import io.grpc.netty.NettyChannelBuilder;
 import io.grpc.stub.StreamObserver;
 import io.netty.channel.nio.NioEventLoopGroup;
+import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.policy.GroupRoutingDecision;
 import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
@@ -21,10 +22,10 @@ import org.flexlb.balance.strategy.CostBasedPrefillStrategy;
 import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.config.FlexlbConfig;
-import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
@@ -53,6 +54,7 @@ import org.springframework.mock.env.MockEnvironment;
 import java.io.BufferedReader;
 import java.io.IOException;
 import java.math.BigInteger;
+import java.net.ServerSocket;
 import java.nio.file.Files;
 import java.nio.file.Path;
 import java.util.ArrayList;
@@ -163,13 +165,14 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         cfg.setFlexlbBatchMaxInflight(20_000);
         cfg.setFlexlbBatchDispatchPoolSize(32);
         cfg.setFlexlbBatchDispatchQueueSize(2_048);
+        cfg.setFlexlbBatchFixedMaxInflightBatches(0);
         cfg.setPrefillQueueSizeThreshold(1_000_000L);
         return cfg;
     }
 
     @Override
     protected EngineWorkerStatus createEngineWorkerStatus() {
-        return new EngineWorkerStatus(new ModelMetaConfig(), endpointRegistry);
+        return new EngineWorkerStatus(endpointRegistry);
     }
 
     @Override
@@ -201,14 +204,16 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 anyString(), anyString(), anyString(), anyString());
         getDecodeEndpoint().getStatus().getAvailableKvCacheTokens().set(1_000_000_000L);
         getDecodeEndpoint().getStatus().getTotalKvCacheTokens().set(2_000_000_000L);
-        getDecodeEndpoint().calibrate(Map.of(), Map.of(), 1_000_000_000L);
+        getDecodeEndpoint().onWorkerStatusUpdate(
+                getDecodeEndpoint().getStatus(), new WorkerStatusResponse());
 
         RouteService routeService = new RouteService(
                 configService,
                 (DefaultRouter) router,
                 mock(QueueManager.class, withSettings().stubOnly()),
                 scheduler,
-                mock(RecentCacheKeyTraceReporter.class, withSettings().stubOnly()));
+                mock(RecentCacheKeyTraceReporter.class, withSettings().stubOnly()),
+                endpointRegistry);
 
         LBStatusConsistencyService consistencyService =
                 mock(LBStatusConsistencyService.class, withSettings().stubOnly());
@@ -225,11 +230,18 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 reporter,
                 latencyRecorder);
 
+        int grpcPort;
+        try (ServerSocket socket = new ServerSocket(0)) {
+            grpcPort = socket.getLocalPort();
+        }
+        // Set executor sizes directly on the config object (FlexlbGrpcServer reads
+        // from FlexlbConfig, not from Environment properties).
+        config.setFlexlbGrpcExecutorCoreSize(16);
+        config.setFlexlbGrpcExecutorMaxSize(32);
+        config.setFlexlbGrpcExecutorQueueSize(4096);
+
         MockEnvironment environment = new MockEnvironment()
-                .withProperty("server.port", "-2")
-                .withProperty("FLEXLB_GRPC_EXECUTOR_CORE_SIZE", "16")
-                .withProperty("FLEXLB_GRPC_EXECUTOR_MAX_SIZE", "32")
-                .withProperty("FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE", "4096");
+                .withProperty("server.port", Integer.toString(grpcPort - 2));
         masterServer = new FlexlbGrpcServer(
                 service,
                 configService,
@@ -240,7 +252,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         masterServer.start();
 
         masterChannel = NettyChannelBuilder
-                .forAddress("127.0.0.1", masterServer.getBoundPort())
+                .forAddress("127.0.0.1", grpcPort)
                 .usePlaintext()
                 .build();
         masterStub = FlexlbServiceGrpc.newStub(masterChannel)
@@ -555,6 +567,7 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 .addAllBlockCacheKeys(template.blockCacheKeys())
                 .setSeqLen(template.seqLen())
                 .setRequestTimeMs(System.currentTimeMillis())
+                .setGenerateTimeout(120_000L)
                 .setMaxNewTokens(template.maxNewTokens())
                 .setNumBeams(1)
                 .setModel(template.model())
@@ -606,6 +619,20 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
         dispatchReasonCounts.clear();
         for (MockPrefillWorker worker : allPrefillWorkers()) {
             worker.resetRecords();
+        }
+        // Reset decode endpoint inflight KV state, simulating production's periodic
+        // status sync. In the mock test there are no engine status reports, so
+        // inflight KV reservations accumulate permanently across QPS levels. This
+        // causes the weighted random selection (exp(-decayFactor * kvDelta)) to
+        // degenerate to greedy minimum-load selection, starving some endpoints.
+        // A status update resets reportedKvAvailable and confirmedRunningCount;
+        // evictExpiredRequests(0) clears all inflight requests and their KV reservations.
+        for (DecodeEndpoint ep : endpointRegistry.getDecodeEndpoints().values()) {
+            WorkerStatusResponse response = new WorkerStatusResponse();
+            response.setRunningTaskInfo(Map.of());
+            response.setFinishedTaskInfo(Map.of());
+            ep.onWorkerStatusUpdate(ep.getStatus(), response);
+            ep.evictExpiredRequests(0);
         }
     }
 

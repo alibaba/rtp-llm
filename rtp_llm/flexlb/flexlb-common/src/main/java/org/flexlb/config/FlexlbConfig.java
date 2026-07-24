@@ -354,13 +354,11 @@ public class FlexlbConfig {
     /**
      * Maximum in-flight prefill batches per worker for the fixed_window batcher.
      * When the engine already has this many batches inflight, the batcher parks
-     * instead of dispatching new batches.  Default 0 disables backpressure —
-     * the fixed_window batcher dispatches regardless of engine load.
+     * instead of dispatching new batches.  Default 2 prevents engine overload.
      *
-     * <p>Set to a small value (e.g. 2–3) to prevent engine overload when
-     * using fixed_window; set to 0 to keep the original always-dispatch behavior.
+     * <p>0 = disable backpressure, use only in test environments.
      */
-    private int flexlbBatchFixedMaxInflightBatches = 0;
+    private int flexlbBatchFixedMaxInflightBatches = 2;
 
     /**
      * Deadline in milliseconds for EnqueueBatch.
@@ -417,12 +415,13 @@ public class FlexlbConfig {
 
     /**
      * Whether to enable score-tie randomization among near-equal prefill candidates.
-     * When enabled (default), endpoints within a threshold of the minimum score are
-     * randomly selected to avoid deterministic routing bias.
-     * When disabled, only endpoints with exactly the minimum score are considered.
+     * When enabled, endpoints within a threshold of the minimum score are
+     * randomly selected (via reservoir sampling) to avoid deterministic routing bias.
+     * When disabled (default), the first endpoint with the exact minimum score is
+     * deterministically selected without any randomization.
      * Environment variable: SCORE_TIE_RANDOM_ENABLED.
      */
-    private boolean scoreTieRandomEnabled = true;
+    private boolean scoreTieRandomEnabled = false;
 
     /**
      * Percentage threshold for score-tie randomization.
@@ -492,11 +491,7 @@ public class FlexlbConfig {
 
     // ========== SLO-Budget Batcher Configuration ==========
 
-    private double flexlbBatchFillThreshold = 0.5;
-
     private int flexlbBatchMaxCapacity = 1048576;
-
-    private int flexlbBatchSearchIter = 10;
 
     private int flexlbBatchScanAhead = 64;
 
@@ -518,8 +513,8 @@ public class FlexlbConfig {
      * Batcher algorithm name. Supported values:
      * <ul>
      *   <li>{@code fixed_window} — Fixed time window batching with optional
-     *       predictor-based early dispatch. No SLO deadline tracking, no EMA,
-     *       no request dropping (default).</li>
+     *       predictor-based early dispatch, queue deadline drop, and token-cap
+     *       filtering (default).</li>
      *   <li>{@code slo_budget} — SLO-deadline-aware batching with EMA arrival
      *       rate estimation, budget-based greedy fill, and deadline-gated dispatch.</li>
      * </ul>
@@ -549,6 +544,46 @@ public class FlexlbConfig {
     // ========== gRPC Configuration ==========
 
     private long prefillLbTimeoutMs = 5000;
+
+    // ========== gRPC Server Executor Configuration ==========
+
+    /**
+     * gRPC server executor core pool size.
+     * Environment variable: FLEXLB_GRPC_EXECUTOR_CORE_SIZE
+     */
+    private int flexlbGrpcExecutorCoreSize = 1000;
+
+    /**
+     * gRPC server executor max pool size.
+     * Environment variable: FLEXLB_GRPC_EXECUTOR_MAX_SIZE
+     */
+    private int flexlbGrpcExecutorMaxSize = 1000;
+
+    /**
+     * gRPC server executor queue size.
+     * Environment variable: FLEXLB_GRPC_EXECUTOR_QUEUE_SIZE
+     */
+    private int flexlbGrpcExecutorQueueSize = 10000;
+
+    // ========== Forwarder Channel Executor Configuration ==========
+
+    /**
+     * Forwarder channel executor core pool size (for FlexlbGrpcForwarder).
+     * Environment variable: FORWARDER_EXECUTOR_CORE_SIZE
+     */
+    private int forwarderExecutorCoreSize = 16;
+
+    /**
+     * Forwarder channel executor max pool size.
+     * Environment variable: FORWARDER_EXECUTOR_MAX_SIZE
+     */
+    private int forwarderExecutorMaxSize = 16;
+
+    /**
+     * Forwarder channel executor queue size.
+     * Environment variable: FORWARDER_EXECUTOR_QUEUE_SIZE
+     */
+    private int forwarderExecutorQueueSize = 2000;
 
     // ========== Decode Load Balance Hard Filter Configuration ==========
 
@@ -623,7 +658,7 @@ public class FlexlbConfig {
         return buckets.get(buckets.size() - 1)[1];
     }
 
-    private List<long[]> getParsedSloBuckets() {
+    List<long[]> getParsedSloBuckets() {
         if (parsedSloBuckets != null) {
             return parsedSloBuckets;
         }
@@ -632,12 +667,22 @@ public class FlexlbConfig {
         }
         List<long[]> result = new ArrayList<>();
         for (String entry : costSloBuckets.split(",")) {
-            String[] kv = entry.trim().split(":");
-            if (kv.length == 2) {
-                try {
-                    result.add(new long[]{Long.parseLong(kv[0].trim()), Long.parseLong(kv[1].trim())});
-                } catch (NumberFormatException ignored) {
-                }
+            String trimmed = entry.trim();
+            if (trimmed.isEmpty()) {
+                continue;
+            }
+            String[] kv = trimmed.split(":");
+            if (kv.length != 2) {
+                throw new ConfigValidationException("costSloBuckets",
+                    "Invalid SLO bucket entry '" + trimmed
+                        + "'. Expected format: seqLen:sloMs (e.g. 4096:2000)");
+            }
+            try {
+                result.add(new long[]{Long.parseLong(kv[0].trim()), Long.parseLong(kv[1].trim())});
+            } catch (NumberFormatException e) {
+                throw new ConfigValidationException("costSloBuckets",
+                    "Invalid number in SLO bucket entry '" + trimmed
+                        + "'. Expected format: seqLen:sloMs (e.g. 4096:2000)", e);
             }
         }
         result.sort(Comparator.comparingLong(a -> a[0]));
@@ -647,12 +692,21 @@ public class FlexlbConfig {
 
     /**
      * Returns the configured default schedule mode as an enum.
+     *
+     * @throws ConfigValidationException if the configured value is not a valid ScheduleModeEnum.
      */
     public ScheduleModeEnum getDefaultScheduleModeEnum() {
+        if (defaultScheduleMode == null) {
+            throw new ConfigValidationException("defaultScheduleMode",
+                "Schedule mode is null. Valid values: "
+                    + java.util.Arrays.toString(ScheduleModeEnum.values()));
+        }
         try {
             return ScheduleModeEnum.valueOf(defaultScheduleMode.toUpperCase());
         } catch (IllegalArgumentException e) {
-            return ScheduleModeEnum.AUTO;
+            throw new ConfigValidationException("defaultScheduleMode",
+                "Invalid schedule mode '" + defaultScheduleMode
+                    + "'. Valid values: " + java.util.Arrays.toString(ScheduleModeEnum.values()), e);
         }
     }
 }

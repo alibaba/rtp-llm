@@ -11,7 +11,6 @@ import java.util.List;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Per-worker request batcher that owns the queue and lifecycle, delegating
@@ -23,13 +22,11 @@ import java.util.concurrent.atomic.AtomicLong;
 public class WorkerBatcher {
 
     private final String key;
-    private final PrefillEndpoint prefillEp;
     private final FlexlbConfig cfg;
     private final BatchDecisionHandler handler;
     private final PriorityBlockingQueue<BatchItem> queue =
             new PriorityBlockingQueue<>(11, Comparator.comparingLong(BatchItem::sortKey));
     private final AtomicInteger queueDepth = new AtomicInteger();
-    private final AtomicLong headSortKey = new AtomicLong();
     private final Thread workerThread;
     private volatile boolean stopped;
     private final BatcherAlgorithm algorithm;
@@ -39,12 +36,11 @@ public class WorkerBatcher {
                          BatchDecisionHandler handler,
                          BatchSchedulerReporter reporter) {
         this.key = key;
-        this.prefillEp = prefillEp;
         this.cfg = cfg;
         this.handler = handler;
         this.algorithm = createAlgorithm(cfg);
         this.ctx = new BatcherContext(
-                key, prefillEp, cfg, handler, queue, queueDepth, headSortKey, reporter);
+                key, prefillEp, cfg, handler, queue, queueDepth, reporter);
         this.workerThread = new Thread(this::runLoop, "flexlb-batcher-" + key);
         this.workerThread.setDaemon(true);
         this.workerThread.setUncaughtExceptionHandler((t, e) ->
@@ -53,11 +49,11 @@ public class WorkerBatcher {
 
     private static BatcherAlgorithm createAlgorithm(FlexlbConfig config) {
         String algoName = config.getFlexlbBatchAlgorithm();
-        if ("fixed_window".equalsIgnoreCase(algoName)) {
-            return new FixedWindowBatcherAlgorithm();
+        if ("slo_budget".equalsIgnoreCase(algoName)) {
+            return new SloBudgetBatcherAlgorithm();
         }
-        // Fallback: slo_budget for any unrecognized value
-        return new SloBudgetBatcherAlgorithm();
+        // Fallback: fixed_window for any unrecognized value (safer default)
+        return new FixedWindowBatcherAlgorithm();
     }
 
     public void start() {
@@ -80,10 +76,8 @@ public class WorkerBatcher {
             item.setSortKey(sortKey);
             algorithm.onOffer(ctx, item, System.currentTimeMillis());
             queue.add(item);
-            ctx.refreshHeadSortKey();
         } catch (RuntimeException | Error e) {
             queueDepth.decrementAndGet();
-            ctx.refreshHeadSortKey();
             throw e;
         }
     }
@@ -92,36 +86,56 @@ public class WorkerBatcher {
         return queueDepth.get();
     }
 
-    public long headSortKey() {
-        return headSortKey.get();
-    }
-
-    /**
-     * Estimated remaining wait time of the head request.
-     * Delegates to the algorithm-specific {@link BatcherAlgorithm#headWaitMs}.
-     */
-    public long headWaitMs() {
-        long currentHeadSortKey = headSortKey.get();
-        if (queueDepth.get() == 0 || currentHeadSortKey == 0) {
-            return 0;
-        }
-        long now = System.currentTimeMillis();
-        if (algorithm instanceof FixedWindowBatcherAlgorithm) {
-            long elapsedMs = now - currentHeadSortKey;
-            return Math.max(0, cfg.getFlexlbBatchFixedWaitMs() - elapsedMs);
-        }
-        return Math.max(0, currentHeadSortKey - now);
-    }
-
     /**
      * Estimated time a new request would wait in the queue before dispatch.
      * Delegates to the algorithm-specific {@link BatcherAlgorithm#queueWaitMs}.
      */
     public long queueWaitMs() {
-        if (queueDepth.get() == 0 && algorithm instanceof FixedWindowBatcherAlgorithm) {
-            return cfg.getFlexlbBatchFixedWaitMs();
+        return algorithm.queueWaitMs(ctx);
+    }
+
+    /**
+     * Return queue items that would be in the same batch as a new request.
+     * Uses remaining = sortedSize % batchMaxCount to determine which items
+     * the new request would join after full-batch dispatches.
+     *
+     * <p>Performance short-circuit: {@code queueDepth} is checked first as
+     * an upper bound on the actual queue size. Because {@code offer}
+     * increments {@code queueDepth} before enqueuing and {@code poll}
+     * dequeues before decrementing, a value of 0 guarantees the queue is
+     * empty, allowing an early return without the O(n) snapshot copy and
+     * sort. A non-zero {@code queueDepth} does not guarantee items are
+     * present (the counter may lag the actual queue), so the subsequent
+     * {@code sortedItems} snapshot is still the source of truth for size.
+     *
+     * <p>{@code remaining} and the {@code subList} bounds are both derived
+     * from the single {@link BatcherContext#sortedItems()} snapshot, whose
+     * size is stable for the duration of this call. This avoids the race
+     * condition where reading {@code queueDepth} (an AtomicInteger that the
+     * batcher run-loop thread decretes concurrently) and then reading the
+     * queue snapshot non-atomically could produce {@code remaining > snapshot
+     * .size()}, making {@code subList}'s first argument negative and throwing
+     * {@link IndexOutOfBoundsException}.
+     *
+     * @return the last 'remaining' sorted items, or empty list if remaining == 0
+     */
+    public List<BatchItem> peekBatchItems() {
+        // 快速短路：queueDepth 是队列大小的上界（offer 先增计数后入队，
+        // poll 先出队后减计数），为 0 时队列必然为空，无需 O(n) 拷贝+排序。
+        if (queueDepth.get() == 0) {
+            return List.of();
         }
-        return headWaitMs();
+        List<BatchItem> sorted = ctx.sortedItems();
+        int sortedSize = sorted.size();
+        if (sortedSize == 0) {
+            return List.of();
+        }
+        int batchMaxCount = Math.max(1, cfg.getFlexlbBatchSizeMax());
+        int remaining = sortedSize % batchMaxCount;
+        if (remaining == 0) {
+            return List.of();
+        }
+        return new ArrayList<>(sorted.subList(sortedSize - remaining, sortedSize));
     }
 
     public void shutdown() {

@@ -10,6 +10,7 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient, trans_input
+from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cache_keys
@@ -28,6 +29,7 @@ from rtp_llm.utils.base_model_datatypes import (
     RequestInfo,
 )
 from rtp_llm.utils.time_util import Timer
+from rtp_llm.utils.util import AtomicCounter
 
 if TYPE_CHECKING:
     from rtp_llm.config.py_config_modules import PyEnvConfigs
@@ -42,6 +44,7 @@ def get_role_names(role_addrs: List[RoleAddr]) -> Set[str]:
 
 PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"
 DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE = 3
+_retry_request_id_counter = AtomicCounter()
 
 
 class BackendRPCServerVisitor:
@@ -82,11 +85,22 @@ class BackendRPCServerVisitor:
         self.sp_config = sp_config
         self.source_role = source_role
         self.source_ip = str(getattr(server_config, "ip", "") or "")
+        self._server_port = int(getattr(server_config, "server_port", 0) or 0)
+        self._server_id_str = str(
+            getattr(server_config, "frontend_server_id", "") or ""
+        )
         assert self.max_seq_len > 0
 
         # Get max_rpc_timeout_ms and decode_entrance from pd_sep_config
         max_rpc_timeout_ms = pd_sep_config.max_rpc_timeout_ms
         decode_entrance = pd_sep_config.decode_entrance
+
+        # Get min_remaining_deadline_ms from master_config (default 500 if not set)
+        min_remaining_deadline_ms = (
+            getattr(master_config, "min_remaining_deadline_ms", 500)
+            if master_config is not None
+            else 500
+        )
 
         # Get client_config from grpc_config if provided, otherwise use empty dict
         if grpc_config is not None:
@@ -99,6 +113,7 @@ class BackendRPCServerVisitor:
             client_config=client_config,
             max_rpc_timeout_ms=max_rpc_timeout_ms,
             decode_entrance=decode_entrance,
+            min_remaining_deadline_ms=min_remaining_deadline_ms,
         )
 
         host_args = HostServiceArgs.create_from_env()
@@ -161,6 +176,23 @@ class BackendRPCServerVisitor:
             or "recvmsg:Connection timed out" in text
             or "Socket closed" in text
         )
+
+    def _generate_retry_request_id(self, original_request_id: int) -> int:
+        """Generate a new request_id for PD route retry.
+
+        A process-wide sequence and a retry-specific machine namespace keep IDs
+        unique across visitor instances and separate from frontend request IDs.
+        """
+        source_ip = str(getattr(self, "source_ip", "") or "127.0.0.1")
+        server_port = int(getattr(self, "_server_port", 0) or os.getpid())
+        server_id = f"{getattr(self, '_server_id_str', '')}:pd-route-retry"
+        while True:
+            sequence = _retry_request_id_counter.increment()
+            retry_request_id = generate_request_id(
+                source_ip, server_port, server_id, sequence
+            )
+            if retry_request_id != original_request_id:
+                return retry_request_id
 
     @staticmethod
     def get_backend_role_list(
@@ -517,6 +549,7 @@ class BackendRPCServerVisitor:
 
         async def stream_with_aux_info():
             attempt = 0
+            original_request_id = None
             is_streaming = bool(getattr(input.generate_config, "is_streaming", False))
             while True:
                 yielded_output = False
@@ -543,12 +576,20 @@ class BackendRPCServerVisitor:
                     ):
                         raise
                     attempt += 1
+                    if original_request_id is None:
+                        original_request_id = input.request_id
+                    input.request_id = self._generate_retry_request_id(
+                        original_request_id
+                    )
                     route_logger.warning(
                         "retrying PD route after retryable RPC error, "
-                        "request_id=%s, attempt=%s/%s, error=%s",
+                        "request_id=%s, original_request_id=%s, attempt=%s/%s, "
+                        "error_type=%s, error=%s",
                         input.request_id,
+                        original_request_id,
                         attempt,
                         self.pd_route_retry_on_unavailable,
+                        type(e).__name__,
                         e,
                     )
                     await asyncio.sleep(min(0.2, 0.05 * attempt))

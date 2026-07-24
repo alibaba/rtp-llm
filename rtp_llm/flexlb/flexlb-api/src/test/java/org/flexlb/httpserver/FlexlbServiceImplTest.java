@@ -1,5 +1,10 @@
 package org.flexlb.httpserver;
 
+import ch.qos.logback.classic.Level;
+import ch.qos.logback.classic.spi.ILoggingEvent;
+import ch.qos.logback.core.read.ListAppender;
+import io.grpc.Status;
+import io.grpc.StatusRuntimeException;
 import io.grpc.stub.StreamObserver;
 import org.flexlb.balance.scheduler.CancelReason;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
@@ -8,6 +13,7 @@ import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
@@ -18,7 +24,10 @@ import org.flexlb.config.FlexlbConfig;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
+import org.slf4j.LoggerFactory;
+import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CompletionException;
 
 import static org.junit.jupiter.api.Assertions.*;
 import static org.mockito.ArgumentMatchers.any;
@@ -330,6 +339,185 @@ class FlexlbServiceImplTest {
                 ArgumentCaptor.forClass(FlexlbScheduleProtocol.GetRequestStateResponsePB.class);
         verify(observer).onNext(captor.capture());
         assertFalse(captor.getValue().getFound());
+    }
+
+    // ---- gRPC status classification (CANCELLED / DEADLINE_EXCEEDED false-error fix) ----
+
+    @Test
+    void grpcStatusCode_recognisesDirectCancelledStatusRuntimeException() {
+        // Mirrors the cancellationListener in schedule(): a bare StatusRuntimeException
+        // carrying CANCELLED, delivered to whenComplete without wrapping.
+        StatusRuntimeException ex =
+                Status.CANCELLED.withDescription("gRPC context cancelled").asRuntimeException();
+        assertEquals(Status.Code.CANCELLED, FlexlbServiceImpl.grpcStatusCode(ex));
+    }
+
+    @Test
+    void grpcStatusCode_unwrapsCompletionExceptionToFindDeadlineExceeded() {
+        // A route future may fail with an exception wrapped in CompletionException; the
+        // classifier must traverse the cause chain to recover the underlying gRPC code.
+        StatusRuntimeException inner =
+                Status.DEADLINE_EXCEEDED.withDescription("deadline exceeded").asRuntimeException();
+        Throwable wrapped = new CompletionException(inner);
+        assertEquals(Status.Code.DEADLINE_EXCEEDED, FlexlbServiceImpl.grpcStatusCode(wrapped));
+    }
+
+    @Test
+    void grpcStatusCode_returnsNullForNonGrpcThrowable() {
+        // A plain non-gRPC exception must yield null so it stays on the ERROR path.
+        assertNull(FlexlbServiceImpl.grpcStatusCode(new RuntimeException("test error")));
+    }
+
+    @Test
+    void testSchedule_clientCancellationProducesCancelledErrorCode() {
+        // Given: route fails with a gRPC CANCELLED (as raised by the cancellation listener)
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        StatusRuntimeException cancelled =
+                Status.CANCELLED.withDescription("gRPC context cancelled").asRuntimeException();
+        when(routeService.route(any(BalanceContext.class)))
+                .thenReturn(CompletableFuture.failedFuture(cancelled));
+
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(12345L)
+                .build();
+
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+
+        // When
+        service.schedule(request, observer);
+
+        // Then: response carries the REQUEST_CANCELLED error code (8504), not a generic 500
+        ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
+                ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(observer).onNext(captor.capture());
+        verify(observer).onCompleted();
+
+        FlexlbScheduleProtocol.FlexlbScheduleResponsePB resp = captor.getValue();
+        assertFalse(resp.getSuccess());
+        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), resp.getCode());
+    }
+
+    @Test
+    void testSchedule_clientCancellationLogsWarnNotError() {
+        // CANCELLED must downgrade to WARN (no throwable) + DEBUG (with throwable), never ERROR.
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        StatusRuntimeException cancelled =
+                Status.CANCELLED.withDescription("gRPC context cancelled").asRuntimeException();
+        when(routeService.route(any(BalanceContext.class)))
+                .thenReturn(CompletableFuture.failedFuture(cancelled));
+
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(12345L)
+                .build();
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+
+        try (LogCapture capture = new LogCapture(Level.DEBUG)) {
+            service.schedule(request, observer);
+
+            assertTrue(capture.hasEvent(Level.WARN, "client cancelled/timeout"),
+                    "CANCELLED should log WARN");
+            assertTrue(capture.hasEventWithThrowable(Level.DEBUG),
+                    "CANCELLED stack should be available at DEBUG");
+            assertFalse(capture.hasEvent(Level.ERROR, null),
+                    "CANCELLED must not log ERROR");
+        }
+
+        ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
+                ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(observer).onNext(captor.capture());
+        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), captor.getValue().getCode());
+    }
+
+    @Test
+    void testSchedule_nonCancelledGrpcErrorLogsError() {
+        // A non-CANCELLED / non-DEADLINE_EXCEEDED gRPC failure must stay on the ERROR path.
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        StatusRuntimeException unknown =
+                Status.UNKNOWN.withDescription("engine boom").asRuntimeException();
+        when(routeService.route(any(BalanceContext.class)))
+                .thenReturn(CompletableFuture.failedFuture(unknown));
+
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(12346L)
+                .build();
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+
+        try (LogCapture capture = new LogCapture(Level.DEBUG)) {
+            service.schedule(request, observer);
+
+            assertTrue(capture.hasEventWithThrowable(Level.ERROR),
+                    "Non-cancelled gRPC error should log ERROR with stack");
+            assertFalse(capture.hasEvent(Level.WARN, "client cancelled/timeout"),
+                    "Non-cancelled gRPC error must not take the cancelled/timeout WARN path");
+        }
+    }
+
+    @Test
+    void testSchedule_deadlineExceededProducesCancelledErrorCodeAndMessage() {
+        // Deadline expiry shares the REQUEST_CANCELLED response code but its message must
+        // distinguish the timeout from an active client cancel.
+        when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(false);
+        StatusRuntimeException deadlineExceeded =
+                Status.DEADLINE_EXCEEDED.withDescription("deadline exceeded").asRuntimeException();
+        when(routeService.route(any(BalanceContext.class)))
+                .thenReturn(CompletableFuture.failedFuture(deadlineExceeded));
+
+        FlexlbScheduleProtocol.FlexlbScheduleRequestPB request = FlexlbScheduleProtocol.FlexlbScheduleRequestPB.newBuilder()
+                .setRequestId(12347L)
+                .build();
+        StreamObserver<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> observer = mock(StreamObserver.class);
+
+        service.schedule(request, observer);
+
+        ArgumentCaptor<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> captor =
+                ArgumentCaptor.forClass(FlexlbScheduleProtocol.FlexlbScheduleResponsePB.class);
+        verify(observer).onNext(captor.capture());
+        verify(observer).onCompleted();
+
+        FlexlbScheduleProtocol.FlexlbScheduleResponsePB resp = captor.getValue();
+        assertFalse(resp.getSuccess());
+        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), resp.getCode());
+        assertTrue(resp.getErrorMessage().contains("deadline exceeded"),
+                "Message should distinguish deadline expiry, got: " + resp.getErrorMessage());
+    }
+
+    /**
+     * Captures {@code flexlbLogger} events via a logback {@link ListAppender} for log-level
+     * assertions. Uses logback's native API (already on the classpath via spring-boot-starter),
+     * so no extra test dependency is required. Restores the previous level on close.
+     */
+    private static final class LogCapture implements AutoCloseable {
+        private final ch.qos.logback.classic.Logger logger;
+        private final Level prevLevel;
+        private final ListAppender<ILoggingEvent> appender = new ListAppender<>();
+
+        LogCapture(Level level) {
+            logger = (ch.qos.logback.classic.Logger) LoggerFactory.getLogger("flexlbLogger");
+            prevLevel = logger.getLevel();
+            logger.setLevel(level);
+            appender.start();
+            logger.addAppender(appender);
+        }
+
+        List<ILoggingEvent> events() {
+            return appender.list;
+        }
+
+        boolean hasEvent(Level level, String fragment) {
+            return events().stream().anyMatch(e -> e.getLevel().equals(level)
+                    && (fragment == null || e.getFormattedMessage().contains(fragment)));
+        }
+
+        boolean hasEventWithThrowable(Level level) {
+            return events().stream().anyMatch(e -> e.getLevel().equals(level)
+                    && e.getThrowableProxy() != null);
+        }
+
+        @Override
+        public void close() {
+            logger.detachAppender(appender);
+            logger.setLevel(prevLevel);
+        }
     }
 
 }

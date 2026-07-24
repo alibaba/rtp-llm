@@ -1,10 +1,10 @@
-"""FlexLB schedule client: request role addrs from master/slave via gRPC."""
+"""FlexLB schedule client: request role addrs from the master via gRPC."""
 
 import asyncio
 import logging
 import time
 from dataclasses import dataclass
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import grpc
 import grpc.aio
@@ -14,7 +14,6 @@ from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.py_config_modules import MasterConfig
 from rtp_llm.cpp.model_rpc.proto.flexlb_schedule_service_pb2 import (
     CANCEL_REASON_CLIENT_CANCELLED,
-    CANCEL_REASON_DEADLINE_EXCEEDED,
     FlexlbCancelRequestPB,
     FlexlbScheduleRequestPB,
 )
@@ -36,6 +35,18 @@ SUCCESS_CODE = 200
 FLEXLB_GRPC_PORT_OFFSET = 2
 BEARER_PREFIX = "Bearer "
 
+# gRPC status codes that indicate a connection-phase failure: the batch was
+# never delivered to the server, so retrying on a slave is safe.  Other failures
+# (e.g. stream established then timed out) may mean the batch was already
+# dispatched and must not be retried.
+_CONNECTION_PHASE_STATUS_CODES = frozenset(
+    {
+        grpc.StatusCode.UNAVAILABLE,
+        grpc.StatusCode.DEADLINE_EXCEEDED,
+        grpc.StatusCode.UNKNOWN,
+    }
+)
+
 
 def _resolve_role_from_server_status(s) -> RoleType:
     """Determine RoleType from the stable string role field."""
@@ -54,7 +65,10 @@ class FlexlbResponse:
 
     Success: role_addrs is set. Failure: connection_failed and/or
     error_code/error_message from scheduler. request_id is always from frontend;
-    only connection_failed triggers slave retry and domain fallback.
+    only connection_failed permits domain fallback.  When a slave is available,
+    connection-phase failures (batch never delivered) are retried on the slave
+    before returning connection_failed; stream-level timeouts are not retried
+    because the batch may already have been dispatched.
     """
 
     role_addrs: Optional[List[RoleAddr]] = None
@@ -88,7 +102,7 @@ class FlexlbResponse:
         error_code: int,
         error_message: Optional[str] = None,
     ) -> "FlexlbResponse":
-        """Scheduler returned error (e.g. non-200 body). No slave retry / no domain fallback."""
+        """Scheduler returned an error. Domain fallback is not allowed."""
         return cls(
             role_addrs=None,
             connection_failed=False,
@@ -99,7 +113,7 @@ class FlexlbResponse:
 
     @classmethod
     def connection_failed_response(cls) -> "FlexlbResponse":
-        """No response (connection/timeout). Triggers slave retry and domain fallback."""
+        """No response (connection/timeout). Permits domain fallback."""
         return cls(
             role_addrs=None,
             connection_failed=True,
@@ -110,7 +124,7 @@ class FlexlbResponse:
 
 
 class MasterClient:
-    """Client for FlexLB schedule gRPC API (master and optional slave)."""
+    """Client for the FlexLB master Schedule gRPC API."""
 
     def __init__(self, host_service=None, server_config=None, master_config=None):
         self.master_config = (
@@ -164,19 +178,28 @@ class MasterClient:
         request_pb: "FlexlbScheduleRequestPB",
         timeout_s: Optional[float],
         request_id: int,
-    ):
-        """Send gRPC schedule request. Returns proto response on success, None on transport failure."""
+    ) -> Tuple[Optional[Any], bool]:
+        """Send gRPC schedule request.
+
+        Returns ``(response, is_connection_phase_failure)`` where *response* is
+        the proto on success or ``None`` on failure.  *is_connection_phase_failure*
+        is ``True`` only when the failure happened before the batch was delivered
+        (i.e. the gRPC status code is in ``_CONNECTION_PHASE_STATUS_CODES``),
+        making a slave retry safe.
+        """
         target = self._get_grpc_target(addr)
         start = time.time()
         try:
             channel = self._get_channel(target)
             stub = FlexlbServiceStub(channel)
             response = await stub.Schedule(request_pb, timeout=timeout_s)
-            return response
+            return response, False
         except grpc.aio.AioRpcError as e:
             elapsed = time.time() - start
+            is_conn_phase = e.code() in _CONNECTION_PHASE_STATUS_CODES
             route_logger.error(
-                "gRPC schedule failed, addr=%s, request_id=%s, status=%s, detail=%s, elapsed=%.3fs",
+                "gRPC schedule failed, addr=%s, request_id=%s, status=%s, "
+                "detail=%s, elapsed=%.3fs",
                 addr,
                 request_id,
                 e.code(),
@@ -184,16 +207,14 @@ class MasterClient:
                 elapsed,
             )
             if e.code() == grpc.StatusCode.DEADLINE_EXCEEDED:
-                await self._best_effort_cancel(
-                    stub, request_id, CANCEL_REASON_DEADLINE_EXCEEDED
-                )
-                await self._close_channel(target)
+                # P0-2: Don't cancel or close channel — leave it for
+                # passive recovery retry with the same request_id.
                 raise FtRuntimeException(
                     exception_type=ExceptionType.DEADLINE_EXCEEDED,
                     message=f"FlexLB schedule deadline exceeded for request {request_id}",
                 ) from e
             await self._close_channel(target)
-            return None
+            return None, is_conn_phase
         except asyncio.CancelledError:
             if "stub" in locals():
                 await self._best_effort_cancel(
@@ -209,7 +230,7 @@ class MasterClient:
                 elapsed,
             )
             await self._close_channel(target)
-            return None
+            return None, False
 
     @staticmethod
     async def _best_effort_cancel(stub, request_id: int, reason: int) -> None:
@@ -235,25 +256,59 @@ class MasterClient:
         input_pb: Optional["GenerateInputPB"] = None,
     ) -> FlexlbResponse:
         """
-        Resolve backend role addrs from FlexLB scheduler (master, then slave on connection failure).
+        Resolve backend role addrs from the FlexLB master.
 
         request_id is frontend-generated and only used for logging.
-        Only connection_failed triggers slave retry and domain fallback.
+        On a connection-phase failure (batch never delivered to the server) the
+        request is retried on the slave when one is available.  Stream-level
+        timeouts are not retried because Schedule may already have taken effect.
         """
         master_addr = self.host_service.get_master_addr() if self.host_service else None
         if not master_addr:
             return FlexlbResponse.connection_failed_response()
 
-        slave_addr = None
-        if self.host_service:
-            slave_addr = getattr(self.host_service, "get_slave_addr", lambda: None)()
+        slave_addr = self.host_service.get_slave_addr() if self.host_service else None
 
         ttft_timeout_ms = getattr(
             input.generate_config, "ttft_timeout_ms", None
         ) or getattr(input.generate_config, "timeout_ms", None)
         if ttft_timeout_ms is None or ttft_timeout_ms <= 0:
             ttft_timeout_ms = self.master_config.master_default_timeout_ms
-        timeout_s = ttft_timeout_ms / 1000.0 if ttft_timeout_ms > 0 else None
+
+        # Absolute-deadline propagation: if absolute_deadline_ms is set (>0),
+        # compute remaining time and use it as the gRPC timeout instead of the
+        # full ttft_timeout_ms. If remaining is below the minimum threshold,
+        # abort immediately without making the gRPC call.
+        absolute_deadline_ms = getattr(input.generate_config, "absolute_deadline_ms", 0)
+        if absolute_deadline_ms > 0:
+            remaining_ms = absolute_deadline_ms - int(time.time() * 1000)
+            min_remaining = self.master_config.min_remaining_deadline_ms
+            # ttft_timeout_ms caps the Schedule phase; absolute_deadline_ms is the
+            # overall deadline.  Cap remaining by ttft_timeout_ms so the Schedule
+            # gRPC call never exceeds the TTFT budget.
+            if ttft_timeout_ms > 0:
+                remaining_ms = min(remaining_ms, ttft_timeout_ms)
+            if remaining_ms < min_remaining:
+                route_logger.warning(
+                    "Schedule aborted: remaining %dms < min %dms, request_id=%s",
+                    remaining_ms,
+                    min_remaining,
+                    request_id,
+                )
+                raise FtRuntimeException(
+                    exception_type=ExceptionType.DEADLINE_EXCEEDED,
+                    message=f"FlexLB schedule deadline exceeded (remaining {remaining_ms}ms < min {min_remaining}ms) for request {request_id}",
+                )
+            timeout_s = remaining_ms / 1000.0
+            # generate_timeout passes remaining so that the Java side computes
+            # absoluteDeadlineMs = request_time_ms + remaining = original deadline,
+            # rather than request_time_ms + full ttft_timeout_ms which would extend
+            # the deadline by the frontend processing time.
+            effective_generate_timeout = remaining_ms
+        else:
+            # Fallback: absolute_deadline_ms not set (old client), use full timeout
+            timeout_s = ttft_timeout_ms / 1000.0 if ttft_timeout_ms > 0 else None
+            effective_generate_timeout = ttft_timeout_ms
 
         gc = input.generate_config
         api_key = self._extract_api_key(input)
@@ -261,7 +316,7 @@ class MasterClient:
             request_id=request_id,
             block_cache_keys=block_cache_keys,
             seq_len=input.prompt_length,
-            generate_timeout=ttft_timeout_ms,
+            generate_timeout=effective_generate_timeout,
             request_time_ms=int(time.time() * 1000),
             max_new_tokens=gc.max_new_tokens,
             num_beams=gc.num_beams,
@@ -273,17 +328,65 @@ class MasterClient:
         if input_pb is not None:
             request_pb.generate_input = input_pb.SerializeToString()
 
-        response = await self._send_schedule_request(
-            master_addr, request_pb, timeout_s, request_id
+        # P0-2: On deadline exceeded, retry the same master with the same
+        # request_id (passive recovery).  Master-side duplicate detection
+        # returns inflight routing info.
+        route_logger.debug(
+            "Schedule attempt starting, master=%s, request_id=%s, timeout=%.3fs",
+            master_addr,
+            request_id,
+            timeout_s if timeout_s is not None else -1.0,
         )
+        for schedule_attempt in range(2):
+            try:
+                schedule_start = time.monotonic()
+                response, is_conn_phase = await self._send_schedule_request(
+                    master_addr, request_pb, timeout_s, request_id
+                )
+                if response is not None:
+                    route_logger.info(
+                        "Schedule succeeded on attempt %d, request_id=%s, master=%s",
+                        schedule_attempt + 1,
+                        request_id,
+                        master_addr,
+                    )
+                    break
+                # response is None: connection-phase failure, fall through to slave retry
+            except FtRuntimeException as e:
+                if (
+                    e.exception_type == ExceptionType.DEADLINE_EXCEEDED
+                    and schedule_attempt == 0
+                ):
+                    elapsed = time.monotonic() - schedule_start
+                    route_logger.warning(
+                        "Schedule deadline exceeded after %.3fs, retrying same master "
+                        "(passive recovery), request_id=%s, master=%s, attempt=%d/2",
+                        elapsed,
+                        request_id,
+                        master_addr,
+                        schedule_attempt + 1,
+                    )
+                    await asyncio.sleep(0.1)
+                    continue
+                if e.exception_type == ExceptionType.DEADLINE_EXCEEDED:
+                    route_logger.warning(
+                        "Schedule retry exhausted (deadline exceeded on attempt %d/2), "
+                        "request_id=%s, master=%s",
+                        schedule_attempt + 1,
+                        request_id,
+                        master_addr,
+                    )
+                raise
 
-        if response is None and slave_addr:
+        if response is None and is_conn_phase and slave_addr:
             route_logger.info(
-                "Master connection failed, retrying slave, slave=%s, request_id=%s",
+                "Master connection failed, retrying slave, master=%s, slave=%s, "
+                "request_id=%s",
+                master_addr,
                 slave_addr,
                 request_id,
             )
-            response = await self._send_schedule_request(
+            response, _ = await self._send_schedule_request(
                 slave_addr, request_pb, timeout_s, request_id
             )
 

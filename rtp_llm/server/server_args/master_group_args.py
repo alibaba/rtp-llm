@@ -61,3 +61,14 @@ def init_master_group_args(parser, master_config):
         help="When True, disable domain fallback routing when master is unavailable or not configured. "
         "Requests will fail with ROUTE_ERROR instead of falling back to VipServer domain routing.",
     )
+
+    master_group.add_argument(
+        "--min_remaining_deadline_ms",
+        env_name="MIN_REMAINING_DEADLINE_MS",
+        bind_to=(master_config, "min_remaining_deadline_ms"),
+        type=int,
+        default=500,
+        help="Minimum remaining deadline (ms) for absolute-deadline propagation. "
+        "If remaining time falls below this threshold, the stage aborts before "
+        "making a gRPC call. Default 500ms.",
+    )

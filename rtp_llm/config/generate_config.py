@@ -180,6 +180,11 @@ class GenerateConfig(BaseModel):
 
     unique_key: str = ""
 
+    # Absolute deadline (epoch ms) for end-to-end timeout propagation.
+    # Set by the frontend entry point; 0 means not set (fallback to per-stage timeout).
+    # NOT serialized to proto — Python-only field for deadline-based timeout calculation.
+    absolute_deadline_ms: int = 0
+
     def gen_hash_value(self):
         cp = copy.copy(self)
         cp.max_new_tokens = 0
@@ -187,6 +192,7 @@ class GenerateConfig(BaseModel):
         cp.random_seed = None
         cp.md5_value = ""
         cp.timeout_ms = -1
+        cp.absolute_deadline_ms = 0
         self.md5_value = hashlib.md5(cp.__str__().encode()).hexdigest()
 
     def max_num_beams(self):

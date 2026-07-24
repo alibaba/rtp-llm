@@ -2,7 +2,6 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -17,7 +16,6 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
-import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -26,7 +24,6 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
@@ -34,7 +31,6 @@ import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
-import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
@@ -51,9 +47,9 @@ class FlexlbBatchSchedulerTest {
     private ConfigService configService;
     private Router router;
     private EngineGrpcClient grpcClient;
-    private EngineWorkerStatus engineWorkerStatus;
     private BatchSchedulerReporter reporter;
     private FlexlbBatchScheduler scheduler;
+    private EndpointRegistry endpointRegistry;
     private FlexlbConfig config;
     private final List<EngineRpcService.EnqueueBatchRequestPB> sentBatches = new CopyOnWriteArrayList<>();
     private final List<String> sentEndpoints = new CopyOnWriteArrayList<>();
@@ -63,7 +59,6 @@ class FlexlbBatchSchedulerTest {
         configService = mock(ConfigService.class);
         router = mock(Router.class);
         grpcClient = mock(EngineGrpcClient.class);
-        engineWorkerStatus = mock(EngineWorkerStatus.class);
         reporter = mock(BatchSchedulerReporter.class);
 
         config = new FlexlbConfig();
@@ -72,7 +67,6 @@ class FlexlbBatchSchedulerTest {
         config.setFlexlbBatchWindowMs(10_000);
         config.setCostSloMs(50000L);
         config.setCostSloRiskMarginMs(50L);
-        config.setFlexlbBatchFillThreshold(1.0);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
         when(router.route(any(BalanceContext.class))).thenAnswer(inv -> {
@@ -89,9 +83,9 @@ class FlexlbBatchSchedulerTest {
         when(grpcClient.cancel(anyString(), anyInt(), anyLong(), anyLong()))
                 .thenReturn(EngineRpcService.EmptyPB.getDefaultInstance());
 
-        EndpointRegistry endpointRegistry = new EndpointRegistry(configService, () -> null, reporter);
+        endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
         BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
-        scheduler = new FlexlbBatchScheduler(configService, router, grpcClient, engineWorkerStatus,
+        scheduler = new FlexlbBatchScheduler(configService, router, grpcClient,
                 endpointRegistry, dispatcher, reporter, null);
 
         // Create endpoint and batcher for the worker that successRoute() returns
@@ -100,13 +94,12 @@ class FlexlbBatchSchedulerTest {
         ws.setIp("10.0.0.1");
         ws.setPort(8080);
         ws.setGrpcPort(8081);
-        PrefillEndpoint endpoint = new PrefillEndpoint(ws, config, scheduler, reporter);
         ServerStatus prefill = new ServerStatus();
         prefill.setServerIp("10.0.0.1");
         prefill.setHttpPort(8080);
         prefill.setGrpcPort(8081);
         prefill.setRole(RoleType.PREFILL);
-        endpointRegistry.putPrefill(ipPort, endpoint);
+        endpointRegistry.ensureEndpoint(RoleType.PREFILL, ipPort, ws);
     }
 
     @AfterEach
@@ -252,8 +245,7 @@ class FlexlbBatchSchedulerTest {
 
         CompletableFuture<Response> scheduleFuture = scheduler.submit(context(85));
         assertTrue(enqueueStarted.await(2, TimeUnit.SECONDS));
-        FlexlbBatchScheduler.InflightEntry entry = scheduler.inflight.get(85L);
-        long batchId = entry.lifecycle.snapshot().batchId();
+        long batchId = sentBatches.getFirst().getBatchId();
 
         TaskInfo finished = new TaskInfo();
         finished.setRequestId(85L);
@@ -261,7 +253,7 @@ class FlexlbBatchSchedulerTest {
         WorkerStatusResponse status = new WorkerStatusResponse();
         status.setRole(RoleType.DECODE);
         status.setFinishedTaskInfo(Map.of("85", finished));
-        scheduler.onWorkerStatusUpdate(new WorkerStatus(), status);
+        scheduler.onWorkerStatusUpdate(status);
 
         assertFalse(scheduleFuture.isDone());
         ackFuture.complete(ackFor(sentBatches.getFirst()));
@@ -274,31 +266,10 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
-    void dispatch_falls_back_to_selected_prefill_when_dp0_status_not_synced() throws Exception {
-        config.setFlexlbBatchSizeMax(1);
-        when(router.route(any(BalanceContext.class))).thenAnswer(inv -> successRouteWithPrefillDp(92, 1));
-
-        WorkerStatus unsyncedDp0 = new WorkerStatus();
-        unsyncedDp0.setIp("10.0.0.9");
-        unsyncedDp0.setPort(8090);
-        unsyncedDp0.setGrpcPort(8091);
-        unsyncedDp0.setDpRank(0);
-        PrefillEndpoint unsyncedEp = new PrefillEndpoint(unsyncedDp0, config, scheduler, reporter);
-        when(engineWorkerStatus.selectModelWorkerStatus(RoleType.PREFILL, "g1"))
-                .thenReturn(Map.of("10.0.0.9:8090", unsyncedEp));
-
-        Response response = scheduler.submit(context(92)).get(2, TimeUnit.SECONDS);
-
-        assertTrue(response.isSuccess());
-        assertEquals("10.0.0.1:8081", sentEndpoints.getFirst());
-        assertEquals(1, sentBatches.getFirst().getDpSlots(0).getDpRank());
-    }
-
-    @Test
     void cancel_removes_request_before_batch_enqueue() throws Exception {
         CompletableFuture<Response> future = scheduler.submit(context(11));
 
-        scheduler.cancel(11L);
+        scheduler.cancel(11L, CancelReason.CLIENT_CANCELLED, 0);
 
         assertTrue(future.isDone());
         Response response = future.get(1, TimeUnit.SECONDS);
@@ -348,6 +319,17 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
+    void duplicate_active_request_id_is_rejected_before_rerouting() {
+        scheduler.submit(context(14));
+
+        Response duplicate = scheduler.submit(context(14)).getNow(null);
+
+        assertFalse(duplicate.isSuccess());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), duplicate.getCode());
+        verify(router).route(any(BalanceContext.class));
+    }
+
+    @Test
     void route_failure_completes_without_batch_enqueue() throws Exception {
         Response failure = Response.error(StrategyErrorType.NO_PREFILL_WORKER);
         when(router.route(any(BalanceContext.class))).thenReturn(failure);
@@ -387,7 +369,6 @@ class FlexlbBatchSchedulerTest {
     @Test
     void batcher_rejects_when_queue_full() throws Exception {
         config.setFlexlbBatchQueueMaxSize(1);
-        config.setFlexlbBatchFillThreshold(1.0);
 
         CompletableFuture<Response> first = scheduler.submit(context(51));
         assertFalse(first.isDone());
@@ -406,7 +387,6 @@ class FlexlbBatchSchedulerTest {
         // So request parks, budget shrinks each 1ms iteration, after ~72ms budget < margin → urgent dispatch
         config.setCostSloMs(300L);
         config.setCostSloRiskMarginMs(100L);
-        config.setFlexlbBatchFillThreshold(2.0);
         config.setFlexlbBatchSizeMax(1000);
 
         CompletableFuture<Response> future = scheduler.submit(context(901));
@@ -424,7 +404,6 @@ class FlexlbBatchSchedulerTest {
         config.setCostSloMs(500L);
         config.setCostSloRiskMarginMs(50L);
         config.setFlexlbBatchMaxCapacity(500);
-        config.setFlexlbBatchFillThreshold(0.3);
         config.setFlexlbBatchSizeMax(1000);
 
         CompletableFuture<Response> future = scheduler.submit(context(1001));
@@ -435,16 +414,15 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
-    void processQueue_bsIter_exhaustion_uses_conservative_bound() throws Exception {
+    void processQueue_dispatches_requests_within_budget() throws Exception {
         // With slo_budget batcher (default), two 100-token requests each have
         // budget ≈ 350ms (slo=500, margin=50, pred≈100). Both fit within the
         // incremental budget and are dispatched together in a single batch.
-        // flexlbBatchSearchIter is NOT used by slo_budget; flexlbBatchScanAhead
-        // (default 64) determines how many candidates are scanned per iteration.
+        // flexlbBatchScanAhead (default 64) determines how many candidates are
+        // scanned per iteration.
         config.setCostSloMs(500L);
         config.setCostSloRiskMarginMs(50L);
         config.setFlexlbBatchMaxCapacity(100000);
-        config.setFlexlbBatchFillThreshold(0.5);
         config.setFlexlbBatchSizeMax(100);
 
         CompletableFuture<Response> f1 = scheduler.submit(contextWithSeqLen(1401, 100));
@@ -503,7 +481,6 @@ class FlexlbBatchSchedulerTest {
         config.setCostSloBuckets("1000:5000,100000:50000");
         config.setCostSloRiskMarginMs(50L);
         config.setFlexlbBatchSizeMax(2);
-        config.setFlexlbBatchFillThreshold(1.0);
 
         CompletableFuture<Response> f1 = scheduler.submit(contextWithSeqLen(601, 600));
         CompletableFuture<Response> f2 = scheduler.submit(contextWithSeqLen(602, 600));
@@ -535,19 +512,20 @@ class FlexlbBatchSchedulerTest {
         decodeStatus.setIp("10.0.0.2");
         decodeStatus.setPort(8081);
         decodeStatus.setGrpcPort(8082);
-        DecodeEndpoint decodeEp = scheduler.endpointRegistry.ensureDecodeEndpoint(
-                "10.0.0.2:8081", decodeStatus);
+        DecodeEndpoint decodeEp = (DecodeEndpoint) endpointRegistry.ensureEndpoint(
+                RoleType.DECODE, "10.0.0.2:8081", decodeStatus);
 
         // Simulate strategy having reserved resources on the decode endpoint
-        decodeEp.calibrate(null, null, 10000);
-        decodeEp.reserve(17L, 500);
+        decodeStatus.getAvailableKvCacheTokens().set(10000);
+        decodeEp.onWorkerStatusUpdate(decodeStatus, new WorkerStatusResponse());
+        decodeEp.reserve(17L, 500, 500);
         assertEquals(1, decodeEp.getInflightCount());
 
         // Submit a request — router returns decode at 10.0.0.2:8081
         CompletableFuture<Response> future = scheduler.submit(context(17));
 
         // Cancel before batch is dispatched
-        scheduler.cancel(17L);
+        scheduler.cancel(17L, CancelReason.CLIENT_CANCELLED, 0);
 
         // Decode endpoint resource should be released
         assertEquals(0, decodeEp.getInflightCount(),
@@ -556,13 +534,12 @@ class FlexlbBatchSchedulerTest {
         assertFalse(future.getNow(null).isSuccess());
     }
 
-
     @Test
     void cancel_with_decode_endpoint_not_registered_is_noop() throws Exception {
         // No DecodeEndpoint registered at 10.0.0.2:8081 — cancel should not throw
         CompletableFuture<Response> future = scheduler.submit(context(20));
 
-        scheduler.cancel(20L);
+        scheduler.cancel(20L, CancelReason.CLIENT_CANCELLED, 0);
 
         assertTrue(future.isDone());
         Response response = future.get(1, TimeUnit.SECONDS);

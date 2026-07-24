@@ -12,8 +12,6 @@ import org.springframework.stereotype.Component;
 
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.function.BiConsumer;
-import java.util.function.BiPredicate;
 import java.util.function.Function;
 
 @Component
@@ -33,22 +31,6 @@ public class EndpointRegistry {
         this.configService = configService;
         this.batchSchedulerFactory = batchSchedulerFactory;
         this.reporter = reporter;
-    }
-
-    public WorkerEndpoint get(String ipPort) {
-        WorkerEndpoint ep = prefillEndpoints.get(ipPort);
-        if (ep != null) {
-            return ep;
-        }
-        ep = decodeEndpoints.get(ipPort);
-        if (ep != null) {
-            return ep;
-        }
-        ep = pdFusionEndpoints.get(ipPort);
-        if (ep != null) {
-            return ep;
-        }
-        return vitEndpoints.get(ipPort);
     }
 
     public WorkerEndpoint get(RoleType roleType, String ipPort) {
@@ -83,31 +65,6 @@ public class EndpointRegistry {
         return Map.of();
     }
 
-    public int visitEndpoints(RoleType roleType,
-                              BiPredicate<String, WorkerEndpoint> visitor) {
-        if (roleType == RoleType.PREFILL) {
-            return visit(prefillEndpoints, visitor);
-        }
-        if (roleType == RoleType.DECODE) {
-            return visit(decodeEndpoints, visitor);
-        }
-        if (roleType == RoleType.PDFUSION) {
-            return visit(pdFusionEndpoints, visitor);
-        }
-        if (roleType == RoleType.VIT) {
-            return visit(vitEndpoints, visitor);
-        }
-        return 0;
-    }
-
-    public void forEachPrefillEndpoint(BiConsumer<String, PrefillEndpoint> action) {
-        prefillEndpoints.forEach(action);
-    }
-
-    public void forEachDecodeEndpoint(BiConsumer<String, DecodeEndpoint> action) {
-        decodeEndpoints.forEach(action);
-    }
-
     public PrefillEndpoint getPrefill(String ipPort) {
         return prefillEndpoints.get(ipPort);
     }
@@ -116,11 +73,11 @@ public class EndpointRegistry {
         return decodeEndpoints.get(ipPort);
     }
 
-    public PrefillEndpoint getPdFusion(String ipPort) {
+    private PrefillEndpoint getPdFusion(String ipPort) {
         return pdFusionEndpoints.get(ipPort);
     }
 
-    public SimpleWorkerEndpoint getVit(String ipPort) {
+    private SimpleWorkerEndpoint getVit(String ipPort) {
         return vitEndpoints.get(ipPort);
     }
 
@@ -140,10 +97,6 @@ public class EndpointRegistry {
         throw new IllegalArgumentException("Unsupported role: " + roleType);
     }
 
-    public PrefillEndpoint ensurePrefillEndpoint(String ipPort, WorkerStatus status) {
-        return ensurePrefillEndpoint(ipPort, status, RoleType.PREFILL);
-    }
-
     private PrefillEndpoint ensurePrefillEndpoint(String ipPort, WorkerStatus status, RoleType roleType) {
         PrefillEndpoint endpoint = prefillEndpoints.get(ipPort);
         if (endpoint != null && endpoint.getStatus() == status) {
@@ -153,13 +106,9 @@ public class EndpointRegistry {
                 candidateStatus -> createPrefillEndpoint(candidateStatus, roleType, ipPort));
     }
 
-    public DecodeEndpoint ensureDecodeEndpoint(String ipPort, WorkerStatus status) {
+    private DecodeEndpoint ensureDecodeEndpoint(String ipPort, WorkerStatus status) {
         return ensureEndpoint(decodeEndpoints, ipPort, status,
                 candidateStatus -> createDecodeEndpoint(candidateStatus, ipPort));
-    }
-
-    public PrefillEndpoint ensurePdFusionEndpoint(String ipPort, WorkerStatus status) {
-        return ensurePdFusionEndpoint(ipPort, status, RoleType.PDFUSION);
     }
 
     private PrefillEndpoint ensurePdFusionEndpoint(String ipPort, WorkerStatus status, RoleType roleType) {
@@ -171,7 +120,7 @@ public class EndpointRegistry {
                 candidateStatus -> createPrefillEndpoint(candidateStatus, roleType, ipPort));
     }
 
-    public SimpleWorkerEndpoint ensureVitEndpoint(String ipPort, WorkerStatus status) {
+    private SimpleWorkerEndpoint ensureVitEndpoint(String ipPort, WorkerStatus status) {
         return ensureEndpoint(vitEndpoints, ipPort, status,
                 candidateStatus -> createSimpleEndpoint(candidateStatus, RoleType.VIT, ipPort));
     }
@@ -243,7 +192,7 @@ public class EndpointRegistry {
     }
 
     private FlexlbBatchScheduler batchScheduler() {
-        return batchSchedulerFactory == null ? null : batchSchedulerFactory.getObject();
+        return batchSchedulerFactory.getObject();
     }
 
     private PrefillEndpoint createPrefillEndpoint(WorkerStatus status, RoleType roleType,
@@ -265,50 +214,7 @@ public class EndpointRegistry {
     }
 
     private void prepareEndpointMetrics(RoleType roleType, WorkerStatus status, String ipPort) {
-        if (reporter != null && roleType != null && status != null) {
-            reporter.prepareEndpointMetrics(roleType.name(), status.getIp(), ipPort);
-        }
-    }
-
-    /**
-     * Replace prefill endpoint at given key. Closes old endpoint if present.
-     * Note: This is primarily used in tests. Production code should use ensurePrefillEndpoint().
-     */
-    public void putPrefill(String ipPort, PrefillEndpoint endpoint) {
-        PrefillEndpoint old = prefillEndpoints.put(ipPort, endpoint);
-        if (old != null && old != endpoint) {
-            old.close();
-        }
-    }
-
-    /**
-     * Replace decode endpoint at given key. Closes old endpoint if present.
-     * Note: This is primarily used in tests. Production code should use ensureDecodeEndpoint().
-     */
-    public void putDecode(String ipPort, DecodeEndpoint endpoint) {
-        DecodeEndpoint old = decodeEndpoints.put(ipPort, endpoint);
-        if (old != null && old != endpoint) {
-            old.close();
-        }
-    }
-
-    public void putPdFusion(String ipPort, PrefillEndpoint endpoint) {
-        PrefillEndpoint old = pdFusionEndpoints.put(ipPort, endpoint);
-        if (old != null && old != endpoint) {
-            old.close();
-        }
-    }
-
-    public void putVit(String ipPort, SimpleWorkerEndpoint endpoint) {
-        putSimple(vitEndpoints, ipPort, endpoint);
-    }
-
-    private void putSimple(ConcurrentHashMap<String, SimpleWorkerEndpoint> endpoints,
-                           String ipPort, SimpleWorkerEndpoint endpoint) {
-        SimpleWorkerEndpoint old = endpoints.put(ipPort, endpoint);
-        if (old != null && old != endpoint) {
-            old.close();
-        }
+        reporter.prepareEndpointMetrics(roleType.name(), status.getIp(), ipPort);
     }
 
     public void close() {
@@ -332,39 +238,8 @@ public class EndpointRegistry {
         return decodeEndpoints;
     }
 
-    public ConcurrentHashMap<String, PrefillEndpoint> getPdFusionEndpoints() {
-        return pdFusionEndpoints;
-    }
-
-    public ConcurrentHashMap<String, SimpleWorkerEndpoint> getVitEndpoints() {
-        return vitEndpoints;
-    }
-
     public int getEndpointCount(RoleType roleType) {
         return getEndpoints(roleType).size();
-    }
-
-    private static <T extends WorkerEndpoint> int visit(
-            ConcurrentHashMap<String, T> endpoints,
-            BiPredicate<String, WorkerEndpoint> visitor) {
-        int visited = 0;
-        for (Map.Entry<String, T> entry : endpoints.entrySet()) {
-            if (visitor.test(entry.getKey(), entry.getValue())) {
-                visited++;
-            }
-        }
-        return visited;
-    }
-
-    /**
-     * Trigger TTL eviction on all prefill and decode endpoints.
-     *
-     * @param ttlMs max age before eviction
-     */
-    public void evictExpiredAll(long ttlMs) {
-        prefillEndpoints.values().forEach(ep -> ep.evictExpiredBatches(ttlMs));
-        decodeEndpoints.values().forEach(ep -> ep.evictExpiredRequests(ttlMs));
-        pdFusionEndpoints.values().forEach(ep -> ep.evictExpiredBatches(ttlMs));
     }
 
     /**
@@ -373,10 +248,28 @@ public class EndpointRegistry {
      * This scheduled method provides a safety-net fallback for entries
      * that were not cleaned up by {@code calibrate()} (e.g., engine crash,
      * network partition, status report delay).
+     * <p>Aggregates eviction counts by role and reports them via
+     * {@code app.flexlb.inflight.ttl.expired.qps} tagged with PREFILL / DECODE.
      */
     @Scheduled(fixedRate = 60000L)
     public void scheduledEviction() {
         long ttlMs = configService.loadBalanceConfig().getFlexlbInflightTtlMs();
-        evictExpiredAll(ttlMs);
+        int prefillExpired = 0;
+        for (PrefillEndpoint ep : prefillEndpoints.values()) {
+            prefillExpired += ep.evictExpiredBatches(ttlMs);
+        }
+        for (PrefillEndpoint ep : pdFusionEndpoints.values()) {
+            prefillExpired += ep.evictExpiredBatches(ttlMs);
+        }
+        int decodeExpired = 0;
+        for (DecodeEndpoint ep : decodeEndpoints.values()) {
+            decodeExpired += ep.evictExpiredRequests(ttlMs);
+        }
+        if (prefillExpired > 0) {
+            reporter.reportInflightTtlExpired(RoleType.PREFILL.name(), prefillExpired);
+        }
+        if (decodeExpired > 0) {
+            reporter.reportInflightTtlExpired(RoleType.DECODE.name(), decodeExpired);
+        }
     }
 }
