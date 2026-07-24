@@ -4,14 +4,8 @@ import os
 from typing import Any, Dict, List, Optional
 
 import torch
-import torch.library as tl
 from PIL import Image
-from transformers import (
-    AutoProcessor,
-    Qwen2VLImageProcessor,
-    Qwen3VLConfig,
-    Qwen3VLVisionModel,
-)
+from transformers import AutoProcessor, Qwen3VLConfig, Qwen3VLVisionModel
 
 from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
@@ -33,6 +27,7 @@ from rtp_llm.multimodal.vit_metrics import (
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
+from rtp_llm.utils.torch_compat import ensure_torch_library_wrap_triton
 
 default_attn_impl = "sdpa"
 try:
@@ -43,26 +38,50 @@ except Exception as e:
         f"initialize flash_attn failed, exception {e}, using sdpa attention in qwen2.5 vl vit"
     )
 
-if not hasattr(tl, "wrap_triton"):
-
-    def wrap_triton(fn):
-        return fn
-
-    tl.wrap_triton = wrap_triton
-
 
 class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
-    def __init__(self, mm_related_params: VitParameters):
+    def __init__(self, mm_related_params: VitParameters, visual=None):
+        # Some supported Torch releases do not expose wrap_triton. Initialize
+        # that process-wide compatibility only when Qwen3-VL vision is created,
+        # rather than as an import-time side effect.
+        ensure_torch_library_wrap_triton()
         self.mm_processor = AutoProcessor.from_pretrained(
             mm_related_params.config["ckpt_path"]
         )
-        self.mm_processor.image_processor = Qwen2VLImageProcessor.from_pretrained(
-            mm_related_params.config["ckpt_path"]
-        )
-        config_hf = Qwen3VLConfig.from_pretrained(mm_related_params.config["ckpt_path"])
-        config_hf.vision_config._attn_implementation = default_attn_impl
-        self.visual = Qwen3VLVisionModel._from_config(config_hf.vision_config)
+        self._uses_new_loader_vision = visual is not None
+        if visual is None:
+            # Keep AutoProcessor's native Qwen3-VL image processor. The old
+            # forced Qwen2-VL override changes the image grid for Qwen3-VL
+            # checkpoints (950 instead of 2752 tokens for the smoke image).
+            config_hf = Qwen3VLConfig.from_pretrained(
+                mm_related_params.config["ckpt_path"]
+            )
+            config_hf.vision_config._attn_implementation = default_attn_impl
+            visual = Qwen3VLVisionModel._from_config(config_hf.vision_config)
+        self.visual = visual
         self.spatial_merge_size = self.visual.spatial_merge_size
+
+    @staticmethod
+    def _unpack_vision_output(vision_output):
+        if isinstance(vision_output, tuple):
+            if len(vision_output) != 2:
+                raise ValueError(
+                    "Qwen3-VL vision tuple output must contain embeddings and "
+                    f"deepstack features, got {len(vision_output)} values"
+                )
+            embeds, deepstack_embeds = vision_output
+        else:
+            embeds = vision_output.pooler_output
+            deepstack_embeds = vision_output.deepstack_features
+        if not isinstance(embeds, torch.Tensor):
+            raise TypeError("Qwen3-VL vision embeddings must be a tensor")
+        if not isinstance(deepstack_embeds, (list, tuple)):
+            raise TypeError("Qwen3-VL deepstack features must be a sequence")
+        if not deepstack_embeds:
+            raise ValueError("Qwen3-VL deepstack features must not be empty")
+        if not all(isinstance(item, torch.Tensor) for item in deepstack_embeds):
+            raise TypeError("Qwen3-VL deepstack features must contain only tensors")
+        return embeds, deepstack_embeds
 
     @property
     def _data_type(self):
@@ -168,7 +187,7 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
                 )
             return res["pixel_values_videos"], res["video_grid_thw"]
         else:
-            raise Exception("unknown mm url type")
+            raise ValueError(f"unknown mm url type: {mm_type}")
 
     def get_preprocess_params(self):
         return {
@@ -181,8 +200,7 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         pixel_values = data[0].to(self._device).to(self._data_type)
         grid_thw = data[1].to(self._device)
         vision_output = self.visual(pixel_values, grid_thw=grid_thw)
-        embeds = vision_output.pooler_output
-        deepstack_embeds = vision_output.deepstack_features
+        embeds, deepstack_embeds = self._unpack_vision_output(vision_output)
         split_sizes = (grid_thw.prod(-1) // self.visual.spatial_merge_size**2).tolist()
         embeds = torch.split(embeds, split_sizes)
         pos_id = self.get_position_ids(grid_thw)[0]
@@ -195,12 +213,23 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
     def batched_embedding(
         self, data_list: List[Any], mm_types: List[MMUrlType], **kwargs
     ):
-        if not all(mm_type == MMUrlType.IMAGE for mm_type in mm_types):
-            return super().batched_embedding(data_list, mm_types, **kwargs)
+        if len(data_list) != len(mm_types):
+            raise ValueError(
+                f"data_list has {len(data_list)} entries but mm_types has "
+                f"{len(mm_types)}"
+            )
+        if not data_list:
+            return []
+        supported_types = {MMUrlType.DEFAULT, MMUrlType.IMAGE, MMUrlType.VIDEO}
+        for index, mm_type in enumerate(mm_types):
+            if mm_type not in supported_types:
+                raise ValueError(
+                    f"unsupported mm_types[{index}] for Qwen3-VL batching: {mm_type}"
+                )
         res_list = []
         pixel_values_list = []
         grid_thw_list = []
-        for data, mm_type in zip(data_list, mm_types):
+        for data in data_list:
             pixel_values_list.append(data[0])
             grid_thw_list.append(data[1])
         pixel_values = (
@@ -208,8 +237,7 @@ class Qwen3_VLImageEmbedding(Qwen2_5_VLImageEmbedding):
         )
         grid_thw = torch.concat(grid_thw_list, dim=0).to(self._device)
         vision_output = self.visual(pixel_values, grid_thw=grid_thw)
-        embeds = vision_output.pooler_output
-        deepstack_embeds = vision_output.deepstack_features
+        embeds, deepstack_embeds = self._unpack_vision_output(vision_output)
         split_sizes = (grid_thw.prod(-1) // self.visual.spatial_merge_size**2).tolist()
         embeds = torch.split(embeds, split_sizes)
         pos_id = self.get_position_ids(grid_thw)
@@ -230,6 +258,21 @@ class Qwen3VLVitWeight(BaseVitWeights):
 
 class Qwen3_VLMixin(Qwen2_5_VLMixin):
     def _init_multimodal(self):
+        if self.use_new_loader:
+            from rtp_llm.models_py.new_models.qwen3_vl.vision import (
+                load_qwen3_vl_vision,
+            )
+
+            visual = load_qwen3_vl_vision(
+                vision_config=self.mm_related_params.config,
+                model_path=self.ckpt_path,
+                compute_dtype=self.compute_dtype,
+                device=self.device,
+            )
+            self.mm_part = Qwen3_VLImageEmbedding(self.mm_related_params, visual=visual)
+            self.mm_related_params.vit_weights = None
+            return
+
         self.mm_part = Qwen3_VLImageEmbedding(self.mm_related_params)
         self.mm_related_params.vit_weights = Qwen3VLVitWeight(
             {"vit": self.mm_part.visual}
@@ -240,5 +283,14 @@ class Qwen3_VLMixin(Qwen2_5_VLMixin):
         return Qwen3_VLImageEmbedding(mm_related_params).visual
 
 
+class Qwen3_VLMoeLegacyMixin(Qwen3_VLMixin):
+    def _init_multimodal(self):
+        if self.use_new_loader:
+            raise ValueError(
+                "qwen3_vl_moe is not supported by the new loader in this change"
+            )
+        super()._init_multimodal()
+
+
 register_multimodal_mixin(["qwen3_vl"], Qwen3_VLMixin)
-register_multimodal_mixin(["qwen3_vl_moe"], Qwen3_VLMixin)
+register_multimodal_mixin(["qwen3_vl_moe"], Qwen3_VLMoeLegacyMixin)

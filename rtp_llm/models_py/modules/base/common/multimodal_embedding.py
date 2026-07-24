@@ -15,11 +15,30 @@ def reshape_extra_input_to_deepstack(
     layers is derived from the element count. This is the model-specific inverse of the
     flatten done in the qwen3-vl producer.
     """
+    if len(extra_input) != len(multimodal_features):
+        raise ValueError(
+            f"extra_input has {len(extra_input)} entries but "
+            f"multimodal_features has {len(multimodal_features)}"
+        )
+
     deepstack: List[torch.Tensor] = []
-    for flat, feature in zip(extra_input, multimodal_features):
+    for index, (flat, feature) in enumerate(zip(extra_input, multimodal_features)):
+        if flat.dim() != 1:
+            raise ValueError(f"extra_input[{index}] must be a flat 1-D tensor")
+        if feature.dim() != 2 or feature.size(0) == 0 or feature.size(1) == 0:
+            raise ValueError(
+                f"multimodal_features[{index}] must have non-empty shape "
+                "[tokens, hidden]"
+            )
         tokens = feature.size(0)
         hidden = feature.size(-1)
-        layers = flat.numel() // (tokens * hidden)
+        values_per_layer = tokens * hidden
+        if flat.numel() == 0 or flat.numel() % values_per_layer:
+            raise ValueError(
+                f"extra_input[{index}] has {flat.numel()} values, which cannot "
+                f"be reshaped using feature shape [{tokens}, {hidden}]"
+            )
+        layers = flat.numel() // values_per_layer
         deepstack.append(flat.reshape(layers, tokens, hidden))
     return deepstack
 

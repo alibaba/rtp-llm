@@ -73,6 +73,27 @@ def rocm_oss_suites():
         ],
     )
 
+    # ROCm VL (Qwen3-VL newloader, including fused MRoPE prefill/decode)
+    native.test_suite(
+        name = "smoke_rocm_vl",
+        tests = [
+            smoke_test(
+                name = "rocm_qwen3_vl_newloader",
+                task_info = "data/model/qwen_vl/q_r_3_rocm.json",
+                smoke_args = {
+                    "llm": "--act_type BF16 --use_local 1 --tp_size 2 --reuse_cache 1 --use_asm_pa 1 --use_aiter_pa 1 --seq_size_per_block 16",
+                    "vit": "--act_type BF16 --use_local 1 --use_local_preprocess 1",
+                },
+                envs = {
+                    "llm": ["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
+                    "vit": ["USE_NEW_LOADER=1", "LOAD_METHOD=scratch"],
+                },
+                gpu_type = ["MI308X-ROCM7"],
+                data = native.glob(["data/model/llava/*.jpg"]),
+            ),
+        ],
+    )
+
 
     # ROCm MoE (Qwen3-30B MoE)
     native.test_suite(
