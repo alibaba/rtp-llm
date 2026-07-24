@@ -650,8 +650,8 @@ TEST_F(BlockTreeCacheFactoryTest, SameTypeGroupsWithDifferentPolicyShapeSeqAndSt
 }
 
 TEST_F(BlockTreeCacheFactoryTest, OnlyCompatibleChainGroupsAggregate) {
-    const auto config    = makeCompatibleFullGroupsConfig(CacheEvictPolicy::CHAIN);
-    auto       allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    const auto    config    = makeCompatibleFullGroupsConfig(CacheEvictPolicy::CHAIN);
+    auto          allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
     KVCacheConfig legacy_conflict;
     legacy_conflict.enable_independent_group_eviction = true;
     auto cache                                        = createBlockTreeCache(config, legacy_conflict, allocator);
@@ -838,8 +838,8 @@ TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesO
 }
 
 TEST_F(BlockTreeCacheFactoryTest, IndependentGroupsNeverAggregateOrEnterAnotherGroupsCascade) {
-    const auto config    = makeCompatibleFullGroupsConfig(CacheEvictPolicy::INDEPENDENT);
-    auto       allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    const auto    config    = makeCompatibleFullGroupsConfig(CacheEvictPolicy::INDEPENDENT);
+    auto          allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
     KVCacheConfig legacy_conflict;
     legacy_conflict.enable_independent_group_eviction = false;
     auto cache                                        = createBlockTreeCache(config, legacy_conflict, allocator);
@@ -1095,7 +1095,7 @@ TEST_F(BlockTreeCacheFactoryTest, InsertRejectsWrongComponentShapeAndSanitizesIn
     valid.device_blocks = {first->front(), second->front()};
     expect_rejected_without_mutation(/*key=*/711, {{valid, valid}});
 
-    size_t sanitized_node_count = 0;
+    size_t sanitized_node_count                = 0;
     auto   expect_sanitized_without_cache_hold = [&](CacheKeyType key, std::vector<std::vector<GroupSlot>> slots) {
         const auto before          = cache->getKeySnapshot(/*limit=*/32);
         const auto first_refcount  = groups[0]->blockPool()->refCount(first->front());
@@ -1112,8 +1112,7 @@ TEST_F(BlockTreeCacheFactoryTest, InsertRejectsWrongComponentShapeAndSanitizesIn
         ASSERT_NE(node_it, cache->tree()->root()->children.end());
         ASSERT_NE(node_it->second, nullptr);
         ASSERT_EQ(node_it->second->group_slots.size(), 1u);
-        EXPECT_EQ(node_it->second->group_slots[0].device_blocks,
-                  (BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX}));
+        EXPECT_EQ(node_it->second->group_slots[0].device_blocks, (BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX}));
     };
 
     GroupSlot wrong_cardinality;
@@ -1241,7 +1240,7 @@ TEST_F(BlockTreeCacheFactoryTest, AppliesDefaultTierWatermarks) {
 
     // Disk enabled: HOST/DISK watermarks keep L2 headroom and avoid a saturated L3.
     {
-        auto                                  allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        auto                                     allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
         block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_watermark_defaults");
         KVCacheConfig                            kv_cache_config;
         kv_cache_config.enable_memory_cache           = true;
@@ -1273,7 +1272,7 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
     cache_config.kernel_seq_size_per_block   = 1;
     cache_config.use_independent_block_pools = true;
 
-    std::vector<KVCacheSpecPtr> specs;
+    std::vector<KVCacheSpecPtr>    specs;
     const std::vector<std::string> group_tags = {"full_kv", "full_aux", "swa_kv"};
     for (const auto& tag : group_tags) {
         specs.push_back(test::makeResolvedMhaSpec(
@@ -1288,9 +1287,9 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
 
     const size_t stride = specs.front()->block_size_bytes();
     cache_config.setGroupBlockLayout({8, 8, 8}, {stride, stride, stride}, {0, 0, 0});
-    cache_config.kv_block_stride_bytes = stride;
-    cache_config.kv_block_size_bytes   = stride;
-    cache_config.block_size_bytes      = stride;
+    cache_config.kv_block_stride_bytes       = stride;
+    cache_config.kv_block_size_bytes         = stride;
+    cache_config.block_size_bytes            = stride;
     cache_config.layer_to_block_stride_bytes = {
         static_cast<int>(stride), static_cast<int>(stride), static_cast<int>(stride)};
 
@@ -1299,7 +1298,7 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
     ASSERT_EQ(allocator->groupBlockPools().size(), 3u);
 
     block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_full_swa");
-    KVCacheConfig                  kv_cache_config;
+    KVCacheConfig                            kv_cache_config;
     kv_cache_config.enable_device_cache           = true;
     kv_cache_config.enable_memory_cache           = true;
     kv_cache_config.enable_tiered_memory_cache    = true;

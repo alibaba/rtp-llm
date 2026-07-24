@@ -43,7 +43,7 @@ private:
     std::atomic<int>        pending_tasks_{0};
     std::mutex              wait_mutex_;
     std::condition_variable wait_cv_;
-    std::function<void()> pending_task_wait_observer_for_test_;
+    std::function<void()>   pending_task_wait_observer_for_test_;
 };
 
 }  // namespace rtp_llm

@@ -20,7 +20,8 @@ TransferStatus BlockTransferDispatcher::executePerRank(const TransferDescriptor&
     return per_rank_engine_->submit(descriptor).status();
 }
 
-bool BlockTransferDispatcher::executeMultiRank(const std::vector<TransferDescriptor>& descriptors, int timeout_ms) const {
+bool BlockTransferDispatcher::executeMultiRank(const std::vector<TransferDescriptor>& descriptors,
+                                               int                                    timeout_ms) const {
     if (descriptors.empty()) {
         return true;
     }

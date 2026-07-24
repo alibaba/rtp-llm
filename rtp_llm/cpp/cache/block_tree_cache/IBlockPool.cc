@@ -295,8 +295,7 @@ void IBlockPool::decRefOneNoLock(BlockIdxType block, size_t ref_type_index) {
     const uint32_t new_rc = old_rc - 1;
     refcounts_[block]     = new_rc;
     adjustActiveTreeCachedBlocksNoLock(old_rc, new_rc);
-    if (metric_refcounts_by_type_[ref_type_index][block] > 0
-        && metric_total_ref_counts_[ref_type_index] > 0) {
+    if (metric_refcounts_by_type_[ref_type_index][block] > 0 && metric_total_ref_counts_[ref_type_index] > 0) {
         metric_refcounts_by_type_[ref_type_index][block] -= 1;
         metric_total_ref_counts_[ref_type_index] -= 1;
     }
@@ -313,11 +312,10 @@ void IBlockPool::adjustActiveTreeCachedBlocksNoLock(uint32_t old_ref_count, uint
 
 void IBlockPool::freeAllocatedBlockNoLock(BlockIdxType block) {
     for (size_t ref_type_index = 0; ref_type_index < kBlockRefTypeCount; ++ref_type_index) {
-        const uint32_t metric_refcount = metric_refcounts_by_type_[ref_type_index][block];
-        metric_total_ref_counts_[ref_type_index] =
-            metric_total_ref_counts_[ref_type_index] >= metric_refcount ?
-                metric_total_ref_counts_[ref_type_index] - metric_refcount :
-                0;
+        const uint32_t metric_refcount                   = metric_refcounts_by_type_[ref_type_index][block];
+        metric_total_ref_counts_[ref_type_index]         = metric_total_ref_counts_[ref_type_index] >= metric_refcount ?
+                                                               metric_total_ref_counts_[ref_type_index] - metric_refcount :
+                                                               0;
         metric_refcounts_by_type_[ref_type_index][block] = 0;
     }
     allocated_[block] = 0;

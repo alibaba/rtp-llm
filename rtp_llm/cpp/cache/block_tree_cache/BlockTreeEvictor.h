@@ -64,8 +64,8 @@ public:
     // A node's topology changed (e.g. became a leaf after child deletion).
     void onTopologyChanged(TreeNode* parent);
     // A node is about to be removed from the tree: drop it from all heaps.
-    void           onNodeAboutToRemove(TreeNode* node);
-    CandidateStats candidateStats() const;
+    void                   onNodeAboutToRemove(TreeNode* node);
+    CandidateStats         candidateStats() const;
     size_t                 candidateCount(int component_group_id, Tier tier) const;
     std::vector<TreeNode*> candidateNodes(int component_group_id, Tier tier) const;
 
@@ -85,14 +85,9 @@ public:
     static bool buildTransferDescriptor(const EvictionMove& eviction_move, TransferDescriptor& descriptor);
 
     // ---- Load-back state transitions (owned here; driven by BlockTreeCache) ----
-    bool reserveLoadBack(TreeNode*                       node,
-                         int                             group_id,
-                         Tier                            source,
-                         const std::vector<BlockIdxType>& source_blocks);
-    bool abortPendingLoadBack(TreeNode*                       node,
-                              int                             group_id,
-                              Tier                            source,
-                              const std::vector<BlockIdxType>& source_blocks);
+    bool reserveLoadBack(TreeNode* node, int group_id, Tier source, const std::vector<BlockIdxType>& source_blocks);
+    bool
+    abortPendingLoadBack(TreeNode* node, int group_id, Tier source, const std::vector<BlockIdxType>& source_blocks);
     bool beginLoadBack(TreeNode* node, int group_id, Tier source);
     bool finishLoadBack(TreeNode* node, int group_id, Tier source, bool copy_ok);
 

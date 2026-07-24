@@ -263,8 +263,8 @@ TEST_F(FullComponentGroupTest, NoDataNotEligible) {
 TEST_F(FullComponentGroupTest, CompleteDeviceValueRequiresExactPoolCardinalityAndNoNullBlocks) {
     auto second_pool = block_tree_cache_test::makeDevicePool({{1, 0}}, 128, "full_component_group_test_second");
     ASSERT_NE(second_pool, nullptr);
-    auto two_pool_group                     = std::make_shared<FullComponentGroup>();
-    two_pool_group->component_group_id      = 0;
+    auto two_pool_group                = std::make_shared<FullComponentGroup>();
+    two_pool_group->component_group_id = 0;
     two_pool_group->setDevicePools({pool_, second_pool}, {"tag_0", "tag_1"});
 
     GroupSlot slot;

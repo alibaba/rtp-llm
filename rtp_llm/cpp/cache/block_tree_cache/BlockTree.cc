@@ -112,23 +112,19 @@ BlockTreeInsertResult BlockTree::insertNode(TreeNode*                           
                 continue;
             }
             if (slots[i].size() != static_cast<size_t>(group_slot_count_)) {
-                RTP_LLM_LOG_WARNING("malformed input slots, key=%ld expected=%d actual=%zu",
-                                    key,
-                                    group_slot_count_,
-                                    slots[i].size());
+                RTP_LLM_LOG_WARNING(
+                    "malformed input slots, key=%ld expected=%d actual=%zu", key, group_slot_count_, slots[i].size());
                 continue;
             }
-            const auto&  incoming_slots = slots[i];
+            const auto& incoming_slots = slots[i];
             for (size_t gid = 0; gid < static_cast<size_t>(group_slot_count_); ++gid) {
-                GroupSlot&       existing = current->group_slots[gid];
-                const GroupSlot& incoming = incoming_slots[gid];
-                const bool       source_valid =
-                    !incoming.device_blocks.empty()
-                    && std::all_of(incoming.device_blocks.begin(), incoming.device_blocks.end(), [](BlockIdxType block) {
-                           return !isNullBlockIdx(block);
-                       });
-                if (!existing.is_empty() || existing.transfer_state != SlotTransferState::IDLE
-                    || !source_valid) {
+                GroupSlot&       existing     = current->group_slots[gid];
+                const GroupSlot& incoming     = incoming_slots[gid];
+                const bool       source_valid = !incoming.device_blocks.empty()
+                                          && std::all_of(incoming.device_blocks.begin(),
+                                                         incoming.device_blocks.end(),
+                                                         [](BlockIdxType block) { return !isNullBlockIdx(block); });
+                if (!existing.is_empty() || existing.transfer_state != SlotTransferState::IDLE || !source_valid) {
                     continue;
                 }
                 existing.device_blocks  = incoming.device_blocks;
@@ -145,10 +141,8 @@ BlockTreeInsertResult BlockTree::insertNode(TreeNode*                           
             if (slots[i].size() == static_cast<size_t>(group_slot_count_)) {
                 current->group_slots = slots[i];
             } else if (!slots[i].empty()) {
-                RTP_LLM_LOG_WARNING("malformed slot count, key=%ld expected=%d actual=%zu",
-                                    key,
-                                    group_slot_count_,
-                                    slots[i].size());
+                RTP_LLM_LOG_WARNING(
+                    "malformed slot count, key=%ld expected=%d actual=%zu", key, group_slot_count_, slots[i].size());
             }
             result.inserted_mask[i] = true;
             result.inserted_nodes.push_back(BlockTreeInsertedNode{current, i});
@@ -165,8 +159,7 @@ void BlockTree::removeNode(TreeNode* node) {
     }
     RTP_LLM_CHECK_WITH_INFO(node->children.empty(), "BlockTree::removeNode called on node with children");
 
-    RTP_LLM_LOG_DEBUG(
-        "removing node key=%ld, pool_size=%zu", node->cache_key, node_pool_.size());
+    RTP_LLM_LOG_DEBUG("removing node key=%ld, pool_size=%zu", node->cache_key, node_pool_.size());
 
     // Remove from parent's children map
     TreeNode* parent = node->parent;

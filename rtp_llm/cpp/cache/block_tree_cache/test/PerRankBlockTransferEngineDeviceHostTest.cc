@@ -135,10 +135,10 @@ static Component makeComponent(int                        component_id,
                                const std::string&         tag             = "",
                                const std::vector<int>&    model_layer_ids = {}) {
     return block_transfer_engine_test::makeSchemaComponent(component_id,
-                                                 component_group_id,
-                                                 tag.empty() ? ("comp_" + std::to_string(component_id)) : tag,
-                                                 layer_bytes,
-                                                 model_layer_ids);
+                                                           component_group_id,
+                                                           tag.empty() ? ("comp_" + std::to_string(component_id)) : tag,
+                                                           layer_bytes,
+                                                           model_layer_ids);
 }
 
 static ComponentGroupPtr makeDeviceHostGroup(int                                     group_id,
@@ -158,8 +158,8 @@ static ComponentGroupPtr makeDeviceHostGroup(int                                
 }
 
 static std::shared_ptr<PerRankBlockTransferEngine> makeEngine(std::vector<ComponentGroupPtr> groups,
-                                              std::vector<Component>         components,
-                                              DeviceHostCopyOptions          options = {}) {
+                                                              std::vector<Component>         components,
+                                                              DeviceHostCopyOptions          options = {}) {
     return std::make_shared<PerRankBlockTransferEngine>(
         std::move(groups),
         block_transfer_engine_test::makeComponentRegistry(std::move(components)),
@@ -239,15 +239,15 @@ protected:
         per_rank_transfer_engine_ = makeEngine({component_group_}, {component_});
     }
 
-    std::vector<size_t>            layer_bytes_;
-    size_t                         host_block_size_;
-    std::shared_ptr<HostBlockPool> host_pool_;
+    std::vector<size_t>                         layer_bytes_;
+    size_t                                      host_block_size_;
+    std::shared_ptr<HostBlockPool>              host_pool_;
     std::shared_ptr<PerRankBlockTransferEngine> per_rank_transfer_engine_;
-    DeviceBlockPoolPtr             device_pool_;
-    BlockIdxType                   device_block_;
-    std::vector<BlockIdxType>      device_blocks_;
-    Component                      component_;
-    ComponentGroupPtr              component_group_;
+    DeviceBlockPoolPtr                          device_pool_;
+    BlockIdxType                                device_block_;
+    std::vector<BlockIdxType>                   device_blocks_;
+    Component                                   component_;
+    ComponentGroupPtr                           component_group_;
 };
 
 TEST_F(PerRankBlockTransferEngineTest, SubmitDeviceHostRoundTripPreservesLayout) {
@@ -641,17 +641,17 @@ protected:
         };
         // Pool bindings remain concrete in the declarative topology. The middle
         // descriptor block is NULL, so lowering must skip it without touching its pool.
-        auto group = makeDeviceHostGroup(0, {0, 1, 2}, pools_, host_pool_, components);
-        engine_    = makeEngine({group}, components);
-        host_block_      = poolMalloc(*host_pool_);
+        auto group  = makeDeviceHostGroup(0, {0, 1, 2}, pools_, host_pool_, components);
+        engine_     = makeEngine({group}, components);
+        host_block_ = poolMalloc(*host_pool_);
         ASSERT_NE(host_block_, NULL_BLOCK_IDX);
     }
 
-    std::shared_ptr<HostBlockPool>  host_pool_;
-    std::vector<DeviceBlockPoolPtr> pools_;
-    std::vector<BlockIdxType>       blocks_;
+    std::shared_ptr<HostBlockPool>              host_pool_;
+    std::vector<DeviceBlockPoolPtr>             pools_;
+    std::vector<BlockIdxType>                   blocks_;
     std::shared_ptr<PerRankBlockTransferEngine> engine_;
-    BlockIdxType                    host_block_{NULL_BLOCK_IDX};
+    BlockIdxType                                host_block_{NULL_BLOCK_IDX};
 };
 
 TEST_F(PerRankBlockTransferEngineMixedNullTest, DeviceToHostMixedNullComponentsPreserveOffsets) {
@@ -784,7 +784,7 @@ protected:
 
 TEST_F(PerRankBlockTransferEngineStrategyTest, GenericStrategyRoundTrip) {
     DeviceHostCopyOptions options;
-    options.cuda_batch_copy_enabled             = false;
+    options.cuda_batch_copy_enabled                          = false;
     auto                            per_rank_transfer_engine = makePerRankBlockTransferEngine(options);
     std::array<StrategyCounters, 3> counters;
     installStrategyRecorders(*per_rank_transfer_engine->device_host_executor_, counters);
@@ -827,7 +827,7 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, BatchStrategyExecutesWhenSupporte
     const bool expect_batch_done = expectCudaBatchStrategyDone();
 
     DeviceHostCopyOptions options;
-    options.cuda_batch_copy_enabled             = true;
+    options.cuda_batch_copy_enabled                          = true;
     auto                            per_rank_transfer_engine = makePerRankBlockTransferEngine(options);
     std::array<StrategyCounters, 3> counters;
     installStrategyRecorders(*per_rank_transfer_engine->device_host_executor_, counters);
@@ -907,10 +907,10 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, BatchNotApplicableFallsBackToGene
 
 TEST_F(PerRankBlockTransferEngineStrategyTest, StagedEnabledBelowThresholdFallsBackToGeneric) {
     DeviceHostCopyOptions options;
-    options.staged_sm_copy_enabled              = true;
-    options.staged_sm_min_tile_count            = 100;
-    options.staged_sm_min_bytes                 = 0;
-    options.cuda_batch_copy_enabled             = false;
+    options.staged_sm_copy_enabled                           = true;
+    options.staged_sm_min_tile_count                         = 100;
+    options.staged_sm_min_bytes                              = 0;
+    options.cuda_batch_copy_enabled                          = false;
     auto                            per_rank_transfer_engine = makePerRankBlockTransferEngine(options);
     std::array<StrategyCounters, 3> counters;
     installStrategyRecorders(*per_rank_transfer_engine->device_host_executor_, counters);
@@ -938,10 +938,10 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedEnabledBelowThresholdFallsB
 
 TEST_F(PerRankBlockTransferEngineStrategyTest, StagedStrategyAboveThresholdRoundTrip) {
     DeviceHostCopyOptions options;
-    options.staged_sm_copy_enabled              = true;
-    options.staged_sm_min_tile_count            = 1;
-    options.staged_sm_min_bytes                 = 1;
-    options.cuda_batch_copy_enabled             = false;
+    options.staged_sm_copy_enabled                           = true;
+    options.staged_sm_min_tile_count                         = 1;
+    options.staged_sm_min_bytes                              = 1;
+    options.cuda_batch_copy_enabled                          = false;
     auto                            per_rank_transfer_engine = makePerRankBlockTransferEngine(options);
     std::array<StrategyCounters, 3> counters;
     installStrategyRecorders(*per_rank_transfer_engine->device_host_executor_, counters);
@@ -977,10 +977,10 @@ TEST_F(PerRankBlockTransferEngineStrategyTest, StagedStrategyAboveThresholdRound
 
 TEST_F(PerRankBlockTransferEngineStrategyTest, StagedStrategyTakesPrecedenceWhenEligible) {
     DeviceHostCopyOptions options;
-    options.staged_sm_copy_enabled              = true;
-    options.staged_sm_min_tile_count            = 1;
-    options.staged_sm_min_bytes                 = 1;
-    options.cuda_batch_copy_enabled             = true;
+    options.staged_sm_copy_enabled                           = true;
+    options.staged_sm_min_tile_count                         = 1;
+    options.staged_sm_min_bytes                              = 1;
+    options.cuda_batch_copy_enabled                          = true;
     auto                            per_rank_transfer_engine = makePerRankBlockTransferEngine(options);
     std::array<StrategyCounters, 3> counters;
     installStrategyRecorders(*per_rank_transfer_engine->device_host_executor_, counters);

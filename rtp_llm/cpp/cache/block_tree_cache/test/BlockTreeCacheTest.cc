@@ -116,8 +116,8 @@ private:
 class BarrierThrowingPerRankBlockTransferEngine final: public PerRankBlockTransferEngine {
 public:
     BarrierThrowingPerRankBlockTransferEngine(const std::vector<ComponentGroupPtr>& groups,
-                              const std::vector<Component>&         components,
-                              std::shared_ptr<CallbackBarrier>      barrier):
+                                              const std::vector<Component>&         components,
+                                              std::shared_ptr<CallbackBarrier>      barrier):
         PerRankBlockTransferEngine(groups, std::make_shared<const std::vector<Component>>(components)),
         barrier_(std::move(barrier)) {}
 
@@ -270,7 +270,7 @@ TEST_F(BlockTreeCacheTest, MatchHardStopsAtPartialDeviceSlot) {
     slots[1][0].device_blocks = {11};
     cache_->insert(nullptr, {100, 200}, slots);
 
-    TreeNode* first_node = cache_->tree()->root()->children.at(100);
+    TreeNode* first_node                     = cache_->tree()->root()->children.at(100);
     first_node->group_slots[0].device_blocks = {10, NULL_BLOCK_IDX};
 
     const BlockTreeMatchResult result = cache_->match({100, 200});
@@ -433,11 +433,11 @@ TEST(BlockTreeCacheConstructionTest, NullComponentGroupFailsInitializationAndDes
 }
 
 TEST(BlockTreeCacheConstructionTest, MissingCollaboratorsFailInitializationAndDestructionReturnsNormally) {
-    auto tree                             = std::make_unique<BlockTree>(1);
-    auto full                             = std::make_shared<FullComponentGroup>();
-    full->component_group_id              = 0;
-    std::vector<ComponentGroupPtr> groups = {full};
-    auto components = std::make_shared<const std::vector<Component>>();
+    auto tree                                 = std::make_unique<BlockTree>(1);
+    auto full                                 = std::make_shared<FullComponentGroup>();
+    full->component_group_id                  = 0;
+    std::vector<ComponentGroupPtr> groups     = {full};
+    auto                           components = std::make_shared<const std::vector<Component>>();
 
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
                                                   std::move(groups),
@@ -671,7 +671,7 @@ TEST(BlockTreeCacheFinalizationTest, CopyExceptionSettlesCreditsBeforePendingTas
     ASSERT_NE(environment, nullptr);
     ASSERT_NE(environment->cache, nullptr);
 
-    auto barrier = std::make_shared<CallbackBarrier>();
+    auto barrier                  = std::make_shared<CallbackBarrier>();
     auto per_rank_transfer_engine = std::make_shared<BarrierThrowingPerRankBlockTransferEngine>(
         environment->groups, environment->components, barrier);
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache, per_rank_transfer_engine);
@@ -1186,7 +1186,7 @@ TEST_F(BlockTreeCacheTest, MatchKeepsAggregatedDevicePoolsSeparate) {
     auto per_rank_engine     = std::make_shared<PerRankBlockTransferEngine>(component_groups, components_ptr);
     auto transfer_dispatcher = std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine));
     auto task_pool           = std::make_unique<BlockCacheTaskPool>(2, 1000, "BlockTreeEvictionPool");
-    std::unique_ptr<BlockTreeCache>            cache =
+    std::unique_ptr<BlockTreeCache> cache =
         std::make_unique<BlockTreeCache>(std::move(tree),
                                          std::move(component_groups),
                                          std::move(components_ptr),
@@ -1261,7 +1261,7 @@ TEST_F(BlockTreeCacheTest, ReorderedPoolsPreserveTagAddressedMatchResults) {
         auto per_rank_engine     = std::make_shared<PerRankBlockTransferEngine>(component_groups, components_ptr);
         auto transfer_dispatcher = std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine));
         auto task_pool           = std::make_unique<BlockCacheTaskPool>(2, 1000, "BlockTreeEvictionPool");
-        auto cache = std::make_unique<BlockTreeCache>(std::make_unique<BlockTree>(1),
+        auto cache               = std::make_unique<BlockTreeCache>(std::make_unique<BlockTree>(1),
                                                       std::move(component_groups),
                                                       std::move(components_ptr),
                                                       BlockTreeCacheConfig{},
@@ -1467,10 +1467,10 @@ TEST_F(BlockTreeCacheTest, LoadBackOnlyReloadsSWAWindow) {
     EXPECT_EQ(result.load_back_ticket->logicalMatchedBlocks(), 4u);
     ASSERT_EQ(result.load_back_ticket->itemCount(), 6u);
     const auto count_exact_item = [&ticket = *result.load_back_ticket](int                group_id,
-                                                                      Tier               source_tier,
-                                                                      size_t             path_index,
-                                                                      BlockIdxType       source_block,
-                                                                      const std::string& device_group_tag) {
+                                                                       Tier               source_tier,
+                                                                       size_t             path_index,
+                                                                       BlockIdxType       source_block,
+                                                                       const std::string& device_group_tag) {
         size_t count = 0;
         for (size_t item_index = 0; item_index < ticket.itemCount(); ++item_index) {
             count += ticket.groupId(item_index) == group_id && ticket.sourceTier(item_index) == source_tier
@@ -1654,7 +1654,7 @@ makeMappingValidationCache(std::vector<BlockTreeCache::PerTagMapping> per_tag_ma
     auto per_rank_engine     = std::make_shared<PerRankBlockTransferEngine>(groups, components_ptr);
     auto transfer_dispatcher = std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine));
     auto task_pool           = std::make_unique<BlockCacheTaskPool>(2, 1000, "BlockTreeEvictionPool");
-    auto                               cache = std::make_unique<BlockTreeCache>(std::make_unique<BlockTree>(1),
+    auto cache               = std::make_unique<BlockTreeCache>(std::make_unique<BlockTree>(1),
                                                   std::move(groups),
                                                   std::move(components_ptr),
                                                   std::move(config),
@@ -1991,10 +1991,10 @@ TEST_F(BlockTreeCacheTest, LoadBackQueueRejectionRollsBackMixedDeviceAndHostItem
         GTEST_SKIP() << "CUDA not available";
     }
 
-    DeviceBlockPoolPtr resident_device_pool = makeDevicePool({{1, 0}}, 1, "load_back_mixed_resident");
-    DeviceBlockPoolPtr target_device_pool   = makeDevicePool({{1, 0}}, 2, "load_back_mixed_target");
-    std::shared_ptr<HostBlockPool> resident_host_pool = makeHostPool(1, 1);
-    std::shared_ptr<HostBlockPool> host_pool          = makeHostPool(1, 2);
+    DeviceBlockPoolPtr             resident_device_pool = makeDevicePool({{1, 0}}, 1, "load_back_mixed_resident");
+    DeviceBlockPoolPtr             target_device_pool   = makeDevicePool({{1, 0}}, 2, "load_back_mixed_target");
+    std::shared_ptr<HostBlockPool> resident_host_pool   = makeHostPool(1, 1);
+    std::shared_ptr<HostBlockPool> host_pool            = makeHostPool(1, 2);
     ASSERT_NE(resident_device_pool, nullptr);
     ASSERT_NE(target_device_pool, nullptr);
     ASSERT_NE(resident_host_pool, nullptr);
@@ -2010,10 +2010,10 @@ TEST_F(BlockTreeCacheTest, LoadBackQueueRejectionRollsBackMixedDeviceAndHostItem
     loading_group->setHostPool(host_pool);
 
     BlockTreeCacheConfig config;
-    config.enable_memory_cache            = true;
-    config.enable_load_back               = true;
-    std::vector<ComponentGroupPtr> groups = {resident_group, loading_group};
-    std::unique_ptr<BlockTreeCache> cache = BlockTreeCacheTestUtil::makeBlockTreeCache(
+    config.enable_memory_cache             = true;
+    config.enable_load_back                = true;
+    std::vector<ComponentGroupPtr>  groups = {resident_group, loading_group};
+    std::unique_ptr<BlockTreeCache> cache  = BlockTreeCacheTestUtil::makeBlockTreeCache(
         std::make_unique<BlockTree>(2), std::move(groups), std::vector<Component>{}, std::move(config));
     ASSERT_NE(cache, nullptr);
 
@@ -2411,11 +2411,11 @@ TEST_F(BlockTreeCacheTest, LoadBackTicketKeepsExplicitLogicalDepthIndependentOfI
     size_t abort_calls = 0;
     auto   registry =
         std::make_shared<LoadBackTicketRegistry>([](const LoadBackTicket&) { return std::shared_ptr<AsyncContext>{}; },
-        [&](const LoadBackTicket& ticket) {
-            const auto& items = ticket.items();
-            ++abort_calls;
-            EXPECT_EQ(items.size(), 1u);
-        });
+                                                 [&](const LoadBackTicket& ticket) {
+                                                     const auto& items = ticket.items();
+                                                     ++abort_calls;
+                                                     EXPECT_EQ(items.size(), 1u);
+                                                 });
 
     PendingLoadBackItem pending_item;
     pending_item.path_index                = 1;

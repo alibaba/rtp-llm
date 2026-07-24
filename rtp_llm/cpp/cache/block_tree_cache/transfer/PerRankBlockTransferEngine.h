@@ -18,7 +18,7 @@ class PerRankBlockTransferEngine {
 public:
     PerRankBlockTransferEngine(std::vector<ComponentGroupPtr>                component_groups,
                                std::shared_ptr<const std::vector<Component>> components,
-               DeviceHostCopyOptions                         device_host_options = {});
+                               DeviceHostCopyOptions                         device_host_options = {});
     PerRankBlockTransferEngine() = delete;
     virtual ~PerRankBlockTransferEngine();
 

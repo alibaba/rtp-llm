@@ -99,17 +99,14 @@ bool ComponentGroup::finalizeLayout(std::vector<int> component_indices, const st
             return false;
         }
         if (component.tag.empty() || !tags.insert(component.tag).second) {
-            RTP_LLM_LOG_ERROR("component[%d] has empty or duplicate tag=%s",
-                              component_index,
-                              component.tag.c_str());
+            RTP_LLM_LOG_ERROR("component[%d] has empty or duplicate tag=%s", component_index, component.tag.c_str());
             return false;
         }
         if (component.model_layer_ids.size() != component.layer_bytes.size()) {
-            RTP_LLM_LOG_ERROR(
-                "component[%d] layer id count %zu != layer bytes count %zu",
-                component_index,
-                component.model_layer_ids.size(),
-                component.layer_bytes.size());
+            RTP_LLM_LOG_ERROR("component[%d] layer id count %zu != layer bytes count %zu",
+                              component_index,
+                              component.model_layer_ids.size(),
+                              component.layer_bytes.size());
             return false;
         }
         component_tags.push_back(component.tag);
@@ -117,8 +114,7 @@ bool ComponentGroup::finalizeLayout(std::vector<int> component_indices, const st
     }
 
     if (!tags_.empty() && tags_ != component_tags) {
-        RTP_LLM_LOG_ERROR("group %d device tag order does not match membership",
-                          component_group_id);
+        RTP_LLM_LOG_ERROR("group %d device tag order does not match membership", component_group_id);
         return false;
     }
 

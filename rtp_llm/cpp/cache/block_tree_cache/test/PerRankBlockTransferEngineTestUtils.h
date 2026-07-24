@@ -28,7 +28,7 @@ public:
 std::shared_ptr<BlockTreeDiskBlockPool> makeDiskPool(size_t                       payload_bytes,
                                                      size_t                       usable_count,
                                                      const std::string&           work_dir,
-                                                     std::unique_ptr<DiskBlockIO> io        = nullptr,
+                                                     std::unique_ptr<DiskBlockIO> io = nullptr,
                                                      const std::string& pool_name    = "per_rank_transfer_engine_disk");
 
 BlockIdxType poolMalloc(IBlockPool& pool);

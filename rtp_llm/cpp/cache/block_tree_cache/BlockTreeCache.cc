@@ -113,16 +113,16 @@ private:
 
 }  // anonymous namespace
 
-BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>         tree,
-                               std::vector<ComponentGroupPtr>     component_groups,
+BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                    tree,
+                               std::vector<ComponentGroupPtr>                component_groups,
                                std::shared_ptr<const std::vector<Component>> components,
-                               BlockTreeCacheConfig               config,
-                               std::shared_ptr<StorageBackend>    storage_backend,
+                               BlockTreeCacheConfig                          config,
+                               std::shared_ptr<StorageBackend>               storage_backend,
                                std::unique_ptr<BlockTransferDispatcher>      transfer_dispatcher,
                                std::unique_ptr<BlockCacheTaskPool>           task_pool,
-                               std::vector<std::string>           per_tag_tags,
-                               std::vector<DeviceKVCacheGroupPtr> per_tag_device_groups,
-                               std::vector<PerTagMapping>         per_tag_mapping):
+                               std::vector<std::string>                      per_tag_tags,
+                               std::vector<DeviceKVCacheGroupPtr>            per_tag_device_groups,
+                               std::vector<PerTagMapping>                    per_tag_mapping):
     config_(std::move(config)),
     tree_(std::move(tree)),
     component_groups_(std::move(component_groups)),
@@ -162,8 +162,7 @@ bool BlockTreeCache::init() {
         return false;
     }
     if (!task_pool_->start()) {
-        RTP_LLM_LOG_ERROR("failed to start task pool, size=%d",
-                          config_.eviction_thread_pool_size);
+        RTP_LLM_LOG_ERROR("failed to start task pool, size=%d", config_.eviction_thread_pool_size);
         return false;
     }
     RTP_LLM_LOG_INFO("initialized with %zu component groups, %zu components, "
@@ -196,9 +195,8 @@ bool BlockTreeCache::initDeviceGroupTags() {
         return false;
     }
     if (per_tag_tags_.size() != per_tag_mapping_.size()) {
-        RTP_LLM_LOG_ERROR("tag/mapping size mismatch, tags=%zu mappings=%zu",
-                          per_tag_tags_.size(),
-                          per_tag_mapping_.size());
+        RTP_LLM_LOG_ERROR(
+            "tag/mapping size mismatch, tags=%zu mappings=%zu", per_tag_tags_.size(), per_tag_mapping_.size());
         return false;
     }
     for (size_t group_id = 0; group_id < component_groups_.size(); ++group_id) {
@@ -215,15 +213,13 @@ bool BlockTreeCache::initDeviceGroupTags() {
         const PerTagMapping& mapping = per_tag_mapping_[tag_index];
         if (mapping.component_group_id == -1) {
             if (mapping.local_pool_index != -1) {
-                RTP_LLM_LOG_ERROR("invalid non-reusable mapping, tag=%s",
-                                  per_tag_tags_[tag_index].c_str());
+                RTP_LLM_LOG_ERROR("invalid non-reusable mapping, tag=%s", per_tag_tags_[tag_index].c_str());
                 return false;
             }
             continue;
         }
         if (mapping.component_group_id < 0 || mapping.local_pool_index < 0) {
-            RTP_LLM_LOG_ERROR("negative mapping index, tag=%s",
-                              per_tag_tags_[tag_index].c_str());
+            RTP_LLM_LOG_ERROR("negative mapping index, tag=%s", per_tag_tags_[tag_index].c_str());
             return false;
         }
         const size_t group_id      = static_cast<size_t>(mapping.component_group_id);
@@ -248,8 +244,7 @@ bool BlockTreeCache::initDeviceGroupTags() {
             return false;
         }
         if (device_group_tags != component_groups_[group_id]->tags()) {
-            RTP_LLM_LOG_ERROR("component group tag mapping mismatch, group=%zu",
-                              group_id);
+            RTP_LLM_LOG_ERROR("component group tag mapping mismatch, group=%zu", group_id);
             return false;
         }
     }
@@ -277,8 +272,7 @@ bool BlockTreeCache::validateConfiguration() const {
     for (size_t group_index = 0; group_index < component_groups_.size(); ++group_index) {
         const ComponentGroupPtr& group = component_groups_[group_index];
         if (group == nullptr || group->component_group_id != static_cast<int>(group_index)) {
-            RTP_LLM_LOG_ERROR("component group must be non-null and indexed by id, index=%zu",
-                              group_index);
+            RTP_LLM_LOG_ERROR("component group must be non-null and indexed by id, index=%zu", group_index);
             return false;
         }
         if (!group->hasLayout()) {
@@ -304,8 +298,7 @@ bool BlockTreeCache::validateConfiguration() const {
         for (size_t component_position = 0; component_position < membership.size(); ++component_position) {
             const int component_index = membership[component_position];
             if (component_index < 0 || static_cast<size_t>(component_index) >= components_->size()) {
-                RTP_LLM_LOG_ERROR(
-                    "group %zu has invalid component index %d", group_index, component_index);
+                RTP_LLM_LOG_ERROR("group %zu has invalid component index %d", group_index, component_index);
                 return false;
             }
             const Component& component = (*components_)[static_cast<size_t>(component_index)];
@@ -567,9 +560,8 @@ bool BlockTreeCache::isNodeStructurallyMatchable(const TreeNode* node) const {
         const bool       has_device_storage  = slot.has_value(Tier::DEVICE);
         const bool       has_complete_device = group->hasCompleteDeviceValue(slot);
         if (has_device_storage != has_complete_device) {
-            RTP_LLM_LOG_WARNING("partial DEVICE slot, node_key=%ld group_id=%d",
-                                node->cache_key,
-                                group->component_group_id);
+            RTP_LLM_LOG_WARNING(
+                "partial DEVICE slot, node_key=%ld group_id=%d", node->cache_key, group->component_group_id);
             return false;
         }
 
@@ -577,9 +569,8 @@ bool BlockTreeCache::isNodeStructurallyMatchable(const TreeNode* node) const {
                                        + static_cast<int>(slot.has_value(Tier::HOST))
                                        + static_cast<int>(slot.has_value(Tier::DISK));
         if (serving_tier_count > 1) {
-            RTP_LLM_LOG_WARNING("multiple serving tiers, node_key=%ld group_id=%d",
-                                node->cache_key,
-                                group->component_group_id);
+            RTP_LLM_LOG_WARNING(
+                "multiple serving tiers, node_key=%ld group_id=%d", node->cache_key, group->component_group_id);
             return false;
         }
     }
@@ -609,8 +600,7 @@ void BlockTreeCache::insertImpl(TreeNode*                                  paren
     }
 
     if (slots.size() != cache_keys.size()) {
-        RTP_LLM_LOG_WARNING(
-            "key/slot size mismatch, keys=%zu slots=%zu", cache_keys.size(), slots.size());
+        RTP_LLM_LOG_WARNING("key/slot size mismatch, keys=%zu slots=%zu", cache_keys.size(), slots.size());
         return;
     }
     std::vector<std::vector<GroupSlot>> sanitized_slots = slots;
@@ -630,9 +620,7 @@ void BlockTreeCache::insertImpl(TreeNode*                                  paren
             const bool  allowed_sparse_absence = allow_sparse_slots && group != nullptr
                                                 && group->group_type != CacheGroupType::FULL && structurally_absent;
             if (group == nullptr) {
-                RTP_LLM_LOG_WARNING("null component group, index=%zu component=%zu",
-                                    i,
-                                    component_group_index);
+                RTP_LLM_LOG_WARNING("null component group, index=%zu component=%zu", i, component_group_index);
                 return;
             }
             if (allowed_sparse_absence || group->hasCompleteDeviceValue(slot)) {
@@ -640,21 +628,19 @@ void BlockTreeCache::insertImpl(TreeNode*                                  paren
             }
 
             if (slot.has_value(Tier::DEVICE)) {
-                RTP_LLM_LOG_WARNING(
-                    "partial DEVICE input rejected, "
-                    "key=%ld component=%zu expected=%zu actual=%zu",
-                    cache_keys[i],
-                    component_group_index,
-                    group->devicePoolCount(),
-                    slot.device_blocks.size());
+                RTP_LLM_LOG_WARNING("partial DEVICE input rejected, "
+                                    "key=%ld component=%zu expected=%zu actual=%zu",
+                                    cache_keys[i],
+                                    component_group_index,
+                                    group->devicePoolCount(),
+                                    slot.device_blocks.size());
             }
 
             // Invalid or absent DEVICE payload is group-local: preserve the
             // topology insertion, but give the tree an exact-size empty slot so
             // no partial ownership can become visible or gain a cache holder.
             sanitized_slots[i][component_group_index] = GroupSlot{};
-            sanitized_slots[i][component_group_index].device_blocks.assign(group->devicePoolCount(),
-                                                                            NULL_BLOCK_IDX);
+            sanitized_slots[i][component_group_index].device_blocks.assign(group->devicePoolCount(), NULL_BLOCK_IDX);
         }
     }
 
@@ -693,12 +679,11 @@ void BlockTreeCache::insertImpl(TreeNode*                                  paren
             || gid >= adopted.node->group_slots.size()) {
             continue;
         }
-        auto&      group  = component_groups_[gid];
-        GroupSlot& slot   = adopted.node->group_slots[gid];
+        auto&      group = component_groups_[gid];
+        GroupSlot& slot  = adopted.node->group_slots[gid];
         if (!group->hasCompleteDeviceValue(slot)) {
-            RTP_LLM_LOG_WARNING("incomplete adopted slot event, key=%ld group=%d",
-                                adopted.node->cache_key,
-                                adopted.component_group_id);
+            RTP_LLM_LOG_WARNING(
+                "incomplete adopted slot event, key=%ld group=%d", adopted.node->cache_key, adopted.component_group_id);
             continue;
         }
         group->referenceBlocks(
@@ -865,19 +850,18 @@ bool BlockTreeCache::cancelLoadBack(const std::shared_ptr<AsyncContext>& context
     return !load_back_context->done() && load_back_context->requestCancel();
 }
 
-void BlockTreeCache::prepareMatchedBlocks(const std::vector<TreeNode*>&                 matched_path,
-                                          const std::vector<bool>&                      candidate_logically_valid,
-                                          BlockTreeMatchResult&                         result,
+void BlockTreeCache::prepareMatchedBlocks(const std::vector<TreeNode*>&         matched_path,
+                                          const std::vector<bool>&              candidate_logically_valid,
+                                          BlockTreeMatchResult&                 result,
                                           LoadBackTicket::PendingLoadBackItems& pending_load_back_items) {
     const size_t logical_matched_block_count = matched_path.size();
     if (logical_matched_block_count == 0) {
         return;
     }
     if (candidate_logically_valid.size() != logical_matched_block_count) {
-        RTP_LLM_LOG_WARNING(
-            "candidate validity size mismatch, path=%zu valid=%zu",
-            logical_matched_block_count,
-            candidate_logically_valid.size());
+        RTP_LLM_LOG_WARNING("candidate validity size mismatch, path=%zu valid=%zu",
+                            logical_matched_block_count,
+                            candidate_logically_valid.size());
         return;
     }
 
@@ -972,12 +956,12 @@ size_t BlockTreeCache::computeReadyMatchedBlockCount(const std::vector<TreeNode*
     return 0;
 }
 
-void BlockTreeCache::prepareMatchedLoadBackItem(TreeNode*                                 path_node,
-                                                const ComponentGroupPtr&                  component_group,
-                                                const GroupSlot&                          group_slot,
-                                                size_t                                    path_index,
-                                                const std::vector<std::string>&           device_group_tags,
-                                                BlockTreeMatchResult&                     result,
+void BlockTreeCache::prepareMatchedLoadBackItem(TreeNode*                             path_node,
+                                                const ComponentGroupPtr&              component_group,
+                                                const GroupSlot&                      group_slot,
+                                                size_t                                path_index,
+                                                const std::vector<std::string>&       device_group_tags,
+                                                BlockTreeMatchResult&                 result,
                                                 LoadBackTicket::PendingLoadBackItems& pending_load_back_items) {
     Tier source_tier = Tier::NONE;
     if (component_group->hasCompleteDeviceValue(group_slot)) {
@@ -1056,10 +1040,8 @@ bool BlockTreeCache::reserveLoadBackItems(const LoadBackTicket::PendingLoadBackI
     }
 
     for (const auto& item : items) {
-        if (item.node == nullptr || item.group_id < 0
-            || static_cast<size_t>(item.group_id) >= component_groups_.size()
-            || (item.source_tier != Tier::DEVICE && item.source_tier != Tier::HOST
-                && item.source_tier != Tier::DISK)) {
+        if (item.node == nullptr || item.group_id < 0 || static_cast<size_t>(item.group_id) >= component_groups_.size()
+            || (item.source_tier != Tier::DEVICE && item.source_tier != Tier::HOST && item.source_tier != Tier::DISK)) {
             return false;
         }
         const ComponentGroupPtr& group = component_groups_[static_cast<size_t>(item.group_id)];
@@ -1125,8 +1107,8 @@ std::shared_ptr<AsyncContext> BlockTreeCache::commitLoadBack(const LoadBackTicke
         }
     }
     for (size_t item_index = 0; item_index < items.size(); ++item_index) {
-        const auto&       item                  = items[item_index];
-        const size_t      component_group_index = static_cast<size_t>(item.group_id);
+        const auto&        item                  = items[item_index];
+        const size_t       component_group_index = static_cast<size_t>(item.group_id);
         ComponentGroupPtr& component_group       = component_groups_[component_group_index];
         if (item.source_tier == Tier::DEVICE) {
             ++prepared_item_count;
@@ -1171,12 +1153,12 @@ void BlockTreeCache::abortLoadBack(const LoadBackTicket& ticket) {
 }
 
 void BlockTreeCache::abortLoadBackUnsafe(const LoadBackTicket::PendingLoadBackItems& items,
-                                         size_t prepared_item_count,
-                                         bool   partial_item_claimed,
-                                         bool   partial_target_holder_added) {
+                                         size_t                                      prepared_item_count,
+                                         bool                                        partial_item_claimed,
+                                         bool                                        partial_target_holder_added) {
     bool global_refresh_required = false;
     for (size_t item_index = 0; item_index < items.size(); ++item_index) {
-        const auto& item = items[item_index];
+        const auto&  item = items[item_index];
         const size_t gid  = static_cast<size_t>(item.group_id);
         if (item.group_id < 0 || gid >= component_groups_.size() || component_groups_[gid] == nullptr) {
             continue;
@@ -1197,9 +1179,8 @@ void BlockTreeCache::abortLoadBackUnsafe(const LoadBackTicket::PendingLoadBackIt
         if (item.source_tier != Tier::DEVICE) {
             if (fully_prepared || partially_prepared) {
                 if (!evictor_.finishLoadBack(item.node, item.group_id, item.source_tier, false)) {
-                    RTP_LLM_LOG_WARNING("loading state mismatch, group=%d source=%s",
-                                        item.group_id,
-                                        tierName(item.source_tier));
+                    RTP_LLM_LOG_WARNING(
+                        "loading state mismatch, group=%d source=%s", item.group_id, tierName(item.source_tier));
                 }
             } else {
                 if (!evictor_.abortPendingLoadBack(item.node, item.group_id, item.source_tier, item.source_blocks)) {
@@ -1262,8 +1243,7 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
         }
         if (item.source_tier == Tier::DEVICE) {
             if (item.source_blocks.empty() || item.source_blocks != item.target_device_blocks) {
-                RTP_LLM_LOG_WARNING("resident identity changed, group=%d",
-                                    item.group_id);
+                RTP_LLM_LOG_WARNING("resident identity changed, group=%d", item.group_id);
                 prepared = false;
             }
             continue;
@@ -1274,9 +1254,7 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
             continue;
         }
         if ((item.source_tier != Tier::HOST && item.source_tier != Tier::DISK) || item.source_blocks.size() != 1) {
-            RTP_LLM_LOG_WARNING("invalid copy item, group=%d source=%s",
-                                item.group_id,
-                                tierName(item.source_tier));
+            RTP_LLM_LOG_WARNING("invalid copy item, group=%d source=%s", item.group_id, tierName(item.source_tier));
             prepared = false;
             continue;
         }
@@ -1299,9 +1277,8 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
         }
 
         if (isNullBlockIdx(source_host_block)) {
-            RTP_LLM_LOG_WARNING("failed to prepare source, group=%d source=%s",
-                                item.group_id,
-                                tierName(item.source_tier));
+            RTP_LLM_LOG_WARNING(
+                "failed to prepare source, group=%d source=%s", item.group_id, tierName(item.source_tier));
             prepared = false;
             continue;
         }
@@ -1341,10 +1318,9 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
     const bool has_device_items = std::any_of(
         items.begin(), items.end(), [](const LoadBackItem& item) { return item.source_tier == Tier::DEVICE; });
     std::vector<bool> target_installed(items.size(), false);
-    bool              settlement_success =
-        copy_success && load_back_context != nullptr && !load_back_context->cancelRequested();
-    bool state_settled     = false;
-    bool tree_data_mutated = false;
+    bool settlement_success = copy_success && load_back_context != nullptr && !load_back_context->cancelRequested();
+    bool state_settled      = false;
+    bool tree_data_mutated  = false;
 
     // Re-acquire the cache lock and atomically settle the whole copy batch. A
     // successful physical copy is committed only while every stateful item is
@@ -1360,8 +1336,7 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
                 if (item.group_id < 0 || gid >= component_groups_.size() || component_groups_[gid] == nullptr
                     || item.node == nullptr || gid >= item.node->group_slots.size()
                     || item.node->group_slots[gid].transfer_state != SlotTransferState::LOADING_BACK) {
-                    RTP_LLM_LOG_WARNING("completion state mismatch, group=%d",
-                                        item.group_id);
+                    RTP_LLM_LOG_WARNING("completion state mismatch, group=%d", item.group_id);
                     settlement_success = false;
                     break;
                 }
@@ -1395,7 +1370,7 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
                                          BlockRefType::BLOCK_CACHE);
                 group->evictFromTier(item.node, slot, item.source_tier);
                 target_installed[item_index] = true;
-                tree_data_mutated             = true;
+                tree_data_mutated            = true;
                 if (!evictor_.finishLoadBack(item.node, item.group_id, item.source_tier, true)) {
                     RTP_LLM_LOG_ERROR("exact-state transition failed after preflight, "
                                       "group=%d",
@@ -1408,8 +1383,7 @@ void BlockTreeCache::performLoadBack(std::vector<LoadBackItem> items, std::share
             }
 
             // On copy/batch-settlement failure, leave the source data untouched.
-            state_settled = evictor_.finishLoadBack(item.node, item.group_id, item.source_tier, false)
-                            || state_settled;
+            state_settled = evictor_.finishLoadBack(item.node, item.group_id, item.source_tier, false) || state_settled;
         }
         if (has_device_items) {
             evictor_.refreshAllCandidates(*tree_);
@@ -1531,8 +1505,8 @@ bool BlockTreeCache::submitEvictionLocked(EvictionMove&                     evic
         return true;
     }
 
-    auto plan_ptr                  = std::make_shared<BlockTreeEvictor::EvictionPlan>(std::move(*plan));
-    auto in_flight_release_credits = accepted_release_credits;
+    auto       plan_ptr                  = std::make_shared<BlockTreeEvictor::EvictionPlan>(std::move(*plan));
+    auto       in_flight_release_credits = accepted_release_credits;
     const bool submitted =
         task_pool_->submit([this, plan_ptr, in_flight_release_credits = std::move(in_flight_release_credits)]() {
             performEvictionCopy(*plan_ptr, in_flight_release_credits);
@@ -1566,11 +1540,10 @@ void BlockTreeCache::performEvictionCopy(const BlockTreeEvictor::EvictionPlan&  
                                        target_tier,
                                        transfer_block_count,
                                        transfer_begin_time_us]() noexcept {
-        const bool transfer_success =
-            copy_results.primary_success
-            && std::all_of(copy_results.cascade_success.begin(),
-                           copy_results.cascade_success.end(),
-                           [](bool success) { return success; });
+        const bool transfer_success = copy_results.primary_success
+                                      && std::all_of(copy_results.cascade_success.begin(),
+                                                     copy_results.cascade_success.end(),
+                                                     [](bool success) { return success; });
         metrics_reporter_.reportTransferFinished(
             source_tier, target_tier, transfer_block_count, transfer_begin_time_us, transfer_success);
 
@@ -1610,8 +1583,7 @@ void BlockTreeCache::performEvictionCopy(const BlockTreeEvictor::EvictionPlan&  
                 completion_succeeded = true;
                 plan_terminalized    = true;
             } catch (const std::exception& error) {
-                RTP_LLM_LOG_ERROR("eviction completion failed; rolling back accepted plan: %s",
-                                  error.what());
+                RTP_LLM_LOG_ERROR("eviction completion failed; rolling back accepted plan: %s", error.what());
                 try {
                     evictor_.rollbackPreparedPlan(plan);
                     plan_terminalized = true;

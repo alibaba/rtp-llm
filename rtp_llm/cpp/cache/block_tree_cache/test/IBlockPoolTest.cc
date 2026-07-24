@@ -153,7 +153,7 @@ TEST(IBlockPoolTest, DecRefFreesSingleRequestHolder) {
 }
 
 TEST(IBlockPoolTest, RefTypeMismatchOnlyAffectsMetrics) {
-    std::shared_ptr<TestPool> pool = makeInitializedPool(/*physical_block_count=*/4);
+    std::shared_ptr<TestPool>   pool  = makeInitializedPool(/*physical_block_count=*/4);
     std::optional<BlockIdxType> block = pool->malloc();
     ASSERT_TRUE(block.has_value());
 

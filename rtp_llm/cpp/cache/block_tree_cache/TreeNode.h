@@ -47,9 +47,9 @@ struct CandidateMeta {
 // Real data-transfer state; a slot is excluded from all heaps while != IDLE.
 enum class SlotTransferState : uint8_t {
     IDLE,
-    DEMOTING,          // Device -> Host, or Host -> Disk
-    LOAD_BACK_PENDING, // Host/Disk source reserved by a deferred load-back ticket
-    LOADING_BACK       // Host/Disk -> Device
+    DEMOTING,           // Device -> Host, or Host -> Disk
+    LOAD_BACK_PENDING,  // Host/Disk source reserved by a deferred load-back ticket
+    LOADING_BACK        // Host/Disk -> Device
 };
 
 // Per-ComponentGroup data location across storage tiers.

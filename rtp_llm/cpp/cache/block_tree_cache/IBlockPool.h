@@ -70,7 +70,7 @@ public:
     void     decRef(const BlockIdList& blocks, BlockRefType ref_type);
     uint32_t refCount(BlockIdxType block) const;
     // used only for metrics report
-    size_t   totalRefCount(BlockRefType ref_type) const;
+    size_t totalRefCount(BlockRefType ref_type) const;
 
     bool validBlock(BlockIdxType block) const;
     bool isAllocated(BlockIdxType block) const;
@@ -95,10 +95,10 @@ protected:
     }
 
 private:
-    bool validBlockNoLock(BlockIdxType block) const;
-    void checkInitializedNoLock() const;
-    void checkAllocatedNoLock(BlockIdxType block) const;
-    void checkUniqueBlocksNoLock(const BlockIdList& blocks) const;
+    bool          validBlockNoLock(BlockIdxType block) const;
+    void          checkInitializedNoLock() const;
+    void          checkAllocatedNoLock(BlockIdxType block) const;
+    void          checkUniqueBlocksNoLock(const BlockIdList& blocks) const;
     static size_t refTypeIndex(BlockRefType ref_type);
 
     size_t       totalBlocksNumNoLock() const;
@@ -113,17 +113,17 @@ private:
     void freeAllocatedBlockNoLock(BlockIdxType block);
 
 private:
-    std::shared_ptr<const BlockPoolConfigBase> config_;
-    mutable std::mutex                         mutex_;
-    bool                                       initialized_{false};
-    std::vector<uint8_t>                       allocated_;
-    std::vector<uint32_t>                      refcounts_;
+    std::shared_ptr<const BlockPoolConfigBase>            config_;
+    mutable std::mutex                                    mutex_;
+    bool                                                  initialized_{false};
+    std::vector<uint8_t>                                  allocated_;
+    std::vector<uint32_t>                                 refcounts_;
     std::array<std::vector<uint32_t>, kBlockRefTypeCount> metric_refcounts_by_type_;
     std::array<size_t, kBlockRefTypeCount>                metric_total_ref_counts_{};
-    std::vector<BlockIdxType>                  free_blocks_;
-    std::vector<BlockIdxType>                  released_blocks_;
-    size_t                                     free_head_{0};
-    size_t                                     active_tree_cached_blocks_num_{0};
+    std::vector<BlockIdxType>                             free_blocks_;
+    std::vector<BlockIdxType>                             released_blocks_;
+    size_t                                                free_head_{0};
+    size_t                                                active_tree_cached_blocks_num_{0};
 };
 
 }  // namespace rtp_llm

@@ -157,7 +157,7 @@ public:
     const std::vector<DeviceBlockPoolPtr>& devicePools() const {
         return device_pools_;
     }
-    bool hasCompleteDeviceValue(const GroupSlot& slot) const;
+    bool                           hasCompleteDeviceValue(const GroupSlot& slot) const;
     std::shared_ptr<HostBlockPool> hostPool() const {
         return host_pool_;
     }

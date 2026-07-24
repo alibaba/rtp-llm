@@ -20,18 +20,18 @@ DeviceHostTransferExecutor::DeviceHostTransferExecutor(DeviceHostCopyOptions opt
 DeviceHostTransferExecutor::~DeviceHostTransferExecutor() = default;
 
 TransferStatus DeviceHostTransferExecutor::execute(const TransferDescriptor&     desc,
-                                               const ComponentGroup&         group,
-                                               const std::vector<Component>& components) {
+                                                   const ComponentGroup&         group,
+                                                   const std::vector<Component>& components) {
     bool device_to_host = (desc.source_tier == Tier::DEVICE && desc.target_tier == Tier::HOST);
     return lowerAndExecute(desc, group, components, device_to_host);
 }
 
 TransferStatus DeviceHostTransferExecutor::lowerAndExecute(const TransferDescriptor&     desc,
-                                                       const ComponentGroup&         group,
-                                                       const std::vector<Component>& components,
-                                                       bool                          device_to_host) {
+                                                           const ComponentGroup&         group,
+                                                           const std::vector<Component>& components,
+                                                           bool                          device_to_host) {
     TransferStatus lower_status = TransferStatus::OK;
-    auto       plan         = lowerPlan(desc, group, components, device_to_host, lower_status);
+    auto           plan         = lowerPlan(desc, group, components, device_to_host, lower_status);
     if (lower_status != TransferStatus::OK) {
         return lower_status;
     }

@@ -132,16 +132,16 @@ public:
         int local_pool_index{-1};
     };
 
-    BlockTreeCache(std::unique_ptr<BlockTree>         tree,
-                   std::vector<ComponentGroupPtr>     component_groups,
+    BlockTreeCache(std::unique_ptr<BlockTree>                    tree,
+                   std::vector<ComponentGroupPtr>                component_groups,
                    std::shared_ptr<const std::vector<Component>> components,
-                   BlockTreeCacheConfig               config,
-                   std::shared_ptr<StorageBackend>    storage_backend,
+                   BlockTreeCacheConfig                          config,
+                   std::shared_ptr<StorageBackend>               storage_backend,
                    std::unique_ptr<BlockTransferDispatcher>      transfer_dispatcher,
                    std::unique_ptr<BlockCacheTaskPool>           task_pool,
-                   std::vector<std::string>           per_tag_tags,
-                   std::vector<DeviceKVCacheGroupPtr> per_tag_device_groups,
-                   std::vector<PerTagMapping>         per_tag_mapping);
+                   std::vector<std::string>                      per_tag_tags,
+                   std::vector<DeviceKVCacheGroupPtr>            per_tag_device_groups,
+                   std::vector<PerTagMapping>                    per_tag_mapping);
 
     ~BlockTreeCache();
     bool init();
@@ -152,13 +152,13 @@ public:
     // group (target_tier = NONE, content dropped). Returns the number actually freed.
     int evictForTag(const std::string& tag, size_t num_blocks);
 
-    CacheStats           getStats() const;
+    CacheStats                                getStats() const;
     std::vector<BlockTreePoolMetricsSnapshot> poolMetricsSnapshots() const;
     void                                      reportMetrics() const;
-    BlockTreeKeySnapshot getKeySnapshot(size_t limit) const;
-    void                 waitForPendingTasks();
-    void                 onBlocksReleased();
-    bool                 cancelLoadBack(const std::shared_ptr<AsyncContext>& context);
+    BlockTreeKeySnapshot                      getKeySnapshot(size_t limit) const;
+    void                                      waitForPendingTasks();
+    void                                      onBlocksReleased();
+    bool                                      cancelLoadBack(const std::shared_ptr<AsyncContext>& context);
 
     // Release path-lock references acquired during match().
     void releaseMatchedBlocks(const std::vector<GroupBlockSet>& sets);
@@ -269,19 +269,19 @@ private:
         std::vector<BlockIdxType> target_device_blocks;
     };
     bool   isNodeStructurallyMatchable(const TreeNode* node) const;
-    void   prepareMatchedBlocks(const std::vector<TreeNode*>&                 matched_path,
-                                const std::vector<bool>&                      candidate_logically_valid,
-                                BlockTreeMatchResult&                         result,
-                                LoadBackTicket::PendingLoadBackItems&         pending_load_back_items);
+    void   prepareMatchedBlocks(const std::vector<TreeNode*>&         matched_path,
+                                const std::vector<bool>&              candidate_logically_valid,
+                                BlockTreeMatchResult&                 result,
+                                LoadBackTicket::PendingLoadBackItems& pending_load_back_items);
     size_t computeReadyMatchedBlockCount(const std::vector<TreeNode*>& matched_path,
                                          const std::vector<bool>&      candidate_logically_valid) const;
-    void   prepareMatchedLoadBackItem(TreeNode*                                 path_node,
-                                      const ComponentGroupPtr&                  component_group,
-                                      const GroupSlot&                          group_slot,
-                                      size_t                                    path_index,
-                                      const std::vector<std::string>&           device_group_tags,
-                                      BlockTreeMatchResult&                     result,
-                                      LoadBackTicket::PendingLoadBackItems&     pending_load_back_items);
+    void   prepareMatchedLoadBackItem(TreeNode*                             path_node,
+                                      const ComponentGroupPtr&              component_group,
+                                      const GroupSlot&                      group_slot,
+                                      size_t                                path_index,
+                                      const std::vector<std::string>&       device_group_tags,
+                                      BlockTreeMatchResult&                 result,
+                                      LoadBackTicket::PendingLoadBackItems& pending_load_back_items);
     bool   reserveLoadBackItems(const LoadBackTicket::PendingLoadBackItems& items);
 
     std::shared_ptr<AsyncContext> commitLoadBack(const LoadBackTicket& ticket);
@@ -304,16 +304,16 @@ private:
     // Per-tag gid -> (component_group_id, local_pool_index).
     std::vector<PerTagMapping> per_tag_mapping_;
     // component_group_id -> local_pool_index -> stable declarative tag.
-    std::vector<std::vector<std::string>>      device_group_tags_;
-    std::shared_ptr<LoadBackTicketRegistry>    load_back_ticket_registry_;
-    std::shared_ptr<StorageBackend>            storage_backend_;
+    std::vector<std::vector<std::string>>    device_group_tags_;
+    std::shared_ptr<LoadBackTicketRegistry>  load_back_ticket_registry_;
+    std::shared_ptr<StorageBackend>          storage_backend_;
     std::unique_ptr<BlockTransferDispatcher> transfer_dispatcher_;
     std::unique_ptr<BlockCacheTaskPool>      task_pool_;
     BlockTreeCacheMetricsReporter            metrics_reporter_;
-    BlockTreeEvictor                           evictor_;
-    bool                                       initialized_{false};
+    BlockTreeEvictor                         evictor_;
+    bool                                     initialized_{false};
 
-    mutable std::mutex    mutex_;
+    mutable std::mutex mutex_;
     // Protected by mutex_. Credits remain reserved from async queue acceptance
     // until the matching plan completes or rolls back.
     std::unordered_map<DeviceBlockPoolPtr, size_t> in_flight_device_release_credits_;

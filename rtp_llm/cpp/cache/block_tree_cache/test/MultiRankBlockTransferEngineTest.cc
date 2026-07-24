@@ -24,9 +24,9 @@ struct MultiRankBlockTransferRpcState {
 };
 
 struct MultiRankBlockTransferRpcConfig {
-    bool                                        has_mem_response;
-    bool                                        mem_response_success;
-    grpc::Status                                rpc_status;
+    bool                                            has_mem_response;
+    bool                                            mem_response_success;
+    grpc::Status                                    rpc_status;
     std::shared_ptr<MultiRankBlockTransferRpcState> state{nullptr};
 };
 
@@ -76,8 +76,8 @@ public:
 
 private:
     std::unique_ptr<MultiRankBlockTransferRpcService> service_;
-    std::unique_ptr<grpc::Server>                 server_;
-    int                                           listen_port_{0};
+    std::unique_ptr<grpc::Server>                     server_;
+    int                                               listen_port_{0};
 };
 
 static std::shared_ptr<BroadcastManager>
@@ -114,7 +114,7 @@ static std::unique_ptr<BlockTreeCache> makeBroadcastCache(const std::shared_ptr<
     full->setDevicePools({device_pool}, {"tag_0"});
     std::vector<Component> components = {block_transfer_engine_test::makeSchemaComponent(0, 0, "tag_0", {256})};
     RTP_LLM_CHECK(full->finalizeLayout({0}, components));
-    std::vector<ComponentGroupPtr> groups    = {full};
+    std::vector<ComponentGroupPtr> groups = {full};
     return makeBlockTreeCacheForTest(std::move(tree),
                                      std::move(groups),
                                      std::move(components),
@@ -395,7 +395,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadBackFailureKeepsSource
 }
 
 TEST_F(MultiRankBlockTransferEngineTest, LoadBackCompletionStateMismatchDoesNotInstallTargetOrClearSource) {
-    std::shared_ptr<MultiRankBlockTransferRpcState> state = std::make_shared<MultiRankBlockTransferRpcState>();
+    std::shared_ptr<MultiRankBlockTransferRpcState>    state   = std::make_shared<MultiRankBlockTransferRpcState>();
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
         {true, true, grpc::Status::OK, state},
         {true, true, grpc::Status::OK, state},
@@ -416,9 +416,9 @@ TEST_F(MultiRankBlockTransferEngineTest, LoadBackCompletionStateMismatchDoesNotI
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
     BlockTreeCacheConfig config;
-    config.enable_memory_cache = true;
-    std::vector<ComponentGroupPtr>  groups = {group};
-    std::unique_ptr<BlockTreeCache> cache  = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1),
+    config.enable_memory_cache                 = true;
+    std::vector<ComponentGroupPtr>      groups = {group};
+    std::unique_ptr<BlockTreeCache>     cache  = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1),
                                                                       std::move(groups),
                                                                       std::move(components),
                                                                       std::move(config),

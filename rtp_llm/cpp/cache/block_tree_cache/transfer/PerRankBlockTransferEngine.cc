@@ -15,7 +15,7 @@ namespace rtp_llm {
 
 PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<ComponentGroupPtr>                component_groups,
                                                        std::shared_ptr<const std::vector<Component>> components,
-                       DeviceHostCopyOptions                         device_host_options):
+                                                       DeviceHostCopyOptions device_host_options):
     component_groups_(std::move(component_groups)),
     components_(std::move(components)),
     device_host_executor_(std::make_unique<DeviceHostTransferExecutor>(std::move(device_host_options))),
@@ -28,8 +28,8 @@ PerRankBlockTransferEngine::~PerRankBlockTransferEngine() = default;
 struct TransferHandle::State {
     explicit State(uint64_t id): request_id(id) {}
 
-    uint64_t   request_id{0};
-    bool       done{false};
+    uint64_t       request_id{0};
+    bool           done{false};
     TransferStatus status{TransferStatus::OK};
 
     std::vector<TransferCompletionCallback> callbacks;
@@ -88,7 +88,7 @@ void TransferHandle::onComplete(TransferCompletionCallback callback) const {
     }
 
     TransferStatus completed_status = TransferStatus::OK;
-    bool       run_now          = false;
+    bool           run_now          = false;
     {
         std::lock_guard<std::mutex> lock(state->mutex);
         if (state->done) {

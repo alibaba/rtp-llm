@@ -20,9 +20,9 @@ public:
 
 private:
     TransferStatus lowerAndExecute(const TransferDescriptor&     desc,
-                               const ComponentGroup&         group,
-                               const std::vector<Component>& components,
-                               bool                          device_to_host);
+                                   const ComponentGroup&         group,
+                                   const std::vector<Component>& components,
+                                   bool                          device_to_host);
 
     DeviceHostCopyPlan lowerPlan(const TransferDescriptor&     desc,
                                  const ComponentGroup&         group,

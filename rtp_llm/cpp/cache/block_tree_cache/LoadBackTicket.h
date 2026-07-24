@@ -154,14 +154,14 @@ private:
     void                          abort(uint64_t ticket_id);
     void                          retireActiveCallback();
 
-    std::mutex                                                               mutex_;
-    std::condition_variable                                                  cv_;
-    bool                                                                     accepting_{true};
-    uint64_t                                                                 next_ticket_id_{1};
-    size_t                                                                   active_callbacks_{0};
-    std::unordered_map<uint64_t, LoadBackTicket::PendingLoadBackItems>           pending_tickets_;
-    CommitCallback                                                           commit_callback_;
-    AbortCallback                                                            abort_callback_;
+    std::mutex                                                         mutex_;
+    std::condition_variable                                            cv_;
+    bool                                                               accepting_{true};
+    uint64_t                                                           next_ticket_id_{1};
+    size_t                                                             active_callbacks_{0};
+    std::unordered_map<uint64_t, LoadBackTicket::PendingLoadBackItems> pending_tickets_;
+    CommitCallback                                                     commit_callback_;
+    AbortCallback                                                      abort_callback_;
     // Installed only by the shutdown test peer; production keeps this empty.
     std::function<void()> shutdown_wait_observer_for_test_;
 };

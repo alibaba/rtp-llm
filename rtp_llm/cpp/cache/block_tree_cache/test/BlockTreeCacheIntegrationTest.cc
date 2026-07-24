@@ -43,9 +43,9 @@ using PendingLoadBackItem = LoadBackTicket::PendingLoadBackItem;
 class PausablePerRankBlockTransferEngine: public PerRankBlockTransferEngine {
 public:
     PausablePerRankBlockTransferEngine(const std::vector<ComponentGroupPtr>& groups,
-                       const std::vector<Component>&         components,
+                                       const std::vector<Component>&         components,
                                        TransferStatus                        result,
-                       bool                                  pause_enabled = true):
+                                       bool                                  pause_enabled = true):
         PerRankBlockTransferEngine(groups, std::make_shared<const std::vector<Component>>(components)),
         pause_enabled_(pause_enabled),
         result_(result) {}
@@ -1181,7 +1181,7 @@ TEST_P(BlockTreeCacheLowerTierTest, CancelPausedLoadBackPreservesSourceAndDiscar
         GTEST_SKIP() << "CUDA not available";
     }
 
-    auto environment          = FullSWAEnvironment::create();
+    auto environment                       = FullSWAEnvironment::create();
     auto pausable_per_rank_transfer_engine = std::make_shared<PausablePerRankBlockTransferEngine>(
         environment->groups, environment->components, TransferStatus::OK, /*pause_enabled=*/false);
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache,
@@ -1293,9 +1293,9 @@ TEST_P(BlockTreeCacheLoadBackDisabledTest, LoadBackDisabled_DoesNotReportLowerTi
     }
 
     FullSWAEnvironmentOptions options;
-    options.enable_load_back = false;
+    options.enable_load_back        = false;
     options.enable_reverse_eviction = false;
-    auto environment         = FullSWAEnvironment::create(options);
+    auto environment                = FullSWAEnvironment::create(options);
     ASSERT_NE(environment, nullptr);
     // The M6 matrix is LoadBack=false and Reverse=false. Assert the effective
     // config so a fixture default change cannot silently alter the matrix.

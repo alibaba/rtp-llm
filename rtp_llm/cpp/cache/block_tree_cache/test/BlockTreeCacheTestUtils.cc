@@ -261,7 +261,7 @@ bool BlockTreeCacheTestPeer::restoreQueueAfterRejectionForTest(BlockTreeCache& c
 }
 
 ScriptedPerRankBlockTransferEngine::ScriptedPerRankBlockTransferEngine(const std::vector<ComponentGroupPtr>& groups,
-                                       const std::vector<Component>&         components):
+                                                                       const std::vector<Component>& components):
     PerRankBlockTransferEngine(groups, std::make_shared<const std::vector<Component>>(components)) {}
 
 TransferHandle ScriptedPerRankBlockTransferEngine::submit(const TransferDescriptor& descriptor) {

@@ -472,11 +472,12 @@ size_t DeviceBlockPool::blockSizeBytes() const {
     RTP_LLM_CHECK_WITH_INFO(config().physical_block_count > 0,
                             "device block pool [%s] physical_block_count must be > 0",
                             config().pool_name.c_str());
-    RTP_LLM_CHECK_WITH_INFO(config().total_size_bytes % config().physical_block_count == 0,
-                            "device block pool [%s] total_size_bytes [%zu] is not divisible by physical_block_count [%zu]",
-                            config().pool_name.c_str(),
-                            config().total_size_bytes,
-                            config().physical_block_count);
+    RTP_LLM_CHECK_WITH_INFO(
+        config().total_size_bytes % config().physical_block_count == 0,
+        "device block pool [%s] total_size_bytes [%zu] is not divisible by physical_block_count [%zu]",
+        config().pool_name.c_str(),
+        config().total_size_bytes,
+        config().physical_block_count);
     return config().total_size_bytes / config().physical_block_count;
 }
 

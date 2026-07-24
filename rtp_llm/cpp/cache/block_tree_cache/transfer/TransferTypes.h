@@ -33,11 +33,11 @@ public:
 
     static TransferHandle completed(TransferStatus status, uint64_t request_id = 0);
 
-    uint64_t   requestId() const;
-    void       wait() const;
-    bool       done() const;
+    uint64_t       requestId() const;
+    void           wait() const;
+    bool           done() const;
     TransferStatus status() const;
-    bool       ok() const {
+    bool           ok() const {
         return status() == TransferStatus::OK;
     }
     void onComplete(TransferCompletionCallback callback) const;

@@ -89,12 +89,12 @@ protected:
     }
 
     TempDirGuard                                temp_dir_{"block_transfer_engine_test"};
-    Component                               component_;
-    size_t                                  host_block_size_;
-    std::shared_ptr<HostBlockPool>          host_pool_;
-    std::shared_ptr<BlockTreeDiskBlockPool> disk_pool_;
+    Component                                   component_;
+    size_t                                      host_block_size_;
+    std::shared_ptr<HostBlockPool>              host_pool_;
+    std::shared_ptr<BlockTreeDiskBlockPool>     disk_pool_;
     std::shared_ptr<PerRankBlockTransferEngine> per_rank_transfer_engine_;
-    ComponentGroupPtr                       component_group_;
+    ComponentGroupPtr                           component_group_;
 };
 
 TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostToDiskRoundTrip) {

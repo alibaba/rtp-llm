@@ -17,7 +17,7 @@ public:
 
 private:
     static TransferStatus blockIOStatusToTransferStatus(BlockIOStatus status);
-    static const char* blockIOStatusName(BlockIOStatus status);
+    static const char*    blockIOStatusName(BlockIOStatus status);
 };
 
 }  // namespace rtp_llm

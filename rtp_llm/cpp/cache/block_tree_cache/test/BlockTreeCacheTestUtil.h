@@ -36,7 +36,7 @@ public:
             std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine), std::move(multi_rank_engine));
         auto task_pool = std::make_unique<BlockCacheTaskPool>(
             static_cast<size_t>(config.eviction_thread_pool_size), 1000, "BlockTreeEvictionPool");
-        std::unique_ptr<BlockTreeCache>            cache = std::make_unique<BlockTreeCache>(std::move(tree),
+        std::unique_ptr<BlockTreeCache> cache = std::make_unique<BlockTreeCache>(std::move(tree),
                                                                                  std::move(component_groups),
                                                                                  std::move(components_ptr),
                                                                                  std::move(config),

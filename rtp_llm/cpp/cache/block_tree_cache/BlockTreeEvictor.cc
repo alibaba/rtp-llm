@@ -36,15 +36,12 @@ bool BlockTreeEvictor::init(EvictionPolicy device_policy, EvictionPolicy host_po
         }
         const int gid = group->component_group_id;
         if (gid < 0 || static_cast<size_t>(gid) >= component_groups_.size()) {
-            RTP_LLM_LOG_ERROR("invalid component_group_id=%d, group_count=%zu",
-                              gid,
-                              component_groups_.size());
+            RTP_LLM_LOG_ERROR("invalid component_group_id=%d, group_count=%zu", gid, component_groups_.size());
             heaps_.clear();
             return false;
         }
         if (static_cast<size_t>(gid) != group_index) {
-            RTP_LLM_LOG_ERROR(
-                "component_group_id=%d must equal vector index=%zu", gid, group_index);
+            RTP_LLM_LOG_ERROR("component_group_id=%d must equal vector index=%zu", gid, group_index);
             heaps_.clear();
             return false;
         }
@@ -154,10 +151,10 @@ void BlockTreeEvictor::onInsertCommitted(const BlockTreeInsertResult& result) {
         if (group == nullptr) {
             continue;
         }
-        GroupSlot& slot = adopted.node->group_slots[gid];
-        slot.candidate_meta.last_access_seq = ++access_seq_;
-        slot.candidate_meta.admission_seq   = ++admission_seq_;
-        slot.candidate_meta.hit_count       = 0;
+        GroupSlot& slot                        = adopted.node->group_slots[gid];
+        slot.candidate_meta.last_access_seq    = ++access_seq_;
+        slot.candidate_meta.admission_seq      = ++admission_seq_;
+        slot.candidate_meta.hit_count          = 0;
         slot.candidate_meta.tier_enter_time_us = currentTimeUs();
         refreshCandidate(*group, adopted.node, group->getTopTier(slot));
 
@@ -176,19 +173,19 @@ void BlockTreeEvictor::onInsertCommitted(const BlockTreeInsertResult& result) {
         if (node == nullptr) {
             continue;
         }
-        const uint64_t access = ++access_seq_;
-        const uint64_t admit  = ++admission_seq_;
+        const uint64_t access             = ++access_seq_;
+        const uint64_t admit              = ++admission_seq_;
         const int64_t  tier_enter_time_us = currentTimeUs();
         for (auto& group : component_groups_) {
             const size_t gid = static_cast<size_t>(group->component_group_id);
             if (gid >= node->group_slots.size()) {
                 continue;
             }
-            GroupSlot& slot                          = node->group_slots[gid];
-            slot.candidate_meta.last_access_seq      = access;
-            slot.candidate_meta.admission_seq        = admit;
-            slot.candidate_meta.hit_count            = 0;
-            slot.candidate_meta.tier_enter_time_us   = tier_enter_time_us;
+            GroupSlot& slot                        = node->group_slots[gid];
+            slot.candidate_meta.last_access_seq    = access;
+            slot.candidate_meta.admission_seq      = admit;
+            slot.candidate_meta.hit_count          = 0;
+            slot.candidate_meta.tier_enter_time_us = tier_enter_time_us;
             refreshCandidate(*group, node, group->getTopTier(slot));
         }
     }
@@ -557,9 +554,7 @@ void BlockTreeEvictor::complete(BlockTree& tree, const EvictionPlan& plan, const
 bool BlockTreeEvictor::applyMoveCompletion(ComponentGroupPtr& group, const EvictionMove& move) {
     auto& slot = move.node->group_slots[static_cast<size_t>(move.component_group_id)];
     if (slot.transfer_state != SlotTransferState::DEMOTING) {
-        RTP_LLM_LOG_WARNING("state mismatch, group=%d node_key=%ld",
-                            move.component_group_id,
-                            move.node->cache_key);
+        RTP_LLM_LOG_WARNING("state mismatch, group=%d node_key=%ld", move.component_group_id, move.node->cache_key);
         releaseTargetBlocks(move);
         return false;
     }
@@ -576,7 +571,7 @@ bool BlockTreeEvictor::applyMoveCompletion(ComponentGroupPtr& group, const Evict
         group->referenceBlocks(target_holder, BlockRefType::BLOCK_CACHE);
         group->unreferenceBlocks(target_holder, BlockRefType::EVICTION);
         // Section 7.5: keep last_access_seq / hit_count, refresh the admission clock.
-        slot.candidate_meta.admission_seq = ++admission_seq_;
+        slot.candidate_meta.admission_seq      = ++admission_seq_;
         slot.candidate_meta.tier_enter_time_us = currentTimeUs();
         refreshCandidate(*group, move.node, move.target_tier);
     }
@@ -617,9 +612,9 @@ void BlockTreeEvictor::writeRemoteThrough(const std::shared_ptr<StorageBackend>&
 }
 
 // ---- Load-back transitions ----
-bool BlockTreeEvictor::reserveLoadBack(TreeNode*                       node,
-                                       int                             group_id,
-                                       Tier                            source,
+bool BlockTreeEvictor::reserveLoadBack(TreeNode*                        node,
+                                       int                              group_id,
+                                       Tier                             source,
                                        const std::vector<BlockIdxType>& source_blocks) {
     const size_t gid = static_cast<size_t>(group_id);
     if (group_id < 0 || node == nullptr || gid >= component_groups_.size() || gid >= node->group_slots.size()) {
@@ -639,9 +634,9 @@ bool BlockTreeEvictor::reserveLoadBack(TreeNode*                       node,
     return true;
 }
 
-bool BlockTreeEvictor::abortPendingLoadBack(TreeNode*                       node,
-                                            int                             group_id,
-                                            Tier                            source,
+bool BlockTreeEvictor::abortPendingLoadBack(TreeNode*                        node,
+                                            int                              group_id,
+                                            Tier                             source,
                                             const std::vector<BlockIdxType>& source_blocks) {
     const size_t gid = static_cast<size_t>(group_id);
     if (group_id < 0 || node == nullptr || gid >= component_groups_.size() || gid >= node->group_slots.size()) {
@@ -679,8 +674,8 @@ bool BlockTreeEvictor::finishLoadBack(TreeNode* node, int group_id, Tier source,
     if (node == nullptr || gid >= component_groups_.size() || gid >= node->group_slots.size()) {
         return false;
     }
-    auto& group         = component_groups_[gid];
-    auto& slot          = node->group_slots[gid];
+    auto& group = component_groups_[gid];
+    auto& slot  = node->group_slots[gid];
     if (group == nullptr || slot.transfer_state != SlotTransferState::LOADING_BACK) {
         RTP_LLM_LOG_WARNING("state mismatch, group=%d node_key=%ld state=%d",
                             group_id,
@@ -690,7 +685,7 @@ bool BlockTreeEvictor::finishLoadBack(TreeNode* node, int group_id, Tier source,
     }
     slot.transfer_state = SlotTransferState::IDLE;
     if (copy_ok) {
-        slot.candidate_meta.admission_seq = ++admission_seq_;
+        slot.candidate_meta.admission_seq      = ++admission_seq_;
         slot.candidate_meta.tier_enter_time_us = currentTimeUs();
         refreshCandidate(*group, node, Tier::DEVICE);
     } else {
@@ -751,7 +746,7 @@ BlockTreeEvictor::makeMove(TreeNode* node, int component_group_id, Tier source_t
     // getBlocks encapsulates the tier->slot-field mapping and returns empty for
     // absent values, so the source_blocks.empty() guard still holds.
     eviction_move.source_tier_enter_time_us = node->group_slots[gid].candidate_meta.tier_enter_time_us;
-    eviction_move.source_blocks = component_groups_[gid]->getBlocks(node->group_slots[gid], source_tier);
+    eviction_move.source_blocks             = component_groups_[gid]->getBlocks(node->group_slots[gid], source_tier);
     return eviction_move;
 }
 
@@ -832,9 +827,8 @@ bool BlockTreeEvictor::restoreSource(const EvictionMove& eviction_move) {
     }
     GroupSlot& slot = eviction_move.node->group_slots[gid];
     if (slot.transfer_state != SlotTransferState::DEMOTING) {
-        RTP_LLM_LOG_WARNING("state mismatch, group=%d node_key=%ld",
-                            eviction_move.component_group_id,
-                            eviction_move.node->cache_key);
+        RTP_LLM_LOG_WARNING(
+            "state mismatch, group=%d node_key=%ld", eviction_move.component_group_id, eviction_move.node->cache_key);
         return false;
     }
     slot.transfer_state = SlotTransferState::IDLE;
