@@ -62,8 +62,12 @@ void validateMropePositionIds(const RopeConfig&    rope_config,
 }  // namespace
 
 static at::ScalarType get_fp8_dtype() {
-    int device_id = 0;
-    hipGetDevice(&device_id);
+    int              device_id     = 0;
+    const hipError_t device_status = hipGetDevice(&device_id);
+    TORCH_CHECK(device_status == hipSuccess,
+                "hipGetDevice failed while selecting the FP8 dtype: ",
+                hipGetErrorString(device_status));
+
     static std::mutex                              cache_mutex;
     static std::unordered_map<int, at::ScalarType> dtype_by_device;
     std::lock_guard<std::mutex>                    lock(cache_mutex);
@@ -71,8 +75,13 @@ static at::ScalarType get_fp8_dtype() {
     if (cached != dtype_by_device.end()) {
         return cached->second;
     }
-    hipDeviceProp_t prop;
-    hipGetDeviceProperties(&prop, device_id);
+    hipDeviceProp_t  prop{};
+    const hipError_t props_status = hipGetDeviceProperties(&prop, device_id);
+    TORCH_CHECK(props_status == hipSuccess,
+                "hipGetDeviceProperties failed for device ",
+                device_id,
+                " while selecting the FP8 dtype: ",
+                hipGetErrorString(props_status));
     std::string arch(prop.gcnArchName);
     const auto  dtype = arch.find("gfx950") != std::string::npos ? torch::kFloat8_e4m3fn : torch::kFloat8_e4m3fnuz;
     dtype_by_device.emplace(device_id, dtype);
@@ -464,6 +473,10 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
         position_ids = params->position_ids.data_ptr<int>();
     }
 
+    // Prefill intentionally computes RoPE sin/cos inline in double precision
+    // (nullptr cache) to match the V1 numerical baseline and avoid greedy-token
+    // drift. Decode keeps the precomputed float cache because it is a per-token
+    // hot path and is covered by dedicated decode numerical tests.
     if (use_asm()) {
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(
             torchDTypeToDataType(qkv.dtype()),

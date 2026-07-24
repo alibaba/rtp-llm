@@ -18,10 +18,10 @@ from rtp_llm.models_py.modules.base.common.multimodal_embedding import (
     reshape_extra_input_to_deepstack,
 )
 from rtp_llm.models_py.new_models.qwen3_vl.vision import Qwen3VLForVisionEmbedding
+from rtp_llm.multimodal.multimodal_mixin_register import get_multimodal_mixin_cls
 from rtp_llm.multimodal.multimodal_mixins.qwen3_vl_mixin import (
     Qwen3_VLImageEmbedding,
     Qwen3_VLMixin,
-    Qwen3_VLMoeLegacyMixin,
 )
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 
@@ -221,32 +221,9 @@ class Qwen3VLNewLoaderRoutingTest(unittest.TestCase):
             newloader_output["image_grid_thw"], legacy_output["image_grid_thw"]
         )
 
-    def test_qwen3_vl_moe_is_explicitly_legacy_only(self):
-        with self.assertRaisesRegex(
-            ValueError, "qwen3_vl_moe is not supported by the new loader"
-        ):
-            Qwen3_VLMoeLegacyMixin(
-                torch.float32,
-                "cpu",
-                types.SimpleNamespace(config={}, vit_weights=None),
-                LoadMethod.SCRATCH,
-                VitConfig(),
-                "/tmp/model",
-                use_new_loader=True,
-            )
-
-        mm_related_params = types.SimpleNamespace(config={}, vit_weights=None)
-        with mock.patch.object(Qwen3_VLMixin, "_init_multimodal") as legacy_init:
-            Qwen3_VLMoeLegacyMixin(
-                torch.float32,
-                "cpu",
-                mm_related_params,
-                LoadMethod.SCRATCH,
-                VitConfig(),
-                "/tmp/model",
-                use_new_loader=False,
-            )
-        legacy_init.assert_called_once_with()
+    def test_qwen3_vl_moe_reuses_shared_vision_routes(self):
+        self.assertIs(get_multimodal_mixin_cls("qwen3_vl"), Qwen3_VLMixin)
+        self.assertIs(get_multimodal_mixin_cls("qwen3_vl_moe"), Qwen3_VLMixin)
 
     def test_batched_image_video_deepstack_roundtrip_matches_single_item(self):
         class FakeVisual:
