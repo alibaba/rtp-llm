@@ -6,6 +6,7 @@ This page lists server arguments used to configure the behavior and performance 
 
 | Arguments | Description | Defaults |
 |-----------|-------------|----------|
+| `--worker_info_port_num` | Stride between port **bases** for each `rank_id`: `base = start_port + rank_id * worker_info_port_num`. Offsets under each base include RPC, HTTP, and DashSc gRPC (`base + 8`). Non-VIT deployments start DashSc and therefore require a stride of at least **9**; smaller values are rejected before server processes start. See [breaking-changes.md](../release/breaking-changes.md). | 9 |
 | `--tp-size` | Specifies the tensor parallelism degree. | None |
 | `--ep-size` | Defines the number of model instances for expert parallelism. | None |
 | `--dp-size` | Sets the number of replicas or group size for data parallelism. | None |

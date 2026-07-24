@@ -51,6 +51,7 @@ class RequestExtractor:
         generate_config = copy.deepcopy(self.default_generate_config)
         remain_config_json = generate_config.update_and_pop(config_json)
         remain_kwargs = generate_config.update_and_pop(kwargs)
+        generate_config.validate_supported_features()
 
         def update_optional(key: str, params: List[str]) -> None:
             for source in [remain_config_json, remain_kwargs]:

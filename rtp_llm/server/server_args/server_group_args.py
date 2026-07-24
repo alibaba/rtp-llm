@@ -1,7 +1,7 @@
 import os
 
 
-def init_server_group_args(parser, server_config):
+def init_server_group_args(parser, server_config, distribute_config):
     ##############################################################################################################
     # Server Configuration
     ##############################################################################################################
@@ -57,10 +57,13 @@ def init_server_group_args(parser, server_config):
     server_group.add_argument(
         "--worker_info_port_num",
         env_name="WORKER_INFO_PORT_NUM",
-        bind_to=(server_config, "worker_info_port_num"),
+        bind_to=[
+            (server_config, "worker_info_port_num"),
+            (distribute_config, "worker_info_port_num"),
+        ],
         type=int,
-        default=8,
-        help="worker的总的端口的数量",
+        default=9,
+        help="rank 端口块步进；启用 DashSc gRPC 的非 VIT 服务最小为 9",
     )
     server_group.add_argument(
         "--shutdown_timeout",

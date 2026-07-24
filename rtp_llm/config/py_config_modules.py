@@ -12,6 +12,7 @@ from rtp_llm.ops import (
     ArpcConfig,
     CacheStoreConfig,
     ConcurrencyConfig,
+    DashScGrpcConfig,
     DeviceResourceConfig,
     EPLBConfig,
     FfnDisAggregateConfig,
@@ -36,12 +37,13 @@ print(f"import rtp_llm.ops took {consume_s:.2f}s")
 
 DEFAULT_START_PORT = 8088
 COORDINATOR_INFO_PORT_NUM = 11
-MIN_WORKER_INFO_PORT_NUM = 8
+MIN_WORKER_INFO_PORT_NUM = 9
 WORKER_INFO_PORT_NUM = MIN_WORKER_INFO_PORT_NUM
+DASH_SC_GRPC_SERVER_PORT_OFFSET = 8
 
 
 class ServerConfig:
-    """Port layout : base = start_port + rank_id * worker_info_port_num, then +0..+7."""
+    """Port layout: base = start_port + rank_id * worker_info_port_num."""
 
     def __init__(self):
         self.frontend_server_count = 4
@@ -86,9 +88,27 @@ class ServerConfig:
     def embedding_rpc_server_port(self) -> int:
         return self._server_base() + 7
 
+    @property
+    def dash_sc_grpc_server_port(self) -> int:
+        """DashSc gRPC listen port (ModelStreamInfer, wire: predict_v2.proto)."""
+        return self._server_base() + DASH_SC_GRPC_SERVER_PORT_OFFSET
+
     def set_local_rank(self, local_rank: int):
         """Update rank_id in place; server_port-related properties reflect new values."""
         self.rank_id = local_rank
+
+    def validate_port_layout(self, *, dash_sc_enabled: bool) -> None:
+        if (
+            dash_sc_enabled
+            and self.worker_info_port_num < MIN_WORKER_INFO_PORT_NUM
+        ):
+            raise ValueError(
+                "worker_info_port_num must be at least "
+                f"{MIN_WORKER_INFO_PORT_NUM} when DashSc gRPC is enabled; "
+                f"got {self.worker_info_port_num}. DashSc uses port offset "
+                f"{DASH_SC_GRPC_SERVER_PORT_OFFSET}, which overlaps the next "
+                "rank's port block with a smaller stride."
+            )
 
     # update_from_args 方法已不再需要
     # 配置绑定现在通过声明式 bind_to 参数在 add_argument 时自动处理
@@ -110,7 +130,8 @@ class ServerConfig:
             f"cache_store_listen_port: {self.cache_store_listen_port}\n"
             f"cache_store_rdma_listen_port: {self.cache_store_rdma_listen_port}\n"
             f"http_port: {self.http_port}\n"
-            f"embedding_rpc_server_port: {self.embedding_rpc_server_port}"
+            f"embedding_rpc_server_port: {self.embedding_rpc_server_port}\n"
+            f"dash_sc_grpc_server_port: {self.dash_sc_grpc_server_port}"
         )
 
 
@@ -338,6 +359,7 @@ class GenerateEnvConfig:
         self.stop_words_list: Optional[str] = None
         self.stop_words_str: Optional[str] = None
         self.think_start_tag: str = "<think>\n"
+        self.think_terminate_token_id: int = 1
         self.generation_config_path: Optional[str] = None
 
     def to_string(self):
@@ -349,7 +371,26 @@ class GenerateEnvConfig:
             f"stop_words_list: {self.stop_words_list}\n"
             f"stop_words_str: {self.stop_words_str}\n"
             f"think_start_tag: {self.think_start_tag}\n"
+            f"think_terminate_token_id: {self.think_terminate_token_id}\n"
             f"generation_config_path: {self.generation_config_path}"
+        )
+
+
+class RepetitionDetectionConfig:
+    def __init__(self):
+        self.tool_call_loop_monitor: bool = True
+        self.tool_call_loop_threshold: int = 5
+        self.tool_call_loop_max_span_tokens: int = 16384
+        self.tool_call_loop_begin_marker: str = ""
+        self.tool_call_loop_end_marker: str = ""
+
+    def to_string(self):
+        return (
+            f"tool_call_loop_monitor: {self.tool_call_loop_monitor}\n"
+            f"tool_call_loop_threshold: {self.tool_call_loop_threshold}\n"
+            f"tool_call_loop_max_span_tokens: {self.tool_call_loop_max_span_tokens}\n"
+            f"tool_call_loop_begin_marker: {self.tool_call_loop_begin_marker}\n"
+            f"tool_call_loop_end_marker: {self.tool_call_loop_end_marker}"
         )
 
 
@@ -490,6 +531,9 @@ class PyEnvConfigs:
         self.distribute_config: DistributeConfig = DistributeConfig()
         self.vit_config: VitConfig = VitConfig()
         self.generate_env_config: GenerateEnvConfig = GenerateEnvConfig()
+        self.repetition_detection_config: RepetitionDetectionConfig = (
+            RepetitionDetectionConfig()
+        )
         self.quantization_config: QuantizationConfig = QuantizationConfig()
         self.eplb_config: EPLBConfig = EPLBConfig()
         self.kv_cache_config: KVCacheConfig = KVCacheConfig()
@@ -515,6 +559,7 @@ class PyEnvConfigs:
         self.cache_store_config = CacheStoreConfig()
         self.arpc_config = ArpcConfig()
         self.grpc_config = GrpcConfig()
+        self.dash_sc_grpc_config = DashScGrpcConfig()
         self.deep_ep_config = DeepEPConfig()
         self.prefill_cp_config = PrefillCPConfig()
 
@@ -532,6 +577,9 @@ class PyEnvConfigs:
             "[distribute_config]\n" + self.distribute_config.to_string() + "\n\n"
             "[vit_config]\n" + self.vit_config.to_string() + "\n\n"
             "[generate_env_config]\n" + self.generate_env_config.to_string() + "\n\n"
+            "[repetition_detection_config]\n"
+            + self.repetition_detection_config.to_string()
+            + "\n\n"
             "[quantization_config]\n" + self.quantization_config.to_string() + "\n\n"
             "[eplb_config]\n" + self.eplb_config.to_string() + "\n\n"
             "[kv_cache_config]\n" + self.kv_cache_config.to_string() + "\n\n"
@@ -566,5 +614,6 @@ class PyEnvConfigs:
             + self.runtime_config.fifo_scheduler_config.to_string()
             + "\n\n"
             "[grpc_config]\n" + self.grpc_config.to_string() + "\n\n"
+            "[dash_sc_grpc_config]\n" + self.dash_sc_grpc_config.to_string() + "\n\n"
             "[prefill_cp_config]\n" + self.prefill_cp_config.to_string() + "\n\n"
         )

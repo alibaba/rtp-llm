@@ -371,6 +371,17 @@ def h20_oss_suites():
                 },
                 gpu_type=["H20"],
             ),
+            # DashSc gRPC frontend smoke. Tokenizes client-side, sends INT32
+            # input_ids via predict_v2.proto ModelStreamInfer to port (START_PORT+8),
+            # accumulates generated_ids, detokenizes, then compares against the
+            # golden response. Sharing the qwen35 fp8 model with next_fp8_basic
+            # so we don't double the load cost.
+            smoke_test(
+                name="next_dash_basic",
+                task_info="data/model/qwen3_next/dash_basic.json",
+                smoke_args="--load_method scratch --act_type BF16 --seq_size_per_block 2048 --tp_size 2",
+                gpu_type=["H20"],
+            ),
         ],
     )
 

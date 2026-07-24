@@ -24,7 +24,10 @@ from rtp_llm.server.server_args.fifo_scheduler_group_args import (
 from rtp_llm.server.server_args.fmha_group_args import init_fmha_group_args
 from rtp_llm.server.server_args.gang_group_args import init_gang_group_args
 from rtp_llm.server.server_args.generate_group_args import init_generate_group_args
-from rtp_llm.server.server_args.grpc_group_args import init_grpc_group_args
+from rtp_llm.server.server_args.grpc_group_args import (
+    init_dash_sc_grpc_group_args,
+    init_model_grpc_group_args,
+)
 from rtp_llm.server.server_args.hw_kernel_group_args import init_hw_kernel_group_args
 from rtp_llm.server.server_args.jit_group_args import init_jit_group_args
 from rtp_llm.server.server_args.kv_cache_group_args import init_kv_cache_group_args
@@ -48,6 +51,9 @@ from rtp_llm.server.server_args.quantization_group_args import (
     init_quantization_group_args,
 )
 from rtp_llm.server.server_args.render_group_args import init_render_group_args
+from rtp_llm.server.server_args.repetition_detection_group_args import (
+    init_repetition_detection_group_args,
+)
 from rtp_llm.server.server_args.role_group_args import init_role_group_args
 from rtp_llm.server.server_args.rpc_discovery_group_args import (
     init_rpc_discovery_group_args,
@@ -127,7 +133,9 @@ class EnvArgumentGroup:
         self,
         *args,
         env_name: Optional[str] = None,
-        bind_to: Optional[Union[Tuple[Any, str], str]] = None,
+        bind_to: Optional[
+            Union[Tuple[Any, str], str, List[Union[Tuple[Any, str], str]]]
+        ] = None,
         **kwargs,
     ) -> argparse.Action:
         """
@@ -136,7 +144,8 @@ class EnvArgumentGroup:
         Args:
             *args: 标准 argparse add_argument 参数
             env_name: 环境变量名称（保留用于兼容，但不再自动更新到 os.environ）
-            bind_to: 配置绑定目标，可以是 (config_obj, 'attr_name') 或 'path.to.attr' 字符串
+            bind_to: 配置绑定目标，可以是 (config_obj, 'attr_name')、
+                'path.to.attr' 字符串或这些目标的列表
             **kwargs: 其他 argparse add_argument 参数
         """
         if "metavar" not in kwargs and "type" in kwargs:
@@ -180,7 +189,11 @@ class EnvArgumentParser(argparse.ArgumentParser):
         self._root_config = root_config
 
     def _register_config_binding(
-        self, action: argparse.Action, bind_to: Union[Tuple[Any, str], str]
+        self,
+        action: argparse.Action,
+        bind_to: Union[
+            Tuple[Any, str], str, List[Union[Tuple[Any, str], str]]
+        ],
     ) -> None:
         """注册参数到配置对象的绑定关系"""
         binding = ConfigBinding(action, bind_to)
@@ -470,15 +483,23 @@ def init_all_group_args(
     )
     init_quantization_group_args(parser, py_env_configs.quantization_config)
     init_render_group_args(parser, py_env_configs.render_config)
+    init_repetition_detection_group_args(
+        parser, py_env_configs.repetition_detection_config
+    )
     init_role_group_args(parser, py_env_configs.role_config)
     init_rpc_discovery_group_args(parser)
     init_scheduler_group_args(parser, py_env_configs.runtime_config)
-    init_server_group_args(parser, py_env_configs.server_config)
+    init_server_group_args(
+        parser,
+        py_env_configs.server_config,
+        py_env_configs.distribute_config,
+    )
     init_speculative_decoding_group_args(parser, py_env_configs.sp_config)
     init_vit_group_args(parser, py_env_configs.vit_config)
     init_jit_group_args(parser, py_env_configs.jit_config)
     init_pd_separation_group_args(parser, py_env_configs.pd_separation_config)
-    init_grpc_group_args(parser, py_env_configs.grpc_config)
+    init_model_grpc_group_args(parser, py_env_configs.grpc_config)
+    init_dash_sc_grpc_group_args(parser, py_env_configs.dash_sc_grpc_config)
 
 
 def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:

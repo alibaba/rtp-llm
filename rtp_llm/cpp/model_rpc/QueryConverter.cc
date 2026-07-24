@@ -171,6 +171,14 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     if (input->has_batch_group_id()) {
         generate_input->batch_group_id = input->batch_group_id().value();
     }
+    if (input->has_request_info()) {
+        const auto& info_pb                  = input->request_info();
+        generate_input->request_info.frontend_ip = info_pb.frontend_ip();
+        generate_input->request_info.dash_ip     = info_pb.dash_ip();
+        generate_input->request_info.trace_id    = info_pb.trace_id();
+        generate_input->request_info.request_id  = info_pb.request_id();
+        generate_input->request_info.source_role = info_pb.source_role();
+    }
 
     return generate_input;
 }

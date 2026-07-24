@@ -1,5 +1,6 @@
 import copy
 import hashlib
+import json
 import logging
 import time
 from typing import Any, Dict, List, Optional, Union
@@ -18,7 +19,6 @@ from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.check_util import *
 from rtp_llm.utils.util import check_with_info
-
 
 class RequestFormat:
     RAW = "raw"
@@ -78,6 +78,25 @@ def _reset_sanitize_warn_state():
     _last_downgrade_warn_time = 0.0
 
 
+def _is_plain_text_response_format(value: Any) -> bool:
+    """Return whether ``response_format`` explicitly requests normal text.
+
+    OpenAI-compatible clients may send ``{"type": "text"}`` even though text
+    is already the default. It is a compatibility sentinel, not a structured
+    output request, and therefore needs no backend transport.
+    """
+    parsed = value
+    if isinstance(parsed, str):
+        stripped = parsed.strip()
+        if stripped == "text":
+            return True
+        try:
+            parsed = json.loads(stripped)
+        except (TypeError, ValueError):
+            return False
+    return isinstance(parsed, dict) and parsed == {"type": "text"}
+
+
 class GenerateConfig(BaseModel):
     # --- private attrs（不参与序列化/schema，生命周期与实例绑定） ---
     _diverge_depth_warned: bool = PrivateAttr(default=False)
@@ -91,6 +110,7 @@ class GenerateConfig(BaseModel):
         False  # same as `enable_thinking` in chat_template_kwargs, discard one in the future
     )
     chat_template_kwargs: Optional[Dict[str, Any]] = None
+    begin_think_token_ids: List[int] = []
     end_think_token_ids: List[int] = []
     num_beams: int = 1
     variable_num_beams: List[int] = []
@@ -144,6 +164,14 @@ class GenerateConfig(BaseModel):
     chat_id: Optional[str] = None
     task_id: Optional[Union[str, int]] = None
     request_format: str = RequestFormat.RAW
+    # Compatibility-only request sentinels. The backend cannot execute structured
+    # output yet, so validate() rejects every non-default value before Model RPC.
+    json_format: bool = False
+    response_format: Optional[Union[str, Dict[str, Any]]] = None
+    json_schema: Optional[Union[str, Dict[str, Any]]] = None
+    regex: Optional[str] = None
+    ebnf: Optional[str] = None
+    structural_tag: Optional[Union[str, Dict[str, Any]]] = None
     # calculate_loss style: 0 for not calculate; 1 for sum; 2 for each token
     calculate_loss: int = 0
     return_logits: bool = False
@@ -528,7 +556,18 @@ class GenerateConfig(BaseModel):
             if item not in self.stop_words_list:
                 self.stop_words_list.append(item)
 
+    def validate_supported_features(self):
+        """Reject parsed compatibility fields that have no executable backend."""
+        structured_output_controls = self._requested_structured_output_controls()
+        if structured_output_controls:
+            raise FtRuntimeException(
+                ExceptionType.UNSUPPORTED_OPERATION,
+                "structured output is not supported yet; unsupported controls: "
+                + ", ".join(structured_output_controls),
+            )
+
     def validate(self):
+        self.validate_supported_features()
         try:
             check_with_info(
                 is_union_positive_integer(self.top_k),
@@ -630,6 +669,10 @@ class GenerateConfig(BaseModel):
                 is_union_positive_integer(self.sp_advice_prompt_token_ids),
                 f"sp_advice_prompt_token_ids {self.sp_advice_prompt_token_ids} is wrong data type",
             )
+            check_with_info(
+                is_list_positive_integer(self.begin_think_token_ids),
+                f"begin_think_token_ids {self.begin_think_token_ids} is wrong data type",
+            )
             if self.in_think_mode:
                 check_with_info(
                     is_positive_integer(self.max_thinking_tokens),
@@ -669,3 +712,22 @@ class GenerateConfig(BaseModel):
         self.is_streaming = False
         self.reuse_cache = False
         self.can_use_pd_separation = False
+
+    def _requested_structured_output_controls(self) -> List[str]:
+        """Return user-facing names for controls the backend cannot execute yet."""
+        controls: List[str] = []
+        if self.json_format:
+            controls.append("json_format")
+        if self.response_format is not None and not _is_plain_text_response_format(
+            self.response_format
+        ):
+            controls.append("response_format")
+        for name in (
+            "json_schema",
+            "regex",
+            "ebnf",
+            "structural_tag",
+        ):
+            if getattr(self, name) is not None:
+                controls.append(name)
+        return controls

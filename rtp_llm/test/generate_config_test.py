@@ -4,6 +4,7 @@ from unittest import TestCase, main
 
 from transformers import AutoTokenizer
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import (
     GenerateEnvConfig,
@@ -260,6 +261,7 @@ class OpenaiGenerateConfigTest(TestCase):
         req_stop: Optional[List[str]] = None,
         req_config_stop_word_str: Optional[List[str]] = None,
         req_config_stop_word_list: Optional[List[List[int]]] = None,
+        response_format: Optional[dict] = None,
     ):
         special_tokens = SpecialTokens()
         if model_stop_word_str is not None:
@@ -292,6 +294,7 @@ class OpenaiGenerateConfigTest(TestCase):
         )
 
         request = ChatCompletionRequest(messages=[])
+        request.response_format = response_format
         if req_stop is not None:
             request.stop = req_stop
         if req_config_stop_word_str is not None:
@@ -304,6 +307,16 @@ class OpenaiGenerateConfigTest(TestCase):
             request.extra_configs.stop_words_list = req_config_stop_word_list
 
         return openai_endpoint._extract_generation_config(request)
+
+    def test_response_format_is_rejected_before_generation(self):
+        with self.assertRaises(FtRuntimeException) as raised:
+            self._generate_config_with_stop_word(
+                response_format={"type": "json_object"}
+            )
+        self.assertEqual(
+            raised.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION
+        )
+        self.assertIn("response_format", raised.exception.message)
 
     def assert_config_stop_word(
         self,

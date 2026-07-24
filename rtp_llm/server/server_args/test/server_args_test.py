@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 import sys
 from unittest import TestCase, main
@@ -343,6 +344,43 @@ class ServerArgsSetTest(TestCase):
         parser.parse_args(["--gpu_batch_wait_ms", "500", "--gpu_max_batch_size", "8"])
         self.assertEqual(cfg.vit_config.gpu_max_batch_size, 8)
         self.assertEqual(cfg.vit_config.gpu_batch_wait_ms, 500)
+
+    def test_repetition_detection_config(self):
+        """Test that repetition detection args bind to PyEnvConfigs."""
+        sys.argv = [
+            "prog",
+            "--tool_call_loop_threshold",
+            "7",
+            "--tool_call_loop_begin_marker",
+            "<tool_call>",
+            "--tool_call_loop_end_marker",
+            "</tool_call>",
+        ]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        cfg = py_env_configs.repetition_detection_config
+        self.assertEqual(cfg.tool_call_loop_threshold, 7)
+        self.assertEqual(cfg.tool_call_loop_begin_marker, "<tool_call>")
+        self.assertEqual(cfg.tool_call_loop_end_marker, "</tool_call>")
+
+    def test_dash_sc_default_allows_large_requests_on_both_ends(self):
+        from rtp_llm.server.server_args.grpc_group_args import (
+            default_dash_sc_grpc_config_json,
+        )
+
+        config = json.loads(default_dash_sc_grpc_config_json())
+        expected = 1024 * 1024 * 1024
+        self.assertEqual(
+            config["client_config"]["grpc.max_receive_message_length"], expected
+        )
+        self.assertEqual(
+            config["server_config"]["grpc.max_receive_message_length"],
+            64 * 1024 * 1024,
+        )
 
 
 if __name__ == "__main__":
