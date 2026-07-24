@@ -60,6 +60,14 @@ void cudaProfilerEnd();
 ExecStatus    getGpuExecStatus();
 torch::Device getTorchCudaDevice();
 void          setTraceMemory(bool trace_memory);
+void          finishTraceMemory();
+// True only inside the RAII-guarded warmup forward (between setTraceMemory(true/false)); the guard
+// transitions the startup lifecycle to finished on both success and exception paths.
+// Exposed to Python (compute_ops.is_trace_memory) so the MoE module can force worst-case
+// routing during warmup, making the measured peak already cover the skewed case.
+bool isTraceMemory();
+// 0=pending, 1=active, 2=finished. Finished is terminal for the startup warmup lifecycle.
+int getTraceMemoryState();
 
 // ===================================================================
 // Copy ops

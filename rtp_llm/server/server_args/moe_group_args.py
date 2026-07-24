@@ -1,4 +1,36 @@
+import argparse
+import math
+
 from rtp_llm.server.server_args.util import str2bool
+
+
+def _nonnegative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError("value must be an integer") from error
+    if parsed < 0:
+        raise argparse.ArgumentTypeError("value must be non-negative")
+    return parsed
+
+
+def _nonnegative_float(value: str) -> float:
+    try:
+        parsed = float(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError("value must be a number") from error
+    if not math.isfinite(parsed) or parsed < 0.0:
+        raise argparse.ArgumentTypeError("value must be a finite non-negative number")
+    return parsed
+
+
+def _sampling_interval(value: str) -> int:
+    parsed = _nonnegative_int(value)
+    if parsed > 2**31 - 1:
+        raise argparse.ArgumentTypeError(
+            "sampling interval must fit in a signed 32-bit integer"
+        )
+    return max(1, parsed)
 
 
 def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
@@ -6,6 +38,54 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
     # MOE 特性
     ##############################################################################################################
     moe_group = parser.add_argument_group("MOE 专家并行")
+    moe_group.add_argument(
+        "--moe_runtime_mem_log",
+        env_name="MOE_RUNTIME_MEM_LOG",
+        type=str2bool,
+        default=False,
+        help="运行期 non-torch 显存诊断，默认关闭；会在每个 MoE layer forward 查询显存。",
+    )
+    moe_group.add_argument(
+        "--moe_runtime_slot_log",
+        env_name="MOE_RUNTIME_SLOT_LOG",
+        type=str2bool,
+        default=False,
+        help=(
+            "运行期 EP slot 分布诊断，默认关闭；采样时执行 Group.DP all_reduce 和 CPU "
+            "同步。启动时校验 DP 组内开关与采样间隔，capture 状态仍须保持一致。"
+        ),
+    )
+    moe_group.add_argument(
+        "--moe_runtime_slot_min_slots",
+        env_name="MOE_RUNTIME_SLOT_MIN_SLOTS",
+        type=_nonnegative_int,
+        default=0,
+        help="输出 EP slot 分布日志所需的最小全局 slot 数，默认 0。",
+    )
+    moe_group.add_argument(
+        "--moe_runtime_slot_log_interval",
+        env_name="MOE_RUNTIME_SLOT_LOG_INTERVAL",
+        type=_sampling_interval,
+        default=100,
+        help=(
+            "每多少次 eligible MoE layer forward 采样一次 slot 分布，默认 100；"
+            "设为 1 表示每次采样，0 会按 1 处理。"
+        ),
+    )
+    moe_group.add_argument(
+        "--moe_skew_mult",
+        env_name="MOE_SKEW_MULT",
+        type=_nonnegative_float,
+        default=1.5,
+        help="MoE warmup skew 的乘法余量，默认 1.5；所有 EP rank 应一致设置。",
+    )
+    moe_group.add_argument(
+        "--moe_skew_add",
+        env_name="MOE_SKEW_ADD",
+        type=_nonnegative_float,
+        default=0.1,
+        help="MoE warmup skew 的加法余量，默认 0.1；所有 EP rank 应一致设置。",
+    )
     moe_group.add_argument(
         "--use_deepep_moe",
         env_name="USE_DEEPEP_MOE",

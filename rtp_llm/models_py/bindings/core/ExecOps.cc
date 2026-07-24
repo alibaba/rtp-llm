@@ -42,6 +42,7 @@ void             multiMergeCopy(const MultiMergeCopyParams& params);
 #include <cuda_runtime.h>
 #include <cuda_profiler_api.h>
 #include <ATen/cuda/CUDAContext.h>
+#include <c10/cuda/CUDACachingAllocator.h>
 #include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #elif USING_ROCM
 #include <hip/hip_runtime.h>
@@ -489,6 +490,21 @@ void cudaProfilerEnd() {
 // Status queries
 // ============================================================
 
+namespace {
+constexpr int kTraceMemoryPending  = 0;
+constexpr int kTraceMemoryActive   = 1;
+constexpr int kTraceMemoryFinished = 2;
+// Startup lifecycle shared with Python: pending -> active -> finished, or pending -> finished when
+// NormalEngine explicitly skips warmup.
+static std::atomic<int> g_trace_memory_state{kTraceMemoryPending};
+#if USING_CUDA
+// Baselines snapshotted right after emptyCache()+resetPeakStats() in setTraceMemory(true).
+// Used to turn absolute readings into the forward's transient deltas (see getGpuExecStatus).
+static size_t g_reserved_baseline_bytes  = 0;  // torch reserved at baseline
+static size_t g_cuda_used_baseline_bytes = 0;  // device used (total-free) at baseline
+#endif
+}  // namespace
+
 ExecStatus getGpuExecStatus() {
     MemoryStatus mem;
     size_t       total_bytes = 0;
@@ -500,6 +516,27 @@ ExecStatus getGpuExecStatus() {
 #endif
     mem.used_bytes      = total_bytes - mem.free_bytes;
     mem.available_bytes = mem.free_bytes;
+#if USING_CUDA
+    if (isTraceMemory()) {
+        // max_consumed_bytes = forward transient growth = torch_peak_increase + non_torch_increase
+        // (vLLM-style decomposition). available_bytes downstream already excludes the steady-state
+        // (weights/context), so we report only the growth on top of the baseline -- counting the
+        // baseline here too would double-subtract it from the KV cache budget.
+        const auto&  stats      = c10::cuda::CUDACachingAllocator::getDeviceStats(at::cuda::current_device());
+        const size_t torch_peak = static_cast<size_t>(stats.reserved_bytes[0].peak);  // [0] = AGGREGATE
+        const size_t torch_cur  = static_cast<size_t>(stats.reserved_bytes[0].current);
+        mem.allocated_bytes     = static_cast<size_t>(stats.allocated_bytes[0].current);
+
+        // cudaMemGetInfo is device-global, so this decomposition assumes the warmup rank has
+        // exclusive use of its GPU during the measurement window. External allocations would be
+        // attributed to non-torch growth.
+        const auto growth = calculateMemoryGrowth(
+            g_reserved_baseline_bytes, torch_peak, torch_cur, g_cuda_used_baseline_bytes, mem.used_bytes);
+        mem.torch_peak_increase_bytes = growth.torch_peak_increase_bytes;
+        mem.non_torch_increase_bytes  = growth.non_torch_increase_bytes;
+        mem.max_consumed_bytes        = growth.max_consumed_bytes;
+    }
+#endif
     ExecStatus status;
     status.device_memory_status = mem;
     return status;
@@ -509,12 +546,44 @@ torch::Device getTorchCudaDevice() {
     return torch::Device(torch::kCUDA);
 }
 
-namespace {
-static bool g_trace_memory = false;
+bool isTraceMemory() {
+    return g_trace_memory_state.load(std::memory_order_acquire) == kTraceMemoryActive;
+}
+
+int getTraceMemoryState() {
+    return g_trace_memory_state.load(std::memory_order_acquire);
+}
+
+void finishTraceMemory() {
+    g_trace_memory_state.store(kTraceMemoryFinished, std::memory_order_release);
 }
 
 void setTraceMemory(bool trace_memory) {
-    g_trace_memory = trace_memory;
+    if (!trace_memory) {
+        g_trace_memory_state.store(kTraceMemoryFinished, std::memory_order_release);
+#if USING_CUDA
+        g_reserved_baseline_bytes  = 0;
+        g_cuda_used_baseline_bytes = 0;
+#endif
+        return;
+    }
+
+#if USING_CUDA
+    // Release loader-cached free blocks so the baseline is pure steady-state (weights), then
+    // zero the peak high-water mark and snapshot the baselines. Without emptyCache, the forward
+    // could reuse cached free blocks without growing reserved, making the measured delta too
+    // small -> KV cache over-allocated -> runtime OOM.
+    c10::cuda::CUDACachingAllocator::emptyCache();
+    const auto device = at::cuda::current_device();
+    c10::cuda::CUDACachingAllocator::resetPeakStats(device);
+    g_reserved_baseline_bytes =
+        static_cast<size_t>(c10::cuda::CUDACachingAllocator::getDeviceStats(device).reserved_bytes[0].current);
+    size_t free_bytes = 0, total_bytes = 0;
+    check_cuda_value(cudaMemGetInfo(&free_bytes, &total_bytes));
+    g_cuda_used_baseline_bytes = total_bytes - free_bytes;  // for non_torch_increase
+#endif
+    // Publish active only after all baselines are initialized.
+    g_trace_memory_state.store(kTraceMemoryActive, std::memory_order_release);
 }
 
 // === Copy ops ===
@@ -706,6 +775,10 @@ OverallExpertStats execCreateMoeExpertStates(const ExpertStatsParams& params) {
 
 void registerExecCtxOps(pybind11::module& m) {
     m.def("get_device_id", &getDeviceId);
+    m.def("is_trace_memory", &isTraceMemory, "True while a warmup forward is being memory-traced.");
+    m.def("get_trace_memory_state",
+          &getTraceMemoryState,
+          "Startup warmup trace state: 0=pending, 1=active, 2=finished.");
     m.def("preprocess_gemm_weight_by_key",
           &preprocessGemmWeightByKey,
           py::arg("key"),

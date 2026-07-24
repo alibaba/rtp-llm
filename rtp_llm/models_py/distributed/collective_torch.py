@@ -36,6 +36,59 @@ class Group(Enum):
 _group_map: Dict[Union[Group, str], torch.distributed.ProcessGroup] = {}
 _parallelism_config: Optional[ParallelismConfig] = None
 _initialized: bool = False  # Track if we've initialized (to prevent double init)
+_runtime_slot_log_synchronized: bool = False
+
+
+def _synchronize_runtime_slot_log(parallelism_config: ParallelismConfig) -> None:
+    """Make the per-forward DP collective gate symmetric within each DP group."""
+    global _runtime_slot_log_synchronized
+
+    if _runtime_slot_log_synchronized:
+        return
+
+    local_enabled = os.environ.get("MOE_RUNTIME_SLOT_LOG", "0") == "1"
+    try:
+        local_interval = max(
+            1, int(os.environ.get("MOE_RUNTIME_SLOT_LOG_INTERVAL", "100"))
+        )
+        if local_interval > 2**31 - 1:
+            raise ValueError
+    except ValueError:
+        local_interval = 100
+    if parallelism_config.dp_size <= 1:
+        os.environ["MOE_RUNTIME_SLOT_LOG"] = "1" if local_enabled else "0"
+        os.environ["MOE_RUNTIME_SLOT_LOG_INTERVAL"] = str(local_interval)
+        _runtime_slot_log_synchronized = True
+        return
+
+    process_group = _get_group(Group.DP)
+    group_size = torch.distributed.get_world_size(process_group)
+    settings_sum = torch.tensor(
+        [int(local_enabled), local_interval],
+        dtype=torch.int64,
+        device=torch.device("cuda", parallelism_config.local_rank),
+    )
+    torch.distributed.all_reduce(
+        settings_sum, op=torch.distributed.ReduceOp.SUM, group=process_group
+    )
+    enabled_ranks = int(settings_sum[0].item())
+    interval_sum = int(settings_sum[1].item())
+    enablement_matches = enabled_ranks in (0, group_size)
+    interval_matches = interval_sum == local_interval * group_size
+    if not enablement_matches or (enabled_ranks == group_size and not interval_matches):
+        os.environ["MOE_RUNTIME_SLOT_LOG"] = "0"
+        logging.error(
+            "MOE_RUNTIME_SLOT_LOG settings differ within the DP group "
+            "(%d/%d ranks enabled, local interval=%d); "
+            "disabling distributed slot logging for this group to prevent an asymmetric collective",
+            enabled_ranks,
+            group_size,
+            local_interval,
+        )
+    else:
+        os.environ["MOE_RUNTIME_SLOT_LOG"] = "1" if enabled_ranks else "0"
+    os.environ["MOE_RUNTIME_SLOT_LOG_INTERVAL"] = str(local_interval)
+    _runtime_slot_log_synchronized = True
 
 
 def init_distributed_environment(
@@ -71,6 +124,7 @@ def init_distributed_environment(
         if not _group_map:
             _create_process_groups(parallelism_config, backend, timedelta(days=36500))
             _register_process_groups_to_cpp()
+        _synchronize_runtime_slot_log(parallelism_config)
         if rocm_rccl.is_available_runtime() and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
         return
@@ -92,6 +146,7 @@ def init_distributed_environment(
         _create_process_groups(parallelism_config, backend, timedelta(days=36500))
         _parallelism_config = parallelism_config
         _initialized = True
+        _synchronize_runtime_slot_log(parallelism_config)
         _register_process_groups_to_cpp()
         if rocm_rccl.is_available_runtime() and parallelism_config.tp_size > 1:
             rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
@@ -126,6 +181,7 @@ def init_distributed_environment(
     _create_process_groups(parallelism_config, backend, timedelta(days=36500))
     _parallelism_config = parallelism_config
     _initialized = True
+    _synchronize_runtime_slot_log(parallelism_config)
     _register_process_groups_to_cpp()
     if rocm_rccl.is_available_runtime() and parallelism_config.tp_size > 1:
         rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
@@ -325,7 +381,10 @@ def _register_process_groups_to_cpp():
         """
         pg = mode_to_group.get(mode)
         if pg is None or pg.size() < 2:
-            return tensor if dest is None else tensor
+            if dest is not None:
+                dest.copy_(tensor)
+                return dest
+            return tensor
         target = dest if dest is not None else tensor
         if dest is not None:
             target.copy_(tensor)
@@ -426,7 +485,10 @@ def destroy_distributed_environment():
     After calling this function, init_distributed_environment() can be called again
     to reinitialize the distributed environment.
     """
-    global _group_map, _parallelism_config, _initialized
+    global _group_map
+    global _parallelism_config
+    global _initialized
+    global _runtime_slot_log_synchronized
 
     rank = torch.distributed.get_rank()
     logging.info(f"[rank: {rank}] Destroying distributed environment")
@@ -460,6 +522,7 @@ def destroy_distributed_environment():
     logging.info(f"[rank: {rank}] Distributed environment destroyed")
     _parallelism_config = None
     _initialized = False
+    _runtime_slot_log_synchronized = False
     gc.collect()
 
 

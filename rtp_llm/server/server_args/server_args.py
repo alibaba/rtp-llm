@@ -61,6 +61,48 @@ from rtp_llm.server.server_args.vit_group_args import init_vit_group_args
 
 _T = TypeVar("_T")
 
+_RUNTIME_TUNING_ENV_ARGS = {
+    "runtime_mem_safety_ratio": "RUNTIME_MEM_SAFETY_RATIO",
+    "runtime_mem_no_warmup_floor_mb": "RUNTIME_MEM_NO_WARMUP_FLOOR_MB",
+    "moe_runtime_mem_log": "MOE_RUNTIME_MEM_LOG",
+    "moe_runtime_slot_log": "MOE_RUNTIME_SLOT_LOG",
+    "moe_runtime_slot_min_slots": "MOE_RUNTIME_SLOT_MIN_SLOTS",
+    "moe_runtime_slot_log_interval": "MOE_RUNTIME_SLOT_LOG_INTERVAL",
+    "moe_skew_mult": "MOE_SKEW_MULT",
+    "moe_skew_add": "MOE_SKEW_ADD",
+}
+
+
+def _export_runtime_tuning_env(parsed_args: argparse.Namespace) -> None:
+    for dest, env_name in _RUNTIME_TUNING_ENV_ARGS.items():
+        value = getattr(parsed_args, dest)
+        os.environ[env_name] = (
+            "1" if value is True else "0" if value is False else str(value)
+        )
+
+    logging.info(
+        "Effective runtime memory tuning: RUNTIME_MEM_SAFETY_RATIO=%s, "
+        "RUNTIME_MEM_NO_WARMUP_FLOOR_MB=%s. Keep values consistent across processes in each PD role.",
+        os.environ["RUNTIME_MEM_SAFETY_RATIO"],
+        os.environ["RUNTIME_MEM_NO_WARMUP_FLOOR_MB"],
+    )
+    logging.info(
+        "MoE warmup/diagnostics: MEM_LOG=%s SLOT_LOG=%s SLOT_MIN=%s SLOT_INTERVAL=%s "
+        "SKEW_MULT=%s SKEW_ADD=%s. Keep values consistent across ranks in each role/group.",
+        os.environ["MOE_RUNTIME_MEM_LOG"],
+        os.environ["MOE_RUNTIME_SLOT_LOG"],
+        os.environ["MOE_RUNTIME_SLOT_MIN_SLOTS"],
+        os.environ["MOE_RUNTIME_SLOT_LOG_INTERVAL"],
+        os.environ["MOE_SKEW_MULT"],
+        os.environ["MOE_SKEW_ADD"],
+    )
+    if getattr(parsed_args, "moe_runtime_slot_log"):
+        logging.warning(
+            "MOE_RUNTIME_SLOT_LOG enabled: sampled forwards perform Group.DP all_reduce plus CPU "
+            "synchronization. All ranks must enter capture/non-capture paths symmetrically; mixed "
+            "capture state can hang the collective."
+        )
+
 
 class ConfigBinding:
     """配置绑定描述符，用于将解析的参数值绑定到配置对象"""
@@ -346,6 +388,10 @@ class EnvArgumentParser(argparse.ArgumentParser):
                                 try:
                                     converted_value = action.type(env_value)
                                     setattr(parsed_args, dest, converted_value)
+                                except argparse.ArgumentTypeError as error:
+                                    self.error(
+                                        f"invalid value for {env_name}: {error}"
+                                    )
                                 except (ValueError, TypeError):
                                     # If conversion fails, skip this value
                                     pass
@@ -501,6 +547,7 @@ def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
     init_all_group_args(parser, py_env_configs)
 
     # 解析参数（会自动应用所有配置绑定）
-    parser.parse_args(args)
+    parsed_args = parser.parse_args(args)
+    _export_runtime_tuning_env(parsed_args)
 
     return py_env_configs

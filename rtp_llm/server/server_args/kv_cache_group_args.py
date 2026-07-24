@@ -1,4 +1,38 @@
+import argparse
+import math
+import struct
+
 from rtp_llm.server.server_args.util import str2bool
+
+
+_BYTES_PER_MIB = 1024 * 1024
+_MAX_RUNTIME_MEMORY_MIB = ((1 << (struct.calcsize("P") * 8)) - 1) // _BYTES_PER_MIB
+
+
+def _runtime_memory_safety_ratio(value: str) -> float:
+    try:
+        ratio = float(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError(
+            "runtime_mem_safety_ratio must be a number"
+        ) from error
+    if not math.isfinite(ratio) or ratio < 0.0 or ratio >= 1.0:
+        raise argparse.ArgumentTypeError(
+            "runtime_mem_safety_ratio must be finite and in [0, 1)"
+        )
+    return ratio
+
+
+def _nonnegative_int(value: str) -> int:
+    try:
+        parsed = int(value)
+    except (TypeError, ValueError) as error:
+        raise argparse.ArgumentTypeError("value must be an integer") from error
+    if parsed < 0 or parsed > _MAX_RUNTIME_MEMORY_MIB:
+        raise argparse.ArgumentTypeError(
+            f"value must be in [0, {_MAX_RUNTIME_MEMORY_MIB}] MiB on this platform"
+        )
+    return parsed
 
 
 def init_kv_cache_group_args(parser, kv_cache_config):
@@ -6,6 +40,26 @@ def init_kv_cache_group_args(parser, kv_cache_config):
     # KV Cache 相关配置
     ##############################################################################################################
     kv_cache_group = parser.add_argument_group("KVCache")
+    kv_cache_group.add_argument(
+        "--runtime_mem_safety_ratio",
+        env_name="RUNTIME_MEM_SAFETY_RATIO",
+        type=_runtime_memory_safety_ratio,
+        default=0.05,
+        help=(
+            "Warmup 路径在 measured/configured/sampler 最大值上追加的 GPU 显存安全余量比例，"
+            "范围 [0,1)，默认 0.05；值越大 KV cache 越小。PD 各 role 内所有进程应一致设置。"
+        ),
+    )
+    kv_cache_group.add_argument(
+        "--runtime_mem_no_warmup_floor_mb",
+        env_name="RUNTIME_MEM_NO_WARMUP_FLOOR_MB",
+        type=_nonnegative_int,
+        default=2048,
+        help=(
+            "未执行 warmup 时的运行期显存绝对下限（MiB），默认 2048；"
+            "值越大 KV cache 越小。PD 各 role 内所有进程应一致设置。"
+        ),
+    )
     kv_cache_group.add_argument(
         "--reuse_cache",
         env_name="REUSE_CACHE",

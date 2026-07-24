@@ -1,0 +1,15 @@
+{
+  "model_type": "qwen_3_moe",
+  "model_path": "/mnt/nas1/hf/Qwen3-30B-A3B-Instruct-2507-FP8",
+  "query_result": [
+    {
+      "prefill_warmup_smoke": {
+        "max_seq_len": 32768,
+        "max_batch_tokens": 65536,
+        "num_seqs": 2
+      },
+      "query": {},
+      "result": {}
+    }
+  ]
+}

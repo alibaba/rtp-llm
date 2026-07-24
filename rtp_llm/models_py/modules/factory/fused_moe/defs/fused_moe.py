@@ -1,6 +1,6 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass
-from typing import Any, Callable, Dict, List, Optional, Tuple, Union, final
+from typing import Any, Dict, List, Optional, Union, final
 
 import torch
 
@@ -13,6 +13,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import (
     ExecutorType,
     RouterType,
+)
+from rtp_llm.models_py.modules.factory.fused_moe.defs.warmup_diagnostics import (
+    diagnostics,
 )
 
 
@@ -168,6 +171,20 @@ class FusedMoe(torch.nn.Module):
         self.router = router
         self.fused_experts = fused_experts
         self.expert_num = expert_num
+        self.ep_size = int(router.config.ep_size)
+        config_expert_num = int(router.config.expert_num)
+        if config_expert_num != expert_num:
+            raise ValueError(
+                f"router expert_num={config_expert_num} does not match FusedMoe expert_num={expert_num}"
+            )
+        if self.ep_size <= 0 or expert_num <= 0 or expert_num % self.ep_size != 0:
+            raise ValueError(
+                f"expert_num={expert_num} must be positive and divisible by ep_size={self.ep_size}"
+            )
+        diagnostics.require_trace_binding(self.ep_size)
+        self.runtime_slot_log_enabled = diagnostics.resolve_runtime_slot_log(router)
+        if self.runtime_slot_log_enabled:
+            diagnostics.warn_runtime_slot_cost_once()
 
     @property
     def topk_ids_dtype(self) -> torch.dtype:
@@ -189,6 +206,22 @@ class FusedMoe(torch.nn.Module):
     ) -> torch.Tensor:
 
         a1 = hidden_states
+
+        is_warmup = diagnostics.in_memory_trace(self.ep_size)
+        if is_warmup:
+            # Include reserved MoE skew in the measured warmup peak.
+            diagnostics.capture_warmup_nontorch_baseline()
+            topk_ids = diagnostics.warmup_skew_topk_ids(
+                topk_ids,
+                self.ep_size,
+                self.expert_num,
+                type(self.fused_experts).__name__,
+            )
+        elif diagnostics.runtime_mem_log_enabled or self.runtime_slot_log_enabled:
+            if diagnostics.runtime_mem_log_enabled:
+                diagnostics.log_runtime_nontorch_peak()
+            if self.runtime_slot_log_enabled:
+                diagnostics.log_runtime_slot_distribution(self.router, topk_ids)
 
         expert_payload = self.router.prepare(
             a1,

@@ -107,20 +107,6 @@ class CaseRunner(object):
                 return str_to_bool(tokens[i + 1])
         return default
 
-    @staticmethod
-    def _extract_int_arg(args_str: str, arg_name: str, default: int) -> int:
-        """Extract an integer argument from a smoke argument string."""
-        if not args_str:
-            return default
-        tokens = args_str.split()
-        for i, token in enumerate(tokens):
-            if token == arg_name and i + 1 < len(tokens):
-                try:
-                    return int(tokens[i + 1])
-                except ValueError:
-                    return default
-        return default
-
     def run(self):
         self._dmesg_baseline = snapshot_dmesg()
         env_dict = self.create_env_from_args(self.env_args)
@@ -218,6 +204,14 @@ class CaseRunner(object):
 
     @staticmethod
     def _get_comparer_cls(q_r: Dict[str, Any], request_endpoint: str) -> Type:
+        if "prefill_warmup_smoke" in q_r:
+            from smoke.prefill_warmup_comparer import PrefillWarmupComparer
+
+            return PrefillWarmupComparer
+        if "decode_warmup_smoke" in q_r:
+            from smoke.decode_warmup_comparer import DecodeWarmupComparer
+
+            return DecodeWarmupComparer
         if q_r.get("tau2_bench", False):
             return Tau2BenchComparer
         if "messages" in q_r["query"]:

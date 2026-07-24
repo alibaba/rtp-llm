@@ -1,11 +1,99 @@
+import argparse
 import importlib
 import os
+import struct
 import sys
 from unittest import TestCase, main
+
+from rtp_llm.utils.pre_import_config import (
+    configure_expandable_segments_for_warmup,
+    is_start_server_entrypoint,
+    str2bool,
+    warmup_requested,
+)
 
 
 class ServerArgsPyEnvConfigsTest(TestCase):
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
+
+
+class PreImportConfigTest(TestCase):
+    def test_server_parser_reuses_pre_import_bool_parser(self):
+        from rtp_llm.server.server_args.util import str2bool as server_str2bool
+
+        self.assertIs(server_str2bool, str2bool)
+
+    def test_identifies_supported_server_entrypoints(self):
+        self.assertTrue(
+            is_start_server_entrypoint(
+                ["python", "-m", "rtp_llm.start_server", "--warm_up", "1"]
+            )
+        )
+        self.assertTrue(is_start_server_entrypoint(["/tmp/start_server.py"]))
+        self.assertTrue(is_start_server_entrypoint(["python", "/tmp/start_server.py"]))
+        self.assertTrue(
+            is_start_server_entrypoint(["python", "-u", "/tmp/start_server.py"])
+        )
+        self.assertFalse(is_start_server_entrypoint(["python", "other.py"]))
+        self.assertFalse(
+            is_start_server_entrypoint(
+                ["python", "other.py", "--config", "/tmp/start_server.py"]
+            )
+        )
+
+    def test_warmup_cli_overrides_environment(self):
+        self.assertFalse(warmup_requested(["--warm_up", "0"], {"WARM_UP": "1"}))
+        self.assertTrue(warmup_requested(["--warm_up=on"], {"WARM_UP": "0"}))
+
+    def test_warmup_environment_and_default(self):
+        self.assertFalse(warmup_requested([], {"WARM_UP": "false"}))
+        self.assertTrue(warmup_requested([], {}))
+
+    def test_rejects_invalid_warmup_value(self):
+        with self.assertRaises(argparse.ArgumentTypeError):
+            warmup_requested(["--warm_up", "invalid"], {})
+
+    def test_invalid_warmup_value_does_not_break_pre_import_configuration(self):
+        env = {}
+        with self.assertLogs(
+            "rtp_llm.utils.pre_import_config", level="WARNING"
+        ) as logs:
+            enabled = configure_expandable_segments_for_warmup(
+                ["--warm_up", "invalid"], env, is_rocm=False
+            )
+
+        self.assertTrue(enabled)
+        self.assertEqual(env["PYTORCH_CUDA_ALLOC_CONF"], "expandable_segments:True")
+        self.assertIn("using default=true", logs.output[0])
+
+    def test_sets_allocator_default_only_for_cuda_warmup(self):
+        env = {}
+        self.assertTrue(
+            configure_expandable_segments_for_warmup([], env, is_rocm=False)
+        )
+        self.assertEqual(env["PYTORCH_CUDA_ALLOC_CONF"], "expandable_segments:True")
+
+        env = {}
+        self.assertFalse(
+            configure_expandable_segments_for_warmup(
+                ["--warm_up", "0"], env, is_rocm=False
+            )
+        )
+        self.assertNotIn("PYTORCH_CUDA_ALLOC_CONF", env)
+
+    def test_preserves_user_allocator_configuration(self):
+        env = {"PYTORCH_CUDA_ALLOC_CONF": "expandable_segments:False"}
+        self.assertFalse(
+            configure_expandable_segments_for_warmup([], env, is_rocm=False)
+        )
+        self.assertEqual(env["PYTORCH_CUDA_ALLOC_CONF"], "expandable_segments:False")
+
+    def test_skips_allocator_default_on_rocm(self):
+        env = {"WARM_UP": "1"}
+        self.assertFalse(
+            configure_expandable_segments_for_warmup([], env, is_rocm=True)
+        )
+        self.assertNotIn("PYTORCH_CUDA_ALLOC_CONF", env)
 
 
 class ServerArgsSetTest(TestCase):
@@ -64,6 +152,57 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.runtime_config.warm_up, True)  # bool in C++
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
+
+    def test_runtime_tuning_args_are_validated_and_exported(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        setup_args(
+            [
+                "--runtime_mem_safety_ratio",
+                "0.08",
+                "--runtime_mem_no_warmup_floor_mb",
+                "3072",
+                "--moe_runtime_mem_log",
+                "true",
+                "--moe_runtime_slot_log",
+                "false",
+                "--moe_runtime_slot_min_slots",
+                "128",
+                "--moe_runtime_slot_log_interval",
+                "50",
+                "--moe_skew_mult",
+                "1.75",
+                "--moe_skew_add",
+                "0.2",
+            ]
+        )
+
+        self.assertEqual(os.environ["RUNTIME_MEM_SAFETY_RATIO"], "0.08")
+        self.assertEqual(os.environ["RUNTIME_MEM_NO_WARMUP_FLOOR_MB"], "3072")
+        self.assertEqual(os.environ["MOE_RUNTIME_MEM_LOG"], "1")
+        self.assertEqual(os.environ["MOE_RUNTIME_SLOT_LOG"], "0")
+        self.assertEqual(os.environ["MOE_RUNTIME_SLOT_MIN_SLOTS"], "128")
+        self.assertEqual(os.environ["MOE_RUNTIME_SLOT_LOG_INTERVAL"], "50")
+        self.assertEqual(os.environ["MOE_SKEW_MULT"], "1.75")
+        self.assertEqual(os.environ["MOE_SKEW_ADD"], "0.2")
+
+    def test_runtime_tuning_args_reject_invalid_ranges(self):
+        from rtp_llm.server.server_args.server_args import setup_args
+
+        with self.assertRaises(SystemExit):
+            setup_args(["--runtime_mem_safety_ratio", "1.0"])
+        with self.assertRaises(SystemExit):
+            setup_args(["--runtime_mem_no_warmup_floor_mb", "-1"])
+        first_unrepresentable_mib = 1 << (struct.calcsize("P") * 8 - 20)
+        with self.assertRaises(SystemExit):
+            setup_args(
+                [
+                    "--runtime_mem_no_warmup_floor_mb",
+                    str(first_unrepresentable_mib),
+                ]
+            )
+        with self.assertRaises(SystemExit):
+            setup_args(["--moe_runtime_slot_log_interval", str(2**31)])
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""

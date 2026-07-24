@@ -114,7 +114,6 @@ uint32_t computeBlockNum(CacheConfig&                                     config
                          const ModelConfig&                               model_config,
                          const RuntimeConfig&                             runtime_config,
                          const KVCacheConfig&                             kv_cache_config,
-                         const ParallelismConfig&                         parallelism_config,
                          const std::optional<WarmUpResult>&               warm_up_result,
                          const std::optional<SpeculativeExecutionConfig>& sp_config) {
     if (kv_cache_config.test_block_num > 0) {
@@ -124,7 +123,7 @@ uint32_t computeBlockNum(CacheConfig&                                     config
     }
 
     const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
-        runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
+        runtime_config, kv_cache_config, model_config, warm_up_result, sp_config);
     config.finalizeBlockNums(0, runtime_config);
 
     const auto block_budget = blockBudgetForConfig(config);
@@ -226,9 +225,9 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     setupKernelSeqSize(config, kv_cache_config, "cache");
 
     uint32_t block_num = computeBlockNum(
-        config, model_config, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
+        config, model_config, runtime_config, kv_cache_config, warm_up_result, sp_config);
     RTP_LLM_CHECK_WITH_INFO(block_num > 0,
-                            "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
+                            "kv cache needs at least 1 block but %u, each block needs %ld MiB memory",
                             block_num,
                             static_cast<long>(config.block_size_bytes / 1024 / 1024));
 
@@ -236,6 +235,12 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
     config.block_num            = static_cast<int>(block_num);
     config.finalizeBlockNums(block_num, runtime_config);
     RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %ld tokens", block_num, kv_cache_seq_len);
+    RTP_LLM_LOG_INFO("[KV_ALLOC] final block_num=%u block_size=%ld MiB total_kv=%ld MiB (%.2f GiB), stores %ld tokens",
+                     block_num,
+                     config.block_size_bytes / 1024 / 1024,
+                     static_cast<size_t>(block_num) * config.block_size_bytes / 1024 / 1024,
+                     static_cast<size_t>(block_num) * config.block_size_bytes / 1024.0 / 1024.0 / 1024.0,
+                     kv_cache_seq_len);
     if (kv_cache_seq_len < model_config.max_seq_len) {
         RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %ld tokens, less than max_seq_len %ld, "
                             "this is dangerous, consider decrease max_seq_len",
@@ -305,7 +310,7 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         block_num = kv_cache_config.test_block_num;
     } else {
         const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
-            runtime_config, kv_cache_config, score_model_config, parallelism_config, warm_up_result, sp_config);
+            runtime_config, kv_cache_config, score_model_config, warm_up_result, sp_config);
 
         if (explicit_pool_reserve > 0) {
             RTP_LLM_CHECK_WITH_INFO(

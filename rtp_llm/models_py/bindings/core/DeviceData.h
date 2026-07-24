@@ -35,7 +35,33 @@ struct MemoryStatus {
     size_t available_bytes    = 0;  // free GPU memory available for allocation
     size_t allocated_bytes    = 0;  // memory allocated via current device
     size_t max_consumed_bytes = 0;  // only applicable if RTP_LLM_TRACE_MEMORY is enabled.
+    // Breakdown of max_consumed_bytes (only set while tracing); kept separate so the KV-sizing
+    // log can report the torch vs non-torch (NCCL/all-to-all) components individually.
+    size_t torch_peak_increase_bytes = 0;
+    size_t non_torch_increase_bytes  = 0;
 };
+
+struct MemoryGrowthBreakdown {
+    size_t torch_peak_increase_bytes = 0;
+    size_t non_torch_increase_bytes  = 0;
+    size_t max_consumed_bytes        = 0;
+};
+
+inline MemoryGrowthBreakdown calculateMemoryGrowth(size_t reserved_baseline_bytes,
+                                                   size_t reserved_peak_bytes,
+                                                   size_t reserved_current_bytes,
+                                                   size_t cuda_used_baseline_bytes,
+                                                   size_t cuda_used_current_bytes) {
+    const size_t torch_peak_increase =
+        reserved_peak_bytes > reserved_baseline_bytes ? reserved_peak_bytes - reserved_baseline_bytes : 0;
+    const size_t non_torch_current =
+        cuda_used_current_bytes > reserved_current_bytes ? cuda_used_current_bytes - reserved_current_bytes : 0;
+    const size_t non_torch_baseline =
+        cuda_used_baseline_bytes > reserved_baseline_bytes ? cuda_used_baseline_bytes - reserved_baseline_bytes : 0;
+    const size_t non_torch_increase =
+        non_torch_current > non_torch_baseline ? non_torch_current - non_torch_baseline : 0;
+    return {torch_peak_increase, non_torch_increase, torch_peak_increase + non_torch_increase};
+}
 
 // runtime device status, such as available memory.
 struct ExecStatus {

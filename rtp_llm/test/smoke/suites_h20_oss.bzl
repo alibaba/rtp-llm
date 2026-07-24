@@ -199,6 +199,23 @@ def h20_oss_suites():
                 },
                 gpu_type=["H20"],
             ),
+            smoke_test(
+                name="moe_prefill_warmup_pd_dp4_ep4",
+                task_info="data/model/qwen3_moe/q_r_30b_prefill_warmup_pd.json",
+                envs=[
+                    "RUNTIME_MEM_SAFETY_RATIO=0.05",
+                    "MOE_SKEW_MULT=1.5",
+                    "MOE_SKEW_ADD=0.1",
+                ],
+                smoke_args="--act_type BF16 --cache_store_rdma_mode 0 --use_local 1 --role_type PREFILL --reuse_cache 1 --seq_size_per_block 64 --tp_size 1 --dp_size 4 --ep_size 4 --world_size 4 --warm_up 1 --max_seq_len 32768 --max_context_batch_size 2 --max_batch_tokens_size 65536 --reserver_runtime_mem_mb 1024 --use_deepep_moe 1 --use_deepep_low_latency 0 --use_all_gather 0 --eplb_mode NONE --redundant_expert 0",
+                gpu_type=["H20"],
+            ),
+            smoke_test(
+                name="moe_decode_warmup_ep2_cudagraph",
+                task_info="data/model/qwen3_moe/q_r_30b_decode_warmup.json",
+                smoke_args="--act_type BF16 --role_type DECODE --seq_size_per_block 64 --tp_size 1 --dp_size 2 --ep_size 2 --world_size 2 --warm_up 1 --max_seq_len 32768 --concurrency_limit 256 --reserver_runtime_mem_mb 1024 --enable_cuda_graph 1 --decode_capture_config '1,256' --use_deepep_moe 1 --use_deepep_low_latency 0 --eplb_mode NONE --redundant_expert 0",
+                gpu_type=["H20"],
+            ),
         ],
     )
 

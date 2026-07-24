@@ -5,6 +5,12 @@ import sys
 import time
 import traceback
 
+# Importing this helper triggers the package initializer, which applies allocator configuration
+# before its torch imports for both module and direct-script server entrypoints.
+from rtp_llm.utils.pre_import_config import (
+    expandable_segments_auto_enabled_for_warmup,
+)
+
 import requests
 import torch
 
@@ -23,6 +29,11 @@ from rtp_llm.utils.concurrency_controller import init_controller
 from rtp_llm.utils.process_manager import ProcessManager
 
 setup_logging()
+if expandable_segments_auto_enabled_for_warmup():
+    logging.info(
+        "PYTORCH_CUDA_ALLOC_CONF=%s (auto-enabled for warmup to reduce allocator fragmentation)",
+        os.environ.get("PYTORCH_CUDA_ALLOC_CONF"),
+    )
 
 
 def check_server_health(server_port):

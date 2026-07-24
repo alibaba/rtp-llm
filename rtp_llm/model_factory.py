@@ -4,8 +4,6 @@ import os
 import sys
 from typing import Any, Dict, Optional, Type, Union
 
-import torch
-
 CUR_PATH = os.path.dirname(os.path.abspath(__file__))
 sys.path.append(os.path.join(str(CUR_PATH), ".."))
 
@@ -78,6 +76,14 @@ class ModelFactory:
         model_name = model_config.model_name or model_cls.__name__
         model_config.model_name = model_name
         engine_config.runtime_config.model_name = model_name
+
+        from rtp_llm.models_py.modules.factory.fused_moe.defs.warmup_diagnostics import (
+            reload_runtime_diagnostics,
+        )
+
+        # Refresh only diagnostic settings here. The C++ trace state owns the final
+        # warmup gate, including platform, multimodal, and FFN-disaggregation checks.
+        reload_runtime_diagnostics()
 
         model = model_cls.from_config(
             model_config=model_config,
