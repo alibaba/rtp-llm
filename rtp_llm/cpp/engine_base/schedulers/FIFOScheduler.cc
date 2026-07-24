@@ -28,11 +28,18 @@ FIFOScheduler::FIFOScheduler(const RuntimeConfig&                   runtime_conf
     max_seq_len_(model_config.max_seq_len),
     max_batch_tokens_size_(runtime_config.fifo_scheduler_config.max_batch_tokens_size),
     max_generate_batch_size_(runtime_config.max_generate_batch_size),
+    max_inited_kv_cache_streams_(
+        std::max<int64_t>(runtime_config.fifo_scheduler_config.max_inited_kv_cache_streams, 0)),
+    cp_force_single_prefill_(parallelism_config.prefill_cp_config.is_enabled()
+                             && runtime_config.fifo_scheduler_config.cp_force_single_prefill),
     need_fill_fake_stream_(parallelism_config.dp_size > 1 && parallelism_config.tp_rank == 0),
     metrics_reporter_(metrics_reporter) {
-    RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu]",
+    RTP_LLM_LOG_INFO("max_generate_batch_size is [%zu], max_batch_tokens_size is [%zu], "
+                     "cp_force_single_prefill is [%d], max_inited_kv_cache_streams is [%zu]",
                      max_generate_batch_size_,
-                     max_batch_tokens_size_);
+                     max_batch_tokens_size_,
+                     cp_force_single_prefill_,
+                     max_inited_kv_cache_streams_);
 }
 
 FIFOScheduler::~FIFOScheduler() {
@@ -174,6 +181,21 @@ size_t FIFOScheduler::countStreams(const std::list<ScheduleUnit>& queue) const {
     return total;
 }
 
+size_t FIFOScheduler::countInitedKVCacheStreams() const {
+    auto count_inited = [](const list<ScheduleUnit>& units) {
+        size_t count = 0;
+        for (const auto& unit : units) {
+            for (const auto& stream : unit.streams) {
+                if (stream && stream->curBlocksNum() > 0) {
+                    ++count;
+                }
+            }
+        }
+        return count;
+    };
+    return count_inited(waiting_) + count_inited(loading_) + count_inited(running_);
+}
+
 std::list<GenerateStreamPtr> FIFOScheduler::flattenRunning() const {
     std::list<GenerateStreamPtr> result;
     for (const auto& unit : running_) {
@@ -188,6 +210,9 @@ bool FIFOScheduler::canAdmitUnit(size_t              admitted_count,
                                  size_t              admitted_total_tokens,
                                  size_t              running_count,
                                  const ScheduleUnit& unit) const {
+    if (cp_force_single_prefill_ && pd_sep_config_.role_type != RoleType::DECODE && admitted_count > 0) {
+        return false;
+    }
     if (pd_sep_config_.role_type == RoleType::DECODE) {
         return running_count + admitted_count + unit.size() <= max_generate_batch_size_;
     }
@@ -213,11 +238,19 @@ void FIFOScheduler::admitWaitingUnits() {
     // Remove units with pre-existing errors to avoid zombie entries
     for (auto it = waiting_.begin(); it != waiting_.end();) {
         if (it->hasError()) {
+            for (auto& s : it->streams) {
+                if (!s->isFinished()) {
+                    s->finish();
+                }
+            }
             it = waiting_.erase(it);
         } else {
             ++it;
         }
     }
+
+    const size_t inited_kv_streams         = max_inited_kv_cache_streams_ > 0 ? countInitedKVCacheStreams() : 0;
+    size_t       admitted_new_init_streams = 0;
 
     for (auto it = waiting_.begin(); it != waiting_.end();) {
         auto& unit = *it;
@@ -247,6 +280,21 @@ void FIFOScheduler::admitWaitingUnits() {
             }
             ++it;
             continue;
+        }
+        // Check max_inited_kv_cache_streams limit
+        if (max_inited_kv_cache_streams_ > 0) {
+            size_t uninited_in_unit = 0;
+            for (const auto& s : unit.streams) {
+                if (s->curBlocksNum() == 0) {
+                    ++uninited_in_unit;
+                }
+            }
+            if (uninited_in_unit > 0
+                && inited_kv_streams + admitted_new_init_streams + uninited_in_unit > max_inited_kv_cache_streams_) {
+                ++it;
+                continue;
+            }
+            admitted_new_init_streams += uninited_in_unit;
         }
         if (admitted_count == 0 && unit.isGroup()) {
             admitted_group_id = unit.group_id;

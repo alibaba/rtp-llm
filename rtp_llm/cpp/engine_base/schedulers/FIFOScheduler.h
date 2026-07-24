@@ -55,6 +55,7 @@ private:
                                               const ScheduleUnit& unit) const;
     std::list<GenerateStreamPtr> flattenRunning() const;
     size_t                       countStreams(const std::list<ScheduleUnit>& queue) const;
+    size_t                       countInitedKVCacheStreams() const;
     void                         cancelUnits(std::list<ScheduleUnit>& units);
 
 protected:
@@ -64,13 +65,15 @@ protected:
     std::list<ScheduleUnit>         loading_;
     std::list<ScheduleUnit>         running_;
     std::shared_ptr<KVCacheManager> cache_manager_;
-    std::atomic<int64_t>            last_schedule_time_      = autil::TimeUtility::currentTimeInMilliSeconds();
-    size_t                          max_seq_len_             = 0;
-    size_t                          max_batch_tokens_size_   = 0;
-    size_t                          max_generate_batch_size_ = 1;
-    const bool                      need_fill_fake_stream_   = false;
-    std::atomic<bool>               stop_                    = false;
-    bool                            schedule_trigger_        = false;
+    std::atomic<int64_t>            last_schedule_time_          = autil::TimeUtility::currentTimeInMilliSeconds();
+    size_t                          max_seq_len_                 = 0;
+    size_t                          max_batch_tokens_size_       = 0;
+    size_t                          max_generate_batch_size_     = 1;
+    size_t                          max_inited_kv_cache_streams_ = 0;
+    bool                            cp_force_single_prefill_     = false;
+    const bool                      need_fill_fake_stream_       = false;
+    std::atomic<bool>               stop_                        = false;
+    bool                            schedule_trigger_            = false;
     std::mutex                      lock_;
     std::condition_variable         cond_;
     kmonitor::MetricsReporterPtr    metrics_reporter_ = nullptr;
