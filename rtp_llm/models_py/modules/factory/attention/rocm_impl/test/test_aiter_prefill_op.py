@@ -50,7 +50,12 @@ try:
         RopeConfig,
         RopeStyle,
     )
-    from rtp_llm.ops.compute_ops import get_typemeta
+    from rtp_llm.ops.compute_ops import (
+        FusedRopeKVCacheDecodeOpAsm,
+        FusedRopeKVCacheDecodeOpNonAsm,
+        LayerKVCache,
+        get_typemeta,
+    )
 
     _OPS_IMPORTABLE = True
 except ImportError:
@@ -113,6 +118,22 @@ def _make_rope_attn_configs(
     return cfg
 
 
+def _make_mrope_attn_configs(
+    head_num: int,
+    head_num_kv: int,
+    head_dim: int,
+    dtype: torch.dtype,
+    mrope_section=(16, 24, 24),
+):
+    """Qwen3-VL-style MRoPE configuration for the real ROCm fused op."""
+    cfg = _make_rope_attn_configs(head_num, head_num_kv, head_dim, dtype)
+    rope = cfg.rope_config
+    rope.style = RopeStyle.Mrope
+    rope.index_factor = 3
+    rope.mrope_dim1, rope.mrope_dim2, rope.mrope_dim3 = mrope_section
+    return cfg
+
+
 def _make_rope_prefill_inputs(
     input_lengths: List[int], device: torch.device, dtype: torch.dtype
 ):
@@ -149,6 +170,58 @@ def _make_rope_prefill_inputs(
     return attn_inputs
 
 
+def _make_mrope_decode_inputs(
+    sequence_lengths: List[int],
+    position_ids: torch.Tensor,
+    device: torch.device,
+    dtype: torch.dtype,
+    tokens_per_block: int = 16,
+):
+    """Build one-token-per-sequence inputs for the real ROCm decode RoPE op."""
+    batch_size = len(sequence_lengths)
+    attn_inputs = PyAttentionInputs()
+    attn_inputs.is_prefill = False
+    attn_inputs.dtype = get_typemeta(torch.empty(1, dtype=dtype))
+    attn_inputs.input_lengths = torch.ones(
+        batch_size, dtype=torch.int32, device="cpu"
+    ).pin_memory()
+    attn_inputs.sequence_lengths = torch.tensor(
+        sequence_lengths, dtype=torch.int32, device="cpu"
+    ).pin_memory()
+    attn_inputs.prefix_lengths = torch.zeros(
+        batch_size, dtype=torch.int32, device="cpu"
+    )
+    attn_inputs.padding_offset = torch.zeros(
+        batch_size, dtype=torch.int32, device=device
+    )
+    attn_inputs.cu_seqlens_device = torch.arange(
+        batch_size + 1, dtype=torch.int32, device=device
+    )
+    attn_inputs.cu_kv_seqlens_device = torch.tensor(
+        [0] + [sum(sequence_lengths[:idx]) + idx for idx in range(1, batch_size + 1)],
+        dtype=torch.int32,
+        device=device,
+    )
+    max_blocks = max(
+        (sequence_length + 1 + tokens_per_block - 1) // tokens_per_block
+        for sequence_length in sequence_lengths
+    )
+    block_table = torch.zeros((batch_size, max_blocks), dtype=torch.int32, device="cpu")
+    next_block = 0
+    for batch_idx, sequence_length in enumerate(sequence_lengths):
+        block_count = (sequence_length + 1 + tokens_per_block - 1) // tokens_per_block
+        block_table[batch_idx, :block_count] = torch.arange(
+            next_block, next_block + block_count, dtype=torch.int32
+        )
+        next_block += block_count
+    attn_inputs.kv_cache_kernel_block_id = block_table
+    attn_inputs.kv_cache_kernel_block_id_device = block_table.to(device)
+    attn_inputs.combo_position_ids = (
+        position_ids.to(device=device, dtype=torch.int32).contiguous().view(-1)
+    )
+    return attn_inputs, next_block
+
+
 def _apply_base_rope(q: torch.Tensor, k: torch.Tensor, input_lengths: List[int]):
     """Torch reference for base RoPE (style=Base, base=10000) — matches the
     RopeConfig produced by _make_rope_attn_configs. Used to validate the C++
@@ -171,6 +244,38 @@ def _apply_base_rope(q: torch.Tensor, k: torch.Tensor, input_lengths: List[int])
         cos_b = cos.unsqueeze(1)
         sin_b = sin.unsqueeze(1)
         return torch.cat([lo * cos_b - hi * sin_b, hi * cos_b + lo * sin_b], dim=-1)
+
+    return rot(q).to(q.dtype), rot(k).to(k.dtype)
+
+
+def _apply_mrope(
+    q: torch.Tensor,
+    k: torch.Tensor,
+    position_ids: torch.Tensor,
+    mrope_section=(16, 24, 24),
+):
+    """Torch reference for token-major three-axis Qwen3-VL MRoPE."""
+    head_dim = q.shape[-1]
+    half = head_dim // 2
+    if sum(mrope_section) != half:
+        raise ValueError("MRoPE sections must cover half of the head dimension")
+
+    axis_by_pair = torch.repeat_interleave(
+        torch.arange(3, device=q.device),
+        torch.tensor(mrope_section, device=q.device),
+    )
+    positions = position_ids.to(device=q.device, dtype=torch.float32)
+    pair_positions = positions[:, axis_by_pair]
+    inv_freq = 10000 ** (
+        -2.0 * torch.arange(half, dtype=torch.float32, device=q.device) / head_dim
+    )
+    angle = pair_positions * inv_freq.unsqueeze(0)
+    cos = torch.cos(angle).unsqueeze(1)
+    sin = torch.sin(angle).unsqueeze(1)
+
+    def rot(x):
+        lo, hi = x[..., :half], x[..., half:]
+        return torch.cat([lo * cos - hi * sin, hi * cos + lo * sin], dim=-1)
 
     return rot(q).to(q.dtype), rot(k).to(k.dtype)
 
@@ -1256,6 +1361,274 @@ class TestAiterPrefillImplNoKvRopeRealOp(unittest.TestCase):
 
     def test_nonasm_no_kv_rope_real_op_matches_reference(self):
         self._check_real_no_kv_rope_path(AiterPrefillImplNonAsm)
+
+
+@unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
+@unittest.skipUnless(_AITER_AVAILABLE, "Requires aiter")
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires ROCm attention wrapper module")
+class TestAiterPrefillImplMropeRealOp(unittest.TestCase):
+    """Numerical and validation coverage for Qwen3-VL MRoPE position IDs."""
+
+    def setUp(self):
+        torch.manual_seed(2)
+        self.device = torch.device("cuda")
+        self.dtype = torch.bfloat16
+
+    def _check_mrope_matches_reference(
+        self, impl_cls, *, define_padding_offset: bool = True
+    ):
+        input_lengths = [3, 2]
+        head_num = 4
+        head_num_kv = 2
+        head_dim = 128
+        cfg = _make_mrope_attn_configs(
+            head_num, head_num_kv, head_dim, dtype=self.dtype
+        )
+        attn_inputs = _make_rope_prefill_inputs(input_lengths, self.device, self.dtype)
+        if not define_padding_offset:
+            attn_inputs.padding_offset = torch.Tensor()
+        position_ids = torch.tensor(
+            [
+                [0, 0, 0],
+                [1, 4, 7],
+                [2, 5, 8],
+                [0, 0, 0],
+                [3, 6, 9],
+            ],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        attn_inputs.combo_position_ids = position_ids.flatten()
+        impl = impl_cls(cfg, attn_inputs)
+
+        total_tokens = sum(input_lengths)
+        q = torch.randn(
+            total_tokens, head_num, head_dim, dtype=self.dtype, device=self.device
+        )
+        k = torch.randn(
+            total_tokens, head_num_kv, head_dim, dtype=self.dtype, device=self.device
+        )
+        v = torch.randn(
+            total_tokens, head_num_kv, head_dim, dtype=self.dtype, device=self.device
+        )
+        qkv = _pack_qkv(q, k, v)
+
+        actual_q, actual_k, actual_v = impl.rope_kvcache_impl.forward(
+            qkv, None, impl.rope_params
+        )
+        ref_q, ref_k = _apply_mrope(q, k, position_ids)
+        ref_k_padded, ref_v_padded = _pad_kv(ref_k, v, attn_inputs.cu_kv_seqlens_device)
+
+        torch.testing.assert_close(actual_q, ref_q, atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(actual_k, ref_k_padded, atol=1e-2, rtol=1e-2)
+        torch.testing.assert_close(actual_v, ref_v_padded, atol=1e-2, rtol=1e-2)
+
+    def test_asm_mrope_uses_all_three_position_axes(self):
+        self._check_mrope_matches_reference(AiterPrefillImplAsm)
+
+    def test_nonasm_mrope_uses_all_three_position_axes(self):
+        self._check_mrope_matches_reference(AiterPrefillImplNonAsm)
+
+    def test_asm_mrope_accepts_undefined_padding_offset(self):
+        self._check_mrope_matches_reference(
+            AiterPrefillImplAsm, define_padding_offset=False
+        )
+
+    def test_prepare_in_place_refreshes_mrope_position_ids(self):
+        input_lengths = [3, 2]
+        head_num = 4
+        head_num_kv = 2
+        head_dim = 128
+        cfg = _make_mrope_attn_configs(
+            head_num, head_num_kv, head_dim, dtype=self.dtype
+        )
+        attn_inputs = _make_rope_prefill_inputs(input_lengths, self.device, self.dtype)
+        first_position_ids = torch.tensor(
+            [
+                [0, 0, 0],
+                [1, 1, 1],
+                [2, 2, 2],
+                [0, 0, 0],
+                [1, 1, 1],
+            ],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        attn_inputs.combo_position_ids = first_position_ids.flatten()
+        impl = AiterPrefillImplAsm(cfg, attn_inputs)
+
+        total_tokens = sum(input_lengths)
+        q = torch.randn(
+            total_tokens, head_num, head_dim, dtype=self.dtype, device=self.device
+        )
+        k = torch.randn(
+            total_tokens, head_num_kv, head_dim, dtype=self.dtype, device=self.device
+        )
+        v = torch.randn(
+            total_tokens, head_num_kv, head_dim, dtype=self.dtype, device=self.device
+        )
+        qkv = _pack_qkv(q, k, v)
+        first_q, _, _ = impl.rope_kvcache_impl.forward(qkv, None, impl.rope_params)
+
+        replay_inputs = _make_rope_prefill_inputs(
+            input_lengths, self.device, self.dtype
+        )
+        replay_position_ids = torch.tensor(
+            [
+                [0, 3, 6],
+                [1, 4, 7],
+                [2, 5, 8],
+                [0, 2, 4],
+                [1, 3, 5],
+            ],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        replay_inputs.combo_position_ids = replay_position_ids.flatten()
+        impl.rope_params.prepare_in_place(replay_inputs)
+        replay_q, _, _ = impl.rope_kvcache_impl.forward(qkv, None, impl.rope_params)
+        expected_q, _ = _apply_mrope(q, k, replay_position_ids)
+
+        self.assertFalse(torch.equal(first_q, replay_q))
+        torch.testing.assert_close(replay_q, expected_q, atol=1e-2, rtol=1e-2)
+
+    def test_prepare_in_place_rejects_invalid_mrope_position_ids(self):
+        cfg = _make_mrope_attn_configs(4, 2, 128, dtype=self.dtype)
+        capture_inputs = _make_rope_prefill_inputs([2], self.device, self.dtype)
+        capture_inputs.combo_position_ids = torch.tensor(
+            [[0, 0, 0], [1, 1, 1]],
+            dtype=torch.int32,
+            device=self.device,
+        ).flatten()
+        impl = AiterPrefillImplAsm(cfg, capture_inputs)
+
+        replay_inputs = _make_rope_prefill_inputs([2], self.device, self.dtype)
+        replay_inputs.combo_position_ids = torch.tensor(
+            [[0, 0, 0], [1, 1, 1]],
+            dtype=torch.float32,
+            device=self.device,
+        ).flatten()
+        with self.assertRaisesRegex(
+            RuntimeError, "prepare_in_place: combo_position_ids must be int32"
+        ):
+            impl.rope_params.prepare_in_place(replay_inputs)
+
+    def test_mrope_missing_position_ids_fails_during_prepare(self):
+        cfg = _make_mrope_attn_configs(4, 2, 128, dtype=self.dtype)
+        attn_inputs = _make_rope_prefill_inputs([2], self.device, self.dtype)
+        with self.assertRaisesRegex(
+            RuntimeError, "requires non-empty combo_position_ids"
+        ):
+            AiterPrefillImplAsm(cfg, attn_inputs)
+
+
+@unittest.skipUnless(_is_rocm(), "Requires ROCm GPU")
+@unittest.skipUnless(_OPS_IMPORTABLE, "Requires ROCm attention operators")
+class TestRocmDecodeMropeRealOp(unittest.TestCase):
+    """Numerical coverage for the distinct ROCm decode MRoPE kernels."""
+
+    def setUp(self):
+        torch.manual_seed(3)
+        self.device = torch.device("cuda")
+        self.dtype = torch.bfloat16
+
+    def _check_decode_matches_reference(
+        self,
+        op_cls,
+        sequence_lengths: List[int],
+        position_ids: torch.Tensor,
+    ):
+        head_num = 4
+        head_num_kv = 2
+        head_dim = 128
+        tokens_per_block = 16
+        cfg = _make_mrope_attn_configs(
+            head_num, head_num_kv, head_dim, dtype=self.dtype
+        )
+        cfg.max_seq_len = 64
+        attn_inputs, block_count = _make_mrope_decode_inputs(
+            sequence_lengths,
+            position_ids,
+            self.device,
+            self.dtype,
+            tokens_per_block,
+        )
+        op = op_cls(cfg)
+        params = op.prepare(attn_inputs)
+        token_num = len(sequence_lengths)
+        q = torch.randn(
+            token_num, head_num, head_dim, dtype=self.dtype, device=self.device
+        )
+        k = torch.randn(
+            token_num, head_num_kv, head_dim, dtype=self.dtype, device=self.device
+        )
+        v = torch.randn(
+            token_num, head_num_kv, head_dim, dtype=self.dtype, device=self.device
+        )
+        qkv = _pack_qkv(q, k, v)
+        kv_cache = LayerKVCache()
+        kv_cache.kv_cache_base = torch.zeros(
+            block_count,
+            2,
+            head_num_kv,
+            tokens_per_block,
+            head_dim,
+            dtype=self.dtype,
+            device=self.device,
+        )
+
+        actual_q = op.forward(qkv, kv_cache, params)
+        expected_q, _ = _apply_mrope(q, k, position_ids)
+        torch.testing.assert_close(actual_q, expected_q, atol=1e-2, rtol=1e-2)
+
+    def test_asm_single_sequence_uses_all_three_position_axes(self):
+        self._check_decode_matches_reference(
+            FusedRopeKVCacheDecodeOpAsm,
+            [3],
+            torch.tensor([[2, 5, 7]], dtype=torch.int32),
+        )
+
+    def test_nonasm_single_sequence_uses_all_three_position_axes(self):
+        self._check_decode_matches_reference(
+            FusedRopeKVCacheDecodeOpNonAsm,
+            [3],
+            torch.tensor([[2, 5, 7]], dtype=torch.int32),
+        )
+
+    def test_asm_multi_sequence_uses_token_major_position_ids(self):
+        self._check_decode_matches_reference(
+            FusedRopeKVCacheDecodeOpAsm,
+            [3, 5],
+            torch.tensor([[2, 5, 7], [4, 1, 9]], dtype=torch.int32),
+        )
+
+    def test_nonasm_multi_sequence_uses_token_major_position_ids(self):
+        self._check_decode_matches_reference(
+            FusedRopeKVCacheDecodeOpNonAsm,
+            [3, 5],
+            torch.tensor([[2, 5, 7], [4, 1, 9]], dtype=torch.int32),
+        )
+
+    def test_decode_without_kv_cache_fails_in_release_builds(self):
+        cfg = _make_mrope_attn_configs(4, 2, 128, dtype=self.dtype)
+        cfg.max_seq_len = 64
+        attn_inputs, _ = _make_mrope_decode_inputs(
+            [3],
+            torch.tensor([[2, 5, 7]], dtype=torch.int32),
+            self.device,
+            self.dtype,
+        )
+        op = FusedRopeKVCacheDecodeOpAsm(cfg)
+        params = op.prepare(attn_inputs)
+        qkv = torch.randn(
+            1,
+            4 * 128 + 2 * 2 * 128,
+            dtype=self.dtype,
+            device=self.device,
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "decode should have kv cache"):
+            op.forward(qkv, None, params)
 
 
 if __name__ == "__main__":

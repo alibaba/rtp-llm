@@ -339,8 +339,45 @@ class NewModelLoader:
             raise TypeError(
                 f"model_config num_experts must be an integer, got {num_experts!r}"
             )
-        if num_experts <= 0:
-            raise ValueError("EP loading requires model_config.num_experts")
+        if num_experts < 0:
+            raise ValueError(
+                f"model_config num_experts must be non-negative, got {num_experts}"
+            )
+        if num_experts == 0:
+            moe_top_k = (
+                self.model_config.get(
+                    "moe_k", self.model_config.get("num_experts_per_tok", 0)
+                )
+                if isinstance(self.model_config, dict)
+                else getattr(self.model_config, "moe_k", 0)
+            )
+            moe_style = (
+                self.model_config.get("moe_style", 0)
+                if isinstance(self.model_config, dict)
+                else getattr(self.model_config, "moe_style", 0)
+            )
+            for name, value in (("moe_k", moe_top_k), ("moe_style", moe_style)):
+                if isinstance(value, bool) or not isinstance(value, int):
+                    raise TypeError(
+                        f"model_config {name} must be an integer, got {value!r}"
+                    )
+                if value < 0:
+                    raise ValueError(
+                        f"model_config {name} must be non-negative, got {value}"
+                    )
+            if moe_top_k > 0 or moe_style > 0:
+                raise ValueError(
+                    "EP is configured for a model with MoE markers "
+                    f"(moe_k={moe_top_k}, moe_style={moe_style}), but "
+                    "model_config reports zero experts"
+                )
+            logger.warning(
+                "EP size %d is configured, but model_config reports zero experts; "
+                "the zero moe_k/moe_style markers identify a dense model, so expert "
+                "checkpoint filtering is disabled",
+                self.load_config.ep_size,
+            )
+            return None
         return _ExpertRangeFilter(
             num_experts,
             self.load_config.ep_size,
@@ -376,8 +413,12 @@ class NewModelLoader:
 
         return should_load
 
-    def _validate_ep_checkpoint_format(self, checkpoint_files) -> None:
-        if self.load_config.ep_size == 1:
+    def _validate_ep_checkpoint_format(
+        self,
+        checkpoint_files,
+        expert_filter: Optional[_ExpertRangeFilter],
+    ) -> None:
+        if expert_filter is None:
             return
         unsupported = [
             path
@@ -508,7 +549,8 @@ class NewModelLoader:
         if method != NewLoaderLoadMethod.SCRATCH:
             raise RuntimeError(f"Resolved unsupported load method: {method}")
         checkpoint_files = self._checkpoint_files()
-        self._validate_ep_checkpoint_format(checkpoint_files)
+        expert_filter = self._expert_filter()
+        self._validate_ep_checkpoint_format(checkpoint_files, expert_filter)
         model = self._create_model()
         if weight_mapper.is_rank_local_checkpoint(checkpoint_files) and not bool(
             getattr(model, "supports_rank_local_checkpoint", False)
@@ -518,8 +560,7 @@ class NewModelLoader:
                 "checkpoints; use a global HF checkpoint"
             )
         started = time.time()
-        expert_filter = self._expert_filter()
-        model_filter = model.checkpoint_weight_name_filter()
+        model_filter = self._model_checkpoint_name_filter(model)
         name_filter = self._checkpoint_name_filter(model_filter, expert_filter)
         selected_files = weight_mapper.select_safetensor_files(
             self._resolved_model_path(), checkpoint_files, model_filter
