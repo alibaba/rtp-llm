@@ -294,13 +294,10 @@ class CkptDatabase(BaseDatabase):
             # native helper (e.g. dev environments where torch ABI does not
             # match the prebuilt fast_safetensors).
             #
-            # force_nogds is set by the level-2 wake reload: the 'shm' copier's
-            # LoadWithShm C++ extension faults in cuMemcpyHtoDAsync_v2 when run
-            # after a torch_memory_saver pause/resume (its /dev/shm bounce
-            # buffer's host registration goes stale across the remap), whereas
-            # the nogds copier reads the same safetensors shards via pread into
-            # a framework host buffer and survives. Cold load keeps use_shm
-            # (faster, unaffected); only the wake reload forces nogds.
+            # force_nogds remains an explicit deployment/debug override. Normal
+            # cold load and level-2 wake both keep the default SHM copier; the
+            # repeated-wakeup regression was localized to downstream Mega
+            # pageable-D2H staging rather than this file copier.
             use_nogds = (
                 force_nogds or os.environ.get("FASTSAFETENSORS_NOGDS", "0") == "1"
             )
