@@ -140,8 +140,8 @@ GroupSlot makeSlot(Tier tier, BlockIdxType block) {
     return slot;
 }
 
-bool initEvictor(BlockTreeEvictor& evictor) {
-    return evictor.init(EvictionPolicy::LRU, EvictionPolicy::LRU, EvictionPolicy::FIFO);
+void initEvictor(BlockTreeEvictor& evictor) {
+    evictor.init(EvictionPolicy::LRU, EvictionPolicy::LRU, EvictionPolicy::FIFO);
 }
 
 class BlockTreeEvictorTestPeer {
@@ -229,9 +229,7 @@ public:
                 return status;
             },
             enable_reverse_eviction);
-        if (!initEvictor(*evictor_)) {
-            return false;
-        }
+        initEvictor(*evictor_);
 
         std::vector<GroupSlot> slots(groups_.size());
         host_blocks_.resize(groups_.size(), NULL_BLOCK_IDX);
@@ -319,7 +317,7 @@ protected:
                 return TransferStatus::OK;
             },
             false);
-        ASSERT_TRUE(initEvictor(*evictor_));
+        initEvictor(*evictor_);
     }
 
     BlockTreeInsertResult insert(const CacheKeysType& keys, const std::vector<std::vector<GroupSlot>>& slots) {
@@ -404,34 +402,6 @@ protected:
     std::unique_ptr<BlockTreeEvictor>   evictor_;
     size_t                              transfer_calls_{0};
 };
-
-TEST(BlockTreeEvictorInitTest, RejectsNullGroupWithoutThrowing) {
-    std::vector<ComponentGroupPtr> groups = {nullptr};
-    BlockTreeEvictor               evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
-
-    EXPECT_NO_THROW(EXPECT_FALSE(initEvictor(evictor)));
-}
-
-TEST(BlockTreeEvictorInitTest, RejectsNegativeGroupIdWithoutThrowing) {
-    std::vector<ComponentGroupPtr> groups = {makeFullGroup(-1)};
-    BlockTreeEvictor               evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
-
-    EXPECT_NO_THROW(EXPECT_FALSE(initEvictor(evictor)));
-}
-
-TEST(BlockTreeEvictorInitTest, RejectsOutOfRangeGroupIdWithoutThrowing) {
-    std::vector<ComponentGroupPtr> groups = {makeFullGroup(1)};
-    BlockTreeEvictor               evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
-
-    EXPECT_NO_THROW(EXPECT_FALSE(initEvictor(evictor)));
-}
-
-TEST(BlockTreeEvictorInitTest, RejectsGroupIdDifferentFromVectorIndexWithoutThrowing) {
-    std::vector<ComponentGroupPtr> groups = {makeFullGroup(0), makeFullGroup(0)};
-    BlockTreeEvictor               evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
-
-    EXPECT_NO_THROW(EXPECT_FALSE(initEvictor(evictor)));
-}
 
 TEST(BlockTreeEvictorPolicyTest, ForwardCascadeIncludesOnlyChainReceivers) {
     auto full                             = makeFullGroup(0);
@@ -1192,7 +1162,7 @@ TEST(BlockTreeEvictorCascadeTest, RejectsSlotsReservedByAnotherPlan) {
 
     std::vector<ComponentGroupPtr> groups = {full, swa, linear};
     BlockTreeEvictor               evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
-    ASSERT_TRUE(initEvictor(evictor));
+    initEvictor(evictor);
 
     GroupBlockSet full_blocks   = full->allocateBlocks(Tier::DEVICE, 1, BlockRefType::BLOCK_CACHE);
     GroupBlockSet swa_blocks    = swa->allocateBlocks(Tier::DEVICE, 1, BlockRefType::BLOCK_CACHE);
@@ -1259,7 +1229,7 @@ TEST(BlockTreeEvictorStatsTest, AggregatesCandidatesAcrossGroupsAndTiers) {
     group1->setDiskPool(disk_pool);
     std::vector<ComponentGroupPtr> groups = {group0, group1};
     BlockTreeEvictor               evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
-    ASSERT_TRUE(initEvictor(evictor));
+    initEvictor(evictor);
 
     GroupBlockSet      device_set = group0->allocateBlocks(Tier::DEVICE, 1, BlockRefType::BLOCK_CACHE);
     const BlockIdxType host_block = group0->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
@@ -1303,7 +1273,7 @@ TEST(BlockTreeEvictorPolicyTest, MatchDoesNotChangeFifoAdmissionOrder) {
     group->setDevicePools({device_pool}, {"tag_0"});
     std::vector<ComponentGroupPtr> groups = {group};
     BlockTreeEvictor               evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
-    ASSERT_TRUE(evictor.init(EvictionPolicy::FIFO, EvictionPolicy::LRU, EvictionPolicy::FIFO));
+    evictor.init(EvictionPolicy::FIFO, EvictionPolicy::LRU, EvictionPolicy::FIFO);
 
     GroupBlockSet device_set = group->allocateBlocks(Tier::DEVICE, 2, BlockRefType::BLOCK_CACHE);
     ASSERT_EQ(device_set.per_node.size(), 2u);
@@ -1344,7 +1314,7 @@ TEST(BlockTreeEvictorPolicyTest, ExistingGroupFillPrecedesNewSuffixAdmission) {
 
     std::vector<ComponentGroupPtr> groups = {group};
     BlockTreeEvictor               evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
-    ASSERT_TRUE(evictor.init(EvictionPolicy::FIFO, EvictionPolicy::LRU, EvictionPolicy::FIFO));
+    evictor.init(EvictionPolicy::FIFO, EvictionPolicy::LRU, EvictionPolicy::FIFO);
 
     BlockTree tree(1);
     GroupSlot empty_slot;
@@ -1385,7 +1355,7 @@ TEST(BlockTreeEvictorPolicyTest, MatchUpdatesLfuHitCountAndOrder) {
     group->setDevicePools({device_pool}, {"tag_0"});
     std::vector<ComponentGroupPtr> groups = {group};
     BlockTreeEvictor               evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
-    ASSERT_TRUE(evictor.init(EvictionPolicy::LFU, EvictionPolicy::LRU, EvictionPolicy::FIFO));
+    evictor.init(EvictionPolicy::LFU, EvictionPolicy::LRU, EvictionPolicy::FIFO);
 
     GroupBlockSet device_set = group->allocateBlocks(Tier::DEVICE, 2, BlockRefType::BLOCK_CACHE);
     ASSERT_EQ(device_set.per_node.size(), 2u);

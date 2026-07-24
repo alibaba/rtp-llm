@@ -661,6 +661,7 @@ TEST_F(BlockTreeCacheFactoryTest, OnlyCompatibleChainGroupsAggregate) {
     EXPECT_EQ(cache->componentGroups()[0]->evict_policy, CacheEvictPolicy::CHAIN);
     EXPECT_EQ(cache->componentGroups()[0]->tags(), (std::vector<std::string>{"full_a", "full_b"}));
     ASSERT_EQ(cache->componentGroups()[0]->devicePools().size(), 2u);
+    EXPECT_TRUE(cache->validateDeviceGroupTagsForComponentGroup(0, {"full_a", "full_b"}));
 }
 
 TEST_F(BlockTreeCacheFactoryTest, CompatibleSwaGroupsAggregateOnlyWhenPolicyWindowsMatch) {
@@ -717,6 +718,7 @@ TEST_F(BlockTreeCacheFactoryTest, MiddleDisabledTagIsExcludedWithoutShiftingReor
                                                            std::vector<std::string>{"full_a", "full_b"};
         ASSERT_EQ(cache->componentGroups().size(), 1u);
         EXPECT_EQ(cache->componentGroups()[0]->tags(), expected_tags);
+        EXPECT_TRUE(cache->validateDeviceGroupTagsForComponentGroup(0, expected_tags));
 
         const auto blocks = insertOneKeyThroughAllocator(config, allocator, /*key=*/701);
         auto       match  = cache->match(CacheKeysType{701});

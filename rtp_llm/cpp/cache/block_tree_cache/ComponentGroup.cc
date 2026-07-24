@@ -1,8 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/ComponentGroup.h"
 
 #include <limits>
-#include <unordered_set>
-
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -10,21 +8,6 @@ namespace rtp_llm {
 
 void ComponentGroup::setDevicePools(std::vector<DeviceBlockPoolPtr> pools, std::vector<std::string> tags) {
     RTP_LLM_CHECK_WITH_INFO(device_pools_.empty() && tags_.empty(), "component group device mapping is immutable");
-    RTP_LLM_CHECK_WITH_INFO(!pools.empty(), "component group device pools must not be empty");
-    RTP_LLM_CHECK_WITH_INFO(tags.empty() || pools.size() == tags.size(),
-                            "component group device pool/tag cardinality mismatch: pools=%zu tags=%zu",
-                            pools.size(),
-                            tags.size());
-    std::unordered_set<std::string> unique_tags;
-    for (size_t i = 0; i < pools.size(); ++i) {
-        RTP_LLM_CHECK_WITH_INFO(pools[i] != nullptr, "component group device pool[%zu] is null", i);
-        if (tags.empty()) {
-            continue;
-        }
-        RTP_LLM_CHECK_WITH_INFO(!tags[i].empty(), "component group tag[%zu] is empty", i);
-        RTP_LLM_CHECK_WITH_INFO(
-            unique_tags.insert(tags[i]).second, "component group contains duplicate tag [%s]", tags[i].c_str());
-    }
     device_pools_ = std::move(pools);
     tags_         = std::move(tags);
 }
@@ -71,64 +54,13 @@ ComponentGroupLayout::create(const std::vector<std::vector<size_t>>& component_l
     return layout;
 }
 
-bool ComponentGroup::finalizeLayout(std::vector<int> component_indices, const std::vector<Component>& components) {
+bool ComponentGroup::setLayout(std::vector<int> component_indices, ComponentGroupLayout layout) {
     if (layout_.has_value()) {
         RTP_LLM_LOG_ERROR("group %d layout is already sealed", component_group_id);
         return false;
     }
-
-    std::unordered_set<std::string>  tags;
-    std::vector<std::string>         component_tags;
-    std::vector<std::vector<size_t>> component_layer_bytes;
-    component_tags.reserve(component_indices.size());
-    component_layer_bytes.reserve(component_indices.size());
-    for (int component_index : component_indices) {
-        if (component_index < 0 || static_cast<size_t>(component_index) >= components.size()) {
-            RTP_LLM_LOG_ERROR("invalid component_index=%d group=%d registry_size=%zu",
-                              component_index,
-                              component_group_id,
-                              components.size());
-            return false;
-        }
-        const Component& component = components[static_cast<size_t>(component_index)];
-        if (component.component_group_id != component_group_id) {
-            RTP_LLM_LOG_ERROR("component[%d] belongs to group %d, expected %d",
-                              component_index,
-                              component.component_group_id,
-                              component_group_id);
-            return false;
-        }
-        if (component.tag.empty() || !tags.insert(component.tag).second) {
-            RTP_LLM_LOG_ERROR("component[%d] has empty or duplicate tag=%s", component_index, component.tag.c_str());
-            return false;
-        }
-        if (component.model_layer_ids.size() != component.layer_bytes.size()) {
-            RTP_LLM_LOG_ERROR("component[%d] layer id count %zu != layer bytes count %zu",
-                              component_index,
-                              component.model_layer_ids.size(),
-                              component.layer_bytes.size());
-            return false;
-        }
-        component_tags.push_back(component.tag);
-        component_layer_bytes.push_back(component.layer_bytes);
-    }
-
-    if (!tags_.empty() && tags_ != component_tags) {
-        RTP_LLM_LOG_ERROR("group %d device tag order does not match membership", component_group_id);
-        return false;
-    }
-
-    auto layout = ComponentGroupLayout::create(component_layer_bytes);
-    if (!layout.has_value()) {
-        RTP_LLM_LOG_ERROR("schema validation failed for group %d", component_group_id);
-        return false;
-    }
-    // Commit membership and layout together; neither is observable on failure.
-    if (tags_.empty()) {
-        tags_ = std::move(component_tags);
-    }
     component_indices_ = std::move(component_indices);
-    layout_            = std::move(*layout);
+    layout_            = std::move(layout);
     return true;
 }
 

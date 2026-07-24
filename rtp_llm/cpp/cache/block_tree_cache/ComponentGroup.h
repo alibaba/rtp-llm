@@ -122,7 +122,7 @@ public:
     CacheGroupType   group_type{CacheGroupType::FULL};
     CacheEvictPolicy evict_policy{CacheEvictPolicy::CHAIN};
 
-    bool finalizeLayout(std::vector<int> component_indices, const std::vector<Component>& components);
+    bool setLayout(std::vector<int> component_indices, ComponentGroupLayout layout);
 
     const std::vector<int>& componentIndices() const {
         return component_indices_;

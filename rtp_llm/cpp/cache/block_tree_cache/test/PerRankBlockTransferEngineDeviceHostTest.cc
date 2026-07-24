@@ -150,10 +150,15 @@ static ComponentGroupPtr makeDeviceHostGroup(int                                
     auto group                = std::make_shared<FullComponentGroup>();
     group->component_group_id = group_id;
     group->group_type         = CacheGroupType::FULL;
-    group->setDevicePools(std::move(device_pools));
+    std::vector<std::string> tags;
+    tags.reserve(component_indices.size());
+    for (int component_index : component_indices) {
+        tags.push_back(components[static_cast<size_t>(component_index)].tag);
+    }
+    group->setDevicePools(std::move(device_pools), std::move(tags));
     group->setHostPool(std::move(host_pool));
     group->setDiskPool(std::move(disk_pool));
-    (void)group->finalizeLayout(std::move(component_indices), components);
+    block_transfer_engine_test::setComponentGroupLayout(*group, std::move(component_indices), components);
     return group;
 }
 
@@ -467,45 +472,7 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitRejectsIncompleteDeviceHostLayout) 
     auto missing_host_group  = makeDeviceHostGroup(0, {0}, {device_pool_}, nullptr, {component_});
     auto missing_host_engine = makeEngine({missing_host_group}, {component_});
     expectStatus(missing_host_engine, desc, TransferStatus::INVALID_ARGS);
-
-    auto empty_group  = makeDeviceHostGroup(0, {}, {device_pool_}, host_pool_, {});
-    auto empty_engine = makeEngine({empty_group}, {});
-    expectStatus(empty_engine, desc, TransferStatus::INVALID_ARGS);
-
-    auto empty_component    = makeComponent(0, 0, std::vector<size_t>{});
-    auto empty_slots_group  = makeDeviceHostGroup(0, {0}, {device_pool_}, host_pool_, {empty_component});
-    auto empty_slots_engine = makeEngine({empty_slots_group}, {empty_component});
-    expectStatus(empty_slots_engine, desc, TransferStatus::INVALID_ARGS);
     host_pool_->free(host_block);
-}
-
-TEST_F(PerRankBlockTransferEngineTest, SubmitRejectsInvalidLayerSlotLayout) {
-    {
-        auto host_pool   = makeHostPool(64, 2, true);
-        auto device_pool = makeDevicePool({{64, 0}, {16, 0}}, 2, "per_rank_transfer_engine_zero_stride");
-        auto block       = poolMalloc(*device_pool);
-        auto host_block  = poolMalloc(*host_pool);
-        auto component   = makeComponent(0, 0, {64, 0});
-        auto group       = makeDeviceHostGroup(0, {0}, {device_pool}, host_pool, {component});
-        EXPECT_FALSE(group->hasLayout());
-        auto engine = makeEngine({group}, {component});
-        expectStatus(
-            engine, makeDescriptor(Tier::DEVICE, Tier::HOST, {block}, host_block), TransferStatus::INVALID_ARGS);
-    }
-
-    {
-        auto host_pool   = makeHostPool(65, 2, true);
-        auto device_pool = makeDevicePool({{64, 0}}, 2, "per_rank_transfer_engine_slot_mismatch");
-        auto block       = poolMalloc(*device_pool);
-        auto host_block  = poolMalloc(*host_pool);
-        auto component   = makeComponent(0, 0, {65});
-        auto group       = makeDeviceHostGroup(0, {0}, {device_pool}, host_pool, {component});
-        auto engine      = makeEngine({group}, {component});
-        expectStatus(
-            engine, makeDescriptor(Tier::DEVICE, Tier::HOST, {block}, host_block), TransferStatus::INVALID_ARGS);
-        expectStatus(
-            engine, makeDescriptor(Tier::HOST, Tier::DEVICE, {block}, host_block), TransferStatus::INVALID_ARGS);
-    }
 }
 
 TEST_F(PerRankBlockTransferEngineTest, UnusableCopyBufferReturnsDeviceIoError) {

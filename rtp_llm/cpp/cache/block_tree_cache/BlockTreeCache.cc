@@ -2,10 +2,8 @@
 
 #include <algorithm>
 #include <exception>
-#include <limits>
 #include <set>
 #include <unordered_map>
-#include <unordered_set>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockCacheTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeEvictor.h"
@@ -62,7 +60,8 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                    tre
                                std::unique_ptr<BlockCacheTaskPool>           task_pool,
                                std::vector<std::string>                      per_tag_tags,
                                std::vector<DeviceKVCacheGroupPtr>            per_tag_device_groups,
-                               std::vector<PerTagMapping>                    per_tag_mapping):
+                               std::vector<PerTagMapping>                    per_tag_mapping,
+                               std::vector<std::vector<std::string>>         device_group_tags):
     config_(std::move(config)),
     tree_(std::move(tree)),
     component_groups_(std::move(component_groups)),
@@ -70,6 +69,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                    tre
     per_tag_tags_(std::move(per_tag_tags)),
     per_tag_device_groups_(std::move(per_tag_device_groups)),
     per_tag_mapping_(std::move(per_tag_mapping)),
+    device_group_tags_(std::move(device_group_tags)),
     load_back_ticket_registry_(std::make_shared<LoadBackTicketRegistry>(
         [this](const LoadBackTicket& ticket) { return commitLoadBack(ticket); },
         [this](const LoadBackTicket& ticket) { abortLoadBack(ticket); })),
@@ -86,21 +86,7 @@ bool BlockTreeCache::init() {
         RTP_LLM_LOG_ERROR("cache is already initialized");
         return false;
     }
-    if (transfer_dispatcher_ == nullptr || task_pool_ == nullptr) {
-        RTP_LLM_LOG_ERROR("transfer dispatcher and task pool must be initialized");
-        return false;
-    }
-    if (!validateConfiguration()) {
-        RTP_LLM_LOG_ERROR("invalid configuration");
-        return false;
-    }
-    if (!initDeviceGroupTags()) {
-        return false;
-    }
-    if (!evictor_.init(config_.device_eviction_policy, config_.host_eviction_policy, config_.disk_eviction_policy)) {
-        RTP_LLM_LOG_ERROR("failed to initialize BlockTreeEvictor");
-        return false;
-    }
+    evictor_.init(config_.device_eviction_policy, config_.host_eviction_policy, config_.disk_eviction_policy);
     if (!task_pool_->start()) {
         RTP_LLM_LOG_ERROR("failed to start task pool, size=%d", config_.eviction_thread_pool_size);
         return false;
@@ -124,183 +110,6 @@ bool BlockTreeCache::init() {
                          component_group->diskPool() ? "enabled" : "null");
     }
     initialized_ = true;
-    return true;
-}
-
-bool BlockTreeCache::initDeviceGroupTags() {
-    device_group_tags_.clear();
-    device_group_tags_.resize(component_groups_.size());
-    if (per_tag_mapping_.empty() || per_tag_tags_.empty()) {
-        RTP_LLM_LOG_ERROR("declarative mapping registry must not be empty");
-        return false;
-    }
-    if (per_tag_tags_.size() != per_tag_mapping_.size()) {
-        RTP_LLM_LOG_ERROR(
-            "tag/mapping size mismatch, tags=%zu mappings=%zu", per_tag_tags_.size(), per_tag_mapping_.size());
-        return false;
-    }
-    for (size_t group_id = 0; group_id < component_groups_.size(); ++group_id) {
-        const ComponentGroupPtr& component_group = component_groups_[group_id];
-        if (component_group == nullptr || component_group->component_group_id != static_cast<int>(group_id)
-            || component_group->devicePoolCount() == 0) {
-            RTP_LLM_LOG_ERROR("invalid component group, group=%zu", group_id);
-            return false;
-        }
-        device_group_tags_[group_id].assign(component_group->devicePoolCount(), {});
-    }
-
-    for (size_t tag_index = 0; tag_index < per_tag_mapping_.size(); ++tag_index) {
-        const PerTagMapping& mapping = per_tag_mapping_[tag_index];
-        if (mapping.component_group_id == -1) {
-            if (mapping.local_pool_index != -1) {
-                RTP_LLM_LOG_ERROR("invalid non-reusable mapping, tag=%s", per_tag_tags_[tag_index].c_str());
-                return false;
-            }
-            continue;
-        }
-        if (mapping.component_group_id < 0 || mapping.local_pool_index < 0) {
-            RTP_LLM_LOG_ERROR("negative mapping index, tag=%s", per_tag_tags_[tag_index].c_str());
-            return false;
-        }
-        const size_t group_id      = static_cast<size_t>(mapping.component_group_id);
-        const size_t local_pool_id = static_cast<size_t>(mapping.local_pool_index);
-        if (group_id >= device_group_tags_.size() || local_pool_id >= device_group_tags_[group_id].size()
-            || !device_group_tags_[group_id][local_pool_id].empty() || per_tag_tags_[tag_index].empty()) {
-            RTP_LLM_LOG_ERROR("invalid mapping, tag=%s group=%zu local=%zu",
-                              per_tag_tags_[tag_index].c_str(),
-                              group_id,
-                              local_pool_id);
-            return false;
-        }
-        device_group_tags_[group_id][local_pool_id] = per_tag_tags_[tag_index];
-    }
-
-    for (size_t group_id = 0; group_id < device_group_tags_.size(); ++group_id) {
-        const std::vector<std::string>& device_group_tags = device_group_tags_[group_id];
-        if (std::any_of(device_group_tags.begin(), device_group_tags.end(), [](const std::string& tag) {
-                return tag.empty();
-            })) {
-            RTP_LLM_LOG_ERROR("incomplete mapping, group=%zu", group_id);
-            return false;
-        }
-        if (device_group_tags != component_groups_[group_id]->tags()) {
-            RTP_LLM_LOG_ERROR("component group tag mapping mismatch, group=%zu", group_id);
-            return false;
-        }
-    }
-    return true;
-}
-
-bool BlockTreeCache::validateConfiguration() const {
-    if (tree_ == nullptr || components_ == nullptr) {
-        RTP_LLM_LOG_ERROR("tree and component registry must be initialized");
-        return false;
-    }
-    if (component_groups_.empty() && !components_->empty()) {
-        RTP_LLM_LOG_ERROR("empty component groups require an empty component registry");
-        return false;
-    }
-    if (config_.enable_disk_cache && !config_.enable_memory_cache) {
-        RTP_LLM_LOG_ERROR("disk cache requires memory cache");
-        return false;
-    }
-    if (config_.enable_load_back && !config_.enable_memory_cache) {
-        RTP_LLM_LOG_ERROR("load back requires memory cache");
-        return false;
-    }
-
-    for (size_t group_index = 0; group_index < component_groups_.size(); ++group_index) {
-        const ComponentGroupPtr& group = component_groups_[group_index];
-        if (group == nullptr || group->component_group_id != static_cast<int>(group_index)) {
-            RTP_LLM_LOG_ERROR("component group must be non-null and indexed by id, index=%zu", group_index);
-            return false;
-        }
-        if (!group->hasLayout()) {
-            RTP_LLM_LOG_ERROR("component group %zu has no finalized layout", group_index);
-            return false;
-        }
-
-        const auto& membership = group->componentIndices();
-        const auto& layout     = group->layout();
-        if (membership.empty() || membership.size() != layout.componentCount()
-            || membership.size() != group->devicePoolCount()) {
-            RTP_LLM_LOG_ERROR("group %zu membership/layout/pool counts differ: %zu/%zu/%zu",
-                              group_index,
-                              membership.size(),
-                              layout.componentCount(),
-                              group->devicePoolCount());
-            return false;
-        }
-
-        std::unordered_set<std::string> tags;
-        size_t                          slice_index     = 0;
-        size_t                          expected_offset = 0;
-        for (size_t component_position = 0; component_position < membership.size(); ++component_position) {
-            const int component_index = membership[component_position];
-            if (component_index < 0 || static_cast<size_t>(component_index) >= components_->size()) {
-                RTP_LLM_LOG_ERROR("group %zu has invalid component index %d", group_index, component_index);
-                return false;
-            }
-            const Component& component = (*components_)[static_cast<size_t>(component_index)];
-            if (component.component_id != component_index
-                || component.component_group_id != static_cast<int>(group_index) || component.tag.empty()
-                || !tags.insert(component.tag).second || component.layerCount() == 0
-                || component.model_layer_ids.size() != component.layerCount()) {
-                RTP_LLM_LOG_ERROR("invalid component binding index=%d group=%zu pool_position=%zu",
-                                  component_index,
-                                  group_index,
-                                  component_position);
-                return false;
-            }
-            for (size_t layer_index = 0; layer_index < component.layerCount(); ++layer_index) {
-                if (slice_index >= layout.slices().size()) {
-                    RTP_LLM_LOG_ERROR("group %zu layout has too few slices", group_index);
-                    return false;
-                }
-                const auto&  slice = layout.slices()[slice_index++];
-                const size_t bytes = component.layerBytes(layer_index);
-                if (bytes == 0 || bytes > std::numeric_limits<size_t>::max() - expected_offset
-                    || slice.component_idx != component_position || slice.layer_idx != layer_index
-                    || slice.offset_bytes != expected_offset) {
-                    RTP_LLM_LOG_ERROR("group %zu layout drift at component=%zu layer=%zu",
-                                      group_index,
-                                      component_position,
-                                      layer_index);
-                    return false;
-                }
-                expected_offset += bytes;
-            }
-        }
-        if (slice_index != layout.slices().size() || expected_offset != layout.payloadBytes()) {
-            RTP_LLM_LOG_ERROR("group %zu layout slice count or payload drift", group_index);
-            return false;
-        }
-
-        const auto host_pool = group->hostPool();
-        const auto disk_pool = group->diskPool();
-        if (config_.enable_memory_cache && host_pool == nullptr) {
-            RTP_LLM_LOG_ERROR("memory cache group %zu has no host pool", group_index);
-            return false;
-        }
-        if (config_.enable_disk_cache && disk_pool == nullptr) {
-            RTP_LLM_LOG_ERROR("disk cache group %zu has no disk pool", group_index);
-            return false;
-        }
-        if (host_pool != nullptr && host_pool->payloadBytes() != layout.payloadBytes()) {
-            RTP_LLM_LOG_ERROR("group %zu host/layout payload mismatch: %zu/%zu",
-                              group_index,
-                              host_pool->payloadBytes(),
-                              layout.payloadBytes());
-            return false;
-        }
-        if (disk_pool != nullptr && disk_pool->payloadBytes() != layout.payloadBytes()) {
-            RTP_LLM_LOG_ERROR("group %zu disk/layout payload mismatch: %zu/%zu",
-                              group_index,
-                              disk_pool->payloadBytes(),
-                              layout.payloadBytes());
-            return false;
-        }
-    }
     return true;
 }
 

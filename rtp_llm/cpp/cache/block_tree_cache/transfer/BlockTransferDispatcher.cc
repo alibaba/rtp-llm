@@ -4,7 +4,6 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
-#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
@@ -13,10 +12,6 @@ BlockTransferDispatcher::BlockTransferDispatcher(std::shared_ptr<PerRankBlockTra
     per_rank_engine_(std::move(per_rank_engine)), multi_rank_engine_(std::move(multi_rank_engine)) {}
 
 TransferStatus BlockTransferDispatcher::executePerRank(const TransferDescriptor& descriptor) const {
-    if (per_rank_engine_ == nullptr) {
-        RTP_LLM_LOG_WARNING("per-rank engine is not initialized");
-        return TransferStatus::INVALID_ARGS;
-    }
     return per_rank_engine_->submit(descriptor).status();
 }
 

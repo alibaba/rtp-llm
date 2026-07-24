@@ -136,16 +136,6 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
             slot_device_bytes += buffer.size_bytes;
         }
 
-        if (slot_device_bytes != expected_bytes) {
-            RTP_LLM_LOG_WARNING("device bytes %zu != layer bytes %zu component=%d layer=%zu block=%d",
-                                slot_device_bytes,
-                                expected_bytes,
-                                component_index,
-                                slice.layer_idx,
-                                device_block);
-            out_status = TransferStatus::INVALID_ARGS;
-            return plan;
-        }
     }
 
     plan.single_device = single_device;

@@ -114,6 +114,20 @@ std::shared_ptr<const std::vector<Component>> makeComponentRegistry(std::vector<
     return std::make_shared<const std::vector<Component>>(std::move(components));
 }
 
+void setComponentGroupLayout(ComponentGroup& group,
+                             std::vector<int> component_indices,
+                             const std::vector<Component>& components) {
+    std::vector<std::vector<size_t>> component_layer_bytes;
+    component_layer_bytes.reserve(component_indices.size());
+    for (const int component_index : component_indices) {
+        RTP_LLM_CHECK(component_index >= 0 && static_cast<size_t>(component_index) < components.size());
+        component_layer_bytes.push_back(components[static_cast<size_t>(component_index)].layer_bytes);
+    }
+    auto layout = ComponentGroupLayout::create(component_layer_bytes);
+    RTP_LLM_CHECK(layout.has_value());
+    RTP_LLM_CHECK(group.setLayout(std::move(component_indices), std::move(*layout)));
+}
+
 TransferDescriptor makeDescriptor(Tier                             source_tier,
                                   Tier                             target_tier,
                                   const std::vector<BlockIdxType>& device_blocks,

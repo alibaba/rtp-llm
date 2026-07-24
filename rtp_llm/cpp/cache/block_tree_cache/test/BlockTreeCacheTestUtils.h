@@ -63,6 +63,10 @@ makeBlockTreeCacheForTest(std::unique_ptr<BlockTree>        tree,
                           std::shared_ptr<StorageBackend>   storage_backend   = nullptr,
                           std::shared_ptr<BroadcastManager> broadcast_manager = nullptr);
 
+void setComponentGroupLayoutForTest(ComponentGroup&                 group,
+                                    std::vector<int>                component_indices,
+                                    const std::vector<Component>&   components);
+
 bool insertComponentGroupSlots(BlockTreeCache&                            cache,
                                TreeNode*                                  parent,
                                const CacheKeysType&                       cache_keys,

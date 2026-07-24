@@ -16,6 +16,12 @@
 
 namespace rtp_llm::block_tree_cache_test {
 
+void setComponentGroupLayoutForTest(ComponentGroup& group,
+                                    std::vector<int> component_indices,
+                                    const std::vector<Component>& components) {
+    block_transfer_engine_test::setComponentGroupLayout(group, std::move(component_indices), components);
+}
+
 namespace {
 
 class BlockTreeCacheBuilder {
@@ -28,6 +34,11 @@ public:
                                                               std::shared_ptr<BroadcastManager> broadcast_manager) {
         std::vector<BlockTreeCache::PerTagMapping> per_tag_mapping = preparePerTagMapping(component_groups, components);
         std::vector<std::string>                   per_tag_tags = preparePerTagTags(component_groups, per_tag_mapping);
+        std::vector<std::vector<std::string>>      device_group_tags;
+        device_group_tags.reserve(component_groups.size());
+        for (const ComponentGroupPtr& component_group : component_groups) {
+            device_group_tags.push_back(component_group->tags());
+        }
         std::vector<DeviceKVCacheGroupPtr>         per_tag_device_groups(per_tag_mapping.size());
         auto components_ptr  = std::make_shared<const std::vector<Component>>(std::move(components));
         auto per_rank_engine = std::make_shared<PerRankBlockTransferEngine>(component_groups, components_ptr);
@@ -49,7 +60,8 @@ public:
                                                                                  std::move(task_pool),
                                                                                  std::move(per_tag_tags),
                                                                                  std::move(per_tag_device_groups),
-                                                                                 std::move(per_tag_mapping));
+                                                                                 std::move(per_tag_mapping),
+                                                                                 std::move(device_group_tags));
         if (!cache->init()) {
             return nullptr;
         }
@@ -204,7 +216,7 @@ private:
                     membership.push_back(component.component_id);
                     components.push_back(std::move(component));
                 }
-                RTP_LLM_CHECK(component_group->finalizeLayout(std::move(membership), components));
+                setComponentGroupLayoutForTest(*component_group, std::move(membership), components);
             }
 
             {
@@ -665,7 +677,7 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
     if (options.enable_disk) {
         full->setDiskPool(environment->disk_pools[0]);
     }
-    RTP_LLM_CHECK(full->finalizeLayout({0, 1}, environment->components));
+    setComponentGroupLayoutForTest(*full, {0, 1}, environment->components);
 
     auto swa                = std::make_shared<SWAComponentGroup>(/*sliding_window_size=*/2,
                                                    /*seq_size_per_block=*/1);
@@ -675,7 +687,7 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
     if (options.enable_disk) {
         swa->setDiskPool(environment->disk_pools[1]);
     }
-    RTP_LLM_CHECK(swa->finalizeLayout({2}, environment->components));
+    setComponentGroupLayoutForTest(*swa, {2}, environment->components);
     environment->groups = {full, swa};
     BlockTreeCacheConfig config;
     config.enable_device_cache     = true;

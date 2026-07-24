@@ -48,7 +48,7 @@ public:
                      ExecuteTransferFn               execute_transfer,
                      bool                            enable_reverse_eviction);
 
-    bool init(EvictionPolicy device_policy, EvictionPolicy host_policy, EvictionPolicy disk_policy);
+    void init(EvictionPolicy device_policy, EvictionPolicy host_policy, EvictionPolicy disk_policy);
 
     // ---- Semantic events (must be called while holding BlockTreeCache mutex) ----
     // Initialize candidate meta for new nodes and refresh their candidacy.

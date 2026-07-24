@@ -142,7 +142,8 @@ public:
                    std::unique_ptr<BlockCacheTaskPool>           task_pool,
                    std::vector<std::string>                      per_tag_tags,
                    std::vector<DeviceKVCacheGroupPtr>            per_tag_device_groups,
-                   std::vector<PerTagMapping>                    per_tag_mapping);
+                   std::vector<PerTagMapping>                    per_tag_mapping,
+                   std::vector<std::vector<std::string>>         device_group_tags);
 
     ~BlockTreeCache();
     bool init();
@@ -238,8 +239,6 @@ public:
 private:
     friend class HybridKVCacheAllocator;
 
-    bool initDeviceGroupTags();
-    bool validateConfiguration() const;
     void
     insertSparse(TreeNode* parent, const CacheKeysType& cache_keys, const std::vector<std::vector<GroupSlot>>& slots);
     void insertImpl(TreeNode*                                  parent,

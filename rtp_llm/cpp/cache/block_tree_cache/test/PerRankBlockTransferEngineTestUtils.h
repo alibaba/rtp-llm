@@ -41,6 +41,10 @@ Component makeSchemaComponent(int                        component_id,
 
 std::shared_ptr<const std::vector<Component>> makeComponentRegistry(std::vector<Component> components);
 
+void setComponentGroupLayout(ComponentGroup&                 group,
+                             std::vector<int>                component_indices,
+                             const std::vector<Component>&   components);
+
 TransferDescriptor makeDescriptor(Tier                             source_tier,
                                   Tier                             target_tier,
                                   const std::vector<BlockIdxType>& device_blocks,

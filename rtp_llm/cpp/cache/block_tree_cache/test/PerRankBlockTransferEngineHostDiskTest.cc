@@ -63,7 +63,7 @@ ComponentGroupPtr makeHostDiskGroup(int                                     grou
     for (const Component& component : components) {
         component_indices.push_back(component.component_id);
     }
-    (void)group->finalizeLayout(std::move(component_indices), components);
+    block_transfer_engine_test::setComponentGroupLayout(*group, std::move(component_indices), components);
     return group;
 }
 

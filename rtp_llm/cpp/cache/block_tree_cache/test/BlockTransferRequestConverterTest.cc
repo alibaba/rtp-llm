@@ -70,7 +70,13 @@ std::vector<ComponentGroupPtr> makeComponentGroups() {
                 makeConverterComponent(local, group_id, component_group->tags()[static_cast<size_t>(local)]));
             component_indices.push_back(local);
         }
-        EXPECT_TRUE(component_group->finalizeLayout(std::move(component_indices), group_components));
+        std::vector<std::vector<size_t>> component_layer_bytes(static_cast<size_t>(pool_count), {128});
+        auto layout = ComponentGroupLayout::create(component_layer_bytes);
+        EXPECT_TRUE(layout.has_value());
+        if (!layout.has_value()) {
+            return {};
+        }
+        EXPECT_TRUE(component_group->setLayout(std::move(component_indices), std::move(*layout)));
         component_groups.push_back(component_group);
     }
     return component_groups;

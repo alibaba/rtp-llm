@@ -112,7 +112,7 @@ static std::unique_ptr<BlockTreeCache> makeBroadcastCache(const std::shared_ptr<
     DeviceBlockPoolPtr device_pool = makeDevicePool({{256, 0}}, 8, "multi_rank_engine_device");
     full->setDevicePools({device_pool}, {"tag_0"});
     std::vector<Component> components = {block_transfer_engine_test::makeSchemaComponent(0, 0, "tag_0", {256})};
-    RTP_LLM_CHECK(full->finalizeLayout({0}, components));
+    setComponentGroupLayoutForTest(*full, {0}, components);
     std::vector<ComponentGroupPtr> groups = {full};
     return makeBlockTreeCacheForTest(std::move(tree),
                                      std::move(groups),
@@ -147,7 +147,7 @@ static void sealBroadcastLayout(const std::shared_ptr<FullComponentGroup>& group
     const std::string component_tag   = group->tags().front();
     components.push_back(block_transfer_engine_test::makeSchemaComponent(
         component_index, group->component_group_id, component_tag, {payload_bytes}));
-    RTP_LLM_CHECK(group->finalizeLayout({component_index}, components));
+    setComponentGroupLayoutForTest(*group, {component_index}, components);
 }
 
 static std::vector<TransferDescriptor> makeBroadcastDescriptors() {

@@ -333,6 +333,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     std::vector<BlockTreeCache::PerTagMapping> mappings(static_cast<size_t>(group_count), {-1, -1});
     std::vector<ComponentGroupPtr>             component_groups;
     std::vector<Component>                     components;
+    std::vector<std::vector<std::string>>      device_group_tags;
     tags.reserve(static_cast<size_t>(group_count));
     device_groups.reserve(static_cast<size_t>(group_count));
     for (int gid = 0; gid < group_count; ++gid) {
@@ -342,6 +343,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
 
     const auto plan = buildAggregationPlan(cache_config);
     component_groups.reserve(plan.members.size());
+    device_group_tags.reserve(plan.members.size());
     for (size_t aggregate_index = 0; aggregate_index < plan.members.size(); ++aggregate_index) {
         const auto&                     members = plan.members[aggregate_index];
         const auto&                     first = cache_config.topology().groupById(static_cast<size_t>(members.front()));
@@ -350,9 +352,11 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
         std::vector<DeviceBlockPoolPtr> device_pools;
         std::vector<std::string>        member_tags;
         std::vector<int>                component_indices;
+        std::vector<std::vector<size_t>> component_layer_bytes;
         device_pools.reserve(members.size());
         member_tags.reserve(members.size());
         component_indices.reserve(members.size());
+        component_layer_bytes.reserve(members.size());
 
         for (size_t local_pool = 0; local_pool < members.size(); ++local_pool) {
             const int   gid      = members[local_pool];
@@ -394,17 +398,23 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
                 component.layer_bytes.push_back(physical_stride);
             }
             component_indices.push_back(component.component_id);
+            component_layer_bytes.push_back(component.layer_bytes);
             components.push_back(std::move(component));
             mappings[static_cast<size_t>(gid)] = {component_group_id, static_cast<int>(local_pool)};
         }
 
         component_group->setDevicePools(std::move(device_pools), std::move(member_tags));
-        RTP_LLM_CHECK_WITH_INFO(component_group->finalizeLayout(std::move(component_indices), components),
+        auto layout = ComponentGroupLayout::create(component_layer_bytes);
+        RTP_LLM_CHECK_WITH_INFO(layout.has_value(),
                                 "createBlockTreeCache: failed to finalize layout for component group %d",
+                                component_group_id);
+        RTP_LLM_CHECK_WITH_INFO(component_group->setLayout(std::move(component_indices), std::move(*layout)),
+                                "createBlockTreeCache: failed to seal layout for component group %d",
                                 component_group_id);
         RTP_LLM_LOG_INFO("createBlockTreeCache: group[%d] layout sealed: payload_bytes=%zu",
                          component_group_id,
                          component_group->layout().payloadBytes());
+        device_group_tags.push_back(component_group->tags());
         component_groups.push_back(std::move(component_group));
     }
 
@@ -505,7 +515,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
                                                    std::move(task_pool),
                                                    std::move(tags),
                                                    std::move(device_groups),
-                                                   std::move(mappings));
+                                                   std::move(mappings),
+                                                   std::move(device_group_tags));
     if (!result->init()) {
         RTP_LLM_LOG_ERROR("createBlockTreeCache: BlockTreeCache init failed");
         return nullptr;

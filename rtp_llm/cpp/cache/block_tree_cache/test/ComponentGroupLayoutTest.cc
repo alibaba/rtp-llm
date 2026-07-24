@@ -7,20 +7,6 @@
 namespace rtp_llm {
 namespace {
 
-Component makeComponent(int                        component_id,
-                        int                        group_id,
-                        const std::string&         tag,
-                        const std::vector<int>&    model_layer_ids,
-                        const std::vector<size_t>& layer_bytes) {
-    Component component;
-    component.component_id       = component_id;
-    component.component_group_id = group_id;
-    component.tag                = tag;
-    component.model_layer_ids    = model_layer_ids;
-    component.layer_bytes        = layer_bytes;
-    return component;
-}
-
 TEST(ComponentGroupLayoutTest, SingleComponentOffsetsAndPayload) {
     const auto layout = ComponentGroupLayout::create({{100, 200, 150}});
     ASSERT_TRUE(layout.has_value());
@@ -60,41 +46,25 @@ TEST(ComponentGroupLayoutTest, RejectsInvalidLayerBytes) {
     EXPECT_FALSE(ComponentGroupLayout::create({{8, 0}}).has_value());
 }
 
-TEST(ComponentGroupFinalizeLayoutTest, SealsMembershipAndLayoutTogether) {
-    const std::vector<Component> components = {
-        makeComponent(0, 0, "a", {0}, {64}),
-        makeComponent(1, 0, "b", {0}, {32}),
-    };
+TEST(ComponentGroupSetLayoutTest, SealsMembershipAndLayoutTogether) {
+    auto layout = ComponentGroupLayout::create({{64}, {32}});
+    ASSERT_TRUE(layout.has_value());
 
     auto group                = std::make_shared<FullComponentGroup>();
     group->component_group_id = 0;
     EXPECT_FALSE(group->hasLayout());
     EXPECT_TRUE(group->componentIndices().empty());
 
-    ASSERT_TRUE(group->finalizeLayout({0, 1}, components));
+    ASSERT_TRUE(group->setLayout({0, 1}, std::move(*layout)));
     ASSERT_TRUE(group->hasLayout());
     EXPECT_EQ(group->componentIndices(), (std::vector<int>{0, 1}));
     EXPECT_EQ(group->layout().payloadBytes(), 96u);
 
-    EXPECT_FALSE(group->finalizeLayout({1, 0}, components));
+    auto replacement = ComponentGroupLayout::create({{32}, {64}});
+    ASSERT_TRUE(replacement.has_value());
+    EXPECT_FALSE(group->setLayout({1, 0}, std::move(*replacement)));
     EXPECT_EQ(group->componentIndices(), (std::vector<int>{0, 1}));
     EXPECT_EQ(group->layout().payloadBytes(), 96u);
-}
-
-TEST(ComponentGroupFinalizeLayoutTest, FailedFinalizeCommitsNothing) {
-    const std::vector<Component> components = {
-        makeComponent(0, 0, "a", {0}, {64}),
-        makeComponent(1, 1, "b", {0}, {32}),
-    };
-
-    const std::vector<std::vector<int>> bad_memberships = {{0, 2}, {0, 1}, {}};
-    for (const auto& membership : bad_memberships) {
-        auto group                = std::make_shared<FullComponentGroup>();
-        group->component_group_id = 0;
-        EXPECT_FALSE(group->finalizeLayout(membership, components));
-        EXPECT_FALSE(group->hasLayout());
-        EXPECT_TRUE(group->componentIndices().empty());
-    }
 }
 
 }  // namespace

@@ -23,40 +23,16 @@ BlockTreeEvictor::BlockTreeEvictor(std::vector<ComponentGroupPtr>& component_gro
     execute_transfer_(std::move(execute_transfer)),
     enable_reverse_eviction_(enable_reverse_eviction) {}
 
-bool BlockTreeEvictor::init(EvictionPolicy device_policy, EvictionPolicy host_policy, EvictionPolicy disk_policy) {
+void BlockTreeEvictor::init(EvictionPolicy device_policy, EvictionPolicy host_policy, EvictionPolicy disk_policy) {
     // Own one heap per (group, tier), using the cache-wide per-tier policies.
     heaps_.clear();
     heaps_.resize(component_groups_.size());
     for (size_t group_index = 0; group_index < component_groups_.size(); ++group_index) {
-        const auto& group = component_groups_[group_index];
-        if (group == nullptr) {
-            RTP_LLM_LOG_ERROR("component group must not be null");
-            heaps_.clear();
-            return false;
-        }
-        const int gid = group->component_group_id;
-        if (gid < 0 || static_cast<size_t>(gid) >= component_groups_.size()) {
-            RTP_LLM_LOG_ERROR("invalid component_group_id=%d, group_count=%zu", gid, component_groups_.size());
-            heaps_.clear();
-            return false;
-        }
-        if (static_cast<size_t>(gid) != group_index) {
-            RTP_LLM_LOG_ERROR("component_group_id=%d must equal vector index=%zu", gid, group_index);
-            heaps_.clear();
-            return false;
-        }
-        auto& tier_heaps = heaps_[static_cast<size_t>(gid)];
-        if (tier_heaps.device || tier_heaps.host || tier_heaps.disk) {
-            RTP_LLM_LOG_ERROR("duplicate component_group_id=%d", gid);
-            heaps_.clear();
-            return false;
-        }
+        auto& tier_heaps  = heaps_[group_index];
         tier_heaps.device = std::make_unique<EvictionHeap>(device_policy);
         tier_heaps.host   = std::make_unique<EvictionHeap>(host_policy);
         tier_heaps.disk   = std::make_unique<EvictionHeap>(disk_policy);
     }
-
-    return true;
 }
 
 EvictionHeap* BlockTreeEvictor::heapFor(int group_id, Tier tier) {

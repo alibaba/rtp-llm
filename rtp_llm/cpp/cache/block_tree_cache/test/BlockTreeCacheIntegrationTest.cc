@@ -336,7 +336,7 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     full->setDevicePools({makeDevicePool({{256, 0}}, 8, "watermark_host_to_disk")}, {"watermark_kv"});
     std::vector<Component> layout_components = {
         block_transfer_engine_test::makeSchemaComponent(0, 0, "watermark_kv", {256})};
-    ASSERT_TRUE(full->finalizeLayout({0}, layout_components));
+    setComponentGroupLayoutForTest(*full, {0}, layout_components);
     const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
     std::vector<ComponentGroupPtr> groups = {full};
@@ -563,7 +563,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadBackSett
         std::vector<Component> components = {
             block_transfer_engine_test::makeSchemaComponent(0, 0, "shutdown_kv", {kBlockBytes}),
         };
-        ASSERT_TRUE(full->finalizeLayout({0}, components));
+        setComponentGroupLayoutForTest(*full, {0}, components);
         std::vector<ComponentGroupPtr> groups = {full};
         BlockTreeCacheConfig           config;
         config.enable_device_cache = true;

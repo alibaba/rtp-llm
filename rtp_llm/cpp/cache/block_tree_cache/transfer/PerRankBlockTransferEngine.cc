@@ -134,12 +134,7 @@ TransferStatus PerRankBlockTransferEngine::validateRequest(const TransferDescrip
         RTP_LLM_LOG_WARNING("invalid component_group_id=%d", desc.component_group_id);
         return TransferStatus::INVALID_ARGS;
     }
-    const ComponentGroupPtr& group_ptr = component_groups_[static_cast<size_t>(desc.component_group_id)];
-    if (group_ptr == nullptr || components_ == nullptr) {
-        RTP_LLM_LOG_WARNING("null component group=%d", desc.component_group_id);
-        return TransferStatus::INVALID_ARGS;
-    }
-    group = group_ptr.get();
+    group = component_groups_[static_cast<size_t>(desc.component_group_id)].get();
 
     const bool device_host = (desc.source_tier == Tier::DEVICE && desc.target_tier == Tier::HOST)
                              || (desc.source_tier == Tier::HOST && desc.target_tier == Tier::DEVICE);
@@ -163,7 +158,7 @@ TransferStatus PerRankBlockTransferEngine::validateRequest(const TransferDescrip
                 continue;
             }
             const DeviceBlockPoolPtr& pool = group->devicePools()[component_idx];
-            if (pool == nullptr || !pool->validBlock(block)) {
+            if (!pool->validBlock(block)) {
                 RTP_LLM_LOG_WARNING("invalid device block %d for component=%zu", block, component_idx);
                 return TransferStatus::INVALID_ARGS;
             }

@@ -13,10 +13,6 @@ MultiRankBlockTransferEngine::MultiRankBlockTransferEngine(std::vector<Component
     component_groups_(std::move(component_groups)), broadcast_manager_(std::move(broadcast_manager)) {}
 
 bool MultiRankBlockTransferEngine::execute(const std::vector<TransferDescriptor>& descriptors, int timeout_ms) const {
-    if (broadcast_manager_ == nullptr) {
-        RTP_LLM_LOG_WARNING("broadcast manager is not initialized");
-        return false;
-    }
     if (descriptors.empty() || timeout_ms <= 0) {
         RTP_LLM_LOG_WARNING("invalid batch, item_count=%zu, timeout_ms=%d", descriptors.size(), timeout_ms);
         return false;
