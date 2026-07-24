@@ -37,7 +37,6 @@ public:
 namespace rtp_llm {
 namespace {
 using namespace block_tree_cache_test;
-using PendingLoadBackItem = LoadBackTicket::PendingLoadBackItem;
 
 class PausablePerRankBlockTransferEngine: public PerRankBlockTransferEngine {
 public:
@@ -265,9 +264,11 @@ size_t ticketItemCountForGroup(const std::shared_ptr<LoadBackTicket>& ticket, in
         return 0;
     }
     return static_cast<size_t>(
-        std::count_if(ticket->items().begin(), ticket->items().end(), [group_id](const PendingLoadBackItem& item) {
-            return item.group_id == group_id;
-        }));
+        std::count_if(ticket->items().begin(),
+                      ticket->items().end(),
+                      [group_id](const LoadBackTicket::PendingLoadBackItem& item) {
+                          return item.group_id == group_id;
+                      }));
 }
 
 std::vector<BlockIdxType> allocatedBlocksSnapshot(const IBlockPool& pool) {
@@ -852,7 +853,7 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndLoadBackUnt
         BlockTreeMatchResult after = environment->cache->match(environment->keys);
         EXPECT_EQ(after.matched_blocks, 0u);
         ASSERT_NE(after.load_back_ticket, nullptr);
-        for (const PendingLoadBackItem& item : after.load_back_ticket->items()) {
+        for (const LoadBackTicket::PendingLoadBackItem& item : after.load_back_ticket->items()) {
             EXPECT_EQ(item.source_tier, Tier::HOST);
         }
         after.load_back_ticket.reset();  // abort the uncommitted ticket -> slot back to IDLE
@@ -882,7 +883,7 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndLoadBackUnt
         ASSERT_NE(first.load_back_ticket, nullptr);
         std::vector<std::pair<IBlockPool*, BlockIdxType>>        host_sources;
         std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> request_targets;
-        for (PendingLoadBackItem& item : first.load_back_ticket->items()) {
+        for (LoadBackTicket::PendingLoadBackItem& item : first.load_back_ticket->items()) {
             ASSERT_EQ(item.source_tier, Tier::HOST);
             ASSERT_EQ(item.source_blocks.size(), 1u);
             host_sources.emplace_back(environment->host_pools[static_cast<size_t>(item.group_id)].get(),
@@ -1030,7 +1031,7 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
     expectUnpublishedResult(result);
     ASSERT_NE(result.load_back_ticket, nullptr);
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> request_targets;
-    for (PendingLoadBackItem& item : result.load_back_ticket->items()) {
+    for (LoadBackTicket::PendingLoadBackItem& item : result.load_back_ticket->items()) {
         ASSERT_EQ(item.source_tier, Tier::DISK);
         item.target_device_blocks.clear();
         for (const std::string& tag : item.device_group_tags) {
@@ -1100,7 +1101,7 @@ TEST_P(BlockTreeCacheLowerTierTest, FullSWA_MatchLowerTierOnlyReturnsTicketWitho
     }
 
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> request_targets;
-    for (PendingLoadBackItem& item : result.load_back_ticket->items()) {
+    for (LoadBackTicket::PendingLoadBackItem& item : result.load_back_ticket->items()) {
         item.target_device_blocks.clear();
         for (const std::string& tag : item.device_group_tags) {
             DeviceBlockPoolPtr pool = devicePoolForTag(*environment, tag);
@@ -1156,7 +1157,7 @@ TEST_P(BlockTreeCacheLowerTierTest, FullSWA_MatchLowerTierOnlyReturnsTicketWitho
 TEST(LoadBackTicketMetricsTest, DeduplicatesPathAndPrefersLowerTier) {
     std::shared_ptr<LoadBackTicketRegistry> registry = std::make_shared<LoadBackTicketRegistry>(
         LoadBackTicketRegistry::CommitCallback{}, LoadBackTicketRegistry::AbortCallback{});
-    std::vector<PendingLoadBackItem> items(5);
+    LoadBackTicket::PendingLoadBackItems items(5);
     items[0].path_index  = 0;
     items[0].source_tier = Tier::DEVICE;
     items[1].path_index  = 0;
@@ -1208,7 +1209,7 @@ TEST_P(BlockTreeCacheLowerTierTest, CancelPausedLoadBackPreservesSourceAndDiscar
     };
     std::vector<SourceRef>                                   source_refs;
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> target_blocks;
-    for (PendingLoadBackItem& item : result.load_back_ticket->items()) {
+    for (LoadBackTicket::PendingLoadBackItem& item : result.load_back_ticket->items()) {
         ASSERT_EQ(item.source_tier, GetParam());
         IBlockPool* source_pool = GetParam() == Tier::HOST ?
                                       static_cast<IBlockPool*>(environment->host_pools[item.group_id].get()) :
@@ -1387,7 +1388,7 @@ TEST_F(BlockTreeCacheIntegrationTest, FullSWA_MatchPublishesOnlyReadyBoundary) {
     EXPECT_EQ(result.load_back_ticket->logicalMatchedBlocks(), kPathLength);
     EXPECT_EQ(ticketItemCountForGroup(result.load_back_ticket, 0), 2u);
     EXPECT_EQ(ticketItemCountForGroup(result.load_back_ticket, 1), 2u);
-    for (const PendingLoadBackItem& item : result.load_back_ticket->items()) {
+    for (const LoadBackTicket::PendingLoadBackItem& item : result.load_back_ticket->items()) {
         if (item.group_id == 0) {
             EXPECT_EQ(item.source_tier, Tier::DEVICE);
             EXPECT_GE(item.path_index, 2u);
@@ -1414,7 +1415,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadBackExplicitAbortImmediatelyRest
     ASSERT_NE(result.load_back_ticket, nullptr);
 
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> device_sources;
-    for (PendingLoadBackItem& item : result.load_back_ticket->items()) {
+    for (LoadBackTicket::PendingLoadBackItem& item : result.load_back_ticket->items()) {
         if (item.source_tier != Tier::DEVICE) {
             continue;
         }
@@ -1475,7 +1476,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadBackAsyncCompletionRefreshesBefo
 
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> device_sources;
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> request_target_blocks;
-    for (PendingLoadBackItem& item : result.load_back_ticket->items()) {
+    for (LoadBackTicket::PendingLoadBackItem& item : result.load_back_ticket->items()) {
         item.target_device_blocks.clear();
         if (item.source_tier == Tier::DEVICE) {
             ASSERT_EQ(item.device_group_tags.size(), item.source_blocks.size());
@@ -1599,7 +1600,7 @@ TEST_F(BlockTreeCacheIntegrationTest, SparseDisconnectedSWADoesNotPublishVacuous
     EXPECT_EQ(result.disk_load_back_blocks, 0u);
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
 
-    for (const PendingLoadBackItem& item : result.load_back_ticket->items()) {
+    for (const LoadBackTicket::PendingLoadBackItem& item : result.load_back_ticket->items()) {
         if (item.group_id == 0) {
             EXPECT_EQ(item.source_tier, Tier::DEVICE);
             ASSERT_EQ(item.source_blocks.size(), 2u);

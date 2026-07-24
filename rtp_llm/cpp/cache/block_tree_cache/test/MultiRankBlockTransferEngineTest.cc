@@ -430,12 +430,22 @@ TEST_F(MultiRankBlockTransferEngineTest, LoadBackCompletionStateMismatchDoesNotI
     ASSERT_NE(find_result.matched_node, nullptr);
 
     group->referenceBlocks(GroupBlockSet{0, Tier::HOST, {{host_block}}}, BlockRefType::REQUEST);
-    ASSERT_TRUE(cache->evictor_.reserveLoadBack(find_result.matched_node, 0, Tier::HOST, {host_block}));
-    ASSERT_TRUE(cache->evictor_.beginLoadBack(find_result.matched_node, 0, Tier::HOST));
+    ASSERT_TRUE(cache->changeLoadBackStateNolock(
+        find_result.matched_node, 0, SlotTransferState::IDLE, SlotTransferState::LOAD_BACK_PENDING));
+    cache->evictor_.eraseNode(find_result.matched_node, 0, Tier::HOST);
+    ASSERT_TRUE(cache->changeLoadBackStateNolock(
+        find_result.matched_node, 0, SlotTransferState::LOAD_BACK_PENDING, SlotTransferState::LOADING_BACK));
     find_result.matched_node->group_slots[0].transfer_state = SlotTransferState::DEMOTING;
 
-    BlockTreeCache::LoadBackItem item{find_result.matched_node, 0, Tier::HOST, {host_block}, {device_block}};
-    cache->performLoadBack({item}, /*ctx=*/nullptr);
+    LoadBackTicket::PendingLoadBackItem pending_item;
+    pending_item.node                 = find_result.matched_node;
+    pending_item.group_id             = 0;
+    pending_item.source_tier          = Tier::HOST;
+    pending_item.source_blocks        = {host_block};
+    pending_item.target_device_blocks = {device_block};
+    LoadBackWorker::TaskPtr task = cache->load_back_worker_.createTask({pending_item}, {group});
+    ASSERT_NE(task, nullptr);
+    cache->runLoadBackTask(task);
 
     GroupSlot& slot = find_result.matched_node->group_slots[0];
     EXPECT_EQ(slot.transfer_state, SlotTransferState::DEMOTING);

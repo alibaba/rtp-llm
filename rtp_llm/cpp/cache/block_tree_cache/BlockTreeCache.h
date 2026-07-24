@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/FullComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/LinearComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/LoadBackTicket.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/LoadBackWorker.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/SWAComponentGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/device_group/DeviceKVCacheGroup.h"
@@ -261,13 +262,6 @@ private:
                                     std::vector<TransferDescriptor>&      descriptors) const;
     int  evictionTransferTimeoutMs(const BlockTreeEvictor::EvictionPlan& plan) const;
 
-    struct LoadBackItem {
-        TreeNode*                 node{nullptr};
-        int                       group_id{-1};
-        Tier                      source_tier{Tier::NONE};
-        std::vector<BlockIdxType> source_blocks;
-        std::vector<BlockIdxType> target_device_blocks;
-    };
     bool   isNodeStructurallyMatchable(const TreeNode* node) const;
     void   prepareMatchedBlocks(const std::vector<TreeNode*>&         matched_path,
                                 const std::vector<bool>&              candidate_logically_valid,
@@ -282,17 +276,16 @@ private:
                                       const std::vector<std::string>&       device_group_tags,
                                       BlockTreeMatchResult&                 result,
                                       LoadBackTicket::PendingLoadBackItems& pending_load_back_items);
+    bool   changeLoadBackStateNolock(TreeNode*         node,
+                                     int               group_id,
+                                     SlotTransferState from,
+                                     SlotTransferState to);
     bool   reserveLoadBackItems(const LoadBackTicket::PendingLoadBackItems& items);
-
     std::shared_ptr<AsyncContext> commitLoadBack(const LoadBackTicket& ticket);
     void                          abortLoadBack(const LoadBackTicket& ticket);
-    // The partial flags describe the item exactly at prepared_item_count while
-    // an exception is unwinding between beginLoadBack and full preparation.
-    void abortLoadBackUnsafe(const LoadBackTicket::PendingLoadBackItems& items,
-                             size_t                                      prepared_item_count,
-                             bool                                        partial_item_claimed        = false,
-                             bool                                        partial_target_holder_added = false);
-    void performLoadBack(std::vector<LoadBackItem> items, std::shared_ptr<AsyncContext> ctx);
+    void abortLoadBackNolock(const LoadBackTicket::PendingLoadBackItems& items, size_t prepared_item_count);
+    void runLoadBackTask(const LoadBackWorker::TaskPtr& task);
+    bool settleLoadBackNolock(LoadBackWorker::Task& task, bool copy_success);
 
     BlockTreeCacheConfig                          config_;
     std::unique_ptr<BlockTree>                    tree_;
@@ -305,6 +298,7 @@ private:
     std::vector<PerTagMapping> per_tag_mapping_;
     // component_group_id -> local_pool_index -> stable declarative tag.
     std::vector<std::vector<std::string>>    device_group_tags_;
+    LoadBackWorker                          load_back_worker_;
     std::shared_ptr<LoadBackTicketRegistry>  load_back_ticket_registry_;
     std::shared_ptr<StorageBackend>          storage_backend_;
     std::unique_ptr<BlockTransferDispatcher> transfer_dispatcher_;

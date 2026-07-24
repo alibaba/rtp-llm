@@ -134,6 +134,45 @@ void BlockTreeEvictor::refreshCandidate(ComponentGroup& group, TreeNode* node, T
     heap->upsert(node, slot.candidate_meta);
 }
 
+void BlockTreeEvictor::eraseNode(TreeNode* node, int component_group_id, Tier tier) {
+    if (node == nullptr) {
+        return;
+    }
+    EvictionHeap* heap = heapFor(component_group_id, tier);
+    if (heap != nullptr) {
+        heap->erase(node);
+    }
+}
+
+void BlockTreeEvictor::refreshNode(TreeNode* node, int component_group_id, Tier tier, bool reset_admission) {
+    if (node == nullptr) {
+        RTP_LLM_LOG_ERROR("invalid candidate refresh mapping, group=%d node=null", component_group_id);
+        return;
+    }
+    if (component_group_id < 0 || static_cast<size_t>(component_group_id) >= component_groups_.size()) {
+        RTP_LLM_LOG_ERROR("invalid candidate refresh mapping, group=%d node_key=%ld group_count=%zu",
+                          component_group_id,
+                          node->cache_key,
+                          component_groups_.size());
+        return;
+    }
+    ComponentGroupPtr& group = component_groups_[static_cast<size_t>(component_group_id)];
+    if (group == nullptr || static_cast<size_t>(component_group_id) >= node->group_slots.size()) {
+        RTP_LLM_LOG_ERROR("invalid candidate refresh mapping, group=%d node_key=%ld group_null=%d slot_count=%zu",
+                          component_group_id,
+                          node->cache_key,
+                          static_cast<int>(group == nullptr),
+                          node->group_slots.size());
+        return;
+    }
+    GroupSlot& slot = node->group_slots[static_cast<size_t>(component_group_id)];
+    if (reset_admission) {
+        slot.candidate_meta.admission_seq      = ++admission_seq_;
+        slot.candidate_meta.tier_enter_time_us = currentTimeUs();
+    }
+    refreshCandidate(*group, node, tier);
+}
+
 // ---- Semantic events ----
 void BlockTreeEvictor::onInsertCommitted(const BlockTreeInsertResult& result) {
     // An existing empty group slot may be repopulated independently from the
@@ -609,89 +648,6 @@ void BlockTreeEvictor::writeRemoteThrough(const std::shared_ptr<StorageBackend>&
                             component_group_id,
                             cache_key);
     }
-}
-
-// ---- Load-back transitions ----
-bool BlockTreeEvictor::reserveLoadBack(TreeNode*                        node,
-                                       int                              group_id,
-                                       Tier                             source,
-                                       const std::vector<BlockIdxType>& source_blocks) {
-    const size_t gid = static_cast<size_t>(group_id);
-    if (group_id < 0 || node == nullptr || gid >= component_groups_.size() || gid >= node->group_slots.size()) {
-        return false;
-    }
-    const ComponentGroupPtr& group = component_groups_[gid];
-    GroupSlot&               slot  = node->group_slots[gid];
-    if (group == nullptr || (source != Tier::HOST && source != Tier::DISK)
-        || slot.transfer_state != SlotTransferState::IDLE || group->getTopTier(slot) != source
-        || group->getBlocks(slot, source) != source_blocks) {
-        return false;
-    }
-    if (EvictionHeap* heap = heapFor(group_id, source)) {
-        heap->erase(node);
-    }
-    slot.transfer_state = SlotTransferState::LOAD_BACK_PENDING;
-    return true;
-}
-
-bool BlockTreeEvictor::abortPendingLoadBack(TreeNode*                        node,
-                                            int                              group_id,
-                                            Tier                             source,
-                                            const std::vector<BlockIdxType>& source_blocks) {
-    const size_t gid = static_cast<size_t>(group_id);
-    if (group_id < 0 || node == nullptr || gid >= component_groups_.size() || gid >= node->group_slots.size()) {
-        return false;
-    }
-    const ComponentGroupPtr& group = component_groups_[gid];
-    GroupSlot&               slot  = node->group_slots[gid];
-    if (group == nullptr || slot.transfer_state != SlotTransferState::LOAD_BACK_PENDING
-        || group->getTopTier(slot) != source || group->getBlocks(slot, source) != source_blocks) {
-        return false;
-    }
-    slot.transfer_state = SlotTransferState::IDLE;
-    return true;
-}
-
-bool BlockTreeEvictor::beginLoadBack(TreeNode* node, int group_id, Tier source) {
-    auto gid = static_cast<size_t>(group_id);
-    if (node == nullptr || gid >= component_groups_.size() || gid >= node->group_slots.size()) {
-        return false;
-    }
-    auto& group = component_groups_[gid];
-    auto& slot  = node->group_slots[gid];
-    if (group == nullptr || (source != Tier::HOST && source != Tier::DISK) || group->getTopTier(slot) != source) {
-        return false;
-    }
-    if (slot.transfer_state != SlotTransferState::LOAD_BACK_PENDING) {
-        return false;
-    }
-    slot.transfer_state = SlotTransferState::LOADING_BACK;
-    return true;
-}
-
-bool BlockTreeEvictor::finishLoadBack(TreeNode* node, int group_id, Tier source, bool copy_ok) {
-    auto gid = static_cast<size_t>(group_id);
-    if (node == nullptr || gid >= component_groups_.size() || gid >= node->group_slots.size()) {
-        return false;
-    }
-    auto& group = component_groups_[gid];
-    auto& slot  = node->group_slots[gid];
-    if (group == nullptr || slot.transfer_state != SlotTransferState::LOADING_BACK) {
-        RTP_LLM_LOG_WARNING("state mismatch, group=%d node_key=%ld state=%d",
-                            group_id,
-                            node->cache_key,
-                            static_cast<int>(slot.transfer_state));
-        return false;
-    }
-    slot.transfer_state = SlotTransferState::IDLE;
-    if (copy_ok) {
-        slot.candidate_meta.admission_seq      = ++admission_seq_;
-        slot.candidate_meta.tier_enter_time_us = currentTimeUs();
-        refreshCandidate(*group, node, Tier::DEVICE);
-    } else {
-        refreshCandidate(*group, node, source);
-    }
-    return true;
 }
 
 bool BlockTreeEvictor::executeTierCopy(const EvictionMove& eviction_move) {

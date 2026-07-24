@@ -4,7 +4,7 @@ namespace rtp_llm {
 
 LoadBackTicket::LoadBackTicket(std::shared_ptr<LoadBackTicketRegistry> registry,
                                uint64_t                                ticket_id,
-                               LoadBackTicket::PendingLoadBackItems    items,
+                               PendingLoadBackItems                    items,
                                size_t                                  logical_matched_blocks):
     registry_(std::move(registry)),
     ticket_id_(ticket_id),
@@ -51,10 +51,14 @@ size_t LoadBackTicket::logicalMatchedBlocks(Tier tier) const {
 LoadBackTicketRegistry::LoadBackTicketRegistry(CommitCallback commit_callback, AbortCallback abort_callback):
     commit_callback_(std::move(commit_callback)), abort_callback_(std::move(abort_callback)) {}
 
-std::shared_ptr<LoadBackTicket> LoadBackTicketRegistry::createTicket(const LoadBackTicket::PendingLoadBackItems& items,
-                                                                     size_t logical_matched_blocks) {
-    std::shared_ptr<LoadBackTicket> ticket(new LoadBackTicket(
-        shared_from_this(), /*ticket_id=*/0, LoadBackTicket::PendingLoadBackItems(items), logical_matched_blocks));
+std::shared_ptr<LoadBackTicket>
+LoadBackTicketRegistry::createTicket(const LoadBackTicket::PendingLoadBackItems& items,
+                                     size_t                                     logical_matched_blocks) {
+    std::shared_ptr<LoadBackTicket> ticket(
+        new LoadBackTicket(shared_from_this(),
+                           /*ticket_id=*/0,
+                           LoadBackTicket::PendingLoadBackItems(items),
+                           logical_matched_blocks));
     if (items.empty()) {
         return ticket;
     }

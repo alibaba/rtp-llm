@@ -8,6 +8,7 @@
 #include <mutex>
 #include <string>
 #include <unordered_map>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
@@ -24,6 +25,19 @@ class LoadBackTicketRegistry;
 
 class LoadBackTicket {
 public:
+    struct PendingLoadBackItem {
+        TreeNode*                 node{nullptr};
+        int                       group_id{-1};
+        size_t                    path_index{0};
+        Tier                      source_tier{Tier::NONE};
+        std::vector<BlockIdxType> source_blocks;
+        // DEVICE means this logical coordinate is already resident but lies
+        // outside the ready boundary; target blocks must preserve its identity.
+        std::vector<std::string>  device_group_tags;
+        std::vector<BlockIdxType> target_device_blocks;
+    };
+    using PendingLoadBackItems = std::vector<PendingLoadBackItem>;
+
     ~LoadBackTicket();
 
     LoadBackTicket(const LoadBackTicket&)            = delete;
@@ -46,7 +60,7 @@ public:
     }
     size_t logicalMatchedBlocks(Tier tier) const;
 
-    // Expose immutable planning metadata without publishing PendingLoadBackItem as a cross-module DTO.
+    // Expose immutable planning metadata without publishing the ticket's item container.
     size_t itemCount() const {
         return items_.size();
     }
@@ -80,23 +94,6 @@ public:
     }
 
 private:
-    struct PendingLoadBackItem {
-        TreeNode*                 node{nullptr};
-        int                       group_id{-1};
-        size_t                    path_index{0};
-        Tier                      source_tier{Tier::NONE};
-        std::vector<BlockIdxType> source_blocks;
-        // DEVICE denotes an already-resident logical coordinate that lies outside
-        // the public ready boundary. It is ticket-owned and settled asynchronously
-        // without a copy; target_device_blocks must preserve source identity.
-        // Allocator-facing per-tag group ids, ordered exactly like this component
-        // group's device pools. The allocator fills target_device_blocks from the
-        // request block table before committing the ticket.
-        std::vector<std::string>  device_group_tags;
-        std::vector<BlockIdxType> target_device_blocks;
-    };
-    using PendingLoadBackItems = std::vector<PendingLoadBackItem>;
-
     PendingLoadBackItems& items() {
         return items_;
     }
@@ -114,9 +111,9 @@ private:
 
     std::shared_ptr<LoadBackTicketRegistry> registry_;
     uint64_t                                ticket_id_{0};
-    PendingLoadBackItems                    items_;
-    const size_t                            logical_matched_blocks_{0};
-    std::array<size_t, 3>                   logical_matched_blocks_by_tier_{};
+    PendingLoadBackItems  items_;
+    const size_t          logical_matched_blocks_{0};
+    std::array<size_t, 3> logical_matched_blocks_by_tier_{};
 };
 
 class LoadBackTicketRegistry: public std::enable_shared_from_this<LoadBackTicketRegistry> {
@@ -133,8 +130,8 @@ private:
     friend class LoadBackTicket;
     friend class block_tree_cache_test::LoadBackShutdownTestPeer;
 
-    std::shared_ptr<LoadBackTicket> createTicket(const LoadBackTicket::PendingLoadBackItems& items,
-                                                 size_t logical_matched_blocks = 0);
+    std::shared_ptr<LoadBackTicket>
+    createTicket(const LoadBackTicket::PendingLoadBackItems& items, size_t logical_matched_blocks = 0);
 
     class ActiveCallbackLease {
     public:

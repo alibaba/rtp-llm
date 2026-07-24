@@ -367,11 +367,34 @@ protected:
         return result;
     }
 
-    bool reserveAndBeginLoadBack(TreeNode* node, int group_id, Tier source) {
-        const std::vector<BlockIdxType> source_blocks =
-            groups_[static_cast<size_t>(group_id)]->getBlocks(node->group_slots[static_cast<size_t>(group_id)], source);
-        return evictor_->reserveLoadBack(node, group_id, source, source_blocks)
-               && evictor_->beginLoadBack(node, group_id, source);
+    bool markLoadingBack(TreeNode* node, int group_id, Tier source) {
+        if (node == nullptr || group_id < 0 || static_cast<size_t>(group_id) >= groups_.size()
+            || static_cast<size_t>(group_id) >= node->group_slots.size()) {
+            return false;
+        }
+        const ComponentGroupPtr& group = groups_[static_cast<size_t>(group_id)];
+        GroupSlot&               slot  = node->group_slots[static_cast<size_t>(group_id)];
+        if (group == nullptr || slot.transfer_state != SlotTransferState::IDLE || group->getTopTier(slot) != source) {
+            return false;
+        }
+        evictor_->eraseNode(node, group_id, source);
+        slot.transfer_state = SlotTransferState::LOADING_BACK;
+        return true;
+    }
+
+    bool finishLoadingBack(TreeNode* node, int group_id, Tier source, bool copy_ok) {
+        if (node == nullptr || group_id < 0 || static_cast<size_t>(group_id) >= groups_.size()
+            || static_cast<size_t>(group_id) >= node->group_slots.size()) {
+            return false;
+        }
+        GroupSlot& slot = node->group_slots[static_cast<size_t>(group_id)];
+        if (slot.transfer_state != SlotTransferState::LOADING_BACK) {
+            return false;
+        }
+        slot.transfer_state = SlotTransferState::IDLE;
+        const Tier target_tier = copy_ok ? Tier::DEVICE : source;
+        evictor_->refreshNode(node, group_id, target_tier, copy_ok);
+        return true;
     }
 
     std::shared_ptr<FullComponentGroup> group_;
@@ -641,7 +664,7 @@ TEST_F(BlockTreeEvictorTest, PrepareMovePreservesLoadBackOwner) {
     ASSERT_NE(result.leaf, nullptr);
     EvictionMove stale = BlockTreeEvictorTestPeer::makeMove(*evictor_, result.leaf, 0, Tier::HOST, Tier::DISK);
 
-    ASSERT_TRUE(reserveAndBeginLoadBack(result.leaf, 0, Tier::HOST));
+    ASSERT_TRUE(markLoadingBack(result.leaf, 0, Tier::HOST));
     ASSERT_EQ(result.leaf->group_slots[0].transfer_state, SlotTransferState::LOADING_BACK);
     EXPECT_FALSE(BlockTreeEvictorTestPeer::prepareMove(*evictor_, stale));
     EXPECT_TRUE(stale.target_blocks.empty());
@@ -651,7 +674,7 @@ TEST_F(BlockTreeEvictorTest, PrepareMovePreservesLoadBackOwner) {
     EXPECT_EQ(disk_pool->freeBlocksNum(), 1u);
     EXPECT_EQ(transfer_calls_, 0u);
 
-    evictor_->finishLoadBack(result.leaf, 0, Tier::HOST, false);
+    ASSERT_TRUE(finishLoadingBack(result.leaf, 0, Tier::HOST, false));
     EXPECT_EQ(result.leaf->group_slots[0].transfer_state, SlotTransferState::IDLE);
     EXPECT_EQ(evictor_->candidateStats().host_candidates, 1u);
 
@@ -716,7 +739,7 @@ TEST_F(BlockTreeEvictorTest, PrepareMoveRejectsSourceTierChangedByLoadBack) {
     ASSERT_NE(result.leaf, nullptr);
     EvictionMove stale = BlockTreeEvictorTestPeer::makeMove(*evictor_, result.leaf, 0, Tier::HOST, Tier::DISK);
 
-    ASSERT_TRUE(reserveAndBeginLoadBack(result.leaf, 0, Tier::HOST));
+    ASSERT_TRUE(markLoadingBack(result.leaf, 0, Tier::HOST));
     auto&         slot       = result.leaf->group_slots[0];
     GroupBlockSet device_set = group_->allocateBlocks(Tier::DEVICE, 1, BlockRefType::BLOCK_CACHE);
     ASSERT_EQ(device_set.per_node.size(), 1u);
@@ -725,7 +748,7 @@ TEST_F(BlockTreeEvictorTest, PrepareMoveRejectsSourceTierChangedByLoadBack) {
     slot.device_blocks              = device_set.per_node.front();
     group_->unreferenceBlocks(GroupBlockSet{0, Tier::HOST, {{source}}}, BlockRefType::BLOCK_CACHE);
     group_->evictFromTier(result.leaf, slot, Tier::HOST);
-    evictor_->finishLoadBack(result.leaf, 0, Tier::HOST, true);
+    ASSERT_TRUE(finishLoadingBack(result.leaf, 0, Tier::HOST, true));
     ASSERT_EQ(slot.transfer_state, SlotTransferState::IDLE);
     ASSERT_EQ(slot.device_blocks, (std::vector<BlockIdxType>{device_block}));
     ASSERT_FALSE(host_pool->isAllocated(source));
@@ -780,37 +803,7 @@ TEST_F(BlockTreeEvictorTest, PrepareMoveRejectsFullNodeThatBecameNonLeaf) {
     group_->releaseSingleBlock(Tier::HOST, child_source, BlockRefType::BLOCK_CACHE);
 }
 
-TEST_F(BlockTreeEvictorTest, LoadBackFailureRestoresSourceAndRejectsDuplicateBegin) {
-    auto result = insert({100}, {{makeSlot(Tier::HOST, 10)}});
-    ASSERT_NE(result.leaf, nullptr);
-    auto& slot = result.leaf->group_slots[0];
-    ASSERT_EQ(evictor_->candidateStats().host_candidates, 1u);
-
-    EXPECT_TRUE(reserveAndBeginLoadBack(result.leaf, 0, Tier::HOST));
-    EXPECT_EQ(slot.transfer_state, SlotTransferState::LOADING_BACK);
-    EXPECT_EQ(evictor_->candidateStats().host_candidates, 0u);
-
-    EXPECT_FALSE(evictor_->beginLoadBack(result.leaf, 0, Tier::HOST));
-    EXPECT_EQ(slot.transfer_state, SlotTransferState::LOADING_BACK);
-    EXPECT_EQ(evictor_->candidateStats().host_candidates, 0u);
-
-    evictor_->finishLoadBack(result.leaf, 0, Tier::HOST, false);
-    EXPECT_EQ(slot.transfer_state, SlotTransferState::IDLE);
-    EXPECT_EQ(evictor_->candidateStats().host_candidates, 1u);
-    EXPECT_EQ(evictor_->candidateStats().device_candidates, 0u);
-}
-
-TEST_F(BlockTreeEvictorTest, FinishLoadBackDoesNotOverwriteForeignTransferState) {
-    auto result = insert({100}, {{makeSlot(Tier::HOST, 10)}});
-    ASSERT_NE(result.leaf, nullptr);
-    GroupSlot& slot     = result.leaf->group_slots[0];
-    slot.transfer_state = SlotTransferState::DEMOTING;
-
-    EXPECT_FALSE(evictor_->finishLoadBack(result.leaf, 0, Tier::HOST, false));
-    EXPECT_EQ(slot.transfer_state, SlotTransferState::DEMOTING);
-}
-
-TEST_F(BlockTreeEvictorTest, LoadBackSuccessAdmitsOnlyStableDeviceSlot) {
+TEST_F(BlockTreeEvictorTest, RefreshNodeAdmitsOnlyStableDeviceSlot) {
     auto host_pool = makePageableHostPool(1);
     ASSERT_NE(host_pool, nullptr);
     group_->setHostPool(host_pool);
@@ -820,14 +813,14 @@ TEST_F(BlockTreeEvictorTest, LoadBackSuccessAdmitsOnlyStableDeviceSlot) {
     ASSERT_NE(result.leaf, nullptr);
     auto& slot = result.leaf->group_slots[0];
 
-    ASSERT_TRUE(reserveAndBeginLoadBack(result.leaf, 0, Tier::HOST));
+    ASSERT_TRUE(markLoadingBack(result.leaf, 0, Tier::HOST));
     GroupBlockSet device_set = group_->allocateBlocks(Tier::DEVICE, 1, BlockRefType::BLOCK_CACHE);
     ASSERT_EQ(device_set.per_node.size(), 1u);
     ASSERT_EQ(device_set.per_node.front().size(), 1u);
     group_->unreferenceBlocks(GroupBlockSet{0, Tier::HOST, {{source}}}, BlockRefType::BLOCK_CACHE);
     group_->evictFromTier(result.leaf, slot, Tier::HOST);
     slot.device_blocks = device_set.per_node.front();
-    evictor_->finishLoadBack(result.leaf, 0, Tier::HOST, true);
+    ASSERT_TRUE(finishLoadingBack(result.leaf, 0, Tier::HOST, true));
 
     EXPECT_EQ(slot.transfer_state, SlotTransferState::IDLE);
     EXPECT_EQ(evictor_->candidateStats().host_candidates, 0u);
@@ -933,10 +926,8 @@ TEST(BlockTreeEvictorCascadeTest, BuildPlanSkipsPinnedSiblingAndReadmitsAfterRel
 TEST(BlockTreeEvictorCascadeTest, BuildPlanSkipsLoadingBackSiblingAndReadmitsAfterFinish) {
     CascadeTestEnvironment environment;
     ASSERT_TRUE(environment.init());
-    const std::vector<BlockIdxType> source_blocks =
-        environment.groups_[1]->getBlocks(environment.node_->group_slots[1], Tier::HOST);
-    ASSERT_TRUE(environment.evictor_->reserveLoadBack(environment.node_, 1, Tier::HOST, source_blocks));
-    ASSERT_TRUE(environment.evictor_->beginLoadBack(environment.node_, 1, Tier::HOST));
+    environment.evictor_->eraseNode(environment.node_, 1, Tier::HOST);
+    environment.node_->group_slots[1].transfer_state = SlotTransferState::LOADING_BACK;
 
     auto plan = environment.buildPlan(0);
     ASSERT_TRUE(plan.has_value());
@@ -948,7 +939,8 @@ TEST(BlockTreeEvictorCascadeTest, BuildPlanSkipsLoadingBackSiblingAndReadmitsAft
     EXPECT_TRUE(environment.transfer_group_ids_.empty());
 
     environment.evictor_->rollbackPreparedPlan(*plan);
-    environment.evictor_->finishLoadBack(environment.node_, 1, Tier::HOST, false);
+    environment.node_->group_slots[1].transfer_state = SlotTransferState::IDLE;
+    environment.evictor_->refreshNode(environment.node_, 1, Tier::HOST, false);
     EXPECT_EQ(environment.node_->group_slots[1].transfer_state, SlotTransferState::IDLE);
 
     auto retry = environment.buildPlan(0);

@@ -39,7 +39,6 @@ public:
 namespace rtp_llm {
 namespace {
 using namespace block_tree_cache_test;
-using PendingLoadBackItem = LoadBackTicket::PendingLoadBackItem;
 
 std::vector<std::string> makeTestTags(size_t count, size_t first_tag = 0) {
     std::vector<std::string> tags;
@@ -1843,20 +1842,16 @@ TEST_F(BlockTreeCacheTest, LoadBackPreparedPrefixFailureRollsBackAllSourceAndTar
 
     BlockTreeMatchResult result = cache->match({100});
     ASSERT_NE(result.load_back_ticket, nullptr);
-    std::vector<PendingLoadBackItem>& items = result.load_back_ticket->items();
+    LoadBackTicket::PendingLoadBackItems& items = result.load_back_ticket->items();
     ASSERT_EQ(items.size(), 2u);
     ASSERT_EQ(items[0].group_id, 0);
     ASSERT_EQ(items[1].group_id, 1);
     EXPECT_EQ(first_host_pool->refCount(first_source), 2u);
     EXPECT_EQ(second_host_pool->refCount(second_source), 2u);
 
-    // Duplicate the first item immediately after itself. The complete batch passes
-    // preflight while both slots are IDLE. Preparation then claims the first item
-    // and takes its target holder; beginLoadBack for the duplicate observes the
-    // same slot already LOADING_BACK and fails with one prepared item and one
-    // untouched trailing item. Add the matching source planning hold explicitly
-    // so every item in the synthetic ticket owns exactly one source hold.
-    PendingLoadBackItem duplicate_first_item = items.front();
+    // Duplicate the first item so changeLoadBackStateNolock conflicts with the prepared item.
+    // Add its source planning hold to keep ownership balanced.
+    LoadBackTicket::PendingLoadBackItem duplicate_first_item = items.front();
     items.insert(items.begin() + 1, std::move(duplicate_first_item));
     first_group->referenceBlocks(GroupBlockSet{0, Tier::HOST, {{first_source}}}, BlockRefType::REQUEST);
     ASSERT_EQ(items.size(), 3u);
@@ -2418,7 +2413,7 @@ TEST_F(BlockTreeCacheTest, LoadBackTicketKeepsExplicitLogicalDepthIndependentOfI
                                                      EXPECT_EQ(items.size(), 1u);
                                                  });
 
-    PendingLoadBackItem pending_item;
+    LoadBackTicket::PendingLoadBackItem pending_item;
     pending_item.path_index                = 1;
     std::shared_ptr<LoadBackTicket> ticket = registry->createTicket({pending_item}, /*logical_matched_blocks=*/7);
     ASSERT_NE(ticket, nullptr);
@@ -2452,11 +2447,11 @@ TEST_F(BlockTreeCacheTest, TicketRegistryShutdownWaitsForClaimedCommit) {
             }
             shutdown_detached_abort.markEntered();
         });
-    PendingLoadBackItem pending_item;
+    LoadBackTicket::PendingLoadBackItem pending_item;
     pending_item.group_id                  = 0;
     std::shared_ptr<LoadBackTicket> ticket = registry->createTicket({pending_item});
     ASSERT_NE(ticket, nullptr);
-    PendingLoadBackItem shutdown_pending_item;
+    LoadBackTicket::PendingLoadBackItem shutdown_pending_item;
     shutdown_pending_item.group_id                          = 1;
     std::shared_ptr<LoadBackTicket> shutdown_pending_ticket = registry->createTicket({shutdown_pending_item});
     ASSERT_NE(shutdown_pending_ticket, nullptr);
@@ -2520,7 +2515,7 @@ TEST_F(BlockTreeCacheTest, TicketRegistryCloseDetachesAndAbortsOnce) {
             full->unreferenceBlocks(source_protection, BlockRefType::REQUEST);
             abort_callback.enterAndWait();
         });
-    PendingLoadBackItem pending_item;
+    LoadBackTicket::PendingLoadBackItem pending_item;
     pending_item.group_id                  = 0;
     pending_item.source_tier               = Tier::HOST;
     pending_item.source_blocks             = {source_block};
@@ -2575,7 +2570,7 @@ TEST_F(BlockTreeCacheTest, TicketRegistryConcurrentShutdownCallersShareDetachedA
             abort_callback.enterAndWait();
         });
     LoadBackShutdownTestPeer::setShutdownWaitObserver(*registry, [&shutdown_waits] { shutdown_waits.notify(); });
-    PendingLoadBackItem pending_item;
+    LoadBackTicket::PendingLoadBackItem pending_item;
     pending_item.group_id                  = 7;
     std::shared_ptr<LoadBackTicket> ticket = registry->createTicket({pending_item});
     ASSERT_NE(ticket, nullptr);
@@ -2659,13 +2654,13 @@ TEST_F(BlockTreeCacheTest, TicketRegistryShutdownWaitsForAbortInFlight) {
             }
             shutdown_detached_abort.markEntered();
         });
-    PendingLoadBackItem pending_item;
+    LoadBackTicket::PendingLoadBackItem pending_item;
     pending_item.group_id                  = 0;
     pending_item.source_tier               = Tier::HOST;
     pending_item.source_blocks             = {source_block};
     std::shared_ptr<LoadBackTicket> ticket = registry->createTicket({pending_item});
     ASSERT_NE(ticket, nullptr);
-    PendingLoadBackItem shutdown_pending_item;
+    LoadBackTicket::PendingLoadBackItem shutdown_pending_item;
     shutdown_pending_item.group_id                          = 1;
     std::shared_ptr<LoadBackTicket> shutdown_pending_ticket = registry->createTicket({shutdown_pending_item});
     ASSERT_NE(shutdown_pending_ticket, nullptr);
