@@ -170,6 +170,65 @@ def _make_rope_prefill_inputs(
     return attn_inputs
 
 
+def _runtime_rocm_fp8_dtype() -> torch.dtype:
+    """Match the architecture-dependent FP8 dtype selected by the fused op."""
+    properties = torch.cuda.get_device_properties(torch.cuda.current_device())
+    arch = getattr(properties, "gcnArchName", "")
+    return torch.float8_e4m3fn if "gfx950" in arch else torch.float8_e4m3fnuz
+
+
+def _read_fp8_paged_cache(
+    pool: torch.Tensor,
+    block_table: torch.Tensor,
+    input_lengths: List[int],
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Decode the vectorized FP8 K/V layout into token-major BF16 tensors."""
+    _, _, head_num_kv, tokens_per_block, head_dim = pool.shape
+    vector_size = 16 // pool.element_size()
+    k_cache = pool[:, 0].view(
+        pool.shape[0],
+        head_num_kv,
+        head_dim // vector_size,
+        tokens_per_block,
+        vector_size,
+    )
+    v_cache = pool[:, 1].view(
+        pool.shape[0],
+        head_num_kv,
+        tokens_per_block // vector_size,
+        head_dim,
+        vector_size,
+    )
+    token_num = sum(input_lengths)
+    k = torch.empty(
+        token_num,
+        head_num_kv,
+        head_dim,
+        dtype=torch.bfloat16,
+        device=pool.device,
+    )
+    v = torch.empty_like(k)
+    token_offset = 0
+    for batch_idx, seq_len in enumerate(input_lengths):
+        for token_idx in range(seq_len):
+            block_id = int(block_table[batch_idx, token_idx // tokens_per_block].item())
+            local_idx = token_idx % tokens_per_block
+            k[token_offset + token_idx] = (
+                k_cache[block_id, :, :, local_idx, :]
+                .reshape(head_num_kv, head_dim)
+                .to(torch.bfloat16)
+            )
+            v[token_offset + token_idx] = v_cache[
+                block_id,
+                :,
+                local_idx // vector_size,
+                :,
+                local_idx % vector_size,
+            ].to(torch.bfloat16)
+        token_offset += seq_len
+    return k, v
+
+
 def _make_mrope_decode_inputs(
     sequence_lengths: List[int],
     position_ids: torch.Tensor,
@@ -1433,6 +1492,76 @@ class TestAiterPrefillImplMropeRealOp(unittest.TestCase):
         self._check_mrope_matches_reference(
             AiterPrefillImplAsm, define_padding_offset=False
         )
+
+    def test_asm_mrope_fp8_paged_kv_cache_matches_reference(self):
+        """Cover MRoPE rotation and architecture-native FP8 cache writes together."""
+        input_lengths = [3, 2]
+        head_num = 4
+        head_num_kv = 2
+        head_dim = 128
+        tokens_per_block = 16
+        cfg = _make_mrope_attn_configs(
+            head_num, head_num_kv, head_dim, dtype=self.dtype
+        )
+        cfg.kv_cache_dtype = KvCacheDataType.FP8
+        attn_inputs = _make_rope_prefill_inputs(input_lengths, self.device, self.dtype)
+        block_table = torch.tensor([[0], [1]], dtype=torch.int32)
+        attn_inputs.kv_cache_kernel_block_id = block_table
+        attn_inputs.kv_cache_kernel_block_id_device = block_table.to(self.device)
+        position_ids = torch.tensor(
+            [
+                [0, 0, 0],
+                [1, 4, 7],
+                [2, 5, 8],
+                [0, 0, 0],
+                [3, 6, 9],
+            ],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        attn_inputs.combo_position_ids = position_ids.flatten()
+        impl = AiterPrefillImplAsm(cfg, attn_inputs)
+
+        total_tokens = sum(input_lengths)
+        q = torch.randn(
+            total_tokens, head_num, head_dim, dtype=self.dtype, device=self.device
+        )
+        k = torch.randn(
+            total_tokens, head_num_kv, head_dim, dtype=self.dtype, device=self.device
+        )
+        v = torch.randn(
+            total_tokens, head_num_kv, head_dim, dtype=self.dtype, device=self.device
+        )
+        kv_cache = LayerKVCache()
+        fp8_dtype = _runtime_rocm_fp8_dtype()
+        kv_cache.kv_cache_base = torch.zeros(
+            len(input_lengths),
+            2,
+            head_num_kv,
+            tokens_per_block,
+            head_dim,
+            dtype=fp8_dtype,
+            device=self.device,
+        )
+
+        actual_q, actual_k, actual_v = impl.rope_kvcache_impl.forward(
+            _pack_qkv(q, k, v), kv_cache, impl.rope_params
+        )
+        self.assertEqual(actual_q.dtype, fp8_dtype)
+        self.assertEqual(actual_k.numel(), 0)
+        self.assertEqual(actual_v.numel(), 0)
+
+        ref_q, ref_k = _apply_mrope(q, k, position_ids)
+        cached_k, cached_v = _read_fp8_paged_cache(
+            kv_cache.kv_cache_base, block_table, input_lengths
+        )
+        # FP8 E4M3 quantization is intentionally visible in this path. These
+        # tolerances are one quantization step around unit-scale values.
+        torch.testing.assert_close(
+            actual_q.to(torch.bfloat16), ref_q, atol=0.125, rtol=0.125
+        )
+        torch.testing.assert_close(cached_k, ref_k, atol=0.125, rtol=0.125)
+        torch.testing.assert_close(cached_v, v, atol=0.125, rtol=0.125)
 
     def test_prepare_in_place_refreshes_mrope_position_ids(self):
         # This covers the persistent-buffer refresh used before graph replay.

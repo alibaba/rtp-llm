@@ -1,7 +1,5 @@
-from collections.abc import Callable, Iterator
+from collections.abc import Callable
 from typing import Any
-
-import torch
 
 from rtp_llm.models_py.new_models.model_base import select_block_map_for_layer
 from rtp_llm.models_py.new_models.qwen3.language import Qwen3ForCausalLM
@@ -25,12 +23,6 @@ class Qwen3VLForCausalLM(Qwen3VLMultimodalMixin, Qwen3ForCausalLM):
         return lambda name: name.startswith("model.language_model.") or name.startswith(
             "lm_head."
         )
-
-    def load_weights(
-        self, weights: Iterator[tuple[str, torch.Tensor]] | dict[str, torch.Tensor]
-    ) -> None:
-        iterator = weights.items() if isinstance(weights, dict) else weights
-        super().load_weights(self.WEIGHTS_MAPPER.apply(iterator))
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         hidden_states, mm_deepstack_embeds, cpu_locs = self._embed_multimodal_inputs(
