@@ -36,6 +36,9 @@ class FusedRopeAttnParams:
 class FusedRopeKVCachePrefillOpBase:
     def __init__(self, attn_configs: AttentionConfigs) -> None:
         self.attn_configs = attn_configs
+        self.rope_cache = get_rope_cache_once(
+            attn_configs.rope_config, attn_configs.max_seq_len
+        )
 
     def prepare(self, attn_inputs: PyAttentionInputs) -> FusedRopeAttnParams:
         if (
@@ -84,8 +87,6 @@ class FusedRopeKVCachePrefillOpBase:
     ) -> torch.Tensor:
         store_cache = kv_cache is not None
         rope_config = self.attn_configs.rope_config
-        rope_cache = get_rope_cache_once(rope_config, self.attn_configs.max_seq_len)
-
         return prefill_fused_rope_kvcache(
             qkv,
             params.cu_seqlens,
@@ -107,7 +108,9 @@ class FusedRopeKVCachePrefillOpBase:
             kv_cache_offset=params.kv_cache_offset,
             kv_cache_offset_h=params.kv_cache_offset_h,
             rope_cache=(
-                rope_cache.data if check_rope_cache(rope_config, rope_cache) else None
+                self.rope_cache.data
+                if check_rope_cache(rope_config, self.rope_cache)
+                else None
             ),
             padding_offset=params.padding_offset,
             position_ids=params.position_ids,
@@ -189,6 +192,9 @@ class FusedRopeKVCachePrefillOpQNoTransposeOut(FusedRopeKVCachePrefillOpBase):
 class FusedRopeKVCacheDecodeOp:
     def __init__(self, attn_configs: AttentionConfigs) -> None:
         self.attn_configs = attn_configs
+        self.rope_cache = get_rope_cache_once(
+            attn_configs.rope_config, attn_configs.max_seq_len
+        )
 
     def forward(
         self,
@@ -197,7 +203,6 @@ class FusedRopeKVCacheDecodeOp:
         params: FusedRopeAttnParams,
     ) -> torch.Tensor:
         rope_config = self.attn_configs.rope_config
-        rope_cache = get_rope_cache_once(rope_config, self.attn_configs.max_seq_len)
         assert params.kv_cache_offset is not None
         assert params.sequence_lengths.is_cuda, "sequence_lengths must be a CUDA tensor"
         return decode_fused_rope_kvcache(
@@ -215,7 +220,9 @@ class FusedRopeKVCacheDecodeOp:
             kv_cache_scale=kv_cache.kv_scale_base,
             kv_cache_offset_h=params.kv_cache_offset_h,
             rope_cache=(
-                rope_cache.data if check_rope_cache(rope_config, rope_cache) else None
+                self.rope_cache.data
+                if check_rope_cache(rope_config, self.rope_cache)
+                else None
             ),
             use_logn_attn=self.attn_configs.use_logn_attn,
             rope_style=rope_config.style,

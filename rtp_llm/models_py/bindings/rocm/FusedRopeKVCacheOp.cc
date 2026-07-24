@@ -43,7 +43,8 @@ void updateKvCacheOffset(CKAttn& params, const torch::Tensor& kv_cache_block_id_
 }
 
 FusedRopeKVCachePrefillOpBase::FusedRopeKVCachePrefillOpBase(const AttentionConfigs& attn_configs):
-    attn_configs_(attn_configs) {}
+    attn_configs_(attn_configs),
+    rope_cache_(getRopeCacheOnce(attn_configs.rope_config, attn_configs.max_seq_len, false)) {}
 
 FusedRopeKVCachePrefillOpAsm::FusedRopeKVCachePrefillOpAsm(const AttentionConfigs& attn_configs):
     FusedRopeKVCachePrefillOpBase(attn_configs) {}
@@ -203,9 +204,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
         position_ids = params->position_ids.data_ptr<int>();
     }
 
-    auto    rope_cache = getRopeCacheOnce(attn_configs_.rope_config, attn_configs_.max_seq_len, false);
     float2* rope_cache_ptr =
-        rope_cache.used && rope_cache.data.defined() ? static_cast<float2*>(rope_cache.data.data_ptr()) : nullptr;
+        rope_cache_.used && rope_cache_.data.defined() ? static_cast<float2*>(rope_cache_.data.data_ptr()) : nullptr;
 
     if (use_asm()) {
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(
@@ -287,7 +287,8 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
 }
 
 FusedRopeKVCacheDecodeOpBase::FusedRopeKVCacheDecodeOpBase(const AttentionConfigs& attn_configs):
-    attn_configs_(attn_configs) {}
+    attn_configs_(attn_configs),
+    rope_cache_(getRopeCacheOnce(attn_configs.rope_config, attn_configs.max_seq_len, false)) {}
 
 FusedRopeKVCacheDecodeOpAsm::FusedRopeKVCacheDecodeOpAsm(const AttentionConfigs& attn_configs):
     FusedRopeKVCacheDecodeOpBase(attn_configs) {}
@@ -395,9 +396,8 @@ torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&        
         position_ids_ptr = params->sequence_lengths.data_ptr<int>();
     }
 
-    auto    rope_cache = getRopeCacheOnce(attn_configs_.rope_config, attn_configs_.max_seq_len, false);
     float2* rope_cache_ptr =
-        rope_cache.used && rope_cache.data.defined() ? static_cast<float2*>(rope_cache.data.data_ptr()) : nullptr;
+        rope_cache_.used && rope_cache_.data.defined() ? static_cast<float2*>(rope_cache_.data.data_ptr()) : nullptr;
 
     if (use_asm()) {
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(torchDTypeToDataType(qkv.dtype()),

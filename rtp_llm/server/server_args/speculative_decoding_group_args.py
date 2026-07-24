@@ -58,6 +58,15 @@ def init_speculative_decoding_group_args(parser, sp_config):
         help="小模型的计算使用的类型",
     )
     speculative_decoding_group.add_argument(
+        "--sp_fp8_kv_cache",
+        env_name="SP_FP8_KV_CACHE",
+        bind_to=(sp_config, "fp8_kv_cache"),
+        type=int,
+        choices=[-1, 0, 1],
+        default=-1,
+        help="小模型是否使用 FP8 KV cache：-1 继承主模型，0 关闭，1 开启",
+    )
+    speculative_decoding_group.add_argument(
         "--sp_quantization",
         env_name="SP_QUANTIZATION",
         bind_to=(sp_config, "quantization"),

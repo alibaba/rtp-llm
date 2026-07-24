@@ -1,13 +1,16 @@
 import logging
 import math
+import os
 import sys
 import unittest
 from typing import List
+from unittest.mock import patch
 
 import torch
 from attention_ref import compute_flashinfer_decode_reference
 from base_attention_test import BaseAttentionTest, compare_tensors
 
+from rtp_llm.models_py.model_desc.minimax_m3 import _target_verify_impl_class
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferDecodeAttnOp,
 )
@@ -272,12 +275,202 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
         attn_op = PyFlashinferDecodeAttnOp(config.attn_configs)
         params = attn_op.prepare(attn_inputs)
         torch.cuda.synchronize()
+        self.assertTrue(attn_op.decode_wrapper._use_cuda_graph)
         self.assertEqual(params.decode_page_indptr_d.cpu().tolist(), [0, 1, 2])
         self.assertEqual(params.paged_kv_last_page_len_d.cpu().tolist(), [1, 1])
 
+        indptr_ptr = attn_op.decode_wrapper._paged_kv_indptr_buf.data_ptr()
+        indices_ptr = attn_op.decode_wrapper._paged_kv_indices_buf.data_ptr()
+        last_page_len_ptr = (
+            attn_op.decode_wrapper._paged_kv_last_page_len_buf.data_ptr()
+        )
+        original_plan = attn_op.decode_wrapper.plan
+        plan_calls = []
+
+        def counted_plan(*args, **kwargs):
+            plan_calls.append((args, kwargs))
+            return original_plan(*args, **kwargs)
+
+        attn_op.decode_wrapper.plan = counted_plan
         attn_op.prepare_for_cuda_graph_replay(attn_inputs)
         torch.cuda.synchronize()
+        self.assertEqual(len(plan_calls), 1)
         self.assertEqual(params.kvlen_d.cpu().tolist(), sequence_lengths)
+        self.assertEqual(
+            attn_op.decode_wrapper._paged_kv_indptr_buf.data_ptr(), indptr_ptr
+        )
+        self.assertEqual(
+            attn_op.decode_wrapper._paged_kv_indices_buf.data_ptr(), indices_ptr
+        )
+        self.assertEqual(
+            attn_op.decode_wrapper._paged_kv_last_page_len_buf.data_ptr(),
+            last_page_len_ptr,
+        )
+
+    def test_cuda_graph_long_kv_replan_matches_eager_reference(self):
+        """A long-KV replay must use the runtime plan, not the 1-page capture plan."""
+        config = self._create_config(
+            head_num=32,
+            head_num_kv=8,
+            size_per_head=128,
+            seq_size_per_block=128,
+            data_type="bf16",
+        )
+        sequence_lengths = [638 * config.seq_size_per_block]
+        attn_inputs = self._create_attention_inputs(
+            batch_size=1,
+            sequence_lengths=sequence_lengths,
+            seq_size_per_block=config.seq_size_per_block,
+            dtype=torch.bfloat16,
+        )
+        attn_inputs.is_cuda_graph = True
+        attn_inputs.sequence_lengths_plus_1_d = torch.tensor(
+            sequence_lengths, dtype=torch.int32, device=self.device
+        )
+
+        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs)
+        params = attn_op.prepare(attn_inputs)
+        q = self._create_query_tensor(
+            1, config.head_num, config.size_per_head, dtype=torch.bfloat16
+        )
+        total_blocks = self._calculate_total_blocks(
+            sequence_lengths, config.seq_size_per_block
+        )
+        kv_cache, k_cache, v_cache = self._create_kv_cache(
+            total_blocks,
+            config.seq_size_per_block,
+            config.head_num_kv,
+            config.size_per_head,
+            dtype=torch.bfloat16,
+        )
+
+        # Compile/JIT the captured one-page schedule before graph capture.
+        attn_op.forward(q, kv_cache, params)
+        torch.cuda.synchronize()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            graph_output = attn_op.forward(q, kv_cache, params)
+
+        # Reproduce the old contract: update only the aliased paged-KV tensors
+        # while retaining the one-page capture plan.
+        params.fill_decode_cuda_graph_params(
+            attn_inputs.sequence_lengths_plus_1_d,
+            attn_inputs.kv_cache_kernel_block_id_device,
+            config.seq_size_per_block,
+        )
+        graph.replay()
+        torch.cuda.synchronize()
+        stale_plan_output = graph_output.clone()
+
+        attn_op.prepare_for_cuda_graph_replay(attn_inputs)
+        graph.replay()
+        torch.cuda.synchronize()
+        replay_output = graph_output.clone()
+
+        block_ids = self._generate_block_id_list(
+            attn_inputs, sequence_lengths, config.seq_size_per_block
+        )
+        ref_output = compute_flashinfer_decode_reference(
+            q,
+            k_cache,
+            v_cache,
+            sequence_lengths,
+            block_ids,
+            config.seq_size_per_block,
+        )
+        self.assertFalse(
+            torch.allclose(stale_plan_output, ref_output, rtol=2e-2, atol=2e-2),
+            "the one-page capture plan unexpectedly matched the 638-page reference",
+        )
+        compare_tensors(
+            replay_output,
+            ref_output,
+            rtol=2e-2,
+            atol=2e-2,
+            name="CUDA graph long-KV replay",
+        )
+
+    def test_target_verify_replay_replans_after_metadata_refresh(self):
+        """Target verify must replace its MAX_SEQ_LEN plan with the live-KV plan."""
+        config = self._create_config(
+            head_num=32,
+            head_num_kv=8,
+            size_per_head=128,
+            seq_size_per_block=128,
+            data_type="bf16",
+        )
+        verify_tokens = 4
+        capture_prefix = 131072 - verify_tokens
+        replay_prefix = 638 * config.seq_size_per_block - verify_tokens
+        max_blocks = math.ceil(131072 / config.seq_size_per_block)
+        block_table = torch.arange(
+            max_blocks, dtype=torch.int32, device=self.device
+        ).unsqueeze(0)
+
+        def target_verify_inputs(prefix: int) -> PyAttentionInputs:
+            attn_inputs = PyAttentionInputs()
+            attn_inputs.is_prefill = True
+            attn_inputs.is_target_verify = True
+            attn_inputs.is_cuda_graph = True
+            attn_inputs.total_tokens = verify_tokens
+            attn_inputs.prefix_lengths = torch.tensor(
+                [prefix], dtype=torch.int32, device=self.device
+            )
+            attn_inputs.input_lengths = torch.tensor(
+                [verify_tokens], dtype=torch.int32, device=self.device
+            )
+            attn_inputs.sequence_lengths = torch.empty(
+                0, dtype=torch.int32, device=self.device
+            )
+            attn_inputs.kv_cache_kernel_block_id_device = block_table
+            attn_inputs.dtype = get_typemeta(
+                torch.empty(1, dtype=torch.bfloat16, device=self.device)
+            )
+            return attn_inputs
+
+        with patch.dict(
+            os.environ,
+            {"RTP_LLM_M3_TARGET_VERIFY_BACKEND": "flashinfer"},
+        ):
+            impl_class = _target_verify_impl_class()
+            impl = object.__new__(impl_class)
+            attn_op = impl._create_fmha_impl(config.attn_configs)
+
+        capture_inputs = target_verify_inputs(capture_prefix)
+        params = attn_op.prepare(capture_inputs)
+        torch.cuda.synchronize()
+        self.assertTrue(attn_op.decode_wrapper._use_cuda_graph)
+        self.assertEqual(attn_op.decode_wrapper._fixed_batch_size, verify_tokens)
+
+        metadata_ptrs = (
+            attn_op.decode_wrapper._paged_kv_indptr_buf.data_ptr(),
+            attn_op.decode_wrapper._paged_kv_indices_buf.data_ptr(),
+            attn_op.decode_wrapper._paged_kv_last_page_len_buf.data_ptr(),
+        )
+        original_plan = attn_op.decode_wrapper.plan
+        planned_indptr = []
+
+        def counted_plan(*args, **kwargs):
+            planned_indptr.append(args[0].cpu().tolist())
+            return original_plan(*args, **kwargs)
+
+        attn_op.decode_wrapper.plan = counted_plan
+        attn_op.prepare_for_cuda_graph_replay(target_verify_inputs(replay_prefix))
+        torch.cuda.synchronize()
+
+        self.assertEqual(planned_indptr, [[0, 638, 1276, 1914, 2552]])
+        self.assertEqual(
+            params.decode_page_indptr_d.cpu().tolist(),
+            [0, 638, 1276, 1914, 2552],
+        )
+        self.assertEqual(
+            (
+                attn_op.decode_wrapper._paged_kv_indptr_buf.data_ptr(),
+                attn_op.decode_wrapper._paged_kv_indices_buf.data_ptr(),
+                attn_op.decode_wrapper._paged_kv_last_page_len_buf.data_ptr(),
+            ),
+            metadata_ptrs,
+        )
 
     def test_edge_case_sequence_lengths(self):
         """Test edge cases with sequence lengths"""

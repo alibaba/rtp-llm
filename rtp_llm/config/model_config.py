@@ -555,7 +555,10 @@ class ModelConfig(CppModelConfig):
             self.apply_rope_scaling_override(model_override_args)
 
     def init_precision_config(
-        self, kv_cache_config: Optional[Any], act_type: Optional[str]
+        self,
+        kv_cache_config: Optional[Any],
+        act_type: Optional[str],
+        kv_cache_dtype_override: Optional[KvCacheDataType] = None,
     ):
         """Initialize precision configuration from checkpoint and quantization settings.
 
@@ -563,13 +566,16 @@ class ModelConfig(CppModelConfig):
         1. Loads quant_config from checkpoint or quantization string
         2. Sets quant_algo if quant_config exists
         3. Initializes data_type from act_type (or config_dtype if act_type is empty)
-        4. Sets attn_config.kv_cache_dtype based on kv_cache_config (if provided)
+        4. Sets attn_config.kv_cache_dtype from an explicit draft override or
+           kv_cache_config
         5. Applies quantization-specific overrides (e.g., fp8 quant_config sets kv_cache_dtype to FP8)
         6. Validates configuration with quant_config using kv_cache_dtype_to_torch_dtype
         7. Sets final data_type
 
         Args:
             kv_cache_config: Optional KVCacheConfig to set attn_config.kv_cache_dtype
+            act_type: Optional activation type override
+            kv_cache_dtype_override: Optional propose-model-only KV dtype override
         """
         # Load quant_config
         quant_config = QuantizationConfig.load_from_ckpt(self.ckpt_path)
@@ -651,8 +657,15 @@ class ModelConfig(CppModelConfig):
                     "ACT_TYPE can be configured manually."
                 )
 
-        # Set attn_config.kv_cache_dtype based on kv_cache_config
-        if kv_cache_config is not None:
+        # A speculative draft may override only its KV dtype. Allocation
+        # policy, page size and memory budget remain shared with the target.
+        if kv_cache_dtype_override is not None:
+            self.attn_config.kv_cache_dtype = kv_cache_dtype_override
+            logging.info(
+                "Setting attn_config.kv_cache_dtype to %s from the propose-model override",
+                kv_cache_dtype_override,
+            )
+        elif kv_cache_config is not None:
             if kv_cache_config.int8_kv_cache:
                 self.attn_config.kv_cache_dtype = KvCacheDataType.INT8
                 logging.info(
@@ -673,6 +686,16 @@ class ModelConfig(CppModelConfig):
             self.attn_config.kv_cache_dtype = KvCacheDataType.FP8
             logging.info(
                 "Setting attn_config.kv_cache_dtype to FP8 based on quant_config.get_method().lower() == 'fp8'"
+            )
+
+        if (
+            kv_cache_dtype_override is not None
+            and self.attn_config.kv_cache_dtype != kv_cache_dtype_override
+        ):
+            raise ValueError(
+                "propose KV cache dtype conflicts with checkpoint quantization: "
+                f"requested {kv_cache_dtype_override}, got "
+                f"{self.attn_config.kv_cache_dtype}"
             )
 
         # Validate configuration with quant_config
@@ -821,6 +844,7 @@ def build_model_config(
     ] = None,  # QuantizationConfig (optional, for quantization)
     vit_config: Optional[VitConfig] = None,
     apply_hack_layer_num: bool = True,
+    kv_cache_dtype_override: Optional[KvCacheDataType] = None,
 ) -> None:
     """Build and initialize ModelConfig from model_args.
 
@@ -835,6 +859,7 @@ def build_model_config(
         embedding_config: Optional EmbeddingConfig (for check_task_type)
         quantization_config: Optional QuantizationConfig (for quantization settings)
         apply_hack_layer_num: Whether to apply the target-model debug layer override
+        kv_cache_dtype_override: Optional propose-model-only KV dtype override
     """
     model_config.ckpt_path = model_args.ckpt_path
     model_config.tokenizer_path = model_args.tokenizer_path
@@ -867,7 +892,9 @@ def build_model_config(
     # This will initialize data_type from act_type (or config_dtype), set attn_config.kv_cache_dtype
     # from kv_cache_config, and validate with quant_config
     model_config.init_precision_config(
-        kv_cache_config=kv_cache_config, act_type=model_args.act_type
+        kv_cache_config=kv_cache_config,
+        act_type=model_args.act_type,
+        kv_cache_dtype_override=kv_cache_dtype_override,
     )
     model_config.attn_config.tokens_per_block = kv_cache_config.seq_size_per_block
     model_config.attn_config.kernel_tokens_per_block = (

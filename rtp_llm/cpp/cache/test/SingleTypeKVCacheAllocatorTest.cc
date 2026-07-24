@@ -73,6 +73,43 @@ makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers, int mtp_module_num, uin
                                                        /*is_mtp=*/true);
 }
 
+TEST(SpeculativeCacheConfigTest, TargetFp8DraftBf16UseIndependentLayouts) {
+    auto score_model_config                         = makeTestModelConfig(/*num_layers=*/2);
+    auto propose_model_config                       = makeTestModelConfig(/*num_layers=*/1);
+    score_model_config.data_type                    = rtp_llm::DataType::TYPE_BF16;
+    propose_model_config.data_type                  = rtp_llm::DataType::TYPE_BF16;
+    score_model_config.attn_config.kv_cache_dtype   = KvCacheDataType::FP8;
+    propose_model_config.attn_config.kv_cache_dtype = KvCacheDataType::BASE;
+
+    rtp_llm::ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = 1;
+    rtp_llm::RuntimeConfig runtime_config;
+    rtp_llm::KVCacheConfig kv_cache_config;
+    kv_cache_config.test_block_num = 8;
+
+    rtp_llm::SpeculativeExecutionConfig sp_config;
+    sp_config.type              = SP_TYPE_EAGLE;
+    sp_config.gen_num_per_cycle = 3;
+
+    auto config = rtp_llm::CacheConfigCreator::createSpConfig(score_model_config,
+                                                              propose_model_config,
+                                                              parallelism_config,
+                                                              runtime_config,
+                                                              kv_cache_config,
+                                                              sp_config,
+                                                              /*warm_up_result=*/std::nullopt,
+                                                              /*is_mtp=*/true);
+
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1);
+    const auto& draft_config = config.mtp_sub_configs[0];
+    ASSERT_NE(draft_config, nullptr);
+    EXPECT_EQ(config.dtype, rtp_llm::DataType::TYPE_FP8_E4M3);
+    EXPECT_EQ(draft_config->dtype, rtp_llm::DataType::TYPE_BF16);
+    EXPECT_GT(draft_config->kv_block_stride_bytes, config.kv_block_stride_bytes);
+    EXPECT_EQ(config.block_size_bytes,
+              config.kv_block_size_bytes + config.kv_scale_size_bytes + draft_config->block_size_bytes);
+}
+
 CompleteTokenIdsPtr createCompleteTokenIds(int batch_size, int seq_length, int seq_size_per_block = 8) {
     auto complete_token_ids =
         std::make_shared<CompleteTokenIds>(batch_size, batch_size, seq_length + 100, seq_size_per_block);
