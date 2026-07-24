@@ -343,6 +343,14 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         input.setGroupSize(groupSize);
 
         EngineRpcService.GenerateConfigPB.Builder config = input.getGenerateConfigBuilder();
+        // Rewrite timeout_ms to the dispatch-time remaining budget so the engine
+        // side (gRPC deadline, CHECK_REQUEST_TIMEOUT, etc.) automatically respects
+        // the end-to-end deadline.  When absoluteDeadlineMs is set (>0), compute
+        // remaining = absoluteDeadlineMs - now; otherwise keep the original timeout_ms.
+        if (item.absoluteDeadlineMs() > 0) {
+            long remaining = item.absoluteDeadlineMs() - System.currentTimeMillis();
+            config.setTimeoutMs((int) Math.max(0, remaining));
+        }
         config.clearRoleAddrs();
         addRoleAddr(config, item.prefill());
         addRoleAddr(config, item.decode());

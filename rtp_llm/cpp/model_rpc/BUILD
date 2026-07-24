@@ -8,6 +8,12 @@ requirement([
 embedding_arpc_deps()
 
 cc_library(
+    name = "prefill_deadline_utils",
+    hdrs = ["PrefillDeadlineUtils.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "tensor_pb_convert",
     srcs = ["TensorPbConvert.cc"],
     hdrs = ["TensorPbConvert.h"],

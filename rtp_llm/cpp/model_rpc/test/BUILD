@@ -130,3 +130,16 @@ cc_test(
     },
     exec_properties = {'gpu':'H20'},
 )
+
+cc_test(
+    name = "prefill_deadline_test",
+    srcs = [
+        "PrefillDeadlineTest.cc",
+    ],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/model_rpc:prefill_deadline_utils",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)

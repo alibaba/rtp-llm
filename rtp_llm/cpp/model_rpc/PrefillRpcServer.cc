@@ -1036,6 +1036,9 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     auto    request_timeout_ms = prefill_context.request_timeout_ms;
     auto    max_rpc_timeout_ms = maga_init_params_.pd_sep_config.max_rpc_timeout_ms;
     int64_t final_timeout_ms   = request_timeout_ms > 0 ? request_timeout_ms : max_rpc_timeout_ms;
+    // 扣减 prefill 已消耗时间（从收到请求到建 decode 连接的 getRpcConnection + multimodalProcess 等耗时）
+    final_timeout_ms =
+        computeRemainingTimeoutMs(final_timeout_ms, prefill_context.request_begin_time_us, currentTimeUs());
     if (final_timeout_ms > 0) {
         auto deadline = std::chrono::system_clock::now() + std::chrono::milliseconds(final_timeout_ms);
         prefill_context.client_context->set_deadline(deadline);

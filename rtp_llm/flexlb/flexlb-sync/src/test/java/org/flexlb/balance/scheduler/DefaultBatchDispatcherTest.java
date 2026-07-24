@@ -311,6 +311,57 @@ class DefaultBatchDispatcherTest {
         assertEquals(failuresBefore + 1, callback.failureCount.get(), "Post-shutdown dispatch should add exactly 1 failure");
     }
 
+    @Test
+    void buildInput_rewrites_timeout_ms_when_absolute_deadline_set() throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        long absoluteDeadlineMs = System.currentTimeMillis() + 2000;
+        // Set a large initial timeout_ms; buildInput should overwrite it with the
+        // dispatch-time remaining budget derived from absoluteDeadlineMs.
+        BatchItem item = createBatchItem(1L, 500, 200, prefillEp, absoluteDeadlineMs, 100_000);
+        AtomicReference<EngineRpcService.EnqueueBatchRequestPB> captured = new AtomicReference<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(),
+                any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+                .thenAnswer(inv -> {
+                    captured.set(inv.getArgument(2));
+                    return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
+                });
+
+        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test", callback);
+
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
+        EngineRpcService.EnqueueBatchRequestPB sent = captured.get();
+        assertNotNull(sent);
+        int timeoutMs = sent.getDpSlots(0).getRequests(0).getInput()
+                .getGenerateConfig().getTimeoutMs();
+        assertTrue(timeoutMs > 0, "timeout_ms should be rewritten to remaining budget");
+        assertTrue(timeoutMs <= 2000,
+                "timeout_ms should be clamped to remaining budget, got " + timeoutMs);
+    }
+
+    @Test
+    void buildInput_preserves_timeout_ms_when_no_absolute_deadline() throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        // absoluteDeadlineMs = 0 (legacy client); original timeout_ms must survive.
+        BatchItem item = createBatchItem(1L, 500, 200, prefillEp, 0L, 100_000);
+        AtomicReference<EngineRpcService.EnqueueBatchRequestPB> captured = new AtomicReference<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(),
+                any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+                .thenAnswer(inv -> {
+                    captured.set(inv.getArgument(2));
+                    return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L)));
+                });
+
+        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test", callback);
+
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
+        EngineRpcService.EnqueueBatchRequestPB sent = captured.get();
+        assertNotNull(sent);
+        int timeoutMs = sent.getDpSlots(0).getRequests(0).getInput()
+                .getGenerateConfig().getTimeoutMs();
+        assertEquals(100_000, timeoutMs,
+                "timeout_ms should be preserved when absoluteDeadlineMs is 0");
+    }
+
     // ---- helpers ----
 
     private PrefillEndpoint createPrefillEndpoint() {
@@ -327,6 +378,12 @@ class DefaultBatchDispatcherTest {
 
     private BatchItem createBatchItem(long requestId, long seqLen, long hitCacheLen,
                                       PrefillEndpoint prefillEp, long absoluteDeadlineMs) {
+        return createBatchItem(requestId, seqLen, hitCacheLen, prefillEp, absoluteDeadlineMs, 0);
+    }
+
+    private BatchItem createBatchItem(long requestId, long seqLen, long hitCacheLen,
+                                      PrefillEndpoint prefillEp, long absoluteDeadlineMs,
+                                      int timeoutMs) {
         Request request = new Request();
         request.setRequestId(requestId);
         request.setSeqLen(seqLen);
@@ -334,12 +391,14 @@ class DefaultBatchDispatcherTest {
         BalanceContext ctx = new BalanceContext();
         ctx.setRequest(request);
 
-        // Provide a valid GenerateInputPB bytes (minimum: requestId + empty config)
+        // Provide a valid GenerateInputPB bytes (minimum: requestId + config with timeout_ms)
         EngineRpcService.GenerateInputPB input = EngineRpcService.GenerateInputPB.newBuilder()
                 .setRequestId(requestId)
                 .setGroupId(Int64Value.of(1L))
                 .setGroupSize(1)
-                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder().build())
+                .setGenerateConfig(EngineRpcService.GenerateConfigPB.newBuilder()
+                        .setTimeoutMs(timeoutMs)
+                        .build())
                 .build();
         ctx.setGenerateInputPbBytes(input.toByteArray());
 

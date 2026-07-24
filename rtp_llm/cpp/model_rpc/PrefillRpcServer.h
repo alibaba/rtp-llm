@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rtp_llm/cpp/model_rpc/PrefillDeadlineUtils.h"
 #include <atomic>
 #include <condition_variable>
 #include "grpc++/grpc++.h"
