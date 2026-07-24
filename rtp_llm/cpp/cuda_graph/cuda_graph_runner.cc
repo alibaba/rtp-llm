@@ -822,6 +822,13 @@ bool CudaGraphRunner::tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, 
                             "(extend prefill_capture_seq_lens or reduce seq_len)",
                             state.current_seq_len,
                             capture_range_.back());
+    if (draft_prefill_graph_mode && !draft_prefill_requires_full_token_capacity_ && *it != state.current_seq_len) {
+        RTP_LLM_LOG_DEBUG("compact draft-prefill CUDA graph has no exact batch bucket: tokens=%d next_capture=%d; "
+                          "run eager forward",
+                          state.current_seq_len,
+                          *it);
+        return false;
+    }
     state.current_real_graph_seq_len = *it;
     return true;
 }
@@ -1354,16 +1361,12 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     // Common slice operations for input_ids and padding_offset
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
     inputs.attention_inputs.is_target_verify = is_target_verify_;
-    // Draft prefill cudagraph has two shapes:
-    // * DSv4 MTP (hc_mult_ > 1) consumes pre-HC hidden as [B*q_len, hc*dim]
-    //   and routes through decode-style hidden preparation, so capture keeps
-    //   full capacity.
-    // * GLM5 GenericMoeMTP (hc_mult_ == 1) is flat token prefill; FlashInfer
-    //   ragged prefill requires q.shape[0] == qo_indptr[-1] == seq_len.
-    // Embedding prefill (num_tokens_per_bs_ == max_seq_len_) also slices to
-    // seq_len because it goes through forward_prefill.
+    // Draft prefill uses compact token rows by default: paged-prefill attention requires
+    // q.shape[0] == cu_seqlens[-1]. Models with a fixed-batch decode-style prefill
+    // path opt in to full token capacity explicitly. Hidden-width expansion is
+    // independent of this token-layout choice. Embedding prefill is also compact.
     const bool draft_prefill_graph_mode    = is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
-    const bool draft_prefill_full_capacity = draft_prefill_graph_mode && hc_mult_ > 1;
+    const bool draft_prefill_full_capacity = draft_prefill_graph_mode && draft_prefill_requires_full_token_capacity_;
     const int  token_slice_len = draft_prefill_full_capacity ? max_bs_ * num_tokens_per_bs_ : seq_len_or_tokens;
     inputs.input_ids           = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
     inputs.input_hiddens       = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, token_slice_len);

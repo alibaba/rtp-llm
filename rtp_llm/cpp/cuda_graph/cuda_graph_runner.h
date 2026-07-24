@@ -33,6 +33,7 @@ public:
         kernel_seq_size_per_block_(graph_params.kernel_tokens_per_block),
         hidden_size_(graph_params.hidden_size),
         hc_mult_(static_cast<int>(graph_params.hc_mult)),
+        draft_prefill_requires_full_token_capacity_(graph_params.draft_prefill_requires_full_token_capacity),
         sp_steps_(graph_params.sp_steps),
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
@@ -144,6 +145,7 @@ private:
     // draft graph can take the target's pre-hc residual ([T, hc*dim]) as
     // input. The post-reduce output tensor still uses hidden_size_.
     int              hc_mult_{1};
+    bool             draft_prefill_requires_full_token_capacity_{false};
     int              sp_steps_{0};
     std::vector<int> capture_range_;
     std::vector<int> prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python

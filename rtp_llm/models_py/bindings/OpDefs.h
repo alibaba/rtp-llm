@@ -326,6 +326,10 @@ struct PyAttentionInputs {
 
     // CUDA Graph mode flags
     bool is_cuda_graph = false;  // True when running in CUDA graph mode (capture or replay)
+    // The captured prefill graph has a fixed query length for every request.
+    // Opt-in only: this lets paged FlashInfer preserve the actual Q tiling
+    // instead of planning for its graph-mode worst-case query distribution.
+    bool prefill_cuda_graph_fixed_q_per_request = false;
 
     std::optional<PyContextParallelParams> context_parallel_info;
 

@@ -178,6 +178,17 @@ class MiniMaxM3Eagle3Model(GptModelBase):
                 f"got {int(qkv_weight.shape[0])}"
             )
 
+    def prepare_fmha_impl(
+        self, inputs: PyModelInputs, is_cuda_graph: bool = False
+    ) -> Any:
+        attn_inputs = inputs.attention_inputs
+        if is_cuda_graph and attn_inputs.is_prefill:
+            # Compact EAGLE3 draft-prefill graphs replay only an exact batch
+            # bucket. Their total Q rows are batch * (proposal_step + 1), so
+            # every request has the same captured Q length.
+            attn_inputs.prefill_cuda_graph_fixed_q_per_request = True
+        return super().prepare_fmha_impl(inputs, is_cuda_graph)
+
     def clone_for_cuda_graph(self) -> "MiniMaxM3Eagle3Model":
         clone = object.__new__(type(self))
         nn.Module.__init__(clone)

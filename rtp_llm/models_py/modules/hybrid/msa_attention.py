@@ -544,12 +544,12 @@ def _fused_qk_idx_norm_rope_write_paged_decode_kernel(
     )
     tl.store(
         paged_kv_ptr + k_store_base + rot_off * KV_STRIDE_DIM,
-        rot_first.to(paged_kv_ptr.dtype.element_ty),
+        rot_first.to(tl.bfloat16).to(paged_kv_ptr.dtype.element_ty),
         mask=rot_mask & valid_paged_slot & is_k,
     )
     tl.store(
         paged_kv_ptr + k_store_base + (HALF_ROT + rot_off) * KV_STRIDE_DIM,
-        rot_second.to(paged_kv_ptr.dtype.element_ty),
+        rot_second.to(tl.bfloat16).to(paged_kv_ptr.dtype.element_ty),
         mask=rot_mask & valid_paged_slot & is_k,
     )
     tl.store(
@@ -565,7 +565,7 @@ def _fused_qk_idx_norm_rope_write_paged_decode_kernel(
     if REM > 0:
         tl.store(
             paged_kv_ptr + k_store_base + (ROTARY_DIM + rem_off) * KV_STRIDE_DIM,
-            rem.to(paged_kv_ptr.dtype.element_ty),
+            rem.to(tl.bfloat16).to(paged_kv_ptr.dtype.element_ty),
             mask=rem_mask & valid_paged_slot & is_k,
         )
         tl.store(
@@ -1396,13 +1396,17 @@ class MSAAttention(nn.Module):
     ):
         fused_qkv_idx = self._mxfp8_fused_qkv_idx_proj(x_fp8=x_fp8, x_scale=x_scale)
         if (
-            paged_kv_base.dtype != fused_qkv_idx.dtype
+            paged_kv_base.dtype
+            not in (
+                fused_qkv_idx.dtype,
+                torch.float8_e4m3fn,
+            )
             or paged_idx_k_flat.dtype != fused_qkv_idx.dtype
         ):
             raise RuntimeError(
-                "M3_MSA_RAW_IDX_MXFP8 fused paged decode requires BF16 paged "
-                "KV cache and BF16 idx_K cache view. Disable M3_MSA_RAW_IDX_MXFP8 "
-                "to use the BF16 idx fallback."
+                "M3_MSA_RAW_IDX_MXFP8 fused paged decode requires BF16 or FP8 "
+                "paged KV cache and a BF16 idx_K cache view. Disable "
+                "M3_MSA_RAW_IDX_MXFP8 to use the BF16 idx fallback."
             )
         q = torch.empty(
             total_tokens,
@@ -3152,9 +3156,8 @@ class MSAAttention(nn.Module):
             attn_inputs, device
         )
 
-        # The MXFP8 fused QKV+idx decode projection writes bf16 straight into the
-        # paged pool and hard-requires a bf16 pool; for an FP8 (e4m3) pool fall
-        # back to the standard project + Triton auto-cast write path instead.
+        # Keep regular decode on the established FP8 cache writer. The fused
+        # FP8 writer is currently scoped to target verify only.
         pool_is_fp8 = (
             kv_cache.kv_cache_base is not None
             and kv_cache.kv_cache_base.dtype == torch.float8_e4m3fn
@@ -3277,8 +3280,9 @@ class MSAAttention(nn.Module):
         total_tokens = int(hidden_states.shape[0])
         device = hidden_states.device
         batch_size = int(attn_inputs.prefix_lengths.numel())
+        request_block_table = self._physical_block_table(attn_inputs)
         phys_block_table = _repeat_request_block_table_for_verify_tokens(
-            self._physical_block_table(attn_inputs), batch_size, total_tokens
+            request_block_table, batch_size, total_tokens
         )
 
         # The shared target-verify contract remains request-row based. Expand it
@@ -3290,34 +3294,63 @@ class MSAAttention(nn.Module):
             device,
         )
 
-        if x_fp8 is not None and x_scale is not None:
-            qkv = self.qkv_proj(x_fp8, input_scales=x_scale)
+        if self._should_use_mxfp8_fused_qkv_idx_decode(x_fp8, x_scale):
+            paged_kv_base = self._paged_kv_base_view(kv_cache)
+            scale = kv_cache.kv_scale_base
+            paged_idx_k = scale.view(torch.bfloat16).view(
+                int(scale.shape[0]), int(self.page_size), int(self.idx_head_dim)
+            )
+            q, idx_q = self._decode_project_fused_qkv_idx(
+                total_tokens,
+                positions,
+                seq_lens,
+                phys_block_table,
+                paged_kv_base,
+                paged_idx_k.reshape(-1, self.idx_head_dim),
+                x_fp8=x_fp8,
+                x_scale=x_scale,
+            )
+            paged_decode_views = (
+                paged_kv_base[:, 0],
+                paged_kv_base[:, 1],
+                phys_block_table,
+                paged_idx_k,
+            )
         else:
-            qkv = self.qkv_proj(hidden_states)
-        if self.qk_fuse_norm is not None:
-            qkv = self.qk_fuse_norm(qkv)
-        q, k, v = torch.split(qkv, [self.q_size, self.kv_size, self.kv_size], dim=-1)
-        q = q.reshape(total_tokens, self.head_num, self.head_dim)
-        k = k.reshape(total_tokens, self.kv_head_num, self.head_dim)
-        v = v.reshape(total_tokens, self.kv_head_num, self.head_dim)
+            if x_fp8 is not None and x_scale is not None:
+                qkv = self.qkv_proj(x_fp8, input_scales=x_scale)
+            else:
+                qkv = self.qkv_proj(hidden_states)
+            if self.qk_fuse_norm is not None:
+                qkv = self.qk_fuse_norm(qkv)
+            q, k, v = torch.split(
+                qkv, [self.q_size, self.kv_size, self.kv_size], dim=-1
+            )
+            q = q.reshape(total_tokens, self.head_num, self.head_dim)
+            k = k.reshape(total_tokens, self.kv_head_num, self.head_dim)
+            v = v.reshape(total_tokens, self.kv_head_num, self.head_dim)
 
-        idx_q = F.linear(hidden_states, self.idx_q_w)
-        idx_k = F.linear(hidden_states, self.idx_k_w)
-        idx_q = idx_q.reshape(total_tokens, self.num_idx_heads, self.idx_head_dim)
-        idx_k = idx_k.reshape(total_tokens, 1, self.idx_head_dim)
-        idx_q = _gemma_rmsnorm_per_head(idx_q, self.idx_q_norm_w, self.layernorm_eps)
-        idx_k = _gemma_rmsnorm_per_head(idx_k, self.idx_k_norm_w, self.layernorm_eps)
+            idx_q = F.linear(hidden_states, self.idx_q_w)
+            idx_k = F.linear(hidden_states, self.idx_k_w)
+            idx_q = idx_q.reshape(total_tokens, self.num_idx_heads, self.idx_head_dim)
+            idx_k = idx_k.reshape(total_tokens, 1, self.idx_head_dim)
+            idx_q = _gemma_rmsnorm_per_head(
+                idx_q, self.idx_q_norm_w, self.layernorm_eps
+            )
+            idx_k = _gemma_rmsnorm_per_head(
+                idx_k, self.idx_k_norm_w, self.layernorm_eps
+            )
 
-        q = q.contiguous()
-        k = k.contiguous()
-        self._apply_rope(q, k, positions)
-        idx_q = idx_q.contiguous()
-        idx_k = idx_k.contiguous()
-        self._apply_rope(idx_q, idx_k, positions)
+            q = q.contiguous()
+            k = k.contiguous()
+            self._apply_rope(q, k, positions)
+            idx_q = idx_q.contiguous()
+            idx_k = idx_k.contiguous()
+            self._apply_rope(idx_q, idx_k, positions)
 
-        paged_decode_views = self._write_kv_cache_and_idx_k_for_decode(
-            kv_cache, k, v, idx_k, seq_lens, phys_block_table
-        )
+            paged_decode_views = self._write_kv_cache_and_idx_k_for_decode(
+                kv_cache, k, v, idx_k, seq_lens, phys_block_table
+            )
         if paged_decode_views is None:
             raise RuntimeError(
                 "MSA target verify requires BF16 or FP8 paged K/V and idx_K scale storage"
@@ -3344,6 +3377,9 @@ class MSAAttention(nn.Module):
             paged_main_v=paged_main_v,
             phys_block_table=phys_block_table,
             paged_idx_k=paged_idx_k,
+            score_block_table=request_block_table,
+            score_seq_lens=seq_lens.view(batch_size, -1)[:, -1],
+            decode_query_len=total_tokens // batch_size,
         )
         o = torch.where(valid_token_mask[:, None, None], o, torch.zeros_like(o))
 

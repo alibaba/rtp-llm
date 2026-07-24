@@ -642,6 +642,7 @@ def flash_decode_with_gqa_share_sparse_paged(
     block_size: int,  # sparse block size; MUST equal page size (k_paged.shape[2])
     topk_idx: torch.Tensor,  # [num_kv_heads, batch_size, topk] logical block ids
     sm_scale: Optional[float] = None,
+    num_topk_chunks: Optional[int] = None,
 ) -> torch.Tensor:
     """Zero-copy paged sparse decode (drop-in for
     ``flash_decode_with_gqa_share_sparse``). Reads the persistent paged K/V pool
@@ -670,12 +671,21 @@ def flash_decode_with_gqa_share_sparse_paged(
     max_topk = topk_idx.shape[2]
     if sm_scale is None:
         sm_scale = head_dim**-0.5
-    TARGET_GRID = 256
-    target = max(
-        1,
-        min(max_topk, TARGET_GRID // max(1, batch_size * num_kv_heads)),
-    )
-    NUM_TOPK_CHUNKS = 1 << (target.bit_length() - 1)
+    if num_topk_chunks is None:
+        target = max(
+            1,
+            min(max_topk, 256 // max(1, batch_size * num_kv_heads)),
+        )
+        num_topk_chunks = 1 << (target.bit_length() - 1)
+    if (
+        num_topk_chunks <= 0
+        or num_topk_chunks > max_topk
+        or num_topk_chunks & (num_topk_chunks - 1)
+    ):
+        raise ValueError(
+            "num_topk_chunks must be a positive power of two no larger than topk"
+        )
+    NUM_TOPK_CHUNKS = num_topk_chunks
     o_partial = torch.empty(
         NUM_TOPK_CHUNKS,
         batch_size,

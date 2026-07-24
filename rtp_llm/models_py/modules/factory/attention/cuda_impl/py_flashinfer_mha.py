@@ -101,6 +101,20 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.max_seq_len = attn_configs.max_seq_len
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         self.enable_cuda_graph = attn_inputs.is_cuda_graph
+        self.fixed_q_cuda_graph_plan = bool(
+            getattr(
+                attn_inputs,
+                "prefill_cuda_graph_fixed_q_per_request",
+                False,
+            )
+        )
+        if (
+            self.fixed_q_cuda_graph_plan
+            and attn_inputs.prefill_cuda_graph_copy_params is not None
+        ):
+            raise RuntimeError(
+                "fixed-Q FlashInfer planning requires compact prefill CUDA graph inputs"
+            )
         self.prefill_cuda_graph_copy_params = None
         # Pre-allocated buffers for CUDA graph copy path (avoid per-forward allocation)
         self._aligned_q_buf = None
@@ -150,7 +164,11 @@ class PyFlashinferPrefillPagedAttnOp(object):
             qo_indptr = attn_inputs.cu_seqlens[: attn_inputs.input_lengths.size(0) + 1]
 
         if self.enable_cuda_graph and self.prefill_wrapper._qo_indptr_buf is None:
-            self.prefill_wrapper._use_cuda_graph = True
+            # FlashInfer graph-mode planning assumes one request may own almost
+            # every Q row. For an explicitly fixed per-request Q layout that
+            # selects an oversized CTA tile. Keep stable metadata buffers but
+            # plan from the real Q layout instead.
+            self.prefill_wrapper._use_cuda_graph = not self.fixed_q_cuda_graph_plan
             self.prefill_wrapper._qo_indptr_buf = qo_indptr
             self.prefill_wrapper._paged_kv_indptr_buf = (
                 self.fmha_params.decode_page_indptr_d
@@ -208,19 +226,24 @@ class PyFlashinferPrefillPagedAttnOp(object):
             )
             qo_indptr = self.qo_indptr
 
-        self.prefill_wrapper.plan(
-            qo_indptr,
-            self.fmha_params.decode_page_indptr_d,
-            self.fmha_params.page_indice_d,
-            self.fmha_params.paged_kv_last_page_len_d,
-            self.local_head_num,
-            self.local_kv_head_num,
-            self.head_dim_qk,
-            self.page_size,
-            causal=True,
-            q_data_type=self.datatype,
-            kv_data_type=self.kv_datatype,
-        )
+        # The fixed-Q schedule is captured once. Replay updates the aliased
+        # paged-KV metadata buffers above, but must not re-plan a different
+        # schedule into an already captured graph.
+        if not (self.fixed_q_cuda_graph_plan and forbid_realloc):
+            self.prefill_wrapper.plan(
+                qo_indptr,
+                self.fmha_params.decode_page_indptr_d,
+                self.fmha_params.page_indice_d,
+                self.fmha_params.paged_kv_last_page_len_d,
+                self.local_head_num,
+                self.local_kv_head_num,
+                self.head_dim_qk,
+                self.page_size,
+                causal=True,
+                q_data_type=self.datatype,
+                kv_data_type=self.kv_datatype,
+                disable_split_kv=self.fixed_q_cuda_graph_plan,
+            )
         return self.fmha_params
 
     @staticmethod

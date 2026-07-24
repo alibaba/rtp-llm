@@ -242,6 +242,9 @@ def minimax_paged_sparse_decode(
     idx_sm_scale: Optional[float] = None,
     score_type: str = "max",
     disable_index_value: bool = False,
+    score_block_table: Optional[torch.Tensor] = None,
+    score_seq_lens: Optional[torch.Tensor] = None,
+    decode_query_len: int = 1,
 ):
     """Paged-only sparse decode that never consumes token-major scratch caches."""
     if not disable_index_value:
@@ -271,8 +274,10 @@ def minimax_paged_sparse_decode(
     idx_o, topk_idx = flash_decode_with_topk_idx_paged(
         q=idx_q,
         k_paged=paged_idx_k,
-        block_table=phys_block_table,
-        seq_lens=seq_lens,
+        block_table=(
+            phys_block_table if score_block_table is None else score_block_table
+        ),
+        seq_lens=seq_lens if score_seq_lens is None else score_seq_lens,
         max_seqlen=max_seqlen,
         block_size=block_size_k,
         topk=topk,
@@ -280,6 +285,8 @@ def minimax_paged_sparse_decode(
         local_blocks=local_blocks,
         sm_scale=idx_sm_scale,
         score_type=score_type,
+        decode_query_len=decode_query_len,
+        token_seq_lens=seq_lens,
     )
     if idx_group_size > 1:
         topk_idx = topk_index_reduce(
@@ -296,6 +303,7 @@ def minimax_paged_sparse_decode(
         block_size=block_size_k,
         topk_idx=topk_idx,
         sm_scale=sm_scale,
+        num_topk_chunks=4 if decode_query_len > 1 else None,
     )
     return idx_o, o
 

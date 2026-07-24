@@ -309,11 +309,18 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.kernel_tokens_per_block      = params.kernel_tokens_per_block;
         graph_params.hidden_size                  = params.hidden_size;
         graph_params.hc_mult                      = params.hc_mult;
-        graph_params.model_data_type              = dtype;
-        graph_params.max_context_batch_size       = params.concurrency_config.concurrency_limit;
-        graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
-        graph_params.decode_capture_batch_sizes   = params.hw_kernel_config.decode_capture_batch_sizes;
-        graph_params.kv_cache_group_num           = params.kv_cache_group_num;
+        // Draft-prefill token layout is a model execution capability, independent of hidden-width expansion.
+        // Models that need max-batch token capacity opt in explicitly; compact layout is the safe default
+        // for paged-prefill attention, whose query rows must match cu_seqlens.
+        if (is_prefill_cuda_graph_mode && py::hasattr(py_instance, "cuda_graph_prefill_requires_full_token_capacity")) {
+            graph_params.draft_prefill_requires_full_token_capacity =
+                py::cast<bool>(py_instance.attr("cuda_graph_prefill_requires_full_token_capacity"));
+        }
+        graph_params.model_data_type            = dtype;
+        graph_params.max_context_batch_size     = params.concurrency_config.concurrency_limit;
+        graph_params.prefill_capture_seq_lens   = params.hw_kernel_config.prefill_capture_seq_lens;
+        graph_params.decode_capture_batch_sizes = params.hw_kernel_config.decode_capture_batch_sizes;
+        graph_params.kv_cache_group_num         = params.kv_cache_group_num;
         // Derive combo_position_ids capture-buffer factor from the C++ rope_config:
         // 0 = model has no combo_position_ids (no buffer allocated, capture skips it);
         // >0 = factor (Mrope models such as qwen3-vl / qwen35-moe set rope_config.style

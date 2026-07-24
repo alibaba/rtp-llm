@@ -1212,6 +1212,8 @@ def flash_decode_with_topk_idx_paged(
     local_blocks: int,
     sm_scale: Optional[float] = None,
     score_type: str = "max",
+    decode_query_len: int = 1,
+    token_seq_lens: Optional[torch.Tensor] = None,
 ) -> tuple[None, torch.Tensor]:
     """Paged-only index decode: score idx_K through the physical block table."""
     assert score_type in (
@@ -1220,13 +1222,24 @@ def flash_decode_with_topk_idx_paged(
     ), f"score_type must be 'max' or 'lse', got {score_type!r}"
     triton.set_allocator(robust_allocator)
     assert q.dtype in (torch.bfloat16, torch.float16)
-    batch_size, num_q_heads, head_dim = q.shape
+    total_q, num_q_heads, head_dim = q.shape
+    request_batch_size = int(block_table.shape[0])
+    if decode_query_len <= 0 or total_q != request_batch_size * decode_query_len:
+        raise RuntimeError(
+            "paged idx decode Q layout must be request-major: "
+            f"total_q={total_q}, requests={request_batch_size}, "
+            f"decode_query_len={decode_query_len}"
+        )
+    if token_seq_lens is None:
+        if decode_query_len != 1:
+            raise RuntimeError("multi-Q paged idx decode requires token_seq_lens")
+        token_seq_lens = seq_lens
     num_phys_blocks, page_size, _ = k_paged.shape
     assert int(page_size) == int(
         block_size
     ), f"paged idx decode requires page_size({page_size}) == block_size({block_size})"
-    assert seq_lens.shape[0] == batch_size
-    assert block_table.shape[0] == batch_size
+    assert seq_lens.shape[0] == request_batch_size
+    assert token_seq_lens.shape[0] == total_q
     num_kv_heads = 1
     assert num_q_heads % num_kv_heads == 0
     gqa_group_size = num_q_heads // num_kv_heads
@@ -1239,7 +1252,7 @@ def flash_decode_with_topk_idx_paged(
     max_seqblock = triton.cdiv(max_kv_len, block_size)
     TARGET_GRID = 4096
     MAX_NUM_KV_CHUNKS = 256
-    chunk_divisor = batch_size
+    chunk_divisor = total_q
     target = max(
         1,
         min(MAX_NUM_KV_CHUNKS, TARGET_GRID // max(1, chunk_divisor)),
@@ -1248,27 +1261,27 @@ def flash_decode_with_topk_idx_paged(
     # Paged score kernels write every valid KV block that topk scans. Capacity
     # beyond ceil(seq_len / block_size) is never read, so avoid an extra fill.
     score = torch.empty(
-        (num_q_heads, batch_size, max_seqblock),
+        (num_q_heads, total_q, max_seqblock),
         dtype=torch.float32,
         device=q.device,
     )
 
     if score_type == "max":
-        grid = (batch_size, NUM_KV_CHUNKS)
+        grid = (request_batch_size, NUM_KV_CHUNKS)
         _decode_index_score_kernel[grid](
             q,
             k_paged,
             score,
             block_table,
             seq_lens,
-            batch_size,
+            request_batch_size,
             num_q_heads,
             head_dim,
             int(block_table.shape[1]),
             int(num_phys_blocks),
             init_blocks,
             local_blocks,
-            1,
+            decode_query_len,
             q.stride(0),
             q.stride(1),
             q.stride(2),
@@ -1280,18 +1293,20 @@ def flash_decode_with_topk_idx_paged(
             score.stride(2),
             block_table.stride(0),
             BLOCK_SIZE_K=block_size,
-            BLOCK_SIZE_Q=1,
+            BLOCK_SIZE_Q=triton.next_power_of_2(decode_query_len),
             num_kv_chunks=NUM_KV_CHUNKS,
         )
     else:
-        grid = (batch_size * NUM_KV_CHUNKS, num_kv_heads)
+        if decode_query_len != 1:
+            raise RuntimeError("multi-Q paged idx decode supports score_type=max only")
+        grid = (request_batch_size * NUM_KV_CHUNKS, num_kv_heads)
         _decode_score_kernel_paged[grid](
             q,
             k_paged,
             block_table,
             score,
             seq_lens,
-            batch_size,
+            request_batch_size,
             gqa_group_size,
             head_dim,
             num_phys_blocks,
@@ -1313,6 +1328,9 @@ def flash_decode_with_topk_idx_paged(
             NUM_KV_CHUNKS=NUM_KV_CHUNKS,
             SCORE_TYPE=score_type,
         )
+
+    batch_size = total_q
+    seq_lens = token_seq_lens
 
     if score.shape[2] <= 4096 and topk <= 32:
         return None, _minimax_decode_topk(score, seq_lens, block_size, topk)
