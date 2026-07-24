@@ -19,6 +19,12 @@ _HEUR_gqa_share_sparse_decode_kernel = {
 }
 
 
+_HEUR_gqa_share_sparse_decode_paged_static_topk_kernel = {
+    **_HEUR_gqa_share_sparse_decode_kernel,
+    "BLOCK_SIZE_T": lambda args: triton.next_power_of_2(args["MAX_TOPK"]),
+}
+
+
 @triton.heuristics(_HEUR_gqa_share_sparse_decode_kernel)
 @triton.autotune(
     configs=[
@@ -459,6 +465,205 @@ def _gqa_share_sparse_decode_paged_kernel(
     tl.store(lse_ptrs, lse_i.to(lse_ptr.dtype.element_ty), boundary_check=(0,))
 
 
+@triton.heuristics(_HEUR_gqa_share_sparse_decode_paged_static_topk_kernel)
+@triton.autotune(
+    configs=[
+        triton.Config({}, num_warps=4, num_stages=num_stages)
+        for num_stages in (2, 3, 5)
+    ],
+    key=[
+        "BATCH_SIZE_BUCKET",
+        "gqa_group_size",
+        "head_dim",
+        "block_size",
+        "MAX_TOPK",
+        "NUM_TOPK_CHUNKS",
+        "HAS_SINK",
+    ],
+)
+@triton.jit
+def _gqa_share_sparse_decode_paged_static_topk_kernel(
+    q_ptr,
+    sink_ptr,
+    k_paged_ptr,
+    v_paged_ptr,
+    block_table_ptr,
+    idx_ptr,
+    o_ptr,
+    lse_ptr,
+    seq_lens,
+    batch_size,
+    gqa_group_size,
+    head_dim,
+    max_topk,
+    max_kv_len,
+    num_phys_blocks,
+    sm_scale,
+    stride_q_b,
+    stride_q_h,
+    stride_q_d,
+    stride_sink_h,
+    stride_sink_d,
+    stride_k_blk,
+    stride_k_h,
+    stride_k_p,
+    stride_k_d,
+    stride_v_blk,
+    stride_v_h,
+    stride_v_p,
+    stride_v_d,
+    stride_bt_b,
+    stride_bt_blk,
+    stride_ti_h,
+    stride_ti_b,
+    stride_ti_t,
+    stride_o_c,
+    stride_o_b,
+    stride_o_h,
+    stride_o_d,
+    stride_l_c,
+    stride_l_b,
+    stride_l_h,
+    BATCH_SIZE_BUCKET: tl.constexpr,
+    BLOCK_SIZE_H: tl.constexpr,
+    BLOCK_SIZE_N: tl.constexpr,
+    BLOCK_SIZE_D: tl.constexpr,
+    BLOCK_SIZE_T: tl.constexpr,
+    MAX_TOPK: tl.constexpr,
+    NUM_TOPK_CHUNKS: tl.constexpr,
+    HAS_SINK: tl.constexpr,
+):
+    """Paged sparse decode for graph-stable target-verify top-k shapes."""
+    pid_bc, pid_kh = tl.program_id(0), tl.program_id(1)
+    pid_b = pid_bc % batch_size
+    pid_c = pid_bc // batch_size
+    pid_h = pid_kh * gqa_group_size
+    chunk_size_topk: tl.constexpr = MAX_TOPK // NUM_TOPK_CHUNKS
+    chunk_start_topk = pid_c * chunk_size_topk
+    seq_len = tl.minimum(tl.load(seq_lens + pid_b), max_kv_len)
+    idx_base = idx_ptr + pid_kh * stride_ti_h + pid_b * stride_ti_b
+    off_n = tl.arange(0, BLOCK_SIZE_N)
+    off_d = tl.arange(0, BLOCK_SIZE_D)
+    dim_mask = off_d < head_dim
+    bt_row = block_table_ptr + pid_b * stride_bt_b
+
+    q_ptrs = tl.make_block_ptr(
+        base=q_ptr + pid_b * stride_q_b + pid_h * stride_q_h,
+        shape=(gqa_group_size, head_dim),
+        strides=(stride_q_h, stride_q_d),
+        offsets=(0, 0),
+        block_shape=(BLOCK_SIZE_H, BLOCK_SIZE_D),
+        order=(1, 0),
+    )
+    q = tl.load(q_ptrs, boundary_check=(0, 1), padding_option="zero")
+    if HAS_SINK and pid_c == 0:
+        sink_ptrs = tl.make_block_ptr(
+            base=sink_ptr + pid_h * stride_sink_h,
+            shape=(gqa_group_size, head_dim),
+            strides=(stride_sink_h, stride_sink_d),
+            offsets=(0, 0),
+            block_shape=(BLOCK_SIZE_H, BLOCK_SIZE_D),
+            order=(1, 0),
+        )
+        sink = tl.load(sink_ptrs, boundary_check=(0, 1), padding_option="zero").to(
+            tl.float32
+        )
+        qsink = tl.sum(q.to(tl.float32) * sink, axis=1) * sm_scale
+        m_i = qsink
+        lse_i = qsink
+    else:
+        m_i = tl.full((BLOCK_SIZE_H,), float("-inf"), dtype=tl.float32)
+        lse_i = tl.full((BLOCK_SIZE_H,), float("-inf"), dtype=tl.float32)
+
+    acc_o = tl.zeros((BLOCK_SIZE_H, BLOCK_SIZE_D), dtype=tl.float32)
+    max_blocks = (max_kv_len + BLOCK_SIZE_N - 1) // BLOCK_SIZE_N
+    for topk_offset in tl.static_range(0, chunk_size_topk):
+        idx_offset = chunk_start_topk + topk_offset
+        logical_block = tl.load(idx_base + idx_offset * stride_ti_t).to(tl.int32)
+        valid_logical_block = (logical_block >= 0) & (logical_block < max_blocks)
+        safe_logical_block = tl.where(valid_logical_block, logical_block, 0)
+        physical_page = tl.load(
+            bt_row + safe_logical_block * stride_bt_blk,
+            mask=valid_logical_block,
+            other=-1,
+        ).to(tl.int64)
+        valid_page = (
+            valid_logical_block
+            & (physical_page >= 0)
+            & (physical_page < num_phys_blocks)
+        )
+        safe_page = tl.where(valid_page, physical_page, 0)
+        base_pos = safe_logical_block * BLOCK_SIZE_N
+        pos_mask = valid_page & ((base_pos + off_n) < seq_len)
+
+        k_off = (
+            safe_page * stride_k_blk
+            + pid_kh * stride_k_h
+            + off_n[None, :] * stride_k_p
+            + off_d[:, None] * stride_k_d
+        )
+        k = tl.load(
+            k_paged_ptr + k_off,
+            mask=valid_page & dim_mask[:, None] & pos_mask[None, :],
+            other=0.0,
+        )
+        v_off = (
+            safe_page * stride_v_blk
+            + pid_kh * stride_v_h
+            + off_n[:, None] * stride_v_p
+            + off_d[None, :] * stride_v_d
+        )
+        v = tl.load(
+            v_paged_ptr + v_off,
+            mask=valid_page & pos_mask[:, None] & dim_mask[None, :],
+            other=0.0,
+        )
+        block_active = tl.sum(tl.where(pos_mask, 1, 0), axis=0) > 0
+        k = k.to(q.dtype)
+        v = v.to(q.dtype)
+        qk = tl.zeros((BLOCK_SIZE_H, BLOCK_SIZE_N), dtype=tl.float32)
+        qk += tl.where(pos_mask[None, :], 0, float("-inf"))
+        qk += tl.dot(q, k) * sm_scale
+        m_ij_candidate = tl.maximum(m_i, tl.max(qk, axis=1))
+        m_ij = tl.where(block_active, m_ij_candidate, m_i)
+        p = tl.where(block_active, tl.exp(qk - m_ij[:, None]), 0.0)
+        l_ij = tl.sum(p, axis=1)
+        acc_o_scale = tl.where(block_active, tl.exp(m_i - m_ij), 1.0)
+        acc_o = acc_o * acc_o_scale[:, None]
+        acc_o += tl.dot(p.to(v.dtype), v)
+        m_i = m_ij
+        lse_i = tl.where(
+            block_active,
+            m_ij + tl.log(tl.exp(lse_i - m_ij) + l_ij),
+            lse_i,
+        )
+
+    scale = tl.where(
+        lse_i > float("-inf"),
+        tl.exp(m_i - lse_i),
+        tl.zeros_like(lse_i),
+    )
+    acc_o = acc_o * scale[:, None]
+    o_ptrs = tl.make_block_ptr(
+        base=o_ptr + pid_c * stride_o_c + pid_b * stride_o_b + pid_h * stride_o_h,
+        shape=(gqa_group_size, head_dim),
+        strides=(stride_o_h, stride_o_d),
+        offsets=(0, 0),
+        block_shape=(BLOCK_SIZE_H, BLOCK_SIZE_D),
+        order=(1, 0),
+    )
+    tl.store(o_ptrs, acc_o.to(o_ptr.dtype.element_ty), boundary_check=(0, 1))
+    lse_ptrs = tl.make_block_ptr(
+        base=lse_ptr + pid_c * stride_l_c + pid_b * stride_l_b + pid_h * stride_l_h,
+        shape=(gqa_group_size,),
+        strides=(stride_l_h,),
+        offsets=(0,),
+        block_shape=(BLOCK_SIZE_H,),
+        order=(0,),
+    )
+    tl.store(lse_ptrs, lse_i.to(lse_ptr.dtype.element_ty), boundary_check=(0,))
+
+
 _HEUR_merge_topk_attn_out_kernel = {
     "BLOCK_SIZE_D": lambda args: triton.next_power_of_2(args["head_dim"]),
 }
@@ -493,15 +698,41 @@ def _merge_topk_attn_out_kernel(
     )
     lse_ptrs = lse_ptr + pid_b * stride_l_b + pid_h * stride_l_h + off_c * stride_l_c
     o = tl.load(o_ptrs, boundary_check=(0, 1), padding_option="zero")
-    lse = tl.load(lse_ptrs)  # empty chunks contribute -inf -> weight 0
+    lse = tl.load(lse_ptrs)  # empty chunks contribute -inf
     # standard flash-decoding merge in linear (not log2) space, matching the
     # decode kernel which uses tl.exp / tl.log.
     lse_max = tl.max(lse, axis=0)
-    weights = tl.exp(lse - lse_max)
-    weights = weights / tl.sum(weights, axis=0)
+    has_valid_chunk = lse_max > float("-inf")
+    safe_lse_max = tl.where(has_valid_chunk, lse_max, 0.0)
+    weights = tl.where(has_valid_chunk, tl.exp(lse - safe_lse_max), 0.0)
+    weight_sum = tl.sum(weights, axis=0)
+    weights = weights / tl.where(has_valid_chunk, weight_sum, 1.0)
     o_merged = tl.sum(o * weights[:, None], axis=0)
     o_out_ptrs = o_ptr + pid_b * stride_o_b + pid_h * stride_o_h + off_d * stride_o_d
     tl.store(o_out_ptrs, o_merged.to(o_ptr.dtype.element_ty), mask=off_d < head_dim)
+
+
+def _merge_topk_attn_out(
+    o_partial: torch.Tensor, lse_partial: torch.Tensor
+) -> torch.Tensor:
+    batch_size = int(o_partial.shape[1])
+    num_q_heads = int(o_partial.shape[2])
+    head_dim = int(o_partial.shape[3])
+    num_topk_chunks = int(o_partial.shape[0])
+    _merge_topk_attn_out_kernel[(batch_size, num_q_heads)](
+        o_partial,
+        lse_partial,
+        head_dim,
+        o_partial.stride(0),
+        o_partial.stride(1),
+        o_partial.stride(2),
+        o_partial.stride(3),
+        lse_partial.stride(0),
+        lse_partial.stride(1),
+        lse_partial.stride(2),
+        NUM_TOPK_CHUNKS=num_topk_chunks,
+    )
+    return o_partial[0].contiguous()
 
 
 @torch.no_grad()
@@ -613,22 +844,7 @@ def flash_decode_with_gqa_share_sparse(
         BLOCK_SIZE_N=block_size,
         NUM_TOPK_CHUNKS=NUM_TOPK_CHUNKS,
     )
-    # merge partials into chunk 0
-    merge_grid = (batch_size, num_q_heads)
-    _merge_topk_attn_out_kernel[merge_grid](
-        o_partial,
-        lse_partial,
-        head_dim,
-        o_partial.stride(0),
-        o_partial.stride(1),
-        o_partial.stride(2),
-        o_partial.stride(3),
-        lse_partial.stride(0),
-        lse_partial.stride(1),
-        lse_partial.stride(2),
-        NUM_TOPK_CHUNKS=NUM_TOPK_CHUNKS,
-    )
-    return o_partial[0].contiguous()
+    return _merge_topk_attn_out(o_partial, lse_partial)
 
 
 @torch.no_grad()
@@ -642,6 +858,8 @@ def flash_decode_with_gqa_share_sparse_paged(
     block_size: int,  # sparse block size; MUST equal page size (k_paged.shape[2])
     topk_idx: torch.Tensor,  # [num_kv_heads, batch_size, topk] logical block ids
     sm_scale: Optional[float] = None,
+    num_topk_chunks: Optional[int] = None,
+    target_verify_static_topk: bool = False,
 ) -> torch.Tensor:
     """Zero-copy paged sparse decode (drop-in for
     ``flash_decode_with_gqa_share_sparse``). Reads the persistent paged K/V pool
@@ -670,12 +888,21 @@ def flash_decode_with_gqa_share_sparse_paged(
     max_topk = topk_idx.shape[2]
     if sm_scale is None:
         sm_scale = head_dim**-0.5
-    TARGET_GRID = 256
-    target = max(
-        1,
-        min(max_topk, TARGET_GRID // max(1, batch_size * num_kv_heads)),
-    )
-    NUM_TOPK_CHUNKS = 1 << (target.bit_length() - 1)
+    if num_topk_chunks is None:
+        target = max(
+            1,
+            min(max_topk, 256 // max(1, batch_size * num_kv_heads)),
+        )
+        num_topk_chunks = 1 << (target.bit_length() - 1)
+    if (
+        num_topk_chunks <= 0
+        or num_topk_chunks > max_topk
+        or num_topk_chunks & (num_topk_chunks - 1)
+    ):
+        raise ValueError(
+            "num_topk_chunks must be a positive power of two no larger than topk"
+        )
+    NUM_TOPK_CHUNKS = num_topk_chunks
     o_partial = torch.empty(
         NUM_TOPK_CHUNKS,
         batch_size,
@@ -692,7 +919,7 @@ def flash_decode_with_gqa_share_sparse_paged(
         device=q.device,
     )
     grid = (batch_size * NUM_TOPK_CHUNKS, num_kv_heads)
-    _gqa_share_sparse_decode_paged_kernel[grid](
+    kernel_args = (
         q,
         sink,
         k_paged,
@@ -734,21 +961,19 @@ def flash_decode_with_gqa_share_sparse_paged(
         lse_partial.stride(0),
         lse_partial.stride(1),
         lse_partial.stride(2),
-        BLOCK_SIZE_N=block_size,
-        NUM_TOPK_CHUNKS=NUM_TOPK_CHUNKS,
     )
-    merge_grid = (batch_size, num_q_heads)
-    _merge_topk_attn_out_kernel[merge_grid](
-        o_partial,
-        lse_partial,
-        head_dim,
-        o_partial.stride(0),
-        o_partial.stride(1),
-        o_partial.stride(2),
-        o_partial.stride(3),
-        lse_partial.stride(0),
-        lse_partial.stride(1),
-        lse_partial.stride(2),
-        NUM_TOPK_CHUNKS=NUM_TOPK_CHUNKS,
-    )
-    return o_partial[0].contiguous()
+    use_static_topk = target_verify_static_topk and max_topk % NUM_TOPK_CHUNKS == 0
+    if use_static_topk:
+        _gqa_share_sparse_decode_paged_static_topk_kernel[grid](
+            *kernel_args,
+            BLOCK_SIZE_N=block_size,
+            MAX_TOPK=max_topk,
+            NUM_TOPK_CHUNKS=NUM_TOPK_CHUNKS,
+        )
+    else:
+        _gqa_share_sparse_decode_paged_kernel[grid](
+            *kernel_args,
+            BLOCK_SIZE_N=block_size,
+            NUM_TOPK_CHUNKS=NUM_TOPK_CHUNKS,
+        )
+    return _merge_topk_attn_out(o_partial, lse_partial)

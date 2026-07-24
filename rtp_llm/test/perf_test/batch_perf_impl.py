@@ -41,16 +41,18 @@ def _curl_server_single_worker(
             "force_sp_accept": True,
         },
     }
-
     if generate_config is not None:
         req["generate_config"].update(generate_config)
-        if "top_k" in generate_config:
-            req["top_k"] = generate_config["top_k"]
         if "top_p" in generate_config:
             req["top_p"] = generate_config["top_p"]
 
-    if "top_k" not in req:
-        req["top_k"] = 1
+    # The native inference endpoint deserializes sampling parameters from
+    # generate_config. Keep the legacy top-level mirror for endpoints that still
+    # consume it, but do not accidentally benchmark the native endpoint with its
+    # default top_k=0 (random sampling).
+    if "top_k" not in req["generate_config"]:
+        req["generate_config"]["top_k"] = 1
+    req["top_k"] = req["generate_config"]["top_k"]
 
     profile_step = _effective_profile_steps(is_decode, decode_test_length)
     if profile:

@@ -1,24 +1,33 @@
 import json
+import os
 import unittest
 from pathlib import Path
 from tempfile import TemporaryDirectory
 from types import SimpleNamespace
+from unittest.mock import patch
 
 import torch
 
 from rtp_llm.model_factory_register import ModelDict
+from rtp_llm.models.llama import Llama
 from rtp_llm.models.minimax_m3_eagle3 import (
     MiniMaxM3Eagle3,
     MiniMaxM3Eagle3WeightInfo,
     MiniMaxM3Eagle3WeightNames,
     _merge_qkv_weight,
 )
-from rtp_llm.models_py.model_desc.minimax_m3 import _MiniMaxM3ModelMixin
+from rtp_llm.models_py.model_desc.minimax_m3 import (
+    _fill_target_verify_compact_lengths,
+    _MiniMaxM3ModelMixin,
+    _requested_target_verify_backend,
+    _require_target_verify_physical_block_table,
+    _target_verify_query_dtype,
+)
 from rtp_llm.models_py.model_desc.minimax_m3_eagle3 import (
     MiniMaxM3Eagle3DecoderLayer,
     MiniMaxM3Eagle3Model,
 )
-from rtp_llm.ops import SpeculativeType
+from rtp_llm.ops import KvCacheDataType, SpeculativeType
 
 
 def _draft_config(**overrides):
@@ -30,6 +39,7 @@ def _draft_config(**overrides):
         "head_dim": 128,
         "hidden_size": 8,
         "intermediate_size": 16,
+        "max_position_embeddings": 4096,
         "norm_output": True,
         "num_attention_heads": 2,
         "num_hidden_layers": 1,
@@ -44,6 +54,9 @@ def _draft_config(**overrides):
 
 
 class Eagle3ConfigTest(unittest.TestCase):
+    def test_uses_llama_model_family(self):
+        self.assertEqual(MiniMaxM3Eagle3.__bases__, (Llama,))
+
     def test_parses_checkpoint_contract(self):
         with TemporaryDirectory() as tmpdir:
             Path(tmpdir, "config.json").write_text(json.dumps(_draft_config()))
@@ -53,6 +66,7 @@ class Eagle3ConfigTest(unittest.TestCase):
         self.assertEqual(config.model_type, "minimax_m3_eagle3")
         self.assertEqual(config.num_layers, 1)
         self.assertEqual(config.hc_mult, 1)
+        self.assertEqual(config.max_seq_len, 4096)
         self.assertEqual(config.vocab_size, 32)
         self.assertEqual(config.config_dtype, "bfloat16")
         self.assertFalse(config.enable_fp32_lm_head)
@@ -250,6 +264,78 @@ class Eagle3ForwardContractTest(unittest.TestCase):
         actual = MiniMaxM3Eagle3Model._combine_aux_hidden_states(model, hidden)
 
         torch.testing.assert_close(actual, hidden)
+
+
+class Eagle3TargetVerifyBackendTest(unittest.TestCase):
+    def test_fa4_fp8_kv_uses_fp8_query(self):
+        self.assertEqual(
+            _target_verify_query_dtype(KvCacheDataType.FP8, torch.bfloat16, "fa4"),
+            torch.float8_e4m3fn,
+        )
+
+    def test_flashinfer_fp8_kv_preserves_model_query_dtype(self):
+        self.assertEqual(
+            _target_verify_query_dtype(
+                KvCacheDataType.FP8, torch.bfloat16, "flashinfer"
+            ),
+            torch.bfloat16,
+        )
+
+    def test_base_kv_preserves_model_query_dtype(self):
+        self.assertEqual(
+            _target_verify_query_dtype(KvCacheDataType.BASE, torch.bfloat16, "fa4"),
+            torch.bfloat16,
+        )
+
+    def test_compact_lengths_mask_cuda_graph_padding(self):
+        output = torch.empty(3, dtype=torch.int32)
+        _fill_target_verify_compact_lengths(
+            prefix_lengths=torch.tensor([10, 20, 0], dtype=torch.int32),
+            input_lengths=torch.tensor([3, 3, 0], dtype=torch.int32),
+            verify_tokens=3,
+            output=output,
+            clear_padded_requests=True,
+        )
+        torch.testing.assert_close(output, torch.tensor([13, 23, 0], dtype=torch.int32))
+
+    def test_fa4_uses_request_physical_page_table(self):
+        physical = torch.tensor([[11, 12]], dtype=torch.int32)
+        kernel = torch.tensor([[21, 22]], dtype=torch.int32)
+        inputs = SimpleNamespace(
+            kv_cache_block_id_device=physical,
+            kv_cache_kernel_block_id_device=kernel,
+        )
+        self.assertIs(_require_target_verify_physical_block_table(inputs), physical)
+
+    def test_fa4_requires_request_physical_page_table(self):
+        inputs = SimpleNamespace(
+            kv_cache_block_id_device=None,
+            kv_cache_kernel_block_id_device=torch.tensor([[21, 22]], dtype=torch.int32),
+        )
+
+        with self.assertRaisesRegex(RuntimeError, "physical KV block table"):
+            _require_target_verify_physical_block_table(inputs)
+
+    def test_defaults_to_flashinfer(self):
+        with patch.dict(os.environ, {}, clear=True):
+            self.assertEqual(_requested_target_verify_backend(), "flashinfer")
+
+    def test_accepts_explicit_backends(self):
+        for backend in ("auto", "fa4", "flashinfer"):
+            with self.subTest(backend=backend), patch.dict(
+                os.environ,
+                {"RTP_LLM_M3_TARGET_VERIFY_BACKEND": backend},
+                clear=True,
+            ):
+                self.assertEqual(_requested_target_verify_backend(), backend)
+
+    def test_rejects_unknown_backend(self):
+        with patch.dict(
+            os.environ,
+            {"RTP_LLM_M3_TARGET_VERIFY_BACKEND": "unknown"},
+            clear=True,
+        ), self.assertRaisesRegex(ValueError, "auto, fa4, flashinfer"):
+            _requested_target_verify_backend()
 
 
 if __name__ == "__main__":
