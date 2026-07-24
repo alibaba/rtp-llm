@@ -23,7 +23,9 @@ import os
 import unittest
 from typing import AsyncGenerator
 from unittest import TestCase, main
+from unittest.mock import patch
 
+import grpc
 import torch
 
 from rtp_llm.config.exceptions import FtRuntimeException
@@ -36,6 +38,7 @@ from rtp_llm.cpp.model_rpc.model_rpc_client import (
     trans_output,
 )
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
+    BatchGenerateOutputsPB,
     GenerateInputPB,
     GenerateOutputsPB,
     TensorPB,
@@ -484,6 +487,152 @@ class BatchEnqueueRoutingTest(TestCase):
         client._decode_entrance = False
         with self.assertRaises(FtRuntimeException):
             client._select_batch_address(inputs)
+
+
+class BatchEnqueueDecodeSemanticsTest(TestCase):
+    """Exercises the REAL ModelRpcClient.batch_enqueue decode/error path.
+
+    The routing tests above stub the client's batch_enqueue wholesale, so the gRPC call, the
+    results-decode loop, the inputs[i] <-> results[i] alignment, the raise-on-first-error
+    (chunk-level all-or-nothing) and the grpc.RpcError translation had no coverage at all. This
+    class drives that method body with a faked stub. trans_input/trans_output are the separately
+    tested leaf decoders; here they are spied so a mis-alignment (trans_output fed the wrong
+    input) or a dropped/renumbered error index turns the test red.
+    """
+
+    @staticmethod
+    def _client():
+        client = ModelRpcClient.__new__(ModelRpcClient)
+        client._addresses = ["10.0.0.1:8089"]
+        client._decode_entrance = False
+        client._max_rpc_timeout_ms = 30000
+
+        class _Pool:
+            async def get(self, addr):
+                return object()
+
+        client._channel_pool = _Pool()
+        return client
+
+    @staticmethod
+    def _input(request_id):
+        return SimpleNamespace(
+            request_id=request_id,
+            prompt_length=4,
+            generate_config=SimpleNamespace(timeout_ms=1000, role_addrs=[]),
+        )
+
+    @staticmethod
+    def _stub(response=None, error=None):
+        class _FakeStub:
+            def __init__(self, channel):
+                pass
+
+            async def BatchGenerateCall(self, batch_input_pb, timeout=None):
+                if error is not None:
+                    raise error
+                return response
+
+        return _FakeStub
+
+    def _run(self, client, inputs, *, response=None, error=None, seen=None):
+        def spy_trans_output(input_py, final_output, stream_state):
+            if seen is not None:
+                seen.append(input_py)
+            return ("OUT", input_py.request_id)
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            new=self._stub(response=response, error=error),
+        ), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.trans_input",
+            new=lambda inp: GenerateInputPB(),
+        ), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.trans_output",
+            new=spy_trans_output,
+        ):
+            return asyncio.run(client.batch_enqueue(inputs))
+
+    def test_empty_batch_short_circuits_without_touching_the_stub(self):
+        # error would fire if the stub were reached; an empty batch must not reach it.
+        self.assertEqual(
+            [], self._run(self._client(), [], error=RuntimeError("stub reached"))
+        )
+
+    def test_all_success_returns_one_output_per_input_in_order(self):
+        resp = BatchGenerateOutputsPB()
+        resp.results.add()  # result[0]: no error_info -> success
+        resp.results.add()  # result[1]: success
+        inputs = [self._input(0), self._input(1)]
+        seen = []
+
+        out = self._run(self._client(), inputs, response=resp, seen=seen)
+
+        self.assertEqual([("OUT", 0), ("OUT", 1)], out)
+        # inputs[i] <-> results[i]: decode input 0 then input 1, asserted by identity so that
+        # trans_output(inputs[0], results[1]) or a reused index cannot pass.
+        self.assertIs(inputs[0], seen[0])
+        self.assertIs(inputs[1], seen[1])
+
+    def test_first_item_error_aborts_whole_chunk_and_names_the_index(self):
+        resp = BatchGenerateOutputsPB()
+        resp.results.add()  # result[0]: success, decoded before the failure is seen ...
+        r1 = resp.results.add()  # result[1]: failure
+        r1.error_info.error_message = "boom"
+        inputs = [self._input(0), self._input(1)]
+        seen = []
+
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._run(self._client(), inputs, response=resp, seen=seen)
+
+        # chunk-level all-or-nothing: item 0's success was computed ...
+        self.assertIs(inputs[0], seen[0])
+        # ... yet the call raised (discarding it) and named the failing index.
+        self.assertIn("batch item 1", str(ctx.exception))
+
+    def test_error_index_is_the_failing_position_not_a_constant(self):
+        # Guards against a hard-coded index or an off-by-one in the error message.
+        resp = BatchGenerateOutputsPB()
+        resp.results.add()
+        resp.results.add()
+        r2 = resp.results.add()
+        r2.error_info.error_message = "third one failed"
+        inputs = [self._input(0), self._input(1), self._input(2)]
+
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._run(self._client(), inputs, response=resp)
+        self.assertIn("batch item 2", str(ctx.exception))
+
+    def test_grpc_error_is_translated_to_ft_runtime_exception(self):
+        class _FakeRpcError(grpc.RpcError):
+            def trailing_metadata(self):
+                return {}
+
+            def code(self):
+                return grpc.StatusCode.UNAVAILABLE
+
+            def details(self):
+                return "backend unavailable"
+
+        # grpc.RpcError must not leak raw; batch_enqueue funnels it through _handle_grpc_error.
+        with self.assertRaises(FtRuntimeException):
+            self._run(self._client(), [self._input(0)], error=_FakeRpcError())
+
+    def test_error_info_present_but_empty_message_is_treated_as_success(self):
+        # The decode guard is `HasField("error_info") AND error_info.error_message`: an error_info
+        # sub-message that is set but carries no message must NOT abort the chunk. Mutation guard:
+        # drop the second conjunct (raise on any error_info present) and item 0 wrongly raises.
+        resp = BatchGenerateOutputsPB()
+        r0 = resp.results.add()
+        r0.error_info.SetInParent()  # error_info present (HasField True) but error_message == ""
+        resp.results.add()  # result[1]: plain success
+        inputs = [self._input(0), self._input(1)]
+        seen = []
+
+        out = self._run(self._client(), inputs, response=resp, seen=seen)
+
+        self.assertEqual([("OUT", 0), ("OUT", 1)], out)
+        self.assertIs(inputs[0], seen[0])
 
 
 class SchedulePayloadSeqLenTest(TestCase):

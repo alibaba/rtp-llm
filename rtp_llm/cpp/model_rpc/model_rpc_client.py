@@ -645,6 +645,21 @@ class ModelRpcClient(object):
         return targets.pop()
 
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
+        """Send one chunk as a single BatchGenerateCall and return one output per input, in order.
+
+        Error semantics are chunk-level all-or-nothing. The C++ BatchGenerateCall returns a
+        per-item result vector (1:1 with ``inputs``: a failed item carries ``error_info`` while
+        its siblings still carry a ``final_output``), but this client raises on the first
+        ``error_info`` and discards the rest. That is deliberate, not an oversight of the
+        server's per-item contract: the consumers (``pipeline.batch_infer``,
+        ``openai_endpoint``) and the single-request ``enqueue`` path have no per-item error
+        slot in a ``list[GenerateOutputs]``, and the dispatcher already provides partial-failure
+        at chunk granularity (a failed chunk becomes a placeholder while sibling chunks survive).
+        Turning this into per-item partial return is a larger change that must also teach both
+        consumers to represent a single failed item. ``BatchEnqueueDecodeSemanticsTest`` locks
+        this behavior (raise-on-first-error, ``inputs[i]`` <-> ``results[i]`` alignment, and
+        ``grpc.RpcError`` translation).
+        """
         if not inputs:
             return []
 
