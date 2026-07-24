@@ -25,7 +25,12 @@ from rtp_llm.config.py_config_modules import (
     VitConfig,
 )
 from rtp_llm.model_factory_register import _model_factory, ensure_model_registered
-from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType, VitSeparation
+from rtp_llm.ops import (
+    KvCacheDataType,
+    ProfilingDebugLoggingConfig,
+    SpeculativeType,
+    VitSeparation,
+)
 from rtp_llm.utils.util import check_with_info
 
 
@@ -38,6 +43,20 @@ def _configure_propose_model_contract(
     configure = getattr(propose_model_cls, "configure_speculative_model", None)
     if configure is not None:
         configure(sp_config, target_config, draft_config)
+
+
+def _resolve_propose_kv_cache_dtype(
+    sp_config: Any,
+) -> Optional[KvCacheDataType]:
+    """Resolve only the draft KV dtype; all other KV policies remain shared."""
+    fp8_kv_cache = sp_config.fp8_kv_cache
+    if fp8_kv_cache not in (-1, 0, 1):
+        raise ValueError(
+            f"sp_config.fp8_kv_cache must be -1, 0 or 1, got {fp8_kv_cache}"
+        )
+    if fp8_kv_cache == -1:
+        return None
+    return KvCacheDataType.FP8 if fp8_kv_cache else KvCacheDataType.BASE
 
 
 class ModelFactory:
@@ -173,6 +192,8 @@ class ModelFactory:
                 model_config=propose_model_config,
                 parallelism_config=engine_config.parallelism_config,
                 hw_kernel_config=engine_config.hw_kernel_config,
+                # The joint target/draft pool shares allocation policy and page
+                # size. Draft precision belongs to its ModelConfig.
                 kv_cache_config=engine_config.kv_cache_config,
                 fmha_config=engine_config.fmha_config,
                 moe_config=engine_config.moe_config,
@@ -433,6 +454,7 @@ class ModelFactory:
         )
 
         # Build propose model config (no finalize_scheduler_config for propose model)
+        propose_kv_cache_dtype = _resolve_propose_kv_cache_dtype(sp_config)
         build_model_config(
             model_config=propose_model_config,
             model_args=propose_model_args,
@@ -440,6 +462,7 @@ class ModelFactory:
             profiling_debug_logging_config=engine_config.profiling_debug_logging_config,
             embedding_config=None,  # Propose model doesn't need embedding_config
             apply_hack_layer_num=False,
+            kv_cache_dtype_override=propose_kv_cache_dtype,
         )
 
         return propose_model_config

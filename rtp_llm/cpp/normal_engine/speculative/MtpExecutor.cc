@@ -961,16 +961,23 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
             const bool enable_cuda_graph           = model_params.hw_kernel_config.enable_cuda_graph;
             const bool disable_sp_prefill_by_env   = kDisableSpPrefillCudaGraphByEnv;
             const bool force_sp_prefill_cuda_graph = kForceSpPrefillCudaGraphByEnv;
-            const bool draft_uses_mega_moe         = isMegaMoeStrategy(params.moe_config.moe_strategy)
-                                             || isMegaMoeStrategy(mtp_params->moe_config.moe_strategy);
-            const bool draft_uses_ep_collective =
+            const bool draft_has_moe               = model_params.description.ffn_conf.moe_configs.has_value();
+            // Keep speculative prefill replay disabled for a distributed MegaMoE
+            // engine unless it is explicitly forced for diagnostics. Even when
+            // the draft itself is dense, replay has shown rank-local latency
+            // spikes that stall the whole DP batch while the target uses EP.
+            const bool target_uses_mega_moe = isMegaMoeStrategy(params.moe_config.moe_strategy);
+            const bool draft_uses_mega_moe  = draft_has_moe && isMegaMoeStrategy(mtp_params->moe_config.moe_strategy);
+            const bool uses_mega_moe        = target_uses_mega_moe || draft_uses_mega_moe;
+            const bool uses_ep_collective =
                 params.parallelism_config.ep_size > 1 || mtp_params->parallelism_config.ep_size > 1;
             const bool disable_sp_prefill_for_mega_moe =
-                draft_uses_mega_moe && draft_uses_ep_collective && !force_sp_prefill_cuda_graph;
+                uses_mega_moe && uses_ep_collective && !force_sp_prefill_cuda_graph;
             const bool disable_sp_prefill_cuda_graph = disable_sp_prefill_by_env || disable_sp_prefill_for_mega_moe;
             RTP_LLM_LOG_INFO("[speculative decoding] enable_cuda_graph=%d disable_sp_prefill_cuda_graph=%d "
                              "disable_by_env=%d disable_for_mega_moe=%d force_sp_prefill_cuda_graph=%d "
-                             "draft_uses_mega_moe=%d draft_uses_ep_collective=%d "
+                             "draft_has_moe=%d target_uses_mega_moe=%d draft_uses_mega_moe=%d "
+                             "uses_ep_collective=%d "
                              "(set ENABLE_CUDA_GRAPH=1 when starting server to enable sp_prefill_draft_model_; "
                              "set DISABLE_SP_PREFILL_CUDA_GRAPH=1 to skip the draft prefill CUDA graph capture only; "
                              "set RTP_LLM_FORCE_SP_PREFILL_CUDA_GRAPH=1 for diagnostic replay on MegaMoE)",
@@ -979,8 +986,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                              static_cast<int>(disable_sp_prefill_by_env),
                              static_cast<int>(disable_sp_prefill_for_mega_moe),
                              static_cast<int>(force_sp_prefill_cuda_graph),
+                             static_cast<int>(draft_has_moe),
+                             static_cast<int>(target_uses_mega_moe),
                              static_cast<int>(draft_uses_mega_moe),
-                             static_cast<int>(draft_uses_ep_collective));
+                             static_cast<int>(uses_ep_collective));
             if (enable_cuda_graph && !disable_sp_prefill_cuda_graph) {
                 RTP_LLM_LOG_INFO(
                     "[speculative decoding] creating separate prefill draft model with CUDA graph support");
@@ -2852,6 +2861,16 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         last_hidden_all         = hidden_3d.gather(1, idx_expanded).squeeze(1);
     }
 
+    // Select all accepted target tokens in one kernel. Per-stream selection
+    // otherwise launches several tiny cast/index kernels for every request.
+    torch::Tensor target_tokens_all;
+    if (accept_tokens_gpu_all.defined() && hidden_idx_all.defined()) {
+        target_tokens_all = accept_tokens_gpu_all.gather(1, hidden_idx_all.reshape({batch_size, 1})).squeeze(1);
+        if (target_tokens_all.scalar_type() != torch::kInt32) {
+            target_tokens_all = target_tokens_all.to(torch::kInt32);
+        }
+    }
+
     // 3. One clone for all probs
     torch::Tensor draft_probs_all;
     if (draft_all_probs_full.defined()) {
@@ -2883,9 +2902,7 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
         // Publish per-stream GPU mirrors before launching bookkeeping.
         auto sp_output_buffer = stream->getSPOutputBuffer();
         if (sp_output_buffer) {
-            auto target_idx = (state.accept_len_gpu - 1).to(torch::kLong);
-            sp_output_buffer->target_token_gpu =
-                state.accept_tokens_gpu.squeeze(0).index_select(/*dim=*/0, target_idx).to(torch::kInt32);
+            sp_output_buffer->target_token_gpu   = target_tokens_all.narrow(0, idx, 1);
             sp_output_buffer->propose_tokens_gpu = state.propose_tokens_gpu;
         }
         stream->setMtpAsyncDeviceState(std::move(state));

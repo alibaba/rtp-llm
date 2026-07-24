@@ -32,6 +32,7 @@ import functools
 import json
 import logging
 import os
+import weakref
 from typing import Any, Dict, List
 
 import torch
@@ -68,6 +69,24 @@ from rtp_llm.utils.model_weight import (
     transpose,
     transpose_pad,
 )
+
+_TARGET_LM_HEAD_BY_DEVICE: Dict[str, weakref.ReferenceType[torch.Tensor]] = {}
+
+
+def _register_target_lm_head(device: str, lm_head: torch.Tensor) -> None:
+    """Expose the live MiniMax-M3 target head to its colocated EAGLE1 draft."""
+    _TARGET_LM_HEAD_BY_DEVICE[device] = weakref.ref(lm_head)
+
+
+def _get_target_lm_head(device: str) -> torch.Tensor:
+    """Return the already-loaded target head for a MiniMax-M3 EAGLE1 draft."""
+    lm_head_ref = _TARGET_LM_HEAD_BY_DEVICE.get(device)
+    lm_head = lm_head_ref() if lm_head_ref is not None else None
+    if lm_head is None:
+        raise RuntimeError(
+            "MiniMax-M3 EAGLE1 requires a live target lm_head on " f"{device}"
+        )
+    return lm_head
 
 
 def _mxfp8_dequant_to_bf16(ts: List[torch.Tensor]) -> torch.Tensor:
@@ -635,6 +654,10 @@ class MiniMaxM3(DeepSeekV2):
     numerically equivalent whenever the total KV length is <= topk *
     block_size (16 * 128 = 2048 tokens for the default M3 config).
     """
+
+    def _load(self, device: str):
+        super()._load(device)
+        _register_target_lm_head(device, self.weight.get_global_weight(W.lm_head))
 
     @classmethod
     def _create_config(cls, ckpt_path: str) -> ModelConfig:

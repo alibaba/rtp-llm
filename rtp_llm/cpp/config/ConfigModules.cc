@@ -298,6 +298,7 @@ std::string SpeculativeExecutionConfig::to_string() const {
         << "gen_num_per_cycle: " << gen_num_per_cycle << "\n"
         << "force_stream_sample: " << force_stream_sample << "\n"
         << "force_score_context_attention: " << force_score_context_attention << "\n"
+        << "fp8_kv_cache: " << fp8_kv_cache << "\n"
         << "quantization: " << quantization << "\n"
         << "checkpoint_path: " << checkpoint_path;
     return oss.str();
