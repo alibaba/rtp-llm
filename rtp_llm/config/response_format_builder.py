@@ -90,9 +90,7 @@ class ResponseFormatBuilder:
         if config.json_schema is not None:
             return True
         final_format = cls(config)._existing_reasoning_envelope_final_format()
-        return (
-            final_format is not None and final_format.get("type") == "json_schema"
-        )
+        return final_format is not None and final_format.get("type") == "json_schema"
 
     def _project_response_format_to_grammar_fields(self) -> None:
         """Project response_format onto typed fields and clear it; rf wins over stale extra_configs grammar."""
@@ -102,6 +100,11 @@ class ResponseFormatBuilder:
 
         try:
             rf = parse_response_format(raw_response_format)
+        except RecursionError as e:
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                "response_format exceeds the supported JSON nesting depth",
+            ) from e
         except (JSONDecodeError, ValidationError, TypeError) as e:
             raise FtRuntimeException(
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,

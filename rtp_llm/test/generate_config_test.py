@@ -2,6 +2,7 @@ import json
 import os
 from typing import Any, List, Optional
 from unittest import TestCase, main
+from unittest.mock import patch
 
 from transformers import AutoTokenizer
 
@@ -655,6 +656,24 @@ class ResponseFormatProjectionTest(TestCase):
         self.assertEqual(cfg.regex, r"[a-z]+")
         self.assertFalse(self._terminate_without_stop_token(cfg))
 
+    def test_response_format_recursion_error_is_reported_as_input_error(self):
+        cfg = GenerateConfig(
+            response_format=(
+                '{"type":"structural_tag","structural_tag":'
+                '{"type":"structural_tag","format":{}}}'
+            )
+        )
+
+        with patch(
+            "rtp_llm.config.response_format_builder.parse_response_format",
+            side_effect=RecursionError("maximum JSON nesting depth exceeded"),
+        ):
+            with self.assertRaises(FtRuntimeException) as ctx:
+                self._validate(cfg)
+        self.assertEqual(
+            ctx.exception.exception_type, ExceptionType.ERROR_INPUT_FORMAT_ERROR
+        )
+
     def test_direct_grammar_dict_normalized(self):
         cfg = GenerateConfig(json_schema={"type": "object"})
         self._validate(cfg)
@@ -731,6 +750,20 @@ class ResponseFormatProjectionTest(TestCase):
             self._validate(cfg, reasoning_format=reasoning_format)
         self.assertEqual(
             ctx.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION
+        )
+
+    def test_deeply_nested_structural_tag_is_reported_as_input_error(self):
+        depth = 2000
+        nested_format = '{"child":' * depth + "{}" + "}" * depth
+        cfg = GenerateConfig(
+            structural_tag=('{"type":"structural_tag","format":' + nested_format + "}")
+        )
+        reasoning_format = self._enable_thinking(cfg)
+
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._validate(cfg, reasoning_format=reasoning_format)
+        self.assertEqual(
+            ctx.exception.exception_type, ExceptionType.ERROR_INPUT_FORMAT_ERROR
         )
 
 
