@@ -1,6 +1,7 @@
 import argparse
 import importlib
 import os
+import struct
 import sys
 from unittest import TestCase, main
 
@@ -167,6 +168,8 @@ class ServerArgsSetTest(TestCase):
                 "false",
                 "--moe_runtime_slot_min_slots",
                 "128",
+                "--moe_runtime_slot_log_interval",
+                "50",
                 "--moe_skew_mult",
                 "1.75",
                 "--moe_skew_add",
@@ -179,6 +182,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(os.environ["MOE_RUNTIME_MEM_LOG"], "1")
         self.assertEqual(os.environ["MOE_RUNTIME_SLOT_LOG"], "0")
         self.assertEqual(os.environ["MOE_RUNTIME_SLOT_MIN_SLOTS"], "128")
+        self.assertEqual(os.environ["MOE_RUNTIME_SLOT_LOG_INTERVAL"], "50")
         self.assertEqual(os.environ["MOE_SKEW_MULT"], "1.75")
         self.assertEqual(os.environ["MOE_SKEW_ADD"], "0.2")
 
@@ -189,6 +193,16 @@ class ServerArgsSetTest(TestCase):
             setup_args(["--runtime_mem_safety_ratio", "1.0"])
         with self.assertRaises(SystemExit):
             setup_args(["--runtime_mem_no_warmup_floor_mb", "-1"])
+        first_unrepresentable_mib = 1 << (struct.calcsize("P") * 8 - 20)
+        with self.assertRaises(SystemExit):
+            setup_args(
+                [
+                    "--runtime_mem_no_warmup_floor_mb",
+                    str(first_unrepresentable_mib),
+                ]
+            )
+        with self.assertRaises(SystemExit):
+            setup_args(["--moe_runtime_slot_log_interval", str(2**31)])
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""

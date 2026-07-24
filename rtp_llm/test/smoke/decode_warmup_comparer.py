@@ -6,15 +6,16 @@ from typing import Any, Dict, List
 
 from pydantic import BaseModel
 from smoke.base_comparer import BaseComparer
+from smoke.prefill_warmup_comparer import WarmupComparerMixin
 
 
 class _DecodeWarmupSmokeQuery(BaseModel):
     max_seq_len: int
     max_generate_batch_size: int
-    expected_ep_size: int = 1
+    expected_ep_size: int
 
 
-class DecodeWarmupComparer(BaseComparer):
+class DecodeWarmupComparer(WarmupComparerMixin, BaseComparer):
     """Validate that a standalone PD-decode server completes decode warmup and KV sizing."""
 
     def format_query(self, query_json: Dict[str, Any]) -> BaseModel:
@@ -62,10 +63,6 @@ class DecodeWarmupComparer(BaseComparer):
             # CUDA graph capture completed rather than silently falling back.
             r"capture success for batch size: [1-9][0-9]*",
         ]
-        if query.expected_ep_size > 1:
-            required.append(
-                rf"\[MOE_WARMUP\].*mode=slot.*ep_size={query.expected_ep_size}"
-            )
         missing = [pattern for pattern in required if re.search(pattern, logs) is None]
         if missing:
             raise AssertionError(
@@ -81,6 +78,15 @@ class DecodeWarmupComparer(BaseComparer):
             raise AssertionError(
                 f"decode warmup max runtime memory must be positive, got {actual} bytes"
             )
+
+        configured_ep_size = self._configured_ep_size()
+        if query.expected_ep_size != configured_ep_size:
+            raise AssertionError(
+                "decode warmup EP configuration mismatch: "
+                f"JSON expected_ep_size={query.expected_ep_size}, "
+                f"server launched with ep_size={configured_ep_size}"
+            )
+        self._assert_moe_warmup_skew(logs, configured_ep_size)
 
         # Exact-value contract: the warmup must actually run at the declared max_seq_len and
         # concurrency (num_return_sequences == max_generate_batch_size == concurrency_limit).

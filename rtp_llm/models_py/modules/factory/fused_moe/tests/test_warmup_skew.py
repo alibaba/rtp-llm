@@ -186,6 +186,29 @@ class WarmupSkewTopkIdsTest(unittest.TestCase):
 
 
 class RuntimeSlotDistributionTest(unittest.TestCase):
+    def setUp(self):
+        interval = patch.object(diagnostics, "runtime_slot_log_interval", 1)
+        calls = patch.object(diagnostics, "runtime_slot_log_calls", 0)
+        interval.start()
+        calls.start()
+        self.addCleanup(interval.stop)
+        self.addCleanup(calls.stop)
+
+    @patch("torch.cuda.is_current_stream_capturing", return_value=False)
+    def test_unsampled_call_returns_before_tensor_or_collective_work(self, _capturing):
+        topk_ids = MagicMock()
+        with (
+            patch.object(diagnostics, "runtime_slot_log_interval", 2),
+            patch.object(diagnostics, "runtime_slot_log_calls", 1),
+            patch(
+                "rtp_llm.models_py.distributed.collective_torch.all_reduce"
+            ) as all_reduce,
+        ):
+            diagnostics.log_runtime_slot_distribution(_FakeRouter(2, 2), topk_ids)
+
+        topk_ids.reshape.assert_not_called()
+        all_reduce.assert_not_called()
+
     @patch("torch.cuda.is_current_stream_capturing", return_value=True)
     def test_capture_returns_before_tensor_or_collective_work(self, _capturing):
         topk_ids = MagicMock()
@@ -255,17 +278,20 @@ class TraceMemoryBindingTest(unittest.TestCase):
                 "MOE_RUNTIME_MEM_LOG": "1",
                 "MOE_RUNTIME_SLOT_LOG": "1",
                 "MOE_RUNTIME_SLOT_MIN_SLOTS": "64",
+                "MOE_RUNTIME_SLOT_LOG_INTERVAL": "25",
             },
         ):
             local_diagnostics = MoeWarmupDiagnostics()
             self.assertFalse(local_diagnostics.runtime_mem_log_enabled)
             self.assertFalse(local_diagnostics.runtime_slot_log_requested)
             self.assertEqual(local_diagnostics.runtime_slot_min_slots, 0)
+            self.assertEqual(local_diagnostics.runtime_slot_log_interval, 100)
 
             local_diagnostics.reload_runtime_settings()
             self.assertTrue(local_diagnostics.runtime_mem_log_enabled)
             self.assertTrue(local_diagnostics.runtime_slot_log_requested)
             self.assertEqual(local_diagnostics.runtime_slot_min_slots, 64)
+            self.assertEqual(local_diagnostics.runtime_slot_log_interval, 25)
 
     def test_binding_is_importable_and_callable(self):
         from rtp_llm.ops.compute_ops import get_trace_memory_state, is_trace_memory

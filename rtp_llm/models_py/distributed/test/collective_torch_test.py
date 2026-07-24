@@ -1,17 +1,21 @@
 """Unit tests for collective_torch.py
 
-This module tests the torch.distributed-based collective operations
-using real multiprocessing spawn.
+This module tests torch.distributed collectives using real multiprocessing spawn,
+plus host-only control-path tests with mocked process groups.
 """
 
 import logging
 import multiprocessing as mp
 import os
 import unittest
+from types import SimpleNamespace
+from unittest.mock import MagicMock, patch
 
 logging.basicConfig(level=logging.INFO)
 
 import torch
+
+import rtp_llm.models_py.distributed.collective_torch as collective_torch
 
 from rtp_llm.models_py.distributed.collective_torch import (
     Group,
@@ -28,6 +32,82 @@ from rtp_llm.models_py.distributed.collective_torch import (
 )
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 from rtp_llm.test.utils.port_util import PortManager
+
+
+class TestRuntimeSlotLogSynchronization(unittest.TestCase):
+    """Host-only coverage for the DP slot-log gate handshake."""
+
+    def _run_case(
+        self,
+        local_enabled: bool,
+        enabled_ranks: int,
+        expected_enabled: bool,
+        interval_sum: int = 200,
+    ) -> None:
+        config = SimpleNamespace(dp_size=2, local_rank=0)
+        process_group = MagicMock()
+        settings = torch.tensor([int(local_enabled), 100], dtype=torch.int64)
+
+        def set_enabled_count(tensor, **_kwargs):
+            tensor[0] = enabled_ranks
+            tensor[1] = interval_sum
+
+        with (
+            patch.dict(
+                os.environ,
+                {
+                    "MOE_RUNTIME_SLOT_LOG": "1" if local_enabled else "0",
+                    "MOE_RUNTIME_SLOT_LOG_INTERVAL": "100",
+                },
+            ),
+            patch.object(
+                collective_torch, "_runtime_slot_log_synchronized", False
+            ),
+            patch.object(collective_torch, "_get_group", return_value=process_group),
+            patch.object(
+                collective_torch.torch.distributed,
+                "get_world_size",
+                return_value=2,
+            ),
+            patch.object(
+                collective_torch.torch.distributed,
+                "all_reduce",
+                side_effect=set_enabled_count,
+            ) as all_reduce,
+            patch.object(collective_torch.torch, "tensor", return_value=settings),
+        ):
+            collective_torch._synchronize_runtime_slot_log(config)
+            collective_torch._synchronize_runtime_slot_log(config)
+
+            self.assertEqual(
+                os.environ["MOE_RUNTIME_SLOT_LOG"],
+                "1" if expected_enabled else "0",
+            )
+            self.assertEqual(os.environ["MOE_RUNTIME_SLOT_LOG_INTERVAL"], "100")
+            self.assertTrue(collective_torch._runtime_slot_log_synchronized)
+            all_reduce.assert_called_once()
+
+    def test_all_ranks_enabled(self):
+        self._run_case(local_enabled=True, enabled_ranks=2, expected_enabled=True)
+
+    def test_all_ranks_disabled(self):
+        self._run_case(local_enabled=False, enabled_ranks=0, expected_enabled=False)
+
+    def test_partial_enablement_is_disabled_and_logged(self):
+        with patch.object(collective_torch.logging, "error") as error:
+            self._run_case(local_enabled=True, enabled_ranks=1, expected_enabled=False)
+        error.assert_called_once()
+        self.assertIn("settings differ within the DP group", error.call_args.args[0])
+
+    def test_interval_mismatch_is_disabled_and_logged(self):
+        with patch.object(collective_torch.logging, "error") as error:
+            self._run_case(
+                local_enabled=True,
+                enabled_ranks=2,
+                expected_enabled=False,
+                interval_sum=250,
+            )
+        error.assert_called_once()
 
 
 def _calculate_group_ranks(rank: int, world_size: int, tp_size: int, group_type: Group):

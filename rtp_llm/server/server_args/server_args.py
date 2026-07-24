@@ -67,6 +67,7 @@ _RUNTIME_TUNING_ENV_ARGS = {
     "moe_runtime_mem_log": "MOE_RUNTIME_MEM_LOG",
     "moe_runtime_slot_log": "MOE_RUNTIME_SLOT_LOG",
     "moe_runtime_slot_min_slots": "MOE_RUNTIME_SLOT_MIN_SLOTS",
+    "moe_runtime_slot_log_interval": "MOE_RUNTIME_SLOT_LOG_INTERVAL",
     "moe_skew_mult": "MOE_SKEW_MULT",
     "moe_skew_add": "MOE_SKEW_ADD",
 }
@@ -80,24 +81,26 @@ def _export_runtime_tuning_env(parsed_args: argparse.Namespace) -> None:
         )
 
     logging.info(
-        "Runtime memory tuning: RUNTIME_MEM_SAFETY_RATIO=%s, "
+        "Effective runtime memory tuning: RUNTIME_MEM_SAFETY_RATIO=%s, "
         "RUNTIME_MEM_NO_WARMUP_FLOOR_MB=%s. Keep values consistent across processes in each PD role.",
         os.environ["RUNTIME_MEM_SAFETY_RATIO"],
         os.environ["RUNTIME_MEM_NO_WARMUP_FLOOR_MB"],
     )
     logging.info(
-        "MoE warmup/diagnostics: MEM_LOG=%s SLOT_LOG=%s SLOT_MIN=%s "
+        "MoE warmup/diagnostics: MEM_LOG=%s SLOT_LOG=%s SLOT_MIN=%s SLOT_INTERVAL=%s "
         "SKEW_MULT=%s SKEW_ADD=%s. Keep values consistent across ranks in each role/group.",
         os.environ["MOE_RUNTIME_MEM_LOG"],
         os.environ["MOE_RUNTIME_SLOT_LOG"],
         os.environ["MOE_RUNTIME_SLOT_MIN_SLOTS"],
+        os.environ["MOE_RUNTIME_SLOT_LOG_INTERVAL"],
         os.environ["MOE_SKEW_MULT"],
         os.environ["MOE_SKEW_ADD"],
     )
     if getattr(parsed_args, "moe_runtime_slot_log"):
         logging.warning(
-            "MOE_RUNTIME_SLOT_LOG enabled: it performs Group.DP all_reduce on every MoE layer forward; "
-            "the setting MUST be identical across the DP/EP group or the collective can hang."
+            "MOE_RUNTIME_SLOT_LOG enabled: sampled forwards perform Group.DP all_reduce plus CPU "
+            "synchronization. All ranks must enter capture/non-capture paths symmetrically; mixed "
+            "capture state can hang the collective."
         )
 
 

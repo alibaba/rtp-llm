@@ -1,7 +1,12 @@
 import argparse
 import math
+import struct
 
 from rtp_llm.server.server_args.util import str2bool
+
+
+_BYTES_PER_MIB = 1024 * 1024
+_MAX_RUNTIME_MEMORY_MIB = ((1 << (struct.calcsize("P") * 8)) - 1) // _BYTES_PER_MIB
 
 
 def _runtime_memory_safety_ratio(value: str) -> float:
@@ -23,9 +28,9 @@ def _nonnegative_int(value: str) -> int:
         parsed = int(value)
     except (TypeError, ValueError) as error:
         raise argparse.ArgumentTypeError("value must be an integer") from error
-    if parsed < 0 or parsed > 2**63 - 1:
+    if parsed < 0 or parsed > _MAX_RUNTIME_MEMORY_MIB:
         raise argparse.ArgumentTypeError(
-            "value must be a non-negative signed 64-bit integer"
+            f"value must be in [0, {_MAX_RUNTIME_MEMORY_MIB}] MiB on this platform"
         )
     return parsed
 

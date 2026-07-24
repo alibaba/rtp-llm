@@ -47,32 +47,47 @@ def _synchronize_runtime_slot_log(parallelism_config: ParallelismConfig) -> None
         return
 
     local_enabled = os.environ.get("MOE_RUNTIME_SLOT_LOG", "0") == "1"
+    try:
+        local_interval = max(
+            1, int(os.environ.get("MOE_RUNTIME_SLOT_LOG_INTERVAL", "100"))
+        )
+        if local_interval > 2**31 - 1:
+            raise ValueError
+    except ValueError:
+        local_interval = 100
     if parallelism_config.dp_size <= 1:
         os.environ["MOE_RUNTIME_SLOT_LOG"] = "1" if local_enabled else "0"
+        os.environ["MOE_RUNTIME_SLOT_LOG_INTERVAL"] = str(local_interval)
         _runtime_slot_log_synchronized = True
         return
 
     process_group = _get_group(Group.DP)
     group_size = torch.distributed.get_world_size(process_group)
-    enabled_count = torch.tensor(
-        [int(local_enabled)],
-        dtype=torch.int32,
+    settings_sum = torch.tensor(
+        [int(local_enabled), local_interval],
+        dtype=torch.int64,
         device=torch.device("cuda", parallelism_config.local_rank),
     )
     torch.distributed.all_reduce(
-        enabled_count, op=torch.distributed.ReduceOp.SUM, group=process_group
+        settings_sum, op=torch.distributed.ReduceOp.SUM, group=process_group
     )
-    enabled_ranks = int(enabled_count.item())
-    if enabled_ranks not in (0, group_size):
+    enabled_ranks = int(settings_sum[0].item())
+    interval_sum = int(settings_sum[1].item())
+    enablement_matches = enabled_ranks in (0, group_size)
+    interval_matches = interval_sum == local_interval * group_size
+    if not enablement_matches or (enabled_ranks == group_size and not interval_matches):
         os.environ["MOE_RUNTIME_SLOT_LOG"] = "0"
         logging.error(
-            "MOE_RUNTIME_SLOT_LOG differs within the DP group (%d/%d ranks enabled); "
+            "MOE_RUNTIME_SLOT_LOG settings differ within the DP group "
+            "(%d/%d ranks enabled, local interval=%d); "
             "disabling distributed slot logging for this group to prevent an asymmetric collective",
             enabled_ranks,
             group_size,
+            local_interval,
         )
     else:
         os.environ["MOE_RUNTIME_SLOT_LOG"] = "1" if enabled_ranks else "0"
+    os.environ["MOE_RUNTIME_SLOT_LOG_INTERVAL"] = str(local_interval)
     _runtime_slot_log_synchronized = True
 
 
@@ -366,7 +381,10 @@ def _register_process_groups_to_cpp():
         """
         pg = mode_to_group.get(mode)
         if pg is None or pg.size() < 2:
-            return tensor if dest is None else tensor
+            if dest is not None:
+                dest.copy_(tensor)
+                return dest
+            return tensor
         target = dest if dest is not None else tensor
         if dest is not None:
             target.copy_(tensor)

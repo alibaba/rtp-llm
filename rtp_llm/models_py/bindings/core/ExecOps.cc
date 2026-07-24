@@ -559,27 +559,31 @@ void finishTraceMemory() {
 }
 
 void setTraceMemory(bool trace_memory) {
-    g_trace_memory_state.store(trace_memory ? kTraceMemoryActive : kTraceMemoryFinished,
-                               std::memory_order_release);
+    if (!trace_memory) {
+        g_trace_memory_state.store(kTraceMemoryFinished, std::memory_order_release);
 #if USING_CUDA
-    if (trace_memory) {
-        // Release loader-cached free blocks so the baseline is pure steady-state (weights), then
-        // zero the peak high-water mark and snapshot the baselines. Without emptyCache, the forward
-        // could reuse cached free blocks without growing reserved, making the measured delta too
-        // small -> KV cache over-allocated -> runtime OOM.
-        c10::cuda::CUDACachingAllocator::emptyCache();
-        const auto device = at::cuda::current_device();
-        c10::cuda::CUDACachingAllocator::resetPeakStats(device);
-        g_reserved_baseline_bytes =
-            static_cast<size_t>(c10::cuda::CUDACachingAllocator::getDeviceStats(device).reserved_bytes[0].current);
-        size_t free_bytes = 0, total_bytes = 0;
-        check_cuda_value(cudaMemGetInfo(&free_bytes, &total_bytes));
-        g_cuda_used_baseline_bytes = total_bytes - free_bytes;  // for non_torch_increase
-    } else {
         g_reserved_baseline_bytes  = 0;
         g_cuda_used_baseline_bytes = 0;
-    }
 #endif
+        return;
+    }
+
+#if USING_CUDA
+    // Release loader-cached free blocks so the baseline is pure steady-state (weights), then
+    // zero the peak high-water mark and snapshot the baselines. Without emptyCache, the forward
+    // could reuse cached free blocks without growing reserved, making the measured delta too
+    // small -> KV cache over-allocated -> runtime OOM.
+    c10::cuda::CUDACachingAllocator::emptyCache();
+    const auto device = at::cuda::current_device();
+    c10::cuda::CUDACachingAllocator::resetPeakStats(device);
+    g_reserved_baseline_bytes =
+        static_cast<size_t>(c10::cuda::CUDACachingAllocator::getDeviceStats(device).reserved_bytes[0].current);
+    size_t free_bytes = 0, total_bytes = 0;
+    check_cuda_value(cudaMemGetInfo(&free_bytes, &total_bytes));
+    g_cuda_used_baseline_bytes = total_bytes - free_bytes;  // for non_torch_increase
+#endif
+    // Publish active only after all baselines are initialized.
+    g_trace_memory_state.store(kTraceMemoryActive, std::memory_order_release);
 }
 
 // === Copy ops ===

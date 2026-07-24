@@ -43,6 +43,8 @@ class MoeWarmupDiagnostics:
         self.runtime_mem_log_enabled = False
         self.runtime_slot_log_requested = False
         self.runtime_slot_min_slots = 0
+        self.runtime_slot_log_interval = 100
+        self.runtime_slot_log_calls = 0
         self.runtime_slot_peaks: List[float] = []
         self.runtime_slot_log_unsupported = False
         self.runtime_slot_config_warned = False
@@ -61,6 +63,14 @@ class MoeWarmupDiagnostics:
             )
         except ValueError:
             self.runtime_slot_min_slots = 0
+        try:
+            self.runtime_slot_log_interval = max(
+                1, int(os.environ.get("MOE_RUNTIME_SLOT_LOG_INTERVAL", "100"))
+            )
+            if self.runtime_slot_log_interval > 2**31 - 1:
+                raise ValueError
+        except ValueError:
+            self.runtime_slot_log_interval = 100
 
     def require_trace_binding(self, ep_size: int) -> None:
         if ep_size > 1 and self.get_trace_memory_state is None:
@@ -91,8 +101,10 @@ class MoeWarmupDiagnostics:
         if self.runtime_slot_config_warned:
             return
         logger.warning(
-            "MOE_RUNTIME_SLOT_LOG is diagnostic-only and performs Group.DP all_reduce on every "
-            "MoE layer forward; startup enables it only after all ranks in the DP group agree"
+            "MOE_RUNTIME_SLOT_LOG is diagnostic-only and samples one Group.DP all_reduce plus CPU "
+            "sync every %d eligible MoE layer calls; startup requires DP-group agreement, and all "
+            "ranks must have symmetric CUDA graph capture state",
+            self.runtime_slot_log_interval,
         )
         self.runtime_slot_config_warned = True
 
@@ -134,6 +146,10 @@ class MoeWarmupDiagnostics:
         self, router: FusedMoeRouter, topk_ids: torch.Tensor
     ) -> None:
         if torch.cuda.is_current_stream_capturing():
+            return
+
+        self.runtime_slot_log_calls += 1
+        if (self.runtime_slot_log_calls - 1) % self.runtime_slot_log_interval != 0:
             return
 
         config = router.config

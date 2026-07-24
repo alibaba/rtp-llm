@@ -24,6 +24,15 @@ def _nonnegative_float(value: str) -> float:
     return parsed
 
 
+def _sampling_interval(value: str) -> int:
+    parsed = _nonnegative_int(value)
+    if parsed > 2**31 - 1:
+        raise argparse.ArgumentTypeError(
+            "sampling interval must fit in a signed 32-bit integer"
+        )
+    return max(1, parsed)
+
+
 def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
     ##############################################################################################################
     # MOE 特性
@@ -42,8 +51,8 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         type=str2bool,
         default=False,
         help=(
-            "运行期 EP slot 分布诊断，默认关闭；每个 MoE layer forward 执行 Group.DP "
-            "all_reduce。DP/EP 组内必须一致设置，否则 collective 可能永久挂起。"
+            "运行期 EP slot 分布诊断，默认关闭；采样时执行 Group.DP all_reduce 和 CPU "
+            "同步。启动时校验 DP 组内开关与采样间隔，capture 状态仍须保持一致。"
         ),
     )
     moe_group.add_argument(
@@ -52,6 +61,16 @@ def init_moe_group_args(parser, moe_config, eplb_config, deep_ep_config):
         type=_nonnegative_int,
         default=0,
         help="输出 EP slot 分布日志所需的最小全局 slot 数，默认 0。",
+    )
+    moe_group.add_argument(
+        "--moe_runtime_slot_log_interval",
+        env_name="MOE_RUNTIME_SLOT_LOG_INTERVAL",
+        type=_sampling_interval,
+        default=100,
+        help=(
+            "每多少次 eligible MoE layer forward 采样一次 slot 分布，默认 100；"
+            "设为 1 表示每次采样，0 会按 1 处理。"
+        ),
     )
     moe_group.add_argument(
         "--moe_skew_mult",
