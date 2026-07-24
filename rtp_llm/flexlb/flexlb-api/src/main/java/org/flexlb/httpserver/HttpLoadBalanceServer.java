@@ -3,9 +3,10 @@ package org.flexlb.httpserver;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.scheduler.QueueManager;
+import org.flexlb.cache.hash.RequestBlockHashService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.LogLevelUpdateRequest;
 import org.flexlb.dao.loadbalance.QueueSnapshotResponse;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -15,7 +16,6 @@ import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
-import org.flexlb.enums.LogLevel;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -49,8 +49,8 @@ public class HttpLoadBalanceServer {
     private final EngineHealthReporter engineHealthReporter;
     private final QueueManager queueManager;
     private final ActiveRequestCounter activeRequestCounter;
-    private final ScheduleRequestPreprocessor requestPreprocessor;
-    private final FlexlbLogLevelManager logLevelManager;
+    private final RequestBlockHashService requestBlockHashService;
+    private final CacheAwareService cacheAwareService;
 
     public HttpLoadBalanceServer(GeneralHttpNettyService generalHttpNettyService,
                                  RouteService routeService,
@@ -58,16 +58,16 @@ public class HttpLoadBalanceServer {
                                  EngineHealthReporter engineHealthReporter,
                                  QueueManager queueManager,
                                  ActiveRequestCounter activeRequestCounter,
-                                 ScheduleRequestPreprocessor requestPreprocessor,
-                                 FlexlbLogLevelManager logLevelManager) {
+                                 RequestBlockHashService requestBlockHashService,
+                                 CacheAwareService cacheAwareService) {
         this.generalHttpNettyService = generalHttpNettyService;
         this.routeService = routeService;
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.engineHealthReporter = engineHealthReporter;
         this.queueManager = queueManager;
         this.activeRequestCounter = activeRequestCounter;
-        this.requestPreprocessor = requestPreprocessor;
-        this.logLevelManager = logLevelManager;
+        this.requestBlockHashService = requestBlockHashService;
+        this.cacheAwareService = cacheAwareService;
     }
 
     @Bean
@@ -81,8 +81,6 @@ public class HttpLoadBalanceServer {
                         this::dumpLBStatus)
                 .POST("/rtp_llm/notify_master", accept(MediaType.APPLICATION_JSON),
                         this::notifyParticipant)
-                .POST("/rtp_llm/update_log_level", accept(MediaType.APPLICATION_JSON),
-                        this::updateLogLevel)
                 .GET("/rtp_llm/queue_snapshot", accept(MediaType.APPLICATION_JSON),
                         this::queueSnapshot)
                 .build();
@@ -122,28 +120,13 @@ public class HttpLoadBalanceServer {
             return forwardRequestToMaster(ctx, req);
         }
 
-        return requestPreprocessor.prepare(ctx)
+        return requestBlockHashService.prepareBlockCacheKeys(ctx)
                 .then(Mono.defer(() -> routeService.route(ctx)))
                 .flatMap(response -> handleRoutingResult(ctx, response))
                 .doOnCancel(() -> {
                     ctx.setSuccess(false);
                     ctx.setErrorMessage("REQUEST_CANCELLED");
                     routeService.cancel(ctx);
-                });
-    }
-
-    private Mono<ServerResponse> updateLogLevel(ServerRequest serverRequest) {
-        return serverRequest.bodyToMono(LogLevelUpdateRequest.class)
-                .flatMap(logLevelUpdateRequest -> {
-                    LogLevel updatedLogLevel = logLevelManager.setLogLevel(logLevelUpdateRequest.getLogLevel());
-                    return ServerResponse.ok()
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just("Success! logLevel=" + updatedLogLevel), String.class);
-                }).onErrorResume(e -> {
-                    Logger.error("update logLevel error", e);
-                    return ServerResponse.status(500)
-                            .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(e.getMessage()), String.class);
                 });
     }
 
@@ -247,7 +230,7 @@ public class HttpLoadBalanceServer {
     }
 
     private Mono<ServerResponse> fallbackToLocalRouting(BalanceContext ctx) {
-        return requestPreprocessor.prepare(ctx)
+        return requestBlockHashService.prepareBlockCacheKeys(ctx)
                 .then(Mono.defer(() -> routeService.route(ctx)))
                 .flatMap(response -> handleRoutingResult(ctx, response))
                 .onErrorResume(e -> {
@@ -344,7 +327,7 @@ public class HttpLoadBalanceServer {
     }
 
     /**
-     * Finalizes the request context by reporting metrics.
+     * Finalizes request metrics and publishes request-derived cache metadata.
      *
      * @param ctx the balance context to finalize
      */
@@ -352,6 +335,21 @@ public class HttpLoadBalanceServer {
         ctx.finishRequestTiming();
         engineHealthReporter.reportBalancingService(ctx);
         logPvRecord(ctx);
+        updateRequestCacheMetadata(ctx);
+    }
+
+    private void updateRequestCacheMetadata(BalanceContext ctx) {
+        Response response = ctx.getResponse();
+        if (!ctx.isSuccess()
+                || response == null
+                || !response.isSuccess()
+                || response.getServerStatus() == null
+                || response.getServerStatus().isEmpty()) {
+            return;
+        }
+        cacheAwareService.updateCacheMetadata(
+                ctx.getRequest(),
+                response.getServerStatus());
     }
 
     /**

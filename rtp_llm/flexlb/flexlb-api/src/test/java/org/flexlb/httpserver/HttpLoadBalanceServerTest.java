@@ -1,40 +1,42 @@
 package org.flexlb.httpserver;
 
 import org.flexlb.balance.scheduler.QueueManager;
+import org.flexlb.cache.hash.RequestBlockHashService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
-import org.flexlb.enums.LogLevel;
-import org.flexlb.metric.NoOpFlexMonitor;
+import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.junit.jupiter.api.BeforeEach;
-import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.ArgumentCaptor;
+import org.mockito.InOrder;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 import org.springframework.http.MediaType;
 import org.springframework.test.web.reactive.server.WebTestClient;
-import reactor.core.Disposable;
 import reactor.core.publisher.Mono;
 
 import java.net.URI;
 import java.util.List;
 import java.util.Map;
-import java.util.concurrent.CountDownLatch;
-import java.util.concurrent.TimeUnit;
+import java.util.concurrent.RejectedExecutionException;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNull;
+import static org.junit.jupiter.api.Assertions.assertSame;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -53,16 +55,14 @@ class HttpLoadBalanceServerTest {
     @Mock
     private QueueManager queueManager;
     @Mock
-    private WorkerBlockHashConfigResolver blockHashConfigResolver;
+    private RequestBlockHashService requestBlockHashService;
     @Mock
-    private FlexlbLogLevelManager logLevelManager;
+    private CacheAwareService cacheAwareService;
 
     private WebTestClient webTestClient;
-    private BlockHashExecutor blockHashExecutor;
 
     @BeforeEach
     void setUp() {
-        blockHashExecutor = new BlockHashExecutor(NoOpFlexMonitor.getInstance(), 1, 1, 60, 1);
         HttpLoadBalanceServer server = new HttpLoadBalanceServer(
                 generalHttpNettyService,
                 routeService,
@@ -70,23 +70,19 @@ class HttpLoadBalanceServerTest {
                 engineHealthReporter,
                 queueManager,
                 new ActiveRequestCounter(),
-                new ScheduleRequestPreprocessor(blockHashConfigResolver, blockHashExecutor),
-                logLevelManager);
-        webTestClient = WebTestClient.bindToRouterFunction(server.loadBalancePrefill()).build();
-    }
-
-    @AfterEach
-    void tearDown() {
-        blockHashExecutor.shutdown();
+                requestBlockHashService,
+                cacheAwareService);
+        webTestClient = WebTestClient.bindToRouterFunction(
+                server.loadBalancePrefill()).build();
     }
 
     @Test
-    void calculatesBlockCacheKeysBeforeRouting() {
+    void preparesBlockCacheKeysBeforeRouting() {
         Response response = new Response();
         response.setSuccess(true);
+        when(requestBlockHashService.prepareBlockCacheKeys(any()))
+                .thenReturn(Mono.empty());
         when(routeService.route(any())).thenReturn(Mono.just(response));
-        when(blockHashConfigResolver.resolve()).thenReturn(
-                new WorkerBlockHashConfigResolver.BlockHashConfig(4L, 0));
 
         webTestClient.post()
                 .uri("/rtp_llm/schedule")
@@ -99,19 +95,89 @@ class HttpLoadBalanceServerTest {
                 .exchange()
                 .expectStatus().isOk();
 
-        ArgumentCaptor<BalanceContext> contextCaptor = ArgumentCaptor.forClass(BalanceContext.class);
-        verify(routeService).route(contextCaptor.capture());
-        assertEquals(
-                List.of(2164874634404590027L),
-                contextCaptor.getValue().getRequest().getBlockCacheKeys());
+        ArgumentCaptor<BalanceContext> prepareContextCaptor =
+                ArgumentCaptor.forClass(BalanceContext.class);
+        ArgumentCaptor<BalanceContext> routeContextCaptor =
+                ArgumentCaptor.forClass(BalanceContext.class);
+        InOrder inOrder = inOrder(requestBlockHashService, routeService);
+        inOrder.verify(requestBlockHashService)
+                .prepareBlockCacheKeys(prepareContextCaptor.capture());
+        inOrder.verify(routeService).route(routeContextCaptor.capture());
+        assertSame(prepareContextCaptor.getValue(), routeContextCaptor.getValue());
         assertEquals(
                 "c68b72ff-982d-944f-9834-bc0e8bf2f43f",
-                contextCaptor.getValue().getRequestId());
-        assertNull(contextCaptor.getValue().getRequest().getInputIds());
-        assertTrue(contextCaptor.getValue().getRequestArrivalDelayMs() > 0);
-        assertTrue(contextCaptor.getValue().getRequestBodyReadAndDeserializeTimeUs() >= 0);
-        assertTrue(contextCaptor.getValue().getBlockHashQueueWaitTimeUs() >= 0);
-        assertTrue(contextCaptor.getValue().getBlockHashExecutionTimeUs() >= 0);
+                routeContextCaptor.getValue().getRequestId());
+        assertArrayEquals(
+                new int[]{1, 2, 3, 4, 5},
+                routeContextCaptor.getValue().getRequest().getInputIds());
+        assertTrue(routeContextCaptor.getValue().getRequestArrivalDelayMs() > 0);
+        assertTrue(routeContextCaptor.getValue()
+                .getRequestBodyReadAndDeserializeTimeUs() >= 0);
+    }
+
+    @Test
+    void updatesRequestCacheMetadataAfterSuccessfulRoutingFinishes() {
+        ServerStatus selectedWorker = new ServerStatus();
+        selectedWorker.setSuccess(true);
+        selectedWorker.setServerIp("10.0.0.1");
+        selectedWorker.setHttpPort(8080);
+        selectedWorker.setRole(RoleType.PREFILL);
+
+        Response response = new Response();
+        response.setSuccess(true);
+        response.setServerStatus(List.of(selectedWorker));
+        when(requestBlockHashService.prepareBlockCacheKeys(any()))
+                .thenReturn(Mono.empty());
+        when(routeService.route(any())).thenAnswer(invocation -> {
+            BalanceContext ctx = invocation.getArgument(0);
+            ctx.setResponse(response);
+            return Mono.just(response);
+        });
+
+        webTestClient.post()
+                .uri("/rtp_llm/schedule")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(Map.of(
+                        "request_id", "request-1",
+                        "seq_len", 4,
+                        "input_ids", new int[]{1, 2, 3, 4}))
+                .exchange()
+                .expectStatus().isOk();
+
+        ArgumentCaptor<BalanceContext> contextCaptor =
+                ArgumentCaptor.forClass(BalanceContext.class);
+        verify(routeService).route(contextCaptor.capture());
+        verify(cacheAwareService).updateCacheMetadata(
+                contextCaptor.getValue().getRequest(),
+                response.getServerStatus());
+    }
+
+    @Test
+    void doesNotUpdateRequestCacheMetadataAfterFailedRouting() {
+        Response response = new Response();
+        response.setSuccess(false);
+        response.setErrorMessage("no worker");
+        when(requestBlockHashService.prepareBlockCacheKeys(any()))
+                .thenReturn(Mono.empty());
+        when(routeService.route(any())).thenAnswer(invocation -> {
+            BalanceContext ctx = invocation.getArgument(0);
+            ctx.setResponse(response);
+            return Mono.just(response);
+        });
+
+        webTestClient.post()
+                .uri("/rtp_llm/schedule")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(Map.of(
+                        "request_id", "request-1",
+                        "seq_len", 4,
+                        "input_ids", new int[]{1, 2, 3, 4}))
+                .exchange()
+                .expectStatus().is5xxServerError();
+
+        verify(cacheAwareService, never()).updateCacheMetadata(
+                any(Request.class),
+                any());
     }
 
     @Test
@@ -121,6 +187,7 @@ class HttpLoadBalanceServerTest {
         when(lbStatusConsistencyService.getMasterHostIpPort()).thenReturn("10.0.0.1:7001");
         Response response = new Response();
         response.setSuccess(true);
+        response.setServerStatus(List.of(new ServerStatus()));
         when(generalHttpNettyService.request(
                 any(Request.class),
                 any(URI.class),
@@ -147,11 +214,18 @@ class HttpLoadBalanceServerTest {
         assertArrayEquals(new int[]{1, 2, 3, 4}, requestCaptor.getValue().getInputIds());
         assertNull(requestCaptor.getValue().getBlockCacheKeys());
         verify(routeService, never()).route(any());
-        verify(blockHashConfigResolver, never()).resolve();
+        verify(requestBlockHashService, never()).prepareBlockCacheKeys(any());
+        verify(cacheAwareService, never()).updateCacheMetadata(
+                any(Request.class),
+                any());
     }
 
     @Test
     void rejectsRequestWhenBlockCacheKeysAndInputIdsAreEmpty() {
+        when(requestBlockHashService.prepareBlockCacheKeys(any()))
+                .thenReturn(Mono.error(new IllegalArgumentException(
+                        "block_cache_keys and input_ids must not both be empty")));
+
         webTestClient.post()
                 .uri("/rtp_llm/schedule")
                 .contentType(MediaType.APPLICATION_JSON)
@@ -183,56 +257,26 @@ class HttpLoadBalanceServerTest {
     }
 
     @Test
-    void rejectsRequestWhenBlockHashExecutorIsSaturated() throws Exception {
-        when(blockHashConfigResolver.resolve()).thenReturn(
-                new WorkerBlockHashConfigResolver.BlockHashConfig(4L, 0));
-        CountDownLatch runningTaskStarted = new CountDownLatch(1);
-        CountDownLatch releaseRunningTask = new CountDownLatch(1);
-        Disposable runningTask = blockHashExecutor.submit(() -> {
-                    runningTaskStarted.countDown();
-                    releaseRunningTask.await(5, TimeUnit.SECONDS);
-                    return "running";
-                })
-                .subscribe();
-        assertTrue(runningTaskStarted.await(5, TimeUnit.SECONDS));
-        Disposable queuedTask = blockHashExecutor.submit(() -> "queued").subscribe();
-
-        try {
-            webTestClient.post()
-                    .uri("/rtp_llm/schedule")
-                    .contentType(MediaType.APPLICATION_JSON)
-                    .bodyValue(Map.of(
-                            "request_id", "request-1",
-                            "seq_len", 4,
-                            "block_size", 4,
-                            "input_ids", new int[]{1, 2, 3, 4}))
-                    .exchange()
-                    .expectStatus().isEqualTo(503)
-                    .expectBody()
-                    .jsonPath("$.success").isEqualTo(false)
-                    .jsonPath("$.code").isEqualTo(8502)
-                    .jsonPath("$.error_message").isEqualTo("block hash executor queue is full");
-
-            verify(routeService, never()).route(any());
-        } finally {
-            releaseRunningTask.countDown();
-            runningTask.dispose();
-            queuedTask.dispose();
-        }
-    }
-
-    @Test
-    void updatesFlexlbLogGroupThroughLegacyEndpoint() {
-        when(logLevelManager.setLogLevel(LogLevel.DEBUG)).thenReturn(LogLevel.DEBUG);
+    void rejectsRequestWhenBlockHashExecutorIsSaturated() {
+        when(requestBlockHashService.prepareBlockCacheKeys(any()))
+                .thenReturn(Mono.error(new RejectedExecutionException("queue full")));
 
         webTestClient.post()
-                .uri("/rtp_llm/update_log_level")
+                .uri("/rtp_llm/schedule")
                 .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(Map.of("log_level", "debug"))
+                .bodyValue(Map.of(
+                        "request_id", "request-1",
+                        "seq_len", 4,
+                        "block_size", 4,
+                        "input_ids", new int[]{1, 2, 3, 4}))
                 .exchange()
-                .expectStatus().isOk()
-                .expectBody(String.class).isEqualTo("Success! logLevel=DEBUG");
+                .expectStatus().isEqualTo(503)
+                .expectBody()
+                .jsonPath("$.success").isEqualTo(false)
+                .jsonPath("$.code").isEqualTo(8502)
+                .jsonPath("$.error_message").isEqualTo("block hash executor queue is full");
 
-        verify(logLevelManager).setLogLevel(LogLevel.DEBUG);
+        verify(routeService, never()).route(any());
     }
+
 }
