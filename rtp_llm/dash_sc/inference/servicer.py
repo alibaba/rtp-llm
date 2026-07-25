@@ -325,7 +325,7 @@ def build_think_runtime(
     )
 
 
-def _phase2_input_ids_for_deepseek_v4(
+def _build_phase2_empty_think_input_ids(
     input_ids_list: list[int],
     matched_bos_ids: list[int],
     empty_think_tokens: list[int],
@@ -915,7 +915,7 @@ async def iter_real_model_stream_infer(
             # carried by request_log_tag (phase=2) and by the ``-2`` suffix on
             # the response infer.id (client-facing).
             phase2_config.trace_id = trace_str
-            phase2_input_ids = _phase2_input_ids_for_deepseek_v4(
+            phase2_input_ids = _build_phase2_empty_think_input_ids(
                 input_ids_list, matched_think_bos_ids, list(runtime.empty_tokens)
             )
             phase2_request_id = (
