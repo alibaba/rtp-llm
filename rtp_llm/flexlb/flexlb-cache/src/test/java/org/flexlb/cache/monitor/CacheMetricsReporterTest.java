@@ -53,9 +53,9 @@ class CacheMetricsReporterTest {
         verify(monitor).register(CACHE_THEORY_HIT_COUNT, FlexMetricType.GAUGE);
         verify(monitor).register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.GAUGE);
         verify(monitor).register(CACHE_THEORY_HIT_RATIO, FlexMetricType.GAUGE);
-        verify(monitor).register(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, FlexMetricType.GAUGE);
-        verify(monitor).register(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, FlexMetricType.GAUGE);
-        verify(monitor).register(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, FlexMetricType.GAUGE);
+        verify(monitor).register(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, FlexMetricType.QPS);
+        verify(monitor).register(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, FlexMetricType.QPS);
+        verify(monitor).register(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, FlexMetricType.QPS);
     }
 
     @Test
