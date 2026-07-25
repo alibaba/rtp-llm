@@ -41,6 +41,9 @@ class FakeFrontendWorker(object):
 
 
 class FakeRawRequest(object):
+    def __init__(self, headers: dict[str, str] | None = None):
+        self.headers = headers or {}
+
     async def is_disconnected(self):
         return False
 
