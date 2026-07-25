@@ -329,10 +329,13 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                 RequestLifecycleSnapshot terminal;
                 synchronized (entry) {
                     RequestLifecycleSnapshot current = entry.lifecycle.snapshot();
+                    // Decode workers have no prefill batch concept and report without a valid
+                    // batchId; do NOT gate completion on batchId or legitimate decode
+                    // completions get dropped, leaving zombie scheduler inflight entries.
                     if (task.getBatchId() >= 0 && task.getBatchId() != current.batchId()) {
-                        Logger.warn("Ignoring stale worker completion request_id={} batch_id={}",
-                                requestId, task.getBatchId());
-                        continue;
+                        Logger.warn("Worker completion batchId mismatch but proceeding: "
+                                        + "request_id={} task_batch_id={} entry_batch_id={}",
+                                requestId, task.getBatchId(), current.batchId());
                     }
                     if (task.getErrorCode() == 0) {
                         terminal = entry.lifecycle.complete("decode completed");
