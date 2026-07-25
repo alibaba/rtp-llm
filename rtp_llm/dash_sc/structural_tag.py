@@ -1,8 +1,8 @@
-"""Compatibility parsing for DashSc structural_tag request controls.
+"""DashSc structural_tag request adapters.
 
-These adapters are retained only to recognize legacy Dash wire shapes and report
-stable request errors. DashSc rejects every valid structured-output control before
-Model RPC until the backend grammar path is implemented.
+This module is intentionally narrow: it only handles DashSc/DashScope wire
+compatibility before the payload is passed to GenerateConfig.structural_tag.
+The grammar compiler remains responsible for full DSL validity.
 """
 
 from __future__ import annotations

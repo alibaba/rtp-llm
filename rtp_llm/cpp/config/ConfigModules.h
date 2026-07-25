@@ -371,6 +371,15 @@ struct FIFOSchedulerConfig {
     std::string to_string() const;
 };
 
+struct GrammarConfig {
+    std::string          grammar_backend                         = "xgrammar";
+    bool                 constrained_json_disable_any_whitespace = false;
+    int                  num_workers                             = 8;
+    std::string          tokenizer_info_json;
+    std::vector<int32_t> override_stop_tokens;
+    std::string          to_string() const;
+};
+
 struct RuntimeConfig {
     int64_t max_generate_batch_size = 1;
 
@@ -560,6 +569,7 @@ struct GrpcConfig: GrpcMapsConfig {
 
 /// DashSc gRPC (predict_v2.proto) Python client/server channel options.
 struct DashScGrpcConfig: GrpcMapsConfig {
+    int max_server_workers = 4;
     DashScGrpcConfig() {};
     DashScGrpcConfig(const std::string& json_str);
     std::string to_string() const;

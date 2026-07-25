@@ -24,6 +24,7 @@ from rtp_llm.server.server_args.fifo_scheduler_group_args import (
 from rtp_llm.server.server_args.fmha_group_args import init_fmha_group_args
 from rtp_llm.server.server_args.gang_group_args import init_gang_group_args
 from rtp_llm.server.server_args.generate_group_args import init_generate_group_args
+from rtp_llm.server.server_args.grammar_group_args import init_grammar_group_args
 from rtp_llm.server.server_args.grpc_group_args import (
     init_dash_sc_grpc_group_args,
     init_model_grpc_group_args,
@@ -458,6 +459,7 @@ def init_all_group_args(
     init_fmha_group_args(parser, py_env_configs.fmha_config)
     init_gang_group_args(parser, py_env_configs.distribute_config)
     init_generate_group_args(parser, py_env_configs.generate_env_config)
+    init_grammar_group_args(parser, py_env_configs.grammar_config)
     init_hw_kernel_group_args(parser, py_env_configs.py_hw_kernel_config)
     init_kv_cache_group_args(parser, py_env_configs.kv_cache_config)
     init_load_group_args(parser, py_env_configs.load_config, py_env_configs.model_args)

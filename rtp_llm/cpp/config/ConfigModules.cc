@@ -383,6 +383,17 @@ std::string FIFOSchedulerConfig::to_string() const {
     return oss.str();
 }
 
+// GrammarConfig
+std::string GrammarConfig::to_string() const {
+    std::ostringstream oss;
+    oss << "grammar_backend: " << grammar_backend << "\n"
+        << "constrained_json_disable_any_whitespace: " << constrained_json_disable_any_whitespace << "\n"
+        << "num_workers: " << num_workers << "\n"
+        << "tokenizer_info_json_size: " << tokenizer_info_json.size() << "\n"
+        << "override_stop_tokens_size: " << override_stop_tokens.size();
+    return oss.str();
+}
+
 // RuntimeConfig
 std::string RuntimeConfig::to_string() const {
     std::ostringstream oss;
@@ -460,6 +471,18 @@ static void parse_grpc_client_server_maps_json(const std::string&          json_
     }
 }
 
+static int parse_optional_root_int_json(const std::string& json_str, const char* key, int default_value) {
+    try {
+        std::string pat = std::string("\"") + key + "\"\\s*:\\s*(\\d+)";
+        std::regex  re(pat);
+        std::smatch m;
+        if (std::regex_search(json_str, m, re) && m.size() > 1) {
+            return std::stoi(m[1].str());
+        }
+    } catch (...) {}
+    return default_value;
+}
+
 static void append_grpc_maps_to_stream(std::ostringstream& oss, const GrpcMapsConfig& maps) {
     oss << "Client Config:\n";
     for (auto it = maps.client_config.begin(); it != maps.client_config.end(); ++it) {
@@ -499,6 +522,7 @@ DashScGrpcConfig::DashScGrpcConfig(const std::string& json_str) {
 std::string DashScGrpcConfig::to_string() const {
     std::ostringstream oss;
     append_grpc_maps_to_stream(oss, *this);
+    oss << "max_server_workers: " << max_server_workers << "\n";
     return oss.str();
 }
 
@@ -508,7 +532,10 @@ void DashScGrpcConfig::from_json(const std::string& json_str) {
     }
     client_config.clear();
     server_config.clear();
+    max_server_workers = 4;
     parse_grpc_client_server_maps_json(json_str, client_config, server_config);
+    int mw             = parse_optional_root_int_json(json_str, "max_server_workers", 4);
+    max_server_workers = mw > 0 ? mw : 4;
 }
 
 // FfnDisAggregateConfig

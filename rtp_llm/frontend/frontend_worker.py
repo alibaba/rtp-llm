@@ -19,11 +19,12 @@ from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.distribute.distributed_server import (
+    WorldInfo,
     get_dp_addrs_from_world_info,
     get_world_info,
 )
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
-from rtp_llm.ops import SpecialTokens, VitSeparation
+from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.structure.request_extractor import Request, RequestExtractor
 from rtp_llm.utils.base_model_datatypes import GenerateResponse
@@ -108,14 +109,24 @@ class FrontendWorker:
             vit_separation=vit_separation,
             server_config=py_env_configs.server_config,
             master_config=py_env_configs.master_config,
+            parallelism_config=engine_config.parallelism_config,
+            prefill_cp_config=py_env_configs.prefill_cp_config,
         )
         self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
         self.generate_env_config = py_env_configs.generate_env_config
 
         logging.info("frontend worker start done.")
 
-    async def close(self) -> None:
+    async def close(self):
         await self.pipeline.close()
+
+    def stop(self):
+        try:
+            loop = asyncio.get_running_loop()
+        except RuntimeError:
+            asyncio.run(self.close())
+        else:
+            loop.create_task(self.close())
 
     def tokenizer_offset_mapping(self, prompt: str) -> Any:
         return self.pipeline.tokenizer(

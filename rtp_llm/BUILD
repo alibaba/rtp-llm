@@ -135,6 +135,8 @@ requirement([
     "aiter",
     "fastsafetensors",
     "pybind11_stubgen",
+    "watchdog",
+    "zstandard",
 ] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
 
 
@@ -149,6 +151,11 @@ py_library(
     name = "utils",
     srcs = glob([
         "utils/**/*.py",
+    ], exclude = [
+        "utils/jit_cache_manager.py",
+        "utils/jit_cache_store.py",
+        "utils/test/*.py",
+        "utils/test/**/*.py",
     ]),
     deps = [
         ":torch",
@@ -159,7 +166,22 @@ py_library(
         ":prettytable",
         ":psutil",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
-    ] + internal_deps()
+    ] + arch_dep + internal_deps()
+)
+
+py_library(
+    name = "jit_cache_manager_lib",
+    srcs = [
+        "utils/jit_cache_manager.py",
+        "utils/jit_cache_store.py",
+    ],
+    deps = [
+        ":config_ops",
+        ":utils",
+        ":watchdog",
+        ":zstandard",
+    ],
+    visibility = ["//visibility:public"],
 )
 
 py_library(
@@ -437,6 +459,8 @@ py_library(
         ":concurrent_log_handler",
         ":blobfile",
         ":partial_json_parser",
+        ":utils",
+        ":jit_cache_manager_lib",
     ],
     data = jit_deps(),
     imports = ["."],
@@ -614,6 +638,8 @@ whl_reqs = [
     "oss2",
     "orjson",
     "aiohttp",
+    "watchdog==6.0.0",
+    "zstandard==0.23.0",
     "json5",
     "dashscope>=1.11.0",
     "jieba",
@@ -647,6 +673,49 @@ rename_wheel(
     name = "rtp_llm_frontend",
     package_name = "rtp_llm_frontend-%s" % RELEASE_VERSION,
     src = ":rtp_llm_frontend_whl",
+)
+
+# Standalone DashSc gRPC server wheel: dash_sc proto + dash_sc_grpc_server, no full frontend app.
+# Run: python -m rtp_llm.dash_sc.server [--port 8000] or: rtp-llm-dash-sc-grpc [--port 8000]
+py_library(
+    name = "dash_sc_grpc_standalone_lib",
+    srcs = ["__init__.py"],
+    deps = [
+        "//rtp_llm/dash_sc:dash_sc_grpc_server",
+    ],
+    visibility = ["//visibility:private"],
+)
+
+py_package(
+    name = "dash_sc_grpc_standalone_package",
+    deps = [":dash_sc_grpc_standalone_lib"],
+    packages = ["rtp_llm"],
+)
+
+whl_reqs_dash_sc_grpc = [
+    "grpcio>=1.57.0",
+    "protobuf>=4.25",
+]
+
+py_wheel(
+    name = "rtp_llm_dash_sc_grpc_whl",
+    distribution = "rtp_llm_dash_sc_grpc",
+    python_tag = "py3",
+    tags = ["manual", "local", "no-remote"],
+    version = RELEASE_VERSION,
+    entry_points = {
+        "console_scripts": [
+            "rtp-llm-dash-sc-grpc = rtp_llm.dash_sc.server:main",
+        ]
+    },
+    deps = [":dash_sc_grpc_standalone_package"],
+    requires = whl_reqs_dash_sc_grpc,
+)
+
+rename_wheel(
+    name = "rtp_llm_dash_sc_grpc",
+    package_name = "rtp_llm_dash_sc_grpc-%s" % RELEASE_VERSION,
+    src = ":rtp_llm_dash_sc_grpc_whl",
 )
 
 # target for wheel

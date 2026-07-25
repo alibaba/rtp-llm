@@ -1,5 +1,4 @@
 import asyncio
-import os
 import signal
 import time
 import unittest
@@ -223,10 +222,11 @@ class FrontendShutdownManagerTest(unittest.TestCase):
     def test_uvicorn_signal_marks_frontend_draining(self):
         manager = FrontendShutdownManager()
         server = GracefulShutdownServer(Config(lambda scope: None))
-        server.set_server(FakeFrontendServer(), manager)
+        server.set_server(
+            FakeFrontendServer(), manager, pre_stop_drain_seconds=0
+        )
 
-        with patch.dict(os.environ, {"FRONTEND_PRE_STOP_DRAIN_SECONDS": "0"}):
-            server.handle_exit(signal.SIGTERM, None)
+        server.handle_exit(signal.SIGTERM, None)
 
         self.assertTrue(manager.is_draining())
         self.assertTrue(server.should_exit)
@@ -279,21 +279,23 @@ class FrontendShutdownManagerTest(unittest.TestCase):
         self.assertFalse(manager.is_draining())
         self.assertFalse(server.should_exit)
 
-    def test_sigterm_after_pre_stop_signal_waits_only_remaining_drain(self):
+    def test_sigterm_after_pre_stop_signal_keeps_existing_drain_timer(self):
         manager = FrontendShutdownManager()
         server = GracefulShutdownServer(Config(lambda scope: None))
-        server.set_server(FakeFrontendServer(), manager)
+        server.set_server(
+            FakeFrontendServer(), manager, pre_stop_drain_seconds=10
+        )
         server.handle_pre_stop_drain_signal(signal.SIGUSR1, None)
+        pre_stop_timer = server._pre_stop_timer
+        self.assertIsNotNone(pre_stop_timer)
 
-        with patch.dict(os.environ, {"FRONTEND_PRE_STOP_DRAIN_SECONDS": "10"}):
-            with patch.object(manager, "drain_elapsed_seconds", return_value=7.0):
-                server.handle_exit(signal.SIGTERM, None)
+        with patch.object(manager, "drain_elapsed_seconds", return_value=7.0):
+            server.handle_exit(signal.SIGTERM, None)
 
         self.assertTrue(manager.is_unavailable())
         self.assertFalse(manager.is_draining())
         self.assertFalse(server.should_exit)
-        self.assertIsNotNone(server._pre_stop_timer)
-        self.assertAlmostEqual(server._pre_stop_timer.interval, 3.0)
+        self.assertIs(server._pre_stop_timer, pre_stop_timer)
         self.assertFalse(manager.try_begin_request())
         server._pre_stop_timer.cancel()
         server._pre_stop_timer = None
@@ -301,12 +303,13 @@ class FrontendShutdownManagerTest(unittest.TestCase):
     def test_sigterm_after_elapsed_pre_stop_signal_starts_shutdown(self):
         manager = FrontendShutdownManager()
         server = GracefulShutdownServer(Config(lambda scope: None))
-        server.set_server(FakeFrontendServer(), manager)
+        server.set_server(
+            FakeFrontendServer(), manager, pre_stop_drain_seconds=10
+        )
         server.handle_pre_stop_drain_signal(signal.SIGUSR1, None)
 
-        with patch.dict(os.environ, {"FRONTEND_PRE_STOP_DRAIN_SECONDS": "10"}):
-            with patch.object(manager, "drain_elapsed_seconds", return_value=10.0):
-                server.handle_exit(signal.SIGTERM, None)
+        with patch.object(manager, "drain_elapsed_seconds", return_value=10.0):
+            server.handle_exit(signal.SIGTERM, None)
 
         self.assertTrue(manager.is_unavailable())
         self.assertTrue(manager.is_draining())
@@ -316,15 +319,16 @@ class FrontendShutdownManagerTest(unittest.TestCase):
     def test_sigterm_waits_for_pre_stop_drain_before_uvicorn_shutdown(self):
         manager = FrontendShutdownManager()
         server = GracefulShutdownServer(Config(lambda scope: None))
-        server.set_server(FakeFrontendServer(), manager)
+        server.set_server(
+            FakeFrontendServer(), manager, pre_stop_drain_seconds=0.01
+        )
 
-        with patch.dict(os.environ, {"FRONTEND_PRE_STOP_DRAIN_SECONDS": "0.01"}):
-            server.handle_exit(signal.SIGTERM, None)
-            self.assertTrue(manager.is_unavailable())
-            self.assertFalse(manager.is_draining())
-            self.assertFalse(manager.try_begin_request())
-            self.assertFalse(server.should_exit)
-            self.assertTrue(self.wait_until(lambda: server.should_exit))
+        server.handle_exit(signal.SIGTERM, None)
+        self.assertTrue(manager.is_unavailable())
+        self.assertFalse(manager.is_draining())
+        self.assertFalse(manager.try_begin_request())
+        self.assertFalse(server.should_exit)
+        self.assertTrue(self.wait_until(lambda: server.should_exit))
 
         self.assertTrue(manager.is_draining())
         self.assertTrue(server.should_exit)
@@ -332,14 +336,15 @@ class FrontendShutdownManagerTest(unittest.TestCase):
     def test_duplicate_sigterm_keeps_pre_stop_drain(self):
         manager = FrontendShutdownManager()
         server = GracefulShutdownServer(Config(lambda scope: None))
-        server.set_server(FakeFrontendServer(), manager)
+        server.set_server(
+            FakeFrontendServer(), manager, pre_stop_drain_seconds=100
+        )
 
-        with patch.dict(os.environ, {"FRONTEND_PRE_STOP_DRAIN_SECONDS": "100"}):
-            server.handle_exit(signal.SIGTERM, None)
-            self.assertTrue(manager.is_unavailable())
-            self.assertFalse(manager.is_draining())
-            self.assertFalse(server.should_exit)
-            server.handle_exit(signal.SIGTERM, None)
+        server.handle_exit(signal.SIGTERM, None)
+        self.assertTrue(manager.is_unavailable())
+        self.assertFalse(manager.is_draining())
+        self.assertFalse(server.should_exit)
+        server.handle_exit(signal.SIGTERM, None)
 
         self.assertFalse(manager.is_draining())
         self.assertFalse(server.should_exit)
@@ -351,56 +356,47 @@ class FrontendShutdownManagerTest(unittest.TestCase):
     def test_sigterm_after_timer_fires_does_not_rearm_pre_stop_drain(self):
         manager = FrontendShutdownManager()
         server = GracefulShutdownServer(Config(lambda scope: None))
-        server.set_server(FakeFrontendServer(), manager)
+        server.set_server(
+            FakeFrontendServer(), manager, pre_stop_drain_seconds=0.01
+        )
 
-        with patch.dict(os.environ, {"FRONTEND_PRE_STOP_DRAIN_SECONDS": "0.01"}):
-            server.handle_exit(signal.SIGTERM, None)
-            self.assertTrue(
-                self.wait_until(lambda: manager.is_draining() and server.should_exit)
-            )
-            server.handle_exit(signal.SIGTERM, None)
+        server.handle_exit(signal.SIGTERM, None)
+        self.assertTrue(
+            self.wait_until(lambda: manager.is_draining() and server.should_exit)
+        )
+        server.handle_exit(signal.SIGTERM, None)
 
         self.assertTrue(manager.is_draining())
         self.assertTrue(server.should_exit)
         self.assertIsNone(server._pre_stop_timer)
 
-    def test_frontend_pre_stop_uses_frontend_env_before_shared_env(self):
-        with patch.dict(
-            os.environ,
-            {
-                "FRONTEND_PRE_STOP_DRAIN_SECONDS": "2.5",
-                "DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "9",
-            },
-        ):
-            self.assertEqual(_pre_stop_drain_seconds(), 2.5)
+    def test_frontend_pre_stop_uses_configured_value(self):
+        self.assertEqual(_pre_stop_drain_seconds(2.5), 2.5)
 
-    def test_frontend_pre_stop_falls_back_to_shared_env(self):
-        with patch.dict(
-            os.environ,
-            {"DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS": "9"},
-            clear=True,
-        ):
-            self.assertEqual(_pre_stop_drain_seconds(), 9.0)
+    def test_frontend_pre_stop_clamps_negative_config_to_zero(self):
+        self.assertEqual(_pre_stop_drain_seconds(-1), 0.0)
 
     def test_frontend_pre_stop_clamps_to_shutdown_timeout(self):
         manager = FrontendShutdownManager()
         server = GracefulShutdownServer(
             Config(lambda scope: None, timeout_graceful_shutdown=10)
         )
-        server.set_server(FakeFrontendServer(), manager)
+        server.set_server(
+            FakeFrontendServer(), manager, pre_stop_drain_seconds=30
+        )
 
-        with patch.dict(os.environ, {"FRONTEND_PRE_STOP_DRAIN_SECONDS": "30"}):
-            self.assertEqual(server._effective_pre_stop_drain_seconds(), 9.0)
+        self.assertEqual(server._effective_pre_stop_drain_seconds(), 9.0)
 
     def test_frontend_pre_stop_reserves_shutdown_headroom(self):
         manager = FrontendShutdownManager()
         server = GracefulShutdownServer(
             Config(lambda scope: None, timeout_graceful_shutdown=600)
         )
-        server.set_server(FakeFrontendServer(), manager)
+        server.set_server(
+            FakeFrontendServer(), manager, pre_stop_drain_seconds=600
+        )
 
-        with patch.dict(os.environ, {"FRONTEND_PRE_STOP_DRAIN_SECONDS": "600"}):
-            self.assertEqual(server._effective_pre_stop_drain_seconds(), 540.0)
+        self.assertEqual(server._effective_pre_stop_drain_seconds(), 540.0)
 
     def test_frontend_graceful_timeout_uses_remaining_pre_stop_budget(self):
         manager = FrontendShutdownManager()

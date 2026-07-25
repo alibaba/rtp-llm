@@ -42,6 +42,8 @@ class BackendRPCServerVisitor:
         vit_separation: Optional[VitSeparation] = None,  # Optional VitSeparation
         server_config=None,
         master_config=None,
+        parallelism_config=None,
+        prefill_cp_config=None,
         source_role: str = "frontend",
     ) -> None:
         """Initialize BackendRPCServerVisitor.
@@ -56,6 +58,8 @@ class BackendRPCServerVisitor:
             vit_separation: Optional VitSeparation for multimodal models
             server_config: Optional ServerConfig for master configuration
             master_config: Optional MasterConfig for master client configuration
+            parallelism_config: Optional ParallelismConfig accepted for callers shared with DashSc.
+            prefill_cp_config: Optional PrefillCPConfig accepted for callers shared with DashSc.
             source_role: Caller role used for request-info correlation fields.
         """
         self.max_seq_len = max_seq_len
@@ -435,5 +439,7 @@ def create_backend_rpc_server_visitor(
         vit_separation=vit_separation,
         server_config=py_env_configs.server_config,
         master_config=py_env_configs.master_config,
+        parallelism_config=engine_config.parallelism_config,
+        prefill_cp_config=py_env_configs.prefill_cp_config,
         source_role=source_role,
     )

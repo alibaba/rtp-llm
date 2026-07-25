@@ -2,6 +2,8 @@ import argparse
 import json
 import logging
 
+DEFAULT_DASH_SC_GRPC_MAX_SERVER_WORKERS = 4
+
 # Model RPC: receive / metadata limits (C++ GenerateStreamCall path).
 _MODEL_RPC_GRPC_RECV_AND_METADATA_BYTES = 1024 * 1024 * 1024
 _DASH_SC_DEFAULT_SERVER_RECV_BYTES = 64 * 1024 * 1024
@@ -33,12 +35,13 @@ def default_model_grpc_config_json() -> str:
 
 def default_dash_sc_grpc_config_json() -> str:
     config = json.loads(default_model_grpc_config_json())
-    # DashSc input_ids arrive in request messages.  Keep a bounded fallback
+    # DashSc input_ids arrive in request messages. Keep a bounded fallback
     # for proxy/standalone mode; DashScApp derives a tighter model-specific
     # cap from max_seq_len for direct inference mode at startup.
     config["server_config"]["grpc.max_receive_message_length"] = (
         _DASH_SC_DEFAULT_SERVER_RECV_BYTES
     )
+    config["max_server_workers"] = DEFAULT_DASH_SC_GRPC_MAX_SERVER_WORKERS
     return json.dumps(config, separators=(",", ":"))
 
 
@@ -50,11 +53,11 @@ def _grpc_config_from_json(grpc_config):
             return grpc_config
         try:
             grpc_config.from_json(json_str)
-            logging.debug(f"Initialized gRPC config from JSON: {json_str}")
+            logging.debug("Initialized gRPC config from JSON: %s", json_str)
             return grpc_config
         except Exception as e:
-            logging.warning(f"Failed to parse gRPC config JSON: {e}")
-            raise argparse.ArgumentTypeError(f"Invalid gRPC config JSON: {e}")
+            logging.warning("Failed to parse gRPC config JSON: %s", e)
+            raise argparse.ArgumentTypeError(f"Invalid gRPC config JSON: {e}") from e
 
     return converter
 
@@ -96,6 +99,7 @@ def init_dash_sc_grpc_group_args(parser, dash_sc_grpc_config):
         default=default_json,
         help=(
             "DashSc gRPC JSON: "
-            '{"client_config": {...}, "server_config": {...}}.'
+            '{"client_config": {...}, "server_config": {...}, "max_server_workers": <int>}. '
+            "max_server_workers is ThreadPoolExecutor size for grpc.server."
         ),
     )

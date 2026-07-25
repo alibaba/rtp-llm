@@ -1,4 +1,4 @@
-import os
+from rtp_llm.server.server_args.util import str2bool
 
 
 def init_server_group_args(parser, server_config, distribute_config):
@@ -72,6 +72,46 @@ def init_server_group_args(parser, server_config, distribute_config):
         type=int,
         default=50,
         help="Process manager shutdown timeout in seconds. Set to -1 to wait indefinitely for processes to finish (no force kill)",
+    )
+    server_group.add_argument(
+        "--frontend_pre_stop_drain_seconds",
+        env_name="FRONTEND_PRE_STOP_DRAIN_SECONDS",
+        bind_to=(server_config, "frontend_pre_stop_drain_seconds"),
+        type=float,
+        default=120.0,
+        help="Frontend pre-stop unavailable/drain window in seconds before graceful shutdown.",
+    )
+    server_group.add_argument(
+        "--dash_sc_grpc_pre_stop_drain_seconds",
+        env_name="DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS",
+        bind_to=(server_config, "dash_sc_grpc_pre_stop_drain_seconds"),
+        type=float,
+        default=120.0,
+        help="DashSc gRPC pre-stop unavailable/drain window in seconds before graceful shutdown.",
+    )
+    server_group.add_argument(
+        "--pre_stop_drain_headroom_seconds",
+        env_name="RTP_LLM_PRE_STOP_DRAIN_HEADROOM_SECONDS",
+        bind_to=(server_config, "pre_stop_drain_headroom_seconds"),
+        type=float,
+        default=-1.0,
+        help="Shutdown budget reserved after pre-stop drain. Negative means auto.",
+    )
+    server_group.add_argument(
+        "--pre_stop_drain_signal",
+        env_name="RTP_LLM_PRE_STOP_DRAIN_SIGNAL",
+        bind_to=(server_config, "pre_stop_drain_signal"),
+        type=str2bool,
+        default=True,
+        help="Whether the parent sends SIGUSR1 for pre-stop drain before SIGTERM.",
+    )
+    server_group.add_argument(
+        "--backend_post_frontend_drain_seconds",
+        env_name="RTP_LLM_BACKEND_POST_FRONTEND_DRAIN_SECONDS",
+        bind_to=(server_config, "backend_post_frontend_drain_seconds"),
+        type=float,
+        default=-1.0,
+        help="Parent wait window before backend shutdown after frontend drain. Negative derives from frontend/dash_sc drain config.",
     )
     server_group.add_argument(
         "--monitor_interval",
