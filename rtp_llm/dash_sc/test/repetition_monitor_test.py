@@ -28,12 +28,7 @@ def _native_status(status):
 
 def _patched_native_module(fake_native):
     return _native_status(
-        NativeModuleStatus(
-            available=True,
-            module=fake_native,
-            module_name="fake",
-            check_tool_call_loop=fake_native.check_tool_call_loop,
-        )
+        NativeModuleStatus(available=True, module=fake_native, module_name="fake")
     )
 
 
@@ -129,8 +124,8 @@ class RepetitionMonitorTest(TestCase):
         with _fresh_native_status():
             status = repetition_monitor.native_online_repetition_status()
             self.assertTrue(status.available)
-            self.assertIsNotNone(status.check_tool_call_loop)
-            guard_result = status.check_tool_call_loop(
+            self.assertTrue(hasattr(status.module, "check_tool_call_loop"))
+            guard_result = status.module.check_tool_call_loop(
                 [1, 42, 2] * 4, [1, 42, 2], [[1]], [[2]], 5, 16
             )
 
