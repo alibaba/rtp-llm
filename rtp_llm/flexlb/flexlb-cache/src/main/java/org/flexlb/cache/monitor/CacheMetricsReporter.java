@@ -90,9 +90,9 @@ public class CacheMetricsReporter {
         monitor.register(CACHE_THEORY_HIT_COUNT, FlexMetricType.GAUGE);
         monitor.register(CACHE_THEORY_TOTAL_COUNT, FlexMetricType.GAUGE);
         monitor.register(CACHE_THEORY_HIT_RATIO, FlexMetricType.GAUGE);
-        monitor.register(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, FlexMetricType.GAUGE);
-        monitor.register(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, FlexMetricType.GAUGE);
-        monitor.register(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, FlexMetricType.GAUGE);
+        monitor.register(CACHE_ROUTING_SELECTED_MATCH_HIT_TOKENS, FlexMetricType.QPS);
+        monitor.register(CACHE_ROUTING_SELECTED_MATCH_TOTAL_TOKENS, FlexMetricType.QPS);
+        monitor.register(CACHE_ROUTING_CANDIDATE_MAX_HIT_TOKENS, FlexMetricType.QPS);
         monitor.register(CACHE_REQUEST_TOTAL, FlexMetricType.QPS);
 
         // Cache service response time metrics
