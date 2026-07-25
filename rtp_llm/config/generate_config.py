@@ -1,24 +1,39 @@
 import copy
 import hashlib
 import json
-import logging
-import time
 from typing import Any, Dict, List, Optional, Union
 
-from pydantic import (
-    BaseModel,
-    ConfigDict,
-    PrivateAttr,
-    field_serializer,
-    field_validator,
-    model_validator,
-)
-from transformers.tokenization_utils_base import PreTrainedTokenizerBase
+from pydantic import BaseModel, ConfigDict, field_serializer, field_validator
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.check_util import *
 from rtp_llm.utils.util import check_with_info
+
+_GRAMMAR_RESPONSE_FORMAT_TYPES = frozenset(
+    {"json_schema", "json_object", "regex", "ebnf", "structural_tag"}
+)
+_JSON_OBJECT_SCHEMA: Dict[str, str] = {"type": "object"}
+
+
+def _compact_json(value: Union[str, Dict[str, Any]]) -> str:
+    if isinstance(value, str):
+        return value
+    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+
+
+def _response_format_is_grammar(rf: Optional[Union[str, Dict[str, Any]]]) -> bool:
+    if rf is None:
+        return False
+    if isinstance(rf, str):
+        try:
+            rf = json.loads(rf)
+        except Exception:
+            return True
+    if not isinstance(rf, dict):
+        return False
+    return rf.get("type") in _GRAMMAR_RESPONSE_FORMAT_TYPES
+
 
 class RequestFormat:
     RAW = "raw"
@@ -44,7 +59,7 @@ class RoleAddr(BaseModel):
     def validate_role(cls, v):
         """Convert string to RoleType enum for deserialization."""
         if isinstance(v, str):
-            return getattr(RoleType, v)
+            return RoleType[v]
         elif isinstance(v, RoleType):
             return v
         else:
@@ -58,50 +73,7 @@ class RoleAddr(BaseModel):
         return role.name
 
 
-# === 跨序列去重共享常量（SYNC: 必须与 RecommendationLogitsProcessor.cc 保持一致） ===
-# 对应 C++ kDivergeStartComboWarnThreshold，更改时两侧同步 + test_generate_config_validators.py 会断言一致。
-_DIVERGE_START_COMBO_WARN_THRESHOLD = 100
-# 对应 C++ kMaxDivergeDepth，超过此值的 num_return_sequences 可能导致采样质量退化。
-_MAX_DIVERGE_DEPTH = 8
-# 警告限流状态：与 C++ INTERVAL_LOG(300) 对齐，每 300 秒最多输出一次。
-# NOTE: 模块级全局无锁读改写，多线程下可能偶发多输出/少输出一次告警，
-# 仅影响告警频率不影响正确性，可接受。
-_SANITIZE_WARN_INTERVAL = 300  # seconds
-_last_sanitize_warn_time: float = 0.0
-_last_downgrade_warn_time: float = 0.0
-
-
-def _reset_sanitize_warn_state():
-    """Reset rate-limiting state for testing. NOT for production use."""
-    global _last_sanitize_warn_time, _last_downgrade_warn_time
-    _last_sanitize_warn_time = 0.0
-    _last_downgrade_warn_time = 0.0
-
-
-def _is_plain_text_response_format(value: Any) -> bool:
-    """Return whether ``response_format`` explicitly requests normal text.
-
-    OpenAI-compatible clients may send ``{"type": "text"}`` even though text
-    is already the default. It is a compatibility sentinel, not a structured
-    output request, and therefore needs no backend transport.
-    """
-    parsed = value
-    if isinstance(parsed, str):
-        stripped = parsed.strip()
-        if stripped == "text":
-            return True
-        try:
-            parsed = json.loads(stripped)
-        except (TypeError, ValueError):
-            return False
-    return isinstance(parsed, dict) and parsed == {"type": "text"}
-
-
 class GenerateConfig(BaseModel):
-    # --- private attrs（不参与序列化/schema，生命周期与实例绑定） ---
-    _diverge_depth_warned: bool = PrivateAttr(default=False)
-    _ban_auto_downgraded: bool = PrivateAttr(default=False)
-
     max_new_tokens: int = 32000
     # only for qwen agent fncall check max input tokens
     max_input_tokens: int = 32000
@@ -126,26 +98,11 @@ class GenerateConfig(BaseModel):
     frequency_penalty: Union[List[float], float] = 0.0
     min_new_tokens: Union[List[int], int] = 0
     no_repeat_ngram_size: Optional[Union[List[int], int]] = None
-    # 生成式推荐：组合 token 粒度去重与曝光过滤。
-    # combo_token_size 表示一个商品由多少个连续 token 组成（例如三层语义 ID = 3），0 表示关闭该功能。
-    # banned_combo_token_ids 是禁止生成的商品 token 组合列表，每项长度必须等于 combo_token_size。
-    # auto_parse_banned_combo 为 True 时，frontend 会自动从 prompt 中解析「已推荐曝光的商品序列」并
-    # 填充到 banned_combo_token_ids；默认关闭，避免影响非推荐场景。
     combo_token_size: int = 0
     banned_combo_token_ids: List[List[int]] = []
     auto_parse_banned_combo: bool = False
-    # 跨序列 combo 去重：当 num_return_sequences > 1 时，任一序列生成完整 combo 后自动广播到
-    # 其他序列的 banned_combos，确保多条序列输出互不重复。默认关闭。
-    # 跨序列去重开关（primary-protected 非对称模式）：开启后，主序列（序列 0）仅保留自身 ban、
-    # 不受其他序列影响；补充序列接收所有序列 banned_combos 并集，保证彼此不重复。
-    # 注意：enable_cross_sequence_ban 必须与 num_return_sequences(>1)、combo_token_size(>=2)
-    # 在同一次 GenerateConfig 构造中给出。若条件不满足会被自动降级；
-    # 后续 update()/update_and_pop() 补齐条件后会自动重新启用（仅限曾被自动降级的情况）。
     enable_cross_sequence_ban: bool = False
-    # 跨序列分叉起始商品位置：前 N 个商品所有序列保持 greedy 一致，
-    # 从第 N+1 个商品开始对非主序列施加 top-K 遮蔽制造分叉。默认 0（立即分叉）。
     cross_seq_diverge_start_combo: int = 0
-
     random_seed: Optional[Union[List[int], int]] = None
     top_p_decay: Optional[Union[List[float], float]] = None
     top_p_min: Optional[Union[List[float], float]] = None
@@ -164,8 +121,6 @@ class GenerateConfig(BaseModel):
     chat_id: Optional[str] = None
     task_id: Optional[Union[str, int]] = None
     request_format: str = RequestFormat.RAW
-    # Compatibility-only request sentinels. The backend cannot execute structured
-    # output yet, so validate() rejects every non-default value before Model RPC.
     json_format: bool = False
     response_format: Optional[Union[str, Dict[str, Any]]] = None
     json_schema: Optional[Union[str, Dict[str, Any]]] = None
@@ -176,7 +131,6 @@ class GenerateConfig(BaseModel):
     calculate_loss: int = 0
     return_logits: bool = False
     logits_index: Optional[int] = None
-    # prompt scoring: return logits for all positions in the input sequence
     return_prompt_logits: bool = False
     prompt_logits_top_k: int = 64
     prompt_logits_start: int = -1
@@ -249,161 +203,9 @@ class GenerateConfig(BaseModel):
 
     unique_key: str = ""
 
-    # --- validators（统一放在所有 field 声明之后） ---
-
-    @staticmethod
-    def _sanitize_diverge_start_combo(v: "int | str | None") -> int:
-        """将 cross_seq_diverge_start_combo 规范化为非负 int32 范围内的整数。
-
-        供 field_validator（构造路径）和 update()/update_and_pop()（请求路径）共同复用，
-        确保任何入口的值都经过相同的 clamp/类型兜底。
-
-        上下界钳制：
-          - 下界：负值 clamp 到 0
-          - 上界：超过 INT32_MAX 的值 clamp 到 INT32_MAX，避免 trans_input protobuf 序列化时
-            触发 ValueError（C++ 侧 int32_t 对应）。超大值的实际语义等价于“永不分叉”。
-
-        NOTE on rate-limiting: 与 C++ INTERVAL_LOG(300) 对齐，非法值告警每 300 秒最多输出一次，
-        避免畸形客户端高 QPS 下无界日志刷屏。
-        """
-        global _last_sanitize_warn_time
-        _INT32_MAX = 2**31 - 1
-        if v is None:
-            return 0
-        try:
-            val = int(v)
-        except (TypeError, ValueError) as e:
-            now = time.monotonic()
-            if now - _last_sanitize_warn_time >= _SANITIZE_WARN_INTERVAL:
-                logging.getLogger(__name__).warning(
-                    "cross_seq_diverge_start_combo received non-integer value %r, defaulting to 0: %s",
-                    v,
-                    e,
-                )
-                _last_sanitize_warn_time = now
-            return 0
-        if val < 0:
-            now = time.monotonic()
-            if now - _last_sanitize_warn_time >= _SANITIZE_WARN_INTERVAL:
-                logging.getLogger(__name__).warning(
-                    "cross_seq_diverge_start_combo is negative (%d), clamped to 0", val
-                )
-                _last_sanitize_warn_time = now
-            return 0
-        if val > _INT32_MAX:
-            now = time.monotonic()
-            if now - _last_sanitize_warn_time >= _SANITIZE_WARN_INTERVAL:
-                logging.getLogger(__name__).warning(
-                    "cross_seq_diverge_start_combo exceeds int32 max (%d), clamped to %d",
-                    val,
-                    _INT32_MAX,
-                )
-                _last_sanitize_warn_time = now
-            return _INT32_MAX
-        # "过大" 告警已移至 _check_cross_seq_ban_compatibility，仅在特性启用时触发，
-        # 与 C++ 侧 (enable_cross_seq_ban && diverge_start_combo > threshold) 行为一致。
-        return val
-
-    @field_validator("cross_seq_diverge_start_combo", mode="before")
-    @classmethod
-    def _clamp_diverge_start_combo(cls, v):
-        """构造路径入口：委托给 _sanitize_diverge_start_combo。"""
-        return cls._sanitize_diverge_start_combo(v)
-
-    @model_validator(mode="after")
-    def _check_cross_seq_ban_compatibility(self):
-        """cross_sequence_ban 与多项配置不兼容时直接禁用，一次性报告所有不兼容原因。
-
-        NOTE on rate-limiting:
-          - 不兼容降级 WARNING：每次调用无条件触发（保证即时性）。
-          - 采样质量软告警（超 depth）：通过 _diverge_depth_warned (PrivateAttr) 标志去重，
-            同一 GenerateConfig 实例生命周期内最多输出一次。若 update() 修改了
-            num_return_sequences 使其重新超 depth，标志会被重置以允许再次告警。
-          - C++ 侧使用 INTERVAL_LOG(300) 是因为 fromGenerateInput 在高 QPS 下可能
-            对同一配置反复调用，属不同场景。
-        """
-        if not self.enable_cross_sequence_ban:
-            # “先建后补”场景补救：若特性曾被自动降级且当前条件已全部满足，重新启用并继续校验。
-            # 解决 request_extractor 两次 update_and_pop 分步合并导致的误降级问题。
-            if (
-                self._ban_auto_downgraded
-                and not self.has_num_beams()
-                and self.combo_token_size >= 2
-                and self.num_return_sequences > 1
-            ):
-                self.enable_cross_sequence_ban = True
-                self._ban_auto_downgraded = False
-                logging.getLogger(__name__).info(
-                    "enable_cross_sequence_ban re-enabled: conditions now satisfied after incremental update"
-                )
-                # 不 return，继续执行下方 depth/过大 告警校验
-            else:
-                return self
-        # SYNC: 以下判定条件必须与 C++ RecommendationLogitsProcessor.cc::fromGenerateInput
-        # 中 enable_cross_seq_ban 的计算逻辑保持一致（取反关系）。
-        # 同步保障机制：
-        #   - 常量：static_assert 钉住 kMaxDivergeDepth / kDivergeStartComboWarnThreshold
-        #   - 启用条件逻辑：人工维护双份真值表测试，无运行期交叉校验
-        #   - 生产映射：C++ 测试中断言 batchSize(0)==max(num,1) 等价性
-        # ━━ 新增/修改启用条件时的 CHECKLIST ━━
-        #   1. 同步修改另一侧的判定逻辑
-        #   2. 更新双侧真值表测试：
-        #      Python: TestCrossLanguageConstantSync::test_enable_conditions_sync
-        #      C++:    RecommendationLogitsProcessorTest::testEnableConditionsTruthTable
-        #   3. 确认新条件在双侧真值表中均有覆盖（正反例）
-        #   未来演进：若条件进一步增多，应将真值表落为共享 JSON 数据文件（单一真源）。
-        reasons: list = []
-        if self.has_num_beams():
-            reasons.append(
-                f"incompatible with beam search (max_num_beams={self.max_num_beams()})"
-            )
-        if self.combo_token_size < 2:
-            reasons.append(f"combo_token_size must be >=2, got {self.combo_token_size}")
-        if self.num_return_sequences <= 1:
-            reasons.append(
-                f"num_return_sequences must be >1, got {self.num_return_sequences}"
-            )
-        if reasons:
-            global _last_downgrade_warn_time
-            now = time.monotonic()
-            if now - _last_downgrade_warn_time >= _SANITIZE_WARN_INTERVAL:
-                logging.getLogger(__name__).warning(
-                    "enable_cross_sequence_ban disabled: %s", "; ".join(reasons)
-                )
-                _last_downgrade_warn_time = now
-            self.enable_cross_sequence_ban = False
-            self._ban_auto_downgraded = True
-        elif self.num_return_sequences - 1 > _MAX_DIVERGE_DEPTH:
-            # 软告警去重：同一实例生命周期内最多输出一次，避免 update() 多次调用时形成日志噪声。
-            if not self._diverge_depth_warned:
-                logging.getLogger(__name__).warning(
-                    "num_return_sequences=%d exceeds recommended max diverge depth %d, "
-                    "sampling quality may degrade for higher-indexed sequences",
-                    self.num_return_sequences,
-                    _MAX_DIVERGE_DEPTH,
-                )
-                self._diverge_depth_warned = True
-        # 「过大」告警：仅在特性最终仍然启用时触发（reasons 为空），与 C++ 侧行为一致
-        # （SYNC: C++ else if (enable_cross_seq_ban && diverge_start_combo > kDivergeStartComboWarnThreshold)）
-        if (
-            not reasons
-            and self.cross_seq_diverge_start_combo > _DIVERGE_START_COMBO_WARN_THRESHOLD
-        ):
-            logging.getLogger(__name__).warning(
-                "cross_seq_diverge_start_combo=%d is very large, top-K diverge masking may never activate",
-                self.cross_seq_diverge_start_combo,
-            )
-        return self
-
     @field_validator("return_all_probs", mode="before")
     @classmethod
     def _coerce_return_all_probs(cls, v):
-        """Legacy bool → ReturnAllProbsMode int. True → DEFAULT, False → NONE.
-
-        return_all_probs was a `bool` field before the ORIGINAL/DEFAULT/NONE three-state
-        refactor. Old callers may still pass `True/False`; pydantic strict mode would
-        otherwise reject the bool→int implicit conversion.
-        """
         if isinstance(v, bool):
             return ReturnAllProbsMode.DEFAULT if v else ReturnAllProbsMode.NONE
         return v
@@ -431,50 +233,16 @@ class GenerateConfig(BaseModel):
         return self.md5_value == config.md5_value
 
     def update(self, new: Dict[str, Any]):
-        """批量更新字段。
-
-        降级/重启用语义：
-          - 当条件不满足时，enable_cross_sequence_ban 会被自动降级为 False。
-          - 若后续 update 补齐了条件，且开关是因自动降级而关闭的（而非用户从未开启），
-            则会自动重新启用。这确保 request_extractor 两阶段合并不会导致误降级。
-          - 若用户在同一次 update 中显式传入 enable_cross_sequence_ban，视为用户重新表态，
-            自动重启用启发式不会覆盖其显式意图。
-        """
         for key, value in new.items():
             if hasattr(self, key):
                 setattr(self, key, value)
-        # setattr 不会触发 field_validator / model_validator，手动补偿：
-        # 1) cross_seq_diverge_start_combo 的 clamp/类型兜底
-        if "cross_seq_diverge_start_combo" in new:
-            self.cross_seq_diverge_start_combo = self._sanitize_diverge_start_combo(
-                self.cross_seq_diverge_start_combo
-            )
-        # 2) 若 num_return_sequences 变化，重置深度告警标志以允许重新检测
-        if "num_return_sequences" in new:
-            self._diverge_depth_warned = False
-        # 3) 用户显式传入 enable_cross_sequence_ban 时，视为重新表态，清除自动降级标志
-        if "enable_cross_sequence_ban" in new:
-            self._ban_auto_downgraded = False
-        # 4) 跨序列去重兼容性
-        self._check_cross_seq_ban_compatibility()
 
     def update_and_pop(self, new: Dict[str, Any]):
-        """批量更新字段并返回未被消费的 key。校验策略同 update()。"""
         to_remove: List[str] = []
         for key, value in new.items():
             if hasattr(self, key):
                 setattr(self, key, value)
                 to_remove.append(key)
-        # setattr 不会触发 field_validator / model_validator，手动补偿：
-        if "cross_seq_diverge_start_combo" in new:
-            self.cross_seq_diverge_start_combo = self._sanitize_diverge_start_combo(
-                self.cross_seq_diverge_start_combo
-            )
-        if "num_return_sequences" in new:
-            self._diverge_depth_warned = False
-        if "enable_cross_sequence_ban" in new:
-            self._ban_auto_downgraded = False
-        self._check_cross_seq_ban_compatibility()
         return {k: v for k, v in new.items() if k not in to_remove}
 
     @staticmethod
@@ -523,7 +291,7 @@ class GenerateConfig(BaseModel):
         )
         if (
             bool(generate_env_config.think_mode)
-            and tokenizer
+            and tokenizer is not None
             and end_think_token_id == -1
         ):
             think_end_tag: str = generate_env_config.think_end_tag.encode(
@@ -556,18 +324,7 @@ class GenerateConfig(BaseModel):
             if item not in self.stop_words_list:
                 self.stop_words_list.append(item)
 
-    def validate_supported_features(self):
-        """Reject parsed compatibility fields that have no executable backend."""
-        structured_output_controls = self._requested_structured_output_controls()
-        if structured_output_controls:
-            raise FtRuntimeException(
-                ExceptionType.UNSUPPORTED_OPERATION,
-                "structured output is not supported yet; unsupported controls: "
-                + ", ".join(structured_output_controls),
-            )
-
     def validate(self):
-        self.validate_supported_features()
         try:
             check_with_info(
                 is_union_positive_integer(self.top_k),
@@ -707,27 +464,34 @@ class GenerateConfig(BaseModel):
             raise FtRuntimeException(ExceptionType.ERROR_INPUT_FORMAT_ERROR, str(e))
 
     def enforce_prompt_scoring_constraints(self):
-        """Clamp config fields for prompt scoring mode. Call after setting return_prompt_logits=True."""
         self.max_new_tokens = 1
         self.is_streaming = False
         self.reuse_cache = False
         self.can_use_pd_separation = False
 
-    def _requested_structured_output_controls(self) -> List[str]:
-        """Return user-facing names for controls the backend cannot execute yet."""
-        controls: List[str] = []
-        if self.json_format:
-            controls.append("json_format")
-        if self.response_format is not None and not _is_plain_text_response_format(
-            self.response_format
+    def _has_grammar_constraint(self) -> bool:
+        return (
+            self.json_format
+            or self.json_schema is not None
+            or self.regex is not None
+            or self.ebnf is not None
+            or self.structural_tag is not None
+            or _response_format_is_grammar(self.response_format)
+        )
+
+    def _normalize_grammar_fields(self):
+        if (
+            self.json_format
+            and self.response_format is None
+            and self.json_schema is None
+            and self.regex is None
+            and self.ebnf is None
+            and self.structural_tag is None
         ):
-            controls.append("response_format")
-        for name in (
-            "json_schema",
-            "regex",
-            "ebnf",
-            "structural_tag",
-        ):
-            if getattr(self, name) is not None:
-                controls.append(name)
-        return controls
+            self.json_schema = _JSON_OBJECT_SCHEMA
+        if self.json_schema is not None:
+            self.json_schema = _compact_json(self.json_schema)
+        if self.structural_tag is not None:
+            self.structural_tag = _compact_json(self.structural_tag)
+        if self.response_format is not None:
+            self.response_format = _compact_json(self.response_format)

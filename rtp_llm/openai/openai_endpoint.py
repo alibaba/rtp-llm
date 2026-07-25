@@ -46,6 +46,15 @@ from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
 
+_INT32_MAX = 2_147_483_647
+
+
+def _positive_int_or_none(value: Optional[int]) -> Optional[int]:
+    if value is None:
+        return None
+    value = int(value)
+    return value if value > 0 else None
+
 
 class OpenaiEndpoint(object):
     def __init__(
@@ -165,14 +174,32 @@ class OpenaiEndpoint(object):
     ) -> List[List[int]]:
         return [i for i, _ in itertools.groupby(sorted(stop_words_list))]
 
+    def _ensure_think_end_token_ids(self, config: GenerateConfig) -> None:
+        if config.end_think_token_ids:
+            return
+        end_token_id = self.generate_env_config.think_end_token_id
+        if end_token_id != -1:
+            config.end_think_token_ids = [end_token_id]
+            return
+        think_end_tag = self.generate_env_config.think_end_tag.encode("utf-8").decode(
+            "unicode_escape"
+        )
+        config.end_think_token_ids = self.tokenizer.encode(
+            think_end_tag, add_special_tokens=False
+        )
+
     def _extract_generation_config(
         self, request: ChatCompletionRequest
     ) -> GenerateConfig:
         # TODO(wangyin): implement this
         config = request.extra_configs or GenerateConfig()
         if request.response_format is not None:
-            config.response_format = request.response_format
-        config.validate_supported_features()
+            # TODO: enable response_format when grammar-constrained decoding is
+            # wired through the backend for this branch.
+            raise FtRuntimeException(
+                ExceptionType.UNSUPPORTED_OPERATION,
+                "response_format is not supported yet",
+            )
         if request.trace_id != None:
             config.trace_id = request.trace_id
         if request.stream == True:
@@ -181,8 +208,8 @@ class OpenaiEndpoint(object):
             config.temperature = request.temperature
         if request.top_p != None:
             config.top_p = request.top_p
-        if request.max_tokens != None:
-            config.max_new_tokens = request.max_tokens
+        if request.top_k != None:
+            config.top_k = request.top_k
         if request.n != None:
             config.num_return_sequences = request.n
         request_stop_words_list = request.stop if request.stop != None else []
@@ -241,9 +268,37 @@ class OpenaiEndpoint(object):
             config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
         # add_thinking_params now accepts generate_env_config parameter
         config.add_thinking_params(self.tokenizer, self.generate_env_config)
+        if request.thinking_budget is not None:
+            budget = int(request.thinking_budget)
+            config.max_thinking_tokens = _INT32_MAX if budget < 0 else budget
+        if request.enable_thinking_requested() and config.max_thinking_tokens != 0:
+            config.in_think_mode = True
+            self._ensure_think_end_token_ids(config)
+        if request.disable_thinking():
+            config.in_think_mode = False
+            config.max_thinking_tokens = 0
+        max_completion_tokens = _positive_int_or_none(request.max_completion_tokens)
+        max_tokens_cap = _positive_int_or_none(request.max_tokens)
+        if max_completion_tokens is not None:
+            backend_max_new_tokens = max_completion_tokens
+            if max_tokens_cap is not None:
+                backend_max_new_tokens = min(backend_max_new_tokens, max_tokens_cap)
+            config.max_new_tokens = backend_max_new_tokens
+        elif request.max_tokens != None:
+            config.max_new_tokens = request.max_tokens
         if request.debug_info:
             config.return_output_ids = True
         return config
+
+    @staticmethod
+    def _apply_renderer_chat_constraints(
+        renderer,
+        request: ChatCompletionRequest,
+        config: GenerateConfig,
+    ) -> None:
+        apply_constraints = getattr(renderer, "apply_chat_completion_constraints", None)
+        if apply_constraints is not None:
+            apply_constraints(request, config)
 
     @staticmethod
     def _merge_tool_calls(
@@ -525,6 +580,7 @@ class OpenaiEndpoint(object):
         parse_and_fill_banned_combo(
             rendered_input.rendered_prompt, generate_config, self.tokenizer
         )
+        self._apply_renderer_chat_constraints(renderer, chat_request, generate_config)
 
         mm_inputs = rendered_input.multimodal_inputs
 
@@ -649,5 +705,6 @@ class OpenaiEndpoint(object):
         )
         rendered_input = renderer.render_chat(chat_request)
         generate_config = self._extract_generation_config(chat_request)
+        self._apply_renderer_chat_constraints(renderer, chat_request, generate_config)
         debug_info = self._get_debug_info(renderer, rendered_input, generate_config)
         return debug_info

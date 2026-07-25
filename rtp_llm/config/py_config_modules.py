@@ -17,6 +17,7 @@ from rtp_llm.ops import (
     EPLBConfig,
     FfnDisAggregateConfig,
     FMHAConfig,
+    GrammarConfig,
     GrpcConfig,
     HWKernelConfig,
     MiscellaneousConfig,
@@ -59,6 +60,11 @@ class ServerConfig:
             50  # Default timeout in seconds, -1 means wait indefinitely
         )
         self.monitor_interval: int = 1  # Monitor interval in seconds
+        self.frontend_pre_stop_drain_seconds: float = 120.0
+        self.dash_sc_grpc_pre_stop_drain_seconds: float = 120.0
+        self.pre_stop_drain_headroom_seconds: float = -1.0
+        self.pre_stop_drain_signal: bool = True
+        self.backend_post_frontend_drain_seconds: float = -1.0
 
     def _server_base(self) -> int:
         return self.start_port + self.rank_id * self.worker_info_port_num
@@ -125,6 +131,11 @@ class ServerConfig:
             f"worker_info_port_num: {self.worker_info_port_num}\n"
             f"shutdown_timeout: {self.shutdown_timeout}\n"
             f"monitor_interval: {self.monitor_interval}\n"
+            f"frontend_pre_stop_drain_seconds: {self.frontend_pre_stop_drain_seconds}\n"
+            f"dash_sc_grpc_pre_stop_drain_seconds: {self.dash_sc_grpc_pre_stop_drain_seconds}\n"
+            f"pre_stop_drain_headroom_seconds: {self.pre_stop_drain_headroom_seconds}\n"
+            f"pre_stop_drain_signal: {self.pre_stop_drain_signal}\n"
+            f"backend_post_frontend_drain_seconds: {self.backend_post_frontend_drain_seconds}\n"
             f"server_port: {self.server_port}\n"
             f"rpc_server_port: {self.rpc_server_port}\n"
             f"cache_store_listen_port: {self.cache_store_listen_port}\n"
@@ -560,6 +571,7 @@ class PyEnvConfigs:
         self.arpc_config = ArpcConfig()
         self.grpc_config = GrpcConfig()
         self.dash_sc_grpc_config = DashScGrpcConfig()
+        self.grammar_config = GrammarConfig()
         self.deep_ep_config = DeepEPConfig()
         self.prefill_cp_config = PrefillCPConfig()
 
@@ -615,5 +627,6 @@ class PyEnvConfigs:
             + "\n\n"
             "[grpc_config]\n" + self.grpc_config.to_string() + "\n\n"
             "[dash_sc_grpc_config]\n" + self.dash_sc_grpc_config.to_string() + "\n\n"
+            "[grammar_config]\n" + self.grammar_config.to_string() + "\n\n"
             "[prefill_cp_config]\n" + self.prefill_cp_config.to_string() + "\n\n"
         )

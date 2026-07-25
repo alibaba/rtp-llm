@@ -33,6 +33,8 @@ class ServerArgsSetTest(TestCase):
         os.environ["MAX_CONTEXT_BATCH_SIZE"] = "32"
         os.environ["WARM_UP"] = "1"
         os.environ["MAX_SEQ_LEN"] = "4096"
+        os.environ["FRONTEND_PRE_STOP_DRAIN_SECONDS"] = "2.5"
+        os.environ["DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"] = "9"
 
         sys.argv = ["prog"]
 
@@ -59,6 +61,14 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.max_context_batch_size,
             32,
+        )
+
+        # Verify frontend and DashSc pre-stop windows are configured independently.
+        self.assertEqual(
+            py_env_configs.server_config.frontend_pre_stop_drain_seconds, 2.5
+        )
+        self.assertEqual(
+            py_env_configs.server_config.dash_sc_grpc_pre_stop_drain_seconds, 9.0
         )
 
         # Verify runtime_config (warm_up is now in RuntimeConfig)

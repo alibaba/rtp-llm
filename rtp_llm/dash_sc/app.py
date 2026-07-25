@@ -36,60 +36,44 @@ from rtp_llm.model_factory import ModelFactory
 from rtp_llm.openai.renderer_factory import ChatRendererFactory
 from rtp_llm.openai.renderers.custom_renderer import RendererParams
 from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_visitor
+from rtp_llm.utils.shutdown_config import (
+    AUTO_PRE_STOP_DRAIN_HEADROOM_SECONDS,
+    DEFAULT_PRE_STOP_DRAIN_SECONDS,
+    effective_pre_stop_drain_seconds,
+    normalize_non_negative_seconds,
+    pre_stop_drain_headroom_seconds,
+)
 
 _PROXY_MODE_ENV_KEY = "DASH_SC_GRPC_PROXY_MODE"
 _FORWARD_ENV_KEY = "DASH_SC_GRPC_FORWARD_ADDR"
 
 _PROXY_SERVICER_STARTUP_TIMEOUT_S = 30.0
 _SERVICER_CLOSE_TIMEOUT_S = 10.0
-_PRE_STOP_DRAIN_SECONDS_ENV = "DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"
-_PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV = "RTP_LLM_PRE_STOP_DRAIN_HEADROOM_SECONDS"
-_DEFAULT_PRE_STOP_DRAIN_SECONDS = 120.0
-_DASH_SC_PROTO_OVERHEAD_BYTES = 1024 * 1024
 
 
-def _pre_stop_drain_seconds() -> float:
-    raw = os.environ.get(_PRE_STOP_DRAIN_SECONDS_ENV, "")
-    if not raw:
-        return _DEFAULT_PRE_STOP_DRAIN_SECONDS
-    try:
-        seconds = float(raw)
-    except ValueError:
-        return _DEFAULT_PRE_STOP_DRAIN_SECONDS
-    return max(0.0, seconds)
+def _pre_stop_drain_seconds(
+    configured_seconds: float = DEFAULT_PRE_STOP_DRAIN_SECONDS,
+) -> float:
+    return normalize_non_negative_seconds(
+        configured_seconds,
+        DEFAULT_PRE_STOP_DRAIN_SECONDS,
+        "dash_sc_grpc_pre_stop_drain_seconds",
+    )
 
 
-def _pre_stop_drain_headroom_seconds(shutdown_timeout: float) -> float:
-    raw = os.environ.get(_PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV, "")
-    if raw:
-        try:
-            return max(0.0, float(raw))
-        except ValueError:
-            logging.warning(
-                "Invalid %s=%r, using default pre-stop drain headroom",
-                _PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV,
-                raw,
-            )
-    return min(60.0, max(1.0, float(shutdown_timeout) * 0.10))
+def _pre_stop_drain_headroom_seconds(
+    shutdown_timeout: float,
+    configured_headroom_seconds: float = AUTO_PRE_STOP_DRAIN_HEADROOM_SECONDS,
+) -> float:
+    return pre_stop_drain_headroom_seconds(
+        configured_headroom_seconds,
+        shutdown_timeout,
+    )
 
 
 def _is_proxy_mode_enabled() -> bool:
     return os.environ.get(_PROXY_MODE_ENV_KEY, "").strip() == "1" or bool(
         os.environ.get(_FORWARD_ENV_KEY, "").strip()
-    )
-
-
-def _max_receive_message_length_for_model(max_seq_len: int) -> int:
-    """Cap one DashSc request before protobuf deserialization.
-
-    ``input_ids`` accepts INT64, so reserve eight bytes per token plus a small
-    protobuf/auxiliary-tensor allowance.  This is intentionally calculated at
-    the process boundary where ModelConfig is available; handler-level checks
-    run too late to protect gRPC's receive buffer.
-    """
-    return max(
-        _DASH_SC_PROTO_OVERHEAD_BYTES,
-        int(max_seq_len) * 8 + _DASH_SC_PROTO_OVERHEAD_BYTES,
     )
 
 
@@ -196,18 +180,13 @@ async def _create_proxy_servicer_on_loop(
     *,
     rank_id: Optional[int] = None,
     server_id: str = "",
-    health_state: Optional[DashScShutdownManager] = None,
 ) -> DashScProxyServicer:
     """Construct proxy servicer inside the running asyncio owner loop.
 
     Outbound ``grpc.aio.Channel`` objects are event-loop affine, but the shared
     channel cache builds them lazily when a request first uses an address.
     """
-    return DashScProxyServicer(
-        rank_id=rank_id,
-        server_id=server_id,
-        health_state=health_state,
-    )
+    return DashScProxyServicer(rank_id=rank_id, server_id=server_id)
 
 
 def _derive_echo_prefix_ids(generate_env_config: Any, base_tok: Any) -> List[int]:
@@ -219,11 +198,11 @@ def _derive_echo_prefix_ids(generate_env_config: Any, base_tok: Any) -> List[int
     """
     if not bool(generate_env_config.think_mode):
         return []
-    tag = generate_env_config.think_start_tag
+    tag = generate_env_config.think_start_tag or ""
     if not tag:
         return []
     try:
-        hf_tok = base_tok.tokenizer
+        hf_tok = getattr(base_tok, "tokenizer", base_tok)
         ids = list(hf_tok.encode(tag, add_special_tokens=False))
     except Exception as e:
         logging.warning("[DashScApp] echo_prefix derive failed: %s", e)
@@ -233,7 +212,7 @@ def _derive_echo_prefix_ids(generate_env_config: Any, base_tok: Any) -> List[int
 
 
 def _tokenize_marker_text(base_tok: Any, text: str) -> List[int]:
-    tokenizer = base_tok.tokenizer
+    tokenizer = getattr(base_tok, "tokenizer", base_tok)
     try:
         token_ids = tokenizer.encode(text, add_special_tokens=False)
     except TypeError:
@@ -302,7 +281,8 @@ def _derive_stop_word_ids_list(
         params = RendererParams(
             model_type=model_config.model_type,
             max_seq_len=model_config.max_seq_len,
-            eos_token_id=base_tok.eos_token_id or special_tokens.eos_token_id,
+            eos_token_id=getattr(base_tok, "eos_token_id", None)
+            or special_tokens.eos_token_id,
             stop_word_ids_list=list(stop_words_id_list),
             template_type=model_config.template_type,
             ckpt_path=model_config.ckpt_path,
@@ -391,6 +371,9 @@ class DashScApp:
         self._enqueue_loop_thread: Optional[threading.Thread] = None
         self._shutdown_event = threading.Event()
         self._shutdown_started_at: Optional[float] = None
+        self._shutdown_requested = False
+        self._pre_stop_lock = threading.RLock()
+        self._pre_stop_timer: Optional[threading.Timer] = None
         self._shutdown_manager = DashScShutdownManager()
         self._grpc_server = DashScGrpcServer(
             dash_sc_grpc_config=self.dash_sc_grpc_config
@@ -434,24 +417,20 @@ class DashScApp:
     def _install_signal_handlers(self) -> None:
         def _drain_only_handler(signum, frame):
             logging.info("[DashScApp] received pre-stop drain signal %s", signum)
-            self._shutdown_manager.start_unavailable(f"signal {signum}")
+            self._start_pre_stop_watchdog(signum)
 
         def _handler(signum, frame):
             logging.info("[DashScApp] received signal %s, shutting down", signum)
-            if self._shutdown_started_at is None:
-                self._shutdown_started_at = time.monotonic()
-            if (
+            keep_unavailable = (
                 signum == signal.SIGTERM
                 and self._effective_pre_stop_drain_seconds() > 0
-            ):
-                self._shutdown_manager.start_unavailable(f"signal {signum}")
-            else:
-                self._shutdown_manager.start_draining(f"signal {signum}")
-            self._shutdown_event.set()
+            )
+            self._begin_shutdown(signum, start_draining=not keep_unavailable)
 
         try:
-            if os.name == "posix":
-                signal.signal(signal.SIGUSR1, _drain_only_handler)
+            pre_stop_signal = getattr(signal, "SIGUSR1", None)
+            if pre_stop_signal is not None:
+                signal.signal(pre_stop_signal, _drain_only_handler)
             signal.signal(signal.SIGTERM, _handler)
             signal.signal(signal.SIGINT, _handler)
         except ValueError:
@@ -460,13 +439,62 @@ class DashScApp:
                 "[DashScApp] signal handlers not installed (not on main thread)"
             )
 
+    def _start_pre_stop_watchdog(self, signum: int) -> None:
+        self._shutdown_manager.start_unavailable(f"signal {signum}")
+        begin_shutdown_now = False
+        with self._pre_stop_lock:
+            if self._shutdown_requested or self._pre_stop_timer is not None:
+                return
+            if self._shutdown_started_at is None:
+                self._shutdown_started_at = time.monotonic()
+            drain_seconds = self._effective_pre_stop_drain_seconds()
+            elapsed = self._shutdown_manager.drain_elapsed_seconds()
+            remaining = max(0.0, drain_seconds - elapsed)
+            if remaining <= 0:
+                begin_shutdown_now = True
+            else:
+                logging.info(
+                    "[DashScApp] pre-stop watchdog will force shutdown in %.3fs",
+                    remaining,
+                )
+                timer = threading.Timer(
+                    remaining,
+                    self._begin_shutdown,
+                    args=(signum,),
+                )
+                timer.daemon = True
+                self._pre_stop_timer = timer
+                timer.start()
+        if begin_shutdown_now:
+            self._begin_shutdown(signum)
+
+    def _begin_shutdown(self, signum: int, start_draining: bool = True) -> None:
+        with self._pre_stop_lock:
+            if self._shutdown_requested:
+                return
+            self._shutdown_requested = True
+            timer = self._pre_stop_timer
+            self._pre_stop_timer = None
+            if self._shutdown_started_at is None:
+                self._shutdown_started_at = time.monotonic()
+        if timer is not None:
+            timer.cancel()
+        if start_draining:
+            self._shutdown_manager.start_draining(f"signal {signum}")
+        else:
+            self._shutdown_manager.start_unavailable(f"signal {signum}")
+        self._shutdown_event.set()
+
     def _close_servicer_on_loop(self, servicer: Any) -> None:
         loop = self._enqueue_loop
-        if loop is None:
+        close = getattr(servicer, "close", None)
+        if loop is None or close is None:
             return
 
         async def _do_close() -> None:
-            await servicer.close()
+            maybe = close()
+            if asyncio.iscoroutine(maybe):
+                await maybe
 
         try:
             asyncio.run_coroutine_threadsafe(_do_close(), loop).result(
@@ -480,7 +508,6 @@ class DashScApp:
         try:
             port = self.server_config.dash_sc_grpc_server_port
             is_proxy = _is_proxy_mode_enabled()
-            max_receive_message_length = None
 
             # Proxy mode skips model / weight loading / visitor construction;
             # the servicer is opened below on the owner loop for a consistent
@@ -495,9 +522,6 @@ class DashScApp:
                     embedding_config=self.py_env_configs.embedding_config,
                     quantization_config=self.py_env_configs.quantization_config,
                     render_config=self.py_env_configs.render_config,
-                )
-                max_receive_message_length = _max_receive_message_length_for_model(
-                    model_config.max_seq_len
                 )
 
                 backend_visitor = create_backend_rpc_server_visitor(
@@ -528,7 +552,7 @@ class DashScApp:
                     self.py_env_configs.generate_env_config.think_terminate_token_id
                 )
                 think_runtime = build_think_runtime(
-                    base_tok.tokenizer,
+                    base_tok,
                     self.py_env_configs.generate_env_config,
                     model_config.model_type,
                     terminate_token_id=(
@@ -542,13 +566,11 @@ class DashScApp:
                     server_id=self.server_config.frontend_server_id,
                     echo_prefix_ids=echo_prefix_ids,
                     extra_stop_word_ids=extra_stop_word_ids,
-                    tokenizer=base_tok.tokenizer,
+                    tokenizer=base_tok,
                     generate_env_config=self.py_env_configs.generate_env_config,
                     think_runtime=think_runtime,
                     rank_id=self.server_config.rank_id,
                     repetition_monitor_config=repetition_monitor_config,
-                    max_seq_len=model_config.max_seq_len,
-                    health_state=self._shutdown_manager,
                 )
 
             loop = self._start_enqueue_loop()
@@ -557,7 +579,6 @@ class DashScApp:
                     _create_proxy_servicer_on_loop(
                         rank_id=self.server_config.rank_id,
                         server_id=self.server_config.frontend_server_id,
-                        health_state=self._shutdown_manager,
                     ),
                     loop,
                 )
@@ -589,7 +610,6 @@ class DashScApp:
                 log_path=get_log_path(),
                 backup_count=self.py_env_configs.profiling_debug_logging_config.log_file_backup_count,
                 rank_id=self.server_config.rank_id,
-                max_receive_message_length=max_receive_message_length,
             )
             logging.info("[DashScApp] gRPC server bound on port %s", port)
         except BaseException as e:
@@ -725,20 +745,13 @@ class DashScApp:
         time.sleep(remaining)
 
     def _effective_pre_stop_drain_seconds(self) -> float:
-        drain_seconds = _pre_stop_drain_seconds()
-        shutdown_timeout = self.server_config.shutdown_timeout
-        if shutdown_timeout is None or shutdown_timeout <= 0:
-            return drain_seconds
-        headroom_seconds = _pre_stop_drain_headroom_seconds(float(shutdown_timeout))
-        max_drain_seconds = max(0.0, float(shutdown_timeout) - headroom_seconds)
-        if drain_seconds <= max_drain_seconds:
-            return drain_seconds
-        logging.warning(
-            "[DashScApp] clamp pre-stop drain %.3fs to %.3fs "
-            "(shutdown_timeout=%ss, headroom=%.3fs)",
-            drain_seconds,
-            max_drain_seconds,
-            shutdown_timeout,
-            headroom_seconds,
+        return effective_pre_stop_drain_seconds(
+            configured_drain_seconds=(
+                self.server_config.dash_sc_grpc_pre_stop_drain_seconds
+            ),
+            shutdown_timeout=self.server_config.shutdown_timeout,
+            configured_headroom_seconds=(
+                self.server_config.pre_stop_drain_headroom_seconds
+            ),
+            component="DashScApp",
         )
-        return max_drain_seconds

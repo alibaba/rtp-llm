@@ -11,8 +11,8 @@ Standalone fake: ``python -m rtp_llm.dash_sc.server [--port PORT]``.
 from __future__ import annotations
 
 import asyncio
+import concurrent.futures
 import logging
-import os
 from typing import Any, Optional
 
 import grpc
@@ -43,8 +43,6 @@ def dash_sc_grpc_server_channel_options(dash_sc_grpc_config) -> list[tuple[str, 
 
 # Max time for grpc.aio.Server.start() + bind before start_on_loop returns.
 _DEFAULT_DASH_SC_GRPC_STARTUP_TIMEOUT_S = 30.0
-_DASH_SC_MAX_CONCURRENT_RPCS_ENV = "DASH_SC_GRPC_MAX_CONCURRENT_RPCS"
-_DEFAULT_DASH_SC_MAX_CONCURRENT_RPCS = 128
 
 # HTTP/2 keepalive permissions for the dash_sc gRPC server side. The upstream
 # (whoever calls us: dash_sc forwarder, client SDK, …) needs to be able to
@@ -79,32 +77,6 @@ def _merge_server_keepalive(
     for k, v in _SERVER_KEEPALIVE_OPTS:
         merged.setdefault(k, v)
     return sorted(merged.items())
-
-
-def _max_concurrent_rpcs() -> int:
-    """Bound accepted RPCs before handlers allocate request-local state."""
-    raw = os.environ.get(_DASH_SC_MAX_CONCURRENT_RPCS_ENV, "")
-    if not raw:
-        return _DEFAULT_DASH_SC_MAX_CONCURRENT_RPCS
-    try:
-        value = int(raw)
-    except ValueError:
-        logging.warning(
-            "Invalid %s=%r; using default %s",
-            _DASH_SC_MAX_CONCURRENT_RPCS_ENV,
-            raw,
-            _DEFAULT_DASH_SC_MAX_CONCURRENT_RPCS,
-        )
-        return _DEFAULT_DASH_SC_MAX_CONCURRENT_RPCS
-    if value <= 0:
-        logging.warning(
-            "Invalid %s=%r; using default %s",
-            _DASH_SC_MAX_CONCURRENT_RPCS_ENV,
-            raw,
-            _DEFAULT_DASH_SC_MAX_CONCURRENT_RPCS,
-        )
-        return _DEFAULT_DASH_SC_MAX_CONCURRENT_RPCS
-    return value
 
 
 class DashScGrpcServer:
@@ -151,7 +123,6 @@ class DashScGrpcServer:
         log_path: str = "",
         backup_count: int = 0,
         rank_id: Optional[int] = None,
-        max_receive_message_length: Optional[int] = None,
     ) -> grpc.aio.Server:
         """Bind + start the aio gRPC server. Must be awaited on the owning loop.
 
@@ -170,10 +141,6 @@ class DashScGrpcServer:
             return self._server
         cfg = _resolve_dash_sc_grpc_config(self._config)
         opts = _merge_server_keepalive(dash_sc_grpc_server_channel_options(cfg))
-        if max_receive_message_length is not None:
-            opts = dict(opts)
-            opts["grpc.max_receive_message_length"] = max_receive_message_length
-            opts = sorted(opts.items())
 
         server_id_int: Optional[int]
         try:
@@ -221,14 +188,13 @@ class DashScGrpcServer:
         interceptors: list[grpc.aio.ServerInterceptor] = []
         if shutdown_manager is not None:
             interceptors.append(DashScGrpcDrainAioInterceptor(shutdown_manager))
-        # Backend queueing happens after gRPC has received/deserialized the
-        # request. Bound the ingress separately so many slow/big streams cannot
-        # exhaust frontend memory before backend backpressure applies.
-        server = grpc.aio.server(
-            options=opts,
-            interceptors=interceptors,
-            maximum_concurrent_rpcs=_max_concurrent_rpcs(),
-        )
+        # Deliberately no ``maximum_concurrent_rpcs`` — under grpc.aio concurrent
+        # RPCs are coroutines on one loop, not threads, so any positive value
+        # becomes a hard admission cap (RESOURCE_EXHAUSTED once N long streams
+        # are in flight). Backpressure comes from the backend visitor's own
+        # concurrency instead. ``DashScGrpcConfig.max_server_workers`` is
+        # retained on the C++ struct for wire compatibility but ignored here.
+        server = grpc.aio.server(options=opts, interceptors=interceptors)
 
         predict_v2_pb2_grpc.add_GRPCInferenceServiceServicer_to_server(servicer, server)
         server.add_insecure_port(f"0.0.0.0:{port}")
@@ -253,7 +219,6 @@ class DashScGrpcServer:
         log_path: str = "",
         backup_count: int = 0,
         rank_id: Optional[int] = None,
-        max_receive_message_length: Optional[int] = None,
         startup_timeout_s: float = _DEFAULT_DASH_SC_GRPC_STARTUP_TIMEOUT_S,
     ) -> None:
         """Schedule ``start()`` on ``loop`` and block until it returns or raises.
@@ -273,7 +238,6 @@ class DashScGrpcServer:
                 log_path=log_path,
                 backup_count=backup_count,
                 rank_id=rank_id,
-                max_receive_message_length=max_receive_message_length,
             ),
             loop,
         )
@@ -307,17 +271,29 @@ class DashScGrpcServer:
                     exc_info=True,
                 )
             if servicer is not None:
-                try:
-                    await servicer.close()
-                except Exception as e:
-                    logging.warning(
-                        "[DashScGrpc] servicer.close failed: %s",
-                        e,
-                        exc_info=True,
-                    )
+                close = getattr(servicer, "close", None)
+                if close is not None:
+                    try:
+                        maybe = close()
+                        if asyncio.iscoroutine(maybe):
+                            await maybe
+                    except Exception as e:
+                        logging.warning(
+                            "[DashScGrpc] servicer.close failed: %s",
+                            e,
+                            exc_info=True,
+                        )
 
+        fut = asyncio.run_coroutine_threadsafe(_do_stop(), loop)
+        stop_timeout = None if grace is None else max(0.0, float(grace))
         try:
-            asyncio.run_coroutine_threadsafe(_do_stop(), loop).result()
+            fut.result(timeout=stop_timeout)
+        except concurrent.futures.TimeoutError:
+            fut.cancel()
+            logging.warning(
+                "[DashScGrpc] stop timed out after %.3fs",
+                stop_timeout,
+            )
         except Exception as e:
             logging.warning(
                 "[DashScGrpc] stop scheduling failed: %s",
@@ -359,7 +335,7 @@ class DashScGrpcDrainAioInterceptor(grpc.aio.ServerInterceptor):
             return handler
 
         method = handler_call_details.method
-        if self._is_health_method(method):
+        if self._is_liveness_method(method):
             return handler
         if handler.request_streaming and handler.response_streaming:
             return grpc.stream_stream_rpc_method_handler(
@@ -386,8 +362,8 @@ class DashScGrpcDrainAioInterceptor(grpc.aio.ServerInterceptor):
         )
 
     @staticmethod
-    def _is_health_method(method: str) -> bool:
-        return method.endswith(("/ServerLive", "/ServerReady", "/ModelReady"))
+    def _is_liveness_method(method: str) -> bool:
+        return method.endswith("/ServerLive")
 
     async def _begin_or_abort(self, context, method: str) -> bool:
         if self._shutdown_manager.try_begin_request():

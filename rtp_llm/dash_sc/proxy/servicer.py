@@ -8,7 +8,7 @@ or async generator so the whole proxy path stays on a single asyncio event loop.
 from __future__ import annotations
 
 import logging
-from typing import Optional, Protocol, runtime_checkable
+from typing import Optional
 
 import grpc
 
@@ -25,9 +25,8 @@ from rtp_llm.dash_sc.grpc_metrics import (
     report_chunk,
     report_forwarder_rpc_done,
 )
-from rtp_llm.dash_sc.proto import predict_v2_pb2
+from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.dash_sc.proxy.service_route import create_service_discovery_from_env
-from rtp_llm.dash_sc.servicer_base import DashScHealthState, DashScServicerBase
 from rtp_llm.utils.grpc_host_channel_pool import GrpcHostChannelPool
 
 _FORWARD_CHANNEL_OPTS: list[tuple[str, int]] = [
@@ -36,16 +35,6 @@ _FORWARD_CHANNEL_OPTS: list[tuple[str, int]] = [
     ("grpc.keepalive_permit_without_calls", 0),
     ("grpc.http2.max_pings_without_data", 0),
 ]
-
-
-@runtime_checkable
-class _CancelableStream(Protocol):
-    def cancel(self) -> bool: ...
-
-
-@runtime_checkable
-class _AsyncClosableStream(Protocol):
-    async def aclose(self) -> None: ...
 _CHANNEL_CLEANUP_INTERVAL_S = 60
 
 
@@ -77,13 +66,30 @@ async def _close_request_iterator_quietly(request_iter) -> None:
         pass
 
 
-async def _abort_with_downstream_grpc_error(context, exc: grpc.aio.AioRpcError) -> None:
+def _append_downstream_frontend_addr(details: str, addr: Optional[str]) -> str:
+    if not addr:
+        return details
+    return f"{details}; downstream_frontend_addr={addr}"
+
+
+async def _abort_with_downstream_grpc_error(
+    context, exc: grpc.aio.AioRpcError, downstream_addr: Optional[str] = None
+) -> None:
     code = exc.code() or grpc.StatusCode.UNKNOWN
-    details = exc.details() or code.name
+    details = _append_downstream_frontend_addr(
+        exc.details() or code.name, downstream_addr
+    )
+    logging.warning(
+        "[DashScGrpc] proxy downstream grpc error: downstream_frontend_addr=%s "
+        "code=%s details=%s",
+        downstream_addr,
+        getattr(code, "name", str(code)),
+        details,
+    )
     await context.abort(code, details)
 
 
-class DashScProxyServicer(DashScServicerBase):
+class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
     """Pure transparent proxy (grpc.aio) across discovered downstream addrs."""
 
     def __init__(
@@ -91,9 +97,7 @@ class DashScProxyServicer(DashScServicerBase):
         *,
         rank_id: Optional[int] = None,
         server_id: str = "",
-        health_state: Optional[DashScHealthState] = None,
     ):
-        super().__init__(health_state)
         self._channel_pool = GrpcHostChannelPool(
             options=_FORWARD_CHANNEL_OPTS,
             cleanup_interval=_CHANNEL_CLEANUP_INTERVAL_S,
@@ -214,7 +218,9 @@ class DashScProxyServicer(DashScServicerBase):
                 channel = await self._channel_pool.get(grpc_target)
             except RuntimeError as e:
                 record.mark_request_done("eof")
-                msg = "forward backend unavailable"
+                msg = _append_downstream_frontend_addr(
+                    "forward backend unavailable", grpc_target
+                )
                 logging.warning(
                     "[DashScGrpc] proxy channel unavailable: backend=%s error=%s",
                     grpc_target,
@@ -240,6 +246,16 @@ class DashScProxyServicer(DashScServicerBase):
                 yield resp
         except BaseException as e:
             exc = e
+            if (
+                record.backend_addr
+                and isinstance(e, Exception)
+                and not isinstance(e, grpc.aio.AioRpcError)
+            ):
+                logging.exception(
+                    "[DashScGrpc] proxy failed after downstream frontend selected: "
+                    "downstream_frontend_addr=%s",
+                    record.backend_addr,
+                )
             raise
         finally:
             end_ts = record.resolve_status(context, exc)
@@ -283,7 +299,7 @@ class DashScProxyServicer(DashScServicerBase):
         except grpc.aio.AioRpcError as e:
             access_record.mark_backend_error(e)
             access_record.mark_backend_done()
-            await _abort_with_downstream_grpc_error(context, e)
+            await _abort_with_downstream_grpc_error(context, e, addr)
             return
         except BaseException as e:
             access_record.mark_backend_error(e)
@@ -344,7 +360,7 @@ class DashScProxyServicer(DashScServicerBase):
                 except Exception:
                     pass
         except grpc.aio.AioRpcError as e:
-            await _abort_with_downstream_grpc_error(context, e)
+            await _abort_with_downstream_grpc_error(context, e, addr)
         finally:
             # Safety net. ``_close_downstream`` is also exposed as a public-ish
             # static method so any future code path that wants to tear down
@@ -386,20 +402,26 @@ class DashScProxyServicer(DashScServicerBase):
         # Close any wrapping async generator first (e.g. counting wrapper).
         if downstream_iter is not upstream_iter:
             try:
-                await downstream_iter.aclose()
+                aclose = getattr(downstream_iter, "aclose", None)
+                if aclose is not None:
+                    await aclose()
             except Exception:
                 pass
-        # Production grpc.aio calls are cancelable. Local stream adapters can
-        # implement the explicit async-close contract instead.
-        if isinstance(upstream_iter, _CancelableStream):
-            upstream_iter.cancel()
-        elif isinstance(upstream_iter, _AsyncClosableStream):
-            await upstream_iter.aclose()
-        else:
-            logging.warning(
-                "[DashScGrpc] downstream stream has no supported close contract: %s",
-                type(upstream_iter).__name__,
-            )
+        # Cancel the underlying grpc.aio.Call. Sync, idempotent.
+        try:
+            cancel = getattr(upstream_iter, "cancel", None)
+            if cancel is not None:
+                cancel()
+        except Exception:
+            pass
+        # Tests / non-grpc fakes expose ``aclose`` on the upstream iterator
+        # (real grpc.aio calls don't); cover that path too.
+        try:
+            aclose = getattr(upstream_iter, "aclose", None)
+            if aclose is not None:
+                await aclose()
+        except Exception:
+            pass
 
     @staticmethod
     async def _buffered_iter(downstream_iter, access_record=None):
@@ -444,11 +466,6 @@ class DashScProxyServicer(DashScServicerBase):
             try:
                 buffered = await it.__anext__()
             except StopAsyncIteration:
-                return
-            if _is_stream_done(buffered):
-                yield buffered
-                buffered = None
-                _set_stage("flushed_terminal_first")
                 return
             _set_stage("waiting_second")
             try:

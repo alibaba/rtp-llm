@@ -7,7 +7,7 @@ import signal
 import socket
 import threading
 import time
-from typing import Any, Awaitable, Callable, Dict, List, Optional, Union
+from typing import Any, Dict, List, Optional, Union
 
 from anyio import CapacityLimiter
 from anyio.lowlevel import RunVar
@@ -17,8 +17,7 @@ from fastapi import Request as RawRequest
 from fastapi import status
 from fastapi.middleware import Middleware
 from fastapi.middleware.cors import CORSMiddleware
-from fastapi.responses import ORJSONResponse
-from fastapi.responses import StreamingResponse
+from fastapi.responses import ORJSONResponse, StreamingResponse
 from typing_extensions import override
 from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
@@ -38,6 +37,13 @@ from rtp_llm.openai.api_datatype import (
     ChatCompletionRequest,
 )
 from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
+from rtp_llm.utils.shutdown_config import (
+    AUTO_PRE_STOP_DRAIN_HEADROOM_SECONDS,
+    DEFAULT_PRE_STOP_DRAIN_SECONDS,
+    effective_pre_stop_drain_seconds,
+    normalize_non_negative_seconds,
+    pre_stop_drain_headroom_seconds,
+)
 from rtp_llm.utils.util import async_request_server
 from rtp_llm.utils.version_info import VersionInfo
 
@@ -45,45 +51,26 @@ from rtp_llm.utils.version_info import VersionInfo
 MAX_INCOMPLETE_EVENT_SIZE = 1024 * 1024
 
 STARTUP_WARMUP_HEALTH_GATE_FILE_ENV = "RTP_LLM_STARTUP_WARMUP_HEALTH_GATE_FILE"
-FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV = "FRONTEND_PRE_STOP_DRAIN_SECONDS"
-DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV = "DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"
-PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV = "RTP_LLM_PRE_STOP_DRAIN_HEADROOM_SECONDS"
-DEFAULT_PRE_STOP_DRAIN_SECONDS = 120.0
 
 
-def _pre_stop_drain_seconds() -> float:
-    for env_key in (
-        FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV,
-        DASH_SC_PRE_STOP_DRAIN_SECONDS_ENV,
-    ):
-        raw = os.environ.get(env_key, "")
-        if not raw:
-            continue
-        try:
-            return max(0.0, float(raw))
-        except ValueError:
-            logging.warning(
-                "Invalid %s=%r, falling back to default pre-stop drain %.3fs",
-                env_key,
-                raw,
-                DEFAULT_PRE_STOP_DRAIN_SECONDS,
-            )
-            return DEFAULT_PRE_STOP_DRAIN_SECONDS
-    return DEFAULT_PRE_STOP_DRAIN_SECONDS
+def _pre_stop_drain_seconds(
+    configured_seconds: float = DEFAULT_PRE_STOP_DRAIN_SECONDS,
+) -> float:
+    return normalize_non_negative_seconds(
+        configured_seconds,
+        DEFAULT_PRE_STOP_DRAIN_SECONDS,
+        "frontend_pre_stop_drain_seconds",
+    )
 
 
-def _pre_stop_drain_headroom_seconds(shutdown_timeout: float) -> float:
-    raw = os.environ.get(PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV, "")
-    if raw:
-        try:
-            return max(0.0, float(raw))
-        except ValueError:
-            logging.warning(
-                "Invalid %s=%r, using default pre-stop drain headroom",
-                PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV,
-                raw,
-            )
-    return min(60.0, max(1.0, float(shutdown_timeout) * 0.10))
+def _pre_stop_drain_headroom_seconds(
+    shutdown_timeout: float,
+    configured_headroom_seconds: float = AUTO_PRE_STOP_DRAIN_HEADROOM_SECONDS,
+) -> float:
+    return pre_stop_drain_headroom_seconds(
+        configured_headroom_seconds,
+        shutdown_timeout,
+    )
 
 
 class GracefulShutdownServer(Server):
@@ -92,18 +79,25 @@ class GracefulShutdownServer(Server):
         frontend_server: FrontendServer,
         shutdown_manager: FrontendShutdownManager,
         grpc_client: Optional[GrpcClientWrapper] = None,
+        pre_stop_drain_seconds: float = DEFAULT_PRE_STOP_DRAIN_SECONDS,
+        pre_stop_drain_headroom_seconds: float = AUTO_PRE_STOP_DRAIN_HEADROOM_SECONDS,
     ):
         self.frontend_server = frontend_server
         self.shutdown_manager = shutdown_manager
         self.grpc_client = grpc_client
+        self._pre_stop_drain_seconds = pre_stop_drain_seconds
+        self._pre_stop_drain_headroom_seconds = pre_stop_drain_headroom_seconds
         self._pre_stop_lock = threading.RLock()
         self._pre_stop_timer: Optional[threading.Timer] = None
+        self._shutdown_requested = False
+        self._shutdown_timeout_budget = self.config.timeout_graceful_shutdown
 
     def install_pre_stop_drain_signal_handler(self) -> None:
-        if os.name != "posix":
+        pre_stop_signal = getattr(signal, "SIGUSR1", None)
+        if pre_stop_signal is None:
             return
         try:
-            signal.signal(signal.SIGUSR1, self.handle_pre_stop_drain_signal)
+            signal.signal(pre_stop_signal, self.handle_pre_stop_drain_signal)
         except ValueError:
             logging.warning(
                 "Frontend pre-stop drain signal handler not installed "
@@ -117,11 +111,13 @@ class GracefulShutdownServer(Server):
             sig_name = str(sig)
         self.shutdown_manager.start_unavailable(f"signal {sig_name}")
         logging.info(
-            "Frontend entering pre-stop unavailable state without uvicorn shutdown: "
+            "Frontend entering pre-stop unavailable state before uvicorn shutdown: "
             "signal=%s, active_requests=%s",
             sig_name,
             self.shutdown_manager.active_request_count(),
         )
+        if not self._schedule_shutdown_after_pre_stop(sig, frame, sig_name):
+            self._begin_shutdown(sig, frame, sig_name)
 
     @override
     def handle_exit(self, sig: int, frame) -> None:
@@ -138,6 +134,9 @@ class GracefulShutdownServer(Server):
             return False
         if self.should_exit:
             return False
+        return self._schedule_shutdown_after_pre_stop(sig, frame, sig_name)
+
+    def _schedule_shutdown_after_pre_stop(self, sig: int, frame, sig_name: str) -> bool:
         drain_seconds = self._effective_pre_stop_drain_seconds()
         if drain_seconds <= 0:
             return False
@@ -147,6 +146,8 @@ class GracefulShutdownServer(Server):
             return False
 
         with self._pre_stop_lock:
+            if self._shutdown_requested:
+                return True
             if self._pre_stop_timer is not None:
                 logging.info(
                     "Frontend received duplicate %s during pre-stop drain; "
@@ -166,22 +167,36 @@ class GracefulShutdownServer(Server):
             timer = threading.Timer(
                 remaining,
                 self._begin_shutdown,
-                args=(sig, frame, sig_name),
+                args=(sig, frame, sig_name, False),
             )
             timer.daemon = True
             self._pre_stop_timer = timer
             timer.start()
             return True
 
-    def _begin_shutdown(self, sig: int, frame, sig_name: str) -> None:
+    def _begin_shutdown(
+        self,
+        sig: int,
+        frame,
+        sig_name: str,
+        force_on_duplicate: bool = True,
+    ) -> None:
         with self._pre_stop_lock:
+            if self._shutdown_requested:
+                if force_on_duplicate:
+                    Server.handle_exit(self, sig, frame)
+                return
+            self._shutdown_requested = True
+            timer = self._pre_stop_timer
             self._pre_stop_timer = None
+        if timer is not None:
+            timer.cancel()
         self.shutdown_manager.start_draining(f"signal {sig_name}")
         self._limit_graceful_shutdown_to_remaining_budget()
         Server.handle_exit(self, sig, frame)
 
     def _remaining_shutdown_timeout_after_pre_stop(self) -> Optional[float]:
-        shutdown_timeout = self.config.timeout_graceful_shutdown
+        shutdown_timeout = self._shutdown_timeout_budget
         if shutdown_timeout is None or shutdown_timeout <= 0:
             return shutdown_timeout
         elapsed = self.shutdown_manager.drain_elapsed_seconds()
@@ -203,23 +218,12 @@ class GracefulShutdownServer(Server):
         self.config.timeout_graceful_shutdown = remaining_timeout
 
     def _effective_pre_stop_drain_seconds(self) -> float:
-        drain_seconds = _pre_stop_drain_seconds()
-        shutdown_timeout = self.config.timeout_graceful_shutdown
-        if shutdown_timeout is None or shutdown_timeout <= 0:
-            return drain_seconds
-        headroom_seconds = _pre_stop_drain_headroom_seconds(float(shutdown_timeout))
-        max_drain_seconds = max(0.0, float(shutdown_timeout) - headroom_seconds)
-        if drain_seconds <= max_drain_seconds:
-            return drain_seconds
-        logging.warning(
-            "Clamp frontend pre-stop drain %.3fs to %.3fs "
-            "(shutdown_timeout=%ss, headroom=%.3fs)",
-            drain_seconds,
-            max_drain_seconds,
-            shutdown_timeout,
-            headroom_seconds,
+        return effective_pre_stop_drain_seconds(
+            configured_drain_seconds=self._pre_stop_drain_seconds,
+            shutdown_timeout=self.config.timeout_graceful_shutdown,
+            configured_headroom_seconds=self._pre_stop_drain_headroom_seconds,
+            component="frontend",
         )
-        return max_drain_seconds
 
     @override
     async def shutdown(self, sockets: Optional[List[socket.socket]] = None) -> None:
@@ -227,19 +231,15 @@ class GracefulShutdownServer(Server):
         try:
             await super().shutdown(sockets)
         finally:
-            try:
+            await self._close_with_remaining_shutdown_budget(
+                "frontend server", self.frontend_server.close
+            )
+            if self.grpc_client is not None:
                 await self._close_with_remaining_shutdown_budget(
-                    "frontend server", self.frontend_server.close
+                    "gRPC client", self.grpc_client.close
                 )
-            finally:
-                if self.grpc_client is not None:
-                    await self._close_with_remaining_shutdown_budget(
-                        "gRPC client", self.grpc_client.close
-                    )
 
-    async def _close_with_remaining_shutdown_budget(
-        self, name: str, close: Callable[[], Awaitable[None]]
-    ) -> None:
+    async def _close_with_remaining_shutdown_budget(self, name, close) -> None:
         remaining = self._remaining_shutdown_timeout_after_pre_stop()
         try:
             close_awaitable = close()
@@ -248,14 +248,11 @@ class GracefulShutdownServer(Server):
             else:
                 await asyncio.wait_for(close_awaitable, timeout=max(0.0, remaining))
         except asyncio.TimeoutError:
-            if remaining is None:
-                logging.warning("Timed out closing %s", name, exc_info=True)
-            else:
-                logging.warning(
-                    "Timed out closing %s after remaining shutdown budget %.3fs",
-                    name,
-                    max(0.0, remaining),
-                )
+            logging.warning(
+                "Timed out closing %s after remaining shutdown budget %.3fs",
+                name,
+                max(0.0, remaining),
+            )
         except Exception as e:
             logging.warning("Failed to close %s: %s", name, e, exc_info=True)
 
@@ -365,7 +362,15 @@ class FrontendApp(object):
         try:
             server = GracefulShutdownServer(config)
             server.set_server(
-                self.frontend_server, self.shutdown_manager, self.grpc_client
+                self.frontend_server,
+                self.shutdown_manager,
+                self.grpc_client,
+                pre_stop_drain_seconds=(
+                    self.server_config.frontend_pre_stop_drain_seconds
+                ),
+                pre_stop_drain_headroom_seconds=(
+                    self.server_config.pre_stop_drain_headroom_seconds
+                ),
             )
             server.install_pre_stop_drain_signal_handler()
             # freeze all current tracked objects to reduce gc cost
@@ -500,7 +505,6 @@ class FrontendApp(object):
                     status_code=400,
                     content={"error": f" HTTP health check failed"},
                 )
-
             return "ok"
 
         @app.get("/")
@@ -675,8 +679,6 @@ class FrontendApp(object):
             return self.frontend_server.tokenize(req)
 
         if self.frontend_server.is_embedding:
-            from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
-
             # embedding
             @app.post("/v1/embeddings/similarity")
             @app.post("/v1/reranker")
