@@ -33,7 +33,8 @@ from rtp_llm.dash_sc.think import (
     plan_dash_sc_thinking,
 )
 
-# Token shapes used throughout these protocol tests.
+# DSV4 token shapes used throughout (mirror mrcr_smoke_test config so future
+# tokenizer drift only needs to be tracked in one place).
 _BOS = (128821, 201)  # encode("<think>\n")
 _END = (128822, 271)  # encode("</think>\n\n")
 _EOS = (201, 128822, 271)  # encode("\n</think>\n\n")

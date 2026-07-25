@@ -530,10 +530,7 @@ def _parse_grammar_controls(
     )
 
     if isinstance(response_format, dict):
-        response_format_type = response_format.get("type")
-        if response_format_type == "text":
-            response_format = None
-        elif response_format_type == "structural_tag":
+        if response_format.get("type") == "structural_tag":
             try:
                 response_structural_tag = structural_tag_from_response_format(
                     response_format, "response_format"
@@ -1085,9 +1082,9 @@ def _append_dashllm_limit_parameters(
     """Mirror dashllm response parameters consumed by dashscope-serving."""
     if generate_config is not None:
         infer.parameters["max_new_tokens"].int64_param = int(
-            generate_config.max_new_tokens or 0
+            getattr(generate_config, "max_new_tokens", 0) or 0
         )
-        max_think = int(generate_config.max_thinking_tokens or 0)
+        max_think = int(getattr(generate_config, "max_thinking_tokens", 0) or 0)
         if max_think > 0:
             infer.parameters["max_new_think_tokens"].int64_param = max_think
 

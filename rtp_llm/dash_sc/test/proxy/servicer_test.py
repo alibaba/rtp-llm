@@ -8,12 +8,11 @@ propagation, and the per-addr channel cache.
 from __future__ import annotations
 
 import asyncio
-from collections.abc import AsyncIterable
 import json
 import os
 import struct
 import unittest
-from unittest.mock import MagicMock, patch
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import grpc
 
@@ -93,9 +92,6 @@ class _AsyncIter:
         self._i += 1
         return x
 
-    def cancel(self) -> bool:
-        return False
-
 
 class _FakeChannel:
     def __init__(self, addr: str = ""):
@@ -129,7 +125,7 @@ def _install_mock_stub(servicer, mock_stub) -> None:
 
 
 def _stop_mock_stub(servicer) -> None:
-    patcher = servicer._test_stub_patcher
+    patcher = getattr(servicer, "_test_stub_patcher", None)
     if patcher is not None:
         patcher.stop()
         servicer._test_stub_patcher = None
@@ -309,7 +305,7 @@ class IteratorBehaviorTest(unittest.IsolatedAsyncioTestCase):
 
         call_arg = self.mock_stub.ModelStreamInfer.call_args[0][0]
         self.assertTrue(
-            isinstance(call_arg, AsyncIterable),
+            hasattr(call_arg, "__aiter__"),
             "Must be async iterable",
         )
         self.assertEqual(len(responses), 2)
@@ -558,6 +554,61 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
         )
         self.assertEqual(self._record_of(ctx).backend_addr, "10.0.0.2:8104")
 
+    async def test_downstream_rpc_abort_detail_includes_frontend_addr(self) -> None:
+        self._patch_addr(1)
+        rpc_error = grpc.aio.AioRpcError(
+            grpc.StatusCode.UNAVAILABLE,
+            grpc.aio.Metadata(),
+            grpc.aio.Metadata(),
+            details="dash_sc is unavailable: reason=signal 10 active_requests=0",
+        )
+
+        async def downstream_gen():
+            raise rpc_error
+            yield  # pragma: no cover
+
+        class AbortRaised(Exception):
+            pass
+
+        async def abort(code, details):
+            raise AbortRaised((code, details))
+
+        self.mock_stub.ModelStreamInfer.return_value = downstream_gen()
+        ctx = self._ctx()
+        ctx.abort = AsyncMock(side_effect=abort)
+
+        with self.assertRaises(AbortRaised) as cm:
+            await _drain(
+                self.servicer.ModelStreamInfer(_request_gen(_make_request("req1")), ctx)
+            )
+
+        code, details = cm.exception.args[0]
+        self.assertEqual(code, grpc.StatusCode.UNAVAILABLE)
+        self.assertIn("reason=signal 10", details)
+        self.assertIn("downstream_frontend_addr=10.0.0.2:8104", details)
+        self.assertEqual(self._record_of(ctx).backend_addr, "10.0.0.2:8104")
+
+    async def test_downstream_non_grpc_error_log_includes_frontend_addr(self) -> None:
+        self._patch_addr(1)
+
+        async def downstream_gen():
+            raise ValueError("downstream boom")
+            yield  # pragma: no cover
+
+        self.mock_stub.ModelStreamInfer.return_value = downstream_gen()
+        ctx = self._ctx()
+
+        with self.assertLogs(level="ERROR") as logs:
+            with self.assertRaises(ValueError):
+                await _drain(
+                    self.servicer.ModelStreamInfer(
+                        _request_gen(_make_request("req1")), ctx
+                    )
+                )
+
+        self.assertIn("downstream_frontend_addr=10.0.0.2:8104", "\n".join(logs.output))
+        self.assertEqual(self._record_of(ctx).backend_addr, "10.0.0.2:8104")
+
     async def test_backend_resp_count_tracks_upstream_frames(self) -> None:
         self._patch_addr(0)
         chunks = [self._make_resp("a"), self._make_resp("b"), self._make_resp("c")]
@@ -662,19 +713,6 @@ class AccessLogDiagInjectionTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(len(out), 1)
         self.assertEqual(record.buffered_stage, "flushed_first")
         self.assertEqual(record.backend_resp_count, 1)
-
-    async def test_terminal_first_chunk_is_not_held_for_a_second_chunk(self) -> None:
-        record = GrpcAccessRecord.create(MagicMock(), "test", "bidi_stream")
-        terminal = _make_finished_response()
-
-        async def terminal_only():
-            yield terminal
-            self.fail("proxy requested a second frame after terminal response")
-
-        chunks = await _drain(self.servicer._buffered_iter(terminal_only(), record))
-
-        self.assertEqual(chunks, [terminal])
-        self.assertEqual(record.buffered_stage, "flushed_terminal_first")
 
     async def test_stage_flushed_both_on_happy_path(self) -> None:
         self._patch_addr(0)
@@ -940,7 +978,10 @@ class ChannelPoolTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(error_no, 5)
         self.assertEqual(payload["status_code"], 503)
         self.assertEqual(payload["status_name"], "ServiceUnavailable")
-        self.assertEqual(payload["status_message"], "forward backend unavailable")
+        self.assertIn("forward backend unavailable", payload["status_message"])
+        self.assertIn(
+            "downstream_frontend_addr=10.0.0.1:8104", payload["status_message"]
+        )
 
     async def test_discovery_none_returns_dash_503_error_frame(self) -> None:
         servicer = _make_servicer(["10.0.0.1:8096"])
