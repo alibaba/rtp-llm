@@ -6,6 +6,7 @@
 #include <memory>
 #include <numeric>
 #include <string>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -435,6 +436,36 @@ inline KVCacheSpecPtr makeLinearSpec(const std::string& tag,
     return SpecBuilder::build(desc, ctx);
 }
 
+inline void setTestTopologyLocalKvHeadNum(CacheConfig& config, uint32_t local_head_num_kv) {
+    RTP_LLM_CHECK_WITH_INFO(local_head_num_kv > 0, "local_head_num_kv must be > 0");
+    auto groups = config.topology().groups();
+    auto layers = config.topology().layers();
+    RTP_LLM_CHECK_WITH_INFO(!groups.empty(), "test cache topology must contain at least one group");
+    for (auto& group : groups) {
+        group.local_kv_head_num = local_head_num_kv;
+    }
+    config.setTopology(std::move(groups), std::move(layers));
+}
+
+inline void finalizeTestCacheConfigLayout(CacheConfig& config,
+                                          size_t       layout_layer_num,
+                                          size_t       kv_block_stride_bytes,
+                                          size_t       kv_scale_stride_bytes) {
+    RTP_LLM_CHECK_WITH_INFO(config.layer_all_num > 0, "test cache config must contain at least one layer");
+    RTP_LLM_CHECK_WITH_INFO(layout_layer_num > 0, "test cache layout must contain at least one layer");
+    RTP_LLM_CHECK_WITH_INFO(kv_block_stride_bytes > 0, "test cache KV block stride must be > 0");
+
+    config.kv_block_stride_bytes = kv_block_stride_bytes;
+    config.kv_scale_stride_bytes = kv_scale_stride_bytes;
+    config.kv_block_size_bytes   = layout_layer_num * config.kv_block_stride_bytes;
+    config.kv_scale_size_bytes   = layout_layer_num * config.kv_scale_stride_bytes;
+    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+
+    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
+    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
+                                              static_cast<int>(per_layer_stride_bytes));
+}
+
 inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
                                             int               block_num,
                                             size_t            tokens_per_block,
@@ -456,16 +487,10 @@ inline CacheConfig makeSimpleMhaCacheConfig(int               layer_num,
         layer_ids[i] = i;
     }
     config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+    setTestTopologyLocalKvHeadNum(config, local_head_num_kv);
 
-    config.kv_block_stride_bytes = spec->block_size_bytes();
-    config.kv_block_size_bytes   = static_cast<size_t>(layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = spec->scale_block_size_bytes();
-    config.kv_scale_size_bytes   = static_cast<size_t>(layer_num) * config.kv_scale_stride_bytes;
-    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-
-    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
-                                              static_cast<int>(per_layer_stride_bytes));
+    finalizeTestCacheConfigLayout(
+        config, static_cast<size_t>(layer_num), spec->block_size_bytes(), spec->scale_block_size_bytes());
 
     return config;
 }
@@ -491,16 +516,10 @@ inline CacheConfig makeSimpleLinearCacheConfig(int               layer_num,
         layer_ids[i] = i;
     }
     config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::LINEAR}, {"linear"});
+    setTestTopologyLocalKvHeadNum(config, local_head_num_kv);
 
-    config.kv_block_stride_bytes = spec->block_size_bytes();
-    config.kv_block_size_bytes   = static_cast<size_t>(layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = spec->scale_block_size_bytes();
-    config.kv_scale_size_bytes   = static_cast<size_t>(layer_num) * config.kv_scale_stride_bytes;
-    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-
-    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
-                                              static_cast<int>(per_layer_stride_bytes));
+    finalizeTestCacheConfigLayout(
+        config, static_cast<size_t>(layer_num), spec->block_size_bytes(), spec->scale_block_size_bytes());
 
     return config;
 }
@@ -559,16 +578,12 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
         layers_by_group.push_back(std::move(group_layers));
     }
     config.fromGroupedSpecs(specs, layers_by_group, types, tags);
+    setTestTopologyLocalKvHeadNum(config, local_head_num_kv);
 
-    config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
-    config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
-    config.kv_scale_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;
-    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-
-    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
-                                              static_cast<int>(per_layer_stride_bytes));
+    finalizeTestCacheConfigLayout(config,
+                                  static_cast<size_t>(config.group_layer_num),
+                                  std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes()),
+                                  full_spec->scale_block_size_bytes());
     return config;
 }
 

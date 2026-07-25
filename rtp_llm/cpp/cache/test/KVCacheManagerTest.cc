@@ -300,6 +300,38 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
     EXPECT_EQ(cache_manager->freeBlocksNum(), 0);
 }
 
+TEST_F(KVCacheManagerTest, SimpleConfigHelpersPropagateLocalKvHeadNumToEveryGroup) {
+    constexpr uint32_t kLocalKvHeadNum       = 3;
+    const auto         expect_local_kv_heads = [=](const CacheConfig& config, size_t expected_group_count) {
+        EXPECT_EQ(config.topology().groups().size(), expected_group_count);
+        for (const auto& group : config.topology().groups()) {
+            EXPECT_EQ(group.local_kv_head_num, kLocalKvHeadNum) << "tag=" << group.tag;
+        }
+    };
+
+    const auto mha = makeSimpleMhaCacheConfig(/*layer_num=*/2,
+                                              /*block_num=*/4,
+                                              /*tokens_per_block=*/2,
+                                              rtp_llm::DataType::TYPE_FP16,
+                                              kLocalKvHeadNum);
+    expect_local_kv_heads(mha, /*expected_group_count=*/1);
+
+    const auto linear = makeSimpleLinearCacheConfig(/*layer_num=*/2,
+                                                    /*block_num=*/4,
+                                                    /*tokens_per_block=*/2,
+                                                    rtp_llm::DataType::TYPE_FP16,
+                                                    kLocalKvHeadNum);
+    expect_local_kv_heads(linear, /*expected_group_count=*/1);
+
+    const auto hybrid = makeSimpleHybridMhaCacheConfig(/*layer_num=*/6,
+                                                       /*block_num=*/4,
+                                                       /*tokens_per_block=*/2,
+                                                       rtp_llm::DataType::TYPE_FP16,
+                                                       /*group_layer_num=*/2,
+                                                       kLocalKvHeadNum);
+    expect_local_kv_heads(hybrid, /*expected_group_count=*/3);
+}
+
 TEST_F(KVCacheManagerTest, InitRejectsSingleLinearGroup) {
     auto cache_config = makeSimpleLinearCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_BF16);
