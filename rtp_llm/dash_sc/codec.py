@@ -530,7 +530,10 @@ def _parse_grammar_controls(
     )
 
     if isinstance(response_format, dict):
-        if response_format.get("type") == "structural_tag":
+        response_format_type = response_format.get("type")
+        if response_format_type == "text":
+            response_format = None
+        elif response_format_type == "structural_tag":
             try:
                 response_structural_tag = structural_tag_from_response_format(
                     response_format, "response_format"

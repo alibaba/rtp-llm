@@ -142,6 +142,25 @@ async def _send_partial_response_metadata(context: Any) -> None:
         await result
 
 
+def _unsupported_grammar_param(
+    request: Any, sampling: Optional[SamplingParams]
+) -> Optional[str]:
+    if sampling is None:
+        return None
+    # TODO: remove this gate after grammar-constrained decoding is enabled.
+    if sampling.json_format:
+        return "json_format"
+    if sampling.structural_tag:
+        if "structural_tag" in request.parameters:
+            return "structural_tag"
+        return "tool_call_structural_tag"
+    if sampling.response_format:
+        if "guided_json" in request.parameters:
+            return "guided_json"
+        return "response_format"
+    return None
+
+
 def _optional_int_attr(obj: Any, attr: str) -> Optional[int]:
     try:
         value = getattr(obj, attr, None)
@@ -1341,6 +1360,25 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 ):
                     await _send_partial_response_metadata(context)
                     partial_metadata_sent = True
+
+                unsupported_param = _unsupported_grammar_param(request, sampling)
+                if unsupported_param is not None:
+                    error_spec = DASH_ERROR_UNSUPPORTED
+                    resp = build_dash_error_response(
+                        str(request.id),
+                        request.model_name,
+                        error_spec=error_spec,
+                        status_message=f"{unsupported_param} is not supported yet",
+                    )
+                    self._record_and_report_chunk(
+                        record,
+                        resp,
+                        delta_len=0,
+                        finished=True,
+                        finish_reason=error_spec.finish_reason,
+                    )
+                    yield resp
+                    return
 
                 if sampling is not None and sampling.max_new_tokens <= 0:
                     param_name = (
