@@ -22,7 +22,6 @@
 import logging
 import unittest
 
-from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import (
     GenerateConfig,
     _DIVERGE_START_COMBO_WARN_THRESHOLD,  # pyright: ignore[reportPrivateUsage]
@@ -31,9 +30,9 @@ from rtp_llm.config.generate_config import (
 )
 
 
-class TestStructuredOutputUnsupported(unittest.TestCase):
+class TestStructuredOutputPassthrough(unittest.TestCase):
 
-    def test_all_structured_output_controls_fail_before_backend_rpc(self):
+    def test_structured_output_controls_are_config_passthrough(self):
         cases = {
             "json_format": True,
             "response_format": {"type": "json_object"},
@@ -45,14 +44,7 @@ class TestStructuredOutputUnsupported(unittest.TestCase):
         for name, value in cases.items():
             with self.subTest(name=name):
                 config = GenerateConfig(**{name: value})
-                with self.assertRaises(FtRuntimeException) as raised:
-                    config.validate()
-                self.assertEqual(
-                    raised.exception.exception_type,
-                    ExceptionType.UNSUPPORTED_OPERATION,
-                )
-                self.assertIn(name, raised.exception.message)
-                self.assertIn("not supported yet", raised.exception.message)
+                config.validate()
 
     def test_default_structured_output_controls_remain_valid(self):
         GenerateConfig().validate()
