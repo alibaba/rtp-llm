@@ -255,15 +255,19 @@ class TestProcessManager(unittest.TestCase):
         for proc in procs:
             proc.start()
 
-        # Monitor - should detect crash and terminate all
-        with patch("logging.error") as mock_error:
-            self.manager.monitor_and_release_processes()
+        # Monitor - should detect crash, terminate all, and fail the parent.
+        with patch("logging.error") as mock_error, patch("os._exit") as mock_exit:
+            mock_exit.side_effect = SystemExit(1)
+            with self.assertRaises(SystemExit):
+                self.manager.monitor_and_release_processes()
             mock_error.assert_called()
+            mock_exit.assert_called_with(1)
 
         # All processes should be terminated
         for proc in procs:
             self.assertFalse(proc.is_alive())
         self.assertTrue(self.manager.terminated)
+        self.assertTrue(self.manager.failure_detected)
 
     def test_monitor_with_shutdown_signal(self):
         """Test monitoring with shutdown signal"""
