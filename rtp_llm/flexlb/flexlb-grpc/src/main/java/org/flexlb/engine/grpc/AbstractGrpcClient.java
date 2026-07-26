@@ -72,8 +72,6 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
      * @param ipPortList Latest worker address list in format ip:httpPort
      */
     private void updateGrpcChannelPool(List<String> ipPortList) {
-        Logger.info("address update, ip:port list size:{}, channel pool size:{}", ipPortList.size(), channelPool.size());
-
         Set<String/*ip:port:serviceType*/> currentKeys = new HashSet<>(channelPool.keySet());
         List<String/*ip:port:serviceType*/> addedKeys = new ArrayList<>();
 
@@ -93,13 +91,22 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
             }
         }
 
+        if (addedKeys.isEmpty() && currentKeys.isEmpty()) {
+            // Nothing changes — keep the 30s address-update path quiet.
+            Logger.debug("address update, no channel change, ip:port list size:{}, channel pool size:{}",
+                    ipPortList.size(), channelPool.size());
+        } else {
+            Logger.info("flexlb.channel.pool.update host_count={} pool_size={} to_add={} to_remove={}",
+                    ipPortList.size(), channelPool.size(), addedKeys.size(), currentKeys.size());
+        }
+
         // Create channels for newly online workers
         for (String newKey : addedKeys) {
             try {
                 ManagedChannel managedChannel = createChannel(newKey);
                 Invoker invoker = putInvokerIfAbsent(newKey, managedChannel);
                 if (invoker.getChannel() == managedChannel) {
-                    Logger.info("add channel for ipPort {}", newKey);
+                    Logger.info("flexlb.channel.create key={} reason=address_update", newKey);
                 }
             } catch (Exception e) {
                 Logger.error("create channel for ipPort {} failed", newKey, e);
@@ -111,12 +118,20 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
             Invoker invoker = channelPool.remove(key);
             if (invoker != null) {
                 try {
+                    Logger.info("flexlb.channel.remove key={} reason=worker_offline connection_duration_us={}",
+                            key, invoker.getConnectionDuration());
                     invoker.shutdown();
                 } catch (Exception e) {
                     Logger.error("shutdown channel for ipPort {} failed", invoker.getChannelKey(), e);
                 }
             }
         }
+
+        // Drop rate-limit entries for keys no longer in the pool so the map
+        // cannot grow unboundedly under high worker churn. ConcurrentHashMap
+        // keySet view retainAll is thread-safe; a lost warn timestamp at worst
+        // allows one extra WARN for that key.
+        channelMissWarnAtMs.keySet().retainAll(channelPool.keySet());
     }
 
     /**
@@ -157,17 +172,26 @@ public abstract class AbstractGrpcClient<STUB extends AbstractGrpcClient.GrpcStu
         grpcReporter.reportChannelPoolSize(channelPool.size());
     }
 
+    /** Per-key timestamp (ms) of the last channel-miss WARN, for rate limiting. */
+    private final Map<String, Long> channelMissWarnAtMs = new ConcurrentHashMap<>();
+    private static final long CHANNEL_MISS_WARN_INTERVAL_MS = 60_000L;
+
     protected Invoker getInvoker(String channelKey) {
         Invoker invoker = channelPool.get(channelKey);
         if (invoker == null) {
-            // Log a compact summary only; the full pool dump (several KB per line)
-            // caused log flooding, so it is downgraded to DEBUG.
-            String ip = channelKey.split(":")[0];
-            List<String> sameIpKeys = channelPool.keySet().stream()
-                    .filter(k -> k.startsWith(ip + ":"))
-                    .toList();
-            Logger.warn("grpc channel not found, key:{}, pool size:{}, existing keys for ip {}:{}",
-                    channelKey, channelPool.size(), ip, sameIpKeys);
+            // Rate-limited to 1 WARN per key per minute to avoid log flooding when
+            // a stale key is looked up on every status-sync round.
+            long now = System.currentTimeMillis();
+            Long lastWarnMs = channelMissWarnAtMs.get(channelKey);
+            if (lastWarnMs == null || now - lastWarnMs >= CHANNEL_MISS_WARN_INTERVAL_MS) {
+                channelMissWarnAtMs.put(channelKey, now);
+                String ip = channelKey.split(":")[0];
+                List<String> sameIpKeys = channelPool.keySet().stream()
+                        .filter(k -> k.startsWith(ip + ":"))
+                        .toList();
+                Logger.warn("flexlb.channel.miss key={} pool_size={} keys_for_same_ip={} (rate-limited: 1/min per key)",
+                        channelKey, channelPool.size(), sameIpKeys);
+            }
             Logger.debug("channelPool full dump: {}", channelPool);
         }
         return invoker;

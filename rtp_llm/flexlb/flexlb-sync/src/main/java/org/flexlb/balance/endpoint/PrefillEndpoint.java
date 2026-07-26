@@ -56,9 +56,20 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.reporter = reporter;
         this.predictor = createPredictor(config);
         this.batcher = createBatcher(config, handler, reporter);
-        this.batchEvictor = new InflightEvictor<>(inflightBatches, batch -> {
+        this.batchEvictor = new InflightEvictor<>(inflightBatches, (batchId, batch) -> {
             inflightRequestCount.addAndGet(-batch.requests().size());
             cachedWaitTimeExpireAtMs = 0;
+            // Full requestId list up to 50 so no zombie id is lost for tracing;
+            // beyond that, truncate but keep the total (eviction is low-frequency).
+            int total = batch.requests().size();
+            List<Long> requestIds = batch.requests().stream()
+                    .map(BatchItem::requestId).limit(50).toList();
+            String requestIdsText = total <= 50
+                    ? requestIds.toString()
+                    : requestIds + "(truncated, total=" + total + ")";
+            logger.info("Inflight TTL evict: role=PREFILL endpoint={} batch_id={} batch_size={} age_ms={} request_ids={}",
+                    ipPort(), batchId, total,
+                    System.currentTimeMillis() - batch.createdAtMs(), requestIdsText);
         });
         this.batcher.start();
     }
@@ -229,6 +240,8 @@ public class PrefillEndpoint extends WorkerEndpoint {
             if (removed != null) {
                 inflightRequestCount.addAndGet(-removed.requests().size());
                 cachedWaitTimeExpireAtMs = 0;
+                logger.debug("Prefill calibrate removed batch: batch_id={} batch_size={} endpoint={}",
+                        batchId, removed.requests().size(), ipPort());
             }
             reportBatchCompletion(batchId, batch, finishedTaskInfo);
         }
@@ -337,6 +350,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     public int getInflightBatchCount() {
         return inflightBatches.size();
+    }
+
+    /**
+     * Sample up to {@code limit} inflight batch ids for orphan diagnostics
+     * (e.g. when this endpoint is removed while batches are still tracked).
+     */
+    public List<Long> sampleInflightBatchIds(int limit) {
+        return inflightBatches.keySet().stream().limit(limit).toList();
     }
 
     /**

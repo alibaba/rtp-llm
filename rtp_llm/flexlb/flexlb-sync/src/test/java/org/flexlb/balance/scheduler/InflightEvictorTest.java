@@ -73,7 +73,7 @@ class InflightEvictorTest {
         map.put(2L, new TestEntry(now - 100_000));
 
         AtomicInteger callbackCount = new AtomicInteger(0);
-        InflightEvictor<Long, TestEntry> evictor = new InflightEvictor<>(map, entry -> callbackCount.incrementAndGet());
+        InflightEvictor<Long, TestEntry> evictor = new InflightEvictor<>(map, (key, entry) -> callbackCount.incrementAndGet());
 
         evictor.evictExpired(60_000);
         assertEquals(2, callbackCount.get());
@@ -87,7 +87,7 @@ class InflightEvictorTest {
         map.put(2L, new TestEntry(now));             // fresh
 
         AtomicInteger callbackCount = new AtomicInteger(0);
-        InflightEvictor<Long, TestEntry> evictor = new InflightEvictor<>(map, entry -> callbackCount.incrementAndGet());
+        InflightEvictor<Long, TestEntry> evictor = new InflightEvictor<>(map, (key, entry) -> callbackCount.incrementAndGet());
 
         int evicted = evictor.evictExpired(60_000);
         assertEquals(1, evicted);

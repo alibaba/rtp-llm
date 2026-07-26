@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import java.util.Map;
-import java.util.function.Consumer;
+import java.util.function.BiConsumer;
 
 /**
  * Generic TTL eviction manager for inflight maps across all scheduling layers.
@@ -22,14 +22,14 @@ public class InflightEvictor<K, V extends InflightEvictor.TtlTracked> {
     }
 
     private final Map<K, V> map;
-    private final Consumer<V> onEvict;
+    private final BiConsumer<K, V> onEvict;
 
     /**
      * @param map     the map to evict from (not owned by this evictor)
-     * @param onEvict called for each evicted entry (e.g. to adjust counters);
-     *                may be null if no side effects are needed
+     * @param onEvict called for each evicted (key, value) entry (e.g. to adjust
+     *                counters or log details); may be null if no side effects are needed
      */
-    public InflightEvictor(Map<K, V> map, Consumer<V> onEvict) {
+    public InflightEvictor(Map<K, V> map, BiConsumer<K, V> onEvict) {
         this.map = map;
         this.onEvict = onEvict;
     }
@@ -53,7 +53,7 @@ public class InflightEvictor<K, V extends InflightEvictor.TtlTracked> {
                 if (removed != null) {
                     count++;
                     if (onEvict != null) {
-                        onEvict.accept(removed);
+                        onEvict.accept(entry.getKey(), removed);
                     }
                 }
             }

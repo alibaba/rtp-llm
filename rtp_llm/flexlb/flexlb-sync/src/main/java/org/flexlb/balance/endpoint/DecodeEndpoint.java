@@ -27,9 +27,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public DecodeEndpoint(WorkerStatus status) {
         super(status);
-        this.requestEvictor = new InflightEvictor<>(inflightRequests, req -> {
+        this.requestEvictor = new InflightEvictor<>(inflightRequests, (requestId, req) -> {
             inflightKvReservedTotal.addAndGet(-req.kvTokens());
             inflightExpectedKvReservedTotal.addAndGet(-req.expectedKvTokens());
+            logger.info("Inflight TTL evict: role=DECODE endpoint={} request_id={} age_ms={} kv_tokens={}",
+                    ipPort(), requestId, System.currentTimeMillis() - req.createdAtMs(), req.kvTokens());
         });
     }
 
@@ -200,6 +202,14 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     public int getInflightCount() {
         return inflightRequests.size();
+    }
+
+    /**
+     * Sample up to {@code limit} inflight request ids for orphan diagnostics
+     * (e.g. when this endpoint is removed while requests are still tracked).
+     */
+    public java.util.List<Long> sampleInflightRequestIds(int limit) {
+        return inflightRequests.keySet().stream().limit(limit).toList();
     }
 
     /**

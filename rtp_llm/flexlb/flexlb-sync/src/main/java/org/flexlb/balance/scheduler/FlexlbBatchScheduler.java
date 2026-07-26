@@ -358,6 +358,35 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         return inflight.size();
     }
 
+    /**
+     * Orphan visibility for endpoint removal (defect #5 diagnostics):
+     * when a worker endpoint is removed, scheduler inflight entries routed to it
+     * can no longer complete via that worker's status reports and will strand
+     * until TTL. Called by {@code EndpointRegistry} on endpoint removal.
+     */
+    public void logOrphanInflightForEndpoint(RoleType roleType, String ipPort) {
+        int orphanCount = 0;
+        List<Long> sampleRequestIds = new ArrayList<>();
+        for (Map.Entry<Long, InflightEntry> e : inflight.entrySet()) {
+            BatchItem item = e.getValue().item;
+            ServerStatus server = roleType == RoleType.DECODE ? item.decode() : item.prefill();
+            if (server == null) {
+                continue;
+            }
+            if (ipPort.equals(server.getServerIp() + ":" + server.getHttpPort())) {
+                orphanCount++;
+                if (sampleRequestIds.size() < 10) {
+                    sampleRequestIds.add(e.getKey());
+                }
+            }
+        }
+        if (orphanCount > 0) {
+            Logger.warn("Endpoint removed with scheduler orphan inflight: role=SCHEDULER endpoint={} "
+                            + "endpoint_role={} orphan_count={} sample_request_ids={} — entries reclaimable only by TTL",
+                    ipPort, roleType, orphanCount, sampleRequestIds);
+        }
+    }
+
     public RequestLifecycleSnapshot getRequestState(long requestId,
                                                     long expectedBatchId) {
         InflightEntry entry = inflight.get(requestId);
@@ -379,13 +408,33 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             if (now - entry.createdAtMs() <= ttlMs) {
                 continue;
             }
+            // Support locals for the per-entry INFO below: snapshot inside the
+            // lock, log outside to keep the synchronized block cheap.
+            long batchId;
+            long ageMs;
+            String prefillServer;
+            String decodeServer;
             synchronized (entry) {
                 if (inflight.get(candidate.getKey()) != entry) {
                     continue;
                 }
+                batchId = entry.lifecycle.snapshot().batchId();
+                ageMs = now - entry.createdAtMs();
+                // Null-safe: an entry may not be bound to endpoints yet (e.g. still
+                // QUEUED) — log "null" instead of risking an NPE.
+                ServerStatus prefill = entry.item.prefill();
+                ServerStatus decode = entry.item.decode();
+                prefillServer = prefill == null ? "null"
+                        : prefill.getServerIp() + ":" + prefill.getHttpPort();
+                decodeServer = decode == null ? "null"
+                        : decode.getServerIp() + ":" + decode.getHttpPort();
                 timeoutEntry(entry, "inflight TTL expired");
                 expiredCount++;
             }
+            // TTL expiry is low-frequency (minute-level scheduler, single digits per
+            // round) — per-entry INFO is safe and lets each leak be traced directly.
+            Logger.info("Inflight TTL cleanup: expired entry request_id={} batch_id={} age_ms={} prefill={} decode={}",
+                    candidate.getKey(), batchId, ageMs, prefillServer, decodeServer);
         }
         if (expiredCount > 0) {
             reporter.reportInflightTtlExpired("SCHEDULER", expiredCount);

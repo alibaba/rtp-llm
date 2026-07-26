@@ -6,6 +6,8 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
+import org.slf4j.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.beans.factory.ObjectFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
@@ -16,6 +18,8 @@ import java.util.function.Function;
 
 @Component
 public class EndpointRegistry {
+
+    private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
     private final ConcurrentHashMap<String, PrefillEndpoint> prefillEndpoints = new ConcurrentHashMap<>();
     private final ConcurrentHashMap<String, DecodeEndpoint> decodeEndpoints = new ConcurrentHashMap<>();
@@ -187,8 +191,45 @@ public class EndpointRegistry {
                 || !endpoints.remove(ipPort, endpoint)) {
             return false;
         }
+        logOrphanInflight(ipPort, endpoint);
         endpoint.close();
         return true;
+    }
+
+    /**
+     * Defect #5 diagnostics: when a worker is removed (e.g. marked dead after
+     * consecutive gRPC failures) while it still tracks inflight entries, those
+     * entries are orphaned and can only be reclaimed by TTL. Log the details so
+     * the leak source is directly visible.
+     */
+    private void logOrphanInflight(String ipPort, WorkerEndpoint endpoint) {
+        RoleType schedulerRole = null;
+        if (endpoint instanceof PrefillEndpoint prefillEp) {
+            schedulerRole = RoleType.PREFILL;
+            int orphanBatches = prefillEp.getInflightBatchCount();
+            if (orphanBatches > 0) {
+                logger.warn("Endpoint removed with orphan inflight: role=PREFILL endpoint={} orphan_batch_count={} "
+                                + "sample_batch_ids={} — entries reclaimable only by TTL",
+                        ipPort, orphanBatches, prefillEp.sampleInflightBatchIds(10));
+            }
+        } else if (endpoint instanceof DecodeEndpoint decodeEp) {
+            schedulerRole = RoleType.DECODE;
+            int orphanRequests = decodeEp.getInflightCount();
+            if (orphanRequests > 0) {
+                logger.warn("Endpoint removed with orphan inflight: role=DECODE endpoint={} orphan_request_count={} "
+                                + "sample_request_ids={} — entries reclaimable only by TTL",
+                        ipPort, orphanRequests, decodeEp.sampleInflightRequestIds(10));
+            }
+        }
+        // Also surface scheduler-level inflight entries routed to this endpoint —
+        // they can no longer complete via this worker's status reports.
+        if (schedulerRole != null) {
+            try {
+                batchScheduler().logOrphanInflightForEndpoint(schedulerRole, ipPort);
+            } catch (Exception e) {
+                logger.debug("Scheduler orphan check skipped for {}: {}", ipPort, e.getMessage());
+            }
+        }
     }
 
     private FlexlbBatchScheduler batchScheduler() {

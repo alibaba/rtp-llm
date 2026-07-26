@@ -188,7 +188,10 @@ public class GrpcWorkerStatusRunner implements Runnable {
             // filter out those finished tasks on the next poll — leaking inflight entries.
             if (latestFinishedVersion != null
                     && latestFinishedVersion > workerStatus.getLatestFinishedTaskVersion().get()) {
-                workerStatus.getLatestFinishedTaskVersion().set(latestFinishedVersion);
+                long previousVersion = workerStatus.getLatestFinishedTaskVersion()
+                        .getAndSet(latestFinishedVersion);
+                logger.debug("Advanced latestFinishedTaskVersion for {} role={} from {} to {}",
+                        ipPort, roleType, previousVersion, latestFinishedVersion);
             }
 
             engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus, ep,
