@@ -1,7 +1,7 @@
 package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.resource.ResourceMeasureFactory;
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.master.TaskInfo;

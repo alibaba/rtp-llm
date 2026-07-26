@@ -4,8 +4,9 @@ import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
-import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchQuery;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -143,19 +144,15 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         }
 
         // Calculate cache match results for each engine
-        long blockSize = resolveBlockSize(balanceContext, availableWorkers);
         CacheMatchResult cacheMatchResult = cacheAwareService.findMatchingEngines(
-                requestId,
-                balanceContext.getRequest().getBlockCacheKeys(),
-                blockSize,
-                roleType,
-                group);
+                cacheMatchQuery(
+                        balanceContext,
+                        balanceContext.getRequest().getBlockSize(),
+                        roleType,
+                        group));
 
         List<ScoredWorker> scoredWorkers = scoreWorkers(
-                availableWorkers,
-                cacheMatchResult.matches(),
-                seqLen,
-                config.getPrefillCacheHitDiscount());
+                availableWorkers, cacheMatchResult, seqLen, config.getPrefillCacheHitDiscount());
 
         ScoredWorker bestWorker = selectBestWorker(
                 scoredWorkers, balanceContext, roleType, group, seqLen, config);
@@ -178,21 +175,6 @@ public class ShortestTTFTStrategy implements LoadBalancer {
                 requestId,
                 seqLen,
                 config.getPrefillCacheHitDiscount());
-    }
-
-    private long resolveBlockSize(
-            BalanceContext balanceContext,
-            List<WorkerStatus> availableWorkers) {
-        long requestBlockSize = balanceContext.getRequest().getBlockSize();
-        if (requestBlockSize > 0) {
-            return requestBlockSize;
-        }
-        for (WorkerStatus worker : availableWorkers) {
-            if (worker.getCacheStatus() != null && worker.getCacheStatus().getBlockSize() > 0) {
-                return worker.getCacheStatus().getBlockSize();
-            }
-        }
-        return 0;
     }
 
     /**
@@ -226,19 +208,16 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * Calculate TTFT scores for all active workers
      *
      * @param workers Worker list
-     * @param cacheMatchResults Cache match results
+     * @param cacheMatchResult Cache match result
      * @param seqLen Sequence length
      * @return List of scored workers
      */
     private List<ScoredWorker> scoreWorkers(
-            List<WorkerStatus> workers,
-            Map<String, Integer> cacheMatchResults,
-            long seqLen,
-            double cacheHitDiscount) {
+            List<WorkerStatus> workers, CacheMatchResult cacheMatchResult, long seqLen, double cacheHitDiscount) {
         return workers.stream()
                 .filter(WorkerStatus::isAlive)
                 .map(workerStatus -> {
-                    long hitCacheTokens = calculatePrefixMatchLength(workerStatus, cacheMatchResults);
+                    long hitCacheTokens = calculatePrefixMatchLength(workerStatus, cacheMatchResult);
                     long prefillTime = TaskInfo.estimatePrefillTimeMs(
                             seqLen, hitCacheTokens, cacheHitDiscount);
                     long queueTime = workerStatus.getRunningQueueTime().get();
@@ -712,11 +691,12 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * Calculate prefix match length (number of cached tokens hit)
      *
      * @param workerStatus Worker status
-     * @param cacheMatchResults Cache match results
+     * @param cacheMatchResult Cache match result
      * @return Number of tokens hit
      */
-    private long calculatePrefixMatchLength(WorkerStatus workerStatus, Map<String, Integer> cacheMatchResults) {
-        if (workerStatus.getCacheStatus() == null || cacheMatchResults == null) {
+    private long calculatePrefixMatchLength(WorkerStatus workerStatus, CacheMatchResult cacheMatchResult) {
+        Map<String, Integer> cacheMatchResults = cacheMatchResult.matches();
+        if (cacheMatchResults == null) {
             return 0L;
         }
 
@@ -725,8 +705,19 @@ public class ShortestTTFTStrategy implements LoadBalancer {
             return 0L;
         }
 
-        long blockSize = workerStatus.getCacheStatus().getBlockSize();
-        return blockSize * prefixMatchLength;
+        return cacheMatchResult.blockSize() * prefixMatchLength;
+    }
+
+    private CacheMatchQuery cacheMatchQuery(BalanceContext balanceContext, long blockSize,
+                                            RoleType roleType, String group) {
+        return new CacheMatchQuery(
+                balanceContext.getRequestId(),
+                balanceContext.getRequest().getBlockCacheKeys(),
+                blockSize,
+                balanceContext.getRequest().getLocalStandbyBlockCacheKeys(),
+                balanceContext.getRequest().getLocalStandbyBlockSize(),
+                roleType,
+                group);
     }
 
 }

@@ -4,8 +4,9 @@ import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.collections4.MapUtils;
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
-import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchQuery;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -86,17 +87,16 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         WorkerStatus selectedWorker = weightedRandomSelection(workerStatusList);
 
         if (selectedWorker != null) {
-            long blockSize = request.getBlockSize();
-            if (blockSize <= 0 && selectedWorker.getCacheStatus() != null) {
-                blockSize = selectedWorker.getCacheStatus().getBlockSize();
-            }
             CacheMatchResult cacheMatchResult = cacheAwareService.findMatchingEngines(
-                    balanceContext.getRequestId(),
-                    balanceContext.getRequest().getBlockCacheKeys(),
-                    blockSize,
-                    roleType,
-                    group);
-            long prefixLength = calcPrefixMatchLength(selectedWorker, cacheMatchResult.matches());
+                    new CacheMatchQuery(
+                            balanceContext.getRequestId(),
+                            request.getBlockCacheKeys(),
+                            request.getBlockSize(),
+                            request.getLocalStandbyBlockCacheKeys(),
+                            request.getLocalStandbyBlockSize(),
+                            roleType,
+                            group));
+            long prefixLength = calcPrefixMatchLength(selectedWorker, cacheMatchResult);
             balanceContext.recordCacheMatch(
                     cacheMatchResult.source().name(),
                     cacheMatchResult.queryTimeUs(),
@@ -137,15 +137,16 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
         }
     }
 
-    private long calcPrefixMatchLength(WorkerStatus workerStatus, Map<String, Integer> cacheMatches) {
-        if (workerStatus.getCacheStatus() == null || cacheMatches == null) {
+    private long calcPrefixMatchLength(WorkerStatus workerStatus, CacheMatchResult cacheMatchResult) {
+        Map<String, Integer> cacheMatches = cacheMatchResult.matches();
+        if (cacheMatches == null) {
             return 0;
         }
         // KVCM returns the host_ip_port reported by Subscriber, while WorkerStatus uses the
         // service-discovery address. No code-level normalization guarantees they are identical;
         // the end-to-end integration must keep both values aligned.
         int prefixMatchBlocks = cacheMatches.getOrDefault(workerStatus.getIpPort(), 0);
-        return workerStatus.getCacheStatus().getBlockSize() * prefixMatchBlocks;
+        return cacheMatchResult.blockSize() * prefixMatchBlocks;
     }
 
     /**
