@@ -47,6 +47,7 @@ py_library(
     ],
     deps = [
         ":utils",
+        "//rtp_llm/metrics:metrics",
         "//rtp_llm/models_py/triton_kernels:triton_kernels",
         "//rtp_llm/models_py/distributed:deepep_wrapper",
         "//rtp_llm/models_py/distributed:moriep_wrapper",
@@ -77,6 +78,15 @@ py_library(
 
 # Export sitecustomize.py for test targets to fix nvidia-cutlass-dsl import
 exports_files(["modules/factory/sitecustomize.py"])
+
+filegroup(
+    name = "topology_kv_policy_runfiles",
+    srcs = [
+        "modules/hybrid/indexer.py",
+        "modules/hybrid/topology_kv_policy.py",
+    ],
+    visibility = ["//visibility:public"],
+)
 
 py_library(
     name = "modules_cuda",

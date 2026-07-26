@@ -1,13 +1,46 @@
+import os
+import logging
 from typing import Any, Dict, Optional, Tuple
 
 import torch
 from torch import nn
 
+from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.models_py.modules import IndexerOp, LayerNorm
 from rtp_llm.models_py.modules.factory import LinearFactory
+from rtp_llm.models_py.modules.hybrid.topology_kv_policy import (
+    TopologyKvPolicyConfig,
+    TopologyKvPolicyResult,
+    apply_topology_kv_policy,
+    normalize_topology_kv_policy,
+)
 from rtp_llm.ops import AttentionConfigs, HWKernelConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import KVCache
 from rtp_llm.utils.model_weight import W
+
+_TOPOLOGY_KV_CUDA_SYNC_WARNING_EMITTED = False
+_TOPOLOGY_KV_BYPASS_WARNED_REASONS: set[str] = set()
+_TOPOLOGY_KV_FALLBACK_WARNED_REASONS: set[str] = set()
+
+
+def _topology_env_int(name: str, default: int) -> int:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return int(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got {value!r}") from exc
+
+
+def _topology_env_float(name: str, default: float) -> float:
+    value = os.getenv(name)
+    if value is None:
+        return default
+    try:
+        return float(value)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a float, got {value!r}") from exc
 
 
 class Indexer(nn.Module):
@@ -42,6 +75,35 @@ class Indexer(nn.Module):
         self.softmax_scale = self.index_head_dim**-0.5
         self.weights_scale = self.index_n_heads**-0.5
         self.blocksize = attn_config.kernel_tokens_per_block  # page size, typically 64
+        self.topology_kv_policy = normalize_topology_kv_policy(
+            os.getenv("RTP_LLM_TOPOLOGY_KV_POLICY", "disabled")
+        )
+        self.topology_sink_blocks = _topology_env_int("RTP_LLM_TOPOLOGY_SINK_BLOCKS", 1)
+        self.topology_local_blocks = _topology_env_int(
+            "RTP_LLM_TOPOLOGY_LOCAL_BLOCKS", 1
+        )
+        self.topology_witness_blocks = _topology_env_int(
+            "RTP_LLM_TOPOLOGY_WITNESS_BLOCKS", 1
+        )
+        self.topology_max_policy_tokens = _topology_env_int(
+            "RTP_LLM_TOPOLOGY_MAX_POLICY_TOKENS", 8192
+        )
+        self.topology_max_topk_elements = _topology_env_int(
+            # Production top-k width is 2048; keep 128-row prefill eligible.
+            "RTP_LLM_TOPOLOGY_MAX_TOPK_ELEMENTS",
+            262144,
+        )
+        self.topology_max_topk_width = _topology_env_int(
+            "RTP_LLM_TOPOLOGY_MAX_TOPK_WIDTH", 8192
+        )
+        self.topology_max_structural_fraction = _topology_env_float(
+            "RTP_LLM_TOPOLOGY_MAX_STRUCTURAL_FRACTION", 0.5
+        )
+        self.topology_coordinate_mismatch_action = os.getenv(
+            "RTP_LLM_TOPOLOGY_COORDINATE_MISMATCH_ACTION", "fallback_disabled"
+        )
+        self.topology_stable_scaffold = os.getenv("RTP_LLM_TOPOLOGY_STABLE_SCAFFOLD")
+        self.topology_output_contract = os.getenv("RTP_LLM_TOPOLOGY_OUTPUT_CONTRACT")
         self.indexer_size = self.index_head_dim / 2 + self.index_head_dim / 128 * 2
         self.is_neox_style = attn_config.rope_config.indexer_is_neox_style
         self.parallelism_config = parallelism_config
@@ -126,7 +188,9 @@ class Indexer(nn.Module):
         if self._prefill_cp_enabled():
             assert cp_params is not None
             query, key = self.indexer_op.apply_rope_and_rotate_q_k_cp(
-                q, k, cp_params.full_rope_pos_ids,
+                q,
+                k,
+                cp_params.full_rope_pos_ids,
             )
         else:
             positions = flashmla_params.positions_d
@@ -163,6 +227,148 @@ class Indexer(nn.Module):
             )
         return self.indexer_op.quant_q_k(query, key, kv_cache, fmha_params.slot_mapping)
 
+    def _apply_topology_kv_policy(
+        self,
+        topk_result: Optional[torch.Tensor],
+        lengths: torch.Tensor,
+        row_starts: Optional[torch.Tensor] = None,
+        topk_indices_offset: Optional[torch.Tensor] = None,
+    ) -> Optional[torch.Tensor]:
+        if self.topology_kv_policy == "disabled" or topk_result is None:
+            return topk_result
+        if (
+            topk_result.is_cuda
+            and os.getenv("RTP_LLM_TOPOLOGY_KV_ALLOW_CUDA_SYNC") != "1"
+        ):
+            kmonitor.report(
+                AccMetrics.TOPOLOGY_KV_POLICY_BYPASS_LAYER_EVENT_METRIC,
+                1,
+                {
+                    "policy": self.topology_kv_policy,
+                    "reason": "cuda_sync_disabled",
+                    "layer_idx": str(self.layer_idx),
+                },
+            )
+            global _TOPOLOGY_KV_CUDA_SYNC_WARNING_EMITTED
+            if not _TOPOLOGY_KV_CUDA_SYNC_WARNING_EMITTED:
+                logging.warning(
+                    "RTP_LLM_TOPOLOGY_KV_POLICY=%s is skipped for CUDA top-k "
+                    "indices because RTP_LLM_TOPOLOGY_KV_ALLOW_CUDA_SYNC is not "
+                    "set to 1. Enabling that flag allows an experimental host-sync "
+                    "Python policy path and is not intended for online hot paths.",
+                    self.topology_kv_policy,
+                )
+                _TOPOLOGY_KV_CUDA_SYNC_WARNING_EMITTED = True
+            return topk_result
+        config = TopologyKvPolicyConfig(
+            policy=self.topology_kv_policy,
+            sink_blocks=self.topology_sink_blocks,
+            local_blocks=self.topology_local_blocks,
+            witness_blocks=self.topology_witness_blocks,
+            block_size=self.blocksize,
+            max_policy_tokens=self.topology_max_policy_tokens,
+            max_topk_elements=self.topology_max_topk_elements,
+            max_topk_width=self.topology_max_topk_width,
+            max_structural_fraction=self.topology_max_structural_fraction,
+            coordinate_mismatch_action=self.topology_coordinate_mismatch_action,
+        )
+        result = apply_topology_kv_policy(
+            topk_result,
+            lengths,
+            config=config,
+            row_starts=row_starts,
+            topk_indices_offset=topk_indices_offset,
+            stable_scaffold=self.topology_stable_scaffold,
+            output_contract=self.topology_output_contract,
+        )
+        self._report_topology_kv_policy_result(
+            result,
+            coordinate_mismatch_action=config.coordinate_mismatch_action,
+        )
+        return result.topk_indices
+
+    def _report_topology_kv_policy_result(
+        self,
+        result: TopologyKvPolicyResult,
+        *,
+        coordinate_mismatch_action: str,
+    ) -> None:
+        """Report bounded-cardinality policy outcomes before returning only indices."""
+        counters = result.counters
+        # Indexer is instantiated per sparse layer. These are layer-forward
+        # events, not request QPS; layer_idx keeps their aggregation explicit.
+        policy_tags = {
+            "policy": self.topology_kv_policy,
+            "layer_idx": str(self.layer_idx),
+        }
+        kmonitor.report(
+            GaugeMetrics.TOPOLOGY_KV_POLICY_SCHEDULE_MS_METRIC,
+            counters.schedule_ms,
+            policy_tags,
+        )
+        kmonitor.report(
+            GaugeMetrics.TOPOLOGY_KV_POLICY_SELECTED_TOKENS_METRIC,
+            counters.raw_selected_tokens,
+            policy_tags,
+        )
+        kmonitor.report(
+            GaugeMetrics.TOPOLOGY_KV_POLICY_EVICTED_TOKENS_METRIC,
+            counters.learned_evicted_tokens,
+            policy_tags,
+        )
+
+        if counters.coordinate_mismatch_fallbacks:
+            reason = "coordinate_mismatch"
+            fallback_tags = {
+                **policy_tags,
+                "reason": reason,
+                "action": coordinate_mismatch_action,
+            }
+            kmonitor.report(
+                AccMetrics.TOPOLOGY_KV_COORDINATE_FALLBACK_LAYER_EVENT_METRIC,
+                counters.coordinate_mismatch_fallbacks,
+                fallback_tags,
+            )
+            if reason not in _TOPOLOGY_KV_FALLBACK_WARNED_REASONS:
+                _TOPOLOGY_KV_FALLBACK_WARNED_REASONS.add(reason)
+                logging.warning(
+                    "Topology KV policy fallback (coordinate_mismatch): "
+                    "policy=%s, action=%s; returning the original top-k. "
+                    "Check row_starts/topk_indices_offset absolute-coordinate contract.",
+                    self.topology_kv_policy,
+                    coordinate_mismatch_action,
+                )
+
+        if counters.policy_bypassed:
+            for reason in result.bypass_reasons or ("unknown_limit",):
+                bypass_tags = {**policy_tags, "reason": reason}
+                kmonitor.report(
+                    AccMetrics.TOPOLOGY_KV_POLICY_BYPASS_LAYER_EVENT_METRIC,
+                    counters.policy_bypassed,
+                    bypass_tags,
+                )
+                if reason in _TOPOLOGY_KV_BYPASS_WARNED_REASONS:
+                    continue
+                # Claim the reason before logging so concurrent requests cannot
+                # emit duplicate warnings while logging temporarily releases the GIL.
+                _TOPOLOGY_KV_BYPASS_WARNED_REASONS.add(reason)
+                logging.warning(
+                    f"Topology KV policy bypassed ({reason}): "
+                    "policy=%s, rows=%d, max_sequence_length=%d, "
+                    "topk_width=%d, topk_elements=%d; limits: "
+                    "RTP_LLM_TOPOLOGY_MAX_POLICY_TOKENS=%d, "
+                    "RTP_LLM_TOPOLOGY_MAX_TOPK_WIDTH=%d, "
+                    "RTP_LLM_TOPOLOGY_MAX_TOPK_ELEMENTS=%d.",
+                    self.topology_kv_policy,
+                    result.topk_indices.size(0),
+                    result.max_sequence_length,
+                    result.topk_indices.size(1),
+                    result.topk_indices.numel(),
+                    self.topology_max_policy_tokens,
+                    self.topology_max_topk_width,
+                    self.topology_max_topk_elements,
+                )
+
     def _compute_topk(
         self,
         q_fp8: torch.Tensor,
@@ -172,13 +378,15 @@ class Indexer(nn.Module):
         attention_inputs: Any,
         cp_params: Optional[Any],
     ) -> torch.Tensor:
+        # Topology KV policy is intentionally prefill-only; decode keeps the
+        # original paged top-k path unchanged because it returns page-table IDs.
         if not attention_inputs.is_prefill:
             return self.indexer_op._get_topk_paged(
                 q_fp8, weights, kv_cache, fmha_params, attention_inputs
             )
         if self._prefill_cp_enabled():
             assert cp_params is not None
-            return self.indexer_op._get_topk_ragged_cp(
+            topk_result = self.indexer_op._get_topk_ragged_cp(
                 q_fp8,
                 weights,
                 kv_cache,
@@ -192,8 +400,20 @@ class Indexer(nn.Module):
                 cp_params.precomputed_lengths,
                 cp_params.precomputed_topk_off,
             )
-        return self.indexer_op._get_topk_ragged(
+            return self._apply_topology_kv_policy(
+                topk_result,
+                cp_params.precomputed_lengths,
+                row_starts=cp_params.precomputed_ks,
+                topk_indices_offset=cp_params.precomputed_topk_off,
+            )
+        topk_result = self.indexer_op._get_topk_ragged(
             q_fp8, weights, kv_cache, fmha_params, attention_inputs
+        )
+        return self._apply_topology_kv_policy(
+            topk_result,
+            fmha_params.expanded_seq_lens,
+            row_starts=fmha_params.ks,
+            topk_indices_offset=fmha_params.topk_indices_offset,
         )
 
     def forward(
