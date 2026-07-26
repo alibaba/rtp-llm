@@ -1,6 +1,6 @@
 package org.flexlb.sync.runner;
 
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -25,7 +25,7 @@ class GrpcCacheStatusCheckRunnerTest {
 
     private final EngineHealthReporter engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
 
-    private final CacheAwareService localKvCacheAwareManager = Mockito.mock(CacheAwareService.class);
+    private final CacheAwareService cacheAwareService = Mockito.mock(CacheAwareService.class);
 
     @Test
     void testGrpcCacheStatusCheckRunner() {
@@ -48,7 +48,8 @@ class GrpcCacheStatusCheckRunnerTest {
 
         // Act
         GrpcCacheStatusCheckRunner runner = new GrpcCacheStatusCheckRunner(
-                modelName, ipPort, site, RoleType.PREFILL, workerStatus, engineHealthReporter, engineGrpcService, localKvCacheAwareManager,
+                modelName, ipPort, site, RoleType.PREFILL, workerStatus, engineHealthReporter,
+                engineGrpcService, cacheAwareService,
                 20, new LongAdder(), 50L);
         runner.run();
 

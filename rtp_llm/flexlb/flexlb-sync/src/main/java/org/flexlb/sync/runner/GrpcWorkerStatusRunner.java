@@ -1,7 +1,9 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.dao.master.TaskStateUpdateResult;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.pv.CacheHitComparisonPvLog;
@@ -18,7 +20,6 @@ import org.flexlb.util.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
-import java.util.List;
 import java.util.Map;
 import java.util.Optional;
 import java.util.concurrent.atomic.AtomicLong;
@@ -43,12 +44,14 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final long createTimeUs = System.nanoTime() / 1000;
     private final String id = IdUtils.fastUuid();
     private final long syncRequestTimeoutMs;
+    private final CacheAwareService cacheAwareService;
 
     public GrpcWorkerStatusRunner(String modelName, WorkerHost host, RoleType roleType,
                                   WorkerStatus workerStatus,
                                   EngineHealthReporter engineHealthReporter,
                                   EngineGrpcService engineGrpcService,
-                                  long syncRequestTimeoutMs) {
+                                  long syncRequestTimeoutMs,
+                                  CacheAwareService cacheAwareService) {
         this.ipPort = host.getIpPort();
         this.ip = host.getIp();
         this.workerStatusPort = host.getWorkerStatusPort();
@@ -60,6 +63,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
+        this.cacheAwareService = cacheAwareService;
     }
 
     @Override
@@ -140,8 +144,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 Map<String, TaskInfo> waitingTaskInfo = newWorkerStatus.getWaitingTaskInfo();
                 Map<String, TaskInfo> runningTaskInfo = newWorkerStatus.getRunningTaskInfo();
                 Map<String, TaskInfo> finishedTaskInfo = newWorkerStatus.getFinishedTaskInfo();
-                logCacheHitComparisons(workerStatus.updateTaskStates(
-                        waitingTaskInfo, runningTaskInfo, finishedTaskInfo));
+                handleTaskStateUpdateResult(workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo));
 
                 // Report success even when version is not updated
                 engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus,
@@ -169,8 +172,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             workerStatus.setRunningTaskList(runningTaskInfo);
 
             // Update local task state (including checking lost, updating running, and cleaning completed)
-            logCacheHitComparisons(workerStatus.updateTaskStates(
-                    waitingTaskInfo, runningTaskInfo, finishedTaskInfo));
+            handleTaskStateUpdateResult(workerStatus.updateTaskStates(waitingTaskInfo, runningTaskInfo, finishedTaskInfo));
 
             // Correct running queue total wait time
             workerStatus.updateRunningQueueTime();
@@ -202,8 +204,9 @@ public class GrpcWorkerStatusRunner implements Runnable {
                 System.nanoTime() / 1000 - startTime);
     }
 
-    private void logCacheHitComparisons(List<CacheHitComparisonPvLog> comparisons) {
-        for (CacheHitComparisonPvLog comparison : comparisons) {
+    private void handleTaskStateUpdateResult(TaskStateUpdateResult updateResult) {
+        for (CacheHitComparisonPvLog comparison : updateResult.cacheHitComparisons()) {
+            cacheAwareService.recordActualCacheHit(comparison);
             engineHealthReporter.reportCacheHitComparisonMetrics(modelName, comparison);
             String json = JsonUtils.toStringOrEmpty(comparison);
             if (!json.isEmpty()) {

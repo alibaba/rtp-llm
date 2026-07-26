@@ -2,9 +2,10 @@ package org.flexlb.balance.strategy;
 
 import ch.qos.logback.classic.Level;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
-import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.CacheMatchResult;
-import org.flexlb.cache.service.CacheMatchSource;
+import org.flexlb.cache.domain.CacheMatchQuery;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
@@ -80,6 +81,7 @@ class ShortestTTFTStrategyTest {
         Request req = new Request();
         req.setSeqLen(1000);
         req.setRequestId("request-12345");
+        req.setBlockSize(256);
         List<Long> blockCacheKeys = new ArrayList<>();
         blockCacheKeys.add(1L);
         blockCacheKeys.add(2L);
@@ -93,10 +95,8 @@ class ShortestTTFTStrategyTest {
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
         Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        Mockito.when(cacheAwareService.findMatchingEngines(
-                        Mockito.anyString(), Mockito.anyList(), Mockito.anyLong(), Mockito.any(), Mockito.any()))
-                .thenReturn(new CacheMatchResult(
-                        Map.of("127.0.0.2:8080", 3), CacheMatchSource.KVCM, 123));
+        Mockito.when(cacheAwareService.findMatchingEngines(Mockito.any(CacheMatchQuery.class)))
+                .thenReturn(new CacheMatchResult(Map.of("127.0.0.2:8080", 3), CacheMatchSource.KVCM, 123, 256));
 
         ShortestTTFTStrategy staticCacheLoadBalancer =
                 new ShortestTTFTStrategy(engineWorkerStatus, engineHealthReporter, cacheAwareService, resourceMeasureFactory);
@@ -114,8 +114,12 @@ class ShortestTTFTStrategyTest {
         Assertions.assertEquals("KVCM", balanceContext.getCacheMatchSource());
         Assertions.assertEquals(123, balanceContext.getCacheMatchQueryTimeUs());
         Assertions.assertEquals(1, balanceContext.getCacheMatchQueryCount());
-        Mockito.verify(cacheAwareService).findMatchingEngines(
-                "request-12345", blockCacheKeys, 256L, RoleType.PREFILL, null);
+        Mockito.verify(cacheAwareService).findMatchingEngines(Mockito.argThat(query ->
+                "request-12345".equals(query.requestId())
+                        && blockCacheKeys.equals(query.blockCacheKeys())
+                        && query.blockSize() == 256L
+                        && query.roleType() == RoleType.PREFILL
+                        && query.group() == null));
         TaskInfo selectedTask = workerStatus1.getLocalTaskMap().get("request-12345");
         Assertions.assertNotNull(selectedTask);
         Assertions.assertEquals(768, selectedTask.getPredictedPrefixLength());
@@ -248,6 +252,7 @@ class ShortestTTFTStrategyTest {
         request.setSeqLen(inputTokens);
         request.setRequestId(requestId);
         request.setBlockCacheKeys(List.of(1L));
+        request.setBlockSize(workers.getFirst().getCacheStatus().getBlockSize());
 
         EngineHealthReporter engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
         CacheAwareService cacheAwareService = Mockito.mock(CacheAwareService.class);
@@ -256,9 +261,12 @@ class ShortestTTFTStrategyTest {
                 Mockito.mock(org.flexlb.balance.resource.ResourceMeasure.class);
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
         Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
-        Mockito.when(cacheAwareService.findMatchingEngines(
-                        Mockito.anyString(), Mockito.anyList(), Mockito.anyLong(), Mockito.any(), Mockito.any()))
-                .thenReturn(new CacheMatchResult(cacheMatches, CacheMatchSource.KVCM, 123));
+        Mockito.when(cacheAwareService.findMatchingEngines(Mockito.any(CacheMatchQuery.class)))
+                .thenReturn(new CacheMatchResult(
+                        cacheMatches,
+                        CacheMatchSource.KVCM,
+                        123,
+                        workers.getFirst().getCacheStatus().getBlockSize()));
 
         ShortestTTFTStrategy strategy = new ShortestTTFTStrategy(
                 new EngineWorkerStatus(new ModelMetaConfig()),

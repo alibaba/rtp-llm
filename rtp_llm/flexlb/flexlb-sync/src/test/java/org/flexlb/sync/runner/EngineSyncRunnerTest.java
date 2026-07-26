@@ -1,6 +1,6 @@
 package org.flexlb.sync.runner;
 
-import org.flexlb.cache.service.CacheAwareService;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.RoleType;
@@ -48,7 +48,7 @@ class EngineSyncRunnerTest {
     private RoleType roleType;
 
     @Mock
-    private CacheAwareService localKvCacheAwareManager;
+    private CacheAwareService cacheAwareService;
 
     private final long syncRequestTimeoutMs = 5000L;
 
@@ -71,7 +71,7 @@ class EngineSyncRunnerTest {
                 engineHealthReporter,
                 engineGrpcService,
                 roleType,
-                localKvCacheAwareManager,
+                cacheAwareService,
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval,
@@ -99,7 +99,7 @@ class EngineSyncRunnerTest {
                 engineHealthReporter,
                 engineGrpcService,
                 roleType,
-                localKvCacheAwareManager,
+                cacheAwareService,
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval,
@@ -126,7 +126,7 @@ class EngineSyncRunnerTest {
                 engineHealthReporter,
                 engineGrpcService,
                 RoleType.PREFILL,
-                localKvCacheAwareManager,
+                cacheAwareService,
                 syncRequestTimeoutMs,
                 syncCount,
                 syncEngineStatusInterval,

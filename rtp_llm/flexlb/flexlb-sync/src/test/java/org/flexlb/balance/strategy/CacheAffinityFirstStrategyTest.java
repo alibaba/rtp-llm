@@ -2,9 +2,10 @@ package org.flexlb.balance.strategy;
 
 import org.flexlb.balance.resource.ResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
-import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.CacheMatchResult;
-import org.flexlb.cache.service.CacheMatchSource;
+import org.flexlb.cache.domain.CacheMatchQuery;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
@@ -179,9 +180,8 @@ class CacheAffinityFirstStrategyTest {
         Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
 
         CacheAwareService cacheAwareService = Mockito.mock(CacheAwareService.class);
-        Mockito.when(cacheAwareService.findMatchingEngines(
-                        Mockito.anyString(), Mockito.anyList(), Mockito.anyLong(), Mockito.any(), Mockito.any()))
-                .thenReturn(new CacheMatchResult(cacheMatches, CacheMatchSource.KVCM, 123));
+        Mockito.when(cacheAwareService.findMatchingEngines(Mockito.any(CacheMatchQuery.class)))
+                .thenReturn(new CacheMatchResult(cacheMatches, CacheMatchSource.KVCM, 123, BLOCK_SIZE));
 
         return new CacheAffinityFirstStrategy(
                 new EngineWorkerStatus(new ModelMetaConfig()),

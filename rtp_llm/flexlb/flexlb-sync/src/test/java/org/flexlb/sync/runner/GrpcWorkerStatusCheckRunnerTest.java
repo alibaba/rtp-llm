@@ -1,5 +1,6 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.TaskInfo;
@@ -25,6 +26,8 @@ class GrpcWorkerStatusCheckRunnerTest {
     private final EngineGrpcService engineGrpcService = Mockito.mock(EngineGrpcService.class);
 
     private final EngineHealthReporter engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
+
+    private final CacheAwareService cacheAwareService = Mockito.mock(CacheAwareService.class);
 
     @Test
     void should_callGrpcServiceAndVerifyInteraction_when_runnerExecutes() {
@@ -63,7 +66,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
                 modelName, host,
                 RoleType.PREFILL,
-                workerStatus, engineHealthReporter, engineGrpcService, 20);
+                workerStatus, engineHealthReporter, engineGrpcService, 20, cacheAwareService);
         runner.run();
 
         // Assert
@@ -115,7 +118,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         // Act
         new GrpcWorkerStatusRunner(
                 modelName, host, RoleType.PREFILL, workerStatus, engineHealthReporter,
-                engineGrpcService, 20).run();
+                engineGrpcService, 20, cacheAwareService).run();
 
         // Assert
         CacheHitComparisonPvLog expected = new CacheHitComparisonPvLog(

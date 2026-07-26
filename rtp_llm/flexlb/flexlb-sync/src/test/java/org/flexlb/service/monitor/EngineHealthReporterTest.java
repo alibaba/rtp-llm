@@ -1,7 +1,7 @@
 package org.flexlb.service.monitor;
 
 import io.netty.channel.EventLoopGroup;
-import org.flexlb.cache.monitor.CacheMetricsReporter;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.dao.pv.CacheHitComparisonPvLog;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.FlexMetricType;

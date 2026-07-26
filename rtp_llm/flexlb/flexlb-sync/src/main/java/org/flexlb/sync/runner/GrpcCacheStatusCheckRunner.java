@@ -1,8 +1,8 @@
 package org.flexlb.sync.runner;
 
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
-import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.DynamicCacheIntervalService;
+import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.cache.match.localsync.DynamicCacheIntervalService;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
@@ -143,7 +143,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             if (validateCacheStatusResponse(workerStatus, newCacheStatus)) {
 
                 workerStatus.setCacheStatus(newCacheStatus);
-                updateLocalKvCache(workerStatus);
+                updateLocalCacheMetadata(workerStatus);
                 logCacheStatusUpdate(newCacheStatus, startTime);
             }
 
@@ -184,12 +184,12 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
                 DynamicCacheIntervalService.getCurrentIntervalMs());
     }
 
-    private void updateLocalKvCache(WorkerStatus workerStatus) {
+    private void updateLocalCacheMetadata(WorkerStatus workerStatus) {
         try {
             if (!RoleType.PREFILL.equals(roleType) && !RoleType.PDFUSION.equals(roleType)) {
                 return;
             }
-            WorkerCacheUpdateResult result = cacheAwareService.updateEngineBlockCache(workerStatus);
+            WorkerCacheUpdateResult result = cacheAwareService.updateCacheMetadata(workerStatus);
             if (!result.isSuccess()) {
                 logger.warn("Failed to update worker cache for IP: {}, error: {}", workerStatus.getIp(), result.getErrorMessage());
                 engineHealthReporter.reportCacheStatusCheckerFail(modelName, ipPort, BalanceStatusEnum.CACHE_UPDATE_FAILED);

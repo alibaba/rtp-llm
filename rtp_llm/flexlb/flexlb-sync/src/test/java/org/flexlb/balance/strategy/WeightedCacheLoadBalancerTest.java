@@ -3,9 +3,10 @@ package org.flexlb.balance.strategy;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
-import org.flexlb.cache.service.CacheAwareService;
-import org.flexlb.cache.service.CacheMatchResult;
-import org.flexlb.cache.service.CacheMatchSource;
+import org.flexlb.cache.domain.CacheMatchQuery;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.BalanceContext;
@@ -36,14 +37,8 @@ class WeightedCacheLoadBalancerTest {
     void setUp() {
         configService = new ConfigService();
         cacheAwareService = Mockito.mock(CacheAwareService.class);
-        Mockito.when(cacheAwareService.findMatchingEngines(
-                        Mockito.anyString(), Mockito.anyList(), Mockito.anyLong(),
-                        Mockito.any(), Mockito.nullable(String.class)))
-                .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL));
-        Mockito.when(cacheAwareService.findMatchingEngines(
-                        Mockito.anyString(), Mockito.isNull(), Mockito.anyLong(),
-                        Mockito.any(), Mockito.nullable(String.class)))
-                .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL));
+        Mockito.when(cacheAwareService.findMatchingEngines(Mockito.any(CacheMatchQuery.class)))
+                .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC, 256));
     }
 
     @org.junit.jupiter.api.AfterEach
@@ -119,7 +114,7 @@ class WeightedCacheLoadBalancerTest {
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertNotNull(status.getServerIp());
-        Assertions.assertEquals("LOCAL", balanceContext.getCacheMatchSource());
+        Assertions.assertEquals("LOCAL_SYNC", balanceContext.getCacheMatchSource());
     }
 
     @Test
@@ -207,11 +202,8 @@ class WeightedCacheLoadBalancerTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap()
                 .put("127.0.0.1:8080", worker);
 
-        Mockito.when(cacheAwareService.findMatchingEngines(
-                        Mockito.anyString(), Mockito.anyList(), Mockito.anyLong(),
-                        Mockito.eq(RoleType.DECODE), Mockito.isNull()))
-                .thenReturn(new CacheMatchResult(
-                        Map.of("127.0.0.1:8080", 4), CacheMatchSource.KVCM, 321));
+        Mockito.when(cacheAwareService.findMatchingEngines(Mockito.any(CacheMatchQuery.class)))
+                .thenReturn(new CacheMatchResult(Map.of("127.0.0.1:8080", 4), CacheMatchSource.KVCM, 321, 256));
 
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
@@ -224,6 +216,7 @@ class WeightedCacheLoadBalancerTest {
         request.setRequestId("request-kvcm");
         request.setSeqLen(2048);
         request.setBlockCacheKeys(List.of(1L));
+        request.setBlockSize(256);
         BalanceContext context = new BalanceContext();
         context.setRequest(request);
         context.setConfig(configService.loadBalanceConfig());
