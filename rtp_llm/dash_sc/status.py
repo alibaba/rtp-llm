@@ -16,12 +16,12 @@ it has a status.
 from __future__ import annotations
 
 import asyncio
-from typing import Any, Optional
+from typing import Optional
 
 import grpc
 
 
-def rpc_code(exc: BaseException) -> Optional[Any]:
+def rpc_code(exc: BaseException) -> Optional[grpc.StatusCode]:
     try:
         return exc.code()
     except Exception:

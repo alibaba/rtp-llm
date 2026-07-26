@@ -3,7 +3,7 @@
 Public API (P8-level explicit surface):
 
 - ``DashScApp``: process-level gRPC server lifecycle (start/stop + signal handling).
-- ``SamplingParams`` / ``OtherParams``: strongly-typed request parameter objects.
+- ``SamplingParams`` / ``DashScRequestControls``: strongly-typed request parameter objects.
 - ``build_model_infer_request``: canonical client-side request builder.
 - ``dash_sc_grpc_client_channel_options``: gRPC channel options (keepalive etc.)
   derived from ``DashScGrpcConfig``.
@@ -18,7 +18,7 @@ from rtp_llm.dash_sc.client import (
     dash_sc_grpc_client_channel_options,
     decode_finish_reason,
 )
-from rtp_llm.dash_sc.codec import OtherParams, SamplingParams
+from rtp_llm.dash_sc.codec import DashScRequestControls, SamplingParams
 
 
 def __getattr__(name):
@@ -32,7 +32,7 @@ def __getattr__(name):
 __all__ = [
     "DashScApp",
     "SamplingParams",
-    "OtherParams",
+    "DashScRequestControls",
     "build_model_infer_request",
     "dash_sc_grpc_client_channel_options",
     "decode_finish_reason",

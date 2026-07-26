@@ -17,7 +17,15 @@ from __future__ import annotations
 import inspect
 import logging
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Callable, Iterator, Optional
+from typing import (
+    TYPE_CHECKING,
+    AsyncIterator,
+    Callable,
+    Iterable,
+    Iterator,
+    Optional,
+    Protocol,
+)
 
 import torch
 
@@ -37,12 +45,11 @@ from rtp_llm.dash_sc.codec import (
     DashErrorSpec,
     DashScParameterError,
     LLMFinishReason,
-    OtherParams,
+    DashScRequestControls,
     SamplingParams,
     _token_ids_list_from_generate_output,
     build_dash_error_response,
     build_stream_response_from_generate_outputs,
-    iter_fake_model_stream_infer,
     parse_dash_sc_grpc_request,
     prepend_to_generated_ids_tensor,
 )
@@ -60,8 +67,16 @@ from rtp_llm.server.request_headers import (
     extract_request_headers,
     extract_trace_id,
 )
-from rtp_llm.utils.base_model_datatypes import GenerateInput, RequestInfo
+from rtp_llm.utils.base_model_datatypes import (
+    GenerateInput,
+    GenerateOutputs,
+    RequestInfo,
+)
 from rtp_llm.utils.util import AtomicCounter
+
+if TYPE_CHECKING:
+    from rtp_llm.config.py_config_modules import GenerateEnvConfig
+    from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 
 # Phase-2 dash_sc_request_id (response infer.id) suffix; keeps client able to tell
 # the two response halves apart. NOT applied to the dashscope-side trace_id, which
@@ -74,11 +89,14 @@ _EMPTY_THINK_BODY = "\n"
 # default in ``GenerateEnvConfig.think_terminate_token_id`` (single source of truth
 # for production; this constant exists so unit tests don't have to repeat it).
 _DEFAULT_TERMINATE_TOKEN_ID = 1
+# Model types whose dash_sc protocol uses the empty-think second pass.
+_EMPTY_THINK_PHASE2_MODEL_TYPES = {"deepseek_v4"}
 _INT32_MAX = 2_147_483_647
 _PARTIAL_RESPONSE_METADATA = (("x-dashscope-partialresponse", "true"),)
+GrpcMetadata = Iterable[tuple[object, object]]
 
 
-def _exception_metric_code(error_code: Any) -> str:
+def _exception_metric_code(error_code: int | ExceptionType) -> str:
     code = int(error_code)
     try:
         return f"{code}_{ExceptionType.from_value(code)}"
@@ -86,7 +104,9 @@ def _exception_metric_code(error_code: Any) -> str:
         return str(code)
 
 
-def _set_access_backend_error_code(access_agg: Any, e: BaseException) -> None:
+def _set_access_backend_error_code(
+    access_agg: GrpcAccessRecord | None, e: BaseException
+) -> None:
     if access_agg is None:
         return
     if not isinstance(e, FtRuntimeException):
@@ -123,7 +143,7 @@ def stream_log_tag(
 
 
 def _headers_from_invocation_metadata(
-    invocation_metadata: Optional[Any],
+    invocation_metadata: Optional[GrpcMetadata],
 ) -> dict[str, str]:
     metadata_headers = {
         str(key).lower(): value
@@ -133,61 +153,83 @@ def _headers_from_invocation_metadata(
     return extract_request_headers(metadata_headers)
 
 
-async def _send_partial_response_metadata(context: Any) -> None:
-    sender = getattr(context, "send_initial_metadata", None)
-    if sender is None:
-        return
-    result = sender(_PARTIAL_RESPONSE_METADATA)
+class _InitialMetadataSender(Protocol):
+    def send_initial_metadata(self, metadata: tuple[tuple[str, str], ...]) -> object:
+        ...
+
+
+async def _send_partial_response_metadata(context: _InitialMetadataSender) -> None:
+    result = context.send_initial_metadata(_PARTIAL_RESPONSE_METADATA)
     if inspect.isawaitable(result):
         await result
 
 
-def _optional_int_attr(obj: Any, attr: str) -> Optional[int]:
-    try:
-        value = getattr(obj, attr, None)
-    except Exception:
+class _TextEncoder(Protocol):
+    def encode(self, text: str, *args: object, **kwargs: object) -> list[int]:
+        ...
+
+
+def _tokenizer_eos_token_id(tokenizer: BaseTokenizer | None) -> Optional[int]:
+    if tokenizer is None:
         return None
-    if value is None:
+    try:
+        eos_token_id = tokenizer.eos_token_id
+    except (AttributeError, NotImplementedError):
+        return None
+    if eos_token_id is None:
         return None
     try:
-        return int(value)
-    except (TypeError, ValueError):
+        return int(eos_token_id)
+    except (TypeError, ValueError, OverflowError):
         return None
 
 
-def _derive_max_token_id(tokenizer: Any) -> Optional[int]:
+def _derive_max_token_id(tokenizer: BaseTokenizer | None) -> Optional[int]:
     if tokenizer is None:
         return None
     try:
         size = len(tokenizer)
     except Exception:
-        size = _optional_int_attr(tokenizer, "vocab_size") or 0
+        try:
+            size = int(tokenizer.vocab_size or 0)
+        except Exception:
+            size = 0
     return size - 1 if size > 0 else None
 
 
-def _hf_tokenizer(tokenizer: Any) -> Any:
-    return getattr(tokenizer, "tokenizer", tokenizer)
+def _hf_tokenizer(tokenizer: BaseTokenizer | None) -> _TextEncoder | None:
+    if tokenizer is None:
+        return None
+    return tokenizer.get_real_tokenizer()
 
 
-def _decode_env_tag(generate_env_config: Any, attr: str) -> str:
-    """Read ``attr`` from generate_env_config and unescape literal ``\\n`` etc.
+class _BackendVisitor(Protocol):
+    async def enqueue(self, input: GenerateInput) -> AsyncIterator[GenerateOutputs]:
+        ...
+
+
+def _decode_env_tag(value: str) -> str:
+    """Unescape literal ``\\n`` etc. from a configured think tag.
 
     No literal default here — ``GenerateEnvConfig`` is the single source of truth
-    for tag defaults. Missing attribute or empty value returns "".
+    for tag defaults. Empty value returns "".
     """
-    value = getattr(generate_env_config, attr, "") or ""
-    return str(value).encode("utf-8").decode("unicode_escape")
+    return (value or "").encode("utf-8").decode("unicode_escape")
 
 
-def _encode_tag(tokenizer: Any, text: str) -> list[int]:
+def _encode_tag(tokenizer: BaseTokenizer | None, text: str) -> list[int]:
     hf_tok = _hf_tokenizer(tokenizer)
     if hf_tok is None or not text:
         return []
     return list(hf_tok.encode(text, add_special_tokens=False))
 
 
-def _is_deepseek_v4(model_type: Optional[str]) -> bool:
-    return str(model_type or "").replace("-", "_").lower() == "deepseek_v4"
+def _normalized_model_type(model_type: Optional[str]) -> str:
+    return str(model_type or "").replace("-", "_").lower()
+
+
+def _uses_dash_sc_empty_think_phase2(model_type: Optional[str]) -> bool:
+    return _normalized_model_type(model_type) in _EMPTY_THINK_PHASE2_MODEL_TYPES
 
 
 def _matched_echo_prefix_ids(
@@ -197,11 +239,11 @@ def _matched_echo_prefix_ids(
     prefix_ids = list(echo_prefix_ids) if echo_prefix_ids else []
     if not prefix_ids:
         return []
-    n = len(prefix_ids)
-    if len(input_ids_list) >= n and list(input_ids_list[-n:]) == prefix_ids:
+    if input_ids_list[-len(prefix_ids) :] == prefix_ids:
         return prefix_ids
-    if n > 1 and input_ids_list and input_ids_list[-1] == prefix_ids[0]:
-        return [prefix_ids[0]]
+    # Some tokenizers collapse the think-BOS prefix to its first token.
+    if len(prefix_ids) > 1 and input_ids_list[-1:] == prefix_ids[:1]:
+        return prefix_ids[:1]
     return []
 
 
@@ -224,10 +266,10 @@ class _ThinkRuntime:
       ``terminate_token_id`` token id that signals "stop thinking immediately" mid-
                              stream (DSV4: 1). ``None`` disables the token-terminate
                              branch (the regular ``</think>`` path keeps working).
-      ``phase2_enabled``     ``is_dsv4 and bool(empty_tokens)``. ``terminate_token_id``
-                             is intentionally *not* part of this gate — even with the
-                             token-terminate branch off, dsv4 still needs the
-                             phase-2-on-close machinery.
+      ``phase2_enabled``     model type is in ``_EMPTY_THINK_PHASE2_MODEL_TYPES``
+                             and ``empty_tokens`` is available. ``terminate_token_id``
+                             is a separate request-path gate for actually entering
+                             phase-2.
       ``eos_token_id``       tokenizer.eos_token_id; written to dashllm
                              ``stop_token_id`` response param
       ``max_token_id``       ``len(tokenizer) - 1``; written to dashllm
@@ -245,8 +287,8 @@ class _ThinkRuntime:
 
 
 def build_think_runtime(
-    tokenizer: Any,
-    generate_env_config: Any,
+    tokenizer: BaseTokenizer | None,
+    generate_env_config: GenerateEnvConfig | None,
     model_type: Optional[str],
     *,
     terminate_token_id: Optional[int] = _DEFAULT_TERMINATE_TOKEN_ID,
@@ -269,7 +311,7 @@ def build_think_runtime(
     eos_tid = (
         eos_token_id
         if eos_token_id is not None
-        else _optional_int_attr(tokenizer, "eos_token_id")
+        else _tokenizer_eos_token_id(tokenizer)
     )
     max_tid = (
         max_token_id if max_token_id is not None else _derive_max_token_id(tokenizer)
@@ -285,15 +327,17 @@ def build_think_runtime(
             eos_token_id=eos_tid,
             max_token_id=max_tid,
         )
-    think_start_tag = _decode_env_tag(generate_env_config, "think_start_tag")
-    think_end_tag = _decode_env_tag(generate_env_config, "think_end_tag")
+    think_start_tag = _decode_env_tag(generate_env_config.think_start_tag)
+    think_end_tag = _decode_env_tag(generate_env_config.think_end_tag)
     bos_tokens = tuple(_encode_tag(tokenizer, think_start_tag))
     eos_tokens = tuple(_encode_tag(tokenizer, think_end_tag))
     empty_tokens = tuple(
         _encode_tag(tokenizer, think_start_tag + _EMPTY_THINK_BODY + think_end_tag)
     )
     close_token_id = int(eos_tokens[0]) if eos_tokens else None
-    phase2_enabled = _is_deepseek_v4(model_type) and bool(empty_tokens)
+    phase2_enabled = _uses_dash_sc_empty_think_phase2(model_type) and bool(
+        empty_tokens
+    )
     return _ThinkRuntime(
         bos_tokens=bos_tokens,
         eos_tokens=eos_tokens,
@@ -306,7 +350,7 @@ def build_think_runtime(
     )
 
 
-def _phase2_input_ids_for_deepseek_v4(
+def _build_empty_think_phase2_input_ids(
     input_ids_list: list[int],
     matched_bos_ids: list[int],
     empty_think_tokens: list[int],
@@ -363,15 +407,13 @@ def _make_generate_input(
     *,
     request_id: int,
     input_ids_list: list[int],
-    generate_config: Any,
-    invocation_metadata: Optional[Any],
+    generate_config: GenerateConfig,
+    invocation_metadata: Optional[GrpcMetadata],
     request_headers: Optional[dict[str, str]] = None,
 ) -> GenerateInput:
     headers = dict(request_headers or {})
     headers.update(_headers_from_invocation_metadata(invocation_metadata))
-    trace_id = str(
-        getattr(generate_config, "trace_id", "") or extract_trace_id(headers) or ""
-    )
+    trace_id = str(generate_config.trace_id or extract_trace_id(headers) or "")
     return GenerateInput(
         request_id=request_id,
         token_ids=torch.tensor(input_ids_list, dtype=torch.int),
@@ -386,8 +428,11 @@ def _make_generate_input(
     )
 
 
-async def _close_async_stream_if_possible(stream: Any, tag: str) -> None:
-    close = getattr(stream, "aclose", None)
+async def _close_async_stream_if_possible(stream: object, tag: str) -> None:
+    try:
+        close = stream.aclose
+    except AttributeError:
+        return
     if not callable(close):
         return
     try:
@@ -422,10 +467,10 @@ def _clone_generate_config(generate_config: GenerateConfig) -> GenerateConfig:
     return cloned_config
 
 
-def _apply_request_overrides(
-    generate_config: Any,
+def _apply_dash_sc_controls_to_generate_config(
+    generate_config: GenerateConfig,
     sampling: SamplingParams,
-    other: OtherParams,
+    request_controls: DashScRequestControls,
     runtime: _ThinkRuntime,
 ) -> None:
     """Apply dash-sc request-level controls after env defaults.
@@ -436,42 +481,43 @@ def _apply_request_overrides(
     """
     request_max_think = sampling.max_new_think_tokens
     if request_max_think is None:
-        request_max_think = other.max_new_think_tokens
+        request_max_think = request_controls.max_new_think_tokens
     if request_max_think is not None:
         max_think = int(request_max_think)
-        generate_config.max_thinking_tokens = _INT32_MAX if max_think < 0 else max_think
+        generate_config.max_thinking_tokens = (
+            _INT32_MAX if max_think < 0 else max_think
+        )
     # Only the selected budget disables thinking; ``max_think_length`` may
     # intentionally override a zero ``max_new_think_tokens`` alias.
     disable_by_budget = request_max_think == 0
     # DashLLM/sglang-compatible Dash requests stay in chat mode unless the
     # caller explicitly asks for thinking or a request-scoped think budget.
-    disable_by_default = other.enable_thinking is None and request_max_think is None
-    if other.enable_thinking is False or disable_by_budget or disable_by_default:
+    disable_by_default = (
+        request_controls.enable_thinking is None and request_max_think is None
+    )
+    if (
+        request_controls.enable_thinking is False
+        or disable_by_budget
+        or disable_by_default
+    ):
         generate_config.in_think_mode = False
         generate_config.max_thinking_tokens = 0
-        if hasattr(generate_config, "thinking"):
-            generate_config.thinking = False
-    elif (other.enable_thinking is True or request_max_think is not None) and (
-        getattr(generate_config, "end_think_token_ids", None) or runtime.eos_tokens
-    ):
+    elif (
+        request_controls.enable_thinking is True or request_max_think is not None
+    ) and (generate_config.end_think_token_ids or runtime.eos_tokens):
         generate_config.in_think_mode = True
-        if not getattr(generate_config, "end_think_token_ids", None):
+        if not generate_config.end_think_token_ids:
             generate_config.end_think_token_ids = list(runtime.eos_tokens)
-        if hasattr(generate_config, "thinking"):
-            generate_config.thinking = True
-    if other.timeout_ms is not None:
-        # Subtract a margin so the engine times out BEFORE the upstream gateway
-        # sends RST_STREAM. This ensures the timeout surfaces as a normal
-        # finish_reason=STOP_TIMEOUT response (200) rather than gRPC CANCELLED (5xx).
-        margin_ms = max(2000, min(5000, int(other.timeout_ms * 0.15)))
-        engine_timeout_ms = max(5000, int(other.timeout_ms) - margin_ms)
-        generate_config.timeout_ms = engine_timeout_ms
-        generate_config.ttft_timeout_ms = engine_timeout_ms
-    if other.traffic_reject_priority is not None:
-        generate_config.traffic_reject_priority = int(other.traffic_reject_priority)
-    if other.reasoning_effort is not None:
-        kwargs = dict(getattr(generate_config, "chat_template_kwargs", None) or {})
-        kwargs["reasoning_effort"] = other.reasoning_effort
+    if request_controls.timeout_ms is not None:
+        generate_config.timeout_ms = int(request_controls.timeout_ms)
+        generate_config.ttft_timeout_ms = int(request_controls.timeout_ms)
+    if request_controls.traffic_reject_priority is not None:
+        generate_config.traffic_reject_priority = int(
+            request_controls.traffic_reject_priority
+        )
+    if request_controls.reasoning_effort is not None:
+        kwargs = dict(generate_config.chat_template_kwargs or {})
+        kwargs["reasoning_effort"] = request_controls.reasoning_effort
         generate_config.chat_template_kwargs = kwargs
 
 
@@ -481,21 +527,21 @@ def _apply_request_overrides(
 
 
 async def iter_real_model_stream_infer(
-    request,
+    request: predict_v2_pb2.ModelInferRequest,
     input_ids_list: list[int],
     sampling: SamplingParams,
-    other: OtherParams,
-    backend_visitor: Any,
+    request_controls: DashScRequestControls,
+    backend_visitor: _BackendVisitor,
     *,
     rtp_llm_request_id: int,
     echo_prefix_ids: Optional[list[int]] = None,
     extra_stop_word_ids: Optional[list[list[int]]] = None,
-    invocation_metadata: Optional[Any] = None,
-    tokenizer: Any = None,
-    generate_env_config: Any = None,
+    invocation_metadata: Optional[GrpcMetadata] = None,
+    tokenizer: BaseTokenizer | None = None,
+    generate_env_config: GenerateEnvConfig | None = None,
     think_runtime: Optional[_ThinkRuntime] = None,
     phase2_request_id_factory: Optional[Callable[[], int]] = None,
-    access_agg: Any = None,
+    access_agg: GrpcAccessRecord | None = None,
     yield_access_stats: bool = False,
 ) -> AsyncIterator[predict_v2_pb2.ModelStreamInferResponse]:
     """Run enqueue on ``backend_visitor`` and yield one proto per chunk as the backend streams.
@@ -540,15 +586,12 @@ async def iter_real_model_stream_infer(
     should_echo = bool(matched_echo_ids)
     echoed = False
     try:
-        generate_config = sampling.to_generate_config(other=other)
+        generate_config = sampling.to_generate_config(request_controls=request_controls)
         generate_config.trace_id = trace_str
         if generate_env_config is not None:
             try:
                 hf_tok = _hf_tokenizer(tokenizer)
-                if (
-                    hf_tok is None
-                    and getattr(generate_env_config, "think_end_token_id", -1) == -1
-                ):
+                if hf_tok is None and generate_env_config.think_end_token_id == -1:
                     logging.warning(
                         "[DashScGrpc] [%s] skip add_thinking_params: tokenizer missing",
                         tag,
@@ -560,13 +603,13 @@ async def iter_real_model_stream_infer(
                     "[DashScGrpc] [%s] add_thinking_params failed: %s", tag, e
                 )
         begin_think_tokens = list(runtime.bos_tokens or tuple(echo_prefix_ids or ()))
-        if begin_think_tokens and hasattr(generate_config, "begin_think_token_ids"):
+        if begin_think_tokens:
             generate_config.begin_think_token_ids = begin_think_tokens
-        if runtime.eos_tokens and not getattr(
-            generate_config, "end_think_token_ids", None
-        ):
+        if runtime.eos_tokens and not generate_config.end_think_token_ids:
             generate_config.end_think_token_ids = list(runtime.eos_tokens)
-        _apply_request_overrides(generate_config, sampling, other, runtime)
+        _apply_dash_sc_controls_to_generate_config(
+            generate_config, sampling, request_controls, runtime
+        )
         if extra_stop_word_ids:
             existing = generate_config.stop_words_list
             if existing:
@@ -588,16 +631,14 @@ async def iter_real_model_stream_infer(
         max_id = runtime.max_token_id
         term_id = runtime.terminate_token_id
         think_close_token_id = runtime.close_token_id
-        max_new_tokens = int(getattr(generate_config, "max_new_tokens", 0) or 0)
+        max_new_tokens = int(generate_config.max_new_tokens or 0)
         matched_think_bos_ids = matched_echo_ids or _matched_echo_prefix_ids(
             input_ids_list, list(runtime.bos_tokens)
         )
         # ``runtime.phase2_enabled`` is the init-time gate (model_type + empty_tokens
         # availability). ``in_think_mode`` is per-request — ``add_thinking_params``
         # sets it from generate_config and a request can override it.
-        phase2_enabled = runtime.phase2_enabled and bool(
-            getattr(generate_config, "in_think_mode", False)
-        )
+        phase2_enabled = runtime.phase2_enabled and bool(generate_config.in_think_mode)
         cumulative_sent_ids: list[int] = []
         generate_think_token_num: Optional[int] = None
         generate_input = _make_generate_input(
@@ -605,9 +646,9 @@ async def iter_real_model_stream_infer(
             input_ids_list=input_ids_list,
             generate_config=generate_config,
             invocation_metadata=invocation_metadata,
-            request_headers=other.request_headers,
+            request_headers=request_controls.request_headers,
         )
-        is_streaming = bool(getattr(generate_config, "is_streaming", True))
+        is_streaming = bool(generate_config.is_streaming)
         logging.debug("[DashScGrpc] [%s] generate_input: %s", tag, generate_input)
         request_shape = list(request.inputs[0].shape) if request.inputs else None
         chunk_idx = 0
@@ -628,7 +669,7 @@ async def iter_real_model_stream_infer(
                 raise ValueError("empty generate_outputs in backend chunk")
             out_py = go.generate_outputs[0]
             generated_ids = _token_ids_list_from_generate_output(out_py)
-            aux_info = getattr(out_py, "aux_info", None)
+            aux_info = out_py.aux_info
             prompt_token_num = (
                 int(aux_info.input_len) if aux_info is not None else len(input_ids_list)
             )
@@ -645,7 +686,7 @@ async def iter_real_model_stream_infer(
                     go=go,
                     request_log_tag=tag,
                     request_input_ids=input_ids_list,
-                    return_input_ids=other.return_input_ids,
+                    return_input_ids=request_controls.return_input_ids,
                     is_streaming=is_streaming,
                     generate_config=generate_config,
                     eos_token_id=eos_id,
@@ -725,7 +766,7 @@ async def iter_real_model_stream_infer(
                         go=go,
                         request_log_tag=tag,
                         request_input_ids=input_ids_list,
-                        return_input_ids=other.return_input_ids,
+                        return_input_ids=request_controls.return_input_ids,
                         is_streaming=is_streaming,
                         generate_config=generate_config,
                         eos_token_id=eos_id,
@@ -757,7 +798,7 @@ async def iter_real_model_stream_infer(
                         go=go,
                         request_log_tag=tag,
                         request_input_ids=input_ids_list,
-                        return_input_ids=other.return_input_ids,
+                        return_input_ids=request_controls.return_input_ids,
                         is_streaming=is_streaming,
                         generate_config=generate_config,
                         eos_token_id=eos_id,
@@ -803,7 +844,7 @@ async def iter_real_model_stream_infer(
                 go=go,
                 request_log_tag=tag,
                 request_input_ids=input_ids_list,
-                return_input_ids=other.return_input_ids,
+                return_input_ids=request_controls.return_input_ids,
                 is_streaming=is_streaming,
                 generate_config=generate_config,
                 eos_token_id=eos_id,
@@ -889,8 +930,6 @@ async def iter_real_model_stream_infer(
         if phase2_needed:
             phase2_config = _clone_generate_config(generate_config)
             phase2_config.in_think_mode = False
-            if hasattr(phase2_config, "thinking"):
-                phase2_config.thinking = False
             if sampling.max_new_tokens_from_completion_alias:
                 phase2_config.max_new_tokens = (
                     _phase2_max_new_tokens_for_completion_alias(
@@ -902,7 +941,7 @@ async def iter_real_model_stream_infer(
             # carried by request_log_tag (phase=2) and by the ``-2`` suffix on
             # the response infer.id (client-facing).
             phase2_config.trace_id = trace_str
-            phase2_input_ids = _phase2_input_ids_for_deepseek_v4(
+            phase2_input_ids = _build_empty_think_phase2_input_ids(
                 input_ids_list, matched_think_bos_ids, list(runtime.empty_tokens)
             )
             phase2_request_id = (
@@ -918,7 +957,7 @@ async def iter_real_model_stream_infer(
                 input_ids_list=phase2_input_ids,
                 generate_config=phase2_config,
                 invocation_metadata=invocation_metadata,
-                request_headers=other.request_headers,
+                request_headers=request_controls.request_headers,
             )
             logging.debug(
                 "[DashScGrpc] [%s] phase-2 generate_input: %s",
@@ -929,14 +968,15 @@ async def iter_real_model_stream_infer(
             phase2_cumulative_sent_ids: list[int] = []
 
             def _build_phase2_response(
-                resp_go: Any,
-            ) -> predict_v2_pb2.ModelStreamInferResponse:
+                resp_go: GenerateOutputs,
+            ) -> tuple[
+                predict_v2_pb2.ModelStreamInferResponse,
+                tuple[int, bool, int, int, int, list[int]],
+            ]:
                 resp_out = resp_go.generate_outputs[0]
                 resp_ids = _token_ids_list_from_generate_output(resp_out)
                 phase2_cumulative_sent_ids.extend(resp_ids)
-                phase2_max_new_tokens = int(
-                    getattr(phase2_config, "max_new_tokens", 0) or 0
-                )
+                phase2_max_new_tokens = int(phase2_config.max_new_tokens or 0)
                 finish_reason_override = None
                 if (
                     resp_out.finished
@@ -954,7 +994,7 @@ async def iter_real_model_stream_infer(
                         else LLMFinishReason.STREAMING
                     )
                 )
-                aux_info = getattr(resp_out, "aux_info", None)
+                aux_info = resp_out.aux_info
                 prompt_token_num = (
                     int(aux_info.input_len)
                     if aux_info is not None
@@ -976,7 +1016,7 @@ async def iter_real_model_stream_infer(
                     go=resp_go,
                     request_log_tag=phase2_tag,
                     request_input_ids=phase2_input_ids,
-                    return_input_ids=other.return_input_ids,
+                    return_input_ids=request_controls.return_input_ids,
                     is_streaming=is_streaming,
                     generate_config=phase2_config,
                     eos_token_id=eos_id,
@@ -1017,7 +1057,7 @@ async def iter_real_model_stream_infer(
             # chunks) → default to Case A so the next chunk's content streams
             # cleanly. Pre-close chunks are buffered in ``phase2_pending``
             # until classification completes.
-            phase2_pending: list[Any] = []
+            phase2_pending: list[GenerateOutputs] = []
             phase2_seen_close = False
 
             def _flush_phase2_pending() -> (
@@ -1134,7 +1174,7 @@ async def iter_real_model_stream_infer(
 
 
 class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
-    """ModelStreamInfer: fake mode (mock) or real mode (``backend_visitor.enqueue``).
+    """ModelStreamInfer bridge to ``backend_visitor.enqueue``.
 
     ``ip`` / ``port`` / ``server_id`` derive the snowflake-style ``GenerateInput.request_id``
     via :func:`generate_request_id` — same scheme as the HTTP path in ``FrontendServer``, so
@@ -1145,19 +1185,21 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
 
     def __init__(
         self,
-        backend_visitor=None,
+        backend_visitor: _BackendVisitor,
         *,
         ip: str = "",
         port: int = 0,
         server_id: str = "",
         echo_prefix_ids: Optional[list[int]] = None,
         extra_stop_word_ids: Optional[list[list[int]]] = None,
-        tokenizer: Any = None,
-        generate_env_config: Any = None,
+        tokenizer: BaseTokenizer | None = None,
+        generate_env_config: GenerateEnvConfig | None = None,
         think_runtime: Optional[_ThinkRuntime] = None,
         rank_id: Optional[int] = None,
         repetition_monitor_config: Optional[RequestRepetitionMonitorConfig] = None,
     ):
+        if backend_visitor is None:
+            raise ValueError("backend_visitor is required for DashScInferenceServicer")
         self._backend_visitor = backend_visitor
         self._ip = ip
         self._port = port
@@ -1177,13 +1219,13 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             think_runtime if think_runtime is not None else _ThinkRuntime()
         )
         self._seq_counter = AtomicCounter()
-        # Access-log identity, injected at construction (``DashScApp`` /
-        # ``__main__`` own the rank/server identity). The two ids are the only
-        # state the log + metric projections need; ``server_id`` arrives as the
-        # snowflake string, coerced to ``Optional[int]`` once here. The kmonitor
-        # tag dict is memoized per (rank, server) in ``grpc_metrics``, so the
-        # per-chunk hot path never re-stringifies them. The repetition monitor
-        # config lives only on this inference path, not the transparent proxy.
+        # Access-log identity is injected at construction. The two ids are the
+        # only state the log + metric projections need; ``server_id`` arrives as
+        # the snowflake string, coerced to ``Optional[int]`` once here. The
+        # kmonitor tag dict is memoized per (rank, server) in ``grpc_metrics``,
+        # so the per-chunk hot path never re-stringifies them. The repetition
+        # monitor config lives only on this inference path, not the transparent
+        # proxy.
         self._rank_id = rank_id
         self._server_id = to_optional_int(server_id)
         self._rep_cfg = repetition_monitor_config or RequestRepetitionMonitorConfig()
@@ -1285,7 +1327,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     request.model_name,
                 )
                 try:
-                    input_ids_list, sampling, other = parse_dash_sc_grpc_request(
+                    input_ids_list, sampling, request_controls = parse_dash_sc_grpc_request(
                         request
                     )
                 except DashScParameterError as e:
@@ -1338,14 +1380,14 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                         request,
                         input_ids=input_ids_list,
                         sampling=sampling,
-                        other=other,
+                        request_controls=request_controls,
                     )
                     record.mark_request_done("eof")
                     first_request = False
                 if (
                     not partial_metadata_sent
-                    and other is not None
-                    and other.timeout_ms is not None
+                    and request_controls is not None
+                    and request_controls.timeout_ms is not None
                 ):
                     await _send_partial_response_metadata(context)
                     partial_metadata_sent = True
@@ -1353,9 +1395,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 if sampling is not None and sampling.max_new_tokens <= 0:
                     param_name = (
                         "max_completion_tokens"
-                        if getattr(
-                            sampling, "max_new_tokens_from_completion_alias", False
-                        )
+                        if sampling.max_new_tokens_from_completion_alias
                         else "max_new_tokens"
                     )
                     error_spec = DASH_ERROR_BAD_REQUEST
@@ -1375,59 +1415,43 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     yield resp
                     return
 
-                if self._backend_visitor is None:
-                    fake_generated_ids = [x + 100 for x in input_ids_list]
-                    for resp in iter_fake_model_stream_infer(
-                        request, input_ids_list, sampling.top_k
-                    ):
-                        record.record_generated_ids(fake_generated_ids)
-                        self._record_and_report_chunk(
-                            record,
-                            resp,
-                            delta_len=len(fake_generated_ids),
-                            finished=True,
-                            finish_reason=LLMFinishReason.STOP,
-                        )
-                        yield resp
-                    return
-                else:
-                    async for resp, stats in iter_real_model_stream_infer(
-                        request,
-                        input_ids_list,
-                        sampling,
-                        other,
-                        self._backend_visitor,
-                        rtp_llm_request_id=self._next_rtp_llm_request_id(),
-                        echo_prefix_ids=self._echo_prefix_ids,
-                        extra_stop_word_ids=self._extra_stop_word_ids,
-                        invocation_metadata=invocation_metadata,
-                        tokenizer=self._tokenizer,
-                        generate_env_config=self._generate_env_config,
-                        think_runtime=self._think_runtime,
-                        phase2_request_id_factory=self._next_rtp_llm_request_id,
-                        access_agg=record,
-                        yield_access_stats=True,
-                    ):
-                        (
-                            delta_len,
-                            finished,
-                            finish_reason,
-                            prompt_token_num,
-                            prompt_cached_token_num,
-                            generated_ids_for_log,
-                        ) = stats
-                        record.record_generated_ids(generated_ids_for_log)
-                        self._record_and_report_chunk(
-                            record,
-                            resp,
-                            delta_len=delta_len,
-                            finished=finished,
-                            finish_reason=finish_reason,
-                            prompt_token_num=prompt_token_num,
-                            prompt_cached_token_num=prompt_cached_token_num,
-                        )
-                        yield resp
-                    return
+                async for resp, stats in iter_real_model_stream_infer(
+                    request,
+                    input_ids_list,
+                    sampling,
+                    request_controls,
+                    self._backend_visitor,
+                    rtp_llm_request_id=self._next_rtp_llm_request_id(),
+                    echo_prefix_ids=self._echo_prefix_ids,
+                    extra_stop_word_ids=self._extra_stop_word_ids,
+                    invocation_metadata=invocation_metadata,
+                    tokenizer=self._tokenizer,
+                    generate_env_config=self._generate_env_config,
+                    think_runtime=self._think_runtime,
+                    phase2_request_id_factory=self._next_rtp_llm_request_id,
+                    access_agg=record,
+                    yield_access_stats=True,
+                ):
+                    (
+                        delta_len,
+                        finished,
+                        finish_reason,
+                        prompt_token_num,
+                        prompt_cached_token_num,
+                        generated_ids_for_log,
+                    ) = stats
+                    record.record_generated_ids(generated_ids_for_log)
+                    self._record_and_report_chunk(
+                        record,
+                        resp,
+                        delta_len=delta_len,
+                        finished=finished,
+                        finish_reason=finish_reason,
+                        prompt_token_num=prompt_token_num,
+                        prompt_cached_token_num=prompt_cached_token_num,
+                    )
+                    yield resp
+                return
             if first_request:
                 record.mark_request_done("eof")
         except BaseException as e:

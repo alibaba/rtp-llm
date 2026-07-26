@@ -30,7 +30,7 @@ from pathlib import Path
 
 import torch
 
-from rtp_llm.dash_sc.codec import OtherParams, SamplingParams
+from rtp_llm.dash_sc.codec import DashScRequestControls, SamplingParams
 from rtp_llm.dash_sc.inference.servicer import (
     build_think_runtime,
     iter_real_model_stream_infer,
@@ -311,7 +311,7 @@ class DeepSeekV4MrcrSmokeTest(unittest.IsolatedAsyncioTestCase):
                     req,
                     case["input_ids_tail"],
                     SamplingParams(max_new_tokens=384000, top_p=1.0, temperature=1.0),
-                    OtherParams(enable_thinking=True),
+                    DashScRequestControls(enable_thinking=True),
                     visitor,
                     rtp_llm_request_id=i,
                     tokenizer=tok,
@@ -338,7 +338,7 @@ class DeepSeekV4MrcrSmokeTest(unittest.IsolatedAsyncioTestCase):
                 "name": "enable_thinking_false",
                 "input_ids": [1001, 1002] + tok.encode("<think>\n"),
                 "sampling": SamplingParams(max_new_tokens=16),
-                "other": OtherParams(enable_thinking=False),
+                "request_controls": DashScRequestControls(enable_thinking=False),
                 "expected_in_think_mode": False,
                 "expected_max_thinking_tokens": 0,
             },
@@ -349,7 +349,7 @@ class DeepSeekV4MrcrSmokeTest(unittest.IsolatedAsyncioTestCase):
                     max_new_tokens=16,
                     max_new_think_tokens=0,
                 ),
-                "other": OtherParams(),
+                "request_controls": DashScRequestControls(),
                 "expected_in_think_mode": False,
                 "expected_max_thinking_tokens": 0,
             },
@@ -357,7 +357,7 @@ class DeepSeekV4MrcrSmokeTest(unittest.IsolatedAsyncioTestCase):
                 "name": "input_ends_with_end_think",
                 "input_ids": [3001, 3002] + tok.encode("</think>"),
                 "sampling": SamplingParams(max_new_tokens=16),
-                "other": OtherParams(enable_thinking=False),
+                "request_controls": DashScRequestControls(enable_thinking=False),
                 "expected_in_think_mode": False,
                 "expected_max_thinking_tokens": 0,
             },
@@ -368,7 +368,7 @@ class DeepSeekV4MrcrSmokeTest(unittest.IsolatedAsyncioTestCase):
                     max_new_tokens=16,
                     max_new_think_tokens=8,
                 ),
-                "other": OtherParams(enable_thinking=True),
+                "request_controls": DashScRequestControls(enable_thinking=True),
                 "expected_in_think_mode": True,
                 "expected_max_thinking_tokens": 8,
             },
@@ -394,7 +394,7 @@ class DeepSeekV4MrcrSmokeTest(unittest.IsolatedAsyncioTestCase):
                     req,
                     input_ids,
                     case["sampling"],
-                    case["other"],
+                    case["request_controls"],
                     visitor,
                     rtp_llm_request_id=i + 1,
                     tokenizer=tok,
@@ -473,7 +473,7 @@ class DeepSeekV4MrcrSmokeTest(unittest.IsolatedAsyncioTestCase):
                     req,
                     input_ids,
                     SamplingParams(max_new_tokens=384000, top_p=1.0, temperature=1.0),
-                    OtherParams(enable_thinking=True),
+                    DashScRequestControls(enable_thinking=True),
                     visitor,
                     rtp_llm_request_id=1,
                     echo_prefix_ids=echo_prefix_ids,

@@ -2,8 +2,8 @@
 
 Covers:
 - ``iter_real_model_stream_infer``: success, empty-stream fallback, exception propagation.
-- ``DashScInferenceServicer.ModelStreamInfer``: fake mode, real mode,
-  missing input_ids, request_id snowflake scheme alignment with HTTP
+- ``DashScInferenceServicer.ModelStreamInfer``: real mode, missing input_ids,
+  request_id snowflake scheme alignment with HTTP
   ``generate_request_id``.
 """
 
@@ -32,7 +32,7 @@ from rtp_llm.dash_sc.codec import (
     DASH_ERROR_UNSUPPORTED,
     DashScParameterError,
     LLMFinishReason,
-    OtherParams,
+    DashScRequestControls,
     SamplingParams,
 )
 from rtp_llm.dash_sc.inference.servicer import (
@@ -162,6 +162,12 @@ class _FakeTokenizer:
         self.encode_calls.append((text, add_special_tokens))
         return list(self._mapping[text])
 
+    def get_real_tokenizer(self):
+        return self
+
+    def __len__(self) -> int:
+        return int(self.vocab_size)
+
 
 class _GenerateEnvCfg:
     think_mode = 1
@@ -230,6 +236,21 @@ def _assert_parameter_error_response(
     testcase.assertEqual(_gen_ids(resp), [])
 
 
+class BuildThinkRuntimeTest(unittest.TestCase):
+    def test_derives_eos_token_id_from_tokenizer(self) -> None:
+        runtime = build_think_runtime(_FakeTokenizer({}), None, None)
+
+        self.assertEqual(runtime.eos_token_id, 2)
+
+    def test_preserves_zero_eos_token_id(self) -> None:
+        tokenizer = _FakeTokenizer({})
+        tokenizer.eos_token_id = 0
+
+        runtime = build_think_runtime(tokenizer, None, None)
+
+        self.assertEqual(runtime.eos_token_id, 0)
+
+
 class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
     def _minimal_request(self) -> predict_v2_pb2.ModelInferRequest:
         req = predict_v2_pb2.ModelInferRequest()
@@ -254,7 +275,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [1, 2],
                 SamplingParams(),
-                OtherParams(),
+                DashScRequestControls(),
                 visitor,
                 rtp_llm_request_id=1,
             )
@@ -287,7 +308,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [1, 2],
                 SamplingParams(),
-                OtherParams(reasoning_effort="xhigh"),
+                DashScRequestControls(reasoning_effort="xhigh"),
                 visitor,
                 rtp_llm_request_id=1,
             )
@@ -315,7 +336,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [1, 2],
                 SamplingParams(max_new_tokens=3),
-                OtherParams(),
+                DashScRequestControls(),
                 visitor,
                 rtp_llm_request_id=1,
             )
@@ -334,7 +355,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [1, 2],
                 SamplingParams(),
-                OtherParams(),
+                DashScRequestControls(),
                 visitor,
                 rtp_llm_request_id=1,
             )
@@ -359,7 +380,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [1, 2],
                 SamplingParams(),
-                OtherParams(),
+                DashScRequestControls(),
                 _BoomVisitor(),
                 rtp_llm_request_id=1,
             )
@@ -394,7 +415,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [1, 2],
                 SamplingParams(),
-                OtherParams(),
+                DashScRequestControls(),
                 _BoomVisitor(),
                 rtp_llm_request_id=1,
                 access_agg=access_agg,
@@ -421,7 +442,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [1, 2],
                 SamplingParams(),
-                OtherParams(),
+                DashScRequestControls(),
                 visitor,
                 rtp_llm_request_id=1,
             )
@@ -534,7 +555,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                     req,
                     [1, 2],
                     SamplingParams(max_new_think_tokens=0),
-                    OtherParams(),
+                    DashScRequestControls(),
                     visitor,
                     rtp_llm_request_id=1,
                     tokenizer=tok,
@@ -578,7 +599,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [1, 2],
                 SamplingParams(),
-                OtherParams(),
+                DashScRequestControls(),
                 visitor,
                 rtp_llm_request_id=1,
                 tokenizer=tok,
@@ -653,7 +674,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 SamplingParams(
                     response_format=json.dumps({"type": "json_object"}),
                 ),
-                OtherParams(enable_thinking=True),
+                DashScRequestControls(enable_thinking=True),
                 visitor,
                 rtp_llm_request_id=100,
                 echo_prefix_ids=[128821, 198],
@@ -739,7 +760,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                     max_new_tokens=2,
                     max_new_tokens_from_completion_alias=True,
                 ),
-                OtherParams(max_new_think_tokens=10),
+                DashScRequestControls(max_new_think_tokens=10),
                 visitor,
                 rtp_llm_request_id=100,
                 echo_prefix_ids=[128821, 198],
@@ -796,7 +817,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                     max_new_tokens_from_completion_alias=True,
                     max_total_tokens=105,
                 ),
-                OtherParams(max_new_think_tokens=10),
+                DashScRequestControls(max_new_think_tokens=10),
                 visitor,
                 rtp_llm_request_id=100,
                 tokenizer=tok,
@@ -839,7 +860,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                     max_new_tokens_from_completion_alias=True,
                     max_total_tokens=3,
                 ),
-                OtherParams(max_new_think_tokens=10),
+                DashScRequestControls(max_new_think_tokens=10),
                 visitor,
                 rtp_llm_request_id=100,
                 tokenizer=tok,
@@ -886,7 +907,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [7, 8, 128821],
                 SamplingParams(),
-                OtherParams(enable_thinking=True),
+                DashScRequestControls(enable_thinking=True),
                 visitor,
                 rtp_llm_request_id=100,
                 echo_prefix_ids=[128821, 198],
@@ -927,7 +948,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [7, 8, 128821],
                 SamplingParams(),
-                OtherParams(enable_thinking=False, max_new_think_tokens=0),
+                DashScRequestControls(enable_thinking=False, max_new_think_tokens=0),
                 visitor,
                 rtp_llm_request_id=100,
                 tokenizer=tok,
@@ -989,7 +1010,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [7, 8, 128821],
                 SamplingParams(),
-                OtherParams(enable_thinking=True),
+                DashScRequestControls(enable_thinking=True),
                 visitor,
                 rtp_llm_request_id=100,
                 echo_prefix_ids=[128821, 198],
@@ -1038,7 +1059,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [1, 2],
                 SamplingParams(),
-                OtherParams(),
+                DashScRequestControls(),
                 visitor,
                 rtp_llm_request_id=1,
                 tokenizer=tok,
@@ -1092,7 +1113,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [7, 8, 128821],
                 SamplingParams(),
-                OtherParams(enable_thinking=True),
+                DashScRequestControls(enable_thinking=True),
                 visitor,
                 rtp_llm_request_id=100,
                 echo_prefix_ids=[128821, 198],
@@ -1144,7 +1165,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [7, 8, 128821],
                 SamplingParams(),
-                OtherParams(enable_thinking=True),
+                DashScRequestControls(enable_thinking=True),
                 visitor,
                 rtp_llm_request_id=100,
                 echo_prefix_ids=[128821, 198],
@@ -1197,7 +1218,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [7, 8, 128821],
                 SamplingParams(),
-                OtherParams(enable_thinking=True),
+                DashScRequestControls(enable_thinking=True),
                 visitor,
                 rtp_llm_request_id=100,
                 echo_prefix_ids=[128821, 198],
@@ -1256,7 +1277,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                     req,
                     [7, 8, 128821],
                     SamplingParams(),
-                    OtherParams(enable_thinking=True),
+                    DashScRequestControls(enable_thinking=True),
                     visitor,
                     rtp_llm_request_id=100,
                     echo_prefix_ids=[128821, 198],
@@ -1333,7 +1354,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [7, 8, 128821],
                 SamplingParams(),
-                OtherParams(enable_thinking=True),
+                DashScRequestControls(enable_thinking=True),
                 visitor,
                 rtp_llm_request_id=100,
                 echo_prefix_ids=[128821, 198],
@@ -1395,7 +1416,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [7, 8, 128821],
                 SamplingParams(),
-                OtherParams(enable_thinking=True),
+                DashScRequestControls(enable_thinking=True),
                 visitor,
                 rtp_llm_request_id=100,
                 echo_prefix_ids=[128821, 198],
@@ -1437,7 +1458,7 @@ class IterRealModelStreamInferEchoTest(unittest.IsolatedAsyncioTestCase):
                 self._req(),
                 input_ids,
                 SamplingParams(),
-                OtherParams(),
+                DashScRequestControls(),
                 visitor,
                 rtp_llm_request_id=1,
                 echo_prefix_ids=echo_prefix_ids,
@@ -1517,7 +1538,7 @@ class IterRealModelStreamInferStopWordsTest(unittest.IsolatedAsyncioTestCase):
                 self._req(),
                 [42],
                 SamplingParams(),
-                OtherParams(),
+                DashScRequestControls(),
                 _CaptureVisitor(),
                 rtp_llm_request_id=1,
                 extra_stop_word_ids=extra_stop_word_ids,
@@ -1553,7 +1574,7 @@ class IterRealModelStreamInferStopWordsTest(unittest.IsolatedAsyncioTestCase):
                 self._req(),
                 [42],
                 SamplingParams(stop_words_list=((154827,),)),
-                OtherParams(),
+                DashScRequestControls(),
                 _CaptureVisitor(),
                 rtp_llm_request_id=1,
                 extra_stop_word_ids=[[154827], [154829]],
@@ -1601,19 +1622,17 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         _add_input_tensor(req, "input_ids", "INT32", [1], struct.pack("<i", 42))
         return req
 
-    async def test_fake_mode_returns_incremented_ids(self) -> None:
-        servicer = DashScInferenceServicer(backend_visitor=None)
-        req = self._valid_infer_request()
-        responses = await _drain(
-            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+    def _terminal_visitor(self, token_ids: list[int] | None = None) -> _FakeVisitor:
+        out = GenerateOutput(
+            output_ids=torch.tensor(
+                token_ids if token_ids is not None else [9], dtype=torch.int32
+            ),
+            finished=True,
+            aux_info=AuxInfo(input_len=1, reuse_len=0),
         )
-        self.assertEqual(len(responses), 1)
-        infer = responses[0].infer_response
-        by_name = {
-            infer.outputs[i].name: infer.raw_output_contents[i]
-            for i in range(len(infer.outputs))
-        }
-        self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [142])
+        return _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
 
     async def test_access_log_records_input_and_generated_ids(self) -> None:
         # Frontend struct path: the emitted access line carries the real token
@@ -1684,7 +1703,9 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(phase1[0]["grpc_port"], 8081)
 
     async def test_empty_request_stream_marks_request_done(self) -> None:
-        servicer = DashScInferenceServicer(backend_visitor=None)
+        servicer = DashScInferenceServicer(
+            backend_visitor=_FakeVisitor(_FakeAsyncStream([]))
+        )
         with patch.object(
             logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME), "info"
         ) as info:
@@ -1730,7 +1751,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         # 铁律: log first, metrics second — a kmonitor hiccup in report_frontend_rpc_done
         # must never delay or drop the access line, so the finally block must
         # call emit_access_log strictly before report_frontend_rpc_done.
-        servicer = DashScInferenceServicer(backend_visitor=None)
+        servicer = DashScInferenceServicer(backend_visitor=self._terminal_visitor())
         order = MagicMock()
         with patch(
             "rtp_llm.dash_sc.inference.servicer.emit_access_log",
@@ -1750,7 +1771,9 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         )
 
     async def test_missing_input_ids_error(self) -> None:
-        servicer = DashScInferenceServicer(backend_visitor=None)
+        servicer = DashScInferenceServicer(
+            backend_visitor=_FakeVisitor(_FakeAsyncStream([]))
+        )
         bad = predict_v2_pb2.ModelInferRequest()
         bad.id = "x"
         bad.model_name = "m"
@@ -1788,7 +1811,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
     async def test_timeout_request_sets_dashscope_partial_response_metadata(
         self,
     ) -> None:
-        servicer = DashScInferenceServicer(backend_visitor=None)
+        servicer = DashScInferenceServicer(backend_visitor=self._terminal_visitor())
         req = self._valid_infer_request()
         req.parameters["ds_header_attributes"].string_param = json.dumps(
             {"x-dashscope-inner-timeout": 1}
@@ -2258,8 +2281,8 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertFalse(generate_config.in_think_mode)
         self.assertEqual(generate_config.max_thinking_tokens, 0)
         self.assertEqual(generate_config.end_think_token_ids, [])
-        self.assertEqual(generate_config.timeout_ms, 1_795_000)
-        self.assertEqual(generate_config.ttft_timeout_ms, 1_795_000)
+        self.assertEqual(generate_config.timeout_ms, 1_800_000)
+        self.assertEqual(generate_config.ttft_timeout_ms, 1_800_000)
         self.assertEqual(generate_config.traffic_reject_priority, 10)
         self.assertEqual(
             visitor.last_generate_input.headers,

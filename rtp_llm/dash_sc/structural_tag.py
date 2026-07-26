@@ -7,8 +7,6 @@ The grammar compiler remains responsible for full DSL validity.
 
 from __future__ import annotations
 
-from typing import Any
-
 
 class DashScStructuralTagError(ValueError):
     """Invalid dash-sc structural_tag request payload."""
@@ -19,7 +17,7 @@ def _raise_invalid(path: str, message: str, field_name: str) -> None:
 
 
 def validate_structural_tag_shape(
-    value: Any, field_name: str = "tool_call_structural_tag"
+    value: object, field_name: str = "tool_call_structural_tag"
 ) -> None:
     if not isinstance(value, dict) or not value:
         _raise_invalid("$", "must be a non-empty object", field_name)
@@ -31,8 +29,8 @@ def validate_structural_tag_shape(
 
 
 def adapt_dashscope_tool_call_wrapper_to_tag(
-    value: dict[str, Any],
-) -> dict[str, Any]:
+    value: dict[str, object],
+) -> dict[str, object]:
     fmt = value.get("format")
     if not isinstance(fmt, dict) or fmt.get("type") != "sequence":
         return value
@@ -63,8 +61,8 @@ def adapt_dashscope_tool_call_wrapper_to_tag(
 
 
 def structural_tag_from_response_format(
-    value: dict[str, Any], field_name: str = "response_format"
-) -> dict[str, Any]:
+    value: dict[str, object], field_name: str = "response_format"
+) -> dict[str, object]:
     if value.get("type") != "structural_tag":
         _raise_invalid("$.type", "must be 'structural_tag'", field_name)
     if isinstance(value.get("format"), dict):

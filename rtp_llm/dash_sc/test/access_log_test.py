@@ -16,6 +16,7 @@ transport-agnostic machinery those servicers compose:
 
 from __future__ import annotations
 
+import dataclasses
 import json
 import logging
 import struct
@@ -187,9 +188,7 @@ def _make_record(*, raw_mode: bool = False, **overrides) -> GrpcAccessRecord:
         start_ts=time.time(),
         raw_mode=raw_mode,
     )
-    for key, val in overrides.items():
-        setattr(rec, key, val)
-    return rec
+    return dataclasses.replace(rec, **overrides)
 
 
 # ---------------------------------------------------------------------------

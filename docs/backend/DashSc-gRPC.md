@@ -192,5 +192,5 @@ bazel test //rtp_llm/dash_sc:forward_service_test
 bazel test //rtp_llm/dash_sc:access_log_test
 ```
 
-`codec_test` 覆盖请求解析、`SamplingParams` / `OtherParams` 以及 `build_stream_response_from_generate_outputs`；
+`codec_test` 覆盖请求解析、`SamplingParams` / `DashScRequestControls` 以及 `build_stream_response_from_generate_outputs`；
 `service_test` 覆盖 `iter_real_model_stream_infer`（mock `run_enqueue_sync`）、`DashScGrpcInferenceServicer.ModelStreamInfer`（fake / real 分支与缺 `input_ids` 错误路径）以及 `_iter_enqueue_sync` 的 gRPC 取消 / 异常传播路径。
