@@ -11,7 +11,7 @@ import dataclasses
 import importlib
 import logging
 import time
-from typing import Any, Optional, Sequence
+from typing import Optional, Protocol, Sequence
 
 _LOGGER = logging.getLogger(__name__)
 
@@ -26,10 +26,23 @@ _NATIVE_TRACKER_MODULES = (
 _NATIVE_TRACKER_REQUIRED_API = "check_tool_call_loop"
 
 
+class _NativeRepetitionModule(Protocol):
+    def check_tool_call_loop(
+        self,
+        input_ids: Sequence[int],
+        output_ids: Sequence[int],
+        marker_begin_ids: list[list[int]],
+        marker_end_ids: list[list[int]],
+        repeat_threshold: int,
+        max_span_tokens: int,
+    ) -> object:
+        ...
+
+
 @dataclasses.dataclass(frozen=True)
 class NativeModuleStatus:
     available: bool
-    module: Optional[Any] = None
+    module: Optional[_NativeRepetitionModule] = None
     module_name: Optional[str] = None
     error: Optional[str] = None
 
@@ -40,20 +53,23 @@ _NATIVE_STATUS: Optional[NativeModuleStatus] = None
 
 def _resolve_native_status() -> NativeModuleStatus:
     errors: list[str] = []
-    module = None
+    module: _NativeRepetitionModule | None = None
     module_name = None
+    raw_module = None
     for name in _NATIVE_TRACKER_MODULES:
         try:
-            module = importlib.import_module(name)
+            raw_module = importlib.import_module(name)
             module_name = name
             break
         except Exception as e:
             errors.append(f"{name}: {type(e).__name__}: {e}")
-    if module is not None and not hasattr(module, _NATIVE_TRACKER_REQUIRED_API):
+    if raw_module is not None and not hasattr(raw_module, _NATIVE_TRACKER_REQUIRED_API):
         errors.append(f"{module_name}: missing API {_NATIVE_TRACKER_REQUIRED_API}")
-        module = None
+        raw_module = None
         module_name = None
-    if module is None:
+    if raw_module is not None:
+        module = raw_module
+    if raw_module is None:
         error = "; ".join(errors) or "module not found"
         _LOGGER.warning("native repetition monitor unavailable: %s", error)
         return NativeModuleStatus(available=False, error=error)
@@ -270,7 +286,7 @@ class RequestRepetitionMonitor:
                 return False, f"tool_call: {self._tool_error}"
         return True, None
 
-    def record_fields(self) -> dict[str, Any]:
+    def record_fields(self) -> dict[str, object]:
         available, unavailable_reason = self.monitor_available()
         # Monitor didn't run (raw mode / native missing / check errored): only
         # report why. Emitting all-clear detection results would be a lie.

@@ -5,7 +5,7 @@ from __future__ import annotations
 import logging
 import random
 from dataclasses import dataclass
-from typing import Any, Callable, Optional
+from typing import Callable, Optional, Protocol
 
 from rtp_llm.config.py_config_modules import DASH_SC_GRPC_SERVER_PORT_OFFSET
 from rtp_llm.dash_sc.proxy.service_route_config import (
@@ -15,7 +15,12 @@ from rtp_llm.dash_sc.proxy.service_route_config import (
     parse_ip_port_list,
 )
 
-VipHostResolver = Callable[[str], Optional[Any]]
+class VipHost(Protocol):
+    ip: str
+    port: int
+
+
+VipHostResolver = Callable[[str], Optional[VipHost]]
 
 
 @dataclass(frozen=True)
@@ -25,7 +30,7 @@ class BackendAddr:
     grpc_port: int
 
     @classmethod
-    def from_host(cls, host: Any) -> "BackendAddr":
+    def from_host(cls, host: VipHost) -> "BackendAddr":
         return cls.from_http_port(str(host.ip), host.port)
 
     @classmethod
@@ -36,7 +41,7 @@ class BackendAddr:
         return cls.from_http_port(ip, port)
 
     @classmethod
-    def from_http_port(cls, ip: str, http_port: Any) -> "BackendAddr":
+    def from_http_port(cls, ip: str, http_port: int | str) -> "BackendAddr":
         try:
             http_port = int(http_port)
         except (TypeError, ValueError) as e:
@@ -112,7 +117,7 @@ def create_service_discovery_from_env():
     raise RuntimeError(f"unsupported service route type: {cfg.type!r}")
 
 
-def _resolve_vipserver_host(domain: str) -> Optional[Any]:
+def _resolve_vipserver_host(domain: str) -> Optional[VipHost]:
     from rtp_llm.vipserver.vip_client import get_one_validate_host
 
     return get_one_validate_host(domain)

@@ -83,7 +83,7 @@ async def _abort_with_downstream_grpc_error(
         "[DashScGrpc] proxy downstream grpc error: downstream_frontend_addr=%s "
         "code=%s details=%s",
         downstream_addr,
-        getattr(code, "name", str(code)),
+        code.name,
         details,
     )
     await context.abort(code, details)
@@ -370,7 +370,7 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             await self._close_downstream(downstream_iter, upstream_iter)
 
     @staticmethod
-    async def _close_downstream(downstream_iter, upstream_iter) -> None:
+    async def _close_downstream(downstream_iter: object, upstream_iter: object) -> None:
         """Deterministically tear down the downstream stub call.
 
         Call this when you want the proxy -> backend stream closed *now*
@@ -402,23 +402,23 @@ class DashScProxyServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
         # Close any wrapping async generator first (e.g. counting wrapper).
         if downstream_iter is not upstream_iter:
             try:
-                aclose = getattr(downstream_iter, "aclose", None)
-                if aclose is not None:
+                aclose = downstream_iter.aclose
+                if callable(aclose):
                     await aclose()
             except Exception:
                 pass
         # Cancel the underlying grpc.aio.Call. Sync, idempotent.
         try:
-            cancel = getattr(upstream_iter, "cancel", None)
-            if cancel is not None:
+            cancel = upstream_iter.cancel
+            if callable(cancel):
                 cancel()
         except Exception:
             pass
         # Tests / non-grpc fakes expose ``aclose`` on the upstream iterator
         # (real grpc.aio calls don't); cover that path too.
         try:
-            aclose = getattr(upstream_iter, "aclose", None)
-            if aclose is not None:
+            aclose = upstream_iter.aclose
+            if callable(aclose):
                 await aclose()
         except Exception:
             pass

@@ -1,7 +1,7 @@
 """DashSc gRPC wire codec: parse ``ModelInferRequest`` tensors; build ``ModelStreamInferResponse``.
 
-Merged from the original ``dash_sc_grpc_request`` / ``_response_real`` / ``_response_fake``
-modules so the single public entry is now this file.
+Merged from the original ``dash_sc_grpc_request`` / ``_response_real`` modules
+so the single public entry is now this file.
 
 Defaults for ``SamplingParams`` align with ``rtp_llm.config.generate_config.GenerateConfig``
 (same field names).
@@ -12,10 +12,9 @@ from __future__ import annotations
 import json
 import logging
 import struct
-from collections.abc import Iterator
 from dataclasses import dataclass, field
 from enum import IntEnum
-from typing import Any, NamedTuple
+from typing import TYPE_CHECKING, Any, NamedTuple
 
 from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.dash_sc.structural_tag import (
@@ -24,7 +23,10 @@ from rtp_llm.dash_sc.structural_tag import (
     structural_tag_from_response_format,
     validate_structural_tag_shape,
 )
-from rtp_llm.utils.base_model_datatypes import GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import GenerateOutput, GenerateOutputs
+
+if TYPE_CHECKING:
+    from rtp_llm.config.generate_config import GenerateConfig
 
 _INT32_MAX = 2_147_483_647
 _DEFAULT_MAX_NEW_TOKENS = 32000
@@ -272,7 +274,9 @@ def _parse_optional_bool(value: Any) -> bool | None:
     return None
 
 
-def parse_ds_header_attributes(request) -> dict[str, Any]:
+def parse_ds_header_attributes(
+    request: predict_v2_pb2.ModelInferRequest,
+) -> dict[str, Any]:
     """Parse ``ds_header_attributes`` into a lower-case-key dict.
 
     The value is a JSON string produced by dashscope-serving. Returning an empty
@@ -334,7 +338,8 @@ def _lookup_ds_request_control(attrs: dict[str, Any], name: str) -> Any:
 
 
 def _is_openai_compatible_request(
-    request, ds_attrs: dict[str, Any] | None = None
+    request: predict_v2_pb2.ModelInferRequest,
+    ds_attrs: dict[str, Any] | None = None,
 ) -> bool:
     attrs = ds_attrs if ds_attrs is not None else parse_ds_header_attributes(request)
     path = str(attrs.get("x-envoy-original-path", "")).lower()
@@ -487,7 +492,8 @@ def _decode_structural_tag_payload(
 
 
 def _parse_grammar_controls(
-    request, ds_attrs: dict[str, Any] | None = None
+    request: predict_v2_pb2.ModelInferRequest,
+    ds_attrs: dict[str, Any] | None = None,
 ) -> tuple[str | None, bool, str | None]:
     response_format = _parse_optional_parameter_string(request, "response_format")
     guided_json = _parse_optional_parameter_string(request, "guided_json")
@@ -551,7 +557,9 @@ def _parse_grammar_controls(
     )
 
 
-def _parse_stop_words_list_input(request) -> tuple[tuple[int, ...], ...] | None:
+def _parse_stop_words_list_input(
+    request: predict_v2_pb2.ModelInferRequest,
+) -> tuple[tuple[int, ...], ...] | None:
     """Input name ``stop_words_list`` -> ``GenerateConfig.stop_words_list`` (groups of token ids)."""
     inp, raw = _find_input_raw(request, "stop_words_list")
     if inp is None or raw is None:
@@ -577,14 +585,17 @@ def _parse_stop_words_list_input(request) -> tuple[tuple[int, ...], ...] | None:
 # ----------------------------------------------------------------------------
 
 
-def parse_max_new_tokens_for_proxy(request) -> tuple[int, bool]:
+def parse_max_new_tokens_for_proxy(
+    request: predict_v2_pb2.ModelInferRequest,
+) -> tuple[int, bool]:
     """Read only max-token controls; proxy hot path must not parse grammar."""
     max_new_tokens, from_completion_alias, _ = _parse_max_token_limits(request)
     return max_new_tokens, from_completion_alias
 
 
 def _parse_max_token_limits(
-    request, ds_attrs: dict[str, Any] | None = None
+    request: predict_v2_pb2.ModelInferRequest,
+    ds_attrs: dict[str, Any] | None = None,
 ) -> tuple[int, bool, int | None]:
     max_new_tokens = _DEFAULT_MAX_NEW_TOKENS
     max_new_tokens_from_completion_alias = False
@@ -634,8 +645,13 @@ def _parse_max_token_limits(
 
 
 @dataclass(frozen=True)
-class OtherParams:
-    """Non-sampling knobs carried alongside ``input_ids`` (filled by ``parse_other_params``)."""
+class DashScRequestControls:
+    """Request-scoped controls carried alongside ``input_ids``.
+
+    These fields are not sampler behavior; they control DashSc-specific
+    frontend/backend handling such as thinking mode, timeout, priority, and
+    scheduler headers.
+    """
 
     return_input_ids: bool = False
     enable_thinking: bool | None = None
@@ -677,14 +693,20 @@ class SamplingParams:
         """``GenerateConfig.stop_words_list`` shape: ``List[List[int]]``."""
         return [list(group) for group in self.stop_words_list]
 
-    def to_generate_config(self, *, other: OtherParams | None = None):
-        """Build ``GenerateConfig``; ``other`` supplies ``return_input_ids`` etc."""
+    def to_generate_config(
+        self,
+        *,
+        request_controls: DashScRequestControls | None = None,
+    ):
+        """Build ``GenerateConfig``; request controls supply non-sampling knobs."""
         from rtp_llm.config.generate_config import GenerateConfig
 
-        return_input_ids = other.return_input_ids if other is not None else False
+        return_input_ids = (
+            request_controls.return_input_ids if request_controls is not None else False
+        )
         request_max_think = self.max_new_think_tokens
-        if request_max_think is None and other is not None:
-            request_max_think = other.max_new_think_tokens
+        if request_max_think is None and request_controls is not None:
+            request_max_think = request_controls.max_new_think_tokens
         if request_max_think is None:
             max_thinking_tokens = 32000
         elif request_max_think < 0:
@@ -693,7 +715,7 @@ class SamplingParams:
             max_thinking_tokens = request_max_think
         backend_max_new_tokens = self.max_new_tokens
         if (
-            other is not None
+            request_controls is not None
             and self.max_new_tokens_from_completion_alias
             and backend_max_new_tokens > 0
         ):
@@ -723,11 +745,13 @@ class SamplingParams:
 
 
 # ----------------------------------------------------------------------------
-# Request parsing: input_ids + sampling + other params
+# Request parsing: input_ids + sampling + request controls
 # ----------------------------------------------------------------------------
 
 
-def parse_input_ids_from_request(request) -> list[int] | None:
+def parse_input_ids_from_request(
+    request: predict_v2_pb2.ModelInferRequest,
+) -> list[int] | None:
     """Read ``input_ids`` (INT32 / INT64, little-endian).
 
     Returns ``None`` if tensor missing, index mismatch, or unsupported datatype.
@@ -739,7 +763,8 @@ def parse_input_ids_from_request(request) -> list[int] | None:
 
 
 def parse_sampling_params(
-    request, ds_attrs: dict[str, Any] | None = None
+    request: predict_v2_pb2.ModelInferRequest,
+    ds_attrs: dict[str, Any] | None = None,
 ) -> SamplingParams:
     """Read sampling fields from ``request.inputs``.
 
@@ -850,7 +875,10 @@ def parse_sampling_params(
     )
 
 
-def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> OtherParams:
+def parse_request_controls(
+    request: predict_v2_pb2.ModelInferRequest,
+    ds_attrs: dict[str, Any] | None = None,
+) -> DashScRequestControls:
     """Parse non-sampling request controls.
 
     ``ds_header_attributes`` carries DashScope request-scoped controls that need
@@ -921,7 +949,7 @@ def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> Other
         if value is not None:
             request_headers[header_name] = value
 
-    return OtherParams(
+    return DashScRequestControls(
         return_input_ids=return_input_ids,
         enable_thinking=enable_thinking,
         max_new_think_tokens=max_new_think_tokens,
@@ -933,9 +961,9 @@ def parse_other_params(request, ds_attrs: dict[str, Any] | None = None) -> Other
 
 
 def parse_dash_sc_grpc_request(
-    request,
-) -> tuple[list[int] | None, SamplingParams | None, OtherParams | None]:
-    """Parse one ``ModelInferRequest``: ``input_ids``, sampling tensors, ``other`` params."""
+    request: predict_v2_pb2.ModelInferRequest,
+) -> tuple[list[int] | None, SamplingParams | None, DashScRequestControls | None]:
+    """Parse one ``ModelInferRequest`` into ids, sampling, and request controls."""
     ids = parse_input_ids_from_request(request)
     if ids is None:
         return None, None, None
@@ -943,16 +971,16 @@ def parse_dash_sc_grpc_request(
     return (
         ids,
         parse_sampling_params(request, ds_attrs),
-        parse_other_params(request, ds_attrs),
+        parse_request_controls(request, ds_attrs),
     )
 
 
 # ----------------------------------------------------------------------------
-# Response builders (real backend + fake / mock)
+# Response builders
 # ----------------------------------------------------------------------------
 
 
-def _token_ids_list_from_generate_output(out_py: Any) -> list[int]:
+def _token_ids_list_from_generate_output(out_py: GenerateOutput) -> list[int]:
     ids: list[int] = []
     if out_py.output_ids is not None:
         t = out_py.output_ids
@@ -962,7 +990,7 @@ def _token_ids_list_from_generate_output(out_py: Any) -> list[int]:
     return ids
 
 
-def _first_int(value: Any) -> int | None:
+def _first_int(value: int | list[int] | tuple[int, ...] | None) -> int | None:
     if value is None:
         return None
     if isinstance(value, list):
@@ -1074,7 +1102,7 @@ def _append_finished_output(
 def _append_dashllm_limit_parameters(
     infer: predict_v2_pb2.ModelInferResponse,
     *,
-    generate_config: Any = None,
+    generate_config: GenerateConfig | None = None,
     eos_token_id: int | None = None,
     max_token_id: int | None = None,
     generate_think_token_num: int | None = None,
@@ -1082,9 +1110,9 @@ def _append_dashllm_limit_parameters(
     """Mirror dashllm response parameters consumed by dashscope-serving."""
     if generate_config is not None:
         infer.parameters["max_new_tokens"].int64_param = int(
-            getattr(generate_config, "max_new_tokens", 0) or 0
+            generate_config.max_new_tokens or 0
         )
-        max_think = int(getattr(generate_config, "max_thinking_tokens", 0) or 0)
+        max_think = int(generate_config.max_thinking_tokens or 0)
         if max_think > 0:
             infer.parameters["max_new_think_tokens"].int64_param = max_think
 
@@ -1128,11 +1156,11 @@ def _append_prompt_cache_usage_parameters(
 
 def _append_aux_info_metrics_outputs(
     infer: predict_v2_pb2.ModelInferResponse,
-    out_py: Any,
+    out_py: GenerateOutput,
     prompt_token_fallback: int = 0,
 ) -> None:
     """``prompt_token_num`` = AuxInfo.input_len; ``prompt_cached_token_num`` = AuxInfo.reuse_len."""
-    ax = getattr(out_py, "aux_info", None)
+    ax = out_py.aux_info
     input_len = int(ax.input_len) if ax is not None else int(prompt_token_fallback)
     reuse_len = int(ax.reuse_len) if ax is not None else 0
     _append_int32_scalar_output(infer, "prompt_token_num", input_len)
@@ -1148,7 +1176,7 @@ def build_stream_response_from_generate_outputs(
     request_input_ids: list[int] | None = None,
     return_input_ids: bool = False,
     is_streaming: bool = True,
-    generate_config: Any = None,
+    generate_config: GenerateConfig | None = None,
     eos_token_id: int | None = None,
     max_token_id: int | None = None,
     generate_think_token_num: int | None = None,
@@ -1214,26 +1242,6 @@ def build_stream_response_from_generate_outputs(
         is_streaming,
     )
     return stream_resp
-
-
-def iter_fake_model_stream_infer(
-    request,
-    input_ids_list: list[int],
-    top_k: int,
-) -> Iterator[predict_v2_pb2.ModelStreamInferResponse]:
-    """Mock: ``generated_ids = input_ids + 100``; single finished chunk."""
-    del top_k  # unused in fake path
-    out_ids = [x + 100 for x in input_ids_list]
-    stream_resp = predict_v2_pb2.ModelStreamInferResponse()
-    infer = stream_resp.infer_response
-    infer.id = request.id
-    infer.model_name = request.model_name
-    _append_generated_ids_output(infer, out_ids)
-    logging.debug("[DashScGrpc] fake out_gen.shape: %s", list(infer.outputs[0].shape))
-    _append_finish_reason_output(infer, finished=True)
-    _append_finished_output(infer, finished=True)
-    infer.parameters["incremental_output"].int64_param = 1
-    yield stream_resp
 
 
 def build_dash_error_response(

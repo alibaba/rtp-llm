@@ -32,15 +32,17 @@ import dataclasses
 import json
 import re
 import time
-from typing import Any, Optional
+from typing import Any, Optional, Sequence
 
 import grpc
 
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.dash_sc.codec import (
+    DashScRequestControls,
+    SamplingParams,
     parse_ds_header_attributes,
     parse_input_ids_from_request,
-    parse_other_params,
+    parse_request_controls,
     parse_sampling_params,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2
@@ -105,14 +107,14 @@ _SENSITIVE_TOKEN_EXACT_KEYS = {
 _TOKEN_ID_EXACT_KEYS = {"eos_token_id", "token_id"}
 
 
-def _normalized_control_key(key: Any) -> str:
+def _normalized_control_key(key: object) -> str:
     key_str = str(key)
     key_str = re.sub(r"(?<=[a-z0-9])(?=[A-Z])", "_", key_str)
     key_str = re.sub(r"(?<=[A-Z])(?=[A-Z][a-z])", "_", key_str)
     return re.sub(r"[^a-z0-9]+", "_", key_str.lower()).strip("_")
 
 
-def _is_sensitive_control_key(key: Any) -> bool:
+def _is_sensitive_control_key(key: object) -> bool:
     normalized = _normalized_control_key(key)
     if not normalized or normalized in _TOKEN_ID_EXACT_KEYS:
         return False
@@ -134,7 +136,7 @@ def _is_sensitive_control_key(key: Any) -> bool:
     return False
 
 
-def to_optional_int(value: Any) -> Optional[int]:
+def to_optional_int(value: object) -> Optional[int]:
     """Coerce a server-id/rank-id value to ``Optional[int]`` for log JSON.
 
     The snowflake ``server_id`` reaches the servicer as a string; access-log
@@ -296,7 +298,9 @@ def _proto_parameter_value(key: Any, param) -> Any:
     return _control_value(str(param), key=key)
 
 
-def _parse_ds_header_attributes_for_log(request) -> dict[str, Any]:
+def _parse_ds_header_attributes_for_log(
+    request: predict_v2_pb2.ModelInferRequest,
+) -> dict[str, Any]:
     """Parse ds_header_attributes for logging, preserving upstream key spelling."""
     try:
         p = request.parameters.get("ds_header_attributes", None)
@@ -313,16 +317,13 @@ def _parse_ds_header_attributes_for_log(request) -> dict[str, Any]:
     return attrs if isinstance(attrs, dict) else {}
 
 
-def _sampling_to_dict(sampling) -> dict[str, Any]:
+def _sampling_to_dict(sampling: SamplingParams) -> dict[str, Any]:
     d = dataclasses.asdict(sampling)
     # stop_words_list is tuple[tuple[int,...],...]; convert for stable JSON.
     swl = d.get("stop_words_list")
     if swl is not None:
         d["stop_words_list"] = [list(group) for group in swl]
     return d
-
-
-_CONTEXT_ATTR = "_dash_sc_forward_access_record"
 
 
 @dataclasses.dataclass
@@ -456,7 +457,7 @@ class GrpcAccessRecord:
         record.attach_to_context(context)
         return record
 
-    def record_generated_ids(self, token_ids) -> None:
+    def record_generated_ids(self, token_ids: Sequence[int]) -> None:
         """Append one frame's generated token ids on the frontend struct path.
 
         The frontend servicer already holds the token-id list it streams to the
@@ -501,16 +502,18 @@ class GrpcAccessRecord:
         """
         return self._repetition_monitor
 
-    def record_request_frame(self, request) -> None:
+    def record_request_frame(
+        self, request: predict_v2_pb2.ModelInferRequest | None
+    ) -> None:
         """Capture transport-level request metadata."""
         if request is None:
             return
         if self.first_request_ts is None:
             self.first_request_ts = time.time()
-        request_id = getattr(request, "id", None)
+        request_id = request.id
         if request_id and self.request_id is None:
             self.request_id = str(request_id)
-        model_name = getattr(request, "model_name", None)
+        model_name = request.model_name
         if model_name and self.model_name is None:
             self.model_name = str(model_name)
         controls = self.request_controls
@@ -520,9 +523,11 @@ class GrpcAccessRecord:
         if "parameters" not in controls and "ds_header_attributes" not in controls:
             controls.update(self._build_request_controls(request))
 
-    def _build_request_controls(self, request) -> dict[str, Any]:
+    def _build_request_controls(
+        self, request: predict_v2_pb2.ModelInferRequest
+    ) -> dict[str, Any]:
         parameters: dict[str, Any] = {}
-        for key, param in getattr(request, "parameters", {}).items():
+        for key, param in request.parameters.items():
             if str(key) == "ds_header_attributes":
                 continue
             parameters[str(key)] = _proto_parameter_value(key, param)
@@ -533,12 +538,17 @@ class GrpcAccessRecord:
         }
 
     def capture_structured_request(
-        self, request, *, input_ids=None, sampling=None, other=None
+        self,
+        request: predict_v2_pb2.ModelInferRequest | None,
+        *,
+        input_ids: list[int] | None = None,
+        sampling: SamplingParams | None = None,
+        request_controls: DashScRequestControls | None = None,
     ) -> None:
         """Capture structured request statistics.
 
         The frontend servicer has already parsed ``input_ids`` / ``sampling`` /
-        ``other`` for inference, so it hands them in and the record reuses them
+        ``request_controls`` for inference, so it hands them in and the record reuses them
         rather than decoding the same request proto a second time (the input_ids
         tensor is large for long context). Direct tests may omit parsed values;
         in that case this method falls back to parsing.
@@ -558,19 +568,25 @@ class GrpcAccessRecord:
                 self._repetition_monitor.set_input_ids(input_ids)
         if self.generate_config is None:
             try:
-                if sampling is None:
+                if sampling is None or request_controls is None:
                     ds_attrs = parse_ds_header_attributes(request)
-                    sampling = parse_sampling_params(request, ds_attrs)
-                    other = parse_other_params(request, ds_attrs)
+                    if sampling is None:
+                        sampling = parse_sampling_params(request, ds_attrs)
+                    if request_controls is None:
+                        request_controls = parse_request_controls(request, ds_attrs)
                 self.generate_config = _sampling_to_dict(sampling)
-                self.generate_config["enable_thinking"] = other.enable_thinking
-                self.generate_config["max_new_think_tokens"] = (
-                    other.max_new_think_tokens
+                self.generate_config["enable_thinking"] = (
+                    request_controls.enable_thinking
                 )
-                self.generate_config["reasoning_effort"] = other.reasoning_effort
-                self.generate_config["timeout_ms"] = other.timeout_ms
+                self.generate_config["max_new_think_tokens"] = (
+                    request_controls.max_new_think_tokens
+                )
+                self.generate_config["reasoning_effort"] = (
+                    request_controls.reasoning_effort
+                )
+                self.generate_config["timeout_ms"] = request_controls.timeout_ms
                 self.generate_config["traffic_reject_priority"] = (
-                    other.traffic_reject_priority
+                    request_controls.traffic_reject_priority
                 )
             except Exception:
                 self.generate_config = None
@@ -861,16 +877,18 @@ class GrpcAccessRecord:
         record.update(self._repetition_monitor.record_fields())
         return record
 
-    def attach_to_context(self, context) -> bool:
+    def attach_to_context(self, context: object) -> bool:
         try:
-            setattr(context, _CONTEXT_ATTR, self)
+            context._dash_sc_forward_access_record = self
             return True
         except Exception:
             return False
 
     @staticmethod
-    def from_context(context) -> Optional["GrpcAccessRecord"]:
+    def from_context(context: object) -> Optional["GrpcAccessRecord"]:
         try:
-            return getattr(context, _CONTEXT_ATTR, None)
+            return context._dash_sc_forward_access_record
+        except AttributeError:
+            return None
         except Exception:
             return None

@@ -11,9 +11,14 @@ end_think_token_ids,这里会自动用 tokenizer 编码默认 prelude 并填入 
 使得 C++ 侧 RecommendationLogitsProcessor 能跳过 prelude 再开始累 combo 前缀。
 """
 
+from __future__ import annotations
+
 import logging
 import re
-from typing import Any, List, Optional
+from typing import TYPE_CHECKING, Any, List, Optional
+
+if TYPE_CHECKING:
+    from rtp_llm.config.generate_config import GenerateConfig
 
 # 匹配 posN:C123C456C789 这种片段。商品语义 ID 段数由 combo_token_size 决定。
 _POS_ITEM_PREFIX_RE = re.compile(r"pos\d+:((?:C\d+)+)")
@@ -82,7 +87,9 @@ def _encode_semantic_id(tokenizer: Any, semantic_id: str) -> Optional[int]:
     return None
 
 
-def _auto_fill_end_think_prelude(generate_config: Any, tokenizer: Any) -> None:
+def _auto_fill_end_think_prelude(
+    generate_config: GenerateConfig, tokenizer: Any
+) -> None:
     """若用户未显式设置 end_think_token_ids,且 tokenizer 属于 qwen3 白名单,
     则用 tokenizer 编码默认 prelude 并填入。
 
@@ -91,8 +98,7 @@ def _auto_fill_end_think_prelude(generate_config: Any, tokenizer: Any) -> None:
       - 非白名单 tokenizer 不做假设,留一条 warning 让调用方可观测。
       - 任何 encode 异常/空返回/赋值失败都静默降级为不填,Processor 行为等同历史版本。
     """
-    existing = getattr(generate_config, "end_think_token_ids", None)
-    if existing:
+    if generate_config.end_think_token_ids:
         return
     if tokenizer is None or not hasattr(tokenizer, "encode"):
         return
@@ -122,7 +128,7 @@ def _auto_fill_end_think_prelude(generate_config: Any, tokenizer: Any) -> None:
 
 def parse_and_fill_banned_combo(
     prompt: str,
-    generate_config: Any,
+    generate_config: GenerateConfig,
     tokenizer: Any,
 ) -> int:
     """解析 prompt 中的已曝光商品并合并到 generate_config.banned_combo_token_ids。
@@ -133,8 +139,8 @@ def parse_and_fill_banned_combo(
     用于 C++ Processor 跳过模型默认输出的 think prelude。
     返回本次追加的商品数量(用于日志/监控)。
     """
-    combo_token_size = getattr(generate_config, "combo_token_size", 0)
-    auto_parse = getattr(generate_config, "auto_parse_banned_combo", False)
+    combo_token_size = generate_config.combo_token_size
+    auto_parse = generate_config.auto_parse_banned_combo
     if not auto_parse or combo_token_size <= 0 or tokenizer is None or not prompt:
         return 0
 

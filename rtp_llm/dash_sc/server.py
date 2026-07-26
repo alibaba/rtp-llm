@@ -4,8 +4,6 @@ Owner: :class:`DashScGrpcServer` instances hold the ``grpc.aio.Server`` +
 servicer; :class:`DashScApp` constructs one per process and drives it on the
 same asyncio loop that hosts the backend ``enqueue`` coroutine. No
 module-level mutable state.
-
-Standalone fake: ``python -m rtp_llm.dash_sc.server [--port PORT]``.
 """
 
 from __future__ import annotations
@@ -13,7 +11,7 @@ from __future__ import annotations
 import asyncio
 import concurrent.futures
 import logging
-from typing import Any, Optional
+from typing import Optional, Protocol, runtime_checkable
 
 import grpc
 
@@ -69,6 +67,32 @@ _SERVER_KEEPALIVE_OPTS: list[tuple[str, int]] = [
 ]
 
 
+class _ShutdownManager(Protocol):
+    def try_begin_request(self) -> bool:
+        ...
+
+    def finish_request(self) -> int:
+        ...
+
+    def is_unavailable(self) -> bool:
+        ...
+
+    def is_draining(self) -> bool:
+        ...
+
+    def drain_reason(self) -> str:
+        ...
+
+    def active_request_count(self) -> int:
+        ...
+
+
+@runtime_checkable
+class _ClosableServicer(Protocol):
+    async def close(self) -> None:
+        ...
+
+
 def _merge_server_keepalive(
     opts: list[tuple[str, int]],
 ) -> list[tuple[str, int]]:
@@ -104,9 +128,7 @@ class DashScGrpcServer:
     def __init__(self, dash_sc_grpc_config=None):
         self._config = dash_sc_grpc_config
         self._server: Optional[grpc.aio.Server] = None
-        self._servicer: Optional[predict_v2_pb2_grpc.GRPCInferenceServiceServicer] = (
-            None
-        )
+        self._servicer: Optional[_ClosableServicer] = None
         self._loop: Optional[asyncio.AbstractEventLoop] = None
 
     @property
@@ -118,7 +140,7 @@ class DashScGrpcServer:
         port: int,
         *,
         servicer: predict_v2_pb2_grpc.GRPCInferenceServiceServicer,
-        shutdown_manager: Optional[Any] = None,
+        shutdown_manager: Optional[_ShutdownManager] = None,
         server_id: str = "",
         log_path: str = "",
         backup_count: int = 0,
@@ -200,7 +222,7 @@ class DashScGrpcServer:
         server.add_insecure_port(f"0.0.0.0:{port}")
         await server.start()
         self._server = server
-        self._servicer = servicer
+        self._servicer = servicer if isinstance(servicer, _ClosableServicer) else None
         logging.info(
             "[DashScGrpc] Listening on 0.0.0.0:%s (predict_v2.proto, servicer=%s)",
             port,
@@ -214,7 +236,7 @@ class DashScGrpcServer:
         *,
         port: int,
         servicer: predict_v2_pb2_grpc.GRPCInferenceServiceServicer,
-        shutdown_manager: Optional[Any] = None,
+        shutdown_manager: Optional[_ShutdownManager] = None,
         server_id: str = "",
         log_path: str = "",
         backup_count: int = 0,
@@ -271,18 +293,14 @@ class DashScGrpcServer:
                     exc_info=True,
                 )
             if servicer is not None:
-                close = getattr(servicer, "close", None)
-                if close is not None:
-                    try:
-                        maybe = close()
-                        if asyncio.iscoroutine(maybe):
-                            await maybe
-                    except Exception as e:
-                        logging.warning(
-                            "[DashScGrpc] servicer.close failed: %s",
-                            e,
-                            exc_info=True,
-                        )
+                try:
+                    await servicer.close()
+                except Exception as e:
+                    logging.warning(
+                        "[DashScGrpc] servicer.close failed: %s",
+                        e,
+                        exc_info=True,
+                    )
 
         fut = asyncio.run_coroutine_threadsafe(_do_stop(), loop)
         stop_timeout = None if grace is None else max(0.0, float(grace))
@@ -326,7 +344,7 @@ class DashScGrpcDrainAioInterceptor(grpc.aio.ServerInterceptor):
     in-flight RPCs.
     """
 
-    def __init__(self, shutdown_manager: Any):
+    def __init__(self, shutdown_manager: _ShutdownManager):
         self._shutdown_manager = shutdown_manager
 
     async def intercept_service(self, continuation, handler_call_details):
@@ -442,20 +460,3 @@ class DashScGrpcDrainAioInterceptor(grpc.aio.ServerInterceptor):
                     self._finish(method)
 
         return behavior
-
-
-def main():
-    """Standalone fake-inference entry. Usage: python -m rtp_llm.dash_sc.server [--port PORT].
-
-    Preserved for backward compatibility with existing docs / tooling. New
-    callers should prefer the per-mode entry points:
-    ``python -m rtp_llm.dash_sc.inference`` (fake inference) and
-    ``python -m rtp_llm.dash_sc.proxy`` (reverse-proxy).
-    """
-    from rtp_llm.dash_sc.inference.__main__ import main as inference_main
-
-    inference_main()
-
-
-if __name__ == "__main__":
-    main()

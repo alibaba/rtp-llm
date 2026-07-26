@@ -125,7 +125,10 @@ def _install_mock_stub(servicer, mock_stub) -> None:
 
 
 def _stop_mock_stub(servicer) -> None:
-    patcher = getattr(servicer, "_test_stub_patcher", None)
+    try:
+        patcher = servicer._test_stub_patcher
+    except AttributeError:
+        return
     if patcher is not None:
         patcher.stop()
         servicer._test_stub_patcher = None

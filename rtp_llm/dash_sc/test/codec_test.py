@@ -13,13 +13,13 @@ from rtp_llm.dash_sc.codec import (
     DashErrorSpec,
     DashScParameterError,
     LLMFinishReason,
-    OtherParams,
+    DashScRequestControls,
     SamplingParams,
     build_dash_error_response,
     build_stream_response_from_generate_outputs,
     parse_dash_sc_grpc_request,
     parse_input_ids_from_request,
-    parse_other_params,
+    parse_request_controls,
     parse_sampling_params,
     prepend_to_generated_ids_tensor,
 )
@@ -375,7 +375,7 @@ class DashScGrpcRequestTest(TestCase):
         )
 
         sp = parse_sampling_params(req)
-        op = parse_other_params(req)
+        op = parse_request_controls(req)
 
         self.assertEqual(json.loads(sp.response_format), {"type": "json_object"})
         self.assertIs(op.enable_thinking, False)
@@ -393,7 +393,7 @@ class DashScGrpcRequestTest(TestCase):
         )
 
         sp = parse_sampling_params(req)
-        op = parse_other_params(req)
+        op = parse_request_controls(req)
 
         self.assertEqual(json.loads(sp.response_format), {"type": "json_object"})
         self.assertTrue(sp.json_format)
@@ -667,9 +667,13 @@ class DashScGrpcRequestTest(TestCase):
             max_new_tokens=100,
             max_new_tokens_from_completion_alias=True,
         )
-        other = OtherParams(enable_thinking=True, max_new_think_tokens=10)
+        request_controls = DashScRequestControls(
+            enable_thinking=True, max_new_think_tokens=10
+        )
 
-        generate_config = sampling.to_generate_config(other=other)
+        generate_config = sampling.to_generate_config(
+            request_controls=request_controls
+        )
 
         self.assertEqual(generate_config.max_new_tokens, 100)
         self.assertEqual(generate_config.max_thinking_tokens, 10)
@@ -682,9 +686,13 @@ class DashScGrpcRequestTest(TestCase):
             max_new_tokens_from_completion_alias=True,
             max_total_tokens=105,
         )
-        other = OtherParams(enable_thinking=True, max_new_think_tokens=10)
+        request_controls = DashScRequestControls(
+            enable_thinking=True, max_new_think_tokens=10
+        )
 
-        generate_config = sampling.to_generate_config(other=other)
+        generate_config = sampling.to_generate_config(
+            request_controls=request_controls
+        )
 
         self.assertEqual(generate_config.max_new_tokens, 100)
         self.assertEqual(generate_config.max_thinking_tokens, 10)
@@ -693,9 +701,13 @@ class DashScGrpcRequestTest(TestCase):
         self,
     ) -> None:
         sampling = SamplingParams(max_new_tokens=100)
-        other = OtherParams(enable_thinking=True, max_new_think_tokens=10)
+        request_controls = DashScRequestControls(
+            enable_thinking=True, max_new_think_tokens=10
+        )
 
-        generate_config = sampling.to_generate_config(other=other)
+        generate_config = sampling.to_generate_config(
+            request_controls=request_controls
+        )
 
         self.assertEqual(generate_config.max_new_tokens, 100)
         self.assertEqual(generate_config.max_thinking_tokens, 10)
@@ -756,24 +768,24 @@ class DashScGrpcRequestTest(TestCase):
         sp = SamplingParams(num_return_sequences=5)
         self.assertEqual(sp.n, 5)
 
-    def test_parse_other_params_default(self) -> None:
+    def test_parse_request_controls_default(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
-        op = parse_other_params(req)
-        self.assertEqual(op, OtherParams(return_input_ids=False))
+        op = parse_request_controls(req)
+        self.assertEqual(op, DashScRequestControls(return_input_ids=False))
 
-    def test_parse_other_params_bool(self) -> None:
+    def test_parse_request_controls_bool(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         _add_tensor(req, "return_input_ids", "BOOL", [1], b"\x01")
-        op = parse_other_params(req)
+        op = parse_request_controls(req)
         self.assertTrue(op.return_input_ids)
 
-    def test_parse_other_params_int32(self) -> None:
+    def test_parse_request_controls_int32(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         _add_tensor(req, "return_input_ids", "INT32", [1], struct.pack("<i", 0))
-        op = parse_other_params(req)
+        op = parse_request_controls(req)
         self.assertFalse(op.return_input_ids)
 
-    def test_parse_other_params_thinking_controls(self) -> None:
+    def test_parse_request_controls_thinking_controls(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["ds_header_attributes"].string_param = json.dumps(
             {
@@ -785,7 +797,7 @@ class DashScGrpcRequestTest(TestCase):
             }
         )
         _add_tensor(req, "max_new_think_tokens", "INT32", [1], struct.pack("<i", 0))
-        op = parse_other_params(req)
+        op = parse_request_controls(req)
         self.assertFalse(op.return_input_ids)
         self.assertIs(op.enable_thinking, False)
         self.assertEqual(op.max_new_think_tokens, 0)
@@ -795,32 +807,32 @@ class DashScGrpcRequestTest(TestCase):
             op.request_headers, {"user_id": "u1", "x-dashscope-apikeyid": "ak1"}
         )
 
-    def test_parse_other_params_reasoning_effort_max_alias(self) -> None:
+    def test_parse_request_controls_reasoning_effort_max_alias(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["reasoning_effort"].string_param = "max"
-        op = parse_other_params(req)
+        op = parse_request_controls(req)
         self.assertEqual(op.reasoning_effort, "xhigh")
 
-    def test_parse_other_params_reasoning_effort_from_dashscope_attrs(self) -> None:
+    def test_parse_request_controls_reasoning_effort_from_dashscope_attrs(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["ds_header_attributes"].string_param = json.dumps(
             {"parameters": {"reasoning_effort": {"effort": "max"}}}
         )
-        op = parse_other_params(req)
+        op = parse_request_controls(req)
         self.assertEqual(op.reasoning_effort, "xhigh")
 
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["ds_header_attributes"].string_param = json.dumps(
             {"body": {"reasoning_effort": "max"}}
         )
-        op = parse_other_params(req)
+        op = parse_request_controls(req)
         self.assertEqual(op.reasoning_effort, "xhigh")
 
-    def test_parse_other_params_dashscope_body_thinking_aliases(self) -> None:
+    def test_parse_request_controls_dashscope_body_thinking_aliases(self) -> None:
         req = predict_v2_pb2.ModelInferRequest()
         req.parameters["enable_thinking"].bool_param = False
         req.parameters["thinking_budget"].int64_param = 100
-        op = parse_other_params(req)
+        op = parse_request_controls(req)
         self.assertIs(op.enable_thinking, False)
         self.assertEqual(op.max_new_think_tokens, 100)
 
@@ -851,7 +863,9 @@ class DashScGrpcRequestTest(TestCase):
             max_new_think_tokens=128,
             stop_words_list=((42,),),
         )
-        gc = sp.to_generate_config(other=OtherParams(return_input_ids=True))
+        gc = sp.to_generate_config(
+            request_controls=DashScRequestControls(return_input_ids=True)
+        )
         self.assertEqual(gc.max_new_tokens, 64)
         self.assertEqual(gc.top_k, 1)
         self.assertEqual(gc.max_thinking_tokens, 128)

@@ -18,7 +18,7 @@ import argparse
 import json
 import struct
 import sys
-from typing import Any
+from typing import TYPE_CHECKING, Iterable
 
 import grpc
 
@@ -27,6 +27,9 @@ from rtp_llm.dash_sc.codec import SamplingParams
 from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 from rtp_llm.server.server_args.grpc_group_args import default_dash_sc_grpc_config_json
+
+if TYPE_CHECKING:
+    from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 
 
 def dash_sc_grpc_client_channel_options(
@@ -141,7 +144,7 @@ def append_return_input_ids_to_model_infer_request(
     request: predict_v2_pb2.ModelInferRequest,
     return_input_ids: bool,
 ) -> None:
-    """If True, append ``return_input_ids`` INT32 tensor shape ``[1]`` (=1), for ``parse_other_params``."""
+    """If True, append ``return_input_ids`` INT32 tensor shape ``[1]`` (=1), for ``parse_request_controls``."""
     if not return_input_ids:
         return
     _append_int32_scalar(request, "return_input_ids", 1)
@@ -168,7 +171,9 @@ def build_model_infer_request(
     return request
 
 
-def decode_finish_reason(out: Any, raw: bytes) -> int | None:
+def decode_finish_reason(
+    out: predict_v2_pb2.ModelInferResponse.InferOutputTensor, raw: bytes
+) -> int | None:
     if out.datatype == "INT64" and len(raw) >= 8:
         return struct.unpack("<q", raw[:8])[0]
     if out.datatype == "INT32" and len(raw) >= 4:
@@ -194,14 +199,16 @@ _DTYPE_ELEMENT_BYTES: dict[str, int] = {
 }
 
 
-def _shape_numel(shape) -> int:
+def _shape_numel(shape: Iterable[int]) -> int:
     p = 1
     for d in shape:
         p *= int(d)
     return p
 
 
-def _expected_raw_len_for_output(out: Any) -> tuple[int | None, int | None]:
+def _expected_raw_len_for_output(
+    out: predict_v2_pb2.ModelInferResponse.InferOutputTensor,
+) -> tuple[int | None, int | None]:
     """Return ``(element_bytes, expected_total_bytes)`` or ``(elem, None)`` if shape unusable."""
     elem = _DTYPE_ELEMENT_BYTES.get(out.datatype)
     if elem is None:
@@ -215,7 +222,7 @@ def _expected_raw_len_for_output(out: Any) -> tuple[int | None, int | None]:
 
 
 def _raw_matches_output_metadata(
-    out: Any,
+    out: predict_v2_pb2.ModelInferResponse.InferOutputTensor,
     raw: bytes,
     output_index: int,
 ) -> bool:
@@ -253,7 +260,7 @@ def _raw_matches_output_metadata(
 
 def print_model_stream_infer_response(
     resp: predict_v2_pb2.ModelStreamInferResponse,
-    tokenizer: Any,
+    tokenizer: BaseTokenizer,
 ) -> None:
     """Print one streaming response (errors, or ``infer_response`` outputs)."""
     if resp.error_message:
