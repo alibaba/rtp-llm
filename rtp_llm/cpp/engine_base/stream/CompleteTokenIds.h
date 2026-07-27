@@ -34,7 +34,8 @@ public:
                 int                  vocab_size,
                 bool                 is_beam_search,
                 int64_t              stream_id,
-                int&                 error_token_id);
+                int&                 error_token_id,
+                const torch::Tensor& src_batch_indices = torch::Tensor());
     void copyTokensTo(int batch_id, void* dst, int offset, size_t token_num);
 
     int  seqLength() const;
