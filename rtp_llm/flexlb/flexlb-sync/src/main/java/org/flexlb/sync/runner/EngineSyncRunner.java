@@ -263,6 +263,12 @@ public class EngineSyncRunner implements Runnable {
             return;
         }
 
+        // Persist the discovery-provided site/group before probing. GrpcWorkerStatusRunner only
+        // writes them back on a successful probe, so without this a worker discovered but not yet
+        // probed carries null site/group — and rideOutDiscoveryGap would then re-probe it with null
+        // reporting labels during a discovery outage. Seeding here keeps the labels available.
+        workerStatus.setSite(host.getSite());
+        workerStatus.setGroup(host.getGroup());
         submitProbes(workerIpPort, host.getSite(), host.getGroup(), workerStatus);
     }
 

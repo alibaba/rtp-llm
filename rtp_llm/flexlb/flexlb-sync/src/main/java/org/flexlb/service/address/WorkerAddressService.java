@@ -61,6 +61,18 @@ public class WorkerAddressService {
         serviceDiscoveryExecutor.shutdown();
     }
 
+    /**
+     * Resolves every worker for a role across all of its discovery groups.
+     *
+     * <p>Failure is intentionally all-or-nothing: {@link #getServiceHosts} throws
+     * {@link ServiceDiscoveryException} on a failed/timed-out lookup, and this method does not
+     * catch it, so a discovery failure on <em>any</em> group aborts the whole role update. The
+     * caller ({@code EngineSyncRunner}) then rides out the gap by freezing the entire role's
+     * membership within its grace window. This is deliberate: a partial update that silently
+     * dropped a group whose discovery merely blipped would reintroduce the exact "outage looks
+     * like an empty fleet" bug the {@link ServiceDiscoveryException} contract exists to prevent.
+     * Per-group degradation would require the same grace treatment applied per group.
+     */
     public List<WorkerHost> getEngineWorkerList(String modelName, RoleType modelEndpointType) {
         ServiceRoute serviceRoute = modelMetaConfig.getServiceRoute(IdUtils.getServiceIdByModelName(modelName));
         if (serviceRoute == null) {
