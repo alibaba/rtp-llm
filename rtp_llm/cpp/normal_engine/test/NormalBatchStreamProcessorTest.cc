@@ -394,6 +394,8 @@ TEST_F(NormalBatchStreamProcessorTest, testBeamDispatchReordersReturnedRows) {
     EXPECT_TRUE(torch::equal(second.logits.value(), raw_logits.narrow(0, 0, 1).cpu()));
     EXPECT_TRUE(torch::equal(first.hidden_states.value(), raw_hidden_states.narrow(0, 1, 1).cpu()));
     EXPECT_TRUE(torch::equal(second.hidden_states.value(), raw_hidden_states.narrow(0, 0, 1).cpu()));
+    EXPECT_EQ(stream->completeTokenIdsVec(0), (std::vector<int>{0, 2, 3}));
+    EXPECT_EQ(stream->completeTokenIdsVec(1), (std::vector<int>{0, 1, 2}));
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testSelectedTokenProbsWithBeamMapping) {
