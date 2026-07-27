@@ -188,6 +188,87 @@ def _kv_flat_to_paged(
     return k_paged, v_paged
 
 
+@triton.jit
+def _maxscore_transpose_kernel(
+    src,  # [H, K_in, Q] fp32 (fmha maxscore layout)
+    out,  # [H, Q, K_out] fp32
+    K_out,
+    Q,
+    s_h,
+    s_k,
+    s_q,
+    o_h,
+    o_q,
+    o_k,
+    BK: tl.constexpr,
+    BQ: tl.constexpr,
+):
+    """out[h, q, k] = src[h, k, q] for k < K_out.
+
+    Tiled 2-D transpose: each program reads a [BK, BQ] tile with a contiguous
+    read along q (src's fastest dim) and writes it with a contiguous write along
+    k (out's fastest dim), so both sides coalesce. Replaces
+    ``maxscore.transpose(1, 2)[:, :, :K_out].contiguous()``, whose aten copy runs
+    at ~1.7 TB/s on this shape vs ~6.2 TB/s here (~3.6x, bit-identical).
+    """
+    pid_h = tl.program_id(0)
+    off_k = tl.program_id(1) * BK + tl.arange(0, BK)
+    off_q = tl.program_id(2) * BQ + tl.arange(0, BQ)
+    mask_k = off_k < K_out
+    mask_q = off_q < Q
+    val = tl.load(
+        src + pid_h * s_h + off_k[:, None] * s_k + off_q[None, :] * s_q,
+        mask=mask_k[:, None] & mask_q[None, :],
+        other=0.0,
+    )
+    tl.store(
+        out + pid_h * o_h + off_q[None, :] * o_q + off_k[:, None] * o_k,
+        val,
+        mask=mask_k[:, None] & mask_q[None, :],
+    )
+
+
+def _maxscore_to_score(maxscore, max_seqblock_k, out=None):
+    """[H, K_in, Q] fmha maxscore -> [H, Q, max_seqblock_k] fp32 contiguous.
+
+    ``out`` may be a buffer reused across sparse layers (the shape depends only
+    on the per-forward plan geometry). fmha always emits fp32, so no cast is
+    needed; guard in case that ever changes.
+    """
+    num_heads, _k_in, total_q = maxscore.shape
+    if maxscore.dtype != torch.float32:
+        return maxscore.transpose(1, 2)[:, :, :max_seqblock_k].contiguous().float()
+    want = (num_heads, total_q, max_seqblock_k)
+    if (
+        out is None
+        or tuple(out.shape) != want
+        or out.dtype != torch.float32
+        or out.device != maxscore.device
+    ):
+        out = torch.empty(want, dtype=torch.float32, device=maxscore.device)
+    # BK=16 / BQ=128 / num_warps=4 measured best at [4, 640, 20480] (~6.3 TB/s,
+    # i.e. the pure-copy ceiling); the kernel is HBM-bound so the tile choice is
+    # flat across nearby configs.
+    BK, BQ = 16, 128
+    grid = (num_heads, triton.cdiv(max_seqblock_k, BK), triton.cdiv(total_q, BQ))
+    _maxscore_transpose_kernel[grid](
+        maxscore,
+        out,
+        max_seqblock_k,
+        total_q,
+        maxscore.stride(0),
+        maxscore.stride(1),
+        maxscore.stride(2),
+        out.stride(0),
+        out.stride(1),
+        out.stride(2),
+        BK=BK,
+        BQ=BQ,
+        num_warps=4,
+    )
+    return out
+
+
 def build_index_score_plan(
     cu_seqlens, seq_lens, prefix_lens, num_idx_heads, idx_kv_heads, block_size_k
 ):
@@ -541,6 +622,19 @@ def flash_prefill_topk_to_block_tables(
         plan = build_index_score_plan(
             cu_seqlens, seq_lens, prefix_lens, num_heads, idx_kv_heads, block_size_k
         )
+    # Reuse the maxscore buffer across sparse layers instead of letting fmha
+    # allocate it per call. fmha's internal alloc is torch.full(..., -inf), whose
+    # fill costs ~31us/layer, and the -inf is dead: the kernel writes every tile in
+    # [0, ceil(kv_len/page)) and _topk_to_block_table_kernel masks its loads to the
+    # causal-valid range (other=-1e30), so it never observes the padding tiles.
+    # Shape depends only on the plan geometry -> stable across layers in a forward.
+    max_k_tiles = int(plan["max_k_tiles"])
+    maxscore = plan.get("_maxscore_buf") if max_k_tiles > 0 else None
+    if maxscore is None and max_k_tiles > 0:
+        maxscore = torch.empty(
+            (num_heads, max_k_tiles, total_q), dtype=torch.float32, device=idx_q.device
+        )
+        plan["_maxscore_buf"] = maxscore
     _o, maxscore = _fmha_sm100(
         idx_q,
         k_pages,
@@ -550,9 +644,13 @@ def flash_prefill_topk_to_block_tables(
         output_o=False,
         output_maxscore=True,
         sm_scale=sm_scale,
+        max_score=maxscore,
     )
-    # [num_heads, max_block, total_q] -> [num_heads, total_q, max_seqblock_k] fp32
-    score = maxscore.transpose(1, 2)[:, :, :max_seqblock_k].contiguous().float()
+    # [num_heads, max_block, total_q] -> [num_heads, total_q, max_seqblock_k] fp32.
+    # Fused Triton transpose (aten's strided copy only reaches ~1.7 TB/s here) into
+    # a buffer reused across sparse layers, like _maxscore_buf above.
+    score = _maxscore_to_score(maxscore, max_seqblock_k, out=plan.get("_score_buf"))
+    plan["_score_buf"] = score
 
     # bt/sl (compacted trtllm-gen block table) are consumed ONLY by the trtllm-gen
     # step3 path; the fmha step3 path uses topk_idx + page_table and never reads them.
