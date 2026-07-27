@@ -1,30 +1,58 @@
 #pragma once
 
 #include <atomic>
-#include <condition_variable>
+#include <chrono>
 #include <memory>
 #include <mutex>
 #include <string>
-#include <thread>
+#include <unordered_map>
 #include <vector>
+#include <grpcpp/alarm.h>
 #include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServer.h"
-#include "rtp_llm/cpp/model_rpc/PrefillMetrics.h"
-#include "rtp_llm/cpp/model_rpc/ResponseBuffer.h"
 
 namespace rtp_llm {
 
+struct DeferredPrefillContext {
+    AtomicGuardPtr                   request_guard;
+    std::shared_ptr<GenerateInputPB> input;
+    // Members are destroyed in reverse order: context must go before input,
+    // because RPCContext keeps a raw pointer into input.
+    std::unique_ptr<PrefillGenerateContext> context;
+    std::shared_ptr<grpc::Alarm>            ttl_alarm;
+
+    void cancel(const grpc::Status& status);
+};
+
+// Owns contexts that have been prepared but not yet claimed by FetchResponse.
+class DeferredPrefillContextMap: public std::enable_shared_from_this<DeferredPrefillContextMap> {
+public:
+    grpc::Status store(int64_t request_id, const std::shared_ptr<DeferredPrefillContext>& context);
+    grpc::Status
+    armTtl(int64_t request_id, const std::shared_ptr<DeferredPrefillContext>& context, std::chrono::milliseconds ttl);
+    grpc::Status                            take(int64_t request_id, std::shared_ptr<DeferredPrefillContext>& context);
+    std::shared_ptr<DeferredPrefillContext> remove(int64_t request_id, const DeferredPrefillContext* expected);
+    void                                    stopAccepting();
+    void                                    cancelAll(const grpc::Status& status);
+    size_t                                  size() const;
+
+private:
+    void expire(int64_t request_id, const DeferredPrefillContext* expected);
+
+    mutable std::mutex                                                   mu_;
+    std::unordered_map<int64_t, std::shared_ptr<DeferredPrefillContext>> contexts_;
+    bool                                                                 stopping_{false};
+};
+
 // Batch-enqueue prefill server for PD separation.
 //
-// This class isolates the entire batch path (EnqueueBatch / EnqueueGroup / FetchResponse and
-// the thread pool, response registry and pool metrics behind them) from the single-request prefill
-// server. It inherits PrefillRpcServer and reuses its shared building blocks — prepareAllocateResource
-// and finishStream — for each request in a group; the base class is never mutated by the batch path,
-// so the single-request behavior stays exactly as it was.
+// EnqueueGroup prepares and admits each request, then stores its context.
+// FetchResponse atomically takes that context and continues the existing
+// synchronous PrefillRpcServer::finishStream path.
 //
 // EnqueueGroup is written to read like the single-request GenerateStreamCall: a linear top level that
-// delegates to named phase methods (admitGroup -> acceptGroup -> buildSlotContexts -> prepareGroup
-// -> enqueueGroupStreams -> launchSlotRunner -> runSlotStream).
+// delegates to named phase methods (admitGroup -> acceptGroup -> buildSlotContexts
+// -> prepareGroup -> enqueueGroupStreams -> publishSlot).
 class PrefillBatchRpcServer: public PrefillRpcServer {
 public:
     PrefillBatchRpcServer() = default;
@@ -44,12 +72,15 @@ public:
                                const FetchRequestPB*                  request,
                                grpc::ServerWriter<GenerateOutputsPB>* writer);
 
+    void beginShutdown();
+
 private:
     // One accepted request inside a group; carried across the EnqueueGroup phase methods.
     struct BatchSlot {
         std::shared_ptr<GenerateInputPB>        input;
         std::unique_ptr<PrefillGenerateContext> prefill_context;
         AtomicGuardPtr                          request_guard;
+        int64_t                                 fetch_attach_timeout_ms{0};
     };
 
     struct PrepareResult {
@@ -58,16 +89,8 @@ private:
     };
 
     struct ReadySlot {
-        BatchSlot*                           slot = nullptr;
-        std::shared_ptr<ResponseBufferEntry> entry;
-    };
-
-    struct SlotRunnerState {
-        std::unique_ptr<PrefillGenerateContext> prefill_context;
-        std::shared_ptr<GenerateInputPB>        input;
-        std::shared_ptr<ResponseBufferWriter>   writer;
-        std::shared_ptr<ResponseBufferEntry>    entry;
-        AtomicGuardPtr                          request_guard;
+        BatchSlot*                              slot = nullptr;
+        std::shared_ptr<DeferredPrefillContext> deferred;
     };
 
     // ---- EnqueueGroup phases (mirror GenerateStreamCall's linear structure) ----
@@ -80,42 +103,20 @@ private:
     void         buildSlotContexts(std::vector<BatchSlot>& slots);
     // prepareAllocateResource-with-retry per slot on prepare_resource_worker_pool_.
     std::vector<PrepareResult> prepareGroup(std::vector<BatchSlot>& slots);
-    // engine_->enqueueMultiple for the prepared slots. Scheduler rejections are written to response and removed from
-    // ready_slots; admitted slots remain for worker launch.
+    // engine_->enqueueMultiple for the stored slots. Scheduler rejections are removed from the context map and written
+    // to response; admitted slots remain for publication.
     grpc::Status enqueueGroupStreams(std::vector<ReadySlot>& ready_slots, EnqueueBatchResponsePB* response);
-    // Submit the per-request finishStream runner after scheduler admission.
-    grpc::Status launchSlotRunner(ReadySlot& ready_slot);
-    // The finishStream driver for one accepted request (mirrors finishStream in the single-request path).
-    void runSlotStream(SlotRunnerState state, int64_t request_id);
-    void publishSlot(ReadySlot& ready_slot, EnqueueBatchResponsePB* response);
+    std::shared_ptr<DeferredPrefillContext> storeSlot(BatchSlot& slot, EnqueueBatchResponsePB* response);
+    void                                    publishSlot(ReadySlot& ready_slot, EnqueueBatchResponsePB* response);
     void rejectSlot(ReadySlot& ready_slot, const grpc::Status& status, EnqueueBatchResponsePB* response);
 
     // ---- Batch infrastructure ----
-    void startResponseRegistryGc();
-    void stopResponseRegistryGc();
-    bool tryStartAsyncResponseWorker();
-    void finishAsyncResponseWorker();
-    void stopAsyncResponseWorkers();
     void initThreadPools();
-    void reportPoolMetrics();
 
 private:
-    ResponseBufferRegistry  response_registry_;
-    std::atomic<bool>       response_gc_stop_{false};
-    std::mutex              response_gc_mu_;
-    std::condition_variable response_gc_cv_;
-    std::thread             response_gc_thread_;
-    bool                    response_worker_stop_{false};
-    std::mutex              response_worker_mu_;
-    std::condition_variable response_worker_cv_;
-    size_t                  response_worker_count_{0};
-
-    // Resource preparation is a short prefill-only phase. Worker runs include cache loading and
-    // span the prefill/decode lifecycle, so both pools have independent configurable capacities.
-    autil::ThreadPoolBasePtr prepare_resource_worker_pool_;
-    autil::ThreadPoolBasePtr worker_run_pool_;
-    PoolMetrics              prepare_resource_pool_metrics_;
-    PoolMetrics              worker_run_pool_metrics_;
+    std::shared_ptr<DeferredPrefillContextMap> deferred_contexts_ = std::make_shared<DeferredPrefillContextMap>();
+    std::atomic<bool>                          stopping_{false};
+    autil::ThreadPoolBasePtr                   prepare_resource_worker_pool_;
 };
 
 }  // namespace rtp_llm
