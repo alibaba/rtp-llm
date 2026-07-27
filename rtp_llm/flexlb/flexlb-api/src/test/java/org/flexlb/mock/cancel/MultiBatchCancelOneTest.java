@@ -27,7 +27,6 @@ class MultiBatchCancelOneTest extends FlexLBMockTestBase {
     @Override
     protected FlexlbConfig createConfig() {
         FlexlbConfig cfg = new FlexlbConfig();
-        cfg.setFlexlbBatchEnabled(true);
         cfg.setFlexlbBatchSizeMax(3);  // allow 3 requests in one batch
         cfg.setFlexlbBatchWindowMs(300);
         cfg.setCostSloMs(50_000L);

@@ -25,8 +25,7 @@ refused) via the mock engine's stop_engine/start_engine HTTP API:
 
 Usage:
     python3 resilience_smoke.py --master-ip 127.0.0.1 \\
-        --master-http-port 18080 --mock-http-port 55150 \\
-        --schedule-mode batch
+        --master-http-port 18080 --mock-http-port 55150
 """
 
 from __future__ import annotations
@@ -51,8 +50,7 @@ class ResilienceSmokeTest(FlexLBSmokeBase):
     # -- Helpers ----------------------------------------------------------
 
     async def _schedule_auto(self, request_id: int, **kwargs):
-        """Schedule with the configured schedule_mode from CLI args."""
-        kwargs.setdefault("schedule_mode", self.args.schedule_mode)
+        """Schedule a request (schedule_mode is no longer set at request level)."""
         return await self._schedule(request_id, **kwargs)
 
     async def _get_engine_names(self, role: str) -> list[str]:
@@ -204,7 +202,7 @@ class ResilienceSmokeTest(FlexLBSmokeBase):
             # inflight cleanup verification (batch path only)
             inflight_ok = True
             inflight_detail = "N/A (non-batch path)"
-            if self.args.schedule_mode == "batch":
+            if self._deploy_mode == "batch":
                 inflight_ok, inflight_detail = await self._verify_inflight_clean(
                     timeout_s=10.0
                 )
@@ -296,7 +294,7 @@ class ResilienceSmokeTest(FlexLBSmokeBase):
 
             inflight_ok = True
             inflight_detail = "N/A (non-batch path)"
-            if self.args.schedule_mode == "batch":
+            if self._deploy_mode == "batch":
                 inflight_ok, inflight_detail = await self._verify_inflight_clean(
                     timeout_s=10.0
                 )
@@ -437,7 +435,7 @@ class ResilienceSmokeTest(FlexLBSmokeBase):
             # Verify stuck inflight cleanup
             inflight_ok = True
             inflight_detail = "N/A (non-batch path)"
-            if self.args.schedule_mode == "batch":
+            if self._deploy_mode == "batch":
                 inflight_ok, inflight_detail = await self._verify_inflight_clean(
                     timeout_s=15.0
                 )
@@ -554,7 +552,7 @@ class ResilienceSmokeTest(FlexLBSmokeBase):
 
             inflight_ok = True
             inflight_detail = "N/A (non-batch path)"
-            if self.args.schedule_mode == "batch":
+            if self._deploy_mode == "batch":
                 inflight_ok, inflight_detail = await self._verify_inflight_clean(
                     timeout_s=15.0
                 )
@@ -627,7 +625,7 @@ class ResilienceSmokeTest(FlexLBSmokeBase):
             # Wait for master to detect all gRPC failures
             await asyncio.sleep(self.ENGINE_STOP_WAIT_S)
 
-            is_queue_mode = self.args.schedule_mode == "queue"
+            is_queue_mode = self._deploy_mode == "queue"
 
             # In queue mode, record decode accepted counts before sending the
             # request so we can verify no decode engine received traffic.
@@ -714,7 +712,7 @@ class ResilienceSmokeTest(FlexLBSmokeBase):
 
             inflight_ok = True
             inflight_detail = "N/A (non-batch path)"
-            if self.args.schedule_mode == "batch":
+            if self._deploy_mode == "batch":
                 inflight_ok, inflight_detail = await self._verify_inflight_clean(
                     timeout_s=15.0
                 )
@@ -727,7 +725,7 @@ class ResilienceSmokeTest(FlexLBSmokeBase):
                 "R5: all_decode_stop",
                 passed,
                 f"stopped_all={len(decode_names)} decode engines, "
-                f"mode={self.args.schedule_mode}, "
+                f"mode={self._deploy_mode}, "
                 f"error_observed={error_observed}({error_detail}), "
                 f"no_decode_traffic={no_decode_traffic}({no_decode_detail}), "
                 f"recovery={recovery_msg}, "
@@ -832,7 +830,7 @@ class ResilienceSmokeTest(FlexLBSmokeBase):
 
             inflight_ok = True
             inflight_detail = "N/A (non-batch path)"
-            if self.args.schedule_mode == "batch":
+            if self._deploy_mode == "batch":
                 inflight_ok, inflight_detail = await self._verify_inflight_clean(
                     timeout_s=15.0
                 )
@@ -878,7 +876,7 @@ class ResilienceSmokeTest(FlexLBSmokeBase):
         print("=" * 70)
         print("FlexLB Resilience Smoke Test")
         print(f"  master: {self._master_target()}")
-        print(f"  schedule_mode: {self.args.schedule_mode}")
+        print(f"  deploy_mode: {self._deploy_mode}")
         print(f"  mock_http_port: {self.args.mock_http_port}")
         print("=" * 70)
 
@@ -924,11 +922,6 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=18080,
         help="flexlb master HTTP port for inflight status check",
-    )
-    parser.add_argument(
-        "--schedule-mode",
-        choices=["auto", "batch", "direct", "queue"],
-        default="batch",
     )
     parser.add_argument("--request-id-base", type=int, default=40000)
     return parser.parse_args()

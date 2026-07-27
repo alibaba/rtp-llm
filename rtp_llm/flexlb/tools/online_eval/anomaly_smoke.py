@@ -11,8 +11,7 @@ two anomaly-path scenarios:
 
 Usage:
     python3 anomaly_smoke.py --master-ip 127.0.0.1 \\
-        --master-http-port 18080 --mock-http-port 55150 \\
-        --schedule-mode batch
+        --master-http-port 18080 --mock-http-port 55150
 """
 
 from __future__ import annotations
@@ -38,8 +37,7 @@ class AnomalySmokeTest(FlexLBSmokeBase):
     # -- Helpers ----------------------------------------------------------
 
     async def _schedule_auto(self, request_id: int, **kwargs):
-        """Schedule with the configured schedule_mode from CLI args."""
-        kwargs.setdefault("schedule_mode", self.args.schedule_mode)
+        """Schedule a request (schedule_mode is no longer set at request level)."""
         return await self._schedule(request_id, **kwargs)
 
     async def _inject_all_prefill(self, config: dict) -> list[str]:
@@ -162,7 +160,7 @@ class AnomalySmokeTest(FlexLBSmokeBase):
             # inflight 清理验证（仅 batch 路径有意义）
             inflight_ok = True
             inflight_detail = "N/A (non-batch path)"
-            if self.args.schedule_mode == "batch":
+            if self._deploy_mode == "batch":
                 inflight_ok, inflight_detail = await self._verify_inflight_clean(
                     timeout_s=10.0
                 )
@@ -249,7 +247,7 @@ class AnomalySmokeTest(FlexLBSmokeBase):
             # inflight 清理验证（仅 batch 路径有意义）
             inflight_ok = True
             inflight_detail = "N/A (non-batch path)"
-            if self.args.schedule_mode == "batch":
+            if self._deploy_mode == "batch":
                 inflight_ok, inflight_detail = await self._verify_inflight_clean(
                     timeout_s=10.0
                 )
@@ -281,7 +279,7 @@ class AnomalySmokeTest(FlexLBSmokeBase):
         print("=" * 70)
         print("FlexLB Anomaly Smoke Test")
         print(f"  master: {self._master_target()}")
-        print(f"  schedule_mode: {self.args.schedule_mode}")
+        print(f"  deploy_mode: {self._deploy_mode}")
         print(f"  mock_http_port: {self.args.mock_http_port}")
         print("=" * 70)
 
@@ -327,11 +325,6 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=18080,
         help="flexlb master HTTP port for inflight status check",
-    )
-    parser.add_argument(
-        "--schedule-mode",
-        choices=["auto", "batch", "direct", "queue"],
-        default="batch",
     )
     parser.add_argument("--request-id-base", type=int, default=30000)
     return parser.parse_args()

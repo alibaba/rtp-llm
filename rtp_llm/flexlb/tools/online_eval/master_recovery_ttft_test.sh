@@ -190,7 +190,6 @@ start_master() {
   env ${FLEXLB_ENV_ARGS[@]+"${FLEXLB_ENV_ARGS[@]}"} \
     "LOAD_BALANCE_STRATEGY=COST_BASED_PREFILL" \
     "DECODE_LOAD_BALANCE_STRATEGY=COST_BASED_DECODE" \
-    "FLEXLB_BATCH_ENABLED=true" \
     "FLEXLB_EXPECT_FETCH_RESPONSE=true" \
     "HYSTERESIS_BIAS_PERCENT=0" \
     "MAX_QUEUE_SIZE=5000" \
@@ -205,7 +204,6 @@ start_master() {
     "COST_SLO_MS=30000" \
     "COST_HOTSPOT_MULTIPLIER=1.5" \
     "DEFAULT_SCHEDULE_MODE=BATCH" \
-    "ENABLE_QUEUEING=false" \
     "STRATEGY_CONFIGS={}" \
     "OTEL_TRACE_SKIP_PATTERN=.*" \
     "OTEL_EXPORTER_OTLP_ENDPOINT=none" \
@@ -301,7 +299,6 @@ mkdir -p "${LOAD_CLIENT_DIR}"
 PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/flexlb_load_client.py" \
   "${TRACE_FILE_USE}" \
   --flexlb-http-addr "127.0.0.1:${FLEXLB_HTTP_PORT}" \
-  --schedule-mode batch \
   --replay-speed "${LOAD_CLIENT_REPLAY_SPEED}" \
   --limit "${LOAD_CLIENT_LIMIT}" \
   --max-concurrency "${LOAD_CLIENT_CONCURRENCY}" \

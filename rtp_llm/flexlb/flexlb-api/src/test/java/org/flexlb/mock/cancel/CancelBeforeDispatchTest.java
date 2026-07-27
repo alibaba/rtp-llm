@@ -26,7 +26,6 @@ class CancelBeforeDispatchTest extends FlexLBMockTestBase {
     @Override
     protected FlexlbConfig createConfig() {
         FlexlbConfig cfg = new FlexlbConfig();
-        cfg.setFlexlbBatchEnabled(true);
         cfg.setFlexlbBatchSizeMax(2);         // need 2 requests to fill batch
         cfg.setFlexlbBatchWindowMs(10_000);   // long window
         cfg.setCostSloMs(50_000L);            // very long SLO → no urgent dispatch

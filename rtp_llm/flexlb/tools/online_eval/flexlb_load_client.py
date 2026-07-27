@@ -73,9 +73,6 @@ def parse_args() -> argparse.Namespace:
         help="shared wall-clock start barrier for synchronized multi-process replay",
     )
     parser.add_argument("--skip-server-latency", action="store_true")
-    parser.add_argument(
-        "--schedule-mode", choices=["auto", "batch", "direct", "queue"], default="batch"
-    )
     parser.add_argument("--timeout-ms", type=int, default=120000)
     parser.add_argument(
         "--response-timeout",
@@ -615,7 +612,6 @@ class LoadClient:
             force_disable_sp_run=False,
             model=self.args.model,
             api_key=self.args.api_key,
-            schedule_mode=self._schedule_mode_pb(),
             cache_key_block_size=1024,
         )
 
@@ -956,14 +952,6 @@ class LoadClient:
             return self.args.flexlb_grpc_target
         host, port = self.args.flexlb_http_addr.rsplit(":", 1)
         return f"{host}:{int(port) + 2}"
-
-    def _schedule_mode_pb(self) -> int:
-        return {
-            "auto": self.schedule_pb2.FLEXLB_SCHEDULE_AUTO,
-            "batch": self.schedule_pb2.FLEXLB_SCHEDULE_BATCH,
-            "direct": self.schedule_pb2.FLEXLB_SCHEDULE_DIRECT,
-            "queue": self.schedule_pb2.FLEXLB_SCHEDULE_QUEUE,
-        }[self.args.schedule_mode]
 
     async def _write_summary(self, elapsed_s: float) -> None:
         ok = [r for r in self._results if r["status"] in ("ok", "scheduled")]

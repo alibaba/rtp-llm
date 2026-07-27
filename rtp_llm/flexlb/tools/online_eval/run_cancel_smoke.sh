@@ -36,8 +36,6 @@ START_FLEXLB="${START_FLEXLB:-1}"
 START_MOCK="${START_MOCK:-1}"
 MAVEN_PROFILES="${MAVEN_PROFILES:-opensource,!internal}"
 
-SCHEDULE_MODE="${SCHEDULE_MODE:-batch}"
-
 # Performance config for cancel tests: enough delay for cancel window.
 # prefill=100ms fixed, decode=20ms/step × 10 steps = 200ms total decode.
 PERF_CONFIG_DIR="${RUN_DIR}/perf"
@@ -269,8 +267,6 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
     "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}" \
     "HIPPO_ROLE=${HIPPO_ROLE}" \
     "FLEXLB_EXPECT_FETCH_RESPONSE=true" \
-    "FLEXLB_BATCH_ENABLED=${FLEXLB_BATCH_ENABLED:-true}" \
-    "ENABLE_QUEUEING=${ENABLE_QUEUEING:-false}" \
     java "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
     --server.port="${FLEXLB_HTTP_PORT}" \
     --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \
@@ -293,7 +289,6 @@ echo ""
 PYTHONDONTWRITEBYTECODE=1 python3 "${SCRIPT_DIR}/cancel_smoke.py" \
   --master-ip 127.0.0.1 \
   --master-http-port "${FLEXLB_HTTP_PORT}" \
-  --schedule-mode "${SCHEDULE_MODE}" \
   2>&1 | tee "${RUN_DIR}/cancel_smoke.stdout"
 
 SMOKE_EXIT="${PIPESTATUS[0]}"

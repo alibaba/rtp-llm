@@ -9,6 +9,7 @@ from __future__ import annotations
 
 import argparse
 import asyncio
+import os
 import time
 from dataclasses import dataclass, field
 from typing import List, Optional
@@ -88,6 +89,11 @@ class FlexLBSmokeBase:
         self._request_counter += 1
         return self._request_counter
 
+    @property
+    def _deploy_mode(self) -> str:
+        """Read deployment schedule mode from DEFAULT_SCHEDULE_MODE env var."""
+        return os.environ.get("DEFAULT_SCHEDULE_MODE", "BATCH").lower()
+
     def _master_target(self) -> str:
         return f"{self.args.master_ip}:{self.args.master_http_port + 2}"
 
@@ -141,7 +147,6 @@ class FlexLBSmokeBase:
         input_len: int = DEFAULT_INPUT_LEN,
         output_len: int = DEFAULT_OUTPUT_LEN,
         block_keys: Optional[List[int]] = None,
-        schedule_mode: str = "batch",
     ):
         input_pb = self._build_generate_input(
             request_id,
@@ -149,12 +154,6 @@ class FlexLBSmokeBase:
             output_len=output_len,
             block_keys=block_keys,
         )
-        mode_pb = {
-            "auto": self.schedule_pb2.FLEXLB_SCHEDULE_AUTO,
-            "batch": self.schedule_pb2.FLEXLB_SCHEDULE_BATCH,
-            "direct": self.schedule_pb2.FLEXLB_SCHEDULE_DIRECT,
-            "queue": self.schedule_pb2.FLEXLB_SCHEDULE_QUEUE,
-        }[schedule_mode]
         keys = block_keys or [request_id * 100 + 1]
         return self.schedule_pb2.FlexlbScheduleRequestPB(
             request_id=request_id,
@@ -168,7 +167,6 @@ class FlexLBSmokeBase:
             force_disable_sp_run=False,
             model="engine_service",
             api_key="",
-            schedule_mode=mode_pb,
             cache_key_block_size=1024,
         )
 
@@ -315,7 +313,6 @@ class FlexLBSmokeBase:
                 rid,
                 output_len=2,
                 block_keys=[rid * 100 + 1],
-                schedule_mode=getattr(self.args, "schedule_mode", "batch"),
             )
             if response.code != 200 or not response.success:
                 return False, f"schedule failed: {response.error_message}"

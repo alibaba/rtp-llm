@@ -7,6 +7,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.enums.ScheduleModeEnum;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -60,7 +61,7 @@ class RouteServiceTest {
     @Test
     void should_report_recent_cache_key_once_after_queued_route_success() {
         Response response = successResponse();
-        when(flexlbConfig.isEnableQueueing()).thenReturn(true);
+        when(flexlbConfig.getDefaultScheduleModeEnum()).thenReturn(ScheduleModeEnum.QUEUE);
         when(queueManager.tryRouteAsync(balanceContext)).thenReturn(Mono.just(response));
 
         Response actual = routeService.route(balanceContext).join();
@@ -76,7 +77,7 @@ class RouteServiceTest {
     @Test
     void should_report_recent_cache_key_once_after_direct_route_success() {
         Response response = successResponse();
-        when(flexlbConfig.isEnableQueueing()).thenReturn(false);
+        when(flexlbConfig.getDefaultScheduleModeEnum()).thenReturn(ScheduleModeEnum.DIRECT);
         when(defaultRouter.route(balanceContext)).thenReturn(response);
 
         Response actual = routeService.route(balanceContext).join();
@@ -93,7 +94,7 @@ class RouteServiceTest {
     void should_not_report_recent_cache_key_after_route_failure() {
         Response response = new Response();
         response.setSuccess(false);
-        when(flexlbConfig.isEnableQueueing()).thenReturn(false);
+        when(flexlbConfig.getDefaultScheduleModeEnum()).thenReturn(ScheduleModeEnum.DIRECT);
         when(defaultRouter.route(balanceContext)).thenReturn(response);
 
         Response actual = routeService.route(balanceContext).join();

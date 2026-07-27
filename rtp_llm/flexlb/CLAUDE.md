@@ -177,7 +177,7 @@ Each `RoleType` can use a different strategy. See `LoadBalanceStrategyEnum` in f
 
 ### Queue-Based Request Scheduling
 
-FlexLB supports two routing modes controlled by `FLEXLB_CONFIG.enableQueueing`:
+FlexLB supports three routing modes controlled by `DEFAULT_SCHEDULE_MODE` (BATCH/DIRECT/QUEUE, default BATCH):
 
 **Direct Mode** (queue disabled): Requests route directly to workers, returning immediate success/failure.
 
@@ -306,7 +306,7 @@ FlexLB reads configuration from environment variables:
   "prefillLbTimeoutMs": 300,
   "prefillGenerateTimeoutMs": 5000,
   "enableGrpcPrefillMaster": false,
-  "enableQueueing": true,
+  "defaultScheduleMode": "BATCH",
   "maxQueueSize": 1000,
   "scheduleWorkerSize": 10,
   "resourceCheckIntervalMs": 5000
@@ -314,7 +314,7 @@ FlexLB reads configuration from environment variables:
 ```
 
 New configuration fields:
-- `enableQueueing`: Enable/disable queue-based routing (default: true)
+- `defaultScheduleMode`: Default routing mode — BATCH/DIRECT/QUEUE (default: BATCH)
 - `maxQueueSize`: Maximum queue capacity for `QueueManager`
 - `scheduleWorkerSize`: Worker thread pool size for `RequestScheduler`
 - `resourceCheckIntervalMs`: Resource check interval for `DynamicWorkerManager`

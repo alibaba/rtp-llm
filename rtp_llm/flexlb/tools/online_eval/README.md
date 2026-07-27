@@ -95,7 +95,6 @@ service discovery port as the engine HTTP port and derives gRPC as `http + 1`.
 python3 rtp_llm/flexlb/tools/online_eval/flexlb_load_client.py \
   rtp_llm/flexlb/tools/online_eval/data/online_logs/trace_30min.jsonl \
   --flexlb-http-addr 127.0.0.1:7001 \
-  --schedule-mode batch \
   --replay-speed 10 \
   --limit 1000 \
   --output-dir rtp_llm/flexlb/tools/online_eval/run/load_client

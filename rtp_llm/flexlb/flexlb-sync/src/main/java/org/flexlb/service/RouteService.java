@@ -13,9 +13,9 @@ import org.flexlb.balance.scheduler.Router;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
-import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.enums.ScheduleModeEnum;
+import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
@@ -45,7 +45,7 @@ public class RouteService {
     }
 
     /**
-     * Route request to appropriate workers
+     * Route request to appropriate workers based on the deployment-level schedule mode.
      * @param balanceContext Load balancing context
      * @return Routing result
      */
@@ -53,32 +53,41 @@ public class RouteService {
         FlexlbConfig flexlbConfig = configService.loadBalanceConfig();
         balanceContext.setConfig(flexlbConfig);
 
-        // Resolve AUTO to actual schedule mode so downstream components
-        // (e.g., CostBasedDecodeStrategy) can make mode-aware decisions.
-        ScheduleModeEnum mode = balanceContext.getScheduleMode();
-        if (mode == ScheduleModeEnum.AUTO) {
-            if (shouldUseFlexlbBatch(balanceContext, flexlbConfig)) {
-                mode = ScheduleModeEnum.BATCH;
-            } else if (flexlbConfig.isEnableQueueing()) {
-                mode = ScheduleModeEnum.QUEUE;
-            } else {
-                mode = ScheduleModeEnum.DIRECT;
-            }
-            balanceContext.setScheduleMode(mode);
-        }
+        ScheduleModeEnum mode = flexlbConfig.getDefaultScheduleModeEnum();
+        balanceContext.setScheduleMode(mode);
 
         CompletableFuture<Response> resultFuture;
-        if (shouldUseFlexlbBatch(balanceContext, flexlbConfig)) {
-            resultFuture = flexlbBatchScheduler.submit(balanceContext);
-            balanceContext.setFuture(resultFuture);
-        } else if (mode == ScheduleModeEnum.QUEUE || flexlbConfig.isEnableQueueing()) {
-            resultFuture = queueManager.tryRouteAsync(balanceContext).toFuture();  // Use async queuing mechanism
-        } else {
-            // Direct routing without queuing
-            try {
-                resultFuture = CompletableFuture.completedFuture(router.route(balanceContext));
-            } catch (Exception e) {
-                resultFuture = CompletableFuture.failedFuture(e);
+        switch (mode) {
+            case BATCH -> {
+                if (flexlbBatchScheduler == null || !hasValidGenerateInput(balanceContext)) {
+                    Logger.warn("BATCH mode cannot process this request, falling back to DIRECT");
+                    balanceContext.setScheduleMode(ScheduleModeEnum.DIRECT);
+                    try {
+                        resultFuture = CompletableFuture.completedFuture(router.route(balanceContext));
+                    } catch (Exception e) {
+                        resultFuture = CompletableFuture.failedFuture(e);
+                    }
+                } else {
+                    resultFuture = flexlbBatchScheduler.submit(balanceContext);
+                    balanceContext.setFuture(resultFuture);
+                }
+            }
+            case QUEUE -> {
+                resultFuture = queueManager.tryRouteAsync(balanceContext).toFuture();
+            }
+            case DIRECT -> {
+                try {
+                    resultFuture = CompletableFuture.completedFuture(router.route(balanceContext));
+                } catch (Exception e) {
+                    resultFuture = CompletableFuture.failedFuture(e);
+                }
+            }
+            default -> {
+                try {
+                    resultFuture = CompletableFuture.completedFuture(router.route(balanceContext));
+                } catch (Exception e) {
+                    resultFuture = CompletableFuture.failedFuture(e);
+                }
             }
         }
 
@@ -91,6 +100,11 @@ public class RouteService {
                 recentCacheKeyTraceReporter.report(balanceContext);
             }
         });
+    }
+
+    private boolean hasValidGenerateInput(BalanceContext ctx) {
+        byte[] bytes = ctx.getGenerateInputPbBytes();
+        return bytes != null && bytes.length > 0;
     }
 
     /**
@@ -123,7 +137,7 @@ public class RouteService {
                     }
                 }
             }
-            default -> { /* AUTO should already be resolved by route() */ }
+            default -> Logger.warn("Unknown schedule mode {} in cancel, no-op", mode);
         }
         balanceContext.setSuccess(false);
         balanceContext.setErrorMessage("request cancelled");
@@ -149,32 +163,5 @@ public class RouteService {
                                                     long expectedBatchId) {
         return flexlbBatchScheduler == null ? null
                 : flexlbBatchScheduler.getRequestState(requestId, expectedBatchId);
-    }
-
-    boolean shouldUseFlexlbBatch(BalanceContext ctx, FlexlbConfig config) {
-        if (flexlbBatchScheduler == null || config == null) {
-            return false;
-        }
-        ScheduleModeEnum mode = ctx.getScheduleMode();
-        if (mode == ScheduleModeEnum.BATCH) {
-            return true;
-        }
-        if (mode == ScheduleModeEnum.DIRECT) {
-            return false;
-        }
-        if (mode == ScheduleModeEnum.QUEUE) {
-            return false;
-        }
-        // AUTO: use batch when config enables it and request characteristics match
-        if (!config.isFlexlbBatchEnabled()) {
-            return false;
-        }
-        Request request = ctx.getRequest();
-        return request != null
-                && request.getMaxNewTokens() > 1
-                && request.getNumBeams() <= 1
-                && !request.isForceDisableSpRun()
-                && ctx.getGenerateInputPbBytes() != null
-                && ctx.getGenerateInputPbBytes().length > 0;
     }
 }

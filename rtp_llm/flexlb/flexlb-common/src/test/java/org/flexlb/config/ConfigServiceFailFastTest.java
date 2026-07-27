@@ -1,5 +1,6 @@
 package org.flexlb.config;
 
+import org.flexlb.enums.ScheduleModeEnum;
 import org.junit.jupiter.api.Test;
 
 import java.util.Arrays;
@@ -62,9 +63,9 @@ class ConfigServiceFailFastTest {
     // ---- Critical field invalid value ----
 
     @Test
-    void critical_field_default_schedule_mode_invalid_throws_at_startup() {
-        assertThrows(ConfigValidationException.class,
-            () -> new ConfigService(Map.of("DEFAULT_SCHEDULE_MODE", "INVALID")));
+    void critical_field_default_schedule_mode_invalid_degrades_to_batch() {
+        ConfigService configService = new ConfigService(Map.of("DEFAULT_SCHEDULE_MODE", "INVALID"));
+        assertEquals(ScheduleModeEnum.BATCH, configService.loadBalanceConfig().getDefaultScheduleModeEnum());
     }
 
     @Test
@@ -81,29 +82,27 @@ class ConfigServiceFailFastTest {
         assertDoesNotThrow(() -> new ConfigService(Map.of("CACHE_HIT_TIME_WINDOW_MS", "not-a-number")));
     }
 
-    @Test
-    void non_critical_boolean_field_invalid_value_does_not_throw() {
-        // FLEXLB_BATCH_ENABLED is a non-critical boolean; invalid value should be
-        // caught and logged, with the default value preserved.
-        ConfigService configService = new ConfigService(Map.of("FLEXLB_BATCH_ENABLED", "maybe"));
-        // Default is true, should remain true because override was rejected
-        assertTrue(configService.loadBalanceConfig().isFlexlbBatchEnabled());
-    }
-
     // ---- FlexlbConfig.getDefaultScheduleModeEnum ----
 
     @Test
-    void getDefaultScheduleModeEnum_invalid_value_throws() {
+    void getDefaultScheduleModeEnum_invalid_value_degrades_to_batch() {
         FlexlbConfig config = new FlexlbConfig();
         config.setDefaultScheduleMode("INVALID");
-        assertThrows(ConfigValidationException.class, config::getDefaultScheduleModeEnum);
+        assertEquals(ScheduleModeEnum.BATCH, config.getDefaultScheduleModeEnum());
     }
 
     @Test
-    void getDefaultScheduleModeEnum_null_value_throws() {
+    void getDefaultScheduleModeEnum_null_value_degrades_to_batch() {
         FlexlbConfig config = new FlexlbConfig();
         config.setDefaultScheduleMode(null);
-        assertThrows(ConfigValidationException.class, config::getDefaultScheduleModeEnum);
+        assertEquals(ScheduleModeEnum.BATCH, config.getDefaultScheduleModeEnum());
+    }
+
+    @Test
+    void getDefaultScheduleModeEnum_auto_degrades_to_batch() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setDefaultScheduleMode("AUTO");
+        assertEquals(ScheduleModeEnum.BATCH, config.getDefaultScheduleModeEnum());
     }
 
     @Test
@@ -118,8 +117,8 @@ class ConfigServiceFailFastTest {
     @Test
     void default_config_construction_does_not_throw() {
         ConfigService configService = assertDoesNotThrow(() -> new ConfigService(Map.of()));
-        // Verify the default schedule mode is AUTO
-        assertEquals("AUTO", configService.loadBalanceConfig().getDefaultScheduleMode());
+        // Verify the default schedule mode is BATCH
+        assertEquals("BATCH", configService.loadBalanceConfig().getDefaultScheduleMode());
     }
 
     // ---- PREFILL_TIME_FORMULA blank skip ----

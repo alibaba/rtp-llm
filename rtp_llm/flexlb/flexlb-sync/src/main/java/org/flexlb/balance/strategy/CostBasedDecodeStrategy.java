@@ -65,7 +65,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
 
         if (selectedEndpoint != null) {
             ServerStatus result = buildServerStatus(selectedEndpoint, seqLen, expectedKvTokens,
-                    roleType, balanceContext.getRequestId(), balanceContext.getScheduleMode());
+                    roleType, balanceContext.getRequestId());
             // Record the release callback so cancel() can release directly without
             // going through FlexlbBatchScheduler. Only set for DECODE role in
             // DIRECT/QUEUE mode; PREFILL has its own cancel mechanism (cancelPrefill
@@ -238,7 +238,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
 
     private ServerStatus buildServerStatus(DecodeEndpoint optimalEndpoint, long seqLen,
                                            long expectedKvTokens, RoleType roleType,
-                                           long requestId, ScheduleModeEnum scheduleMode) {
+                                           long requestId) {
         ServerStatus result = new ServerStatus();
         try {
             // All schedule modes (BATCH, DIRECT, QUEUE) reserve decode KV to prevent

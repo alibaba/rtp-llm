@@ -25,8 +25,7 @@ class CancelSmokeTest(FlexLBSmokeBase):
     # -- Helpers ----------------------------------------------------------
 
     async def _schedule_auto(self, request_id: int, **kwargs):
-        """Schedule with the configured schedule_mode from CLI args."""
-        kwargs.setdefault("schedule_mode", self.args.schedule_mode)
+        """Schedule a request (schedule_mode is no longer set at request level)."""
         return await self._schedule(request_id, **kwargs)
 
     # -- Scenario T1: basic_cancel ---------------------------------------
@@ -532,7 +531,7 @@ class CancelSmokeTest(FlexLBSmokeBase):
         print("=" * 70)
         print("FlexLB Cancel Smoke Test")
         print(f"  master: {self._master_target()}")
-        print(f"  schedule_mode: {self.args.schedule_mode}")
+        print(f"  deploy_mode: {self._deploy_mode}")
         print("=" * 70)
 
         for scenario in scenarios:
@@ -578,11 +577,6 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=18080,
         help="flexlb master HTTP port for inflight status check",
-    )
-    parser.add_argument(
-        "--schedule-mode",
-        choices=["auto", "batch", "direct", "queue"],
-        default="batch",
     )
     parser.add_argument("--request-id-base", type=int, default=10000)
     return parser.parse_args()

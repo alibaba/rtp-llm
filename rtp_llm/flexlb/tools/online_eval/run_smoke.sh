@@ -138,25 +138,16 @@ set_group_config() {
   case "$1" in
     batch)
       LOAD_BALANCE_STRATEGY="COST_BASED_PREFILL"
-      FLEXLB_BATCH_ENABLED="true"
-      ENABLE_QUEUEING="false"
-      SCHEDULE_MODE="batch"
       DEFAULT_SCHEDULE_MODE="BATCH"
       TEST_RID_BASES=(10000 20000 30000 31000)
       ;;
     direct)
       LOAD_BALANCE_STRATEGY="SHORTEST_TTFT"
-      FLEXLB_BATCH_ENABLED="false"
-      ENABLE_QUEUEING="false"
-      SCHEDULE_MODE="direct"
       DEFAULT_SCHEDULE_MODE="DIRECT"
       TEST_RID_BASES=(40000 50000 60000 61000)
       ;;
     queue)
       LOAD_BALANCE_STRATEGY="SHORTEST_TTFT"
-      FLEXLB_BATCH_ENABLED="false"
-      ENABLE_QUEUEING="true"
-      SCHEDULE_MODE="queue"
       DEFAULT_SCHEDULE_MODE="QUEUE"
       TEST_RID_BASES=(70000 80000 90000 91000)
       ;;
@@ -173,7 +164,7 @@ start_smoke_master() {
   local group="$1"
   local group_dir="${RUN_DIR}/${group}"
   mkdir -p "${group_dir}"
-  echo "  starting master (group=${group}, mode=${SCHEDULE_MODE}) ..."
+  echo "  starting master (group=${group}, mode=${DEFAULT_SCHEDULE_MODE}) ..."
   env ${FLEXLB_ENV_ARGS[@]+"${FLEXLB_ENV_ARGS[@]}"} \
     "LOAD_BALANCE_STRATEGY=${LOAD_BALANCE_STRATEGY}" \
     "DECODE_LOAD_BALANCE_STRATEGY=${DECODE_LOAD_BALANCE_STRATEGY}" \
@@ -195,8 +186,6 @@ start_smoke_master() {
     "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}" \
     "HIPPO_ROLE=${HIPPO_ROLE}" \
     "FLEXLB_EXPECT_FETCH_RESPONSE=true" \
-    "FLEXLB_BATCH_ENABLED=${FLEXLB_BATCH_ENABLED}" \
-    "ENABLE_QUEUEING=${ENABLE_QUEUEING}" \
     java "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
     --server.port="${FLEXLB_HTTP_PORT}" \
     --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \
@@ -218,7 +207,6 @@ run_test_suite() {
     --master-ip 127.0.0.1
     --master-http-port "${FLEXLB_HTTP_PORT}"
     --flexlb-http-port "${FLEXLB_HTTP_PORT}"
-    --schedule-mode "${SCHEDULE_MODE}"
     --request-id-base "${rid_base}"
   )
   if [[ "${script}" != "cancel_smoke.py" ]]; then

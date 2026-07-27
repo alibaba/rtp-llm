@@ -299,8 +299,6 @@ def run_sweep(speed: int, experiment_dir: Path) -> dict:
         TRACE_FILE,
         "--flexlb-http-addr",
         f"127.0.0.1:{FLEXLB_HTTP_PORT}",
-        "--schedule-mode",
-        "batch",
         "--replay-speed",
         str(speed),
         "--max-concurrency",

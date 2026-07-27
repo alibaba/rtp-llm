@@ -59,7 +59,7 @@ public class RequestCancelTest {
     public void run() {
 
         try {
-            configService.loadBalanceConfig().setEnableQueueing(true);
+            configService.loadBalanceConfig().setDefaultScheduleMode("QUEUE");
 
             EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap().clear();
             EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
@@ -122,7 +122,7 @@ public class RequestCancelTest {
             EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
             EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
             EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
-            configService.loadBalanceConfig().setEnableQueueing(false);
+            configService.loadBalanceConfig().setDefaultScheduleMode("BATCH");
         }
     }
 

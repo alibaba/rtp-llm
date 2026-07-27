@@ -277,11 +277,10 @@ public abstract class FlexLBMockTestBase {
 
     /**
      * Override to customize the FlexlbConfig.
-     * Default: batch enabled, size_max=1, immediate dispatch.
+     * Default: BATCH mode, size_max=1, immediate dispatch.
      */
     protected FlexlbConfig createConfig() {
         FlexlbConfig cfg = new FlexlbConfig();
-        cfg.setFlexlbBatchEnabled(true);
         cfg.setFlexlbBatchSizeMax(1);        // single request triggers dispatch
         cfg.setFlexlbBatchWindowMs(300);
         cfg.setCostSloMs(50_000L);

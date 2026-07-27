@@ -71,6 +71,7 @@ public class ConfigService {
         config.getParsedSloBuckets();
 
         dumpEffectiveConfig(config);
+        warnDeprecatedEnvVars();
         this.flexlbConfig = config;
     }
 
@@ -89,7 +90,7 @@ public class ConfigService {
     /**
      * Apply environment variable overrides to configuration
      * Environment variable naming rule: {FIELD_NAME_UPPER_SNAKE_CASE}
-     * Example: enableQueueing -> ENABLE_QUEUEING
+     * Example: defaultScheduleMode -> DEFAULT_SCHEDULE_MODE
      */
     private void applyEnvironmentOverrides(FlexlbConfig config, Map<String, String> environment) {
         Field[] fields = FlexlbConfig.class.getDeclaredFields();
@@ -203,7 +204,7 @@ public class ConfigService {
 
     /**
      * Convert camel case to upper snake case
-     * Example: enableQueueing -> ENABLE_QUEUEING
+     * Example: defaultScheduleMode -> DEFAULT_SCHEDULE_MODE
      */
     private String camelToUpperSnakeCase(String camelCase) {
         StringBuilder result = new StringBuilder();
@@ -257,9 +258,10 @@ public class ConfigService {
      */
     private void dumpEffectiveConfig(FlexlbConfig config) {
         log.info("===== FlexLB Effective Configuration =====");
-        log.info("scheduleMode={}, batchAlgorithm={}, batchEnabled={}",
-            config.getDefaultScheduleMode(), config.getFlexlbBatchAlgorithm(),
-            config.isFlexlbBatchEnabled());
+        log.info("scheduleMode={} (effective: {}), batchAlgorithm={}",
+            config.getDefaultScheduleMode(),
+            config.getDefaultScheduleModeEnum(),
+            config.getFlexlbBatchAlgorithm());
         log.info("batchMaxCapacity={}, batchMaxInflight={}",
             config.getFlexlbBatchMaxCapacity(), config.getFlexlbBatchMaxInflight());
         log.info("fixedMaxInflightBatches={}, sloMaxInflightBatches={}",
@@ -267,5 +269,15 @@ public class ConfigService {
             config.getFlexlbBatchSloMaxInflightBatches());
         log.info("prefillPredictorType={}", config.getPrefillPredictorType());
         log.info("==========================================");
+    }
+
+    private void warnDeprecatedEnvVars() {
+        Map<String, String> env = System.getenv();
+        if (env.containsKey("FLEXLB_BATCH_ENABLED")) {
+            log.warn("Environment variable FLEXLB_BATCH_ENABLED is deprecated and ignored. Use DEFAULT_SCHEDULE_MODE=BATCH|DIRECT|QUEUE instead.");
+        }
+        if (env.containsKey("ENABLE_QUEUEING")) {
+            log.warn("Environment variable ENABLE_QUEUEING is deprecated and ignored. Use DEFAULT_SCHEDULE_MODE=BATCH|DIRECT|QUEUE instead.");
+        }
     }
 }

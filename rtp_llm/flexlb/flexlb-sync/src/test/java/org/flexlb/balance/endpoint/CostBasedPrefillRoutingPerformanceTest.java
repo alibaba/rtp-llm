@@ -113,7 +113,6 @@ class CostBasedPrefillRoutingPerformanceTest {
 
     private CostBasedPrefillStrategy createStrategy() {
         FlexlbConfig config = new FlexlbConfig();
-        config.setFlexlbBatchEnabled(true);
         config.setCostSloMs(50_000L);
         config.setPrefillQueueSizeThreshold(1_000_000L);
         // Explicitly enable score-tie randomization so that requests are
@@ -224,7 +223,6 @@ class CostBasedPrefillRoutingPerformanceTest {
 
     private static BalanceContext context(long requestId) {
         FlexlbConfig config = new FlexlbConfig();
-        config.setFlexlbBatchEnabled(true);
         config.setCostSloMs(50_000L);
         // The strategy reads scoreTieRandomEnabled from BalanceContext.config.
         // Enable it here so select() performs reservoir sampling across the

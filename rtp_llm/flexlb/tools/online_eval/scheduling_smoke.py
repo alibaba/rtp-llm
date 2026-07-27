@@ -24,8 +24,7 @@ SHORTEST_TTFT (direct/queue-only):
 
 Usage:
     python3 scheduling_smoke.py --master-ip 127.0.0.1 \\
-        --master-http-port 18080 --mock-http-port 55150 \\
-        --schedule-mode batch
+        --master-http-port 18080 --mock-http-port 55150
 """
 
 from __future__ import annotations
@@ -54,8 +53,7 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
     # -- Helpers ----------------------------------------------------------
 
     async def _schedule_auto(self, request_id: int, **kwargs):
-        """Schedule with the configured schedule_mode from CLI args."""
-        kwargs.setdefault("schedule_mode", self.args.schedule_mode)
+        """Schedule a request (schedule_mode is no longer set at request level)."""
         return await self._schedule(request_id, **kwargs)
 
     async def _snapshot_by_name(self) -> dict[str, dict]:
@@ -110,7 +108,7 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
         """
         start = time.monotonic()
         n = self.LOAD_BALANCE_N
-        is_batch = self.args.schedule_mode == "batch"
+        is_batch = self._deploy_mode == "batch"
         perf_engine: str | None = None
         try:
             # In batch mode, differentiate prefill performance to make
@@ -1056,7 +1054,7 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
             self.test_reserve_weight_change,
         ]
         # Path-specific scenarios
-        if self.args.schedule_mode == "batch":
+        if self._deploy_mode == "batch":
             scenarios += [
                 self.test_hotspot_filter,
                 self.test_kv_cache_hit_preference,
@@ -1071,7 +1069,7 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
         print("=" * 70)
         print("FlexLB Scheduling Smoke Test")
         print(f"  master: {self._master_target()}")
-        print(f"  schedule_mode: {self.args.schedule_mode}")
+        print(f"  deploy_mode: {self._deploy_mode}")
         print(f"  mock_http_port: {self.args.mock_http_port}")
         print("=" * 70)
 
@@ -1117,11 +1115,6 @@ def parse_args() -> argparse.Namespace:
         type=int,
         default=18080,
         help="flexlb master HTTP port for inflight status check",
-    )
-    parser.add_argument(
-        "--schedule-mode",
-        choices=["auto", "batch", "direct", "queue"],
-        default="batch",
     )
     parser.add_argument("--request-id-base", type=int, default=20000)
     return parser.parse_args()

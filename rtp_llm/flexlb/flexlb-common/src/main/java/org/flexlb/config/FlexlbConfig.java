@@ -2,6 +2,7 @@ package org.flexlb.config;
 
 import lombok.Getter;
 import lombok.Setter;
+import lombok.extern.slf4j.Slf4j;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
@@ -20,10 +21,10 @@ import static org.flexlb.enums.ResourceMeasureIndicatorEnum.WAIT_TIME;
 /**
  * Supports environment variable override configuration
  * Environment variable naming rule: {FIELD_NAME_UPPER_SNAKE_CASE}
- * Example: enableQueueing -> ENABLE_QUEUEING
  */
 @Getter
 @Setter
+@Slf4j
 public class FlexlbConfig {
 
     /**
@@ -84,11 +85,6 @@ public class FlexlbConfig {
     private boolean cacheHitTheoryLogEnabled = true;
 
     // ========== Queue Configuration ==========
-
-    /**
-     * Whether to enable queuing
-     */
-    private boolean enableQueueing = false;
 
     /**
      * Maximum queue length per model
@@ -288,17 +284,10 @@ public class FlexlbConfig {
     // ========== FlexLB Batch Configuration ==========
 
     /**
-     * Enables master-side request coalescing. Requests carrying a full
-     * GenerateInputPB are routed once, grouped by Prefill worker,
-     * and submitted through EnqueueBatch.
+     * Default schedule mode. Controls the routing path for all requests.
+     * Environment variable: DEFAULT_SCHEDULE_MODE (values: BATCH, DIRECT, QUEUE).
      */
-    private boolean flexlbBatchEnabled = true;
-
-    /**
-     * Default schedule mode when the frontend doesn't specify one in the gRPC request.
-     * Environment variable: DEFAULT_SCHEDULE_MODE (values: AUTO, BATCH, DIRECT).
-     */
-    private String defaultScheduleMode = "AUTO";
+    private String defaultScheduleMode = "BATCH";
 
     /**
      * Maximum real requests in one EnqueueBatch request.
@@ -691,22 +680,37 @@ public class FlexlbConfig {
     }
 
     /**
+     * Returns {@code true} when the effective schedule mode is BATCH.
+     * Convenience method for strategy classes that need to decide whether
+     * to reserve prefill inflight locally or defer to FlexlbBatchScheduler.
+     */
+    public boolean isBatchPath() {
+        return getDefaultScheduleModeEnum() == ScheduleModeEnum.BATCH;
+    }
+
+    /**
      * Returns the configured default schedule mode as an enum.
      *
-     * @throws ConfigValidationException if the configured value is not a valid ScheduleModeEnum.
+     * <p>Gracefully degrades unknown or legacy values to {@code BATCH}:
+     * <ul>
+     *   <li>{@code "AUTO"} (legacy) → {@code BATCH} with WARN log</li>
+     *   <li>null or any other invalid string → {@code BATCH} with WARN log</li>
+     * </ul>
+     * This method never throws, ensuring startup always succeeds even when
+     * stale configuration references the removed {@code AUTO} mode.
      */
     public ScheduleModeEnum getDefaultScheduleModeEnum() {
-        if (defaultScheduleMode == null) {
-            throw new ConfigValidationException("defaultScheduleMode",
-                "Schedule mode is null. Valid values: "
-                    + java.util.Arrays.toString(ScheduleModeEnum.values()));
+        if (defaultScheduleMode == null || defaultScheduleMode.isBlank()) {
+            log.warn("defaultScheduleMode is null/blank, falling back to BATCH");
+            defaultScheduleMode = "BATCH";
+            return ScheduleModeEnum.BATCH;
         }
         try {
             return ScheduleModeEnum.valueOf(defaultScheduleMode.toUpperCase());
         } catch (IllegalArgumentException e) {
-            throw new ConfigValidationException("defaultScheduleMode",
-                "Invalid schedule mode '" + defaultScheduleMode
-                    + "'. Valid values: " + java.util.Arrays.toString(ScheduleModeEnum.values()), e);
+            log.warn("Invalid or legacy schedule mode '{}', falling back to BATCH", defaultScheduleMode);
+            defaultScheduleMode = "BATCH";
+            return ScheduleModeEnum.BATCH;
         }
     }
 }
