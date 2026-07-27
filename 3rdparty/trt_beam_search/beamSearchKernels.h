@@ -15,11 +15,7 @@
  */
 #pragma once
 
-#if USING_ROCM
-#include <hiprand/hiprand_kernel_rocm.h>
-#else
 #include <curand_kernel.h>
-#endif
 #include "rtp_llm/cpp/utils/StringUtil.h"
 #include "common.h"
 #include "decodingCommon.h"
@@ -144,10 +140,18 @@ void invokeTopkBeamSearch(T const* logProbs, T const* bias, void* workspace, Bea
 void invokeUpdateCacheIndirection(int* tgtCI, int const* srcCI, BeamHypotheses& bh,
     runtime::SizeType32 const maxAttentionWindow, runtime::SizeType32 sinkTokenLength, cudaStream_t stream);
 
+// nvcc 13 emits explicit template instantiations of __global__ kernels with
+// internal linkage (Itanium-ABI L-prefix in the mangled name), so launching
+// addCumLogProbs<<<>>> from beamSearchKernels{4,8,...}.cu — which include the
+// template header — cannot resolve against the instantiation in
+// beamSearchKernels.cu.  Instead, expose a host wrapper that lives in the
+// same TU as the kernel definition, and have the template code call that.
 template <typename T>
-__global__ void addCumLogProbs(T* __restrict pStage1Probs, float const* __restrict cumLogProbs,
-    FinishedState const* finished, int const* endIds, float const* diversityRates,
-    runtime::SizeType32 const* batchSlots, size_t const nBS, size_t const nBMIn, size_t const nBMOut);
+void launchAddCumLogProbs(
+    T* pStage1LogProbs, float const* cumLogProbs, FinishedState const* finished,
+    int const* endIds, float const* diversityRates,
+    runtime::SizeType32 const* batchSlots, size_t nBS, size_t nBMIn, size_t nBMOut,
+    int nThread, cudaStream_t stream);
 
 __global__ void gatherId(int const* __restrict pStage1Id, int* __restrict pStage2Id, size_t const nBS,
     size_t const nBMIn, size_t const nBMOut, size_t const nV);

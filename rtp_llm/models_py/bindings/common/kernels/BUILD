@@ -189,6 +189,7 @@ cc_library(
     deps = any_cuda_deps + [
         "//rtp_llm/models_py/bindings/cuda:trt_utils",
         "//rtp_llm/cpp/model_utils:model_utils",
+        "//3rdparty:cub_compat",
         "@cutlass_h_moe//:cutlass",
         "@cutlass_h_moe//:cutlass_utils",
     ] + torch_deps(),

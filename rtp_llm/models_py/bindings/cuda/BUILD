@@ -157,6 +157,12 @@ cc_library(
         "@//:using_cuda12_9": [
             "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp4_quant",
         ],
+        "@//:using_cuda13_x86": [
+            "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp4_quant",
+        ],
+        "@//:using_cuda13_arm": [
+            "//rtp_llm/models_py/bindings/cuda/kernels:scaled_fp4_quant",
+        ],
         "//conditions:default": [],
     }),
 )
@@ -202,6 +208,12 @@ cc_library(
         ":cuda_attn_bindings_base"
     ] + select({
         "@//:using_cuda12_9": [
+            "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
+        ],
+        "@//:using_cuda13_x86": [
+            "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
+        ],
+        "@//:using_cuda13_arm": [
             "//rtp_llm/models_py/bindings/cuda/cutlass:fp4_gemm_cu",
         ],
         "//conditions:default": [],

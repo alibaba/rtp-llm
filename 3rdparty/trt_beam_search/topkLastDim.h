@@ -16,7 +16,6 @@
 
 #pragma once
 
-#include <optional>
 #include "common.h"
 
 namespace tensorrt_llm
@@ -29,8 +28,8 @@ size_t invokeComputeTopkLastDimWorkspaceSize(
     runtime::SizeType32 batchSize, runtime::SizeType32 inputLength, runtime::SizeType32 k, bool is_largest);
 
 template <typename T>
-void invokeTopkLastDim(runtime::SizeType32 batchSize, runtime::SizeType32 inputLength, runtime::SizeType32 k, bool is_largest, 
-    std::optional<T> mask_val, void const* __restrict__ input, void* __restrict__ out_val, void* __restrict__ out_ind,
+void invokeTopkLastDim(runtime::SizeType32 batchSize, runtime::SizeType32 inputLength, runtime::SizeType32 k,
+    bool is_largest, void const* __restrict__ input, void* __restrict__ out_val, void* __restrict__ out_ind,
     void* workspace, cudaStream_t stream);
 
 } // namespace kernels

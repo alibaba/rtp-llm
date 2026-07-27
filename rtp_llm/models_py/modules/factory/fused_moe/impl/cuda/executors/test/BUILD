@@ -21,6 +21,7 @@ py_test (
     exec_properties = {'gpu':'H20', 'gpu_count':'1'},
 )
 
+# CUDA 12 and CUDA 13 use separate ARM pools selected by the Bazel config.
 py_test (
     name = "deepgemm_masked_executor_sm100_test",
     srcs = ["deepgemm_masked_executor_test.py",
@@ -35,7 +36,7 @@ py_test (
         "GPU_COUNT": "1",
     },
     tags = ["open_skip", "SM100_ARM"],
-    exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'},
+    exec_properties = {'gpu_count':'1'},
 )
 
 py_test (
@@ -66,7 +67,7 @@ py_test (
         "GPU_COUNT": "1",
     },
     tags = ["open_skip", "SM100_ARM"],
-    exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'},
+    exec_properties = {'gpu_count':'1'},
 )
 
 py_test (
@@ -83,7 +84,7 @@ py_test (
         "GPU_COUNT": "1",
     },
     tags = ["open_skip", "SM100_ARM"],
-    exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'},
+    exec_properties = {'gpu_count':'1'},
 )
 
 py_test (
@@ -100,5 +101,5 @@ py_test (
         "FLASHINFER_DISABLE_VERSION_CHECK": "1",
     },
     tags = ["open_skip", "SM100_ARM"],
-    exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'},
+    exec_properties = {'gpu_count':'1'},
 )

@@ -21,6 +21,7 @@ py_test(
     exec_properties = {'gpu':'SM100'},
 )
 
+# The Bazel config selects the CUDA-specific ARM pool for these shared targets.
 py_test(
     name = "fp8_deepgemm_linear_sm100_arm_test",
     srcs = [
@@ -29,7 +30,6 @@ py_test(
     ],
     deps = py_test_deps,
     tags = ["SM100_ARM"],
-    exec_properties = {'gpu':'SM100_ARM'},
 )
 
 py_test(
@@ -37,5 +37,4 @@ py_test(
     srcs = ["fp4_gemm_linear_test.py"],
     deps = py_test_deps,
     tags = ["SM100_ARM"],
-    exec_properties = {'gpu':'SM100_ARM'},
 )
