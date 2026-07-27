@@ -23,7 +23,6 @@ py_library(
         "codec.py",
         "grpc_metrics.py",
         "inference/__init__.py",
-        "inference/__main__.py",
         "inference/servicer.py",
         "proxy/__init__.py",
         "proxy/__main__.py",
