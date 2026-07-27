@@ -169,6 +169,28 @@ class _TextEncoder(Protocol):
         ...
 
 
+def _positive_int(value: object) -> Optional[int]:
+    try:
+        size = int(value)
+    except (TypeError, ValueError, OverflowError):
+        return None
+    return size if size > 0 else None
+
+
+def _tokenizer_size(tokenizer: BaseTokenizer) -> Optional[int]:
+    try:
+        size = _positive_int(len(tokenizer))
+    except (AttributeError, NotImplementedError, TypeError, ValueError):
+        size = None
+    if size is not None:
+        return size
+    try:
+        vocab_size = tokenizer.vocab_size
+    except (AttributeError, NotImplementedError):
+        return None
+    return _positive_int(vocab_size)
+
+
 def _tokenizer_eos_token_id(tokenizer: BaseTokenizer | None) -> Optional[int]:
     if tokenizer is None:
         return None
@@ -187,14 +209,8 @@ def _tokenizer_eos_token_id(tokenizer: BaseTokenizer | None) -> Optional[int]:
 def _derive_max_token_id(tokenizer: BaseTokenizer | None) -> Optional[int]:
     if tokenizer is None:
         return None
-    try:
-        size = len(tokenizer)
-    except Exception:
-        try:
-            size = int(tokenizer.vocab_size or 0)
-        except Exception:
-            size = 0
-    return size - 1 if size > 0 else None
+    size = _tokenizer_size(tokenizer)
+    return size - 1 if size is not None else None
 
 
 def _hf_tokenizer(tokenizer: BaseTokenizer | None) -> _TextEncoder | None:

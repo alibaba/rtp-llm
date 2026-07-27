@@ -38,6 +38,7 @@ from rtp_llm.dash_sc.codec import (
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
     _dash_error_spec_for_ft_exception,
+    _derive_max_token_id,
     build_think_runtime,
     iter_real_model_stream_infer,
 )
@@ -234,6 +235,32 @@ def _assert_parameter_error_response(
     )
     testcase.assertEqual(_finish_reason(resp), LLMFinishReason.STOP_ENGINE_PARAM)
     testcase.assertEqual(_gen_ids(resp), [])
+
+
+class DeriveMaxTokenIdTest(unittest.TestCase):
+    def test_uses_len_when_available(self) -> None:
+        tok = _FakeTokenizer({})
+
+        self.assertEqual(_derive_max_token_id(tok), 199999)
+
+    def test_falls_back_to_vocab_size_when_len_is_unavailable(self) -> None:
+        class _Tokenizer:
+            vocab_size = "42"
+
+            def __len__(self):
+                raise TypeError("len unavailable")
+
+        self.assertEqual(_derive_max_token_id(_Tokenizer()), 41)
+
+    def test_returns_none_without_positive_size(self) -> None:
+        class _Tokenizer:
+            vocab_size = "bad"
+
+            def __len__(self):
+                raise TypeError("len unavailable")
+
+        self.assertIsNone(_derive_max_token_id(None))
+        self.assertIsNone(_derive_max_token_id(_Tokenizer()))
 
 
 class BuildThinkRuntimeTest(unittest.TestCase):
