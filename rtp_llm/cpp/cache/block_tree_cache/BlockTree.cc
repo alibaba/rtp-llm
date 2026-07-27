@@ -69,7 +69,7 @@ bool BlockTree::isNodeMatchReady(const TreeNode& node) const {
         return false;
     }
     return std::all_of(node.group_slots.begin(), node.group_slots.end(), [](const GroupSlot& slot) {
-        return slot.transfer_state == SlotTransferState::IDLE;
+        return slot.transfer_state == SlotTransferState::IDLE || slot.transfer_state == SlotTransferState::LOADING_BACK;
     });
 }
 

@@ -213,6 +213,20 @@ cc_test(
     env = {},
 )
 
+cc_test(
+    name = "load_back_async_context_test",
+    srcs = ["LoadBackAsyncContextTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+)
+
+cc_test(
+    name = "load_back_worker_test",
+    srcs = ["LoadBackWorkerTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+)
+
 cc_library(
     name = "block_tree_cache_test_utils",
     srcs = ["BlockTreeCacheTestUtils.cc"],

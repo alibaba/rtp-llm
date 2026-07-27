@@ -187,18 +187,20 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
 
     if (ticket != nullptr) {
         for (size_t item_index = 0; item_index < ticket->itemCount(); ++item_index) {
-            if (ticket->sourceTier(item_index) != Tier::DEVICE) {
+            if (ticket->sourceTier(item_index) != Tier::DEVICE && !ticket->joinedLoadBack(item_index)) {
                 continue;
             }
             const auto& source_blocks     = ticket->sourceBlocks(item_index);
             const auto& device_group_tags = ticket->deviceGroupTags(item_index);
-            if (source_blocks.size() != device_group_tags.size() || source_blocks.empty()) {
+            const BlockIndicesType& reusable_blocks =
+                ticket->joinedLoadBack(item_index) ? ticket->targetDeviceBlocks(item_index) : source_blocks;
+            if (reusable_blocks.size() != device_group_tags.size() || reusable_blocks.empty()) {
                 return fail_match();
             }
             for (size_t local = 0; local < device_group_tags.size(); ++local) {
                 const int gid = groupIdForStableTag(config_, device_group_tags[local]);
                 if (gid < 0 || gid >= kv_resource.groupNums() || skipReuseCacheGroup(gid)
-                    || isNullBlockIdx(source_blocks[local])) {
+                    || isNullBlockIdx(reusable_blocks[local])) {
                     return fail_match();
                 }
                 const auto   type = config_.typeForGroup(static_cast<size_t>(gid));
@@ -210,10 +212,10 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
                 auto& target = kv_resource.mutableBlockIds(0, gid);
                 if (target_position >= target.blocksNum()
                     || (!isNullBlockIdx(target.blocks()[target_position])
-                        && target.blocks()[target_position] != source_blocks[local])) {
+                        && target.blocks()[target_position] != reusable_blocks[local])) {
                     return fail_match();
                 }
-                target.setAt(target_position, source_blocks[local]);
+                target.setAt(target_position, reusable_blocks[local]);
             }
         }
     }
@@ -280,6 +282,9 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     if (load_back_ticket != nullptr && !load_back_ticket->empty()) {
         for (size_t item_index = 0; item_index < load_back_ticket->itemCount(); ++item_index) {
             if (load_back_ticket->sourceTier(item_index) == Tier::DEVICE) {
+                continue;
+            }
+            if (load_back_ticket->joinedLoadBack(item_index)) {
                 continue;
             }
             for (const auto& tag : load_back_ticket->deviceGroupTags(item_index)) {
@@ -376,7 +381,16 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
                 }
                 target_device_blocks.push_back(blocks[position]);
             }
-            if (!valid || !load_back_ticket->bindTargetDeviceBlocks(item_index, std::move(target_device_blocks))) {
+            if (!valid) {
+                return rollback(original_sizes);
+            }
+            if (load_back_ticket->joinedLoadBack(item_index)) {
+                if (target_device_blocks != load_back_ticket->targetDeviceBlocks(item_index)) {
+                    return rollback(original_sizes);
+                }
+                continue;
+            }
+            if (!load_back_ticket->bindTargetDeviceBlocks(item_index, std::move(target_device_blocks))) {
                 return rollback(original_sizes);
             }
         }

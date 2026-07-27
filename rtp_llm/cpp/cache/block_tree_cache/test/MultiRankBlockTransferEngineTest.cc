@@ -443,8 +443,12 @@ TEST_F(MultiRankBlockTransferEngineTest, LoadBackCompletionStateMismatchDoesNotI
     pending_item.source_tier          = Tier::HOST;
     pending_item.source_blocks        = {host_block};
     pending_item.target_device_blocks = {device_block};
-    LoadBackWorker::TaskPtr task = cache->load_back_worker_.createTask({pending_item}, {group});
+    const std::shared_ptr<LoadBackAsyncContext> context = std::make_shared<LoadBackAsyncContext>(1);
+    LoadBackWorker::TaskPtr                     task;
+    ASSERT_TRUE(cache->load_back_worker_.createTask({pending_item}, {group}, context, task));
     ASSERT_NE(task, nullptr);
+    ASSERT_TRUE(cache->load_back_worker_.startLoading(
+        find_result.matched_node, 0, pending_item.target_device_blocks, task->context));
     cache->runLoadBackTask(task);
 
     GroupSlot& slot = find_result.matched_node->group_slots[0];

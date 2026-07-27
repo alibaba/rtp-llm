@@ -1656,7 +1656,7 @@ TEST_F(BlockTreeCacheTest, LoadBackPreparedPrefixFailureRollsBackAllSourceAndTar
 
     BlockTreeMatchResult result = cache->match({100});
     ASSERT_NE(result.load_back_ticket, nullptr);
-    LoadBackTicket::PendingLoadBackItems& items = result.load_back_ticket->items();
+    LoadBackTicket::PendingLoadBackItems& items = result.load_back_ticket->items_;
     ASSERT_EQ(items.size(), 2u);
     ASSERT_EQ(items[0].group_id, 0);
     ASSERT_EQ(items[1].group_id, 1);
@@ -1766,7 +1766,7 @@ TEST_F(BlockTreeCacheTest, LoadBackQueueRejectionRollsBackCoreHoldersAndRetainsR
     device_pool->incRef(request_targets, BlockRefType::REQUEST);
     const BlockIdxType request_target = request_targets.front();
     EXPECT_EQ(device_pool->refCount(request_target), 1u);
-    result.load_back_ticket->items().front().target_device_blocks = {request_target};
+    result.load_back_ticket->items_.front().target_device_blocks = {request_target};
     ASSERT_EQ(device_pool->refCount(request_target), 1u);
 
     BlockTreeCacheTestPeer::ScopedQueueRejectionGuard rejection_guard(*cache);
@@ -1941,7 +1941,7 @@ TEST_F(BlockTreeCacheTest, LoadBackTicketCommitTriggersLoadBack) {
     const BlockIdxType request_target = request_targets.front();
     EXPECT_EQ(device_pool->refCount(request_target), 1u);
     ASSERT_EQ(result.load_back_ticket->items().size(), 1u);
-    result.load_back_ticket->items()[0].target_device_blocks = {request_target};
+    result.load_back_ticket->items_[0].target_device_blocks = {request_target};
 
     std::shared_ptr<AsyncContext> context = result.load_back_ticket->commit();
     EXPECT_NE(context, nullptr);
@@ -2229,7 +2229,8 @@ TEST_F(BlockTreeCacheTest, LoadBackTicketKeepsExplicitLogicalDepthIndependentOfI
 
     LoadBackTicket::PendingLoadBackItem pending_item;
     pending_item.path_index                = 1;
-    std::shared_ptr<LoadBackTicket> ticket = registry->createTicket({pending_item}, /*logical_matched_blocks=*/7);
+    std::shared_ptr<LoadBackTicket> ticket =
+        registry->createTicket({pending_item}, /*logical_matched_blocks=*/7, nullptr);
     ASSERT_NE(ticket, nullptr);
     EXPECT_EQ(ticket->logicalMatchedBlocks(), 7u);
     ASSERT_EQ(ticket->items().size(), 1u);
@@ -2263,11 +2264,12 @@ TEST_F(BlockTreeCacheTest, TicketRegistryShutdownWaitsForClaimedCommit) {
         });
     LoadBackTicket::PendingLoadBackItem pending_item;
     pending_item.group_id                  = 0;
-    std::shared_ptr<LoadBackTicket> ticket = registry->createTicket({pending_item});
+    std::shared_ptr<LoadBackTicket> ticket = registry->createTicket({pending_item}, 0, nullptr);
     ASSERT_NE(ticket, nullptr);
     LoadBackTicket::PendingLoadBackItem shutdown_pending_item;
     shutdown_pending_item.group_id                          = 1;
-    std::shared_ptr<LoadBackTicket> shutdown_pending_ticket = registry->createTicket({shutdown_pending_item});
+    std::shared_ptr<LoadBackTicket> shutdown_pending_ticket =
+        registry->createTicket({shutdown_pending_item}, 0, nullptr);
     ASSERT_NE(shutdown_pending_ticket, nullptr);
 
     std::shared_ptr<AsyncContext> commit_result;
@@ -2298,7 +2300,7 @@ TEST_F(BlockTreeCacheTest, TicketRegistryShutdownWaitsForClaimedCommit) {
     shutdown_pending_ticket.reset();
     EXPECT_EQ(commit_calls.load(), 1);
     EXPECT_EQ(abort_calls.load(), 1);
-    EXPECT_EQ(registry->createTicket({pending_item}), nullptr);
+    EXPECT_EQ(registry->createTicket({pending_item}, 0, nullptr), nullptr);
     registry->shutdown();
 }
 
@@ -2333,7 +2335,7 @@ TEST_F(BlockTreeCacheTest, TicketRegistryCloseDetachesAndAbortsOnce) {
     pending_item.group_id                  = 0;
     pending_item.source_tier               = Tier::HOST;
     pending_item.source_blocks             = {source_block};
-    std::shared_ptr<LoadBackTicket> ticket = registry->createTicket({pending_item});
+    std::shared_ptr<LoadBackTicket> ticket = registry->createTicket({pending_item}, 0, nullptr);
     ASSERT_NE(ticket, nullptr);
 
     std::thread shutdown_thread([&] {
@@ -2386,7 +2388,7 @@ TEST_F(BlockTreeCacheTest, TicketRegistryConcurrentShutdownCallersShareDetachedA
     LoadBackShutdownTestPeer::setShutdownWaitObserver(*registry, [&shutdown_waits] { shutdown_waits.notify(); });
     LoadBackTicket::PendingLoadBackItem pending_item;
     pending_item.group_id                  = 7;
-    std::shared_ptr<LoadBackTicket> ticket = registry->createTicket({pending_item});
+    std::shared_ptr<LoadBackTicket> ticket = registry->createTicket({pending_item}, 0, nullptr);
     ASSERT_NE(ticket, nullptr);
 
     std::thread first_shutdown_thread([&] {
@@ -2429,7 +2431,7 @@ TEST_F(BlockTreeCacheTest, TicketRegistryConcurrentShutdownCallersShareDetachedA
     registry->shutdown();
     EXPECT_EQ(abort_calls.load(), 1);
     EXPECT_EQ(commit_calls.load(), 0);
-    EXPECT_EQ(registry->createTicket({pending_item}), nullptr);
+    EXPECT_EQ(registry->createTicket({pending_item}, 0, nullptr), nullptr);
     LoadBackShutdownTestPeer::setShutdownWaitObserver(*registry, std::function<void()>{});
 }
 
@@ -2472,11 +2474,12 @@ TEST_F(BlockTreeCacheTest, TicketRegistryShutdownWaitsForAbortInFlight) {
     pending_item.group_id                  = 0;
     pending_item.source_tier               = Tier::HOST;
     pending_item.source_blocks             = {source_block};
-    std::shared_ptr<LoadBackTicket> ticket = registry->createTicket({pending_item});
+    std::shared_ptr<LoadBackTicket> ticket = registry->createTicket({pending_item}, 0, nullptr);
     ASSERT_NE(ticket, nullptr);
     LoadBackTicket::PendingLoadBackItem shutdown_pending_item;
     shutdown_pending_item.group_id                          = 1;
-    std::shared_ptr<LoadBackTicket> shutdown_pending_ticket = registry->createTicket({shutdown_pending_item});
+    std::shared_ptr<LoadBackTicket> shutdown_pending_ticket =
+        registry->createTicket({shutdown_pending_item}, 0, nullptr);
     ASSERT_NE(shutdown_pending_ticket, nullptr);
 
     std::thread abort_thread([ticket = std::move(ticket)]() mutable { ticket.reset(); });
@@ -2502,7 +2505,7 @@ TEST_F(BlockTreeCacheTest, TicketRegistryShutdownWaitsForAbortInFlight) {
     EXPECT_EQ(shutdown_pending_ticket->commit(), nullptr);
     shutdown_pending_ticket.reset();
     EXPECT_EQ(abort_calls.load(), 2);
-    EXPECT_EQ(registry->createTicket({pending_item}), nullptr);
+    EXPECT_EQ(registry->createTicket({pending_item}, 0, nullptr), nullptr);
     full->releaseSingleBlock(Tier::HOST, source_block, BlockRefType::REQUEST);
     EXPECT_EQ(host_pool->freeBlocksNum(), 2u);
 }

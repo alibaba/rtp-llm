@@ -95,9 +95,22 @@ TEST(BlockTreeTest, FindPartialMatch) {
     EXPECT_EQ(result.matched_node->cache_key, 200);
 }
 
-TEST(BlockTreeTest, FindStopsBeforeBusyNodeAndItsDescendants) {
-    for (SlotTransferState state :
-         {SlotTransferState::DEMOTING, SlotTransferState::LOAD_BACK_PENDING, SlotTransferState::LOADING_BACK}) {
+TEST(BlockTreeTest, FindAllowsLoadingBackNode) {
+    BlockTree                   tree(2);
+    const BlockTreeInsertResult insert_result = tree.insertNode(nullptr, {100, 200, 300}, make2DSlots(2, 3, 42));
+    ASSERT_NE(insert_result.leaf, nullptr);
+
+    TreeNode* loading_node                      = tree.root()->children.at(100)->children.at(200);
+    loading_node->group_slots[1].transfer_state = SlotTransferState::LOADING_BACK;
+
+    const BlockTreeFindResult result = tree.findNode({100, 200, 300});
+    ASSERT_EQ(result.path.size(), 3u);
+    EXPECT_EQ(result.matched_blocks, 3u);
+    EXPECT_EQ(result.matched_node, tree.root()->children.at(100)->children.at(200)->children.at(300));
+}
+
+TEST(BlockTreeTest, FindStopsBeforeUnavailableNodeAndItsDescendants) {
+    for (SlotTransferState state : {SlotTransferState::DEMOTING, SlotTransferState::LOAD_BACK_PENDING}) {
         BlockTree tree(1);
         tree.insertNode(nullptr, {100, 200, 300}, make2DSlots(1, 3, 42));
 

@@ -275,6 +275,10 @@ private:
                                       const std::vector<std::string>&       device_group_tags,
                                       BlockTreeMatchResult&                 result,
                                       LoadBackTicket::PendingLoadBackItems& pending_load_back_items);
+    std::shared_ptr<LoadBackTicket> prepareLoadBackTicket(LoadBackTicket::PendingLoadBackItems& items,
+                                                          size_t                                logical_matched_blocks);
+    bool                            prepareJoinedLoadBackItem(LoadBackTicket::PendingLoadBackItem&         item,
+                                                              const std::shared_ptr<LoadBackAsyncContext>& context);
     bool   changeLoadBackStateNolock(TreeNode*         node,
                                      int               group_id,
                                      SlotTransferState from,
@@ -282,7 +286,9 @@ private:
     bool   reserveLoadBackItems(const LoadBackTicket::PendingLoadBackItems& items);
     std::shared_ptr<AsyncContext> commitLoadBack(const LoadBackTicket& ticket);
     void                          abortLoadBack(const LoadBackTicket& ticket);
-    void abortLoadBackNolock(const LoadBackTicket::PendingLoadBackItems& items, size_t prepared_item_count);
+    void abortLoadBackNolock(const LoadBackTicket::PendingLoadBackItems&  items,
+                             size_t                                       prepared_item_count,
+                             const std::shared_ptr<LoadBackAsyncContext>& context);
     void runLoadBackTask(const LoadBackWorker::TaskPtr& task);
     bool settleLoadBackNolock(LoadBackWorker::Task& task, bool copy_success);
 

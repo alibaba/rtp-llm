@@ -21,6 +21,7 @@ class LoadBackShutdownTestPeer;
 
 class AsyncContext;
 class BlockTreeCache;
+class LoadBackAsyncContext;
 class LoadBackTicketRegistry;
 
 class LoadBackTicket {
@@ -31,6 +32,8 @@ public:
         size_t                    path_index{0};
         Tier                      source_tier{Tier::NONE};
         std::vector<BlockIdxType> source_blocks;
+        // This ticket joins an existing transfer and does not own its source or state.
+        bool joined_load_back{false};
         // DEVICE means this logical coordinate is already resident but lies
         // outside the ready boundary; target blocks must preserve its identity.
         std::vector<std::string>  device_group_tags;
@@ -85,6 +88,14 @@ public:
         return items_.at(item_index).device_group_tags;
     }
 
+    bool joinedLoadBack(size_t item_index) const {
+        return items_.at(item_index).joined_load_back;
+    }
+
+    const std::vector<BlockIdxType>& targetDeviceBlocks(size_t item_index) const {
+        return items_.at(item_index).target_device_blocks;
+    }
+
     bool bindTargetDeviceBlocks(size_t item_index, std::vector<BlockIdxType> target_device_blocks) {
         if (item_index >= items_.size()) {
             return false;
@@ -93,27 +104,29 @@ public:
         return true;
     }
 
-private:
-    PendingLoadBackItems& items() {
-        return items_;
-    }
     const PendingLoadBackItems& items() const {
         return items_;
     }
 
-    friend class BlockTreeCache;
+    const std::shared_ptr<LoadBackAsyncContext>& context() const {
+        return context_;
+    }
+
+private:
     friend class LoadBackTicketRegistry;
 
     LoadBackTicket(std::shared_ptr<LoadBackTicketRegistry> registry,
                    uint64_t                                ticket_id,
                    PendingLoadBackItems                    items,
-                   size_t                                  logical_matched_blocks);
+                   size_t                                  logical_matched_blocks,
+                   std::shared_ptr<LoadBackAsyncContext>   context);
 
     std::shared_ptr<LoadBackTicketRegistry> registry_;
     uint64_t                                ticket_id_{0};
-    PendingLoadBackItems  items_;
-    const size_t          logical_matched_blocks_{0};
-    std::array<size_t, 3> logical_matched_blocks_by_tier_{};
+    PendingLoadBackItems                    items_;
+    const size_t                            logical_matched_blocks_{0};
+    std::array<size_t, 3>                   logical_matched_blocks_by_tier_{};
+    std::shared_ptr<LoadBackAsyncContext>   context_;
 };
 
 class LoadBackTicketRegistry: public std::enable_shared_from_this<LoadBackTicketRegistry> {
@@ -130,8 +143,9 @@ private:
     friend class LoadBackTicket;
     friend class block_tree_cache_test::LoadBackShutdownTestPeer;
 
-    std::shared_ptr<LoadBackTicket>
-    createTicket(const LoadBackTicket::PendingLoadBackItems& items, size_t logical_matched_blocks = 0);
+    std::shared_ptr<LoadBackTicket> createTicket(const LoadBackTicket::PendingLoadBackItems&  items,
+                                                 size_t                                       logical_matched_blocks,
+                                                 const std::shared_ptr<LoadBackAsyncContext>& context);
 
     class ActiveCallbackLease {
     public:
@@ -151,14 +165,19 @@ private:
     void                          abort(uint64_t ticket_id);
     void                          retireActiveCallback();
 
-    std::mutex                                                         mutex_;
-    std::condition_variable                                            cv_;
-    bool                                                               accepting_{true};
-    uint64_t                                                           next_ticket_id_{1};
-    size_t                                                             active_callbacks_{0};
-    std::unordered_map<uint64_t, LoadBackTicket::PendingLoadBackItems> pending_tickets_;
-    CommitCallback                                                     commit_callback_;
-    AbortCallback                                                      abort_callback_;
+    struct PendingTicket {
+        LoadBackTicket::PendingLoadBackItems  items;
+        std::shared_ptr<LoadBackAsyncContext> context;
+    };
+
+    std::mutex                                  mutex_;
+    std::condition_variable                     cv_;
+    bool                                        accepting_{true};
+    uint64_t                                    next_ticket_id_{1};
+    size_t                                      active_callbacks_{0};
+    std::unordered_map<uint64_t, PendingTicket> pending_tickets_;
+    CommitCallback                              commit_callback_;
+    AbortCallback                               abort_callback_;
     // Installed only by the shutdown test peer; production keeps this empty.
     std::function<void()> shutdown_wait_observer_for_test_;
 };

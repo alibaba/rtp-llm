@@ -151,6 +151,19 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
                         return rollback();
                     }
                     block_ids_0.setAt(path_index, source_blocks.front());
+                    continue;
+                }
+                if (load_back_ticket->joinedLoadBack(item_index)) {
+                    const std::vector<BlockIdxType>& joined_targets =
+                        load_back_ticket->targetDeviceBlocks(item_index);
+                    if (joined_targets.size() != 1 || isNullBlockIdx(joined_targets.front())) {
+                        return rollback();
+                    }
+                    const BlockIdxType current = block_ids_0.blocks()[path_index];
+                    if (!isNullBlockIdx(current) && current != joined_targets.front()) {
+                        return rollback();
+                    }
+                    block_ids_0.setAt(path_index, joined_targets.front());
                 }
             }
         }
@@ -174,6 +187,9 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     if (load_back_ticket && !load_back_ticket->empty()) {
         for (size_t item_index = 0; item_index < load_back_ticket->itemCount(); ++item_index) {
             if (load_back_ticket->sourceTier(item_index) == Tier::DEVICE) {
+                continue;
+            }
+            if (load_back_ticket->joinedLoadBack(item_index)) {
                 continue;
             }
             const size_t path_index = load_back_ticket->pathIndex(item_index);
@@ -223,6 +239,13 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
             if (load_back_ticket->sourceTier(item_index) == Tier::DEVICE
                 && target != load_back_ticket->sourceBlocks(item_index).front()) {
                 return rollback();
+            }
+            if (load_back_ticket->joinedLoadBack(item_index)) {
+                const std::vector<BlockIdxType>& joined_targets = load_back_ticket->targetDeviceBlocks(item_index);
+                if (joined_targets.size() != 1 || target != joined_targets.front()) {
+                    return rollback();
+                }
+                continue;
             }
             if (!load_back_ticket->bindTargetDeviceBlocks(item_index, {target})) {
                 return rollback();

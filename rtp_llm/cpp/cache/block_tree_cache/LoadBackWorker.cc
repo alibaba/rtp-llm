@@ -1,6 +1,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/LoadBackWorker.h"
 
+#include <algorithm>
 #include <exception>
+#include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
@@ -8,68 +10,45 @@
 
 namespace rtp_llm {
 
-bool LoadBackAsyncContext::requestCancel() {
-    State expected = State::PENDING;
-    if (state_.compare_exchange_strong(expected, State::CANCEL_REQUESTED)) {
+bool LoadBackWorker::createTask(const LoadBackTicket::PendingLoadBackItems&  items,
+                                const std::vector<ComponentGroupPtr>&        component_groups,
+                                const std::shared_ptr<LoadBackAsyncContext>& context,
+                                TaskPtr&                                     task) {
+    task.reset();
+    if (context == nullptr) {
+        RTP_LLM_LOG_ERROR("invalid load-back task context");
+        return false;
+    }
+
+    LoadBackTicket::PendingLoadBackItems task_items;
+    std::vector<ComponentGroupPtr>       task_item_groups;
+    for (const LoadBackTicket::PendingLoadBackItem& item : items) {
+        if (item.group_id < 0 || static_cast<size_t>(item.group_id) >= component_groups.size()) {
+            RTP_LLM_LOG_ERROR("invalid load-back task group, group=%d", item.group_id);
+            return false;
+        }
+        const ComponentGroupPtr& group = component_groups[static_cast<size_t>(item.group_id)];
+        if (group == nullptr || group->component_group_id != item.group_id) {
+            RTP_LLM_LOG_ERROR("mismatched load-back task group, group=%d", item.group_id);
+            return false;
+        }
+        if (item.joined_load_back) {
+            continue;
+        }
+        task_items.push_back(item);
+        task_item_groups.push_back(group);
+    }
+    if (task_items.empty()) {
         return true;
     }
-    return expected == State::CANCEL_REQUESTED;
-}
 
-bool LoadBackAsyncContext::cancelRequested() const {
-    return state_.load() == State::CANCEL_REQUESTED;
-}
-
-void LoadBackAsyncContext::onTaskComplete(bool ok) {
-    State expected = State::PENDING;
-    State terminal = ok ? State::SUCCEEDED : State::FAILED;
-    if (!state_.compare_exchange_strong(expected, terminal)) {
-        if (expected == State::CANCEL_REQUESTED) {
-            state_.store(State::CANCELLED);
-        }
-    }
-    std::lock_guard<std::mutex> lock(mutex_);
-    cv_.notify_all();
-}
-
-void LoadBackAsyncContext::waitDone() {
-    std::unique_lock<std::mutex> lock(mutex_);
-    cv_.wait(lock, [this] { return done(); });
-}
-
-bool LoadBackAsyncContext::done() const {
-    const State state = state_.load();
-    return state == State::SUCCEEDED || state == State::FAILED || state == State::CANCELLED;
-}
-
-bool LoadBackAsyncContext::success() const {
-    return state_.load() == State::SUCCEEDED;
-}
-
-LoadBackWorker::TaskPtr
-LoadBackWorker::createTask(const LoadBackTicket::PendingLoadBackItems& items,
-                           const std::vector<ComponentGroupPtr>&       item_groups) {
-    if (items.size() != item_groups.size()) {
-        RTP_LLM_LOG_ERROR(
-            "load-back task group count mismatch, items=%zu groups=%zu", items.size(), item_groups.size());
-        return nullptr;
-    }
-
-    TaskPtr task = std::make_shared<Task>();
-    for (size_t item_index = 0; item_index < items.size(); ++item_index) {
-        const LoadBackTicket::PendingLoadBackItem& item = items[item_index];
-        if (item_groups[item_index] == nullptr
-            || item_groups[item_index]->component_group_id != item.group_id) {
-            RTP_LLM_LOG_ERROR("invalid load-back task group, group=%d index=%zu", item.group_id, item_index);
-            return nullptr;
-        }
-    }
-    task->items       = items;
-    task->item_groups = item_groups;
-    task->staging_host_blocks.assign(items.size(), NULL_BLOCK_IDX);
-    task->target_installed.assign(items.size(), false);
-    task->context = std::make_shared<LoadBackAsyncContext>();
-    return task;
+    task              = std::make_shared<Task>();
+    task->items       = std::move(task_items);
+    task->item_groups = std::move(task_item_groups);
+    task->staging_host_blocks.assign(task->items.size(), NULL_BLOCK_IDX);
+    task->target_installed.assign(task->items.size(), false);
+    task->context = context;
+    return true;
 }
 
 LoadBackWorker::PrepareStatus LoadBackWorker::prepareTransferItem(Task& task, size_t item_index) {
@@ -180,13 +159,8 @@ bool LoadBackWorker::runTransfer(Task&                          task,
     return copy_success;
 }
 
-void LoadBackWorker::completeTask(Task& task, bool success) {
+void LoadBackWorker::releaseTaskResources(Task& task) {
     releaseUninstalledTargetHolders(task);
-    if (task.context == nullptr) {
-        RTP_LLM_LOG_ERROR("load-back task context is null");
-        return;
-    }
-    task.context->onTaskComplete(success);
 }
 
 void LoadBackWorker::releaseStagingBlocks(Task& task) {
@@ -219,6 +193,99 @@ bool LoadBackWorker::cancelLoadBackNolock(const std::shared_ptr<AsyncContext>& c
         return false;
     }
     return !load_back_context->done() && load_back_context->requestCancel();
+}
+
+bool LoadBackWorker::startLoading(TreeNode*                                    node,
+                                  int                                          group_id,
+                                  const std::vector<BlockIdxType>&             target_blocks,
+                                  const std::shared_ptr<LoadBackAsyncContext>& context) {
+    if (node == nullptr || group_id < 0 || target_blocks.empty() || context == nullptr
+        || std::any_of(
+            target_blocks.begin(), target_blocks.end(), [](BlockIdxType block) { return isNullBlockIdx(block); })) {
+        return false;
+    }
+
+    const LoadingKey                                  key{node, group_id};
+    const std::pair<LoadingRecordMap::iterator, bool> insert_result =
+        loading_records_.emplace(key, LoadingRecord{target_blocks, {context}});
+    return insert_result.second;
+}
+
+std::optional<std::vector<BlockIdxType>>
+LoadBackWorker::joinLoading(TreeNode* node, int group_id, const std::shared_ptr<LoadBackAsyncContext>& context) {
+    if (node == nullptr || group_id < 0 || context == nullptr) {
+        return std::nullopt;
+    }
+
+    const LoadingKey                 key{node, group_id};
+    const LoadingRecordMap::iterator record_it = loading_records_.find(key);
+    if (record_it == loading_records_.end()) {
+        return std::nullopt;
+    }
+
+    for (const std::shared_ptr<LoadBackAsyncContext>& registered_context : record_it->second.contexts) {
+        if (registered_context == context) {
+            return record_it->second.target_blocks;
+        }
+    }
+    record_it->second.contexts.push_back(context);
+    return record_it->second.target_blocks;
+}
+
+bool LoadBackWorker::finishLoading(TreeNode* node, int group_id, bool success) {
+    if (node == nullptr || group_id < 0) {
+        return false;
+    }
+
+    const LoadingKey                 key{node, group_id};
+    const LoadingRecordMap::iterator record_it = loading_records_.find(key);
+    if (record_it == loading_records_.end()) {
+        return false;
+    }
+
+    std::vector<std::shared_ptr<LoadBackAsyncContext>> contexts = std::move(record_it->second.contexts);
+    const size_t                                       erased   = loading_records_.erase(key);
+    if (erased != 1) {
+        RTP_LLM_LOG_ERROR("failed to erase loading record, group=%d", group_id);
+        return false;
+    }
+
+    bool all_completed = true;
+    for (const std::shared_ptr<LoadBackAsyncContext>& context : contexts) {
+        if (context == nullptr || !context->completeOne(success)) {
+            all_completed = false;
+            RTP_LLM_LOG_WARNING("failed to complete joined load-back context, group=%d", group_id);
+        }
+    }
+    return all_completed;
+}
+
+bool LoadBackWorker::eraseLoadingForOneContext(TreeNode*                                    node,
+                                               int                                          group_id,
+                                               const std::shared_ptr<LoadBackAsyncContext>& context) {
+    if (node == nullptr || group_id < 0 || context == nullptr) {
+        return false;
+    }
+
+    const LoadingKey                 key{node, group_id};
+    const LoadingRecordMap::iterator record_it = loading_records_.find(key);
+    if (record_it == loading_records_.end()) {
+        return false;
+    }
+    const std::vector<std::shared_ptr<LoadBackAsyncContext>>::iterator context_it =
+        std::find(record_it->second.contexts.begin(), record_it->second.contexts.end(), context);
+    if (context_it == record_it->second.contexts.end()) {
+        return false;
+    }
+    record_it->second.contexts.erase(context_it);
+    if (record_it->second.contexts.empty()) {
+        const size_t erased = loading_records_.erase(key);
+        if (erased != 1) {
+            RTP_LLM_LOG_ERROR("failed to erase empty loading record, group=%d", group_id);
+            return false;
+        }
+    }
+    return true;
 }
 
 }  // namespace rtp_llm
