@@ -6,6 +6,8 @@ test_copts = [
 ] + copts()
 
 exec_ops_test_deps = [
+    "//rtp_llm/cpp/cache:cache_config",
+    "//rtp_llm/models_py/bindings:op_defs",
     "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
     "//rtp_llm/models_py/bindings/common:common",
     "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
@@ -54,10 +56,10 @@ cc_test(
 cc_test_wrapper(
     name = "cache_store_async_writer_test",
     srcs = ["CacheStoreAsyncWriterTest.cpp"],
-    deps = [
+    deps = exec_ops_test_deps + [
+        "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/models_py/bindings/core:cache_store_async_writer",
         "@com_google_googletest//:gtest",
-        "@com_google_googletest//:gtest_main",
     ],
-    copts = copts(),
+    copts = test_copts,
 )

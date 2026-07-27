@@ -185,13 +185,17 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
                                     "kv_cache_block_id must be 2-D when kernel block table is 2-D");
             py_attn_inputs.kv_cache_block_id        = inputs.kv_cache_block_id;
             py_attn_inputs.kv_cache_block_id_device = tensorHoldHostAndToCuda(py_attn_inputs.kv_cache_block_id);
+            if (py_attn_inputs.cache_store_inputs.has_value()) {
+                py_attn_inputs.cache_store_inputs->host_kv_cache_offset = py_attn_inputs.kv_cache_block_id;
+            }
         }
         return {};
     }
 
     const size_t group_count = static_cast<size_t>(inputs.kv_cache_kernel_block_id.size(0));
-    RTP_LLM_CHECK_WITH_INFO(cache_manager_ != nullptr, "tagged attention inputs require a KVCacheManager topology");
-    const auto group_tags = cache_manager_->cacheConfig().groupTagsSnapshot();
+    RTP_LLM_CHECK_WITH_INFO(kv_cache_layer_layout_.has_value(),
+                            "tagged attention inputs require the current model cache layout");
+    const auto& group_tags = kv_cache_layer_layout_->topology().groupTagsSnapshot();
     RTP_LLM_CHECK_WITH_INFO(group_tags.size() == group_count,
                             "KV block table group count=%zu does not match topology tag count=%zu",
                             group_count,
@@ -207,6 +211,9 @@ PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs& py_
         if (inputs.kv_cache_block_id.defined()) {
             group_inputs.kv_cache_block_id        = inputs.kv_cache_block_id[group_id];
             group_inputs.kv_cache_block_id_device = tensorHoldHostAndToCuda(group_inputs.kv_cache_block_id);
+            if (group_inputs.cache_store_inputs.has_value()) {
+                group_inputs.cache_store_inputs->host_kv_cache_offset = group_inputs.kv_cache_block_id;
+            }
         }
         const auto [it, inserted] = by_tag.emplace(group_tags[group_id], std::move(group_inputs));
         (void)it;
@@ -278,70 +285,21 @@ GptModelOutputs PyWrappedModel::callForwardPostLayers(torch::Tensor         hidd
 
 std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.prepareWriteCacheParams");
-    std::optional<PyCacheStoreInputs> params;
-    if (!inputs.warmup && inputs.pd_separation) {
-        const size_t         decoder_batch_size = inputs.sequence_lengths.size(0);
-        const size_t         context_batch_size = inputs.input_lengths.size(0) - decoder_batch_size;
-        std::vector<int64_t> cache_keys_vec;
-        if (inputs.cache_keys.defined()) {
-            auto ck        = inputs.cache_keys.contiguous();
-            cache_keys_vec = std::vector<int64_t>(ck.data_ptr<int64_t>(), ck.data_ptr<int64_t>() + ck.numel());
-        }
-        RTP_LLM_CHECK_WITH_INFO(cache_manager_ != nullptr, "PD cache-store requires a KVCacheManager topology");
-        const auto& cache_config = cache_manager_->cacheConfig();
-        const auto& topology     = cache_config.topology();
-
-        PyCacheStoreInputs cache_store_inputs;
-        cache_store_inputs.context_batch_size        = context_batch_size;
-        cache_store_inputs.decoder_batch_size        = decoder_batch_size;
-        cache_store_inputs.request_id                = inputs.request_id;
-        cache_store_inputs.request_pd_separation     = inputs.request_pd_separation;
-        cache_store_inputs.cache_keys                = transVectorToString(cache_keys_vec);
-        cache_store_inputs.tokens_per_block          = inputs.seq_size_per_block;
-        cache_store_inputs.kv_block_stride_bytes     = inputs.kv_block_stride_bytes;
-        cache_store_inputs.kv_scale_stride_bytes     = inputs.kv_scale_stride_bytes;
-        cache_store_inputs.pd_separation             = inputs.pd_separation;
-        cache_store_inputs.model_id                  = model_id_;
-        cache_store_inputs.decode_entrance           = inputs.decode_entrance;
-        cache_store_inputs.warmup                    = inputs.warmup;
-        cache_store_inputs.use_opaque_kv_cache_store = inputs.use_opaque_kv_cache_store;
-        cache_store_inputs.mla_kvcache =
-            description_.attention_conf.use_mla && mla_ops_type_ != rtp_llm::MlaOpsType::MHA;
-        cache_store_inputs.cache_store              = cache_manager_->getCacheStore();
-        cache_store_inputs.cache_store_async_writer = cache_store_async_writer_.get();
-        cache_store_inputs.cp_size =
-            device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_size) : 1;
-        cache_store_inputs.cp_rank =
-            device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_rank) : 0;
-
-        // Shared-pool allocators pad every group to the runtime layout carried
-        // by GptModelInputs.  The topology keeps the group's logical/spec
-        // layout, which is only the physical layout for independent pools.
-        // Cache-store metadata must describe the actual backing tensor on both
-        // the prefill and decode side (including CP-local slicing).
-        const bool use_group_local_storage_layout = cache_config.use_independent_block_pools;
-        for (const auto& group : topology.groups()) {
-            cache_store_inputs.kv_cache_group_policies.emplace(group.tag, group.policy);
-            cache_store_inputs.tokens_per_block_by_tag.emplace(
-                group.tag,
-                use_group_local_storage_layout ? group.seq_size_per_block : cache_store_inputs.tokens_per_block);
-            cache_store_inputs.kv_block_stride_bytes_by_tag.emplace(group.tag,
-                                                                    use_group_local_storage_layout ?
-                                                                        group.kv_block_stride_bytes :
-                                                                        cache_store_inputs.kv_block_stride_bytes);
-            cache_store_inputs.kv_scale_stride_bytes_by_tag.emplace(group.tag,
-                                                                    use_group_local_storage_layout ?
-                                                                        group.kv_scale_stride_bytes :
-                                                                        cache_store_inputs.kv_scale_stride_bytes);
-            // The decode-side allocator registers the tag-local logical block,
-            // even when the shared backing pool spaces blocks by the maximum
-            // group stride. Keep transfer length separate from address stride.
-            cache_store_inputs.kv_block_transfer_bytes_by_tag.emplace(group.tag, group.kv_block_stride_bytes);
-            cache_store_inputs.kv_scale_transfer_bytes_by_tag.emplace(group.tag, group.kv_scale_stride_bytes);
-        }
-        params = cache_store_inputs;
+    if (inputs.warmup) {
+        return std::nullopt;
     }
-    return params;
+    if (!inputs.pd_separation || !inputs.request_id.defined() || inputs.request_id.numel() == 0) {
+        return std::nullopt;
+    }
+
+    PyCacheStoreInputs cache_store_inputs;
+    cache_store_inputs.input_lengths_host    = inputs.input_lengths;
+    cache_store_inputs.prefix_lengths_host   = inputs.prefix_lengths;
+    cache_store_inputs.host_kv_cache_offset  = inputs.kv_cache_block_id;
+    cache_store_inputs.request_id            = inputs.request_id;
+    cache_store_inputs.request_pd_separation = inputs.request_pd_separation;
+    cache_store_inputs.cache_keys            = inputs.cache_keys;
+    return cache_store_inputs;
 }
 
 GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs) {
@@ -376,14 +334,17 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
     input_list.reserve(split_inputs.size());
 
     for (size_t i = 0; i < split_inputs.size(); ++i) {
-        const auto& micro_inputs =
-            split_inputs[i].kv_cache_kernel_block_id.defined() ? split_inputs[i] : split_inputs[0];
-        auto py_attn_inputs        = buildPyAttentionInputs(micro_inputs);
-        auto embedding_inputs      = buildPyEmbeddingInputs(micro_inputs);
-        auto multimodal_inputs     = buildPyMultimodalInputs(micro_inputs);
-        auto bert_embedding_inputs = buildBertEmbeddingInputs(micro_inputs);
-        if (!inputs.warmup && inputs.pd_separation) {
-            py_attn_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
+        const bool  is_real_micro_input   = split_inputs[i].kv_cache_kernel_block_id.defined();
+        const auto& micro_inputs          = is_real_micro_input ? split_inputs[i] : split_inputs[0];
+        auto        py_attn_inputs        = buildPyAttentionInputs(micro_inputs);
+        auto        embedding_inputs      = buildPyEmbeddingInputs(micro_inputs);
+        auto        multimodal_inputs     = buildPyMultimodalInputs(micro_inputs);
+        auto        bert_embedding_inputs = buildBertEmbeddingInputs(micro_inputs);
+        if (is_real_micro_input && py_attn_inputs.is_prefill) {
+            py_attn_inputs.cache_store_inputs = prepareWriteCacheParams(micro_inputs);
+            if (py_attn_inputs.cache_store_inputs.has_value()) {
+                py_attn_inputs.cache_store_writer = cache_store_async_writer_;
+            }
         }
         torch::Tensor combo_position_ids = micro_inputs.combo_position_ids.defined() ?
                                                tensorHoldHostAndToCuda(micro_inputs.combo_position_ids) :
@@ -536,8 +497,17 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             attention_inputs.context_parallel_info = cp_params;
         }
 
-        if (!inputs.warmup && inputs.pd_separation) {
+        if (attention_inputs.is_prefill) {
             attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
+            if (attention_inputs.cache_store_inputs.has_value()) {
+                if (device_props_.enable_prefill_cp) {
+                    attention_inputs.cache_store_inputs->input_lengths_host =
+                        cp_params.prefill_actual_input_lengths_cpu;
+                }
+                attention_inputs.cache_store_writer = cache_store_async_writer_;
+            }
+        }
+        if (!inputs.warmup && inputs.pd_separation) {
             cache_store_async_writer_->init();
         }
         calculatePaddingOffset(attention_inputs);

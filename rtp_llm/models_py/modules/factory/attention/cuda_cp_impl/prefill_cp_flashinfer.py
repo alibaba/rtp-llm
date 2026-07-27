@@ -2,7 +2,6 @@ from typing import Optional
 
 import torch
 
-from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
 from rtp_llm.models_py.modules.factory.attention import common
 
 # Select implementation based on CP method
@@ -19,7 +18,7 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplB
 from rtp_llm.ops import AttentionConfigs, CPRotateMethod, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCachePrefillOpQKVOut,
-    KVCache,
+    LayerKVCache,
     PyAttentionInputs,
 )
 
@@ -146,15 +145,7 @@ class CPFlashInferImpl(FMHAImplBase):
         # Create params
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)
         self.rope_params = self.rope_kvcache_impl.prepare(attn_inputs)
-        if attn_inputs.is_prefill and attn_inputs.cache_store_inputs:
-            self.write_cache_store_impl = WriteCacheStoreOp(
-                attn_inputs.context_parallel_info.prefill_actual_input_lengths_cpu,
-                attn_inputs.prefix_lengths,
-                attn_inputs.kv_cache_block_id,
-                attn_inputs.cache_store_inputs,
-            )
-        else:
-            self.write_cache_store_impl = None
+        self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
         self.attn_inputs = attn_inputs
 
@@ -176,7 +167,7 @@ class CPFlashInferImpl(FMHAImplBase):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         need_rope_kv_cache: bool = True,
     ) -> torch.Tensor:
         assert self.rope_kvcache_impl is not None and self.rope_params is not None
@@ -189,9 +180,7 @@ class CPFlashInferImpl(FMHAImplBase):
         output = self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
         # Delay write to cache store until local kv cache finishes writing
-        if (
-            self.attn_inputs.cache_store_inputs
-            and self.write_cache_store_impl is not None
-        ):
-            self.write_cache_store_impl(kv_cache)
+        common.apply_write_cache_store(
+            self.write_cache_store_impl, self.attn_inputs, kv_cache
+        )
         return output
