@@ -11,7 +11,7 @@ py_library(
     srcs = glob(["fla/*.py"]),
     deps = [":common"] + select({
         "@rtp_llm//:using_rocm": [
-            requirement_gpu_rocm("aiter"),
+            "//rtp_llm:aiter",
             requirement_gpu_rocm("flydsl"),
         ],
         "//conditions:default": [],

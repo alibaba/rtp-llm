@@ -90,7 +90,6 @@ class Qwen3NextMetadata(object):
         self.cp_restore_indices = cp_restore_indices
         self.cp_local_extract_indices = cp_local_extract_indices
         self.cp_local_valid_mask = cp_local_valid_mask
-        self.aiter_flydsl_gdn_decode_indices = {}
 
     def get_prefill_conv1d_meta(self) -> Optional[CausalConv1dMetadata]:
         return self.prefill_conv1d_meta
@@ -458,7 +457,6 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
         is_target_verify: bool,
-        attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
         batch, seq = self._get_bs_from_attenion_input(
             mixed_qkv, attn_inputs, is_target_verify
@@ -482,39 +480,21 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
 
         ssm_states = self._get_ssm_states(kv_cache_tensor)
         use_aiter_flydsl_decode = (
-            torch.version.hip is not None
             # The current RTP block-cache index adapter resolves one state
             # transition per request. Target verify adds multiple tokens per
             # request, so retain the Triton implementation for that path.
-            and not is_target_verify
+            not is_target_verify
             and is_aiter_flydsl_gdn_decode_supported(
                 query, key, value, a, b, ssm_states
             )
         )
         if use_aiter_flydsl_decode:
             block_map = attn_inputs.kv_cache_kernel_block_id_device
-            cache_key = (
-                block_map.data_ptr(),
-                block_map.stride(0),
+            read_indices, write_indices = prepare_aiter_flydsl_gdn_decode_state_indices(
+                block_map,
+                attn_inputs.sequence_lengths_plus_1_device,
                 seq_size_per_block,
             )
-            indices = attn_meta.aiter_flydsl_gdn_decode_indices.get(cache_key)
-            if indices is None:
-                indices = prepare_aiter_flydsl_gdn_decode_state_indices(
-                    block_map,
-                    attn_inputs.sequence_lengths_plus_1_device,
-                    seq_size_per_block,
-                )
-                attn_meta.aiter_flydsl_gdn_decode_indices[cache_key] = indices
-
-            sequence_lengths = attn_inputs.sequence_lengths
-            # In serving this tensor is host-resident. If a future caller
-            # supplies a device tensor, launch the safe conditional copy.
-            copy_state = True
-            if sequence_lengths.device.type == "cpu":
-                copy_state = bool(
-                    torch.any(sequence_lengths % seq_size_per_block == 0).item()
-                )
             core_attn_out = aiter_flydsl_gdn_decode(
                 A_log=self.alog,
                 a=a,
@@ -524,9 +504,8 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
                 v=value,
                 b=b,
                 state=ssm_states,
-                read_indices=indices[0],
-                write_indices=indices[1],
-                copy_state=copy_state,
+                read_indices=read_indices,
+                write_indices=write_indices,
                 scale=None,
                 use_qk_l2norm_in_kernel=True,
             )
@@ -588,7 +567,6 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             kv_cache.seq_size_per_block,
             attn_inputs,
             is_target_verify,
-            attn_meta,
         )
 
         return attn_out
@@ -649,8 +627,10 @@ class Qwen3NextAttention(CausalAttention):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache],
         attention_inputs: Optional[PyAttentionInputs],
-        attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
+        attn_meta: Optional[Qwen3NextMetadata] = None,
     ) -> torch.Tensor:
+        if attn_meta is None:
+            attn_meta = Qwen3NextMetadata()
         gate = self.gate(hidden_states)
         attn_out = super().forward(hidden_states, fmha_impl, kv_cache, gate)
         return attn_out
@@ -1093,8 +1073,10 @@ class Qwen3NextDecoderLayer(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
-        attn_meta: Qwen3NextMetadata = Qwen3NextMetadata(),
+        attn_meta: Optional[Qwen3NextMetadata] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
+        if attn_meta is None:
+            attn_meta = Qwen3NextMetadata()
         hidden_states, residual = self.input_layernorm(hidden_states, residual)
 
         hidden_states = self.self_attn(
