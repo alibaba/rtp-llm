@@ -32,6 +32,8 @@ from PIL import Image
 from transformers import AutoConfig, AutoTokenizer
 
 from rtp_llm.config.py_config_modules import VitConfig
+from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
+from rtp_llm.model_loader.weight_module import CustomAtomicWeight
 from rtp_llm.multimodal.mm_error_messages import MMErr, raise_mm
 from rtp_llm.multimodal.multimodal_mixin_register import register_multimodal_mixin
 from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
@@ -45,6 +47,7 @@ from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
 from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
 from rtp_llm.ops import MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType, VitParameters
+from rtp_llm.utils.model_weight import CkptWeightInfo, concat_0, identity, sp_id
 
 from .image_processor import (
     MiniMaxM3VLImageProcessor,
@@ -52,7 +55,11 @@ from .image_processor import (
     get_hw_multiple_of,
     smart_resize,
 )
-from .minimax_m3_vl_vit import MiniMaxM3VLVisionTower, VisionConfig  # noqa: F401
+from .minimax_m3_vl_vit import (  # noqa: F401
+    MiniMaxM3VLVisionTower,
+    VisionConfig,
+    get_fused_qkv_checkpoint_names,
+)
 
 logger = logging.getLogger(__name__)
 
@@ -411,9 +418,9 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
             channel * temporal_patch_size * patch_size * patch_size,
         )
         pixel_values = flatten.squeeze(0).to(dtype)
-        grid_thw = torch.tensor(
-            [[grid_t, grid_h, grid_w]], dtype=torch.long, device=device
-        )
+        # Shape metadata stays on CPU. The vision tower creates cu_seqlens on
+        # the target device once, avoiding a grid_thw D2H sync in every batch.
+        grid_thw = torch.tensor([[grid_t, grid_h, grid_w]], dtype=torch.long)
         return pixel_values, grid_thw
 
     @staticmethod
@@ -528,14 +535,9 @@ class MiniMaxM3VLVitWeight(BaseVitWeights):
         vision_tower.vision_model.*, multi_modal_projector.*, patch_merge_mlp.*
     so `_ckpt_prefix` is empty.
 
-    In the rtp-llm runtime the MiniMaxM3VLVisionTower composite is hung off
-    `self.mm_part.visual` and its child attribute names (`vision_tower`,
-    `multi_modal_projector`, `patch_merge_mlp`) are chosen to mirror the
-    on-disk hierarchy exactly. So passing a single-entry dict
-    `{"vit": self.mm_part.visual}` (no extra prefix needed) makes
-    BaseVitWeights emit state_dict() keys whose full dotted path matches the
-    on-disk key 1:1, and the loader resolves each one back to a live tensor
-    by walking `self.mm_part.visual.<weight_name>`.
+    Runtime names mirror the checkpoint except that each attention layer has a
+    fused `qkv_proj`. MiniMaxM3VLDeployWeightInfo maps that live parameter to
+    the three published q/k/v tensors and concatenates them while loading.
     """
 
     def _set_weight_prefix(self):
@@ -543,25 +545,44 @@ class MiniMaxM3VLVitWeight(BaseVitWeights):
         self._ft_prefix = "self.mm_part.visual."
 
 
+class MiniMaxM3VLDeployWeightInfo(BaseMultiModalDeployWeightInfo):
+    """Load published Q/K/V tensors into the fused runtime projection."""
+
+    def get_weight_info(self):
+        weights = []
+        ckpt_prefix = self.vit_weights.ckpt_prefix
+        for weight_name in self.vit_weights.weight_names:
+            qkv_names = get_fused_qkv_checkpoint_names(weight_name)
+            checkpoint_names = qkv_names or (weight_name,)
+            weights.append(
+                CustomAtomicWeight(
+                    weight_name,
+                    [
+                        CkptWeightInfo(ckpt_prefix + name, identity)
+                        for name in checkpoint_names
+                    ],
+                    concat_0 if qkv_names else identity,
+                    split_func=sp_id,
+                )
+            )
+        return ModelWeightInfo(layer_weights=[], weights=weights)
+
+
 class MiniMaxM3VLMixin(BaseMultiModalMixin):
     def _init_multimodal(self) -> None:
         self.mm_part = MiniMaxM3VLImageEmbedding(self.mm_related_params)
 
-        # The live MiniMaxM3VLVisionTower hierarchy is structurally
-        # isomorphic to the on-disk checkpoint hierarchy:
+        # The live MiniMaxM3VLVisionTower hierarchy follows the checkpoint:
         #   visual.vision_tower.vision_model.*  /  visual.multi_modal_projector.*
-        #   visual.patch_merge_mlp.*
-        # so we register the composite tower as a single root and let
-        # BaseVitWeights pull state_dict() keys verbatim — they already match
-        # the on-disk top-level naming, and they round-trip back to the live
-        # tensors via the ft_prefix "self.mm_part.visual.".
+        #   visual.patch_merge_mlp.*. The deploy weight info handles the fused
+        # QKV exception.
         self.mm_related_params.vit_weights = MiniMaxM3VLVitWeight(
             {"vit": self.mm_part.visual}
         )
 
     @classmethod
     def get_multimodal_mixin_weight_info(cls):
-        return BaseMultiModalDeployWeightInfo
+        return MiniMaxM3VLDeployWeightInfo
 
     @classmethod
     def _get_mm_module(cls, mm_related_params: VitParameters, vit_config: VitConfig):
