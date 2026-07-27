@@ -318,8 +318,8 @@ start_nginx() {
 after_start_up() {
   now=`date "+%Y-%m-%d %H:%M:%S"`
   echo "INFO: ${APP_NAME} try to execute whale-handler after_start_up ... $now"
-  echo "INFO: Calling /usr/bin/curl --max-time 5 -s -w '\n%{http_code}' 'http://localhost:7001/hook/after_start'"
-  ret_str=`/usr/bin/curl --max-time 5 -s -w "\n%{http_code}" "http://localhost:7001/hook/after_start" 2>&1`
+  echo "INFO: Calling /usr/bin/curl --max-time 60 -s -w '\n%{http_code}' 'http://localhost:7001/hook/after_start'"
+  ret_str=`/usr/bin/curl --max-time 60 -s -w "\n%{http_code}" "http://localhost:7001/hook/after_start" 2>&1`
   http_code=$(echo "$ret_str" | tail -n1)
   response_body=$(echo "$ret_str" | head -n-1)
   echo "INFO: curl raw output: ${ret_str}"
