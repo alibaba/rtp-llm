@@ -18,12 +18,6 @@
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
-// Forward declare for opaque pointers in PyCacheStoreInputs
-namespace rtp_llm {
-class CacheStore;
-class CacheStoreAsyncWriter;
-}  // namespace rtp_llm
-
 namespace torch_ext {
 
 // Per-layer KV cache view. Returned by KVCache::getLayerCache().
@@ -255,39 +249,31 @@ struct PyModelInitResources {
 };
 
 struct PyCacheStoreInputs {
-    size_t                                           context_batch_size = 0;
-    size_t                                           decoder_batch_size = 0;
-    torch::Tensor                                    request_id;
-    torch::Tensor                                    request_pd_separation;
-    std::map<std::string, rtp_llm::CacheGroupPolicy> kv_cache_group_policies;
-    std::map<std::string, size_t>                    tokens_per_block_by_tag;
-    // Physical address step and logical transfer length are different for a
-    // shared pool: blocks are max-group-stride apart, while each tag transfers
-    // only the bytes described by its own cache group.
-    std::map<std::string, size_t> kv_block_stride_bytes_by_tag;
-    std::map<std::string, size_t> kv_scale_stride_bytes_by_tag;
-    std::map<std::string, size_t> kv_block_transfer_bytes_by_tag;
-    std::map<std::string, size_t> kv_scale_transfer_bytes_by_tag;
-    std::vector<std::string>      cache_keys;  // [context_batch_size]
-    size_t                        tokens_per_block = 0;
-    // Physical KV-manager block strides, supplied by CacheConfig rather than inferred from tensor views.
-    size_t kv_block_stride_bytes     = 0;
-    size_t kv_scale_stride_bytes     = 0;
-    bool   pd_separation             = false;
-    size_t model_id                  = 0;
-    bool   decode_entrance           = false;
-    bool   warmup                    = false;
-    bool   use_opaque_kv_cache_store = false;
-    bool   mla_kvcache               = false;
-
-    // Cache store reference (C++ only; passes through Python without inspection)
-    std::shared_ptr<rtp_llm::CacheStore> cache_store;
-    rtp_llm::CacheStoreAsyncWriter*      cache_store_async_writer = nullptr;
-
-    // CP-page-RR sharding context. (1, 0) = no sharding.
-    int cp_size = 1;
-    int cp_rank = 0;
+    // Eligible non-warmup PD-prefill work item, filtered by PyWrappedModel before entering Python.
+    torch::Tensor input_lengths_host;     // int32, [decoder + context]
+    torch::Tensor prefix_lengths_host;    // int32, [context]
+    torch::Tensor host_kv_cache_offset;   // int32, [batch, tag-local blocks]
+    torch::Tensor request_id;             // int64, [context]
+    torch::Tensor request_pd_separation;  // bool, [context]
+    torch::Tensor cache_keys;             // int64, [context, global key width]
 };
+
+}  // namespace torch_ext
+
+namespace rtp_llm {
+
+// Python-facing write contract. The concrete writer owns scheduling and CacheStore state.
+class CacheStoreWriter {
+public:
+    virtual ~CacheStoreWriter() = default;
+
+    virtual void write(const torch_ext::PyCacheStoreInputs& cache_store_inputs,
+                       const torch_ext::LayerKVCache&       layer_kv) = 0;
+};
+
+}  // namespace rtp_llm
+
+namespace torch_ext {
 
 struct PyPrefillCudaGaphCopyParams {
     // for embedding model cuda graph capture, the attenton batch size is padded to max_batch_size,
@@ -336,7 +322,8 @@ struct PyAttentionInputs {
     torch::Tensor combo_position_ids;
 
     // for write cache store
-    std::optional<PyCacheStoreInputs> cache_store_inputs;
+    std::optional<PyCacheStoreInputs>          cache_store_inputs;
+    std::shared_ptr<rtp_llm::CacheStoreWriter> cache_store_writer;
 
     std::optional<PyPrefillCudaGaphCopyParams> prefill_cuda_graph_copy_params;
     bool                                       is_s_padded = false;

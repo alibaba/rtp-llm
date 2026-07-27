@@ -1,6 +1,5 @@
 #pragma once
 #include "rtp_llm/models_py/bindings/core/Types.h"
-#include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/models/models_weight/Weights.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #include "rtp_llm/cpp/model_utils/activation_types.h"
@@ -8,7 +7,6 @@
 #include "rtp_llm/cpp/models/eplb/stats/ExpertStats.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include <cstddef>
-#include <map>
 #include <optional>
 #include <string>
 #include <memory>
@@ -172,58 +170,12 @@ struct KvCacheInfo {
     torch::Tensor kv_scale_buffer;
 };
 
-struct CacheStoreInputs {
-    torch::Tensor                                    input_lengths_host;
-    torch::Tensor                                    prefix_lengths_host;
-    torch::Tensor                                    host_kv_cache_offset;
-    std::map<std::string, rtp_llm::CacheGroupPolicy> kv_cache_group_policies;
-    std::map<std::string, size_t>                    tokens_per_block_by_tag;
-    // Address strides describe the backing allocation. Transfer sizes describe
-    // the tag-local payload registered by the decode-side allocator.
-    std::map<std::string, size_t> kv_block_stride_bytes_by_tag;
-    std::map<std::string, size_t> kv_scale_stride_bytes_by_tag;
-    std::map<std::string, size_t> kv_block_transfer_bytes_by_tag;
-    std::map<std::string, size_t> kv_scale_transfer_bytes_by_tag;
-
-    size_t context_batch_size = 0;
-    size_t decoder_batch_size = 0;
-
-    torch::Tensor            request_id;             // [context_batch_size]
-    torch::Tensor            request_pd_separation;  // [context_batch_size]
-    std::vector<std::string> cache_keys;             // [context_batch_size]
-    size_t                   tokens_per_block          = 0;
-    size_t                   kv_block_stride_bytes     = 0;
-    size_t                   kv_scale_stride_bytes     = 0;
-    bool                     pd_separation             = false;
-    size_t                   model_id                  = 0;
-    bool                     decode_entrance           = false;
-    bool                     warmup                    = false;
-    bool                     use_opaque_kv_cache_store = true;
-
-    int         layer_id = 0;
-    std::string tag;
-
-    // CP-page-RR sharding context. ``cp_size > 1`` means FULL groups have
-    // their kv_cache_offset compacted to ``ceil(total/cp_size)`` per rank;
-    // the writer must re-pair (cache_keys[r + i*cp_size], offset[i]) instead
-    // of the legacy (cache_keys[i], offset[i]). Defaults of (0, 1) preserve
-    // the non-sharded path. See ``buildCacheStorePlan``.
-    int cp_rank = 0;
-    int cp_size = 1;
-
-    // Pre-created event from the main thread to avoid cudaEventRecord
-    // contention on background threads. nullptr means writeCacheStore will
-    // create an event on the spot (single-threaded / C++ path).
-    std::shared_ptr<torch::Event> pre_created_event = nullptr;
-};
-
 struct AttentionCommonInputs {
     // see detailed comments at GptModelInputs
     torch::Tensor input_lengths;     // int32_t, [decoder_batch_size + context_batch_size]
     torch::Tensor sequence_lengths;  // int32_t, [decoder_batch_size]
 
-    std::optional<KvCacheInfo>      kv_cache;
-    std::optional<CacheStoreInputs> cache_store_inputs;
+    std::optional<KvCacheInfo> kv_cache;
 
     torch::Tensor cu_seqlens;
     torch::Tensor cu_kv_seqlens;

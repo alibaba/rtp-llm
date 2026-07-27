@@ -53,13 +53,14 @@ def create_write_cache_store_impl(
     Returns:
         WriteCacheStoreOp instance if cache store is needed, None otherwise
     """
-    if attn_inputs.is_prefill and attn_inputs.cache_store_inputs:
-        return WriteCacheStoreOp(
-            attn_inputs.input_lengths,
-            attn_inputs.prefix_lengths,
-            attn_inputs.kv_cache_block_id,
-            attn_inputs.cache_store_inputs,
-        )
+    cache_store_inputs = attn_inputs.cache_store_inputs
+    cache_store_writer = attn_inputs.cache_store_writer
+    if (
+        attn_inputs.is_prefill
+        and cache_store_inputs is not None
+        and cache_store_writer is not None
+    ):
+        return WriteCacheStoreOp(cache_store_writer, cache_store_inputs)
     return None
 
 
@@ -75,11 +76,7 @@ def apply_write_cache_store(
         attn_inputs: Attention calculation input parameters
         kv_cache: KV Cache to write to
     """
-    if (
-        attn_inputs.is_prefill
-        and attn_inputs.cache_store_inputs
-        and write_cache_store_impl is not None
-    ):
+    if attn_inputs.is_prefill and write_cache_store_impl is not None:
         write_cache_store_impl(kv_cache)
 
 

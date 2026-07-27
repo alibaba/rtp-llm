@@ -10,6 +10,7 @@ from . import rtp_llm_ops
 __all__: list[str] = [
     "BertEmbeddingInputs",
     "CacheGroupType",
+    "CacheStoreWriter",
     "LayerKVCache",
     "KVCache",
     "ParamsBase",
@@ -210,9 +211,19 @@ class ParamsBase:
         Fill parameters for CUDA graph execution
         """
 
+class CacheStoreWriter:
+    def write(
+        self,
+        cache_store_inputs: PyCacheStoreInputs,
+        kv_cache: LayerKVCache,
+    ) -> None: ...
+
 class PyAttentionInputs:
     def __init__(self) -> None: ...
-    cache_store_inputs: PyCacheStoreInputs | None
+    @property
+    def cache_store_inputs(self) -> PyCacheStoreInputs | None: ...
+    @property
+    def cache_store_writer(self) -> CacheStoreWriter | None: ...
     combo_position_ids: torch.Tensor
     context_parallel_info: PyContextParallelParams | None
     context_total_kv_length: int

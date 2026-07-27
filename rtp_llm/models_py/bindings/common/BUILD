@@ -33,9 +33,6 @@ cc_library(
     deps = [
         ":fuse_copy_op",
         "//rtp_llm/models_py/bindings:op_defs",
-        "//rtp_llm/models_py/bindings/core:op_data",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
-        "//rtp_llm/models_py/bindings/core:cache_store_async_writer",
         "//rtp_llm/models_py/bindings/common/kernels:fuse_copy_kernel",
     ] + torch_deps() + select({
         "//:using_cuda": [

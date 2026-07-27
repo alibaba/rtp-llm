@@ -3,7 +3,6 @@
 #include "rtp_llm/models_py/bindings/common/RtpNorm.h"
 #include "rtp_llm/models_py/bindings/common/RtpEmbeddingLookup.h"
 #include "rtp_llm/models_py/bindings/common/FusedQKRmsNorm.h"
-#include "rtp_llm/models_py/bindings/common/WriteCacheStoreOp.h"
 #include "rtp_llm/models_py/bindings/common/CudaGraphPrefillCopy.h"
 #include "rtp_llm/models_py/bindings/cuda/FlashInferMlaParams.h"
 #include "rtp_llm/models_py/bindings/cuda/SelectTopkOp.h"
@@ -37,15 +36,6 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("n"),
                   py::arg("row_len"),  // Will use data.sizes()[1] if 0
                   py::arg("info_id"));
-
-    rtp_ops_m.def("write_cache_store",
-                  &WriteCacheStoreOp,
-                  "WriteCacheStoreOp kernel",
-                  py::arg("input_lengths"),
-                  py::arg("prefix_lengths"),
-                  py::arg("kv_cache_block_id_host"),
-                  py::arg("cache_store_member"),
-                  py::arg("kv_cache"));
 
     rtp_ops_m.def("rmsnorm",
                   &rmsnorm,

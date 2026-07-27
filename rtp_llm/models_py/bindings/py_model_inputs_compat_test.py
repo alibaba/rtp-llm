@@ -8,6 +8,7 @@ from rtp_llm.models_py.model_desc.block_map import select_attention_inputs_for_l
 from rtp_llm.models_py.utils.kvcache import SingleGroupKVCacheAdapter
 from rtp_llm.ops import HybridAttentionConfig, HybridAttentionType
 from rtp_llm.ops.compute_ops import (
+    CacheStoreWriter,
     KVCache,
     LayerKVCache,
     PyAttentionInputs,
@@ -56,6 +57,7 @@ class PyModelInputsCompatTest(unittest.TestCase):
         }
 
         for class_name, runtime_class in (
+            ("CacheStoreWriter", CacheStoreWriter),
             ("KVCache", KVCache),
             ("LayerKVCache", LayerKVCache),
             ("PyAttentionInputs", PyAttentionInputs),
