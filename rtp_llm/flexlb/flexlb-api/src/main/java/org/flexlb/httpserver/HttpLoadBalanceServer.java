@@ -339,17 +339,17 @@ public class HttpLoadBalanceServer {
     }
 
     private void updateRequestCacheMetadata(BalanceContext ctx) {
-        Response response = ctx.getResponse();
-        if (!ctx.isSuccess()
-                || response == null
-                || !response.isSuccess()
-                || response.getServerStatus() == null
-                || response.getServerStatus().isEmpty()) {
-            return;
+        try {
+            Response response = ctx.getResponse();
+            if (!ctx.isSuccess()
+                    || response == null || !response.isSuccess()
+                    || response.getServerStatus() == null || response.getServerStatus().isEmpty()) {
+                return;
+            }
+            cacheAwareService.updateFromRoutedRequest(ctx.getRequest(), response.getServerStatus());
+        } catch (Exception e) {
+            Logger.warn("Failed to update request cache metadata", e);
         }
-        cacheAwareService.updateCacheMetadata(
-                ctx.getRequest(),
-                response.getServerStatus());
     }
 
     /**

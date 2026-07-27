@@ -25,7 +25,7 @@ New HTTP endpoints in `HttpLoadBalanceServer`:
 - `POST /rtp_llm/master/info`: Get master info
 - `POST /rtp_llm/schedule_snapshot`: Dump LB status
 - `POST /rtp_llm/notify_master`: Notify participant of master change
-- `POST /rtp_llm/update_log_level`: Debug log level control
+- `POST /flexlb/update_log_level`: Debug log level control
 - `GET /rtp_llm/queue_snapshot`: Get queue snapshot
 
 ### flexlb-common

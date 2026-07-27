@@ -1,11 +1,13 @@
 package org.flexlb.httpserver;
 
-import org.flexlb.cache.domain.CacheMatchModeUpdateRequest;
+import org.flexlb.cache.domain.CacheMatchFailoverAction;
+import org.flexlb.cache.domain.CacheMatchFailoverRequest;
 import org.flexlb.cache.domain.CacheMatchStatus;
-import org.flexlb.cache.domain.CacheMatchMode;
 import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.match.CacheMatchQueryOrchestrator;
+import org.flexlb.config.CacheMatchMode;
 import org.flexlb.consistency.LBStatusConsistencyService;
+import org.flexlb.dao.kvcm.KvcmHealthState;
 import org.flexlb.enums.LogLevel;
 import org.flexlb.service.monitor.FlexlbLogLevelManager;
 import org.flexlb.transport.GeneralHttpNettyService;
@@ -76,61 +78,101 @@ class FlexlbControlServerTest {
                 .exchange()
                 .expectStatus().isOk()
                 .expectBody()
-                .jsonPath("$.configuredMode").isEqualTo("AUTO")
+                .jsonPath("$.configuredMode").isEqualTo("KVCM")
+                .jsonPath("$.autoSwitchEnabled").isEqualTo(true)
                 .jsonPath("$.effectiveSource").isEqualTo("KVCM")
+                .jsonPath("$.kvcmHealthState").isEqualTo("HEALTHY")
+                .jsonPath("$.failoverState").doesNotExist()
                 .jsonPath("$.localStandbyEntries").isEqualTo(123)
                 .jsonPath("$.localStandbyMaximumEntries").isEqualTo(456);
     }
 
     @Test
-    void updatesCacheMatchMode() {
+    void activatesCacheMatchFailover() {
         when(cacheMatchQueryOrchestrator.status()).thenReturn(cacheMatchStatus());
 
         webTestClient.post()
-                .uri("/flexlb/cache_match/mode")
+                .uri("/flexlb/cache_match/failover")
                 .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(Map.of("mode", CacheMatchMode.FORCE_LOCAL_STANDBY.name()))
+                .bodyValue(Map.of(
+                        "action",
+                        CacheMatchFailoverAction.ACTIVATE_FALLBACK.name()))
                 .exchange()
                 .expectStatus().isOk();
 
         verify(cacheMatchQueryOrchestrator)
-                .setMode(CacheMatchMode.FORCE_LOCAL_STANDBY);
+                .applyFailoverAction(CacheMatchFailoverAction.ACTIVATE_FALLBACK);
     }
 
     @Test
-    void updatesCacheMatchModeOnFollower() {
+    void recoversKvcmPrimary() {
+        when(cacheMatchQueryOrchestrator.status()).thenReturn(cacheMatchStatus());
+
+        webTestClient.post()
+                .uri("/flexlb/cache_match/failover")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(Map.of(
+                        "action",
+                        CacheMatchFailoverAction.RECOVER_PRIMARY.name()))
+                .exchange()
+                .expectStatus().isOk();
+
+        verify(cacheMatchQueryOrchestrator)
+                .applyFailoverAction(CacheMatchFailoverAction.RECOVER_PRIMARY);
+    }
+
+    @Test
+    void rejectsUnknownFailoverAction() {
+        webTestClient.post()
+                .uri("/flexlb/cache_match/failover")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(Map.of("action", "UNKNOWN"))
+                .exchange()
+                .expectStatus().isBadRequest();
+
+        verify(cacheMatchQueryOrchestrator, never())
+                .applyFailoverAction(any());
+    }
+
+    @Test
+    void forwardsCacheMatchFailoverOnFollower() {
         when(lbStatusConsistencyService.isNeedConsistency()).thenReturn(true);
         when(lbStatusConsistencyService.isMaster()).thenReturn(false);
         when(lbStatusConsistencyService.getMasterHostIpPort())
                 .thenReturn("10.0.0.1:7001");
         when(generalHttpNettyService.request(
-                any(CacheMatchModeUpdateRequest.class),
+                any(CacheMatchFailoverRequest.class),
                 any(URI.class),
-                eq("/flexlb/cache_match/mode"),
+                eq("/flexlb/cache_match/failover"),
                 eq(CacheMatchStatus.class)))
                 .thenReturn(Mono.just(cacheMatchStatus()));
 
         webTestClient.post()
-                .uri("/flexlb/cache_match/mode")
+                .uri("/flexlb/cache_match/failover")
                 .contentType(MediaType.APPLICATION_JSON)
-                .bodyValue(Map.of("mode", CacheMatchMode.FORCE_LOCAL_STANDBY.name()))
+                .bodyValue(Map.of(
+                        "action",
+                        CacheMatchFailoverAction.ACTIVATE_FALLBACK.name()))
                 .exchange()
                 .expectStatus().isOk();
 
         verify(generalHttpNettyService).request(
-                any(CacheMatchModeUpdateRequest.class),
+                any(CacheMatchFailoverRequest.class),
                 any(URI.class),
-                eq("/flexlb/cache_match/mode"),
+                eq("/flexlb/cache_match/failover"),
                 eq(CacheMatchStatus.class));
-        verify(cacheMatchQueryOrchestrator, never()).setMode(any());
+        verify(cacheMatchQueryOrchestrator, never())
+                .applyFailoverAction(any());
     }
 
     private CacheMatchStatus cacheMatchStatus() {
         return new CacheMatchStatus(
                 true,
                 true,
-                CacheMatchMode.AUTO,
+                CacheMatchMode.KVCM,
+                true,
                 CacheMatchSource.KVCM,
+                KvcmHealthState.HEALTHY,
                 0,
                 0,
                 3,

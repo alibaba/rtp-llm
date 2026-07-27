@@ -5,6 +5,7 @@ import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.KvcmConfig;
+import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.RoutingServiceDiscovery;
 import org.flexlb.util.JsonUtils;
@@ -22,9 +23,7 @@ public class ModelServiceConfiguration {
     private static final String MODEL_SERVICE_CONFIG = "MODEL_SERVICE_CONFIG";
 
     @Bean
-    public ModelMetaConfig modelMetaConfig(
-            Environment environment,
-            RoutingServiceDiscovery serviceDiscovery) {
+    public ModelMetaConfig modelMetaConfig(Environment environment, RoutingServiceDiscovery serviceDiscovery) {
         String modelConfigJson = environment.getProperty(MODEL_SERVICE_CONFIG);
         if (StringUtils.isBlank(modelConfigJson)) {
             throw new IllegalStateException(MODEL_SERVICE_CONFIG + " must not be blank");
@@ -40,9 +39,7 @@ public class ModelServiceConfiguration {
         return modelMetaConfig;
     }
 
-    private void validateServiceRoute(
-            ServiceRoute serviceRoute,
-            RoutingServiceDiscovery serviceDiscovery) {
+    private void validateServiceRoute(ServiceRoute serviceRoute, RoutingServiceDiscovery serviceDiscovery) {
         if (StringUtils.isBlank(serviceRoute.getServiceId())) {
             throw new IllegalArgumentException("MODEL_SERVICE_CONFIG service_id must not be blank");
         }
@@ -61,15 +58,37 @@ public class ModelServiceConfiguration {
         validateKvcm(serviceRoute.getKvcm(), serviceDiscovery);
     }
 
-    private void validateKvcm(
-            KvcmConfig kvcm,
-            RoutingServiceDiscovery serviceDiscovery) {
+    private void validateKvcm(KvcmConfig kvcm, RoutingServiceDiscovery serviceDiscovery) {
         if (kvcm == null || !kvcm.isEnabled()) {
             return;
         }
         if (kvcm.getRequestTimeoutMs() <= 0 || kvcm.getLeaderRefreshIntervalMs() <= 0) {
             throw new IllegalArgumentException("MODEL_SERVICE_CONFIG kvcm timeouts must be greater than zero");
         }
+        if (kvcm.getHeartbeatFailureThreshold() <= 0
+                || kvcm.getQueryFailureThreshold() <= 0
+                || kvcm.getRecoverySuccessThreshold() <= 0) {
+            throw new IllegalArgumentException(
+                    "MODEL_SERVICE_CONFIG kvcm health thresholds must be greater than zero");
+        }
+        validateLocalStandby(kvcm.getLocalStandby());
         serviceDiscovery.validate(kvcm.toEndpoint());
+    }
+
+    private void validateLocalStandby(LocalStandbyConfig localStandby) {
+        if (localStandby == null) {
+            return;
+        }
+        if (localStandby.getBlockSize() < 0
+                || localStandby.getBlockSize() > Integer.MAX_VALUE
+                || localStandby.getEntryTtlMs() <= 0
+                || localStandby.getMaximumEntries() <= 0
+                || !Double.isFinite(localStandby.getCapacityMultiplier())
+                || localStandby.getCapacityMultiplier() < 1.0
+                || localStandby.getAsyncQueueCapacity() <= 0
+                || localStandby.getHashThreadCount() <= 0
+                || localStandby.getHashQueueCapacity() <= 0) {
+            throw new IllegalArgumentException("MODEL_SERVICE_CONFIG kvcm.local_standby values must be positive");
+        }
     }
 }

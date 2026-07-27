@@ -160,8 +160,12 @@ object at the same level as `role_endpoints`:
     "discovery": {
       "type": "dashscope"
     },
-    "request_timeout_ms": 50,
-    "leader_refresh_interval_ms": 5000
+    "request_timeout_ms": 500,
+    "max_query_retry_count": 1,
+    "leader_refresh_interval_ms": 10000,
+    "local_standby": {
+      "auto_switch": true
+    }
   }
 }
 ```
@@ -172,6 +176,15 @@ KVCM communication always uses gRPC and does not require a protocol setting.
 The optional KVCM `port` defaults to `6381` and is used with discovered seed IPs only for
 `GetClusterInfo`. Subsequent RPCs use the leader host and `meta_rpc_port` returned in
 `leader_endpoint`.
+
+Each cache query is retried once by default before that request falls back to Local Standby.
+`max_query_retry_count` controls the maximum retry count and does not include the initial attempt. KVCM is
+marked unhealthy after three consecutive `GetClusterInfo` failures or ten logical cache-query
+failures after retries are exhausted. It recovers only after three consecutive successful
+background `GetClusterInfo` probes. The optional `heartbeat_failure_threshold`,
+`query_failure_threshold`, and `recovery_success_threshold` fields override those defaults.
+`local_standby.auto_switch` controls whether an unhealthy KVCM changes subsequent requests to
+Local Standby automatically; the current request still falls back after its KVCM retries fail.
 
 `kvcm.namespace` can explicitly override the namespace for every role and group:
 

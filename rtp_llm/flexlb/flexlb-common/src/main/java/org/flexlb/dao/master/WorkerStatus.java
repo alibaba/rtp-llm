@@ -2,7 +2,6 @@ package org.flexlb.dao.master;
 
 import lombok.Data;
 import lombok.extern.slf4j.Slf4j;
-import org.flexlb.dao.pv.CacheHitComparisonPvLog;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.KvCacheGroupMode;
 import org.flexlb.enums.TaskStateEnum;
@@ -10,7 +9,6 @@ import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
 
 import java.util.ArrayList;
-import java.util.Collections;
 import java.util.Iterator;
 import java.util.List;
 import java.util.Map;
@@ -113,12 +111,14 @@ public class WorkerStatus {
     /**
      * Update task states
      * Check for lost tasks, update running/waiting tasks, and clean up finished tasks
+     *
+     * @return outcomes produced by this task-state update
      */
-    public List<CacheHitComparisonPvLog> updateTaskStates(
-            Map<String, TaskInfo> waitingTaskInfo,
-            Map<String, TaskInfo> runningTaskInfo,
-            Map<String, TaskInfo> finishedTaskInfo) {
-        List<CacheHitComparisonPvLog> cacheHitComparisons = Collections.emptyList();
+    public TaskStateUpdateResult updateTaskStates(Map<String, TaskInfo> waitingTaskInfo,
+                                                  Map<String, TaskInfo> runningTaskInfo,
+                                                  Map<String, TaskInfo> finishedTaskInfo) {
+
+        List<CacheHitFeedback> cacheHitFeedbacks = new ArrayList<>();
         Iterator<Map.Entry<String, TaskInfo>> iterator = localTaskMap.entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<String, TaskInfo> entry = iterator.next();
@@ -133,9 +133,7 @@ public class WorkerStatus {
                 }
                 localTask.updateTaskState(TaskStateEnum.FINISHED);
                 updateTaskInputLength(localTask, finishedTask);
-                cacheHitComparisons = appendCacheHitComparison(
-                        cacheHitComparisons,
-                        applyActualCacheHit(localTask, finishedTask, "finished"));
+                updateCacheHitFromEngine(localTask, finishedTask, "finished", cacheHitFeedbacks);
 
                 if (RoleType.PREFILL.matches(role) || RoleType.PDFUSION.matches(role)) {
                     long delta = localTask.estimatePrefillTime();
@@ -159,9 +157,7 @@ public class WorkerStatus {
                 }
 
                 updateTaskInputLength(localTask, runningTask);
-                cacheHitComparisons = appendCacheHitComparison(
-                        cacheHitComparisons,
-                        applyActualCacheHit(localTask, runningTask, "running"));
+                updateCacheHitFromEngine(localTask, runningTask, "running", cacheHitFeedbacks);
                 localTask.setPrefillTime(runningTask.getPrefillTime());
                 localTask.setWaitingTime(runningTask.getWaitingTime());
                 localTask.setIterateCount(runningTask.getIterateCount());
@@ -181,9 +177,7 @@ public class WorkerStatus {
                 }
 
                 updateTaskInputLength(localTask, waitingTask);
-                cacheHitComparisons = appendCacheHitComparison(
-                        cacheHitComparisons,
-                        applyActualCacheHit(localTask, waitingTask, "waiting"));
+                updateCacheHitFromEngine(localTask, waitingTask, "waiting", cacheHitFeedbacks);
                 localTask.setWaitingTime(waitingTask.getWaitingTime());
                 localTask.setDpRank(waitingTask.getDpRank());
 
@@ -195,7 +189,7 @@ public class WorkerStatus {
                 logger.warn("Task {} marked as LOST - not in waiting, running or finished list", requestId);
             }
         }
-        return cacheHitComparisons;
+        return TaskStateUpdateResult.fromCacheHitFeedbacks(cacheHitFeedbacks);
     }
 
     private void updateTaskInputLength(TaskInfo localTask, TaskInfo engineTask) {
@@ -204,23 +198,8 @@ public class WorkerStatus {
         }
     }
 
-    private List<CacheHitComparisonPvLog> appendCacheHitComparison(
-            List<CacheHitComparisonPvLog> comparisons,
-            CacheHitComparisonPvLog comparison) {
-        if (comparison == null) {
-            return comparisons;
-        }
-        if (comparisons.isEmpty()) {
-            comparisons = new ArrayList<>();
-        }
-        comparisons.add(comparison);
-        return comparisons;
-    }
-
-    private CacheHitComparisonPvLog applyActualCacheHit(
-            TaskInfo localTask,
-            TaskInfo engineTask,
-            String taskState) {
+    private void updateCacheHitFromEngine(TaskInfo localTask, TaskInfo engineTask, String taskState,
+                                          List<CacheHitFeedback> cacheHitFeedbacks) {
         if (!engineTask.isPrefixLengthValid()) {
             if (localTask.isPrefixLengthValid()) {
                 long previousPrefillTime = localTask.estimatePrefillTime();
@@ -228,7 +207,7 @@ public class WorkerStatus {
                 localTask.setPrefixLengthValid(false);
                 correctRunningQueueTime(localTask.estimatePrefillTime() - previousPrefillTime);
             }
-            return null;
+            return;
         }
 
         boolean cacheHitBecameValid = !localTask.isPrefixLengthValid();
@@ -238,14 +217,14 @@ public class WorkerStatus {
         correctRunningQueueTime(localTask.estimatePrefillTime() - previousPrefillTime);
 
         if (!cacheHitBecameValid) {
-            return null;
+            return;
         }
 
         long predictedHitTokens = localTask.getPredictedPrefixLength();
         long actualHitTokens = localTask.getPrefixLength();
         long inputTokens = localTask.getInputLength();
         long blockSize = cacheStatus == null ? 0 : cacheStatus.getBlockSize();
-        return new CacheHitComparisonPvLog(
+        cacheHitFeedbacks.add(new CacheHitFeedback(
                 "cache_hit_comparison",
                 localTask.getRequestId(),
                 localTask.getCacheMatchSource(),
@@ -258,7 +237,7 @@ public class WorkerStatus {
                 blockSize,
                 predictedHitTokens,
                 actualHitTokens,
-                actualHitTokens - predictedHitTokens);
+                actualHitTokens - predictedHitTokens));
     }
 
     private void correctRunningQueueTime(long correction) {

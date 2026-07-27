@@ -1,9 +1,8 @@
 package org.flexlb.httpserver;
 
 import org.apache.commons.lang3.StringUtils;
-import org.flexlb.cache.domain.CacheMatchModeUpdateRequest;
+import org.flexlb.cache.domain.CacheMatchFailoverRequest;
 import org.flexlb.cache.domain.CacheMatchStatus;
-import org.flexlb.cache.domain.CacheMatchMode;
 import org.flexlb.cache.match.CacheMatchQueryOrchestrator;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.loadbalance.LogLevelUpdateRequest;
@@ -32,7 +31,7 @@ public class FlexlbControlServer {
 
     private static final String UPDATE_LOG_LEVEL_PATH = "/flexlb/update_log_level";
     private static final String CACHE_MATCH_STATUS_PATH = "/flexlb/cache_match/status";
-    private static final String CACHE_MATCH_MODE_PATH = "/flexlb/cache_match/mode";
+    private static final String CACHE_MATCH_FAILOVER_PATH = "/flexlb/cache_match/failover";
 
     private final GeneralHttpNettyService generalHttpNettyService;
     private final LBStatusConsistencyService lbStatusConsistencyService;
@@ -57,8 +56,8 @@ public class FlexlbControlServer {
                         this::updateLogLevel)
                 .GET(CACHE_MATCH_STATUS_PATH, accept(MediaType.APPLICATION_JSON),
                         this::cacheMatchStatus)
-                .POST(CACHE_MATCH_MODE_PATH, accept(MediaType.APPLICATION_JSON),
-                        this::updateCacheMatchMode)
+                .POST(CACHE_MATCH_FAILOVER_PATH, accept(MediaType.APPLICATION_JSON),
+                        this::updateCacheMatchFailover)
                 .build();
     }
 
@@ -87,22 +86,23 @@ public class FlexlbControlServer {
                 .bodyValue(cacheMatchQueryOrchestrator.status());
     }
 
-    private Mono<ServerResponse> updateCacheMatchMode(ServerRequest request) {
-        return request.bodyToMono(CacheMatchModeUpdateRequest.class)
+    private Mono<ServerResponse> updateCacheMatchFailover(ServerRequest request) {
+        return request.bodyToMono(CacheMatchFailoverRequest.class)
                 .flatMap(updateRequest -> {
                     if (lbStatusConsistencyService.isNeedConsistency()
                             && !lbStatusConsistencyService.isMaster()) {
-                        return forwardCacheMatchModeToMaster(updateRequest);
+                        return forwardCacheMatchFailoverToMaster(updateRequest);
                     }
-                    return applyCacheMatchMode(updateRequest);
-                });
+                    return applyCacheMatchFailover(updateRequest);
+                })
+                .onErrorResume(e -> ServerResponse.badRequest()
+                        .contentType(MediaType.APPLICATION_JSON)
+                        .bodyValue(e.getMessage()));
     }
 
-    private Mono<ServerResponse> applyCacheMatchMode(
-            CacheMatchModeUpdateRequest updateRequest) {
+    private Mono<ServerResponse> applyCacheMatchFailover(CacheMatchFailoverRequest updateRequest) {
         try {
-            CacheMatchMode mode = CacheMatchMode.valueOf(updateRequest.mode());
-            cacheMatchQueryOrchestrator.setMode(mode);
+            cacheMatchQueryOrchestrator.applyFailoverAction(updateRequest.action());
             return ServerResponse.ok()
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(cacheMatchQueryOrchestrator.status());
@@ -113,11 +113,10 @@ public class FlexlbControlServer {
         }
     }
 
-    private Mono<ServerResponse> forwardCacheMatchModeToMaster(
-            CacheMatchModeUpdateRequest updateRequest) {
+    private Mono<ServerResponse> forwardCacheMatchFailoverToMaster(CacheMatchFailoverRequest updateRequest) {
         String master = lbStatusConsistencyService.getMasterHostIpPort();
         if (StringUtils.isBlank(master)) {
-            Logger.error("Cannot update cache match mode: real master is unavailable");
+            Logger.error("Cannot update cache failover state: real master is unavailable");
             return ServerResponse.status(503)
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue("real master is unavailable");
@@ -127,17 +126,17 @@ public class FlexlbControlServer {
         return generalHttpNettyService.request(
                         updateRequest,
                         uri,
-                        CACHE_MATCH_MODE_PATH,
+                        CACHE_MATCH_FAILOVER_PATH,
                         CacheMatchStatus.class)
                 .flatMap(status -> ServerResponse.ok()
                         .contentType(MediaType.APPLICATION_JSON)
                         .bodyValue(status))
                 .onErrorResume(e -> {
-                    Logger.error("Failed to forward cache match mode update to real master: {}",
+                    Logger.error("Failed to forward cache failover update to real master: {}",
                             master, e);
                     return ServerResponse.status(503)
                             .contentType(MediaType.APPLICATION_JSON)
-                            .bodyValue("failed to update cache match mode on real master");
+                            .bodyValue("failed to update cache failover state on real master");
                 });
     }
 }

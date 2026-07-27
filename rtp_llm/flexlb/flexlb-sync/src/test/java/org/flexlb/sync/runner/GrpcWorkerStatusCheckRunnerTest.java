@@ -1,10 +1,11 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.match.CacheAwareService;
+import org.flexlb.dao.master.CacheHitFeedback;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.TaskInfo;
-import org.flexlb.dao.pv.CacheHitComparisonPvLog;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.KvCacheGroupMode;
@@ -12,6 +13,8 @@ import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+
+import java.util.concurrent.CompletableFuture;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -115,21 +118,27 @@ class GrpcWorkerStatusCheckRunnerTest {
         when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(), org.mockito.ArgumentMatchers.any(RoleType.class)))
                 .thenReturn(workerStatusPB);
 
+        CacheHitFeedback expected = new CacheHitFeedback(
+                "cache_hit_comparison", requestId, "KVCM", "PREFILL", "test-group", "127.0.0.1", 8080,
+                "running", 200, 64, 100, 120, 20);
+        CacheHitComparisonResult unifiedComparison = new CacheHitComparisonResult(
+                "cache_hit_comparison", requestId, "KVCM", "PREFILL", "test-group", "127.0.0.1", 8080,
+                "running", 200, 64, 4096, 100, 80, true, 120, 20, 40);
+        when(cacheAwareService.buildCacheHitComparison(expected))
+                .thenReturn(CompletableFuture.completedFuture(unifiedComparison));
+
         // Act
         new GrpcWorkerStatusRunner(
                 modelName, host, RoleType.PREFILL, workerStatus, engineHealthReporter,
                 engineGrpcService, 20, cacheAwareService).run();
 
         // Assert
-        CacheHitComparisonPvLog expected = new CacheHitComparisonPvLog(
-                "cache_hit_comparison", requestId, "KVCM", "PREFILL", "test-group", "127.0.0.1", 8080,
-                "running", 200, 64, 100, 120, 20);
         assertTrue(Mockito.mockingDetails(engineHealthReporter).getInvocations().stream().anyMatch(invocation -> {
             Object[] arguments = invocation.getArguments();
             return invocation.getMethod().getName().equals("reportCacheHitComparisonMetrics")
                     && arguments.length == 2
                     && modelName.equals(arguments[0])
-                    && expected.equals(arguments[1]);
+                    && unifiedComparison.equals(arguments[1]);
         }));
     }
 }

@@ -1,0 +1,83 @@
+package org.flexlb.cache.match.localstandby;
+
+import org.flexlb.cache.domain.CacheHitComparisonResult;
+import org.flexlb.cache.domain.CacheMatchQuery;
+import org.flexlb.cache.domain.CacheMatchResult;
+import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.config.CacheMatchConfiguration;
+import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.dao.route.KvcmConfig;
+import org.flexlb.dao.route.LocalStandbyConfig;
+import org.flexlb.dao.route.RoleType;
+import org.flexlb.dao.route.ServiceRoute;
+import org.flexlb.dao.master.CacheHitFeedback;
+import org.junit.jupiter.api.Test;
+
+import java.util.List;
+import java.util.Map;
+import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.TimeUnit;
+
+import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.verify;
+import static org.mockito.Mockito.when;
+
+class LocalStandbyComparisonServiceTest {
+
+    @Test
+    void buildsUnifiedComparisonWithLocalStandbyPrediction() throws Exception {
+        LocalStandbyCacheMatchProvider provider = mock(LocalStandbyCacheMatchProvider.class);
+        LocalStandbyComparisonService comparisonService = new LocalStandbyComparisonService(
+                new CacheMatchConfiguration(modelMetaConfig()), provider);
+        CacheMatchQuery query = new CacheMatchQuery(
+                "request-1",
+                List.of(11L),
+                2192,
+                null,
+                4096,
+                RoleType.PREFILL,
+                "default");
+        CompletableFuture<CacheMatchResult> pendingMatch = new CompletableFuture<>();
+        when(provider.asyncLocalStandbyMatch(query)).thenReturn(pendingMatch);
+
+        comparisonService.trackLocalStandbyPrediction(query);
+
+        verify(provider).asyncLocalStandbyMatch(query);
+        pendingMatch.complete(new CacheMatchResult(
+                Map.of("10.0.0.1:8080", 1),
+                CacheMatchSource.LOCAL_STANDBY,
+                10,
+                4096));
+
+        CacheHitFeedback feedback = new CacheHitFeedback(
+                "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "default",
+                "10.0.0.1", 8080, "running", 8000, 2192, 4384, 6000, 1616);
+        CacheHitComparisonResult result =
+                comparisonService.buildCacheHitComparison(feedback).get(1, TimeUnit.SECONDS);
+
+        assertEquals(4384, result.routingPredictedHitTokens());
+        assertEquals(4096, result.localStandbyPredictedHitTokens());
+        assertEquals(6000, result.actualHitTokens());
+        assertEquals(1616, result.routingDeltaHitTokens());
+        assertEquals(1904, result.localStandbyDeltaHitTokens());
+        assertTrue(result.localStandbyPredictionAvailable());
+    }
+
+    private ModelMetaConfig modelMetaConfig() {
+        LocalStandbyConfig standby = new LocalStandbyConfig();
+
+        KvcmConfig kvcm = new KvcmConfig();
+        kvcm.setEnabled(true);
+        kvcm.setLocalStandby(standby);
+
+        ServiceRoute route = new ServiceRoute();
+        route.setServiceId("test-service");
+        route.setKvcm(kvcm);
+
+        ModelMetaConfig config = new ModelMetaConfig();
+        config.putServiceRoute(route.getServiceId(), route);
+        return config;
+    }
+}

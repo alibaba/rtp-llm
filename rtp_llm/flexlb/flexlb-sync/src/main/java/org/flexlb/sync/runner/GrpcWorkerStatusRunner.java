@@ -1,12 +1,13 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.dao.master.CacheStatus;
+import org.flexlb.dao.master.CacheHitFeedback;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.TaskStateUpdateResult;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.pv.CacheHitComparisonPvLog;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.worker.WorkerStatusResponse;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -205,13 +206,25 @@ public class GrpcWorkerStatusRunner implements Runnable {
     }
 
     private void handleTaskStateUpdateResult(TaskStateUpdateResult updateResult) {
-        for (CacheHitComparisonPvLog comparison : updateResult.cacheHitComparisons()) {
-            cacheAwareService.recordActualCacheHit(comparison);
-            engineHealthReporter.reportCacheHitComparisonMetrics(modelName, comparison);
-            String json = JsonUtils.toStringOrEmpty(comparison);
-            if (!json.isEmpty()) {
-                pvLogger.info(json);
-            }
+        for (CacheHitFeedback feedback : updateResult.cacheHitFeedbacks()) {
+            cacheAwareService.buildCacheHitComparison(feedback)
+                    .thenAccept(this::reportCacheHitComparison)
+                    .exceptionally(error -> {
+                        logger.warn("Failed to build cache hit comparison, requestId={}",
+                                feedback.requestId(), error);
+                        return null;
+                    });
+        }
+    }
+
+    private void reportCacheHitComparison(CacheHitComparisonResult comparison) {
+        if (comparison == null) {
+            return;
+        }
+        engineHealthReporter.reportCacheHitComparisonMetrics(modelName, comparison);
+        String json = JsonUtils.toStringOrEmpty(comparison);
+        if (!json.isEmpty()) {
+            pvLogger.info(json);
         }
     }
 

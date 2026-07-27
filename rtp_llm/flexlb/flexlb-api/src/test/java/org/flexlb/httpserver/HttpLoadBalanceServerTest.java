@@ -147,7 +147,7 @@ class HttpLoadBalanceServerTest {
         ArgumentCaptor<BalanceContext> contextCaptor =
                 ArgumentCaptor.forClass(BalanceContext.class);
         verify(routeService).route(contextCaptor.capture());
-        verify(cacheAwareService).updateCacheMetadata(
+        verify(cacheAwareService).updateFromRoutedRequest(
                 contextCaptor.getValue().getRequest(),
                 response.getServerStatus());
     }
@@ -175,7 +175,7 @@ class HttpLoadBalanceServerTest {
                 .exchange()
                 .expectStatus().is5xxServerError();
 
-        verify(cacheAwareService, never()).updateCacheMetadata(
+        verify(cacheAwareService, never()).updateFromRoutedRequest(
                 any(Request.class),
                 any());
     }
@@ -215,7 +215,7 @@ class HttpLoadBalanceServerTest {
         assertNull(requestCaptor.getValue().getBlockCacheKeys());
         verify(routeService, never()).route(any());
         verify(requestBlockHashService, never()).prepareBlockCacheKeys(any());
-        verify(cacheAwareService, never()).updateCacheMetadata(
+        verify(cacheAwareService, never()).updateFromRoutedRequest(
                 any(Request.class),
                 any());
     }

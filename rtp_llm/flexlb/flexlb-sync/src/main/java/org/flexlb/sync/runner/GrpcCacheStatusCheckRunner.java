@@ -189,7 +189,7 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
             if (!RoleType.PREFILL.equals(roleType) && !RoleType.PDFUSION.equals(roleType)) {
                 return;
             }
-            WorkerCacheUpdateResult result = cacheAwareService.updateCacheMetadata(workerStatus);
+            WorkerCacheUpdateResult result = cacheAwareService.updateFromWorkerStatus(workerStatus);
             if (!result.isSuccess()) {
                 logger.warn("Failed to update worker cache for IP: {}, error: {}", workerStatus.getIp(), result.getErrorMessage());
                 engineHealthReporter.reportCacheStatusCheckerFail(modelName, ipPort, BalanceStatusEnum.CACHE_UPDATE_FAILED);

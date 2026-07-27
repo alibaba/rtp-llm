@@ -285,6 +285,7 @@ public class QueueStressTest {
                   "request_id": "request-%d",
                   "model": "engine_service",
                   "block_cache_keys": [%d, %d, %d],
+                  "block_size": 256,
                   "seq_len": 1000,
                   "generate_timeout": %d,
                   "debug": 1

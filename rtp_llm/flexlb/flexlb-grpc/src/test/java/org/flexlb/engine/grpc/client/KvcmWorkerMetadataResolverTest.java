@@ -1,5 +1,6 @@
 package org.flexlb.engine.grpc.client;
 
+import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusProvider;
@@ -24,9 +25,9 @@ class KvcmWorkerMetadataResolverTest {
         WorkerStatus workerStatus = workerStatus(
                 "prefill-deployment", KvCacheGroupMode.WITH_MAMBA);
         KvcmWorkerMetadataResolver resolver = new KvcmWorkerMetadataResolver(
-                modelMetaConfig(null), provider(List.of(workerStatus)));
+                configuration(null), provider(List.of(workerStatus)));
 
-        resolver.refresh();
+        resolver.refreshNamespacesAndQueryTypes();
 
         assertEquals("prefill-deployment_2192",
                 resolver.resolveNamespace(RoleType.PREFILL, "default", 2192));
@@ -41,9 +42,9 @@ class KvcmWorkerMetadataResolverTest {
         WorkerStatus workerStatus = workerStatus(
                 "ignored-deployment", KvCacheGroupMode.FULL_ATTENTION_ONLY);
         KvcmWorkerMetadataResolver resolver = new KvcmWorkerMetadataResolver(
-                modelMetaConfig("configured-namespace"), provider(List.of(workerStatus)));
+                configuration("configured-namespace"), provider(List.of(workerStatus)));
 
-        resolver.refresh();
+        resolver.refreshNamespacesAndQueryTypes();
 
         assertEquals("configured-namespace_1024",
                 resolver.resolveNamespace(RoleType.PREFILL, "default", 1024));
@@ -56,11 +57,11 @@ class KvcmWorkerMetadataResolverTest {
         WorkerStatus workerStatus = workerStatus(
                 "prefill-deployment", KvCacheGroupMode.WITH_MAMBA);
         KvcmWorkerMetadataResolver resolver = new KvcmWorkerMetadataResolver(
-                modelMetaConfig(null), provider(List.of(workerStatus)));
-        resolver.refresh();
+                configuration(null), provider(List.of(workerStatus)));
+        resolver.refreshNamespacesAndQueryTypes();
 
         workerStatus.setKvCacheGroupMode(KvCacheGroupMode.UNSPECIFIED);
-        resolver.refresh();
+        resolver.refreshNamespacesAndQueryTypes();
 
         assertEquals(QueryType.QT_PREFIX_MATCH_WITH_MAMBA,
                 resolver.resolveQueryType(RoleType.PREFILL, "default"));
@@ -102,5 +103,9 @@ class KvcmWorkerMetadataResolverTest {
         ModelMetaConfig modelMetaConfig = new ModelMetaConfig();
         modelMetaConfig.putServiceRoute(route.getServiceId(), route);
         return modelMetaConfig;
+    }
+
+    private CacheMatchConfiguration configuration(String namespace) {
+        return new CacheMatchConfiguration(modelMetaConfig(namespace));
     }
 }

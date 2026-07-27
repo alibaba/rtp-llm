@@ -83,6 +83,43 @@ class ModelServiceConfigurationTest {
                 });
     }
 
+    @Test
+    void loadsLocalStandbyConfiguration() {
+        String config = """
+                {"service_id":"test-service","kvcm":{"enabled":true,"address":"kvcm-service",
+                "heartbeat_failure_threshold":4,"query_failure_threshold":5,
+                "max_query_retry_count":2,"recovery_success_threshold":2,
+                "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]},
+                "local_standby":{"auto_switch":true,"block_size":4096,
+                "entry_ttl_ms":300000,"maximum_entries":1000000,
+                "capacity_multiplier":1.3,
+                "async_queue_capacity":8192,"hash_thread_count":6,
+                "hash_queue_capacity":2048}},
+                "role_endpoints":[{"group":"default",
+                "pd_fusion_endpoint":{"address":"service-a","protocol":"http","path":"/",
+                "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]}}}]}
+                """;
+
+        contextRunner
+                .withPropertyValues("MODEL_SERVICE_CONFIG=" + config)
+                .run(context -> {
+                    assertThat(context).hasNotFailed();
+                    var kvcm = context.getBean(ModelMetaConfig.class)
+                            .getServiceRoute("test-service")
+                            .getKvcm();
+                    var standby = kvcm.getLocalStandby();
+                    assertThat(standby.isAutoSwitch()).isTrue();
+                    assertThat(standby.getBlockSize()).isEqualTo(4096);
+                    assertThat(standby.getCapacityMultiplier()).isEqualTo(1.3);
+                    assertThat(standby.getHashThreadCount()).isEqualTo(6);
+                    assertThat(standby.getHashQueueCapacity()).isEqualTo(2048);
+                    assertThat(kvcm.getHeartbeatFailureThreshold()).isEqualTo(4);
+                    assertThat(kvcm.getQueryFailureThreshold()).isEqualTo(5);
+                    assertThat(kvcm.getMaxQueryRetryCount()).isEqualTo(2);
+                    assertThat(kvcm.getRecoverySuccessThreshold()).isEqualTo(2);
+                });
+    }
+
     private String staticModelConfig() {
         return """
                 {"service_id":"test-service","role_endpoints":[{"group":"default",

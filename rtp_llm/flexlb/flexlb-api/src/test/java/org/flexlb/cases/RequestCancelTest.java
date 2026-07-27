@@ -134,6 +134,7 @@ public class RequestCancelTest {
                     1002,
                     1003
                   ],
+                  "block_size": 256,
                   "seq_len": 1000,
                   "debug": 1
                 }""";

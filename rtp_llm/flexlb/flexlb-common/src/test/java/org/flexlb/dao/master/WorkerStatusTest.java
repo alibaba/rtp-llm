@@ -399,13 +399,13 @@ class WorkerStatusTest {
             waitingTask.setPrefixLength(0);
             waitingTask.setPrefixLengthValid(false);
 
-            var comparisons = workerStatus.updateTaskStates(
+            var updateResult = workerStatus.updateTaskStates(
                     Map.of(REQUEST_ID, waitingTask), Map.of(), Map.of());
 
             TaskInfo updated = workerStatus.getLocalTaskMap().get(REQUEST_ID);
             assertEquals(100, updated.getPrefixLength());
             assertFalse(updated.isPrefixLengthValid());
-            assertTrue(comparisons.isEmpty());
+            assertTrue(updateResult.cacheHitFeedbacks().isEmpty());
         }
 
         @Test
@@ -430,7 +430,7 @@ class WorkerStatusTest {
             runningTask.setPrefixLength(120);
             runningTask.setPrefixLengthValid(true);
 
-            var firstComparisons = workerStatus.updateTaskStates(
+            var firstUpdateResult = workerStatus.updateTaskStates(
                     Map.of(), Map.of(REQUEST_ID, runningTask), Map.of());
 
             TaskInfo updated = workerStatus.getLocalTaskMap().get(REQUEST_ID);
@@ -439,14 +439,14 @@ class WorkerStatusTest {
             assertEquals(TaskInfo.estimatePrefillTimeMs(200, 120),
                     workerStatus.getRunningQueueTime().get());
             assertTrue(workerStatus.getRunningQueueTime().get() < predictedQueueTime);
-            assertEquals(1, firstComparisons.size());
-            assertEquals(100, firstComparisons.getFirst().predictedHitTokens());
-            assertEquals(120, firstComparisons.getFirst().actualHitTokens());
-            assertEquals(20, firstComparisons.getFirst().deltaHitTokens());
+            assertEquals(1, firstUpdateResult.cacheHitFeedbacks().size());
+            assertEquals(100, firstUpdateResult.cacheHitFeedbacks().getFirst().predictedHitTokens());
+            assertEquals(120, firstUpdateResult.cacheHitFeedbacks().getFirst().actualHitTokens());
+            assertEquals(20, firstUpdateResult.cacheHitFeedbacks().getFirst().deltaHitTokens());
 
-            var repeatedComparisons = workerStatus.updateTaskStates(
+            var repeatedUpdateResult = workerStatus.updateTaskStates(
                     Map.of(), Map.of(REQUEST_ID, runningTask), Map.of());
-            assertTrue(repeatedComparisons.isEmpty());
+            assertTrue(repeatedUpdateResult.cacheHitFeedbacks().isEmpty());
         }
 
         @Test
@@ -487,7 +487,8 @@ class WorkerStatusTest {
             firstRunningTask.setPrefixLength(120);
             firstRunningTask.setPrefixLengthValid(true);
             assertEquals(1, workerStatus.updateTaskStates(
-                    Map.of(), Map.of(REQUEST_ID, firstRunningTask), Map.of()).size());
+                    Map.of(), Map.of(REQUEST_ID, firstRunningTask), Map.of())
+                    .cacheHitFeedbacks().size());
 
             TaskInfo preemptedWaitingTask = new TaskInfo();
             preemptedWaitingTask.setInputLength(200);
@@ -500,11 +501,11 @@ class WorkerStatusTest {
             resumedRunningTask.setInputLength(200);
             resumedRunningTask.setPrefixLength(80);
             resumedRunningTask.setPrefixLengthValid(true);
-            var resumedComparisons = workerStatus.updateTaskStates(
+            var resumedUpdateResult = workerStatus.updateTaskStates(
                     Map.of(), Map.of(REQUEST_ID, resumedRunningTask), Map.of());
 
-            assertEquals(1, resumedComparisons.size());
-            assertEquals(80, resumedComparisons.getFirst().actualHitTokens());
+            assertEquals(1, resumedUpdateResult.cacheHitFeedbacks().size());
+            assertEquals(80, resumedUpdateResult.cacheHitFeedbacks().getFirst().actualHitTokens());
             assertEquals(TaskInfo.estimatePrefillTimeMs(200, 80),
                     workerStatus.getRunningQueueTime().get());
         }
@@ -578,15 +579,15 @@ class WorkerStatusTest {
             finishedTask.setPrefixLength(120);
             finishedTask.setPrefixLengthValid(true);
 
-            var comparisons = workerStatus.updateTaskStates(
+            var updateResult = workerStatus.updateTaskStates(
                     Map.of(), Map.of(), Map.of(REQUEST_ID, finishedTask));
 
             assertNull(workerStatus.getLocalTaskMap().get(REQUEST_ID));
             assertEquals(0, workerStatus.getRunningQueueTime().get());
-            assertEquals(1, comparisons.size());
-            assertEquals("finished", comparisons.getFirst().taskState());
-            assertEquals(100, comparisons.getFirst().predictedHitTokens());
-            assertEquals(120, comparisons.getFirst().actualHitTokens());
+            assertEquals(1, updateResult.cacheHitFeedbacks().size());
+            assertEquals("finished", updateResult.cacheHitFeedbacks().getFirst().taskState());
+            assertEquals(100, updateResult.cacheHitFeedbacks().getFirst().predictedHitTokens());
+            assertEquals(120, updateResult.cacheHitFeedbacks().getFirst().actualHitTokens());
         }
 
         @Test

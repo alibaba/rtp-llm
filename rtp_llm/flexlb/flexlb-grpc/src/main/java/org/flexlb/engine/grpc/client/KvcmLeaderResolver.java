@@ -2,11 +2,10 @@ package org.flexlb.engine.grpc.client;
 
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
-import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.KvcmConfig;
-import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.RoutingServiceDiscovery;
 import org.flexlb.engine.grpc.core.GrpcTarget;
 import org.flexlb.kvcm.grpc.ErrorCode;
@@ -36,13 +35,9 @@ public class KvcmLeaderResolver {
     private final KvcmMetaServiceClient metaServiceClient;
     private final AtomicReference<GrpcTarget> leader = new AtomicReference<>();
 
-    public KvcmLeaderResolver(
-            ModelMetaConfig modelMetaConfig,
-            RoutingServiceDiscovery serviceDiscovery,
-            KvcmMetaServiceClient metaServiceClient) {
-        ServiceRoute serviceRoute = modelMetaConfig.getServiceRoutes().stream().findFirst().orElse(null);
-        this.config = serviceRoute != null ? serviceRoute.getKvcm() : null;
-        this.enabled = config != null && config.isEnabled();
+    public KvcmLeaderResolver(CacheMatchConfiguration configuration, RoutingServiceDiscovery serviceDiscovery, KvcmMetaServiceClient metaServiceClient) {
+        this.config = configuration.getKvcmConfig();
+        this.enabled = configuration.isKvcmEnabled();
         this.kvcmEndpoint = enabled ? config.toEndpoint() : null;
         this.serviceDiscovery = serviceDiscovery;
         this.metaServiceClient = metaServiceClient;
@@ -52,9 +47,9 @@ public class KvcmLeaderResolver {
         return leader.get();
     }
 
-    public void refresh() {
+    public boolean refresh() {
         if (!enabled) {
-            return;
+            return false;
         }
 
         List<WorkerHost> discoveredHosts = serviceDiscovery.getHosts(kvcmEndpoint);
@@ -97,10 +92,11 @@ public class KvcmLeaderResolver {
                 Set<GrpcTarget> activeTargets = new HashSet<>(bootstrapTargets);
                 activeTargets.add(newLeader);
                 metaServiceClient.removeStaleChannels(activeTargets);
-                return;
+                return true;
             } catch (Exception e) {
                 log.warn("Failed to query KVCM cluster info from bootstrap target: {}", bootstrapTarget, e);
             }
         }
+        return false;
     }
 }

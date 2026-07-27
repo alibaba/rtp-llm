@@ -145,6 +145,26 @@ public class MetricConstant {
     public static final String CACHE_HIT_COMPARISON_DELTA_TOKENS = "app.cache.hit.comparison.delta.tokens";
 
     /**
+     * Cache-hit tokens predicted by the local standby matcher.
+     */
+    public static final String CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS = "app.cache.hit.comparison.local.standby.predicted.tokens";
+
+    /**
+     * Difference between actual and local standby predicted cache-hit tokens.
+     */
+    public static final String CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS = "app.cache.hit.comparison.local.standby.delta.tokens";
+
+    /**
+     * Local Standby mappings rejected because the configured capacity has been reached.
+     */
+    public static final String CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS = "app.cache.local.standby.capacity.rejected.qps";
+
+    /**
+     * Current number of Local Standby block-worker mappings.
+     */
+    public static final String CACHE_LOCAL_STANDBY_MAPPING_COUNT = "app.cache.local.standby.mapping.count";
+
+    /**
      * Cache request total count
      */
     public static final String CACHE_REQUEST_TOTAL = "app.cache.request.total";
@@ -242,6 +262,14 @@ public class MetricConstant {
      * Dedicated block hash thread pool status
      */
     public static final String BLOCK_HASH_THREAD_POOL_INFO = "app.block.hash.thread.pool.info";
+
+    public static final String LOCAL_STANDBY_HASH_QUEUE_WAIT_TIME_US = "app.local.standby.hash.queue.wait.time.us";
+
+    public static final String LOCAL_STANDBY_HASH_EXECUTION_TIME_US = "app.local.standby.hash.execution.time.us";
+
+    public static final String LOCAL_STANDBY_HASH_RESULT = "app.local.standby.hash.result";
+
+    public static final String LOCAL_STANDBY_HASH_THREAD_POOL_INFO = "app.local.standby.hash.thread.pool.info";
 
     /* ------------------------ gRPC Connection Pool Monitoring -------------------------- */
 

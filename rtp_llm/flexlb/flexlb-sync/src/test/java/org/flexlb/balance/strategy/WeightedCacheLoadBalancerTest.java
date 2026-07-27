@@ -38,7 +38,7 @@ class WeightedCacheLoadBalancerTest {
         configService = new ConfigService();
         cacheAwareService = Mockito.mock(CacheAwareService.class);
         Mockito.when(cacheAwareService.findMatchingEngines(Mockito.any(CacheMatchQuery.class)))
-                .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC, 256));
+                .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
     }
 
     @org.junit.jupiter.api.AfterEach

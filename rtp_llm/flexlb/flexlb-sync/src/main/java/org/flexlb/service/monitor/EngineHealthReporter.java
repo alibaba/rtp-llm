@@ -5,12 +5,12 @@ import io.netty.util.concurrent.EventExecutor;
 import io.netty.util.concurrent.SingleThreadEventExecutor;
 import lombok.Data;
 import org.apache.commons.collections4.CollectionUtils;
+import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.pv.CacheHitComparisonPvLog;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.BalanceStatusEnum;
@@ -39,6 +39,8 @@ import static org.flexlb.constant.MetricConstant.CACHE_AVAILABLE_KV_CACHE_TOKENS
 import static org.flexlb.constant.MetricConstant.CACHE_BLOCK_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_ACTUAL_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_DELTA_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS;
+import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_HIT_COMPARISON_PREDICTED_TOKENS;
 import static org.flexlb.constant.MetricConstant.CACHE_KEY_SIZE;
 import static org.flexlb.constant.MetricConstant.CACHE_STATUS_CHECK_FAIL;
@@ -143,6 +145,8 @@ public class EngineHealthReporter {
         this.monitor.register(CACHE_HIT_COMPARISON_PREDICTED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_ACTUAL_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_HIT_COMPARISON_DELTA_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_USED_KV_CACHE_TOKENS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_AVAILABLE_KV_CACHE_TOKENS, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_TOTAL_KV_CACHE_TOKENS, FlexMetricType.GAUGE);
@@ -379,7 +383,7 @@ public class EngineHealthReporter {
         cacheMetricsReporter.reportCacheHitMetrics(roleType, engineIp, hitTokens, hitRatio);
     }
 
-    public void reportCacheHitComparisonMetrics(String modelName, CacheHitComparisonPvLog comparison) {
+    public void reportCacheHitComparisonMetrics(String modelName, CacheHitComparisonResult comparison) {
         if (comparison == null) {
             return;
         }
@@ -390,9 +394,13 @@ public class EngineHealthReporter {
                 "group", comparison.group(),
                 "taskState", comparison.taskState(),
                 "cacheMatchSource", comparison.cacheMatchSource() == null ? "" : comparison.cacheMatchSource());
-        monitor.report(CACHE_HIT_COMPARISON_PREDICTED_TOKENS, metricTags, comparison.predictedHitTokens());
+        monitor.report(CACHE_HIT_COMPARISON_PREDICTED_TOKENS, metricTags, comparison.routingPredictedHitTokens());
         monitor.report(CACHE_HIT_COMPARISON_ACTUAL_TOKENS, metricTags, comparison.actualHitTokens());
-        monitor.report(CACHE_HIT_COMPARISON_DELTA_TOKENS, metricTags, comparison.deltaHitTokens());
+        monitor.report(CACHE_HIT_COMPARISON_DELTA_TOKENS, metricTags, comparison.routingDeltaHitTokens());
+        if (comparison.localStandbyPredictionAvailable()) {
+            monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_TOKENS, metricTags, comparison.localStandbyPredictedHitTokens());
+            monitor.report(CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS, metricTags, comparison.localStandbyDeltaHitTokens());
+        }
     }
 
     public void reportArriveDelayTime(BalanceContext ctx) {
