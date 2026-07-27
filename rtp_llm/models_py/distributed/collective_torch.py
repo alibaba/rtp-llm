@@ -751,7 +751,7 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     process_group = _get_group(group)
     world_size = torch.distributed.get_world_size(process_group)
 
-    tensor_list = torch.zeros(
+    tensor_list = torch.empty(
         [world_size * tensor.shape[0]] + list(tensor.shape)[1:],
         device=tensor.device,
         dtype=tensor.dtype,
