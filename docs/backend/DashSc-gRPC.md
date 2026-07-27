@@ -22,7 +22,7 @@ DashSc gRPC 在进程内提供 **predict_v2 协议**（`predict_v2.proto`）的 
 
 ### 升级注意：`worker_info_port_num` 默认值 8 → 9（破坏性）
 
-为在每台 worker 的端口块内为 DashSc gRPC 预留 **base + 8** 且不与其他 rank 重叠，**`--worker_info_port_num` / `WORKER_INFO_PORT_NUM` 的默认值由 8 改为 9**。此前**未显式配置**该参数且使用 **多 rank / 分布式** 的部署，`rank ≥ 1` 的 **base 端口会整体偏移**，需同步改服务发现、防火墙或运维文档；若必须维持旧步进，可显式指定 `--worker_info_port_num 8`（须自行评估是否与新端口占用冲突）。
+为在每台 worker 的端口块内为 DashSc gRPC 预留 **base + 8** 且不与其他 rank 重叠，**`--worker_info_port_num` / `WORKER_INFO_PORT_NUM` 的默认值由 8 改为 9**。启用 DashSc gRPC 的非 VIT 服务要求 `worker_info_port_num >= 9`，显式配置为 `8` 会在启动校验阶段失败。此前使用 **多 rank / 分布式** 且依赖旧步进的部署，`rank ≥ 1` 的 **base 端口会整体偏移**，需同步改服务发现、防火墙或运维文档。
 
 详见：[Breaking changes / `worker_info_port_num`](../release/breaking-changes.md)（含英文 Summary，便于写 release notes）。
 

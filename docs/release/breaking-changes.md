@@ -14,11 +14,11 @@
 **Impact:**
 
 - **Single rank (`rank_id = 0`)**: `base` is unchanged (still `start_port`). Offsets within the block still land on the same absolute ports as before **only if** you also did not rely on “next rank” occupying a specific slot; DashSc gRPC now uses **base + 8**, which required a wider stride so ranks do not overlap.
-- **Multiple ranks / distributed setups** that relied on the **old default 8** without explicitly setting `worker_info_port_num`: bases for `rank_id ≥ 1` **shift** (`start_port + rank * 8` → `start_port + rank * 9`). Service discovery, firewalls, and docs that hard-coded old ports **must be updated**, or you must pin the old layout.
+- **Multiple ranks / distributed setups** that relied on the **old stride 8**: bases for `rank_id ≥ 1` **shift** (`start_port + rank * 8` → `start_port + rank * 9`). Service discovery, firewalls, and docs that hard-coded old ports **must be updated**.
 
 **Migration:**
 
-1. Prefer **reconfiguring** discovery and firewall rules to the new layout (default `9`).
-2. To **preserve the previous stride** (not recommended unless you understand port overlap with new services): set `--worker_info_port_num 8` or `WORKER_INFO_PORT_NUM=8` explicitly, and verify it does not collide with DashSc gRPC or other offsets in your topology.
+1. Reconfigure discovery and firewall rules to the new layout (default `9`).
+2. Do not set `--worker_info_port_num 8` or `WORKER_INFO_PORT_NUM=8` for services with DashSc gRPC enabled; startup validation requires `worker_info_port_num >= 9`.
 
 See also: [DashSc gRPC — listen ports](../backend/DashSc-gRPC.md).

@@ -1,6 +1,5 @@
 [
   {
-    "source": "/home/luoli.hn/work/RTP-LLM/github-opensource/14054750/benchmark_report.json",
     "question_id": 1,
     "request_id": "2524e22f-8e9b-9a49-af08-d132600f4775",
     "context_tokens": 146252,
@@ -48,7 +47,6 @@
     "bucket": "128K-256K"
   },
   {
-    "source": "/home/luoli.hn/work/RTP-LLM/github-opensource/14054750/benchmark_report.json",
     "question_id": 2,
     "request_id": "5e227150-33c5-961b-b4bf-8192da51780a",
     "context_tokens": 135351,
@@ -96,7 +94,6 @@
     "bucket": "128K-256K"
   },
   {
-    "source": "/home/luoli.hn/work/RTP-LLM/github-opensource/14054750/benchmark_report.json",
     "question_id": 4,
     "request_id": "824e8a33-2129-94ca-a760-8c3bb22adcf8",
     "context_tokens": 227666,
@@ -144,7 +141,6 @@
     "bucket": "128K-256K"
   },
   {
-    "source": "/data0/luoli.hn/work/RTP-LLM/github-opensource/14060932/phase_boundary_focus_31.jsonl",
     "question_id": 40,
     "request_id": "0a67eb99-5c0f-9b28-9dd8-101fd924e02c",
     "context_tokens": 253431,
@@ -197,7 +193,6 @@
     "expected_generate_think_token_num": 2
   },
   {
-    "source": "/data0/luoli.hn/work/RTP-LLM/github-opensource/14060932/phase_boundary_focus_31.jsonl",
     "question_id": 643,
     "request_id": "e38bb721-8412-9c2a-8749-26684a28c0aa",
     "context_tokens": 97927,
@@ -246,7 +241,6 @@
     "rtp_reasoning_prefix": "9uFrKRKWmx**Title: Exploring the Power of Thought: Unveiling the Mysteries of the Mind**\\n\\n**Date:** October 10, 2023\\n\\n**"
   },
   {
-    "source": "/data0/luoli.hn/work/RTP-LLM/github-opensource/14060932/phase_boundary_focus_31.jsonl",
     "question_id": 118,
     "request_id": "42b947e0-5a92-9a1e-a802-ac4bffc68dc1",
     "context_tokens": 17549,
@@ -296,7 +290,6 @@
     "rtp_content_suffix": "simple pleasure of a beautifully crafted cake.\\n\\nWarm regards,\\n\\n[Your Name]  \\n[Your Position]  \\n[Your Bakery/Company Name]  \\n[Your Contact Information]</think>\\n\\n"
   },
   {
-    "source": "/data0/luoli.hn/work/RTP-LLM/github-opensource/14060932/phase_boundary_focus_31.jsonl",
     "question_id": 573,
     "request_id": "1fb035b1-75f1-9512-9ffc-16393909b326",
     "context_tokens": 791660,
@@ -346,7 +339,6 @@
     "rtp_content_suffix": " the gloves, faithful and true,  \\nProtecting me, in all that I do.  \\nIn the depths of winter, they'll be there,  \\nA steady comfort, in the frosty air.</think>\\n\\n"
   },
   {
-    "source": "/data0/luoli.hn/work/RTP-LLM/github-opensource/14060932/phase_boundary_focus_31.jsonl",
     "question_id": 203,
     "request_id": "2bbf8900-b717-9dcc-ad6e-e97607c7fcb7",
     "context_tokens": 294902,
