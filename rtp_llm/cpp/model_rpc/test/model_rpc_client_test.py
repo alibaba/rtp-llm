@@ -560,6 +560,239 @@ class ModelRpcClientTest(TestCase):
         # timeout should be 1000 ms / 1000 = 1.0 s (original behaviour)
         self.assertEqual(stub.fetch_calls[0][1]["timeout"], 1.0)
 
+    def test_enqueue_fetch_timeout_preserved_when_deadline_expired(self):
+        """When absolute_deadline_ms has already passed (remaining <= 0), the
+        original effective_ms is kept so the RPC still carries a timeout
+        instead of silently dropping the gRPC deadline."""
+        client = ModelRpcClient(
+            addresses=["worker:9000"],
+            client_config={},
+            max_rpc_timeout_ms=0,
+            decode_entrance=False,
+        )
+        client._channel_pool = _FakeChannelPool()
+        stub = _RoutingStub(fetch_responses=[_make_response(finished=True)])
+        # absolute_deadline_ms = 4 999 000 ms (epoch); with time.time()=5000,
+        # now = 5 000 000 ms -> remaining = -1 000 ms (expired).
+        # effective_ms must stay 10 000 -> timeout = 10.0 s
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(
+                timeout_ms=10000,
+                role_addrs=[_prefill_role_addr("prefill-worker", 9000)],
+                absolute_deadline_ms=4999000,
+            ),
+            request_id=332,
+            mm_inputs=[],
+            enqueued_by_master=True,
+        )
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        ), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.time.time",
+            return_value=5000,
+        ):
+            responses = asyncio.run(self._run(client, input_py))
+
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(len(stub.fetch_calls), 1)
+        # timeout should keep the original 10 000 ms / 1000 = 10.0 s
+        self.assertEqual(stub.fetch_calls[0][1]["timeout"], 10.0)
+
+    def test_enqueue_fetch_timeout_uses_deadline_when_no_effective_timeout(self):
+        """When neither timeout_ms nor max_rpc_timeout_ms is set
+        (effective_ms <= 0), a positive remaining budget from
+        absolute_deadline_ms becomes the gRPC timeout."""
+        client = ModelRpcClient(
+            addresses=["worker:9000"],
+            client_config={},
+            max_rpc_timeout_ms=0,
+            decode_entrance=False,
+        )
+        client._channel_pool = _FakeChannelPool()
+        stub = _RoutingStub(fetch_responses=[_make_response(finished=True)])
+        # timeout_ms unset (defaults to -1) and max_rpc_timeout_ms = 0
+        # -> effective_ms = 0; absolute_deadline_ms = 5 000 500 ms with
+        # time.time()=5000 -> remaining = 500 ms -> timeout = 0.5 s
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(
+                role_addrs=[_prefill_role_addr("prefill-worker", 9000)],
+                absolute_deadline_ms=5000500,
+            ),
+            request_id=333,
+            mm_inputs=[],
+            enqueued_by_master=True,
+        )
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        ), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.time.time",
+            return_value=5000,
+        ):
+            responses = asyncio.run(self._run(client, input_py))
+
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(len(stub.fetch_calls), 1)
+        # timeout should be 500 ms / 1000 = 0.5 s
+        self.assertEqual(stub.fetch_calls[0][1]["timeout"], 0.5)
+
+    def test_generate_stream_timeout_respects_absolute_deadline(self):
+        """The GenerateStreamCall path (enqueued_by_master=False) also caps the
+        gRPC timeout to the remaining budget from absolute_deadline_ms."""
+        client = ModelRpcClient(
+            addresses=["worker:9000"],
+            client_config={},
+            max_rpc_timeout_ms=0,
+            decode_entrance=False,
+        )
+        client._channel_pool = _FakeChannelPool()
+        stub = _RoutingStub(generate_responses=[_make_response(finished=True)])
+        # timeout_ms = 10 000 ms; absolute_deadline_ms = 5 000 500 ms with
+        # time.time()=5000 -> remaining = 500 ms -> timeout = 0.5 s
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(
+                timeout_ms=10000,
+                absolute_deadline_ms=5000500,
+            ),
+            request_id=334,
+            mm_inputs=[],
+        )
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        ), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.time.time",
+            return_value=5000,
+        ):
+            responses = asyncio.run(self._run(client, input_py))
+
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(len(stub.generate_calls), 1)
+        self.assertEqual(stub.fetch_calls, [])
+        # timeout should be 500 ms / 1000 = 0.5 s, not 10.0 s
+        self.assertEqual(stub.generate_calls[0][1]["timeout"], 0.5)
+
+    def test_generate_stream_timeout_preserved_when_deadline_expired(self):
+        """The GenerateStreamCall path keeps the original effective_ms when
+        absolute_deadline_ms has already passed (remaining <= 0), so the RPC
+        still carries a timeout instead of silently dropping it."""
+        client = ModelRpcClient(
+            addresses=["worker:9000"],
+            client_config={},
+            max_rpc_timeout_ms=0,
+            decode_entrance=False,
+        )
+        client._channel_pool = _FakeChannelPool()
+        stub = _RoutingStub(generate_responses=[_make_response(finished=True)])
+        # absolute_deadline_ms = 4 999 000 ms (epoch); with time.time()=5000,
+        # now = 5 000 000 ms -> remaining = -1 000 ms (expired).
+        # effective_ms must stay 10 000 -> timeout = 10.0 s
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(
+                timeout_ms=10000,
+                absolute_deadline_ms=4999000,
+            ),
+            request_id=335,
+            mm_inputs=[],
+        )
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        ), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.time.time",
+            return_value=5000,
+        ):
+            responses = asyncio.run(self._run(client, input_py))
+
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(len(stub.generate_calls), 1)
+        self.assertEqual(stub.fetch_calls, [])
+        # timeout should keep the original 10 000 ms / 1000 = 10.0 s
+        self.assertEqual(stub.generate_calls[0][1]["timeout"], 10.0)
+
+    def test_generate_stream_timeout_preserved_when_no_deadline(self):
+        """The GenerateStreamCall path keeps the original effective_ms when
+        absolute_deadline_ms is 0 (not set)."""
+        client = ModelRpcClient(
+            addresses=["worker:9000"],
+            client_config={},
+            max_rpc_timeout_ms=0,
+            decode_entrance=False,
+        )
+        client._channel_pool = _FakeChannelPool()
+        stub = _RoutingStub(generate_responses=[_make_response(finished=True)])
+        # absolute_deadline_ms = 0 (not set) -> timeout = timeout_ms
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(
+                timeout_ms=10000,
+                absolute_deadline_ms=0,
+            ),
+            request_id=336,
+            mm_inputs=[],
+        )
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        ):
+            responses = asyncio.run(self._run(client, input_py))
+
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(len(stub.generate_calls), 1)
+        self.assertEqual(stub.fetch_calls, [])
+        # timeout should be 10 000 ms / 1000 = 10.0 s (original behaviour)
+        self.assertEqual(stub.generate_calls[0][1]["timeout"], 10.0)
+
+    def test_enqueue_fetch_timeout_uses_deadline_with_global_max_rpc_timeout(self):
+        """When timeout_ms is unset and max_rpc_timeout_ms is the only timeout
+        source, a positive remaining budget from absolute_deadline_ms still
+        tightens the gRPC timeout."""
+        client = ModelRpcClient(
+            addresses=["worker:9000"],
+            client_config={},
+            max_rpc_timeout_ms=10000,
+            decode_entrance=False,
+        )
+        client._channel_pool = _FakeChannelPool()
+        stub = _RoutingStub(fetch_responses=[_make_response(finished=True)])
+        # timeout_ms unset (defaults to -1) -> effective_ms = max_rpc_timeout_ms
+        # = 10 000; absolute_deadline_ms = 5 000 500 ms with time.time()=5000
+        # -> remaining = 500 ms -> effective_ms = min(10 000, 500) = 500
+        input_py = GenerateInput(
+            token_ids=torch.tensor([1, 2, 3]),
+            generate_config=GenerateConfig(
+                role_addrs=[_prefill_role_addr("prefill-worker", 9000)],
+                absolute_deadline_ms=5000500,
+            ),
+            request_id=337,
+            mm_inputs=[],
+            enqueued_by_master=True,
+        )
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.RpcServiceStub",
+            return_value=stub,
+        ), patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.time.time",
+            return_value=5000,
+        ):
+            responses = asyncio.run(self._run(client, input_py))
+
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(len(stub.fetch_calls), 1)
+        # timeout should be 500 ms / 1000 = 0.5 s, not 10.0 s
+        self.assertEqual(stub.fetch_calls[0][1]["timeout"], 0.5)
+
 
 if __name__ == "__main__":
     setup_logging()

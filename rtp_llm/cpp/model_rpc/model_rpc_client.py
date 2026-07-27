@@ -449,18 +449,20 @@ class ModelRpcClient(object):
         # compute the remaining budget and cap effective_ms so the
         # FetchResponse / GenerateStreamCall deadline never exceeds the
         # end-to-end deadline.  When effective_ms is already 0 (no deadline),
-        # use remaining_ms directly.  A non-positive remaining_ms leaves
-        # effective_ms <= 0, which the grpc_kwargs guard below handles by
-        # not setting a deadline.
+        # use remaining_ms directly.
         absolute_deadline_ms = getattr(
             input_py.generate_config, "absolute_deadline_ms", 0
         )
         if absolute_deadline_ms > 0:
             remaining_ms = absolute_deadline_ms - int(time.time() * 1000)
-            if effective_ms > 0:
-                effective_ms = min(effective_ms, remaining_ms)
-            else:
-                effective_ms = remaining_ms
+            # If the deadline has already passed (remaining_ms <= 0), keep the
+            # original effective_ms so the RPC still carries a timeout instead of
+            # silently dropping the gRPC deadline.
+            if remaining_ms > 0:
+                if effective_ms > 0:
+                    effective_ms = min(effective_ms, remaining_ms)
+                else:
+                    effective_ms = remaining_ms
         input_pb = trans_input(input_py)
         response_iterator = None
         stream_state = StreamState()
