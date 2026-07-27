@@ -1805,6 +1805,7 @@ class DeepEPTest(TestCase):
             arpc_config=py_env.arpc_config,
             grpc_config=py_env.grpc_config,
             dash_sc_grpc_config=py_env.dash_sc_grpc_config,
+            grammar_config=py_env.grammar_config,
             load_config=py_env.load_config,
         )
 

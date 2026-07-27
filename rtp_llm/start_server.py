@@ -467,6 +467,19 @@ def start_server(py_env_configs: PyEnvConfigs):
     process_manager = ProcessManager(
         shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
         monitor_interval=py_env_configs.server_config.monitor_interval,
+        frontend_pre_stop_drain_seconds=(
+            py_env_configs.server_config.frontend_pre_stop_drain_seconds
+        ),
+        dash_sc_grpc_pre_stop_drain_seconds=(
+            py_env_configs.server_config.dash_sc_grpc_pre_stop_drain_seconds
+        ),
+        pre_stop_drain_headroom_seconds=(
+            py_env_configs.server_config.pre_stop_drain_headroom_seconds
+        ),
+        pre_stop_drain_signal=py_env_configs.server_config.pre_stop_drain_signal,
+        backend_post_frontend_drain_seconds=(
+            py_env_configs.server_config.backend_post_frontend_drain_seconds
+        ),
     )
     # Backward compat: VIT_SEPARATION=ROLE without ROLE_TYPE=VIT
     if (
@@ -481,9 +494,7 @@ def start_server(py_env_configs: PyEnvConfigs):
         py_env_configs.role_config.role_type = RoleType.VIT
 
     dash_sc_enabled = py_env_configs.role_config.role_type != RoleType.VIT
-    py_env_configs.server_config.validate_port_layout(
-        dash_sc_enabled=dash_sc_enabled
-    )
+    py_env_configs.server_config.validate_port_layout(dash_sc_enabled=dash_sc_enabled)
 
     # Initialize backend_process to None in case role_type is FRONTEND
     backend_process = None
@@ -523,7 +534,8 @@ def start_server(py_env_configs: PyEnvConfigs):
 
     except Exception as e:
         logging.error(f"start failed, trace: {traceback.format_exc()}")
-        process_manager.graceful_shutdown()
+        if not process_manager.shutdown_requested:
+            process_manager.request_failure_shutdown()
     finally:
         process_manager.monitor_and_release_processes()
 

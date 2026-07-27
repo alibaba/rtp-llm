@@ -311,10 +311,6 @@ message GenerateRequestPB {
     repeated int32 position_ids = 9;
     TensorPB propose_probs = 10;
     TensorPB propose_hidden = 11;
-    // CP size used by prefill node; > 1 means kv cache is page-RR sharded across
-    // cp_size physical blocks per virtual block. Default 0 keeps backward
-    // compatibility (treated as 1 by decode side).
-    int32 prefill_cp_size = 13;
 }
 
 // In the TP case, the decode master broadcasts to decode workers.

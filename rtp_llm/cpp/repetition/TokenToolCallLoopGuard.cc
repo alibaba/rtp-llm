@@ -38,13 +38,12 @@ std::vector<Marker> buildMarkers(const std::vector<std::vector<int>>& begin_ids,
     return markers;
 }
 
-// True when ``pattern`` equals the tokens ending exactly at index ``end``.
-bool endsWith(const std::vector<int>& tokens, int end, const std::vector<int>& pattern) {
+// True when ``pattern`` equals the tokens starting exactly at index ``start``.
+bool startsWith(const std::vector<int>& tokens, int start, const std::vector<int>& pattern) {
     const int len = static_cast<int>(pattern.size());
-    if (end + 1 < len) {
+    if (start + len > static_cast<int>(tokens.size())) {
         return false;
     }
-    const int start = end - len + 1;
     for (int k = 0; k < len; ++k) {
         if (tokens[start + k] != pattern[k]) {
             return false;
@@ -53,14 +52,23 @@ bool endsWith(const std::vector<int>& tokens, int end, const std::vector<int>& p
     return true;
 }
 
-// Index of the marker whose begin sequence ends at ``end``, preferring the
+// True when ``pattern`` equals the tokens ending exactly at index ``end``.
+bool endsWith(const std::vector<int>& tokens, int end, const std::vector<int>& pattern) {
+    const int len = static_cast<int>(pattern.size());
+    if (end + 1 < len) {
+        return false;
+    }
+    return startsWith(tokens, end - len + 1, pattern);
+}
+
+// Index of the marker whose begin sequence starts at ``start``, preferring the
 // longest match when several markers share a prefix. -1 when none match.
-int beginMarkerEndingAt(const std::vector<int>& tokens, int end, const std::vector<Marker>& markers) {
+int beginMarkerStartingAt(const std::vector<int>& tokens, int start, const std::vector<Marker>& markers) {
     int         best     = -1;
     std::size_t best_len = 0;
     for (std::size_t i = 0; i < markers.size(); ++i) {
         const auto& begin = markers[i].begin_ids;
-        if (endsWith(tokens, end, begin) && (best < 0 || begin.size() > best_len)) {
+        if (startsWith(tokens, start, begin) && (best < 0 || begin.size() > best_len)) {
             best     = static_cast<int>(i);
             best_len = begin.size();
         }
@@ -72,12 +80,12 @@ int beginMarkerEndingAt(const std::vector<int>& tokens, int end, const std::vect
 //
 // Each span is found in two phases, which is why there are two loops:
 //   1. outer loop = find a span's BEGIN. Step one token at a time until some
-//      begin marker finishes exactly at ``i``.
+//      begin marker starts exactly at ``i``. When several markers share a
+//      prefix, the longest matching begin marker wins.
 //   2. inner loop = find THAT span's END. From the next token on, scan forward
 //      for the same marker's end sequence (or for the size cap).
 // Once the end is found, the outer loop resumes right after it (``i = j + 1``),
-// so spans never overlap and no token is scanned twice — the whole thing is
-// O(n), not O(n^2), despite the nesting.
+// so spans never overlap and the nested loops do not rescan span contents.
 //
 // Three ways the inner loop ends, per span:
 //   - end marker found  -> push the [begin .. end] token window as a real span.
@@ -90,15 +98,15 @@ std::vector<Span> scanSpans(const std::vector<int>& tokens, const std::vector<Ma
     const int         n = static_cast<int>(tokens.size());
     int               i = 0;
     while (i < n) {
-        // Phase 1: is a begin marker completed at ``i``? If not, keep walking.
-        const int marker_index = beginMarkerEndingAt(tokens, i, markers);
+        // Phase 1: does a begin marker start at ``i``? If not, keep walking.
+        const int marker_index = beginMarkerStartingAt(tokens, i, markers);
         if (marker_index < 0) {
             ++i;
             continue;
         }
         const auto& marker        = markers[marker_index];
-        const int   span_start    = i - static_cast<int>(marker.begin_ids.size()) + 1;
-        const int   content_start = i + 1;
+        const int   span_start    = i;
+        const int   content_start = i + static_cast<int>(marker.begin_ids.size());
 
         // Phase 2: walk the content looking for this marker's matching end.
         int  j      = content_start;
