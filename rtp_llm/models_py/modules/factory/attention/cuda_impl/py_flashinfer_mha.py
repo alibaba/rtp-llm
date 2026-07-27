@@ -409,6 +409,9 @@ class PyFlashinferPrefillAttnOp(object):
 class PyFlashinferPrefillImplBase(FMHAImplBase):
     """Base class for FlashInfer prefill implementations (Ragged and Paged)."""
 
+    # Both attn ops thread attn_configs.is_causal into flashinfer's `causal=`.
+    SUPPORTS_NONCAUSAL = True
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,

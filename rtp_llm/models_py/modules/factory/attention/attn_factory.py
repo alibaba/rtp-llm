@@ -158,6 +158,16 @@ def get_fmha_impl(
         if _is_fmha_impl_disabled(impl_class_name, fmha_config):
             continue
 
+        # Non-causal prefill (e.g. the dflash draft) must land on an impl that
+        # consumes is_causal; a hardcoded-causal kernel would silently run
+        # causal and corrupt the semantics.
+        if (
+            attn_inputs.is_prefill
+            and not attn_configs.is_causal
+            and not impl.SUPPORTS_NONCAUSAL
+        ):
+            continue
+
         # Check support before creating instance
         if not impl.support(attn_configs, attn_inputs):
             continue

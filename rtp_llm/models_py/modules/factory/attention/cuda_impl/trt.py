@@ -19,6 +19,10 @@ from rtp_llm.ops.compute_ops import (
 
 class TRTMHAImpl(FMHAImplBase):
 
+    # TrtV2FmhaRunnerConfig.fromAttentionConfigs threads attn_configs.is_causal
+    # into the C++ runner.
+    SUPPORTS_NONCAUSAL = True
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -121,6 +125,10 @@ class TRTMHAImpl(FMHAImplBase):
 
 
 class TRTPagedMHAImpl(FMHAImplBase):
+
+    # TrtV2FmhaRunnerConfig.fromAttentionConfigs threads attn_configs.is_causal
+    # into the C++ runner.
+    SUPPORTS_NONCAUSAL = True
 
     def __init__(
         self,

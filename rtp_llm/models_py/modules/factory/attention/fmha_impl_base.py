@@ -102,6 +102,12 @@ class FMHAImplBase(ABC):
     所有具体的实现类都应该继承此类并实现这些方法。
     """
 
+    # Only impls that actually pass attn_configs.is_causal through to their
+    # kernel may claim this; the factory skips everything else for non-causal
+    # prefill batches (e.g. the dflash draft) instead of letting a hardcoded
+    # causal kernel win on priority and silently drop the semantics.
+    SUPPORTS_NONCAUSAL = False
+
     @abstractmethod
     def forward(
         self,

@@ -1396,6 +1396,11 @@ class AiterDecodeAttnOpTriton(AiterDecodeAttnOpBase):
 class AiterPrefillImplAsm(FMHAImplBase):
     """Aiter prefill attention implementation using ASM."""
 
+    # Pre-existing ROCm status quo: AiterPrefillAttnOp threads is_causal on its
+    # main branches (the prefix/batch-prefill branch hardcodes causal=True);
+    # kept selectable for non-causal batches to avoid changing ROCm selection.
+    SUPPORTS_NONCAUSAL = True
+
     def __init__(
         self,
         attn_configs: AttentionConfigs,
@@ -1455,6 +1460,11 @@ class AiterPrefillImplAsm(FMHAImplBase):
 
 class AiterPrefillImplNonAsm(FMHAImplBase):
     """Aiter prefill attention implementation using non-ASM."""
+
+    # Pre-existing ROCm status quo: AiterPrefillAttnOp threads is_causal on its
+    # main branches (the prefix/batch-prefill branch hardcodes causal=True);
+    # kept selectable for non-causal batches to avoid changing ROCm selection.
+    SUPPORTS_NONCAUSAL = True
 
     def __init__(
         self,
@@ -1519,6 +1529,11 @@ class AiterPrefillImplPaged(FMHAImplBase):
     - seq_len <= 4: Triton PA (short query optimization)
     - Otherwise: CK batch-prefill (general paged prefill)
     """
+
+    # Pre-existing ROCm status quo: AiterPrefillAttnOp threads is_causal on its
+    # main branches (the prefix/batch-prefill branch hardcodes causal=True);
+    # kept selectable for non-causal batches to avoid changing ROCm selection.
+    SUPPORTS_NONCAUSAL = True
 
     def __init__(
         self,
