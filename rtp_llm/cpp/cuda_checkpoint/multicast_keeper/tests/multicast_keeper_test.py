@@ -803,6 +803,84 @@ s.close(); backing.close()
         self.assertTrue(wait_until(lambda: not self.socket_path.exists()))
         self.assertFalse(self.ready_path.exists())
 
+    def test_parent_death_terminates_holder_and_cleans_runtime_files(self) -> None:
+        parent_root = self.root / "parent_death"
+        parent_root.mkdir()
+        socket_path = parent_root / "mcsk.sock"
+        ready_path = parent_root / "holder.ready"
+        parent_script = textwrap.dedent(
+            """
+            import os
+            import subprocess
+            import sys
+            import time
+
+            holder, creator, socket_path, ready_path = sys.argv[1:]
+            process = subprocess.Popen(
+                [
+                    holder,
+                    "--socket", socket_path,
+                    "--ready-file", ready_path,
+                    "--creator", creator,
+                    "--gpus", "0",
+                    "--parent-pid", str(os.getpid()),
+                ],
+                stdin=subprocess.DEVNULL,
+                stdout=subprocess.DEVNULL,
+                stderr=subprocess.DEVNULL,
+            )
+            deadline = time.monotonic() + 5
+            while time.monotonic() < deadline:
+                if os.path.exists(socket_path) and os.path.exists(ready_path):
+                    print(process.pid, flush=True)
+                    sys.exit(0)
+                if process.poll() is not None:
+                    sys.exit(1)
+                time.sleep(0.02)
+            sys.exit(2)
+            """
+        )
+        parent = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                parent_script,
+                str(self.holder),
+                str(self.fake_creator),
+                str(socket_path),
+                str(ready_path),
+            ],
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        holder_pid = int(parent.stdout.strip())
+        self.assertTrue(
+            wait_until(
+                lambda: not socket_path.exists() and not ready_path.exists(), timeout=5
+            ),
+            f"holder {holder_pid} did not clean up after its parent exited",
+        )
+
+    def test_parent_pid_must_be_positive(self) -> None:
+        invalid = subprocess.run(
+            [
+                str(self.holder),
+                "--socket",
+                str(self.root / "invalid_parent.sock"),
+                "--creator",
+                str(self.fake_creator),
+                "--gpus",
+                "0",
+                "--parent-pid",
+                "0",
+            ],
+            capture_output=True,
+            text=True,
+        )
+        self.assertEqual(invalid.returncode, 2)
+        self.assertIn("invalid --parent-pid", invalid.stderr)
+
     def test_creator_argument_validation_and_dry_run_do_not_initialize_cuda(
         self,
     ) -> None:
@@ -862,6 +940,51 @@ s.close(); backing.close()
         self.assertIn("env -u LD_PRELOAD -u CUDA_VISIBLE_DEVICES setsid", launcher_text)
         self.assertIn("LD_PRELOAD", launcher_text)
         self.assertIn("${LD_PRELOAD:+${LD_PRELOAD}:}", launcher_text)
+
+    def test_launcher_starts_from_bazel_runfiles_without_explicit_paths(self) -> None:
+        launcher_root = self.root / "launcher_runfiles"
+        environment = self.environment.copy()
+        for name in (
+            "REPO_ROOT",
+            "RTP_LLM_MC_KEEPER_BIN_DIR",
+            "RTP_LLM_MC_HOLDER_BIN",
+            "RTP_LLM_MC_CREATOR_BIN",
+            "RTP_LLM_MC_SHIM",
+        ):
+            environment.pop(name, None)
+        command = [
+            str(self.launcher),
+            "--keeper-dir",
+            str(launcher_root),
+        ]
+        started = subprocess.run(
+            [command[0], "start", "--gpus", "0", *command[1:]],
+            cwd="/",
+            env=environment,
+            check=True,
+            capture_output=True,
+            text=True,
+        )
+        self.assertIn("KEEPER_READY", started.stdout)
+        try:
+            status = subprocess.run(
+                [command[0], "status", *command[1:]],
+                cwd="/",
+                env=environment,
+                check=True,
+                capture_output=True,
+                text=True,
+            )
+            self.assertIn("KEEPER_RUNNING", status.stdout)
+        finally:
+            subprocess.run(
+                [command[0], "stop", *command[1:]],
+                cwd="/",
+                env=environment,
+                check=False,
+                capture_output=True,
+                text=True,
+            )
 
     # --- Cross-machine (GB300 NVL72 MNNVL) fabric path ------------------------
 

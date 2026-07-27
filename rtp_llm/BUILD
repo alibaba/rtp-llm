@@ -571,7 +571,12 @@ py_library(
     ],
     data = [
         "//rtp_llm/libs:whl_package_libs"
-    ]
+    ] + select({
+        "@//:using_cuda": [
+            "//rtp_llm/cpp/cuda_checkpoint/multicast_keeper:runtime_files",
+        ],
+        "//conditions:default": [],
+    }),
 )
 
 py_package(

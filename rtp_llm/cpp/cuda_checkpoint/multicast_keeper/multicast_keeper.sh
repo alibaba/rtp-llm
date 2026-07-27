@@ -1,13 +1,82 @@
 #!/usr/bin/env bash
 set -Eeuo pipefail
 
-SCRIPT_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
-REPO_ROOT="${REPO_ROOT:-$(cd "${SCRIPT_DIR}/../../../.." && pwd)}"
 TARGET_DIR="rtp_llm/cpp/cuda_checkpoint/multicast_keeper"
-BIN_DIR="${RTP_LLM_MC_KEEPER_BIN_DIR:-${REPO_ROOT}/bazel-bin/${TARGET_DIR}}"
-HOLDER_BIN="${RTP_LLM_MC_HOLDER_BIN:-${BIN_DIR}/keeper_lite_holder}"
-CREATOR_BIN="${RTP_LLM_MC_CREATOR_BIN:-${BIN_DIR}/keeper_lite_creator}"
-SHIM="${RTP_LLM_MC_SHIM:-${BIN_DIR}/mc_shim_unified.so}"
+RUNFILES_WORKSPACE="${TEST_WORKSPACE:-rtp_llm}"
+INVOKED_DIR="$(cd "$(dirname "${BASH_SOURCE[0]}")" && pwd)"
+SCRIPT_REAL="$(readlink -f "${BASH_SOURCE[0]}")"
+SOURCE_DIR="$(cd "$(dirname "${SCRIPT_REAL}")" && pwd)"
+REPO_ROOT="${REPO_ROOT:-$(cd "${SOURCE_DIR}/../../../.." && pwd)}"
+
+find_runfile() {
+    local name="$1"
+    local logical="${RUNFILES_WORKSPACE}/${TARGET_DIR}/${name}"
+    local candidate manifest resolved
+
+    if [[ -n "${RUNFILES_DIR:-}" ]]; then
+        candidate="${RUNFILES_DIR}/${logical}"
+        if [[ -e "${candidate}" ]]; then
+            readlink -f "${candidate}"
+            return 0
+        fi
+    fi
+    for candidate in \
+        "${BASH_SOURCE[0]}.runfiles/${logical}" \
+        "$0.runfiles/${logical}"; do
+        if [[ -e "${candidate}" ]]; then
+            readlink -f "${candidate}"
+            return 0
+        fi
+    done
+
+    for manifest in \
+        "${RUNFILES_MANIFEST_FILE:-}" \
+        "${BASH_SOURCE[0]}.runfiles_manifest" \
+        "${BASH_SOURCE[0]}.runfiles/MANIFEST" \
+        "$0.runfiles_manifest" \
+        "$0.runfiles/MANIFEST"; do
+        [[ -r "${manifest}" ]] || continue
+        resolved="$(awk -v key="${logical}" \
+            'index($0, key " ") == 1 { print substr($0, length(key) + 2); exit } $0 == key { print key; exit }' \
+            "${manifest}")"
+        if [[ -n "${resolved}" && -e "${resolved}" ]]; then
+            readlink -f "${resolved}"
+            return 0
+        fi
+    done
+    return 1
+}
+
+default_artifact() {
+    local name="$1"
+    local candidate
+    if candidate="$(find_runfile "${name}")"; then
+        printf '%s\n' "${candidate}"
+        return
+    fi
+    # A packaged debug copy may sit beside its native artifacts.
+    for candidate in "${INVOKED_DIR}/${name}" "${SOURCE_DIR}/${name}"; do
+        if [[ -e "${candidate}" ]]; then
+            readlink -f "${candidate}"
+            return
+        fi
+    done
+    printf '%s\n' "${REPO_ROOT}/bazel-bin/${TARGET_DIR}/${name}"
+}
+
+if [[ -n "${RTP_LLM_MC_KEEPER_BIN_DIR:-}" ]]; then
+    BIN_DIR="${RTP_LLM_MC_KEEPER_BIN_DIR}"
+    DEFAULT_HOLDER_BIN="${BIN_DIR}/keeper_lite_holder"
+    DEFAULT_CREATOR_BIN="${BIN_DIR}/keeper_lite_creator"
+    DEFAULT_SHIM="${BIN_DIR}/mc_shim_unified.so"
+else
+    DEFAULT_HOLDER_BIN="$(default_artifact keeper_lite_holder)"
+    DEFAULT_CREATOR_BIN="$(default_artifact keeper_lite_creator)"
+    DEFAULT_SHIM="$(default_artifact mc_shim_unified.so)"
+fi
+HOLDER_BIN="${RTP_LLM_MC_HOLDER_BIN:-${DEFAULT_HOLDER_BIN}}"
+CREATOR_BIN="${RTP_LLM_MC_CREATOR_BIN:-${DEFAULT_CREATOR_BIN}}"
+SHIM="${RTP_LLM_MC_SHIM:-${DEFAULT_SHIM}}"
 
 canonicalize_artifact() {
     local path="$1"
@@ -24,6 +93,9 @@ SHIM="$(canonicalize_artifact "${SHIM}")"
 
 usage() {
     cat <<'EOF'
+Development/debug CLI. Production Level3 startup is owned by the RTP-LLM
+process supervisor and invokes the packaged holder binary directly.
+
 Usage:
   multicast_keeper.sh start --gpus LIST [--fabric-team-size N] [--keeper-dir DIR] [--socket PATH]
   multicast_keeper.sh stop  [--keeper-dir DIR] [--socket PATH]
@@ -40,7 +112,7 @@ Options:
   --creator-timeout-ms N     Per-size creator timeout (default 120000)
 
 Build first:
-  bazel build //rtp_llm/cpp/cuda_checkpoint/multicast_keeper:all --config=cuda13
+  bazelisk build //rtp_llm/cpp/cuda_checkpoint/multicast_keeper:all --config=cuda13
 EOF
 }
 

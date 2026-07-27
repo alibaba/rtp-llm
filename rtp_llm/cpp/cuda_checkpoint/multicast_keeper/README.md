@@ -92,9 +92,47 @@ bazelisk build \
   --config=cuda13
 ```
 
-## Start and launch ranks
+## Production runtime contract
 
-Start one holder for the local GPU team before launching any checkpointed rank:
+The complete CUDA `rtp_llm` wheel ships these executable runtime artifacts at
+stable package-relative paths:
+
+```text
+rtp_llm/cpp/cuda_checkpoint/multicast_keeper/keeper_lite_holder
+rtp_llm/cpp/cuda_checkpoint/multicast_keeper/keeper_lite_creator
+rtp_llm/cpp/cuda_checkpoint/multicast_keeper/mc_shim_unified.so
+```
+
+The frontend-only wheel does not contain them. CPU and ROCm wheels also omit
+the CUDA-only payload. Container images need only install the complete CUDA
+wheel; they must not copy `bazel-bin` or rebuild the keeper during image
+startup.
+
+Production Level3 startup is owned by the RTP-LLM process supervisor. It
+resolves the three paths from the installed `rtp_llm` package, starts the holder
+before any backend rank, waits for `--ready-file` plus a successful protocol PING,
+and passes `--parent-pid` with its own PID. On Linux the holder arms
+`PR_SET_PDEATHSIG=SIGTERM` and verifies the parent after arming it, so supervisor
+death cannot leave an unowned holder alive. The supervisor injects the keeper
+environment and shim into backend rank environments directly; production code
+does not source `keeper.env` or invoke the shell launcher.
+
+The holder is outside the checkpoint PID set. A holder exit is fatal for the
+current Level3 instance: do not restart it underneath restored ranks, because
+the replacement has a different holder identity and no longer owns their
+multicast objects.
+
+## Development/debug launcher
+
+`multicast_keeper` is a development and diagnostics CLI. It is not the
+production service manager. Its Bazel target resolves native artifacts through
+runfiles, whether invoked with `bazelisk run` or directly through the
+`bazel-bin` symlink. Source-tree invocation and the explicit
+`RTP_LLM_MC_KEEPER_BIN_DIR`, `RTP_LLM_MC_HOLDER_BIN`,
+`RTP_LLM_MC_CREATOR_BIN`, and `RTP_LLM_MC_SHIM` overrides remain supported.
+
+For local testing, start one holder for the local GPU team before launching any
+checkpointed rank:
 
 ```bash
 KEEPER=./bazel-bin/rtp_llm/cpp/cuda_checkpoint/multicast_keeper/multicast_keeper
@@ -134,13 +172,15 @@ For a foreground command with automatic cleanup:
 "${KEEPER}" run --gpus 0,1 --keeper-dir /tmp/my-keeper -- torchrun ...
 ```
 
-For a detached service, use `start`, `status`, and `stop`. `SIGTERM` closes all
-cached FDs and removes the socket and ready file. Stop the holder only after all
-ranks have exited; killing the sole FD holder frees the multicast objects.
+For a detached development session, use `start`, `status`, and `stop`.
+`SIGTERM` closes all cached FDs and removes the socket and ready file. Stop the
+holder only after all ranks have exited; killing the sole FD holder frees the
+multicast objects.
 
 ## Checkpoint lifecycle
 
-1. Start the holder outside the rank process tree and source `keeper.env`.
+1. The node supervisor starts and verifies the holder, then launches ranks with
+   an explicit environment containing the keeper socket and shim preload.
 2. Launch all ranks with the unified shim preloaded.
 3. Before checkpoint, quiesce work and destroy rank-side symmetric-memory
    handles/mappings, NCCL communicators, and other CUDA collectives.

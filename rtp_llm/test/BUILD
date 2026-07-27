@@ -133,6 +133,13 @@ py_test(
 )
 
 py_test(
+    name = "multicast_keeper_startup_test",
+    srcs = ["multicast_keeper_startup_test.py"],
+    deps = ["//rtp_llm:testlib"],
+    timeout = "short",
+)
+
+py_test(
     name = "concurrency_limit_test",
     srcs = [
         "concurrency_limit_test.py"

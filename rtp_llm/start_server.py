@@ -5,6 +5,7 @@ import sys
 import threading
 import time
 import traceback
+from contextlib import contextmanager
 
 from rtp_llm.utils.time_util import timer_wrapper
 
@@ -48,6 +49,17 @@ STARTUP_REAL_WARMUP_MIN_TOKEN_LEN = 2
 STARTUP_REAL_WARMUP_TIMEOUT_S = 600.0
 STARTUP_REAL_WARMUP_MAX_NEW_TOKENS = 1
 STARTUP_REAL_WARMUP_TOKEN_ID = 100
+MULTICAST_KEEPER_ENV = "RTP_LLM_CUDA_CKPT_MULTICAST_KEEPER"
+MULTICAST_KEEPER_OWNER_ID_ENV = "RTP_LLM_MC_OWNER_ID"
+MULTICAST_KEEPER_BACKEND_ENV_KEYS = (
+    MULTICAST_KEEPER_ENV,
+    MULTICAST_KEEPER_OWNER_ID_ENV,
+    "RTP_LLM_MC_OWNER_GENERATION",
+    "NEKYIA_KEEPER_DIR",
+    "RTP_LLM_CUDA_CKPT_MULTICAST_SOCKET",
+    "RTP_LLM_MC_LOCAL_GPUS",
+    "RTP_LLM_MC_FABRIC_TEAM_SIZE",
+)
 
 
 class StartupRealWarmupAddressResolutionError(RuntimeError):
@@ -95,6 +107,118 @@ def _sync_server_shutdown_timeout(py_env_configs: PyEnvConfigs):
     )
 
 
+def _multicast_keeper_requested(py_env_configs: PyEnvConfigs) -> bool:
+    runtime_config = py_env_configs.runtime_config
+    return (
+        bool(getattr(runtime_config, "enable_sleep_mode", False))
+        and int(getattr(runtime_config, "sleep_mode_level", 1) or 1) == 3
+        and os.environ.get(MULTICAST_KEEPER_ENV, "0") == "1"
+    )
+
+
+def _create_multicast_keeper_runtime(py_env_configs: PyEnvConfigs):
+    if not _multicast_keeper_requested(py_env_configs):
+        return None
+
+    from rtp_llm.utils.multicast_keeper import MulticastKeeperRuntime
+
+    runtime = MulticastKeeperRuntime.from_config(py_env_configs)
+    if runtime is None:
+        raise RuntimeError(
+            "Level3 multicast keeper was requested but no runtime was configured"
+        )
+    return runtime
+
+
+@contextmanager
+def _without_multicast_keeper_environment(runtime):
+    previous = {key: os.environ.get(key) for key in MULTICAST_KEEPER_BACKEND_ENV_KEYS}
+    previous_preload = os.environ.get("LD_PRELOAD")
+    shim = str(runtime.artifacts.shim)
+    preload_entries = [
+        entry
+        for entry in (previous_preload or "").replace(":", " ").split()
+        if entry != shim and os.path.realpath(entry) != os.path.realpath(shim)
+    ]
+    try:
+        for key in MULTICAST_KEEPER_BACKEND_ENV_KEYS:
+            os.environ.pop(key, None)
+        if preload_entries:
+            os.environ["LD_PRELOAD"] = ":".join(preload_entries)
+        else:
+            os.environ.pop("LD_PRELOAD", None)
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
+        if previous_preload is None:
+            os.environ.pop("LD_PRELOAD", None)
+        else:
+            os.environ["LD_PRELOAD"] = previous_preload
+
+
+def _start_multicast_keeper_monitor(
+    runtime,
+    process_manager: ProcessManager,
+    stop_event: threading.Event,
+    monitor_interval: float,
+) -> threading.Thread:
+    def monitor():
+        interval = max(0.1, float(monitor_interval or 1.0))
+        unresponsive_since = None
+        unresponsive_timeout = (
+            runtime.creator_timeout_ms + runtime.client_timeout_ms
+        ) / 1000.0
+        while not stop_event.wait(interval):
+            try:
+                runtime.health()
+                unresponsive_since = None
+                continue
+            except OSError:
+                # CREATE/IMPORT_ADD is synchronous in the holder and can occupy
+                # its socket loop until the bounded creator finishes. A live
+                # holder is allowed that same bounded window to resume PINGs.
+                process = runtime.process
+                if process is not None and process.poll() is None:
+                    now = time.monotonic()
+                    if unresponsive_since is None:
+                        unresponsive_since = now
+                    if now - unresponsive_since <= unresponsive_timeout:
+                        logging.warning(
+                            "Multicast keeper PING is temporarily unavailable; "
+                            "holder pid=%s remains alive",
+                            process.pid,
+                        )
+                        continue
+                logging.error(
+                    "Multicast keeper PING remained unavailable past its "
+                    "creator deadline",
+                    exc_info=True,
+                )
+            except Exception:
+                logging.error(
+                    "Multicast keeper health probe failed",
+                    exc_info=True,
+                )
+            logging.critical(
+                "Multicast keeper holder is unhealthy; shutting down the "
+                "complete server instance"
+            )
+            process_manager.request_failure_shutdown()
+            return
+
+    thread = threading.Thread(
+        target=monitor,
+        name="multicast_keeper_monitor",
+        daemon=True,
+    )
+    thread.start()
+    return thread
+
+
 @timer_wrapper(description="start backend server")
 def start_backend_server_impl(
     global_controller,
@@ -114,11 +238,15 @@ def start_backend_server_impl(
 
     old_defer = os.environ.get(DEFER_FIRST_SIGTERM_ENV)
     old_defer_seconds = os.environ.get(DEFER_FIRST_SIGTERM_SECONDS_ENV)
+    old_owner_id = os.environ.get(MULTICAST_KEEPER_OWNER_ID_ENV)
     _sync_server_shutdown_timeout(py_env_configs)
     os.environ[DEFER_FIRST_SIGTERM_ENV] = DEFER_FIRST_SIGTERM_VALUE
     os.environ[DEFER_FIRST_SIGTERM_SECONDS_ENV] = _backend_deferred_sigterm_seconds(
         py_env_configs
     )
+    if os.environ.get(MULTICAST_KEEPER_ENV, "0") == "1":
+        world_rank = int(py_env_configs.parallelism_config.world_rank)
+        os.environ[MULTICAST_KEEPER_OWNER_ID_ENV] = str(world_rank + 1)
     try:
         backend_process = multiprocessing.Process(
             target=start_backend_server,
@@ -137,6 +265,10 @@ def start_backend_server_impl(
             os.environ.pop(DEFER_FIRST_SIGTERM_SECONDS_ENV, None)
         else:
             os.environ[DEFER_FIRST_SIGTERM_SECONDS_ENV] = old_defer_seconds
+        if old_owner_id is None:
+            os.environ.pop(MULTICAST_KEEPER_OWNER_ID_ENV, None)
+        else:
+            os.environ[MULTICAST_KEEPER_OWNER_ID_ENV] = old_owner_id
     pipe_writer.close()  # Parent process closes write end
 
     # Create check_ready_fn for pipe-based health check
@@ -526,26 +658,58 @@ def start_server(py_env_configs: PyEnvConfigs):
     # Initialize backend_process to None in case role_type is FRONTEND
     backend_process = None
     startup_warmup_gate_file = _setup_startup_warmup_health_gate(py_env_configs)
+    multicast_keeper_runtime = None
+    multicast_keeper_monitor_stop = threading.Event()
+    multicast_keeper_monitor_thread = None
 
     try:
         if py_env_configs.role_config.role_type != RoleType.FRONTEND:
+            multicast_keeper_runtime = _create_multicast_keeper_runtime(py_env_configs)
+            if multicast_keeper_runtime is not None:
+                multicast_keeper_runtime.start()
+                multicast_keeper_monitor_thread = _start_multicast_keeper_monitor(
+                    multicast_keeper_runtime,
+                    process_manager,
+                    multicast_keeper_monitor_stop,
+                    py_env_configs.server_config.monitor_interval,
+                )
             logging.info("start backend server")
-            backend_process = start_backend_server_impl(
-                global_controller, py_env_configs, process_manager
-            )
+            if multicast_keeper_runtime is None:
+                backend_process = start_backend_server_impl(
+                    global_controller, py_env_configs, process_manager
+                )
+            else:
+                # Only the backend manager (and ranks it spawns) inherit the
+                # keeper socket and shim. Frontend and dash_sc stay untouched.
+                with multicast_keeper_runtime.configure_subprocess():
+                    backend_process = start_backend_server_impl(
+                        global_controller, py_env_configs, process_manager
+                    )
             process_manager.add_process(backend_process, shutdown_group="backend")
 
         logging.info("start frontend server")
-        frontend_process = start_frontend_server_impl(
-            global_controller, py_env_configs, process_manager
-        )
+        if multicast_keeper_runtime is None:
+            frontend_process = start_frontend_server_impl(
+                global_controller, py_env_configs, process_manager
+            )
+        else:
+            with _without_multicast_keeper_environment(multicast_keeper_runtime):
+                frontend_process = start_frontend_server_impl(
+                    global_controller, py_env_configs, process_manager
+                )
         process_manager.add_processes(frontend_process, shutdown_group="frontend")
 
         if py_env_configs.role_config.role_type != RoleType.VIT:
             logging.info("start dash_sc server")
-            dash_sc_processes = start_dash_sc_server_impl(
-                global_controller, py_env_configs, process_manager
-            )
+            if multicast_keeper_runtime is None:
+                dash_sc_processes = start_dash_sc_server_impl(
+                    global_controller, py_env_configs, process_manager
+                )
+            else:
+                with _without_multicast_keeper_environment(multicast_keeper_runtime):
+                    dash_sc_processes = start_dash_sc_server_impl(
+                        global_controller, py_env_configs, process_manager
+                    )
             if dash_sc_processes:
                 process_manager.add_processes(
                     dash_sc_processes, shutdown_group="frontend"
@@ -575,7 +739,16 @@ def start_server(py_env_configs: PyEnvConfigs):
         if not process_manager.shutdown_requested:
             process_manager.request_failure_shutdown()
     finally:
-        process_manager.monitor_and_release_processes()
+        try:
+            # Backend manager cleanup includes joining every rank. The holder
+            # must outlive that cleanup because rank teardown sends RELEASE.
+            process_manager.monitor_and_release_processes()
+        finally:
+            multicast_keeper_monitor_stop.set()
+            if multicast_keeper_runtime is not None:
+                multicast_keeper_runtime.stop()
+            if multicast_keeper_monitor_thread is not None:
+                multicast_keeper_monitor_thread.join(timeout=1.0)
 
 
 def _get_startup_real_warmup_pow2_lens(max_len: int):

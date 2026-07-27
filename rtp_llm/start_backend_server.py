@@ -9,8 +9,9 @@ import sys
 import threading
 import time
 import traceback
+from contextlib import contextmanager
 from multiprocessing import Process
-from typing import List, Optional
+from typing import Dict, Iterator, List, Optional
 
 import torch
 from setproctitle import setproctitle
@@ -42,9 +43,26 @@ from rtp_llm.utils.process_manager import (
 
 setup_logging()
 
+MULTICAST_KEEPER_ENV = "RTP_LLM_CUDA_CKPT_MULTICAST_KEEPER"
+MULTICAST_KEEPER_OWNER_ID_ENV = "RTP_LLM_MC_OWNER_ID"
+
 
 class BackendStartupInterrupted(Exception):
     pass
+
+
+@contextmanager
+def _temporary_process_environment(updates: Dict[str, str]) -> Iterator[None]:
+    previous = {key: os.environ.get(key) for key in updates}
+    os.environ.update(updates)
+    try:
+        yield
+    finally:
+        for key, value in previous.items():
+            if value is None:
+                os.environ.pop(key, None)
+            else:
+                os.environ[key] = value
 
 
 def _install_hot_hook_runtime(role: str) -> None:
@@ -279,20 +297,44 @@ def _create_rank_processes(
         range(pc.world_rank, pc.world_rank + local_world_size)
     ):
         reader, writer = multiprocessing.Pipe(duplex=False)
-        os.environ["CUDA_VISIBLE_DEVICES"] = ",".join(cuda_device_list)
-        os.environ["WORLD_RANK"] = str(world_rank)
+        rank_environment = {
+            "CUDA_VISIBLE_DEVICES": ",".join(cuda_device_list),
+            "WORLD_RANK": str(world_rank),
+        }
+        if os.environ.get(MULTICAST_KEEPER_ENV, "0") == "1":
+            # The shim does not consume WORLD_RANK. Use the global rank as the
+            # stable owner key, biased by one because zero means unspecified.
+            rank_environment[MULTICAST_KEEPER_OWNER_ID_ENV] = str(world_rank + 1)
 
-        proc = Process(
-            target=local_rank_start,
-            args=(global_controller, py_env_configs, world_rank, writer),
-            name=f"rank-{world_rank}",
-        )
-        start_memory_saver_configured_process(proc)
+        with _temporary_process_environment(rank_environment):
+            proc = Process(
+                target=local_rank_start,
+                args=(global_controller, py_env_configs, world_rank, writer),
+                name=f"rank-{world_rank}",
+            )
+            # The keeper shim is already present in the inherited LD_PRELOAD.
+            # TMS configure_subprocess prepends itself and restores this env.
+            start_memory_saver_configured_process(proc)
         writer.close()  # Parent process closes write end
         processes.append(proc)
         rank_pipe_readers.append(reader)
 
     return processes, rank_pipe_readers
+
+
+def _start_single_rank(
+    global_controller: ConcurrencyController,
+    py_env_configs: PyEnvConfigs,
+    world_rank: int,
+    pipe_writer=None,
+):
+    rank_environment = {}
+    if os.environ.get(MULTICAST_KEEPER_ENV, "0") == "1":
+        rank_environment[MULTICAST_KEEPER_OWNER_ID_ENV] = str(world_rank + 1)
+    with _temporary_process_environment(rank_environment):
+        return local_rank_start(
+            global_controller, py_env_configs, world_rank, pipe_writer
+        )
 
 
 def _wait_for_ranks_startup(
@@ -574,10 +616,12 @@ def start_backend_server(
         )
     )
 
-    if not torch.cuda.is_available():
-        return local_rank_start(global_controller, py_env_configs)
-
     pc = py_env_configs.parallelism_config
+    if not torch.cuda.is_available():
+        return _start_single_rank(
+            global_controller, py_env_configs, int(pc.world_rank), pipe_writer
+        )
+
     if (
         pc.world_size % torch.cuda.device_count() != 0
         and pc.world_size > torch.cuda.device_count()
@@ -590,7 +634,9 @@ def start_backend_server(
     if torch.cuda.device_count() > 1 and pc.world_size > 1:
         return multi_rank_start(global_controller, py_env_configs, pipe_writer)
     else:
-        return local_rank_start(global_controller, py_env_configs, 0, pipe_writer)
+        return _start_single_rank(
+            global_controller, py_env_configs, int(pc.world_rank), pipe_writer
+        )
 
 
 def main():

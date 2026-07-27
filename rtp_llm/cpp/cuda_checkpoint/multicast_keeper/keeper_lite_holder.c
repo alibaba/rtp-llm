@@ -13,6 +13,7 @@
 #include <stdlib.h>
 #include <string.h>
 #include <sys/mman.h>
+#include <sys/prctl.h>
 #include <sys/random.h>
 #include <sys/socket.h>
 #include <sys/stat.h>
@@ -76,6 +77,7 @@ static void usage(FILE* stream, const char* program) {
             "  --socket-mode OCTAL        Unix socket permissions (default 0600)\n"
             "  --client-timeout-ms N      Request/reply I/O timeout (default 1000)\n"
             "  --creator-timeout-ms N     Creator timeout (default 120000)\n"
+            "  --parent-pid PID           Exit with SIGTERM when this parent exits\n"
             "  --fabric-team-size N       Exact global FABRIC team size\n",
             program,
             program);
@@ -133,6 +135,17 @@ static int parse_positive_u32(const char* text, uint32_t* value) {
         return -1;
     }
     *value = (uint32_t)parsed;
+    return 0;
+}
+
+static int parse_parent_pid(const char* text, pid_t* value) {
+    char* end   = NULL;
+    errno       = 0;
+    long parsed = strtol(text == NULL ? "" : text, &end, 10);
+    if (errno != 0 || end == text || *end != '\0' || parsed <= 0 || parsed > INT_MAX) {
+        return -1;
+    }
+    *value = (pid_t)parsed;
     return 0;
 }
 
@@ -1058,6 +1071,7 @@ int main(int argc, char** argv) {
     int                        check_only         = 0;
     int                        client_timeout_ms  = 1000;
     int                        creator_timeout_ms = 120000;
+    pid_t                      parent_pid         = -1;
     mode_t                     socket_mode        = 0600;
     static const struct option options[]          = {
         {"socket", required_argument, NULL, 's'},
@@ -1066,6 +1080,7 @@ int main(int argc, char** argv) {
         {"creator", required_argument, NULL, 'C'},
         {"client-timeout-ms", required_argument, NULL, 'i'},
         {"creator-timeout-ms", required_argument, NULL, 't'},
+        {"parent-pid", required_argument, NULL, 'p'},
         {"gpus", required_argument, NULL, 'g'},
         {"fabric-team-size", required_argument, NULL, 'f'},
         {"check", no_argument, NULL, 'c'},
@@ -1073,7 +1088,7 @@ int main(int argc, char** argv) {
         {NULL, 0, NULL, 0},
     };
     int option;
-    while ((option = getopt_long(argc, argv, "s:r:m:C:i:t:g:f:ch", options, NULL)) != -1) {
+    while ((option = getopt_long(argc, argv, "s:r:m:C:i:t:p:g:f:ch", options, NULL)) != -1) {
         switch (option) {
             case 's':
                 socket_path = optarg;
@@ -1120,6 +1135,12 @@ int main(int argc, char** argv) {
                 }
                 break;
             }
+            case 'p':
+                if (parse_parent_pid(optarg, &parent_pid) != 0) {
+                    fprintf(stderr, "invalid --parent-pid: %s\n", optarg);
+                    return 2;
+                }
+                break;
             case 'c':
                 check_only = 1;
                 break;
@@ -1136,7 +1157,7 @@ int main(int argc, char** argv) {
         return 2;
     }
     if (check_only) {
-        if (ready_file != NULL || creator != NULL || gpus != NULL || have_fabric_team) {
+        if (ready_file != NULL || creator != NULL || gpus != NULL || have_fabric_team || parent_pid > 0) {
             fprintf(stderr, "--check only accepts --socket\n");
             return 2;
         }
@@ -1165,6 +1186,21 @@ int main(int argc, char** argv) {
     if (sigaction(SIGTERM, &action, NULL) != 0 || sigaction(SIGINT, &action, NULL) != 0) {
         perror("sigaction");
         return 1;
+    }
+    if (parent_pid > 0) {
+        if (prctl(PR_SET_PDEATHSIG, SIGTERM) != 0) {
+            perror("prctl(PR_SET_PDEATHSIG)");
+            return 1;
+        }
+        // The parent may have exited immediately before prctl(). Verify its
+        // identity after arming PDEATHSIG so that race also fails closed.
+        if (getppid() != parent_pid) {
+            fprintf(stderr,
+                    "parent process changed before holder startup: expected=%d actual=%d\n",
+                    (int)parent_pid,
+                    (int)getppid());
+            return 1;
+        }
     }
     g_listener = create_listener(socket_path, socket_mode);
     if (g_listener < 0) {

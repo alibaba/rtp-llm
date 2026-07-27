@@ -34,6 +34,17 @@ cc_binary(
     deps = [":keeper_protocol"],
 )
 
+# Production runtime payload. The full CUDA wheel consumes this filegroup and
+# preserves these package-relative paths; the frontend-only wheel does not.
+filegroup(
+    name = "runtime_files",
+    srcs = [
+        ":keeper_lite_creator",
+        ":keeper_lite_holder",
+        ":mc_shim_unified.so",
+    ],
+)
+
 sh_binary(
     name = "multicast_keeper",
     srcs = ["multicast_keeper.sh"],
