@@ -691,13 +691,14 @@ public class FlexlbConfig {
     /**
      * Returns the configured default schedule mode as an enum.
      *
-     * <p>Gracefully degrades unknown or legacy values to {@code BATCH}:
+     * <p>Behavior:
      * <ul>
-     *   <li>{@code "AUTO"} (legacy) → {@code BATCH} with WARN log</li>
-     *   <li>null or any other invalid string → {@code BATCH} with WARN log</li>
+     *   <li>null or blank → {@code BATCH} with WARN log (unconfigured, use default)</li>
+     *   <li>{@code "AUTO"} (legacy, case-insensitive) → {@code BATCH} with WARN log
+     *       (backward compatibility, field is corrected to avoid repeated warnings)</li>
+     *   <li>Any other invalid string (e.g. typos like "queuu") → throws
+     *       {@link IllegalArgumentException} (fail-fast, so misconfiguration is caught immediately)</li>
      * </ul>
-     * This method never throws, ensuring startup always succeeds even when
-     * stale configuration references the removed {@code AUTO} mode.
      */
     public ScheduleModeEnum getDefaultScheduleModeEnum() {
         if (defaultScheduleMode == null || defaultScheduleMode.isBlank()) {
@@ -705,12 +706,18 @@ public class FlexlbConfig {
             defaultScheduleMode = "BATCH";
             return ScheduleModeEnum.BATCH;
         }
-        try {
-            return ScheduleModeEnum.valueOf(defaultScheduleMode.toUpperCase());
-        } catch (IllegalArgumentException e) {
-            log.warn("Invalid or legacy schedule mode '{}', falling back to BATCH", defaultScheduleMode);
+        String upper = defaultScheduleMode.toUpperCase();
+        // Backward compatibility: legacy AUTO mode degrades to BATCH
+        if ("AUTO".equals(upper)) {
+            log.warn("Legacy schedule mode 'AUTO' is deprecated, falling back to BATCH. Use BATCH/DIRECT/QUEUE instead.");
             defaultScheduleMode = "BATCH";
             return ScheduleModeEnum.BATCH;
+        }
+        try {
+            return ScheduleModeEnum.valueOf(upper);
+        } catch (IllegalArgumentException e) {
+            throw new IllegalArgumentException(
+                String.format("Invalid schedule mode '%s'. Valid values: BATCH, DIRECT, QUEUE", defaultScheduleMode), e);
         }
     }
 }

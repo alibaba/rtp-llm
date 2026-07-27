@@ -63,9 +63,12 @@ class ConfigServiceFailFastTest {
     // ---- Critical field invalid value ----
 
     @Test
-    void critical_field_default_schedule_mode_invalid_degrades_to_batch() {
-        ConfigService configService = new ConfigService(Map.of("DEFAULT_SCHEDULE_MODE", "INVALID"));
-        assertEquals(ScheduleModeEnum.BATCH, configService.loadBalanceConfig().getDefaultScheduleModeEnum());
+    void critical_field_default_schedule_mode_invalid_throws_at_startup() {
+        // ConfigService pre-validates critical fields at construction time.
+        // An invalid schedule mode (e.g. typo) must fail-fast rather than
+        // silently degrading to BATCH.
+        assertThrows(IllegalArgumentException.class,
+            () -> new ConfigService(Map.of("DEFAULT_SCHEDULE_MODE", "INVALID")));
     }
 
     @Test
@@ -85,10 +88,10 @@ class ConfigServiceFailFastTest {
     // ---- FlexlbConfig.getDefaultScheduleModeEnum ----
 
     @Test
-    void getDefaultScheduleModeEnum_invalid_value_degrades_to_batch() {
+    void getDefaultScheduleModeEnum_invalid_value_throws() {
         FlexlbConfig config = new FlexlbConfig();
         config.setDefaultScheduleMode("INVALID");
-        assertEquals(ScheduleModeEnum.BATCH, config.getDefaultScheduleModeEnum());
+        assertThrows(IllegalArgumentException.class, () -> config.getDefaultScheduleModeEnum());
     }
 
     @Test
