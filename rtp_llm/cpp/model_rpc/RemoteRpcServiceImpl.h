@@ -112,8 +112,15 @@ public:
         return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, error_msg);
     }
 
+    void beginShutdown() override {
+        if (prefill_server_) {
+            prefill_server_->beginShutdown();
+        }
+    }
+
     void stop() override {
         if (prefill_server_) {
+            prefill_server_->beginShutdown();
             prefill_server_->stop();
         } else {
             decode_server_->stop();
