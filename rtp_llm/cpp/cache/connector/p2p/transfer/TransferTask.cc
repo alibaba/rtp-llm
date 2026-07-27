@@ -91,13 +91,15 @@ void TransferTask::notifyDone(bool success, TransferErrorCode error_code, const 
 
 // ==================== TransferTaskStore ====================
 
-std::shared_ptr<TransferTask>
-TransferTaskStore::addTask(const std::string& unique_key, transfer::KeyBlockInfoMap block_infos, int64_t deadline_ms) {
+std::shared_ptr<TransferTask> TransferTaskStore::addTask(const std::string&        unique_key,
+                                                         transfer::KeyBlockInfoMap block_infos,
+                                                         int64_t                   deadline_ms,
+                                                         std::shared_ptr<void>     lifetime_token) {
     std::unique_lock<std::shared_mutex> lock(mutex_);
     if (task_map_.find(unique_key) != task_map_.end()) {
         return nullptr;
     }
-    auto task             = std::make_shared<TransferTask>(std::move(block_infos), deadline_ms);
+    auto task = std::make_shared<TransferTask>(std::move(block_infos), deadline_ms, std::move(lifetime_token));
     task_map_[unique_key] = task;
     return task;
 }
@@ -122,6 +124,19 @@ std::shared_ptr<TransferTask> TransferTaskStore::stealTask(const std::string& un
 int64_t TransferTaskStore::getTaskCount() const {
     std::shared_lock<std::shared_mutex> lock(mutex_);
     return static_cast<int64_t>(task_map_.size());
+}
+
+void TransferTaskStore::cancelAll() {
+    std::map<std::string, std::shared_ptr<TransferTask>> tasks;
+    {
+        std::unique_lock<std::shared_mutex> lock(mutex_);
+        tasks.swap(task_map_);
+    }
+    for (const auto& [_, task] : tasks) {
+        if (task) {
+            task->forceCancel();
+        }
+    }
 }
 
 }  // namespace transfer

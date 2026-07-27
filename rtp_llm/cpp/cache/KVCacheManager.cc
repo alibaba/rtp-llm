@@ -16,6 +16,7 @@
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -748,6 +749,62 @@ void KVCacheManager::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cach
 
 void KVCacheManager::deregUserMr() {
     allocator_->deregUserMr();
+}
+
+bool KVCacheManager::freezeExternalTransfers() {
+    bool ok = true;
+    if (auto cache_store = getCacheStore()) {
+        ok = cache_store->beginCheckpointDrain() && ok;
+    }
+    if (coordinator_) {
+        ok = coordinator_->freezeExternalTransfers() && ok;
+    }
+    return ok;
+}
+
+bool KVCacheManager::teardownRdmaTransports() {
+    bool ok = true;
+    // Drop P2P's transport-owned Barex resources first, then CacheStore's
+    // endpoints. CacheStore's MemoryUtil owner remains alive for KV MR dereg.
+    if (coordinator_) {
+        ok = coordinator_->teardownRdmaTransports() && ok;
+    }
+    if (auto cache_store = getCacheStore()) {
+        ok = cache_store->teardownForCheckpoint() && ok;
+    }
+    return ok;
+}
+
+bool KVCacheManager::teardownMemoryOwnerAfterMrDereg() {
+    auto cache_store = getCacheStore();
+    return !cache_store || cache_store->teardownMemoryOwnerAfterMrDereg();
+}
+
+bool KVCacheManager::rebuildMemoryOwnerBeforeMrReg() {
+    auto cache_store = getCacheStore();
+    return !cache_store || cache_store->rebuildMemoryOwnerBeforeMrReg();
+}
+
+bool KVCacheManager::rebuildRdmaTransports() {
+    bool ok = true;
+    if (auto cache_store = getCacheStore()) {
+        ok = cache_store->rebuildAfterRestore() && ok;
+    }
+    if (coordinator_) {
+        ok = coordinator_->rebuildRdmaTransports() && ok;
+    }
+    return ok;
+}
+
+bool KVCacheManager::resumeExternalTransfers() {
+    bool ok = true;
+    if (coordinator_) {
+        ok = coordinator_->resumeExternalTransfers() && ok;
+    }
+    if (auto cache_store = getCacheStore()) {
+        ok = cache_store->resumeAfterCheckpoint() && ok;
+    }
+    return ok;
 }
 
 void KVCacheManager::setCacheStore(std::shared_ptr<CacheStore> cache_store) {

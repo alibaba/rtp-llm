@@ -30,7 +30,8 @@ public:
                    const std::string&                                    unique_key,
                    int64_t                                               deadline_ms,
                    const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-                   int                                                   remote_tp_size = 1);
+                   int                                                   remote_tp_size = 1,
+                   std::shared_ptr<void>                                 lifetime_token = nullptr);
 
     bool cancelRead(const std::string& unique_key);
 
@@ -61,7 +62,8 @@ private:
                              const std::string&                                    unique_key,
                              int64_t                                               deadline_ms,
                              const std::shared_ptr<ReadTaskGroup>&                 task_group,
-                             int&                                                  total_block_count) const;
+                             int&                                                  total_block_count,
+                             const std::shared_ptr<void>&                          lifetime_token) const;
 
     /// 等待 recv 完成、cancel，或到达 return_deadline_ms（D - return_before）；到达 steal 时刻时从 store steal 各
     /// partition key。

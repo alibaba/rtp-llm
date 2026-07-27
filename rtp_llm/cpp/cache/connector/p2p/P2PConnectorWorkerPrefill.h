@@ -41,7 +41,8 @@ public:
     ErrorInfo sendKVCache(int64_t                                              request_id,
                           const std::string&                                   unique_key,
                           int64_t                                              deadline_ms,
-                          const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers);
+                          const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
+                          std::shared_ptr<void>                                lifetime_token = nullptr);
 
     bool cancelSend(const std::string& unique_key);
 
@@ -73,13 +74,15 @@ private:
                                       const std::shared_ptr<std::atomic<bool>>&        cancel_flag,
                                       const std::shared_ptr<SendTransferResult>&       transfer_result,
                                       std::set<int>&                                   sent_layer_ids,
-                                      int                                              total_transfers);
+                                      int                                              total_transfers,
+                                      const std::shared_ptr<void>&                     lifetime_token);
 
     int sendLayerToPartitions(const std::shared_ptr<LayerCacheBuffer>&   layer_cache_buffer,
                               const std::vector<AsymmetricTPContext>&    tp_partition_ctxs,
                               const std::string&                         unique_key,
                               int64_t                                    transfer_deadline_ms,
-                              const std::shared_ptr<SendTransferResult>& transfer_result);
+                              const std::shared_ptr<SendTransferResult>& transfer_result,
+                              const std::shared_ptr<void>&               lifetime_token);
 
     bool waitSendCallbacksWithTimeout(const std::shared_ptr<SendTransferResult>& transfer_result,
                                       int                                        sent_transfer_count,

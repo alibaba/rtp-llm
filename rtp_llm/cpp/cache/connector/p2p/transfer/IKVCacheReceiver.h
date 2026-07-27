@@ -45,6 +45,10 @@ struct RecvRequest {
     std::string     unique_key;
     KeyBlockInfoMap block_info;
     int64_t         deadline_ms = 0;
+
+    // Keeps the connector admission lease alive through the backend's physical
+    // completion, even if the synchronous read path times out or is cancelled.
+    std::shared_ptr<void> lifetime_token;
 };
 
 using RecvRequestPtr = std::shared_ptr<RecvRequest>;

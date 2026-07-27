@@ -185,6 +185,22 @@ bool KVCacheConnectorCoordinator::hasP2PConnector() const {
     return p2p_connector_ != nullptr;
 }
 
+bool KVCacheConnectorCoordinator::freezeExternalTransfers() {
+    return !p2p_connector_ || p2p_connector_->freezeExternalTransfers();
+}
+
+bool KVCacheConnectorCoordinator::teardownRdmaTransports() {
+    return !p2p_connector_ || p2p_connector_->teardownRdmaTransports();
+}
+
+bool KVCacheConnectorCoordinator::rebuildRdmaTransports() {
+    return !p2p_connector_ || p2p_connector_->rebuildRdmaTransports();
+}
+
+bool KVCacheConnectorCoordinator::resumeExternalTransfers() {
+    return !p2p_connector_ || p2p_connector_->resumeExternalTransfers();
+}
+
 size_t KVCacheConnectorCoordinator::inflightTransferCount() const {
     std::lock_guard<std::mutex> lock(update_mutex_);
     return fused_async_read_context_list_.size() + fused_async_write_context_list_.size();

@@ -260,6 +260,23 @@ TEST_F(TransferTaskTest, ForceCancel_Transferring_SubsequentNotifyDoneIgnored) {
     EXPECT_EQ(task.errorCode(), TransferErrorCode::CANCELLED);
 }
 
+TEST_F(TransferTaskTest, ForceCancelDoesNotReleasePhysicalCompletionToken) {
+    auto               lifetime_token = std::make_shared<int>(1);
+    std::weak_ptr<int> token_observer = lifetime_token;
+    auto               task =
+        std::make_unique<TransferTask>(transfer::KeyBlockInfoMap{}, currentTimeMs() + 5000, std::move(lifetime_token));
+
+    ASSERT_TRUE(task->startTransfer());
+    task->forceCancel();
+    ASSERT_TRUE(task->done());
+    EXPECT_FALSE(token_observer.expired());
+
+    // The backend completion context owns TransferTask until the physical IO
+    // callback returns. Logical force-cancel alone must not release its lease.
+    task.reset();
+    EXPECT_TRUE(token_observer.expired());
+}
+
 TEST_F(TransferTaskTest, ForceCancel_AfterDone_NoOp) {
     auto task = makeTask();
     task.startTransfer();

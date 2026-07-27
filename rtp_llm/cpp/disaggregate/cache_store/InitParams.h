@@ -12,6 +12,7 @@ struct MessagerInitParams {
     uint32_t worker_thread_count = 4;
     uint32_t worker_queue_size   = 100;
     int      device_id           = -1;
+    bool     start_paused        = false;
 
     uint32_t rdma_server_port         = 0;
     uint32_t rdma_io_thread_count     = 1;

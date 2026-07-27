@@ -7,6 +7,21 @@ test_copts = [
 ] + copts()
 
 cc_test(
+    name = "transfer_backend_lifecycle_test",
+    srcs = [
+        "TransferBackendLifecycleTest.cc",
+        "main.cc",
+    ],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_backend_factory_interface",
+        "//rtp_llm/cpp/metrics:metrics",
+        "@havenask//aios/autil:log",
+        "@com_google_googletest//:gtest",
+    ],
+)
+
+cc_test(
     name = "transfer_task_store_test",
     srcs = [
         "TransferTaskStoreTest.cc",

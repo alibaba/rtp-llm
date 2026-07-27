@@ -17,8 +17,11 @@ namespace transfer {
 /// @brief 单次 recv 任务（一层一个 partition），实现 IKVCacheRecvTask
 class TransferTask: public IKVCacheRecvTask {
 public:
-    TransferTask(KeyBlockInfoMap block_infos, int64_t deadline_ms):
-        block_infos_(std::move(block_infos)), deadline_ms_(deadline_ms), start_time_us_(currentTimeUs()) {}
+    TransferTask(KeyBlockInfoMap block_infos, int64_t deadline_ms, std::shared_ptr<void> lifetime_token = nullptr):
+        block_infos_(std::move(block_infos)),
+        deadline_ms_(deadline_ms),
+        start_time_us_(currentTimeUs()),
+        lifetime_token_(std::move(lifetime_token)) {}
     ~TransferTask() override = default;
 
 public:
@@ -61,6 +64,7 @@ private:
     bool                      cancel_requested_ = false;
     TransferErrorCode         error_code_       = TransferErrorCode::OK;
     std::string               error_msg_;
+    std::shared_ptr<void>     lifetime_token_;
 };
 
 /// @brief 内部 task store，被 TcpKVCacheReceiver / RdmaKVCacheReceiver 私有持有
@@ -70,8 +74,10 @@ public:
     ~TransferTaskStore() = default;
 
     /// @brief 创建并注册一个新的 recv task
-    std::shared_ptr<TransferTask>
-    addTask(const std::string& unique_key, KeyBlockInfoMap block_infos, int64_t deadline_ms);
+    std::shared_ptr<TransferTask> addTask(const std::string&    unique_key,
+                                          KeyBlockInfoMap       block_infos,
+                                          int64_t               deadline_ms,
+                                          std::shared_ptr<void> lifetime_token = nullptr);
 
     /// @brief 按 unique_key 查询 task（不转移所有权）
     std::shared_ptr<TransferTask> getTask(const std::string& unique_key) const;
@@ -79,6 +85,9 @@ public:
     std::shared_ptr<TransferTask> stealTask(const std::string& unique_key);
 
     int64_t getTaskCount() const;
+
+    /// Force-cancel and remove every task before a transport backend is torn down.
+    void cancelAll();
 
 private:
     mutable std::shared_mutex                            mutex_;

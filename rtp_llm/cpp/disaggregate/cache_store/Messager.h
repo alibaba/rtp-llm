@@ -26,6 +26,24 @@ public:
 
 public:
     virtual bool init(MessagerInitParams params) = 0;
+    virtual bool teardownForCheckpoint() {
+        return true;
+    }
+    virtual bool rebuildAfterRestore() {
+        return true;
+    }
+    virtual bool isAvailable() const {
+        return true;
+    }
+    virtual bool beginCheckpointDrain() {
+        return true;
+    }
+    virtual bool resumeAfterCheckpoint() {
+        return true;
+    }
+    virtual size_t activeRequestCount() const {
+        return 0;
+    }
 
     virtual void load(const std::shared_ptr<LoadRequest>&                          request,
                       const std::shared_ptr<CacheStoreClientLoadMetricsCollector>& collector) = 0;

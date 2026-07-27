@@ -28,7 +28,8 @@ P2PConnectorWorkerDecode::buildRecvTasks(const std::vector<std::shared_ptr<Layer
                                          const std::string&                                    unique_key,
                                          int64_t                                               deadline_ms,
                                          const std::shared_ptr<ReadTaskGroup>&                 task_group,
-                                         int& total_block_count) const {
+                                         int&                                                  total_block_count,
+                                         const std::shared_ptr<void>&                          lifetime_token) const {
     // 与 return_deadline_ms（D - p2p_read_return_before_deadline_ms）对齐，TransferTask / TCP 侧 isTimeout 与 worker
     // 必须结束 read 的时刻一致。
     const int64_t recv_task_deadline_ms = deadline_ms - config_.p2p_read_return_before_deadline_ms;
@@ -47,9 +48,10 @@ P2PConnectorWorkerDecode::buildRecvTasks(const std::vector<std::shared_ptr<Layer
                 P2PKeyUtil::makePartitionLayerKey(unique_key, layer_id, partition_id);
 
             transfer::RecvRequest recv_req;
-            recv_req.unique_key  = partition_layer_key;
-            recv_req.block_info  = std::move(key_block_infos);
-            recv_req.deadline_ms = recv_task_deadline_ms;
+            recv_req.unique_key     = partition_layer_key;
+            recv_req.block_info     = std::move(key_block_infos);
+            recv_req.deadline_ms    = recv_task_deadline_ms;
+            recv_req.lifetime_token = lifetime_token;
 
             auto task = receiver_->recv(recv_req);
             if (!task) {
@@ -151,7 +153,8 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                                
                                          const std::string&                                    unique_key,
                                          int64_t                                               deadline_ms,
                                          const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-                                         int                                                   remote_tp_size) {
+                                         int                                                   remote_tp_size,
+                                         std::shared_ptr<void>                                 lifetime_token) {
     int recv_partition_count = calculateRecvPartitionCount(remote_tp_size);
 
     RTP_LLM_LOG_DEBUG(
@@ -171,8 +174,13 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                                
     auto          task_group         = std::make_shared<ReadTaskGroup>();
     int           total_block_count  = 0;
 
-    ErrorInfo build_result = buildRecvTasks(
-        layer_cache_buffers, recv_partition_count, unique_key, deadline_ms, task_group, total_block_count);
+    ErrorInfo build_result = buildRecvTasks(layer_cache_buffers,
+                                            recv_partition_count,
+                                            unique_key,
+                                            deadline_ms,
+                                            task_group,
+                                            total_block_count,
+                                            lifetime_token);
     if (build_result.hasError()) {
         return build_result;
     }

@@ -35,9 +35,7 @@ bool P2PConnector::init() {
         }
     }
 
-    worker_ = std::make_shared<P2PConnectorWorker>(config_.worker_config, layer_block_converter_, metrics_reporter_);
-    if (!worker_->init()) {
-        RTP_LLM_LOG_ERROR("init failed: worker init failed");
+    if (!initWorker()) {
         return false;
     }
 
@@ -52,8 +50,51 @@ bool P2PConnector::init() {
     return true;
 }
 
+bool P2PConnector::initWorker() {
+    auto worker =
+        std::make_shared<P2PConnectorWorker>(config_.worker_config, layer_block_converter_, metrics_reporter_);
+    if (!worker->init()) {
+        RTP_LLM_LOG_ERROR("init failed: worker init failed");
+        return false;
+    }
+    return worker_admission_.installWorker(std::move(worker));
+}
+
+bool P2PConnector::freezeExternalTransfers() {
+    return worker_admission_.close();
+}
+
+bool P2PConnector::teardownRdmaTransports() {
+    const bool rdma_mode = config_.worker_config.transfer_backend_config.cache_store_rdma_mode;
+    const bool ok        = worker_admission_.teardown([rdma_mode](P2PConnectorWorker& worker) {
+        return rdma_mode ? worker.teardownRdmaTransports() : worker.teardownLogicalStateForCheckpoint();
+    });
+    if (!ok) {
+        RTP_LLM_LOG_ERROR("P2P checkpoint teardown requires closed admission and zero physical transfer leases");
+    }
+    return ok;
+}
+
+bool P2PConnector::rebuildRdmaTransports() {
+    const bool rdma_mode = config_.worker_config.transfer_backend_config.cache_store_rdma_mode;
+    return worker_admission_.rebuild([rdma_mode](P2PConnectorWorker& worker) {
+        return rdma_mode ? worker.rebuildRdmaTransports() : worker.rebuildLogicalStateAfterRestore();
+    });
+}
+
+bool P2PConnector::resumeExternalTransfers() {
+    if (!config_.worker_config.transfer_backend_config.cache_store_rdma_mode) {
+        return worker_admission_.resume();
+    }
+    return worker_admission_.resume([](P2PConnectorWorker& worker) { return worker.resumeRdmaTransports(); });
+}
+
 std::shared_ptr<AsyncMatchContext> P2PConnector::asyncMatch(const KVCacheResourcePtr&    resource,
                                                             const std::shared_ptr<Meta>& meta) {
+    auto lease = worker_admission_.tryAcquire();
+    if (!lease) {
+        return nullptr;
+    }
     if (!meta || !resource || !meta->generateStream()) {
         RTP_LLM_LOG_WARNING("asyncMatch failed, meta is null or resource is null or generate_stream is null");
         return nullptr;
@@ -79,6 +120,10 @@ std::shared_ptr<AsyncContext> P2PConnector::asyncRead(const KVCacheResourcePtr& 
                                                       const std::shared_ptr<AsyncMatchContext>& match_context,
                                                       int                                       start_read_block_index,
                                                       int                                       read_block_num) {
+    auto lease = worker_admission_.tryAcquire();
+    if (!lease) {
+        return nullptr;
+    }
     if (!meta || !resource || !meta->generateStream()) {
         RTP_LLM_LOG_WARNING("asyncRead failed, meta is null");
         return nullptr;
@@ -114,14 +159,24 @@ std::shared_ptr<AsyncContext> P2PConnector::asyncWrite(const KVCacheResourcePtr&
 
 std::shared_ptr<AsyncContext>
 P2PConnector::asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) {
+    auto lease = worker_admission_.tryAcquire();
+    if (!lease) {
+        return nullptr;
+    }
     auto resource = std::make_shared<KVCacheResource>(layer_context->kvCacheResource());
-    worker_->writeByLayer(layer_id, resource, layer_context->requestId(), layer_context->attentionEvent());
+    lease->worker()->writeByLayer(layer_id, resource, layer_context->requestId(), layer_context->attentionEvent());
     return std::make_shared<P2PConnectorAsyncWriteByLayerContext>(resource);
 }
 
 void P2PConnector::handleRead(const P2PConnectorStartLoadRequestPB& request,
                               P2PConnectorStartLoadResponsePB&      response,
                               std::function<bool()>                 is_cancelled) {
+    auto lease = worker_admission_.tryAcquire();
+    if (!lease) {
+        response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED));
+        response.set_error_message("P2P transfers are frozen for checkpoint");
+        return;
+    }
     if (scheduler_ == nullptr) {
         RTP_LLM_LOG_WARNING("handleRead failed, scheduler not initialized (only tp_rank 0 has scheduler)");
         response.set_error_code(transErrorCodeToRPC(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED));
@@ -245,16 +300,19 @@ void setP2PResponseOk(FunctionResponsePB& response) {
 
 }  // namespace
 
-bool P2PConnector::executeHandleRead(int64_t                                 request_id,
-                                     const std::string&                      unique_key,
-                                     int64_t                                 deadline_ms,
-                                     const P2PConnectorBroadcastTpRequestPB& p2p_request,
-                                     FunctionResponsePB&                     response) {
+bool P2PConnector::executeHandleRead(int64_t                                    request_id,
+                                     const std::string&                         unique_key,
+                                     int64_t                                    deadline_ms,
+                                     const P2PConnectorBroadcastTpRequestPB&    p2p_request,
+                                     FunctionResponsePB&                        response,
+                                     const std::shared_ptr<P2PConnectorWorker>& worker,
+                                     const std::shared_ptr<void>&               lifetime_token) {
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
     for (const auto& peer_worker : p2p_request.peer_workers()) {
         decode_transfer_servers.emplace_back(peer_worker.ip(), peer_worker.cache_store_port());
     }
-    ErrorInfo error_info = worker_->sendKVCache(request_id, unique_key, deadline_ms, decode_transfer_servers);
+    ErrorInfo error_info =
+        worker->sendKVCache(request_id, unique_key, deadline_ms, decode_transfer_servers, lifetime_token);
     if (error_info.hasError()) {
         RTP_LLM_LOG_WARNING("executeHandleRead failed, request_id: %ld, unique_key: %s, error: %s",
                             request_id,
@@ -265,11 +323,13 @@ bool P2PConnector::executeHandleRead(int64_t                                 req
     return error_info.ok();
 }
 
-bool P2PConnector::executeRead(int64_t                                 request_id,
-                               const std::string&                      unique_key,
-                               int64_t                                 deadline_ms,
-                               const P2PConnectorBroadcastTpRequestPB& p2p_request,
-                               FunctionResponsePB&                     response) {
+bool P2PConnector::executeRead(int64_t                                    request_id,
+                               const std::string&                         unique_key,
+                               int64_t                                    deadline_ms,
+                               const P2PConnectorBroadcastTpRequestPB&    p2p_request,
+                               FunctionResponsePB&                        response,
+                               const std::shared_ptr<P2PConnectorWorker>& worker,
+                               const std::shared_ptr<void>&               lifetime_token) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
     for (const auto& layer_block_pb : p2p_request.layer_blocks()) {
         auto layer_id           = layer_block_pb.layer_id();
@@ -282,7 +342,8 @@ bool P2PConnector::executeRead(int64_t                                 request_i
         layer_cache_buffers.push_back(layer_cache_buffer);
     }
     int       remote_tp_size = (p2p_request.remote_tp_size() > 0) ? p2p_request.remote_tp_size() : 1;
-    ErrorInfo error_info     = worker_->read(request_id, unique_key, deadline_ms, layer_cache_buffers, remote_tp_size);
+    ErrorInfo error_info =
+        worker->read(request_id, unique_key, deadline_ms, layer_cache_buffers, remote_tp_size, lifetime_token);
     if (error_info.hasError()) {
         RTP_LLM_LOG_WARNING("executeRead failed, request_id: %ld, unique_key: %s, error: %s",
                             request_id,
@@ -293,28 +354,34 @@ bool P2PConnector::executeRead(int64_t                                 request_i
     return error_info.ok();
 }
 
-bool P2PConnector::executeCancelRead(const std::string& unique_key, FunctionResponsePB& response) {
-    bool ret = worker_->cancelRead(unique_key);
+bool P2PConnector::executeCancelRead(const std::string&                         unique_key,
+                                     FunctionResponsePB&                        response,
+                                     const std::shared_ptr<P2PConnectorWorker>& worker) {
+    bool ret = worker->cancelRead(unique_key);
     setP2PResponseOk(response);
     return ret;
 }
 
-bool P2PConnector::executeCancelHandleRead(const std::string& unique_key, FunctionResponsePB& response) {
-    bool ret = worker_->cancelSend(unique_key);
+bool P2PConnector::executeCancelHandleRead(const std::string&                         unique_key,
+                                           FunctionResponsePB&                        response,
+                                           const std::shared_ptr<P2PConnectorWorker>& worker) {
+    bool ret = worker->cancelSend(unique_key);
     setP2PResponseOk(response);
     return ret;
 }
 
 bool P2PConnector::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
-    if (worker_ == nullptr) {
-        RTP_LLM_LOG_WARNING("executeFunction failed, worker not init");
-        return false;
-    }
-
     if (!request.has_p2p_request()) {
         RTP_LLM_LOG_WARNING("executeFunction failed, no p2p_request in FunctionRequestPB");
         return false;
     }
+
+    auto lease = worker_admission_.tryAcquire();
+    if (!lease) {
+        RTP_LLM_LOG_WARNING("executeFunction rejected while P2P transfers are frozen or transport is suspended");
+        return false;
+    }
+    const auto& worker = lease->worker();
 
     const auto& p2p_request = request.p2p_request();
     int64_t     request_id  = p2p_request.request_id();
@@ -323,13 +390,13 @@ bool P2PConnector::executeFunction(const FunctionRequestPB& request, FunctionRes
 
     switch (p2p_request.type()) {
         case P2PConnectorBroadcastType::HANDLE_READ:
-            return executeHandleRead(request_id, unique_key, deadline_ms, p2p_request, response);
+            return executeHandleRead(request_id, unique_key, deadline_ms, p2p_request, response, worker, lease);
         case P2PConnectorBroadcastType::READ:
-            return executeRead(request_id, unique_key, deadline_ms, p2p_request, response);
+            return executeRead(request_id, unique_key, deadline_ms, p2p_request, response, worker, lease);
         case P2PConnectorBroadcastType::CANCEL_READ:
-            return executeCancelRead(unique_key, response);
+            return executeCancelRead(unique_key, response, worker);
         case P2PConnectorBroadcastType::CANCEL_HANDLE_READ:
-            return executeCancelHandleRead(unique_key, response);
+            return executeCancelHandleRead(unique_key, response, worker);
         default:
             RTP_LLM_LOG_WARNING("executeFunction failed, unsupported p2p_request type %d", p2p_request.type());
             auto* p2p_response = response.mutable_p2p_response();

@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
+#include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferBackendFactory.h"
 #include <c10/core/Event.h>
 #include <optional>
 #include "rtp_llm/cpp/utils/ErrorCode.h"
@@ -35,13 +36,21 @@ public:
     ErrorInfo sendKVCache(int64_t                                              request_id,
                           const std::string&                                   unique_key,
                           int64_t                                              deadline_ms,
-                          const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers);
+                          const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
+                          std::shared_ptr<void>                                lifetime_token = nullptr);
 
     ErrorInfo read(int64_t                                               request_id,
                    const std::string&                                    unique_key,
                    int64_t                                               deadline_ms,
                    const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-                   int                                                   remote_tp_size = 1);
+                   int                                                   remote_tp_size = 1,
+                   std::shared_ptr<void>                                 lifetime_token = nullptr);
+
+    bool teardownRdmaTransports();
+    bool rebuildRdmaTransports();
+    bool resumeRdmaTransports();
+    bool teardownLogicalStateForCheckpoint();
+    bool rebuildLogicalStateAfterRestore();
 
     bool cancelRead(const std::string& unique_key);
     bool cancelSend(const std::string& unique_key);
@@ -52,9 +61,14 @@ public:
     void setStoreWaitTimeoutMs(int64_t store_wait_timeout_ms);
 
 private:
+    void resetLogicalStateForCheckpoint();
+
+private:
     P2PConnectorWorkerConfig             config_;
     std::shared_ptr<LayerBlockConverter> layer_block_converter_;
     kmonitor::MetricsReporterPtr         metrics_reporter_;
+    transfer::TransferBackendPair        transfer_backend_;
+    int64_t                              store_wait_timeout_ms_{10 * 1000};
 
     std::unique_ptr<P2PConnectorWorkerPrefill> prefill_;
     std::unique_ptr<P2PConnectorWorkerDecode>  decode_;

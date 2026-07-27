@@ -350,6 +350,35 @@ protected:
     std::shared_ptr<MockIKVCacheReceiver>          mock_receiver_;
 };
 
+TEST_F(P2PConnectorWorkerTest, CheckpointRebuildDropsComputedAndPendingLogicalState) {
+    P2PConnectorWorker worker(worker_config_, mock_layer_block_converter_, nullptr);
+    worker.transfer_backend_ = {mock_sender_, mock_receiver_};
+    ASSERT_TRUE(worker.rebuildLogicalStateAfterRestore());
+
+    auto old_computed_buffers = worker.getComputedBuffersStore();
+    old_computed_buffers->addBuffer(7001, createLayerCacheBuffer(0), currentTimeMs() + 10000);
+    ASSERT_EQ(old_computed_buffers->getBuffersCount(), 1);
+
+    std::weak_ptr<StoreWaitContextChecker> old_checker    = worker.prefill_->store_wait_context_checker_;
+    auto                                   old_read_group = std::make_shared<P2PConnectorWorkerDecode::ReadTaskGroup>();
+    std::weak_ptr<P2PConnectorWorkerDecode::ReadTaskGroup> old_read_group_weak = old_read_group;
+    worker.decode_->read_tasks_.emplace("pre_sleep_pending", old_read_group);
+    old_read_group.reset();
+
+    ASSERT_TRUE(worker.teardownLogicalStateForCheckpoint());
+    EXPECT_EQ(worker.prefill_, nullptr);
+    EXPECT_EQ(worker.decode_, nullptr);
+    EXPECT_TRUE(old_checker.expired());
+    EXPECT_TRUE(old_read_group_weak.expired());
+
+    ASSERT_TRUE(worker.rebuildLogicalStateAfterRestore());
+    auto rebuilt_computed_buffers = worker.getComputedBuffersStore();
+    EXPECT_NE(rebuilt_computed_buffers, old_computed_buffers);
+    EXPECT_EQ(rebuilt_computed_buffers->getBuffersCount(), 0);
+    EXPECT_EQ(old_computed_buffers->getBuffersCount(), 1);
+    EXPECT_TRUE(worker.decode_->read_tasks_.empty());
+}
+
 // ==================== writeByLayer 测试 (Prefill 端) ====================
 
 TEST_F(P2PConnectorWorkerTest, WriteByLayer_ReturnTrue_WithReadyEvent) {

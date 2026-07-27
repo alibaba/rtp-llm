@@ -8,8 +8,291 @@
 #include "c10/cuda/CUDAGuard.h"
 #include <cuda_runtime.h>
 #include <atomic>
+#include <mutex>
+#include <thread>
+#include <vector>
 
 namespace rtp_llm {
+
+class CheckpointMemoryUtil: public MemoryUtil {
+public:
+    bool regUserMr(void*, uint64_t, bool, uint64_t) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        events_.push_back("reg_mr");
+        return available_;
+    }
+    bool deregUserMr(void*, bool) override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        events_.push_back("dereg_mr");
+        return available_;
+    }
+    bool isMemoryMr(void*, uint64_t, bool, bool) override {
+        return isAvailable();
+    }
+    bool findMemoryMr(void*, void*, uint64_t, bool, bool) override {
+        return isAvailable();
+    }
+    bool isRdmaMode() override {
+        return false;
+    }
+    bool teardownForCheckpoint() override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (!available_) {
+            return true;
+        }
+        available_ = false;
+        teardown_count_++;
+        events_.push_back("teardown");
+        return true;
+    }
+    bool rebuildAfterRestore() override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        if (available_) {
+            return true;
+        }
+        rebuild_count_++;
+        if (fail_rebuild_) {
+            return false;
+        }
+        available_ = true;
+        events_.push_back("rebuild");
+        return true;
+    }
+    bool isAvailable() const override {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return available_;
+    }
+
+    void setFailRebuild(bool fail) {
+        std::lock_guard<std::mutex> lock(mutex_);
+        fail_rebuild_ = fail;
+    }
+    int teardownCount() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return teardown_count_;
+    }
+    int rebuildCount() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return rebuild_count_;
+    }
+    std::vector<std::string> events() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return events_;
+    }
+
+private:
+    mutable std::mutex       mutex_;
+    bool                     available_{true};
+    bool                     fail_rebuild_{false};
+    int                      teardown_count_{0};
+    int                      rebuild_count_{0};
+    std::vector<std::string> events_;
+};
+
+class NormalCacheStoreCheckpointTest: public ::testing::Test {
+protected:
+    void SetUp() override {
+        memory_util_ = std::make_shared<CheckpointMemoryUtil>();
+        CacheStoreInitParams params;
+        params.listen_port   = autil::NetUtil::randomPort();
+        params.rdma_mode     = false;
+        params.enable_metric = false;
+        params.memory_util   = memory_util_;
+        cache_store_         = NormalCacheStore::createNormalCacheStore(params);
+        ASSERT_NE(cache_store_, nullptr);
+    }
+
+    void expectEmptyStore(bool expected_ok, CacheStoreErrorCode expected_error) {
+        bool callback_called = false;
+        auto request         = std::make_shared<RequestBlockBuffer>("checkpoint-empty-request");
+        cache_store_->store(request, [&](bool ok, CacheStoreErrorCode error) {
+            callback_called = true;
+            EXPECT_EQ(ok, expected_ok);
+            EXPECT_EQ(error, expected_error);
+        });
+        EXPECT_TRUE(callback_called);
+    }
+
+    std::shared_ptr<CheckpointMemoryUtil> memory_util_;
+    std::shared_ptr<NormalCacheStore>     cache_store_;
+};
+
+TEST_F(NormalCacheStoreCheckpointTest, TwoCheckpointCyclesKeepIdentityAndAreIdempotent) {
+    auto*                       identity  = cache_store_.get();
+    std::shared_ptr<CacheStore> lifecycle = cache_store_;
+    std::vector<std::string>    expected_events;
+
+    for (int cycle = 1; cycle <= 2; ++cycle) {
+        std::vector<std::thread> threads;
+        std::atomic<int>         successful_calls{0};
+        for (int i = 0; i < 8; ++i) {
+            threads.emplace_back([&]() { successful_calls += lifecycle->beginCheckpointDrain(); });
+        }
+        for (auto& thread : threads) {
+            thread.join();
+        }
+        EXPECT_EQ(successful_calls.load(), 8);
+        EXPECT_FALSE(lifecycle->isAvailable());
+        expectEmptyStore(false, CacheStoreErrorCode::PushWorkerItemFailed);
+
+        threads.clear();
+        successful_calls = 0;
+        for (int i = 0; i < 8; ++i) {
+            threads.emplace_back([&]() { successful_calls += lifecycle->teardownForCheckpoint(); });
+        }
+        for (auto& thread : threads) {
+            thread.join();
+        }
+        EXPECT_EQ(successful_calls.load(), 8);
+        EXPECT_EQ(memory_util_->teardownCount(), cycle - 1);
+        EXPECT_TRUE(memory_util_->isAvailable());
+
+        // Level 3 stops transport first. The MR owner must remain usable until
+        // the controller has deregistered every KV MR.
+        EXPECT_TRUE(memory_util_->deregUserMr(reinterpret_cast<void*>(0x1000 + cycle), true));
+        expected_events.push_back("dereg_mr");
+        EXPECT_TRUE(lifecycle->teardownMemoryOwnerAfterMrDereg());
+        EXPECT_TRUE(lifecycle->teardownMemoryOwnerAfterMrDereg());
+        expected_events.push_back("teardown");
+        EXPECT_EQ(memory_util_->teardownCount(), cycle);
+        EXPECT_FALSE(memory_util_->isAvailable());
+
+        EXPECT_TRUE(lifecycle->rebuildMemoryOwnerBeforeMrReg());
+        EXPECT_TRUE(lifecycle->rebuildMemoryOwnerBeforeMrReg());
+        expected_events.push_back("rebuild");
+
+        threads.clear();
+        successful_calls = 0;
+        for (int i = 0; i < 8; ++i) {
+            threads.emplace_back([&]() { successful_calls += lifecycle->rebuildAfterRestore(); });
+        }
+        for (auto& thread : threads) {
+            thread.join();
+        }
+        EXPECT_EQ(successful_calls.load(), 8);
+        EXPECT_EQ(memory_util_->rebuildCount(), cycle);
+        EXPECT_EQ(cache_store_.get(), identity);
+        EXPECT_FALSE(lifecycle->isAvailable());
+        expectEmptyStore(false, CacheStoreErrorCode::PushWorkerItemFailed);
+
+        EXPECT_TRUE(memory_util_->regUserMr(reinterpret_cast<void*>(0x2000 + cycle), 4096, true, 4096));
+        expected_events.push_back("reg_mr");
+        EXPECT_TRUE(lifecycle->resumeAfterCheckpoint());
+        EXPECT_TRUE(lifecycle->isAvailable());
+        expectEmptyStore(true, CacheStoreErrorCode::None);
+        EXPECT_EQ(memory_util_->events(), expected_events);
+    }
+}
+
+TEST_F(NormalCacheStoreCheckpointTest, MemoryOwnerCannotStopBeforeTransportTeardown) {
+    EXPECT_FALSE(cache_store_->teardownMemoryOwnerAfterMrDereg());
+    EXPECT_EQ(memory_util_->teardownCount(), 0);
+    EXPECT_TRUE(memory_util_->isAvailable());
+
+    ASSERT_TRUE(cache_store_->beginCheckpointDrain());
+    EXPECT_FALSE(cache_store_->teardownMemoryOwnerAfterMrDereg());
+    EXPECT_EQ(memory_util_->teardownCount(), 0);
+    EXPECT_TRUE(memory_util_->isAvailable());
+}
+
+TEST_F(NormalCacheStoreCheckpointTest, DrainRejectsNewWorkAndCanBeCancelled) {
+    bool                        existing_callback_called = false;
+    CacheStoreStoreDoneCallback callback          = [&](bool, CacheStoreErrorCode) { existing_callback_called = true; };
+    auto                        existing_callback = cache_store_->countTransfer(std::move(callback));
+    ASSERT_EQ(cache_store_->activeTransferCount(), 1);
+
+    ASSERT_TRUE(cache_store_->beginCheckpointDrain());
+    expectEmptyStore(false, CacheStoreErrorCode::PushWorkerItemFailed);
+    EXPECT_FALSE(cache_store_->teardownForCheckpoint());
+
+    existing_callback(true, CacheStoreErrorCode::None);
+    EXPECT_TRUE(existing_callback_called);
+    EXPECT_EQ(cache_store_->activeTransferCount(), 0);
+    EXPECT_TRUE(cache_store_->resumeAfterCheckpoint());
+    EXPECT_TRUE(cache_store_->isAvailable());
+    expectEmptyStore(true, CacheStoreErrorCode::None);
+}
+
+TEST_F(NormalCacheStoreCheckpointTest, ConcurrentAdmissionFailsClosedAfterDrain) {
+    std::atomic<bool>        start{false};
+    std::atomic<int>         callback_count{0};
+    std::atomic<int>         success_count{0};
+    std::vector<std::thread> workers;
+    for (int i = 0; i < 8; ++i) {
+        workers.emplace_back([&, i]() {
+            while (!start.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            auto request = std::make_shared<RequestBlockBuffer>("concurrent-admission-" + std::to_string(i));
+            cache_store_->store(request, [&](bool ok, CacheStoreErrorCode) {
+                callback_count++;
+                success_count += ok;
+            });
+        });
+    }
+    start.store(true, std::memory_order_release);
+    ASSERT_TRUE(cache_store_->beginCheckpointDrain());
+    for (auto& worker : workers) {
+        worker.join();
+    }
+    EXPECT_EQ(callback_count.load(), 8);
+    EXPECT_LE(success_count.load(), 8);
+
+    for (int i = 0; i < 32; ++i) {
+        expectEmptyStore(false, CacheStoreErrorCode::PushWorkerItemFailed);
+    }
+    EXPECT_TRUE(cache_store_->teardownForCheckpoint());
+    EXPECT_TRUE(cache_store_->rebuildAfterRestore());
+    EXPECT_FALSE(cache_store_->isAvailable());
+    EXPECT_TRUE(memory_util_->regUserMr(reinterpret_cast<void*>(0x3000), 4096, true, 4096));
+    EXPECT_TRUE(cache_store_->resumeAfterCheckpoint());
+}
+
+TEST_F(NormalCacheStoreCheckpointTest, RebuildFailureStaysFailClosed) {
+    ASSERT_TRUE(cache_store_->beginCheckpointDrain());
+    ASSERT_TRUE(cache_store_->teardownForCheckpoint());
+    ASSERT_TRUE(cache_store_->teardownMemoryOwnerAfterMrDereg());
+    memory_util_->setFailRebuild(true);
+
+    EXPECT_FALSE(cache_store_->rebuildMemoryOwnerBeforeMrReg());
+    EXPECT_FALSE(cache_store_->rebuildMemoryOwnerBeforeMrReg());
+    EXPECT_FALSE(cache_store_->rebuildAfterRestore());
+    EXPECT_FALSE(cache_store_->resumeAfterCheckpoint());
+    EXPECT_FALSE(cache_store_->isAvailable());
+    EXPECT_EQ(memory_util_->rebuildCount(), 1);
+    expectEmptyStore(false, CacheStoreErrorCode::PushWorkerItemFailed);
+}
+
+TEST_F(NormalCacheStoreCheckpointTest, CancelDoesNotHideDelayedPhysicalTransfer) {
+    std::atomic<bool> cancelled{false};
+    auto              request = std::make_shared<RemoteStoreRequest>(
+        "client", "remote-store-request", "127.0.0.1", 1, 2, currentTimeUs() + 1000000, 1, 0, 1, 0);
+    request->buffer_pairs["local"] = "remote";
+    auto collector                 = std::make_shared<CacheStoreRemoteStoreMetricsCollector>(nullptr, 1);
+    auto task                      = std::make_shared<RemoteStoreTaskImpl>(
+        request, collector, [&cancelled]() { return cancelled.load(std::memory_order_acquire); });
+
+    auto storage          = std::shared_ptr<void>(new char[16], [](void* ptr) { delete[] static_cast<char*>(ptr); });
+    auto block            = std::make_shared<BlockBuffer>("local", storage, 16, false, true);
+    auto transfer_request = task->makeAvailableRequest(std::vector<std::shared_ptr<BlockBuffer>>{block});
+    ASSERT_NE(transfer_request, nullptr);
+    cache_store_->trackPhysicalTransfer(transfer_request);
+    ASSERT_EQ(cache_store_->activePhysicalTransferCount(), 1);
+
+    cancelled.store(true, std::memory_order_release);
+    task->waitDone();
+    ASSERT_TRUE(task->done());
+    ASSERT_TRUE(cache_store_->beginCheckpointDrain());
+    EXPECT_EQ(cache_store_->activePhysicalTransferCount(), 1);
+    EXPECT_FALSE(cache_store_->teardownForCheckpoint());
+
+    transfer_request->callback(false, CacheStoreErrorCode::CallPrefillTimeout, transfer_request->buffer_pairs);
+    EXPECT_EQ(cache_store_->activePhysicalTransferCount(), 0);
+    EXPECT_TRUE(cache_store_->teardownForCheckpoint());
+    EXPECT_TRUE(memory_util_->isAvailable());
+    EXPECT_TRUE(cache_store_->teardownMemoryOwnerAfterMrDereg());
+    EXPECT_FALSE(memory_util_->isAvailable());
+}
 
 class NormalCacheStoreTest: public CacheStoreTestBase {
 protected:

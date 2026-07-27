@@ -101,7 +101,8 @@ int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
     const std::shared_ptr<std::atomic<bool>>&        cancel_flag,
     const std::shared_ptr<SendTransferResult>&       transfer_result,
     std::set<int>&                                   sent_layer_ids,
-    int                                              total_transfers) {
+    int                                              total_transfers,
+    const std::shared_ptr<void>&                     lifetime_token) {
     int sent_count = 0;
 
     while (sent_count < total_transfers && !cancel_flag->load() && currentTimeMs() < return_deadline_ms) {
@@ -124,7 +125,7 @@ int P2PConnectorWorkerPrefill::dispatchPendingLayerTransfers(
             }
             sent_layer_ids.insert(layer_id);
             sent_count += sendLayerToPartitions(
-                layer_cache_buffer, tp_partition_ctxs, unique_key, return_deadline_ms, transfer_result);
+                layer_cache_buffer, tp_partition_ctxs, unique_key, return_deadline_ms, transfer_result, lifetime_token);
         }
 
         if (ready_layer_buffers.empty()) {
@@ -138,7 +139,8 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
                                                      const std::vector<AsymmetricTPContext>&    tp_partition_ctxs,
                                                      const std::string&                         unique_key,
                                                      int64_t                                    transfer_deadline_ms,
-                                                     const std::shared_ptr<SendTransferResult>& transfer_result) {
+                                                     const std::shared_ptr<SendTransferResult>& transfer_result,
+                                                     const std::shared_ptr<void>&               lifetime_token) {
     int       count    = 0;
     const int layer_id = layer_cache_buffer->getLayerId();
 
@@ -160,8 +162,8 @@ int P2PConnectorWorkerPrefill::sendLayerToPartitions(const std::shared_ptr<Layer
 
         ++count;
         sender_->send(send_req,
-                      [transfer_result, partition_layer_key](transfer::TransferErrorCode transfer_ec,
-                                                             const std::string&          cb_error_msg) {
+                      [transfer_result, partition_layer_key, lifetime_token](transfer::TransferErrorCode transfer_ec,
+                                                                             const std::string&          cb_error_msg) {
                           RTP_LLM_LOG_DEBUG("send done, partition_layer_key: %s, success: %d",
                                             partition_layer_key.c_str(),
                                             transfer_ec == transfer::TransferErrorCode::OK);
@@ -217,7 +219,8 @@ ErrorInfo
 P2PConnectorWorkerPrefill::sendKVCache(int64_t                                              request_id,
                                        const std::string&                                   unique_key,
                                        int64_t                                              deadline_ms,
-                                       const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers) {
+                                       const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
+                                       std::shared_ptr<void>                                lifetime_token) {
     // D（deadline_ms）为 RPC 语义截止；return_deadline_ms = D - return_before，与 decode recv_req.deadline_ms 对齐。
     const int64_t return_before_ms   = config_.p2p_read_return_before_deadline_ms;
     const int64_t return_deadline_ms = deadline_ms - return_before_ms;
@@ -264,7 +267,8 @@ P2PConnectorWorkerPrefill::sendKVCache(int64_t                                  
                                                                   cancel_flag,
                                                                   transfer_result,
                                                                   sent_layer_ids,
-                                                                  total_transfers);
+                                                                  total_transfers,
+                                                                  lifetime_token);
     collector->last_layer_wait_time_us = currentTimeUs() - start_time_us;
 
     {

@@ -118,6 +118,16 @@ public:
     bool releaseMemoryCacheBacking();
     bool restoreMemoryCacheBacking();
 
+    // Transfer admission is closed/reopened on every level. The teardown/rebuild
+    // operations remain Level-3 only. CacheStore is late-bound by RemoteRpcServer,
+    // so these methods resolve current owners at call time.
+    bool freezeExternalTransfers();
+    bool teardownRdmaTransports();
+    bool teardownMemoryOwnerAfterMrDereg();
+    bool rebuildMemoryOwnerBeforeMrReg();
+    bool rebuildRdmaTransports();
+    bool resumeExternalTransfers();
+
     KVCachePhysicalMemoryControllerPtr kvMemoryController() const {
         return kv_memory_controller_;
     }

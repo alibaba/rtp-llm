@@ -58,6 +58,34 @@ public:
         return 0;
     }
 
+    // Every level uses begin/drain and resume to protect MR/KV release. Level 3
+    // additionally follows: transport-only teardown ->
+    // external MR deregistration -> MR-owner teardown -> CUDA checkpoint/restore
+    // -> MR-owner rebuild -> transport rebuild (still paused) -> external MR
+    // registration -> resume. teardownForCheckpoint must not destroy the
+    // MemoryUtil/MR owner.
+    virtual bool beginCheckpointDrain() {
+        return true;
+    }
+    virtual bool resumeAfterCheckpoint() {
+        return true;
+    }
+    virtual bool teardownForCheckpoint() {
+        return true;
+    }
+    virtual bool teardownMemoryOwnerAfterMrDereg() {
+        return true;
+    }
+    virtual bool rebuildMemoryOwnerBeforeMrReg() {
+        return true;
+    }
+    virtual bool rebuildAfterRestore() {
+        return true;
+    }
+    virtual bool isAvailable() const {
+        return true;
+    }
+
     virtual void debugInfo() = 0;
 };
 

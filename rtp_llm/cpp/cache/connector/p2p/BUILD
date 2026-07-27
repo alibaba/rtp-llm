@@ -119,6 +119,7 @@ cc_library(
         "P2PConnectorWorkerDecode.h",
         "P2PConnector.h",
         "P2PKeyUtil.h",
+        "TransferAdmissionController.h",
     ],
     deps = [
         ":components",

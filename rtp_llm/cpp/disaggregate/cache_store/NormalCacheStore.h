@@ -65,18 +65,36 @@ public:
 
     size_t activeTransferCount() const override;
 
+    bool beginCheckpointDrain() override;
+    bool resumeAfterCheckpoint() override;
+    bool teardownForCheckpoint() override;
+    bool teardownMemoryOwnerAfterMrDereg() override;
+    bool rebuildMemoryOwnerBeforeMrReg() override;
+    bool rebuildAfterRestore() override;
+    bool isAvailable() const override;
+
+    size_t activePhysicalTransferCount() const;
+
 private:
-    bool init(const CacheStoreInitParams& params);
+    bool   init(const CacheStoreInitParams& params);
+    bool   initRuntimeLocked(bool start_paused);
+    bool   startThreadPoolLocked();
+    void   stopThreadPoolLocked();
+    size_t activeTransferCountLocked() const;
+    // Installs a completion guard before an admitted outbound request is handed
+    // to Messager. Logical timeout/cancel does not release this count.
+    void trackPhysicalTransfer(const std::shared_ptr<TransferRequest>& request);
 
     // Wraps a done callback so the global active transfer counter is
     // incremented now and decremented exactly once when the callback fires.
     template<typename Callback>
     Callback countTransfer(Callback callback) {
-        active_transfer_count_.fetch_add(1, std::memory_order_relaxed);
+        auto active_count = active_transfer_count_;
+        active_count->fetch_add(1, std::memory_order_relaxed);
         auto done = std::make_shared<std::atomic<bool>>(false);
-        return [this, callback = std::move(callback), done](auto&&... args) {
+        return [active_count, callback = std::move(callback), done](auto&&... args) {
             if (!done->exchange(true, std::memory_order_acq_rel)) {
-                active_transfer_count_.fetch_sub(1, std::memory_order_relaxed);
+                active_count->fetch_sub(1, std::memory_order_relaxed);
             }
             callback(std::forward<decltype(args)>(args)...);
         };
@@ -98,18 +116,33 @@ private:
     const std::shared_ptr<RequestBlockBufferStore>& getRequestBlockBufferStore() const;
 
 private:
-    bool                                                                             thread_pool_close_{false};
-    int                                                                              device_id_{-1};
-    CacheStoreInitParams                                                             params_;
-    std::shared_ptr<MemoryUtil>                                                      memory_util_;
-    std::shared_ptr<RequestBlockBufferStore>                                         request_block_buffer_store_;
-    std::shared_ptr<Messager>                                                        messager_;
-    autil::ThreadPoolBasePtr                                                         thread_pool_;  // task executor
-    kmonitor::MetricsReporterPtr                                                     metrics_reporter_;
-    mutable std::shared_mutex                                                        remote_store_tasks_mutex_;
+    enum class LifecycleState {
+        New,
+        Running,
+        Draining,
+        Suspended,
+        Rebuilding,
+        Failed,
+        Destroyed
+    };
+    mutable std::shared_mutex                lifecycle_mutex_;
+    LifecycleState                           lifecycle_state_{LifecycleState::New};
+    std::atomic<bool>                        thread_pool_close_{true};
+    bool                                     owns_memory_util_{false};
+    bool                                     restored_paused_{false};
+    bool                                     memory_owner_suspended_{false};
+    int                                      device_id_{-1};
+    CacheStoreInitParams                     params_;
+    std::shared_ptr<MemoryUtil>              memory_util_;
+    std::shared_ptr<RequestBlockBufferStore> request_block_buffer_store_;
+    std::shared_ptr<Messager>                messager_;
+    autil::ThreadPoolBasePtr                 thread_pool_;  // task executor
+    kmonitor::MetricsReporterPtr             metrics_reporter_;
+    mutable std::shared_mutex                remote_store_tasks_mutex_;
     std::unordered_map<std::string, std::list<std::shared_ptr<RemoteStoreTaskImpl>>> remote_store_tasks_;
-    std::atomic<size_t>                                                              active_transfer_count_{0};
-    mutable std::shared_mutex                                                        store_tasks_mutex_;
+    std::shared_ptr<std::atomic<size_t>> active_transfer_count_{std::make_shared<std::atomic<size_t>>(0)};
+    std::shared_ptr<std::atomic<size_t>> active_physical_transfer_count_{std::make_shared<std::atomic<size_t>>(0)};
+    mutable std::shared_mutex            store_tasks_mutex_;
     std::unordered_map<std::shared_ptr<RequestBlockBuffer>,
                        std::pair<CacheStoreStoreDoneCallback, std::function<void()>>>
         store_tasks_;

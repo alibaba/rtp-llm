@@ -3,11 +3,14 @@
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
+#include "rtp_llm/cpp/cache/connector/p2p/TransferAdmissionController.h"
 #include <c10/core/Event.h>
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 #include <grpc++/grpc++.h>
+#include <atomic>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 
@@ -36,6 +39,14 @@ public:
 
 public:
     bool init();
+
+    // Level-3 checkpoint lifecycle. The gate is closed before drain so no new
+    // peer request can race destruction of logical KV-buffer state. TCP keeps
+    // its transport, while CUDA/verbs-backed Barex transport is also rebuilt.
+    bool freezeExternalTransfers();
+    bool teardownRdmaTransports();
+    bool rebuildRdmaTransports();
+    bool resumeExternalTransfers();
 
     // Expose stream_store_ for testing
     std::shared_ptr<P2PConnectorResourceStore> streamStore() const {
@@ -66,6 +77,9 @@ public:
     bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
 
 private:
+    bool initWorker();
+
+private:
     grpc::Status waitForResourceEntry(const std::string&                          unique_key,
                                       int64_t                                     deadline_ms,
                                       std::function<bool()>                       is_cancelled,
@@ -78,30 +92,38 @@ private:
     grpc::Status fillResponseWithStreamInfo(const std::shared_ptr<P2PConnectorResourceEntry>& resource_entry,
                                             P2PConnectorStartLoadResponsePB&                  response);
 
-    bool executeHandleRead(int64_t                                 request_id,
-                           const std::string&                      unique_key,
-                           int64_t                                 deadline_ms,
-                           const P2PConnectorBroadcastTpRequestPB& p2p_request,
-                           FunctionResponsePB&                     response);
+    bool executeHandleRead(int64_t                                    request_id,
+                           const std::string&                         unique_key,
+                           int64_t                                    deadline_ms,
+                           const P2PConnectorBroadcastTpRequestPB&    p2p_request,
+                           FunctionResponsePB&                        response,
+                           const std::shared_ptr<P2PConnectorWorker>& worker,
+                           const std::shared_ptr<void>&               lifetime_token);
 
-    bool executeRead(int64_t                                 request_id,
-                     const std::string&                      unique_key,
-                     int64_t                                 deadline_ms,
-                     const P2PConnectorBroadcastTpRequestPB& p2p_request,
-                     FunctionResponsePB&                     response);
+    bool executeRead(int64_t                                    request_id,
+                     const std::string&                         unique_key,
+                     int64_t                                    deadline_ms,
+                     const P2PConnectorBroadcastTpRequestPB&    p2p_request,
+                     FunctionResponsePB&                        response,
+                     const std::shared_ptr<P2PConnectorWorker>& worker,
+                     const std::shared_ptr<void>&               lifetime_token);
 
-    bool executeCancelRead(const std::string& unique_key, FunctionResponsePB& response);
+    bool executeCancelRead(const std::string&                         unique_key,
+                           FunctionResponsePB&                        response,
+                           const std::shared_ptr<P2PConnectorWorker>& worker);
 
-    bool executeCancelHandleRead(const std::string& unique_key, FunctionResponsePB& response);
+    bool executeCancelHandleRead(const std::string&                         unique_key,
+                                 FunctionResponsePB&                        response,
+                                 const std::shared_ptr<P2PConnectorWorker>& worker);
 
 private:
     const P2PConnectorConfig             config_;
     std::shared_ptr<LayerBlockConverter> layer_block_converter_;
     kmonitor::MetricsReporterPtr         metrics_reporter_;
 
-    std::shared_ptr<P2PConnectorScheduler>     scheduler_;
-    std::shared_ptr<P2PConnectorWorker>        worker_;
-    std::shared_ptr<P2PConnectorResourceStore> stream_store_;
+    std::shared_ptr<P2PConnectorScheduler>          scheduler_;
+    std::shared_ptr<P2PConnectorResourceStore>      stream_store_;
+    TransferAdmissionController<P2PConnectorWorker> worker_admission_;
 };
 
 }  // namespace rtp_llm

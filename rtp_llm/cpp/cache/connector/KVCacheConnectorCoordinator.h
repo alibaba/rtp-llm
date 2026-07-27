@@ -64,6 +64,11 @@ public:
     bool releaseMemoryCacheBacking();
     bool restoreMemoryCacheBacking();
 
+    bool freezeExternalTransfers();
+    bool teardownRdmaTransports();
+    bool rebuildRdmaTransports();
+    bool resumeExternalTransfers();
+
     uint32_t convertToGlobalLayerId(int model_id, int layer_id) const override {
         return allocator_->convertToGlobalLayerId(model_id, layer_id);
     }

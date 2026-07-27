@@ -59,6 +59,7 @@ cc_test(
     name = "p2p_connector_test",
     srcs = [
         "P2PConnectorTest.cc",
+        "TransferAdmissionControllerTest.cc",
         "main.cc",
     ],
     deps = [
@@ -96,6 +97,25 @@ cc_test(
     name = "p2p_connector_worker_test",
     srcs = [
         "P2PConnectorWorkerTest.cc",
+        "main.cc",
+    ],
+    deps = [
+        "//rtp_llm/cpp/cache/connector/p2p:connector",
+        "//rtp_llm/cpp/cache/connector/p2p/transfer:basic_types",
+        "@com_google_googletest//:gtest",
+        "//rtp_llm/cpp/testing:device_test_utils",
+    ] + device_impl_target(),
+    copts = test_copts,
+    exec_properties = {'gpu':'A10'},
+)
+
+# Sleep-mode Level3 transport-only checkpoint wiring: proves P2PConnectorWorker
+# delegates stop/restoreTransportForCheckpoint to a lifecycle-aware transfer backend
+# (fail-closed on suspend, restore-before-resume on wake). CPU-only via mock backend.
+cc_test(
+    name = "p2p_connector_worker_checkpoint_test",
+    srcs = [
+        "P2PConnectorWorkerCheckpointTest.cc",
         "main.cc",
     ],
     deps = [
