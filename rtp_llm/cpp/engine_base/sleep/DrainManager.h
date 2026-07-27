@@ -64,13 +64,13 @@ public:
     // True iff every registered counter currently reads zero.
     bool drained() const;
 
-    // Wait drain: poll until drained or timeout. timeout_ms <= 0 performs a
-    // single immediate check. Returns false on timeout (caller keeps DRAINING).
-    bool waitDrained(int64_t timeout_ms);
+    // Wait drain: poll until drained, timeout, or cancellation. timeout_ms <= 0
+    // performs a single immediate check. False keeps the caller in DRAINING.
+    bool waitDrained(int64_t timeout_ms, const DrainCancellationPredicate& cancelled = {});
 
     // SleepHooks::drain entry: applies abort policy (cancel callback) when
-    // requested, then waits for drain up to opt.timeout_ms.
-    bool drain(const SleepOptions& opt);
+    // requested, then waits for drain up to opt.timeout_ms or cancellation.
+    bool drain(const SleepOptions& opt, const DrainCancellationPredicate& cancelled = {});
 
     // Invoke the injected cancel callback (if any). Called outside the internal
     // lock so the callback may freely query this DrainManager.

@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <memory>
 #include <chrono>
+#include <stdexcept>
 #include "torch/all.h"
 #include "gtest/gtest.h"
 
@@ -156,6 +157,24 @@ public:
 private:
     TestDataHolder<GptModelInputs>  input_holder;
     TestDataHolder<GptModelOutputs> output_holder;
+};
+
+class CudaGraphLifecycleFakeModel: public ModelBase {
+public:
+    GptModelOutputs forward(const GptModelInputs&) override {
+        return {};
+    }
+
+    void invalidateCudaGraphs() override {
+        ++invalidate_count;
+    }
+
+    void recaptureCudaGraphs() override {
+        ++recapture_count;
+    }
+
+    int invalidate_count{0};
+    int recapture_count{0};
 };
 
 class FakeFastTopKSampler: public spec::FastTopKSampler {
@@ -482,6 +501,34 @@ public:
         return output;
     }
 };
+
+TEST_F(MtpExecutorTest, testCudaGraphLifecycleCoversAllModelsForTwoCycles) {
+    MtpExecutorTestConfig test_config;
+    auto                  components = createMtpExecutorComponents(test_config);
+
+    auto  target      = std::make_unique<CudaGraphLifecycleFakeModel>();
+    auto  draft       = std::make_unique<CudaGraphLifecycleFakeModel>();
+    auto  sp_prefill  = std::make_shared<CudaGraphLifecycleFakeModel>();
+    auto* target_view = target.get();
+    auto* draft_view  = draft.get();
+    auto* sp_view     = sp_prefill.get();
+
+    components.executor->setTargetModel(std::move(target));
+    components.executor->setDraftModel(std::move(draft));
+    components.executor->sp_prefill_draft_model_ = std::move(sp_prefill);
+
+    for (int cycle = 1; cycle <= 2; ++cycle) {
+        components.executor->invalidateCudaGraphs();
+        EXPECT_EQ(target_view->invalidate_count, cycle);
+        EXPECT_EQ(draft_view->invalidate_count, cycle);
+        EXPECT_EQ(sp_view->invalidate_count, cycle);
+
+        components.executor->recaptureCudaGraphs();
+        EXPECT_EQ(target_view->recapture_count, cycle);
+        EXPECT_EQ(draft_view->recapture_count, cycle);
+        EXPECT_EQ(sp_view->recapture_count, cycle);
+    }
+}
 
 TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     MtpExecutorTestConfig test_config;
@@ -1254,6 +1301,22 @@ TEST_F(MtpExecutorTest, testProcessForPauseSignalsSelfPause) {
     ASSERT_TRUE(components.executor->processForPause().ok());
     EXPECT_TRUE(components.executor->consumeLastPauseSignal());
     EXPECT_FALSE(components.executor->consumeLastPauseSignal());
+}
+
+TEST_F(MtpExecutorTest, testDrainAsyncRunnersReturnsFailureAndJoinsRemainingRunners) {
+    MtpExecutorTestConfig test_config;
+    auto                  components = createMtpExecutorComponents(test_config);
+    std::atomic<bool>     bookkeeping_finished{false};
+
+    components.executor->target_verify_prepare_runner_.launch([] { throw std::runtime_error("injected failure"); });
+    components.executor->spec_bookkeeping_runner_.launch(
+        [&] { bookkeeping_finished.store(true, std::memory_order_release); });
+
+    const auto status = components.executor->drainAsyncRunners();
+
+    EXPECT_FALSE(status.ok());
+    EXPECT_NE(status.message().find("target verify prepare"), std::string::npos);
+    EXPECT_TRUE(bookkeeping_finished.load(std::memory_order_acquire));
 }
 
 }  // namespace rtp_llm

@@ -4,10 +4,13 @@
 #include <cstdio>
 #include <fstream>
 #include <optional>
+#include <random>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <unordered_map>
 #include <vector>
+#include <sys/stat.h>
 #include <unistd.h>
 #include <c10/core/InferenceMode.h>
 #if USING_CUDA
@@ -20,6 +23,7 @@
 #include <hip/hip_runtime.h>
 #endif
 #include "autil/EnvUtil.h"
+#include "rtp_llm/cpp/engine_base/sleep/SleepMemoryPolicy.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -68,6 +72,84 @@ std::string resolveInstanceId() {
         }
     }
     return instance_id;
+}
+
+uint64_t readSelfProcessStarttime() {
+    std::ifstream stat_file("/proc/self/stat");
+    std::string   stat;
+    if (!std::getline(stat_file, stat)) {
+        return 0;
+    }
+    const auto comm_end = stat.rfind(')');
+    if (comm_end == std::string::npos) {
+        return 0;
+    }
+    std::istringstream fields(stat.substr(comm_end + 1));
+    std::string        field;
+    for (int index = 0; index <= 19; ++index) {
+        if (!(fields >> field)) {
+            return 0;
+        }
+    }
+    try {
+        return std::stoull(field);
+    } catch (const std::exception&) {
+        return 0;
+    }
+}
+
+uint64_t readSelfPidNamespace() {
+    struct stat namespace_stat{};
+    return stat("/proc/self/ns/pid", &namespace_stat) == 0 ? namespace_stat.st_ino : 0;
+}
+
+std::string readHostBootId() {
+    std::ifstream boot_id_file("/proc/sys/kernel/random/boot_id");
+    std::string   boot_id;
+    std::getline(boot_id_file, boot_id);
+    return boot_id;
+}
+
+// Unique identity for this backend process launch. Combines host boot id and the
+// process's (pid, starttime, ns-pid) with a random nonce so two launches - even
+// after a PID reuse on the same host boot - never collide. Used by the sleep
+// coordinator to namespace lease/manifest keys per instance generation.
+std::string generateInstanceGenerationUuid() {
+    std::random_device                      rd;
+    std::mt19937_64                         gen(rd() ^ static_cast<uint64_t>(getpid()) ^ readSelfProcessStarttime());
+    std::uniform_int_distribution<uint64_t> dist;
+    std::ostringstream                      out;
+    out << readHostBootId() << "-" << std::hex << static_cast<uint64_t>(getpid()) << "-" << readSelfProcessStarttime()
+        << "-" << readSelfPidNamespace() << "-" << dist(gen);
+    return out.str();
+}
+
+// Process-global multicast keeper holder identity, published by the Python
+// collective layer (see LocalRpcServer::setMulticastHolderInstance). Guarded by a
+// mutex because the two words must be read/written together. Unset by default so
+// non-keeper deployments report an empty holder_instance.
+std::mutex g_multicast_holder_mutex;
+bool       g_multicast_holder_set = false;
+uint64_t   g_multicast_holder_hi  = 0;
+uint64_t   g_multicast_holder_lo  = 0;
+
+// Stable PD role string for sleep coordination. Mirrors the strings used on the
+// worker-status path (WorkerStatusInfo.role) so both surfaces agree.
+std::string roleTypeToString(RoleType role) {
+    switch (role) {
+        case RoleType::PDFUSION:
+            return "RoleType.PDFUSION";
+        case RoleType::PREFILL:
+            return "RoleType.PREFILL";
+        case RoleType::DECODE:
+            return "RoleType.DECODE";
+        case RoleType::VIT:
+            return "RoleType.VIT";
+        case RoleType::FRONTEND:
+            return "RoleType.FRONTEND";
+        default:
+            return "RoleType.UNKNOWN";
+    }
 }
 
 class OptionalSleepDeviceGuard {
@@ -224,6 +306,10 @@ grpc::Status sleepResultToGrpcStatus(const SleepResult& result) {
 }
 
 void fillSleepStatusPb(const SleepStatus& status, SleepStatusResponsePB* response) {
+    response->set_process_id(static_cast<int32_t>(getpid()));
+    response->set_process_starttime(readSelfProcessStarttime());
+    response->set_process_pid_namespace(readSelfPidNamespace());
+    response->set_process_boot_id(readHostBootId());
     response->set_state(sleepStateToString(status.state));
     response->set_sleep_epoch(status.sleep_epoch);
     response->set_kv_memory_state(status.kv_memory_state);
@@ -249,9 +335,10 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
                                   py::object                                    mm_process_engine,
                                   std::unique_ptr<ProposeModelEngineInitParams> propose_params) {
     meta_.reset(new RpcServerRuntimeMeta());
-    maga_init_params_ = maga_init_params;
-    weight_manager_   = maga_init_params.weight_manager;
-    metrics_reporter_ = maga_init_params.metrics_reporter;
+    instance_generation_uuid_ = generateInstanceGenerationUuid();
+    maga_init_params_         = maga_init_params;
+    weight_manager_           = maga_init_params.weight_manager;
+    metrics_reporter_         = maga_init_params.metrics_reporter;
     RTP_LLM_LOG_INFO("LocalRpcServer aux_string %s", maga_init_params_.misc_config.aux_string.c_str());
     propose_maga_init_params_ = propose_params.get();
     if (maga_init_params_.parallelism_config.tp_rank == 0
@@ -269,8 +356,14 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
                                 "running engine init with gil held may cause program hang, please check");
         engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
     }
-    admission_gate_ = std::make_shared<AdmissionGate>(&engine_->sleepController(), resolveInstanceId());
     installSleepHooks();
+    // Sleep-disabled serving keeps the pre-sleep hot path: no admission mutex,
+    // lease tracking, or error-payload construction on inference RPCs.
+    if (engine_->sleepController().effective()) {
+        admission_gate_ = std::make_shared<AdmissionGate>(&engine_->sleepController(), resolveInstanceId());
+    } else {
+        admission_gate_.reset();
+    }
     if (!mm_process_engine.is_none()) {
         auto vit_separation = maga_init_params.vit_config.vit_separation;
         if (vit_separation == VitSeparation::VIT_SEPARATION_REMOTE) {
@@ -369,7 +462,11 @@ void LocalRpcServer::installSleepHooks() {
         }
         return true;
     };
-    hooks.synchronizeAndDeregisterMr = [this, engine, local_rank](const SleepOptions&) {
+    hooks.freezeExternalTransfers = [engine](const SleepOptions&) {
+        auto cache_manager = engine->getCacheManager();
+        return !cache_manager || cache_manager->freezeExternalTransfers();
+    };
+    hooks.synchronizeAndDeregisterMr = [this, engine, local_rank](const SleepOptions& opt) {
         OptionalSleepDeviceGuard device_guard(local_rank);
         // Baseline before any resource is dropped: MR-pinned (VmPin) + KV + weights all live.
         logSleepMemorySnapshot("sleep/RUNNING", local_rank);
@@ -378,6 +475,10 @@ void LocalRpcServer::installSleepHooks() {
         }
         if (auto cache_manager = engine->getCacheManager()) {
             cache_manager->deregUserMr();
+            if (opt.level == 3 && !cache_manager->teardownMemoryOwnerAfterMrDereg()) {
+                RTP_LLM_LOG_ERROR("teardown MemoryUtil owner after KV MR deregistration failed");
+                return false;
+            }
         }
         if (!synchronizeSleepDevice("after_dereg_mr")) {
             return false;
@@ -385,6 +486,10 @@ void LocalRpcServer::installSleepHooks() {
         // MR deregistered: VmPin should have collapsed relative to the baseline above.
         logSleepMemorySnapshot("sleep/after_dereg_mr", local_rank);
         return true;
+    };
+    hooks.teardownRdmaTransports = [engine](const SleepOptions&) {
+        auto cache_manager = engine->getCacheManager();
+        return !cache_manager || cache_manager->teardownRdmaTransports();
     };
     hooks.releaseKvMemoryBacking = [this, engine, local_rank](const SleepOptions&) {
         OptionalSleepDeviceGuard device_guard(local_rank);
@@ -411,12 +516,9 @@ void LocalRpcServer::installSleepHooks() {
         logSleepMemorySnapshot("sleep/after_kv_release", local_rank);
         return success;
     };
-    // M6: weights are tagged by rtp_llm/model_loader/weight_memory_saver.py under
-    // "weights" with cpu backup. CUDA graph runtime buffers are tagged under
-    // "cuda_graph" during graph capture with cpu backup too: after VMM pause
-    // the physical pages can be recycled by other processes, so graph-owned
-    // persistent buffers cannot rely on stale physical contents. Releasing an
-    // unknown tag is a harmless no-op.
+    // Weights always use VMM backing. Level 1/2 also preserve CUDA graphs and
+    // therefore manage their VMM tag; Level 3 destroys graphs and uses ordinary
+    // allocator memory for each fresh capture.
     hooks.releaseRestorableGpuMemory = [this, vmm_backend, local_rank](const SleepOptions& opt) {
         OptionalSleepDeviceGuard device_guard(local_rank);
         if (!vmm_backend->isAvailable()) {
@@ -430,8 +532,11 @@ void LocalRpcServer::installSleepHooks() {
         // (see restoreRestorableGpuMemory below), so sleep just pauses the region.
         // These pauses are the ESSENTIAL GPU release; do them first so a failure in the
         // best-effort emptyCache() below can never leave the regions mapped.
-        bool ok = pause_tag("cuda_graph");
-        ok      = pause_tag("weights") && ok;
+        bool ok = true;
+        if (sleep_memory_policy::manageCudaGraphVmmBacking(opt.level)) {
+            ok = pause_tag("cuda_graph");
+        }
+        ok = pause_tag("weights") && ok;
         // Python-side reclaim: drop long-lived Python-held device caches (e.g. the MegaMoE
         // per-token output staging buffer) so segments they co-tenanted with freed
         // per-forward workspaces become 100%-free, then empty_cache hands them back to the
@@ -453,17 +558,12 @@ void LocalRpcServer::installSleepHooks() {
         // buffers (activations, attention/cuBLAS workspaces, sampler) can linger in the torch
         // device caching allocator as reserved-but-free blocks, which cudaMemGetInfo still
         // counts as used. Return them to the driver; the allocator transparently re-grows on
-        // wake. Only frees FREE cached blocks; the VMM-tagged weights/kv/cuda_graph regions
-        // paused above are still torch-"allocated", so this does not target them.
+        // wake. Only frees FREE cached blocks; the VMM-tagged weights/kv and level-1/2
+        // cuda_graph regions paused above are still torch-"allocated", so this does not target them.
         //
-        // BEST-EFFORT ONLY: on a decode role with captured CUDA graphs, the caching allocator
-        // holds graph-private MemPool blocks backed by torch_memory_saver VMM. emptyCache()'s
-        // release_block() then issues a cuMemUnmap/cudaFree that returns "CUDA error: invalid
-        // argument" (reproduced on decode DP2 + CUDA graph regardless of whether it runs before
-        // or after the pauses; prefill without graph never hits it -- same family as the
-        // MemPool-destroy-under-TMS issue). This reclaim is non-essential -- yield is near-zero
-        // once the engine is quiesced -- so a failure must NOT fail the sleep: swallow it, drain
-        // the sticky CUDA error so it can't poison the subsequent wake, and continue.
+        // Level 3 invalidates its ordinary-allocator graph pool before reaching
+        // this hook, so emptyCache can release that pool without routing a VMM
+        // pointer through cudaFree. Keep this best-effort for unrelated caches.
 #if USING_CUDA || USING_ROCM
         {
             OptionalSleepDeviceGuard empty_cache_guard(local_rank);
@@ -482,7 +582,7 @@ void LocalRpcServer::installSleepHooks() {
             }
         }
 #endif
-        // Terminal sleep state: weights + cuda_graph GPU memory released (level-2 keeps no backup).
+        // Terminal sleep state: weights and any preserved level-1/2 graph backing released.
         logSleepMemorySnapshot("sleep/SLEEPING", local_rank);
         return ok;
     };
@@ -513,9 +613,8 @@ void LocalRpcServer::installSleepHooks() {
             return true;
         }
         auto resume_tag = [vmm_backend](const std::string& tag) { return vmm_backend->resume(tag); };
-        // resume("weights") and resume("cuda_graph") remap physical pages at the same VA.
-        // For level 1 the tms host cpu_backup already restored the content; for level 2 the
-        // weights pages come back blank and are reloaded below.
+        // Level 1/2 remap both graph and weight pages at their original VAs.
+        // Level 3 remaps only weights; its graph pool is created by recapture.
         //
         // IMPORTANT (level 2): resume BOTH VMM regions BEFORE the loader reload. The reload
         // allocates transient shard/dequant buffers via the torch caching allocator
@@ -523,23 +622,26 @@ void LocalRpcServer::installSleepHooks() {
         // allocator's graph-private MemPool is left with unmapped VMM pages, and a fresh
         // at::empty_cuda throws "CUDA error: invalid argument" (reproduced on decode DP2 +
         // CUDA graph; same MemPool-under-TMS family as the sleep-side emptyCache failure).
-        // Resuming cuda_graph first re-maps that pool so the reload's allocations succeed.
-        bool ok = resume_tag("weights");
-        ok      = resume_tag("cuda_graph") && ok;
-        if (ok && engine->sleepController().activeSleepLevel() == 2) {
+        // Resuming cuda_graph before the reload re-maps that pool so its allocations succeed.
+        const int32_t sleep_level = engine->sleepController().activeSleepLevel();
+        bool          ok          = resume_tag("weights");
+        if (sleep_memory_policy::manageCudaGraphVmmBacking(sleep_level)) {
+            ok = resume_tag("cuda_graph") && ok;
+        }
+        if (ok && sleep_level >= 2) {
             if (weight_manager_.is_none()) {
-                RTP_LLM_LOG_WARNING("level-2 wake: weight_manager unavailable, cannot reload weights");
+                RTP_LLM_LOG_WARNING("level-%d wake: weight_manager unavailable, cannot reload weights", sleep_level);
                 return false;
             }
             try {
                 py::gil_scoped_acquire acquire;
                 weight_manager_.attr("reload_weights_from_loader")();
             } catch (const py::error_already_set& e) {
-                RTP_LLM_LOG_WARNING("level-2 wake: reload_weights_from_loader failed: %s", e.what());
+                RTP_LLM_LOG_WARNING("level-%d wake: reload_weights_from_loader failed: %s", sleep_level, e.what());
                 return false;
             }
         }
-        // Weights (level-1 host restore / level-2 loader reload) + cuda_graph GPU memory back.
+        // Weights are restored here; Level 3 graph memory returns during recapture.
         logSleepMemorySnapshot("wake/after_weights_restore", local_rank);
         return ok;
     };
@@ -557,6 +659,11 @@ void LocalRpcServer::installSleepHooks() {
         // Fully restored: MR re-registered, VmPin should be back at the baseline.
         logSleepMemorySnapshot("wake/RUNNING", local_rank);
         return true;
+    };
+    hooks.rebuildRdmaTransports = [engine]() {
+        auto cache_manager = engine->getCacheManager();
+        return !cache_manager
+               || (cache_manager->rebuildMemoryOwnerBeforeMrReg() && cache_manager->rebuildRdmaTransports());
     };
     hooks.restartEngine = [engine]() {
         engine->restart();
@@ -583,12 +690,103 @@ void LocalRpcServer::installSleepHooks() {
         RTP_LLM_LOG_INFO("sleep warmup/self-check passed");
         return true;
     };
+    hooks.resumeExternalTransfers = [engine]() {
+        auto cache_manager = engine->getCacheManager();
+        return !cache_manager || cache_manager->resumeExternalTransfers();
+    };
+
+    const bool has_collectives = parallelism_config.world_size > 1;
+    const bool has_deepep      = has_collectives && maga_init_params_.model_config_.expert_num > 0
+                            && maga_init_params_.moe_config.use_deepep_moe
+                            && !maga_init_params_.moe_config.use_all_gather;
+    const bool has_cuda_graph = maga_init_params_.hw_kernel_config.enable_cuda_graph;
+    hooks.coordinateResourcePhase =
+        [has_collectives](const std::string& phase, int64_t sleep_epoch, bool local_success) {
+            if (!has_collectives) {
+                return local_success;
+            }
+            try {
+                py::gil_scoped_acquire acquire;
+                return py::module_::import("rtp_llm.models_py.distributed.collective_torch")
+                    .attr("coordinate_level3_phase")(phase, sleep_epoch, local_success)
+                    .cast<bool>();
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_ERROR(
+                    "level-3 resource phase coordination failed: phase=%s epoch=%ld local_success=%d error=%s",
+                    phase.c_str(),
+                    sleep_epoch,
+                    local_success,
+                    e.what());
+                return false;
+            }
+        };
+    hooks.teardownCollectives = [engine, local_rank, has_collectives, has_deepep](const SleepOptions&) {
+        try {
+            OptionalSleepDeviceGuard device_guard(local_rank);
+            engine->invalidateCudaGraphs();
+            if (has_collectives) {
+                py::gil_scoped_acquire acquire;
+                // MegaMoE owns a separate symmetric-memory communicator. Drop it
+                // before DeepEP and ProcessGroupNCCL while its PG is still valid.
+                py::module_::import("rtp_llm.models_py.modules.dsv4.moe.mega_buf").attr("release_mega_symm_buffers")();
+                if (has_deepep) {
+                    py::module_::import("rtp_llm.models_py.distributed.deepep_wrapper")
+                        .attr("destroy_deepep_wrapper")();
+                }
+                py::module_::import("rtp_llm.models_py.distributed.collective_torch")
+                    .attr("teardown_distributed_environment")();
+            }
+            return synchronizeSleepDevice("after_level3_teardown");
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("level-3 resource teardown failed: %s", e.what());
+            return false;
+        }
+    };
+    hooks.rebuildCollectives = [local_rank, has_collectives, has_deepep]() {
+        if (!has_collectives) {
+            return true;
+        }
+        try {
+            OptionalSleepDeviceGuard device_guard(local_rank);
+            py::gil_scoped_acquire   acquire;
+            py::module_::import("rtp_llm.models_py.distributed.collective_torch")
+                .attr("rebuild_distributed_environment")();
+            if (has_deepep) {
+                py::module_::import("rtp_llm.models_py.distributed.deepep_wrapper").attr("rebuild_deepep_wrapper")();
+            }
+            // Recreate Mega's symmetric-memory allocation while every rank is
+            // still inside the coordinated Level3 rebuild. Decode recapture then
+            // bakes the new addresses; no-graph prefill cannot defer this
+            // collective rendezvous to its first online request.
+            py::module_::import("rtp_llm.models_py.modules.dsv4.moe.mega_buf").attr("rebuild_mega_symm_buffers")();
+            return true;
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("level-3 collective rebuild failed: %s", e.what());
+            return false;
+        }
+    };
+    hooks.recaptureCollectiveGraphs = [engine, local_rank, has_cuda_graph]() {
+        if (!has_cuda_graph) {
+            return true;
+        }
+        try {
+            OptionalSleepDeviceGuard device_guard(local_rank);
+            engine->recaptureCudaGraphs();
+            return true;
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_WARNING("level-3 CUDA graph recapture failed: %s", e.what());
+            return false;
+        }
+    };
 
     engine_->sleepController().setHooks(hooks);
 }
 
 std::shared_ptr<void> LocalRpcServer::registerAbortableStreamForScope(const std::shared_ptr<GenerateStream>& stream) {
-    if (!stream || stream->isStreaming()) {
+    // A directly constructed test server has no engine and retains the helper's
+    // standalone behavior. A production server with sleep disabled must not pay
+    // the registry mutex/control-block cost on non-streaming requests.
+    if ((engine_ && !admission_gate_) || !stream || stream->isStreaming()) {
         return nullptr;
     }
     const auto request_id = stream->streamId();
@@ -1312,11 +1510,43 @@ LocalRpcServer::IsSleeping(grpc::ServerContext* context, const EmptyPB* request,
     return grpc::Status::OK;
 }
 
+void LocalRpcServer::setMulticastHolderInstance(uint64_t hi, uint64_t lo) {
+    std::lock_guard<std::mutex> lock(g_multicast_holder_mutex);
+    g_multicast_holder_set = true;
+    g_multicast_holder_hi  = hi;
+    g_multicast_holder_lo  = lo;
+}
+
+void LocalRpcServer::clearMulticastHolderInstance() {
+    std::lock_guard<std::mutex> lock(g_multicast_holder_mutex);
+    g_multicast_holder_set = false;
+    g_multicast_holder_hi  = 0;
+    g_multicast_holder_lo  = 0;
+}
+
+std::string LocalRpcServer::multicastHolderInstanceString() {
+    std::lock_guard<std::mutex> lock(g_multicast_holder_mutex);
+    if (!g_multicast_holder_set) {
+        return "";
+    }
+    return std::to_string(g_multicast_holder_hi) + ":" + std::to_string(g_multicast_holder_lo);
+}
+
 grpc::Status
 LocalRpcServer::GetSleepStatus(grpc::ServerContext* context, const EmptyPB* request, SleepStatusResponsePB* response) {
     RTP_LLM_LOG_DEBUG("receive GetSleepStatus rpc request from client: %s", context->peer().c_str());
     const auto status = engine_->sleepController().status();
     fillSleepStatusPb(status, response);
+    // Sleep-coordination identity: authoritative world rank, PD role, and this
+    // process's generation uuid. The coordinator keys rank/role/instance by these
+    // instead of relying on control-address order.
+    response->set_world_rank(maga_init_params_.parallelism_config.world_rank);
+    response->set_role(roleTypeToString(maga_init_params_.pd_sep_config.role_type));
+    response->set_instance_generation_uuid(instance_generation_uuid_);
+    // Durable multicast keeper holder (empty unless the Python collective layer
+    // pinned it for an in-flight Level-3 checkpoint). The manifest persists+verifies
+    // this so a holder that exits/changes fails wake closed.
+    response->set_holder_instance(multicastHolderInstanceString());
     return grpc::Status::OK;
 }
 

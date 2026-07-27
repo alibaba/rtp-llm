@@ -644,7 +644,7 @@ message BatchGenerateOutputsPB {
 
 // Engine sleep/wake_up (distinct from SetPause/SetRestart semantics).
 message SleepRequestPB {
-    int32 level = 1;              // level=0 defined but unimplemented; 1=host backup, 2=discard weights + disk restore (fixed at startup by sleep_mode_level).
+    int32 level = 1;              // level=0 defined but unimplemented; 1=host backup, 2=discard weights, 3=discard + CUDA process checkpoint.
     string mode = 2;              // "wait" (default) | "abort"; "keep" is unsupported.
     int64 timeout_ms = 3;
     string reason = 4;
@@ -672,6 +672,22 @@ message SleepStatusResponsePB {
     repeated int32 supported_levels = 11;
     repeated string supported_modes = 12;
     string disabled_reason = 13;
+    int32 process_id = 14;        // backend rank PID targeted by level-3 CUDA process checkpoint.
+    uint64 process_starttime = 15; // /proc/<pid>/stat field 22; protects against PID reuse.
+    uint64 process_pid_namespace = 16; // inode of /proc/<pid>/ns/pid; coordinator must match.
+    string process_boot_id = 17;  // host boot ID; coordinator must be on the same host.
+    // Sleep-coordination identity (additive; backward compatible with L1/L2).
+    // The coordinator must key rank/role/instance by these instead of address
+    // order so a shared TCPStore cannot collide across PD roles or instances.
+    int64 world_rank = 18;        // backend world rank; authoritative, replaces address-order.
+    string role = 19;             // PD role string, e.g. "RoleType.PREFILL" / "RoleType.DECODE".
+    string instance_generation_uuid = 20; // unique per backend process launch; identifies this generation.
+    // Level-3 multicast keeper holder identity ("hi:lo"), pinned by the Python
+    // collective layer during a checkpoint window and handed to the engine. Empty
+    // unless the multicast keeper is enabled (L1/L2 and non-keeper deployments leave
+    // it blank). The checkpoint manifest persists + fail-closed verifies this so a
+    // holder that exited/changed makes wake unrecoverable instead of silently wrong.
+    string holder_instance = 21;
 }
 
 message IsSleepingResponsePB {

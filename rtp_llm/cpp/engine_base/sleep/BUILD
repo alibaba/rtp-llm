@@ -1,6 +1,12 @@
 load("//:def.bzl", "copts")
 
 cc_library(
+    name = "sleep_memory_policy",
+    hdrs = ["SleepMemoryPolicy.h"],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "sleep",
     hdrs = [
         "SleepLifecycleController.h",

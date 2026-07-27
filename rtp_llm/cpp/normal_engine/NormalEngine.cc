@@ -556,12 +556,42 @@ void NormalEngine::restart() {
     pause_cv_.notify_all();
 }
 
-void NormalEngine::markPauseQuiesced(uint64_t pause_epoch) {
+void NormalEngine::invalidateCudaGraphs() {
+    if (executor_) {
+        executor_->invalidateCudaGraphs();
+    }
+}
+
+void NormalEngine::recaptureCudaGraphs() {
+    if (executor_) {
+        executor_->recaptureCudaGraphs();
+    }
+}
+
+void NormalEngine::recordPauseQuiesceFailure(uint64_t pause_epoch, const absl::Status& status) {
+    if (status.ok()) {
+        return;
+    }
     {
         std::lock_guard<std::mutex> lock(pause_mutex_);
-        // Monotonic: only ever advance. A stale/late caller for an older epoch cannot
-        // pull the ack backwards and strand a waiter that captured a newer epoch.
-        if (pause_epoch > quiesced_pause_epoch_) {
+        if (failed_pause_epoch_ != pause_epoch) {
+            failed_pause_epoch_  = pause_epoch;
+            failed_pause_status_ = status;
+        }
+    }
+    pause_cv_.notify_all();
+}
+
+void NormalEngine::completePauseQuiesce(uint64_t pause_epoch, const absl::Status& status) {
+    if (!status.ok()) {
+        recordPauseQuiesceFailure(pause_epoch, status);
+        return;
+    }
+    {
+        std::lock_guard<std::mutex> lock(pause_mutex_);
+        // A failure wins over a later successful retry for the same epoch. The coordinator
+        // must roll the failed pause back instead of releasing resources after partial drain.
+        if (failed_pause_epoch_ != pause_epoch && pause_epoch > quiesced_pause_epoch_) {
             quiesced_pause_epoch_ = pause_epoch;
         }
     }
@@ -569,40 +599,26 @@ void NormalEngine::markPauseQuiesced(uint64_t pause_epoch) {
 }
 
 void NormalEngine::enterPausedState() {
-    std::unique_lock<std::mutex> lock(pause_mutex_);
-    // Loop, re-reading the epoch under the lock on every wake, so that a pause
-    // epoch published *while we are parked here* is still acknowledged. A rapid
-    // restart() (pause_ cleared) immediately followed by a new pause() (pause_
-    // re-set, epoch bumped) would otherwise leave us waiting in a call that only
-    // ever recorded the previous epoch, stranding the new epoch's coordinator
-    // until its deadline. Loading the epoch under the lock also rules out a stale
-    // pre-bump value, since pause() bumps it under the same lock.
     while (running_.load()) {
-        if (!pause_.load(std::memory_order_acquire)) {
-            break;
+        uint64_t active_epoch = 0;
+        {
+            std::lock_guard<std::mutex> lock(pause_mutex_);
+            if (!pause_.load(std::memory_order_acquire)) {
+                break;
+            }
+            active_epoch = pause_epoch_.load(std::memory_order_acquire);
         }
-        const uint64_t epoch = pause_epoch_.load(std::memory_order_acquire);
-        if (epoch > quiesced_pause_epoch_) {
-            quiesced_pause_epoch_ = epoch;
-            pause_cv_.notify_all();
-        }
-        pause_cv_.wait(lock, [this, epoch] {
-            return !pause_.load(std::memory_order_acquire) || pause_epoch_.load(std::memory_order_acquire) > epoch
-                   || !running_.load();
+
+        // The engine loop owns executor quiescence. Ack this epoch only after all host
+        // runners have joined and their device work has completed.
+        completePauseQuiesce(active_epoch, quiesceExecutorForPause(active_epoch));
+
+        std::unique_lock<std::mutex> lock(pause_mutex_);
+        pause_cv_.wait(lock, [this, active_epoch] {
+            return !pause_.load(std::memory_order_acquire)
+                   || pause_epoch_.load(std::memory_order_acquire) > active_epoch || !running_.load();
         });
     }
-}
-
-absl::Status NormalEngine::runExecutorProcess(const std::list<GenerateStreamPtr>& streams) {
-    std::lock_guard<std::mutex> lock(process_mutex_);
-    auto                        status = executor_->process(streams);
-    if (status.ok() && executor_->consumeLastPauseSignal()) {
-        pause();
-    }
-    if (pause_.load(std::memory_order_acquire)) {
-        processed_pause_epoch_.store(pause_epoch_.load(std::memory_order_acquire), std::memory_order_release);
-    }
-    return status;
 }
 
 bool NormalEngine::collectiveSleepQuiesceEnabled() const {
@@ -650,15 +666,20 @@ bool NormalEngine::collectiveSleepQuiesceEnabled() const {
 //     consensus makes the k-th round unambiguous on every rank.
 //
 // Round matching / termination: a rank issues round k+1 only after round k completes, so all
-// ranks run the same 1..K rounds. The verdict is derived from the shared summed result, so
-// every rank reaches the same terminal round K simultaneously (all armed + all drained ->
-// REACHED; or, after a cancel/wake, the pending count returns to zero -> CANCELLED) and stops
-// issuing together -- no rank is ever left with an unmatched collective. (The single-rank /
-// pure-TP deployment escapes all of this -- see releasePendingTpCollectiveForPause() /
-// enterPausedState(), which need no collective.)
+// ranks run the same 1..K rounds. A shared ready verdict starts terminal alignment; it does not
+// immediately park a rank. Ranks first exchange the maximum host-enqueued forward sequence,
+// compensate to that sequence, and confirm that every peer has enqueued it before synchronizing
+// CUDA. This closes the poll skew where one rank observes round K one engine step later than a
+// peer and has already launched one more peer-symmetric MegaMoE forward. (The single-rank /
+// pure-TP deployment escapes all of this: enterPausedState() drives its pause wave and
+// executor drain locally, without a cross-rank sleep-quiesce collective.)
 absl::Status NormalEngine::maybeReachCollectiveSleepQuiesce() {
     if (!collectiveSleepQuiesceEnabled()) {
         return absl::OkStatus();
+    }
+
+    if (collective_quiesce_alignment_.terminalAlignmentActive()) {
+        return driveCollectiveSleepTerminalAlignment();
     }
 
     const bool pending = pause_.load(std::memory_order_acquire);
@@ -681,7 +702,14 @@ absl::Status NormalEngine::maybeReachCollectiveSleepQuiesce() {
         // SLEEP_QUIESCE all-reduce never completes (repeat-sleep hang, MTP-only). Draining here
         // is on the engine loop thread, exactly like process()'s own start-of-step sync.
         if (executor_) {
-            executor_->drainAsyncRunners();
+            const auto status = executor_->drainAsyncRunners();
+            if (!status.ok()) {
+                const auto epoch = pause_epoch_.load(std::memory_order_acquire);
+                RTP_LLM_LOG_ERROR("collective sleep quiesce async runner drain failed, epoch=%lu: %s",
+                                  epoch,
+                                  status.ToString().c_str());
+                recordPauseQuiesceFailure(epoch, status);
+            }
         }
     }
     if (pending) {
@@ -727,6 +755,10 @@ absl::Status NormalEngine::maybeReachCollectiveSleepQuiesce() {
                     // to progress the quiesce.
                     RTP_LLM_LOG_ERROR("collective sleep quiesce pre-round drain sync failed, skipping round: %s",
                                       cudaGetErrorString(err));
+                    recordPauseQuiesceFailure(
+                        pause_epoch_.load(std::memory_order_acquire),
+                        absl::InternalError(std::string("collective sleep quiesce device sync failed: ")
+                                            + cudaGetErrorString(err)));
                     cudaGetLastError();  // clear sticky so it cannot resurface on an unrelated later call
                     return absl::OkStatus();
                 }
@@ -783,68 +815,191 @@ absl::Status NormalEngine::maybeReachCollectiveSleepQuiesce() {
     }
 
     if (reached) {
-        // Final drain BEFORE any teardown bookkeeping: the CPU consensus above only proves no rank
-        // will enqueue new work; it does NOT prove the GPU is idle. This step's runExecutorProcess()
-        // launched a (fake-MoE) forward whose EP dispatch/combine is still async-retiring; for
-        // internode DeepEP the cross-node combine has a real RDMA tail. All ranks reach this branch
-        // in the same step (consensus is derived from the shared all-reduce), so draining here is
-        // symmetric and cannot hang. Combined with the coordinator's two-phase protocol (commit is
-        // sent only after every rank's prepare/quiesce returns, i.e. after this sync), it guarantees
-        // no rank tears down its MR / unmaps weight pages while a peer's collective still references
-        // them -- which is what otherwise poisons the CUDA context and makes torch_memory_saver's
-        // cuMemUnmap return a sticky CUDA 999 and abort the whole fleet.
-#if USING_CUDA
-        if (auto err = cudaDeviceSynchronize(); err != cudaSuccess) {
-            // The context is poisoned; committing the park now would unmap weight/KV pages on top of
-            // a broken context. Stay engaged (do not disengage or park) and let the coordinator's
-            // pauseAndWaitQuiesced timeout roll the sleep back. A non-OK return is fatal here
-            // (loop() -> THROW_IF_STATUS_ERROR), so clear the sticky error and stay OK.
-            RTP_LLM_LOG_ERROR("collective sleep quiesce final drain sync failed, refusing to park: %s",
-                              cudaGetErrorString(err));
-            cudaGetLastError();  // clear sticky so it cannot resurface on an unrelated later call
-            return absl::OkStatus();
-        }
-#endif
-        // Disengage before parking so a subsequent wake resumes at the steady zero-cost path.
-        collective_quiesce_engaged_ = false;
-        if (scheduler_) {
-            scheduler_->setForcePoll(false);  // consensus done; the loop parks next in enterPausedState
-        }
-        const auto pause_epoch = pause_epoch_.load(std::memory_order_acquire);
-        processed_pause_epoch_.store(pause_epoch, std::memory_order_release);
-        RTP_LLM_LOG_INFO("normal engine collective sleep quiesce reached, epoch=%lu, world_size=%ld",
-                         pause_epoch,
-                         parallelism_config.world_size);
-        enterPausedState();
+        collective_quiesce_alignment_.beginTargetExchange();
+        RTP_LLM_LOG_INFO("collective sleep quiesce entering terminal alignment, local_forward_seq=%ld",
+                         collective_quiesce_alignment_.forward_sequence);
+        return driveCollectiveSleepTerminalAlignment();
     }
     return absl::OkStatus();
 }
 
-absl::Status NormalEngine::releasePendingTpCollectiveForPause(uint64_t pause_epoch) {
-    if (parallelism_config.tp_size <= 1 || parallelism_config.tp_rank != 0) {
-        return absl::OkStatus();
-    }
-    if (processed_pause_epoch_.load(std::memory_order_acquire) >= pause_epoch) {
-        return absl::OkStatus();
+absl::Status NormalEngine::runCollectiveSleepCompensationForward() {
+    list<GenerateStreamPtr> streams;
+    if (parallelism_config.tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
+        mayAddFakeStream(streams);
     }
 
-    std::lock_guard<std::mutex> lock(process_mutex_);
-    if (processed_pause_epoch_.load(std::memory_order_acquire) >= pause_epoch) {
-        return absl::OkStatus();
-    }
-
-    RTP_LLM_LOG_INFO("normal engine pause: run one empty TP sync step, epoch=%lu", pause_epoch);
-    auto status = executor_->processForPause();
-    (void)executor_->consumeLastPauseSignal();
+    const auto before = collective_quiesce_alignment_.forward_sequence;
+    auto       status = executor_->process(streams, autil::TimeUtility::currentTimeInMicroSeconds());
     if (!status.ok()) {
         return status;
     }
-    processed_pause_epoch_.store(pause_epoch, std::memory_order_release);
-    // Rank0 may be blocked in scheduler_->schedule() while worker ranks are
-    // waiting in tpSyncModelInputs. The RPC thread's empty sync step releases
-    // those workers, and rank0 itself is not touching GPU while scheduler-blocked.
-    markPauseQuiesced(pause_epoch);
+    collective_quiesce_alignment_.noteForwardEnqueued();
+    RTP_LLM_LOG_INFO("collective sleep quiesce compensated forward, seq=%ld->%ld, target=%ld",
+                     before,
+                     collective_quiesce_alignment_.forward_sequence,
+                     collective_quiesce_alignment_.target_sequence);
     return absl::OkStatus();
+}
+
+absl::Status NormalEngine::finishCollectiveSleepQuiesce(bool should_park) {
+    const auto aligned_sequence = collective_quiesce_alignment_.target_sequence;
+    if (should_park) {
+        // The host barrier proves every rank has enqueued exactly aligned_sequence forwards.
+        // Only now is a device drain safe: every peer-symmetric invocation already has its
+        // matching launch. enterPausedState() performs runner drain followed by device sync,
+        // keeping the acknowledgement invariant identical for every topology.
+    }
+
+    collective_quiesce_alignment_.resetToConsensus();
+    collective_quiesce_engaged_ = false;
+    if (scheduler_) {
+        scheduler_->setForcePoll(false);
+    }
+
+    if (!should_park) {
+        RTP_LLM_LOG_INFO("normal engine collective sleep quiesce cancelled during terminal alignment, "
+                         "forward_seq=%ld, world_size=%ld",
+                         aligned_sequence,
+                         parallelism_config.world_size);
+        return absl::OkStatus();
+    }
+
+    const auto pause_epoch = pause_epoch_.load(std::memory_order_acquire);
+    RTP_LLM_LOG_INFO("normal engine collective sleep quiesce reached, epoch=%lu, world_size=%ld, forward_seq=%ld",
+                     pause_epoch,
+                     parallelism_config.world_size,
+                     aligned_sequence);
+    enterPausedState();
+    return absl::OkStatus();
+}
+
+absl::Status NormalEngine::driveCollectiveSleepTerminalAlignment() {
+    using Phase = CollectiveQuiesceAlignment::Phase;
+
+    if (collective_quiesce_alignment_.phase == Phase::COMPENSATE_FORWARDS) {
+        if (collective_quiesce_alignment_.needsCompensationForward()) {
+            return runCollectiveSleepCompensationForward();
+        }
+        if (collective_quiesce_alignment_.readyForBarrier()) {
+            collective_quiesce_alignment_.beginReadyBarrier();
+        }
+    }
+
+    bool finish      = false;
+    bool should_park = false;
+    {
+        std::lock_guard<std::mutex> lock(collective_quiesce_state_mutex_);
+        if (collective_quiesce_alignment_.phase == Phase::TARGET_EXCHANGE) {
+            if (collective_quiesce_handle_ == 0) {
+                collective_quiesce_state_.select(0, 0).fill_(collective_quiesce_alignment_.forward_sequence);
+                collective_quiesce_state_.select(0, 1).zero_();
+                collective_quiesce_handle_ =
+                    execAllReduceAsync({collective_quiesce_state_, ReduceOp::Max, false, ParallelMode::SLEEP_QUIESCE});
+                return absl::OkStatus();
+            }
+            if (!pollAsyncComm(collective_quiesce_handle_)) {
+                return absl::OkStatus();
+            }
+            collective_quiesce_handle_ = 0;
+            auto reduced               = collective_quiesce_state_;
+            if (reduced.device().is_cuda()) {
+                reduced = reduced.cpu();
+            }
+            const auto target_sequence = reduced.data_ptr<int64_t>()[0];
+            if (!collective_quiesce_alignment_.acceptTargetSequence(target_sequence)) {
+                return absl::InternalError("collective sleep quiesce target sequence regressed from "
+                                           + std::to_string(collective_quiesce_alignment_.forward_sequence) + " to "
+                                           + std::to_string(target_sequence));
+            }
+            RTP_LLM_LOG_INFO("collective sleep quiesce target aligned, local_forward_seq=%ld, target=%ld",
+                             collective_quiesce_alignment_.forward_sequence,
+                             target_sequence);
+            return absl::OkStatus();
+        }
+
+        if (collective_quiesce_alignment_.phase != Phase::READY_BARRIER) {
+            return absl::OkStatus();
+        }
+
+        if (collective_quiesce_handle_ == 0) {
+            collective_quiesce_state_.select(0, 0).fill_(1);
+            collective_quiesce_state_.select(0, 1).fill_(pause_.load(std::memory_order_acquire) ? 1 : 0);
+            collective_quiesce_handle_ =
+                execAllReduceAsync({collective_quiesce_state_, ReduceOp::Sum, false, ParallelMode::SLEEP_QUIESCE});
+            return absl::OkStatus();
+        }
+        if (!pollAsyncComm(collective_quiesce_handle_)) {
+            return absl::OkStatus();
+        }
+        collective_quiesce_handle_ = 0;
+        auto reduced               = collective_quiesce_state_;
+        if (reduced.device().is_cuda()) {
+            reduced = reduced.cpu();
+        }
+        const auto* reduced_data    = reduced.data_ptr<int64_t>();
+        const auto  participant_sum = reduced_data[0];
+        const auto  pending_sum     = reduced_data[1];
+        if (participant_sum != parallelism_config.world_size) {
+            return absl::InternalError("collective sleep quiesce terminal barrier participant mismatch: "
+                                       + std::to_string(participant_sum)
+                                       + " != " + std::to_string(parallelism_config.world_size));
+        }
+        if (pending_sum == parallelism_config.world_size) {
+            finish      = true;
+            should_park = true;
+        } else if (pending_sum == 0) {
+            finish = true;
+        }
+        // A partial cancel is sampled identically by every rank. Keep issuing decision rounds
+        // without launching forwards until the coordinator converges all ranks to park or cancel.
+    }
+
+    if (finish) {
+        return finishCollectiveSleepQuiesce(should_park);
+    }
+    return absl::OkStatus();
+}
+
+absl::Status NormalEngine::quiesceExecutorForPause(uint64_t pause_epoch) {
+    if (processed_pause_epoch_.load(std::memory_order_acquire) >= pause_epoch) {
+        return absl::OkStatus();
+    }
+    if (!executor_) {
+        return absl::FailedPreconditionError("pause quiesce requires an initialized executor");
+    }
+
+    absl::Status status = absl::OkStatus();
+    // In pure TP, rank 0 drives the empty pause wave from the engine loop. Keeping all
+    // executor calls on this thread avoids racing an RPC-thread processForPause() against
+    // a normal model step. Worker ranks receive the marker, finish their current process(),
+    // and enter this same quiesce boundary.
+    if (!collectiveSleepQuiesceEnabled() && parallelism_config.tp_size > 1 && parallelism_config.tp_rank == 0) {
+        RTP_LLM_LOG_INFO("normal engine pause: run one empty TP sync step, epoch=%lu", pause_epoch);
+        status = executor_->processForPause();
+        (void)executor_->consumeLastPauseSignal();
+    }
+
+    auto drain_status = executor_->drainAsyncRunners();
+    if (status.ok() && !drain_status.ok()) {
+        status = drain_status;
+    }
+
+#if USING_CUDA
+    if (auto err = cudaDeviceSynchronize(); err != cudaSuccess) {
+        auto sync_status =
+            absl::InternalError(std::string("pause quiesce device sync failed: ") + cudaGetErrorString(err));
+        if (status.ok()) {
+            status = std::move(sync_status);
+        }
+        cudaGetLastError();
+    }
+#endif
+
+    if (status.ok()) {
+        processed_pause_epoch_.store(pause_epoch, std::memory_order_release);
+    }
+    return status;
 }
 
 absl::Status NormalEngine::pauseAndWaitQuiesced(int64_t timeout_ms) {
@@ -857,24 +1012,24 @@ absl::Status NormalEngine::pauseAndWaitQuiesced(int64_t timeout_ms) {
         return absl::OkStatus();
     }
 
-    if (!collectiveSleepQuiesceEnabled()) {
-        auto status = releasePendingTpCollectiveForPause(pause_epoch);
-        if (!status.ok()) {
-            return status;
-        }
-    }
-
     std::unique_lock<std::mutex> lock(pause_mutex_);
+    if (failed_pause_epoch_ == pause_epoch) {
+        return failed_pause_status_;
+    }
     if (quiesced_pause_epoch_ >= pause_epoch || !pause_.load(std::memory_order_acquire)) {
         return absl::OkStatus();
     }
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::milliseconds(effective_timeout_ms);
     if (!pause_cv_.wait_until(lock, deadline, [this, pause_epoch] {
-            return quiesced_pause_epoch_ >= pause_epoch || !pause_.load(std::memory_order_acquire) || !running_.load();
+            return failed_pause_epoch_ == pause_epoch || quiesced_pause_epoch_ >= pause_epoch
+                   || !pause_.load(std::memory_order_acquire) || !running_.load();
         })) {
         return absl::Status(absl::StatusCode::kDeadlineExceeded,
                             "normal engine pause quiesce timeout after " + std::to_string(effective_timeout_ms)
                                 + " ms");
+    }
+    if (failed_pause_epoch_ == pause_epoch) {
+        return failed_pause_status_;
     }
     return absl::OkStatus();
 }
@@ -967,7 +1122,12 @@ NormalEngine::batchEnqueue(const std::vector<std::shared_ptr<GenerateInput>>& in
 
 absl::Status NormalEngine::step() {
     RTP_LLM_PROFILE_SCOPE("engine.normal.step_work");
-    const bool collective_sleep_quiesce = collectiveSleepQuiesceEnabled();
+    // Cache the feature flag once so disabled serving keeps the same single atomic load it
+    // already paid for the collective gate. Pure-TP workers also use it to consume a pause
+    // marker that can arrive before their local control RPC.
+    const bool sleep_mode_enabled       = sleep_controller_.enabled();
+    const bool collective_sleep_quiesce = sleep_mode_enabled && parallelism_config.world_size > 1
+                                          && (parallelism_config.dp_size > 1 || parallelism_config.ep_size > 1);
     if (pause_.load(std::memory_order_acquire) && !collective_sleep_quiesce
         && (parallelism_config.tp_size <= 1 || parallelism_config.tp_rank == 0)) {
         enterPausedState();
@@ -982,6 +1142,14 @@ absl::Status NormalEngine::step() {
         return absl::OkStatus();
     }
 
+    // Once a rank has observed the shared ready verdict it must stop normal scheduling.
+    // Peers may observe that verdict one or more host steps later, so terminal alignment is
+    // driven separately and only launches the exact number of fake forwards needed to reach
+    // the shared maximum sequence.
+    if (collective_sleep_quiesce && collective_quiesce_alignment_.terminalAlignmentActive()) {
+        return driveCollectiveSleepTerminalAlignment();
+    }
+
     // Sleep-quiesce, decode (tp1) DP/EP path: DO NOT skip the fake-decode forward while a
     // consensus round is in flight. This model's MoE is DeepGEMM ``fp8_fp4_mega_moe`` -- a
     // peer-symmetric NVLink-barrier collective (symm-mem), NOT DeepEP low-latency. Every rank
@@ -992,12 +1160,9 @@ absl::Status NormalEngine::step() {
     // reached simultaneously on all ranks. A forward-skip here (the earlier "DeepEP" fix) breaks
     // that: the first-armed rank starts skipping while a not-yet-armed peer still runs its fake
     // forward -> the peer's mega kernel strands with no partner -> NVLink-barrier trap (this is
-    // the repeated-sleep arm-skew hang). So we keep co-stepping through the whole drain; the
-    // async SLEEP_QUIESCE consensus (maybeReachCollectiveSleepQuiesce, run at the end of step())
-    // only tells every rank when ALL are armed+drained, and because the mega barrier holds the
-    // forwards in lockstep the shared verdict is observed on the same forward -> all ranks park
-    // together after the same forward, none stranded. Armed-only path; steady serving is
-    // untouched.
+    // the repeated-sleep arm-skew hang). So we keep co-stepping through the whole drain. The
+    // terminal alignment state machine handles the remaining host poll skew after the shared
+    // ready verdict; armed-only path, steady serving is untouched.
     int64_t                 tps_schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     list<GenerateStreamPtr> streams;
     if (parallelism_config.tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
@@ -1033,6 +1198,12 @@ absl::Status NormalEngine::step() {
         const bool refresh_cache_status_snapshot =
             resource_context_.cache_manager && shouldRefreshCacheStatusSnapshot(pd_sep_config.role_type, streams);
         status = executor_->process(streams, tps_schedule_time_us);
+        if (status.ok() && sleep_mode_enabled && executor_->consumeLastPauseSignal()) {
+            pause();
+        }
+        if (status.ok() && collective_sleep_quiesce) {
+            collective_quiesce_alignment_.noteForwardEnqueued();
+        }
         if (status.ok() && refresh_cache_status_snapshot) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.refresh_cache_status_snapshot");
             resource_context_.cache_manager->refreshKVCacheInfoSnapshot();

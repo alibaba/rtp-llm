@@ -123,6 +123,8 @@ public:
     virtual ~ModelBase()                                          = default;
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
+    virtual void            invalidateCudaGraphs() {}
+    virtual void            recaptureCudaGraphs() {}
     virtual void            prepareAttentionInputs(const GptModelInputs& inputs) {}
 
     // Refresh only kv_cache_kernel_block_id-dependent state on a previously-

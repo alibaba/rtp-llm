@@ -24,16 +24,14 @@ public:
     virtual bool consumeLastPauseSignal() {
         return false;
     }
+    virtual void invalidateCudaGraphs() {}
+    virtual void recaptureCudaGraphs() {}
 
-    // Drain any outstanding stream-async worker tasks (dispatch / MTP prepare-verify
-    // runners) so nothing referencing weights or KV is left in flight. Called by the
-    // engine when it arms a sleep-quiesce, BEFORE it stops issuing forwards and starts
-    // the consensus rounds: otherwise the last pre-pause step's async runners keep work
-    // pending on their own streams, and across a torch_memory_saver release/restore that
-    // stale state leaves NCCL/CUDA inconsistent -- the *next* sleep's SLEEP_QUIESCE
-    // all-reduce then never completes (2nd sleep hangs with MTP on; clean without).
-    // Default: no async runners to drain.
-    virtual void drainAsyncRunners() {}
+    // Drain outstanding stream-async worker tasks before a sleep pause is acknowledged.
+    // Returning an error keeps the lifecycle from releasing weights/KV after a failed drain.
+    virtual absl::Status drainAsyncRunners() {
+        return absl::OkStatus();
+    }
 
     static GptModelDescription genModelDescription(const ModelConfig&       model_config,
                                                    const ParallelismConfig& parallelism_config,

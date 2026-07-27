@@ -82,7 +82,12 @@ std::string DrainManager::pendingCountersDebugString() const {
     return result;
 }
 
-bool DrainManager::waitDrained(int64_t timeout_ms) {
+bool DrainManager::waitDrained(int64_t timeout_ms, const DrainCancellationPredicate& cancelled) {
+    const auto cancellation_requested = [&cancelled]() { return cancelled && cancelled(); };
+    if (cancellation_requested()) {
+        RTP_LLM_LOG_INFO("drain manager: drain cancelled before wait");
+        return false;
+    }
     if (drained()) {
         return true;
     }
@@ -102,6 +107,10 @@ bool DrainManager::waitDrained(int64_t timeout_ms) {
     const auto deadline      = std::chrono::steady_clock::now() + std::chrono::milliseconds(timeout_ms);
     auto       next_log_time = std::chrono::steady_clock::now();
     while (true) {
+        if (cancellation_requested()) {
+            RTP_LLM_LOG_INFO("drain manager: drain cancelled while waiting");
+            return false;
+        }
         if (drained()) {
             RTP_LLM_LOG_INFO("drain manager: drained");
             return true;
@@ -125,16 +134,19 @@ bool DrainManager::waitDrained(int64_t timeout_ms) {
     }
 }
 
-bool DrainManager::drain(const SleepOptions& opt) {
+bool DrainManager::drain(const SleepOptions& opt, const DrainCancellationPredicate& cancelled) {
     const bool abort = opt.mode == "abort";
     RTP_LLM_LOG_INFO("drain manager: start drain, mode=%s abort=%d timeout_ms=%ld",
                      opt.mode.c_str(),
                      static_cast<int>(abort),
                      opt.timeout_ms);
+    if (cancelled && cancelled()) {
+        return false;
+    }
     if (abort) {
         forceCancel();
     }
-    return waitDrained(opt.timeout_ms);
+    return waitDrained(opt.timeout_ms, cancelled);
 }
 
 void DrainManager::forceCancel() {
@@ -180,7 +192,9 @@ int64_t DrainManager::activeCacheTransferCount() const {
 }
 
 void DrainManager::installHooks(SleepHooks& hooks) {
-    hooks.drain                    = [this](const SleepOptions& opt) { return drain(opt); };
+    hooks.drain = [this](const SleepOptions& opt, const DrainCancellationPredicate& cancelled) {
+        return drain(opt, cancelled);
+    };
     hooks.activeRequestCount       = [this]() { return activeRequestCount(); };
     hooks.activeCacheTransferCount = [this]() { return activeCacheTransferCount(); };
 }

@@ -1816,7 +1816,31 @@ bool MtpExecutor::consumeLastPauseSignal() {
     return last_pause_signal_.exchange(false, std::memory_order_acq_rel);
 }
 
-void MtpExecutor::drainAsyncRunners() {
+void MtpExecutor::invalidateCudaGraphs() {
+    if (model_) {
+        model_->invalidateCudaGraphs();
+    }
+    if (draft_model_) {
+        draft_model_->invalidateCudaGraphs();
+    }
+    if (sp_prefill_draft_model_) {
+        sp_prefill_draft_model_->invalidateCudaGraphs();
+    }
+}
+
+void MtpExecutor::recaptureCudaGraphs() {
+    if (model_) {
+        model_->recaptureCudaGraphs();
+    }
+    if (draft_model_) {
+        draft_model_->recaptureCudaGraphs();
+    }
+    if (sp_prefill_draft_model_) {
+        sp_prefill_draft_model_->recaptureCudaGraphs();
+    }
+}
+
+absl::Status MtpExecutor::drainAsyncRunners() {
     // MTP launches cross-step async prepare/verify/bookkeeping work (target-verify prepare,
     // draft-prefill prepare, spec-logits verify, bookkeeping) whose sync() normally lands at
     // the START of the next process() step. When the engine arms a sleep-quiesce it stops
@@ -1825,30 +1849,32 @@ void MtpExecutor::drainAsyncRunners() {
     // sleep -- corrupting NCCL/CUDA state so the next sleep's SLEEP_QUIESCE all-reduce hangs.
     // Drain them all here. sync() is a no-op for a runner with nothing in flight.
     //
-    // AsyncRunner::sync() rethrows any exception its worker fn raised. This runs on the engine loop
-    // thread inside the sleep-quiesce arm path (step() -> maybeReachCollectiveSleepQuiesce), where an
-    // uncaught throw would escape step()/loop() and kill the engine thread. Swallow it here: log +
-    // clear any sticky CUDA error. The drain is best-effort (its point is to retire cross-step work
-    // before torch_memory_saver releases weights/KV); if a runner actually failed, the subsequent
-    // quiesce cudaDeviceSynchronize (NormalEngine) detects the poisoned context and refuses to commit
-    // the sleep, so we never park on a broken state.
-    const auto stream = cuda_graph::graphGetCurrentStream();
-    try {
-        target_verify_prepare_runner_.sync(stream);
-        draft_prefill_prepare_runner_.sync(stream);
-        spec_logits_verify_async_runner_.sync(stream);
-        spec_bookkeeping_runner_.sync(stream);
-    } catch (const std::exception& e) {
-        RTP_LLM_LOG_ERROR("drainAsyncRunners: async runner sync failed during sleep quiesce: %s", e.what());
-#if USING_CUDA
-        cudaGetLastError();  // clear sticky so it cannot resurface on an unrelated later call
-#endif
-    } catch (...) {
-        RTP_LLM_LOG_ERROR("drainAsyncRunners: async runner sync failed during sleep quiesce (unknown exception)");
-#if USING_CUDA
-        cudaGetLastError();
-#endif
-    }
+    // AsyncRunner::sync() rethrows worker failures. Drain every runner and return the first
+    // failure so the pause epoch cannot be acknowledged and resources cannot be released.
+    const auto   stream      = cuda_graph::graphGetCurrentStream();
+    absl::Status first_error = absl::OkStatus();
+    auto         drain       = [&](AsyncRunner& runner, const char* name) {
+        try {
+            runner.sync(stream);
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("drainAsyncRunners: %s failed during sleep quiesce: %s", name, e.what());
+            if (first_error.ok()) {
+                first_error =
+                    absl::InternalError(std::string("MTP async runner drain failed (") + name + "): " + e.what());
+            }
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("drainAsyncRunners: %s failed during sleep quiesce (unknown exception)", name);
+            if (first_error.ok()) {
+                first_error =
+                    absl::InternalError(std::string("MTP async runner drain failed (") + name + "): unknown exception");
+            }
+        }
+    };
+    drain(target_verify_prepare_runner_, "target verify prepare");
+    drain(draft_prefill_prepare_runner_, "draft prefill prepare");
+    drain(spec_logits_verify_async_runner_, "spec logits verify");
+    drain(spec_bookkeeping_runner_, "spec bookkeeping");
+    return first_error;
 }
 
 absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {

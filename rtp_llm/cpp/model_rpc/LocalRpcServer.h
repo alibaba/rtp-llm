@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <cstdint>
 #include <memory>
 #include <mutex>
 #include <string>
@@ -113,6 +114,18 @@ public:
     ::grpc::Status
     ExecuteFunction(::grpc::ServerContext* context, const ::FunctionRequestPB* request, ::FunctionResponsePB* response);
 
+    // Multicast keeper holder identity, handed down from the Python collective layer
+    // (which discovers it by pinging the keeper socket) so GetSleepStatus can report
+    // it in SleepStatusResponsePB.holder_instance for the durable checkpoint manifest.
+    // Process-global on purpose: there is exactly one backend engine/RPC server per
+    // process and the collective layer has no handle to this instance, only to the
+    // process. No-op paths (keeper disabled) simply never set it -> empty string.
+    static void setMulticastHolderInstance(uint64_t hi, uint64_t lo);
+    static void clearMulticastHolderInstance();
+    // "hi:lo" when set, empty string when unset. Matches the format the Python
+    // collective layer and checkpoint manifest use for holder_instance.
+    static std::string multicastHolderInstanceString();
+
 public:
     typedef grpc::internal::WriterInterface<GenerateOutputsPB> WriterInterface;
 
@@ -172,6 +185,11 @@ protected:
     std::shared_ptr<BroadcastManager>                          profile_broadcaster_;
     mutable std::mutex                                         abortable_streams_mutex_;
     std::unordered_map<int64_t, std::weak_ptr<GenerateStream>> abortable_streams_;
+    // Unique per backend process launch. Reported in SleepStatusResponsePB so the
+    // sleep coordinator can namespace lease/manifest keys by (generation, role)
+    // instead of address order, preventing cross-role/instance collisions on a
+    // shared TCPStore.
+    std::string instance_generation_uuid_;
 };
 
 }  // namespace rtp_llm

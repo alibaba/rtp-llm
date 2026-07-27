@@ -8,6 +8,7 @@ cc_test_wrapper(
     copts = copts(),
     deps = [
         "//rtp_llm/cpp/engine_base/sleep",
+        "//rtp_llm/cpp/engine_base/sleep:sleep_memory_policy",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],

@@ -113,6 +113,23 @@ TEST_F(DrainManagerTest, WaitDrainedReturnsPromptlyAfterCountersReachZero) {
     worker.join();
 }
 
+TEST_F(DrainManagerTest, WaitDrainedReturnsPromptlyWhenCancelled) {
+    std::atomic<size_t> inflight{1};
+    std::atomic<bool>   cancelled{false};
+    manager_.registerCounter("rpc_onflight", [&]() { return inflight.load(); });
+
+    std::thread canceller([&]() {
+        std::this_thread::sleep_for(std::chrono::milliseconds(30));
+        cancelled.store(true, std::memory_order_release);
+    });
+
+    const auto start = std::chrono::steady_clock::now();
+    EXPECT_FALSE(manager_.waitDrained(10000, [&]() { return cancelled.load(std::memory_order_acquire); }));
+    EXPECT_LT(elapsedMs(start), 1000);
+    EXPECT_EQ(inflight.load(), 1u);
+    canceller.join();
+}
+
 // §3 M3: force invokes the injected cancel callback (which cancels
 // non-streaming requests only) and then keeps waiting for full drain;
 // streaming requests finish naturally.

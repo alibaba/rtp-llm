@@ -189,12 +189,32 @@ bool NormalExecutor::consumeLastPauseSignal() {
     return last_pause_signal_.exchange(false, std::memory_order_acq_rel);
 }
 
-void NormalExecutor::drainAsyncRunners() {
+void NormalExecutor::invalidateCudaGraphs() {
+    if (model_) {
+        model_->invalidateCudaGraphs();
+    }
+}
+
+void NormalExecutor::recaptureCudaGraphs() {
+    if (model_) {
+        model_->recaptureCudaGraphs();
+    }
+}
+
+absl::Status NormalExecutor::drainAsyncRunners() {
     // Flush the stream-async output-dispatch worker (D2H/KV release/update). sync() is a
     // no-op when nothing is in flight (task_done_ starts true). Only meaningful when
     // stream-async is enabled; unconditionally safe otherwise.
-    if (useStreamAsync()) {
+    if (!useStreamAsync()) {
+        return absl::OkStatus();
+    }
+    try {
         dispatch_runner_.sync(cuda_graph::graphGetCurrentStream());
+        return absl::OkStatus();
+    } catch (const std::exception& e) {
+        return absl::InternalError(std::string("normal executor async runner drain failed: ") + e.what());
+    } catch (...) {
+        return absl::InternalError("normal executor async runner drain failed: unknown exception");
     }
 }
 

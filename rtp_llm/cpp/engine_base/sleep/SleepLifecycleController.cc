@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 
 #include <exception>
+#include <stdexcept>
 #include <utility>
 
 namespace rtp_llm {
@@ -19,6 +20,23 @@ bool invokeHookNoThrow(const char* name, Hook& hook, Args&&... args) {
         RTP_LLM_LOG_ERROR("sleep lifecycle hook %s threw unknown exception", name);
     }
     return false;
+}
+
+bool coordinateResourcePhaseNoThrow(SleepHooks& hooks, const char* phase, int64_t epoch, bool local_success) {
+    if (!hooks.coordinateResourcePhase) {
+        return local_success;
+    }
+    return invokeHookNoThrow(
+        "coordinateResourcePhase", hooks.coordinateResourcePhase, std::string(phase), epoch, local_success);
+}
+
+void refreezeExternalTransfersNoThrow(SleepHooks& hooks, int32_t level) {
+    if (!hooks.freezeExternalTransfers) {
+        return;
+    }
+    SleepOptions freeze_opt;
+    freeze_opt.level = level;
+    invokeHookNoThrow("freezeExternalTransfers", hooks.freezeExternalTransfers, freeze_opt);
 }
 
 }  // namespace
@@ -135,6 +153,21 @@ bool SleepLifecycleController::transitionLocked(SleepState expected_from, SleepS
     return true;
 }
 
+uint64_t SleepLifecycleController::supersedeDrainAndWaitLocked() {
+    const uint64_t               generation = drain_generation_.fetch_add(1, std::memory_order_acq_rel) + 1;
+    std::unique_lock<std::mutex> drain_lock(drain_mutex_);
+    drain_cv_.wait(drain_lock, [this]() { return !drain_active_; });
+    return generation;
+}
+
+void SleepLifecycleController::finishDrainAttempt() {
+    {
+        std::lock_guard<std::mutex> drain_lock(drain_mutex_);
+        drain_active_ = false;
+    }
+    drain_cv_.notify_all();
+}
+
 void SleepLifecycleController::setLastError(const std::string& msg) {
     std::lock_guard<std::mutex> lock(status_mutex_);
     last_error_ = msg;
@@ -157,10 +190,10 @@ bool SleepLifecycleController::enabled() const {
 }
 
 void SleepLifecycleController::setConfiguredLevel(int32_t level) {
-    // torch_memory_saver fixes the weights backup mode at model-load time: level
-    // 2 discards weights (region opened without host cpu_backup); any other value
-    // keeps host backup and is treated as level 1.
-    configured_level_.store(level == 2 ? 2 : 1, std::memory_order_release);
+    if (level < 1 || level > 3) {
+        throw std::invalid_argument("sleep_mode_level must be one of 1, 2 or 3");
+    }
+    configured_level_.store(level, std::memory_order_release);
 }
 
 int32_t SleepLifecycleController::configuredLevel() const {
@@ -168,7 +201,7 @@ int32_t SleepLifecycleController::configuredLevel() const {
 }
 
 bool SleepLifecycleController::discardWeights() const {
-    return configuredLevel() == 2;
+    return configuredLevel() >= 2;
 }
 
 int32_t SleepLifecycleController::activeSleepLevel() const {
@@ -207,7 +240,7 @@ std::string SleepLifecycleController::disabledReason() const {
 }
 
 SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
-    std::lock_guard<std::mutex> lock(transition_mutex_);
+    std::unique_lock<std::mutex> lock(transition_mutex_);
 
     if (!effective()) {
         return SleepResult::disabled(disabledReason());
@@ -217,8 +250,8 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
     }
     // torch_memory_saver binds the weights region's cpu_backup at model-load
     // time, so this process supports exactly one non-zero level, selected at
-    // startup: 2 (discard weights) when sleep_mode_level=2, otherwise 1 (host
-    // backup). A request must match it.
+    // startup: 1 (host backup), 2 (discard weights), or 3 (discard weights plus
+    // CUDA process checkpoint). A request must match it.
     const int32_t configured_level = configuredLevel();
     if (opt.level == 0) {
         return SleepResult::unimplemented(
@@ -265,25 +298,64 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
         }
     }
 
+    uint64_t drain_generation = 0;
+    int64_t  drain_epoch      = 0;
+    if (!opt.commit_only) {
+        drain_generation = supersedeDrainAndWaitLocked();
+        drain_epoch      = sleep_epoch_.load(std::memory_order_acquire);
+    }
+
+    if (!opt.commit_only && hooks_.freezeExternalTransfers) {
+        if (!invokeHookNoThrow("freezeExternalTransfers", hooks_.freezeExternalTransfers, opt)) {
+            setLastError("freezeExternalTransfers failed, staying in DRAINING");
+            return SleepResult::failedPrecondition(lastError());
+        }
+    }
+
     // Arm the collective sleep-quiesce consensus BEFORE the (rank-asymmetric) drain, on
     // every rank symmetrically. Only the rank holding an in-flight request blocks in the
     // drain hook below; if arming waited until after that block, the busy rank would never
     // arm while its idle peers issue unmatched consensus rounds -> forward/EP desync ->
-    // DeepEP timeout / worker death. Best-effort: a failure here does not abort the sleep
-    // (drain + quiesceEngine still run and arm as a fallback). No-op for single-rank.
+    // DeepEP timeout / worker death. Level 3 cannot safely recover from an arm failure:
+    // peers may already have issued their consensus round, so fail closed without draining
+    // or releasing resources. Levels 1 and 2 retain their legacy best-effort behavior.
     // Placed before the drain block so it also runs on an idempotent DRAINING retry (where
     // the underlying pause() is a no-op CAS).
     if (!opt.commit_only && hooks_.armEngineQuiesce) {
-        invokeHookNoThrow("armEngineQuiesce", hooks_.armEngineQuiesce, opt);
+        const bool armed = invokeHookNoThrow("armEngineQuiesce", hooks_.armEngineQuiesce, opt);
+        if (!armed && configured_level == 3) {
+            setLastError("armEngineQuiesce failed; Level 3 cannot safely continue");
+            transitionLocked(SleepState::DRAINING, SleepState::ERROR);
+            return SleepResult::failedPrecondition(lastError());
+        }
     }
 
     // --- DRAINING: wait for in-flight requests and cache transfers. ---
     if (!opt.commit_only && hooks_.drain) {
-        // Route through invokeHookNoThrow like every other hook: a throwing
-        // drain must not escape the transition while transition_mutex_ is held
-        // (it would leave the controller wedged in DRAINING with a poisoned
-        // mutex). An exception is treated as "not drained".
-        if (!invokeHookNoThrow("drain", hooks_.drain, opt)) {
+        // Drain may wait for minutes. Run it without transition_mutex_ so wake_up
+        // and a newer retry can invalidate this generation. Copy the hook before
+        // unlocking so setHooks() cannot race its std::function storage.
+        auto                       drain_hook = hooks_.drain;
+        DrainCancellationPredicate cancelled  = [this, drain_generation, drain_epoch]() {
+            return drain_generation_.load(std::memory_order_acquire) != drain_generation
+                   || sleep_epoch_.load(std::memory_order_acquire) != drain_epoch
+                   || state_.load(std::memory_order_acquire) != SleepState::DRAINING;
+        };
+        {
+            std::lock_guard<std::mutex> drain_lock(drain_mutex_);
+            drain_active_ = true;
+        }
+        lock.unlock();
+        const bool drained = invokeHookNoThrow("drain", drain_hook, opt, cancelled);
+        finishDrainAttempt();
+        lock.lock();
+
+        // The result belongs only to the attempt that still owns this exact
+        // DRAINING epoch. A superseded hook must never quiesce or release.
+        if (cancelled()) {
+            return SleepResult::failedPrecondition("drain cancelled or superseded by a newer lifecycle operation");
+        }
+        if (!drained) {
             // Per design: graceful drain timeout keeps DRAINING and does NOT
             // release GPU. The controller stays in DRAINING; control plane can
             // retry sleep (idempotent) or escalate with mode=abort.
@@ -316,15 +388,48 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
         return SleepResult::failedPrecondition(lastError());
     }
 
-    // --- SUSPENDING: dereg MR, release memory backing. ---
-    // Ordering: engine already quiesced in prepare; CUDA sync + dereg MR happen
-    // before pausing KV physical memory; CPU-backed persistent allocations are
-    // released last.
+    // --- SUSPENDING: stop transports, dereg MR, release memory backing. ---
+    // Ordering: engine already quiesced and external admission is closed. Level 3
+    // first stops RDMA listeners, QPs, and CQs so no transport can still access an
+    // MR, then synchronizes CUDA and deregisters MRs while MemoryUtil still exists.
+    // Levels 1 and 2 skip transport teardown and retain their existing MR order.
+    // Only after that may collectives and GPU physical memory be released.
     bool ok = true;
+    if (ok && opt.level == 3 && hooks_.teardownRdmaTransports) {
+        ok = invokeHookNoThrow("teardownRdmaTransports", hooks_.teardownRdmaTransports, opt);
+        if (!ok) {
+            setLastError("teardownRdmaTransports failed");
+        }
+    }
     if (ok && hooks_.synchronizeAndDeregisterMr) {
         ok = invokeHookNoThrow("synchronizeAndDeregisterMr", hooks_.synchronizeAndDeregisterMr, opt);
         if (!ok) {
             setLastError("synchronizeAndDeregisterMr failed");
+        }
+    }
+    if (opt.level == 3) {
+        const bool local_ready  = ok;
+        const bool global_ready = coordinateResourcePhaseNoThrow(
+            hooks_, "collective_teardown_ready", sleep_epoch_.load(std::memory_order_acquire), local_ready);
+        if (!global_ready) {
+            if (local_ready) {
+                setLastError("collective teardown ready gate failed");
+            }
+            ok = false;
+        } else {
+            bool local_done = true;
+            if (hooks_.teardownCollectives) {
+                local_done = invokeHookNoThrow("teardownCollectives", hooks_.teardownCollectives, opt);
+                if (!local_done) {
+                    setLastError("teardownCollectives failed");
+                }
+            }
+            const bool global_done = coordinateResourcePhaseNoThrow(
+                hooks_, "collective_teardown_done", sleep_epoch_.load(std::memory_order_acquire), local_done);
+            if (!global_done && local_done) {
+                setLastError("collective teardown done gate failed");
+            }
+            ok = global_done;
         }
     }
     if (ok && hooks_.releaseKvMemoryBacking) {
@@ -380,6 +485,7 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
     // sleep that never committed. No GPU resource was released in DRAINING.
     if (current == SleepState::DRAINING) {
         setLastError("");
+        supersedeDrainAndWaitLocked();
         if (hooks_.cancelQuiesceAndRestartEngine) {
             if (!invokeHookNoThrow("cancelQuiesceAndRestartEngine", hooks_.cancelQuiesceAndRestartEngine)) {
                 setLastError("cancelQuiesceAndRestartEngine failed");
@@ -394,7 +500,18 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
             }
         }
         engine_quiesced_.store(false, std::memory_order_release);
+        const int32_t active_level = active_sleep_level_.load(std::memory_order_acquire);
+        if (hooks_.resumeExternalTransfers
+            && !invokeHookNoThrow("resumeExternalTransfers", hooks_.resumeExternalTransfers)) {
+            // resumeExternalTransfers is required to fail closed. Re-apply the
+            // freeze hook as a defensive compensation for partially-open hooks.
+            refreezeExternalTransfersNoThrow(hooks_, active_level);
+            setLastError("resumeExternalTransfers failed while cancelling prepared sleep");
+            transitionLocked(SleepState::DRAINING, SleepState::ERROR);
+            return SleepResult::failedPrecondition(lastError());
+        }
         if (!transitionLocked(SleepState::DRAINING, SleepState::RUNNING)) {
+            refreezeExternalTransfersNoThrow(hooks_, active_level);
             return SleepResult::failedPrecondition(lastError());
         }
         return SleepResult::success();
@@ -416,7 +533,7 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
 
     // --- WAKING_UP: restore memory backing, reset metadata, reg MR, warmup. ---
     bool ok = true;
-    // Restore weights (level-2 streams them back in place from the model loader)
+    // Restore weights (levels 2/3 stream them back in place from the model loader)
     // BEFORE re-backing the KV cache. The KV cache is sized to consume nearly all
     // GPU memory left free after weights at cold start, so remapping the KV
     // physical pages first leaves no headroom for the loader's transient buffers
@@ -441,6 +558,38 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
     if (!opt.commit_only && ok) {
         kv_memory_state_.store(KvMemoryState::ACTIVE, std::memory_order_release);
     }
+    if (!opt.commit_only && active_sleep_level_.load(std::memory_order_acquire) == 3) {
+        const bool local_ready  = ok;
+        const bool global_ready = coordinateResourcePhaseNoThrow(
+            hooks_, "collective_rebuild_ready", sleep_epoch_.load(std::memory_order_acquire), local_ready);
+        if (!global_ready) {
+            if (local_ready) {
+                setLastError("collective rebuild ready gate failed");
+            }
+            ok = false;
+        } else {
+            bool local_done = true;
+            if (hooks_.rebuildCollectives) {
+                local_done = invokeHookNoThrow("rebuildCollectives", hooks_.rebuildCollectives);
+                if (!local_done) {
+                    setLastError("rebuildCollectives failed");
+                }
+            }
+            const bool global_done = coordinateResourcePhaseNoThrow(
+                hooks_, "collective_rebuild_done", sleep_epoch_.load(std::memory_order_acquire), local_done);
+            if (!global_done && local_done) {
+                setLastError("collective rebuild done gate failed");
+            }
+            ok = global_done;
+        }
+    }
+    if (!opt.commit_only && ok && active_sleep_level_.load(std::memory_order_acquire) == 3
+        && hooks_.rebuildRdmaTransports) {
+        ok = invokeHookNoThrow("rebuildRdmaTransports", hooks_.rebuildRdmaTransports);
+        if (!ok) {
+            setLastError("rebuildRdmaTransports failed");
+        }
+    }
     if (!opt.commit_only && ok && hooks_.registerMr) {
         ok = invokeHookNoThrow("registerMr", hooks_.registerMr);
         if (!ok) {
@@ -448,7 +597,8 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
         }
     }
 
-    if (!ok) {
+    const bool level_three = active_sleep_level_.load(std::memory_order_acquire) == 3;
+    if (!ok && (opt.prepare_only || !level_three)) {
         // Admission remains closed in ERROR. Control plane only observes wake_up
         // failure; recovery is an explicit retry or operator action.
         // Only the transient WAKING_UP is a half-state to clear; if the KV restore already completed
@@ -465,6 +615,32 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
         return SleepResult::success();
     }
 
+    if (level_three) {
+        const bool local_ready  = ok;
+        const bool global_ready = coordinateResourcePhaseNoThrow(
+            hooks_, "graph_recapture_ready", sleep_epoch_.load(std::memory_order_acquire), local_ready);
+        if (!global_ready) {
+            if (local_ready) {
+                setLastError("graph recapture ready gate failed");
+            }
+            ok = false;
+        } else {
+            bool local_done = true;
+            if (hooks_.recaptureCollectiveGraphs) {
+                local_done = invokeHookNoThrow("recaptureCollectiveGraphs", hooks_.recaptureCollectiveGraphs);
+                if (!local_done) {
+                    setLastError("recaptureCollectiveGraphs failed");
+                }
+            }
+            const bool global_done = coordinateResourcePhaseNoThrow(
+                hooks_, "graph_recapture_done", sleep_epoch_.load(std::memory_order_acquire), local_done);
+            if (!global_done && local_done) {
+                setLastError("graph recapture done gate failed");
+            }
+            ok = global_done;
+        }
+    }
+
     if (ok && hooks_.restartEngine) {
         ok = invokeHookNoThrow("restartEngine", hooks_.restartEngine);
         if (!ok) {
@@ -475,6 +651,13 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
         ok = invokeHookNoThrow("warmupAndHealthCheck", hooks_.warmupAndHealthCheck);
         if (!ok) {
             setLastError("warmupAndHealthCheck failed");
+        }
+    }
+    if (ok && hooks_.resumeExternalTransfers) {
+        ok = invokeHookNoThrow("resumeExternalTransfers", hooks_.resumeExternalTransfers);
+        if (!ok) {
+            refreezeExternalTransfersNoThrow(hooks_, active_sleep_level_.load(std::memory_order_acquire));
+            setLastError("resumeExternalTransfers failed");
         }
     }
 
@@ -498,7 +681,7 @@ SleepStatus SleepLifecycleController::status() const {
     s.sleep_mode_enabled = enabled();
     s.effective          = effective();
     // This process supports exactly one non-zero level, fixed at startup by
-    // sleep_mode_level (2 = discard weights, else 1); see sleep() gate.
+    // sleep_mode_level (1 = host backup, 2/3 = discard weights); see sleep().
     const int32_t configured_level = configuredLevel();
     s.supported_levels             = s.effective ? std::vector<int32_t>{configured_level} : std::vector<int32_t>{};
     s.supported_modes       = s.effective ? std::vector<std::string>{"wait", "abort"} : std::vector<std::string>{};

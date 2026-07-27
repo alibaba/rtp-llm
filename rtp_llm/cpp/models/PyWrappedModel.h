@@ -60,6 +60,8 @@ public:
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
     void            releaseBuffers() override;
+    void            invalidateCudaGraphs() override;
+    void            recaptureCudaGraphs() override;
     torch::Tensor   getMtpTargetHiddenStates(int64_t num_tokens) override;
     torch::Tensor   getMtpLastHiddenStates(int64_t num_tokens) override;
     void            prepareAttentionInputs(const GptModelInputs& inputs) override;
@@ -288,6 +290,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         graph_params.kernel_tokens_per_block      = params.kernel_tokens_per_block;
         graph_params.hidden_size                  = params.hidden_size;
         graph_params.hc_mult                      = params.hc_mult;
+        graph_params.world_size                   = params.parallelism_config.world_size;
         graph_params.model_data_type              = dtype;
         graph_params.max_context_batch_size       = params.concurrency_config.concurrency_limit;
         graph_params.prefill_capture_seq_lens     = params.hw_kernel_config.prefill_capture_seq_lens;
@@ -365,6 +368,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
             graph_runner_->initCapture();
         } catch (const py::error_already_set& e) {
             RTP_LLM_LOG_ERROR("Python model initialize failed (cuda_graph branch):\n%s", e.what());
+            delete graph_runner_;
+            graph_runner_ = nullptr;
+            throw;
+        } catch (...) {
+            delete graph_runner_;
+            graph_runner_ = nullptr;
             throw;
         }
     }

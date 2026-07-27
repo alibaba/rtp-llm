@@ -39,6 +39,8 @@ public:
     void                              pause() override;
     void                              restart() override;
     absl::Status                      pauseAndWaitQuiesced(int64_t timeout_ms) override;
+    void                              invalidateCudaGraphs() override;
+    void                              recaptureCudaGraphs() override;
     // Arm the collective sleep-quiesce consensus at the DRAINING transition (before drain),
     // symmetrically on every rank (DP/EP). No-op for single-rank. See definition.
     void armCollectiveSleepQuiesce() override;
@@ -57,6 +59,58 @@ public:
     bool isTimelineProfilingEnabled() const override;
 
 private:
+    struct CollectiveQuiesceAlignment {
+        enum class Phase {
+            CONSENSUS,
+            TARGET_EXCHANGE,
+            COMPENSATE_FORWARDS,
+            READY_BARRIER,
+        };
+
+        void noteForwardEnqueued() {
+            ++forward_sequence;
+        }
+
+        void beginTargetExchange() {
+            target_sequence = forward_sequence;
+            phase           = Phase::TARGET_EXCHANGE;
+        }
+
+        bool acceptTargetSequence(int64_t target) {
+            if (target < forward_sequence) {
+                return false;
+            }
+            target_sequence = target;
+            phase           = Phase::COMPENSATE_FORWARDS;
+            return true;
+        }
+
+        bool needsCompensationForward() const {
+            return phase == Phase::COMPENSATE_FORWARDS && forward_sequence < target_sequence;
+        }
+
+        bool readyForBarrier() const {
+            return phase == Phase::COMPENSATE_FORWARDS && forward_sequence == target_sequence;
+        }
+
+        void beginReadyBarrier() {
+            phase = Phase::READY_BARRIER;
+        }
+
+        bool terminalAlignmentActive() const {
+            return phase != Phase::CONSENSUS;
+        }
+
+        void resetToConsensus() {
+            target_sequence = forward_sequence;
+            phase           = Phase::CONSENSUS;
+        }
+
+        Phase   phase            = Phase::CONSENSUS;
+        int64_t forward_sequence = 0;
+        int64_t target_sequence  = 0;
+    };
+
     void                            initScheduler();
     std::shared_ptr<GenerateStream> createMinFakeStream(int32_t max_new_tokens);
     WarmUpResult                    warmUp(const EngineInitParams& params);
@@ -70,12 +124,15 @@ private:
     std::shared_ptr<GenerateInput>  makeFakeInput(size_t seq_len);
     size_t                          getWarmUpInputLength() const;
     void                            mayAddFakeStream(std::list<GenerateStreamPtr>& streams);
-    absl::Status                    runExecutorProcess(const std::list<GenerateStreamPtr>& streams);
-    absl::Status                    releasePendingTpCollectiveForPause(uint64_t pause_epoch);
+    absl::Status                    quiesceExecutorForPause(uint64_t pause_epoch);
     bool                            collectiveSleepQuiesceEnabled() const;
     absl::Status                    maybeReachCollectiveSleepQuiesce();
+    absl::Status                    driveCollectiveSleepTerminalAlignment();
+    absl::Status                    runCollectiveSleepCompensationForward();
+    absl::Status                    finishCollectiveSleepQuiesce(bool should_park);
     void                            enterPausedState();
-    void                            markPauseQuiesced(uint64_t pause_epoch);
+    void                            completePauseQuiesce(uint64_t pause_epoch, const absl::Status& status);
+    void                            recordPauseQuiesceFailure(uint64_t pause_epoch, const absl::Status& status);
 
     void initExecutor(const EngineInitParams& params, std::unique_ptr<ProposeModelEngineInitParams>& propose_params);
 
@@ -85,7 +142,6 @@ private:
 private:
     autil::ThreadPtr  loop_thread_;
     std::atomic<bool> running_{false};
-    std::mutex        process_mutex_;
     std::mutex        collective_quiesce_state_mutex_;
     torch::Tensor     collective_quiesce_state_;
     // Async arm-on-demand sleep-quiesce consensus state (see maybeReachCollectiveSleepQuiesce).
@@ -95,15 +151,18 @@ private:
     // handle_:  opaque non-zero id of the in-flight async all-reduce (0 = none in flight). A
     //           rank issues round k+1 only after round k completes, so per-rank round counts
     //           stay matched across the group.
-    bool                    collective_quiesce_engaged_ = false;
-    uint64_t                collective_quiesce_handle_  = 0;
-    std::mutex              pause_mutex_;
-    std::condition_variable pause_cv_;
+    bool                       collective_quiesce_engaged_ = false;
+    uint64_t                   collective_quiesce_handle_  = 0;
+    CollectiveQuiesceAlignment collective_quiesce_alignment_;
+    std::mutex                 pause_mutex_;
+    std::condition_variable    pause_cv_;
     // Monotonic quiesce acknowledgement: the highest pause epoch a quiesce has
     // completed for. pauseAndWaitQuiesced() waits for this to reach the epoch it
     // captured. Monotonic-and-epoch-stamped so a fresh pause() (which only bumps
     // pause_epoch_) can never race-erase a quiesce already recorded for that epoch.
     uint64_t                                      quiesced_pause_epoch_{0};
+    uint64_t                                      failed_pause_epoch_{0};
+    absl::Status                                  failed_pause_status_;
     std::atomic<uint64_t>                         pause_epoch_{0};
     std::atomic<uint64_t>                         processed_pause_epoch_{0};
     std::unique_ptr<Executor>                     executor_;

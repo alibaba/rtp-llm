@@ -89,6 +89,41 @@ void PyWrappedModel::releaseBuffers() {
     buffer_holder_.release();
 }
 
+void PyWrappedModel::invalidateCudaGraphs() {
+    if (graph_runner_ == nullptr) {
+        return;
+    }
+
+    graph_runner_->invalidateCapturedGraphs();
+    prepared_attention_inputs_.store(false, std::memory_order_release);
+    graph_state_ = CudaGraphState();
+    buffer_holder_.release();
+
+    py::gil_scoped_acquire gil;
+    attention_inputs_                 = torch_ext::PyAttentionInputs();
+    attention_inputs_.headwise_config = py::object();
+    held_attn_pyobj_                  = py::object();
+    if (py::hasattr(py_model_, "invalidate_cuda_graph_resources")) {
+        py_model_.attr("invalidate_cuda_graph_resources")();
+    }
+}
+
+void PyWrappedModel::recaptureCudaGraphs() {
+    if (graph_runner_ == nullptr) {
+        return;
+    }
+
+    py::gil_scoped_acquire gil;
+    if (py::hasattr(py_model_, "prepare_cuda_graph_recapture")) {
+        py_model_.attr("prepare_cuda_graph_recapture")();
+    }
+    graph_runner_->recaptureCapturedGraphs();
+    if (py::hasattr(py_model_, "mark_cuda_graph_resources_recaptured")) {
+        py_model_.attr("mark_cuda_graph_resources_recaptured")();
+    }
+    graph_state_ = CudaGraphState();
+}
+
 torch::Tensor PyWrappedModel::getMtpTargetHiddenStates(int64_t num_tokens) {
     if (!py_model_) {
         return torch::Tensor();
@@ -122,13 +157,14 @@ torch::Tensor PyWrappedModel::getMtpLastHiddenStates(int64_t num_tokens) {
 PyWrappedModel::~PyWrappedModel() {
     try {
         py::gil_scoped_acquire gil;
-        held_attn_pyobj_ = py::object();
-        // Always release py_model_ since it's always initialized now
-        py_model_.release();
+        attention_inputs_                 = torch_ext::PyAttentionInputs();
+        attention_inputs_.headwise_config = py::object();
+        held_attn_pyobj_                  = py::object();
         if (graph_runner_ != nullptr) {
             delete graph_runner_;
             graph_runner_ = nullptr;
         }
+        py_model_ = py::object();
         RTP_LLM_LOG_INFO("PyWrappedModel destroyed, Python object instance released.");
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during PyWrappedModel destruction: %s", e.what());

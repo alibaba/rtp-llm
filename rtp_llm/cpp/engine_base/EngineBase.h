@@ -63,6 +63,10 @@ public:
     // the base so engines without a collective quiesce path (and single-rank) do nothing.
     virtual void armCollectiveSleepQuiesce() {}
 
+    virtual void invalidateCudaGraphs() {}
+
+    virtual void recaptureCudaGraphs() {}
+
     virtual std::shared_ptr<GenerateStream> enqueue(const std::shared_ptr<GenerateInput>& input) = 0;
 
     virtual void enqueue(std::shared_ptr<GenerateStream>& stream) = 0;

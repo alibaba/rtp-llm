@@ -13,7 +13,7 @@ constexpr int64_t kEngineUnavailable = 8600;
 
 SleepHooks successHooks() {
     SleepHooks hooks;
-    hooks.drain = [](const SleepOptions&) { return true; };
+    hooks.drain = [](const SleepOptions&, const DrainCancellationPredicate&) { return true; };
     return hooks;
 }
 
@@ -39,6 +39,8 @@ TEST_F(AdmissionGateTest, LeaseMoveTransfersOwnershipAndReleasesOnce) {
     auto acquired = gate_.acquire();
     ASSERT_TRUE(acquired.detail.admitted);
     ASSERT_TRUE(static_cast<bool>(acquired.lease));
+    EXPECT_TRUE(acquired.detail.state.empty());
+    EXPECT_TRUE(acquired.detail.instance_id.empty());
     EXPECT_EQ(controller_.activeAdmissionCount(), 1);
 
     AdmissionLease moved(std::move(acquired.lease));
@@ -59,7 +61,7 @@ TEST_F(AdmissionGateTest, NullControllerAdmits) {
 TEST_F(AdmissionGateTest, DrainingRejects) {
     SleepHooks hooks;
     // Drain "timeout": controller stays in DRAINING per design.
-    hooks.drain = [](const SleepOptions&) { return false; };
+    hooks.drain = [](const SleepOptions&, const DrainCancellationPredicate&) { return false; };
     controller_.setHooks(hooks);
     EXPECT_FALSE(controller_.sleep(SleepOptions{}).ok);
     ASSERT_EQ(controller_.state(), SleepState::DRAINING);

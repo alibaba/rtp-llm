@@ -1,6 +1,7 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
 #include <cstdint>
 #include <functional>
 #include <mutex>
@@ -79,7 +80,8 @@ std::string kvMemoryStateToString(KvMemoryState state);
 struct SleepOptions {
     // vLLM-compatible level. level=0 is defined as state-preserving sleep
     // (restore weights/device KV/cuda graph on wake_up), but is not implemented
-    // in the current MVP. Only level=1 is advertised in supported_levels.
+    // in the current MVP. The startup-configured level (1, 2, or 3) is the
+    // process's only advertised non-zero level.
     int32_t                  level      = 1;
     std::string              mode       = "wait";  // "wait" (default) | "abort"; "keep" is unsupported.
     int64_t                  timeout_ms = 0;
@@ -88,6 +90,8 @@ struct SleepOptions {
     bool                     prepare_only = false;  // DRAINING + drained, no GPU release
     bool                     commit_only  = false;  // DRAINING -> SUSPENDING -> SLEEPING
 };
+
+using DrainCancellationPredicate = std::function<bool()>;
 
 // Options passed in via WakeUpServing RPC.
 struct WakeUpOptions {
@@ -150,16 +154,28 @@ struct SleepResult {
 // restorable GPU memory, MR/engine quiesce). Hooks left empty are treated as
 // no-op success so the core state machine remains unit-testable.
 struct SleepHooks {
+    // Close the external CacheStore/P2P admission gate before drain starts on
+    // every sleep level. Existing transfers may finish, but no new transfer may
+    // race MR deregistration or KV backing release.
+    std::function<bool(const SleepOptions&)> freezeExternalTransfers;
     // Arm the engine's collective sleep-quiesce consensus at the DRAINING transition,
     // BEFORE drain, symmetrically on every rank. Needed for any multi-rank DP/EP deployment
     // where drain is rank-asymmetric: a rank that armed only after its local drain would
     // leave the busy rank unarmed and desync the forward/EP collective. No-op for single-rank.
+    // For Level 3, false or an exception is terminal: the controller enters ERROR without
+    // draining or releasing resources, and external transfer admission remains closed.
+    // Levels 1 and 2 retain the legacy best-effort behavior.
     std::function<bool(const SleepOptions&)> armEngineQuiesce;
-    // Block until drained (or timeout). Return true when drained.
-    std::function<bool(const SleepOptions&)> drain;
+    // Block until drained (or timeout/cancellation). Long waits must poll the
+    // predicate so wake_up or a newer sleep retry can supersede this attempt.
+    std::function<bool(const SleepOptions&, const DrainCancellationPredicate&)> drain;
     // Stop scheduler loop at a collective-safe point. No memory/MR release here.
     std::function<bool(const SleepOptions&)> quiesceEngine;
-    // After every rank is quiesced, CUDA sync and dereg MR before memory release.
+    // Level-3 only: stop RDMA listeners/connections and release transport-owned
+    // CUDA/verbs state before any MR or memory backing is removed.
+    std::function<bool(const SleepOptions&)> teardownRdmaTransports;
+    // After every rank is quiesced and transports are stopped, CUDA sync and
+    // deregister KV MRs before memory release.
     std::function<bool(const SleepOptions&)> synchronizeAndDeregisterMr;
     // Release KV physical pages while keeping VA reserved. KV content is discarded.
     std::function<bool(const SleepOptions&)> releaseKvMemoryBacking;
@@ -178,6 +194,26 @@ struct SleepHooks {
     std::function<bool()> cancelQuiesceAndRestartEngine;
     // Warmup + health self-check before going back online.
     std::function<bool()> warmupAndHealthCheck;
+    // Reopen external transfer admission only after every restored resource and
+    // health check is ready. Also used to cancel a prepare-only sleep, after the
+    // engine has restarted. A failed/throwing call must leave the gate closed.
+    std::function<bool()> resumeExternalTransfers;
+
+    // Level-3 only: tear down CUDA-backed cross-process resources before the
+    // process is checkpointed, then rebuild them after restore. Graphs that
+    // embed collective kernels are recaptured in wake commit after every rank
+    // has completed wake prepare.
+    // The coordinator returns the all-rank AND for (phase, epoch). Controllers
+    // call every ready gate even when preceding local work failed; CUDA
+    // collective work runs only after a successful global ready gate. A done
+    // gate then propagates each rank's local result to every peer.
+    std::function<bool(const std::string&, int64_t, bool)> coordinateResourcePhase;
+    std::function<bool(const SleepOptions&)>               teardownCollectives;
+    std::function<bool()>                                  rebuildCollectives;
+    // Recreate transport-owned mempools/listeners/QPs after CUDA restore and
+    // memory restoration, but before KV MRs are registered and advertised.
+    std::function<bool()> rebuildRdmaTransports;
+    std::function<bool()> recaptureCollectiveGraphs;
 
     // Live counters surfaced through status().
     std::function<int64_t()> activeRequestCount;
@@ -207,12 +243,11 @@ public:
     bool enabled() const;
 
     // Startup-selected sleep level for this process (see RuntimeConfig
-    // sleep_mode_level). Must be called before sleep()/wakeUp(). level==2 is the
-    // discard-weights mode: the weights VMM region was opened without host
-    // cpu_backup, so sleep frees GPU+host and wake reloads from a disk backup.
-    // This is fixed at model-load time by torch_memory_saver and cannot change
-    // per request, so a /sleep request's level must match it. Any value other
-    // than 2 is normalized to level 1 (host backup).
+    // sleep_mode_level). Must be called before sleep()/wakeUp(). Levels 2 and 3
+    // discard weights: the weights VMM region was opened without host backup,
+    // so wake reloads from the original checkpoint. Level 3 additionally tears
+    // down CUDA-backed cross-process resources before an external CUDA process
+    // checkpoint. The value is fixed at model-load time and must be 1, 2 or 3.
     void    setConfiguredLevel(int32_t level);
     int32_t configuredLevel() const;
     bool    discardWeights() const;
@@ -266,6 +301,12 @@ private:
     // illegal transition.
     bool transitionLocked(SleepState expected_from, SleepState to);
 
+    // Caller holds transition_mutex_. Invalidates the previous token, then
+    // joins its hook through drain_cv_ before returning the new generation.
+    uint64_t supersedeDrainAndWaitLocked();
+    // Called by the hook owner before it tries to reacquire transition_mutex_.
+    void finishDrainAttempt();
+
     void releaseAdmission();
     void setLastError(const std::string& msg);
     // Read last_error_ under status_mutex_ only. Error paths use this instead of
@@ -280,17 +321,24 @@ private:
     std::atomic<bool>       enabled_{false};
     std::atomic<bool>       runtime_supported_{true};
     // Startup-fixed sleep level for this process (1 = host backup, 2 = discard
-    // weights). Normalized in setConfiguredLevel(); torch_memory_saver binds the
-    // weights backup mode at load time, so it never changes per request.
+    // weights, 3 = discard weights plus CUDA process checkpoint).
     std::atomic<int32_t> configured_level_{1};
     // Level of the in-progress/last sleep, captured at RUNNING->DRAINING.
     std::atomic<int32_t> active_sleep_level_{0};
-    // Lock ordering: transition_mutex_ -> admission_mutex_ -> hooks_mutex_ ->
-    // status_mutex_.
+    // Monotonic token for the drain attempt allowed to continue into quiesce.
+    // wake_up(DRAINING) and every newer non-commit sleep retry invalidate the
+    // previous token, then join its promptly-cancelled drain hook.
+    std::atomic<uint64_t> drain_generation_{0};
+    // Lock ordering: transition_mutex_ -> drain_mutex_ / admission_mutex_ ->
+    // hooks_mutex_ -> status_mutex_. A drain hook clears drain_active_ without
+    // transition_mutex_, releases drain_mutex_, then reacquires transition_mutex_.
     // Never acquire in reverse.
-    std::mutex         transition_mutex_;  // serializes sleep/wake_up + idempotency
-    mutable std::mutex admission_mutex_;
-    int64_t            active_admissions_ = 0;
+    std::mutex              transition_mutex_;  // serializes sleep/wake_up + idempotency
+    std::mutex              drain_mutex_;
+    std::condition_variable drain_cv_;
+    bool                    drain_active_ = false;
+    mutable std::mutex      admission_mutex_;
+    int64_t                 active_admissions_ = 0;
 
     std::atomic<KvMemoryState> kv_memory_state_{KvMemoryState::ACTIVE};
     std::atomic<bool>          device_kv_cache_valid_{true};

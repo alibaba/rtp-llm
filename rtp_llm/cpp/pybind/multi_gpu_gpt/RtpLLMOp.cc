@@ -439,6 +439,22 @@ void registerRtpLLMOp(const py::module& m) {
              py::arg("tokenizer"),
              py::arg("render"))
         .def("stop", &RtpLLMOp::stop);
+
+    // Hand the multicast keeper holder identity discovered by the Python collective
+    // layer down to the engine so GetSleepStatus can report it in
+    // SleepStatusResponsePB.holder_instance (durable checkpoint manifest). Free
+    // functions on purpose: there is one backend engine/RPC server per process and
+    // the collective layer has no handle to the RtpLLMOp instance. No-op for
+    // non-keeper deployments (they simply never call these -> empty holder_instance).
+    // registerRtpLLMOp takes a const module ref; py::module is a reference-semantic
+    // handle, so copy it to get a non-const handle for module-level defs.
+    py::module mod = m;
+    mod.def(
+        "set_multicast_holder_instance",
+        [](uint64_t hi, uint64_t lo) { LocalRpcServer::setMulticastHolderInstance(hi, lo); },
+        py::arg("hi"),
+        py::arg("lo"));
+    mod.def("clear_multicast_holder_instance", []() { LocalRpcServer::clearMulticastHolderInstance(); });
 }
 
 }  // namespace rtp_llm

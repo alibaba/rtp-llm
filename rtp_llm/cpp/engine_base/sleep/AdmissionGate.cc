@@ -62,12 +62,16 @@ AdmissionCheckResult AdmissionGate::checkDetail() const {
 AdmissionAcquireResult AdmissionGate::acquire() const {
     AdmissionAcquireResult result;
     if (controller_ == nullptr) {
-        result.detail = makeCheckResult(instance_id_, SleepState::RUNNING, 0);
         return result;
     }
     auto controller_result = controller_->acquireAdmission();
-    result.detail          = makeCheckResult(instance_id_, controller_result.state, controller_result.sleep_epoch);
     result.lease           = std::move(controller_result.lease);
+    // The admitted path runs for every inference request. Keep its default
+    // result payload empty; state strings and retry details are needed only when
+    // the gate rejects a request.
+    if (controller_result.state != SleepState::RUNNING) {
+        result.detail = makeCheckResult(instance_id_, controller_result.state, controller_result.sleep_epoch);
+    }
     return result;
 }
 
