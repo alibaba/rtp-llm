@@ -16,8 +16,6 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.util.Logger;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.context.annotation.Lazy;
 import org.springframework.stereotype.Component;
 
 @Component
@@ -33,7 +31,7 @@ public class RouteService {
     public RouteService(ConfigService configService,
                         DefaultRouter defaultScheduler,
                         QueueManager queueManager,
-                        @Lazy @Autowired(required = false) FlexlbBatchScheduler flexlbBatchScheduler,
+                        FlexlbBatchScheduler flexlbBatchScheduler,
                         RecentCacheKeyTraceReporter recentCacheKeyTraceReporter,
                         EndpointRegistry endpointRegistry) {
         this.configService = configService;
