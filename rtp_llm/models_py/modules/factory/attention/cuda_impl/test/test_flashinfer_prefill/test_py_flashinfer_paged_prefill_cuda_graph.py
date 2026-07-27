@@ -12,11 +12,13 @@ import torch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
     PyFlashinferPrefillPagedAttnOp,
+    quantize_to_fp8_if_needed,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_test import (
     BaseAttentionTest,
     compare_tensors,
 )
+from rtp_llm.ops import KvCacheDataType
 from rtp_llm.ops.compute_ops import (
     LayerKVCache,
     PyAttentionInputs,
@@ -86,7 +88,9 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
 
         return inp
 
-    def _make_paged_kv_cache(self, k, v, seq_lengths, num_kv_heads, head_dim):
+    def _make_paged_kv_cache(
+        self, k, v, seq_lengths, num_kv_heads, head_dim, cache_dtype
+    ):
         if isinstance(seq_lengths, int):
             seq_lengths = [seq_lengths]
         total_pages = sum(math.ceil(s / PAGE_SIZE) for s in seq_lengths)
@@ -96,7 +100,7 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
             num_kv_heads,
             PAGE_SIZE,
             head_dim,
-            dtype=k.dtype,
+            dtype=cache_dtype,
             device=self.device,
         )
         page_idx, token_offset = 0, 0
@@ -126,6 +130,9 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
         size_per_head=64,
         capture_input_lengths=None,
         capture_prefix_lengths=None,
+        kv_cache_dtype=KvCacheDataType.BASE,
+        cache_dtype=torch.float16,
+        verify_cast_buffer_reuse=False,
     ):
         if isinstance(input_lengths, int):
             input_lengths = [input_lengths]
@@ -139,6 +146,7 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
             size_per_head=size_per_head,
             seq_size_per_block=PAGE_SIZE,
         )
+        config.attn_configs.kv_cache_dtype = kv_cache_dtype
         seq_lengths = [p + i for p, i in zip(prefix_lengths, input_lengths)]
         total_q = sum(input_lengths)
         total_kv = sum(seq_lengths)
@@ -161,7 +169,7 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
             device=self.device,
         )
         kv_cache = self._make_paged_kv_cache(
-            k, v, seq_lengths, head_num_kv, size_per_head
+            k, v, seq_lengths, head_num_kv, size_per_head, cache_dtype
         )
 
         # Normal path
@@ -181,6 +189,20 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
         cg_replay = self._make_inputs(input_lengths, prefix_lengths, True, max_seq_len)
         cg_op.prepare(cg_replay, forbid_realloc=True)
         cg_out = cg_op.forward(q, kv_cache)
+
+        if verify_cast_buffer_reuse:
+            cast_buf = cg_op._aligned_q_cast_buf
+            self.assertIsNotNone(cast_buf)
+            first_out = cg_out.clone()
+            replay_out = cg_op.forward(q, kv_cache)
+            self.assertIs(cg_op._aligned_q_cast_buf, cast_buf)
+            compare_tensors(
+                first_out,
+                replay_out,
+                rtol=0,
+                atol=0,
+                name="FP8 CUDA graph replay",
+            )
 
         compare_tensors(
             normal_out,
@@ -228,8 +250,43 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
             capture_prefix_lengths=[200, 200, 200, 200],
         )
 
+    def test_fp8_q_cast_buffer_reused_across_replay(self):
+        self._test_forward_match(
+            [2, 4, 3],
+            [100, 50, 200],
+            max_seq_len=5,
+            capture_input_lengths=[5, 5, 5, 5],
+            capture_prefix_lengths=[200, 200, 200, 200],
+            kv_cache_dtype=KvCacheDataType.FP8,
+            cache_dtype=torch.float8_e4m3fn,
+            verify_cast_buffer_reuse=True,
+        )
+
+    def test_fp8_unit_scale_cast_saturates_outliers(self):
+        values = torch.tensor(
+            [-1000.0, -448.0, 448.0, 1000.0],
+            dtype=torch.float16,
+            device=self.device,
+        )
+        quantized = quantize_to_fp8_if_needed(values, torch.float8_e4m3fn).float()
+        expected = torch.tensor(
+            [-448.0, -448.0, 448.0, 448.0],
+            dtype=torch.float32,
+            device=self.device,
+        )
+        torch.testing.assert_close(quantized, expected, rtol=0, atol=0)
+        self.assertFalse(torch.isnan(quantized).any().item())
+
     def test_multi_batch_single_tokens(self):
         self._test_forward_match([1, 1, 1], [100, 200, 300])
+
+    def test_non_fp8_dtype_mismatch_raises(self):
+        values = torch.ones(1, dtype=torch.float16, device=self.device)
+        with self.assertRaisesRegex(
+            ValueError,
+            "unsupported dtype conversion from torch.float16 to torch.bfloat16",
+        ):
+            quantize_to_fp8_if_needed(values, torch.bfloat16)
 
 
 if __name__ == "__main__":

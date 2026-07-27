@@ -14,13 +14,21 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_t
     BaseAttentionTest,
     compare_tensors,
 )
-from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
+from rtp_llm.ops import KvCacheDataType
+from rtp_llm.ops.compute_ops import LayerKVCache
+from rtp_llm.test.utils.numeric_util import assert_close_with_mismatch_tolerance
 
 logging.basicConfig(level=logging.INFO, format="%(message)s")
 
 
 class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
     """Test suite for PyFlashinferPrefillPagedAttnOp with paged KV cache"""
+
+    kv_cache_dtype = KvCacheDataType.BASE
+    cache_dtype = torch.float16
+    rtol = 1e-2
+    atol = 5e-3
+    max_mismatch_rate = 0.0
 
     def setUp(self):
         """Set up test fixtures"""
@@ -29,6 +37,11 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
 
         # Call parent setUp for common initialization
         super().setUp()
+
+    def _create_config(self, *args, **kwargs):
+        config = super()._create_config(*args, **kwargs)
+        config.attn_configs.kv_cache_dtype = self.kv_cache_dtype
+        return config
 
     def _create_chunked_prefill_attention_inputs(
         self,
@@ -85,6 +98,7 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
         attn_inputs.cu_seqlens_device = torch.tensor(
             cu_seqlens, dtype=torch.int32, device=self.device
         )
+        attn_inputs.dtype = get_typemeta(torch.zeros([1], dtype=torch.float16))
 
         return attn_inputs
 
@@ -232,6 +246,9 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
         k = k_flat.reshape(total_tokens, config.head_num_kv, config.size_per_head)
         v = v_flat.reshape(total_tokens, config.head_num_kv, config.size_per_head)
 
+        k = k.to(self.cache_dtype)
+        v = v.to(self.cache_dtype)
+
         # Create paged KV cache
         paged_kv_cache = self._create_paged_kv_cache(
             k, v, sequence_lengths, page_size, config.head_num_kv, config.size_per_head
@@ -240,9 +257,13 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
         # Forward pass through PyFlashinferPrefillPagedAttnOp
         output = attn_op.forward(q, paged_kv_cache)  # Use layer 0
 
-        # Compute reference outputs using flashinfer's reference
+        # Compute reference outputs using flashinfer's reference (with round-trip)
         ref_output = compute_flashinfer_prefill_reference(
-            q, k, v, attn_inputs.cu_seqlens_device, causal=causal
+            q.to(attn_op.q_dtype).to(q.dtype),
+            k.to(q.dtype),
+            v.to(q.dtype),
+            attn_inputs.cu_seqlens_device,
+            causal=causal,
         )
 
         # Compare outputs
@@ -254,13 +275,24 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
 
         # Assert closeness (with relaxed tolerance for FP16)
         try:
-            compare_tensors(
-                output,
-                ref_output,
-                rtol=1e-2,
-                atol=5e-3,
-                name="Prefill output",
-            )
+            if self.max_mismatch_rate > 0:
+                assert_close_with_mismatch_tolerance(
+                    output,
+                    ref_output,
+                    rtol=self.rtol,
+                    atol=self.atol,
+                    max_mismatched_elements=math.ceil(
+                        self.max_mismatch_rate * ref_output.numel()
+                    ),
+                )
+            else:
+                compare_tensors(
+                    output,
+                    ref_output,
+                    rtol=self.rtol,
+                    atol=self.atol,
+                    name="Prefill output",
+                )
             print("✓ Test passed")
         except AssertionError as e:
             logging.error(f"✗ Test failed: {e}")
@@ -416,10 +448,18 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
             device=self.device,
         )
 
+        k = k.to(self.cache_dtype)
+        v = v.to(self.cache_dtype)
+
         # Create paged KV cache
         sequence_lengths = [p + i for p, i in zip(prefix_lengths, input_lengths)]
         paged_kv_cache = self._create_paged_kv_cache(
-            k, v, sequence_lengths, page_size, config.head_num_kv, config.size_per_head
+            k,
+            v,
+            sequence_lengths,
+            page_size,
+            config.head_num_kv,
+            config.size_per_head,
         )
 
         # Forward pass through PyFlashinferPrefillPagedAttnOp
@@ -462,7 +502,8 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
             dtype=torch.float16,
             device=self.device,
         )
-        q_full[prefix_len:] = q  # 把真实的 Q 放在后面
+        # with round-trip
+        q_full[prefix_len:] = q.to(attn_op.q_dtype).to(q.dtype)  # 把真实的 Q 放在后面
 
         print(f"  Q_full shape: {q_full.shape} (padded)")
         print(f"  K shape: {k.shape}")
@@ -470,7 +511,7 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
 
         # 用 FlashInfer 计算完整的 attention
         ref_output_full = single_prefill_with_kv_cache(
-            q_full, k, v, causal=True, kv_layout="NHD"
+            q_full, k.to(q.dtype), v.to(q.dtype), causal=True, kv_layout="NHD"
         )
 
         # 只取最后 input_len 个输出（对应真实的 Q）
@@ -492,13 +533,26 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
         # Compare outputs
         print(f"\n[Correctness Check]")
         try:
-            compare_tensors(
-                output,
-                ref_output,
-                atol=1e-2,
-                rtol=1e-2,
-                name="Chunked prefill output",
-            )
+            atol = max(self.atol, 1e-2)
+            rtol = max(self.rtol, 1e-2)
+            if self.max_mismatch_rate > 0:
+                assert_close_with_mismatch_tolerance(
+                    output,
+                    ref_output,
+                    rtol=rtol,
+                    atol=atol,
+                    max_mismatched_elements=math.ceil(
+                        self.max_mismatch_rate * ref_output.numel()
+                    ),
+                )
+            else:
+                compare_tensors(
+                    output,
+                    ref_output,
+                    atol=atol,
+                    rtol=rtol,
+                    name="Chunked prefill output",
+                )
             print("✅ Correctness check PASSED!")
         except AssertionError as e:
             print(f"❌ Correctness check FAILED: {e}")
@@ -577,6 +631,14 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
             size_per_head=128,
             page_size=64,
         )
+
+
+class TestPyFlashinferPrefillPagedAttnOpFP8(TestPyFlashinferPrefillPagedAttnOp):
+    kv_cache_dtype = KvCacheDataType.FP8
+    cache_dtype = torch.float8_e4m3fn
+    rtol = 4e-2
+    atol = 4e-2
+    max_mismatch_rate = 1e-5
 
 
 if __name__ == "__main__":

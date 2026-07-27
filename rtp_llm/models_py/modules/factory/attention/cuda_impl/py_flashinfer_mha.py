@@ -18,7 +18,7 @@ from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla im
     check_attention_inputs,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.models_py.utils.arch import is_sm10x
+from rtp_llm.models_py.utils.arch import is_sm10x, is_sm90
 from rtp_llm.ops import (
     AttentionConfigs,
     FMHAType,
@@ -38,6 +38,43 @@ from rtp_llm.ops.compute_ops import (
 
 # Constants
 DEFAULT_PY_FLASHINFER_WORKSPACE_SIZE_MB = 128
+
+# FP8 KV cache uses a unit quantization scale: K/V are cast
+# directly to float8_e4m3fn and FA3 FP8 kernels run with scale_q/k/v = 1.0.
+FP8_UNIT_SCALE = 1.0
+_g_fp8_unit_scale_tensors: dict[torch.device, torch.Tensor] = {}
+
+
+def _get_fp8_unit_scale_tensor(device: torch.device) -> torch.Tensor:
+    scale = _g_fp8_unit_scale_tensors.get(device)
+    if scale is None:
+        scale = torch.tensor([FP8_UNIT_SCALE], dtype=torch.float32, device=device)
+        _g_fp8_unit_scale_tensors[device] = scale
+    return scale
+
+
+def quantize_to_fp8_if_needed(
+    tensor: torch.Tensor, target_dtype: torch.dtype
+) -> torch.Tensor:
+    """Return a matching tensor or quantize it to the supported FP8 dtype."""
+    if tensor.dtype == target_dtype:
+        return tensor
+    if target_dtype != torch.float8_e4m3fn:
+        raise ValueError(
+            f"unsupported dtype conversion from {tensor.dtype} to {target_dtype}; "
+            "only quantization to torch.float8_e4m3fn is supported"
+        )
+
+    # per_tensor_quant_fp8 requires contiguous input; packed-QKV split
+    # views are strided, so materialize them first.
+    if not tensor.is_contiguous():
+        tensor = tensor.contiguous()
+    output = torch.empty_like(tensor, dtype=target_dtype)
+    rtp_llm_ops.per_tensor_quant_fp8(
+        tensor, output, _get_fp8_unit_scale_tensor(tensor.device), True
+    )
+    return output
+
 
 # Global workspace buffer pool
 _g_py_flashinfer_workspace_pool: list[torch.Tensor] = []
@@ -87,6 +124,27 @@ def _device_or(device_tensor, host_tensor):
     return host_tensor
 
 
+def attn_kv_dtype(attn_configs: AttentionConfigs) -> torch.dtype:
+    # Use one dtype source for both plan() and forward().
+    if attn_configs.kv_cache_dtype == KvCacheDataType.FP8:
+        return torch.float8_e4m3fn
+    return attn_configs.dtype
+
+
+def attn_q_dtype(attn_configs: AttentionConfigs) -> torch.dtype:
+    # FA3 FP8 (Hopper wgmma) requires Q/KV in the same FP8 dtype and is
+    # SM90-only with head_dim 64/128/256;
+    # Otherwise keep Q in fp16/bf16 (FA2 KV-dequant path)
+    # Q uses the same unit-scale FP8 contract as the KV cache on this path.
+    if (
+        attn_configs.kv_cache_dtype == KvCacheDataType.FP8
+        and is_sm90()
+        and attn_configs.size_per_head in (64, 128, 256)
+    ):
+        return torch.float8_e4m3fn
+    return attn_configs.dtype
+
+
 class PyFlashinferPrefillPagedAttnOp(object):
     """FlashInfer Prefill Attention Op with Paged KV Cache support"""
 
@@ -102,12 +160,9 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.head_dim_qk = attn_configs.size_per_head
         self.head_dim_vo = attn_configs.size_per_head
         self.page_size = attn_configs.kernel_tokens_per_block
-        self.datatype = attn_configs.dtype
-        self.kv_cache_dtype = attn_configs.kv_cache_dtype
-        if self.kv_cache_dtype == KvCacheDataType.FP8:
-            self.kv_datatype = torch.float8_e4m3fn
-        else:
-            self.kv_datatype = self.datatype
+        self.dtype = attn_configs.dtype
+        self.kv_dtype = attn_kv_dtype(attn_configs)
+        self.q_dtype = attn_q_dtype(attn_configs)
         self.max_seq_len = attn_configs.max_seq_len
         self.is_causal = attn_configs.is_causal
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
@@ -115,6 +170,8 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.prefill_cuda_graph_copy_params = None
         # Pre-allocated buffers for CUDA graph copy path (avoid per-forward allocation)
         self._aligned_q_buf = None
+        # reserve buffer for q cast
+        self._aligned_q_cast_buf = None
         self._compact_out_buf = None
         # Use Paged KV Cache wrapper
         self.prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
@@ -233,8 +290,9 @@ class PyFlashinferPrefillPagedAttnOp(object):
             self.head_dim_qk,
             self.page_size,
             causal=self.is_causal,
-            q_data_type=self.datatype,
-            kv_data_type=self.kv_datatype,
+            q_data_type=self.q_dtype,
+            kv_data_type=self.kv_dtype,
+            o_data_type=self.dtype,
         )
         return self.fmha_params
 
@@ -321,7 +379,27 @@ class PyFlashinferPrefillPagedAttnOp(object):
 
             # Reshape back to 3D for FlashInfer
             q_aligned = self._aligned_q_buf.view(total_len, head_num, head_size)
+            if q_aligned.dtype != self.q_dtype:
+                if (
+                    self._aligned_q_cast_buf is None
+                    or self._aligned_q_cast_buf.shape != q_aligned.shape
+                    or self._aligned_q_cast_buf.dtype != self.q_dtype
+                    or self._aligned_q_cast_buf.device != q_aligned.device
+                ):
+                    self._aligned_q_cast_buf = torch.empty(
+                        q_aligned.shape,
+                        dtype=self.q_dtype,
+                        device=q_aligned.device,
+                    )
+                rtp_llm_ops.per_tensor_quant_fp8(
+                    q_aligned,
+                    self._aligned_q_cast_buf,
+                    _get_fp8_unit_scale_tensor(q_aligned.device),
+                    True,
+                )
+                q_aligned = self._aligned_q_cast_buf
 
+            # Paged FP8 defaults to unit scales and the output dtype from plan().
             result = self.prefill_wrapper.run(q_aligned, paged_kv_cache)
 
             # Reshape result to 2D for copy back (ensure contiguous)
@@ -344,7 +422,10 @@ class PyFlashinferPrefillPagedAttnOp(object):
             result = self._compact_out_buf.view(token_num, head_num, head_size)
         else:
             # No CUDA graph copy, direct execution
-            result = self.prefill_wrapper.run(q, paged_kv_cache)
+            # Paged FP8 defaults to unit scales and the output dtype from plan().
+            result = self.prefill_wrapper.run(
+                quantize_to_fp8_if_needed(q, self.q_dtype), paged_kv_cache
+            )
 
         return result
 
@@ -367,7 +448,9 @@ class PyFlashinferPrefillAttnOp(object):
             self.g_workspace_buffer,
             backend=backend,
         )
-        self.datatype = attn_configs.dtype
+        self.dtype = attn_configs.dtype
+        self.q_dtype = attn_q_dtype(attn_configs)
+        self.kv_dtype = attn_kv_dtype(attn_configs)
         self.is_causal = attn_configs.is_causal
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
 
@@ -410,7 +493,9 @@ class PyFlashinferPrefillAttnOp(object):
             self.head_dim_qk,
             self.head_dim_vo,
             causal=self.is_causal,
-            q_data_type=get_scalar_type(attn_inputs.dtype),
+            q_data_type=self.q_dtype,
+            kv_data_type=self.kv_dtype,
+            o_data_type=self.dtype,
         )
         return self.fmha_params
 
@@ -421,24 +506,30 @@ class PyFlashinferPrefillAttnOp(object):
             or attn_inputs.prefix_lengths.sum().item() == 0
         )
 
-    ## 1. pure prefill attn: qkv contains q and k,v
-    ## 2. paged attn: qkv is only q, and kv is in kv_cache
     def forward(
-        self, qkv: torch.Tensor, kv_cache: Optional[LayerKVCache]
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        kv_cache: Optional[LayerKVCache] = None,
     ) -> torch.Tensor:
-        qkv = qkv.reshape(qkv.shape[0], -1)
-        q, k, v = torch.split(
-            qkv,
-            [
-                self.head_dim_qk * self.local_head_num,
-                self.head_dim_qk * self.local_kv_head_num,
-                self.head_dim_vo * self.local_kv_head_num,
-            ],
-            dim=-1,
-        )
-        q = q.reshape(q.shape[0], self.local_head_num, self.head_dim_qk)
-        k = k.reshape(k.shape[0], self.local_kv_head_num, self.head_dim_qk)
-        v = v.reshape(v.shape[0], self.local_kv_head_num, self.head_dim_vo)
+        q = quantize_to_fp8_if_needed(q, self.q_dtype)
+        k = quantize_to_fp8_if_needed(k, self.kv_dtype)
+        v = quantize_to_fp8_if_needed(v, self.kv_dtype)
+        if q.dtype == torch.float8_e4m3fn:
+            # FlashInfer's FA3 FP8 need scale_q, scale_k, scale_v and an output matching the planned dtype.
+            out = torch.empty(
+                q.shape[:-1] + v.shape[-1:], dtype=self.dtype, device=q.device
+            )
+            return self.prefill_wrapper.run(
+                q,
+                k,
+                v,
+                FP8_UNIT_SCALE,
+                FP8_UNIT_SCALE,
+                FP8_UNIT_SCALE,
+                out=out,
+            )
         return self.prefill_wrapper.run(q, k, v)
 
 
@@ -541,20 +632,21 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         layer_idx: int = 0,
     ) -> torch.Tensor:
         """Common forward implementation for all prefill implementations."""
-        # Apply RoPE and KV Cache processing
-        if self.need_rope_kv_cache:
-            if self.rope_impl is not None:
-                # Apply RoPE and get Q, K, V
-                query, key, value = self.rope_impl.forward(qkv)
-            else:
-                # No RoPE, just split QKV
-                query, key, value = self._split_qkv(qkv)
+        if self.need_rope_kv_cache and self.rope_impl is not None:
+            query, key, value = self.rope_impl.forward(qkv)
+        else:
+            query, key, value = self._split_qkv(qkv)
 
-            # Write KV to cache
+        # Cast K/V once so the KV cache write and the attention op share
+        # the same tensors.
+        kv_dtype = attn_kv_dtype(self.attn_configs)
+        key = quantize_to_fp8_if_needed(key, kv_dtype)
+        value = quantize_to_fp8_if_needed(value, kv_dtype)
+
+        if self.need_rope_kv_cache:
             self.kv_cache_write_op.forward(key, value, kv_cache)
 
-            # Pass query to FMHA (for paged) or reconstruct qkv (for ragged)
-            qkv = self._prepare_fmha_input(query, key, value)
+        fmha_inputs = self._prepare_fmha_input(query, key, value)
 
         # Apply write cache store if needed
         common.apply_write_cache_store(
@@ -562,14 +654,16 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
         )
 
         # Execute FMHA forward
-        return self.fmha_impl.forward(qkv, kv_cache)
+        return self.fmha_impl.forward(*fmha_inputs, kv_cache)
 
     def _prepare_fmha_input(
         self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
-    ) -> torch.Tensor:
-        """Prepare input for FMHA. To be overridden by subclasses if needed."""
-        # Default: just return query (for paged layout)
-        return query
+    ) -> tuple[torch.Tensor, ...]:
+        """Positional args for fmha_impl.forward; kv_cache is appended by forward().
+
+        Default: only query (paged layout, KV is read from the cache).
+        """
+        return (query,)
 
 
 class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
@@ -589,9 +683,9 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
 
     def _prepare_fmha_input(
         self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
-    ) -> torch.Tensor:
-        """For paged layout, only return query (KV is already in cache)."""
-        return query
+    ) -> tuple[torch.Tensor, ...]:
+        """For paged layout, only pass query (KV is already in cache)."""
+        return (query,)
 
     @staticmethod
     def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
@@ -631,29 +725,9 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
 
     def _prepare_fmha_input(
         self, query: torch.Tensor, key: torch.Tensor, value: torch.Tensor
-    ) -> torch.Tensor:
-        """For ragged layout, reconstruct full qkv tensor from q, k, v."""
-        # query: [total_tokens, num_heads, head_dim]
-        # key: [total_tokens, num_kv_heads, head_dim]
-        # value: [total_tokens, num_kv_heads, head_dim]
-
-        # Flatten to 2D and concatenate
-        q_flat = query.reshape(
-            query.shape[0], -1
-        )  # [total_tokens, num_heads * head_dim]
-        k_flat = key.reshape(
-            key.shape[0], -1
-        )  # [total_tokens, num_kv_heads * head_dim]
-        v_flat = value.reshape(
-            value.shape[0], -1
-        )  # [total_tokens, num_kv_heads * head_dim]
-
-        # Concatenate along feature dimension
-        qkv = torch.cat(
-            [q_flat, k_flat, v_flat], dim=-1
-        )  # [total_tokens, (num_heads + 2*num_kv_heads) * head_dim]
-
-        return qkv
+    ) -> tuple[torch.Tensor, ...]:
+        """For ragged layout, pass Q/K/V directly to the ragged wrapper."""
+        return query, key, value
 
     def support_cuda_graph(self) -> bool:
         return False
@@ -864,6 +938,7 @@ class PyFlashinferDecodeAttnOp(object):
                 self.seq_size_per_block,
                 self.head_dim_qk,
             )
+        # Decode FP8 defaults to unit scales and the output dtype from plan().
         return self.decode_wrapper.run(q, paged_kv_cache)
 
 
