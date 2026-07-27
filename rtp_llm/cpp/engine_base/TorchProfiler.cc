@@ -91,6 +91,22 @@ void ProfilerSaveWorker::run() {
 StepWindowProfiler::StepWindowProfiler(const std::string& default_output_dir, int world_rank):
     default_output_dir_(default_output_dir.empty() ? "." : default_output_dir), world_rank_(world_rank) {}
 
+// trace_name arrives from the request body and ends up in the trace file path;
+// keep it a plain filename component so it cannot steer the file outside the
+// output dir.
+static std::string sanitizeTraceName(const std::string& name) {
+    std::string out;
+    out.reserve(name.size());
+    for (char c : name) {
+        const bool ok = (c >= 'a' && c <= 'z') || (c >= 'A' && c <= 'Z') || (c >= '0' && c <= '9') || c == '.'
+                        || c == '_' || c == '-';
+        if (ok) {
+            out += c;
+        }
+    }
+    return out;
+}
+
 void StepWindowProfiler::configure(bool enable, const std::string& trace_name, int start_step, int num_steps) {
     // First-come-first-served: if a profiling session is already active, ignore new requests
     // to prevent concurrent requests from repeatedly restarting the profiler.
@@ -100,11 +116,14 @@ void StepWindowProfiler::configure(bool enable, const std::string& trace_name, i
     }
     {
         std::lock_guard<std::mutex> lock(mu_);
-        trace_name_ = trace_name;
+        trace_name_ = sanitizeTraceName(trace_name);
     }
     static constexpr int kDefaultNumSteps = 3;
+    // num_steps is request-supplied; bound the capture window so one request
+    // cannot keep the whole engine under the profiler indefinitely.
+    static constexpr int kMaxNumSteps = 100;
     start_step_.store(std::max(0, start_step));
-    num_steps_.store(num_steps > 0 ? num_steps : kDefaultNumSteps);
+    num_steps_.store(std::min(kMaxNumSteps, num_steps > 0 ? num_steps : kDefaultNumSteps));
     enabled_.store(enable);
     reconfigure_.store(true);
     RTP_LLM_LOG_INFO("timeline profiling configured: enable=%d start_step=%d num_steps=%d trace=%s",
