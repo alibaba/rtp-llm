@@ -14,6 +14,7 @@ Covered cases:
   * multi-batch ragged request (B=2, different q/k lengths) -- exercises
     per-batch cu_seqlens / page_table / seqused_k partitioning,
   * mixed fp8 KV cache + bf16 Q,
+  * FP8 partial O with both BF16 and FP8 KV cache,
   * **CP zigzag regression** (B=2 with ``seqused_k < kv_segment_lens`` on the
     first segment). Under load-balanced/zigzag context parallelism a segment's
     causal ``seqused_k`` (= qo_offset + q_len) is smaller than the full KV run
@@ -131,7 +132,17 @@ def _aligned_page_table(ids_per_batch, device) -> torch.Tensor:
 
 
 def _run_full_reference(
-    builder, q, k_paged, v_paged, topk_idx, segs, blk, topk, sm_scale, device
+    builder,
+    q,
+    k_paged,
+    v_paged,
+    topk_idx,
+    segs,
+    blk,
+    topk,
+    sm_scale,
+    device,
+    partial_dtype=torch.bfloat16,
 ):
     """Non-chunked ground truth: one CSR build + one sparse_atten_func call over
     the full (possibly multi-batch) sequence.
@@ -200,6 +211,7 @@ def _run_full_reference(
         blk_kv=blk,
         causal=True,
         softmax_scale=sm_scale,
+        partial_dtype=partial_dtype,
         return_softmax_lse=False,
         page_table=pt,
         seqused_k=sk,
@@ -228,6 +240,11 @@ class SparsePrefillChunkTest(unittest.TestCase):
         # so we can assert reuse within a case.
         tbf._M3_CHUNK_WS_CACHE.clear()
         torch.cuda.set_device(0)
+
+    def test_partial_dtype_defaults_to_bf16(self):
+        self.assertEqual(
+            self.tbf._M3_SPARSE_ATTN_PARTIAL_DTYPE, torch.bfloat16
+        )
 
     def _make_inputs(self, segs, device, seed=0, kv_dtype=torch.bfloat16):
         from src.sm100.prepare_k2q_csr import SparseK2qCsrBuilderSm100
@@ -268,6 +285,7 @@ class SparsePrefillChunkTest(unittest.TestCase):
         sm_scale,
         device,
         usable_sm=-1,
+        partial_dtype=torch.bfloat16,
     ):
         nkv = self.HKV
         qo_lens = [s["q_len"] for s in segs]
@@ -281,6 +299,7 @@ class SparsePrefillChunkTest(unittest.TestCase):
             # -- this key is what distinguishes the fixed path from the bug.
             kv_segment_lens=torch.tensor(kv_runs, dtype=torch.int32, device=device),
             causal=True,
+            partial_dtype=partial_dtype,
             # usable_SM_count > 0 makes the builder skip its schedule (return_schedule
             # =False) and sparse_atten_func build its own -- a distinct workspace path.
             usable_SM_count=usable_sm,
@@ -322,17 +341,44 @@ class SparsePrefillChunkTest(unittest.TestCase):
         self.assertLess(max_abs, 0.05, f"{case_name}: max_abs {max_abs:.3e} too large")
 
     def _run_case(
-        self, segs, chunk_size, case_name, seed=0, kv_dtype=torch.bfloat16, usable_sm=-1
+        self,
+        segs,
+        chunk_size,
+        case_name,
+        seed=0,
+        kv_dtype=torch.bfloat16,
+        usable_sm=-1,
+        partial_dtype=torch.bfloat16,
     ):
         device = torch.device("cuda", 0)
         q, k, v, topk_idx, kv_indices, builder, sm = self._make_inputs(
             segs, device, seed=seed, kv_dtype=kv_dtype
         )
         ref = _run_full_reference(
-            builder, q, k, v, topk_idx, segs, self.BLK, self.TOPK, sm, device
+            builder,
+            q,
+            k,
+            v,
+            topk_idx,
+            segs,
+            self.BLK,
+            self.TOPK,
+            sm,
+            device,
+            partial_dtype,
         )
         out = self._run_chunked(
-            q, k, v, topk_idx, kv_indices, segs, chunk_size, sm, device, usable_sm
+            q,
+            k,
+            v,
+            topk_idx,
+            kv_indices,
+            segs,
+            chunk_size,
+            sm,
+            device,
+            usable_sm,
+            partial_dtype,
         )
         self._assert_close(out, ref, case_name)
         return out, ref
@@ -357,6 +403,25 @@ class SparsePrefillChunkTest(unittest.TestCase):
         # and the full reference consume the SAME fp8 K/V, so they must agree.
         self._run_case(
             [_seg(8192)], 2048, "fp8_kv_cache", seed=21, kv_dtype=torch.float8_e4m3fn
+        )
+
+    def test_fp8_partial_bf16_kv_cache(self):
+        self._run_case(
+            [_seg(4096)],
+            2048,
+            "fp8_partial_bf16_kv_cache",
+            seed=23,
+            partial_dtype=torch.float8_e4m3fn,
+        )
+
+    def test_fp8_partial_fp8_kv_cache(self):
+        self._run_case(
+            [_seg(4096)],
+            2048,
+            "fp8_partial_fp8_kv_cache",
+            seed=25,
+            kv_dtype=torch.float8_e4m3fn,
+            partial_dtype=torch.float8_e4m3fn,
         )
 
     def test_cp_zigzag_prefix(self):
@@ -403,6 +468,22 @@ class SparsePrefillChunkTest(unittest.TestCase):
         reused = self.tbf._M3_CHUNK_WS_CACHE[dev]
         self.assertEqual(reused.data_ptr(), large_ptr, "workspace was reallocated")
         self.assertEqual(reused.numel(), n_large)
+
+    def test_fp8_partial_workspace_is_smaller(self):
+        dev = torch.device("cuda", 0)
+        self._run_case([_seg(2048)], 512, "ws_bf16_partial", seed=47)
+        bf16_bytes = self.tbf._M3_CHUNK_WS_CACHE[dev].numel()
+
+        self.tbf._M3_CHUNK_WS_CACHE.clear()
+        self._run_case(
+            [_seg(2048)],
+            512,
+            "ws_fp8_partial",
+            seed=47,
+            partial_dtype=torch.float8_e4m3fn,
+        )
+        fp8_bytes = self.tbf._M3_CHUNK_WS_CACHE[dev].numel()
+        self.assertLess(fp8_bytes, bf16_bytes)
 
 
 if __name__ == "__main__":
