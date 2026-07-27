@@ -1,5 +1,9 @@
 # Test configuration for PyFlashinferDecodeAttnOp
 
+load("@arch_config//:arch_select.bzl", "requirement")
+
+requirement(["filelock"])
+
 py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
@@ -238,5 +242,47 @@ py_test(
     tags = ["H20"],
     exec_properties = {
         'gpu': 'H20',
+    },
+)
+
+# PrefillImpl BenchTest
+# Manual developer benchmark; correctness is covered by the test matrix above.
+py_test(
+    name = "bench_prefill_impls",
+    main = "bench/bench_prefill_impls.py",
+    srcs = [
+        "base_attention_test.py",
+        "bench/bench_prefill_impls.py",
+        "bench/core.py",
+        "bench/prefill_benches.py",
+        "bench/scheduler.py",
+        "bench_utils.py",
+    ],
+    args = [
+        "--q-dtype=bf16",
+        "--kv-cache-dtype=bf16,fp8",
+        "--input-len=4096,8192,16384,65536,131072",
+        "--reuse-cache-ratio=0,0.3,0.7,0.9",
+        "--batch-size=1",
+        "--preset=qwen3-8b",
+        "--page-size=64",
+        "--repeat=15",
+    ],
+    env = {"GPU_COUNT": "1"},
+    deps = py_test_deps + [
+        ":filelock",
+        "//rtp_llm/test/utils:test_util",
+    ] + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps + ["//rtp_llm:rtp-kernel"],
+        "//conditions:default": [],
+    }),
+    tags = ["manual", "H20", "cuda12_9"],
+    target_compatible_with = select({
+        "@//:using_cuda12_9_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+    exec_properties = {
+        'gpu': 'H20',
+        'gpu_count': '1',
     },
 )

@@ -75,8 +75,10 @@ def fill_paged_kv_cache(
         device=device,
     )
     for batch_idx, fill_len in enumerate(fill_lengths):
+        # Avoid one device sync per page for long benchmark sequences.
+        page_ids = block_table[batch_idx].tolist()
         for page_offset in range(math.ceil(fill_len / page_size)):
-            page_id = int(block_table[batch_idx, page_offset].item())
+            page_id = page_ids[page_offset]
             start = page_offset * page_size
             end = min(start + page_size, fill_len)
             # [num_tokens, H, D] -> [H, num_tokens, D]
