@@ -1097,7 +1097,8 @@ void BlockTreeCache::reserveInFlightDeviceReleaseCreditsLocked(
     }
 }
 
-void BlockTreeCache::settleInFlightDeviceReleaseCreditsLocked(const std::vector<DeviceReleaseCredit>& release_credits) {
+void BlockTreeCache::settleInFlightDeviceReleaseCreditsLocked(
+    const std::vector<DeviceReleaseCredit>& release_credits) noexcept {
     for (const DeviceReleaseCredit& credit : release_credits) {
         const auto it = in_flight_device_release_credits_.find(credit.pool);
         if (it == in_flight_device_release_credits_.end() || it->second == 0) {
@@ -1212,14 +1213,8 @@ void BlockTreeCache::performEvictionCopy(const BlockTreeEvictor::EvictionPlan&  
                 return;
             }
             credit_settlement_attempted = true;
-            try {
-                std::lock_guard<std::mutex> lock(mutex_);
-                settleInFlightDeviceReleaseCreditsLocked(release_credits);
-            } catch (const std::exception& error) {
-                RTP_LLM_LOG_ERROR("DEVICE release-credit settlement failed: %s", error.what());
-            } catch (...) {
-                RTP_LLM_LOG_ERROR("DEVICE release-credit settlement failed with unknown exception");
-            }
+            std::lock_guard<std::mutex> lock(mutex_);
+            settleInFlightDeviceReleaseCreditsLocked(release_credits);
         };
         ScopeRollback<decltype(credit_settlement_action)> credit_settlement_guard(std::move(credit_settlement_action));
 
@@ -1243,37 +1238,19 @@ void BlockTreeCache::performEvictionCopy(const BlockTreeEvictor::EvictionPlan&  
                 plan_terminalized    = true;
             } catch (const std::exception& error) {
                 RTP_LLM_LOG_ERROR("eviction completion failed; rolling back accepted plan: %s", error.what());
-                try {
-                    evictor_.rollbackPreparedPlan(plan);
-                    plan_terminalized = true;
-                } catch (const std::exception& rollback_error) {
-                    RTP_LLM_LOG_ERROR("accepted eviction rollback failed: %s", rollback_error.what());
-                } catch (...) {
-                    RTP_LLM_LOG_ERROR("accepted eviction rollback failed with unknown exception");
-                }
+                evictor_.rollbackPreparedPlan(plan);
+                plan_terminalized = true;
             } catch (...) {
                 RTP_LLM_LOG_ERROR("eviction completion failed with unknown exception; rolling back "
                                   "accepted plan");
-                try {
-                    evictor_.rollbackPreparedPlan(plan);
-                    plan_terminalized = true;
-                } catch (const std::exception& rollback_error) {
-                    RTP_LLM_LOG_ERROR("accepted eviction rollback failed: %s", rollback_error.what());
-                } catch (...) {
-                    RTP_LLM_LOG_ERROR("accepted eviction rollback failed with unknown exception");
-                }
+                evictor_.rollbackPreparedPlan(plan);
+                plan_terminalized = true;
             }
 
             // Credits are accounting-only. The completed or rolled-back evictor plan above owns all
             // pool reference transitions; settlement must never add another decRef.
             credit_settlement_attempted = true;
-            try {
-                settleInFlightDeviceReleaseCreditsLocked(release_credits);
-            } catch (const std::exception& error) {
-                RTP_LLM_LOG_ERROR("DEVICE release-credit settlement failed: %s", error.what());
-            } catch (...) {
-                RTP_LLM_LOG_ERROR("DEVICE release-credit settlement failed with unknown exception");
-            }
+            settleInFlightDeviceReleaseCreditsLocked(release_credits);
 
             const bool mutated = plan_terminalized && completion_succeeded
                                  && (copy_results.primary_success
@@ -1291,13 +1268,7 @@ void BlockTreeCache::performEvictionCopy(const BlockTreeEvictor::EvictionPlan&  
             if (plan_succeeded) {
                 // A fully completed device->host or host->disk plan changes the target tier's
                 // pressure. This remains under the cache lock, after this plan's credits settle.
-                try {
-                    checkWatermark();
-                } catch (const std::exception& error) {
-                    RTP_LLM_LOG_ERROR("post-eviction watermark check failed: %s", error.what());
-                } catch (...) {
-                    RTP_LLM_LOG_ERROR("post-eviction watermark check failed with unknown exception");
-                }
+                checkWatermark();
             }
         } catch (const std::exception& error) {
             RTP_LLM_LOG_ERROR("eviction terminalization lock/follow-up failed: %s", error.what());

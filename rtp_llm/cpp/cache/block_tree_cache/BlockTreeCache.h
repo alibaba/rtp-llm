@@ -254,7 +254,7 @@ private:
     };
     bool submitEvictionLocked(EvictionMove& eviction_move, std::vector<DeviceReleaseCredit>* release_credits = nullptr);
     void reserveInFlightDeviceReleaseCreditsLocked(const std::vector<DeviceReleaseCredit>& release_credits);
-    void settleInFlightDeviceReleaseCreditsLocked(const std::vector<DeviceReleaseCredit>& release_credits);
+    void settleInFlightDeviceReleaseCreditsLocked(const std::vector<DeviceReleaseCredit>& release_credits) noexcept;
     void performEvictionCopy(const BlockTreeEvictor::EvictionPlan&   plan,
                              const std::vector<DeviceReleaseCredit>& release_credits);
     bool buildEvictionTransferBatch(const BlockTreeEvictor::EvictionPlan& plan,
