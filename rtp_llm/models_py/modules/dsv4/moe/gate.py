@@ -62,6 +62,45 @@ def _use_fused_gate(score_func: str, x_size_0: int) -> bool:
     return True
 
 
+def _select_routes_with_nonfinite_fallback(
+    original_scores: torch.Tensor,
+    ranking_scores: torch.Tensor,
+    topk: int,
+    route_scale: float,
+    normalize: bool,
+    indices: Optional[torch.Tensor] = None,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Select routes without exposing non-finite router outputs downstream."""
+    # ranking_scores contains original_scores plus the optional bias, so every
+    # non-finite original score remains non-finite here as well.
+    row_is_finite = torch.isfinite(ranking_scores).all(dim=-1)
+
+    if indices is None:
+        safe_ranking_scores = torch.nan_to_num(
+            ranking_scores,
+            nan=-float("inf"),
+            posinf=-float("inf"),
+            neginf=-float("inf"),
+        )
+        indices = safe_ranking_scores.topk(topk, dim=-1)[1]
+
+    weights = original_scores.gather(1, indices)
+    if normalize:
+        weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-12)
+    weights = weights * route_scale
+
+    # A bad router row must not reach MegaMoE. PyTorch topk still returns valid
+    # indices after the replacement above; use uniform finite weights for the
+    # whole row so later quantization/dispatch kernels never consume NaN/Inf.
+    fallback_weight = float(route_scale) / float(topk)
+    weights = torch.where(
+        row_is_finite.unsqueeze(-1),
+        weights,
+        fallback_weight,
+    )
+    return weights, indices
+
+
 class Gate(nn.Module):
     """Per-token routing scores + top-k expert selection.
 
@@ -101,7 +140,9 @@ class Gate(nn.Module):
 
         from rtp_llm.utils.model_weight import W
 
-        assert layer_weights is not None, "Gate requires layer_weights (descriptor path)"
+        assert (
+            layer_weights is not None
+        ), "Gate requires layer_weights (descriptor path)"
         self.weight = layer_weights[W.v4_router_w]
         if self.hash:
             assert vocab_size > 0
@@ -192,10 +233,13 @@ class Gate(nn.Module):
             assert input_ids is not None
             indices = self.tid2eid[input_ids].long()  # [N, topk]
         else:
-            indices = scores.topk(self.topk, dim=-1)[1]  # [N, topk]
+            indices = None
 
-        weights = original_scores.gather(1, indices)  # [N, topk]
-        if self.score_func != "softmax":
-            weights = weights / (weights.sum(dim=-1, keepdim=True) + 1e-12)
-        weights = weights * self.route_scale
-        return weights, indices
+        return _select_routes_with_nonfinite_fallback(
+            original_scores,
+            scores,
+            self.topk,
+            float(self.route_scale),
+            self.score_func != "softmax",
+            indices,
+        )

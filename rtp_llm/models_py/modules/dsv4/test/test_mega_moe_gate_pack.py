@@ -54,7 +54,9 @@ def _pack_reference(x: torch.Tensor, weights: torch.Tensor, indices: torch.Tenso
 
 
 def _assert_buf_equal(test: unittest.TestCase, ref, got) -> None:
-    test.assertTrue(torch.equal(ref.x.view(torch.uint8).cpu(), got.x.view(torch.uint8).cpu()))
+    test.assertTrue(
+        torch.equal(ref.x.view(torch.uint8).cpu(), got.x.view(torch.uint8).cpu())
+    )
     test.assertTrue(torch.equal(ref.x_sf.cpu(), got.x_sf.cpu()))
     test.assertTrue(torch.equal(ref.topk_idx.cpu(), got.topk_idx.cpu()))
     diff = (ref.topk_weights - got.topk_weights).abs()
@@ -69,7 +71,9 @@ class MegaMoeGatePackTest(unittest.TestCase):
         torch.manual_seed(11)
         torch.cuda.set_device(0)
 
-    def _case_nonhash(self, tokens: int, dim: int = 512, experts: int = 256, topk: int = 6):
+    def _case_nonhash(
+        self, tokens: int, dim: int = 512, experts: int = 256, topk: int = 6
+    ):
         x = torch.randn(tokens, dim, device="cuda", dtype=torch.bfloat16) * 0.3
         scores_bf16 = torch.randn(tokens, experts, device="cuda", dtype=torch.bfloat16)
         bias = torch.randn(experts, device="cuda", dtype=torch.float32) * 0.1
@@ -143,6 +147,43 @@ class MegaMoeGatePackTest(unittest.TestCase):
 
     def test_hash_large(self):
         self._case_hash(tokens=257)
+
+    def test_nonfinite_router_and_activations_are_contained(self):
+        tokens, dim, experts, topk = 4, 512, 256, 6
+        route_scale = 2.5
+        x = torch.randn(tokens, dim, device="cuda", dtype=torch.bfloat16)
+        scores_bf16 = torch.randn(tokens, experts, device="cuda", dtype=torch.bfloat16)
+        bias = torch.randn(experts, device="cuda", dtype=torch.float32) * 0.1
+        x[0, 0] = float("nan")
+        x[1, 1] = float("inf")
+        x[2, 2] = -float("inf")
+        scores_bf16[0, 3] = float("nan")
+        scores_bf16[1, 7] = float("inf")
+        scores_bf16[2, 11] = -float("inf")
+
+        got = _make_buf(tokens, dim, topk, "cuda")
+        _GATE_PACK.fused_mega_moe_gate_pack_nonhash(
+            x,
+            scores_bf16.contiguous(),
+            bias.contiguous(),
+            got.x,
+            got.x_sf,
+            got.topk_idx,
+            got.topk_weights,
+            route_scale=route_scale,
+            norm_eps=1.0e-12,
+        )
+        torch.cuda.synchronize()
+
+        expected_indices = torch.arange(topk, device="cuda", dtype=torch.int64)
+        expected_weights = torch.full(
+            (topk,), route_scale / topk, device="cuda", dtype=torch.float32
+        )
+        for row in range(3):
+            self.assertTrue(torch.equal(got.topk_idx[row], expected_indices))
+            self.assertTrue(torch.allclose(got.topk_weights[row], expected_weights))
+        self.assertTrue(torch.isfinite(got.x.float()).all().item())
+        self.assertTrue(torch.isfinite(got.topk_weights).all().item())
 
 
 if __name__ == "__main__":
