@@ -1933,10 +1933,15 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
         last_hidden_all = hidden_3d.gather(1, idx_long).squeeze(1);
     }
 
-    // One clone for all probs
+    // One clone for all probs.  dspark skips it: the tail draft forward's
+    // all_probs is already step-local storage (the graph-path wrapper clones
+    // it out of the static graph buffers, the eager path returns a fresh
+    // softmax), so the published per-stream views can alias it directly.
+    // The MTP path keeps the clone — its all_probs comes from the fast_topk
+    // sampler, whose buffers are not guaranteed step-local.
     torch::Tensor draft_probs_all;
     if (draft_all_probs_full.defined()) {
-        draft_probs_all = draft_all_probs_full.clone();
+        draft_probs_all = is_dspark_ ? draft_all_probs_full : draft_all_probs_full.clone();
     }
 
     // Assign per-stream views

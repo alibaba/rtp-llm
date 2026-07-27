@@ -1004,7 +1004,14 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
 
     const auto& lm_head = weights_.lm_head;
 
-    if (lm_head) {
+    // DSpark/DFlash draft: the proposal comes back in-model as
+    // draft_tokens/draft_probs and the executor builds no draft sampler
+    // (vLLM's greedy draft path likewise skips compute_logits), so the
+    // anchor-row logits computed here have no consumer.  Skip the lm_head
+    // GEMM unless all logits were explicitly requested.
+    const bool dspark_draft_skip_lm_head = is_dspark_ && !use_spec_decoding_ && !need_all_logits;
+
+    if (lm_head && !dspark_draft_skip_lm_head) {
         RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(lm_head)");
         printTorchTensorData(lm_output_indexes, "lm_output_indexes");
 

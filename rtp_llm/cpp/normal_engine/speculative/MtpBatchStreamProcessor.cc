@@ -777,8 +777,32 @@ void MtpBatchStreamProcessor::updateDSparkDraftSamplerOutput(const StreamGroups&
         probs_slices.push_back(probs);
     }
 
-    draft_sampler_output.token_ids = torch::stack(token_rows, 0);               // [B, k]
-    draft_token_probs_d_t          = torch::cat(probs_slices, 0).contiguous();  // [B, k, vocab]
+    draft_sampler_output.token_ids = torch::stack(token_rows, 0);  // [B, k]
+
+    // The per-stream [1, k, vocab] views published by the previous step are
+    // consecutive slices of one contiguous [B, k, vocab] buffer in the steady
+    // state; rebuilding that buffer with cat() copies ~4 MiB fp32 per request
+    // per step.  Reuse the underlying buffer when the layout checks out and
+    // fall back to cat when the batch composition changed (streams joined,
+    // left, or arrived with prefill-sourced probs in separate storage).
+    bool consecutive = !probs_slices.empty();
+    for (size_t i = 1; consecutive && i < probs_slices.size(); ++i) {
+        const auto& first = probs_slices[0];
+        const auto& p     = probs_slices[i];
+        consecutive       = p.is_contiguous() && first.is_contiguous() && p.dtype() == first.dtype()
+                      && p.is_alias_of(first)
+                      && static_cast<const uint8_t*>(p.data_ptr())
+                             == static_cast<const uint8_t*>(first.data_ptr())
+                                    + i * first.numel() * first.element_size();
+    }
+    if (consecutive) {
+        const auto&   first = probs_slices[0];
+        const int64_t vocab = first.size(2);
+        draft_token_probs_d_t =
+            first.as_strided({(int64_t)batch_size, propose_step_, vocab}, {propose_step_ * vocab, vocab, 1});
+    } else {
+        draft_token_probs_d_t = torch::cat(probs_slices, 0).contiguous();  // [B, k, vocab]
+    }
     draft_sampler_output.all_probs = draft_token_probs_d_t;
 }
 
