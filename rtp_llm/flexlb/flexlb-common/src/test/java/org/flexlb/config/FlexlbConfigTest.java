@@ -58,6 +58,24 @@ class FlexlbConfigTest {
     }
 
     @Test
+    void batch_strategy_falls_back_to_round_robin_when_unset() {
+        FlexlbConfig config = new FlexlbConfig();
+
+        // Field starts null; the getter must never return null so /batch_schedule works out of the
+        // box. Without the fallback branch this would return null and the assertion would fail.
+        config.setBatchLoadBalanceStrategy(null);
+        assertEquals(LoadBalanceStrategyEnum.ROUND_ROBIN, config.getBatchLoadBalanceStrategy());
+    }
+
+    @Test
+    void batch_strategy_honours_explicit_value() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setBatchLoadBalanceStrategy(LoadBalanceStrategyEnum.RANDOM);
+
+        assertEquals(LoadBalanceStrategyEnum.RANDOM, config.getBatchLoadBalanceStrategy());
+    }
+
+    @Test
     void embedding_engine_ignores_undeployed_roles() {
         FlexlbConfig config = new FlexlbConfig();
         config.setEngineType(EngineType.EMBEDDING);
