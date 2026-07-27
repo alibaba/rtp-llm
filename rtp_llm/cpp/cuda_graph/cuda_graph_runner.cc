@@ -207,6 +207,33 @@ void copyStridedHost(const torch::Tensor& src, torch::Tensor& dst) {
     }
 }
 
+// Zero dst's rows beyond what copyStridedHost refreshed from src. Replay-padded
+// rows would otherwise keep the previous (larger) batch's entries, which for the
+// dspark injection table means writing into a block that may since have been
+// freed and re-allocated to another stream; a zeroed row resolves to reserved
+// block 0, matching the kernel block table's full per-replay clear.
+void zeroStridedHostTail(const torch::Tensor& src, torch::Tensor& dst) {
+    if (!dst.defined() || dst.numel() <= 0) {
+        return;
+    }
+    if (dst.dim() < 2) {
+        const int64_t from = (src.defined() && src.numel() > 0) ? src.numel() : 0;
+        if (from < dst.numel()) {
+            memset(reinterpret_cast<char*>(dst.data_ptr()) + from * dst.element_size(),
+                   0,
+                   (dst.numel() - from) * dst.element_size());
+        }
+        return;
+    }
+    const int64_t from_row   = (src.defined() && src.dim() >= 2) ? src.size(0) : 0;
+    const size_t  row_bytes  = dst.size(1) * dst.element_size();
+    const size_t  dst_stride = dst.stride(0) * dst.element_size();
+    char*         dst_ptr    = reinterpret_cast<char*>(dst.data_ptr());
+    for (int64_t r = from_row; r < dst.size(0); ++r) {
+        memset(dst_ptr + r * dst_stride, 0, row_bytes);
+    }
+}
+
 size_t hybridCacheGroup(const PyModelInputs& src_inputs, const PyModelInputs& dst_inputs, bool require_equal = true) {
     const auto src_group = src_inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.size();
     const auto dst_group = dst_inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.size();
@@ -274,13 +301,12 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
 
     // DSpark dense injection window base: refresh the captured [batch] buffer
     // from the executor's device tensor (D2D). One int32 per request.
-    if (is_dspark_ && !is_target_verify_ && inputs.dspark_ctx_starts.defined()
-        && inputs.dspark_ctx_starts.numel() > 0 && py_model_inputs_.dspark_ctx_starts.defined()) {
-        RTP_LLM_CHECK_WITH_INFO(
-            inputs.dspark_ctx_starts.numel() <= py_model_inputs_.dspark_ctx_starts.numel(),
-            "dspark_ctx_starts numel mismatch: %zu > %zu",
-            inputs.dspark_ctx_starts.numel(),
-            py_model_inputs_.dspark_ctx_starts.numel());
+    if (is_dspark_ && !is_target_verify_ && inputs.dspark_ctx_starts.defined() && inputs.dspark_ctx_starts.numel() > 0
+        && py_model_inputs_.dspark_ctx_starts.defined()) {
+        RTP_LLM_CHECK_WITH_INFO(inputs.dspark_ctx_starts.numel() <= py_model_inputs_.dspark_ctx_starts.numel(),
+                                "dspark_ctx_starts numel mismatch: %zu > %zu",
+                                inputs.dspark_ctx_starts.numel(),
+                                py_model_inputs_.dspark_ctx_starts.numel());
         optimizedCopyAsync(inputs.dspark_ctx_starts,
                            py_model_inputs_.dspark_ctx_starts,
                            inputs.dspark_ctx_starts.numel() * sizeof(int));
@@ -376,6 +402,15 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                 addCudaGraphPrepareFillRegion(
                     fill_params, prefix_lens_tail, state.current_batch_size, prefix_lens_tail.numel(), 0);
             }
+            // DSpark injection window bases: prepareInputData only refreshes the
+            // real rows, so zero the padded tail — a stale start would aim the
+            // captured injection at another stream's blocks (pairs with the
+            // zeroStridedHostTail of the injection block table below).
+            auto& ctx_starts_tail = py_model_inputs_.dspark_ctx_starts;
+            if (is_dspark_ && !is_target_verify_ && ctx_starts_tail.defined()) {
+                addCudaGraphPrepareFillRegion(
+                    fill_params, ctx_starts_tail, state.current_batch_size, ctx_starts_tail.numel(), 0);
+            }
         }
         invokeCudaGraphPrepareFill(fill_params, cuda_graph::graphGetCurrentStream().stream());
     }
@@ -415,6 +450,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         auto& prefix_lens_tail = py_model_inputs_.attention_inputs.prefix_lengths;
         if (prefix_lens_tail.defined()) {
             fillDeviceInt32(prefix_lens_tail, state.current_batch_size, prefix_lens_tail.numel(), 0);
+        }
+        auto& ctx_starts_tail = py_model_inputs_.dspark_ctx_starts;
+        if (is_dspark_ && !is_target_verify_ && ctx_starts_tail.defined()) {
+            fillDeviceInt32(ctx_starts_tail, state.current_batch_size, ctx_starts_tail.numel(), 0);
         }
     }
 #endif
@@ -505,11 +544,14 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                         py_model_inputs_.attention_inputs.kv_cache_kernel_block_id_host);
 
         // DSpark injection reads the LOGICAL block table via a captured H2D from
-        // this static pinned buffer; refresh it here so the H2D sees fresh ids.
-        if (is_dspark_ && !is_target_verify_
-            && py_model_inputs_.attention_inputs.kv_cache_block_id_host.defined()) {
+        // this static pinned buffer; refresh it here so the H2D sees fresh ids,
+        // and zero the padded [real_bs, graph_bs) rows so their injection lands
+        // in reserved block 0 instead of a stale, possibly re-allocated block.
+        if (is_dspark_ && !is_target_verify_ && py_model_inputs_.attention_inputs.kv_cache_block_id_host.defined()) {
             copyStridedHost(inputs.attention_inputs.kv_cache_block_id_host,
                             py_model_inputs_.attention_inputs.kv_cache_block_id_host);
+            zeroStridedHostTail(inputs.attention_inputs.kv_cache_block_id_host,
+                                py_model_inputs_.attention_inputs.kv_cache_block_id_host);
         }
 
         optimizedCopyAsync(inputs.attention_inputs.kv_cache_layer_to_group,
@@ -633,16 +675,14 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
                 0, 0, state.seq_len_sum);
         // DSpark target verify: surface the aux static buffer alongside the
         // hidden states (PyWrappedModel clones it out of the graph buffer).
-        const auto& aux_hold =
-            graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_aux_hidden_states_;
+        const auto& aux_hold = graph_instances_[state.current_real_graph_bs].mem_hold_.decoder_layer_aux_hidden_states_;
         if (aux_hold.defined()) {
             outputs.aux_hidden_states = aux_hold.slice(0, 0, state.seq_len_sum);
         }
         // DSpark draft full-tail capture: surface the batch-major draft
         // outputs, sliced to the real (unpadded) batch (PyWrappedModel clones
         // them out of the graph buffers).
-        const auto& draft_tokens_hold =
-            graph_instances_[state.current_real_graph_bs].mem_hold_.dspark_draft_tokens_;
+        const auto& draft_tokens_hold = graph_instances_[state.current_real_graph_bs].mem_hold_.dspark_draft_tokens_;
         if (draft_tokens_hold.defined()) {
             const int real_bs    = state.current_batch_size;
             outputs.draft_tokens = draft_tokens_hold.slice(0, 0, real_bs);
@@ -734,8 +774,7 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
         // (dspark_ctx_starts set) is capturable; prefill seeding uses a ragged
         // host-indexed feature injection that cannot be captured, so it falls
         // through to eager here.
-        if (!enable_cuda_graph_ || !inputs.dspark_ctx_starts.defined()
-            || inputs.dspark_ctx_starts.numel() == 0) {
+        if (!enable_cuda_graph_ || !inputs.dspark_ctx_starts.defined() || inputs.dspark_ctx_starts.numel() == 0) {
             return false;
         }
         return tryGetRealGraphDecodeBatchSize(inputs, state);
@@ -993,7 +1032,7 @@ void CudaGraphRunner::initCapture() {
 
         PyModelInputs inputs;
         // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
-        inputs.input_ids     = torch::zeros({max_num_token_}, options_cuda_int32_);
+        inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
         // The DSpark draft consumes the target's layer-concatenated aux hiddens
         // [T, n_aux*H] (stage A's fc input), wider than the model hidden H; the
         // model reports the exact width so the static buffer's numel check
@@ -1198,8 +1237,9 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
             // DSpark draft full-tail capture: persist draft_tokens/draft_probs
             // into their static buffers as part of the graph.
             if (graph_instances_[key].mem_hold_.dspark_draft_tokens_.defined()) {
-                RTP_LLM_CHECK_WITH_INFO(outputs.draft_tokens.defined() && outputs.draft_probs.defined(),
-                                        "dspark draft full-tail capture: forward did not emit draft_tokens/draft_probs");
+                RTP_LLM_CHECK_WITH_INFO(
+                    outputs.draft_tokens.defined() && outputs.draft_probs.defined(),
+                    "dspark draft full-tail capture: forward did not emit draft_tokens/draft_probs");
                 graph_instances_[key].mem_hold_.dspark_draft_tokens_.copy_(outputs.draft_tokens);
                 graph_instances_[key].mem_hold_.dspark_draft_probs_.copy_(outputs.draft_probs);
             }
@@ -1244,8 +1284,7 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     inputs.input_ids           = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
     inputs.input_hiddens       = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, token_slice_len);
     if (is_dspark_ && capture_mem_hold_.py_model_inputs_.dspark_ctx_starts.defined()) {
-        inputs.dspark_ctx_starts =
-            capture_mem_hold_.py_model_inputs_.dspark_ctx_starts.slice(0, 0, batch_size);
+        inputs.dspark_ctx_starts = capture_mem_hold_.py_model_inputs_.dspark_ctx_starts.slice(0, 0, batch_size);
     }
     inputs.attention_inputs.input_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, batch_size);
