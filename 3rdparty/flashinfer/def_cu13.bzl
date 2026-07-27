@@ -4,8 +4,8 @@ load("//bazel:arch_select.bzl", "torch_deps")
 preloaded_deps = [
     ":flashinfer_hdrs",
     ":dispatch",
-    "@cutlass//:cutlass",
-    "@cutlass//:cutlass_utils",
+    "@cutlass3.6_cu13//:cutlass",
+    "@cutlass3.6_cu13//:cutlass_utils",
     "@local_config_cuda//cuda:cuda_headers",
     "@local_config_cuda//cuda:cudart",
     "@local_config_cuda//cuda:cublas_headers",

@@ -46,7 +46,7 @@
      max_grid_size = num_blocks_per_sm * num_sm;
      if (batch_size * gdy >= max_grid_size) {
        split_kv = false;
-@@ -284,8 +284,9 @@
+@@ -284,19 +284,13 @@
            num_qo_heads);
    gdy_ = gdy;
    const uint32_t num_threads = k_warps * 32;
@@ -55,6 +55,18 @@
 +  (void)num_threads;
 +  (void)smem_size;
 +  // CUDA 13: avoid cross-TU kernel address access (see WorkEstimation above).
-   int num_blocks_per_sm;
+-  int num_blocks_per_sm;
++  int num_blocks_per_sm = 2;
    int num_sm = 0;
    int dev_id = 0;
+   FLASHINFER_CUDA_CALL(cudaGetDevice(&dev_id));
+   FLASHINFER_CUDA_CALL(cudaDeviceGetAttribute(&num_sm, cudaDevAttrMultiProcessorCount, dev_id));
+-
+-  // FLASHINFER_CUDA_CALL(cudaOccupancyMaxActiveBlocksPerMultiprocessor(&num_blocks_per_sm, kernel,
+-  //                                   num_threads, smem_size));
+-  // fixme: num_blocks_per_sm is 0 derived from cudaOccupancyMaxActiveBlocksPerMultiprocessor at
+-  // times, and we fill smem with q-heads as many as possible, so num_blocks_per_sm should be 1
+-  num_blocks_per_sm = 1;
+-
+   max_grid_size = num_blocks_per_sm * num_sm;
+   if (batch_size * gdy >= max_grid_size) {

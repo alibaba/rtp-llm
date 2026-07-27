@@ -72,6 +72,7 @@ build:cuda12 --action_env TF_CUDA_VERSION="12.4"
 build:cuda12 --host_action_env TF_CUDA_VERSION="12.4"
 build:cuda12 --define=using_cuda12=true
 build:cuda12 --define=using_cuda12_9_x86=false
+build:cuda12 --define=using_cuda13_x86=false
 build:cuda12 --define=using_cuda12_x86=true
 build:cuda12 --define=using_cuda12_arm=false
 build:cuda12 --copt="-DUSING_CUDA12=1"

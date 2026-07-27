@@ -19,11 +19,11 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
 from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.executors.cutedsl_fp4_executor import (
     CutedslFp4Executor,
 )
+from rtp_llm.models_py.kernels.cuda.fp4_kernel import scaled_fp4_grouped_quant
 from rtp_llm.utils.model_weight import W
 
 from flashinfer import fp4_quantize
 from torch.nn import functional as F
-from flashinfer import scaled_fp4_grouped_quantize
 
 
 class CutedslFp4ExecutorTestBase:
@@ -236,18 +236,18 @@ class CutedslFp4ExecutorTestBase:
         
         w1_global_scale = self.FLOAT8_E4M3_MAX * self.FLOAT4_E2M1_MAX / w1_amax
         w2_global_scale = self.FLOAT8_E4M3_MAX * self.FLOAT4_E2M1_MAX / w2_amax
-        w1_fp4, w1_blockscale = scaled_fp4_grouped_quantize(
+        w1_fp4, w1_blockscale = scaled_fp4_grouped_quant(
             w1_bf16,
+            w1_global_scale,
             torch.ones(num_local_experts, dtype=torch.int32, device=w1_bf16.device)
             * 2
             * intermediate_size,
-            w1_global_scale,
         )
-        w2_fp4, w2_blockscale = scaled_fp4_grouped_quantize(
+        w2_fp4, w2_blockscale = scaled_fp4_grouped_quant(
             w2_bf16,
+            w2_global_scale,
             torch.ones(num_local_experts, dtype=torch.int32, device=w2_bf16.device)
             * self.K,
-            w2_global_scale,
         )
         
         w1_quantized = w1_fp4.permute(2, 0, 1)

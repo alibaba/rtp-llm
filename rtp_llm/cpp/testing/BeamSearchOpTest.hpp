@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/models_py/bindings/core/ops/BeamSearchOp.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include <limits>
 #include <torch/torch.h>
 
 using namespace rtp_llm;
@@ -127,6 +128,32 @@ public:
 
         // assertTensorClose(result.token_ids, ref.token_ids);
         // assertTensorClose(result.beam_indices, ref.beam_indices);
+    }
+
+    void paddedVocabTest() {
+        constexpr int batch_size    = 1;
+        constexpr int beam_width    = 2;
+        constexpr int vocab_size    = 4096;
+        constexpr int max_seq_len   = 8;
+        auto logits = torch::full(
+            {batch_size, beam_width, vocab_size}, -std::numeric_limits<float>::infinity(), float_options);
+        logits.index_put_({0, 0, 17}, 10.0f);
+        logits.index_put_({0, 1, 23}, 9.0f);
+
+        TestBeamSearchInput input({logits,
+                                   torch::zeros({batch_size, beam_width, max_seq_len}, int_options),
+                                   torch::ones({batch_size, beam_width}, int_options),
+                                   torch::ones({batch_size, beam_width}, int_options),
+                                   torch::tensor({0.0f, -0.25f}, float_options).reshape({batch_size, beam_width}),
+                                   beam_width});
+
+        auto result = opRun(input);
+        auto ref    = torchRef(input);
+        assertTensorClose(result.token_ids, ref.token_ids);
+        assertTensorClose(result.beam_indices, ref.beam_indices);
+        assertTensorClose(result.cum_log_probs, ref.cum_log_probs);
+        assertTensorClose(result.sequence_lengths, ref.sequence_lengths);
+        assertTensorClose(result.input_lengths, ref.input_lengths);
     }
 
     void runSimpleTests() {

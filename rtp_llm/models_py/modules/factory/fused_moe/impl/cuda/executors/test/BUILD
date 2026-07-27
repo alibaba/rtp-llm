@@ -3,6 +3,7 @@ py_library(
     srcs = ["fused_moe_executor_test_util.py"],
     deps = [
         "//rtp_llm/models_py:modules",
+        "//rtp_llm/models_py:kernels",
         "//rtp_llm:config",
     ]
 )

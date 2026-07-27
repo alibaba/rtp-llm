@@ -144,7 +144,10 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
         extra_deps = []
         data = data + ["//rtp_llm/test/smoke:smoke_framework_srcs"]
 
-    # CUDA 12 and CUDA 13 use separate SM100 ARM pools selected by the Bazel config.
+    # internal_source/.cicd_bazelrc owns the SM100 ARM pool contract through
+    # --remote_default_exec_properties: cuda12_9_arm -> SM100_ARM and
+    # cuda13_arm -> SM100_ARM_CU13. If that config is no longer imported,
+    # restore the explicit gpu property here as the rollback path.
     exec_properties = {
         'gpu_count': str(gpu_count),
     }

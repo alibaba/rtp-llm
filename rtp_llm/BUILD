@@ -271,8 +271,8 @@ py_library(
         "@//:using_cuda": deep,
         "//conditions:default": []
     }) + select({
-        "@//:using_cuda13_x86": ["flash-mla", "tilelang"],
-        "@//:using_cuda13_arm": ["flash-mla", "tilelang"],
+        "@//:using_cuda13_x86": flashinfer + ["flash-mla", "tilelang"],
+        "@//:using_cuda13_arm": flashinfer + ["flash-mla", "tilelang"],
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache + ["flash-mla", "fast-hadamard-transform"],
         "@//:cuda_pre_12_9": flashinfer,
