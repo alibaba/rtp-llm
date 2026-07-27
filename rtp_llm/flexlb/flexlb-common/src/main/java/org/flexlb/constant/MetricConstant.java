@@ -105,6 +105,13 @@ public class MetricConstant {
     public static final String INFLIGHT_TTL_EXPIRED_QPS = "app.flexlb.inflight.ttl.expired.qps";
 
     /**
+     * FlexLB dispatch-time expired count — number of batch items dropped before
+     * dispatch because their absolute deadline already passed.
+     * Reported as QPS, tagged by role and engineIpPort.
+     */
+    public static final String DISPATCH_EXPIRED_QPS = "app.flexlb.dispatch.expired.qps";
+
+    /**
      * Batch predicted execution time (formula estimate) in milliseconds
      */
     public static final String BATCH_PREDICTED_TIME_MS = "app.flexlb.batch.predicted.time.ms";

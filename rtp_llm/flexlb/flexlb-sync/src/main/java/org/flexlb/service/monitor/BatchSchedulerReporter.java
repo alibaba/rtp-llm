@@ -31,6 +31,7 @@ import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_DISPATC
 import static org.flexlb.constant.MetricConstant.INFLIGHT_BATCH_COUNT;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_MAX_AGE_MS;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_REQUEST_COUNT;
+import static org.flexlb.constant.MetricConstant.DISPATCH_EXPIRED_QPS;
 import static org.flexlb.constant.MetricConstant.INFLIGHT_TTL_EXPIRED_QPS;
 import static org.flexlb.constant.MetricConstant.SCHEDULER_INFLIGHT_SIZE;
 
@@ -93,6 +94,10 @@ public class BatchSchedulerReporter {
         // Inflight TTL expired — count of inflight requests cleaned up by the TTL task, QPS tagged by role
         monitor.register(INFLIGHT_TTL_EXPIRED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
+        // Dispatch-time expired — count of items dropped before dispatch because their
+        // absolute deadline already passed, QPS tagged by role and engineIpPort
+        monitor.register(DISPATCH_EXPIRED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+
         // Prediction accuracy — predicted vs actual engine execution time (timer for distribution)
         monitor.register(BATCH_PREDICTED_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         monitor.register(BATCH_ACTUAL_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
@@ -107,7 +112,7 @@ public class BatchSchedulerReporter {
         // ACK-to-response time — from engine ACK to schedule response sent to client (timer for distribution)
         monitor.register(ACK_TO_RESPONSE_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
-        log.info("BatchSchedulerReporter initialized (19 metrics)");
+        log.info("BatchSchedulerReporter initialized (20 metrics)");
     }
 
     // ==================== Queue metrics ====================
@@ -252,6 +257,21 @@ public class BatchSchedulerReporter {
     public void reportInflightTtlExpired(String role, int count) {
         FlexMetricTags tags = FlexMetricTags.of("role", role);
         monitor.report(INFLIGHT_TTL_EXPIRED_QPS, tags, count);
+    }
+
+    /**
+     * Report the count of batch items dropped before dispatch because their absolute
+     * deadline already passed, via {@code app.flexlb.dispatch.expired.qps}.
+     *
+     * @param role         the endpoint role tag (e.g. PREFILL)
+     * @param engineIpPort the target engine ip:port
+     * @param count        number of expired items dropped in this dispatch
+     */
+    public void reportDispatchExpired(String role, String engineIpPort, int count) {
+        FlexMetricTags tags = FlexMetricTags.of(
+                "role", role,
+                "engineIpPort", engineIpPort);
+        monitor.report(DISPATCH_EXPIRED_QPS, tags, count);
     }
 
     // ==================== Decode inflight metrics ====================

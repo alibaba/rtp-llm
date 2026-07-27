@@ -16,8 +16,10 @@ import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
+import java.lang.reflect.Method;
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
@@ -32,6 +34,7 @@ import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.timeout;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -55,7 +58,7 @@ class DefaultBatchDispatcherTest {
         config.setFlexlbBatchEnqueueDeadlineMs(5000);
         when(configService.loadBalanceConfig()).thenReturn(config);
 
-        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, reporter);
         callback = new TestCallback();
     }
 
@@ -127,7 +130,9 @@ class DefaultBatchDispatcherTest {
 
         assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS));
         assertEquals(1, callback.failureCount.get());
-        verify(prefillEp).releaseBatch(1L);
+        // onTimeout fires before releaseBatch on the dispatch thread; use a
+        // timed verify to avoid racing with the executor.
+        verify(prefillEp, timeout(5000)).releaseBatch(1L);
         verify(grpcClient, never()).batchEnqueueAsync(
                 anyString(), anyInt(), any(), anyLong());
     }
@@ -362,6 +367,255 @@ class DefaultBatchDispatcherTest {
                 "timeout_ms should be preserved when absoluteDeadlineMs is 0");
     }
 
+    @Test
+    void buildInput_rewrites_timeout_only_for_items_with_absolute_deadline() throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        long absoluteDeadlineMs = System.currentTimeMillis() + 2000;
+        // Item A carries an absolute deadline; its timeout_ms must be rewritten.
+        BatchItem itemA = createBatchItem(1L, 500, 200, prefillEp, absoluteDeadlineMs, 100_000);
+        // Item B has no deadline (legacy client); its timeout_ms must survive.
+        BatchItem itemB = createBatchItem(2L, 300, 100, prefillEp, 0L, 50_000);
+        AtomicReference<EngineRpcService.EnqueueBatchRequestPB> captured = new AtomicReference<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(),
+                any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+                .thenAnswer(inv -> {
+                    captured.set(inv.getArgument(2));
+                    return CompletableFuture.completedFuture(ackResponse(1L, List.of(1L, 2L)));
+                });
+
+        dispatcher.dispatch(List.of(itemA, itemB), prefillEp, 1L, 100, "test", callback);
+
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
+        EngineRpcService.EnqueueBatchRequestPB sent = captured.get();
+        assertNotNull(sent);
+        Integer timeoutA = null;
+        Integer timeoutB = null;
+        for (EngineRpcService.EnqueueBatchExternalInputPB request : sent.getDpSlots(0).getRequestsList()) {
+            EngineRpcService.GenerateInputPB input = request.getInput();
+            if (input.getRequestId() == 1L) {
+                timeoutA = input.getGenerateConfig().getTimeoutMs();
+            } else if (input.getRequestId() == 2L) {
+                timeoutB = input.getGenerateConfig().getTimeoutMs();
+            }
+        }
+        assertNotNull(timeoutA);
+        assertNotNull(timeoutB);
+        assertTrue(timeoutA > 0 && timeoutA <= 2000,
+                "item A timeout_ms should be rewritten to remaining budget, got " + timeoutA);
+        assertEquals(50_000, timeoutB.intValue(),
+                "item B timeout_ms should be preserved when absoluteDeadlineMs is 0");
+    }
+
+    @Test
+    void dispatch_drops_expired_items_and_sends_survivors() throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        long now = System.currentTimeMillis();
+        // Item A already expired; must be dropped before dispatch with onTimeout.
+        BatchItem itemA = createBatchItem(1L, 500, 200, prefillEp, now - 1000, 100_000);
+        // Item B still has budget; must be dispatched with rewritten timeout_ms.
+        BatchItem itemB = createBatchItem(2L, 300, 100, prefillEp, now + 2000, 100_000);
+        AtomicReference<EngineRpcService.EnqueueBatchRequestPB> captured = new AtomicReference<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(),
+                any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+                .thenAnswer(inv -> {
+                    captured.set(inv.getArgument(2));
+                    return CompletableFuture.completedFuture(ackResponse(1L, List.of(2L)));
+                });
+
+        dispatcher.dispatch(List.of(itemA, itemB), prefillEp, 1L, 100, "test", callback);
+
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
+        EngineRpcService.EnqueueBatchRequestPB sent = captured.get();
+        assertNotNull(sent);
+        long sentCount = sent.getDpSlotsList().stream()
+                .mapToLong(slot -> slot.getRequestsCount())
+                .sum();
+        assertEquals(1, sentCount, "only the surviving item should be sent");
+        EngineRpcService.GenerateInputPB input = sent.getDpSlots(0).getRequests(0).getInput();
+        assertEquals(2L, input.getRequestId());
+        int timeoutMs = input.getGenerateConfig().getTimeoutMs();
+        assertTrue(timeoutMs > 0 && timeoutMs <= 2000,
+                "survivor timeout_ms should be within remaining budget, got " + timeoutMs);
+        assertEquals(1, callback.timeoutCount.get(), "expired item should get onTimeout");
+        assertTrue(callback.timeoutRequestIds.contains(1L));
+        verify(reporter).reportDispatchExpired("PREFILL", "127.0.0.1:8080", 1);
+    }
+
+    @Test
+    void dispatch_skips_grpc_when_all_items_expired() throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        long now = System.currentTimeMillis();
+        BatchItem itemA = createBatchItem(1L, 500, 200, prefillEp, now - 1000, 100_000);
+        BatchItem itemB = createBatchItem(2L, 300, 100, prefillEp, now - 500, 100_000);
+
+        dispatcher.dispatch(List.of(itemA, itemB), prefillEp, 7L, 100, "test", callback);
+
+        verify(prefillEp, timeout(5000)).releaseBatch(7L);
+        assertEquals(2, callback.timeoutCount.get(), "every expired item should get onTimeout");
+        assertTrue(callback.timeoutRequestIds.contains(1L));
+        assertTrue(callback.timeoutRequestIds.contains(2L));
+        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
+        verify(reporter).reportDispatchExpired("PREFILL", "127.0.0.1:8080", 2);
+    }
+
+    @Test
+    void buildInput_floors_timeout_ms_to_1_when_deadline_already_passed() throws Exception {
+        // Covers the race-leak path: an item whose deadline passes between the
+        // per-item expiry check and buildInput must produce timeout_ms >= 1
+        // (0 would be treated as "unset" downstream and fall back to defaults).
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        BatchItem item = createBatchItem(1L, 500, 200, prefillEp,
+                System.currentTimeMillis() - 1000, 100_000);
+        Method buildInput = DefaultBatchDispatcher.class.getDeclaredMethod(
+                "buildInput", long.class, int.class, BatchItem.class);
+        buildInput.setAccessible(true);
+
+        EngineRpcService.GenerateInputPB input =
+                (EngineRpcService.GenerateInputPB) buildInput.invoke(dispatcher, 1L, 1, item);
+
+        int timeoutMs = input.getGenerateConfig().getTimeoutMs();
+        assertTrue(timeoutMs >= 1, "timeout_ms must be floored to >= 1, got " + timeoutMs);
+        assertEquals(1, timeoutMs, "expired remaining budget should floor to exactly 1ms");
+    }
+
+    @Test
+    void dispatch_drops_expired_items_without_reporter() throws Exception {
+        // reporter=null must be safe: expired items still get onTimeout, no gRPC, no exception.
+        DefaultBatchDispatcher noReporterDispatcher =
+                new DefaultBatchDispatcher(grpcClient, configService, null, null);
+        try {
+            PrefillEndpoint prefillEp = createPrefillEndpoint();
+            BatchItem item = createBatchItem(
+                    1L, 500, 200, prefillEp, System.currentTimeMillis() - 1000, 100_000);
+
+            noReporterDispatcher.dispatch(List.of(item), prefillEp, 3L, 100, "test", callback);
+
+            assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS));
+            assertEquals(1, callback.timeoutCount.get());
+            assertTrue(callback.timeoutRequestIds.contains(1L));
+            verify(prefillEp, timeout(5000)).releaseBatch(3L);
+            verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
+        } finally {
+            noReporterDispatcher.shutdown();
+        }
+    }
+
+    @Test
+    void dispatch_reports_fallback_when_deadline_expires_after_per_item_check() throws Exception {
+        // Deterministically reproduce the race: the item is still valid at the
+        // per-item expiry check, but its deadline passes before the EnqueueBatch
+        // deadline computation. Uses an injected time source instead of sleeps.
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        long deadline = 1_000_000L;
+        BatchItem item = createBatchItem(1L, 500, 200, prefillEp, deadline, 100_000);
+        AtomicInteger nowCalls = new AtomicInteger();
+        DefaultBatchDispatcher racingDispatcher =
+                new DefaultBatchDispatcher(grpcClient, configService, null, reporter) {
+                    @Override
+                    long nowMs() {
+                        // First call (per-item check): 1ms before the deadline;
+                        // subsequent calls (deadline computation + log): past it.
+                        return nowCalls.getAndIncrement() == 0 ? deadline - 1 : deadline + 1;
+                    }
+                };
+        try {
+            racingDispatcher.dispatch(List.of(item), prefillEp, 5L, 100, "test", callback);
+
+            assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS));
+            assertEquals(1, callback.timeoutCount.get(), "valid item should go through onTimeout");
+            assertTrue(callback.timeoutRequestIds.contains(1L));
+            verify(prefillEp, timeout(5000)).releaseBatch(5L);
+            verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
+            verify(reporter).reportDispatchExpired("PREFILL", "127.0.0.1:8080", 1);
+        } finally {
+            racingDispatcher.shutdown();
+        }
+    }
+
+    @Test
+    void dispatch_drops_only_deadline_items_and_preserves_legacy_items() throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        // Item A carries an already-passed deadline; must be dropped.
+        BatchItem itemA = createBatchItem(1L, 500, 200, prefillEp,
+                System.currentTimeMillis() - 1000, 100_000);
+        // Item B is a legacy client without deadline; must survive with its original timeout_ms.
+        BatchItem itemB = createBatchItem(2L, 300, 100, prefillEp, 0L, 50_000);
+        AtomicReference<EngineRpcService.EnqueueBatchRequestPB> captured = new AtomicReference<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(),
+                any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+                .thenAnswer(inv -> {
+                    captured.set(inv.getArgument(2));
+                    return CompletableFuture.completedFuture(ackResponse(1L, List.of(2L)));
+                });
+
+        dispatcher.dispatch(List.of(itemA, itemB), prefillEp, 1L, 100, "test", callback);
+
+        assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS));
+        EngineRpcService.EnqueueBatchRequestPB sent = captured.get();
+        assertNotNull(sent);
+        long sentCount = sent.getDpSlotsList().stream()
+                .mapToLong(slot -> slot.getRequestsCount())
+                .sum();
+        assertEquals(1, sentCount, "only the legacy item should be sent");
+        EngineRpcService.GenerateInputPB input = sent.getDpSlots(0).getRequests(0).getInput();
+        assertEquals(2L, input.getRequestId());
+        assertEquals(50_000, input.getGenerateConfig().getTimeoutMs(),
+                "legacy item timeout_ms must be preserved");
+        assertEquals(1, callback.timeoutCount.get());
+        assertTrue(callback.timeoutRequestIds.contains(1L));
+        verify(reporter).reportDispatchExpired("PREFILL", "127.0.0.1:8080", 1);
+    }
+
+    @Test
+    void dispatch_survives_onTimeout_exception_and_sends_valid_items() throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        long now = System.currentTimeMillis();
+        BatchItem itemA = createBatchItem(1L, 500, 200, prefillEp, now - 1000, 100_000);
+        BatchItem itemB = createBatchItem(2L, 300, 100, prefillEp, now + 2000, 100_000);
+        ThrowingOnTimeoutCallback throwingCallback = new ThrowingOnTimeoutCallback(1L);
+        AtomicReference<EngineRpcService.EnqueueBatchRequestPB> captured = new AtomicReference<>();
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(),
+                any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
+                .thenAnswer(inv -> {
+                    captured.set(inv.getArgument(2));
+                    return CompletableFuture.completedFuture(ackResponse(1L, List.of(2L)));
+                });
+
+        dispatcher.dispatch(List.of(itemA, itemB), prefillEp, 1L, 100, "test", throwingCallback);
+
+        assertTrue(throwingCallback.successLatch.await(5, TimeUnit.SECONDS),
+                "valid item must still be dispatched despite the onTimeout exception");
+        assertEquals(1, throwingCallback.successCount.get());
+        EngineRpcService.EnqueueBatchRequestPB sent = captured.get();
+        assertNotNull(sent);
+        assertEquals(2L, sent.getDpSlots(0).getRequests(0).getInput().getRequestId());
+        // The throwing item is routed to onFailure as best-effort fallback.
+        assertEquals(1, throwingCallback.failureCount.get());
+        // Batch proceeds with the survivor, so it must NOT be released here.
+        verify(prefillEp, never()).releaseBatch(anyLong());
+    }
+
+    @Test
+    void dispatch_survives_onTimeout_exception_when_all_items_expired() throws Exception {
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        long now = System.currentTimeMillis();
+        BatchItem itemA = createBatchItem(1L, 500, 200, prefillEp, now - 1000, 100_000);
+        BatchItem itemB = createBatchItem(2L, 300, 100, prefillEp, now - 500, 100_000);
+        ThrowingOnTimeoutCallback throwingCallback = new ThrowingOnTimeoutCallback(1L);
+
+        dispatcher.dispatch(List.of(itemA, itemB), prefillEp, 9L, 100, "test", throwingCallback);
+
+        // No batch leak: the batch is still released after the callback exception.
+        verify(prefillEp, timeout(5000)).releaseBatch(9L);
+        assertEquals(1, throwingCallback.timeoutCount.get(),
+                "second expired item must still receive onTimeout");
+        assertTrue(throwingCallback.timeoutRequestIds.contains(2L));
+        // The throwing item is routed to onFailure; the second one delegates normally.
+        assertEquals(2, throwingCallback.failureCount.get());
+        verify(grpcClient, never()).batchEnqueueAsync(anyString(), anyInt(), any(), anyLong());
+        verify(reporter).reportDispatchExpired("PREFILL", "127.0.0.1:8080", 2);
+    }
+
     // ---- helpers ----
 
     private PrefillEndpoint createPrefillEndpoint() {
@@ -369,6 +623,7 @@ class DefaultBatchDispatcherTest {
         when(endpoint.getIp()).thenReturn("127.0.0.1");
         when(endpoint.getHttpPort()).thenReturn(8080);
         when(endpoint.getGrpcPort()).thenReturn(8090);
+        when(endpoint.ipPort()).thenReturn("127.0.0.1:8080");
         return endpoint;
     }
 
@@ -436,6 +691,8 @@ class DefaultBatchDispatcherTest {
     private static class TestCallback implements DispatchCallback {
         final AtomicInteger successCount = new AtomicInteger(0);
         final AtomicInteger failureCount = new AtomicInteger(0);
+        final AtomicInteger timeoutCount = new AtomicInteger(0);
+        final List<Long> timeoutRequestIds = new CopyOnWriteArrayList<>();
         final CountDownLatch successLatch = new CountDownLatch(1);
         final CountDownLatch failureLatch = new CountDownLatch(1);
 
@@ -449,6 +706,34 @@ class DefaultBatchDispatcherTest {
         public void onFailure(BatchItem item, Throwable error) {
             failureCount.incrementAndGet();
             failureLatch.countDown();
+        }
+
+        @Override
+        public void onTimeout(BatchItem item, Throwable error) {
+            timeoutCount.incrementAndGet();
+            timeoutRequestIds.add(item.requestId());
+            // Keep the default delegation semantics so existing failure assertions hold.
+            onFailure(item, error);
+        }
+    }
+
+    /**
+     * Callback whose onTimeout throws for a specific requestId, to verify the
+     * dispatcher's exception guard does not break the remaining items.
+     */
+    private static class ThrowingOnTimeoutCallback extends TestCallback {
+        final long throwForRequestId;
+
+        ThrowingOnTimeoutCallback(long throwForRequestId) {
+            this.throwForRequestId = throwForRequestId;
+        }
+
+        @Override
+        public void onTimeout(BatchItem item, Throwable error) {
+            if (item.requestId() == throwForRequestId) {
+                throw new RuntimeException("boom from onTimeout");
+            }
+            super.onTimeout(item, error);
         }
     }
 }

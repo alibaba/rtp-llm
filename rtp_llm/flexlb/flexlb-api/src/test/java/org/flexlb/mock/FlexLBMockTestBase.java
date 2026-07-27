@@ -150,11 +150,11 @@ public abstract class FlexLBMockTestBase {
                 nameResolver, grpcExecutor, eventLoopGroup,
                 engineLocalView, globalCacheIndex, grpcReporter);
 
-        // 4. Create real dispatcher
-        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
-
-        // 5. Mock reporter (metrics no-op)
+        // 4. Mock reporter (metrics no-op)
         reporter = mock(BatchSchedulerReporter.class);
+
+        // 5. Create real dispatcher
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null, reporter);
 
         // 6. Create real EndpointRegistry (scheduler=null for now, replaced below)
         endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);

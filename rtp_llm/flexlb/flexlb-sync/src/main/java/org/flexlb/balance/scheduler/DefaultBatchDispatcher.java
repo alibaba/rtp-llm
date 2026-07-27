@@ -15,6 +15,7 @@ import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.RoleTypeProtoConverter;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
@@ -48,12 +49,15 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
     private final ConfigService configService;
     private final ThreadPoolExecutor dispatchExecutor;
     private final MeterRegistry meterRegistry;
+    private final BatchSchedulerReporter reporter;
 
     public DefaultBatchDispatcher(EngineGrpcClient grpcClient, ConfigService configService,
-                                  @Autowired(required = false) MeterRegistry meterRegistry) {
+                                  @Autowired(required = false) MeterRegistry meterRegistry,
+                                  @Autowired(required = false) BatchSchedulerReporter reporter) {
         this.grpcClient = grpcClient;
         this.configService = configService;
         this.meterRegistry = meterRegistry;
+        this.reporter = reporter;
         int poolSize = configService.loadBalanceConfig().getFlexlbBatchDispatchPoolSize();
         int queueSize = configService.loadBalanceConfig().getFlexlbBatchDispatchQueueSize();
         Logger.info("FlexLB dispatch executor config: poolSize={}, queueSize={}, threadFactory=flexlb-dispatch-executor, rejectionPolicy=AbortPolicy",
@@ -137,6 +141,13 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         } catch (Throwable t) {
             // Safety net: ensure callbacks are always invoked even for unexpected errors
             Logger.error("Unexpected error in doDispatch batchId={}", batchId, t);
+            // Release the batch first to avoid leaking inflight state on the
+            // unexpected-error path (releaseBatch is idempotent, safe to call).
+            try {
+                prefillEp.releaseBatch(batchId);
+            } catch (Throwable ignored) {
+                // best-effort
+            }
             for (BatchItem item : items) {
                 try {
                     callback.onFailure(item, t);
@@ -167,24 +178,70 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
             return;
         }
 
+        // Per-item expiry check: drop items whose absolute deadline already passed
+        // so they never reach the engine (downstream would otherwise treat a
+        // clamped timeout as "unset" and fall back to the default timeout).
+        long now = nowMs();
+        List<BatchItem> valid = new ArrayList<>(active.size());
+        List<BatchItem> expired = new ArrayList<>();
+        for (BatchItem item : active) {
+            if (item.absoluteDeadlineMs() > 0 && now >= item.absoluteDeadlineMs()) {
+                expired.add(item);
+            } else {
+                valid.add(item);
+            }
+        }
+        for (BatchItem item : expired) {
+            long overdueMs = now - item.absoluteDeadlineMs();
+            Logger.warn("Dropping expired item before dispatch: batch_id={}, request_id={}, overdue_ms={}",
+                    batchId, item.requestId(), overdueMs);
+            try {
+                callback.onTimeout(item, new RuntimeException(
+                        "Item absolute deadline exceeded before dispatch, requestId=" + item.requestId()
+                                + ", overdueMs=" + overdueMs));
+            } catch (Throwable t) {
+                // A misbehaving callback must not break the remaining items.
+                Logger.error("onTimeout callback failed for request_id={}, batch_id={}",
+                        item.requestId(), batchId, t);
+                try {
+                    callback.onFailure(item, t);
+                } catch (Throwable ignored) {
+                    // best-effort
+                }
+            }
+        }
+        if (!expired.isEmpty()) {
+            // Counts items already expired at the per-item check above. This set is
+            // disjoint from the batch-level fallback report below (which only covers
+            // items expiring after this check), so no item is ever counted twice.
+            reportDispatchExpired(prefillEp, expired.size());
+        }
+        if (valid.isEmpty()) {
+            // onTimeout may have already repacked/emptied this batch; releaseBatch is idempotent.
+            Logger.warn("All items expired before dispatch, batch_id={}, expired_count={}",
+                    batchId, expired.size());
+            prefillEp.releaseBatch(batchId);
+            return;
+        }
+
         // 1. Build gRPC request
         EngineRpcService.EnqueueBatchRequestPB request;
         try {
-            request = buildBatchRequest(batchId, active);
+            request = buildBatchRequest(batchId, valid);
         } catch (Exception e) {
             Logger.error("Failed to build FlexLB batch request batchId: {}", batchId, e);
-            failItems(active, prefillEp, batchId, "Batch request build failed: " + e.getMessage(), callback);
+            failItems(valid, prefillEp, batchId, "Batch request build failed: " + e.getMessage(), callback);
             return;
         }
 
         // 2. Log dispatch
-        logDispatch(batchId, active, prefillEp, predMs, reason);
+        logDispatch(batchId, valid, prefillEp, predMs, reason);
 
         // 3. Compute EnqueueBatch deadline from absolute_deadline_ms if set.
         // Uses the minimum absolute deadline across all items in the batch.
         long configDeadlineMs = configService.loadBalanceConfig().getFlexlbBatchEnqueueDeadlineMs();
         long minAbsoluteDeadline = Long.MAX_VALUE;
-        for (BatchItem item : active) {
+        for (BatchItem item : valid) {
             if (item.absoluteDeadlineMs() > 0) {
                 minAbsoluteDeadline = Math.min(minAbsoluteDeadline, item.absoluteDeadlineMs());
             }
@@ -192,16 +249,22 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
 
         long deadlineMs;
         if (minAbsoluteDeadline != Long.MAX_VALUE) {
-            long remaining = minAbsoluteDeadline - System.currentTimeMillis();
+            long remaining = minAbsoluteDeadline - nowMs();
             if (remaining <= 0) {
-                // Absolute deadline already passed — don't dispatch, mark as timed out
+                // Absolute deadline already passed — don't dispatch, mark as timed out.
+                // Race fallback: only reachable for items that were still valid at the
+                // per-item expiry check but crossed their deadline before this point.
                 Logger.warn("EnqueueBatch skipped: absolute deadline already passed, "
                         + "batchId={}, minAbsoluteDeadline={}, now={}",
-                        batchId, minAbsoluteDeadline, System.currentTimeMillis());
+                        batchId, minAbsoluteDeadline, nowMs());
+                // Counts only items that expired between the per-item check and this
+                // deadline computation — disjoint from the per-item report above,
+                // so no item is ever counted twice.
+                reportDispatchExpired(prefillEp, valid.size());
                 prefillEp.releaseBatch(batchId);
                 RuntimeException timeoutError = new RuntimeException(
                         "EnqueueBatch deadline already exceeded (absolute deadline passed)");
-                for (BatchItem item : active) {
+                for (BatchItem item : valid) {
                     callback.onTimeout(item, timeoutError);
                 }
                 return;
@@ -222,25 +285,36 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
                                     batchId, prefillEp.getIp(), prefillEp.getGrpcPort(), cause.getMessage());
                             if (Status.fromThrowable(cause).getCode() == Status.Code.DEADLINE_EXCEEDED) {
                                 prefillEp.releaseBatch(batchId);
-                                for (BatchItem item : active) {
+                                for (BatchItem item : valid) {
                                     callback.onTimeout(item, cause);
                                 }
                             } else {
-                                failItems(active, prefillEp, batchId,
+                                failItems(valid, prefillEp, batchId,
                                         "gRPC dispatch failed: " + cause.getMessage(), callback);
                             }
                         } else if (response == null) {
-                            failItems(active, prefillEp, batchId, "EnqueueBatch returned null response", callback);
+                            failItems(valid, prefillEp, batchId, "EnqueueBatch returned null response", callback);
                         } else {
-                            handleResponse(batchId, active, response, callback);
+                            handleResponse(batchId, valid, response, callback);
                         }
                     } catch (Throwable t) {
                         // Safety net: ensure callbacks are always invoked even for unexpected errors
                         Logger.error("Unexpected error in EnqueueBatch callback batchId={}", batchId, t);
-                        failItems(active, prefillEp, batchId,
+                        failItems(valid, prefillEp, batchId,
                                 "Unexpected callback error: " + t.getMessage(), callback);
                     }
                 }, dispatchExecutor);
+    }
+
+    private void reportDispatchExpired(PrefillEndpoint prefillEp, int count) {
+        if (reporter != null) {
+            reporter.reportDispatchExpired(RoleType.PREFILL.name(), prefillEp.ipPort(), count);
+        }
+    }
+
+    /** Overridable time source for the expiry checks (package-private for deterministic tests). */
+    long nowMs() {
+        return System.currentTimeMillis();
     }
 
     private void failItems(List<BatchItem> items, PrefillEndpoint prefillEp,
@@ -349,7 +423,11 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         // remaining = absoluteDeadlineMs - now; otherwise keep the original timeout_ms.
         if (item.absoluteDeadlineMs() > 0) {
             long remaining = item.absoluteDeadlineMs() - System.currentTimeMillis();
-            config.setTimeoutMs((int) Math.max(0, remaining));
+            // Clamp to [1, Integer.MAX_VALUE]: floor of 1ms ensures the downstream
+            // CHECK_REQUEST_TIMEOUT fires immediately instead of treating 0 as
+            // "unset" and falling back to the default timeout; the upper bound
+            // avoids int overflow on cast.
+            config.setTimeoutMs((int) Math.min(Math.max(1, remaining), Integer.MAX_VALUE));
         }
         config.clearRoleAddrs();
         addRoleAddr(config, item.prefill());
