@@ -58,6 +58,56 @@ TEST(RpcServerRuntimeMetaTest, FinishTaskWithoutPendingStillReportsFailure) {
     EXPECT_EQ(finished.error_message, "remote load failed");
 }
 
+// Simulates a decode early failure after setStream(): the request is already tracked as running,
+// then finishTask() must move it to finished with the error details and bump the version.
+TEST(RpcServerRuntimeMetaTest, FinishTaskAfterEnqueueClearsRunningAndBumpsVersion) {
+    RpcServerRuntimeMeta meta;
+
+    meta.enqueuePending(/*request_id=*/404, /*input_length=*/256);
+    auto before = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(before.running_task_info_list.size(), 1);
+    ASSERT_TRUE(before.finished_task_info_list.empty());
+
+    meta.finishTask(/*request_id=*/404,
+                    /*input_length=*/256,
+                    /*prefix_length=*/0,
+                    /*error_code=*/602,
+                    /*error_message=*/"decode allocate resource failed");
+
+    auto after = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    EXPECT_TRUE(after.running_task_info_list.empty());
+    ASSERT_EQ(after.finished_task_info_list.size(), 1);
+    const auto& finished = after.finished_task_info_list[0];
+    EXPECT_EQ(finished.request_id, 404);
+    EXPECT_EQ(finished.input_length, 256);
+    EXPECT_EQ(finished.error_code, 602);
+    EXPECT_EQ(finished.error_message, "decode allocate resource failed");
+    EXPECT_GT(after.latest_finished_version, before.latest_finished_version);
+}
+
+// finishTask() erases the running entry first, so the fallback dequeue in ~GenerateContext()
+// finds nothing and returns early: exactly one finished record is reported, no duplicates.
+TEST(RpcServerRuntimeMetaTest, DequeueAfterFinishTaskDoesNotDuplicateReport) {
+    RpcServerRuntimeMeta meta;
+
+    meta.enqueuePending(/*request_id=*/505, /*input_length=*/640);
+    meta.finishTask(/*request_id=*/505,
+                    /*input_length=*/640,
+                    /*prefix_length=*/0,
+                    /*error_code=*/8302,
+                    /*error_message=*/"decode load cache from prefill failed");
+    // The destructor-path dequeue arrives after finishTask; the running entry is already gone so
+    // it must be a no-op (the null stream is never dereferenced on this path).
+    meta.dequeue(/*request_id=*/505, /*stream=*/nullptr);
+
+    auto info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    EXPECT_TRUE(info.running_task_info_list.empty());
+    ASSERT_EQ(info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(info.finished_task_info_list[0].request_id, 505);
+    EXPECT_EQ(info.finished_task_info_list[0].error_code, 8302);
+    EXPECT_EQ(info.finished_task_info_list[0].error_message, "decode load cache from prefill failed");
+}
+
 // Engine execution time is the turnaround (finish - begin) minus the queue wait.
 TEST(RpcServerRuntimeMetaTest, ComputeExecutionTimeExcludesQueueWait) {
     // Begin at 1000ms, finish at 1800ms → 800ms turnaround, of which 120ms was queued.

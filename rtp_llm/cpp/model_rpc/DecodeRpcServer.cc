@@ -191,6 +191,11 @@ void DecodeRpcServer::loadCacheFromPrefill(DecodeGenerateContext& decode_context
         decode_context, grpc_stream->Write(load_response), grpc::StatusCode::INTERNAL, "send load response failed");
     if (!error_info.ok()) {
         decode_context.error_info = error_info;
+        // loadCacheFromPrefill is not retried (not wrapped by EXECUTE_WITH_RETRY), so this is a final
+        // failure point: report to FlexLB immediately.
+        reportEarlyFinishTask(decode_context,
+                              static_cast<int64_t>(error_info.code()),
+                              "decode load cache from prefill failed: " + error_info.ToString());
     }
     GRPC_RET_IF_ERROR(decode_context, error_info.ok(), grpc::StatusCode::INTERNAL, error_info.ToString().c_str());
     RTP_LLM_LOG_INFO("request [%s] load cache from prefill done", decode_context.request_key.c_str());
@@ -1233,6 +1238,30 @@ grpc::Status DecodeRpcServer::allocateResourceFunc(DecodeGenerateContext& decode
     return grpc::Status::OK;
 }
 
+// Report a terminal early failure to FlexLB via finishedTaskInfo so the scheduler can clean up its
+// inflight entry immediately instead of waiting for the 300s TTL eviction. finishTask() removes the
+// running entry first, so the fallback dequeue in ~GenerateContext() becomes a no-op afterwards and
+// no duplicate report is produced. NOTE: never call this from functions driven by EXECUTE_WITH_RETRY
+// (e.g. allocateResource), only from final failure points after retries are exhausted.
+void DecodeRpcServer::reportEarlyFinishTask(DecodeGenerateContext& decode_context,
+                                            int64_t                error_code,
+                                            const std::string&     error_message) {
+    if (decode_context.request_id == 0 || decode_context.early_finish_reported) {
+        return;
+    }
+    decode_context.early_finish_reported = true;
+    auto& stream                         = decode_context.getStream();
+    meta_->finishTask(decode_context.request_id,
+                      stream ? stream->inputLength() : 0,
+                      /*prefix_length=*/0,
+                      error_code,
+                      error_message);
+    RTP_LLM_LOG_ERROR("request [%s] report early finished task to master, error_code [%ld], error_message [%s]",
+                      decode_context.request_key.c_str(),
+                      error_code,
+                      error_message.c_str());
+}
+
 grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context, ServerStream* grpc_stream) {
     RTP_LLM_PROFILE_FUNCTION();
     AtomicGuard      request_guard(onflight_requests_);
@@ -1258,6 +1287,14 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
                                 decode_context.retry_cost_time_ms,
                                 max_retry_times + 1,
                                 max_retry_timeout_ms);
+            // Retries are exhausted: this is the final failure point, report it to FlexLB so the
+            // scheduler releases its inflight entry without waiting for TTL eviction.
+            auto& stream     = decode_context.getStream();
+            auto  error_code = static_cast<int64_t>(stream && stream->hasError() ? stream->statusInfo().code() :
+                                                                                  ErrorCode::MALLOC_FAILED);
+            reportEarlyFinishTask(decode_context,
+                                  error_code,
+                                  "decode allocate resource failed: " + decode_context.error_status.error_message());
             return decode_context.error_status;
         }
         EXECUTE_STAGE_FUNC(loadCacheFromPrefill, decode_context);
@@ -1266,10 +1303,12 @@ grpc::Status DecodeRpcServer::RemoteGenerate(grpc::ServerContext* server_context
     } catch (const std::exception& e) {
         auto error_msg              = "request [" + decode_context.request_key + "] catch exception [" + e.what() + "]";
         decode_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        reportEarlyFinishTask(decode_context, static_cast<int64_t>(ErrorCode::UNKNOWN_ERROR), error_msg);
         return decode_context.error_status;
     } catch (...) {
         auto error_msg              = "request [" + decode_context.request_key + "] catch unknown exception";
         decode_context.error_status = grpc::Status(grpc::StatusCode::INTERNAL, error_msg);
+        reportEarlyFinishTask(decode_context, static_cast<int64_t>(ErrorCode::UNKNOWN_ERROR), error_msg);
         return decode_context.error_status;
     }
 
