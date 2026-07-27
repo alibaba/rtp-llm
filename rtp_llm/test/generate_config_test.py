@@ -262,6 +262,7 @@ class OpenaiGenerateConfigTest(TestCase):
         req_config_stop_word_str: Optional[List[str]] = None,
         req_config_stop_word_list: Optional[List[List[int]]] = None,
         response_format: Optional[dict] = None,
+        json_format: Optional[bool] = None,
     ):
         special_tokens = SpecialTokens()
         if model_stop_word_str is not None:
@@ -295,6 +296,7 @@ class OpenaiGenerateConfigTest(TestCase):
 
         request = ChatCompletionRequest(messages=[])
         request.response_format = response_format
+        request.json_format = json_format
         if req_stop is not None:
             request.stop = req_stop
         if req_config_stop_word_str is not None:
@@ -317,6 +319,14 @@ class OpenaiGenerateConfigTest(TestCase):
             raised.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION
         )
         self.assertIn("response_format", raised.exception.message)
+
+    def test_json_format_is_rejected_before_generation(self):
+        with self.assertRaises(FtRuntimeException) as raised:
+            self._generate_config_with_stop_word(json_format=True)
+        self.assertEqual(
+            raised.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION
+        )
+        self.assertIn("json_format", raised.exception.message)
 
     def assert_config_stop_word(
         self,

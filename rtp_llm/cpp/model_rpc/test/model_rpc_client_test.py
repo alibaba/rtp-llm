@@ -162,6 +162,33 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(request_info_pb.trace_id, "header-trace")
         self.assertEqual(request_info_pb.request_id, "header-request-id")
 
+    def test_trans_input_serializes_jsonable_generate_config_options(self):
+        input_py = GenerateInput(
+            request_id=123,
+            token_ids=torch.tensor([1, 2]),
+            mm_inputs=[],
+            generate_config=GenerateConfig(
+                json_schema={"type": "object"},
+                regex="[a-z]+",
+                structural_tag={"format": {"type": "json_schema"}},
+                response_format='{"type":"json_object"}',
+            ),
+        )
+
+        generate_config_pb = trans_input(input_py).generate_config
+
+        self.assertEqual(generate_config_pb.json_schema.value, '{"type":"object"}')
+        self.assertEqual(generate_config_pb.regex.value, "[a-z]+")
+        self.assertFalse(generate_config_pb.HasField("ebnf"))
+        self.assertEqual(
+            generate_config_pb.structural_tag.value,
+            '{"format":{"type":"json_schema"}}',
+        )
+        self.assertEqual(
+            generate_config_pb.response_format.value,
+            '{"type":"json_object"}',
+        )
+
     @unittest.skip("need fix")
     def test_generate_stream(self):
         client = FakeModelRpcClient()

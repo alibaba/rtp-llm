@@ -200,6 +200,13 @@ class OpenaiEndpoint(object):
                 ExceptionType.UNSUPPORTED_OPERATION,
                 "response_format is not supported yet",
             )
+        if request.json_format:
+            # TODO: enable json_format with the response_format / grammar path
+            # when grammar-constrained decoding is wired through this branch.
+            raise FtRuntimeException(
+                ExceptionType.UNSUPPORTED_OPERATION,
+                "json_format is not supported yet",
+            )
         if request.trace_id != None:
             config.trace_id = request.trace_id
         if request.stream == True:
