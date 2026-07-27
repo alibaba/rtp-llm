@@ -30,6 +30,7 @@ import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 class RoundRobinLoadBalancerTest {
 
@@ -118,10 +119,10 @@ class RoundRobinLoadBalancerTest {
 
     @Test
     void selectBatch_stays_in_range_after_cursor_overflows_past_max_value() throws Exception {
-        // The cursor is an AtomicInteger that getAndAdd()s without bound; once it crosses
-        // Integer.MAX_VALUE it goes negative. Math.floorMod (not %) is what keeps the index
+        // The cursor is an AtomicLong that getAndAdd()s without bound; once it crosses
+        // Long.MAX_VALUE it goes negative. Math.floorMod (not %) is what keeps the index
         // non-negative through that wrap — seed the cursor at the boundary to exercise it.
-        seedCursor(RoleType.PDFUSION, Integer.MAX_VALUE - 1);
+        seedCursor(RoleType.PDFUSION, Long.MAX_VALUE - 1);
 
         List<BatchScheduleTarget> targets = rr.selectBatch(8, RoleType.PDFUSION, null);
 
@@ -173,18 +174,27 @@ class RoundRobinLoadBalancerTest {
 
     @Test
     void selectBatch_atomic_range_does_not_overlap_with_concurrent_selects() throws Exception {
-        // Verifies the getAndAdd(count) optimization: a batch call must occupy a
-        // contiguous cursor range so that concurrent select() calls do not land
-        // on indices already claimed by the batch (and vice versa).
-        // 4 workers, batch=4 -> batch claims one full cycle; concurrent singles
-        // proceed on the next cycle. Across many trials, the union of slots
-        // assigned in one (batch, single) pair should always cover 4 distinct
-        // index positions modulo 4 (i.e. the batch picks 4 distinct workers and
-        // each single pick is one of those 4 -- which is exactly the RR contract
-        // when cursor advances atomically).
+        // Verifies getAndAdd(count) atomically reserves a CONTIGUOUS cursor range: a batch call
+        // and the concurrent select() calls must never draw the same cursor value.
+        //
+        // The earlier version of this test used pool==batch==4, which made the check vacuous:
+        // 4 consecutive integers mod 4 always cover {0,1,2,3} for ANY start, atomic or not, so the
+        // only assertion (batchWorkers.size()==4) held even under a non-atomic cursor. Fix: make
+        // the pool LARGER than the total picks per trial so each consumed cursor value maps to a
+        // DISTINCT worker, then require every pick (batch targets + concurrent singles) to be
+        // distinct. Atomic operations partition the consecutive integers [base, base+perTrialPicks)
+        // one-per-op, so under a correct cursor the union is exactly perTrialPicks distinct workers.
+        // A non-atomic reservation (e.g. get()+set() instead of getAndAdd) lets a concurrent
+        // select() read the un-advanced cursor and collide with the batch's range -> a duplicate
+        // worker -> a detected violation, and also loses updates -> a wrong final cursor value.
+        int pool = 32;
+        int batch = 4;
+        int concurrentSingles = 16; // batch + singles = 20 < pool, so distinct cursor -> distinct worker
+        int perTrialPicks = batch + concurrentSingles;
+        clearWorkerMaps();
+        populatePdFusion(pool);
 
         int trials = 200;
-        int concurrentSingles = 16;
         ExecutorService exec = Executors.newFixedThreadPool(concurrentSingles + 1);
         AtomicInteger violations = new AtomicInteger(0);
 
@@ -201,7 +211,7 @@ class RoundRobinLoadBalancerTest {
                     try {
                         ready.countDown();
                         start.await();
-                        batchOut.set(0, rr.selectBatch(4, RoleType.PDFUSION, null));
+                        batchOut.set(0, rr.selectBatch(batch, RoleType.PDFUSION, null));
                     } catch (InterruptedException ignored) {
                     } finally {
                         done.countDown();
@@ -230,16 +240,15 @@ class RoundRobinLoadBalancerTest {
                 Assertions.assertTrue(done.await(5, TimeUnit.SECONDS),
                         "trial " + t + " did not finish in time");
 
-                List<BatchScheduleTarget> b = batchOut.get(0);
-                Set<String> batchWorkers = new HashSet<>();
-                for (BatchScheduleTarget bt : b) {
-                    batchWorkers.add(bt.getServerIp() + ":" + bt.getHttpPort());
-                }
-                if (batchWorkers.size() != 4) {
-                    violations.incrementAndGet();
-                }
+                // Union of every worker picked in this trial: batch targets + concurrent singles.
+                // With pool > perTrialPicks, atomic cursor reservation => all consumed cursor values
+                // are distinct consecutive integers => all workers distinct.
                 Set<String> poolWorkers =
                         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().keySet();
+                Set<String> allPicks = new HashSet<>();
+                for (BatchScheduleTarget bt : batchOut.get(0)) {
+                    allPicks.add(bt.getServerIp() + ":" + bt.getHttpPort());
+                }
                 synchronized (singleOut) {
                     Assertions.assertEquals(concurrentSingles, singleOut.size(),
                             "every concurrent select() must produce a result");
@@ -248,7 +257,13 @@ class RoundRobinLoadBalancerTest {
                                 "concurrent select() must succeed under batch pressure: " + s.getMessage());
                         Assertions.assertTrue(poolWorkers.contains(s.getServerIp() + ":" + s.getHttpPort()),
                                 "single pick must be a pool worker: " + s.getServerIp() + ":" + s.getHttpPort());
+                        allPicks.add(s.getServerIp() + ":" + s.getHttpPort());
                     }
+                }
+                if (allPicks.size() != perTrialPicks) {
+                    // A collision means two picks shared a cursor value -> the batch range was not
+                    // reserved atomically against the concurrent singles.
+                    violations.incrementAndGet();
                 }
             }
         } finally {
@@ -257,8 +272,11 @@ class RoundRobinLoadBalancerTest {
         }
 
         Assertions.assertEquals(0, violations.get(),
-                "batch=4 must always pick all 4 workers regardless of concurrent select() pressure "
-                        + "(verifies getAndAdd is atomic over the whole range)");
+                "batch + concurrent singles must never share a cursor value "
+                        + "(verifies getAndAdd reserves a contiguous range atomically)");
+        Assertions.assertEquals((long) trials * perTrialPicks,
+                cursorMap().get(RoleType.PDFUSION.name()).get(),
+                "cursor must advance by exactly one per single + count per batch, with no lost updates");
     }
 
     @Test
@@ -301,19 +319,19 @@ class RoundRobinLoadBalancerTest {
     }
 
     @SuppressWarnings("unchecked")
-    private void seedCursor(RoleType role, int value) throws Exception {
+    private void seedCursor(RoleType role, long value) throws Exception {
         Field f = RoundRobinLoadBalancer.class.getDeclaredField("cursors");
         f.setAccessible(true);
         // Cursors are keyed "<role>" for group=null and "<role>|<group>" otherwise.
-        Map<String, AtomicInteger> cursors = (Map<String, AtomicInteger>) f.get(rr);
-        cursors.computeIfAbsent(role.name(), k -> new AtomicInteger(0)).set(value);
+        Map<String, AtomicLong> cursors = (Map<String, AtomicLong>) f.get(rr);
+        cursors.computeIfAbsent(role.name(), k -> new AtomicLong(0)).set(value);
     }
 
     @SuppressWarnings("unchecked")
-    private Map<String, AtomicInteger> cursorMap() throws Exception {
+    private Map<String, AtomicLong> cursorMap() throws Exception {
         Field f = RoundRobinLoadBalancer.class.getDeclaredField("cursors");
         f.setAccessible(true);
-        return (Map<String, AtomicInteger>) f.get(rr);
+        return (Map<String, AtomicLong>) f.get(rr);
     }
 
     private BalanceContext newSingleContext(long requestId) {
@@ -388,10 +406,10 @@ class RoundRobinLoadBalancerTest {
         Assertions.assertEquals(Map.of("10.0.0.2", 2, "10.0.0.3", 2), g2Picks,
                 "g2 picks must rotate uniformly over g2's own subset despite interleaved g1 traffic");
 
-        Map<String, AtomicInteger> cursors = cursorMap();
-        Assertions.assertEquals(4, cursors.get(RoleType.PDFUSION.name() + "|g1").get(),
+        Map<String, AtomicLong> cursors = cursorMap();
+        Assertions.assertEquals(4L, cursors.get(RoleType.PDFUSION.name() + "|g1").get(),
                 "g1 cursor must advance once per g1 pick only");
-        Assertions.assertEquals(4, cursors.get(RoleType.PDFUSION.name() + "|g2").get(),
+        Assertions.assertEquals(4L, cursors.get(RoleType.PDFUSION.name() + "|g2").get(),
                 "g2 cursor must advance once per g2 pick only");
         Assertions.assertNull(cursors.get(RoleType.PDFUSION.name()),
                 "group traffic must not touch the null-group cursor");

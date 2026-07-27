@@ -16,7 +16,7 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
-import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Cursor-based round-robin load balancer.
@@ -52,7 +52,14 @@ public class RoundRobinLoadBalancer implements BatchLoadBalancer {
     private final EngineWorkerStatus engineWorkerStatus;
     /** Engine type is fixed at boot; resolved once instead of a config lookup per selection. */
     private final boolean embeddingEngine;
-    private final Map<String, AtomicInteger> cursors = new ConcurrentHashMap<>();
+    /**
+     * Per-(role, group) rotation cursors. Each is a {@code long} (not {@code int}) so it never wraps
+     * at any realistic QPS (2^63 picks), mirroring {@link org.flexlb.dispatcher.FePool}: an {@code int}
+     * cursor wrapped every ~2^32 picks and, because 2^32 is not a multiple of the pool size, produced
+     * a one-off RR discontinuity at the wrap point. {@link Math#floorMod(long, int)} keeps the index
+     * non-negative regardless.
+     */
+    private final Map<String, AtomicLong> cursors = new ConcurrentHashMap<>();
 
     public RoundRobinLoadBalancer(EngineWorkerStatus engineWorkerStatus, ConfigService configService) {
         this.engineWorkerStatus = engineWorkerStatus;
@@ -60,9 +67,9 @@ public class RoundRobinLoadBalancer implements BatchLoadBalancer {
         LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.ROUND_ROBIN, this);
     }
 
-    private AtomicInteger cursor(RoleType roleType, String group) {
+    private AtomicLong cursor(RoleType roleType, String group) {
         String key = group == null ? roleType.name() : roleType.name() + '|' + group;
-        return cursors.computeIfAbsent(key, k -> new AtomicInteger(0));
+        return cursors.computeIfAbsent(key, k -> new AtomicLong(0));
     }
 
     @Override
@@ -85,7 +92,7 @@ public class RoundRobinLoadBalancer implements BatchLoadBalancer {
             return new ArrayList<>();
         }
         int aliveSize = alive.size();
-        int start = cursor(roleType, group).getAndAdd(count);
+        long start = cursor(roleType, group).getAndAdd(count);
         List<BatchScheduleTarget> targets = new ArrayList<>(count);
         for (int i = 0; i < count; i++) {
             int idx = Math.floorMod(start + i, aliveSize);
