@@ -653,7 +653,7 @@ rename_wheel(
     src = ":rtp_llm_frontend_whl",
 )
 
-# Standalone DashSc gRPC server wheel: dash_sc proto + dash_sc_grpc_server, no full frontend app.
+# Standalone DashSc gRPC proxy wheel: dash_sc proto + proxy server, no full frontend app.
 # Run: python -m rtp_llm.dash_sc.server [--port 8000] or: rtp-llm-dash-sc-grpc [--port 8000]
 py_library(
     name = "dash_sc_grpc_standalone_lib",

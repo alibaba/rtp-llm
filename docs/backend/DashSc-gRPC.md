@@ -34,17 +34,16 @@ DashSc gRPC 在进程内提供 **predict_v2 协议**（`predict_v2.proto`）的 
 
 正常启动带 Frontend 的 RTP-LLM 服务即可：在 **FastAPI/Uvicorn 启动阶段**会自动拉起 DashSc gRPC（后台线程 + 独立 `grpc.Server`）。
 
-- **真实推理**：当 Frontend 已挂载 `FrontendWorker` 时，DashSc 请求会走 `backend_rpc_server_visitor.enqueue`，与主链路一致。
-- **Fake（占位）**：若无 `FrontendWorker` / 无 backend visitor，服务端使用内置 mock（例如基于 `input_ids` 的简化输出），便于联调协议。
+- **真实推理**：DashSc 请求会走 `backend_rpc_server_visitor.enqueue`，与主链路一致。
 
 若启动失败，日志会提示检查 **`grpcio-tools`** 与 Python 桩是否已生成（见文末「开发：生成 Python proto」）。
 
-### 2. 独立进程（仅 Fake 模式）
+### 2. 独立反向代理进程
 
-不拉起完整 Frontend、只做协议或客户端联调时，可单独起 DashSc gRPC 服务（**始终为 fake**，不接真实引擎）：
+不拉起完整 Frontend、只做 gRPC 反向代理或 canary 联调时，可单独起 DashSc gRPC proxy。proxy 会按 `SERVICE_ROUTE`（或兼容的 `DASH_SC_GRPC_FORWARD_ADDR`）把请求转发到下游 Frontend 的 DashSc gRPC 端口。
 
 ```bash
-# 仓库根目录，PYTHONPATH 含 rtp_llm
+export SERVICE_ROUTE='{"type":"ip_port_list","address":"127.0.0.1:8088"}'
 python -m rtp_llm.dash_sc.server --port 8000
 ```
 
@@ -55,7 +54,7 @@ python -m rtp_llm.dash_sc.server --port 8000 \
   --dash_sc_grpc_config_json '{"client_config":{},"server_config":{},"max_server_workers":4}'
 ```
 
-若使用 Bazel 打出的 **`rtp_llm_dash_sc_grpc` wheel**，入口点为：`rtp-llm-dash-sc-grpc`（等价于上述模块的 `main`）。
+若使用 Bazel 打出的 **`rtp_llm_dash_sc_grpc` wheel**，入口点为：`rtp-llm-dash-sc-grpc`（等价于 `python -m rtp_llm.dash_sc.server`）。
 
 ## 配置：`--dash_sc_grpc_config_json` / `DASH_SC_GRPC_CONFIG_JSON`
 
@@ -177,20 +176,21 @@ python -m rtp_llm.dash_sc.generate_proto_py
 
 ## 相关代码路径（便于深入）
 
-- 服务实现：`rtp_llm/dash_sc/server.py`、`rtp_llm/dash_sc/service.py`
+- 服务生命周期：`rtp_llm/dash_sc/server.py`、`rtp_llm/dash_sc/app.py`
+- 推理 / 代理 servicer：`rtp_llm/dash_sc/inference/servicer.py`、`rtp_llm/dash_sc/proxy/servicer.py`
 - 请求解析 / 张量约定 / 响应构建：`rtp_llm/dash_sc/codec.py`
 - 客户端：`rtp_llm/dash_sc/client.py`
-- 进程级 App：`rtp_llm/dash_sc/app.py`（`DashScApp`,独立 asyncio loop + signal handler）
 - 参数定义：`rtp_llm/server/server_args/grpc_group_args.py`（`init_dash_sc_grpc_group_args`）
 
 ## 单测
 
 ```bash
-bazel test //rtp_llm/dash_sc:codec_test
-bazel test //rtp_llm/dash_sc:service_test
-bazel test //rtp_llm/dash_sc:forward_service_test
-bazel test //rtp_llm/dash_sc:access_log_test
+bazel test //rtp_llm/dash_sc/test:codec_test
+bazel test //rtp_llm/dash_sc/test:inference_servicer_test
+bazel test //rtp_llm/dash_sc/test:proxy_servicer_test
+bazel test //rtp_llm/dash_sc/test:access_log_test
 ```
 
 `codec_test` 覆盖请求解析、`SamplingParams` / `DashScRequestControls` 以及 `build_stream_response_from_generate_outputs`；
-`service_test` 覆盖 `iter_real_model_stream_infer`（mock `run_enqueue_sync`）、`DashScGrpcInferenceServicer.ModelStreamInfer`（fake / real 分支与缺 `input_ids` 错误路径）以及 `_iter_enqueue_sync` 的 gRPC 取消 / 异常传播路径。
+`inference_servicer_test` 覆盖 `iter_real_model_stream_infer`（mock `run_enqueue_sync`）、`DashScInferenceServicer.ModelStreamInfer` 与缺 `input_ids` 错误路径；
+`proxy_servicer_test` 覆盖 gRPC proxy 转发、下游异常和流关闭路径。

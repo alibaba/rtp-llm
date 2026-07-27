@@ -1,9 +1,10 @@
 import functools
 import json
 import logging
-from typing import AsyncGenerator, Optional
+from typing import Any, AsyncGenerator, Dict, Optional, Union
 
 import grpc
+from google.protobuf.wrappers_pb2 import StringValue
 from grpc import StatusCode
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -11,6 +12,7 @@ from rtp_llm.config.generate_config import ReturnAllProbsMode, RoleType
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     BatchGenerateInputPB,
     ErrorDetailsPB,
+    GenerateConfigPB,
     GenerateInputPB,
     GenerateOutputsPB,
     MultimodalInputPB,
@@ -38,6 +40,7 @@ from rtp_llm.utils.grpc_util import (
 )
 
 MAX_GRPC_TIMEOUT_SECONDS = 3600
+JsonableOption = Optional[Union[str, Dict[str, Any]]]
 
 
 class StreamState:
@@ -58,15 +61,22 @@ def trans_role_type(role_type: RoleType) -> RoleAddrPB.RoleType:
         return RoleAddrPB.RoleType.FRONTEND
 
 
-def _trans_jsonable_option(config_pb, config, field_name):
-    if not hasattr(config_pb, field_name):
-        return
-    value = getattr(config, field_name, None)
+def _trans_jsonable_option(option_pb: StringValue, value: JsonableOption) -> None:
     if value is None:
         return
     if not isinstance(value, str):
         value = json.dumps(value, ensure_ascii=False, separators=(",", ":"))
-    getattr(config_pb, field_name).value = value
+    option_pb.value = value
+
+
+def _trans_jsonable_options(
+    config_pb: GenerateConfigPB, config: GenerateConfig
+) -> None:
+    _trans_jsonable_option(config_pb.json_schema, config.json_schema)
+    _trans_jsonable_option(config_pb.regex, config.regex)
+    _trans_jsonable_option(config_pb.ebnf, config.ebnf)
+    _trans_jsonable_option(config_pb.structural_tag, config.structural_tag)
+    _trans_jsonable_option(config_pb.response_format, config.response_format)
 
 
 def trans_input(input_py: GenerateInput):
@@ -135,15 +145,7 @@ def trans_input(input_py: GenerateInput):
     trans_option(generate_config_pb, input_py.generate_config, "top_p_decay")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_min")
     trans_option(generate_config_pb, input_py.generate_config, "top_p_reset_ids")
-    _trans_jsonable_option(generate_config_pb, input_py.generate_config, "json_schema")
-    _trans_jsonable_option(generate_config_pb, input_py.generate_config, "regex")
-    _trans_jsonable_option(generate_config_pb, input_py.generate_config, "ebnf")
-    _trans_jsonable_option(
-        generate_config_pb, input_py.generate_config, "structural_tag"
-    )
-    _trans_jsonable_option(
-        generate_config_pb, input_py.generate_config, "response_format"
-    )
+    _trans_jsonable_options(generate_config_pb, input_py.generate_config)
     trans_option(generate_config_pb, input_py.generate_config, "adapter_name")
     trans_option_cast(
         generate_config_pb, input_py.generate_config, "task_id", functools.partial(str)

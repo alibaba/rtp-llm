@@ -460,3 +460,19 @@ class DashScGrpcDrainAioInterceptor(grpc.aio.ServerInterceptor):
                     self._finish(method)
 
         return behavior
+
+
+def main() -> None:
+    """Standalone proxy entry. Usage: python -m rtp_llm.dash_sc.server [--port PORT].
+
+    Kept as the stable console_script target, matching the dsv4_on_dev wheel
+    shape. Fake inference mode has been removed on this branch, so the wrapper
+    delegates to the standalone proxy entry.
+    """
+    from rtp_llm.dash_sc.proxy.__main__ import main as proxy_main
+
+    proxy_main()
+
+
+if __name__ == "__main__":
+    main()
