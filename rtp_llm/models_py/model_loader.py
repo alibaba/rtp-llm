@@ -472,7 +472,7 @@ class NewModelLoader:
             )
         root_validator(loaded_tensor_ids)
 
-        for module in model.modules():
+        for module_name, module in model.named_modules():
             if module is model:
                 continue
             custom_loader = getattr(type(module), "load_weights", None)
@@ -486,7 +486,14 @@ class NewModelLoader:
                         f"Custom weight loader {type(module).__name__}.load_weights() "
                         "must define validate_weights_loaded()"
                     )
-                validator(loaded_tensor_ids)
+                try:
+                    validator(loaded_tensor_ids)
+                except RuntimeError as exc:
+                    qualified_name = module_name or "<root>"
+                    raise RuntimeError(
+                        f"Weight validation failed for {qualified_name} "
+                        f"({type(module).__name__}): {exc}"
+                    ) from exc
 
     @staticmethod
     def _run_post_load_hooks(model: nn.Module) -> None:

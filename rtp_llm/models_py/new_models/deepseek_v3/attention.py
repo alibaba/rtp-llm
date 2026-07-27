@@ -6,8 +6,7 @@ Key design decisions:
     (q_a_proj, kv_a_proj_with_mqa, q_a_layernorm, kv_a_layernorm, q_b_proj, o_proj).
     HF weights flow through RtpModule.load_weights directly into nn.Parameter.
   - process_weights_after_loading() fuses q_a_proj + kv_a_proj_with_mqa into
-    _fused_qkv_a_w (following Qwen3Experts pattern), and stacks q_b_proj
-    + kv_b_proj split into _fused_qkv_b_w.
+    _fused_qkv_a_w and splits kv_b_proj into the absorb/decode views.
   - _build_mla_kernel_weights() assembles the W.* layout that MlaImplBase
     factory expects at forward time.
   - forward() mirrors MlaAttention.forward() exactly; the Indexer is a
@@ -28,7 +27,9 @@ from rtp_llm.models_py.modules.factory.attention.attn_factory import MlaImplBase
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 from rtp_llm.models_py.quant_methods.fp8 import (
     _resolve_fp8_gemm_nt,
+    _resolve_requant_weight_ue8m0,
     _resolve_sgl_per_token_group_quant,
+    is_deep_gemm_e8m0_used,
 )
 from rtp_llm.ops.compute_ops import LayerKVCache
 from rtp_llm.utils.model_weight import W
@@ -48,13 +49,14 @@ class _CudaRuntimeFusedFp8Linear(nn.Module):
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
         input_2d = x.view(-1, x.shape[-1]).contiguous()
+        scale_ue8m0 = self.weight_scale.dtype == torch.int32
         qinput, input_scales = _resolve_sgl_per_token_group_quant()(
             input_2d,
             group_size=128,
             eps=1e-4,
             column_major_scales=True,
             scale_tma_aligned=True,
-            scale_ue8m0=False,
+            scale_ue8m0=scale_ue8m0,
         )
         output = torch.empty(
             input_2d.shape[0],
@@ -67,7 +69,7 @@ class _CudaRuntimeFusedFp8Linear(nn.Module):
             (self.weight, self.weight_scale),
             output,
             c=None,
-            disable_ue8m0_cast=True,
+            disable_ue8m0_cast=not scale_ue8m0,
         )
         return output.view(*x.shape[:-1], self.weight.shape[0])
 
@@ -166,6 +168,43 @@ def _linear_weight_bf16(linear: nn.Module) -> torch.Tensor:
     return _dequant_fp8_to_bf16(w, scale.data, _fp8_block_size(linear))
 
 
+def _kernel_fp8_weight_and_scale(
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Return the layout consumed by the legacy LinearFactory.
+
+    FP32 block scales use the historical flattened-transpose view. DeepGEMM
+    UE8M0 postprocessing instead stores an already runtime-ready ``[N, K]``
+    weight and packed int32 ``[N, ceil(K / 512)]`` scales; reshaping either
+    tensor would corrupt that contract.
+    """
+    if scale.dtype == torch.int32:
+        return weight, scale
+    if scale.dim() == 2:
+        return (
+            weight.reshape(weight.shape[1], weight.shape[0]),
+            scale.reshape(scale.shape[1], scale.shape[0]),
+        )
+    return weight, scale
+
+
+def _prepare_fused_fp8_runtime_weight(
+    weight: torch.Tensor,
+    scale: torch.Tensor,
+) -> tuple[torch.Tensor, torch.Tensor]:
+    """Apply the same UE8M0 conversion as the child FP8 linear hook.
+
+    RtpModule post-load hooks visit this attention module before its child
+    projections.  The fused QKV-A runtime view must therefore perform the
+    device-specific conversion itself instead of caching the checkpoint's
+    pre-requantized FP32 block scales.
+    """
+    if is_deep_gemm_e8m0_used(weight.device):
+        return _resolve_requant_weight_ue8m0()(weight, scale)
+    return weight, scale
+
+
 class DeepSeekV32MlaAttention(RtpModule):
     """MLA attention for DeepSeek V3.2, new-loader style.
 
@@ -179,9 +218,8 @@ class DeepSeekV32MlaAttention(RtpModule):
       model.layers.{i}.self_attn.o_proj.weight             → o_proj
 
     process_weights_after_loading fuses q_a_proj + kv_a_proj_with_mqa into
-    _fused_qkv_a_w, copies q_b_proj into _fused_qkv_b_w, and splits
-    kv_b_proj into _kc_w (nope half) and _vc_w (v half) using the same
-    transpose+slice formula as the legacy loader.
+    _fused_qkv_a_w and splits kv_b_proj into _kc_w (nope half) and _vc_w
+    (v half) using the same transpose+slice formula as the legacy loader.
     """
 
     def __init__(
@@ -318,11 +356,12 @@ class DeepSeekV32MlaAttention(RtpModule):
 
         # --- Fused weights (built after loading) ---
         self.register_buffer("_fused_qkv_a_w", None, persistent=False)
+        self.register_buffer("_fused_qkv_a_s", None, persistent=False)
         self._fused_qkv_a_runtime: Optional[nn.Module] = None
-        self.register_buffer("_fused_qkv_b_w", None, persistent=False)
         self.register_buffer("_kv_b_w", None, persistent=False)
         self.register_buffer("_kc_w", None, persistent=False)
         self.register_buffer("_vc_w", None, persistent=False)
+        self.indexer: Optional[nn.Module] = None
 
     def load_weights(self, weights):
         if self.q_lora_rank == 0:
@@ -340,10 +379,10 @@ class DeepSeekV32MlaAttention(RtpModule):
     def process_weights_after_loading(self):
         """Fuse q_a_proj + kv_a_proj_with_mqa into a single _fused_qkv_a_w.
 
-        Also collect q_b_proj weight into _fused_qkv_b_w, and split
-        kv_b_proj into _kc_w (nope) and _vc_w (v) using the same formula
-        as the legacy loader's transpose_slice_k / transpose_slice_v
-        (utils/model_weight.py).
+        Also split kv_b_proj into _kc_w (nope) and _vc_w (v) using the same
+        formula as the legacy loader's transpose_slice_k / transpose_slice_v
+        (utils/model_weight.py). q_b_proj stays in its quantized linear module;
+        _build_mla_kernel_weights creates only a view over that storage.
         """
         # These derivations run through torch.cat / torch.bmm, which do not
         # support fp8, so dequantize the (possibly fp8-per-block) weights to
@@ -356,14 +395,15 @@ class DeepSeekV32MlaAttention(RtpModule):
         block_n, _ = _fp8_block_size(self.q_a_proj)
         fused_a_block_aligned = self.q_a_proj.weight.shape[0] % block_n == 0
         if (
-            q_a_scale is not None
+            self.q_lora_rank > 0
+            and q_a_scale is not None
             and kv_a_scale is not None
             and not is_hip
             and fused_a_block_aligned
             and _is_fp8_block_scale(self.q_a_proj, q_a_scale)
             and _is_fp8_block_scale(self.kv_a_proj_with_mqa, kv_a_scale)
         ):
-            self._fused_qkv_a_runtime = _CudaRuntimeFusedFp8Linear(
+            fused_a_weight, fused_a_scale = _prepare_fused_fp8_runtime_weight(
                 torch.cat(
                     [
                         self.q_a_proj.weight.detach(),
@@ -376,30 +416,40 @@ class DeepSeekV32MlaAttention(RtpModule):
                     dim=0,
                 ),
             )
-
-        q_a_w = _linear_weight_bf16(self.q_a_proj)
-        kv_a_w = _linear_weight_bf16(self.kv_a_proj_with_mqa)
-        if (
-            self._fused_qkv_a_runtime is None
-            and not is_hip
-            and self.quant_config is not None
-            and self.quant_config.quant_type == "fp8_block_online"
-        ):
-            from rtp_llm.models_py.kernels.cuda.fp8_quant import per_block_cast_to_fp8
-
-            fused_a_fp8, fused_a_scale = per_block_cast_to_fp8(
-                torch.cat([q_a_w, kv_a_w], dim=0),
-                use_ue8m0=False,
-            )
             self._fused_qkv_a_runtime = _CudaRuntimeFusedFp8Linear(
-                fused_a_fp8, fused_a_scale
+                fused_a_weight,
+                fused_a_scale,
             )
-        self._fused_qkv_a_w = torch.cat([q_a_w, kv_a_w], dim=0).contiguous()
-        if self.q_lora_rank > 0:
-            if self.q_b_proj is None:
-                raise RuntimeError("q_b_proj is required when q_lora_rank is positive")
-            # q_b_proj weight: [num_heads * q_head_dim, q_lora_rank]
-            self._fused_qkv_b_w = _linear_weight_bf16(self.q_b_proj).clone()
+            self._fused_qkv_a_w = fused_a_weight
+            self._fused_qkv_a_s = fused_a_scale
+        else:
+            q_a_w = _linear_weight_bf16(self.q_a_proj)
+            kv_a_w = _linear_weight_bf16(self.kv_a_proj_with_mqa)
+            fused_a_bf16 = torch.cat([q_a_w, kv_a_w], dim=0).contiguous()
+            if (
+                self.q_lora_rank > 0
+                and not is_hip
+                and self.quant_config is not None
+                and self.quant_config.quant_type == "fp8_block_online"
+            ):
+                from rtp_llm.models_py.kernels.cuda.fp8_quant import (
+                    per_block_cast_to_fp8,
+                )
+
+                fused_a_weight, fused_a_scale = per_block_cast_to_fp8(
+                    fused_a_bf16,
+                    use_ue8m0=False,
+                )
+                fused_a_weight, fused_a_scale = _prepare_fused_fp8_runtime_weight(
+                    fused_a_weight, fused_a_scale
+                )
+                self._fused_qkv_a_runtime = _CudaRuntimeFusedFp8Linear(
+                    fused_a_weight, fused_a_scale
+                )
+                self._fused_qkv_a_w = fused_a_weight
+                self._fused_qkv_a_s = fused_a_scale
+            else:
+                self._fused_qkv_a_w = fused_a_bf16
 
         # kv_b_proj weight: [num_heads * (nope + v_head), kv_lora_rank].
         # Reshape to [kv_lora_rank, num_heads, nope+v_head] then slice.
@@ -432,26 +482,41 @@ class DeepSeekV32MlaAttention(RtpModule):
             )
         weights: Dict[str, torch.Tensor] = {}
         if self.q_lora_rank > 0:
-            if self._fused_qkv_b_w is None or self.q_a_layernorm is None:
+            if self.q_b_proj is None or self.q_a_layernorm is None:
                 raise RuntimeError("incomplete MLA Q-LoRA runtime layout")
-            weights[W.mla_fusedqkrope_w] = self._fused_qkv_a_w
-            weights[W.mla_q_b_w] = self._fused_qkv_b_w
+            if self._fused_qkv_a_s is not None:
+                (
+                    weights[W.mla_fusedqkrope_w],
+                    weights[W.mla_fusedqkrope_s],
+                ) = _kernel_fp8_weight_and_scale(
+                    self._fused_qkv_a_w,
+                    self._fused_qkv_a_s,
+                )
+            else:
+                weights[W.mla_fusedqkrope_w] = self._fused_qkv_a_w.t()
+
+            q_b_weight = self.q_b_proj.weight.data
+            if hasattr(self.q_b_proj, "weight_scale"):
+                q_b_scale = self.q_b_proj.weight_scale.data
+                (
+                    weights[W.mla_q_b_w],
+                    weights[W.mla_q_b_s],
+                ) = _kernel_fp8_weight_and_scale(q_b_weight, q_b_scale)
+            else:
+                weights[W.mla_q_b_w] = q_b_weight.t()
             weights[W.mla_q_a_ln_gamma] = self.q_a_layernorm.weight.data
         else:
-            weights[W.mla_fusedqkrope_no_lora_w] = self._fused_qkv_a_w
+            weights[W.mla_fusedqkrope_no_lora_w] = self._fused_qkv_a_w.t()
         weights[W.mla_kv_a_ln_gamma] = self.kv_a_layernorm.weight.data
         o_weight = self.o_proj.weight.data
         if hasattr(self.o_proj, "weight_scale"):
             o_scale = self.o_proj.weight_scale.data
-            weights[W.attn_o_w] = (
-                o_weight.reshape(o_weight.shape[1], o_weight.shape[0])
-                if o_scale.dim() == 2
-                else o_weight
-            )
-            weights[W.attn_o_s] = (
-                o_scale.reshape(o_scale.shape[1], o_scale.shape[0])
-                if o_scale.dim() == 2
-                else o_scale
+            (
+                weights[W.attn_o_w],
+                weights[W.attn_o_s],
+            ) = _kernel_fp8_weight_and_scale(
+                o_weight,
+                o_scale,
             )
         else:
             # BF16 LinearFactory consumes the legacy [input, output] layout.
@@ -465,15 +530,12 @@ class DeepSeekV32MlaAttention(RtpModule):
         kv_b_weight = self.kv_b_proj.weight.data
         if hasattr(self.kv_b_proj, "weight_scale"):
             kv_b_scale = self.kv_b_proj.weight_scale.data
-            weights[W.mla_kv_b_w] = (
-                kv_b_weight.reshape(kv_b_weight.shape[1], kv_b_weight.shape[0])
-                if kv_b_scale.dim() == 2
-                else kv_b_weight
-            )
-            weights[W.mla_kv_b_s] = (
-                kv_b_scale.reshape(kv_b_scale.shape[1], kv_b_scale.shape[0])
-                if kv_b_scale.dim() == 2
-                else kv_b_scale
+            (
+                weights[W.mla_kv_b_w],
+                weights[W.mla_kv_b_s],
+            ) = _kernel_fp8_weight_and_scale(
+                kv_b_weight,
+                kv_b_scale,
             )
         else:
             weights[W.mla_kv_b_w] = self._kv_b_w
@@ -496,11 +558,10 @@ class DeepSeekV32MlaAttention(RtpModule):
         (indexer not attached) so fmha_impl.forward gets a None and dense
         backends short-circuit; sparse backends require non-None.
         """
-        indexer = getattr(self, "indexer", None)
-        if indexer is None:
+        if self.indexer is None:
             return None
         q_for_indexer = q_c if self.q_lora_rank > 0 else q_view
-        return indexer(
+        return self.indexer(
             hidden_states,
             q_for_indexer,
             kv_cache,

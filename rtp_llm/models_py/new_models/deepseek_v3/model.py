@@ -309,6 +309,7 @@ class DeepSeekV32DecoderLayer(RtpModule):
         routed_scaling_factor: float = 1.0,
         n_group: int = 1,
         topk_group: int = 1,
+        topk_method: str = "greedy",
         has_moe_norm: bool = False,
         correction_bias: bool = False,
         # --- Indexer config ---
@@ -369,6 +370,7 @@ class DeepSeekV32DecoderLayer(RtpModule):
                 routed_scaling_factor=routed_scaling_factor,
                 n_group=n_group,
                 topk_group=topk_group,
+                topk_method=topk_method,
                 has_moe_norm=has_moe_norm,
                 correction_bias=correction_bias,
             )

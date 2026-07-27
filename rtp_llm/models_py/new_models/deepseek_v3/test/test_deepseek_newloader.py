@@ -1,13 +1,19 @@
+import json
 import math
+import tempfile
 import types
 import unittest
+from unittest import mock
 
 import torch
 
+from rtp_llm.device.device_type import DeviceType, get_device_type
 from rtp_llm.models_py.model_loader import NewLoaderConfig
 from rtp_llm.models_py.new_models.deepseek_v3.attention import (
     DeepSeekV32MlaAttention,
+    _kernel_fp8_weight_and_scale,
     _linear_weight_bf16,
+    _prepare_fused_fp8_runtime_weight,
 )
 from rtp_llm.models_py.new_models.deepseek_v3.language import (
     DeepSeekV32ForCausalLM,
@@ -15,6 +21,14 @@ from rtp_llm.models_py.new_models.deepseek_v3.language import (
     _extract_config_values,
 )
 from rtp_llm.models_py.new_models.deepseek_v3.mlp import DeepSeekV32MLP
+from rtp_llm.models_py.new_models.deepseek_v3.moe import (
+    DeepSeekV32MoEBlock,
+    _select_deepseek_noaux_topk,
+    _select_deepseek_topk,
+)
+from rtp_llm.models_py.new_models.deepseek_v3.rotary_embedding import (
+    DeepseekV3RotaryEmbedding,
+)
 from rtp_llm.models_py.new_models.deepseek_v3_mtp.language import (
     DeepSeekV32MTPForCausalLM,
     _draft_checkpoint_layer,
@@ -23,6 +37,7 @@ from rtp_llm.models_py.new_models.deepseek_v3_mtp.language import (
 from rtp_llm.models_py.new_models.mtp import MTPBlock
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 from rtp_llm.models_py.registry import get_model_class
+from rtp_llm.utils.model_weight import W
 
 
 def _model_config(*, sparse=False, q_lora_rank=4):
@@ -200,6 +215,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             "deepseek_v31",
             "deepseek_v32",
             "glm_5",
+            "kimi_k2",
         ):
             with self.subTest(model_type=model_type):
                 self.assertIs(get_model_class(model_type), DeepSeekV32ForCausalLM)
@@ -207,6 +223,17 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             get_model_class("deepseek-v3-mtp"),
             DeepSeekV32MTPForCausalLM,
         )
+
+    def test_rotary_cache_is_valid_immediately_after_construction(self):
+        rotary = DeepseekV3RotaryEmbedding(
+            dim=8,
+            max_position_embeddings=16,
+            device=torch.device("cpu"),
+        )
+        cache_ptr = rotary.cos_cached.data_ptr()
+        self.assertEqual(rotary.max_seq_len_cached, 16)
+        rotary(torch.zeros(1, 8), seq_len=8)
+        self.assertEqual(rotary.cos_cached.data_ptr(), cache_ptr)
 
     def test_core_filter_excludes_appended_draft_and_unrelated_tensors(self):
         model = _uninitialized_model(DeepSeekV32ForCausalLM, layer_count=4)
@@ -265,6 +292,30 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                     "num_nextn_predict_layers": 2,
                 }
             )
+
+    def test_mtp_real_constructor_uses_appended_layer_from_full_checkpoint(self):
+        config_json = _raw_config()
+        model_config = _model_config()
+        # ModelFactory creates the draft config from the full checkpoint, so
+        # this remains the main-model layer count at construction time.
+        model_config.num_layers = config_json["num_hidden_layers"]
+        with tempfile.TemporaryDirectory() as checkpoint_path:
+            model_config.ckpt_path = checkpoint_path
+            with open(
+                f"{checkpoint_path}/config.json", "w", encoding="utf-8"
+            ) as config_file:
+                json.dump(config_json, config_file)
+            with torch.device("cpu"):
+                model = DeepSeekV32MTPForCausalLM(
+                    model_config,
+                    _load_config(),
+                )
+
+        self.assertEqual(model._checkpoint_layer, 4)
+        self.assertEqual(model._checkpoint_prefix, "model.layers.4.")
+        self.assertEqual(model.layer_num, 1)
+        self.assertEqual(len(model.layers), 1)
+        self.assertEqual(model.cos_sin_cache.device.type, "cpu")
 
     def test_mtp_filter_is_exact_and_rank_invariant(self):
         model = _uninitialized_model(
@@ -391,6 +442,27 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertEqual((cfg["lm_head_tp_size"], cfg["lm_head_tp_rank"]), (2, 1))
         self.assertEqual((cfg["ep_size"], cfg["ep_rank"]), (2, 1))
         self.assertEqual(cfg["moe_layer_index"], [3])
+        self.assertEqual(cfg["topk_method"], "greedy")
+
+    def test_raw_router_config_is_canonical(self):
+        raw = _raw_config()
+        raw.update(
+            {
+                "scoring_func": "softmax",
+                "routed_scaling_factor": 2.5,
+                "n_group": 4,
+                "topk_group": 2,
+                "norm_topk_prob": False,
+                "topk_method": "group_limited_greedy",
+            }
+        )
+        cfg = _extract_config_values(_model_config(), _load_config(), raw)
+        self.assertEqual(cfg["scoring_func"], 0)
+        self.assertEqual(cfg["routed_scaling_factor"], 2.5)
+        self.assertEqual(cfg["n_group"], 4)
+        self.assertEqual(cfg["topk_group"], 2)
+        self.assertFalse(cfg["has_moe_norm"])
+        self.assertEqual(cfg["topk_method"], "group_limited_greedy")
 
     def test_sparse_indexer_rejects_no_q_lora(self):
         with self.assertRaisesRegex(ValueError, "requires q_lora_rank"):
@@ -404,14 +476,13 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         raw = _raw_config()
         raw.update(
             {
+                "n_group": 3,
                 "topk_method": "noaux_tc",
                 "topk_group": 1,
             }
         )
-        model_config = _model_config()
-        model_config.moe_n_group = 3
         with self.assertRaisesRegex(ValueError, "divisible by n_group"):
-            _extract_config_values(model_config, _load_config(), raw)
+            _extract_config_values(_model_config(), _load_config(), raw)
 
     def test_no_q_lora_has_no_empty_checkpoint_parameters(self):
         attention = DeepSeekV32MlaAttention(
@@ -478,6 +549,642 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                     torch.bfloat16
                 )
                 self.assertTrue(torch.equal(_linear_weight_bf16(linear), expected))
+
+    def test_mla_kernel_fp8_layout_preserves_ue8m0_contract(self):
+        weight = torch.arange(24, dtype=torch.float32).reshape(6, 4)
+        fp32_scale = torch.arange(6, dtype=torch.float32).reshape(3, 2)
+        normal_weight, normal_scale = _kernel_fp8_weight_and_scale(weight, fp32_scale)
+        self.assertEqual(tuple(normal_weight.shape), (4, 6))
+        self.assertEqual(tuple(normal_scale.shape), (2, 3))
+        self.assertEqual(normal_weight.data_ptr(), weight.data_ptr())
+        self.assertEqual(normal_scale.data_ptr(), fp32_scale.data_ptr())
+
+        ue8m0_scale = torch.ones(6, 1, dtype=torch.int32)
+        ue8m0_weight, preserved_scale = _kernel_fp8_weight_and_scale(
+            weight, ue8m0_scale
+        )
+        self.assertIs(ue8m0_weight, weight)
+        self.assertIs(preserved_scale, ue8m0_scale)
+        self.assertEqual(tuple(ue8m0_weight.shape), (6, 4))
+        self.assertEqual(tuple(preserved_scale.shape), (6, 1))
+
+    def test_mla_fused_runtime_requants_before_child_post_load(self):
+        weight = torch.arange(24, dtype=torch.float32).reshape(6, 4)
+        scale = torch.arange(6, dtype=torch.float32).reshape(3, 2)
+        requant_weight = weight + 1
+        requant_scale = torch.ones(6, 1, dtype=torch.int32)
+        requant = mock.Mock(return_value=(requant_weight, requant_scale))
+
+        with (
+            mock.patch(
+                "rtp_llm.models_py.new_models.deepseek_v3.attention."
+                "is_deep_gemm_e8m0_used",
+                return_value=True,
+            ) as e8m0_used,
+            mock.patch(
+                "rtp_llm.models_py.new_models.deepseek_v3.attention."
+                "_resolve_requant_weight_ue8m0",
+                return_value=requant,
+            ),
+        ):
+            runtime_weight, runtime_scale = _prepare_fused_fp8_runtime_weight(
+                weight, scale
+            )
+
+        e8m0_used.assert_called_once_with(weight.device)
+        requant.assert_called_once_with(weight, scale)
+        self.assertIs(runtime_weight, requant_weight)
+        self.assertIs(runtime_scale, requant_scale)
+        self.assertEqual(runtime_scale.dtype, torch.int32)
+
+    def test_mla_fused_runtime_keeps_standard_block_scales(self):
+        weight = torch.arange(24, dtype=torch.float32).reshape(6, 4)
+        scale = torch.arange(6, dtype=torch.float32).reshape(3, 2)
+        with mock.patch(
+            "rtp_llm.models_py.new_models.deepseek_v3.attention."
+            "is_deep_gemm_e8m0_used",
+            return_value=False,
+        ):
+            runtime_weight, runtime_scale = _prepare_fused_fp8_runtime_weight(
+                weight, scale
+            )
+        self.assertIs(runtime_weight, weight)
+        self.assertIs(runtime_scale, scale)
+
+    def test_mla_bf16_kernel_views_match_legacy_orientation(self):
+        attention = DeepSeekV32MlaAttention(
+            hidden_size=8,
+            num_heads=2,
+            q_lora_rank=4,
+            kv_lora_rank=4,
+            nope_head_dim=2,
+            rope_head_dim=2,
+            v_head_dim=2,
+            layer_idx=0,
+            params_dtype=torch.float32,
+        )
+        attention.process_weights_after_loading()
+        weights = attention._build_mla_kernel_weights()
+
+        self.assertFalse(hasattr(attention, "_fused_qkv_b_w"))
+        self.assertEqual(
+            tuple(weights[W.mla_fusedqkrope_w].shape),
+            (8, 4 + 4 + 2),
+        )
+        self.assertEqual(
+            tuple(weights[W.mla_q_b_w].shape),
+            (4, 2 * (2 + 2)),
+        )
+        self.assertTrue(
+            torch.equal(
+                weights[W.mla_fusedqkrope_w],
+                attention._fused_qkv_a_w.t(),
+            )
+        )
+        self.assertTrue(
+            torch.equal(weights[W.mla_q_b_w], attention.q_b_proj.weight.t())
+        )
+        self.assertNotIn(W.mla_fusedqkrope_s, weights)
+        self.assertNotIn(W.mla_q_b_s, weights)
+
+    def test_mla_fp8_kernel_views_keep_scales_without_bf16_qb_copy(self):
+        attention = DeepSeekV32MlaAttention(
+            hidden_size=128,
+            num_heads=2,
+            q_lora_rank=128,
+            kv_lora_rank=128,
+            nope_head_dim=64,
+            rope_head_dim=64,
+            v_head_dim=64,
+            layer_idx=0,
+            quant_config=QuantizationConfig("FP8_PER_BLOCK"),
+            params_dtype=torch.bfloat16,
+        )
+        fused_weight = torch.zeros(
+            128 + 128 + 64,
+            128,
+            dtype=torch.float8_e4m3fn,
+        )
+        fused_scale = torch.ones(3, 1, dtype=torch.float32)
+        attention._fused_qkv_a_w = fused_weight
+        attention._fused_qkv_a_s = fused_scale
+        del attention.q_b_proj.weight_scale_inv
+        attention.q_b_proj.register_parameter(
+            "weight_scale",
+            torch.nn.Parameter(
+                torch.ones(2, 1, dtype=torch.float32),
+                requires_grad=False,
+            ),
+        )
+        attention._kv_b_w = torch.empty(128, 256)
+        attention._kc_w = torch.empty(2, 64, 128)
+        attention._vc_w = torch.empty(2, 128, 64)
+
+        weights = attention._build_mla_kernel_weights()
+
+        self.assertEqual(
+            tuple(weights[W.mla_fusedqkrope_w].shape),
+            (128, 320),
+        )
+        self.assertEqual(
+            tuple(weights[W.mla_fusedqkrope_s].shape),
+            (1, 3),
+        )
+        self.assertEqual(
+            tuple(weights[W.mla_q_b_w].shape),
+            (128, 256),
+        )
+        self.assertEqual(
+            tuple(weights[W.mla_q_b_s].shape),
+            (1, 2),
+        )
+        self.assertEqual(weights[W.mla_q_b_w].dtype, torch.float8_e4m3fn)
+
+    def test_non_noaux_router_preserves_scoring_grouping_and_scaling(self):
+        logits = torch.tensor(
+            [
+                [1.0, 2.0, -1.0, 0.0],
+                [-2.0, -1.0, 3.0, 2.0],
+            ],
+            dtype=torch.float32,
+        )
+        weights, ids = _select_deepseek_topk(
+            logits,
+            top_k=2,
+            scoring_func=1,
+            n_group=2,
+            topk_group=1,
+            group_limited=True,
+            renormalize=True,
+            routed_scaling_factor=2.5,
+        )
+        scores = logits.sigmoid()
+        group_scores = scores.view(2, 2, 2).amax(dim=-1)
+        selected_groups = group_scores.topk(1, dim=-1, sorted=False).indices
+        group_mask = torch.zeros_like(group_scores, dtype=torch.bool)
+        group_mask.scatter_(1, selected_groups, True)
+        masked = scores.masked_fill(
+            ~group_mask.unsqueeze(-1).expand(-1, -1, 2).reshape_as(scores),
+            float("-inf"),
+        )
+        expected_weights, expected_ids = masked.topk(2, dim=-1, sorted=False)
+        expected_weights = (
+            expected_weights
+            / expected_weights.sum(dim=-1, keepdim=True).clamp_min(1e-20)
+            * 2.5
+        )
+        self.assertTrue(torch.equal(ids, expected_ids))
+        self.assertTrue(torch.equal(weights, expected_weights))
+
+        softmax_weights, softmax_ids = _select_deepseek_topk(
+            logits,
+            top_k=2,
+            scoring_func=0,
+            n_group=2,
+            topk_group=1,
+            group_limited=False,
+            renormalize=False,
+            routed_scaling_factor=1.5,
+        )
+        reference_weights, reference_ids = logits.softmax(dim=-1).topk(
+            2, dim=-1, sorted=False
+        )
+        self.assertTrue(torch.equal(softmax_ids, reference_ids))
+        self.assertTrue(torch.equal(softmax_weights, reference_weights * 1.5))
+
+    def test_noaux_router_uses_bias_only_for_selection(self):
+        logits = torch.tensor(
+            [
+                [2.0, 1.0, 0.0, -1.0, -2.0, 3.0, 0.5, -0.5],
+                [-1.0, 0.0, 1.0, 2.0, 3.0, -2.0, -0.5, 0.5],
+            ],
+            dtype=torch.float32,
+        )
+        correction_bias = torch.tensor(
+            [-0.3, 0.2, 0.1, -0.2, 0.4, -0.4, 0.3, -0.1],
+            dtype=torch.float32,
+        )
+        weights, ids = _select_deepseek_noaux_topk(
+            logits,
+            correction_bias,
+            top_k=2,
+            n_group=4,
+            topk_group=2,
+            renormalize=True,
+            routed_scaling_factor=2.5,
+        )
+
+        scores = logits.sigmoid()
+        choice_scores = scores + correction_bias
+        grouped = choice_scores.view(2, 4, 2)
+        group_scores = grouped.topk(2, dim=-1, sorted=False).values.sum(dim=-1)
+        selected_groups = group_scores.topk(2, dim=-1, sorted=False).indices
+        group_mask = torch.zeros_like(group_scores, dtype=torch.bool)
+        group_mask.scatter_(1, selected_groups, True)
+        expert_mask = (
+            group_mask.unsqueeze(-1).expand(-1, -1, 2).reshape_as(choice_scores)
+        )
+        expected_ids = (
+            choice_scores.masked_fill(~expert_mask, float("-inf"))
+            .topk(2, dim=-1, sorted=False)
+            .indices
+        )
+        expected_weights = scores.gather(1, expected_ids)
+        expected_weights = (
+            expected_weights
+            / expected_weights.sum(dim=-1, keepdim=True).clamp_min(1e-20)
+            * 2.5
+        )
+        self.assertTrue(torch.equal(ids, expected_ids))
+        self.assertTrue(torch.equal(weights, expected_weights))
+        self.assertFalse(
+            torch.equal(
+                weights,
+                choice_scores.gather(1, ids)
+                / choice_scores.gather(1, ids).sum(dim=-1, keepdim=True)
+                * 2.5,
+            )
+        )
+
+    def test_noaux_router_constructs_without_cuda_group_topk(self):
+        parallelism_config = types.SimpleNamespace(
+            dp_rank=0,
+            dp_size=1,
+        )
+        moe_config = types.SimpleNamespace(fake_balance_expert=False)
+        model_config = types.SimpleNamespace(quant_config=None)
+        with torch.device("cpu"):
+            block = DeepSeekV32MoEBlock(
+                hidden_size=8,
+                moe_intermediate_size=4,
+                num_experts=4,
+                top_k=2,
+                layer_idx=0,
+                tp_size=1,
+                tp_rank=0,
+                ep_size=1,
+                ep_rank=0,
+                model_config=model_config,
+                parallelism_config=parallelism_config,
+                moe_config=moe_config,
+                quant_config=None,
+                params_dtype=torch.float32,
+                has_shared_expert=False,
+                scoring_func=1,
+                routed_scaling_factor=1.0,
+                n_group=2,
+                topk_group=1,
+                topk_method="noaux_tc",
+                correction_bias=True,
+            )
+        expect_fast_group_topk = get_device_type() == DeviceType.Cuda
+        self.assertEqual(block._use_fast_group_topk, expect_fast_group_topk)
+        self.assertEqual(block.group_topk is not None, expect_fast_group_topk)
+
+    def test_non_noaux_router_avoids_cuda_select_topk_on_other_devices(self):
+        parallelism_config = types.SimpleNamespace(dp_rank=0, dp_size=1)
+        moe_config = types.SimpleNamespace(fake_balance_expert=False)
+        model_config = types.SimpleNamespace(quant_config=None)
+        with (
+            mock.patch(
+                "rtp_llm.models_py.new_models.deepseek_v3.moe.get_device_type",
+                return_value=DeviceType.ROCm,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.new_models.deepseek_v3.moe.SelectTopk"
+            ) as select_topk,
+            torch.device("cpu"),
+        ):
+            block = DeepSeekV32MoEBlock(
+                hidden_size=8,
+                moe_intermediate_size=4,
+                num_experts=4,
+                top_k=2,
+                layer_idx=0,
+                tp_size=1,
+                tp_rank=0,
+                ep_size=1,
+                ep_rank=0,
+                model_config=model_config,
+                parallelism_config=parallelism_config,
+                moe_config=moe_config,
+                quant_config=None,
+                params_dtype=torch.float32,
+                has_shared_expert=False,
+                scoring_func=0,
+                routed_scaling_factor=1.0,
+                n_group=1,
+                topk_group=1,
+                topk_method="greedy",
+                correction_bias=False,
+            )
+        self.assertFalse(block._use_fast_select_topk)
+        self.assertIsNone(block.select_topk)
+        select_topk.assert_not_called()
+
+    def test_moe_forward_uses_reference_noaux_routing_on_cpu(self):
+        parallelism_config = types.SimpleNamespace(
+            dp_rank=0,
+            dp_size=1,
+        )
+        with torch.device("cpu"):
+            block = DeepSeekV32MoEBlock(
+                hidden_size=4,
+                moe_intermediate_size=2,
+                num_experts=4,
+                top_k=2,
+                layer_idx=0,
+                tp_size=1,
+                tp_rank=0,
+                ep_size=1,
+                ep_rank=0,
+                model_config=types.SimpleNamespace(quant_config=None),
+                parallelism_config=parallelism_config,
+                moe_config=types.SimpleNamespace(fake_balance_expert=False),
+                quant_config=None,
+                params_dtype=torch.float32,
+                has_shared_expert=False,
+                scoring_func=1,
+                routed_scaling_factor=2.0,
+                n_group=2,
+                topk_group=1,
+                topk_method="noaux_tc",
+                has_moe_norm=True,
+                correction_bias=True,
+            )
+
+        class CapturingExperts(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fused_moe = types.SimpleNamespace(topk_ids_dtype=torch.int64)
+                self.weights = None
+                self.ids = None
+
+            def forward(self, hidden_states, topk_weights, topk_ids):
+                self.weights = topk_weights.clone()
+                self.ids = topk_ids.clone()
+                return hidden_states + topk_weights.sum(dim=-1, keepdim=True)
+
+        capturing_experts = CapturingExperts()
+        block.experts = capturing_experts
+        hidden_states = torch.tensor([[1.0, 0.5, -1.0, 2.0], [-0.5, 1.5, 0.25, -1.0]])
+        with torch.no_grad():
+            block.gate.weight.copy_(
+                torch.tensor(
+                    [
+                        [1.0, 0.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0, 0.0],
+                        [0.0, 0.0, 1.0, 0.0],
+                        [0.0, 0.0, 0.0, 1.0],
+                    ]
+                )
+            )
+            block.gate.e_score_correction_bias.copy_(
+                torch.tensor([0.1, -0.2, 0.3, -0.4])
+            )
+
+        expected_weights, expected_ids = _select_deepseek_noaux_topk(
+            block.gate(hidden_states).float(),
+            block.gate.e_score_correction_bias,
+            top_k=2,
+            n_group=2,
+            topk_group=1,
+            renormalize=True,
+            routed_scaling_factor=2.0,
+        )
+        output = block(hidden_states)
+
+        self.assertTrue(torch.equal(capturing_experts.ids, expected_ids))
+        self.assertTrue(torch.equal(capturing_experts.weights, expected_weights))
+        self.assertTrue(
+            torch.equal(
+                output,
+                hidden_states + expected_weights.sum(dim=-1, keepdim=True),
+            )
+        )
+
+    def test_moe_rejects_invalid_fake_balance_and_input_rank(self):
+        kwargs = dict(
+            hidden_size=4,
+            moe_intermediate_size=2,
+            num_experts=4,
+            top_k=2,
+            layer_idx=0,
+            tp_size=1,
+            tp_rank=0,
+            ep_size=1,
+            ep_rank=0,
+            model_config=types.SimpleNamespace(quant_config=None),
+            parallelism_config=types.SimpleNamespace(dp_rank=0, dp_size=1),
+            quant_config=None,
+            params_dtype=torch.float32,
+            has_shared_expert=False,
+            scoring_func=0,
+            routed_scaling_factor=2.0,
+            n_group=1,
+            topk_group=1,
+            topk_method="greedy",
+            correction_bias=False,
+        )
+        with self.assertRaisesRegex(TypeError, "fake_balance_expert"):
+            DeepSeekV32MoEBlock(
+                moe_config=types.SimpleNamespace(fake_balance_expert=1),
+                **kwargs,
+            )
+
+        block = DeepSeekV32MoEBlock(
+            moe_config=types.SimpleNamespace(fake_balance_expert=False),
+            **kwargs,
+        )
+        block.experts.fused_moe = types.SimpleNamespace(topk_ids_dtype=torch.int64)
+        with self.assertRaisesRegex(ValueError, "two-dimensional"):
+            block(torch.zeros(1, 2, 4))
+
+    @unittest.skipUnless(
+        get_device_type() == DeviceType.Cuda,
+        "CUDA GroupTopK is required",
+    )
+    def test_moe_cuda_noaux_router_matches_reference(self):
+        with torch.device("cuda"):
+            block = DeepSeekV32MoEBlock(
+                hidden_size=4,
+                moe_intermediate_size=2,
+                num_experts=8,
+                top_k=2,
+                layer_idx=0,
+                tp_size=1,
+                tp_rank=0,
+                ep_size=1,
+                ep_rank=0,
+                model_config=types.SimpleNamespace(quant_config=None),
+                parallelism_config=types.SimpleNamespace(dp_rank=0, dp_size=1),
+                moe_config=types.SimpleNamespace(fake_balance_expert=False),
+                quant_config=None,
+                params_dtype=torch.float32,
+                has_shared_expert=False,
+                scoring_func=1,
+                routed_scaling_factor=2.5,
+                n_group=4,
+                topk_group=2,
+                topk_method="noaux_tc",
+                has_moe_norm=True,
+                correction_bias=True,
+            )
+        self.assertTrue(block._use_fast_group_topk)
+
+        class CapturingExperts(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fused_moe = types.SimpleNamespace(topk_ids_dtype=torch.int32)
+                self.weights = None
+                self.ids = None
+
+            def forward(self, hidden_states, topk_weights, topk_ids):
+                self.weights = topk_weights.clone()
+                self.ids = topk_ids.clone()
+                return hidden_states
+
+        capturing_experts = CapturingExperts()
+        block.experts = capturing_experts
+        hidden_states = torch.tensor(
+            [
+                [1.0, 0.5, -1.0, 2.0],
+                [-0.5, 1.5, 0.25, -1.0],
+                [0.75, -0.25, 1.25, 0.5],
+            ],
+            device="cuda",
+        )
+        with torch.no_grad():
+            block.gate.weight.copy_(
+                torch.tensor(
+                    [
+                        [1.0, 0.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0, 0.0],
+                        [0.0, 0.0, 1.0, 0.0],
+                        [0.0, 0.0, 0.0, 1.0],
+                        [0.5, -0.5, 0.25, 0.0],
+                        [-0.25, 0.75, 0.0, 0.5],
+                        [0.0, 0.25, 0.75, -0.5],
+                        [0.5, 0.0, -0.25, 0.75],
+                    ],
+                    device="cuda",
+                )
+            )
+            block.gate.e_score_correction_bias.copy_(
+                torch.tensor(
+                    [0.1, -0.2, 0.3, -0.4, 0.05, 0.15, -0.1, 0.2],
+                    device="cuda",
+                )
+            )
+
+        router_logits = block.gate(hidden_states).float()
+        expected_weights, expected_ids = _select_deepseek_noaux_topk(
+            router_logits,
+            block.gate.e_score_correction_bias,
+            top_k=2,
+            n_group=4,
+            topk_group=2,
+            renormalize=True,
+            routed_scaling_factor=2.5,
+        )
+        output = block(hidden_states)
+
+        actual_order = capturing_experts.ids.argsort(dim=-1)
+        expected_order = expected_ids.argsort(dim=-1)
+        actual_ids = capturing_experts.ids.gather(1, actual_order)
+        expected_ids = expected_ids.gather(1, expected_order).to(actual_ids.dtype)
+        actual_weights = capturing_experts.weights.gather(1, actual_order)
+        expected_weights = expected_weights.gather(1, expected_order)
+        self.assertTrue(torch.equal(actual_ids, expected_ids))
+        self.assertTrue(torch.allclose(actual_weights, expected_weights, atol=1e-6))
+        self.assertTrue(torch.equal(output, hidden_states))
+
+    @unittest.skipUnless(
+        get_device_type() == DeviceType.ROCm,
+        "ROCm is required",
+    )
+    def test_moe_rocm_noaux_reference_router_matches_expected(self):
+        with torch.device("cuda"):
+            block = DeepSeekV32MoEBlock(
+                hidden_size=4,
+                moe_intermediate_size=2,
+                num_experts=8,
+                top_k=2,
+                layer_idx=0,
+                tp_size=1,
+                tp_rank=0,
+                ep_size=1,
+                ep_rank=0,
+                model_config=types.SimpleNamespace(quant_config=None),
+                parallelism_config=types.SimpleNamespace(dp_rank=0, dp_size=1),
+                moe_config=types.SimpleNamespace(fake_balance_expert=False),
+                quant_config=None,
+                params_dtype=torch.float32,
+                has_shared_expert=False,
+                scoring_func=1,
+                routed_scaling_factor=2.5,
+                n_group=4,
+                topk_group=2,
+                topk_method="noaux_tc",
+                has_moe_norm=True,
+                correction_bias=True,
+            )
+        self.assertFalse(block._use_fast_group_topk)
+        self.assertIsNone(block.group_topk)
+
+        class CapturingExperts(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fused_moe = types.SimpleNamespace(topk_ids_dtype=torch.int32)
+                self.weights = None
+                self.ids = None
+
+            def forward(self, hidden_states, topk_weights, topk_ids):
+                self.weights = topk_weights.clone()
+                self.ids = topk_ids.clone()
+                return hidden_states
+
+        capturing_experts = CapturingExperts()
+        block.experts = capturing_experts
+        hidden_states = torch.tensor(
+            [
+                [1.0, 0.5, -1.0, 2.0],
+                [-0.5, 1.5, 0.25, -1.0],
+            ],
+            device="cuda",
+        )
+        with torch.no_grad():
+            block.gate.weight.copy_(
+                torch.tensor(
+                    [
+                        [1.0, 0.0, 0.0, 0.0],
+                        [0.0, 1.0, 0.0, 0.0],
+                        [0.0, 0.0, 1.0, 0.0],
+                        [0.0, 0.0, 0.0, 1.0],
+                        [1.0, 1.0, 0.0, 0.0],
+                        [0.0, 1.0, 1.0, 0.0],
+                        [0.0, 0.0, 1.0, 1.0],
+                        [1.0, 0.0, 0.0, 1.0],
+                    ],
+                    device="cuda",
+                )
+            )
+            block.gate.e_score_correction_bias.copy_(
+                torch.linspace(-0.2, 0.2, 8, device="cuda")
+            )
+
+        expected_weights, expected_ids = _select_deepseek_noaux_topk(
+            block.gate(hidden_states).float(),
+            block.gate.e_score_correction_bias,
+            top_k=2,
+            n_group=4,
+            topk_group=2,
+            renormalize=True,
+            routed_scaling_factor=2.5,
+        )
+        block(hidden_states)
+        self.assertTrue(torch.equal(capturing_experts.ids, expected_ids))
+        torch.testing.assert_close(capturing_experts.weights, expected_weights)
 
     def test_mla_misaligned_fp8_a_projection_uses_bf16_fallback(self):
         attention = DeepSeekV32MlaAttention(
@@ -550,10 +1257,71 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             parameter.data.zero_()
         attention.process_weights_after_loading()
         self.assertIsNotNone(attention._fused_qkv_a_runtime)
+        self.assertEqual(attention._fused_qkv_a_w.dtype, torch.float8_e4m3fn)
+        self.assertIsNotNone(attention._fused_qkv_a_s)
         self.assertEqual(
             tuple(attention._fused_qkv_a_runtime.weight.shape),
             (128 + 128 + 2, 128),
         )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires a CUDA GPU")
+    @unittest.skipIf(
+        getattr(torch.version, "hip", None) is not None,
+        "DeepGEMM fused FP8 projection is CUDA-only",
+    )
+    def test_mla_online_fused_fp8_projection_matches_bf16_reference(self):
+        device = torch.device("cuda")
+        with torch.device(device):
+            attention = DeepSeekV32MlaAttention(
+                hidden_size=128,
+                num_heads=2,
+                q_lora_rank=128,
+                kv_lora_rank=128,
+                nope_head_dim=64,
+                rope_head_dim=128,
+                v_head_dim=64,
+                layer_idx=0,
+                quant_config=QuantizationConfig("fp8_block_online"),
+                params_dtype=torch.bfloat16,
+            )
+        generator = torch.Generator(device=device).manual_seed(20260727)
+        q_a_weight = torch.randn(
+            attention.q_a_proj.weight.shape,
+            generator=generator,
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        kv_a_weight = torch.randn(
+            attention.kv_a_proj_with_mqa.weight.shape,
+            generator=generator,
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        attention.q_a_proj.weight.data.copy_(q_a_weight)
+        attention.kv_a_proj_with_mqa.weight.data.copy_(kv_a_weight)
+        reference_weight = torch.cat([q_a_weight, kv_a_weight], dim=0)
+
+        attention.process_weights_after_loading()
+        self.assertIsNotNone(attention._fused_qkv_a_runtime)
+        x = torch.randn(
+            (7, 128),
+            generator=generator,
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        actual = attention._fused_qkv_a_runtime(x)
+        expected = torch.nn.functional.linear(x, reference_weight)
+        difference = actual.float() - expected.float()
+        relative_rmse = (
+            difference.square().mean().sqrt() / expected.float().square().mean().sqrt()
+        )
+        cosine = torch.nn.functional.cosine_similarity(
+            actual.float().flatten(),
+            expected.float().flatten(),
+            dim=0,
+        )
+        self.assertLess(float(relative_rmse), 0.05)
+        self.assertGreater(float(cosine), 0.998)
 
     def test_mlp_tp_reduction_is_owned_by_row_parallel_linear(self):
         dense = DeepSeekV32MLP(

@@ -172,12 +172,14 @@ class DeepSeekV32MTPForCausalLM(GptModelBase):
                 "DeepSeek MTP newloader requires checkpoint config.json"
             )
         cfg = _extract_config_values(model_config, load_config, config_json)
+        self._checkpoint_layer = _draft_checkpoint_layer(config_json)
+        self._checkpoint_prefix = f"model.layers.{self._checkpoint_layer}."
 
-        if cfg["num_layers"] != 1:
-            raise ValueError(
-                "DeepSeek MTP runtime config must expose exactly one draft layer, "
-                f"got num_layers={cfg['num_layers']}"
-            )
+        # The engine builds the draft ModelConfig from the full checkpoint, so
+        # model_config.num_layers still describes all main-model layers.  This
+        # class represents exactly the single appended MTP layer selected above.
+        cfg["num_layers"] = 1
+        self.layer_num = 1
         if cfg["num_experts"] <= 0 or not 0 < cfg["top_k"] <= cfg["num_experts"]:
             raise ValueError(
                 "DeepSeek MTP requires routed experts with "
@@ -188,14 +190,12 @@ class DeepSeekV32MTPForCausalLM(GptModelBase):
                 f"num_experts={cfg['num_experts']} must be divisible by "
                 f"ep_size={cfg['ep_size']}"
             )
-        self._checkpoint_layer = _draft_checkpoint_layer(config_json)
-        self._checkpoint_prefix = f"model.layers.{self._checkpoint_layer}."
 
         # The single draft layer always uses the routed/shared MoE path.
         cfg["moe_layer_index"] = [0]
 
         # --- RoPE cache ---
-        device = torch.device("cuda")
+        device = torch.device(getattr(load_config, "device", "cuda"))
         cos_sin_cache = _build_rope_cache(
             config_json if config_json else cfg,
             cfg["max_seq_len"],
@@ -257,6 +257,7 @@ class DeepSeekV32MTPForCausalLM(GptModelBase):
             routed_scaling_factor=cfg["routed_scaling_factor"],
             n_group=cfg["n_group"],
             topk_group=cfg["topk_group"],
+            topk_method=cfg["topk_method"],
             has_moe_norm=cfg["has_moe_norm"],
             correction_bias=cfg["has_e_score_correction"],
             is_sparse=cfg["is_sparse"],

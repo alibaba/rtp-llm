@@ -27,14 +27,13 @@ class DeepseekV3RotaryEmbedding(nn.Module):
             device=self.inv_freq.device,
             dtype=torch.get_default_dtype(),
         )
-        self.max_seq_lencached = None
 
     def _set_cos_sin_cache(
         self, seq_len: int, device: torch.device, dtype: torch.dtype
     ) -> None:
-        self.max_seq_lencached = seq_len
+        self.max_seq_len_cached = seq_len
         t = torch.arange(
-            self.max_seq_lencached,
+            self.max_seq_len_cached,
             device=device,
             dtype=self.inv_freq.dtype,
         )
@@ -46,7 +45,7 @@ class DeepseekV3RotaryEmbedding(nn.Module):
     def forward(
         self, x: torch.Tensor, seq_len: int
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        if self.max_seq_lencached is None or seq_len > self.max_seq_lencached:
+        if seq_len > self.max_seq_len_cached:
             self._set_cos_sin_cache(seq_len=seq_len, device=x.device, dtype=x.dtype)
         return (
             self.cos_cached[:seq_len].to(dtype=x.dtype),
@@ -123,7 +122,7 @@ class DeepseekV3YarnRotaryEmbedding(DeepseekV3RotaryEmbedding):
     def _set_cos_sin_cache(
         self, seq_len: int, device: torch.device, dtype: torch.dtype
     ) -> None:
-        self.max_seq_lencached = seq_len
+        self.max_seq_len_cached = seq_len
         dim = self.dim
         freq_extra = 1.0 / (
             self.base

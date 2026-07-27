@@ -324,12 +324,17 @@ def _extract_config_values(
         model_config, "has_moe_norm", _get(model_config, "norm_topk_prob", None)
     )
     if config_json:
-        if n_group is None:
-            n_group = config_json.get("n_group", 1)
-        if topk_group is None:
-            topk_group = config_json.get("topk_group", 1)
-        if has_moe_norm is None:
-            has_moe_norm = config_json.get("norm_topk_prob", False)
+        raw_scoring_func = config_json.get("scoring_func")
+        if raw_scoring_func is not None:
+            if raw_scoring_func == "softmax":
+                scoring_func = 0
+            elif raw_scoring_func == "sigmoid":
+                scoring_func = 1
+            else:
+                raise ValueError(f"unsupported scoring_func={raw_scoring_func!r}")
+        n_group = config_json.get("n_group", n_group)
+        topk_group = config_json.get("topk_group", topk_group)
+        has_moe_norm = config_json.get("norm_topk_prob", has_moe_norm)
     n_group = n_group if n_group is not None else 1
     topk_group = topk_group if topk_group is not None else 1
     has_moe_norm = has_moe_norm if has_moe_norm is not None else False
@@ -338,12 +343,17 @@ def _extract_config_values(
         routed_scaling_factor = config_json.get(
             "routed_scaling_factor", routed_scaling_factor
         )
+    topk_method = config_json.get("topk_method", "greedy") if config_json else "greedy"
+    if topk_method == "gready":
+        topk_method = "greedy"
+    if topk_method not in {"greedy", "group_limited_greedy", "noaux_tc"}:
+        raise ValueError(f"unsupported topk_method={topk_method!r}")
     # has_e_score_correction is not a ModelConfig field — the legacy loader
     # detects it from ckpt key presence on the weight class side. Derive it
     # here from config.json's topk_method ("noaux_tc" => correction bias).
     has_e_score_correction = _get(model_config, "has_e_score_correction", False)
     if not has_e_score_correction and config_json:
-        has_e_score_correction = config_json.get("topk_method") == "noaux_tc"
+        has_e_score_correction = topk_method == "noaux_tc"
     has_e_score_correction = _bool_value(
         has_e_score_correction, "has_e_score_correction"
     )
@@ -456,7 +466,7 @@ def _extract_config_values(
     topk_group = _positive_int(topk_group, "topk_group")
     if topk_group > n_group:
         raise ValueError(f"topk_group={topk_group} exceeds n_group={n_group}")
-    if moe_layer_index and has_e_score_correction:
+    if moe_layer_index and topk_method in {"group_limited_greedy", "noaux_tc"}:
         if num_experts % n_group:
             raise ValueError(
                 f"num_experts={num_experts} must be divisible by " f"n_group={n_group}"
@@ -490,6 +500,7 @@ def _extract_config_values(
         routed_scaling_factor=routed_scaling_factor,
         n_group=n_group,
         topk_group=topk_group,
+        topk_method=topk_method,
         has_moe_norm=has_moe_norm,
         has_e_score_correction=has_e_score_correction,
         is_sparse=is_sparse,
@@ -636,7 +647,7 @@ class DeepSeekV32ForCausalLM(GptModelBase):
         self.tie_word_embeddings = cfg["tie_word_embeddings"]
 
         # --- RoPE cache: read config.json directly for full rope fields ---
-        device = torch.device("cuda")
+        device = torch.device(getattr(load_config, "device", "cuda"))
         cos_sin_cache = _build_rope_cache(
             config_json if config_json else cfg,
             cfg["max_seq_len"],
@@ -691,6 +702,7 @@ class DeepSeekV32ForCausalLM(GptModelBase):
                 routed_scaling_factor=cfg["routed_scaling_factor"],
                 n_group=cfg["n_group"],
                 topk_group=cfg["topk_group"],
+                topk_method=cfg["topk_method"],
                 has_moe_norm=cfg["has_moe_norm"],
                 correction_bias=cfg["has_e_score_correction"],
                 is_sparse=cfg["is_sparse"],
