@@ -154,11 +154,13 @@ class FanoutServiceTest {
     }
 
     @Test
-    void garbageFeBodyCountsExactlyOnceAsFailedChunk() {
+    void garbageFeBodyCountsExactlyOnceAsMalformedChunk() {
         // The FE body is parsed BEFORE the ok report: a 200 whose body is not JSON (proxy error
         // page, truncated write) must produce exactly one reportChunk with result "failed" —
         // never an "ok" for the 200 plus a "failed" for the parse — and still hold the chunk's
-        // failed placeholder at the right index.
+        // failed placeholder at the right index. A parse failure on a 200 is a MALFORMED success,
+        // not a transport fault: it must categorize as malformed_body (same as a wrong-length
+        // response array), keeping the transport tag reserved for connection-layer failures.
         FeClient feClient = mock(FeClient.class);
         when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any()))
                 .thenReturn(Mono.just(responseBatchBytes("r0", "r1")));
@@ -187,8 +189,36 @@ class FanoutServiceTest {
         List<DispatcherTestSupport.RecordingMetrics.ChunkReport> failed = metrics.chunkReports.stream()
                 .filter(r -> "failed".equals(r.result())).toList();
         assertEquals(1, failed.size(), "the garbage-body chunk reports failed exactly once");
-        assertEquals("transport", failed.get(0).reason(),
-                "a parse failure carries no FE status, so it categorizes as transport");
+        assertEquals("malformed_body", failed.get(0).reason(),
+                "a 200 with an unparseable body is a malformed success, not a transport failure");
+    }
+
+    @Test
+    void nonObject200BodyMetersMalformedNotTransport() {
+        // A 200 whose body is valid JSON but not an object (top-level array/scalar) must also
+        // categorize as malformed_body — it is a malformed success, distinct from a connection-layer
+        // transport fault. Mutation guard: let the parse failure fall through to the transport
+        // onErrorResume and this asserts transport instead.
+        FeClient feClient = mock(FeClient.class);
+        when(feClient.postBytes(eq("http://a"), eq("/batch_infer"), any(), any(), any()))
+                .thenReturn(Mono.just("[1,2,3]".getBytes(StandardCharsets.UTF_8)));
+        DispatcherTestSupport.RecordingMetrics metrics = DispatcherTestSupport.recordingMetrics();
+        FanoutService svc = new FanoutService(feClient, metrics);
+
+        StepVerifier.create(svc.dispatchChunks(
+                        "/batch_infer", List.of(chunk("p0")), List.of("http://a"),
+                        BATCH_INFER, new HttpHeaders(), null))
+                .assertNext(subs -> {
+                    assertEquals(1, subs.size());
+                    assertFalse(subs.get(0).success(), "a non-object 200 body must fail the chunk");
+                    assertNotNull(subs.get(0).reason());
+                })
+                .verifyComplete();
+
+        assertEquals(1, metrics.chunkReports.size(), "exactly one report for the chunk");
+        assertEquals("failed", metrics.chunkReports.get(0).result());
+        assertEquals("malformed_body", metrics.chunkReports.get(0).reason(),
+                "a non-object 200 body is a malformed success, not a transport failure");
     }
 
     @Test

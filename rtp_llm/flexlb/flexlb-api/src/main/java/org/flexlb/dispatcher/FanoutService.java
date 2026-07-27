@@ -1,6 +1,7 @@
 package org.flexlb.dispatcher;
 
 import com.alibaba.fastjson2.JSON;
+import com.alibaba.fastjson2.JSONException;
 import com.alibaba.fastjson2.JSONObject;
 import com.alibaba.fastjson2.JSONWriter;
 import lombok.RequiredArgsConstructor;
@@ -36,6 +37,14 @@ public class FanoutService {
      * at once — bounding concurrent I/O and outbound buffer pressure. The merge still collects all
      * parsed responses before assembling, so peak heap scales with total batch size, not with this
      * cap. The common {@code count:5} split never reaches it; it only bites huge batches.
+     *
+     * <p><strong>Heap sizing (non-streaming merge, deliberate):</strong> because {@link #dispatchChunks}
+     * {@code collectList()}s every chunk response and parses each into a JSONObject tree before
+     * {@code ResponseMerger} assembles them, peak heap per request ≈ Σ(chunk response bytes) plus the
+     * parsed-tree expansion multiple, and cluster peak ≈ that × concurrent in-flight requests. Each
+     * chunk body is bounded by {@code FeClient.MAX_RESPONSE_BYTES} (16MB) but there is no
+     * aggregate-level byte watermark, so JVM heap must be provisioned for the largest expected
+     * (batch size × response size × concurrency), not just for a single chunk.
      */
     private static final int FANOUT_MAX_CONCURRENCY = 64;
 
@@ -107,7 +116,24 @@ public class FanoutService {
                             .map(bytes -> {
                                 // Parse before reporting: a 200 with a non-JSON body must count
                                 // once as failed, not once as ok and again as failed.
-                                JSONObject parsed = JSON.parseObject(bytes);
+                                JSONObject parsed;
+                                try {
+                                    parsed = JSON.parseObject(bytes);
+                                } catch (JSONException ex) {
+                                    parsed = null;
+                                }
+                                if (parsed == null) {
+                                    // A 200 whose body is not a JSON object (top-level array/scalar or
+                                    // garbage) is a malformed success, not a transport fault — meter it
+                                    // as CHUNK_MALFORMED, the same tag as a wrong-length response array,
+                                    // so CHUNK_TRANSPORT stays reserved for connection-layer failures.
+                                    metricsReporter.reportChunk(DispatcherMetricsReporter.CHUNK_MALFORMED,
+                                            System.currentTimeMillis() - start);
+                                    failureWarn.warn("FE chunk returned a non-object 200 body: url={}, path={}, size={}",
+                                            pick.feUrl(), fePath, plan.chunkSize());
+                                    return SubBatchResult.failed(plan.chunkSize(), plan.startIndex(),
+                                            "malformed FE response body");
+                                }
                                 SubBatchResult result = SubBatchResult.ok(parsed, plan.chunkSize(), plan.startIndex());
                                 // A 200 whose response array is absent or the wrong length is merged
                                 // as a failure, so meter it as one too — using the merge's own
