@@ -43,6 +43,8 @@ if triton is not None:
         x = tl.load(x_ptr + pid_m * x_stride_m + col, mask=mask, other=0.0).to(
             tl.float32
         )
+        x_is_finite = tl.abs(x) < float("inf")
+        x = tl.where(x_is_finite, x, 0.0)
         x_2d = tl.reshape(tl.abs(x), (4, 32))
         block_absmax = tl.maximum(tl.max(x_2d, axis=1), eps)
         scale = tl.math.exp2(tl.ceil(tl.log2(block_absmax / fp8_max)))
@@ -125,6 +127,8 @@ if triton is not None:
                 mask=mask,
                 other=0.0,
             ).to(tl.float32)
+            x_is_finite = tl.abs(x) < float("inf")
+            x = tl.where(x_is_finite, x, 0.0)
 
             block_absmax = tl.maximum(tl.max(tl.abs(x), axis=1), eps)
             scale_raw = block_absmax / fp8_max

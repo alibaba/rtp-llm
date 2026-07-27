@@ -53,6 +53,8 @@ if triton is not None:
                 x = tl.load(x_ptr + base_in + cols[None, :], mask=mask, other=0.0).to(
                     tl.float32
                 )
+                x_is_finite = tl.abs(x) < float("inf")
+                x = tl.where(x_is_finite, x, 0.0)
                 absmax = tl.max(tl.abs(x), axis=1)
                 scale_raw = tl.maximum(absmax, clamp_eps) / fp8_max
                 exponent = tl.ceil(tl.log2(scale_raw))

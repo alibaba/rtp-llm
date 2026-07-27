@@ -16,6 +16,7 @@ indices [N, 6] long, weights [N, 6] fp32.
 Currently supports score_func='sqrtsoftplus' (V4 default).  For other
 score functions, fall back to the eager path.
 """
+
 import torch
 import triton
 import triton.language as tl
@@ -50,11 +51,16 @@ def _v4_gate_sqrtsoftplus_topk_kernel(
     offs = tl.arange(0, BLOCK_E)
     mask = offs < E
 
-    # Load row + bias.
-    s_row = tl.load(scores_ptr + pid * E + offs, mask=mask, other=-float("inf")).to(
-        tl.float32
-    )
+    # Load row + bias. A single non-finite value invalidates the whole router
+    # row, matching the eager fallback and keeping bad weights out of MegaMoE.
+    s_row = tl.load(scores_ptr + pid * E + offs, mask=mask, other=0.0).to(tl.float32)
     bias_row = tl.load(bias_ptr + offs, mask=mask, other=0.0).to(tl.float32)
+    score_is_finite = tl.abs(s_row) < float("inf")
+    bias_is_finite = tl.abs(bias_row) < float("inf")
+    bad_value = mask & (~score_is_finite | ~bias_is_finite)
+    row_is_finite = tl.sum(bad_value.to(tl.int32), axis=0) == 0
+    s_row = tl.where(score_is_finite, s_row, 0.0)
+    bias_row = tl.where(bias_is_finite, bias_row, 0.0)
 
     # softplus(x) = log(1 + exp(x)); numerically stable for x>20: just x.
     THRESH = tl.full([1], 20.0, dtype=tl.float32)
@@ -74,7 +80,8 @@ def _v4_gate_sqrtsoftplus_topk_kernel(
         idx = tl.argmax(cur_biased, axis=0)  # int32 scalar
         # Gather the un-biased score at this index for the weight.
         sel = tl.sum(tl.where(offs == idx, s_active, 0.0), axis=0)
-        tl.store(out_idx_ptr + pid * K + k, idx.to(tl.int64))
+        safe_idx = tl.where(row_is_finite, idx, k)
+        tl.store(out_idx_ptr + pid * K + k, safe_idx.to(tl.int64))
         tl.store(out_w_ptr + pid * K + k, sel)
         # Blank out the chosen position so the next argmax ignores it.
         cur_biased = tl.where(offs == idx, -float("inf"), cur_biased)
@@ -87,6 +94,7 @@ def _v4_gate_sqrtsoftplus_topk_kernel(
     )
     s = tl.sum(w_loaded, axis=0) + NORM_EPS
     w_norm = w_loaded / s * ROUTE_SCALE
+    w_norm = tl.where(row_is_finite, w_norm, ROUTE_SCALE / K)
     tl.store(out_w_ptr + pid * K + k_offs, w_norm, mask=k_mask)
 
 

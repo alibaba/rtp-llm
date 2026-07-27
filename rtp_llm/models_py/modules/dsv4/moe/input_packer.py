@@ -54,7 +54,8 @@ class TorchMegaMoeInputPacker(MegaMoeInputPacker):
             raise RuntimeError(
                 "DSV4_MOE_STRICT_FUSED=1 forbids TorchMegaMoeInputPacker"
             )
-        x_fp8, x_sf = _per_token_cast_to_fp8_packed_ue8m0(x.contiguous(), gran_k=32)
+        safe_x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0).contiguous()
+        x_fp8, x_sf = _per_token_cast_to_fp8_packed_ue8m0(safe_x, gran_k=32)
         buf.x[:tokens].copy_(x_fp8)
         buf.x_sf[:tokens].copy_(x_sf)
         buf.topk_idx[:tokens].copy_(indices.to(torch.int64).contiguous())

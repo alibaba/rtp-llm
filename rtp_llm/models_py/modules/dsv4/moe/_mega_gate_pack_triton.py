@@ -56,6 +56,8 @@ if triton is not None:
                 mask=mask,
                 other=0.0,
             ).to(tl.float32)
+            x_is_finite = tl.abs(x) < float("inf")
+            x = tl.where(x_is_finite, x, 0.0)
 
             block_absmax = tl.maximum(tl.max(tl.abs(x), axis=1), eps)
             scale_raw = block_absmax / fp8_max
@@ -130,6 +132,8 @@ if triton is not None:
             offs_e = tl.arange(0, BLOCK_E)
             e_mask = offs_e < E
             bias_row = tl.load(bias_ptr + offs_e, mask=e_mask, other=0.0).to(tl.float32)
+            bias_is_finite = tl.abs(bias_row) < float("inf")
+            bias_row = tl.where(bias_is_finite, bias_row, 0.0)
             k_offs = tl.arange(0, BLOCK_K)
             k_mask_base = k_offs < K
 
@@ -139,11 +143,17 @@ if triton is not None:
                 scores = tl.load(
                     scores_ptr + row * scores_stride_m + offs_e,
                     mask=row_mask & e_mask,
-                    other=-float("inf"),
+                    other=0.0,
                 ).to(tl.float32)
+                score_is_finite = tl.abs(scores) < float("inf")
+                bad_value = row_mask & e_mask & (~score_is_finite | ~bias_is_finite)
+                row_is_finite = tl.sum(bad_value.to(tl.int32), axis=0) == 0
+                scores = tl.where(score_is_finite, scores, 0.0)
 
                 threshold = tl.full([1], 20.0, dtype=tl.float32)
-                softplus = tl.where(scores > threshold, scores, tl.log(1.0 + tl.exp(scores)))
+                softplus = tl.where(
+                    scores > threshold, scores, tl.log(1.0 + tl.exp(scores))
+                )
                 active = tl.sqrt(softplus)
                 biased = tl.where(e_mask, active + bias_row, -float("inf"))
                 cur = biased
@@ -152,9 +162,10 @@ if triton is not None:
                 for k in tl.static_range(K):
                     idx = tl.argmax(cur, axis=0)
                     weight = tl.sum(tl.where(offs_e == idx, active, 0.0), axis=0)
+                    safe_idx = tl.where(row_is_finite, idx, k)
                     tl.store(
                         out_indices_ptr + row * out_indices_stride_m + k,
-                        idx.to(tl.int64),
+                        safe_idx.to(tl.int64),
                         mask=row_mask,
                     )
                     selected_weights = tl.where(k_offs == k, weight, selected_weights)
@@ -163,6 +174,7 @@ if triton is not None:
                 k_mask = row_mask & k_mask_base
                 denom = tl.sum(tl.where(k_mask_base, selected_weights, 0.0), axis=0)
                 weights = selected_weights / (denom + norm_eps) * route_scale
+                weights = tl.where(row_is_finite, weights, route_scale / K)
                 tl.store(
                     out_weights_ptr + row * out_weights_stride_m + k_offs,
                     weights,
@@ -233,15 +245,26 @@ if triton is not None:
                 ).to(tl.int64)
                 k_mask = row_mask & k_mask_base
                 idx = tl.load(
-                    tid2eid_ptr + token_id * tid2eid_stride_m + k_offs * tid2eid_stride_k,
+                    tid2eid_ptr
+                    + token_id * tid2eid_stride_m
+                    + k_offs * tid2eid_stride_k,
                     mask=k_mask,
                     other=0,
                 ).to(tl.int64)
                 selected = tl.load(
                     scores_ptr + row * scores_stride_m + idx,
                     mask=k_mask,
-                    other=-float("inf"),
+                    other=0.0,
                 ).to(tl.float32)
+                selected_is_finite = tl.abs(selected) < float("inf")
+                row_is_finite = (
+                    tl.sum(
+                        (k_mask & ~selected_is_finite).to(tl.int32),
+                        axis=0,
+                    )
+                    == 0
+                )
+                selected = tl.where(selected_is_finite, selected, 0.0)
                 threshold = tl.full([1], 20.0, dtype=tl.float32)
                 softplus = tl.where(
                     selected > threshold, selected, tl.log(1.0 + tl.exp(selected))
@@ -249,6 +272,7 @@ if triton is not None:
                 weights = tl.sqrt(softplus)
                 denom = tl.sum(tl.where(k_mask, weights, 0.0), axis=0) + norm_eps
                 weights = weights / denom * route_scale
+                weights = tl.where(row_is_finite, weights, route_scale / K)
                 tl.store(
                     out_indices_ptr + row * out_indices_stride_m + k_offs,
                     idx,
@@ -298,9 +322,7 @@ def _validate_common(
     tokens, dim = x.shape
     score_tokens, experts = scores_bf16.shape
     if score_tokens != tokens:
-        raise ValueError(
-            f"scores rows {score_tokens} must match x rows {tokens}"
-        )
+        raise ValueError(f"scores rows {score_tokens} must match x rows {tokens}")
     if dim % 128 != 0:
         raise ValueError(f"MegaMoE gate-pack requires D % 128 == 0, got D={dim}")
     if out_sf.shape[1] != dim // 128:
