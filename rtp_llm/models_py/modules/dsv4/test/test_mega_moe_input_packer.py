@@ -74,16 +74,24 @@ class TestMegaMoeInputPacker(unittest.TestCase):
                 topk = 8
                 x = torch.randn(tokens, dim, device="cuda", dtype=torch.bfloat16)
                 weights = torch.randn(tokens, topk, device="cuda", dtype=torch.float32)
-                indices = torch.randint(0, 256, (tokens, topk), device="cuda", dtype=torch.int64)
+                indices = torch.randint(
+                    0, 256, (tokens, topk), device="cuda", dtype=torch.int64
+                )
                 ref = _make_buf(tokens, dim, topk, "cuda")
                 got = _make_buf(tokens, dim, topk, "cuda")
                 with _env("DSV4_MOE_STRICT_FUSED", "0"):
                     TorchMegaMoeInputPacker().pack(x, weights, indices, ref, tokens)
                 FusedMegaMoeInputPacker().pack(x, weights, indices, got, tokens)
-                self.assertTrue(torch.equal(ref.x.view(torch.uint8).cpu(), got.x.view(torch.uint8).cpu()))
+                self.assertTrue(
+                    torch.equal(
+                        ref.x.view(torch.uint8).cpu(), got.x.view(torch.uint8).cpu()
+                    )
+                )
                 self.assertTrue(torch.equal(ref.x_sf.cpu(), got.x_sf.cpu()))
                 self.assertTrue(torch.equal(ref.topk_idx.cpu(), got.topk_idx.cpu()))
-                self.assertTrue(torch.equal(ref.topk_weights.cpu(), got.topk_weights.cpu()))
+                self.assertTrue(
+                    torch.equal(ref.topk_weights.cpu(), got.topk_weights.cpu())
+                )
 
     @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
     def test_zero_tokens_noop(self):
@@ -95,6 +103,29 @@ class TestMegaMoeInputPacker(unittest.TestCase):
             buf,
             0,
         )
+
+    @unittest.skipIf(not torch.cuda.is_available(), "CUDA required")
+    def test_nonfinite_activations_are_zeroed(self):
+        tokens, dim, topk = 3, 256, 8
+        x = torch.randn(tokens, dim, device="cuda", dtype=torch.bfloat16)
+        x[0, 0] = float("nan")
+        x[1, 1] = float("inf")
+        x[2, 2] = -float("inf")
+        weights = torch.rand(tokens, topk, device="cuda", dtype=torch.float32)
+        indices = torch.randint(
+            0, 256, (tokens, topk), device="cuda", dtype=torch.int64
+        )
+        ref = _make_buf(tokens, dim, topk, "cuda")
+        got = _make_buf(tokens, dim, topk, "cuda")
+
+        with _env("DSV4_MOE_STRICT_FUSED", "0"):
+            TorchMegaMoeInputPacker().pack(x, weights, indices, ref, tokens)
+        FusedMegaMoeInputPacker().pack(x, weights, indices, got, tokens)
+        torch.cuda.synchronize()
+
+        self.assertTrue(torch.equal(ref.x.view(torch.uint8), got.x.view(torch.uint8)))
+        self.assertTrue(torch.equal(ref.x_sf, got.x_sf))
+        self.assertTrue(torch.isfinite(got.x.float()).all().item())
 
 
 if __name__ == "__main__":
