@@ -1077,7 +1077,8 @@ void GenerateStream::update(const StreamUpdateInfo& update_info) {
                                      vocab_size_,
                                      usesBeamSearchTokenLayoutForCurrentStep(),
                                      streamId(),
-                                     error_token_id)) {
+                                     error_token_id,
+                                     update_info.src_batch_indices)) {
         reportEventWithoutLock(StreamEvents::Error,
                                ErrorCode::OUT_OF_VOCAB_RANGE,
                                "output token id:" + std::to_string(error_token_id)
