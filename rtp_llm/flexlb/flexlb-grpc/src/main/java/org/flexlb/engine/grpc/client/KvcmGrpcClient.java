@@ -16,6 +16,7 @@ import org.flexlb.kvcm.grpc.GetHostCacheStateRequest;
 import org.flexlb.kvcm.grpc.GetHostCacheStateResponse;
 import org.flexlb.kvcm.grpc.HostCacheMatch;
 import org.flexlb.kvcm.grpc.QueryType;
+import org.flexlb.listener.ApplicationWarmupState;
 import org.flexlb.util.IdUtils;
 import org.springframework.stereotype.Component;
 
@@ -48,6 +49,7 @@ public class KvcmGrpcClient {
     private final KvcmMetaServiceClient metaServiceClient;
     private final KvcmLeaderResolver leaderResolver;
     private final KvcmWorkerMetadataResolver workerMetadataResolver;
+    private final ApplicationWarmupState applicationWarmupState;
     private final ScheduledExecutorService refreshExecutor;
     private final int heartbeatFailureThreshold;
     private final int queryFailureThreshold;
@@ -64,10 +66,15 @@ public class KvcmGrpcClient {
     @Setter
     private volatile Consumer<KvcmHealthSnapshot> healthSnapshotListener = ignored -> { };
 
-    public KvcmGrpcClient(CacheMatchConfiguration configuration, KvcmMetaServiceClient metaServiceClient, KvcmLeaderResolver leaderResolver, KvcmWorkerMetadataResolver workerMetadataResolver) {
+    public KvcmGrpcClient(CacheMatchConfiguration configuration,
+                          KvcmMetaServiceClient metaServiceClient,
+                          KvcmLeaderResolver leaderResolver,
+                          KvcmWorkerMetadataResolver workerMetadataResolver,
+                          ApplicationWarmupState applicationWarmupState) {
         this.metaServiceClient = metaServiceClient;
         this.leaderResolver = leaderResolver;
         this.workerMetadataResolver = workerMetadataResolver;
+        this.applicationWarmupState = applicationWarmupState;
         this.config = configuration.getKvcmConfig();
         this.enabled = configuration.isKvcmEnabled();
 
@@ -230,6 +237,16 @@ public class KvcmGrpcClient {
     }
 
     private void recordHeartbeat(boolean success) {
+        if (!applicationWarmupState.isWarmupFinished()) {
+            long currentTimeMs = System.currentTimeMillis();
+            if (success) {
+                lastHeartbeatSuccessTimeMs.set(currentTimeMs);
+            } else {
+                lastHeartbeatFailureTimeMs.set(currentTimeMs);
+            }
+            log.debug("Ignoring KVCM heartbeat result during application warm-up, success={}", success);
+            return;
+        }
         if (success) {
             recordHeartbeatSuccess();
         } else {
@@ -267,6 +284,10 @@ public class KvcmGrpcClient {
     }
 
     private void recordQueryFailure() {
+        if (!applicationWarmupState.isWarmupFinished()) {
+            log.debug("Ignoring KVCM query failure during application warm-up");
+            return;
+        }
         int failures = consecutiveQueryFailures.incrementAndGet();
         if (failures >= queryFailureThreshold) {
             boolean becameUnhealthy = healthState.compareAndSet(KvcmHealthState.HEALTHY, KvcmHealthState.UNHEALTHY);

@@ -136,7 +136,8 @@ class KvcmGrpcClientTest {
                 new CacheMatchConfiguration(new ModelMetaConfig()),
                 metaServiceClient,
                 leaderResolver,
-                workerMetadataResolver);
+                workerMetadataResolver,
+                () -> true);
         List<KvcmHealthState> healthSnapshots = new ArrayList<>();
         client.setHealthSnapshotListener(snapshot -> healthSnapshots.add(snapshot.state()));
 
@@ -171,6 +172,86 @@ class KvcmGrpcClientTest {
         assertEquals(KvcmHealthState.HEALTHY, recovered.state());
         assertEquals(3, recovered.consecutiveHeartbeatSuccesses());
         assertEquals(List.of(KvcmHealthState.UNHEALTHY, KvcmHealthState.HEALTHY), healthSnapshots);
+    }
+
+    @Test
+    void ignoresHeartbeatFailuresUntilApplicationWarmupFinishes() {
+        KvcmMetaServiceClient metaServiceClient = Mockito.mock(KvcmMetaServiceClient.class);
+        KvcmLeaderResolver leaderResolver = Mockito.mock(KvcmLeaderResolver.class);
+        KvcmWorkerMetadataResolver workerMetadataResolver =
+                Mockito.mock(KvcmWorkerMetadataResolver.class);
+        AtomicBoolean warmupFinished = new AtomicBoolean();
+        when(leaderResolver.refresh()).thenReturn(false);
+        client = new KvcmGrpcClient(
+                new CacheMatchConfiguration(new ModelMetaConfig()),
+                metaServiceClient,
+                leaderResolver,
+                workerMetadataResolver,
+                warmupFinished::get);
+
+        client.refreshKvcmServiceStateSafely();
+        client.refreshKvcmServiceStateSafely();
+        client.refreshKvcmServiceStateSafely();
+
+        KvcmHealthSnapshot duringWarmup = client.healthSnapshot();
+        assertEquals(KvcmHealthState.HEALTHY, duringWarmup.state());
+        assertEquals(0, duringWarmup.consecutiveHeartbeatFailures());
+        assertTrue(duringWarmup.lastHeartbeatFailureTimeMs() > 0);
+
+        warmupFinished.set(true);
+        client.refreshKvcmServiceStateSafely();
+        client.refreshKvcmServiceStateSafely();
+        client.refreshKvcmServiceStateSafely();
+
+        KvcmHealthSnapshot afterWarmup = client.healthSnapshot();
+        assertEquals(KvcmHealthState.UNHEALTHY, afterWarmup.state());
+        assertEquals(3, afterWarmup.consecutiveHeartbeatFailures());
+    }
+
+    @Test
+    void ignoresQueryFailuresUntilApplicationWarmupFinishes() {
+        KvcmMetaServiceClient metaServiceClient = Mockito.mock(KvcmMetaServiceClient.class);
+        KvcmLeaderResolver leaderResolver = Mockito.mock(KvcmLeaderResolver.class);
+        KvcmWorkerMetadataResolver workerMetadataResolver =
+                Mockito.mock(KvcmWorkerMetadataResolver.class);
+        AtomicBoolean warmupFinished = new AtomicBoolean();
+        GrpcTarget leader = new GrpcTarget("127.0.0.1", 6381);
+
+        when(leaderResolver.resolve()).thenReturn(leader);
+        when(workerMetadataResolver.resolveNamespace(
+                RoleType.PREFILL, "default", 2192L))
+                .thenReturn("test-namespace");
+        when(workerMetadataResolver.resolveQueryType(
+                RoleType.PREFILL, "default"))
+                .thenReturn(QueryType.QT_PREFIX_MATCH);
+        when(metaServiceClient.getHostCacheState(
+                any(GrpcTarget.class),
+                any(GetHostCacheStateRequest.class),
+                anyLong()))
+                .thenThrow(io.grpc.Status.UNAVAILABLE.asRuntimeException());
+
+        ModelMetaConfig modelMetaConfig =
+                modelMetaConfig(seedServer.getPort(), "test-namespace");
+        KvcmConfig kvcm = modelMetaConfig
+                .getServiceRoute("test-service")
+                .getKvcm();
+        kvcm.setQueryFailureThreshold(1);
+        kvcm.setMaxQueryRetryCount(0);
+        client = new KvcmGrpcClient(
+                new CacheMatchConfiguration(modelMetaConfig),
+                metaServiceClient,
+                leaderResolver,
+                workerMetadataResolver,
+                warmupFinished::get);
+
+        assertThrows(KvcmQueryException.class, this::queryMockClient);
+        assertEquals(KvcmHealthState.HEALTHY, client.healthSnapshot().state());
+        assertEquals(0, client.healthSnapshot().consecutiveQueryFailures());
+
+        warmupFinished.set(true);
+        assertThrows(KvcmQueryException.class, this::queryMockClient);
+        assertEquals(KvcmHealthState.UNHEALTHY, client.healthSnapshot().state());
+        assertEquals(1, client.healthSnapshot().consecutiveQueryFailures());
     }
 
     @Test
@@ -215,7 +296,8 @@ class KvcmGrpcClientTest {
                 new CacheMatchConfiguration(modelMetaConfig),
                 metaServiceClient,
                 leaderResolver,
-                workerMetadataResolver);
+                workerMetadataResolver,
+                () -> true);
         Mockito.verify(leaderResolver, Mockito.timeout(1_000)).refresh();
         int heartbeatSuccessesBeforeQueries =
                 client.healthSnapshot().consecutiveHeartbeatSuccesses();
@@ -286,7 +368,8 @@ class KvcmGrpcClientTest {
                 configuration,
                 metaServiceClient,
                 new KvcmLeaderResolver(configuration, serviceDiscovery, metaServiceClient),
-                new KvcmWorkerMetadataResolver(configuration, workerStatusProvider(mode)));
+                new KvcmWorkerMetadataResolver(configuration, workerStatusProvider(mode)),
+                () -> true);
     }
 
     private WorkerStatusProvider workerStatusProvider(KvCacheGroupMode mode) {
