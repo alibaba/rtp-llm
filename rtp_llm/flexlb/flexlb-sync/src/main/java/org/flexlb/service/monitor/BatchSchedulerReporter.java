@@ -14,6 +14,8 @@ import javax.annotation.PostConstruct;
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_SIZE;
 import static org.flexlb.constant.MetricConstant.BATCHER_QUEUE_WAIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_ACTUAL_TIME_MS;
+import static org.flexlb.constant.MetricConstant.BATCH_CANCEL_QPS;
+import static org.flexlb.constant.MetricConstant.BATCH_CANCEL_RELEASE_RESULT_QPS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICTED_TIME_MS;
 import static org.flexlb.constant.MetricConstant.BATCH_PREDICT_GAP_MS;
 import static org.flexlb.constant.MetricConstant.DISPATCH_ACK_TIME_MS;
@@ -98,6 +100,14 @@ public class BatchSchedulerReporter {
         // absolute deadline already passed, QPS tagged by role and engineIpPort
         monitor.register(DISPATCH_EXPIRED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
 
+        // Batch cancel — number of cancel() calls on FlexlbBatchScheduler,
+        // QPS tagged by reason and outcome
+        monitor.register(BATCH_CANCEL_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+
+        // Batch cancel engine-side result — success/failure of the cancelPrefill gRPC call,
+        // QPS tagged by step (CANCEL_PREFILL) and result (SUCCESS / FAILURE)
+        monitor.register(BATCH_CANCEL_RELEASE_RESULT_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+
         // Prediction accuracy — predicted vs actual engine execution time (timer for distribution)
         monitor.register(BATCH_PREDICTED_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
         monitor.register(BATCH_ACTUAL_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
@@ -112,7 +122,7 @@ public class BatchSchedulerReporter {
         // ACK-to-response time — from engine ACK to schedule response sent to client (timer for distribution)
         monitor.register(ACK_TO_RESPONSE_TIME_MS, FlexMetricType.TIMER, FlexPriorityType.PRECISE);
 
-        log.info("BatchSchedulerReporter initialized (20 metrics)");
+        log.info("BatchSchedulerReporter initialized (22 metrics)");
     }
 
     // ==================== Queue metrics ====================
@@ -272,6 +282,35 @@ public class BatchSchedulerReporter {
                 "role", role,
                 "engineIpPort", engineIpPort);
         monitor.report(DISPATCH_EXPIRED_QPS, tags, count);
+    }
+
+    // ==================== Cancel metrics ====================
+
+    /**
+     * Report a batch cancel event via {@code app.flexlb.batch.cancel.qps}.
+     *
+     * @param reason  cancel reason (CLIENT_CANCELLED / DEADLINE_EXCEEDED)
+     * @param outcome cancel outcome (SUCCESS / NOT_FOUND / ALREADY_CANCELLED / ALREADY_TERMINAL / STALE_BATCH_ID)
+     */
+    public void reportBatchCancel(String reason, String outcome) {
+        FlexMetricTags tags = FlexMetricTags.of(
+                "reason", reason,
+                "outcome", outcome);
+        monitor.report(BATCH_CANCEL_QPS, tags, 1.0);
+    }
+
+    /**
+     * Report the result of the cancelPrefill gRPC call to the prefill engine via
+     * {@code app.flexlb.batch.cancel.release.result.qps}.
+     *
+     * @param step   release step (CANCEL_PREFILL)
+     * @param result step result (SUCCESS / FAILURE)
+     */
+    public void reportBatchCancelReleaseResult(String step, String result) {
+        FlexMetricTags tags = FlexMetricTags.of(
+                "step", step,
+                "result", result);
+        monitor.report(BATCH_CANCEL_RELEASE_RESULT_QPS, tags, 1.0);
     }
 
     // ==================== Decode inflight metrics ====================

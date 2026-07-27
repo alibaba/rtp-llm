@@ -112,6 +112,21 @@ public class MetricConstant {
     public static final String DISPATCH_EXPIRED_QPS = "app.flexlb.dispatch.expired.qps";
 
     /**
+     * FlexLB batch cancel QPS — number of cancel() calls on FlexlbBatchScheduler.
+     * Reported as QPS, tagged by reason (CLIENT_CANCELLED / DEADLINE_EXCEEDED)
+     * and outcome (SUCCESS / NOT_FOUND / ALREADY_CANCELLED / ALREADY_TERMINAL / STALE_BATCH_ID).
+     */
+    public static final String BATCH_CANCEL_QPS = "app.flexlb.batch.cancel.qps";
+
+    /**
+     * FlexLB batch cancel engine-side result — success/failure of the cancelPrefill
+     * gRPC call to the prefill engine. Reported as QPS, tagged by step (CANCEL_PREFILL)
+     * and result (SUCCESS / FAILURE). FAILURE indicates the engine did not acknowledge
+     * the cancel, risking wasted GPU compute and delayed KV release.
+     */
+    public static final String BATCH_CANCEL_RELEASE_RESULT_QPS = "app.flexlb.batch.cancel.release.result.qps";
+
+    /**
      * Batch predicted execution time (formula estimate) in milliseconds
      */
     public static final String BATCH_PREDICTED_TIME_MS = "app.flexlb.batch.predicted.time.ms";

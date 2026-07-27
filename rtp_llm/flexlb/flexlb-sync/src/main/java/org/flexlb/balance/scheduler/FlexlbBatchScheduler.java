@@ -251,9 +251,14 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
         InflightEntry entry = inflight.get(requestId);
         if (entry == null) {
             Logger.debug("flexlb batch cancel ignored; request {} not found in inflight", requestId);
+            reporter.reportBatchCancel(reason.name(), "NOT_FOUND");
             RequestLifecycleSnapshot terminal = terminalStates.get(requestId);
             return batchMatches(terminal, expectedBatchId) ? terminal : null;
         }
+
+        // Locals to collect reporting info from inside the synchronized block,
+        // reported outside to avoid holding the entry lock during monitor I/O.
+        String cancelOutcome = null;
 
         RequestLifecycleSnapshot snapshot;
         RequestLifecycleState phase;
@@ -262,18 +267,22 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             if (!batchMatches(current, expectedBatchId)) {
                 Logger.warn("Ignoring stale cancel request_id={} expected_batch_id={}",
                         requestId, expectedBatchId);
+                reporter.reportBatchCancel(reason.name(), "STALE_BATCH_ID");
                 return null;
             }
             if (current.state() == RequestLifecycleState.CANCEL_REQUESTED) {
+                reporter.reportBatchCancel(reason.name(), "ALREADY_CANCELLED");
                 return current;
             }
             if (current.state().isTerminal()) {
+                reporter.reportBatchCancel(reason.name(), "ALREADY_TERMINAL");
                 return current;
             }
             phase = current.state();
             snapshot = entry.lifecycle.requestCancel(reason);
             entry.item.ctx().cancel();
             rollbackOnce(entry);
+            cancelOutcome = "SUCCESS";
             completeError(entry.item.future(), errorTypeFor(snapshot.state()), snapshot.detail());
             repackPrefillBatch(entry);
 
@@ -281,15 +290,27 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             // enqueue ACK can arrive first and be lost by the engine, so dispatching
             // requests are reconciled from onSuccess/onFailure instead.
             if (phase == RequestLifecycleState.DISPATCHING) {
+                // Early return inside synchronized — report before returning.
+                // cancelPrefill is skipped: dispatching requests are reconciled
+                // from onSuccess/onFailure instead.
+                reporter.reportBatchCancel(reason.name(), cancelOutcome);
                 return snapshot;
             }
             if (phase == RequestLifecycleState.QUEUED && snapshot.state().isTerminal()) {
+                // Early return inside synchronized — report before returning.
+                // cancelPrefill is skipped: request never reached the engine.
+                reporter.reportBatchCancel(reason.name(), cancelOutcome);
                 finishEntry(entry, snapshot);
                 return snapshot;
             }
         }
 
+        // Report cancel outcome outside synchronized block
+        reporter.reportBatchCancel(reason.name(), cancelOutcome);
+
         boolean engineCancelAcknowledged = cancelPrefill(entry);
+        reporter.reportBatchCancelReleaseResult("CANCEL_PREFILL",
+                engineCancelAcknowledged ? "SUCCESS" : "FAILURE");
         synchronized (entry) {
             if (snapshot.state() == RequestLifecycleState.CANCEL_REQUESTED && engineCancelAcknowledged) {
                 snapshot = entry.lifecycle.finishCancellation();
