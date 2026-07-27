@@ -15,6 +15,7 @@ py_test(
     name = "test_sparse_prefill_chunk",
     srcs = ["test_sparse_prefill_chunk.py"],
     deps = [
+        "//rtp_llm:fmha-sm100",
         "//rtp_llm/models_py/standalone:py_standalone_testlib",
     ],
     env = {"GPU_COUNT": "1"},

@@ -34,6 +34,14 @@ _M3_MSA_FUSED_CSR = os.environ.get("M3_MSA_FUSED_CSR", "1") == "1"
 _M3_SPARSE_ATTN_CHUNK_ENABLE = os.environ.get("M3_SPARSE_ATTN_CHUNK_ENABLE", "0") == "1"
 _M3_SPARSE_ATTN_CHUNK_SIZE = int(os.environ.get("M3_SPARSE_ATTN_CHUNK_SIZE", "16384"))
 
+# Keep BF16 partial O as the production default. FP8 only changes the K1 -> K2
+# intermediate; Q/K/V storage and the final output dtype remain unchanged.
+_M3_SPARSE_ATTN_PARTIAL_DTYPE = (
+    torch.float8_e4m3fn
+    if os.environ.get("M3_SPARSE_ATTN_FP8_PARTIAL", "0") == "1"
+    else torch.bfloat16
+)
+
 # One-time reusable workspace for the chunked step3 (M3_SPARSE_ATTN_CHUNK_ENABLE).
 # Mirrors the megamoe symm-mem buffer pattern (mega_buf._MEGA_BUF_CACHE): a single
 # flat CUDA uint8 tensor is allocated on first use, cached at module level per
@@ -42,8 +50,9 @@ _M3_SPARSE_ATTN_CHUNK_SIZE = int(os.environ.get("M3_SPARSE_ATTN_CHUNK_SIZE", "16
 # SparseK2qCsrBuilderSm100 re-allocate the temporaries below on every chunk of
 # every layer. Layout (sizes computed by fmha_sm100, offsets 256B-aligned):
 #   [0, fwd_bytes)  sparse_atten_func intra-call temporaries
-#       O_partial   [topk, chunk_q, Hq, dim] bf16 -- dominant term, e.g.
-#                   topk=16, chunk_q=16384, Hq=64, dim=128 -> 4 GiB
+#       O_partial   [topk, chunk_q, Hq, dim] partial_dtype -- dominant term;
+#                   topk=16, chunk_q=16384, Hq=64, dim=128 uses 4 GiB in
+#                   BF16 or 2 GiB in FP8
 #       LSE_partial [topk, chunk_q, Hq] fp32     -- ~64 MiB at the same shape
 #       fwd_bytes = interface.sparse_fwd_workspace_bytes(...) (256B-aligned)
 #   [fwd_bytes, fwd_bytes + csr_words*4)  CSR builder pipeline scratch, int32
@@ -283,6 +292,7 @@ def build_sparse_attn_plan(
         output_maxscore=False,
         kv_block_num=topk,
         causal=True,
+        partial_dtype=_M3_SPARSE_ATTN_PARTIAL_DTYPE,
     )
     if _M3_MSA_FUSED_CSR:
         _attach_direct_csr(plan, kv_seg, block_size_k, cu_seqlens.device)
@@ -630,6 +640,7 @@ def _sparse_attn_chunked(
     num_kv_heads = int(p["num_kv_heads"])
     qhead_per_kv = num_q_heads // num_kv_heads
     usable_sm = int(p.get("usable_SM_count", -1))
+    partial_dtype = p.get("partial_dtype", torch.bfloat16)
 
     # Per-forward host metadata: per-batch aligned page tables + per-chunk
     # geometry/cu_seqlens tensors, built by the first sparse layer and reused by
@@ -690,7 +701,11 @@ def _sparse_attn_chunked(
 
         max_csz = max(c["csz"] for c in chunks)
         ws_fwd_bytes = sparse_fwd_workspace_bytes(
-            topk, max_csz, num_q_heads, head_dim=head_dim
+            topK=topk,
+            total_q=max_csz,
+            head_q=num_q_heads,
+            head_dim=head_dim,
+            partial_dtype=partial_dtype,
         )
         ws_csr_words = max(
             k2q_csr_workspace_words(
@@ -751,6 +766,7 @@ def _sparse_attn_chunked(
             blk_kv=block_size_k,
             causal=p["causal"],
             softmax_scale=sm_scale,
+            partial_dtype=partial_dtype,
             return_softmax_lse=False,
             page_table=c["pt"],
             seqused_k=c["seqused"],
@@ -912,6 +928,7 @@ def flash_prefill_with_fmha(
             blk_kv=block_size_k,
             causal=p["causal"],
             softmax_scale=sm_scale,
+            partial_dtype=p.get("partial_dtype", torch.bfloat16),
             return_softmax_lse=False,
             page_table=pt,
             seqused_k=p["seqused_k"],
