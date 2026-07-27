@@ -129,7 +129,7 @@ class Qwen3Model(GptModelBase):
             fmha_impl = self.prepare_fmha_impl(inputs)
         # dspark/dflash draft feature export: 0-based layer ids whose output
         # (full residual stream) to capture; None => zero overhead.
-        capture_ids = getattr(self.config, "capture_aux_hidden_layer_ids", None)
+        capture_ids = self.config.capture_aux_hidden_layer_ids
         aux_hidden_states = [] if capture_ids else None
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             select_block_map_for_layer(inputs.attention_inputs, i)

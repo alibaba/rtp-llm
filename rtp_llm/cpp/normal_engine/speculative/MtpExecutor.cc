@@ -397,6 +397,16 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         RTP_LLM_CHECK_WITH_INFO(params.sp_config.sp_dspark_mask_token_id >= 0,
                                 "dspark requires sp_dspark_mask_token_id from the draft ckpt config, got %ld",
                                 (long)params.sp_config.sp_dspark_mask_token_id);
+        // The dspark draft emits token ids straight from its own lm_head (no
+        // fast_topk_sampler_, so no d2t remap), and markov_correct chains the
+        // previous draft id back into the target-vocab markov_w1 table. Both
+        // silently assume the vocabs coincide; reject a trimmed draft vocab
+        // until d2t plumbing lands (phase 2).
+        RTP_LLM_CHECK_WITH_INFO(draft_vocab_size_ == vocab_size_,
+                                "dspark requires draft vocab == target vocab (d2t mapping is bypassed), "
+                                "got draft=%d target=%d",
+                                draft_vocab_size_,
+                                vocab_size_);
     }
 
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
@@ -1934,9 +1944,11 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
     }
 
     // One clone for all probs.  dspark skips it: the tail draft forward's
-    // all_probs is already step-local storage (the graph-path wrapper clones
-    // it out of the static graph buffers, the eager path returns a fresh
-    // softmax), so the published per-stream views can alias it directly.
+    // all_probs is already step-local storage (the graph-path wrapper's
+    // load-bearing clone in PyWrappedModel::forward copies it out of the
+    // static graph buffers, the eager path returns a fresh softmax), so the
+    // published per-stream views can alias it directly.  If that wrapper-side
+    // clone is ever removed, this skip becomes a use-after-replay bug.
     // The MTP path keeps the clone — its all_probs comes from the fast_topk
     // sampler, whose buffers are not guaranteed step-local.
     torch::Tensor draft_probs_all;

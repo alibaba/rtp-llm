@@ -194,16 +194,16 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         };
 
         inputs.combo_tokens     = allocBuf(rtp_llm::DataType::TYPE_INT32,
-                                           {(size_t)shape_hints_ptr[GptModelInputIndex::comboTokens]},
+                                       {(size_t)shape_hints_ptr[GptModelInputIndex::comboTokens]},
                                        pickAlloc(GptModelInputDeviceBit::kDeviceBitComboTokens));
         inputs.input_lengths    = allocBuf(rtp_llm::DataType::TYPE_INT32,
-                                           {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths]},
+                                        {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths]},
                                         pickAlloc(GptModelInputDeviceBit::kDeviceBitInputLengths));
         inputs.sequence_lengths = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                            {(size_t)shape_hints_ptr[GptModelInputIndex::sequenceLengths]},
                                            pickAlloc(GptModelInputDeviceBit::kDeviceBitSequenceLengths));
         inputs.prefix_lengths   = allocBuf(rtp_llm::DataType::TYPE_INT32,
-                                           {context_batch_size},
+                                         {context_batch_size},
                                          pickAlloc(GptModelInputDeviceBit::kDeviceBitPrefixLengths));
         if (max_kernel_blocks != 0) {
             // kv_cache_kernel_block_id is now device-resident on the producer (rank 0). Allocate
@@ -233,7 +233,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.request_id            = allocBuf(rtp_llm::DataType::TYPE_INT64, {request_length});
         inputs.request_pd_separation = allocBuf(rtp_llm::DataType::TYPE_BOOL, {request_length});
         inputs.lm_output_indexes     = allocBuf(rtp_llm::DataType::TYPE_INT32,
-                                                {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]},
+                                            {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]},
                                             pickAlloc(GptModelInputDeviceBit::kDeviceBitLmOutputIndexes));
         if (combo_position_ids_size) {
             inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)combo_position_ids_size});
@@ -241,7 +241,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         if (shape_hints_ptr[GptModelInputIndex::mtpHiddenStates]) {
             // Prefer the explicit row count: the dspark prefill-seeding input
             // carries [ctx_tokens, n_aux*H] aux features whose rows differ
-            // from combo_tokens. Fall back to comboTokens for older senders.
+            // from combo_tokens. The comboTokens branch is a defensive
+            // zero-value fallback only — both tpSync sides are always the same
+            // binary (shape_hints length itself changed), so a sender that
+            // fills mtpHiddenStates always fills the row count too.
             auto hidden_states_dim0 = (size_t)shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesRows];
             if (hidden_states_dim0 == 0) {
                 hidden_states_dim0 = (size_t)shape_hints_ptr[GptModelInputIndex::comboTokens];

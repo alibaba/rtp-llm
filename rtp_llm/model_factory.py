@@ -446,6 +446,13 @@ class ModelFactory:
             )
         dspark_params.speculative_tokens = k
         # propose_step / verify width / lookahead reservation all key off this.
+        if sp_config.gen_num_per_cycle not in (1, k):
+            logging.warning(
+                "dspark overrides gen_num_per_cycle=%d with k=%d "
+                "(set --sp_dspark_propose_num to control the commit length)",
+                sp_config.gen_num_per_cycle,
+                k,
+            )
         sp_config.gen_num_per_cycle = k
         # The executor builds each [anchor + k*mask] query block in C++.
         sp_config.sp_dspark_mask_token_id = dspark_params.mask_token_id

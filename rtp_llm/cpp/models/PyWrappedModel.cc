@@ -829,10 +829,15 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             // Graph output buffers are reused across replays; detach copies of
             // the optional dspark outputs.  On the full-tail boundary
             // draft_tokens/draft_probs alias static graph buffers, so this
-            // clone is load-bearing — the next replay overwrites them.  On the
-            // backbone-only boundary they are fresh eager tensors from
-            // draft_tail (clone redundant but harmless).  aux_hidden_states
-            // may alias a static buffer on the target-verify graph.
+            // clone is load-bearing — the next replay overwrites them, AND
+            // MtpExecutor::publishSyncMtpDeviceState relies on it to skip its
+            // own all_probs clone for dspark (per-stream views alias this
+            // storage directly).  On the backbone-only boundary they are fresh
+            // eager tensors from draft_tail (clone redundant there, but do not
+            // remove it — the publish-side contract above still needs
+            // step-local storage on the full-tail boundary).
+            // aux_hidden_states may alias a static buffer on the target-verify
+            // graph.
             for (torch::Tensor* t :
                  {&py_model_outputs.aux_hidden_states, &py_model_outputs.draft_tokens, &py_model_outputs.draft_probs}) {
                 if (t->defined()) {

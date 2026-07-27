@@ -83,9 +83,11 @@ public:
                                         torch::Tensor&      draft_token_probs_d_t,
                                         TensorHolder&       host_holder);
 
-    // Decode tail seeding: anchor = last accepted token, feature window =
-    // this round's accepted rows of the verify aux export (ctx_lengths =
-    // accept_len; overwrites last round's rejected-slot KV by position).
+    // Decode tail seeding (dense): anchor = last accepted token; feature
+    // window is a fixed k+1-wide slice of the verify aux export based at
+    // dspark_ctx_starts = old prefix (rows past accept_len carry garbage by
+    // design — see the write-before-read note in the .cc). Overwrites last
+    // round's rejected-slot KV by position.
     void updateDecodePostDSparkDraftModelInput(GptModelInputs&                              model_input,
                                                const GptModelOutputs&                       model_output,
                                                const speculative::SpeculativeSamplerOutput& speculative_sampler_output,

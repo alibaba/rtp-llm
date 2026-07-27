@@ -96,6 +96,11 @@ class Qwen3DSparkModel(Qwen3DFlashModel):
         FULL graph).
         """
         corrected = base_logits.float()
+        if corrected is base_logits:
+            # .float() on an already-fp32 lm_head (enable_fp32_lm_head) returns
+            # an alias; the in-place += below must not mutate the caller's
+            # pre-correction base_logits.
+            corrected = corrected.clone()
         k = corrected.shape[1]
         prev = anchor_ids.long()
         tokens = torch.empty(
