@@ -65,18 +65,11 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
 
         if (selectedEndpoint != null) {
             ServerStatus result = buildServerStatus(selectedEndpoint, seqLen, expectedKvTokens,
-                    roleType, balanceContext.getRequestId());
-            // Record the release callback so cancel() can release directly without
-            // going through FlexlbBatchScheduler. Only set for DECODE role in
-            // DIRECT/QUEUE mode; PREFILL has its own cancel mechanism (cancelPrefill
-            // gRPC), and BATCH cancel goes through FlexlbBatchScheduler.cancel().
-            if (result.isSuccess() && roleType == RoleType.DECODE
-                    && (balanceContext.getScheduleMode() == ScheduleModeEnum.DIRECT
-                        || balanceContext.getScheduleMode() == ScheduleModeEnum.QUEUE)) {
-                final DecodeEndpoint ep = selectedEndpoint;
-                final long rid = balanceContext.getRequestId();
-                balanceContext.setDecodeReleaseCallback(() -> ep.release(rid));
-            }
+                    roleType, balanceContext);
+            // Non-BATCH modes skip decode reserve by default (no release callback needed).
+            // When enableNonBatchInflightTracking is true, reserve is called but cleanup
+            // relies on QueueManager.cancel() brute-force release. BATCH cancel goes
+            // through FlexlbBatchScheduler.
             return result;
         }
 
@@ -238,12 +231,18 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
 
     private ServerStatus buildServerStatus(DecodeEndpoint optimalEndpoint, long seqLen,
                                            long expectedKvTokens, RoleType roleType,
-                                           long requestId) {
+                                           BalanceContext balanceContext) {
+        long requestId = balanceContext.getRequestId();
         ServerStatus result = new ServerStatus();
         try {
-            // All schedule modes (BATCH, DIRECT, QUEUE) reserve decode KV to prevent
-            // oversubscription. DIRECT/QUEUE reservations are released via
-            // calibrate() / TTL eviction / explicit cancel.
+            // BATCH mode always reserves decode KV.
+            // Non-BATCH modes (DIRECT/QUEUE): skip reserve by default to avoid
+            // inflight buildup when client doesn't call FetchResponse (QUEUE) or
+            // dispatches directly (DIRECT). Engine's own concurrency limit
+            // (DECODE_CONCURRENCY_LIMIT) and KV threshold (90%) provide protection.
+            // When enableNonBatchInflightTracking is true, non-batch mode also reserves
+            // for master-side load-aware scoring; QueueManager.cancel() brute-force
+            // release covers cleanup.
             //
             // Cap expectedKvTokens to the endpoint's total KV capacity. When
             // maxNewTokens is very large (e.g. 8192), the raw sum seqLen +
@@ -254,7 +253,10 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             if (totalKv > 0 && expectedKvTokens > totalKv) {
                 expectedKvTokens = totalKv;
             }
-            optimalEndpoint.reserve(requestId, seqLen, expectedKvTokens);
+            if (balanceContext.getScheduleMode() == ScheduleModeEnum.BATCH
+                    || isNonBatchInflightTrackingEnabled(balanceContext)) {
+                optimalEndpoint.reserve(requestId, seqLen, expectedKvTokens);
+            }
 
             result.setSuccess(true);
             result.setRole(roleType);
@@ -271,5 +273,16 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
             result.setMessage(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorMsg());
         }
         return result;
+    }
+
+    /**
+     * Returns {@code true} when non-BATCH inflight tracking is explicitly enabled
+     * via {@link FlexlbConfig#isEnableNonBatchInflightTracking()}.
+     * <p>Null-safe: returns {@code false} when the context has no config attached,
+     * preserving the default skip-reserve behavior for non-BATCH modes.
+     */
+    private boolean isNonBatchInflightTrackingEnabled(BalanceContext balanceContext) {
+        FlexlbConfig config = balanceContext.getConfig();
+        return config != null && config.isEnableNonBatchInflightTracking();
     }
 }

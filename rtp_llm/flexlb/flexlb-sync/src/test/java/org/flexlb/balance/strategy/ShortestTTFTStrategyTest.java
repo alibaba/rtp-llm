@@ -29,6 +29,8 @@ import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -231,6 +233,42 @@ class ShortestTTFTStrategyTest {
         // If candidateCount were 2 → worker 2 would be selected
         // If candidateCount were 1 → worker 1 would be selected
         assertEquals("10.0.1.3", result2.getServerIp());
+    }
+
+    @Test
+    void select_withNonBatchTrackingEnabled_commitsBatchAndSetsCallback() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setDefaultScheduleMode("DIRECT");
+        config.setEnableNonBatchInflightTracking(true);
+
+        Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+
+        BalanceContext ctx = buildContext(500, 60L, config);
+        ServerStatus result = strategy.select(ctx, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        PrefillEndpoint ep = endpointRegistry.getPrefill("10.0.0.1:8080");
+        assertEquals(1, ep.getInflightBatchCount());
+        assertNotNull(ctx.getPrefillReleaseCallback());
+    }
+
+    @Test
+    void select_withNonBatchTrackingDisabled_skipsCommitBatch() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setDefaultScheduleMode("DIRECT");
+        config.setEnableNonBatchInflightTracking(false);
+
+        Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+
+        BalanceContext ctx = buildContext(500, 61L, config);
+        ServerStatus result = strategy.select(ctx, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        PrefillEndpoint ep = endpointRegistry.getPrefill("10.0.0.1:8080");
+        assertEquals(0, ep.getInflightBatchCount());
+        assertNull(ctx.getPrefillReleaseCallback());
     }
 
     // ==================== Helpers (mirrors CostBasedPrefillStrategyTest) ====================

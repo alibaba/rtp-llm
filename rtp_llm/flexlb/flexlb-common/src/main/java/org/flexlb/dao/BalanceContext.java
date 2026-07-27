@@ -89,16 +89,32 @@ public class BalanceContext {
     //===================== Decode Release ===================//
 
     /**
-     * Callback to release the decode KV reservation for DIRECT/QUEUE paths.
-     * Set by CostBasedDecodeStrategy.select() after a successful DECODE reserve.
-     * Executed by RouteService.cancel() so each path releases its own reservation
-     * directly, without going through FlexlbBatchScheduler.
+     * Callback to release the decode KV reservation.
+     * <p>Historically set by CostBasedDecodeStrategy.select() for DIRECT/QUEUE paths.
+     * Currently not set — non-BATCH modes (DIRECT/QUEUE) no longer reserve decode
+     * inflight, so no release callback is needed. BATCH mode releases via
+     * calibrate() / FlexlbBatchScheduler.cancel(). The field is retained for
+     * potential future use by QueueManager.cancel() which still checks it.
      *
      * <p>Uses Runnable (not DecodeEndpoint) because BalanceContext lives in
      * flexlb-common which cannot depend on flexlb-sync classes.
      */
     @ToString.Exclude
     private volatile Runnable decodeReleaseCallback;
+
+    //===================== Prefill Release ===================//
+
+    /**
+     * Callback to release the prefill inflight reservation (commitBatch entry).
+     * <p>Set by prefill strategies (CostBasedPrefillStrategy / ShortestTTFTStrategy)
+     * only when {@code enableNonBatchInflightTracking} is true in non-batch mode.
+     * Called by {@code QueueManager.cancel()} to avoid inflight leakage until
+     * calibrate or TTL.
+     * <p>Uses Runnable (not PrefillEndpoint) because BalanceContext lives in
+     * flexlb-common which cannot depend on flexlb-sync classes.
+     */
+    @ToString.Exclude
+    private volatile Runnable prefillReleaseCallback;
 
     //===================== Method ===================//
 

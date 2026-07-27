@@ -4,6 +4,7 @@ import java.util.concurrent.CompletableFuture;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.DefaultRouter;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.balance.scheduler.CancelReason;
@@ -132,6 +133,16 @@ public class RouteService {
                     long rid = balanceContext.getRequestId();
                     for (DecodeEndpoint ep : endpointRegistry.getDecodeEndpoints().values()) {
                         ep.release(rid);
+                    }
+                }
+                // Release prefill inflight reservation if non-batch inflight tracking is enabled.
+                Runnable prefillCallback = balanceContext.getPrefillReleaseCallback();
+                if (prefillCallback != null) {
+                    prefillCallback.run();
+                } else {
+                    long rid = balanceContext.getRequestId();
+                    for (PrefillEndpoint ep : endpointRegistry.getPrefillEndpoints().values()) {
+                        ep.releaseBatch(rid);
                     }
                 }
             }

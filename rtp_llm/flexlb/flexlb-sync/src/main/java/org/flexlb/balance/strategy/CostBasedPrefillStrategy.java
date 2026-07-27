@@ -128,7 +128,7 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
         long bestCacheHit = survivors.cacheHit(selectedIndex);
         reportCacheHitMetrics(roleType, best.getIp(), best.ipPort(), bestCacheHit, seqLen);
 
-        return buildServerStatus(best, roleType, requestId, minScore, config, bestCacheHit);
+        return buildServerStatus(best, roleType, requestId, minScore, config, bestCacheHit, balanceContext);
     }
 
     private record EndpointFilterResult(CandidateSet endpoints, Map<String, Integer> rejections) {}
@@ -347,11 +347,13 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
     }
 
     private ServerStatus buildServerStatus(PrefillEndpoint ep, RoleType roleType, long requestId, long score,
-                                            FlexlbConfig config, long bestCacheHit) {
-        // Non-batch path: reserve prefill inflight for load-aware scoring.
+                                            FlexlbConfig config, long bestCacheHit, BalanceContext balanceContext) {
+        // Non-batch path with inflight tracking enabled: reserve prefill inflight for load-aware scoring.
         // Batch path uses FlexlbBatchScheduler.commitBatch() instead — skip here to avoid double-counting.
-        if (isNonBatchPath(config)) {
+        // When tracking is disabled (default), skip commitBatch to avoid inflight leakage in non-batch mode.
+        if (isNonBatchPath(config) && config.isEnableNonBatchInflightTracking()) {
             ep.commitBatch(requestId, score, Collections.emptyList());
+            balanceContext.setPrefillReleaseCallback(() -> ep.releaseBatch(requestId));
         }
 
         // Populate DebugInfo so BatchItem.hitCache() can read hitCacheLen for batch metrics

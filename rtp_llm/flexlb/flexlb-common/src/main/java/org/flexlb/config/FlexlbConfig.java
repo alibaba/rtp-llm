@@ -689,6 +689,22 @@ public class FlexlbConfig {
     }
 
     /**
+     * Controls whether non-batch modes (DIRECT/QUEUE) track inflight on the master side.
+     * <p>When {@code false} (default): non-batch mode skips prefill {@code commitBatch}
+     * and decode {@code reserve}, avoiding inflight buildup that leaks when the client
+     * doesn't call FetchResponse (QUEUE) or dispatches directly (DIRECT).
+     * <p>When {@code true}: non-batch mode also tracks inflight, enabling master-side
+     * load-aware scoring. A prefill release callback is set so cancel can clean up.
+     * <p>BATCH mode is always inflight-tracked regardless of this switch.
+     * <p>Environment variable: {@code ENABLE_NON_BATCH_INFLIGHT_TRACKING}
+     */
+    private boolean enableNonBatchInflightTracking = false;
+
+    public boolean isEnableNonBatchInflightTracking() {
+        return enableNonBatchInflightTracking;
+    }
+
+    /**
      * Returns the configured default schedule mode as an enum.
      *
      * <p>Behavior:

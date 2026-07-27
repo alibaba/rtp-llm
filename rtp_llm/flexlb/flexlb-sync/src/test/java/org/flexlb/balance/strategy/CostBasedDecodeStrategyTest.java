@@ -6,6 +6,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -344,7 +345,7 @@ class CostBasedDecodeStrategyTest {
     }
 
     @Test
-    void direct_mode_also_reserves_decode_kv() {
+    void non_batch_mode_skips_decode_reserve() {
         Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
 
         WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
@@ -367,18 +368,100 @@ class CostBasedDecodeStrategyTest {
         Mockito.when(decodeResourceMeasure.isResourceAvailable(any())).thenReturn(true);
         CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory);
 
-        BalanceContext balanceContext = new BalanceContext();
-        balanceContext.setRequest(req);
-        balanceContext.setConfig(configService.loadBalanceConfig());
-        balanceContext.setScheduleMode(ScheduleModeEnum.DIRECT);
+        // DIRECT mode: Master only routes, doesn't dispatch to engine — skip reserve.
+        BalanceContext directCtx = new BalanceContext();
+        directCtx.setRequest(req);
+        directCtx.setConfig(configService.loadBalanceConfig());
+        directCtx.setScheduleMode(ScheduleModeEnum.DIRECT);
 
-        ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
+        ServerStatus directStatus = costBasedDecodeStrategy.select(directCtx, RoleType.DECODE, null);
 
-        Assertions.assertTrue(status.isSuccess());
-        // DIRECT mode should now reserve decode KV (previously skipped)
+        Assertions.assertTrue(directStatus.isSuccess());
+        DecodeEndpoint selectedEp = registry.getDecode("127.0.0.1:8080");
+        Assertions.assertEquals(0, selectedEp.getInflightCount(),
+                "DIRECT mode should not reserve decode KV");
+
+        // QUEUE mode: same behavior — Master only routes, skip reserve.
+        selectedEp.release(1000L); // clean up any leftover
+        BalanceContext queueCtx = new BalanceContext();
+        queueCtx.setRequest(req);
+        queueCtx.setConfig(configService.loadBalanceConfig());
+        queueCtx.setScheduleMode(ScheduleModeEnum.QUEUE);
+
+        ServerStatus queueStatus = costBasedDecodeStrategy.select(queueCtx, RoleType.DECODE, null);
+
+        Assertions.assertTrue(queueStatus.isSuccess());
+        Assertions.assertEquals(0, selectedEp.getInflightCount(),
+                "QUEUE mode should not reserve decode KV");
+
+        // BATCH mode: still reserves decode KV to prevent oversubscription.
+        // This guards against accidental removal of the BATCH guard in buildServerStatus().
+        selectedEp.release(1000L); // clean up any leftover
+        req.setRequestId(2000L);
+        BalanceContext batchCtx = new BalanceContext();
+        batchCtx.setRequest(req);
+        batchCtx.setConfig(configService.loadBalanceConfig());
+        batchCtx.setScheduleMode(ScheduleModeEnum.BATCH);
+
+        ServerStatus batchStatus = costBasedDecodeStrategy.select(batchCtx, RoleType.DECODE, null);
+
+        Assertions.assertTrue(batchStatus.isSuccess());
+        Assertions.assertEquals(1, selectedEp.getInflightCount(),
+                "BATCH mode should reserve decode KV to prevent oversubscription");
+    }
+
+    @Test
+    void nonBatchModeWithTrackingEnabled_reservesDecodeKv() {
+        Map<String, WorkerStatus> decodeMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap();
+
+        WorkerStatus worker1 = createWorkerStatus("127.0.0.1");
+        worker1.getTotalKvCacheTokens().set(10000);
+        worker1.getAvailableKvCacheTokens().set(9000);
+
+        decodeMap.put("127.0.0.1:8080", worker1);
+
+        EndpointRegistry registry = createDecodeRegistry(decodeMap);
+        EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(registry);
+
+        Request req = new Request();
+        req.setSeqLen(1000);
+        req.setMaxNewTokens(500);
+        req.setRequestId(1000L);
+
+        ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
+        DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
+        Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(decodeResourceMeasure);
+        Mockito.when(decodeResourceMeasure.isResourceAvailable(any())).thenReturn(true);
+        CostBasedDecodeStrategy costBasedDecodeStrategy = new CostBasedDecodeStrategy(configService, engineWorkerStatus, resourceMeasureFactory);
+
+        FlexlbConfig trackingConfig = new FlexlbConfig();
+        trackingConfig.setEnableNonBatchInflightTracking(true);
+
+        // DIRECT mode with tracking enabled: should reserve decode KV
+        BalanceContext directCtx = new BalanceContext();
+        directCtx.setRequest(req);
+        directCtx.setConfig(trackingConfig);
+        directCtx.setScheduleMode(ScheduleModeEnum.DIRECT);
+
+        ServerStatus directStatus = costBasedDecodeStrategy.select(directCtx, RoleType.DECODE, null);
+
+        Assertions.assertTrue(directStatus.isSuccess());
         DecodeEndpoint selectedEp = registry.getDecode("127.0.0.1:8080");
         Assertions.assertEquals(1, selectedEp.getInflightCount(),
-                "DIRECT mode should reserve decode KV to prevent oversubscription");
+                "DIRECT mode with tracking enabled should reserve decode KV");
+
+        // QUEUE mode with tracking enabled: should reserve decode KV
+        selectedEp.release(1000L); // clean up DIRECT reservation
+        BalanceContext queueCtx = new BalanceContext();
+        queueCtx.setRequest(req);
+        queueCtx.setConfig(trackingConfig);
+        queueCtx.setScheduleMode(ScheduleModeEnum.QUEUE);
+
+        ServerStatus queueStatus = costBasedDecodeStrategy.select(queueCtx, RoleType.DECODE, null);
+
+        Assertions.assertTrue(queueStatus.isSuccess());
+        Assertions.assertEquals(1, selectedEp.getInflightCount(),
+                "QUEUE mode with tracking enabled should reserve decode KV");
     }
 
     @Test

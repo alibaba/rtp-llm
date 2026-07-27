@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.QueueSnapshot;
@@ -113,16 +114,23 @@ public class QueueManager {
     }
 
     /**
-     * Cancel a QUEUE-mode request: complete future exceptionally and release
-     * decode KV reservation.
+     * Cancel a QUEUE-mode request: complete future exceptionally and attempt
+     * to release any decode KV reservation and prefill inflight reservation.
      *
      * <p>First completes the pending {@link CompletableFuture} exceptionally so
-     * that the waiting caller unblocks immediately, then releases the decode KV
-     * reservation via the callback recorded in {@link BalanceContext} by
-     * CostBasedDecodeStrategy.select(). When the callback is not yet set (narrow
-     * race window between reserve() and setCallback()), falls back to iterating
-     * all decode endpoints — {@code ConcurrentHashMap.remove()} inside release()
-     * is idempotent, so this is safe regardless of timing.
+     * that the waiting caller unblocks immediately. Then attempts to release the
+     * decode KV reservation via the callback in {@link BalanceContext}.
+     *
+     * <p>Since non-BATCH modes (DIRECT/QUEUE) skip {@code reserve()} by default,
+     * the decode release callback is {@code null}. The fallback path iterates
+     * all decode endpoints and calls {@code release(rid)}, which is effectively a
+     * no-op. This brute-force release is retained as a safety net —
+     * {@code ConcurrentHashMap.remove()} inside {@code release()} is idempotent.
+     *
+     * <p>When {@code enableNonBatchInflightTracking} is true, the prefill strategy
+     * sets a {@code prefillReleaseCallback} on the context. This callback calls
+     * {@code PrefillEndpoint.releaseBatch(rid)} to clean up the commitBatch entry,
+     * avoiding inflight leakage until calibrate or TTL.
      *
      * @param ctx the balance context of the request to cancel
      */
@@ -140,6 +148,20 @@ public class QueueManager {
                 ep.release(rid);
             }
         }
+        // Release prefill inflight reservation if non-batch inflight tracking is enabled.
+        // The callback calls PrefillEndpoint.releaseBatch(requestId).
+        // Brute-force fallback mirrors the decode release pattern above, ensuring
+        // inflight entries are cleaned up even if the callback was not yet set
+        // due to the commitBatch/setPrefillReleaseCallback race window.
+        Runnable prefillCallback = ctx.getPrefillReleaseCallback();
+        if (prefillCallback != null) {
+            prefillCallback.run();
+        } else {
+            long rid = ctx.getRequestId();
+            for (PrefillEndpoint ep : endpointRegistry.getPrefillEndpoints().values()) {
+                ep.releaseBatch(rid);
+            }
+        }
     }
 
     /**
@@ -147,7 +169,8 @@ public class QueueManager {
      * cancelByRequestId).
      *
      * <p>Since the mode is unknown, this brute-force releases across all
-     * decode endpoints. {@code ConcurrentHashMap.remove()} is idempotent,
+     * decode endpoints and prefill endpoints. {@code ConcurrentHashMap.remove()}
+     * inside {@code release()} / {@code releaseBatch()} is idempotent,
      * so this is safe even if the reservation was already released.
      *
      * @param requestId the request ID to cancel
@@ -155,6 +178,9 @@ public class QueueManager {
     public void cancelByRequestId(long requestId) {
         for (DecodeEndpoint ep : endpointRegistry.getDecodeEndpoints().values()) {
             ep.release(requestId);
+        }
+        for (PrefillEndpoint ep : endpointRegistry.getPrefillEndpoints().values()) {
+            ep.releaseBatch(requestId);
         }
     }
 

@@ -55,7 +55,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
         super(status);
         this.reporter = reporter;
         this.predictor = createPredictor(config);
-        this.batcher = createBatcher(config, handler, reporter);
+        // Only create WorkerBatcher in BATCH mode. Non-batch modes (DIRECT/QUEUE)
+        // don't use batch dispatching, so the daemon thread would block forever
+        // on queue.take() with no work — wasting a thread per endpoint.
+        this.batcher = config.isBatchPath() ? createBatcher(config, handler, reporter) : null;
         this.batchEvictor = new InflightEvictor<>(inflightBatches, (batchId, batch) -> {
             inflightRequestCount.addAndGet(-batch.requests().size());
             cachedWaitTimeExpireAtMs = 0;
@@ -71,7 +74,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
                     ipPort(), batchId, total,
                     System.currentTimeMillis() - batch.createdAtMs(), requestIdsText);
         });
-        this.batcher.start();
+        if (this.batcher != null) {
+            this.batcher.start();
+        }
     }
 
     private WorkerBatcher createBatcher(FlexlbConfig config, BatchDecisionHandler handler,
@@ -86,14 +91,16 @@ public class PrefillEndpoint extends WorkerEndpoint {
     @Override
     public void close() {
         try {
-            batcher.shutdown();
+            if (batcher != null) {
+                batcher.shutdown();
+            }
         } finally {
             super.close();
         }
     }
 
     public long batcherWaitMs() {
-        return batcher.queueWaitMs();
+        return batcher != null ? batcher.queueWaitMs() : 0;
     }
 
     /**
@@ -103,7 +110,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * start a fresh batch (empty queue or remaining == 0).
      */
     public long estimateBatchPrefillMs(long seqLen, long cacheHit) {
-        List<BatchItem> batchItems = batcher.peekBatchItems();
+        List<BatchItem> batchItems = batcher != null ? batcher.peekBatchItems() : List.of();
         return (long) predictor.predictBatchMs(batchItems, seqLen, cacheHit);
     }
 
@@ -335,7 +342,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * waiting queue (e.g. traffic not tracked by the current master).
      */
     public long realPendingCount() {
-        return inflightRequestCount.get() + batcher.queueSize() + engineWaitingQueryLen;
+        return inflightRequestCount.get() + (batcher != null ? batcher.queueSize() : 0) + engineWaitingQueryLen;
     }
 
     // ==================== Wait Time ====================
@@ -386,7 +393,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
      * Called periodically by {@link org.flexlb.balance.scheduler.FlexlbBatchScheduler}.
      */
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
-        int queueSize = batcher.queueSize();
+        int queueSize = batcher != null ? batcher.queueSize() : 0;
         reporter.reportBatcherQueueSize(RoleType.PREFILL.name(), getIp(), ipPort(), queueSize);
         reporter.reportInflightBatchCount(RoleType.PREFILL.name(), getIp(), ipPort(), getInflightBatchCount());
         reporter.reportInflightRequestCount(RoleType.PREFILL.name(), getIp(), ipPort(), inflightRequestCount.get());

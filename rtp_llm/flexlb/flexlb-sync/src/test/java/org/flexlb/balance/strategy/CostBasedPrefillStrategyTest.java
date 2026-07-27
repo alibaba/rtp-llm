@@ -34,6 +34,7 @@ import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -379,6 +380,48 @@ class CostBasedPrefillStrategyTest {
         for (long requestId = 52; requestId < 72; requestId++) {
             assertTrue(strategy.select(buildContext(500, requestId), RoleType.PREFILL, null).isSuccess());
         }
+    }
+
+    @Test
+    void select_withNonBatchTrackingEnabled_commitsBatchAndSetsCallback() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setCostSloMs(50000L);
+        config.setCostSloRiskMarginMs(50L);
+        config.setDefaultScheduleMode("DIRECT");
+        config.setEnableNonBatchInflightTracking(true);
+
+        Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.clear();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+
+        BalanceContext ctx = buildContext(500, 60L, config);
+        ServerStatus result = strategy.select(ctx, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        PrefillEndpoint ep = endpointRegistry.getPrefill("10.0.0.1:8080");
+        assertEquals(1, ep.getInflightBatchCount());
+        assertNotNull(ctx.getPrefillReleaseCallback());
+    }
+
+    @Test
+    void select_withNonBatchTrackingDisabled_skipsCommitBatch() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setCostSloMs(50000L);
+        config.setCostSloRiskMarginMs(50L);
+        config.setDefaultScheduleMode("DIRECT");
+        config.setEnableNonBatchInflightTracking(false);
+
+        Map<String, WorkerStatus> prefillMap = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap();
+        prefillMap.clear();
+        prefillMap.put("10.0.0.1:8080", createWorker("10.0.0.1", 0));
+
+        BalanceContext ctx = buildContext(500, 61L, config);
+        ServerStatus result = strategy.select(ctx, RoleType.PREFILL, null);
+
+        assertTrue(result.isSuccess());
+        PrefillEndpoint ep = endpointRegistry.getPrefill("10.0.0.1:8080");
+        assertEquals(0, ep.getInflightBatchCount());
+        assertNull(ctx.getPrefillReleaseCallback());
     }
 
     private WorkerStatus createWorker(String ip, long estimatedWaitMs) {
