@@ -4,7 +4,6 @@ from typing import Optional
 
 import torch
 
-from rtp_llm.models_py.kernels.cuda.deepgemm_wrapper import has_deep_gemm
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 from rtp_llm.models_py.modules.factory.linear.impl.cuda.fp8_deepgemm_linear import (
     CudaFp8DeepGEMMLinear,
@@ -47,7 +46,41 @@ class CudaFp8GEMMLinear(LinearBase):
     ) -> bool:
         if not cls._is_fp8_per_block_candidate(quant_config, weight, weight_scales):
             return False
-        return has_deep_gemm() and not is_sm12x()
+        # Preserve the sm90/sm100 behavior where construction reports the
+        # actionable DeepGEMM installation error. Only sm12x is excluded from
+        # this strategy because it uses the SM120 CUTLASS backend instead.
+        if not is_sm12x(weight.device):
+            return True
+
+        return False
+
+    @classmethod
+    def rejection_reason(
+        cls,
+        quant_config: object,
+        weight: torch.Tensor,
+        weight_scales: Optional[torch.Tensor],
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
+        weight_scale_2: Optional[torch.Tensor] = None,
+        input_scale: Optional[torch.Tensor] = None,
+    ) -> Optional[str]:
+        if not is_sm12x(weight.device) or not cls._is_fp8_per_block_candidate(
+            quant_config, weight, weight_scales
+        ):
+            return None
+        # The SM120 strategy can be absent from the registry when its binding
+        # was not compiled. Preserve its public diagnostic in that case.
+        try:
+            from .fp8_vllm_blockwise_sm120_linear import CudaFp8VllmBlockwiseLinear
+        except ImportError as error:
+            return (
+                "SM120 FP8_PER_BLOCK backend is unavailable; rebuild on x86 "
+                f"with --config=cuda12_9 (ENABLE_FP8_SM120): {error}"
+            )
+
+        return CudaFp8VllmBlockwiseLinear.rejection_reason(
+            quant_config, weight, weight_scales
+        )
 
     @torch.inference_mode()
     def __init__(

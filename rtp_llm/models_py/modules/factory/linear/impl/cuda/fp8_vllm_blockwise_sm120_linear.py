@@ -12,17 +12,17 @@ import torch
 
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.modules.factory.linear import LinearBase
-from rtp_llm.models_py.utils.arch import get_sm, is_cuda, is_sm12x
+from rtp_llm.models_py.utils.arch import is_sm12x, is_sm120
 from rtp_llm.ops import HWKernelConfig
 
 
-def _is_sm120_runtime() -> bool:
+def _is_sm120_runtime(device_id=None) -> bool:
     """Match the exact SASS architectures emitted by ``sm120_cuda_copts``."""
-    return is_cuda() and is_sm12x() and get_sm() == (12, 0)
+    return is_sm120(device_id)
 
 
-def _get_cutlass_scaled_mm_blockwise_sm120_fp8():
-    if not _is_sm120_runtime():
+def _get_cutlass_scaled_mm_blockwise_sm120_fp8(device_id=None):
+    if not _is_sm120_runtime(device_id):
         return None
     try:
         from rtp_llm.ops.compute_ops import (
@@ -37,8 +37,9 @@ def _get_cutlass_scaled_mm_blockwise_sm120_fp8():
         return None
 
 
-def _has_cutlass_scaled_mm_blockwise_sm120_fp8() -> bool:
-    return _get_cutlass_scaled_mm_blockwise_sm120_fp8() is not None
+def sm120_blockwise_backend_available(device_id=None) -> bool:
+    """Return whether the SM120 blockwise binding can run on this device."""
+    return _get_cutlass_scaled_mm_blockwise_sm120_fp8(device_id) is not None
 
 
 class CudaFp8VllmBlockwiseLinear(LinearBase):
@@ -64,7 +65,13 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         weight_scales: torch.Tensor,
         block_size: int = 128,
     ) -> tuple[torch.Tensor, torch.Tensor, int, int, int, int]:
-        """Restore SM120 loader tensors from logical (K,N) to physical (N,K)."""
+        """Restore SM120 loader tensors from logical (K,N) to physical (N,K).
+
+        This is the inverse of PerBlockFp8Weight._postprocess's SM12x reshape;
+        keep both sides and their integration smoke coverage in sync.
+        """
+        if weight.device.type != "cuda" or weight_scales.device.type != "cuda":
+            raise ValueError("SM120 FP8 blockwise weights must be on a CUDA device")
         if not weight.is_contiguous():
             raise ValueError("SM120 FP8 blockwise weight must be contiguous")
         if not weight_scales.is_contiguous():
@@ -88,7 +95,7 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         )
 
     @classmethod
-    def _classify_support(
+    def classify_support(
         cls,
         quant_config: object,
         weight: torch.Tensor,
@@ -98,10 +105,16 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         if (
             weight_scales is None
             or quant_config is None
-            or not _is_sm120_runtime()
             or quant_config.get_method() != "FP8_PER_BLOCK"
             or weight.dtype != torch.float8_e4m3fn
         ):
+            return False, None
+        if not _is_sm120_runtime(weight.device):
+            if is_sm12x(weight.device):
+                return False, (
+                    "SM12x FP8_PER_BLOCK CUTLASS backend currently supports exact "
+                    "sm_120 devices only; this device needs a matching SM12x kernel"
+                )
             return False, None
         if weight_scales.dtype != torch.float32:
             detail = f"got {weight_scales.dtype}"
@@ -113,7 +126,7 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
                 False,
                 f"SM120 FP8_PER_BLOCK requires float32 weight scales, {detail}",
             )
-        if not _has_cutlass_scaled_mm_blockwise_sm120_fp8():
+        if not sm120_blockwise_backend_available(weight.device):
             return False, (
                 "SM120 FP8_PER_BLOCK backend is unavailable; rebuild on x86 "
                 "with --config=cuda12_9 (ENABLE_FP8_SM120)"
@@ -139,8 +152,21 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ) -> bool:
-        supported, _ = cls._classify_support(quant_config, weight, weight_scales)
+        supported, _ = cls.classify_support(quant_config, weight, weight_scales)
         return supported
+
+    @classmethod
+    def rejection_reason(
+        cls,
+        quant_config: object,
+        weight: torch.Tensor,
+        weight_scales: Optional[torch.Tensor],
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
+        weight_scale_2: Optional[torch.Tensor] = None,
+        input_scale: Optional[torch.Tensor] = None,
+    ) -> Optional[str]:
+        _, reason = cls.classify_support(quant_config, weight, weight_scales)
+        return reason
 
     @torch.inference_mode()
     def __init__(
@@ -157,7 +183,7 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
         )
         if weight_scales is None:
             raise ValueError("SM120 FP8 blockwise GEMM requires weight_scales")
-        self._gemm_op = _get_cutlass_scaled_mm_blockwise_sm120_fp8()
+        self._gemm_op = _get_cutlass_scaled_mm_blockwise_sm120_fp8(weight.device)
         if self._gemm_op is None:
             raise RuntimeError(
                 "cutlass_scaled_mm_blockwise_sm120_fp8 op is not available; "
@@ -210,6 +236,7 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
                 )
             if self.bias.dtype != torch.bfloat16:
                 raise ValueError(f"Bias dtype must be bfloat16, got {self.bias.dtype}")
+            self.bias = self.bias.to(device=self.weight.device)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:
         if input.dtype != torch.bfloat16:
@@ -246,6 +273,5 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
             self.weight_scales,
         )
         if self.bias is not None:
-            output = output + self.bias.to(device=output.device, dtype=output.dtype)
+            output.add_(self.bias)
         return output
-

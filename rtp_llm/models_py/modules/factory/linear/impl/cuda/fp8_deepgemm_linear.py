@@ -48,7 +48,10 @@ class CudaFp8DeepGEMMLinear(LinearBase):
 
         # DeepGEMM 2.1.x wheel ships only sm_90/sm_100 cubins. Let sm_12x
         # consumer Blackwell use the CUTLASS blockwise backend instead.
-        if not has_deep_gemm() or is_sm12x():
+        # Keep the pre-existing factory contract on sm90/sm100: select this
+        # strategy and let __init__ report the actionable installation error
+        # when DeepGEMM is unavailable. Only sm12x is routed away from it.
+        if is_sm12x(weight.device):
             return False
 
         # Check quantization method - handle all other FP8 methods
@@ -75,7 +78,7 @@ class CudaFp8DeepGEMMLinear(LinearBase):
         self.bias = bias
 
         # Check if DeepGEMM is available
-        if not has_deep_gemm() or is_sm12x():
+        if not has_deep_gemm() or is_sm12x(weight.device):
             if not has_deep_gemm():
                 error_msg = (
                     "DeepGEMM is not available. Please install the `deep_gemm` "

@@ -65,6 +65,10 @@ void registerPyModuleOps(py::module& rtp_ops_m) {
 #endif
 
 #if defined(ENABLE_FP8_SM120)
+    // Keep an explicit capability probe paired with the BUILD/local_defines
+    // gate so Python can reject a future registration/linkage mismatch before
+    // selecting the backend.
+    rtp_ops_m.def("has_cutlass_scaled_mm_blockwise_sm120_fp8", &has_cutlass_scaled_mm_blockwise_sm120_fp8);
     rtp_ops_m.def("cutlass_scaled_mm_blockwise_sm120_fp8",
                   &cutlass_scaled_mm_blockwise_sm120_fp8,
                   py::arg("D"),
