@@ -537,7 +537,7 @@ static held_entry* create_entry(const char*                     creator,
     int child_status = 0;
     int child_ok     = 0;
     if (receive_ok) {
-        child_ok = wait_for_child(child, 1000, &child_status) == 0;
+        child_ok = wait_for_child(child, timeout_ms, &child_status) == 0;
     }
     if (!receive_ok || !child_ok) {
         child_ok = terminate_creator(child, &child_status) == 0;
@@ -881,7 +881,7 @@ handle_client(int client_fd, const char* creator, const char* gpus, uint32_t gpu
         if (owned_reply_fd >= 0) {
             close(owned_reply_fd);
         }
-        if (owner_added && request.opcode == RTP_MC_OP_CREATE && response.object_id != 0) {
+        if (owner_added && response.object_id != 0) {
             held_entry* registered = find_entry(response.object_id);
             if (registered != NULL) {
                 (void)drop_owner_ref(registered, owner_id, owner_generation);

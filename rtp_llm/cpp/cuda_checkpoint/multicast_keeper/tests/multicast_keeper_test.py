@@ -38,6 +38,7 @@ HANDLE_FABRIC_POSIX = HANDLE_FABRIC | HANDLE_POSIX
 CREATOR_FLAG_FABRIC_VALID = 1
 FABRIC_BYTES = 64
 HANG_SIZE = 0xBAD000
+SLOW_EXIT_SIZE = 0x51E000
 UNKNOWN_SIZE = (1 << 64) - 1
 MAX_ENTRIES = 256
 REQUEST = struct.Struct("<QHHIQQQQIIQ")
@@ -131,6 +132,7 @@ s=socket.socket(fileno=a.deposit_fd)
 served = a.size if a.size == {UNKNOWN_SIZE} else a.size + 4096
 payload=struct.pack('<QQQiI64s', {CREATOR_MAGIC}, a.size, served, 0, result_flags, fabric)
 s.sendmsg([payload], [(socket.SOL_SOCKET, socket.SCM_RIGHTS, array.array('i',[fd]))])
+if a.size == {SLOW_EXIT_SIZE}: time.sleep(1.2)
 s.close(); backing.close()
 """,
             encoding="utf-8",
@@ -737,6 +739,17 @@ s.close(); backing.close()
         ping, _ = self.exchange(OP_PING)
         self.assertEqual(ping["status"], STATUS_OK)
 
+    def test_successful_creator_uses_configured_exit_timeout(self) -> None:
+        self.stop_holder()
+        self.process = self.start_holder(
+            client_timeout_ms=3000, creator_timeout_ms=2500
+        )
+
+        response, fds = self.create(SLOW_EXIT_SIZE, timeout=4.0)
+
+        fd = self.assert_success_fd(response, fds)
+        os.close(fd)
+
     def test_properties_fail_closed_for_subgroup_unknown_handle_and_flags(self) -> None:
         for overrides in (
             {"num_devices": 2},
@@ -905,6 +918,35 @@ s.close(); backing.close()
         os.close(self.assert_success_fd(other, other_fds))
         self.assertNotEqual(other["object_id"], first["object_id"])
         self.assertEqual(self.entry_count(), 2)
+
+    def test_import_add_reply_failure_rolls_back_owner(self) -> None:
+        handle = b"DISCONNECTED-PEER".ljust(FABRIC_BYTES, b"\0")
+        request = IMPORT_ADD_REQUEST.pack(
+            PROTOCOL_MAGIC,
+            PROTOCOL_VERSION,
+            OP_IMPORT_ADD,
+            IMPORT_ADD_REQUEST.size,
+            0,
+            0,
+            0,
+            2 * 1024 * 1024,
+            8,
+            HANDLE_FABRIC_POSIX,
+            0,
+            23,
+            1,
+            handle,
+        )
+        client = socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET)
+        client.connect(str(self.socket_path))
+        client.sendall(request)
+        client.shutdown(socket.SHUT_RDWR)
+        client.close()
+
+        self.assertEqual(self.entry_count(), 0)
+        recovered, fds = self.import_add(handle, size=2 * 1024 * 1024)
+        os.close(self.assert_success_fd(recovered, fds))
+        self.assertEqual(self.entry_count(), 1)
 
     def test_import_add_same_handle_mismatched_properties_fails_closed(self) -> None:
         handle = b"CONFLICT-HANDLE".ljust(FABRIC_BYTES, b"\0")
