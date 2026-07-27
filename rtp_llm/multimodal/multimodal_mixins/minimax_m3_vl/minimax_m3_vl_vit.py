@@ -15,19 +15,84 @@
 #   * multi_modal_projector.linear_{1,2}.{weight,bias}
 #   * patch_merge_mlp.linear_{1,2}.{weight,bias}
 #
-# Naming choice (q/k/v + out_proj vs fused qkv_proj + proj):
-#   We keep the *HF checkpoint* layout — separate q_proj / k_proj / v_proj and
-#   `out_proj` — so the weight loader is a straight `state_dict.update`. The
-#   sglang loader fuses these into `qkv_proj` and renames `out_proj` -> `proj`,
-#   but that is only required for the tensor-parallel `QKVParallelLinear` it
-#   uses. In this single-GPU pure-torch port, no fusion or rename happens.
+# Runtime naming differs from the checkpoint only for QKV: the three published
+# q/k/v tensors are concatenated into `qkv_proj` by the multimodal weight loader.
+# `out_proj` keeps its checkpoint name.
 
+import logging
+import os
+import sys
 from dataclasses import dataclass, field, fields
-from typing import Any, Dict, List, Optional, Tuple
+from typing import Any, Dict, List, Optional, Sequence, Tuple
 
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+
+logger = logging.getLogger(__name__)
+
+_FA4_VARLEN_FUNC = None
+try:
+    from flash_attn.cute import flash_attn_varlen_func as _FA4_VARLEN_FUNC
+except Exception:
+    # FA4 is packaged only for CUDA 13 x86. Other builds use FA2/FA3 or SDPA.
+    pass
+
+_FLASH_ATTN_VARLEN_FUNC = None
+try:
+    from flash_attn import flash_attn_varlen_func as _FLASH_ATTN_VARLEN_FUNC
+except Exception:
+    pass
+
+_FLASHINFER_RAGGED_WRAPPER = None
+try:
+    # Bazel does not process the wheel's .pth file for subprocesses.
+    import nvidia_cutlass_dsl
+
+    for package_dir in nvidia_cutlass_dsl.__path__:
+        python_packages_dir = os.path.join(package_dir, "python_packages")
+        if os.path.isdir(python_packages_dir) and python_packages_dir not in sys.path:
+            sys.path.insert(0, python_packages_dir)
+    from flashinfer.prefill import (
+        BatchPrefillWithRaggedKVCacheWrapper as _FLASHINFER_RAGGED_WRAPPER,
+    )
+except Exception:
+    pass
+
+
+def get_fused_qkv_checkpoint_names(
+    parameter_name: str,
+) -> Optional[Tuple[str, str, str]]:
+    """Map a live fused-QKV parameter to the three published checkpoint keys."""
+    marker = "qkv_proj."
+    if marker not in parameter_name:
+        return None
+    prefix, suffix = parameter_name.rsplit(marker, 1)
+    if suffix not in ("weight", "bias"):
+        return None
+    return tuple(
+        f"{prefix}{projection}_proj.{suffix}" for projection in ("q", "k", "v")
+    )
+
+
+def _select_attention_backend(tensor: torch.Tensor) -> str:
+    if not tensor.is_cuda:
+        return "sdpa"
+    capability = torch.cuda.get_device_capability(tensor.device)
+    if _FA4_VARLEN_FUNC is not None and capability in ((9, 0), (10, 0), (11, 0)):
+        return "fa4"
+    if _FLASH_ATTN_VARLEN_FUNC is not None and capability[0] in (8, 9):
+        return "flash_attn"
+    if _FLASHINFER_RAGGED_WRAPPER is not None:
+        return "flashinfer"
+    return "sdpa"
+
+
+@dataclass
+class PackedAttentionContext:
+    backend: str
+    flashinfer_wrapper: Optional[Any] = None
+
 
 # ---------------------------------------------------------------------------
 # Config
@@ -161,13 +226,7 @@ class CLIPVisionEmbeddings(nn.Module):
 
 
 class CLIPAttention(nn.Module):
-    """Per-segment SDPA with 3D RoPE applied to leading channels of q/k.
-
-    Receives a flat [seq, hidden] tensor plus per-segment ``cu_seqlens`` and
-    runs attention independently on each segment slice. This is simple and
-    correct; performance optimization (flashinfer / pseudo-batched attention)
-    is intentionally out of scope.
-    """
+    """Fused-QKV packed vision attention with a segmented SDPA fallback."""
 
     def __init__(self, config: VisionConfig):
         super().__init__()
@@ -177,45 +236,130 @@ class CLIPAttention(nn.Module):
         self.head_dim = self.embed_dim // self.num_heads
         self.scaling = self.head_dim**-0.5
 
-        self.q_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
-        self.k_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
-        self.v_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
+        self.qkv_proj = nn.Linear(self.embed_dim, self.embed_dim * 3, bias=True)
         # Keep the HF checkpoint name `out_proj` (sglang renames to `proj`
         # only because of its TP RowParallelLinear wrapper).
         self.out_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
+        self.last_backend = "uninitialized"
+
+    @staticmethod
+    def _segmented_sdpa(
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        segment_offsets: Sequence[int],
+    ) -> torch.Tensor:
+        out = torch.empty_like(q)
+        for start, end in zip(segment_offsets[:-1], segment_offsets[1:]):
+            if end == start:
+                continue
+            qs = q[start:end].transpose(0, 1).unsqueeze(0)
+            ks = k[start:end].transpose(0, 1).unsqueeze(0)
+            vs = v[start:end].transpose(0, 1).unsqueeze(0)
+            attn = F.scaled_dot_product_attention(
+                qs,
+                ks,
+                vs,
+                attn_mask=None,
+                dropout_p=0.0,
+                is_causal=False,
+            )
+            out[start:end] = attn.squeeze(0).transpose(0, 1)
+        return out
+
+    def _packed_attention(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        max_seqlen: int,
+        segment_offsets: Sequence[int],
+        attention_context: PackedAttentionContext,
+    ) -> torch.Tensor:
+        backend = attention_context.backend
+        self.last_backend = backend
+        if backend == "fa4":
+            out = _FA4_VARLEN_FUNC(
+                q,
+                k,
+                v,
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=max_seqlen,
+                max_seqlen_k=max_seqlen,
+                causal=False,
+                softmax_scale=self.scaling,
+            )
+            return out[0] if isinstance(out, tuple) else out
+        if backend == "flashinfer":
+            wrapper = attention_context.flashinfer_wrapper
+            if wrapper is not None:
+                try:
+                    out = wrapper.run(
+                        q.contiguous(),
+                        k.contiguous(),
+                        v.contiguous(),
+                    )
+                    return out[0] if isinstance(out, tuple) else out
+                except (AssertionError, RuntimeError, ValueError) as error:
+                    if "out of memory" in str(error).lower():
+                        raise
+                    logger.warning(
+                        "FlashInfer vision attention unavailable; "
+                        "falling back to segmented SDPA: %s",
+                        error,
+                    )
+            attention_context.backend = "sdpa"
+            self.last_backend = "sdpa"
+        if backend == "flash_attn":
+            out = _FLASH_ATTN_VARLEN_FUNC(
+                q,
+                k,
+                v,
+                cu_seqlens_q=cu_seqlens,
+                cu_seqlens_k=cu_seqlens,
+                max_seqlen_q=max_seqlen,
+                max_seqlen_k=max_seqlen,
+                dropout_p=0.0,
+                softmax_scale=self.scaling,
+                causal=False,
+            )
+            return out[0] if isinstance(out, tuple) else out
+        return self._segmented_sdpa(q, k, v, segment_offsets)
 
     def forward(
         self,
         hidden_states: torch.Tensor,  # [seq, hidden]
         cu_seqlens: torch.Tensor,  # [num_segments + 1] int32
         position_embeddings: Tuple[torch.Tensor, torch.Tensor],  # (cos, sin)
+        max_seqlen: int,
+        segment_offsets: Sequence[int],
+        attention_context: Optional[PackedAttentionContext] = None,
     ) -> torch.Tensor:
         seq_len, _ = hidden_states.shape
 
-        q = self.q_proj(hidden_states).view(seq_len, self.num_heads, self.head_dim)
-        k = self.k_proj(hidden_states).view(seq_len, self.num_heads, self.head_dim)
-        v = self.v_proj(hidden_states).view(seq_len, self.num_heads, self.head_dim)
+        qkv = self.qkv_proj(hidden_states).view(
+            seq_len, 3, self.num_heads, self.head_dim
+        )
+        q, k, v = qkv.unbind(dim=1)
 
         cos, sin = position_embeddings  # [seq, 1, rot_dim]
         q, k = _apply_rope(q, k, cos, sin)
 
-        # Per-segment SDPA.
-        out = torch.empty_like(q)
-        starts = cu_seqlens[:-1].tolist()
-        ends = cu_seqlens[1:].tolist()
-        for s, e in zip(starts, ends):
-            if e == s:
-                continue
-            # [1, num_heads, len, head_dim]
-            qs = q[s:e].transpose(0, 1).unsqueeze(0)
-            ks = k[s:e].transpose(0, 1).unsqueeze(0)
-            vs = v[s:e].transpose(0, 1).unsqueeze(0)
-            attn = F.scaled_dot_product_attention(
-                qs, ks, vs, attn_mask=None, dropout_p=0.0, is_causal=False
+        if attention_context is None:
+            attention_context = PackedAttentionContext(
+                backend=_select_attention_backend(q)
             )
-            # back to [len, num_heads, head_dim]
-            out[s:e] = attn.squeeze(0).transpose(0, 1)
-
+        out = self._packed_attention(
+            q,
+            k,
+            v,
+            cu_seqlens,
+            max_seqlen,
+            segment_offsets,
+            attention_context,
+        )
         out = out.reshape(seq_len, self.embed_dim)
         return self.out_proj(out)
 
@@ -252,10 +396,20 @@ class CLIPEncoderLayer(nn.Module):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        max_seqlen: int,
+        segment_offsets: Sequence[int],
+        attention_context: PackedAttentionContext,
     ) -> torch.Tensor:
         residual = hidden_states
         hidden_states = self.layer_norm1(hidden_states)
-        hidden_states = self.self_attn(hidden_states, cu_seqlens, position_embeddings)
+        hidden_states = self.self_attn(
+            hidden_states,
+            cu_seqlens,
+            position_embeddings,
+            max_seqlen,
+            segment_offsets,
+            attention_context,
+        )
         hidden_states = residual + hidden_states
 
         residual = hidden_states
@@ -277,9 +431,19 @@ class CLIPEncoder(nn.Module):
         hidden_states: torch.Tensor,
         cu_seqlens: torch.Tensor,
         position_embeddings: Tuple[torch.Tensor, torch.Tensor],
+        max_seqlen: int,
+        segment_offsets: Sequence[int],
+        attention_context: PackedAttentionContext,
     ) -> torch.Tensor:
         for layer in self.layers:
-            hidden_states = layer(hidden_states, cu_seqlens, position_embeddings)
+            hidden_states = layer(
+                hidden_states,
+                cu_seqlens,
+                position_embeddings,
+                max_seqlen,
+                segment_offsets,
+                attention_context,
+            )
         return hidden_states
 
 
@@ -314,6 +478,8 @@ class MiniMaxM3VLVisionModel(nn.Module):
         # NOTE: typo `pre_layrnorm` preserved to match HF ckpt key.
         self.pre_layrnorm = nn.LayerNorm(embed_dim, eps=config.layer_norm_eps)
         self.encoder = CLIPEncoder(config)
+        self._flashinfer_workspace: Optional[torch.Tensor] = None
+        self._flashinfer_wrapper: Optional[Any] = None
 
         assert (
             config.position_embedding_type == "rope"
@@ -424,17 +590,73 @@ class MiniMaxM3VLVisionModel(nn.Module):
                     out.append([sub_t, grid_h, grid_w])
         return out
 
-    def _compute_cu_seq_len(
+    def _compute_attention_metadata(
         self, grid_thw: List[List[int]], device: torch.device
-    ) -> torch.Tensor:
-        """Cumulative sum of per-segment token counts (= t*h*w). Length
-        num_segments + 1, leading 0."""
-        seg_lens = [0] + [t * h * w for t, h, w in grid_thw]
+    ) -> Tuple[torch.Tensor, int, Tuple[int, ...]]:
+        """Build varlen metadata once and reuse it in every encoder layer."""
+        segment_lengths = [t * h * w for t, h, w in grid_thw]
+        segment_offsets = [0]
+        for length in segment_lengths:
+            segment_offsets.append(segment_offsets[-1] + length)
         return (
-            torch.tensor(seg_lens, device=device, dtype=torch.int32)
-            .cumsum(0)
-            .to(torch.int32)
+            torch.tensor(segment_offsets, device=device, dtype=torch.int32),
+            max(segment_lengths, default=0),
+            tuple(segment_offsets),
         )
+
+    def _prepare_attention_context(
+        self,
+        hidden_states: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+    ) -> PackedAttentionContext:
+        backend = _select_attention_backend(hidden_states)
+        if backend != "flashinfer":
+            return PackedAttentionContext(backend=backend)
+
+        try:
+            if (
+                self._flashinfer_workspace is None
+                or self._flashinfer_workspace.device != hidden_states.device
+            ):
+                self._flashinfer_workspace = torch.empty(
+                    128 * 1024 * 1024,
+                    dtype=torch.uint8,
+                    device=hidden_states.device,
+                )
+                self._flashinfer_wrapper = _FLASHINFER_RAGGED_WRAPPER(
+                    self._flashinfer_workspace,
+                    kv_layout="NHD",
+                    backend="cute-dsl",
+                )
+
+            assert self._flashinfer_wrapper is not None
+            head_dim = self.config.hidden_size // self.config.num_attention_heads
+            self._flashinfer_wrapper.plan(
+                cu_seqlens,
+                cu_seqlens,
+                self.config.num_attention_heads,
+                self.config.num_attention_heads,
+                head_dim,
+                head_dim,
+                causal=False,
+                sm_scale=head_dim**-0.5,
+                q_data_type=hidden_states.dtype,
+                kv_data_type=hidden_states.dtype,
+                o_data_type=hidden_states.dtype,
+            )
+            return PackedAttentionContext(
+                backend=backend,
+                flashinfer_wrapper=self._flashinfer_wrapper,
+            )
+        except (AssertionError, RuntimeError, ValueError) as error:
+            if "out of memory" in str(error).lower():
+                raise
+            logger.warning(
+                "Failed to plan FlashInfer vision attention; "
+                "falling back to segmented SDPA: %s",
+                error,
+            )
+            return PackedAttentionContext(backend="sdpa")
 
     # ------------------------------------------------------------------ forward
 
@@ -457,12 +679,34 @@ class MiniMaxM3VLVisionModel(nn.Module):
             grid_thw_list = [list(g) for g in grid_thw]
         grid_thw_list = self._apply_max_frames_limit(grid_thw_list)
 
-        cu_seqlens = self._compute_cu_seq_len(grid_thw_list, hidden_states.device)
+        cu_seqlens, max_seqlen, segment_offsets = self._compute_attention_metadata(
+            grid_thw_list, hidden_states.device
+        )
+        if segment_offsets[-1] != hidden_states.shape[0]:
+            raise ValueError(
+                "grid_thw token count does not match pixel_values: "
+                f"{segment_offsets[-1]} != {hidden_states.shape[0]}"
+            )
         rotary_freqs = self._get_rope_embed_3d(grid_thw_list, self.spatial_merge_size)
         assert rotary_freqs.device == hidden_states.device
         position_embeddings = self._prepare_cos_sin(rotary_freqs)
+        attention_context = self._prepare_attention_context(hidden_states, cu_seqlens)
 
-        return self.encoder(hidden_states, cu_seqlens, position_embeddings)
+        hidden_states = self.encoder(
+            hidden_states,
+            cu_seqlens,
+            position_embeddings,
+            max_seqlen,
+            segment_offsets,
+            attention_context,
+        )
+        logger.debug(
+            "MiniMax M3VL vision attention backend=%s segments=%d max_seqlen=%d",
+            self.encoder.layers[0].self_attn.last_backend,
+            len(segment_offsets) - 1,
+            max_seqlen,
+        )
+        return hidden_states
 
 
 # ---------------------------------------------------------------------------
