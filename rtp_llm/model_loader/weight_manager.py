@@ -443,9 +443,29 @@ class WeightManager:
         mega_peak_host_bytes = 0
         compressors: list = []
         try:
-            from rtp_llm.models_py.modules.dsv4.fp8.compressor import iter_compressors
-            from rtp_llm.models_py.modules.dsv4.moe.mega_buf import iter_mega_strategies
+            import sys
+
             from rtp_llm.utils.model_weight import W
+
+            # Do not import DSV4 and its optional kernels from a generic model's
+            # wake path. A live participant can only exist after its module was
+            # loaded during model construction; an absent module therefore means
+            # an empty registry, while a loaded-but-broken registry must fail the
+            # reload closed.
+            compressor_module = sys.modules.get(
+                "rtp_llm.models_py.modules.dsv4.fp8.compressor"
+            )
+            mega_module = sys.modules.get("rtp_llm.models_py.modules.dsv4.moe.mega_buf")
+            iter_compressors = (
+                getattr(compressor_module, "iter_compressors")
+                if compressor_module is not None
+                else lambda: ()
+            )
+            iter_mega_strategies = (
+                getattr(mega_module, "iter_mega_strategies")
+                if mega_module is not None
+                else lambda: ()
+            )
 
             mega_routed_keys = {
                 W.v4_routed_w1_w,
@@ -470,14 +490,22 @@ class WeightManager:
 
             for strat in iter_mega_strategies():
                 if _owned(strat):
-                    mega_by_layer[strat.cfg.layer_id] = strat
+                    layer_id = strat.cfg.layer_id
+                    if layer_id in mega_by_layer:
+                        raise RuntimeError(
+                            "duplicate Mega reload participant for model scope "
+                            f"{self._model_scope}, layer {layer_id}"
+                        )
+                    mega_by_layer[layer_id] = strat
             compressors = [c for c in iter_compressors() if _owned(c)]
-        except Exception:
-            logging.info(
-                "reload_weights_from_loader: DSV4 computed-weight registries "
-                "unavailable; skipping mega/compressor re-derivation",
-                exc_info=True,
-            )
+        except Exception as e:
+            # These buffers live in the paused weights region but are not part of
+            # ModelWeights, so the generic coverage check below cannot detect a
+            # skipped restore. Fail the wake instead of returning RUNNING with
+            # blank Mega/compressor pages.
+            raise RuntimeError(
+                "reload_weights_from_loader: cannot discover computed-weight reload participants"
+            ) from e
 
         # suppress_weights_region: the resident weights already occupy their VA;
         # keep every reload transient (scratch WeightModule.load intermediates and

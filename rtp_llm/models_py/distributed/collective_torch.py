@@ -4,9 +4,14 @@ import gc
 import logging
 import os
 import re
+import socket
+import stat
+import struct
+import threading
+from dataclasses import dataclass
 from datetime import timedelta
 from enum import Enum
-from typing import Any, Dict, List, Optional, Union
+from typing import Any, Callable, Dict, List, Optional, Union
 
 import torch
 import torch.distributed
@@ -24,6 +29,7 @@ _CPP_PARALLEL_MODE_SLEEP_QUIESCE = 6
 # Bounded deadline for the one-shot SLEEP_QUIESCE group warmup at startup, so a peer that died
 # during launch fails the warmup fast instead of hanging boot on the group's ~infinite timeout.
 _SLEEP_QUIESCE_WARMUP_TIMEOUT_S = 30
+_LEVEL3_PHASE_TIMEOUT_S = 300
 
 
 class Group(Enum):
@@ -38,14 +44,580 @@ class Group(Enum):
     SLEEP_QUIESCE = "SLEEP_QUIESCE"
 
 
+@dataclass
+class _CollectiveResource:
+    name: str
+    rebuild: Callable[[], None]
+    teardown: Callable[[], None]
+    active: bool = False
+
+
+class _CollectiveLifecycleRegistry:
+    """Order checkpoint-sensitive resources by their dependencies."""
+
+    def __init__(self) -> None:
+        self._resources: List[_CollectiveResource] = []
+        self._lock = threading.RLock()
+
+    def register(
+        self,
+        name: str,
+        *,
+        rebuild: Callable[[], None],
+        teardown: Callable[[], None],
+    ) -> None:
+        with self._lock:
+            if any(resource.name == name for resource in self._resources):
+                raise ValueError(f"collective resource '{name}' is already registered")
+            self._resources.append(_CollectiveResource(name, rebuild, teardown))
+
+    def rebuild(self) -> None:
+        """Rebuild dependencies first, resuming cleanly after a failed attempt."""
+        with self._lock:
+            if not self._resources:
+                raise RuntimeError("no collective resources are registered")
+            for resource in self._resources:
+                if resource.active:
+                    continue
+                try:
+                    resource.rebuild()
+                except Exception as error:
+                    try:
+                        resource.teardown()
+                    except Exception as cleanup_error:
+                        raise RuntimeError(
+                            f"failed to rebuild collective resource '{resource.name}' "
+                            f"after {type(error).__name__}: {error}; "
+                            f"cleanup also failed: {cleanup_error}"
+                        ) from error
+                    raise RuntimeError(
+                        f"failed to rebuild collective resource '{resource.name}': "
+                        f"{type(error).__name__}: {error}"
+                    ) from error
+                resource.active = True
+
+    def teardown(self) -> None:
+        """Destroy dependents first, resuming cleanly after a failed attempt."""
+        with self._lock:
+            for resource in reversed(self._resources):
+                if not resource.active:
+                    continue
+                try:
+                    resource.teardown()
+                except Exception as error:
+                    raise RuntimeError(
+                        f"failed to teardown collective resource '{resource.name}': "
+                        f"{type(error).__name__}: {error}"
+                    ) from error
+                resource.active = False
+
+    def active_resources(self) -> List[str]:
+        with self._lock:
+            return [resource.name for resource in self._resources if resource.active]
+
+    def reset(self) -> None:
+        """Forget lifecycle state after a terminal destroy or in hermetic tests."""
+        with self._lock:
+            for resource in self._resources:
+                resource.active = False
+
+
+@dataclass(frozen=True)
+class _DistributedInitSnapshot:
+    parallelism_config: ParallelismConfig
+    nccl_comm_config: NcclCommConfig
+    nccl_init_port: int
+    backend: str
+    timeout: Optional[int]
+
+
 # Global process group storage
 # Key can be Group enum or string (for multiple DP/TP groups)
 _group_map: Dict[Union[Group, str], torch.distributed.ProcessGroup] = {}
 _parallelism_config: Optional[ParallelismConfig] = None
 _initialized: bool = False  # Track if we've initialized (to prevent double init)
 _cpu_tp_broadcaster_base_path: Optional[str] = None
+_distributed_init_snapshot: Optional[_DistributedInitSnapshot] = None
+_collective_lifecycle = _CollectiveLifecycleRegistry()
+_collective_resources_registered = False
+_lifecycle_store: Optional[Any] = None
+_process_group_generation = 0
 _rocm_rccl = None
 _symm_mem = None
+
+
+def _sleep_mode_level3_enabled() -> bool:
+    return (
+        os.environ.get("ENABLE_SLEEP_MODE", "0") == "1"
+        and os.environ.get("SLEEP_MODE_LEVEL", "1") == "3"
+    )
+
+
+_SLEEP_INSTANCE_GENERATION_ENV = "RTP_LLM_SLEEP_INSTANCE_GENERATION"
+
+
+def _sanitize_key_component(value: Any) -> str:
+    return re.sub(r"[^A-Za-z0-9._-]", "_", str(value or ""))
+
+
+def _level3_role_component(parallelism_config: ParallelismConfig) -> str:
+    """Stable PD-role token for coordination keys (cross-rank consistent).
+
+    Returns "" when no role is configured so the coordination keys keep their
+    legacy (role-less) layout: this preserves backward compatibility with L1/L2
+    deployments and only namespaces by role once a PD role is actually present.
+    """
+    role = getattr(parallelism_config, "role_type", None)
+    if role is None:
+        return ""
+    # pybind RoleType enum -> its name (e.g. "PREFILL"); fall back to str().
+    return _sanitize_key_component(getattr(role, "name", None) or str(role))
+
+
+def _level3_key_namespace(parallelism_config: ParallelismConfig) -> str:
+    """Namespace prefix for Level3 TCPStore coordination keys.
+
+    Includes the PD role (always, cross-rank consistent from config) and, when the
+    deployment publishes one, an instance-generation token shared identically
+    across ranks. This prevents a shared/misconfigured TCPStore from colliding
+    ready-gate keys across PD roles or across successive instance generations.
+    """
+    role = _level3_role_component(parallelism_config)
+    generation = _sanitize_key_component(
+        os.environ.get(_SLEEP_INSTANCE_GENERATION_ENV, "")
+    )
+    if generation:
+        return f"{role}/{generation}"
+    return role
+
+
+_MULTICAST_KEEPER_ENABLE_ENV = "RTP_LLM_CUDA_CKPT_MULTICAST_KEEPER"
+_MULTICAST_KEEPER_DIR_ENV = "NEKYIA_KEEPER_DIR"
+_MULTICAST_KEEPER_SOCKET_ENV = "RTP_LLM_CUDA_CKPT_MULTICAST_SOCKET"
+_MULTICAST_KEEPER_SOCKET = "mcsk.sock"
+_MULTICAST_SHIM_BASENAME = "mc_shim_unified.so"
+_MULTICAST_PROTOCOL_MAGIC = 0x3250434D505452
+_MULTICAST_PROTOCOL_VERSION = 3
+_MULTICAST_OP_PING = 1
+_MULTICAST_STATUS_OK = 0
+_MULTICAST_REQUEST = struct.Struct("<QHHIQQQQIIQ")
+_MULTICAST_RESPONSE = struct.Struct("<QHHIiIQQQQQIIQ")
+_MULTICAST_KEEPER_PING_TIMEOUT_S = 2.0
+_multicast_keeper_instance_lock = threading.RLock()
+_multicast_keeper_pinned_epoch: Optional[int] = None
+_multicast_keeper_pinned_instance: Optional[tuple[int, int]] = None
+
+
+def _multicast_keeper_socket_path() -> tuple[Optional[str], str]:
+    socket_path = os.environ.get(_MULTICAST_KEEPER_SOCKET_ENV, "").strip()
+    if socket_path:
+        return socket_path, ""
+    keeper_dir = os.environ.get(_MULTICAST_KEEPER_DIR_ENV, "").strip()
+    if not keeper_dir:
+        return None, (
+            f"neither {_MULTICAST_KEEPER_SOCKET_ENV} nor "
+            f"{_MULTICAST_KEEPER_DIR_ENV} is set"
+        )
+    return os.path.join(keeper_dir, _MULTICAST_KEEPER_SOCKET), ""
+
+
+def _ping_multicast_keeper(
+    socket_path: str,
+) -> tuple[bool, str, Optional[tuple[int, int]]]:
+    request = _MULTICAST_REQUEST.pack(
+        _MULTICAST_PROTOCOL_MAGIC,
+        _MULTICAST_PROTOCOL_VERSION,
+        _MULTICAST_OP_PING,
+        _MULTICAST_REQUEST.size,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+        0,
+    )
+    try:
+        with socket.socket(socket.AF_UNIX, socket.SOCK_SEQPACKET) as client:
+            client.settimeout(_MULTICAST_KEEPER_PING_TIMEOUT_S)
+            client.connect(socket_path)
+            client.sendall(request)
+            response = client.recv(_MULTICAST_RESPONSE.size + 1)
+    except OSError as error:
+        return False, f"keeper ping failed for {socket_path}: {error}", None
+
+    if len(response) != _MULTICAST_RESPONSE.size:
+        return (
+            False,
+            "keeper ping returned an invalid response size: "
+            f"{len(response)} (expected {_MULTICAST_RESPONSE.size})",
+            None,
+        )
+    fields = _MULTICAST_RESPONSE.unpack(response)
+    magic, version, opcode, struct_size, status = fields[:5]
+    holder_instance_hi, holder_instance_lo = fields[6:8]
+    if (
+        magic != _MULTICAST_PROTOCOL_MAGIC
+        or version != _MULTICAST_PROTOCOL_VERSION
+        or opcode != _MULTICAST_OP_PING
+        or struct_size != _MULTICAST_RESPONSE.size
+        or status != _MULTICAST_STATUS_OK
+        or (holder_instance_hi == 0 and holder_instance_lo == 0)
+    ):
+        return (
+            False,
+            "keeper ping returned an incompatible response: "
+            f"magic=0x{magic:x} version={version} opcode={opcode} "
+            f"size={struct_size} status={status}",
+            None,
+        )
+    return True, "", (holder_instance_hi, holder_instance_lo)
+
+
+def _multicast_keeper_ready() -> tuple[bool, str, Optional[tuple[int, int]]]:
+    socket_path, path_error = _multicast_keeper_socket_path()
+    if socket_path is None:
+        return False, path_error, None
+    try:
+        if not stat.S_ISSOCK(os.stat(socket_path).st_mode):
+            return False, f"keeper endpoint is not a UNIX socket: {socket_path}", None
+    except OSError as error:
+        return False, f"keeper socket is unavailable: {socket_path}: {error}", None
+
+    ping_ok, ping_error, holder_instance = _ping_multicast_keeper(socket_path)
+    if not ping_ok:
+        return False, ping_error, None
+
+    # LD_PRELOAD is inherited by multiprocessing-spawn ranks. Check the actual
+    # mappings as well, because merely leaving a stale path in the environment
+    # would otherwise advertise checkpoint-safe multicast without interposition.
+    try:
+        with open("/proc/self/maps", encoding="utf-8") as maps:
+            if any(_MULTICAST_SHIM_BASENAME in line for line in maps):
+                return True, "", holder_instance
+    except OSError as error:
+        return False, f"cannot inspect loaded multicast shim: {error}", None
+    return False, f"{_MULTICAST_SHIM_BASENAME} is not loaded in this rank", None
+
+
+def _publish_holder_instance_to_engine(
+    holder_instance: Optional[tuple[int, int]]
+) -> None:
+    """Hand the pinned multicast keeper holder to the C++ engine.
+
+    GetSleepStatus reports it in SleepStatusResponsePB.holder_instance so the durable
+    checkpoint manifest can persist + fail-closed verify the holder. No-op unless the
+    multicast keeper is enabled, so L1/L2 and non-keeper deployments are unaffected.
+    Best-effort: the manifest-side re-verification is the authoritative gate, and the
+    engine module may be absent under unit tests, so failures never break the barrier.
+    """
+    if os.environ.get(_MULTICAST_KEEPER_ENABLE_ENV, "0") != "1":
+        return
+    try:
+        from libth_transformer import (
+            clear_multicast_holder_instance,
+            set_multicast_holder_instance,
+        )
+    except Exception as error:  # pragma: no cover - engine module optional in tests
+        logging.debug("multicast holder engine setter unavailable: %s", error)
+        return
+    try:
+        if holder_instance is None:
+            clear_multicast_holder_instance()
+        else:
+            set_multicast_holder_instance(
+                int(holder_instance[0]), int(holder_instance[1])
+            )
+    except Exception as error:  # pragma: no cover - best-effort
+        logging.warning("failed to publish keeper holder to engine: %s", error)
+
+
+def _validate_multicast_keeper_phase_instance(
+    phase: str, sleep_epoch: int, holder_instance: tuple[int, int]
+) -> tuple[bool, str]:
+    global _multicast_keeper_pinned_epoch, _multicast_keeper_pinned_instance
+    with _multicast_keeper_instance_lock:
+        if phase == "collective_teardown_ready":
+            if _multicast_keeper_pinned_instance is None:
+                _multicast_keeper_pinned_epoch = sleep_epoch
+                _multicast_keeper_pinned_instance = holder_instance
+                # Publish the just-pinned holder to the engine so the coordinator's
+                # GetSleepStatus poll reports it into the checkpoint manifest.
+                _publish_holder_instance_to_engine(holder_instance)
+                return True, ""
+            if _multicast_keeper_pinned_epoch != sleep_epoch:
+                return False, (
+                    "multicast keeper instance is still pinned by incomplete epoch "
+                    f"{_multicast_keeper_pinned_epoch}"
+                )
+            if _multicast_keeper_pinned_instance != holder_instance:
+                return False, "multicast keeper was replaced during collective teardown"
+            return True, ""
+
+        if _multicast_keeper_pinned_instance is None:
+            return False, "multicast keeper instance was not pinned for Level3 wake"
+        if _multicast_keeper_pinned_epoch != sleep_epoch:
+            return False, (
+                "multicast keeper rebuild epoch does not match pinned epoch "
+                f"{_multicast_keeper_pinned_epoch}"
+            )
+        if _multicast_keeper_pinned_instance != holder_instance:
+            return False, "multicast keeper was replaced during Level3 wake"
+        return True, ""
+
+
+def _reset_multicast_keeper_phase_instance() -> None:
+    global _multicast_keeper_pinned_epoch, _multicast_keeper_pinned_instance
+    with _multicast_keeper_instance_lock:
+        _multicast_keeper_pinned_epoch = None
+        _multicast_keeper_pinned_instance = None
+        # Drop the holder from the engine too so a stale value is not reported after
+        # the checkpoint window closes.
+        _publish_holder_instance_to_engine(None)
+
+
+def get_pinned_multicast_holder_instance() -> Optional[tuple[int, int]]:
+    """Return the multicast keeper holder pinned for the in-flight checkpoint.
+
+    Exposed so the durable checkpoint manifest can persist and later re-verify the
+    holder identity (fail-closed if it exits/changes). None when no keeper is
+    pinned (keeper disabled, or outside a teardown->rebuild window).
+    """
+    with _multicast_keeper_instance_lock:
+        return _multicast_keeper_pinned_instance
+
+
+def _keeper_holder_store_key(namespace: str, sleep_epoch: int) -> str:
+    scope = f"{namespace}/" if namespace else ""
+    return f"rtp_llm_level3_keeper/{scope}{sleep_epoch}/holder"
+
+
+def _publish_keeper_holder_instance(
+    store: torch.distributed.Store,
+    namespace: str,
+    sleep_epoch: int,
+    holder_instance: tuple[int, int],
+) -> None:
+    """Record the pinned keeper holder on the coordination store (best-effort).
+
+    This puts the holder identity onto the existing Level3 coordination path so it
+    is durable and observable per (role, generation, epoch). Failures never break
+    the barrier: the manifest-side re-verification is the authoritative gate.
+    """
+    try:
+        store.set(
+            _keeper_holder_store_key(namespace, sleep_epoch),
+            f"{holder_instance[0]}:{holder_instance[1]}".encode("utf-8"),
+        )
+    except Exception as error:  # pragma: no cover - best-effort publish
+        logging.warning(
+            "failed to publish multicast keeper holder for epoch %s: %s",
+            sleep_epoch,
+            error,
+        )
+
+
+def _configure_level3_multicast() -> None:
+    """Select the fail-closed Level3 multicast policy before NCCL initializes."""
+    if not _sleep_mode_level3_enabled():
+        return
+
+    keeper_enabled = os.environ.get(_MULTICAST_KEEPER_ENABLE_ENV, "0") == "1"
+    if keeper_enabled:
+        ready, reason, _ = _multicast_keeper_ready()
+        if not ready:
+            raise RuntimeError(
+                "Sleep mode Level3 multicast keeper was requested but is not ready: "
+                + reason
+            )
+        required = {
+            "NCCL_NVLS_ENABLE": "1",
+            "TORCH_SYMM_MEM_DISABLE_MULTICAST": "0",
+        }
+        policy = "enabled through the external CUDA-checkpoint multicast keeper"
+    else:
+        required = {
+            "NCCL_NVLS_ENABLE": "0",
+            "TORCH_SYMM_MEM_DISABLE_MULTICAST": "1",
+        }
+        policy = "disabled because no CUDA-checkpoint multicast keeper was requested"
+
+    for name, value in required.items():
+        configured = os.environ.get(name)
+        if configured == value:
+            continue
+        os.environ[name] = value
+        log = logging.info if configured is None else logging.warning
+        log(
+            "Sleep mode Level3 overrides %s=%s with %s before collective "
+            "initialization; multicast is %s",
+            name,
+            configured,
+            value,
+            policy,
+        )
+
+
+def _enforce_level3_multicast_disabled() -> None:
+    """Compatibility alias for callers/tests predating keeper support."""
+    _configure_level3_multicast()
+
+
+def _get_or_create_lifecycle_store(
+    snapshot: _DistributedInitSnapshot,
+) -> torch.distributed.Store:
+    """Return a CPU-only rendezvous store that outlives every CUDA PG."""
+    global _lifecycle_store
+
+    if _lifecycle_store is not None:
+        return _lifecycle_store
+
+    parallelism_config = snapshot.parallelism_config
+    timeout = timedelta(seconds=snapshot.timeout or 300)
+    _lifecycle_store = torch.distributed.TCPStore(
+        host_name=snapshot.nccl_comm_config.nccl_ip,
+        port=snapshot.nccl_init_port,
+        world_size=parallelism_config.world_size,
+        is_master=parallelism_config.world_rank == 0,
+        timeout=timeout,
+        wait_for_workers=True,
+        multi_tenant=True,
+    )
+    logging.info(
+        "[rank: %s] created persistent process-group TCPStore at %s:%s",
+        parallelism_config.world_rank,
+        snapshot.nccl_comm_config.nccl_ip,
+        snapshot.nccl_init_port,
+    )
+    return _lifecycle_store
+
+
+def _wait_for_process_group_generation_ready(
+    store: torch.distributed.Store,
+    *,
+    generation: int,
+    world_rank: int,
+    world_size: int,
+    timeout: timedelta,
+    namespace: str = "",
+) -> None:
+    """Wait until every rank has completed local restore for this generation."""
+    scope = f"{namespace}/" if namespace else ""
+    key_prefix = f"rtp_llm_pg_ready/{scope}{generation}"
+    rank_key = f"{key_prefix}/rank/{world_rank}"
+    ready_keys = [f"{key_prefix}/rank/{rank}" for rank in range(world_size)]
+    try:
+        store.set(rank_key, b"1")
+        store.wait(ready_keys, timeout)
+    except Exception as error:
+        raise RuntimeError(
+            f"process-group generation {generation} ready barrier failed for "
+            f"rank {world_rank} of {world_size}: {type(error).__name__}: {error}"
+        ) from error
+
+
+def coordinate_level3_phase(
+    phase: str,
+    sleep_epoch: int,
+    local_success: bool,
+    *,
+    timeout_s: Optional[int] = None,
+) -> bool:
+    """Return true only when every rank reports success for a Level3 phase.
+
+    The TCPStore is CPU-only and intentionally survives process-group teardown,
+    so this barrier is available both before checkpoint and after CUDA restore.
+    Keys include the sleep epoch and phase to make retries idempotent without
+    consuming results from an earlier sleep cycle.
+    """
+    if not phase or re.fullmatch(r"[A-Za-z0-9_.-]+", phase) is None:
+        raise ValueError(f"invalid Level3 lifecycle phase: {phase!r}")
+    if sleep_epoch <= 0:
+        raise ValueError(f"invalid Level3 sleep epoch: {sleep_epoch}")
+
+    keeper_enabled = (
+        _sleep_mode_level3_enabled()
+        and os.environ.get(_MULTICAST_KEEPER_ENABLE_ENV, "0") == "1"
+    )
+    holder_instance: Optional[tuple[int, int]] = None
+    if (
+        local_success
+        and phase
+        in {
+            "collective_teardown_ready",
+            "collective_rebuild_ready",
+            "graph_recapture_ready",
+            "graph_recapture_done",
+        }
+        and keeper_enabled
+    ):
+        keeper_ready, keeper_error, holder_instance = _multicast_keeper_ready()
+        if keeper_ready:
+            assert holder_instance is not None
+            keeper_ready, keeper_error = _validate_multicast_keeper_phase_instance(
+                phase, sleep_epoch, holder_instance
+            )
+        if not keeper_ready:
+            logging.error(
+                "Level3 phase %s epoch %s rejected locally: %s",
+                phase,
+                sleep_epoch,
+                keeper_error,
+            )
+            local_success = False
+
+    snapshot = _require_distributed_init_snapshot()
+    parallelism_config = snapshot.parallelism_config
+    world_rank = parallelism_config.world_rank
+    world_size = parallelism_config.world_size
+    store = _get_or_create_lifecycle_store(snapshot)
+    timeout = timedelta(
+        seconds=(
+            timeout_s
+            if timeout_s is not None
+            else snapshot.timeout or _LEVEL3_PHASE_TIMEOUT_S
+        )
+    )
+    namespace = _level3_key_namespace(parallelism_config)
+    scope = f"{namespace}/" if namespace else ""
+    key_prefix = f"rtp_llm_level3/{scope}{sleep_epoch}/{phase}"
+    rank_key = f"{key_prefix}/rank/{world_rank}"
+    rank_keys = [f"{key_prefix}/rank/{rank}" for rank in range(world_size)]
+
+    try:
+        store.set(rank_key, b"1" if local_success else b"0")
+        store.wait(rank_keys, timeout)
+        rank_results = [store.get(key) for key in rank_keys]
+    except Exception as error:
+        raise RuntimeError(
+            f"Level3 phase {phase!r} epoch {sleep_epoch} coordination failed "
+            f"for rank {world_rank} of {world_size}: "
+            f"{type(error).__name__}: {error}"
+        ) from error
+
+    all_success = all(result == b"1" for result in rank_results)
+    if not all_success:
+        failed_ranks = [
+            rank for rank, result in enumerate(rank_results) if result != b"1"
+        ]
+        logging.error(
+            "Level3 phase %s epoch %s rejected by ranks %s",
+            phase,
+            sleep_epoch,
+            failed_ranks,
+        )
+    elif phase == "graph_recapture_done" and keeper_enabled:
+        _reset_multicast_keeper_phase_instance()
+    elif (
+        phase == "collective_teardown_ready"
+        and keeper_enabled
+        and holder_instance is not None
+        and world_rank == 0
+    ):
+        # Publish the pinned holder onto the coordination path so the checkpoint
+        # manifest can durably persist and later re-verify it (fail-closed).
+        _publish_keeper_holder_instance(store, namespace, sleep_epoch, holder_instance)
+    return all_success
 
 
 def _get_rocm_rccl():
@@ -141,88 +713,119 @@ def init_distributed_environment(
     Raises:
         RuntimeError: If already initialized and not destroyed
     """
-    global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path
+    global _distributed_init_snapshot
 
-    # Check if already initialized (and not destroyed)
-    if _initialized and torch.distributed.is_initialized():
+    if backend != "nccl":
+        raise ValueError(f"unsupported distributed backend: {backend}")
+    _enforce_level3_multicast_disabled()
+    _ensure_collective_resources_registered()
+    if _initialized and _collective_lifecycle.active_resources():
         logging.warning(
             "Distributed environment already initialized, skipping initialization"
         )
-        # Still need to create groups if they don't exist
-        if not _group_map:
-            _normalize_parallelism_ranks(parallelism_config)
-            _cpu_tp_broadcaster_base_path = _make_cpu_tp_broadcaster_base_path(
-                parallelism_config, nccl_init_port
-            )
-            _create_process_groups(parallelism_config, backend, timedelta(days=36500))
-            _register_process_groups_to_cpp()
-        rocm_rccl = _get_rocm_rccl()
-        if rocm_rccl is not None and parallelism_config.tp_size > 1:
-            rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
         return
+    if _distributed_init_snapshot is not None:
+        raise RuntimeError(
+            "distributed environment has a retained lifecycle snapshot; "
+            "call rebuild_distributed_environment() or destroy_distributed_environment()"
+        )
 
+    _distributed_init_snapshot = _DistributedInitSnapshot(
+        parallelism_config=parallelism_config,
+        nccl_comm_config=nccl_comm_config,
+        nccl_init_port=nccl_init_port,
+        backend=backend,
+        timeout=timeout,
+    )
+    try:
+        _collective_lifecycle.rebuild()
+    except Exception:
+        # Keep the snapshot and successfully-created participants so a retry can
+        # continue from the exact failed dependency.
+        raise
+
+
+def _rebuild_torch_process_groups() -> None:
+    global _group_map, _parallelism_config, _initialized
+    global _cpu_tp_broadcaster_base_path
+    global _lifecycle_store, _process_group_generation
+
+    _enforce_level3_multicast_disabled()
+    snapshot = _require_distributed_init_snapshot()
+    parallelism_config = snapshot.parallelism_config
+    nccl_comm_config = snapshot.nccl_comm_config
     _normalize_parallelism_ranks(parallelism_config)
     _cpu_tp_broadcaster_base_path = _make_cpu_tp_broadcaster_base_path(
-        parallelism_config, nccl_init_port
+        parallelism_config, snapshot.nccl_init_port
     )
 
-    assert backend in ["nccl"], "backend current only supports nccl"
     ip = nccl_comm_config.nccl_ip
-    port = nccl_init_port
     world_rank = parallelism_config.world_rank
     world_size = parallelism_config.world_size
     local_rank = parallelism_config.local_rank
+    infinite_timeout = timedelta(days=36500)
+    init_timeout = timedelta(seconds=snapshot.timeout or 300)
+
+    distributed_initialized = torch.distributed.is_initialized()
+    store = None
+    generation = None
+    if not distributed_initialized:
+        store = _get_or_create_lifecycle_store(snapshot)
+        _process_group_generation += 1
+        generation = _process_group_generation
+        _wait_for_process_group_generation_ready(
+            store,
+            generation=generation,
+            world_rank=world_rank,
+            world_size=world_size,
+            timeout=init_timeout,
+            namespace=_level3_key_namespace(parallelism_config),
+        )
 
     rocm_rccl = _get_rocm_rccl()
     if rocm_rccl is not None:
         rocm_rccl.configure_process_groups(parallelism_config)
     os.environ["TORCH_DIST_INIT_BARRIER"] = "1"
+    _group_map.clear()
 
-    # If torch.distributed is already initialized (e.g., by external code),
-    # we still need to create our process groups
-    if torch.distributed.is_initialized():
+    if not distributed_initialized:
+        logging.info(
+            f"[rank: {world_rank}] initialize process_group: {ip}:{snapshot.nccl_init_port}, "
+            f"rank: {world_rank}, world_size: {world_size}, local_rank: {local_rank}, "
+            f"backend: {snapshot.backend}, timeout: {snapshot.timeout}",
+        )
+        init_kwargs: Dict[str, Any] = {
+            "backend": snapshot.backend,
+            "world_size": world_size,
+            "rank": world_rank,
+            "timeout": init_timeout,
+        }
+        assert store is not None
+        assert generation is not None
+        prefix = f"rtp_llm_pg/{generation}"
+        init_kwargs["store"] = torch.distributed.PrefixStore(prefix, store)
+        if snapshot.backend == "nccl" and torch.cuda.is_available():
+            torch.cuda.set_device(local_rank)
+            init_kwargs["device_id"] = torch.device("cuda", local_rank)
+        logging.info(
+            "[rank: %s] initializing process-group generation %s with store prefix %s",
+            world_rank,
+            generation,
+            prefix,
+        )
+        torch.distributed.init_process_group(**init_kwargs)
+        torch.distributed.barrier(
+            group=torch.distributed.group.WORLD, device_ids=[local_rank]
+        )
+    else:
         logging.info("torch.distributed already initialized, creating process groups")
-        _create_process_groups(parallelism_config, backend, timedelta(days=36500))
-        _parallelism_config = parallelism_config
-        _initialized = True
-        _register_process_groups_to_cpp()
-        if rocm_rccl is not None and parallelism_config.tp_size > 1:
-            rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
-        return
 
-    logging.info(
-        f"[rank: {world_rank}] initialize process_group: {ip}:{port}, rank: {world_rank}, world_size: {world_size}, "
-        f"local_rank: {local_rank}, backend: {backend}, timeout: {timeout}",
-    )
-
-    # Use a very large timeout for NCCL so that workers simply block
-    # until rank 0 has real work, instead of crashing with a timeout.
-    # Note: timedelta.max overflows in PyTorch's C++ TCP store, so use 100 years instead.
-    infinite_timeout = timedelta(days=36500)
-
-    # DP_AND_TP (global group) - initialized via init_process_group
-    torch.distributed.init_process_group(
-        backend=backend,
-        init_method=f"tcp://{ip}:{port}",
-        world_size=world_size,
-        rank=world_rank,
-        # device_id=torch.device(f"cuda:{local_rank}"), # https://github.com/pytorch/pytorch/pull/149144
-        timeout=infinite_timeout,
-    )
-    torch.distributed.barrier(group=torch.distributed.group.WORLD)
     _group_map[Group.DP_AND_TP] = torch.distributed.group.WORLD
-    logging.info(
-        f"[rank: {world_rank}] Created DP_AND_TP group {torch.distributed.group.WORLD} with ranks: {list(range(world_size))}"
-    )
-
-    # Create DP and TP groups
-    _create_process_groups(parallelism_config, backend, timedelta(days=36500))
     _parallelism_config = parallelism_config
     _initialized = True
-    _register_process_groups_to_cpp()
+    _create_process_groups(parallelism_config, snapshot.backend, infinite_timeout)
     if rocm_rccl is not None and parallelism_config.tp_size > 1:
         rocm_rccl.prepare_comm_if_needed(parallelism_config, _get_group(Group.TP))
-    init_user_buffers_environment(parallelism_config)
 
 
 def _create_process_groups(
@@ -642,9 +1245,14 @@ def _register_process_groups_to_cpp():
         f"Registered C++ comm ops callbacks (modes: {list(mode_to_group.keys())})"
     )
 
-    # Bootstrap the UDS-backed intra-node TP broadcaster right after new_group.
-    # Lazy C++ init can race if a peer reaches tpSyncModelInputs before rank 0
-    # binds; cross-node TP keeps the NCCL fallback.
+
+def _init_cpu_tp_broadcaster() -> None:
+    """Bootstrap the UDS-backed intra-node TP broadcaster after process groups."""
+    try:
+        import librtp_compute_ops
+    except ImportError:
+        return
+
     if (
         _parallelism_config is not None
         and _parallelism_config.tp_size > 1
@@ -664,6 +1272,134 @@ def _register_process_groups_to_cpp():
             f"Initialized CpuTpBroadcaster (tp_rank={_parallelism_config.tp_rank}, "
             f"tp_size={_parallelism_config.tp_size}, base_path={base_path})"
         )
+
+
+def _destroy_user_buffers() -> None:
+    snapshot = _require_distributed_init_snapshot()
+    from rtp_llm.models_py.utils.arch import is_cuda
+
+    if snapshot.parallelism_config.use_ub_comm and is_cuda():
+        from rtp_llm.models_py.distributed import user_buffers
+
+        user_buffers.destroy_user_buffers_communicator()
+        # The legacy destroy helper deletes this module variable rather than
+        # assigning None. Restore the sentinel so the next wake can initialize.
+        user_buffers._global_communicator = None
+
+
+def _clear_comm_ops() -> None:
+    try:
+        import librtp_compute_ops
+
+        if hasattr(librtp_compute_ops, "clear_comm_ops"):
+            librtp_compute_ops.clear_comm_ops()
+    except ImportError:
+        pass
+
+
+def _destroy_cpu_tp_broadcaster() -> None:
+    global _cpu_tp_broadcaster_base_path
+    try:
+        import librtp_compute_ops
+
+        if hasattr(librtp_compute_ops, "destroy_cpu_tp_broadcaster"):
+            librtp_compute_ops.destroy_cpu_tp_broadcaster()
+    except ImportError:
+        pass
+    _cpu_tp_broadcaster_base_path = None
+
+
+def _destroy_torch_process_groups() -> None:
+    global _parallelism_config, _initialized
+
+    rocm_rccl = _get_rocm_rccl()
+    if rocm_rccl is not None:
+        rocm_rccl.destroy_capture_comm()
+    if torch.distributed.is_initialized():
+        # Every rank reaches the destroy boundary before rank 0 drops the
+        # rendezvous store. This also prevents a fast rank from rebuilding
+        # against the previous process-group generation.
+        quiesce_group = _group_map.get(Group.SLEEP_QUIESCE)
+        if quiesce_group is not None:
+            torch.distributed.barrier(group=quiesce_group)
+        else:
+            local_rank = (
+                _require_distributed_init_snapshot().parallelism_config.local_rank
+            )
+            torch.distributed.barrier(
+                group=torch.distributed.group.WORLD, device_ids=[local_rank]
+            )
+
+        # Symmetric-memory handles retain NVLS/P2P mappings and a strong PG
+        # reference. They must be gone before ProcessGroupNCCL shutdown.
+        _get_symm_mem().destroy_symm_mem_communicator()
+        group_keys = [str(key) for key in _group_map]
+        torch.distributed.destroy_process_group()
+        if torch.distributed.is_initialized():
+            raise RuntimeError(
+                "torch.distributed remained initialized after destroying all "
+                f"process groups: {group_keys}"
+            )
+        logging.info("Destroyed all torch process groups: %s", group_keys)
+    _group_map.clear()
+    _parallelism_config = None
+    _initialized = False
+    cleanup_operations = [("gc.collect", gc.collect)]
+    if torch.cuda.is_available():
+        # Trim the CUDA IPC cache after every communication object has been
+        # destroyed. Do not call empty_cache() here: in decode CUDA-graph
+        # deployments backed by TMS it walks graph-private MemPools and can issue
+        # a duplicate unmap/free. Level3 checkpointing releases the whole CUDA
+        # context next, so allocator-cache trimming cannot improve final yield.
+        cleanup_operations.extend((("cuda.ipc_collect", torch.cuda.ipc_collect),))
+    for operation, reclaim in cleanup_operations:
+        try:
+            reclaim()
+        except Exception as error:  # noqa: BLE001 - best-effort cache trim
+            logging.warning(
+                "Best-effort %s failed after process-group teardown " "(ignored): %s",
+                operation,
+                error,
+            )
+
+
+def _require_distributed_init_snapshot() -> _DistributedInitSnapshot:
+    if _distributed_init_snapshot is None:
+        raise RuntimeError(
+            "distributed lifecycle has no initialization snapshot; initialize it first"
+        )
+    return _distributed_init_snapshot
+
+
+def _ensure_collective_resources_registered() -> None:
+    global _collective_resources_registered
+    if _collective_resources_registered:
+        return
+
+    # Dependency order. Teardown is automatically the exact reverse order.
+    _collective_lifecycle.register(
+        "torch_process_groups",
+        rebuild=_rebuild_torch_process_groups,
+        teardown=_destroy_torch_process_groups,
+    )
+    _collective_lifecycle.register(
+        "cpu_tp_broadcaster",
+        rebuild=_init_cpu_tp_broadcaster,
+        teardown=_destroy_cpu_tp_broadcaster,
+    )
+    _collective_lifecycle.register(
+        "comm_ops",
+        rebuild=_register_process_groups_to_cpp,
+        teardown=_clear_comm_ops,
+    )
+    _collective_lifecycle.register(
+        "user_buffers",
+        rebuild=lambda: init_user_buffers_environment(
+            _require_distributed_init_snapshot().parallelism_config
+        ),
+        teardown=_destroy_user_buffers,
+    )
+    _collective_resources_registered = True
 
 
 def distributed_environment_initialized() -> bool:
@@ -699,50 +1435,65 @@ def init_user_buffers_environment(parallelism_config: ParallelismConfig):
         )
 
 
-def destroy_distributed_environment():
-    """Destroy distributed environment and clean up process groups.
+def teardown_distributed_environment(*, coordinated: bool = True) -> None:
+    """Suspend all collective resources while retaining rebuild configuration."""
+    if _distributed_init_snapshot is None:
+        if _collective_lifecycle.active_resources():
+            raise RuntimeError(
+                "collective resources are active without an initialization snapshot"
+            )
+        return
 
-    After calling this function, init_distributed_environment() can be called again
-    to reinitialize the distributed environment.
-    """
-    global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path
+    rank = _distributed_init_snapshot.parallelism_config.world_rank
+    logging.info(f"[rank: {rank}] Tearing down distributed environment")
+    _collective_lifecycle.teardown()
+    logging.info(f"[rank: {rank}] Distributed environment torn down")
+    gc.collect()
 
-    rank = torch.distributed.get_rank()
-    logging.info(f"[rank: {rank}] Destroying distributed environment")
 
-    from rtp_llm.models_py.utils.arch import is_cuda
+def rebuild_distributed_environment() -> None:
+    """Rebuild a previously torn-down environment in dependency order."""
+    _enforce_level3_multicast_disabled()
+    snapshot = _require_distributed_init_snapshot()
+    if _collective_lifecycle.active_resources() and _initialized:
+        # A fully active environment is an idempotent no-op. Partial state is
+        # handled by registry.rebuild(), which resumes at the failed resource.
+        expected = {
+            "torch_process_groups",
+            "cpu_tp_broadcaster",
+            "comm_ops",
+            "user_buffers",
+        }
+        if set(_collective_lifecycle.active_resources()) == expected:
+            return
+    logging.info(
+        f"[rank: {snapshot.parallelism_config.world_rank}] Rebuilding distributed environment"
+    )
+    _collective_lifecycle.rebuild()
 
-    if is_cuda():
-        from rtp_llm.models_py.distributed.user_buffers import (
-            destroy_user_buffers_communicator,
+
+def destroy_distributed_environment() -> None:
+    """Terminal, idempotent collective teardown that also drops rebuild state."""
+    global _distributed_init_snapshot, _parallelism_config, _initialized
+    global _cpu_tp_broadcaster_base_path
+    global _lifecycle_store, _process_group_generation
+
+    if _distributed_init_snapshot is not None:
+        teardown_distributed_environment(coordinated=False)
+    elif _collective_lifecycle.active_resources():
+        raise RuntimeError(
+            "cannot destroy active collective resources without an initialization snapshot"
         )
 
-        destroy_user_buffers_communicator()
-
-    try:
-        import librtp_compute_ops
-
-        if hasattr(librtp_compute_ops, "clear_comm_ops"):
-            librtp_compute_ops.clear_comm_ops()
-        if hasattr(librtp_compute_ops, "destroy_cpu_tp_broadcaster"):
-            librtp_compute_ops.destroy_cpu_tp_broadcaster()
-    except ImportError:
-        pass
-
-    # Clean up ROCm RCCL capture comm before destroying process groups,
-    # so that re-init will bootstrap a fresh communicator instead of
-    # reusing the stale one from the destroyed environment.
-    rocm_rccl = _get_rocm_rccl()
-    if rocm_rccl is not None:
-        rocm_rccl.destroy_capture_comm()
-
-    if torch.distributed.is_initialized():
-        torch.distributed.destroy_process_group()
     _group_map.clear()
-    logging.info(f"[rank: {rank}] Distributed environment destroyed")
     _parallelism_config = None
     _cpu_tp_broadcaster_base_path = None
     _initialized = False
+    _distributed_init_snapshot = None
+    _lifecycle_store = None
+    _process_group_generation = 0
+    _reset_multicast_keeper_phase_instance()
+    _collective_lifecycle.reset()
     gc.collect()
 
 
@@ -975,6 +1726,8 @@ __all__ = [
     "init_user_buffers_environment",
     "distributed_environment_initialized",
     "destroy_distributed_environment",
+    "teardown_distributed_environment",
+    "rebuild_distributed_environment",
     "send",
     "recv",
     "broadcast",

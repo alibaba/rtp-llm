@@ -15,6 +15,7 @@ import sys
 import types
 import unittest
 from typing import Any, Dict, Iterator, List, Optional
+from unittest.mock import MagicMock, patch
 
 from rtp_llm.model_loader import weight_memory_saver as wms
 
@@ -177,6 +178,23 @@ class DefaultDisabledTest(WeightMemorySaverTestBase):
         self.assertFalse(wms.is_enabled())
 
 
+class LoaderDatabaseRetentionTest(unittest.TestCase):
+    def test_discard_levels_keep_database_for_wake_reload(self) -> None:
+        for level in (2, 3):
+            with self.subTest(level=level):
+                with patch.object(wms, "is_enabled", return_value=True), patch.object(
+                    wms, "sleep_mode_level", return_value=level
+                ):
+                    self.assertTrue(wms.keep_loader_database_for_wake())
+
+    def test_database_is_not_retained_without_discard_sleep(self) -> None:
+        for enabled, level in ((True, 1), (False, 2), (False, 3)):
+            with self.subTest(enabled=enabled, level=level), patch.object(
+                wms, "is_enabled", return_value=enabled
+            ), patch.object(wms, "sleep_mode_level", return_value=level):
+                self.assertFalse(wms.keep_loader_database_for_wake())
+
+
 class UnavailableTest(WeightMemorySaverTestBase):
     """Env switch on but torch_memory_saver not importable: graceful no-op."""
 
@@ -243,6 +261,48 @@ class FakeTmsForwardingTest(WeightMemorySaverTestBase):
         self.assertEqual(module.configure_subprocess_exit_count, 1)
         self.assertEqual(os.environ.get("LD_PRELOAD"), old_value)
 
+    def test_configure_subprocess_preserves_other_preloads(self) -> None:
+        module = self._get_fake_module()
+        old_value = os.environ.get("LD_PRELOAD")
+        os.environ["LD_PRELOAD"] = "mc_shim_unified.so:other_hook.so"
+        try:
+            with wms.configure_subprocess():
+                self.assertEqual(
+                    os.environ.get("LD_PRELOAD"),
+                    "fake_torch_memory_saver_preload.so:mc_shim_unified.so:other_hook.so",
+                )
+            self.assertEqual(
+                os.environ.get("LD_PRELOAD"),
+                "mc_shim_unified.so:other_hook.so",
+            )
+        finally:
+            if old_value is None:
+                os.environ.pop("LD_PRELOAD", None)
+            else:
+                os.environ["LD_PRELOAD"] = old_value
+        self.assertEqual(module.configure_subprocess_enter_count, 1)
+        self.assertEqual(module.configure_subprocess_exit_count, 1)
+
+    def test_tms_binary_preload_only_restores_combined_value(self) -> None:
+        old_value = os.environ.get("LD_PRELOAD")
+        combined = (
+            "mc_shim_unified.so:"
+            "/tmp/torch_memory_saver_hook_mode_preload_cu13.abi3.so"
+        )
+        os.environ["LD_PRELOAD"] = combined
+        try:
+            with wms._tms_binary_preload_only():
+                self.assertEqual(
+                    os.environ.get("LD_PRELOAD"),
+                    "/tmp/torch_memory_saver_hook_mode_preload_cu13.abi3.so",
+                )
+            self.assertEqual(os.environ.get("LD_PRELOAD"), combined)
+        finally:
+            if old_value is None:
+                os.environ.pop("LD_PRELOAD", None)
+            else:
+                os.environ["LD_PRELOAD"] = old_value
+
     def test_start_configured_process_forwards_preload(self) -> None:
         module = self._get_fake_module()
         old_value = os.environ.get("LD_PRELOAD")
@@ -266,6 +326,24 @@ class FakeTmsForwardingTest(WeightMemorySaverTestBase):
             [{"tag": wms.WEIGHTS_TAG, "enable_cpu_backup": True}],
         )
         self.assertEqual(self.fake.region_depth, 0)
+
+    def test_level_three_region_discards_host_backup(self) -> None:
+        wms.configure_from_runtime(True, sleep_mode_level=3)
+        with wms.weights_region():
+            pass
+        self.assertEqual(
+            self.fake.region_calls,
+            [{"tag": wms.WEIGHTS_TAG, "enable_cpu_backup": False}],
+        )
+
+    def test_level_two_region_still_discards_host_backup(self) -> None:
+        wms.configure_from_runtime(True, sleep_mode_level=2)
+        with wms.weights_region():
+            pass
+        self.assertEqual(
+            self.fake.region_calls,
+            [{"tag": wms.WEIGHTS_TAG, "enable_cpu_backup": False}],
+        )
 
     def test_region_reentrant_enters_once(self) -> None:
         with wms.weights_region():

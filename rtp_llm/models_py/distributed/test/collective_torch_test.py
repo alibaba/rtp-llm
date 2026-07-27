@@ -22,8 +22,10 @@ from rtp_llm.models_py.distributed.collective_torch import (
     destroy_distributed_environment,
     distributed_environment_initialized,
     init_distributed_environment,
+    rebuild_distributed_environment,
     recv,
     send,
+    teardown_distributed_environment,
 )
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
 from rtp_llm.test.utils.port_util import PortManager
@@ -326,6 +328,81 @@ def _test_all_collectives_worker(
         raise
 
 
+def _test_collective_rebuild_worker(
+    rank: int, world_size: int, tp_size: int, dp_size: int, nccl_port: int
+):
+    """Exercise the same process-group teardown/rebuild used by level-3 wake."""
+    from rtp_llm.models_py.distributed import symm_mem
+
+    def check_collectives(expected_comm=None):
+        nccl_value = torch.tensor(float(rank + 1), device="cuda")
+        torch.distributed.all_reduce(nccl_value)
+        torch.cuda.synchronize()
+        assert nccl_value.item() == 3.0
+
+        comm = symm_mem.get_symm_mem_communicator()
+        assert comm is not None and not comm.disabled
+        if expected_comm is not None:
+            assert comm is not expected_comm
+        symm_value = torch.full((4,), rank + 1, dtype=torch.bfloat16, device="cuda")
+        assert comm.should_torch_symm_mem_allreduce(symm_value)
+        symm_result = comm.all_reduce(symm_value)
+        torch.cuda.synchronize()
+        assert torch.all(symm_result == 3).item()
+        return comm
+
+    def check_symm_mem_destroyed(comm):
+        assert comm.disabled
+        assert comm.handle is None
+        assert comm.buffer is None
+        assert comm.group is None
+        assert symm_mem.get_symm_mem_communicator() is None
+        for cache_name in (
+            "_group_name_to_workspace_tensor",
+            "_backend_streams",
+            "_group_name_to_store",
+            "_symm_mem_pools",
+        ):
+            cache = getattr(symm_mem.torch_symm_mem, cache_name, {})
+            assert not cache, f"stale torch symmetric-memory cache: {cache_name}"
+
+    parallelism_config = ParallelismConfig()
+    base_port = nccl_port + 11
+    nccl_comm_config = NcclCommConfig(
+        nccl_ip="127.0.0.1",
+        tp_nccl_port=base_port - 2,
+        dp_tp_nccl_port=base_port - 10,
+        ffn_tp_nccl_port=base_port - 5,
+    )
+    parallelism_config.world_rank = rank
+    parallelism_config.world_size = world_size
+    parallelism_config.local_rank = rank % torch.cuda.device_count()
+    parallelism_config.tp_size = tp_size
+    parallelism_config.dp_size = dp_size
+    parallelism_config.ep_size = world_size
+
+    torch.cuda.set_device(parallelism_config.local_rank)
+    torch.set_default_device(f"cuda:{parallelism_config.local_rank}")
+    try:
+        init_distributed_environment(
+            parallelism_config,
+            nccl_comm_config=nccl_comm_config,
+            nccl_init_port=nccl_port,
+            backend="nccl",
+            timeout=60,
+        )
+        previous_comm = check_collectives()
+
+        for _ in range(2):
+            teardown_distributed_environment()
+            assert not distributed_environment_initialized()
+            check_symm_mem_destroyed(previous_comm)
+            rebuild_distributed_environment()
+            previous_comm = check_collectives(previous_comm)
+    finally:
+        destroy_distributed_environment()
+
+
 class TestCollectiveOperations(unittest.TestCase):
     """Test collective operations with real multiprocessing"""
 
@@ -368,6 +445,11 @@ class TestCollectiveOperations(unittest.TestCase):
             for p in processes:
                 p.join(timeout=120)
                 if p.exitcode != 0:
+                    for process in processes:
+                        if process.is_alive():
+                            process.terminate()
+                    for process in processes:
+                        process.join(timeout=10)
                     raise RuntimeError(
                         f"Process {p.name} exited with code {p.exitcode}"
                     )
@@ -407,6 +489,16 @@ class TestCollectiveOperations(unittest.TestCase):
             tp_size=1,
             dp_size=4,
             test_name="all_collectives_tp1_dp4",
+        )
+
+    def test_collective_rebuild_tp2_ep2(self):
+        """Level-3 CP2 topology can destroy and rebuild its process groups."""
+        self._run_test(
+            _test_collective_rebuild_worker,
+            world_size=2,
+            tp_size=2,
+            dp_size=1,
+            test_name="collective_rebuild_tp2_ep2",
         )
 
 

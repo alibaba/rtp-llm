@@ -45,11 +45,15 @@ _MEGA_STRATEGY_REGISTRY: "weakref.WeakSet" = weakref.WeakSet()
 # rank. The sticky CUDA error then surfaces at the async output dispatch and
 # escalates to ``std::terminate`` (SIGABRT).
 #
-# So when graphs are captured, both buffers must stay resident at a stable VA
-# across sleep/wake. Without graphs (e.g. the prefill role) the buffers are
-# recreated eagerly on every forward, so freeing them at sleep is safe -- and for
-# the output buffer worthwhile, since a large-context prefill sizes it into GBs.
+# L1/L2 therefore keep graph-baked buffers at stable VAs. L3 first destroys every
+# graph owner, releases these buffers, eagerly rebuilds them after PG restore, and
+# then recaptures the graphs. No-graph roles use the same eager L3 rebuild; lower
+# sleep levels retain the forward fallback.
 _MEGA_BUFFERS_GRAPH_BAKED: bool = False
+_MEGA_CUDA_GRAPH_GENERATION: int = 0
+_MEGA_CUDA_GRAPH_INVALIDATED: bool = False
+_MEGA_CUDA_GRAPH_OWNERS: set[int] = set()
+_MEGA_CUDA_GRAPH_INVALIDATED_OWNERS: set[int] = set()
 
 
 def set_mega_buffers_graph_baked(enabled: bool) -> None:
@@ -60,11 +64,25 @@ def set_mega_buffers_graph_baked(enabled: bool) -> None:
     pointers stay valid across the wake boundary.
     """
     global _MEGA_BUFFERS_GRAPH_BAKED
-    _MEGA_BUFFERS_GRAPH_BAKED = bool(enabled)
+    _MEGA_BUFFERS_GRAPH_BAKED = bool(enabled) or bool(_MEGA_CUDA_GRAPH_OWNERS)
+
+
+def register_mega_cuda_graph_owner(owner: int) -> None:
+    global _MEGA_BUFFERS_GRAPH_BAKED
+    _MEGA_CUDA_GRAPH_OWNERS.add(int(owner))
+    _MEGA_BUFFERS_GRAPH_BAKED = True
 
 
 def mega_buffers_graph_baked() -> bool:
     return _MEGA_BUFFERS_GRAPH_BAKED
+
+
+def mega_buffer_generation() -> int:
+    return _MEGA_CUDA_GRAPH_GENERATION
+
+
+def mega_cuda_graph_resources_invalidated() -> bool:
+    return _MEGA_CUDA_GRAPH_INVALIDATED
 
 
 def mega_output_buffer_gib() -> float:
@@ -80,7 +98,8 @@ def mega_output_buffer_gib() -> float:
 
 def _register_mega_strategy(strategy) -> None:
     """Track a live Mega MoE strategy so its per-layer buffer refs can be dropped
-    at sleep. Best-effort; never raises.
+    at sleep. Registration is fail-closed when discard-mode wake depends on it;
+    other configurations retain best-effort behavior.
 
     Also stamp the owning model's build scope (``id(base_model)`` while its
     py-model is under construction) so the level-2 wake reload can attribute this
@@ -90,16 +109,19 @@ def _register_mega_strategy(strategy) -> None:
     its own layers. ``None`` when built outside a scope (e.g. non-sleep runs) —
     harmless, as the reload filter matches ``None`` scope managers to ``None``
     stamps."""
-    try:
-        from rtp_llm.model_loader.weight_memory_saver import current_model_scope
+    from rtp_llm.model_loader.weight_memory_saver import (
+        current_model_scope,
+        keep_loader_database_for_wake,
+    )
 
-        strategy._sleep_model_scope = current_model_scope()
-    except Exception:
-        pass
+    strict_reload = keep_loader_database_for_wake()
     try:
+        strategy._sleep_model_scope = current_model_scope()
         _MEGA_STRATEGY_REGISTRY.add(strategy)
     except Exception:
-        pass
+        if strict_reload:
+            raise
+        return
 
 
 def iter_mega_strategies() -> list:
@@ -112,15 +134,32 @@ def iter_mega_strategies() -> list:
     return list(_MEGA_STRATEGY_REGISTRY)
 
 
-def release_mega_output_buffers() -> tuple[int, float]:
-    """Drop per-layer refs to the shared bf16 output staging buffer.
+def rebuild_mega_symm_buffers() -> int:
+    """Eagerly rebuild every live Mega buffer after Level3 PG restore.
 
-    Returns ``(cache_entries, GiB)`` for sleep-reclaim diagnostics. A no-op when
-    CUDA graphs are captured (the buffer's pointer is baked into the graph and
-    must stay resident across sleep/wake -- see ``_MEGA_BUFFERS_GRAPH_BAKED``).
+    The creation path is collective, so use the saved buffer arguments to keep
+    distinct buffer configurations in the same order on every rank. Strategies
+    sharing a configuration reuse the module cache after the first rendezvous.
+    Returns the number of live strategies rebuilt for lifecycle diagnostics.
     """
-    if _MEGA_BUFFERS_GRAPH_BAKED:
-        return 0, 0.0
+    strategies = list(_MEGA_STRATEGY_REGISTRY)
+    strategies.sort(
+        key=lambda strategy: tuple(
+            (name, repr(value))
+            for name, value in sorted(strategy._mega_buf_kwargs.items())
+        )
+    )
+    for strategy in strategies:
+        strategy._ensure_mega_buffers()
+    if strategies:
+        logging.info(
+            "[DSV4 MegaMoE] eagerly rebuilt buffers for %d live strategies",
+            len(strategies),
+        )
+    return len(strategies)
+
+
+def _release_mega_output_buffers_unchecked() -> tuple[int, float]:
     freed_bytes = 0
     for buf in _MEGA_OUTPUT_CACHE.values():
         try:
@@ -137,50 +176,139 @@ def release_mega_output_buffers() -> tuple[int, float]:
     return entries, freed_bytes / (1024**3)
 
 
-def release_mega_symm_buffers() -> float:
-    """Sleep-time reclaim of the Mega MoE symmetric-memory buffer (+ bf16 output
-    staging buffer).
+def release_mega_output_buffers() -> tuple[int, float]:
+    """Drop per-layer refs to the shared bf16 output staging buffer.
 
-    Drops every per-layer strong reference (``self._mega_buf`` / ``self._mega_y``
-    across all registered strategies), destroys the cached buffers, clears the
-    module caches, and gc's so the symmetric-memory allocation is actually
-    released to the driver. Returns the GiB of symm buffer dropped (best-effort
-    estimate).
-
-    Non-collective (pure Python ref-drops + ``SymmBuffer.destroy()``), so it is
-    safe on the quiesced sleep path. The buffers are lazily re-created on the
-    first forward after wake via ``MegaStrategy._ensure_mega_buffers`` -- that
-    path runs ``symm_mem.rendezvous`` (a collective), which is safe because all
-    ranks execute the same MoE layer's forward in lockstep, exactly as at init.
-
-    A no-op when CUDA graphs are captured: the symm buffer's pointer is baked into
-    the graph, and a graph replay after wake would deref the destroyed buffer
-    (Python's re-create never runs during replay). See ``_MEGA_BUFFERS_GRAPH_BAKED``.
+    Returns ``(cache_entries, GiB)`` for sleep-reclaim diagnostics. A no-op when
+    CUDA graphs are captured; L3 uses the explicit invalidation path below only
+    after every graph owner has stopped replaying the baked addresses.
     """
     if _MEGA_BUFFERS_GRAPH_BAKED:
-        return 0.0
+        return 0, 0.0
+    return _release_mega_output_buffers_unchecked()
+
+
+def _release_mega_symm_buffers_unchecked() -> float:
     freed_bytes = 0.0
-    for buf in _MEGA_BUF_CACHE.values():
+    cached_buffers = list(_MEGA_BUF_CACHE.items())
+    strategies = list(_MEGA_STRATEGY_REGISTRY)
+    buffers_to_destroy: dict[int, tuple[object, list[str]]] = {}
+
+    def add_buffer(buf, owner: str) -> None:
+        if buf is None:
+            return
+        entry = buffers_to_destroy.get(id(buf))
+        if entry is None:
+            buffers_to_destroy[id(buf)] = (buf, [owner])
+        else:
+            entry[1].append(owner)
+
+    for key, buf in cached_buffers:
+        add_buffer(buf, f"cache[{key!r}]")
         try:
             freed_bytes += buf.buffer.numel() * buf.buffer.element_size()
         except Exception:
             pass
-    # 1) Drop per-layer strong refs first, else the buffers stay alive below.
-    for strat in list(_MEGA_STRATEGY_REGISTRY):
+
+    cleanup_errors: list[tuple[str, Exception]] = []
+    for index, strat in enumerate(strategies):
+        owner = f"strategy[{index}]"
         try:
-            strat._mega_buf = None
-        except Exception:
-            pass
-    # 2) Destroy the cached buffers (nulls each SymmBuffer's handle/tensor refs).
-    for buf in list(_MEGA_BUF_CACHE.values()):
+            add_buffer(getattr(strat, "_mega_buf", None), owner)
+        except Exception as error:
+            cleanup_errors.append((f"{owner} read _mega_buf", error))
+        for attribute in ("_mega_buf", "_mega_y", "_mega_group"):
+            try:
+                setattr(strat, attribute, None)
+            except Exception as error:
+                cleanup_errors.append((f"{owner} clear {attribute}", error))
+
+    # Clear all module and owner references even when a native destroy fails.
+    _MEGA_BUF_CACHE.clear()
+    try:
+        _release_mega_output_buffers_unchecked()
+    except Exception as error:
+        cleanup_errors.append(("clear Mega output buffers", error))
+
+    for buf, owners in buffers_to_destroy.values():
         try:
             buf.destroy()
-        except Exception:
-            pass
-    _MEGA_BUF_CACHE.clear()
-    release_mega_output_buffers()
-    gc.collect()
+        except Exception as error:
+            cleanup_errors.append(
+                (f"destroy Mega symmetric buffer owned by {', '.join(owners)}", error)
+            )
+
+    try:
+        gc.collect()
+    except Exception as error:
+        cleanup_errors.append(("collect released Mega buffers", error))
+
+    if cleanup_errors:
+        details = "; ".join(
+            f"{operation}: {type(error).__name__}: {error}"
+            for operation, error in cleanup_errors
+        )
+        raise RuntimeError(
+            f"failed to release Mega symmetric buffers "
+            f"({len(cleanup_errors)} error(s)): {details}"
+        ) from cleanup_errors[0][1]
+
     return freed_bytes / (1024**3)
+
+
+def release_mega_symm_buffers() -> float:
+    """Sleep-time reclaim of the Mega symmetric and output staging buffers.
+
+    This is the existing L1/L2 path. Graph-baked buffers remain resident at
+    stable VAs; L3 bypasses this gate only after all graph owners invalidate.
+    """
+    global _MEGA_CUDA_GRAPH_GENERATION
+    if _MEGA_BUFFERS_GRAPH_BAKED:
+        return 0.0
+    # ProcessGroupNCCL is destroyed immediately after this call in L3. Force
+    # every strategy to bind the rebuilt WORLD group before the next rendezvous.
+    _MEGA_CUDA_GRAPH_GENERATION += 1
+    return _release_mega_symm_buffers_unchecked()
+
+
+def invalidate_mega_cuda_graph_resources(owner: int | None = None) -> int:
+    """L3-only invalidation after captured graphs have been destroyed.
+
+    This deliberately bypasses the L1/L2 graph-baked gate. The generation bump
+    makes every live strategy reject its previous references before the
+    coordinated L3 wake eagerly materializes the new generation.
+    """
+    global _MEGA_CUDA_GRAPH_GENERATION, _MEGA_CUDA_GRAPH_INVALIDATED
+    if not _MEGA_BUFFERS_GRAPH_BAKED:
+        return _MEGA_CUDA_GRAPH_GENERATION
+
+    if _MEGA_CUDA_GRAPH_OWNERS:
+        if owner is None:
+            _MEGA_CUDA_GRAPH_INVALIDATED_OWNERS.update(_MEGA_CUDA_GRAPH_OWNERS)
+        elif int(owner) in _MEGA_CUDA_GRAPH_OWNERS:
+            _MEGA_CUDA_GRAPH_INVALIDATED_OWNERS.add(int(owner))
+        else:
+            return _MEGA_CUDA_GRAPH_GENERATION
+        if not _MEGA_CUDA_GRAPH_OWNERS.issubset(_MEGA_CUDA_GRAPH_INVALIDATED_OWNERS):
+            return _MEGA_CUDA_GRAPH_GENERATION
+
+    if _MEGA_CUDA_GRAPH_INVALIDATED:
+        return _MEGA_CUDA_GRAPH_GENERATION
+    _MEGA_CUDA_GRAPH_INVALIDATED = True
+    _MEGA_CUDA_GRAPH_GENERATION += 1
+    _release_mega_symm_buffers_unchecked()
+    return _MEGA_CUDA_GRAPH_GENERATION
+
+
+def mark_mega_cuda_graph_resources_recaptured(owner: int | None = None) -> None:
+    """Mark the current Mega generation reusable after successful recapture."""
+    global _MEGA_CUDA_GRAPH_INVALIDATED
+    if owner is None:
+        _MEGA_CUDA_GRAPH_INVALIDATED_OWNERS.clear()
+    else:
+        _MEGA_CUDA_GRAPH_INVALIDATED_OWNERS.discard(int(owner))
+    if _MEGA_BUFFERS_GRAPH_BAKED:
+        _MEGA_CUDA_GRAPH_INVALIDATED = bool(_MEGA_CUDA_GRAPH_INVALIDATED_OWNERS)
 
 
 def estimate_mega_moe_symm_buffer_bytes(

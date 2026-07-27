@@ -3,6 +3,7 @@ import sys
 import types
 import unittest
 from typing import Iterator, List, Tuple
+from unittest import mock
 
 from rtp_llm.utils.database import CkptDatabase
 
@@ -49,6 +50,7 @@ class FastsafetensorsRegionTest(unittest.TestCase):
 
     def test_allocation_context_starts_after_parallel_loader_init(self) -> None:
         events: List[Tuple[str, bool]] = []
+        loader_kwargs = {}
         in_region = False
 
         def active() -> bool:
@@ -64,6 +66,7 @@ class FastsafetensorsRegionTest(unittest.TestCase):
 
         class FakeParallelLoader:
             def __init__(self, **kwargs) -> None:
+                loader_kwargs.update(kwargs)
                 events.append(("init", active()))
                 self.loader = FakeBackendLoader()
 
@@ -117,12 +120,16 @@ class FastsafetensorsRegionTest(unittest.TestCase):
         database = object.__new__(CkptDatabase)
         database.pretrain_file_list = [_FakeCkptFile("model.safetensors")]
 
-        for _key, _tensor in database.fastsafetensors_weights_iterator(
-            "cuda",
-            use_tqdm_on_load=False,
-            allocation_context=allocation_context,
-        ):
-            events.append(("consumer", active()))
+        with mock.patch(
+            "rtp_llm.utils.database.torch.distributed.is_initialized",
+            return_value=False,
+        ) as is_initialized:
+            for _key, _tensor in database.fastsafetensors_weights_iterator(
+                "cuda",
+                use_tqdm_on_load=False,
+                allocation_context=allocation_context,
+            ):
+                events.append(("consumer", active()))
 
         self.assertEqual(
             events,
@@ -136,6 +143,9 @@ class FastsafetensorsRegionTest(unittest.TestCase):
                 ("close", False),
             ],
         )
+        is_initialized.assert_called_once_with()
+        self.assertIsInstance(loader_kwargs["pg"], FakeSingleGroup)
+        self.assertEqual(loader_kwargs["device"], "cuda:0")
 
 
 if __name__ == "__main__":

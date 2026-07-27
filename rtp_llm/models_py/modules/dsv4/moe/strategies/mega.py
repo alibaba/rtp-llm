@@ -32,6 +32,8 @@ from ..mega_buf import (
     _get_or_create_mega_output,
     _mega_moe_enabled,
     _register_mega_strategy,
+    mega_buffer_generation,
+    mega_buffers_graph_baked,
 )
 from ..mega_jit_warmup import (
     clamp_token_counts,
@@ -51,6 +53,18 @@ _PRE_KERNEL_BARRIER_VERBOSE_ENV = "DSV4_MEGA_MOE_PRE_KERNEL_BARRIER_VERBOSE"
 _PRE_KERNEL_BARRIER_LOGGED_KEYS: set[tuple[int, int]] = set()
 _GATE_PACK_KERNELS = None
 _GATE_PACK_KERNELS_UNAVAILABLE = False
+
+
+def _best_effort_empty_cache(stage: str) -> None:
+    """Release transform scratch without making TMS MemPool errors fatal."""
+    try:
+        torch.cuda.empty_cache()
+    except Exception as error:  # noqa: BLE001 - optional allocator cache trim
+        logging.warning(
+            "Mega MoE %s empty_cache failed (ignored): %s",
+            stage,
+            error,
+        )
 
 
 def _get_gate_pack_kernels():
@@ -247,10 +261,8 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         self._mega_group = group
         # Symm buffer is single-layer staging — share one across all MoE layers
         # via the module-level cache (see _get_or_create_mega_buf). Store the
-        # creation kwargs so the buffer (and the small bf16 output staging buffer)
-        # can be dropped at engine sleep and lazily re-created on the first
-        # forward after wake -- see _ensure_mega_buffers / release_mega_symm_buffers
-        # (sleep release is opt-in via RTP_LLM_SLEEP_FREE_MEGA_SYMM=1).
+        # creation kwargs for coordinated L3 wake rebuild and the lower-level
+        # lazy fallback (see _ensure_mega_buffers / release_mega_symm_buffers).
         self._mega_buf_kwargs = dict(
             num_experts=cfg.n_routed_experts,
             num_max_tokens_per_rank=max(cfg.max_tokens_per_rank, 1),
@@ -267,6 +279,19 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         self._mega_out_device = device
         self._mega_buf = None
         self._mega_y = None
+        self._mega_buffer_generation = -1
+        from rtp_llm.model_loader.weight_memory_saver import (
+            is_enabled as sleep_mode_enabled,
+        )
+        from rtp_llm.model_loader.weight_memory_saver import sleep_mode_level
+
+        # Runtime sleep configuration is immutable after model construction.
+        # Avoid a generation/global-cache check on every MoE layer when buffers
+        # can never be released: sleep is off, or L1/L2 CUDA graphs require their
+        # baked addresses to remain resident. L3 invalidates graphs and rebuilds.
+        self._mega_buffers_may_rebuild = sleep_mode_enabled() and (
+            sleep_mode_level() == 3 or not mega_buffers_graph_baked()
+        )
         _register_mega_strategy(self)
         # Create eagerly now (init-time collective rendezvous, in lockstep with
         # every rank's warmup) so JIT warmup below has a live buffer.
@@ -332,7 +357,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         del st_w1_w, st_w1_s, st_w3_w, st_w3_s
         s13_int = prepare_fp4_weight_scale_for_deepgemm(s13_raw, 2 * inter, D, E)
         del s13_raw
-        torch.cuda.empty_cache()
+        _best_effort_empty_cache("L1 scale transform")
 
         # --- L2 (down): only after L1's fp32 buffer has been freed.
         #
@@ -376,7 +401,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             del st_w2_w, st_w2_s
             s2_int = prepare_fp4_weight_scale_for_deepgemm(s2_raw, D, inter, E)
             del s2_raw
-            torch.cuda.empty_cache()
+            _best_effort_empty_cache("L2 scale transform")
 
             # Mega MoE transform: L1 gate/up interleave (gran=8 along N) +
             # both SFs UTCCP-transposed. Drop inputs immediately after.
@@ -411,7 +436,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             self._mega_l2_sf.copy_(l2_sf)
             del l1_w, l1_sf, l2_w, l2_sf
         del w13, s13_int, w2, s2_int
-        torch.cuda.empty_cache()
+        _best_effort_empty_cache("routed weight transform")
 
     def reload_routed_weights(self, layer_weights: Dict) -> None:
         """Level-2 wake: re-derive the Mega kernel weights from freshly reloaded
@@ -424,9 +449,9 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         existing buffers (``isolate_scratch=True``) -- deliberately NOT freeing +
         reallocating them, which would fragment the private weights MemPool and
         leak ~35 GiB of unreturnable reserved segments across the MoE layers,
-        OOMing the KV-cache resume. The symm-mem dispatch buffer is untouched: it
-        is released at sleep (``release_mega_symm_buffers``) and lazily re-created
-        on the first post-wake forward (``_ensure_mega_buffers``).
+        OOMing the KV-cache resume. The symm-mem dispatch buffer is untouched;
+        when released by a non-L3 sleep it is lazily re-created by
+        ``_ensure_mega_buffers``.
 
         ``layer_weights`` is a plain dict carrying exactly this layer's six
         ``W.v4_routed_*`` tensors, assembled by ``reload_weights_from_loader``
@@ -438,11 +463,21 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
 
     def _ensure_mega_buffers(self) -> None:
         """Create the symm-mem dispatch buffer + bf16 output staging buffer if
-        absent. Called at construction and at the top of every forward path, so a
-        sleep-time release (``release_mega_symm_buffers``) is transparently undone
-        on the first forward after wake. ``_get_or_create_mega_buf`` runs a
-        symmetric-memory rendezvous (a collective) -- safe here because all ranks
-        execute the same MoE layer's forward in lockstep, exactly as at init."""
+        absent. Level3 invokes this eagerly inside its coordinated collective
+        rebuild; construction and lower-level forward fallback also call it in
+        rank lockstep because ``_get_or_create_mega_buf`` is collective."""
+        generation = mega_buffer_generation()
+        if self._mega_buffer_generation != generation:
+            import torch.distributed as dist
+
+            if not dist.is_initialized():
+                raise RuntimeError(
+                    "cannot rebuild Mega MoE buffers before distributed "
+                    "environment initialization"
+                )
+            self._mega_group = dist.group.WORLD
+            self._mega_buf = None
+            self._mega_y = None
         if self._mega_buf is None:
             self._mega_buf = _get_or_create_mega_buf(
                 group=self._mega_group,
@@ -455,6 +490,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
                 torch.bfloat16,
                 self._mega_out_device,
             )
+        self._mega_buffer_generation = generation
 
     def _resolve_jit_warmup_token_counts(self, num_sms: int) -> list[int]:
         cfg = self.cfg
@@ -658,9 +694,9 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         """
         import deep_gemm
 
-        # Lazily re-create the symm buffer if it was released at sleep (all ranks
-        # hit this in lockstep on the first post-wake forward -> collective safe).
-        self._ensure_mega_buffers()
+        # Lower-level fallback; Level3 already rebuilt during coordinated wake.
+        if self._mega_buffers_may_rebuild:
+            self._ensure_mega_buffers()
         T = x.size(0)
         buf = self._mega_buf
         if T > buf.num_max_tokens_per_rank:
@@ -737,9 +773,9 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
             _,
         ) = kernels
 
-        # Lazily re-create the symm buffer if it was released at sleep (all ranks
-        # hit this in lockstep on the first post-wake forward -> collective safe).
-        self._ensure_mega_buffers()
+        # Lower-level fallback; Level3 already rebuilt during coordinated wake.
+        if self._mega_buffers_may_rebuild:
+            self._ensure_mega_buffers()
         T = x.size(0)
         buf = self._mega_buf
         if T > buf.num_max_tokens_per_rank:

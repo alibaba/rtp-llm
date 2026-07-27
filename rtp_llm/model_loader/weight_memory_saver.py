@@ -1,13 +1,10 @@
-"""WeightMemorySaver: weight GPU memory pause/resume with CPU backup.
+"""WeightMemorySaver: weight GPU memory pause/resume.
 
 Wraps ``torch_memory_saver`` so that every CUDA allocation that holds model
-weights is registered under the ``tag="weights"`` region with
-``enable_cpu_backup=True``. On engine sleep, :func:`pause_weights` backs the
-weight pages up to host (pinned) memory and releases the physical GPU pages
-while keeping the virtual addresses stable (data_ptr must not change because
-CUDA graphs and the C++ ``weights_`` aliases bake pointers in). On wake_up,
-:func:`resume_weights` remaps physical pages at the same VA and copies the
-content back so weight values are preserved.
+weights is registered under the ``tag="weights"`` region. Level 1 enables a
+host backup; levels 2 and 3 discard weight contents and reload them from the
+original checkpoint on wake. The virtual addresses remain stable because CUDA
+graphs and C++ weight aliases bake pointers in.
 
 Activation
 ----------
@@ -64,8 +61,9 @@ the entering thread (including synchronous C++ calls issued from it).
 
 import logging
 import os
+import re
 import threading
-from contextlib import contextmanager
+from contextlib import ExitStack, contextmanager
 from typing import Any, Iterator, Optional
 
 ENV_SWITCH: str = "ENABLE_SLEEP_MODE"
@@ -176,7 +174,7 @@ def configure_from_runtime(
     sleep controller is exercised, so this explicit override keeps
     ``--enable-sleep-mode`` / ``--sleep-mode-level`` and the corresponding env
     vars equivalent. ``sleep_mode_level`` selects whether the weights region is
-    opened with host cpu_backup (level 1) or as discard-only (level 2); it is
+    opened with host cpu_backup (level 1) or as discard-only (levels 2 and 3); it is
     frozen at allocation time by torch_memory_saver, so it cannot change per
     /sleep request.
     """
@@ -202,7 +200,7 @@ def is_enabled() -> bool:
 
 
 def sleep_mode_level() -> int:
-    """Startup-selected sleep level for this process (1 = host backup, 2 = discard).
+    """Startup-selected level (1 = host backup, 2/3 = discard and reload).
 
     Reads the explicit override first (set via :func:`configure_from_runtime`),
     then the ``SLEEP_MODE_LEVEL`` env var (mirrored from the parsed runtime
@@ -214,6 +212,11 @@ def sleep_mode_level() -> int:
         return int(os.environ.get(ENV_LEVEL, "1"))
     except (TypeError, ValueError):
         return 1
+
+
+def keep_loader_database_for_wake() -> bool:
+    """Whether discarded weights will need the loader database after startup."""
+    return is_enabled() and sleep_mode_level() in (2, 3)
 
 
 def _get_tms() -> Optional[Any]:
@@ -279,8 +282,68 @@ def configure_subprocess() -> Iterator[None]:
         yield
         return
 
-    with tms_configure_subprocess():
+    original_preload = os.environ.get("LD_PRELOAD")
+    try:
+        with tms_configure_subprocess():
+            # torch_memory_saver replaces LD_PRELOAD instead of extending it.
+            # Preserve other process-wide hooks, notably the Level3 multicast
+            # keeper shim, across every multiprocessing "spawn" boundary.
+            tms_preload = os.environ.get("LD_PRELOAD", "")
+            # Keep TMS first. Its cudaMalloc interposer resolves the real
+            # allocator with dlsym(RTLD_NEXT); putting a dlsym-interposing shim
+            # before it can resolve cudaMalloc back to TMS and recurse.
+            os.environ["LD_PRELOAD"] = _merge_preloads(
+                tms_preload, original_preload or ""
+            )
+            try:
+                yield
+            finally:
+                # Its context manager validates/restores the value it installed.
+                os.environ["LD_PRELOAD"] = tms_preload
+    finally:
+        if original_preload is None:
+            os.environ.pop("LD_PRELOAD", None)
+        else:
+            os.environ["LD_PRELOAD"] = original_preload
+
+
+def _preload_entries(value: str) -> list[str]:
+    return [entry for entry in re.split(r"[:\s]+", value) if entry]
+
+
+def _merge_preloads(*values: str) -> str:
+    entries: list[str] = []
+    for value in values:
+        for entry in _preload_entries(value):
+            if entry not in entries:
+                entries.append(entry)
+    return ":".join(entries)
+
+
+@contextmanager
+def _tms_binary_preload_only() -> Iterator[None]:
+    """Expose one TMS .so while its lazy Python wrapper resolves the CDLL.
+
+    HookUtilModePreload currently treats the complete LD_PRELOAD string as one
+    ctypes.CDLL path. A rank needs multiple preloads for Level3, so narrow the
+    value only while entering the lazy TMS context; all libraries have already
+    been loaded by ld.so and the full value is immediately restored.
+    """
+    original = os.environ.get("LD_PRELOAD")
+    entries = _preload_entries(original or "")
+    tms_entries = [entry for entry in entries if "torch_memory_saver" in entry]
+    if len(entries) <= 1 or len(tms_entries) != 1:
         yield
+        return
+
+    os.environ["LD_PRELOAD"] = tms_entries[0]
+    try:
+        yield
+    finally:
+        if original is None:
+            os.environ.pop("LD_PRELOAD", None)
+        else:
+            os.environ["LD_PRELOAD"] = original
 
 
 def start_configured_process(process: Any) -> None:
@@ -548,12 +611,9 @@ def weights_region() -> Iterator[None]:
     except Exception:  # pragma: no cover - defensive, torch is a hard dep
         pass
 
-    # Level 1 backs weights up to pinned host on pause (fast wake, holds host
-    # RAM). Level 2 opens the region without host backup: pause frees GPU without
-    # a host copy and resume remaps blank pages at the same VA; the sleep hooks
-    # dump/reload the weights via a local-disk raw backup. tms freezes this
-    # choice at allocation time, hence it is a startup-level knob.
-    enable_cpu_backup = sleep_mode_level() != 2
+    # Level 1 backs weights up to pinned host on pause. Levels 2 and 3 remap
+    # blank pages on wake and reload weights from the original checkpoint.
+    enable_cpu_backup = sleep_mode_level() == 1
     _region_depth.value = 1
     try:
         # Keep weights non-expandable. During init this is already the case
@@ -566,7 +626,17 @@ def weights_region() -> Iterator[None]:
             # early in a future regression, would leave expandable live and let
             # these weight pages corrupt across the first sleep/wake).
             assert_pausable_alloc_safe("weights_region")
-            with tms.region(tag=WEIGHTS_TAG, enable_cpu_backup=enable_cpu_backup):
+            with ExitStack() as stack:
+                # TMS initializes lazily on the first __enter__. Keep the full
+                # preload set in the process environment outside that call so
+                # any later spawned worker inherits all Level3 hooks.
+                with _tms_binary_preload_only():
+                    stack.enter_context(
+                        tms.region(
+                            tag=WEIGHTS_TAG,
+                            enable_cpu_backup=enable_cpu_backup,
+                        )
+                    )
                 yield
     finally:
         _region_depth.value = 0
@@ -638,7 +708,8 @@ def pause_weights() -> bool:
         if _paused:
             logging.info("WeightMemorySaver.pause_weights: already paused, skip")
             return True
-        tms.pause(WEIGHTS_TAG)
+        with _tms_binary_preload_only():
+            tms.pause(WEIGHTS_TAG)
         _paused = True
         logging.info("WeightMemorySaver: weights paused (cpu backup, VA preserved)")
         return True
@@ -664,7 +735,8 @@ def resume_weights() -> bool:
         if not _paused:
             logging.info("WeightMemorySaver.resume_weights: not paused, skip")
             return True
-        tms.resume(WEIGHTS_TAG)
+        with _tms_binary_preload_only():
+            tms.resume(WEIGHTS_TAG)
         _paused = False
         logging.info("WeightMemorySaver: weights resumed (content restored)")
         return True
@@ -672,7 +744,7 @@ def resume_weights() -> bool:
 
 def _reset_for_testing() -> None:
     """Reset module-level caches/state. Test-only helper."""
-    global _tms, _import_attempted, _paused, _enabled_override
+    global _tms, _import_attempted, _paused, _enabled_override, _level_override
     global _expandable_prepared, _expandable_requested, _expandable_active
     global _expandable_base_conf, _expandable_live
     with _lock:
@@ -680,6 +752,7 @@ def _reset_for_testing() -> None:
         _import_attempted = False
         _paused = False
         _enabled_override = None
+        _level_override = None
         _expandable_prepared = False
         _expandable_requested = False
         _expandable_active = False

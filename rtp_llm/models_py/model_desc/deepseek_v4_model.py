@@ -311,15 +311,20 @@ class DeepSeekV4Model(GptModelBase):
 
         # When the decode forward is captured into a CUDA graph, the Mega MoE
         # symm + output staging buffers get their device pointers baked into the
-        # graph, so they must stay resident across a sleep/wake cycle (a post-wake
-        # replay writes into them and Python's lazy re-create never runs during
-        # replay). Record it once so the sleep reclaim keeps them instead of
-        # freeing + unmapping their VA. See mega_buf._MEGA_BUFFERS_GRAPH_BAKED.
+        # graph. Level 1/2 must keep those addresses resident because replay does
+        # not execute Python's lazy re-create path. Level 3 first invalidates the
+        # graph, then releases these buffers and recaptures with rebuilt addresses.
+        # Record graph ownership so mega_buf can enforce both lifecycle paths.
         from rtp_llm.models_py.modules.dsv4.moe import mega_buf
 
-        mega_buf.set_mega_buffers_graph_baked(
-            bool(getattr(py_hw_kernel_config, "enable_cuda_graph", False))
+        cuda_graph_enabled = bool(
+            getattr(py_hw_kernel_config, "enable_cuda_graph", False)
         )
+        mega_buf.set_mega_buffers_graph_baked(cuda_graph_enabled)
+        self._cuda_graph_resource_owner: Optional[int] = None
+        if cuda_graph_enabled:
+            self._cuda_graph_resource_owner = id(self)
+            mega_buf.register_mega_cuda_graph_owner(self._cuda_graph_resource_owner)
 
         # Build V4Transformer with matching args.
         args = _args_from_model_config(model_config, max_generate_batch_size)
@@ -493,6 +498,19 @@ class DeepSeekV4Model(GptModelBase):
                 traceback.format_exc(),
             )
             raise
+
+    def invalidate_cuda_graph_resources(self) -> None:
+        """Release DSV4 buffers only after the owning graph is invalidated."""
+        from rtp_llm.models_py.modules.dsv4.moe import mega_buf
+
+        mega_buf.invalidate_mega_cuda_graph_resources(self._cuda_graph_resource_owner)
+
+    def mark_cuda_graph_resources_recaptured(self) -> None:
+        from rtp_llm.models_py.modules.dsv4.moe import mega_buf
+
+        mega_buf.mark_mega_cuda_graph_resources_recaptured(
+            self._cuda_graph_resource_owner
+        )
 
     def _resolve_shared_token_capacity(self) -> int:
         if self._is_decode_role:

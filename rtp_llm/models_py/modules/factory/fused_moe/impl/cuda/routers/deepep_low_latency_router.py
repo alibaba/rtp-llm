@@ -82,7 +82,7 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         assert (
             wrapper.mode == DeepEPMode.LOW_LATENCY
         ), "DeepEP mode should be LOW_LATENCY"
-        self._buffer = wrapper.buffer
+        self._deepep_buffer_wrapper = wrapper
         self._num_topk = wrapper.num_topk
         self._num_max_dispatch_tokens_per_rank = wrapper.ll_num_max_token_per_rank
         self._use_fp8_dispatch = use_fp8_dispatch
@@ -92,6 +92,11 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
         self._opt_level = int(os.environ.get("ACCL_LOW_LATENCY_OPTIMIZE", 1))
         self._handle: Optional[Tuple[Any, ...]] = None
         self._use_accl_ep = wrapper.use_accl_ep
+
+    @property
+    def _buffer(self):
+        """Resolve the current buffer so L3 rebuild cannot leave a stale reference."""
+        return self._deepep_buffer_wrapper.buffer
 
     @property
     def handle(self) -> Optional[Tuple[Any, ...]]:

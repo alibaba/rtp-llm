@@ -6,6 +6,7 @@ This module provides common model building and KV cache initialization functiona
 import logging
 import math
 import os
+import threading
 from dataclasses import dataclass
 from types import SimpleNamespace
 from typing import Any, Optional
@@ -60,6 +61,10 @@ class SyntheticCudaGraphModel(nn.Module):
         self.device = device
         self.kv_cache = None
         self._attention = _NoopCudaGraphAttention()
+        self.fail_next_forward = False
+        self.block_next_forward = False
+        self.capture_forward_started = threading.Event()
+        self.capture_forward_release = threading.Event()
 
     def prepare_fmha_impl(
         self, inputs: PyModelInputs, is_cuda_graph: bool = False
@@ -71,6 +76,14 @@ class SyntheticCudaGraphModel(nn.Module):
         inputs: PyModelInputs,
         fmha_impl: Optional[_NoopCudaGraphAttention] = None,
     ) -> PyModelOutputs:
+        if self.block_next_forward:
+            self.block_next_forward = False
+            self.capture_forward_started.set()
+            if not self.capture_forward_release.wait(timeout=30):
+                raise RuntimeError("timed out waiting to release CUDA graph capture")
+        if self.fail_next_forward:
+            self.fail_next_forward = False
+            raise RuntimeError("injected CUDA graph capture failure")
         if (
             isinstance(inputs.input_hiddens, torch.Tensor)
             and inputs.input_hiddens.numel() > 0
@@ -310,7 +323,7 @@ class CudaGraphTestModelBuilder:
             kv_shape, dtype=result.compute_dtype, device=self.config.device
         )
 
-        result.kv_cache.layer_attn_types = [
+        result.kv_cache.layer_group_types = [
             CacheGroupType.FULL for _ in range(result.layer_num)
         ]
         result.kv_cache.kv_cache_base_by_layer = [

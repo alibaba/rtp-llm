@@ -10,6 +10,7 @@ py_library(
         "symm_mem.py",
     ],
     deps = [
+        "//rtp_llm:ops",
         "//rtp_llm:torch",
     ],
     visibility = ["//visibility:public"],

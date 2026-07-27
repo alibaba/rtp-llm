@@ -332,7 +332,8 @@ def get_user_buffers_communicator() -> Optional[UserBufferCommunicator]:
 def destroy_user_buffers_communicator() -> None:
     global _global_communicator
     if _global_communicator is not None:
-        del _global_communicator
+        communicator, _global_communicator = _global_communicator, None
+        del communicator
 
 
 __all__ = [

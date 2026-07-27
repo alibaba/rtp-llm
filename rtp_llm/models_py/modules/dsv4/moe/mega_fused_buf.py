@@ -260,6 +260,17 @@ def _mega_moe_fused_available() -> bool:
 
 def _mega_moe_fused_enabled() -> bool:
     """Fused path is opt-in: ``DSV4_USE_MEGA_MOE_FUSED=1`` AND available."""
+    if mega_moe_fused_requested():
+        from rtp_llm.model_loader.weight_memory_saver import (
+            is_enabled,
+            sleep_mode_level,
+        )
+
+        if is_enabled() and sleep_mode_level() == 3:
+            raise RuntimeError(
+                "sleep mode level 3 does not support DSV4_USE_MEGA_MOE_FUSED=1; "
+                "the fused Mega buffers are not rebuildable after process-group teardown"
+            )
     return mega_moe_fused_requested() and _mega_moe_fused_available()
 
 

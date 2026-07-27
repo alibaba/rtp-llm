@@ -1,6 +1,8 @@
 #pragma once
 
 #include <atomic>
+#include <memory>
+#include <string>
 #include <unordered_map>
 #include <vector>
 #include <pybind11/embed.h>
@@ -12,10 +14,13 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_utils.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
+#include "rtp_llm/cpp/engine_base/sleep/SleepMemoryPolicy.h"
 
 namespace py = pybind11;
 
 namespace rtp_llm {
+
+class CudaGraphTestRunner;
 
 class CudaGraphRunner: public GraphBase {
 public:
@@ -33,6 +38,7 @@ public:
         hidden_size_(graph_params.hidden_size),
         hc_mult_(static_cast<int>(graph_params.hc_mult)),
         sp_steps_(graph_params.sp_steps),
+        world_size_(graph_params.world_size),
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         model_data_type_(graph_params.model_data_type),
@@ -45,6 +51,10 @@ public:
         if (kernel_seq_size_per_block_ <= 0) {
             throw std::runtime_error("CudaGraphRunner constructor: kernel_tokens_per_block must be > 0.");
         }
+        use_cuda_graph_vmm_region_ = sleep_memory_policy::useCudaGraphVmmRegionFromEnvironment();
+        lifecycle_state_.store(enable_cuda_graph_ ? CudaGraphLifecycleState::Invalidated :
+                                                    CudaGraphLifecycleState::Disabled,
+                               std::memory_order_release);
         max_bs_               = graph_params.max_context_batch_size;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr("forward");
@@ -65,12 +75,7 @@ public:
                          is_target_verify_);
     }
 
-    ~CudaGraphRunner() {
-        RTP_LLM_LOG_INFO("Release CudaGraphRunner .....");
-        py::gil_scoped_acquire gil;
-        py_instance_.release();
-        RTP_LLM_LOG_INFO("Release CudaGraphRunner Successfully");
-    }
+    ~CudaGraphRunner() override;
     void           captureDecode();
     void           capturePrefill();
     void           captureDecodeOneBatchSize(int bs);
@@ -88,6 +93,13 @@ public:
     int            getCurrentRealGraphBs(const CudaGraphState& state) const;
     PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
     void           initCapture() override;
+    void           invalidateCapturedGraphs() override;
+    void           recaptureCapturedGraphs() override;
+    bool           capturedGraphsReady() const override;
+    uint64_t       captureGeneration() const override;
+    bool           usesCudaGraphVmmRegion() const {
+        return use_cuda_graph_vmm_region_;
+    }
 
     // Factory methods for test: take GraphParams so callers can reuse the same struct
     static CudaGraphRunner* createForPrefill(py::object py_instance, GraphParams params);
@@ -107,8 +119,15 @@ private:
     void              setPositionEncoding(torch::Tensor position_encoding) override;
     void              setTokenTypeEmbedding(torch::Tensor token_type_embedding) override;
     void              setInputEmbeddingScalar(float input_embedding_scalar) override;
+    void              clearCapturedGraphs();
+    void              releaseCapturedGraphResources();
+    void              initCaptureWithGil();
+    void              synchronizeCaptureRanks(const char* phase);
+    void              validateReplayState(const CudaGraphState& state, const char* operation) const;
 
 private:
+    friend class CudaGraphTestRunner;
+
     std::vector<int> getDecodeBatchSizesToCapture();
     std::vector<int> getPrefillSequenceLengthsToCapture();
     /// Select graph key for decode; false if no captured graph can serve current_batch_size (e.g. lower_bound hit end).
@@ -123,6 +142,7 @@ private:
     bool                    enable_cuda_graph_{false};
     bool                    is_prefill_cuda_graph_mode_{false};
     bool                    is_target_verify_{false};
+    bool                    use_cuda_graph_vmm_region_{true};
     cuda_graph::GraphStream capture_stream_;
     bool                    enable_cuda_graph_debug_mode_{false};
     size_t                  max_bs_{1};
@@ -136,11 +156,12 @@ private:
     // models). input_hiddens captures with hidden_size_ * hc_mult_ so the MTP
     // draft graph can take the target's pre-hc residual ([T, hc*dim]) as
     // input. The post-reduce output tensor still uses hidden_size_.
-    int                     hc_mult_{1};
-    int                     sp_steps_{0};
-    std::vector<int>        capture_range_;
-    std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
-    std::vector<int>        decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python
+    int              hc_mult_{1};
+    int              sp_steps_{0};
+    int64_t          world_size_{1};
+    std::vector<int> capture_range_;
+    std::vector<int> prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
+    std::vector<int> decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python
     // capture seqLen -> GraphInstance (prefill)
     // batch_size -> GraphInstance (decode)
     std::unordered_map<int, GraphInstance> graph_instances_;
@@ -161,6 +182,13 @@ private:
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();
 
     std::atomic<bool> prepared_attention_inputs_ = false;
+    // Level3 invalidate/recapture run only while the engine is quiesced (no
+    // concurrent replay), so lifecycle_state_/capture_generation_ need no lock:
+    // the replay hot path reads them lock-free, and the sleep control thread is
+    // the sole writer. capture_generation_ lets a replay reject a graph key
+    // stamped before an invalidate/recapture cycle.
+    std::atomic<CudaGraphLifecycleState> lifecycle_state_{CudaGraphLifecycleState::Disabled};
+    std::atomic<uint64_t>                capture_generation_{0};
 };
 
 }  // namespace rtp_llm

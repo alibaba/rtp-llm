@@ -1,4 +1,5 @@
 # Adapted from https://github.com/vllm-project/vllm/blob/bf214ca22625e311a2c4c0dfbf7af19128f4919c/vllm/distributed/device_communicators/symm_mem.py
+import gc
 import logging
 import math
 from typing import Optional, Union
@@ -32,6 +33,33 @@ try:
         torch_symm_mem_available = True
 except ImportError:
     torch_symm_mem_available = False
+
+
+# Sleep-mode Level3 transport classification for a symmetric-memory handle.
+SYMM_MEM_TRANSPORT_MULTICAST = "multicast"
+SYMM_MEM_TRANSPORT_RDMA = "rdma"
+
+
+def classify_symm_mem_transport(multicast_ptr: int) -> str:
+    """Classify the sleep-mode Level3 transport backing a symm_mem handle.
+
+    The classifier drives the transport split for CUDA process-checkpoint
+    (Level3): the two transports are preserved across checkpoint by completely
+    different mechanisms.
+
+    - ``multicast_ptr != 0`` -> ``"multicast"``: an NVLS multicast object (RM
+      class NV00FD) exists. It is *not* restorable in-process after
+      cuda-checkpoint, so it is held alive by the external multicast keeper and
+      re-imported on wake (single-node via a POSIX fd; cross-machine GB300 NVL72
+      MNNVL via a 64-byte FABRIC handle that torch broadcasts over its own store
+      and the shim routes to the local keeper). The object is never destroyed
+      and rebuilt.
+    - ``multicast_ptr == 0`` -> ``"rdma"``: no multicast object (RDMA/P2P-backed
+      symmetric memory, e.g. cross-super-node InfiniBand). RDMA QP/MR/CQ are
+      rebuildable, so this transport is torn down with the other collective
+      resources and rebuilt on wake — the keeper is neither used nor needed.
+    """
+    return SYMM_MEM_TRANSPORT_MULTICAST if multicast_ptr else SYMM_MEM_TRANSPORT_RDMA
 
 
 class TorchSymmMemCommunicator:
@@ -78,6 +106,7 @@ class TorchSymmMemCommunicator:
         self.group = group
         self.world_size = dist.get_world_size(self.group)
         self.device_capability = torch.cuda.get_device_capability(device)[0]
+        self.has_multicast_support = False
         if self.device_capability < 9:
             logging.warning(
                 "TorchSymmMemCommunicator: Device capability %s not supported, "
@@ -104,24 +133,61 @@ class TorchSymmMemCommunicator:
             dtype=self.dtype,
         )
         # Try ProcessGroup object first, fallback to group_name if needed
-        handle = torch_symm_mem.rendezvous(self.buffer, group=self.group.group_name)
-        if handle.multicast_ptr == 0:
+        self.handle = torch_symm_mem.rendezvous(
+            self.buffer, group=self.group.group_name
+        )
+        self.has_multicast_support = self.handle.multicast_ptr != 0
+        # Level3 transport split: multicast objects are preserved by the external
+        # keeper; RDMA-backed symm_mem is rebuilt on wake. See
+        # classify_symm_mem_transport for the full rationale.
+        self.transport = classify_symm_mem_transport(self.handle.multicast_ptr)
+        logging.info(
+            "TorchSymmMemCommunicator: world_size=%d transport=%s "
+            "(multicast_ptr=%s) — Level3 %s across CUDA checkpoint.",
+            self.world_size,
+            self.transport,
+            "set" if self.has_multicast_support else "0",
+            ("keeper-preserved" if self.has_multicast_support else "teardown+rebuild"),
+        )
+        uses_multimem_all_reduce = (
+            self.world_size in self._WORLD_SIZES_MULTIMEM[self.device_capability]
+        )
+        if uses_multimem_all_reduce and not self.has_multicast_support:
             logging.warning(
                 "TorchSymmMemCommunicator: torch symmetric memory "
-                "multicast operations are not supported."
+                "multicast operations are required for world size %d but are "
+                "not supported.",
+                self.world_size,
             )
+            self.handle = None
             self.buffer = None
             self.disabled = True
             return
-        if not hasattr(torch.ops.symm_mem, "multimem_all_gather_out"):
+        self.has_multimem_all_gather = self.has_multicast_support and hasattr(
+            torch.ops.symm_mem, "multimem_all_gather_out"
+        )
+        if self.has_multicast_support and not self.has_multimem_all_gather:
             logging.warning(
                 "TorchSymmMemCommunicator: torch.ops.symm_mem.multimem_all_gather_out "
-                "is not available in this PyTorch build, disabling symm_mem communicator."
+                "is not available in this PyTorch build; symmetric-memory "
+                "all-gather is disabled."
             )
-            self.buffer = None
-            self.disabled = True
-            return
         self.disabled = False
+
+    def destroy(self) -> None:
+        """Release NVLS/P2P mappings before the owning process group is destroyed."""
+        self.disabled = True
+        device = getattr(self, "device", None)
+        if device is not None and torch.cuda.is_available():
+            torch.cuda.synchronize(device)
+
+        # The native handle owns peer and multicast mappings. Drop it before the
+        # backing allocation and before the process group used for rendezvous.
+        self.handle = None
+        self.buffer = None
+        self.group = None
+        self.device = None
+        gc.collect()
 
     def should_torch_symm_mem_allreduce(self, inp: torch.Tensor):
         """
@@ -193,7 +259,12 @@ class TorchSymmMemCommunicator:
             (empirical heuristic from PyTorch fused_all_gather_matmul).
           - Total gathered size (shard * world_size) must fit in the buffer.
         """
-        if self.disabled or shard.dtype != self.dtype or not shard.is_contiguous():
+        if (
+            self.disabled
+            or not self.has_multimem_all_gather
+            or shard.dtype != self.dtype
+            or not shard.is_contiguous()
+        ):
             return False
         shard_bytes = shard.numel() * shard.element_size()
         if shard_bytes % 4 != 0:
@@ -227,6 +298,8 @@ class TorchSymmMemCommunicator:
             - Output is staged through the symmetric buffer and then copied
               to a regular tensor.
         """
+        if not self.should_torch_symm_mem_allgather(shard):
+            return None
         shard_numel = shard.numel()
         total_numel = shard_numel * self.world_size
         if out is None:
@@ -269,3 +342,47 @@ def get_symm_mem_communicator() -> Optional[TorchSymmMemCommunicator]:
     """Get or initialize TorchSymmMemCommunicator (lazy initialization)."""
     global _symm_mem_comm
     return _symm_mem_comm
+
+
+def _destroy_torch_symm_mem_runtime_state() -> None:
+    """Drop every CUDA-backed cache retained by PyTorch symmetric memory."""
+    if not torch_symm_mem_available:
+        return
+
+    # The deprecated enable_symm_mem_for_group() path also writes a native
+    # group_info_map that PyTorch 2.11 cannot erase. Clearing only this Python
+    # cache would make a same-name rebuild fail or bind stale rendezvous state.
+    legacy_stores = getattr(torch_symm_mem, "_group_name_to_store", None)
+    if isinstance(legacy_stores, dict) and legacy_stores:
+        raise RuntimeError(
+            "cannot rebuild torch symmetric memory after "
+            "enable_symm_mem_for_group(); PyTorch exposes no native group-info "
+            f"unregister API (groups={sorted(legacy_stores)})"
+        )
+
+    released = {}
+    for cache_name in (
+        "_group_name_to_workspace_tensor",
+        "_backend_streams",
+        "_symm_mem_pools",
+    ):
+        cache = getattr(torch_symm_mem, cache_name, None)
+        if isinstance(cache, dict):
+            released[cache_name] = len(cache)
+            cache.clear()
+
+    # In PyTorch 2.11, symm_mem.empty() defaults to a private MemPool. The
+    # buffer Storage deleter above releases its symmetric allocation; dropping
+    # this cache separately prevents the pool object itself crossing checkpoint.
+    gc.collect()
+    logging.info("Destroyed torch symmetric-memory runtime state: %s", released)
+
+
+def destroy_symm_mem_communicator() -> None:
+    """Destroy the global communicator while its process group is still valid."""
+    global _symm_mem_comm
+    communicator, _symm_mem_comm = _symm_mem_comm, None
+    if communicator is not None:
+        communicator.destroy()
+        del communicator
+    _destroy_torch_symm_mem_runtime_state()

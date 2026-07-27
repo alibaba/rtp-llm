@@ -10,11 +10,24 @@ using namespace torch_ext;
 
 // Current state of CUDA graph execution (used when calling canRun/forward with graph runner)
 struct CudaGraphState {
-    int current_batch_size{1};
-    int current_seq_len{1};
-    int current_real_graph_bs{1};       // for decode
-    int current_real_graph_seq_len{1};  // for prefill
-    int seq_len_sum{0};
+    int      current_batch_size{1};
+    int      current_seq_len{1};
+    int      current_real_graph_bs{1};       // for decode
+    int      current_real_graph_seq_len{1};  // for prefill
+    int      seq_len_sum{0};
+    uint64_t graph_generation{0};
+};
+
+// Level3 sleep drives invalidate/recapture only from the SUSPENDING/wake phases
+// of the sleep FSM, after the engine step loop is drained and quiesced. No
+// replay (forward) can be in flight then, and the single sleep control thread
+// invalidates each runner sequentially, so the FSM stays a simple linear
+// progression with no concurrent-join transient states.
+enum class CudaGraphLifecycleState : uint8_t {
+    Disabled,
+    Invalidated,
+    Ready,
+    Failed,
 };
 
 struct GraphParams {
@@ -27,6 +40,7 @@ struct GraphParams {
     int                  kernel_tokens_per_block      = 0;  // must be explicitly configured
     int                  num_tokens_per_bs = 1;  // Number of tokens per batch (1 for decode, max_seq_len for prefill)
     int                  sp_steps          = 0;
+    int64_t              world_size        = 1;
     size_t               max_context_batch_size = 128;
     std::size_t          hidden_size            = 0;
     c10::ScalarType      model_data_type        = c10::ScalarType::Float;
@@ -38,7 +52,7 @@ struct GraphParams {
     // CudaGraphRunner allocates input_hiddens with hidden_size * hc_mult so
     // the DSv4 MTP draft graph captures with the [T, hc*dim] residual shape
     // produced by the target's getMtpTargetHiddenStates accessor.
-    int64_t              hc_mult            = 1;
+    int64_t hc_mult = 1;
 };
 
 class GraphBase {
@@ -51,6 +65,10 @@ public:
     virtual void           setTokenTypeEmbedding(torch::Tensor token_type_embedding)    = 0;
     virtual void           setInputEmbeddingScalar(float input_embedding_scalar)        = 0;
     virtual bool           canRun(const PyModelInputs& inputs, CudaGraphState& state)   = 0;
+    virtual void           invalidateCapturedGraphs()                                   = 0;
+    virtual void           recaptureCapturedGraphs()                                    = 0;
+    virtual bool           capturedGraphsReady() const                                  = 0;
+    virtual uint64_t       captureGeneration() const                                    = 0;
     virtual void           prepareAttentionInputs(const PyModelInputs& inputs,
                                                   CudaGraphState&      state,
                                                   bool                 skip_forward_event_sync = false) = 0;

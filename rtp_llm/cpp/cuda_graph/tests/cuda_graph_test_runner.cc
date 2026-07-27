@@ -1,7 +1,11 @@
 #include <pybind11/pybind11.h>
 #include <pybind11/stl.h>
 
+#include <stdexcept>
+#include <utility>
+
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_base.h"
+#include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 
@@ -67,12 +71,54 @@ public:
         return runner_ != nullptr && runner_->canRun(inputs, state_);
     }
 
+    bool canRunWithFreshState(torch_ext::PyModelInputs& inputs) {
+        CudaGraphState fresh_state;
+        return runner_ != nullptr && runner_->canRun(inputs, fresh_state);
+    }
+
     torch_ext::PyModelOutputs forward(torch_ext::PyModelInputs& inputs) {
         return runner_->forward(inputs, state_);
     }
 
     int getCurrentRealGraphSize() {
         return runner_ != nullptr ? runner_->getCurrentRealGraphBs(state_) : 0;
+    }
+
+    void invalidate() {
+        if (runner_ != nullptr) {
+            runner_->invalidateCapturedGraphs();
+        }
+    }
+
+    void recapture() {
+        if (runner_ != nullptr) {
+            runner_->recaptureCapturedGraphs();
+        }
+    }
+
+    bool isReady() const {
+        return runner_ != nullptr && runner_->capturedGraphsReady();
+    }
+
+    uint64_t generation() const {
+        return runner_ != nullptr ? runner_->captureGeneration() : 0;
+    }
+
+    bool usesVmmGraphRegion() const {
+        return runner_ != nullptr && runner_->usesCudaGraphVmmRegion();
+    }
+
+    void reset() {
+        reset_runner();
+        state_ = CudaGraphState{};
+    }
+
+    void reclaimAllocatorCache() {
+        cuda_graph::graphEmptyCache();
+    }
+
+    std::pair<size_t, size_t> allocatorMemoryBytes() const {
+        return {cuda_graph::graphAllocatedBytes(), cuda_graph::graphReservedBytes()};
     }
 
     ~CudaGraphTestRunner() {
@@ -115,6 +161,15 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("kernel_tokens_per_block"),
              py::arg("decode_capture_batch_sizes"))
         .def("canRun", &CudaGraphTestRunner::canRun)
+        .def("canRunWithFreshState", &CudaGraphTestRunner::canRunWithFreshState)
         .def("forward", &CudaGraphTestRunner::forward)
-        .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);
+        .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize)
+        .def("invalidate", &CudaGraphTestRunner::invalidate)
+        .def("recapture", &CudaGraphTestRunner::recapture)
+        .def("isReady", &CudaGraphTestRunner::isReady)
+        .def("generation", &CudaGraphTestRunner::generation)
+        .def("usesVmmGraphRegion", &CudaGraphTestRunner::usesVmmGraphRegion)
+        .def("reset", &CudaGraphTestRunner::reset)
+        .def("reclaimAllocatorCache", &CudaGraphTestRunner::reclaimAllocatorCache)
+        .def("allocatorMemoryBytes", &CudaGraphTestRunner::allocatorMemoryBytes);
 }

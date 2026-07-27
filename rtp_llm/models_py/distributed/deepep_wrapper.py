@@ -9,6 +9,7 @@ import logging
 import os
 import platform
 import threading
+import weakref
 from dataclasses import dataclass
 from enum import IntEnum, auto
 from typing import Optional, Tuple
@@ -40,9 +41,7 @@ except ImportError as _deep_ep_import_err:
             )
 
         def __init_subclass__(cls, **kwargs):
-            raise NotImplementedError(
-                "deep_ep is not available in this build."
-            )
+            raise NotImplementedError("deep_ep is not available in this build.")
 
         @classmethod
         def get_low_latency_rdma_size_hint(cls, *args, **kwargs):
@@ -72,7 +71,9 @@ __all__ = [
     "DeepEPMode",
     "use_accl_ep",
     "allow_mnnvl",
+    "destroy_deepep_wrapper",
     "init_deepep_wrapper",
+    "rebuild_deepep_wrapper",
 ]
 
 
@@ -285,6 +286,9 @@ class DeepEPWrapper:
         """
         self._config = config
         self._use_accl_ep = use_accl_ep()
+        self._retired_buffer_ref = None
+        self._retired_buffer_id = None
+        self._lifecycle_error = None
 
         self._mode, self._buffer = self._init_deepep_buffer(group)
 
@@ -380,13 +384,19 @@ class DeepEPWrapper:
                         )
                 else:
                     if DeepEPWrapper._instance is not None:
-                        raise RuntimeError(
-                            "DeepEP state is inconsistent, _initialized is False but _instance is not None"
+                        if not DeepEPWrapper._instance._config.equal(config):
+                            raise RuntimeError(
+                                "cannot rebuild suspended DeepEP wrapper with a different "
+                                f"config, origin: {DeepEPWrapper._instance._config}, new: {config}"
+                            )
+                        DeepEPWrapper._instance._rebuild_buffer(
+                            torch.distributed.group.WORLD
                         )
-                    logging.info("Start initialize DeepEP wrapper")
-                    DeepEPWrapper._instance = DeepEPWrapper(
-                        torch.distributed.group.WORLD, config
-                    )
+                    else:
+                        logging.info("Start initialize DeepEP wrapper")
+                        DeepEPWrapper._instance = DeepEPWrapper(
+                            torch.distributed.group.WORLD, config
+                        )
                     DeepEPWrapper._initialized = True
                     logging.info("Finish initialize DeepEP wrapper")
         except Exception as e:
@@ -400,10 +410,81 @@ class DeepEPWrapper:
         Warning: This should only be used in tests.
         """
         with cls._lock:
-            if cls._instance is not None:
-                cls._instance._destroy_buffer()
-                cls._instance = None
+            instance = cls._instance
+            cls._instance = None
             cls._initialized = False
+            if instance is not None:
+                instance._destroy_buffer()
+
+    @classmethod
+    def destroy_buffer(cls) -> None:
+        """Suspend DeepEP while retaining wrapper identity and configuration."""
+        with cls._lock:
+            if cls._instance is None:
+                if cls._initialized:
+                    cls._initialized = False
+                    raise RuntimeError(
+                        "DeepEP state is inconsistent: initialized without an instance"
+                    )
+                return
+            lifecycle_error = getattr(cls._instance, "_lifecycle_error", None)
+            if lifecycle_error is not None:
+                cls._initialized = False
+                raise RuntimeError(
+                    "DeepEP teardown previously failed; process restart is required: "
+                    f"{lifecycle_error}"
+                )
+            if not cls._initialized:
+                if cls._instance._buffer is not None:
+                    try:
+                        cls._instance._destroy_buffer()
+                    except Exception as error:
+                        raise RuntimeError(
+                            "DeepEP state is inconsistent: suspended wrapper still had "
+                            "a buffer, and fail-closed cleanup failed"
+                        ) from error
+                    raise RuntimeError(
+                        "DeepEP state is inconsistent: suspended wrapper still had a "
+                        "buffer; the buffer was destroyed"
+                    )
+                return
+            cls._initialized = False
+            cls._instance._destroy_buffer()
+
+    @classmethod
+    def rebuild_buffer(cls) -> None:
+        """Rebuild a suspended buffer on the existing singleton wrapper."""
+        with cls._lock:
+            if cls._instance is None:
+                if cls._initialized:
+                    cls._initialized = False
+                    raise RuntimeError(
+                        "DeepEP state is inconsistent: initialized without an instance"
+                    )
+                logging.info(
+                    "DeepEP rebuild skipped because startup did not create a wrapper"
+                )
+                return
+            lifecycle_error = getattr(cls._instance, "_lifecycle_error", None)
+            if lifecycle_error is not None:
+                cls._initialized = False
+                raise RuntimeError(
+                    "cannot rebuild DeepEP after a failed teardown; process restart "
+                    f"is required: {lifecycle_error}"
+                )
+            if cls._initialized:
+                if cls._instance._buffer is None:
+                    cls._initialized = False
+                    raise RuntimeError(
+                        "DeepEP state is inconsistent: initialized wrapper has no buffer"
+                    )
+                return
+            if not torch.distributed.is_initialized():
+                raise RuntimeError(
+                    "cannot rebuild DeepEP before the distributed environment is initialized"
+                )
+            cls._instance._rebuild_buffer(torch.distributed.group.WORLD)
+            cls._initialized = True
 
     @property
     def buffer(self) -> DeepEPBuffer:
@@ -413,7 +494,10 @@ class DeepEPWrapper:
             The initialized DeepEP buffer
         """
         if self._buffer is None:
-            raise RuntimeError("DeepEP buffer is not initialized")
+            raise RuntimeError(
+                "DeepEP buffer is suspended; rebuild_deepep_wrapper() must complete "
+                "before routing resumes"
+            )
         return self._buffer
 
     @property
@@ -534,6 +618,7 @@ class DeepEPWrapper:
             "num_rdma_bytes": num_rdma_bytes,
             "low_latency_mode": False,
             "num_qps_per_rank": num_qps_per_rank,
+            "explicitly_destroy": True,
         }
 
         if self._use_accl_ep:
@@ -575,6 +660,7 @@ class DeepEPWrapper:
             "low_latency_mode": True,
             "num_qps_per_rank": num_qps_per_rank,
             "allow_mnnvl": True,
+            "explicitly_destroy": True,
         }
 
         if self._use_accl_ep:
@@ -625,6 +711,7 @@ class DeepEPWrapper:
             "num_rdma_bytes": num_rdma_bytes,
             "low_latency_mode": True,
             "num_qps_per_rank": num_qps_per_rank,
+            "explicitly_destroy": True,
         }
 
         if self._use_accl_ep:
@@ -634,11 +721,85 @@ class DeepEPWrapper:
         return DeepEPBuffer(**init_kwargs)  # type: ignore
 
     def _destroy_buffer(self) -> None:
-        """Destroy the DeepEP buffer and free resources."""
+        """Destroy the DeepEP runtime deterministically. Idempotent."""
+        if self._buffer is None:
+            return
+        buffer = self._buffer
+        self._buffer = None
+        try:
+            self._release_buffer(buffer)
+        except Exception as error:
+            self._lifecycle_error = f"{type(error).__name__}: {error}"
+            raise
+        self._lifecycle_error = None
+
+    def _record_retired_buffer(self, buffer: DeepEPBuffer) -> None:
+        """Remember the retired object without retaining its CUDA resources."""
+        try:
+            self._retired_buffer_ref = weakref.ref(buffer)
+            self._retired_buffer_id = None
+        except TypeError:
+            self._retired_buffer_ref = None
+            self._retired_buffer_id = id(buffer)
+        try:
+            setattr(buffer, "_rtp_llm_deepep_destroyed", True)
+        except Exception:
+            pass
+
+    def _is_retired_buffer(self, buffer: DeepEPBuffer) -> bool:
+        if getattr(buffer, "_rtp_llm_deepep_destroyed", False):
+            return True
+        retired_ref = getattr(self, "_retired_buffer_ref", None)
+        if retired_ref is not None and retired_ref() is buffer:
+            return True
+        retired_id = getattr(self, "_retired_buffer_id", None)
+        return retired_id is not None and retired_id == id(buffer)
+
+    def _release_buffer(self, buffer: DeepEPBuffer) -> None:
+        """Release the native runtime and every wrapper-owned strong reference."""
+        self._record_retired_buffer(buffer)
+        destroy = getattr(buffer, "destroy", None)
+        try:
+            if not callable(destroy):
+                raise RuntimeError(
+                    "DeepEP buffer does not expose destroy(); explicitly_destroy "
+                    "support is required"
+                )
+            destroy()
+        finally:
+            del destroy
+            del buffer
+            gc.collect()
+
+    def _rebuild_buffer(self, group: ProcessGroup) -> None:
+        lifecycle_error = getattr(self, "_lifecycle_error", None)
+        if lifecycle_error is not None:
+            raise RuntimeError(
+                "cannot rebuild DeepEP after a failed teardown; process restart "
+                f"is required: {lifecycle_error}"
+            )
         if self._buffer is not None:
-            del self._buffer
-            self._buffer = None
-        gc.collect()
+            raise RuntimeError("cannot rebuild DeepEP while its buffer is still active")
+        mode, buffer = self._init_deepep_buffer(group)
+        if self._is_retired_buffer(buffer):
+            del buffer
+            gc.collect()
+            raise RuntimeError("DeepEP rebuild returned a previously destroyed buffer")
+        if mode != self._mode:
+            mode_error = RuntimeError(
+                f"DeepEP mode changed across rebuild: {self._mode} -> {mode}"
+            )
+            try:
+                self._release_buffer(buffer)
+            except Exception as cleanup_error:
+                self._lifecycle_error = (
+                    f"{type(cleanup_error).__name__}: {cleanup_error}"
+                )
+                raise RuntimeError(
+                    f"{mode_error}; failed to destroy the rejected buffer"
+                ) from cleanup_error
+            raise mode_error
+        self._buffer = buffer
 
 
 def init_deepep_wrapper(
@@ -697,3 +858,13 @@ def init_deepep_wrapper(
     )
 
     DeepEPWrapper.create(deepep_config)
+
+
+def destroy_deepep_wrapper() -> None:
+    """Idempotently suspend DeepEP without invalidating cached wrapper objects."""
+    DeepEPWrapper.destroy_buffer()
+
+
+def rebuild_deepep_wrapper() -> None:
+    """Idempotently rebuild DeepEP after distributed collectives are restored."""
+    DeepEPWrapper.rebuild_buffer()

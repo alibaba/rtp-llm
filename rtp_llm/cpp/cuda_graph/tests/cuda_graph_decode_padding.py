@@ -1,6 +1,8 @@
+import gc
 import logging
 import os
 import unittest
+import weakref
 from typing import List
 
 import torch
@@ -34,7 +36,7 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         # Test parameters (can be configured)
         self.max_seq_len = 64
         self.tokens_per_block = 64
-        self.max_batch_size = 64
+        self.max_batch_size = 1 if methodName == "test_lifecycle_two_cycles" else 64
         self.device = "cuda:0"
 
         # Generate decode_capture_batch_sizes from 1 to max_batch_size, excluding some values
@@ -83,6 +85,7 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         self.hidden_size = hidden_size
 
         self.op = CudaGraphRunner()
+        self.graph_model = model
         self.op.init_decode(
             model,
             hidden_size,
@@ -249,6 +252,95 @@ class TestCudaGraphDecodePadding(unittest.TestCase):
         for bs in batch_range:
             self._test_single(bs)
             print(f"success for batch size: {bs}")
+
+    def test_lifecycle_two_cycles(self):
+        inputs = self.build_inputs(1, self.max_seq_len, self.kernel_tokens_per_block)
+        expected_vmm_region = os.environ.get(
+            "ENABLE_SLEEP_MODE"
+        ) == "1" and os.environ.get("SLEEP_MODE_LEVEL") in (None, "1", "2")
+        self.assertEqual(self.op.usesVmmGraphRegion(), expected_vmm_region)
+        self.assertTrue(self.op.isReady())
+        generation = self.op.generation()
+        self.assertGreater(generation, 0)
+        cycle_memory = []
+
+        for cycle in range(2):
+            self.assertTrue(self.op.canRun(inputs))
+            stale_generation = self.op.generation()
+
+            # invalidate/recapture run single-threaded from the quiesced sleep
+            # path; a second invalidate is an idempotent no-op.
+            self.op.invalidate()
+            self.op.invalidate()
+            self.assertFalse(self.op.isReady())
+            self.assertFalse(self.op.canRunWithFreshState(inputs))
+            self.assertEqual(self.op.generation(), stale_generation)
+
+            # Production reclaims the ordinary Level3 pools once, after every
+            # model runner has been invalidated. Keep process-global reclaim out
+            # of CudaGraphRunner::recaptureCapturedGraphs itself.
+            if not self.op.usesVmmGraphRegion():
+                self.op.reclaimAllocatorCache()
+
+            self.op.recapture()
+            self.assertTrue(self.op.isReady())
+            self.assertEqual(self.op.generation(), stale_generation + 1)
+            with self.assertRaises(RuntimeError):
+                self.op.forward(inputs)
+
+            generation = self.op.generation()
+            self.op.recapture()
+            self.assertEqual(self.op.generation(), generation)
+            self._test_single(1)
+            torch.cuda.synchronize()
+            allocated, reserved = self.op.allocatorMemoryBytes()
+            cycle_memory.append((allocated, reserved))
+            print(
+                f"cycle={len(cycle_memory)} allocated={allocated} reserved={reserved}",
+                flush=True,
+            )
+
+        if not self.op.usesVmmGraphRegion():
+            plateau_tolerance = 64 * 1024 * 1024
+            first_allocated, first_reserved = cycle_memory[0]
+            second_allocated, second_reserved = cycle_memory[1]
+            self.assertLessEqual(
+                second_allocated,
+                first_allocated + plateau_tolerance,
+                "allocated bytes grew across identical recapture cycles",
+            )
+            self.assertLessEqual(
+                second_reserved,
+                first_reserved + plateau_tolerance,
+                "reserved bytes grew across identical recapture cycles",
+            )
+
+        if use_synthetic_cuda_graph_model():
+            self.op.invalidate()
+            if not self.op.usesVmmGraphRegion():
+                self.op.reclaimAllocatorCache()
+            stale_generation = self.op.generation()
+            # A capture failure is terminal: the runner lands in Failed and the
+            # generation does not advance.
+            self.graph_model.fail_next_forward = True
+            with self.assertRaisesRegex(
+                RuntimeError, "injected CUDA graph capture failure"
+            ):
+                self.op.recapture()
+            self.assertFalse(self.op.isReady())
+            self.assertEqual(self.op.generation(), stale_generation)
+            # Failed is enum ordinal 3 (Disabled=0, Invalidated=1, Ready=2,
+            # Failed=3); recapture from Failed is rejected, not retried.
+            with self.assertRaisesRegex(RuntimeError, "current=3"):
+                self.op.recapture()
+
+        model_ref = weakref.ref(self.graph_model)
+        del self.graph_model
+        self.op.reset()
+        gc.collect()
+        self.assertIsNone(
+            model_ref(), "CudaGraphRunner retained its Python model owner"
+        )
 
 
 if __name__ == "__main__":
