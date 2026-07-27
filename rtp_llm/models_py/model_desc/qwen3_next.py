@@ -35,6 +35,11 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
 )
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
 from rtp_llm.models_py.triton_kernels.common.scatter_qkv import scatter_qkv
+from rtp_llm.models_py.triton_kernels.fla.aiter_flydsl_decode import (
+    aiter_flydsl_gdn_decode,
+    is_aiter_flydsl_gdn_decode_supported,
+    prepare_aiter_flydsl_gdn_decode_state_indices,
+)
 from rtp_llm.models_py.triton_kernels.fla.block import (
     load_initial_state_from_block_map,
     store_ssm_state_to_block_map,
@@ -85,6 +90,7 @@ class Qwen3NextMetadata(object):
         self.cp_restore_indices = cp_restore_indices
         self.cp_local_extract_indices = cp_local_extract_indices
         self.cp_local_valid_mask = cp_local_valid_mask
+        self.aiter_flydsl_gdn_decode_indices = {}
 
     def get_prefill_conv1d_meta(self) -> Optional[CausalConv1dMetadata]:
         return self.prefill_conv1d_meta
@@ -452,6 +458,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
         is_target_verify: bool,
+        attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
         batch, seq = self._get_bs_from_attenion_input(
             mixed_qkv, attn_inputs, is_target_verify
@@ -473,26 +480,77 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             dim=2,
         )
 
-        g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
-
-        # contiguous will be applyed when call fused_recurrent_gated_delta_rule
-        g = g.view(batch, seq, self.local_num_v_heads)
-        beta = beta.view(batch, seq, self.local_num_v_heads)
         ssm_states = self._get_ssm_states(kv_cache_tensor)
-        core_attn_out, _ = fused_recurrent_gated_delta_rule(
-            q=query,
-            k=key,
-            v=value,
-            g=g,
-            beta=beta,
-            scale=None,
-            initial_state=ssm_states,
-            inplace_final_state=True,
-            block_map=self._get_fla_block_map(attn_inputs),
-            seq_size_per_block=seq_size_per_block,
-            sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
-            use_qk_l2norm_in_kernel=True,
+        use_aiter_flydsl_decode = (
+            torch.version.hip is not None
+            # The current RTP block-cache index adapter resolves one state
+            # transition per request. Target verify adds multiple tokens per
+            # request, so retain the Triton implementation for that path.
+            and not is_target_verify
+            and is_aiter_flydsl_gdn_decode_supported(
+                query, key, value, a, b, ssm_states
+            )
         )
+        if use_aiter_flydsl_decode:
+            block_map = attn_inputs.kv_cache_kernel_block_id_device
+            cache_key = (
+                block_map.data_ptr(),
+                block_map.stride(0),
+                seq_size_per_block,
+            )
+            indices = attn_meta.aiter_flydsl_gdn_decode_indices.get(cache_key)
+            if indices is None:
+                indices = prepare_aiter_flydsl_gdn_decode_state_indices(
+                    block_map,
+                    attn_inputs.sequence_lengths_plus_1_device,
+                    seq_size_per_block,
+                )
+                attn_meta.aiter_flydsl_gdn_decode_indices[cache_key] = indices
+
+            sequence_lengths = attn_inputs.sequence_lengths
+            # In serving this tensor is host-resident. If a future caller
+            # supplies a device tensor, launch the safe conditional copy.
+            copy_state = True
+            if sequence_lengths.device.type == "cpu":
+                copy_state = bool(
+                    torch.any(sequence_lengths % seq_size_per_block == 0).item()
+                )
+            core_attn_out = aiter_flydsl_gdn_decode(
+                A_log=self.alog,
+                a=a,
+                dt_bias=self.dt_bias,
+                q=query,
+                k=key,
+                v=value,
+                b=b,
+                state=ssm_states,
+                read_indices=indices[0],
+                write_indices=indices[1],
+                copy_state=copy_state,
+                scale=None,
+                use_qk_l2norm_in_kernel=True,
+            )
+        else:
+            # Keep the original Triton implementation for NVIDIA CUDA and as
+            # the ROCm fallback when AITER FlyDSL cannot handle the inputs.
+            g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
+            # contiguous will be applied by fused_recurrent_gated_delta_rule.
+            g = g.view(batch, seq, self.local_num_v_heads)
+            beta = beta.view(batch, seq, self.local_num_v_heads)
+            core_attn_out, _ = fused_recurrent_gated_delta_rule(
+                q=query,
+                k=key,
+                v=value,
+                g=g,
+                beta=beta,
+                scale=None,
+                initial_state=ssm_states,
+                inplace_final_state=True,
+                block_map=self._get_fla_block_map(attn_inputs),
+                seq_size_per_block=seq_size_per_block,
+                sequence_lengths=attn_inputs.sequence_lengths_plus_1_device,
+                use_qk_l2norm_in_kernel=True,
+            )
         res = core_attn_out.reshape(
             [-1, core_attn_out.shape[2], core_attn_out.shape[3]]
         )
@@ -530,6 +588,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             kv_cache.seq_size_per_block,
             attn_inputs,
             is_target_verify,
+            attn_meta,
         )
 
         return attn_out
