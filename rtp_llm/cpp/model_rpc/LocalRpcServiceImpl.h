@@ -142,6 +142,8 @@ public:
         return local_server_->onflightRequestNum();
     }
 
+    virtual void beginShutdown() {}
+
     virtual void stop() {
         if (local_server_) {
             local_server_->stop();

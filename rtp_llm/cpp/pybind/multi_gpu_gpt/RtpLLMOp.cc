@@ -376,6 +376,9 @@ void RtpLLMOp::startHttpServer(py::object model_weights_loader,
 void RtpLLMOp::stop() {
     const int64_t stop_timeout_ms = getGrpcStopTimeoutMs();
     if (!is_server_shutdown_) {
+        if (model_rpc_service_) {
+            model_rpc_service_->beginShutdown();
+        }
         if (grpc_server_) {
             auto begin_wait_us = autil::TimeUtility::currentTimeInMicroSeconds();
             while (auto onflight_request = model_rpc_service_->onflightRequestNum()) {
