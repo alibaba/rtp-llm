@@ -291,6 +291,14 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
     if (!inputs.pd_separation || !inputs.request_id.defined() || inputs.request_id.numel() == 0) {
         return std::nullopt;
     }
+    const int64_t context_batch_size = inputs.input_lengths.size(0) - inputs.sequence_lengths.size(0);
+    if (context_batch_size <= 0) {
+        return std::nullopt;
+    }
+    if (!inputs.cache_keys.defined() || inputs.cache_keys.numel() == 0) {
+        RTP_LLM_LOG_DEBUG("pd cache-store inputs have no cache_keys, skip write cache store");
+        return std::nullopt;
+    }
 
     PyCacheStoreInputs cache_store_inputs;
     cache_store_inputs.input_lengths_host    = inputs.input_lengths;
@@ -340,7 +348,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         auto        embedding_inputs      = buildPyEmbeddingInputs(micro_inputs);
         auto        multimodal_inputs     = buildPyMultimodalInputs(micro_inputs);
         auto        bert_embedding_inputs = buildBertEmbeddingInputs(micro_inputs);
-        if (is_real_micro_input && py_attn_inputs.is_prefill) {
+        if (is_real_micro_input) {
             py_attn_inputs.cache_store_inputs = prepareWriteCacheParams(micro_inputs);
             if (py_attn_inputs.cache_store_inputs.has_value()) {
                 py_attn_inputs.cache_store_writer = cache_store_async_writer_;
@@ -497,15 +505,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             attention_inputs.context_parallel_info = cp_params;
         }
 
-        if (attention_inputs.is_prefill) {
-            attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
-            if (attention_inputs.cache_store_inputs.has_value()) {
-                if (device_props_.enable_prefill_cp) {
-                    attention_inputs.cache_store_inputs->input_lengths_host =
-                        cp_params.prefill_actual_input_lengths_cpu;
-                }
-                attention_inputs.cache_store_writer = cache_store_async_writer_;
+        attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
+        if (attention_inputs.cache_store_inputs.has_value()) {
+            if (device_props_.enable_prefill_cp) {
+                attention_inputs.cache_store_inputs->input_lengths_host = cp_params.prefill_actual_input_lengths_cpu;
             }
+            attention_inputs.cache_store_writer = cache_store_async_writer_;
         }
         if (!inputs.warmup && inputs.pd_separation) {
             cache_store_async_writer_->init();

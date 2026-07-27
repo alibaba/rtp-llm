@@ -235,8 +235,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     LogitsProcessorFactory::init(params.model_config_.ckpt_path, params.sp_config.tree_decode_config);
     cudaProfilerBegin();
 
-    for (auto& mtp_params : *propose_params->mtp_model_params_) {
-        auto model_params =
+    const auto& mtp_model_params = *propose_params->mtp_model_params_;
+    for (size_t mtp_module_index = 0; mtp_module_index < mtp_model_params.size(); ++mtp_module_index) {
+        auto& mtp_params = mtp_model_params[mtp_module_index];
+        auto  model_params =
             GptModelInitParams({mtp_params->gpt_weights,
                                 Executor::genModelDescription(mtp_params->model_config_,
                                                               mtp_params->parallelism_config,
@@ -257,7 +259,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 mtp_params->model_config_.attn_config.tokens_per_block,
                                 mtp_params->model_config_.attn_config.kernel_tokens_per_block,
                                 cache_manager,
-                                std::make_optional(0)});
+                                std::make_optional(static_cast<int>(mtp_module_index))});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
             draft_model_.reset(new PyWrappedModel(model_params, params.py_sp_model, false, false));
