@@ -17,10 +17,12 @@ import grpc
 from rtp_llm.dash_sc import app as bg_app
 from rtp_llm.dash_sc.app import (
     DashScShutdownManager,
+    _abort_bind_barrier,
     _create_proxy_servicer_on_loop,
     _derive_echo_prefix_ids,
     _is_proxy_mode_enabled,
     _pre_stop_drain_seconds,
+    _wait_for_bind_barrier,
 )
 from rtp_llm.dash_sc.server import DashScGrpcDrainAioInterceptor, DashScGrpcServer
 
@@ -50,6 +52,75 @@ class _FakeTokenizer:
 class _BaseTok:
     def __init__(self, tok):
         self.tokenizer = tok
+
+
+class BindBarrierTest(TestCase):
+    def test_waits_for_all_workers_before_bind(self) -> None:
+        barrier = Mock()
+        barrier.wait.return_value = 3
+
+        _wait_for_bind_barrier(barrier, rank_id=2, server_id=7)
+
+        barrier.wait.assert_called_once_with(timeout=600.0)
+
+    def test_broken_barrier_fails_startup(self) -> None:
+        barrier = Mock()
+        barrier.wait.side_effect = threading.BrokenBarrierError
+
+        with self.assertRaisesRegex(
+            RuntimeError,
+            "DashSc gRPC bind barrier failed for rank 2 server 7",
+        ):
+            _wait_for_bind_barrier(barrier, rank_id=2, server_id=7)
+
+    def test_abort_is_best_effort(self) -> None:
+        barrier = Mock()
+
+        _abort_bind_barrier(barrier)
+
+        barrier.abort.assert_called_once_with()
+
+    def test_app_waits_at_barrier_before_starting_grpc_server(self) -> None:
+        app = bg_app.DashScApp.__new__(bg_app.DashScApp)
+        app.server_config = SimpleNamespace(
+            dash_sc_grpc_server_port=26818,
+            rank_id=2,
+            frontend_server_id=7,
+        )
+        app.py_env_configs = SimpleNamespace(
+            profiling_debug_logging_config=SimpleNamespace(log_file_backup_count=1)
+        )
+        app._grpc_server = Mock()
+        app._shutdown_manager = Mock()
+        app._shutdown_event = Mock()
+        app._install_signal_handlers = Mock()
+        app._start_enqueue_loop = Mock(return_value=Mock())
+        app.stop = Mock()
+
+        events = []
+        barrier = Mock()
+        barrier.wait.side_effect = lambda **_kwargs: events.append("barrier")
+        app._grpc_server.start_on_loop.side_effect = lambda *_args, **_kwargs: (
+            events.append("start_on_loop")
+        )
+        servicer = Mock()
+
+        def submit(coroutine, _loop):
+            coroutine.close()
+            future = Mock()
+            future.result.return_value = servicer
+            return future
+
+        with patch.object(bg_app, "_is_proxy_mode_enabled", return_value=True), patch(
+            "rtp_llm.dash_sc.app.asyncio.run_coroutine_threadsafe",
+            side_effect=submit,
+        ), patch("rtp_llm.dash_sc.app.kmonitor.init"), patch(
+            "rtp_llm.dash_sc.app.get_log_path", return_value="/tmp"
+        ):
+            app.start(bind_barrier=barrier)
+
+        self.assertEqual(events, ["barrier", "start_on_loop"])
+        app._grpc_server.start_on_loop.assert_called_once()
 
 
 class DeriveEchoPrefixIdsTest(TestCase):
