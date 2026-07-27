@@ -212,11 +212,21 @@ try:
     import librtp_compute_ops
     from .compute_ops import rtp_llm_ops
     # Export LayerKVCache and other types from librtp_compute_ops
-    from librtp_compute_ops import LayerKVCache, KVCache, PyAttentionInputs, PyModelInputs, PyModelOutputs, PyModelInitResources, PyCacheStoreInputs
+    from librtp_compute_ops import (
+        CacheStoreWriter,
+        KVCache,
+        LayerKVCache,
+        PyAttentionInputs,
+        PyCacheStoreInputs,
+        PyModelInitResources,
+        PyModelInputs,
+        PyModelOutputs,
+    )
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
     rtp_llm_ops = EmptyClass
-    LayerKVCache = KVCache = PyAttentionInputs = PyModelInputs = PyModelOutputs = PyModelInitResources = PyCacheStoreInputs = EmptyClass
+    CacheStoreWriter = LayerKVCache = KVCache = PyAttentionInputs = EmptyClass
+    PyModelInputs = PyModelOutputs = PyModelInitResources = PyCacheStoreInputs = EmptyClass
 
 try:
 
