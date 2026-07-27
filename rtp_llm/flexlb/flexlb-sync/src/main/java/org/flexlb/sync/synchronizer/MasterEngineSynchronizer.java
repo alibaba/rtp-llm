@@ -112,7 +112,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
         modelNames.add(IdUtils.getModelNameByServiceId(serviceRoute.getServiceId()));
 
         flexlbConfig.validateEngineTypeConfig(serviceRoute.getAllRoleTypes());
-        Logger.warn("engine type: {}", flexlbConfig.getEngineType());
+        Logger.info("engine type: {}", flexlbConfig.getEngineType());
 
         // Start the periodic sync only after config parse + validation succeed, so a failed
         // construction never leaves a live scheduler thread running against partial state.

@@ -864,23 +864,10 @@ class DefaultRouterTest {
         return new BatchScheduleTarget(ip, port, port + 1);
     }
 
-    private void replaceRoleLoadBalancer(RoleType roleType, LoadBalancer loadBalancer) {
-        try {
-            Field loadBalancerMapField = DefaultRouter.class.getDeclaredField("loadBalancerMap");
-            loadBalancerMapField.setAccessible(true);
-
-            @SuppressWarnings("unchecked")
-            Map<RoleType, LoadBalancer> loadBalancerMap = (Map<RoleType, LoadBalancer>) loadBalancerMapField.get(defaultRouter);
-            loadBalancerMap.put(roleType, loadBalancer);
-        } catch (Exception e) {
-            fail("Failed to replace load balancer: " + e.getMessage());
-        }
-    }
-
     /**
-     * Replace the batch-path LoadBalancer. Mirrors {@link #replaceRoleLoadBalancer} but
-     * operates on the {@code batchLoadBalancer} that {@code /batch_schedule} consults —
-     * independent of the regular {@code loadBalancerMap} that {@code /schedule} uses.
+     * Replace the batch-path LoadBalancer — the {@code batchLoadBalancer} that
+     * {@code /batch_schedule} consults, independent of the regular {@code loadBalancerMap}
+     * that {@code /schedule} uses.
      */
     private void replaceBatchLoadBalancer(LoadBalancer loadBalancer) {
         try {

@@ -58,7 +58,7 @@ public class DefaultRouter implements Router {
         for (RoleType roleType : RoleType.values()) {
             LoadBalanceStrategyEnum strategy = config.getStrategyForRoleType(roleType);
             loadBalancerMap.put(roleType, LoadBalanceStrategyFactory.getLoadBalancer(strategy));
-            Logger.warn("DefaultRouter role={}: schedule={}", roleType, strategy);
+            Logger.info("DefaultRouter role={}: schedule={}", roleType, strategy);
         }
 
         LoadBalanceStrategyEnum batchStrategy = config.getBatchLoadBalanceStrategy();
@@ -68,7 +68,7 @@ public class DefaultRouter implements Router {
             throw new IllegalStateException("batchScheduleMaxCount must be >= 1, got "
                     + batchScheduleMaxCount + "; check BATCH_SCHEDULE_MAX_COUNT");
         }
-        Logger.warn("DefaultRouter batchSchedule={}, batchScheduleMaxCount={}",
+        Logger.info("DefaultRouter batchSchedule={}, batchScheduleMaxCount={}",
                 batchStrategy, batchScheduleMaxCount);
     }
 
@@ -137,12 +137,9 @@ public class DefaultRouter implements Router {
                     "batch_count must be in [1, " + batchScheduleMaxCount + "]");
         }
 
-        // (2) master readiness
+        // (2) Master readiness. The MODEL_ROLE_WORKER_STATUS singleton is never null; readiness is
+        //     expressed by an empty role list, checked identically to /schedule below.
         ModelWorkerStatus workerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
-        if (workerStatus == null) {
-            return BatchScheduleResponse.error(NO_AVAILABLE_WORKER,
-                    "master not ready or MODEL_SERVICE_CONFIG missing");
-        }
 
         // (3) Single-role check against deployment configuration first: the runtime view
         //     can transiently hide a role (workers down or not yet synced), which must not
@@ -197,11 +194,6 @@ public class DefaultRouter implements Router {
         if (balanceContext.getRequest() == null) {
             Logger.error("masterRequest is null");
             return Response.error(StrategyErrorType.INVALID_REQUEST);
-        }
-
-        if (EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS == null) {
-            Logger.error("targetModelRoleWorkerStatus is null");
-            return Response.error(NO_AVAILABLE_WORKER);
         }
 
         return null;
