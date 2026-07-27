@@ -26,47 +26,30 @@ public class QueryWarmerHooker implements AppOnlineHooker, ApplicationWarmupStat
     @Override
     public void afterStartUp() {
         warmupFinished = false;
+        long startTime = System.currentTimeMillis();
         Timer timer = new Timer("query-warmup-timeout", true);
         TimerTask task = new TimerTask() {
             @Override
             public void run() {
-                warmupFinished = true;
-                log.info("max wait time before health online finished");
+                try {
+                    long duration = System.currentTimeMillis() - startTime;
+                    lifecycleReporter.reportWarmerComplete(duration);
+                    log.info("warm up success");
+                } catch (Exception e) {
+                    log.error("warm up error", e);
+                } finally {
+                    warmupFinished = true;
+                    timer.cancel();
+                }
             }
         };
         log.info("max wait time before health online: {} seconds", WARMUP_WAIT_SECONDS);
         timer.schedule(task, TimeUnit.SECONDS.toMillis(WARMUP_WAIT_SECONDS));
-        try {
-            doWarmUp();
-        } finally {
-            timer.cancel();
-        }
     }
 
     @Override
     public int priority() {
         return 0;
-    }
-
-    /**
-     * Warm up
-     */
-    private void doWarmUp() {
-        log.info("do warm up: waiting for {} seconds for dependencies", WARMUP_WAIT_SECONDS);
-        long startTime = System.currentTimeMillis();
-        try {
-            TimeUnit.SECONDS.sleep(WARMUP_WAIT_SECONDS);
-            long duration = System.currentTimeMillis() - startTime;
-            lifecycleReporter.reportWarmerComplete(duration);
-            log.info("warm up success");
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-            log.error("warm up interrupted", e);
-        } catch (Exception e) {
-            log.error("warm up error", e);
-        } finally {
-            warmupFinished = true;
-        }
     }
 
     @Override
