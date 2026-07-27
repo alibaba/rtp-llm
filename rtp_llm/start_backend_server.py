@@ -351,8 +351,9 @@ def multi_rank_start(
     manager = ProcessManager(
         shutdown_timeout=py_env_configs.server_config.shutdown_timeout,
         monitor_interval=py_env_configs.server_config.monitor_interval,
+        allow_defer_first_sigterm=True,
     )
-    manager.set_processes(processes)
+    manager.set_processes(processes, shutdown_group="backend")
     manager.monitor_and_release_processes()
 
     return processes

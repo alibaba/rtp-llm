@@ -437,6 +437,29 @@ class PreStopDrainSecondsTest(TestCase):
 
 
 class DashScGrpcServerStopTest(TestCase):
+    def test_start_raises_when_port_bind_fails(self) -> None:
+        grpc_server = DashScGrpcServer(
+            dash_sc_grpc_config=SimpleNamespace(get_server_config=lambda: {})
+        )
+        fake_server = Mock()
+        fake_server.add_insecure_port.return_value = 0
+
+        async def run():
+            with patch(
+                "rtp_llm.dash_sc.server.grpc.aio.server",
+                return_value=fake_server,
+            ), patch(
+                "rtp_llm.dash_sc.server.predict_v2_pb2_grpc."
+                "add_GRPCInferenceServiceServicer_to_server"
+            ):
+                with self.assertRaisesRegex(RuntimeError, "0\\.0\\.0\\.0:12345"):
+                    await grpc_server.start(12345, servicer=Mock())
+
+        asyncio.run(run())
+        fake_server.add_insecure_port.assert_called_once_with("0.0.0.0:12345")
+        fake_server.start.assert_not_called()
+        self.assertFalse(grpc_server.is_running)
+
     def test_stop_wait_is_bounded_by_remaining_grace(self) -> None:
         grpc_server = DashScGrpcServer()
         grpc_server._server = Mock()

@@ -36,6 +36,7 @@ from rtp_llm.dash_sc.proto import predict_v2_pb2, predict_v2_pb2_grpc
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
 
 DASH_ENDPOINT = "dash://ModelStreamInfer"
+DASH_GRPC_TIMEOUT_SECONDS = 600
 
 
 class DashQueryInfo(BaseModel):
@@ -112,8 +113,6 @@ def _build_sampling_params(gc: Dict[str, Any]) -> SamplingParams:
         "num_return_sequences",
         "random_seed",
         "max_new_think_tokens",
-        "response_format",
-        "structural_tag",
     ):
         if k in gc and gc[k] is not None:
             kwargs[k] = gc[k]
@@ -230,7 +229,9 @@ class DashGrpcComparer(BaseComparer):
             prompt_token_num: Optional[int] = None
             prompt_cached_token_num: Optional[int] = None
             prompt_token_ids: Optional[List[int]] = None
-            for resp in stub.ModelStreamInfer(iter([request])):
+            for resp in stub.ModelStreamInfer(
+                iter([request]), timeout=DASH_GRPC_TIMEOUT_SECONDS
+            ):
                 if resp.error_message:
                     raise SmokeException(
                         QueryStatus.VISIT_FAILED,

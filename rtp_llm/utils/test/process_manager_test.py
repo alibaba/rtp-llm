@@ -8,17 +8,13 @@ from contextlib import contextmanager
 from unittest.mock import Mock, patch
 
 from rtp_llm.utils.process_manager import (
-    BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV,
-    DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS_ENV,
     DEFER_FIRST_SIGTERM_ENV,
     DEFER_FIRST_SIGTERM_SECONDS_ENV,
     DEFER_FIRST_SIGTERM_VALUE,
-    FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV,
-    PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV,
-    PRE_STOP_DRAIN_SIGNAL_ENV,
-    ProcessManager,
+    DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS_ENV,
     SHUTDOWN_TIMEOUT_ENV,
     STOP_TIMEOUT_MS_ENV,
+    ProcessManager,
 )
 
 
@@ -29,6 +25,7 @@ def _watchdog(seconds: float, msg: str = "test exceeded watchdog"):
     Uses SIGALRM (main-thread only); raises AssertionError on timeout so the
     test fails immediately instead of blocking the whole suite.
     """
+
     def handler(_signum: int, _frame: object) -> None:
         raise AssertionError(f"{msg}: exceeded {seconds}s")
 
@@ -336,7 +333,9 @@ class TestProcessManager(unittest.TestCase):
         for proc in procs:
             proc.start()
 
-        # Monitor until completion
+        # Intentional clean child exits are graceful only after shutdown has
+        # been requested. Otherwise, even exit code 0 is a service failure.
+        self.manager.shutdown_requested = True
         self.manager.monitor_and_release_processes()
 
         # All processes should be done
@@ -1034,25 +1033,29 @@ class TestFailureShutdownPaths(unittest.TestCase):
         ordinary frontend children still receive SIGTERM.
         """
 
+        signals = []
+
         class FakeProcess:
             _popen = object()
 
             def __init__(self, name, pid):
                 self.name = name
                 self.pid = pid
+                self._alive = True
 
             def is_alive(self):
-                return True
+                return self._alive
+
+            def terminate(self):
+                signals.append((self.pid, signal.SIGTERM))
+                self._alive = False
 
         frontend = FakeProcess("frontend", 123456)
         backend = FakeProcess("backend", 123457)
         self.manager.add_process(frontend, shutdown_group="frontend")
         self.manager.add_process(backend, shutdown_group="backend")
 
-        signals = []
-        with patch(
-            "os.kill", side_effect=lambda pid, sig: signals.append((pid, sig))
-        ):
+        with patch("os.kill", side_effect=lambda pid, sig: signals.append((pid, sig))):
             self.manager._terminate_processes(drain_timeout=0, staged=False)
 
         self.assertEqual(
@@ -1065,6 +1068,11 @@ class TestFailureShutdownPaths(unittest.TestCase):
 
     def test_backend_shutdown_lingers_after_frontend_drain(self):
         events = []
+        self.manager = ProcessManager(
+            shutdown_timeout=1,
+            monitor_interval=0.01,
+            backend_post_frontend_drain_seconds=0.05,
+        )
 
         class FakeProcess:
             _popen = None
@@ -1086,21 +1094,30 @@ class TestFailureShutdownPaths(unittest.TestCase):
         self.manager.add_process(frontend_proc, shutdown_group="frontend")
         self.manager.add_process(backend_proc, shutdown_group="backend")
 
-        with patch.dict(os.environ, {BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV: "0.05"}):
-            self.manager._terminate_processes(drain_timeout=1)
+        self.manager._terminate_processes(drain_timeout=1)
 
         self.assertEqual([name for name, _ in events], ["frontend", "backend"])
         self.assertGreaterEqual(events[1][1] - events[0][1], 0.04)
 
     def test_pre_stop_signal_drains_frontend_before_sigterm(self):
         events = []
+        self.manager = ProcessManager(
+            shutdown_timeout=1,
+            monitor_interval=0.005,
+            frontend_pre_stop_drain_seconds=0.02,
+            pre_stop_drain_signal=True,
+            backend_post_frontend_drain_seconds=0.02,
+        )
 
         class FakeProcess:
+            _next_pid = 100
+
             def __init__(self, name):
+                type(self)._next_pid += 1
                 self.name = name
-                self.pid = 100 + len(events)
+                self.pid = type(self)._next_pid
                 self._alive = True
-                self._popen = object() if name == "frontend" else None
+                self._popen = object()
 
             def is_alive(self):
                 return self._alive
@@ -1115,21 +1132,17 @@ class TestFailureShutdownPaths(unittest.TestCase):
 
         frontend_proc = FakeProcess("frontend")
         backend_proc = FakeProcess("backend")
-        self.manager.monitor_interval = 0.005
         self.manager.add_process(frontend_proc, shutdown_group="frontend")
         self.manager.add_process(backend_proc, shutdown_group="backend")
 
         def fake_kill(pid, sig):
             if pid == frontend_proc.pid:
                 events.append(("frontend", sig))
+            if pid == backend_proc.pid:
+                events.append(("backend", sig))
+                backend_proc._alive = False
 
-        with patch("os.kill", side_effect=fake_kill), patch.dict(
-            os.environ,
-            {
-                FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV: "0.02",
-                BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV: "0.02",
-            },
-        ):
+        with patch("os.kill", side_effect=fake_kill):
             self.manager._terminate_processes(drain_timeout=1)
 
         self.assertEqual(
@@ -1137,12 +1150,19 @@ class TestFailureShutdownPaths(unittest.TestCase):
             [
                 ("frontend", signal.SIGUSR1),
                 ("frontend", signal.SIGTERM),
-                ("backend", signal.SIGTERM),
+                ("backend", signal.SIGINT),
             ],
         )
 
     def test_pre_stop_signal_sent_to_all_drain_groups_before_sigterm(self):
         events = []
+        self.manager = ProcessManager(
+            shutdown_timeout=1,
+            monitor_interval=0.005,
+            frontend_pre_stop_drain_seconds=0.02,
+            pre_stop_drain_signal=True,
+            backend_post_frontend_drain_seconds=0.02,
+        )
 
         class FakeProcess:
             _next_pid = 100
@@ -1152,7 +1172,7 @@ class TestFailureShutdownPaths(unittest.TestCase):
                 self.name = name
                 self.pid = type(self)._next_pid
                 self._alive = True
-                self._popen = object() if name in ("frontend", "ingress") else None
+                self._popen = object()
 
             def is_alive(self):
                 return self._alive
@@ -1168,7 +1188,6 @@ class TestFailureShutdownPaths(unittest.TestCase):
         frontend_proc = FakeProcess("frontend")
         ingress_proc = FakeProcess("ingress")
         backend_proc = FakeProcess("backend")
-        self.manager.monitor_interval = 0.005
         self.manager.add_process(frontend_proc, shutdown_group="frontend")
         self.manager.add_process(ingress_proc, shutdown_group="ingress")
         self.manager.add_process(backend_proc, shutdown_group="backend")
@@ -1178,14 +1197,11 @@ class TestFailureShutdownPaths(unittest.TestCase):
                 events.append(("frontend", sig))
             if pid == ingress_proc.pid:
                 events.append(("ingress", sig))
+            if pid == backend_proc.pid:
+                events.append(("backend", sig))
+                backend_proc._alive = False
 
-        with patch("os.kill", side_effect=fake_kill), patch.dict(
-            os.environ,
-            {
-                FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV: "0.02",
-                BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV: "0.02",
-            },
-        ):
+        with patch("os.kill", side_effect=fake_kill):
             self.manager._terminate_processes(drain_timeout=1)
 
         self.assertEqual(
@@ -1195,56 +1211,53 @@ class TestFailureShutdownPaths(unittest.TestCase):
                 ("ingress", signal.SIGUSR1),
                 ("frontend", signal.SIGTERM),
                 ("ingress", signal.SIGTERM),
-                ("backend", signal.SIGTERM),
+                ("backend", signal.SIGINT),
             ],
         )
 
     def test_pre_stop_signal_can_be_disabled(self):
+        self.manager = ProcessManager(
+            shutdown_timeout=1,
+            monitor_interval=0.01,
+            frontend_pre_stop_drain_seconds=0.02,
+            pre_stop_drain_signal=False,
+            backend_post_frontend_drain_seconds=0.02,
+        )
         frontend = _FakeProc("frontend", dies_on_terminate=True)
         self.manager.add_process(frontend, shutdown_group="frontend")
         signals = []
 
-        with patch(
-            "os.kill", side_effect=lambda pid, sig: signals.append(sig)
-        ), patch.dict(
-            os.environ,
-            {
-                FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV: "0.02",
-                PRE_STOP_DRAIN_SIGNAL_ENV: "0",
-            },
-        ):
+        with patch("os.kill", side_effect=lambda pid, sig: signals.append(sig)):
             self.manager._terminate_processes(drain_timeout=1)
 
         self.assertNotIn(signal.SIGUSR1, signals)
 
     def test_pre_stop_signal_window_reserves_shutdown_headroom(self):
-        self.manager.shutdown_timeout = 10
-        with patch.dict(
-            os.environ,
-            {
-                FRONTEND_PRE_STOP_DRAIN_SECONDS_ENV: "10",
-                PRE_STOP_DRAIN_HEADROOM_SECONDS_ENV: "2",
-            },
-        ):
-            window_s = self.manager._pre_stop_drain_signal_window_seconds(
-                time.time() + 10
-            )
+        self.manager = ProcessManager(
+            shutdown_timeout=10,
+            monitor_interval=0.01,
+            pre_stop_drain_headroom_seconds=2,
+            backend_post_frontend_drain_seconds=10,
+        )
+        window_s = self.manager._pre_stop_drain_signal_window_seconds(time.time() + 10)
 
         self.assertGreater(window_s, 7.0)
         self.assertLessEqual(window_s, 8.0)
 
     def test_backend_linger_is_clamped_to_shutdown_deadline(self):
+        self.manager = ProcessManager(
+            shutdown_timeout=1,
+            monitor_interval=0.01,
+            backend_post_frontend_drain_seconds=10,
+        )
         frontend = _FakeProc("frontend")
         backend = _FakeProc("backend")
         self.manager.add_process(frontend, shutdown_group="frontend")
         self.manager.add_process(backend, shutdown_group="backend")
 
         sleeps = []
-        with patch.dict(os.environ, {BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV: "10"}):
-            with patch("time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
-                self.manager._linger_before_deferred_group_shutdown(
-                    time.time() + 0.05
-                )
+        with patch("time.sleep", side_effect=lambda seconds: sleeps.append(seconds)):
+            self.manager._linger_before_deferred_group_shutdown(time.time() + 0.05)
 
         self.assertEqual(len(sleeps), 1)
         self.assertGreater(sleeps[0], 0)
@@ -1332,8 +1345,9 @@ class TestFailureShutdownPaths(unittest.TestCase):
             if pid == frontend.pid:
                 frontend._alive = False
 
-        with patch("os.kill", side_effect=fake_kill), _watchdog(
-            5, "failure path with dead backend regressed"
+        with (
+            patch("os.kill", side_effect=fake_kill),
+            _watchdog(5, "failure path with dead backend regressed"),
         ):
             self.manager._monitor_processes_health()
 
@@ -1357,8 +1371,9 @@ class TestFailureShutdownPaths(unittest.TestCase):
                 frontend._alive = False
 
         t0 = time.time()
-        with patch("os.kill", side_effect=fake_kill), _watchdog(
-            5, "failure path with alive backend regressed"
+        with (
+            patch("os.kill", side_effect=fake_kill),
+            _watchdog(5, "failure path with alive backend regressed"),
         ):
             self.manager._monitor_processes_health()
         elapsed = time.time() - t0
@@ -1375,9 +1390,7 @@ class TestFailureShutdownPaths(unittest.TestCase):
         then force-kills the non-draining frontend after POST_KILL_REAP_WINDOW."""
         frontend = _FakeProc("frontend")  # ignores SIGTERM
         # Backend dies 0.1s into drain wait with non-zero exitcode (crash).
-        backend = _FakeProc(
-            "backend", dies_after=time.time() + 0.1, exitcode=1
-        )
+        backend = _FakeProc("backend", dies_after=time.time() + 0.1, exitcode=1)
         self.manager.add_process(frontend, shutdown_group="frontend")
         self.manager.add_process(backend, shutdown_group="backend")
         self.manager.shutdown_requested = True  # mirror SIGTERM handler
@@ -1389,8 +1402,9 @@ class TestFailureShutdownPaths(unittest.TestCase):
             if pid == frontend.pid:
                 frontend._alive = False
 
-        with patch("os.kill", side_effect=fake_kill), _watchdog(
-            15, "crash-mid-drain regressed: force-kill never fired"
+        with (
+            patch("os.kill", side_effect=fake_kill),
+            _watchdog(15, "crash-mid-drain regressed: force-kill never fired"),
         ):
             self.manager._monitor_processes_health()
 
@@ -1409,9 +1423,7 @@ class TestFailureShutdownPaths(unittest.TestCase):
         because they ignore SIGTERM."""
         frontend = _FakeProc("frontend")  # ignores SIGTERM
         # Backend exits cleanly 0.1s into drain wait.
-        backend = _FakeProc(
-            "backend", dies_after=time.time() + 0.1, exitcode=0
-        )
+        backend = _FakeProc("backend", dies_after=time.time() + 0.1, exitcode=0)
         self.manager.add_process(frontend, shutdown_group="frontend")
         self.manager.add_process(backend, shutdown_group="backend")
         self.manager.shutdown_requested = True  # mirror SIGTERM handler
@@ -1423,8 +1435,9 @@ class TestFailureShutdownPaths(unittest.TestCase):
             if pid == frontend.pid:
                 frontend._alive = False
 
-        with patch("os.kill", side_effect=fake_kill), _watchdog(
-            15, "clean-exit-mid-drain regressed: drain never aborted"
+        with (
+            patch("os.kill", side_effect=fake_kill),
+            _watchdog(15, "clean-exit-mid-drain regressed: drain never aborted"),
         ):
             self.manager._monitor_processes_health()
 
@@ -1452,8 +1465,9 @@ class TestFailureShutdownPaths(unittest.TestCase):
             if pid == frontend.pid:
                 frontend._alive = False
 
-        with patch("os.kill", side_effect=fake_kill), _watchdog(
-            15, "clean SIGTERM backend exit regressed"
+        with (
+            patch("os.kill", side_effect=fake_kill),
+            _watchdog(15, "clean SIGTERM backend exit regressed"),
         ):
             self.manager._monitor_processes_health()
 
@@ -1465,17 +1479,16 @@ class TestFailureShutdownPaths(unittest.TestCase):
         """No backend group registered. SIGTERM lets frontend drain (here:
         dies after 0.2s, well under shutdown_timeout). No SIGKILL, no failure."""
         # Frontend exits cleanly on SIGTERM after a short fake drain.
-        frontend = _FakeProc(
-            "frontend", dies_after=time.time() + 0.2
-        )
+        frontend = _FakeProc("frontend", dies_after=time.time() + 0.2)
         self.manager.add_process(frontend, shutdown_group="frontend")
         # No backend at all.
         self.manager.shutdown_requested = True
 
         kills = []
-        with patch(
-            "os.kill", side_effect=lambda pid, sig: kills.append((pid, sig))
-        ), _watchdog(5, "frontend-only graceful drain regressed"):
+        with (
+            patch("os.kill", side_effect=lambda pid, sig: kills.append((pid, sig))),
+            _watchdog(5, "frontend-only graceful drain regressed"),
+        ):
             self.manager._monitor_processes_health()
 
         self.assertFalse(self.manager.failure_detected)
@@ -1500,8 +1513,9 @@ class TestFailureShutdownPaths(unittest.TestCase):
             if pid == frontend.pid:
                 frontend._alive = False
 
-        with patch("os.kill", side_effect=fake_kill), _watchdog(
-            5, "frontend-only force kill regressed"
+        with (
+            patch("os.kill", side_effect=fake_kill),
+            _watchdog(5, "frontend-only force kill regressed"),
         ):
             self.manager._monitor_processes_health()
 
@@ -1515,6 +1529,12 @@ class TestFailureShutdownPaths(unittest.TestCase):
         """Graceful path must wait for frontend to drain before SIGTERM'ing
         backend — that's the whole point of staged shutdown. Verifies the wait
         actually happens by checking backend SIGTERM timestamp vs t0."""
+        self.manager = ProcessManager(
+            shutdown_timeout=5,
+            monitor_interval=0.01,
+            backend_post_frontend_drain_seconds=0,
+        )
+        self.manager.POST_KILL_REAP_WINDOW = 0.1
         DRAIN_DELAY = 0.3  # frontend drains after this long
         frontend = _FakeProc("frontend", dies_after=time.time() + DRAIN_DELAY)
         backend = _FakeProc("backend", dies_on_terminate=True)
@@ -1527,15 +1547,15 @@ class TestFailureShutdownPaths(unittest.TestCase):
 
         backend.terminate = tracked  # type: ignore[method-assign]
 
-        self.manager.shutdown_timeout = 5  # plenty of headroom for the drain
         self.manager.add_process(frontend, shutdown_group="frontend")
         self.manager.add_process(backend, shutdown_group="backend")
         self.manager.shutdown_requested = True  # mirror SIGTERM handler
 
         t0 = time.time()
-        with patch("os.kill", side_effect=lambda pid, sig: None), patch.dict(
-            os.environ, {BACKEND_POST_FRONTEND_DRAIN_SECONDS_ENV: "0"}
-        ), _watchdog(5, "graceful drain timing regressed"):
+        with (
+            patch("os.kill", side_effect=lambda pid, sig: None),
+            _watchdog(5, "graceful drain timing regressed"),
+        ):
             self.manager._monitor_processes_health()
 
         self.assertEqual(len(backend_terminated_at), 1, "backend SIGTERM'd once")
@@ -1566,9 +1586,10 @@ class TestFailureShutdownPaths(unittest.TestCase):
         self.manager.shutdown_requested = True
 
         kills = []
-        with patch(
-            "os.kill", side_effect=lambda pid, sig: kills.append((pid, sig))
-        ), _watchdog(3, "backend shutdown budget was squeezed by frontend drain"):
+        with (
+            patch("os.kill", side_effect=lambda pid, sig: kills.append((pid, sig))),
+            _watchdog(3, "backend shutdown budget was squeezed by frontend drain"),
+        ):
             self.manager._monitor_processes_health()
 
         self.assertEqual(
@@ -1595,12 +1616,14 @@ class TestFailureShutdownPaths(unittest.TestCase):
         self.manager.shutdown_requested = True
 
         kills = []
-        with patch.dict(
-            os.environ,
-            {DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS_ENV: "1"},
-        ), patch(
-            "os.kill", side_effect=lambda pid, sig: kills.append((pid, sig))
-        ), _watchdog(3, "backend-only deferred headroom regressed"):
+        with (
+            patch.dict(
+                os.environ,
+                {DEFERRED_GROUP_SHUTDOWN_HEADROOM_SECONDS_ENV: "1"},
+            ),
+            patch("os.kill", side_effect=lambda pid, sig: kills.append((pid, sig))),
+            _watchdog(3, "backend-only deferred headroom regressed"),
+        ):
             self.manager._monitor_processes_health()
 
         self.assertEqual(kills, [])
@@ -1623,8 +1646,11 @@ class TestFailureShutdownPaths(unittest.TestCase):
                 frontend._alive = False
 
         t0 = time.time()
-        with patch("os.kill", side_effect=fake_kill), _watchdog(
-            3, "failure path waited on shutdown_timeout instead of skipping drain"
+        with (
+            patch("os.kill", side_effect=fake_kill),
+            _watchdog(
+                3, "failure path waited on shutdown_timeout instead of skipping drain"
+            ),
         ):
             self.manager._monitor_processes_health()
         elapsed = time.time() - t0
@@ -1654,8 +1680,9 @@ class TestFailureShutdownPaths(unittest.TestCase):
                 backend._alive = False
 
         t0 = time.time()
-        with patch("os.kill", side_effect=fake_kill), _watchdog(
-            3, "failure path waited on backend graceful headroom"
+        with (
+            patch("os.kill", side_effect=fake_kill),
+            _watchdog(3, "failure path waited on backend graceful headroom"),
         ):
             self.manager._monitor_processes_health()
         elapsed = time.time() - t0
@@ -1679,9 +1706,10 @@ class TestFailureShutdownPaths(unittest.TestCase):
 
         kills = []
         t0 = time.time()
-        with patch(
-            "os.kill", side_effect=lambda pid, sig: kills.append((pid, sig))
-        ), _watchdog(5, "default backend group graceful wait regressed"):
+        with (
+            patch("os.kill", side_effect=lambda pid, sig: kills.append((pid, sig))),
+            _watchdog(5, "default backend group graceful wait regressed"),
+        ):
             self.manager._monitor_processes_health()
         elapsed = time.time() - t0
 
@@ -1770,9 +1798,10 @@ class TestFailureShutdownPaths(unittest.TestCase):
         self.manager.shutdown_requested = True  # like SIGTERM handler
 
         kills = []
-        with patch(
-            "os.kill", side_effect=lambda pid, sig: kills.append((pid, sig))
-        ), _watchdog(5, "graceful path regressed"):
+        with (
+            patch("os.kill", side_effect=lambda pid, sig: kills.append((pid, sig))),
+            _watchdog(5, "graceful path regressed"),
+        ):
             self.manager._monitor_processes_health()
 
         self.assertNotIn(signal.SIGKILL, [sig for _, sig in kills])

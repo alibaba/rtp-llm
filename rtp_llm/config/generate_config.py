@@ -38,8 +38,10 @@ def _response_format_is_grammar(rf: Optional[Union[str, Dict[str, Any]]]) -> boo
     if isinstance(rf, str):
         try:
             rf = json.loads(rf)
-        except Exception:
-            return True
+        except json.JSONDecodeError as e:
+            if rf != "text":
+                logging.warning("invalid response_format json string: %s", e)
+            return False
     if not isinstance(rf, dict):
         return False
     return rf.get("type") in _GRAMMAR_RESPONSE_FORMAT_TYPES

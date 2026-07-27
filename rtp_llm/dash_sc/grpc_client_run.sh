@@ -47,9 +47,9 @@ else
 fi
 export PYTHONPATH="$_REPO_ROOT${PYTHONPATH:+:$PYTHONPATH}"
 
-PYTHON="${PYTHON:-/opt/conda310/bin/python3}"
+PYTHON="${PYTHON:-python3}"
 GRPC_ADDR="${GRPC_ADDR:-127.0.0.1:8096}"
-CKPT_PATH="${CKPT_PATH:-/home/xinfei.sxf/work/Qwen2-0.5B}"
+CKPT_PATH="${CKPT_PATH:-}"
 MODEL_TYPE="${MODEL_TYPE:-qwen_2}"
 # PROMPT="${PROMPT:-hello, what is your name}"
 PROMPT="${PROMPT:-今天中午吃什么？}"
@@ -72,6 +72,11 @@ TOOL_CALL_STRUCTURAL_TAG="${TOOL_CALL_STRUCTURAL_TAG:-${STRUCTURAL_TAG:-}}"
 ENABLE_THINKING="${ENABLE_THINKING:-}"
 GRPC_CLIENT_LOOPS="${GRPC_CLIENT_LOOPS:-1}"
 GRPC_CLIENT_DELAY_SEC="${GRPC_CLIENT_DELAY_SEC:-0}"
+
+if [[ -z "$CKPT_PATH" ]]; then
+  echo "error: CKPT_PATH is required. Example: export CKPT_PATH=/path/to/model" >&2
+  exit 1
+fi
 
 run_once() {
   local idx="$1"

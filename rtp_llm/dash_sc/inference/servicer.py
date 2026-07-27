@@ -29,7 +29,11 @@ from typing import (
 
 import torch
 
-from rtp_llm.config.exceptions import ExceptionCategory, ExceptionType, FtRuntimeException
+from rtp_llm.config.exceptions import (
+    ExceptionCategory,
+    ExceptionType,
+    FtRuntimeException,
+)
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
@@ -44,8 +48,8 @@ from rtp_llm.dash_sc.codec import (
     DASH_ERROR_UNSUPPORTED,
     DashErrorSpec,
     DashScParameterError,
-    LLMFinishReason,
     DashScRequestControls,
+    LLMFinishReason,
     SamplingParams,
     _token_ids_list_from_generate_output,
     build_dash_error_response,
@@ -154,8 +158,9 @@ def _headers_from_invocation_metadata(
 
 
 class _InitialMetadataSender(Protocol):
-    def send_initial_metadata(self, metadata: tuple[tuple[str, str], ...]) -> object:
-        ...
+    def send_initial_metadata(
+        self, metadata: tuple[tuple[str, str], ...]
+    ) -> object: ...
 
 
 async def _send_partial_response_metadata(context: _InitialMetadataSender) -> None:
@@ -165,8 +170,7 @@ async def _send_partial_response_metadata(context: _InitialMetadataSender) -> No
 
 
 class _TextEncoder(Protocol):
-    def encode(self, text: str, *args: object, **kwargs: object) -> list[int]:
-        ...
+    def encode(self, text: str, *args: object, **kwargs: object) -> list[int]: ...
 
 
 def _positive_int(value: object) -> Optional[int]:
@@ -216,12 +220,11 @@ def _derive_max_token_id(tokenizer: BaseTokenizer | None) -> Optional[int]:
 def _hf_tokenizer(tokenizer: BaseTokenizer | None) -> _TextEncoder | None:
     if tokenizer is None:
         return None
-    return tokenizer.get_real_tokenizer()
+    return getattr(tokenizer, "tokenizer", tokenizer)
 
 
 class _BackendVisitor(Protocol):
-    async def enqueue(self, input: GenerateInput) -> AsyncIterator[GenerateOutputs]:
-        ...
+    async def enqueue(self, input: GenerateInput) -> AsyncIterator[GenerateOutputs]: ...
 
 
 def _decode_env_tag(value: str) -> str:
@@ -325,9 +328,7 @@ def build_think_runtime(
     the "missing tokenizer" fallback shape the previous derive helpers produced.
     """
     eos_tid = (
-        eos_token_id
-        if eos_token_id is not None
-        else _tokenizer_eos_token_id(tokenizer)
+        eos_token_id if eos_token_id is not None else _tokenizer_eos_token_id(tokenizer)
     )
     max_tid = (
         max_token_id if max_token_id is not None else _derive_max_token_id(tokenizer)
@@ -351,9 +352,7 @@ def build_think_runtime(
         _encode_tag(tokenizer, think_start_tag + _EMPTY_THINK_BODY + think_end_tag)
     )
     close_token_id = int(eos_tokens[0]) if eos_tokens else None
-    phase2_enabled = _uses_dash_sc_empty_think_phase2(model_type) and bool(
-        empty_tokens
-    )
+    phase2_enabled = _uses_dash_sc_empty_think_phase2(model_type) and bool(empty_tokens)
     return _ThinkRuntime(
         bos_tokens=bos_tokens,
         eos_tokens=eos_tokens,
@@ -500,9 +499,7 @@ def _apply_dash_sc_controls_to_generate_config(
         request_max_think = request_controls.max_new_think_tokens
     if request_max_think is not None:
         max_think = int(request_max_think)
-        generate_config.max_thinking_tokens = (
-            _INT32_MAX if max_think < 0 else max_think
-        )
+        generate_config.max_thinking_tokens = _INT32_MAX if max_think < 0 else max_think
     # Only the selected budget disables thinking; ``max_think_length`` may
     # intentionally override a zero ``max_new_think_tokens`` alias.
     disable_by_budget = request_max_think == 0
@@ -1343,9 +1340,17 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     request.model_name,
                 )
                 try:
-                    input_ids_list, sampling, request_controls = parse_dash_sc_grpc_request(
-                        request
+                    input_ids_list, sampling, request_controls = (
+                        parse_dash_sc_grpc_request(request)
                     )
+                    if sampling is not None and (
+                        sampling.response_format is not None
+                        or sampling.json_format
+                        or sampling.structural_tag is not None
+                    ):
+                        raise DashScParameterError(
+                            "structured output/grammar controls are not supported yet"
+                        )
                 except DashScParameterError as e:
                     if first_request:
                         record.record_request_frame(request)

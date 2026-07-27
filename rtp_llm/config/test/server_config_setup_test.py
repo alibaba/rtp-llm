@@ -8,7 +8,7 @@ from rtp_llm.config.server_config_setup import (
     set_parallelism_config,
     setup_and_configure_server,
 )
-from rtp_llm.ops import RoleType
+from rtp_llm.ops import NcclCommConfig, RoleType
 from rtp_llm.server.server_args.server_args import setup_args
 
 
@@ -96,6 +96,42 @@ class GenerateConfigTest(TestCase):
 
         self.assertEqual(engine_config.pd_sep_config.role_type, RoleType.PREFILL)
         self.assertEqual(engine_config.parallelism_config.role_type, RoleType.PREFILL)
+
+    def test_engine_config_minimal_dataclass_construction_from_py_env_configs(self):
+        py_env_configs = PyEnvConfigs()
+
+        engine_config = EngineConfig(
+            parallelism_config=py_env_configs.parallelism_config,
+            runtime_config=py_env_configs.runtime_config,
+            nccl_comm_config=NcclCommConfig(
+                nccl_ip="",
+                tp_nccl_port=0,
+                dp_tp_nccl_port=0,
+                ffn_tp_nccl_port=0,
+            ),
+            server_config=py_env_configs.server_config,
+            pd_sep_config=py_env_configs.pd_separation_config,
+            concurrency_config=py_env_configs.concurrency_config,
+            fmha_config=py_env_configs.fmha_config,
+            kv_cache_config=py_env_configs.kv_cache_config,
+            profiling_debug_logging_config=(
+                py_env_configs.profiling_debug_logging_config
+            ),
+            hw_kernel_config=py_env_configs.py_hw_kernel_config,
+            device_resource_config=py_env_configs.device_resource_config,
+            moe_config=py_env_configs.moe_config,
+            model_specific_config=py_env_configs.model_specific_config,
+            sp_config=py_env_configs.sp_config,
+            cache_store_config=py_env_configs.cache_store_config,
+            misc_config=py_env_configs.misc_config.misc_config,
+            arpc_config=py_env_configs.arpc_config,
+            grpc_config=py_env_configs.grpc_config,
+            dash_sc_grpc_config=py_env_configs.dash_sc_grpc_config,
+            grammar_config=py_env_configs.grammar_config,
+            load_config=py_env_configs.load_config,
+        )
+
+        self.assertIs(engine_config.grammar_config, py_env_configs.grammar_config)
 
     def test_set_parallelism_config_propagates_prefill_cp_cache_fields(self):
         py_env_configs = PyEnvConfigs()

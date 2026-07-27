@@ -219,7 +219,10 @@ class DashScGrpcServer:
         server = grpc.aio.server(options=opts, interceptors=interceptors)
 
         predict_v2_pb2_grpc.add_GRPCInferenceServiceServicer_to_server(servicer, server)
-        server.add_insecure_port(f"0.0.0.0:{port}")
+        bind_addr = f"0.0.0.0:{port}"
+        bound_port = server.add_insecure_port(bind_addr)
+        if bound_port == 0:
+            raise RuntimeError(f"[DashScGrpc] failed to bind {bind_addr}")
         await server.start()
         self._server = server
         self._servicer = servicer if isinstance(servicer, _ClosableServicer) else None

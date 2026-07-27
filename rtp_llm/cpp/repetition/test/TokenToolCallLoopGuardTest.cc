@@ -1,16 +1,10 @@
 #include "rtp_llm/cpp/repetition/TokenToolCallLoopGuard.h"
 
-#include <cstdlib>
-#include <iostream>
-#include <vector>
+#include "gtest/gtest.h"
 
-#define RTP_EXPECT(expr)                                                                                               \
-    do {                                                                                                               \
-        if (!(expr)) {                                                                                                 \
-            std::cerr << __FILE__ << ":" << __LINE__ << " check failed: " << #expr << std::endl;                       \
-            std::abort();                                                                                              \
-        }                                                                                                              \
-    } while (false)
+#include <initializer_list>
+#include <stdexcept>
+#include <vector>
 
 namespace rtp_llm {
 namespace {
@@ -34,47 +28,58 @@ std::vector<int> withFillers(std::initializer_list<std::vector<int>> spans) {
     return ids;
 }
 
-void testInputFourPlusOutputHitsThresholdFive() {
+TEST(TokenToolCallLoopGuardTest, InputFourPlusOutputHitsThresholdFive) {
+    const auto result = checkToolCallLoop(
+        withFillers({toolA(), toolA(), toolA(), toolA()}), toolA(), {{1, 2}}, {{3, 4}}, 5, 16);
+
+    EXPECT_TRUE(result.hit);
+    EXPECT_EQ(result.repeat_count, 5);
+    EXPECT_EQ(result.current_span_tokens, 5);
+}
+
+TEST(TokenToolCallLoopGuardTest, InputThreePlusOutputDoesNotHitThresholdFive) {
     const auto result =
-        checkToolCallLoop(withFillers({toolA(), toolA(), toolA(), toolA()}), toolA(), {{1, 2}}, {{3, 4}}, 5, 16);
+        checkToolCallLoop(withFillers({toolA(), toolA(), toolA()}), toolA(), {{1, 2}}, {{3, 4}}, 5, 16);
 
-    RTP_EXPECT(result.hit);
-    RTP_EXPECT(result.repeat_count == 5);
-    RTP_EXPECT(result.current_span_tokens == 5);
+    EXPECT_FALSE(result.hit);
+    EXPECT_EQ(result.repeat_count, 4);
 }
 
-void testInputThreePlusOutputDoesNotHitThresholdFive() {
-    const auto result = checkToolCallLoop(withFillers({toolA(), toolA(), toolA()}), toolA(), {{1, 2}}, {{3, 4}}, 5, 16);
-
-    RTP_EXPECT(!result.hit);
-    RTP_EXPECT(result.repeat_count == 4);
-}
-
-void testBrokenHistoryTailDoesNotAttachEarlierMatches() {
+TEST(TokenToolCallLoopGuardTest, BrokenHistoryTailDoesNotAttachEarlierMatches) {
     const auto result = checkToolCallLoop(
         withFillers({toolA(), toolA(), toolA(), toolA(), toolB()}), toolA(), {{1, 2}}, {{3, 4}}, 5, 16);
 
-    RTP_EXPECT(!result.hit);
-    RTP_EXPECT(result.repeat_count == 1);
+    EXPECT_FALSE(result.hit);
+    EXPECT_EQ(result.repeat_count, 1);
 }
 
-void testOutputSameSpanContinuesHistoryChain() {
+TEST(TokenToolCallLoopGuardTest, OutputSameSpanContinuesHistoryChain) {
     const auto result = checkToolCallLoop(
-        withFillers({toolA(), toolA(), toolA(), toolA()}), withFillers({toolA(), toolA()}), {{1, 2}}, {{3, 4}}, 5, 16);
+        withFillers({toolA(), toolA(), toolA(), toolA()}),
+        withFillers({toolA(), toolA()}),
+        {{1, 2}},
+        {{3, 4}},
+        5,
+        16);
 
-    RTP_EXPECT(result.hit);
-    RTP_EXPECT(result.repeat_count == 6);
+    EXPECT_TRUE(result.hit);
+    EXPECT_EQ(result.repeat_count, 6);
 }
 
-void testOutputDifferentSpanBreaksHistoryChain() {
+TEST(TokenToolCallLoopGuardTest, OutputDifferentSpanBreaksHistoryChain) {
     const auto result = checkToolCallLoop(
-        withFillers({toolA(), toolA(), toolA(), toolA()}), withFillers({toolB(), toolA()}), {{1, 2}}, {{3, 4}}, 5, 16);
+        withFillers({toolA(), toolA(), toolA(), toolA()}),
+        withFillers({toolB(), toolA()}),
+        {{1, 2}},
+        {{3, 4}},
+        5,
+        16);
 
-    RTP_EXPECT(!result.hit);
-    RTP_EXPECT(result.repeat_count == 1);
+    EXPECT_FALSE(result.hit);
+    EXPECT_EQ(result.repeat_count, 1);
 }
 
-void testOverflowSpanBreaksHistoryChain() {
+TEST(TokenToolCallLoopGuardTest, OverflowSpanBreaksHistoryChain) {
     std::vector<int> output = {1, 2, 10, 11, 12, 1000};
     const auto       tail   = toolA();
     output.insert(output.end(), tail.begin(), tail.end());
@@ -82,28 +87,54 @@ void testOverflowSpanBreaksHistoryChain() {
     const auto result =
         checkToolCallLoop(withFillers({toolA(), toolA(), toolA(), toolA()}), output, {{1, 2}}, {{3, 4}}, 5, 5);
 
-    RTP_EXPECT(!result.hit);
-    RTP_EXPECT(result.repeat_count == 1);
+    EXPECT_FALSE(result.hit);
+    EXPECT_EQ(result.repeat_count, 1);
 }
 
-void testNoCompletedOutputSpanDoesNotHit() {
-    const auto result =
-        checkToolCallLoop(withFillers({toolA(), toolA(), toolA(), toolA()}), {1, 2, 10}, {{1, 2}}, {{3, 4}}, 5, 16);
+TEST(TokenToolCallLoopGuardTest, NoCompletedOutputSpanDoesNotHit) {
+    const auto result = checkToolCallLoop(
+        withFillers({toolA(), toolA(), toolA(), toolA()}), {1, 2, 10}, {{1, 2}}, {{3, 4}}, 5, 16);
 
-    RTP_EXPECT(!result.hit);
+    EXPECT_FALSE(result.hit);
+}
+
+TEST(TokenToolCallLoopGuardTest, EmptyOutputIdsDoesNotHit) {
+    const auto result =
+        checkToolCallLoop(withFillers({toolA(), toolA(), toolA(), toolA()}), {}, {{1, 2}}, {{3, 4}}, 5, 16);
+
+    EXPECT_FALSE(result.hit);
+    EXPECT_EQ(result.repeat_count, 0);
+    EXPECT_EQ(result.current_span_tokens, 0);
+    EXPECT_EQ(result.marker_index, -1);
+}
+
+TEST(TokenToolCallLoopGuardTest, SharedPrefixBeginMarkersPreferLongestAndReportMarkerIndex) {
+    const std::vector<int> long_tool = {1, 2, 9, 20, 5, 6};
+    const auto result = checkToolCallLoop(
+        withFillers({long_tool, long_tool, long_tool, long_tool}),
+        long_tool,
+        {{1, 2}, {1, 2, 9}},
+        {{3, 4}, {5, 6}},
+        5,
+        16);
+
+    EXPECT_TRUE(result.hit);
+    EXPECT_EQ(result.repeat_count, 5);
+    EXPECT_EQ(result.current_span_tokens, 6);
+    EXPECT_EQ(result.marker_index, 1);
+}
+
+TEST(TokenToolCallLoopGuardTest, ThrowsOnMarkerListSizeMismatch) {
+    EXPECT_THROW(checkToolCallLoop({}, {}, {{1, 2}}, {}, 5, 16), std::invalid_argument);
+}
+
+TEST(TokenToolCallLoopGuardTest, ThrowsOnEmptyBeginMarker) {
+    EXPECT_THROW(checkToolCallLoop({}, {}, {{}}, {{3, 4}}, 5, 16), std::invalid_argument);
+}
+
+TEST(TokenToolCallLoopGuardTest, ThrowsOnEmptyEndMarker) {
+    EXPECT_THROW(checkToolCallLoop({}, {}, {{1, 2}}, {{}}, 5, 16), std::invalid_argument);
 }
 
 }  // namespace
 }  // namespace rtp_llm
-
-int main() {
-    rtp_llm::testInputFourPlusOutputHitsThresholdFive();
-    rtp_llm::testInputThreePlusOutputDoesNotHitThresholdFive();
-    rtp_llm::testBrokenHistoryTailDoesNotAttachEarlierMatches();
-    rtp_llm::testOutputSameSpanContinuesHistoryChain();
-    rtp_llm::testOutputDifferentSpanBreaksHistoryChain();
-    rtp_llm::testOverflowSpanBreaksHistoryChain();
-    rtp_llm::testNoCompletedOutputSpanDoesNotHit();
-    std::cout << "TokenToolCallLoopGuard tests passed\n";
-    return 0;
-}

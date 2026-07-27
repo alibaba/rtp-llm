@@ -54,6 +54,14 @@ class TestStructuredOutputPassthrough(unittest.TestCase):
             with self.subTest(value=value):
                 GenerateConfig(response_format=value).validate()
 
+    def test_plain_text_response_format_allows_beam_and_multi_return(self):
+        for value in ({"type": "text"}, '{"type":"text"}', "text", "not-json"):
+            with self.subTest(value=value):
+                GenerateConfig(response_format=value, num_beams=2).validate()
+                GenerateConfig(
+                    response_format=value, num_return_sequences=2
+                ).validate()
+
 
 class TestClampDivergeStartCombo(unittest.TestCase):
 

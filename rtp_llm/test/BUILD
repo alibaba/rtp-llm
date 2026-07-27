@@ -132,6 +132,17 @@ py_test(
 )
 
 py_test(
+    name = "start_server_failure_test",
+    srcs = [
+        "start_server_failure_test.py",
+    ],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'H20'},
+)
+
+py_test(
     name = "prompt_scoring_test",
     srcs = [
         "prompt_scoring_test.py",
