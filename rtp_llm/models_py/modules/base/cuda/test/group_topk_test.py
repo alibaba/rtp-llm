@@ -175,6 +175,29 @@ class MLATest(TestCase):
             ):
                 self._run_mla_test(*params)
 
+    def test_non_finite_scores_use_safe_fallback(self):
+        num_experts = self.NUM_EXPERT[0]
+        topk = self.TOPK[0]
+        scores = torch.full((1, num_experts), float("nan"), dtype=torch.float32)
+        scores_with_bias = torch.rand((1, num_experts), dtype=torch.float32)
+        output = torch.empty((1, topk), dtype=torch.float32)
+        indices = torch.empty((1, topk), dtype=torch.int64)
+
+        GroupTopK().group_topk_op.forward(
+            output,
+            indices,
+            scores,
+            scores_with_bias,
+            self.NUM_EXPERT_GROUP[0],
+            self.TOPK_GROUP[0],
+            topk,
+            True,
+            2.5,
+        )
+
+        torch.testing.assert_close(indices, torch.arange(topk).unsqueeze(0))
+        torch.testing.assert_close(output, torch.full_like(output, 1.0 / topk))
+
 
 if __name__ == "__main__":
     main()
