@@ -9,6 +9,7 @@ import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
+import org.flexlb.enums.KvCacheGroupMode;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -74,7 +75,9 @@ public class LocalStandbyCacheManager {
         if (workerStatuses == null || workerStatuses.isEmpty()) {
             return Collections.emptyMap();
         }
-        return calculatePrefixMatchBlockCounts(blockCacheKeys, workerStatuses);
+        Map<String, Integer> prefixMatches = calculatePrefixMatchBlockCounts(blockCacheKeys, workerStatuses);
+        applyPdFusionMambaRollback(prefixMatches, workerStatuses, roleType);
+        return prefixMatches;
     }
 
     private Map<String, Integer> calculatePrefixMatchBlockCounts(List<Long> blockCacheKeys, Collection<WorkerStatus> workerStatuses) {
@@ -128,6 +131,26 @@ public class LocalStandbyCacheManager {
             prefixMatches.put(candidateWorker, blockCacheKeys.size());
         }
         return prefixMatches;
+    }
+
+    private void applyPdFusionMambaRollback(Map<String, Integer> prefixMatches,
+                                            Collection<WorkerStatus> workerStatuses,
+                                            RoleType roleType) {
+        if (roleType != RoleType.PDFUSION) {
+            return;
+        }
+
+        // Keep Local Standby consistent with KVCM's WITH_MAMBA prefix-match semantics.
+        for (WorkerStatus workerStatus : workerStatuses) {
+            if (workerStatus == null || workerStatus.getKvCacheGroupMode() != KvCacheGroupMode.WITH_MAMBA) {
+                continue;
+            }
+            String workerIpPort = workerStatus.getIpPort();
+            Integer matchedBlocks = prefixMatches.get(workerIpPort);
+            if (matchedBlocks != null && matchedBlocks > 0) {
+                prefixMatches.put(workerIpPort, matchedBlocks - 1);
+            }
+        }
     }
 
     public void addRoutedRequestBlocks(String workerIpPort, List<Long> blockCacheKeys) {

@@ -12,6 +12,7 @@ import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
+import org.flexlb.enums.KvCacheGroupMode;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -47,6 +48,63 @@ class LocalStandbyCacheManagerTest {
         assertEquals(
                 Map.of(worker1.getIpPort(), 1, worker2.getIpPort(), 1),
                 manager.findMatchingEngines(List.of(11L), RoleType.PREFILL, "default"));
+        manager.shutdown();
+    }
+
+    @Test
+    void rollsBackOneBlockForPdFusionWithMamba() {
+        WorkerStatusProvider workerStatusProvider = mock(WorkerStatusProvider.class);
+        WorkerStatus worker = worker("10.0.0.1", 8080);
+        worker.setKvCacheGroupMode(KvCacheGroupMode.WITH_MAMBA);
+        when(workerStatusProvider.getWorkerStatuses(RoleType.PDFUSION, "default"))
+                .thenReturn(List.of(worker));
+        LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
+                new CacheMatchConfiguration(modelMetaConfig(300_000)),
+                workerStatusProvider,
+                mock(CacheMetricsReporter.class));
+
+        manager.addRoutedRequestBlocks(worker.getIpPort(), List.of(11L, 22L, 33L));
+
+        assertEquals(
+                2,
+                manager.findMatchingEngines(
+                                List.of(11L, 22L, 33L), RoleType.PDFUSION, "default")
+                        .get(worker.getIpPort()));
+        assertEquals(
+                0,
+                manager.findMatchingEngines(
+                                List.of(11L), RoleType.PDFUSION, "default")
+                        .get(worker.getIpPort()));
+        manager.shutdown();
+    }
+
+    @Test
+    void keepsFullPrefixForPrefillOrFullAttention() {
+        WorkerStatusProvider workerStatusProvider = mock(WorkerStatusProvider.class);
+        WorkerStatus worker = worker("10.0.0.1", 8080);
+        when(workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, "default"))
+                .thenReturn(List.of(worker));
+        when(workerStatusProvider.getWorkerStatuses(RoleType.PDFUSION, "default"))
+                .thenReturn(List.of(worker));
+        LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
+                new CacheMatchConfiguration(modelMetaConfig(300_000)),
+                workerStatusProvider,
+                mock(CacheMetricsReporter.class));
+        manager.addRoutedRequestBlocks(worker.getIpPort(), List.of(11L, 22L, 33L));
+
+        worker.setKvCacheGroupMode(KvCacheGroupMode.WITH_MAMBA);
+        assertEquals(
+                3,
+                manager.findMatchingEngines(
+                                List.of(11L, 22L, 33L), RoleType.PREFILL, "default")
+                        .get(worker.getIpPort()));
+
+        worker.setKvCacheGroupMode(KvCacheGroupMode.FULL_ATTENTION_ONLY);
+        assertEquals(
+                3,
+                manager.findMatchingEngines(
+                                List.of(11L, 22L, 33L), RoleType.PDFUSION, "default")
+                        .get(worker.getIpPort()));
         manager.shutdown();
     }
 
