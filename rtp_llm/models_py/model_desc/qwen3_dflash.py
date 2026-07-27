@@ -224,24 +224,36 @@ class Qwen3DFlashModel(GptModelBase):
     # ---- Stage B ------------------------------------------------------
 
     def project_context_kv(
-        self, fused: torch.Tensor, positions: torch.Tensor, layer_idx: int
+        self,
+        normed: torch.Tensor,
+        positions: torch.Tensor,
+        layer_idx: int,
+        dummy_q: torch.Tensor,
     ) -> tuple[torch.Tensor, torch.Tensor]:
-        """One layer's feature K/V: hidden_norm -> K/V proj -> k_norm -> RoPE(K).
+        """One layer's feature K/V over pre-normed features: K/V proj -> k_norm -> RoPE(K).
 
-        fused: [T, H] fused features; positions: [T] int32 absolute positions.
+        normed: [T, H] hidden_norm(fused) — layer-invariant, so callers compute
+        it once outside their layer loop; positions: [T] int32 absolute
+        positions; dummy_q: [T, 1, hd] zero q shared across layers (_apply_rope
+        rotates q and k in-place, and a rotated zero stays zero).
         Returns (k, v) each [T, nkv, hd]; V is NOT rotated.
         """
         nkv, hd = self.attn_configs.kv_head_num, self.attn_configs.size_per_head
-        normed = self.hidden_norm(fused)
         k = (normed @ self._ctx_k_w[layer_idx]).view(-1, nkv, hd)
         v = (normed @ self._ctx_v_w[layer_idx]).view(-1, nkv, hd)
         k = self.ctx_k_norms[layer_idx](k.reshape(-1, hd)).view(-1, nkv, hd)
         k = k.contiguous()
         # RoPE on K only, at the tokens' original positions (V not rotated).
-        # _apply_rope rotates q and k in-place; feed a 1-head dummy q.
-        dummy_q = k.new_zeros((k.shape[0], 1, hd))
         self._ctx_rope._apply_rope(dummy_q, k, _PosIdsParams(positions))
         return k, v
+
+    def _prenorm_ctx_features(
+        self, fused: torch.Tensor
+    ) -> tuple[torch.Tensor, torch.Tensor]:
+        """hidden_norm(fused) plus the shared dummy q for project_context_kv."""
+        hd = self.attn_configs.size_per_head
+        normed = self.hidden_norm(fused)
+        return normed, normed.new_zeros((normed.shape[0], 1, hd))
 
     def _build_ctx_write_indices(
         self,
@@ -270,6 +282,9 @@ class Qwen3DFlashModel(GptModelBase):
         page_indptr: List[int] = [0]
         last_page_len: List[int] = []
         for i, (p, c) in enumerate(zip(prefix, ctx)):
+            # c == 0 would mean a fully prefix-cached prompt; the engine always
+            # recomputes at least the last prompt token (input_lengths >= 1),
+            # so an empty window here is a broken caller, not a valid state.
             assert 0 < c <= p, f"invalid ctx window: ctx={c}, prefix={p}"
             n_pages = math.ceil(p / page_size)
             page_indices.extend(block_table[i, :n_pages].tolist())
@@ -342,8 +357,9 @@ class Qwen3DFlashModel(GptModelBase):
         slots = pos_long % page_size
 
         assert self.kv_cache is not None, "kv_cache required for feature injection"
+        normed, dummy_q = self._prenorm_ctx_features(fused)
         for layer_idx in range(self.layer_num):
-            k, v = self.project_context_kv(fused, positions, layer_idx)
+            k, v = self.project_context_kv(normed, positions, layer_idx, dummy_q)
             base = self.kv_cache.get_layer_cache(layer_idx).kv_cache_base
             # base is [P, 2, nkv, page, hd] (HND); advanced indices at dims
             # 0/1/3 broadcast to the front => LHS shape [B*width, nkv, hd].
@@ -390,8 +406,9 @@ class Qwen3DFlashModel(GptModelBase):
         ) = self._build_ctx_write_indices(attn_inputs, ctx_lengths)
 
         assert self.kv_cache is not None, "kv_cache required for feature injection"
+        normed, dummy_q = self._prenorm_ctx_features(fused)
         for layer_idx in range(self.layer_num):
-            k, v = self.project_context_kv(fused, positions, layer_idx)
+            k, v = self.project_context_kv(normed, positions, layer_idx, dummy_q)
             layer_cache = self.kv_cache.get_layer_cache(layer_idx)
             kv_base = layer_cache.kv_cache_base
             page.append_paged_kv_cache(
@@ -528,14 +545,15 @@ class Qwen3DFlashModel(GptModelBase):
         # Executor channel for the dense decode-tail window base; when set,
         # injection takes the device fast path with a fixed [B, width] window.
         if ctx_starts is None:
-            ctx_starts = getattr(inputs, "dspark_ctx_starts", None)
+            # pybind maps an undefined C++ tensor field to None.
+            ctx_starts = inputs.dspark_ctx_starts
             if ctx_starts is not None and ctx_starts.numel() == 0:
                 ctx_starts = None
 
         if ctx_lengths is None and ctx_starts is None:
             # Executor channel for the incremental (decode-tail) injection
             # window; unset means "whole prefix" (prefill seeding).
-            ctx_from_inputs = getattr(inputs, "dspark_ctx_lengths", None)
+            ctx_from_inputs = inputs.dspark_ctx_lengths
             if ctx_from_inputs is not None and ctx_from_inputs.numel() > 0:
                 ctx_lengths = ctx_from_inputs.cpu()
 

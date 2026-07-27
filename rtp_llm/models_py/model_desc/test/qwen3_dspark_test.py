@@ -362,8 +362,11 @@ class DSparkModelGoldenTest(unittest.TestCase):
 
             positions = torch.tensor([pos], dtype=torch.int32, device="cuda")
             page_size = self.model.attn_configs.kernel_tokens_per_block
+            normed, dummy_q = self.model._prenorm_ctx_features(fused)
             for i in range(self.config.num_layers):
-                want_k, want_v = self.model.project_context_kv(fused, positions, i)
+                want_k, want_v = self.model.project_context_kv(
+                    normed, positions, i, dummy_q
+                )
                 base = self.layer_caches[i].kv_cache_base
                 got_k = base[pos // page_size, 0, :, pos % page_size, :]
                 got_v = base[pos // page_size, 1, :, pos % page_size, :]
