@@ -9,17 +9,19 @@ from typing import Dict, List, Optional, Type
 import torch
 from torch import nn
 
-from .linear_base import LinearBase
-
 from rtp_llm.ops import HWKernelConfig
+
+from .linear_base import LinearBase
 
 try:
     # Fix nvidia-cutlass-dsl cutlass module path on sm100 or upper device
-    import sys
     import os
+    import sys
+
     import nvidia_cutlass_dsl
+
     pkg_dir = nvidia_cutlass_dsl.__path__[0]
-    python_packages_dir = os.path.join(pkg_dir, 'python_packages')
+    python_packages_dir = os.path.join(pkg_dir, "python_packages")
 
     if os.path.isdir(python_packages_dir) and python_packages_dir not in sys.path:
         sys.path.insert(0, python_packages_dir)
@@ -38,6 +40,28 @@ class LinearFactory:
     """
 
     _strategies: List[Type[LinearBase]] = []
+
+    @staticmethod
+    def _merge_sm120_blockwise_tensors(
+        tensors: List[torch.Tensor], dim: int
+    ) -> torch.Tensor:
+        """Merge logical (K, N) views while preserving physical (N, K) data."""
+        if dim not in (-1, 1) or any(tensor.dim() != 2 for tensor in tensors):
+            raise ValueError(
+                "SM120 FP8_PER_BLOCK merged linear only supports 2D tensors "
+                "merged along the output dimension"
+            )
+        K = tensors[0].shape[0]
+        if any(
+            tensor.shape[0] != K or not tensor.is_contiguous() for tensor in tensors
+        ):
+            raise ValueError(
+                "SM120 FP8_PER_BLOCK merged tensors must have the same K and "
+                "contiguous loader storage"
+            )
+        physical = [tensor.reshape(tensor.shape[1], K) for tensor in tensors]
+        merged_n = sum(tensor.shape[1] for tensor in tensors)
+        return torch.cat(physical, dim=0).reshape(K, merged_n)
 
     @classmethod
     def register(cls, strategy_class: type) -> None:
@@ -62,7 +86,7 @@ class LinearFactory:
         scale_key: Optional[str] = None,
         bias_key: Optional[str] = None,
         quant_config: object = None,
-        hw_kernel_config: Optional['HWKernelConfig'] = None,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
         weight_scale_2_key: Optional[str] = None,
         input_scale_key: Optional[str] = None,
     ) -> LinearBase:
@@ -86,11 +110,20 @@ class LinearFactory:
         weight = weights[weight_key]
         weight_scales = weights.get(scale_key) if scale_key else None
         bias = weights.get(bias_key) if bias_key else None
-        weight_scale_2 = weights.get(weight_scale_2_key, None) if weight_scale_2_key else None
+        weight_scale_2 = (
+            weights.get(weight_scale_2_key, None) if weight_scale_2_key else None
+        )
         input_scale = weights.get(input_scale_key, None) if input_scale_key else None
 
-        return cls.create_linear(weight, bias, weight_scales, quant_config, hw_kernel_config,
-                                 weight_scale_2, input_scale)
+        return cls.create_linear(
+            weight,
+            bias,
+            weight_scales,
+            quant_config,
+            hw_kernel_config,
+            weight_scale_2,
+            input_scale,
+        )
 
     @classmethod
     def create_linear(
@@ -99,23 +132,54 @@ class LinearFactory:
         bias: Optional[torch.Tensor],
         weight_scales: Optional[torch.Tensor],
         quant_config: object,
-        hw_kernel_config: Optional['HWKernelConfig'] = None,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
         weight_scale_2: Optional[torch.Tensor] = None,
         input_scale: Optional[torch.Tensor] = None,
     ):
         candidates = [
             strategy_class
             for strategy_class in cls._strategies
-            if strategy_class.can_handle(quant_config, weight, weight_scales, hw_kernel_config,
-                                         weight_scale_2, input_scale)
+            if strategy_class.can_handle(
+                quant_config,
+                weight,
+                weight_scales,
+                hw_kernel_config,
+                weight_scale_2,
+                input_scale,
+            )
         ]
 
         if not candidates:
+            rejection_reasons = []
+            for strategy_class in cls._strategies:
+                try:
+                    reason = strategy_class.rejection_reason(
+                        quant_config,
+                        weight,
+                        weight_scales,
+                        hw_kernel_config,
+                        weight_scale_2,
+                        input_scale,
+                    )
+                except Exception:
+                    logger.debug(
+                        "Linear strategy %s rejection diagnostic failed",
+                        strategy_class.__name__,
+                        exc_info=True,
+                    )
+                    continue
+                if reason is not None and reason not in rejection_reasons:
+                    rejection_reasons.append(reason)
+            details = (
+                f" Rejections: {'; '.join(rejection_reasons)}"
+                if rejection_reasons
+                else ""
+            )
             raise ValueError(
                 f"No suitable Linear strategy found for:"
                 f"weight.dtype={weight.dtype}, "
                 f"has_scales={weight_scales is not None}, "
-                f"quant_config={quant_config}"
+                f"quant_config={quant_config}.{details}"
             )
 
         # Check uniqueness - should only have one matching strategy
@@ -156,24 +220,41 @@ class LinearFactory:
         input_scale_keys: Optional[List[str]],
         quant_config: object,
         dim: int = -1,
-        hw_kernel_config: Optional['HWKernelConfig'] = None,
+        hw_kernel_config: Optional["HWKernelConfig"] = None,
     ) -> nn.Module:
         """Create merged Linear layer (e.g., gate_up_proj)."""
         # Check FP8 usage based on first weight
-        use_fp8 = LinearFactory.should_use_fp8_linear(quant_config, weights, weight_keys[0])
-        
+        use_fp8 = LinearFactory.should_use_fp8_linear(
+            quant_config, weights, weight_keys[0]
+        )
+
         # Check FP4 usage based on first weight
-        use_fp4 = LinearFactory.should_use_fp4_linear(quant_config, weights, weight_keys[0])
+        use_fp4 = LinearFactory.should_use_fp4_linear(
+            quant_config, weights, weight_keys[0]
+        )
 
         # Merge weights
         weight_tensors = [weights[key] for key in weight_keys]
-        merged_weight = torch.cat(weight_tensors, dim=dim)
+        use_sm120_blockwise_layout = False
+        if use_fp8 and quant_config.get_method() == "FP8_PER_BLOCK":
+            from rtp_llm.models_py.utils.arch import is_sm120
+
+            use_sm120_blockwise_layout = is_sm120(weight_tensors[0].device)
+        merged_weight = (
+            cls._merge_sm120_blockwise_tensors(weight_tensors, dim)
+            if use_sm120_blockwise_layout
+            else torch.cat(weight_tensors, dim=dim)
+        )
 
         # Merge scales if needed (for both FP8 and NVFP4)
         merged_scales = None
         if (use_fp8 or use_fp4) and scale_keys:
             scale_tensors = [weights[key] for key in scale_keys]
-            merged_scales = torch.cat(scale_tensors, dim=dim)
+            merged_scales = (
+                cls._merge_sm120_blockwise_tensors(scale_tensors, dim)
+                if use_sm120_blockwise_layout
+                else torch.cat(scale_tensors, dim=dim)
+            )
 
         # Merge bias if exists
         merged_bias = None
@@ -186,7 +267,7 @@ class LinearFactory:
 
             if bias_tensors:
                 merged_bias = torch.cat(bias_tensors, dim=dim)
-        
+
         # Merge scale2 and input_scale if exists
         weight_scale_2 = None
         if use_fp4 and scale2_keys:
@@ -273,4 +354,3 @@ class LinearFactory:
             return False
 
         return weight.dtype == torch.uint8
-

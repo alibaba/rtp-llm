@@ -232,7 +232,7 @@ def cutlass_moe_mm(out_tensors: torch.Tensor, a_tensors: torch.Tensor, b_tensors
 def cutlass_scaled_fp4_mm(out: torch.Tensor, a: torch.Tensor, b: torch.Tensor, a_sf: torch.Tensor, b_sf: torch.Tensor, alpha: torch.Tensor) -> None:
     ...
 
-def cutlass_scaled_mm_blockwise_sm120_fp8(D: torch.Tensor, A: torch.Tensor, B: torch.Tensor, A_sf: torch.Tensor, B_sf: torch.Tensor, bias: torch.Tensor | None = None) -> None:
+def cutlass_scaled_mm_blockwise_sm120_fp8(D: torch.Tensor, A: torch.Tensor, B: torch.Tensor, A_sf: torch.Tensor, B_sf: torch.Tensor) -> None:
     """SM120 FP8 binding; call only after guarded runtime feature detection."""
     ...
 def has_cutlass_scaled_mm_blockwise_sm120_fp8() -> bool:
