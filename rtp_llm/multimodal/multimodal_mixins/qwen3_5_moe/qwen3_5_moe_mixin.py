@@ -25,9 +25,8 @@ from rtp_llm.multimodal.multimodal_mixins.qwen3_vl_mixin import (
 from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
-from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
 from rtp_llm.utils.database import CkptDatabase
-
+from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
 
 default_attn_impl = "sdpa"
 try:
@@ -188,4 +187,4 @@ class Qwen3_5MoeMixin(Qwen3_VLMixin):
 
 register_multimodal_mixin(["qwen35_moe"], Qwen3_5MoeMixin)
 register_multimodal_mixin(["qwen35_dense"], Qwen3_5MoeMixin)
-register_multimodal_mixin(["qwen35_moe_mtp"], Qwen3_5MoeMixin)
+register_multimodal_mixin(["qwen35_moe_mtp", "qwen35_dense_mtp"], Qwen3_5MoeMixin)
