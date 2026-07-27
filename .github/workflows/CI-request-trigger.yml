@@ -99,6 +99,7 @@ jobs:
 
       - name: Check review qualification
         id: review-gate
+        continue-on-error: true
         run: |
           python3 -m ci_gate resolve-context \
             --github-token "${{ secrets.GITHUB_TOKEN }}" \
@@ -111,6 +112,12 @@ jobs:
             --event-pr-number "${{ github.event.pull_request.number }}" \
             --event-clone-url "${{ github.event.pull_request.head.repo.clone_url }}" \
             --output-file "$GITHUB_OUTPUT"
+
+      - name: Validate review gate execution
+        if: steps.review-gate.outputs.qualified == ''
+        run: |
+          echo "::error::Review gate failed unexpectedly"
+          exit 1
 
       - name: Set pending commit status
         if: github.event_name == 'workflow_dispatch' && steps.review-gate.outputs.qualified == 'true'
