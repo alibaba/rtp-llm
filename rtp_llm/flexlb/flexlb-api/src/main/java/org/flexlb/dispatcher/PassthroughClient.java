@@ -115,16 +115,26 @@ public class PassthroughClient {
                                                             .timeout(Duration.ofMillis(STREAM_TIMEOUT_MS))))
                                             .doOnCancel(() -> clientResponse.releaseBody().subscribe());
                                 } catch (RuntimeException assemblyFailure) {
-                                    // Headers arrived but building the passthrough response threw before the FE
-                                    // body was handed to a self-releasing consumer; release it now or the pooled
+                                    // Headers arrived but assembling the passthrough response threw before it was
+                                    // handed to a self-releasing consumer; release the FE body now or the pooled
                                     // connection leaks. The shared 502 envelope below answers the caller.
                                     clientResponse.releaseBody().subscribe();
                                     throw assemblyFailure;
                                 }
-                                pv.finish(status, null);
-                                pv.emit();
-                                metricsReporter.reportRequest("passthrough", metricPathTag(fePath),
-                                        status, pv.getCostMs());
+                                // response is built and will be returned (then subscribed), so its doOnCancel /
+                                // body consumption now owns FE-body release. PV/metrics are best-effort
+                                // book-keeping: swallow a failure here (log WARN) instead of rethrowing.
+                                // Rethrowing would fall into .doOnError and re-emit PV/metrics as a 502 — a
+                                // double count — even though the caller still gets this good response.
+                                try {
+                                    pv.finish(status, null);
+                                    pv.emit();
+                                    metricsReporter.reportRequest("passthrough", metricPathTag(fePath),
+                                            status, pv.getCostMs());
+                                } catch (RuntimeException bookkeepingFailure) {
+                                    Logger.warn("passthrough PV/metrics emit failed, response still returned: {}",
+                                            bookkeepingFailure.toString());
+                                }
                                 return response;
                             });
                 })

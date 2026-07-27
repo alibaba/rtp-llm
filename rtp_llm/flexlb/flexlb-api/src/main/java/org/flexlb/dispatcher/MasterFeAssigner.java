@@ -81,7 +81,11 @@ public class MasterFeAssigner {
             // One snapshot for the whole batch: nextBatch returns exactly targets.size() urls (so the
             // zip below is 1:1 by construction) or throws before assigning any — an empty snapshot
             // leaves every target's fe_url null rather than stamping a prefix, keeping assignment
-            // all-or-nothing per batch.
+            // all-or-nothing per batch. This is a behavior convergence from the earlier per-pick
+            // version (pool.next() in a loop), which could leave a partial prefix stamped and the
+            // rest null when the snapshot went empty mid-batch; no caller relied on that partial
+            // result (fe_url == null fails a chunk with CHUNK_NO_FE either way), so the stricter
+            // all-or-nothing contract is safe.
             List<String> feUrls = pool.nextBatch(targets.size());
             for (int i = 0; i < targets.size(); i++) {
                 targets.get(i).setFeUrl(feUrls.get(i));

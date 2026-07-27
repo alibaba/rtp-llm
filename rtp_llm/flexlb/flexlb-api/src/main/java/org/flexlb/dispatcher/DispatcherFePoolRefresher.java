@@ -257,6 +257,10 @@ public class DispatcherFePoolRefresher {
     }
 
     private static List<String> toUrls(List<WorkerHost> hosts) {
-        return hosts.stream().map(h -> "http://" + h.getIpPort()).collect(Collectors.toList());
+        // Unmodifiable: FePool.livePool() may hand this very list back to callers by reference (the
+        // all-alive fast path, no copy), and the reference is shared across threads via the
+        // AtomicReference. Making it immutable turns "published, never mutated in place" from a
+        // convention into a type guarantee, so a future FePool consumer cannot corrupt the snapshot.
+        return hosts.stream().map(h -> "http://" + h.getIpPort()).collect(Collectors.toUnmodifiableList());
     }
 }

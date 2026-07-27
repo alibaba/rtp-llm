@@ -156,9 +156,9 @@ class HttpLoadBalanceServerTest {
 
     @Test
     void master_empty_fe_pool_leaves_fe_url_null_without_failing_the_schedule() {
-        // An empty FE snapshot makes fePool.next() throw. assignFeUrls must swallow it: BE
-        // assignment already succeeded, so the schedule response still returns 200 with its
-        // targets; the affected chunks fail later in the dispatcher (no fallback), not here.
+        // An empty FE snapshot makes fePool.nextBatch(...) throw. MasterFeAssigner.assign must
+        // swallow it: BE assignment already succeeded, so the schedule response still returns 200
+        // with its targets; the affected chunks fail later in the dispatcher (no fallback), not here.
         BatchScheduleRequest batchRequest = new BatchScheduleRequest();
         batchRequest.setBatchCount(1);
         when(serverRequest.bodyToMono(BatchScheduleRequest.class)).thenReturn(Mono.just(batchRequest));

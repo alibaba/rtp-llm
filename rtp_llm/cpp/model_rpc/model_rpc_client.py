@@ -684,6 +684,17 @@ class ModelRpcClient(object):
                 batch_input_pb, timeout=grpc_timeout_seconds
             )
 
+            if len(response.results) != len(inputs):
+                # C++ BatchGenerateCall is contractually 1:1 (one result per input). A shorter
+                # result vector would otherwise make the loop below return a silently-truncated
+                # list (dropping trailing inputs with no error); a longer one would IndexError on
+                # inputs[i]. Fail typed instead so a server-side contract break surfaces loudly.
+                raise FtRuntimeException(
+                    ExceptionType.UNKNOWN_ERROR,
+                    f"batch request: [{len(inputs)} items] got {len(response.results)} result(s); "
+                    f"server violated the 1:1 per-item contract",
+                )
+
             results = []
             for i, result_pb in enumerate(response.results):
                 if (

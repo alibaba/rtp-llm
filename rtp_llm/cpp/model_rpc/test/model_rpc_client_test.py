@@ -515,12 +515,16 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
         return client
 
     @staticmethod
-    def _input(request_id):
+    def _input(request_id, role_addrs=()):
         return SimpleNamespace(
             request_id=request_id,
             prompt_length=4,
-            generate_config=SimpleNamespace(timeout_ms=1000, role_addrs=[]),
+            generate_config=SimpleNamespace(timeout_ms=1000, role_addrs=list(role_addrs)),
         )
+
+    @staticmethod
+    def _addr(ip):
+        return SimpleNamespace(role=RoleType.PDFUSION, ip=ip, grpc_port=8089)
 
     @staticmethod
     def _stub(response=None, error=None):
@@ -633,6 +637,49 @@ class BatchEnqueueDecodeSemanticsTest(TestCase):
 
         self.assertEqual([("OUT", 0), ("OUT", 1)], out)
         self.assertIs(inputs[0], seen[0])
+
+    def test_result_count_mismatch_fails_loudly_instead_of_silently_truncating(self):
+        # The C++ contract is 1:1 (one result per input). A short result vector must fail typed,
+        # not silently return a truncated list (trailing inputs dropped with no error). Mutation
+        # guard: drop the length check and this returns [("OUT", 0)] for two inputs instead of
+        # raising.
+        resp = BatchGenerateOutputsPB()
+        resp.results.add()  # only 1 result for 2 inputs
+        inputs = [self._input(0), self._input(1)]
+
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._run(self._client(), inputs, response=resp)
+        self.assertIn("1:1 per-item contract", str(ctx.exception))
+
+    def test_result_count_longer_than_inputs_also_raises(self):
+        # The guard's other direction: MORE results than inputs (which would otherwise IndexError
+        # on inputs[i] for the surplus i) must fail typed with the same 1:1-contract error. The
+        # docstring/comment names both failure modes; this pins the longer one. 3 results / 2 inputs.
+        resp = BatchGenerateOutputsPB()
+        resp.results.add()
+        resp.results.add()
+        resp.results.add()
+        inputs = [self._input(0), self._input(1)]
+
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._run(self._client(), inputs, response=resp)
+        self.assertIn("1:1 per-item contract", str(ctx.exception))
+
+    def test_mixed_pre_assigned_batch_raises_before_reaching_the_stub(self):
+        # _select_batch_address runs in the real body AFTER trans_input on every input but BEFORE
+        # the gRPC call. Two inputs pre-assigned to different backends is a caller assembly error
+        # that must fail typed (INVALID_PARAMS) without shipping the batch to either backend. The
+        # isolated BatchEnqueueRoutingTest drives _select_batch_address directly; this pins the same
+        # guard inside batch_enqueue's real ordering. error= would fire if the stub were reached.
+        inputs = [
+            self._input(0, [self._addr("10.0.0.7")]),
+            self._input(1, [self._addr("10.0.0.8")]),
+        ]
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._run(
+                self._client(), inputs, error=RuntimeError("stub must not be reached")
+            )
+        self.assertIn("one batch RPC targets one backend", str(ctx.exception))
 
 
 class SchedulePayloadSeqLenTest(TestCase):

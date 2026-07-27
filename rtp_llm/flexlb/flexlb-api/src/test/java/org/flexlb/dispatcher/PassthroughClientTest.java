@@ -233,6 +233,11 @@ class PassthroughClientTest {
         // non-consuming exit must release it explicitly or the pooled connection leaks. Drive the
         // real catch branch by injecting a ClientResponse whose header copy throws, and assert both
         // the shared 502 envelope and that releaseBody() was actually subscribed.
+        //
+        // Note: that catch guards the response-assembly block (header copy, body wiring,
+        // doOnCancel), not the PV/metrics emit — the emit runs in a separate best-effort try that
+        // swallows its own failures (so it can never leak the body nor double-emit). asHttpHeaders()
+        // is the earliest reachable throw in the assembly block and stands in for the rest.
         AtomicBoolean released = new AtomicBoolean(false);
         ClientResponse.Headers headers = mock(ClientResponse.Headers.class);
         when(headers.asHttpHeaders()).thenThrow(new RuntimeException("boom copying FE headers"));
