@@ -100,13 +100,20 @@ if [ -z $SETENV_SETTED ]; then
 
         let memTotal=`cat /proc/meminfo | grep MemTotal | awk '{printf "%d", $2/1024 }'`
         echo "INFO: OS total memory: "$memTotal"M"
-        # Keep enough native-memory headroom for the 8c16g pool: direct buffers,
-        # metaspace, code cache, thread stacks, and the container runtime.
+        # Keep enough native-memory headroom for direct buffers, metaspace,
+        # code cache, thread stacks, and the container runtime.
         if [ $memTotal -le 2048 ]; then
           SERVICE_OPTS="${SERVICE_OPTS} -Xms1536m -Xmx1536m"
           maxDirectMemory=2g
         elif [ $memTotal -le 16384 ]; then
           SERVICE_OPTS="${SERVICE_OPTS} -Xms10g -Xmx10g"
+          maxDirectMemory=1g
+        elif [ $memTotal -le 24576 ]; then
+          # The 12c24g ASI pool exposes about 19GiB to the container.
+          SERVICE_OPTS="${SERVICE_OPTS} -Xms12g -Xmx12g"
+          maxDirectMemory=1g
+        elif [ $memTotal -le 32768 ]; then
+          SERVICE_OPTS="${SERVICE_OPTS} -Xms18g -Xmx18g"
           maxDirectMemory=1g
         else
           SERVICE_OPTS="${SERVICE_OPTS} -Xms32g -Xmx32g"
