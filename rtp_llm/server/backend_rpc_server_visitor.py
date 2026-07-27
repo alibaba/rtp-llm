@@ -20,6 +20,22 @@ from rtp_llm.utils.time_util import Timer
 route_logger = logging.getLogger("route_logger")
 
 
+def has_input_embeddings(input: GenerateInput) -> bool:
+    return (
+        input.input_embeddings is not None
+        and len(input.input_embeddings.embeddings) > 0
+    )
+
+
+def disable_token_only_reuse_for_input_embeddings(input: GenerateInput) -> None:
+    if not has_input_embeddings(input):
+        return
+    input.generate_config.reuse_cache = False
+    input.generate_config.enable_device_cache = False
+    input.generate_config.enable_memory_cache = False
+    input.generate_config.enable_remote_cache = False
+
+
 class BackendRPCServerVisitor:
     def __init__(
         self,
@@ -32,6 +48,7 @@ class BackendRPCServerVisitor:
         vit_separation: Optional[VitSeparation] = None,  # Optional VitSeparation
         server_config=None,
         master_config=None,
+        trans_output_fn=None,
     ) -> None:
         """Initialize BackendRPCServerVisitor.
 
@@ -45,6 +62,8 @@ class BackendRPCServerVisitor:
             vit_separation: Optional VitSeparation for multimodal models
             server_config: Optional ServerConfig for master configuration
             master_config: Optional MasterConfig for master client configuration
+            trans_output_fn: Custom function to transform protobuf outputs to Python objects.
+                Passed through to ModelRpcClient. If None, uses default implementation.
         """
         self.max_seq_len = max_seq_len
         self.seq_size_per_block = seq_size_per_block
@@ -67,6 +86,7 @@ class BackendRPCServerVisitor:
             client_config=client_config,
             max_rpc_timeout_ms=max_rpc_timeout_ms,
             decode_entrance=decode_entrance,
+            trans_output_fn=trans_output_fn,
         )
 
         host_args = HostServiceArgs.create_from_env()
@@ -130,12 +150,19 @@ class BackendRPCServerVisitor:
         Returns None on success; on failure returns FlexlbResponse for routing decisions.
         request_id is frontend-generated and is not overwritten.
         """
-        token_ids = (
-            input.token_ids.tolist()[0]
-            if len(input.token_ids.shape) == 2
-            else input.token_ids.tolist()
-        )
-        block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
+        if has_input_embeddings(input):
+            block_cache_keys = []
+            route_logger.debug(
+                "skip token-only block cache keys for input_embeddings request_id=%s",
+                input.request_id,
+            )
+        else:
+            token_ids = (
+                input.token_ids.tolist()[0]
+                if len(input.token_ids.shape) == 2
+                else input.token_ids.tolist()
+            )
+            block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
 
         try:
             route_result = await self.master_client.get_backend_role_addrs(
@@ -263,6 +290,9 @@ class BackendRPCServerVisitor:
     def check_sp_supported(self, input: GenerateInput):
         if not self.sp_config or not self.sp_config.model_type:
             return
+        if has_input_embeddings(input):
+            input.generate_config.force_disable_sp_run = True
+            return
         if input.generate_config.force_disable_sp_run:
             return
 
@@ -309,6 +339,7 @@ class BackendRPCServerVisitor:
     async def enqueue(
         self, input: GenerateInput
     ) -> AsyncGenerator[GenerateOutputs, None]:
+        disable_token_only_reuse_for_input_embeddings(input)
         self._validate_input(input)
         self.check_sp_supported(input)
 
@@ -320,6 +351,7 @@ class BackendRPCServerVisitor:
     @torch.inference_mode()
     async def batch_enqueue(self, inputs: list[GenerateInput]) -> list[GenerateOutputs]:
         for input in inputs:
+            disable_token_only_reuse_for_input_embeddings(input)
             self._validate_input(input)
             self.check_sp_supported(input)
 

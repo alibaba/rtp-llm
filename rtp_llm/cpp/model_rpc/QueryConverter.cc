@@ -1,9 +1,11 @@
 #include "rtp_llm/cpp/model_rpc/QueryConverter.h"
 
 #include <numeric>
+#include <stdexcept>
 
 #include "RPCPool.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
+#include "rtp_llm/cpp/engine_base/stream/InputEmbeddingsUtils.h"
 #include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 
@@ -118,8 +120,8 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     TRANS_OPTIONAL(force_batch);
 
     // 生成式推荐：组合 token 约束
-    generate_config->combo_token_size = config_proto->combo_token_size();
-    generate_config->enable_cross_sequence_ban = config_proto->enable_cross_sequence_ban();
+    generate_config->combo_token_size              = config_proto->combo_token_size();
+    generate_config->enable_cross_sequence_ban     = config_proto->enable_cross_sequence_ban();
     generate_config->cross_seq_diverge_start_combo = config_proto->cross_seq_diverge_start_combo();
     for (const auto& combo_proto : config_proto->banned_combo_token_ids().rows()) {
         std::vector<int> combo;
@@ -170,6 +172,32 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     generate_input->batch_group_size = input->batch_group_size() > 0 ? input->batch_group_size() : 1;
     if (input->has_batch_group_id()) {
         generate_input->batch_group_id = input->batch_group_id().value();
+    }
+
+    // 转换 input_embeddings
+    if (input->has_input_embeddings()) {
+        const auto& input_embeddings_pb = input->input_embeddings();
+
+        std::vector<torch::Tensor> embeddings;
+        std::vector<int32_t>       embedding_locs;
+
+        // 转换 embeddings
+        for (int i = 0; i < input_embeddings_pb.embeddings_size(); i++) {
+            embeddings.push_back(transTensor(input_embeddings_pb.embeddings(i)));
+        }
+
+        // 转换 embedding_locs
+        embedding_locs.resize(input_embeddings_pb.embedding_locs_size());
+        memcpy(embedding_locs.data(),
+               input_embeddings_pb.embedding_locs().data(),
+               input_embeddings_pb.embedding_locs_size() * sizeof(int32_t));
+
+        generate_input->input_embeddings      = embeddings;
+        generate_input->input_embeddings_locs = embedding_locs;
+        auto status                           = validateAndNormalizeInputEmbeddings(*generate_input);
+        if (!status.ok()) {
+            throw std::runtime_error(status.ToString());
+        }
     }
 
     return generate_input;
@@ -411,12 +439,30 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
     stackBuffersToTensorPB(
         flatten_output->mutable_hidden_states(), source_outputs, [](const auto& r) { return r.hidden_states; });
 
+    if (dump_aux_info) {
+        // Keep writing the per-output AuxInfo field for rolling-upgrade compatibility.
+        // New clients consume this aggregate tensor and avoid deserializing one TensorPB per beam/output.
+        stackBuffersToTensorPB(flatten_output->mutable_all_softmax_probs(), source_outputs, [](const auto& r) {
+            return r.aux_info.softmax_probs;
+        });
+    }
+
     stackBuffersToTensorPB(flatten_output->mutable_loss(), source_outputs, [](const auto& r) { return r.loss; });
 
     stackBuffersToTensorPB(flatten_output->mutable_logits(), source_outputs, [](const auto& r) { return r.logits; });
 
-    stackBuffersToTensorPB(
-        flatten_output->mutable_all_hidden_states(), source_outputs, [](const auto& r) { return r.all_hidden_states; });
+    {
+        torch::Tensor all_hidden_states;
+        for (const auto& resp : source_outputs) {
+            if (resp.all_hidden_states.has_value()) {
+                all_hidden_states = resp.all_hidden_states.value();
+                break;
+            }
+        }
+        if (all_hidden_states.defined()) {
+            transTensorPB(flatten_output->mutable_all_hidden_states(), all_hidden_states.contiguous());
+        }
+    }
 
     if (!source_outputs.empty() && source_outputs[0].prompt_logits.has_value()) {
         auto*       pb = flatten_output->mutable_prompt_logits();

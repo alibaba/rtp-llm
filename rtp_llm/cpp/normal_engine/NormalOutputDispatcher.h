@@ -1,7 +1,9 @@
 #pragma once
 
+#include <memory>
 #include <torch/all.h>
 #include "absl/status/status.h"
+#include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/engine_base/stream/StreamGroups.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
 
@@ -9,11 +11,16 @@ namespace rtp_llm {
 
 class NormalOutputDispatcher {
 public:
-    NormalOutputDispatcher() = default;
+    explicit NormalOutputDispatcher(std::shared_ptr<autil::LockFreeThreadPool> thread_pool = nullptr):
+        thread_pool_(std::move(thread_pool)) {}
 
     absl::Status dispatch(const StreamGroups& stream_groups, const MergedOutput& merge_outputs) const;
 
 private:
+    torch::Tensor calculateSelectedTokenProbs(const torch::Tensor& logits,
+                                              const torch::Tensor& token_ids,
+                                              const torch::Tensor& src_batch_indices) const;
+
     void dispatchSingleStream(GenerateStreamPtr    stream,
                               const MergedOutput&  merge_outputs,
                               int                  batch_idx_in,
@@ -23,6 +30,8 @@ private:
                               const torch::Tensor& new_tokens_all,
                               const torch::Tensor& token_ids_cpu,
                               const torch::Tensor& success_cpu) const;
+
+    std::shared_ptr<autil::LockFreeThreadPool> thread_pool_;
 };
 
 }  // namespace rtp_llm

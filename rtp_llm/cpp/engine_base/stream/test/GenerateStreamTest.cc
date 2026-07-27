@@ -113,6 +113,69 @@ TEST_F(GenerateStreamTest, testConstruct) {
     auto stream2 = builder.createDecoderStream({1, 2, 3, 4, 5}, {1, 2, 3});
 }
 
+TEST_F(GenerateStreamTest, testBatchSizeWithNumReturnSequences) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    RuntimeConfig runtime_config;
+
+    auto generate_input                                   = std::make_shared<GenerateInput>();
+    generate_input->generate_config                       = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->num_return_sequences = 3;
+    generate_input->input_ids                             = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    auto stream =
+        std::make_shared<NormalGenerateStream>(generate_input, model_config, runtime_config, resource_context, nullptr);
+
+    EXPECT_EQ(1, stream->batchSize(0));
+    EXPECT_EQ(3, stream->batchSize(1));
+    EXPECT_EQ(3, stream->batchSize(5));
+    EXPECT_EQ(3, stream->maxBatchSize());
+    EXPECT_TRUE(stream->needTilingForSampling());
+}
+
+TEST_F(GenerateStreamTest, testBatchSizeWithBeamSearch) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    RuntimeConfig runtime_config;
+
+    auto generate_input                        = std::make_shared<GenerateInput>();
+    generate_input->generate_config            = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->num_beams = 4;
+    generate_input->input_ids                  = torch::tensor({1, 2, 3}, torch::kInt32);
+
+    auto stream =
+        std::make_shared<NormalGenerateStream>(generate_input, model_config, runtime_config, resource_context, nullptr);
+
+    EXPECT_EQ(1, stream->batchSize(0));
+    EXPECT_EQ(4, stream->batchSize(1));
+    EXPECT_EQ(4, stream->maxBatchSize());
+    EXPECT_FALSE(stream->needTilingForSampling());
+}
+
+TEST_F(GenerateStreamTest, testCompleteTokenIdsUsesRequestBoundAndInitializesAllRows) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 128;
+    RuntimeConfig runtime_config;
+
+    auto generate_input                             = std::make_shared<GenerateInput>();
+    generate_input->generate_config                 = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->num_beams      = 2;
+    generate_input->generate_config->max_new_tokens = 4;
+    generate_input->input_ids                       = torch::tensor({7, 8, 9}, torch::kInt32);
+
+    auto stream =
+        std::make_shared<NormalGenerateStream>(generate_input, model_config, runtime_config, resource_context, nullptr);
+
+    auto token_ids = stream->completeTokenIds();
+    ASSERT_EQ(2, token_ids.size(0));
+    ASSERT_EQ(7, token_ids.size(1));
+    EXPECT_TRUE(torch::equal(token_ids[0].narrow(0, 0, 3), generate_input->input_ids));
+    EXPECT_TRUE(torch::equal(token_ids[1].narrow(0, 0, 3), generate_input->input_ids));
+}
+
 TEST_F(GenerateStreamTest, testGenerateStreamReuseCacheMethod) {
     auto builder = GenerateStreamBuilder();
     auto stream  = builder.createContextStream({1, 2, 3, 4, 5, 6});
@@ -505,6 +568,98 @@ TEST_F(GenerateStreamTest, publicReadinessReaderIsSafeDuringPublication) {
     EXPECT_TRUE(stream->hasOutput());
     EXPECT_TRUE(stream->hasEvent(StreamEvents::GenerateDone));
     EXPECT_EQ(stream->statusInfo().code(), ErrorCode::CANCELLED);
+}
+
+TEST_F(GenerateStreamTest, testNonStreamingFinalOutputReturnsCachedAllHiddenStates) {
+    auto builder                                                       = GenerateStreamBuilder();
+    auto stream                                                        = builder.createContextStream({1, 2});
+    stream->generate_input_->generate_config->max_new_tokens           = 2;
+    stream->generate_input_->generate_config->return_all_hidden_states = true;
+    stream->generate_input_->generate_config->return_incremental       = true;
+    stream->generate_input_->generate_config->is_streaming             = false;
+
+    auto first_all_hidden_states = torch::tensor({1.0f, 2.0f, 3.0f, 4.0f}).reshape({2, 2});
+    stream->step();
+    stream->update(StreamUpdateInfo{torch::tensor({10}, torch::kInt32).reshape({1, 1}),
+                                    1,
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    first_all_hidden_states,
+                                    false});
+    ASSERT_FALSE(stream->hasOutput());
+
+    stream->step();
+    stream->update(StreamUpdateInfo{torch::tensor({11}, torch::kInt32).reshape({1, 1}),
+                                    1,
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    torch::Tensor(),
+                                    false});
+
+    ASSERT_TRUE(stream->hasOutput());
+    auto output = stream->nextOutput();
+    ASSERT_TRUE(output.ok());
+    ASSERT_EQ(output.value().generate_outputs.size(), 1);
+    const auto& generate_output = output.value().generate_outputs[0];
+    ASSERT_TRUE(generate_output.finished);
+    ASSERT_TRUE(generate_output.all_hidden_states.has_value());
+    ASSERT_TRUE(torch::equal(generate_output.all_hidden_states.value(), first_all_hidden_states));
+}
+
+TEST_F(GenerateStreamTest, testAllHiddenStatesCopiedToCpuOnceForMultipleOutputs) {
+    auto builder = GenerateStreamBuilder();
+    auto stream  = std::dynamic_pointer_cast<NormalGenerateStream>(builder.createComplexContextStream({1, 2}));
+    ASSERT_NE(stream, nullptr);
+    stream->generate_input_->generate_config->return_all_hidden_states = true;
+    stream->iter_count_                                                = 1;
+
+    auto all_hidden_states =
+        torch::tensor({1.0f, 2.0f, 3.0f, 4.0f}, torch::TensorOptions().device(torch::kCUDA)).reshape({2, 2});
+    StreamUpdateInfo update_info{torch::Tensor(),
+                                 0,
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 all_hidden_states,
+                                 false};
+
+    auto outputs = stream->prepareGenerateOutput(update_info);
+
+    ASSERT_EQ(outputs.generate_outputs.size(), 2);
+    const auto& first  = outputs.generate_outputs[0].all_hidden_states;
+    const auto& second = outputs.generate_outputs[1].all_hidden_states;
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(second.has_value());
+    ASSERT_FALSE(first->is_cuda());
+    ASSERT_EQ(first->data_ptr(), second->data_ptr());
+    ASSERT_TRUE(torch::equal(first.value(), all_hidden_states.cpu()));
+}
+
+TEST_F(GenerateStreamTest, testInputEmbeddingsDisableTokenOnlyReuseCache) {
+    auto builder                                   = GenerateStreamBuilder();
+    auto stream                                    = builder.createContextStream({1, 2, 3, 4, 5, 6});
+    stream->generate_input_->input_embeddings      = std::vector<torch::Tensor>{torch::rand({1, 8}, torch::kFloat32)};
+    stream->generate_input_->input_embeddings_locs = std::vector<int32_t>{2};
+
+    ASSERT_TRUE(stream->hasInputEmbeddings());
+    ASSERT_FALSE(stream->reuseCache());
+    ASSERT_FALSE(stream->enableDeviceCache());
+    ASSERT_FALSE(stream->enableMemoryCache());
+    ASSERT_FALSE(stream->enableRemoteCache());
 }
 
 }  // namespace rtp_llm

@@ -1,4 +1,6 @@
 #include <memory>
+#include <optional>
+#include <string>
 #include "gtest/gtest.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/multimodal_processor/test/FakeMultimodalProcessor.h"
@@ -42,6 +44,78 @@ TEST_F(MultimodalProcessorTest, testSimple) {
 
     EXPECT_TRUE(input->multimodal_features);
     EXPECT_EQ(input->multimodal_features.value().size(), 1);
+}
+
+TEST_F(MultimodalProcessorTest, testInputEmbeddingsLocsShiftAfterMultimodalExpansion) {
+    FakeMultimodalProcessor        processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 10);
+    std::shared_ptr<GenerateInput> input     = std::make_shared<GenerateInput>();
+    input->input_ids                         = torch::tensor({0, 1, 2, 3}, torch::kInt32);
+    input->input_embeddings                  = {torch::ones({2, 1}, torch::kFloat32)};
+    input->input_embeddings_locs             = {2};
+    auto mm_inputs                           = std::vector<MultimodalInput>();
+    mm_inputs.emplace_back("3");
+    input->multimodal_inputs = mm_inputs;
+
+    auto res = processor.updateMultimodalFeatures(input);
+    EXPECT_EQ(res.ok(), true);
+
+    EXPECT_EQ(input->input_ids.numel(), 6);
+    ASSERT_TRUE(input->input_embeddings_locs.has_value());
+    ASSERT_EQ(input->input_embeddings_locs->size(), 1);
+    EXPECT_EQ(input->input_embeddings_locs->at(0), 4);
+}
+
+TEST_F(MultimodalProcessorTest, testInputEmbeddingsLocsShiftAcrossMultipleMultimodalTags) {
+    FakeMultimodalProcessor processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}, {3}}, false, 20);
+    std::shared_ptr<GenerateInput> input = std::make_shared<GenerateInput>();
+    input->input_ids                     = torch::tensor({0, 1, 2, 3, 4, 5}, torch::kInt32);
+    input->input_embeddings              = {torch::ones({1, 1}, torch::kFloat32), torch::ones({1, 1}, torch::kFloat32)};
+    input->input_embeddings_locs         = {2, 4};
+    auto mm_inputs                       = std::vector<MultimodalInput>();
+    mm_inputs.emplace_back("3");
+    mm_inputs.emplace_back("2");
+    input->multimodal_inputs = mm_inputs;
+
+    auto res = processor.updateMultimodalFeatures(input);
+    EXPECT_EQ(res.ok(), true);
+
+    ASSERT_TRUE(input->input_embeddings_locs.has_value());
+    ASSERT_EQ(input->input_embeddings_locs->size(), 2);
+    EXPECT_EQ(input->input_embeddings_locs->at(0), 4);
+    EXPECT_EQ(input->input_embeddings_locs->at(1), 7);
+}
+
+TEST_F(MultimodalProcessorTest, testInputEmbeddingsRejectOverlapMultimodalTag) {
+    FakeMultimodalProcessor        processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 10);
+    std::shared_ptr<GenerateInput> input     = std::make_shared<GenerateInput>();
+    input->input_ids                         = torch::tensor({0, 1, 2, 3}, torch::kInt32);
+    input->input_embeddings                  = {torch::ones({1, 1}, torch::kFloat32)};
+    input->input_embeddings_locs             = {1};
+    auto mm_inputs                           = std::vector<MultimodalInput>();
+    mm_inputs.emplace_back("3");
+    input->multimodal_inputs = mm_inputs;
+
+    auto res = processor.updateMultimodalFeatures(input);
+    EXPECT_EQ(res.ok(), false);
+    EXPECT_NE(res.ToString().find("overlaps multimodal tag interval"), std::string::npos);
+    EXPECT_EQ(res.code(), ErrorCode::MM_WRONG_FORMAT_ERROR);
+}
+
+TEST_F(MultimodalProcessorTest, testEmbeddingEngineRejectInputEmbeddingsWithMultimodalInputs) {
+    FakeMultimodalProcessor processor     = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 10);
+    std::shared_ptr<EmbeddingInput> input = std::make_shared<EmbeddingInput>(std::vector<int32_t>{0, 1, 2, 3},
+                                                                             std::vector<int32_t>{0, 0, 0, 0},
+                                                                             std::vector<int32_t>{4},
+                                                                             0,
+                                                                             std::nullopt,
+                                                                             torch::ones({4, 1}, torch::kFloat32));
+    auto                            mm_inputs = std::vector<MultimodalInput>();
+    mm_inputs.emplace_back("3");
+
+    auto res = processor.updateMultimodalFeatures(input, mm_inputs, "");
+    EXPECT_EQ(res.ok(), false);
+    EXPECT_NE(res.ToString().find("full-sequence tensor"), std::string::npos);
+    EXPECT_EQ(res.code(), ErrorCode::MM_NOT_SUPPORTED_ERROR);
 }
 
 TEST_F(MultimodalProcessorTest, testMultiInput) {

@@ -48,6 +48,12 @@ class VitParameters:
     eval_model_size = None
 
 
+@dataclass
+class InputEmbeddings:
+    embeddings: List[torch.Tensor]
+    embedding_locs: List[int]
+
+
 # single batch prompt input
 @dataclass
 class GenerateInput:
@@ -62,6 +68,7 @@ class GenerateInput:
     batch_group_id: int = (
         -1
     )  # Batch group ID for force batch grouping, -1 means not set
+    input_embeddings: Optional[InputEmbeddings] = None
 
     class Config:
         arbitrary_types_allowed = True
@@ -77,6 +84,10 @@ class GenerateInput:
     def update_prefix(self, prefix_tokens: torch.Tensor):
         self.token_ids = torch.concat([prefix_tokens, self.token_ids], dim=0)
         self.prefix_length = prefix_tokens.nelement()
+        if self.input_embeddings is not None:
+            self.input_embeddings.embedding_locs = [
+                loc + self.prefix_length for loc in self.input_embeddings.embedding_locs
+            ]
 
 
 @dataclass

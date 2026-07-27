@@ -29,6 +29,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["DP_SIZE"] = "2"
         os.environ["WORLD_SIZE"] = "8"
         os.environ["CONCURRENCY_LIMIT"] = "64"
+        os.environ["ENGINE_ASYNC_WORKER_COUNT"] = "3"
         os.environ["MAX_CONTEXT_BATCH_SIZE"] = "32"
         os.environ["WARM_UP"] = "1"
         os.environ["MAX_SEQ_LEN"] = "4096"
@@ -53,6 +54,7 @@ class ServerArgsSetTest(TestCase):
 
         # Verify concurrency_config
         self.assertEqual(py_env_configs.concurrency_config.concurrency_limit, 64)
+        self.assertEqual(py_env_configs.concurrency_config.engine_async_worker_count, 3)
 
         # Verify fifo_scheduler_config
         self.assertEqual(
@@ -83,6 +85,8 @@ class ServerArgsSetTest(TestCase):
             "32",
             "--concurrency_limit",
             "128",
+            "--engine_async_worker_count",
+            "4",
             "--max_context_batch_size",
             "64",
             "--warm_up",
@@ -123,6 +127,7 @@ class ServerArgsSetTest(TestCase):
 
         # Verify concurrency_config
         self.assertEqual(py_env_configs.concurrency_config.concurrency_limit, 128)
+        self.assertEqual(py_env_configs.concurrency_config.engine_async_worker_count, 4)
 
         # Verify fifo_scheduler_config
         self.assertEqual(

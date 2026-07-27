@@ -15,6 +15,7 @@ inline grpc::StatusCode transErrorCodeToGrpc(ErrorCode error_code) {
         {ErrorCode::GENERATE_TIMEOUT, grpc::StatusCode::DEADLINE_EXCEEDED},
         {ErrorCode::OUT_OF_VOCAB_RANGE, grpc::StatusCode::OUT_OF_RANGE},
         {ErrorCode::LONG_PROMPT_ERROR, grpc::StatusCode::OUT_OF_RANGE},
+        {ErrorCode::INVALID_PARAMS, grpc::StatusCode::INVALID_ARGUMENT},
     };
     auto it = error_code_map.find(error_code);
     if (it != error_code_map.end()) {
