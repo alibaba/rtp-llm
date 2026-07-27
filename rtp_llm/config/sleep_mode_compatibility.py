@@ -26,8 +26,8 @@ def validate_level2_sleep_compatibility(
     sleep_mode_level: int,
     compatibility: Level2SleepCompatibility,
 ) -> None:
-    """Reject level-2 configurations with GPU weights that cannot be reloaded."""
-    if not enable_sleep_mode or sleep_mode_level != 2:
+    """Reject discard-mode configurations with GPU weights that cannot be reloaded."""
+    if not enable_sleep_mode or sleep_mode_level not in (2, 3):
         return
 
     conflicts: List[str] = []
@@ -52,7 +52,7 @@ def validate_level2_sleep_compatibility(
 
     if conflicts:
         raise ValueError(
-            "sleep mode level 2 is incompatible with active GPU weight owners: "
+            f"sleep mode level {sleep_mode_level} is incompatible with active GPU weight owners: "
             + "; ".join(conflicts)
             + ". Use sleep mode level 1 instead."
         )
@@ -77,10 +77,10 @@ def reject_embedding_sleep(*, enable_sleep_mode: bool, is_embedding: bool) -> No
 def reject_dynamic_lora_mutation(
     *, enable_sleep_mode: bool, sleep_mode_level: int
 ) -> None:
-    """Prevent runtime LoRA uploads that level-2 wake cannot reconstruct."""
-    if enable_sleep_mode and sleep_mode_level == 2:
+    """Prevent runtime LoRA uploads that discard-mode wake cannot reconstruct."""
+    if enable_sleep_mode and sleep_mode_level in (2, 3):
         raise ValueError(
-            "sleep mode level 2 does not support runtime LoRA add/update/load "
+            f"sleep mode level {sleep_mode_level} does not support runtime LoRA add/update/load "
             "because the adapter GPU weights cannot be reconstructed after wake. "
             "Remove adapters or use sleep mode level 1 instead."
         )
@@ -89,15 +89,15 @@ def reject_dynamic_lora_mutation(
 def reject_dynamic_weight_update(
     *, enable_sleep_mode: bool, sleep_mode_level: int
 ) -> None:
-    """Prevent runtime weight sync (e.g. RLHF) that level-2 wake would silently revert.
+    """Prevent runtime weight sync that discard-mode wake would silently revert.
 
-    Level-2 wake restores GPU weights from the original on-disk checkpoint, so any
+    Level-2/3 wake restores GPU weights from the original on-disk checkpoint, so any
     in-place weight update pushed at runtime would be discarded on the next wake.
     Level-1 (host backup) captures the updated content and is unaffected.
     """
-    if enable_sleep_mode and sleep_mode_level == 2:
+    if enable_sleep_mode and sleep_mode_level in (2, 3):
         raise ValueError(
-            "sleep mode level 2 does not support runtime weight update because "
+            f"sleep mode level {sleep_mode_level} does not support runtime weight update because "
             "the pushed GPU weights are not in the checkpoint and would be reverted "
             "on wake. Use sleep mode level 1 instead."
         )

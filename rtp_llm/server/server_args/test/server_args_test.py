@@ -177,6 +177,25 @@ class ServerArgsSetTest(TestCase):
             self.assertEqual(py_env_configs.runtime_config.enable_sleep_mode, True)
         self.assertTrue(wms.is_enabled())
 
+    def test_sleep_mode_level_three_configures_discard_mode(self):
+        sys.argv = [
+            "prog",
+            "--enable-sleep-mode",
+            "1",
+            "--sleep-mode-level",
+            "3",
+        ]
+
+        import rtp_llm.server.server_args.server_args
+        from rtp_llm.model_loader import weight_memory_saver as wms
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        wms._reset_for_testing()
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(py_env_configs.runtime_config.sleep_mode_level, 3)
+        self.assertEqual(wms.sleep_mode_level(), 3)
+
     def test_cmd_args_override_env_vars(self):
         """Test that command line arguments override environment variables."""
         # Set environment variables

@@ -9,6 +9,28 @@ filegroup(
 )
 
 py_test(
+    name = "checkpoint_controller_test",
+    srcs = ["checkpoint_controller_test.py"],
+    deps = [
+        "//rtp_llm:protobuf",
+        "//rtp_llm:utils",
+        "//rtp_llm/cpp/model_rpc:grpcio",
+        "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_py_proto",
+        "//rtp_llm/metrics:metrics",
+    ],
+    timeout = "short",
+)
+
+py_test(
+    name = "checkpoint_controller_gpu_test",
+    srcs = ["checkpoint_controller_gpu_test.py"],
+    deps = ["//rtp_llm:utils"],
+    size = "large",
+    tags = ["manual", "local", "no-remote"],
+    timeout = "long",
+)
+
+py_test(
     name = "ckpt_database_test",
     srcs = [
         "ckpt_database_test.py",

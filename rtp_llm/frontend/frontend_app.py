@@ -41,7 +41,10 @@ from rtp_llm.frontend.worker_address_utils import (
     infer_control_addrs_from_gang_metadata,
 )
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
-from rtp_llm.utils.grpc_client_wrapper import GrpcClientWrapper
+from rtp_llm.utils.grpc_client_wrapper import (
+    GrpcClientWrapper,
+    sleep_level3_options_from_config,
+)
 from rtp_llm.utils.util import async_request_server
 from rtp_llm.utils.version_info import VersionInfo
 
@@ -332,9 +335,10 @@ class FrontendApp(object):
         if not control_addresses:
             control_addresses = local_control_addresses
         expected_control_address_count = engine_config.parallelism_config.world_size
+        world_size = int(engine_config.parallelism_config.world_size)
+        level3_options = sleep_level3_options_from_config(engine_config, world_info)
         require_instance_lease = (
-            self.server_config.frontend_server_count > 1
-            or engine_config.parallelism_config.world_size > 1
+            self.server_config.frontend_server_count > 1 or world_size > 1
         )
 
         def connect_lifecycle_store():
@@ -352,6 +356,7 @@ class FrontendApp(object):
             control_address_resolver=resolve_global_control_addresses,
             lifecycle_store_factory=connect_lifecycle_store,
             require_instance_lease=require_instance_lease,
+            **level3_options,
         )
         logging.info(
             "sleep coordinator control_addresses=%s, expected_control_address_count=%s",
@@ -443,10 +448,27 @@ class FrontendApp(object):
             raise e
 
     def create_app(self):
+        # CORS is browser-enforced only; the real protection for the admin
+        # lifecycle routes (/sleep, /wake_up, /sleep_status) is the opt-in
+        # RTP_LLM_SLEEP_ADMIN_TOKEN gate in sleep_routes.py. Starlette's
+        # CORSMiddleware is app-global and cannot be scoped per-route, so we
+        # expose an env knob to tighten the origin allowlist without breaking
+        # the default. RTP_LLM_CORS_ALLOW_ORIGINS is a comma-separated list of
+        # allowed origins; when unset the default "*" preserves existing
+        # behavior (do not silently narrow CORS for normal inference routes).
+        cors_origins_env = os.environ.get("RTP_LLM_CORS_ALLOW_ORIGINS", "").strip()
+        if cors_origins_env:
+            allow_origins = [
+                origin.strip()
+                for origin in cors_origins_env.split(",")
+                if origin.strip()
+            ]
+        else:
+            allow_origins = ["*"]
         middleware = [
             Middleware(
                 CORSMiddleware,
-                allow_origins=["*"],
+                allow_origins=allow_origins,
                 allow_credentials=True,
                 allow_methods=["*"],
                 allow_headers=["*"],

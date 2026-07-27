@@ -512,7 +512,7 @@ def setup_args() -> PyEnvConfigs:
     # environment so ENABLE_SLEEP_MODE / SLEEP_MODE_LEVEL work the same from CLI
     # and env. SLEEP_MODE_LEVEL is read at weight-load time to decide whether the
     # torch_memory_saver weights region is opened with host cpu_backup (level 1)
-    # or as discard-only (level 2).
+    # or as discard-only (levels 2 and 3).
     os.environ["ENABLE_SLEEP_MODE"] = (
         "1" if getattr(parsed_args, "enable_sleep_mode", False) else "0"
     )

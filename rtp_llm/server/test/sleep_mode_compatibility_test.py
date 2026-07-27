@@ -12,10 +12,10 @@ from rtp_llm.config.sleep_mode_compatibility import (
 
 
 class Level2SleepCompatibilityTest(unittest.TestCase):
-    def validate(self, **kwargs) -> None:
+    def validate(self, sleep_mode_level=2, **kwargs) -> None:
         validate_level2_sleep_compatibility(
             enable_sleep_mode=True,
-            sleep_mode_level=2,
+            sleep_mode_level=sleep_mode_level,
             compatibility=Level2SleepCompatibility(**kwargs),
         )
 
@@ -63,6 +63,8 @@ class Level2SleepCompatibilityTest(unittest.TestCase):
             with self.subTest(case=case):
                 with self.assertRaises(ValueError):
                     self.validate(**case)
+                with self.assertRaises(ValueError):
+                    self.validate(sleep_mode_level=3, **case)
 
     def test_diagnostics_aggregate_in_deterministic_order(self):
         with self.assertRaisesRegex(
@@ -80,17 +82,21 @@ class Level2SleepCompatibilityTest(unittest.TestCase):
                 redundant_expert=3,
             )
 
-    def test_dynamic_lora_gate_only_blocks_level_two(self):
+    def test_dynamic_lora_gate_blocks_discard_levels(self):
         reject_dynamic_lora_mutation(enable_sleep_mode=False, sleep_mode_level=2)
         reject_dynamic_lora_mutation(enable_sleep_mode=True, sleep_mode_level=1)
         with self.assertRaisesRegex(ValueError, "runtime LoRA add/update/load"):
             reject_dynamic_lora_mutation(enable_sleep_mode=True, sleep_mode_level=2)
+        with self.assertRaisesRegex(ValueError, "runtime LoRA add/update/load"):
+            reject_dynamic_lora_mutation(enable_sleep_mode=True, sleep_mode_level=3)
 
-    def test_dynamic_weight_update_gate_only_blocks_level_two(self):
+    def test_dynamic_weight_update_gate_blocks_discard_levels(self):
         reject_dynamic_weight_update(enable_sleep_mode=False, sleep_mode_level=2)
         reject_dynamic_weight_update(enable_sleep_mode=True, sleep_mode_level=1)
         with self.assertRaisesRegex(ValueError, "runtime weight update"):
             reject_dynamic_weight_update(enable_sleep_mode=True, sleep_mode_level=2)
+        with self.assertRaisesRegex(ValueError, "runtime weight update"):
+            reject_dynamic_weight_update(enable_sleep_mode=True, sleep_mode_level=3)
 
     def test_embedding_sleep_rejected_only_when_both(self):
         # Allowed: generate deployment with sleep, embedding without sleep.
