@@ -36,7 +36,6 @@ private:
                               int                  token_offset,
                               bool                 return_all_probs,
                               const torch::Tensor& new_tokens_all,
-                              const torch::Tensor& token_ids_cpu,
                               const torch::Tensor& success_cpu) const;
 
 private:
