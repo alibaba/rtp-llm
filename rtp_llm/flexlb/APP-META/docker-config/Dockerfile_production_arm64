@@ -1,5 +1,4 @@
-ARG FROM_IMAGE
-FROM ${FROM_IMAGE}
+FROM hub.docker.alibaba-inc.com/aone/flexlb_base_arm64:2026_07_27_18_47_57bf944_arm64
 
 ARG APP_NAME=ai-whale
 ENV APP_NAME=${APP_NAME}
