@@ -246,8 +246,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         // The DSpark draft's block forward is always a k+1-wide (anchor + k masks)
         // query per request in BOTH decode-tail and seeding, so a single decode
         // graph captures it -- unlike MTP, which needs a separate prefill draft
-        // object (decode width 1, prefill width gamma+1). See
-        // docs/dspark-two-phase-plan-2026-07-14.md 2.5.
+        // object (decode width 1, prefill width gamma+1).
         // clang-format on
 
         const bool is_dspark = params.sp_config.type == SP_TYPE_DSPARK;

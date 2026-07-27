@@ -457,9 +457,9 @@ class ModelFactory:
         # The executor builds each [anchor + k*mask] query block in C++.
         sp_config.sp_dspark_mask_token_id = dspark_params.mask_token_id
 
-        # Phase-2 knobs (confidence / STS / SPS, dspark-phase2-design §API) are
-        # not implemented in phase 1 — reject them loudly instead of silently
-        # ignoring a scheduling/temperature policy the user asked for.
+        # Phase-2 knobs (confidence / STS / SPS) are not implemented in
+        # phase 1 — reject them loudly instead of silently ignoring a
+        # scheduling/temperature policy the user asked for.
         phase2_envs = [
             "SP_DSPARK_CONFIDENCE_SHADOW",
             "SP_DSPARK_CONFIDENCE_THRESHOLD",
@@ -474,8 +474,7 @@ class ModelFactory:
         if set_phase2:
             raise NotImplementedError(
                 f"dspark phase-2 flags not implemented yet: {set_phase2} "
-                "(confidence/STS/SPS land with phase 2, see "
-                "docs/dspark-phase2-design-2026-07-14.md)"
+                "(confidence/STS/SPS land with phase 2)"
             )
 
         # Target-side multi-layer feature capture: the ckpt's

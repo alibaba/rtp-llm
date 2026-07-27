@@ -10,7 +10,7 @@ Mirrors upstream vLLM's split (qwen3_dspark.py: DSparkMarkovHead +
 Qwen3DSparkModel(DFlashQwen3Model)).  Stages A/B/C and the propose/forward
 skeleton are inherited unchanged from Qwen3DFlashModel; only markov_correct is
 overridden.  The sampling loop lives in the model (not the executor) per the
-phase-1 design's G3 contract (docs/dspark-two-phase-plan-2026-07-14.md §2.3):
+phase-1 design's G3 contract:
 that keeps it inside the draft CUDA-graph capture boundary and lets the
 phase-2 confidence head co-locate with the Markov head.
 """

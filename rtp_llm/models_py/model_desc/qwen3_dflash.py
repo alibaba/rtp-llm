@@ -19,8 +19,8 @@ The query block is the speculators "bonus anchor" layout: 1+k wide, anchor
 (last verified token) at position committed_len, mask_j at committed_len+j;
 predictions are read at the k mask positions.
 
-Stage B is a write-only pass over the paged KV cache (design:
-docs/dspark-phase1-design-2026-07-14.md, "特征注入 = 独立投影 pass"): it reuses
+Stage B is a write-only pass over the paged KV cache (an independent
+projection pass by design, not part of any decoder forward): it reuses
 MhaRotaryEmbeddingOp + flashinfer append_paged_kv_cache with self-built page
 indices, eager-only, never captured by CUDA graph.  Stage C is a regular
 chunked-prefill decoder forward whose non-causal visibility comes entirely

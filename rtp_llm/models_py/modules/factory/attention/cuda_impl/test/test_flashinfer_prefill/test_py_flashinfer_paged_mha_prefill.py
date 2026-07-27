@@ -444,8 +444,7 @@ class TestPyFlashinferNonCausalPagedPrefill(BaseAttentionTest):
     (compute_dense_attention_reference), NOT FlashInfer itself.  This
     combination (causal=False + prefix_lengths>0) was never exercised in this
     repo before: BERT/ViT are non-causal but have no paged prefix, MTP verify
-    has a prefix but is causal.  Validation gate for DSpark phase-1 G2, see
-    docs/dspark-phase1-design-2026-07-14.md.
+    has a prefix but is causal.  Validation gate for DSpark phase-1 G2.
     """
 
     def setUp(self):

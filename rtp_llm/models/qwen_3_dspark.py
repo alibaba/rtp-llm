@@ -5,7 +5,7 @@ rtp_llm/tools/convert/dspark_ckpt_convert.py: a Qwen3 (qk-norm) backbone under
 model.* plus top-level draft extras (fc, hidden_norm inside model.*, lm_head,
 markov_head.*).  confidence_head.* tensors are intentionally unmapped — the
 loader only pulls what the weight info declares, so they are ignored
-(phase-1 No Goal, see docs/dspark-phase1-design-2026-07-14.md).
+(explicitly out of phase-1 scope; the confidence head lands with phase 2).
 
 DSpark extends DFlash (mirroring upstream vLLM's qwen3_dflash/qwen3_dspark
 split): Qwen3DFlash is the backbone + feature-KV base; Qwen3DSpark adds the
