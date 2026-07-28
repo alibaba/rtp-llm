@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 
 #include <algorithm>
+#include <optional>
 #include <sstream>
 #include <unordered_map>
 #include <unordered_set>
@@ -17,6 +18,20 @@ CacheGroupType groupTypeForSpec(const KVCacheSpec& spec) {
 
 bool isFullAttentionSpec(KVCacheSpecType type) {
     return type == KVCacheSpecType::MultiHeadAttention || type == KVCacheSpecType::MultiHeadLatentAttention;
+}
+
+std::string cacheGroupPolicySummary(const CacheGroupPolicy& policy) {
+    std::ostringstream os;
+    os << "{group_type=" << cacheGroupTypeName(policy.group_type) << ", prefix_reuse=" << policy.enable_prefix_reuse
+       << ", evict=" << static_cast<int>(policy.evict_policy) << ", reservable=" << policy.reservable
+       << ", explicit_block_num=" << policy.explicit_block_num
+       << ", charge_to_paged_budget=" << policy.charge_to_paged_budget
+       << ", memory_placement=" << static_cast<int>(policy.memory_placement)
+       << ", active_tail_blocks=" << policy.active_tail_blocks
+       << ", validate_tail_blocks=" << policy.validate_tail_blocks
+       << ", cp_mapping=" << static_cast<int>(policy.cp_mapping) << ", cp_slice=" << static_cast<int>(policy.cp_slice)
+       << '}';
+    return os.str();
 }
 
 std::string targetGroupSummary(const CacheConfig& target_config) {
@@ -38,28 +53,28 @@ std::string targetGroupSummary(const CacheConfig& target_config) {
         }
         os << ", seq_size_per_block=" << group.seq_size_per_block
            << ", kv_block_stride_bytes=" << group.kv_block_stride_bytes
-           << ", kv_scale_stride_bytes=" << group.kv_scale_stride_bytes << '}';
+           << ", kv_scale_stride_bytes=" << group.kv_scale_stride_bytes
+           << ", policy=" << cacheGroupPolicySummary(group.policy) << '}';
     }
     os << ']';
     return os.str();
 }
 
-size_t resolveDefaultMTPGroupAlias(const CacheConfig& target_config, const CacheConfig& propose_config) {
-    constexpr size_t invalid_gid = std::numeric_limits<size_t>::max();
+std::optional<size_t> resolveDefaultMTPGroupAlias(const CacheConfig& target_config, const CacheConfig& propose_config) {
     if (propose_config.groupNums() != 1 || propose_config.tagForGroup(0) != "default") {
-        return invalid_gid;
+        return std::nullopt;
     }
 
     for (size_t target_gid = 0; target_gid < static_cast<size_t>(target_config.groupNums()); ++target_gid) {
         if (target_config.tagForGroup(target_gid) == "default") {
-            return invalid_gid;  // Exact tag matching remains authoritative.
+            return std::nullopt;  // Exact tag matching remains authoritative.
         }
     }
 
     const auto& source_group = propose_config.topology().groupById(0);
     if (source_group.policy.group_type != CacheGroupType::FULL || source_group.spec == nullptr
         || !isFullAttentionSpec(source_group.spec->type)) {
-        return invalid_gid;
+        return std::nullopt;
     }
 
     std::vector<size_t> candidates;
@@ -67,7 +82,7 @@ size_t resolveDefaultMTPGroupAlias(const CacheConfig& target_config, const Cache
         const auto& target_group = target_config.topology().groupById(target_gid);
         // The aliased draft layer uses its own MTP memory layout. Group-tag APIs still expose it as the target
         // group, however, so both logical block granularity and physical block shape must remain compatible.
-        if (target_group.policy.group_type == source_group.policy.group_type && target_group.spec != nullptr
+        if (CacheConfig::samePolicy(target_group.policy, source_group.policy) && target_group.spec != nullptr
             && target_group.spec->type == source_group.spec->type
             && target_group.spec->memoryLayoutDType() == source_group.spec->memoryLayoutDType()
             && target_group.spec->block_size_bytes() == source_group.spec->block_size_bytes()
@@ -79,26 +94,32 @@ size_t resolveDefaultMTPGroupAlias(const CacheConfig& target_config, const Cache
         }
     }
 
-    const auto target_summary = targetGroupSummary(target_config);
-    RTP_LLM_CHECK_WITH_INFO(!candidates.empty(),
-                            "CacheConfig::mergeMTPModule no compatible target group for sole propose tag=default: "
-                            "source_spec_type=%d source_dtype=%d source_seq_size_per_block=%zu "
-                            "source_block_size_bytes=%zu source_scale_block_size_bytes=%zu "
-                            "source_kv_block_stride_bytes=%zu source_kv_scale_stride_bytes=%zu target_groups=%s",
-                            static_cast<int>(source_group.spec->type),
-                            static_cast<int>(source_group.spec->memoryLayoutDType()),
-                            source_group.seq_size_per_block,
-                            source_group.spec->block_size_bytes(),
-                            source_group.spec->scale_block_size_bytes(),
-                            source_group.kv_block_stride_bytes,
-                            source_group.kv_scale_stride_bytes,
-                            target_summary.c_str());
-    RTP_LLM_CHECK_WITH_INFO(candidates.size() <= 1,
-                            "CacheConfig::mergeMTPModule ambiguous default FULL group mapping: "
-                            "compatible target groups=%zu spec_type=%d target_groups=%s",
-                            candidates.size(),
-                            static_cast<int>(source_group.spec->type),
-                            target_summary.c_str());
+    if (candidates.empty()) {
+        const auto target_summary = targetGroupSummary(target_config);
+        const auto source_policy  = cacheGroupPolicySummary(source_group.policy);
+        RTP_LLM_FAIL("CacheConfig::mergeMTPModule no compatible target group for sole propose tag=default: "
+                     "source_spec_type=%d source_dtype=%d source_seq_size_per_block=%zu "
+                     "source_block_size_bytes=%zu source_scale_block_size_bytes=%zu "
+                     "source_kv_block_stride_bytes=%zu source_kv_scale_stride_bytes=%zu "
+                     "source_policy=%s target_groups=%s",
+                     static_cast<int>(source_group.spec->type),
+                     static_cast<int>(source_group.spec->memoryLayoutDType()),
+                     source_group.seq_size_per_block,
+                     source_group.spec->block_size_bytes(),
+                     source_group.spec->scale_block_size_bytes(),
+                     source_group.kv_block_stride_bytes,
+                     source_group.kv_scale_stride_bytes,
+                     source_policy.c_str(),
+                     target_summary.c_str());
+    }
+    if (candidates.size() > 1) {
+        const auto target_summary = targetGroupSummary(target_config);
+        RTP_LLM_FAIL("CacheConfig::mergeMTPModule ambiguous default FULL group mapping: "
+                     "compatible target groups=%zu spec_type=%d target_groups=%s",
+                     candidates.size(),
+                     static_cast<int>(source_group.spec->type),
+                     target_summary.c_str());
+    }
     return candidates.front();
 }
 
@@ -232,8 +253,7 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
     for (size_t gid = 0; gid < propose_config.topology().groups().size(); ++gid) {
         propose_gid_by_tag.emplace(propose_config.tagForGroup(gid), gid);
     }
-    const size_t     default_alias_target_gid = resolveDefaultMTPGroupAlias(*this, propose_config);
-    constexpr size_t invalid_gid              = std::numeric_limits<size_t>::max();
+    const auto default_alias_target_gid = resolveDefaultMTPGroupAlias(*this, propose_config);
 
     std::vector<GroupBase> sub_groups;
     std::vector<LayerBase> sub_layers(static_cast<size_t>(mtp_layer_num));
@@ -244,23 +264,35 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
         const auto  propose_it      = propose_gid_by_tag.find(tag);
         const bool  has_exact_group = propose_it != propose_gid_by_tag.end();
         const bool  uses_default_alias =
-            !has_exact_group && default_alias_target_gid != invalid_gid && target_gid == default_alias_target_gid;
-        const bool   has_propose_group = has_exact_group || uses_default_alias;
-        const auto&  source_config     = has_propose_group ? propose_config : *this;
-        const size_t source_gid        = has_exact_group ? propose_it->second : uses_default_alias ? 0 : target_gid;
-        const auto&  source_group      = source_config.topology().groupById(source_gid);
+            !has_exact_group && default_alias_target_gid.has_value() && target_gid == *default_alias_target_gid;
+
+        const CacheConfig* source_config = this;
+        size_t             source_gid    = target_gid;
+        if (has_exact_group) {
+            source_config = &propose_config;
+            source_gid    = propose_it->second;
+        } else if (uses_default_alias) {
+            source_config = &propose_config;
+            source_gid    = 0;
+        }
+        const bool  has_propose_group = has_exact_group || uses_default_alias;
+        const auto& source_group      = source_config->topology().groupById(source_gid);
 
         if (has_propose_group) {
             RTP_LLM_CHECK_WITH_INFO(
                 source_group.layer_ids.size() == static_cast<size_t>(mtp_layer_num),
-                "CacheConfig::mergeMTPModule tag=%s must cover every module layer, got=%zu expected=%u",
+                "CacheConfig::mergeMTPModule source_tag=%s target_tag=%s must cover every module layer, "
+                "got=%zu expected=%u",
+                source_group.tag.c_str(),
                 tag.c_str(),
                 source_group.layer_ids.size(),
                 mtp_layer_num);
             for (size_t local_layer_id = 0; local_layer_id < source_group.layer_ids.size(); ++local_layer_id) {
                 RTP_LLM_CHECK_WITH_INFO(
                     source_group.layer_ids[local_layer_id] == static_cast<int>(local_layer_id),
-                    "CacheConfig::mergeMTPModule tag=%s source layers must be ordered 0..%u, index=%zu value=%d",
+                    "CacheConfig::mergeMTPModule source_tag=%s target_tag=%s source layers must be ordered 0..%u, "
+                    "index=%zu value=%d",
+                    source_group.tag.c_str(),
                     tag.c_str(),
                     mtp_layer_num - 1,
                     local_layer_id,
@@ -270,8 +302,10 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
             const size_t expected_existing_layers =
                 static_cast<size_t>(group_layer_num) + static_cast<size_t>(module_index) * mtp_layer_num;
             RTP_LLM_CHECK_WITH_INFO(target_groups[target_gid].layer_ids.size() == expected_existing_layers,
-                                    "CacheConfig::mergeMTPModule tag=%s gid=%zu physical group alignment mismatch: "
+                                    "CacheConfig::mergeMTPModule source_tag=%s target_tag=%s gid=%zu "
+                                    "physical group alignment mismatch: "
                                     "existing_layers=%zu expected=%zu module=%d group_layer_num=%d module_layers=%u",
+                                    source_group.tag.c_str(),
                                     tag.c_str(),
                                     target_gid,
                                     target_groups[target_gid].layer_ids.size(),
