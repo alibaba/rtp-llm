@@ -1,4 +1,3 @@
-import logging
 import sys
 from typing import Any, Dict, Optional
 
@@ -26,6 +25,7 @@ from rtp_llm.models_py.modules import (
     RMSNorm,
     RMSResNorm,
 )
+from rtp_llm.models_py.modules.factory.attention import common as attention_common
 from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     CausalConv1dMetadata,
     causal_conv1d_fn,
@@ -97,11 +97,7 @@ def _write_cp_cache_store(
     attention_inputs: PyAttentionInputs, kv_cache: LayerKVCache
 ) -> None:
     """Write a CP linear layer using that layer's tag-local cache metadata."""
-    cache_store_inputs = attention_inputs.cache_store_inputs
-    cache_store_writer = attention_inputs.cache_store_writer
-    if cache_store_inputs is None or cache_store_writer is None:
-        return
-    cache_store_writer.write(cache_store_inputs, kv_cache)
+    attention_common.write_cache_store_if_needed(attention_inputs, kv_cache)
 
 
 def _maybe_write_cp_cache_store(
@@ -378,14 +374,7 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
         attn_out = self._fla(
             mixed_qkv, b, a, kv_cache_tensor, seq_size_per_block, attn_inputs
         )
-        cache_store_inputs = attn_inputs.cache_store_inputs
-        cache_store_writer = attn_inputs.cache_store_writer
-        if (
-            kv_cache is not None
-            and cache_store_inputs is not None
-            and cache_store_writer is not None
-        ):
-            cache_store_writer.write(cache_store_inputs, kv_cache)
+        attention_common.write_cache_store_if_needed(attn_inputs, kv_cache)
         return attn_out
 
 

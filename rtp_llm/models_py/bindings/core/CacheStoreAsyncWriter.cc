@@ -20,18 +20,40 @@ CacheStoreAsyncWriter::PendingTaskGuard::~PendingTaskGuard() {
     writer_.completePendingTask();
 }
 
+const char* CacheStoreAsyncWriter::stateName(State state) {
+    switch (state) {
+        case State::IDLE:
+            return "IDLE";
+        case State::RUNNING:
+            return "RUNNING";
+        case State::DRAINING:
+            return "DRAINING";
+    }
+    return "UNKNOWN";
+}
+
+std::shared_ptr<const CacheConfig>
+CacheStoreAsyncWriter::selectCacheConfig(const std::shared_ptr<KVCacheManager>& cache_manager,
+                                         const std::optional<int>&              mtp_cache_config_index) {
+    if (!cache_manager) {
+        return nullptr;
+    }
+    const CacheConfig* selected_config = &cache_manager->cacheConfig();
+    if (mtp_cache_config_index.has_value()) {
+        selected_config = &cache_manager->getMTPModuleCacheConfig(*mtp_cache_config_index);
+    }
+    return std::shared_ptr<const CacheConfig>(cache_manager, selected_config);
+}
+
 CacheStoreAsyncWriter::CacheStoreAsyncWriter(int                             device_id,
                                              std::shared_ptr<KVCacheManager> cache_manager,
                                              size_t                          cache_model_id,
                                              std::optional<int>              mtp_cache_config_index):
-    device_id_(device_id), cache_manager_(std::move(cache_manager)), cache_model_id_(cache_model_id) {
+    device_id_(device_id),
+    cache_manager_(std::move(cache_manager)),
+    cache_config_(selectCacheConfig(cache_manager_, mtp_cache_config_index)),
+    cache_model_id_(cache_model_id) {
     if (cache_manager_) {
-        const CacheConfig* selected_config = &cache_manager_->cacheConfig();
-        if (mtp_cache_config_index.has_value()) {
-            selected_config = &cache_manager_->getMTPModuleCacheConfig(*mtp_cache_config_index);
-        }
-        cache_config_ = std::shared_ptr<const CacheConfig>(cache_manager_, selected_config);
-
         if (const auto cp_slot_mapper = cache_manager_->cpSlotMapper()) {
             cp_rank_ = cp_slot_mapper->cpRank();
             cp_size_ = cp_slot_mapper->cpSize();
@@ -60,9 +82,15 @@ void CacheStoreAsyncWriter::storeCurrentException() {
 }
 
 CacheStoreAsyncWriter::~CacheStoreAsyncWriter() {
-    if (state_ == State::RUNNING) {
-        RTP_LLM_LOG_WARNING("CacheStoreAsyncWriter destroyed while RUNNING - "
-                            "caller should call waitAllDone() before destruction");
+    State state;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        state = state_;
+    }
+    if (state != State::IDLE) {
+        RTP_LLM_LOG_WARNING("CacheStoreAsyncWriter destroyed while %s - "
+                            "caller should call waitAllDone() before destruction",
+                            stateName(state));
     }
     if (thread_pool_) {
         thread_pool_->stop();
@@ -73,20 +101,50 @@ CacheStoreAsyncWriter::~CacheStoreAsyncWriter() {
 void CacheStoreAsyncWriter::init() {
     std::lock_guard<std::mutex> lock(state_mutex_);
     RTP_LLM_CHECK_WITH_INFO(state_ == State::IDLE,
-                            "CacheStoreAsyncWriter::init() called while already RUNNING. "
-                            "Must call waitAllDone() before re-initializing.");
+                            "CacheStoreAsyncWriter::init() requires IDLE state, got %s. "
+                            "Must call waitAllDone() before re-initializing.",
+                            stateName(state_));
+    RTP_LLM_CHECK_WITH_INFO(cache_manager_ != nullptr,
+                            "CacheStoreAsyncWriter::init() cannot start cache-store work because KVCacheManager is "
+                            "unavailable (model_id=%zu, device_id=%d)",
+                            cache_model_id_,
+                            device_id_);
+    RTP_LLM_CHECK_WITH_INFO(cache_config_ != nullptr,
+                            "CacheStoreAsyncWriter::init() cannot start cache-store work because CacheConfig is "
+                            "unavailable (model_id=%zu, device_id=%d)",
+                            cache_model_id_,
+                            device_id_);
+    auto cache_store = cache_manager_->getCacheStore();
+    RTP_LLM_CHECK_WITH_INFO(cache_store != nullptr,
+                            "CacheStoreAsyncWriter::init() cannot start cache-store work because CacheStore is "
+                            "unavailable (model_id=%zu, device_id=%d). Ensure RemoteRpcServer::setCacheStore() "
+                            "completes before PD prefill.",
+                            cache_model_id_,
+                            device_id_);
+
     pending_count_.store(0, std::memory_order_relaxed);
-    stored_exception_   = nullptr;
-    active_cache_store_ = cache_manager_ ? cache_manager_->getCacheStore() : nullptr;
-    state_              = State::RUNNING;
+    {
+        std::lock_guard<std::mutex> exception_lock(exception_mutex_);
+        stored_exception_ = nullptr;
+    }
+    active_cache_store_ = std::move(cache_store);
+    ++cycle_id_;
+    state_ = State::RUNNING;
 }
 
 // Enqueue a task to the background thread pool. Must be in RUNNING state.
 void CacheStoreAsyncWriter::submit(std::function<void()> task) {
     std::lock_guard<std::mutex> lock(state_mutex_);
+    enqueueLocked(std::move(task));
+}
+
+// state_mutex_ must be held by the caller. Admission and pending accounting are
+// intentionally one critical section with the RUNNING-state check.
+void CacheStoreAsyncWriter::enqueueLocked(std::function<void()> task) {
     RTP_LLM_CHECK_WITH_INFO(state_ == State::RUNNING,
-                            "CacheStoreAsyncWriter::submit() called when not RUNNING. "
-                            "Call init() first.");
+                            "CacheStoreAsyncWriter task submission requires RUNNING state, got %s. "
+                            "Call init() first and do not submit after waitAllDone() starts.",
+                            stateName(state_));
 
     pending_count_.fetch_add(1, std::memory_order_acq_rel);
     auto wrapped = [this, task = std::move(task)]() {
@@ -110,14 +168,16 @@ void CacheStoreAsyncWriter::submit(std::function<void()> task) {
     }
 }
 
-// Block until all submitted tasks complete, then RUNNING -> IDLE.
+// Stop accepting new tasks, then block until all admitted tasks complete.
 // Re-throws the first stored exception after state transition.
 void CacheStoreAsyncWriter::waitAllDone() {
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
         RTP_LLM_CHECK_WITH_INFO(state_ == State::RUNNING,
-                                "CacheStoreAsyncWriter::waitAllDone() called when not RUNNING. "
-                                "Call init() first.");
+                                "CacheStoreAsyncWriter::waitAllDone() requires RUNNING state, got %s. "
+                                "Call init() first.",
+                                stateName(state_));
+        state_ = State::DRAINING;
     }
 
     {
@@ -125,34 +185,69 @@ void CacheStoreAsyncWriter::waitAllDone() {
         wait_cv_.wait(lock, [this]() { return pending_count_.load(std::memory_order_acquire) == 0; });
     }
 
+    std::exception_ptr ex;
     {
         std::lock_guard<std::mutex> lock(state_mutex_);
+        RTP_LLM_CHECK_WITH_INFO(state_ == State::DRAINING,
+                                "CacheStoreAsyncWriter::waitAllDone() expected DRAINING state, got %s",
+                                stateName(state_));
+        std::lock_guard<std::mutex> exception_lock(exception_mutex_);
+        ex                = stored_exception_;
+        stored_exception_ = nullptr;
         active_cache_store_.reset();
         state_ = State::IDLE;
     }
-
-    if (stored_exception_) {
-        auto ex           = stored_exception_;
-        stored_exception_ = nullptr;
+    if (ex) {
         std::rethrow_exception(ex);
     }
 }
 
 void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_store_inputs,
                                   const torch_ext::LayerKVCache&       layer_kv) {
-    if (!active_cache_store_ || !cache_config_) {
-        return;
-    }
-
+#if !USING_CUDA && !USING_ROCM
+    (void)cache_store_inputs;
+    (void)layer_kv;
+    RTP_LLM_CHECK_WITH_INFO(false, "CacheStoreAsyncWriter::write() requires a CUDA or ROCm build");
+#else
     // Capture tensors by value so their underlying storage stays alive in the background thread.
     // A torch::Tensor copy only increments the reference count.
     auto captured_cache_store_inputs = cache_store_inputs;
     auto captured_layer_kv           = layer_kv;
-    auto cache_config                = cache_config_;
-    auto cache_store                 = active_cache_store_;
-    // Create the event on the main thread to avoid event-record contention in worker threads.
+
+    std::shared_ptr<const CacheConfig> cache_config;
+    std::shared_ptr<CacheStore>        cache_store;
+    uint64_t                           cycle_id;
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        RTP_LLM_CHECK_WITH_INFO(state_ == State::RUNNING,
+                                "CacheStoreAsyncWriter::write() requires an active RUNNING forward cycle, got %s "
+                                "for tag=%s layer=%d",
+                                stateName(state_),
+                                layer_kv.tag.c_str(),
+                                layer_kv.layer_id);
+        RTP_LLM_CHECK_WITH_INFO(active_cache_store_ != nullptr && cache_config_ != nullptr,
+                                "CacheStoreAsyncWriter::write() has no active CacheStore/CacheConfig snapshot "
+                                "for tag=%s layer=%d (model_id=%zu, device_id=%d)",
+                                layer_kv.tag.c_str(),
+                                layer_kv.layer_id,
+                                cache_model_id_,
+                                device_id_);
+        cache_config = cache_config_;
+        cache_store  = active_cache_store_;
+        cycle_id     = cycle_id_;
+    }
+
+    // Create the event on the caller thread without extending the writer state lock
+    // across a device runtime call.
     auto event = runtimeCreateEvent();
-    auto run   = [captured_cache_store_inputs,
+
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    RTP_LLM_CHECK_WITH_INFO(state_ == State::RUNNING && cycle_id_ == cycle_id,
+                            "CacheStoreAsyncWriter forward cycle changed while creating an event "
+                            "for tag=%s layer=%d",
+                            layer_kv.tag.c_str(),
+                            layer_kv.layer_id);
+    auto run = [captured_cache_store_inputs,
                 captured_layer_kv,
                 cache_config,
                 cache_store,
@@ -169,7 +264,8 @@ void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_sto
                                cp_size,
                                std::move(event));
     };
-    submit(std::move(run));
+    enqueueLocked(std::move(run));
+#endif
 }
 
 }  // namespace rtp_llm

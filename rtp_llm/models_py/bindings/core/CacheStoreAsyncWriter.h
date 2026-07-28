@@ -22,6 +22,8 @@ class KVCacheManager;
 // Offloads writeCacheStore CPU-heavy work to a background thread pool so the
 // main thread can keep launching CUDA kernels without stalling.
 // Lifecycle: init() -> write()* -> waitAllDone() -> init() -> ...
+// write() is valid only during the RUNNING portion of an active forward cycle.
+// Once waitAllDone() starts draining, new writes are rejected.
 class CacheStoreAsyncWriter: public CacheStoreWriter {
 public:
     explicit CacheStoreAsyncWriter(int                             device_id              = -1,
@@ -31,12 +33,13 @@ public:
     ~CacheStoreAsyncWriter() override;
 
     void init();
+    void submit(std::function<void()> task);
     void waitAllDone();
     void write(const torch_ext::PyCacheStoreInputs& cache_store_inputs,
                const torch_ext::LayerKVCache&       layer_kv) override;
 
 private:
-    void submit(std::function<void()> task);
+    void enqueueLocked(std::function<void()> task);
 
     class PendingTaskGuard {
     public:
@@ -55,8 +58,13 @@ private:
 
     enum class State {
         IDLE,
-        RUNNING
+        RUNNING,
+        DRAINING
     };
+
+    static const char*                        stateName(State state);
+    static std::shared_ptr<const CacheConfig> selectCacheConfig(const std::shared_ptr<KVCacheManager>& cache_manager,
+                                                                const std::optional<int>& mtp_cache_config_index);
 
     autil::ThreadPoolBasePtr thread_pool_;
     std::atomic<int64_t>     pending_count_{0};
@@ -66,13 +74,15 @@ private:
     std::mutex               exception_mutex_;
     std::exception_ptr       stored_exception_;
     State                    state_{State::IDLE};
+    uint64_t                 cycle_id_{0};
     int                      device_id_{-1};
 
-    std::shared_ptr<KVCacheManager>    cache_manager_;
-    std::shared_ptr<const CacheConfig> cache_config_;
-    size_t                             cache_model_id_{0};
-    int                                cp_rank_{0};
-    int                                cp_size_{1};
+    const std::shared_ptr<KVCacheManager> cache_manager_;
+    // Selected once during construction and immutable for the writer lifetime.
+    const std::shared_ptr<const CacheConfig> cache_config_;
+    size_t                                   cache_model_id_{0};
+    int                                      cp_rank_{0};
+    int                                      cp_size_{1};
 
     // CacheStore can be injected after model construction, so resolve it once per forward.
     std::shared_ptr<CacheStore> active_cache_store_;

@@ -69,6 +69,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
             cache_store_writer = Mock()
             layer_inputs[tag] = (
                 SimpleNamespace(
+                    is_prefill=True,
                     cache_store_inputs=cache_store_inputs,
                     cache_store_writer=cache_store_writer,
                 ),
@@ -82,19 +83,10 @@ class AttentionInputRoutingTest(unittest.TestCase):
                 attention_inputs.cache_store_inputs, kv_cache
             )
 
-    def test_cp_cache_store_skips_layer_without_store_inputs(self):
-        cache_store_writer = Mock()
+    def test_cp_cache_store_skips_layer_without_store_pair(self):
         attention_inputs = SimpleNamespace(
-            cache_store_inputs=None, cache_store_writer=cache_store_writer
-        )
-
-        _write_cp_cache_store(attention_inputs, SimpleNamespace(tag="linear0"))
-
-        cache_store_writer.write.assert_not_called()
-
-    def test_cp_cache_store_skips_layer_without_writer(self):
-        attention_inputs = SimpleNamespace(
-            cache_store_inputs=SimpleNamespace(tag="linear0"),
+            is_prefill=True,
+            cache_store_inputs=None,
             cache_store_writer=None,
         )
 
@@ -102,6 +94,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
 
     def test_non_cp_linear_attention_does_not_write_cache_store(self):
         attention_inputs = SimpleNamespace(
+            is_prefill=True,
             cache_store_inputs=SimpleNamespace(tag="linear0"),
             cache_store_writer=Mock(),
             context_parallel_info=SimpleNamespace(

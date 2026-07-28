@@ -24,6 +24,49 @@ using namespace std;
 
 namespace rtp_llm {
 
+namespace {
+
+class CacheStoreWriteCycleGuard {
+public:
+    CacheStoreWriteCycleGuard(const std::shared_ptr<CacheStoreAsyncWriter>& writer, bool has_work):
+        writer_(writer), active_(has_work) {
+        if (active_) {
+            writer_->init();
+        }
+    }
+
+    ~CacheStoreWriteCycleGuard() {
+        if (!active_) {
+            return;
+        }
+        active_ = false;
+        try {
+            writer_->waitAllDone();
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("failed to drain CacheStore writer while unwinding forward: %s", e.what());
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("failed to drain CacheStore writer while unwinding forward: unknown exception");
+        }
+    }
+
+    void finish() {
+        if (!active_) {
+            return;
+        }
+        active_ = false;
+        writer_->waitAllDone();
+    }
+
+    CacheStoreWriteCycleGuard(const CacheStoreWriteCycleGuard&)            = delete;
+    CacheStoreWriteCycleGuard& operator=(const CacheStoreWriteCycleGuard&) = delete;
+
+private:
+    std::shared_ptr<CacheStoreAsyncWriter> writer_;
+    bool                                   active_{false};
+};
+
+}  // namespace
+
 torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tensor) {
     if (tensor.device().is_cuda()) {
         return tensor;
@@ -283,17 +326,66 @@ GptModelOutputs PyWrappedModel::callForwardPostLayers(torch::Tensor         hidd
                              skip_final_layernorm);
 }
 
-std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const GptModelInputs& inputs) {
+std::optional<PyCacheStoreInputs>
+PyWrappedModel::prepareWriteCacheParams(const GptModelInputs& inputs,
+                                        const torch::Tensor&  cache_store_input_lengths_host) {
     RTP_LLM_PROFILE_SCOPE("py_model.prepareWriteCacheParams");
     if (inputs.warmup) {
         return std::nullopt;
     }
-    if (!inputs.pd_separation || !inputs.request_id.defined() || inputs.request_id.numel() == 0) {
+    if (!inputs.pd_separation) {
         return std::nullopt;
     }
+    const int64_t context_batch_size = inputs.input_lengths.size(0) - inputs.sequence_lengths.size(0);
+    RTP_LLM_CHECK_WITH_INFO(context_batch_size >= 0,
+                            "cache-store model input batch=%ld is smaller than decode batch=%ld",
+                            inputs.input_lengths.size(0),
+                            inputs.sequence_lengths.size(0));
+    if (context_batch_size == 0) {
+        return std::nullopt;
+    }
+    RTP_LLM_CHECK_WITH_INFO(inputs.request_id.defined(),
+                            "cache-store request_id must be defined for context batch=%ld",
+                            context_batch_size);
+    RTP_LLM_CHECK_WITH_INFO(inputs.request_id.dim() == 1,
+                            "cache-store request_id must be 1-D for context batch=%ld, got dim=%ld",
+                            context_batch_size,
+                            inputs.request_id.dim());
+    RTP_LLM_CHECK_WITH_INFO(inputs.request_id.device().is_cpu(),
+                            "cache-store request_id must be a CPU tensor for context batch=%ld",
+                            context_batch_size);
+    RTP_LLM_CHECK_WITH_INFO(inputs.request_id.scalar_type() == torch::kInt64,
+                            "cache-store request_id must use int64 for context batch=%ld, got %s",
+                            context_batch_size,
+                            c10::toString(inputs.request_id.scalar_type()));
+    RTP_LLM_CHECK_WITH_INFO(inputs.request_id.numel() == context_batch_size,
+                            "cache-store request_id count=%ld does not match context batch=%ld",
+                            inputs.request_id.numel(),
+                            context_batch_size);
+    // request_id identifies mandatory PD work; missing cache_keys remains a warned no-op
+    // until all producers guarantee it.
+    if (!inputs.cache_keys.defined() || inputs.cache_keys.numel() == 0) {
+        RTP_LLM_INTERVAL_LOG(60,
+                             WARN,
+                             "pd prefill request [%ld] has no cache_keys; skip cache-store write for context batch=%ld",
+                             inputs.request_id[0].item<int64_t>(),
+                             context_batch_size);
+        return std::nullopt;
+    }
+    RTP_LLM_CHECK_WITH_INFO(cache_store_input_lengths_host.defined(),
+                            "cache-store input lengths must be defined for eligible PD-prefill work");
+    RTP_LLM_CHECK_WITH_INFO(cache_store_input_lengths_host.device().is_cpu(),
+                            "cache-store input lengths must be a CPU tensor");
+    RTP_LLM_CHECK_WITH_INFO(cache_store_input_lengths_host.scalar_type() == torch::kInt32,
+                            "cache-store input lengths must use int32, got %s",
+                            c10::toString(cache_store_input_lengths_host.scalar_type()));
+    RTP_LLM_CHECK_WITH_INFO(cache_store_input_lengths_host.numel() == inputs.input_lengths.numel(),
+                            "cache-store input length count=%ld does not match model input length count=%ld",
+                            cache_store_input_lengths_host.numel(),
+                            inputs.input_lengths.numel());
 
     PyCacheStoreInputs cache_store_inputs;
-    cache_store_inputs.input_lengths_host    = inputs.input_lengths;
+    cache_store_inputs.input_lengths_host    = cache_store_input_lengths_host;
     cache_store_inputs.prefix_lengths_host   = inputs.prefix_lengths;
     cache_store_inputs.host_kv_cache_offset  = inputs.kv_cache_block_id;
     cache_store_inputs.request_id            = inputs.request_id;
@@ -332,6 +424,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
     auto [split_inputs, _] = splitInputsIntoMicroBatches(inputs, micro_batch_plan);
     std::vector<PyModelInputs> input_list;
     input_list.reserve(split_inputs.size());
+    bool has_cache_store_work = false;
 
     for (size_t i = 0; i < split_inputs.size(); ++i) {
         const bool  is_real_micro_input   = split_inputs[i].kv_cache_kernel_block_id.defined();
@@ -340,10 +433,11 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         auto        embedding_inputs      = buildPyEmbeddingInputs(micro_inputs);
         auto        multimodal_inputs     = buildPyMultimodalInputs(micro_inputs);
         auto        bert_embedding_inputs = buildBertEmbeddingInputs(micro_inputs);
-        if (is_real_micro_input && py_attn_inputs.is_prefill) {
-            py_attn_inputs.cache_store_inputs = prepareWriteCacheParams(micro_inputs);
+        if (is_real_micro_input) {
+            py_attn_inputs.cache_store_inputs = prepareWriteCacheParams(micro_inputs, micro_inputs.input_lengths);
             if (py_attn_inputs.cache_store_inputs.has_value()) {
                 py_attn_inputs.cache_store_writer = cache_store_async_writer_;
+                has_cache_store_work              = true;
             }
         }
         torch::Tensor combo_position_ids = micro_inputs.combo_position_ids.defined() ?
@@ -366,9 +460,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                                               bert_embedding_inputs});
     }
 
-    if (!inputs.warmup && inputs.pd_separation) {
-        cache_store_async_writer_->init();
-    }
+    CacheStoreWriteCycleGuard cache_store_write_cycle(cache_store_async_writer_, has_cache_store_work);
 
     fusedCopy(d2d_copies_);
 
@@ -385,9 +477,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                             py_model_outputs.size(),
                             input_list.size());
 
-    if (!inputs.warmup && inputs.pd_separation) {
-        cache_store_async_writer_->waitAllDone();
-    }
+    cache_store_write_cycle.finish();
 
     // TODO: merge hidden states in one tensor
     torch::Tensor hidden_states;
@@ -474,9 +564,21 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         if (int(device_props_.enable_layer_micro_batch)) {
             return forwardMicroBatched(inputs);
         }
+
+        // Resolve CacheStore eligibility and initialize the writer before context-parallel
+        // input preparation mutates input_lengths and combo_tokens in place. This keeps a
+        // missing CacheStore failure retryable with the same GptModelInputs instance.
+        auto                      cache_store_inputs = prepareWriteCacheParams(inputs, inputs.input_lengths);
+        CacheStoreWriteCycleGuard cache_store_write_cycle(cache_store_async_writer_, cache_store_inputs.has_value());
+
         PyContextParallelParams cp_params;
         if (device_props_.enable_prefill_cp) {
             context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
+            if (cache_store_inputs.has_value()) {
+                cache_store_inputs = prepareWriteCacheParams(inputs, cp_params.prefill_actual_input_lengths_cpu);
+                RTP_LLM_CHECK_WITH_INFO(cache_store_inputs.has_value(),
+                                        "cache-store eligibility changed during context-parallel input preparation");
+            }
         }
 
         torch::Tensor token_ids;
@@ -497,18 +599,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             attention_inputs.context_parallel_info = cp_params;
         }
 
-        if (attention_inputs.is_prefill) {
-            attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
-            if (attention_inputs.cache_store_inputs.has_value()) {
-                if (device_props_.enable_prefill_cp) {
-                    attention_inputs.cache_store_inputs->input_lengths_host =
-                        cp_params.prefill_actual_input_lengths_cpu;
-                }
-                attention_inputs.cache_store_writer = cache_store_async_writer_;
-            }
-        }
-        if (!inputs.warmup && inputs.pd_separation) {
-            cache_store_async_writer_->init();
+        attention_inputs.cache_store_inputs = std::move(cache_store_inputs);
+        if (attention_inputs.cache_store_inputs.has_value()) {
+            attention_inputs.cache_store_writer = cache_store_async_writer_;
         }
         calculatePaddingOffset(attention_inputs);
         attention_inputs.padding_offset = tensorHoldHostAndToCuda(attention_inputs.padding_offset);
@@ -557,9 +650,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             hidden_states         = py_model_outputs.hidden_states.clone();
         }
 
-        if (!inputs.warmup && inputs.pd_separation) {
-            cache_store_async_writer_->waitAllDone();
-        }
+        cache_store_write_cycle.finish();
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
         const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);

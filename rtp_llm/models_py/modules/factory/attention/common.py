@@ -11,7 +11,12 @@ from typing import Any, Optional
 import torch
 
 from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
-from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
+from rtp_llm.ops.compute_ops import (
+    CacheStoreWriter,
+    LayerKVCache,
+    PyAttentionInputs,
+    PyCacheStoreInputs,
+)
 
 
 def reshape_paged_kv_cache(
@@ -42,10 +47,24 @@ def reshape_paged_kv_cache(
     )
 
 
+def _resolve_cache_store_pair(
+    attn_inputs: PyAttentionInputs,
+) -> Optional[tuple[CacheStoreWriter, PyCacheStoreInputs]]:
+    cache_store_inputs = attn_inputs.cache_store_inputs
+    cache_store_writer = attn_inputs.cache_store_writer
+    if cache_store_inputs is None or cache_store_writer is None:
+        return None
+    return cache_store_writer, cache_store_inputs
+
+
 def create_write_cache_store_impl(
     attn_inputs: PyAttentionInputs,
 ) -> Optional[WriteCacheStoreOp]:
-    """Create write cache store implementation if needed.
+    """Create a cache-store operation for a complete writer/input pair.
+
+    PyWrappedModel constructs ``input_lengths_host`` from the original request
+    lengths before context-parallel chunking and attaches the writer and inputs
+    as one pair.
 
     Args:
         attn_inputs: Attention calculation input parameters
@@ -53,14 +72,11 @@ def create_write_cache_store_impl(
     Returns:
         WriteCacheStoreOp instance if cache store is needed, None otherwise
     """
-    cache_store_inputs = attn_inputs.cache_store_inputs
-    cache_store_writer = attn_inputs.cache_store_writer
-    if (
-        attn_inputs.is_prefill
-        and cache_store_inputs is not None
-        and cache_store_writer is not None
-    ):
-        return WriteCacheStoreOp(cache_store_writer, cache_store_inputs)
+    if not attn_inputs.is_prefill:
+        return None
+    cache_store_pair = _resolve_cache_store_pair(attn_inputs)
+    if cache_store_pair is not None:
+        return WriteCacheStoreOp(*cache_store_pair)
     return None
 
 
@@ -78,6 +94,19 @@ def apply_write_cache_store(
     """
     if attn_inputs.is_prefill and write_cache_store_impl is not None:
         write_cache_store_impl(kv_cache)
+
+
+def write_cache_store_if_needed(
+    attn_inputs: PyAttentionInputs, kv_cache: Optional[LayerKVCache]
+) -> None:
+    """Write one prefill layer when C++ attached a complete CacheStore pair."""
+    if not attn_inputs.is_prefill or kv_cache is None:
+        return
+    cache_store_pair = _resolve_cache_store_pair(attn_inputs)
+    if cache_store_pair is None:
+        return
+    cache_store_writer, cache_store_inputs = cache_store_pair
+    cache_store_writer.write(cache_store_inputs, kv_cache)
 
 
 def copy_kv_cache_offset(old_offset: torch.Tensor, new_offset: torch.Tensor) -> None:

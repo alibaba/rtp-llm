@@ -42,7 +42,8 @@ public:
     void            releaseBuffers() override;
 
 private:
-    std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
+    std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs,
+                                                              const torch::Tensor&  cache_store_input_lengths_host);
 
 private:
     // Helper functions to reduce code duplication

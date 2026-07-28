@@ -210,8 +210,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
          params.model_config_.hidden_size,
          params.model_config_.attn_config.tokens_per_block,
          params.model_config_.attn_config.kernel_tokens_per_block,
-         cache_manager,
-         std::nullopt});
+         cache_manager});
 
     if (params.ffn_disaggregate_config.enable_ffn_disaggregate) {
         RTP_LLM_LOG_INFO("using ffn as service");
@@ -257,7 +256,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 mtp_params->model_config_.attn_config.tokens_per_block,
                                 mtp_params->model_config_.attn_config.kernel_tokens_per_block,
                                 cache_manager,
-                                std::make_optional(0)});
+                                /*mtp_cache_config_index=*/0});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
             draft_model_.reset(new PyWrappedModel(model_params, params.py_sp_model, false, false));

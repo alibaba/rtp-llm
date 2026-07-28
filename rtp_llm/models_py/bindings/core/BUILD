@@ -98,13 +98,33 @@ cc_library(
     visibility = ["//visibility:public"],
 )
 
-filegroup(
-    name = "exec_ops_srcs",
-    srcs = [
-        "ExecOps.cc",
-    ],
-    visibility = ["//visibility:public"],
-)
+_EXEC_OPS_COMMON_DEPS = [
+    ":device_data",
+    ":op_data",
+    ":type_convert",
+    ":types_hdr",
+    ":common_defines",
+    "//rtp_llm/cpp/cache:cache_config",
+    "//rtp_llm/cpp/utils:signal_utils",
+    "//rtp_llm/cpp/utils:kv_cache_utils",
+    "//rtp_llm/cpp/utils:debug_utils",
+    "//rtp_llm/cpp/config:static_config",
+    "//rtp_llm/cpp/model_utils:model_utils",
+    "//rtp_llm/cpp/config:config_modules",
+    "//rtp_llm/models_py/bindings:op_defs",
+    "//rtp_llm/cpp/models:stats",
+    "//rtp_llm/cpp/models/models_weight:weights_define",
+    "//rtp_llm/cpp/cache:cache_group_type",
+    "//rtp_llm/cpp/utils:core_utils",
+    "//rtp_llm/cpp/utils:device_pin",
+    "//rtp_llm/cpp/utils:error_code",
+    "//rtp_llm/cpp/pybind:th_utils",
+    "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
+    "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
+    "@havenask//aios/autil:stack_tracer",
+    "@havenask//aios/autil:string_helper",
+    "@havenask//aios/autil:scope",
+] + torch_deps()
 
 # Test-only library for ExecOps.cc.
 # Use this for tests that already link cuda_impl.
@@ -116,33 +136,7 @@ cc_library(
     srcs = [
         "ExecOps.cc",
     ],
-    deps = [
-        ":device_data",
-        ":op_data",
-        ":type_convert",
-        ":types_hdr",
-        ":common_defines",
-        "//rtp_llm/cpp/cache:cache_config",
-        "//rtp_llm/cpp/utils:signal_utils",
-        "//rtp_llm/cpp/utils:kv_cache_utils",
-        "//rtp_llm/cpp/utils:debug_utils",
-        "//rtp_llm/cpp/config:static_config",
-        "//rtp_llm/cpp/model_utils:model_utils",
-        "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/models_py/bindings:op_defs",
-        "//rtp_llm/cpp/models:stats",
-        "//rtp_llm/cpp/models/models_weight:weights_define",
-        "//rtp_llm/cpp/cache:cache_group_type",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:device_pin",
-        "//rtp_llm/cpp/utils:error_code",
-        "//rtp_llm/cpp/pybind:th_utils",
-        "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
-        "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
-        "@havenask//aios/autil:stack_tracer",
-        "@havenask//aios/autil:string_helper",
-        "@havenask//aios/autil:scope",
-    ] + torch_deps() + select({
+    deps = _EXEC_OPS_COMMON_DEPS + select({
         "@//:using_cuda": [
             "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
         ],
@@ -200,33 +194,7 @@ cc_library(
     srcs = [
         "ExecOps.cc",
     ],
-    deps = [
-        ":device_data",
-        ":op_data",
-        ":type_convert",
-        ":types_hdr",
-        ":common_defines",
-        "//rtp_llm/cpp/cache:cache_config",
-        "//rtp_llm/cpp/utils:signal_utils",
-        "//rtp_llm/cpp/utils:kv_cache_utils",
-        "//rtp_llm/cpp/utils:debug_utils",
-        "//rtp_llm/cpp/config:static_config",
-        "//rtp_llm/cpp/model_utils:model_utils",
-        "//rtp_llm/cpp/config:config_modules",
-        "//rtp_llm/models_py/bindings:op_defs",
-        "//rtp_llm/cpp/models:stats",
-        "//rtp_llm/cpp/models/models_weight:weights_define",
-        "//rtp_llm/cpp/cache:cache_group_type",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/cpp/utils:device_pin",
-        "//rtp_llm/cpp/utils:error_code",
-        "//rtp_llm/cpp/pybind:th_utils",
-        "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
-        "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
-        "@havenask//aios/autil:stack_tracer",
-        "@havenask//aios/autil:string_helper",
-        "@havenask//aios/autil:scope",
-    ] + torch_deps() + select({
+    deps = _EXEC_OPS_COMMON_DEPS + select({
         "@//:using_rocm": [
             "//rtp_llm/models_py/bindings/rocm/kernels/sampling:sampling",
             "//rtp_llm/models_py/bindings/rocm:rocm_host_utils",

@@ -6,7 +6,6 @@ Hybrid architecture:
   - MoE FFN with sigmoid routing (layer 1+), Dense FFN (layer 0)
 """
 
-import logging
 from typing import Any, Dict, Optional
 
 import torch
@@ -31,6 +30,7 @@ from rtp_llm.models_py.modules import (
     MlaAttention,
     RMSResNorm,
 )
+from rtp_llm.models_py.modules.factory.attention import common as attention_common
 from rtp_llm.models_py.triton_kernels.causal_conv1d import (
     CausalConv1dMetadata,
     causal_conv1d_fn,
@@ -334,14 +334,7 @@ class KimiLinearKDAPrefill(KimiLinearKDABase):
             seq_size_per_block,
             attn_inputs,
         )
-        cache_store_inputs = attn_inputs.cache_store_inputs
-        cache_store_writer = attn_inputs.cache_store_writer
-        if (
-            kv_cache is not None
-            and cache_store_inputs is not None
-            and cache_store_writer is not None
-        ):
-            cache_store_writer.write(cache_store_inputs, kv_cache)
+        attention_common.write_cache_store_if_needed(attn_inputs, kv_cache)
         return attn_out
 
 

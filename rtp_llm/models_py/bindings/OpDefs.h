@@ -250,6 +250,8 @@ struct PyModelInitResources {
 
 struct PyCacheStoreInputs {
     // Eligible non-warmup PD-prefill work item, filtered by PyWrappedModel before entering Python.
+    // Under prefill context parallelism, PyWrappedModel constructs input_lengths_host from the
+    // requests' original (pre-CP-chunking) lengths so block publication covers the full sequence.
     torch::Tensor input_lengths_host;     // int32, [decoder + context]
     torch::Tensor prefix_lengths_host;    // int32, [context]
     torch::Tensor host_kv_cache_offset;   // int32, [batch, tag-local blocks]
