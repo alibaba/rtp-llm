@@ -21,6 +21,7 @@ struct GroupBase {
     std::string                        tag;
     std::shared_ptr<const KVCacheSpec> spec;
     CacheGroupPolicy                   policy;
+    bool                               policy_explicit = false;
     std::vector<int>                   layer_ids;
 
     uint32_t block_num                 = 0;

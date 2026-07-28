@@ -313,11 +313,18 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
     }
     if (!load_context.block_ids_by_group.empty()) {
         const auto& topology = engine_->resourceContext().cache_manager->cacheConfig().topology();
-        for (size_t group_id = 0; group_id < load_context.block_ids_by_group.size(); ++group_id) {
+        RTP_LLM_CHECK_WITH_INFO(load_context.block_ids_by_group.size() == topology.groups().size(),
+                                "PD tagged block row count %zu != topology tag count %zu",
+                                load_context.block_ids_by_group.size(),
+                                topology.groups().size());
+        auto tags = topology.groupTagsSnapshot();
+        std::sort(tags.begin(), tags.end());
+        for (const auto& tag : tags) {
+            const auto  group_id    = topology.groupIdForTag(tag);
             const auto& group_block = load_context.block_ids_by_group[group_id];
-            RTP_LLM_CHECK_WITH_INFO(group_block != nullptr, "null group_block in block_ids_by_group");
+            RTP_LLM_CHECK_WITH_INFO(group_block != nullptr, "null group_block for tag=%s", tag.c_str());
             auto* tagged_row = request.add_tagged_group_block_ids();
-            tagged_row->set_tag(topology.groupById(group_id).tag);
+            tagged_row->set_tag(tag);
             for (const auto& block_id : group_block->blocks()) {
                 tagged_row->add_block_ids(block_id);
             }
@@ -375,11 +382,18 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
     // Prefer per-group block ids if available (hybrid KV cache).
     if (!load_context.block_ids_by_group.empty()) {
         const auto& topology = engine_->resourceContext().cache_manager->cacheConfig().topology();
-        for (size_t group_id = 0; group_id < load_context.block_ids_by_group.size(); ++group_id) {
+        RTP_LLM_CHECK_WITH_INFO(load_context.block_ids_by_group.size() == topology.groups().size(),
+                                "PD tagged block row count %zu != topology tag count %zu",
+                                load_context.block_ids_by_group.size(),
+                                topology.groups().size());
+        auto tags = topology.groupTagsSnapshot();
+        std::sort(tags.begin(), tags.end());
+        for (const auto& tag : tags) {
+            const auto  group_id    = topology.groupIdForTag(tag);
             const auto& group_block = load_context.block_ids_by_group[group_id];
-            RTP_LLM_CHECK_WITH_INFO(group_block != nullptr, "null group_block in block_ids_by_group");
+            RTP_LLM_CHECK_WITH_INFO(group_block != nullptr, "null group_block for tag=%s", tag.c_str());
             auto* tagged_row = request.add_tagged_group_block_ids();
-            tagged_row->set_tag(topology.groupById(group_id).tag);
+            tagged_row->set_tag(tag);
             for (const auto& block_id : group_block->blocks()) {
                 tagged_row->add_block_ids(block_id);
             }
@@ -664,7 +678,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     RTP_LLM_CHECK_WITH_INFO(peer_cnt > 0, "peer_addrs is empty");
 
     const bool   use_mla             = cache_config.use_mla;
-    const bool   use_hybrid          = cache_config.groupNums() > 1;
+    const bool   use_hybrid          = !cache_config.isStandardSingleTopology();
     const bool   use_opaque_kv_store = cache_config.use_opaque_kv_cache_store;
     const auto&  spec                = cache_config.specForGroup(0);
     const size_t k_total_bytes       = spec->k_block_size_bytes();
@@ -946,7 +960,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                                 + " (mtp_model_id=" + std::to_string(mtp_model_id) + ")");
 
                     for (size_t layer_id = 0; layer_id < layer_num; layer_id++) {
-                        const bool mtp_use_hybrid          = mtp_cache_cfg.groupNums() > 1;
+                        const bool mtp_use_hybrid          = !mtp_cache_cfg.isStandardSingleTopology();
                         const bool mtp_use_opaque_kv_store = mtp_cache_cfg.use_opaque_kv_cache_store;
 
                         // Same multi-group iteration as the main path.

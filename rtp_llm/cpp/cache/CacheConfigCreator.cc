@@ -5,7 +5,6 @@
 #include <numeric>
 
 #include "rtp_llm/cpp/cache/HybridPoolConfigCreator.h"
-#include "rtp_llm/cpp/cache/HybridConfigCreator.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/cache/SingleConfigCreator.h"
@@ -15,6 +14,32 @@
 namespace rtp_llm {
 
 namespace {
+
+bool useHybridPoolConfig(const ModelConfig& model_config) {
+    if (model_config.hybrid_attention_config.enable_hybrid_attention) {
+        return true;
+    }
+    const KVCacheSpecDesc* first_desc = nullptr;
+    for (const auto& layer_descs : model_config.kv_cache_spec_descs) {
+        if (layer_descs.size() != 1) {
+            return true;
+        }
+
+        const auto& desc = layer_descs.front();
+        if ((desc.cache_type != KVCacheSpecType::MultiHeadAttention
+             && desc.cache_type != KVCacheSpecType::MultiHeadLatentAttention)
+            || SpecBuilder::hasExplicitPolicy(desc)) {
+            return true;
+        }
+
+        if (first_desc == nullptr) {
+            first_desc = &desc;
+        } else if (desc.tag != first_desc->tag || desc.cache_type != first_desc->cache_type) {
+            return true;
+        }
+    }
+    return false;
+}
 
 bool blockNumFitsBudget(uint32_t block_num, size_t total_budget_bytes, const KVCacheBlockBudget& budget, int step) {
     if (budget.explicit_pool_reserve_bytes > total_budget_bytes) {
@@ -36,14 +61,14 @@ bool blockNumFitsBudget(uint32_t block_num, size_t total_budget_bytes, const KVC
 
 KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
     KVCacheBlockBudget budget;
-    if (!config.use_independent_block_pools) {
+    if (config.isStandardSingleTopology()) {
         budget.paged_block_bytes = config.block_size_bytes;
         return budget;
     }
 
     budget.explicit_pool_reserve_bytes = config.explicitly_sized_pool_reserve_bytes;
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-        if (config.usesExplicitIndependentBlocks(gid)) {
+        if (config.usesExplicitBlocks(gid)) {
             continue;
         }
         const auto group_bytes = config.blockSizeBytesForGroup(gid);
@@ -185,19 +210,17 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
                                                   bool                     is_mtp,
                                                   int                      gen_num_per_cycle) {
     CacheConfig config;
-    if (model_config.hybrid_attention_config.enable_independent_kv_cache_pools) {
+    if (useHybridPoolConfig(model_config)) {
         KVCacheConfig no_override_config;
         no_override_config.seq_size_per_block        = 0;
         no_override_config.kernel_seq_size_per_block = 0;
         config                                       = HybridPoolConfigCreator::createConfig(
             model_config, parallelism_config, no_override_config, is_mtp, gen_num_per_cycle);
-    } else if (model_config.hybrid_attention_config.enable_hybrid_attention) {
-        config = HybridConfigCreator::createHybridConfig(model_config, parallelism_config, is_mtp, gen_num_per_cycle);
     } else {
         config = SingleConfigCreator::createSingleConfig(model_config, parallelism_config, is_mtp, gen_num_per_cycle);
     }
 
-    if (!model_config.hybrid_attention_config.enable_independent_kv_cache_pools) {
+    if (config.isStandardSingleTopology()) {
         const auto full_group_num = std::count_if(
             config.topology().groups().begin(), config.topology().groups().end(), [](const GroupBase& group) {
                 return group.policy.group_type == CacheGroupType::FULL && group.spec
@@ -218,7 +241,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                                              const std::optional<WarmUpResult>&               warm_up_result,
                                              const std::optional<SpeculativeExecutionConfig>& sp_config) {
     CacheConfig config =
-        model_config.hybrid_attention_config.enable_independent_kv_cache_pools ?
+        useHybridPoolConfig(model_config) ?
             HybridPoolConfigCreator::createConfig(model_config, parallelism_config, kv_cache_config, false, 0) :
             CacheConfigCreator::createBasicConfig(model_config, parallelism_config, false, 0);
 
@@ -256,13 +279,13 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                                bool                               is_mtp,
                                                bool                               is_eagle) {
     CacheConfig score_config =
-        score_model_config.hybrid_attention_config.enable_independent_kv_cache_pools ?
+        useHybridPoolConfig(score_model_config) ?
             HybridPoolConfigCreator::createConfig(
                 score_model_config, parallelism_config, kv_cache_config, false, sp_config.gen_num_per_cycle) :
             CacheConfigCreator::createBasicConfig(
                 score_model_config, parallelism_config, false, sp_config.gen_num_per_cycle);
     CacheConfig propose_config =
-        propose_model_config.hybrid_attention_config.enable_independent_kv_cache_pools ?
+        useHybridPoolConfig(propose_model_config) ?
             HybridPoolConfigCreator::createConfig(
                 propose_model_config, parallelism_config, kv_cache_config, is_mtp, sp_config.gen_num_per_cycle) :
             CacheConfigCreator::createBasicConfig(

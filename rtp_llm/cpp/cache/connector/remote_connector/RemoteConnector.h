@@ -32,13 +32,12 @@ public:
                     const RuntimeConfig&                      runtime_config,
                     const ParallelismConfig&                  parallelism_config,
                     const SpeculativeExecutionConfig&         sp_config,
-                    void*                                     register_buffer_addr,
-                    size_t                                    register_buffer_size,
                     std::shared_ptr<KVCacheAllocator>         allocator,
                     const kmonitor::MetricsReporterPtr        metrics_reporter = nullptr,
                     const std::map<std::string, std::string>& lora_info_map    = {});
     ~RemoteConnector() override;
 
+    bool registerBuffer(const std::string& tag, void* register_buffer_addr, size_t register_buffer_size);
     bool init();
 
     // for rank_0:
@@ -112,8 +111,7 @@ private:
         const RuntimeConfig&              runtime_config;
         const ParallelismConfig&          parallelism_config;
         const SpeculativeExecutionConfig& sp_config;
-        void*                             register_buffer_addr;
-        size_t                            register_buffer_size;
+        std::shared_ptr<KVCacheAllocator> allocator;
         std::vector<std::string>          tp_addrs;
     };
 
@@ -124,6 +122,13 @@ private:
     int                                              get_broadcast_timeout_ = 2000;
     int                                              put_broadcast_timeout_ = 2000;
     std::shared_ptr<InitParams>                      init_params_;
+
+    struct BufferRegistration {
+        void*  address    = nullptr;
+        size_t size_bytes = 0;
+    };
+    std::map<std::string, BufferRegistration> registrations_;
+    bool                                      init_started_ = false;
 
     std::unique_ptr<remote_connector::GroupPolicy> group_policy_;
     const kmonitor::MetricsReporterPtr             metrics_reporter_;

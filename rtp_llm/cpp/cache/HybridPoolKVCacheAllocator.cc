@@ -146,6 +146,16 @@ bool HybridPoolKVCacheAllocator::doInit() {
     return true;
 }
 
+BlockPoolPtr HybridPoolKVCacheAllocator::blockPoolForTag(const std::string& tag) const {
+    const auto gid = config_.topology().groupIdForTag(tag);
+    RTP_LLM_CHECK_WITH_INFO(gid < group_block_pools_.size(),
+                            "cache block pool missing for tag=%s gid=%zu pools=%zu",
+                            tag.c_str(),
+                            gid,
+                            group_block_pools_.size());
+    return group_block_pools_[gid];
+}
+
 int HybridPoolKVCacheAllocator::defaultGroupIdForLayer(int layer_id) const {
     if (layer_id < 0 || static_cast<size_t>(layer_id) >= config_.layer_all_num) {
         RTP_LLM_FAIL("invalid layer_id=%d", layer_id);
@@ -361,6 +371,21 @@ void HybridPoolKVCacheAllocator::blockBatchCopyByTag(const std::vector<TaggedBlo
     }
 
     execBatchCopy(copy_params);
+}
+
+std::vector<TaggedPoolRegion> HybridPoolKVCacheAllocator::taggedPoolRegions() const {
+    RTP_LLM_CHECK_WITH_INFO(group_block_pools_.size() == static_cast<size_t>(config_.groupNums()),
+                            "hybrid pool region count mismatch: pools=%zu groups=%d",
+                            group_block_pools_.size(),
+                            config_.groupNums());
+    std::vector<TaggedPoolRegion> regions;
+    regions.reserve(group_block_pools_.size());
+    for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
+        const auto& pool = group_block_pools_[gid];
+        RTP_LLM_CHECK_WITH_INFO(pool != nullptr, "hybrid pool region has null pool gid=%zu", gid);
+        regions.push_back({config_.tagForGroup(gid), pool->getBaseAddress(), pool->getTotalSizeBytes()});
+    }
+    return regions;
 }
 
 size_t HybridPoolKVCacheAllocator::freeBlocksNum() const {
@@ -618,7 +643,7 @@ int64_t HybridPoolKVCacheAllocator::getMrCostTimeMs() const {
 size_t HybridPoolKVCacheAllocator::totalReservableAvailableBlocks() const {
     size_t total = 0;
     for (size_t gid = 0; gid < group_block_pools_.size(); ++gid) {
-        if (!group_block_pools_[gid] || config_.usesExplicitIndependentBlocks(gid)) {
+        if (!group_block_pools_[gid] || config_.usesExplicitBlocks(gid)) {
             continue;
         }
         total += group_block_pools_[gid]->availableBlocksNum();
@@ -633,7 +658,7 @@ size_t HybridPoolKVCacheAllocator::reservableAvailableBlocksNum() const {
 size_t HybridPoolKVCacheAllocator::reserveBlocksForPool(size_t gid,
                                                         size_t reserve_blocks,
                                                         size_t total_reservable_available_blocks) const {
-    if (gid >= group_block_pools_.size() || !group_block_pools_[gid] || config_.usesExplicitIndependentBlocks(gid)
+    if (gid >= group_block_pools_.size() || !group_block_pools_[gid] || config_.usesExplicitBlocks(gid)
         || total_reservable_available_blocks == 0) {
         return 0;
     }

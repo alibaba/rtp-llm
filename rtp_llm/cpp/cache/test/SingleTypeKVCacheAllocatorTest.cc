@@ -553,12 +553,11 @@ TEST_F(SingleTypeKVCacheAllocatorTest, MtpGlobalLayerIdRejectsInvalidModuleAndLo
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigSlicesDescriptorAndAttentionType) {
-    auto config                                            = makeTestModelConfig(/*num_layers=*/2);
-    config.kv_cache_spec_descs[0][0].tag                   = "layer0";
-    config.kv_cache_spec_descs[1][0].tag                   = "layer1";
-    config.hybrid_attention_config.enable_hybrid_attention = true;
-    config.hybrid_attention_config.hybrid_attention_types  = {HybridAttentionType::LINEAR,
-                                                              HybridAttentionType::SLIDING_WINDOW};
+    auto config                                           = makeTestModelConfig(/*num_layers=*/2);
+    config.kv_cache_spec_descs[0][0].tag                  = "layer0";
+    config.kv_cache_spec_descs[1][0].tag                  = "layer1";
+    config.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::LINEAR,
+                                                             HybridAttentionType::SLIDING_WINDOW};
 
     const auto single_layer = makeSingleLayerMTPModelConfig(config, /*source_layer=*/1);
 
@@ -570,13 +569,11 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigSlicesDescriptorAndAt
     EXPECT_EQ(single_layer.hybrid_attention_config.hybrid_attention_types[0], HybridAttentionType::SLIDING_WINDOW);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigSupportsDescriptorDrivenIndependentPools) {
-    auto config                                                      = makeTestModelConfig(/*num_layers=*/2);
-    config.hybrid_attention_config.enable_hybrid_attention           = true;
-    config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
-    config.hybrid_attention_config.hybrid_attention_types            = {};
-    auto second_desc                                                 = config.kv_cache_spec_descs[1][0];
-    second_desc.tag                                                  = "layer1_state";
+TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigSupportsDescriptorDrivenHybridPool) {
+    auto config                                           = makeTestModelConfig(/*num_layers=*/2);
+    config.hybrid_attention_config.hybrid_attention_types = {};
+    auto second_desc                                      = config.kv_cache_spec_descs[1][0];
+    second_desc.tag                                       = "layer1_state";
     config.kv_cache_spec_descs[1].push_back(second_desc);
 
     const auto single_layer = makeSingleLayerMTPModelConfig(config, /*source_layer=*/1);
@@ -588,18 +585,17 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigSupportsDescriptorDri
     EXPECT_TRUE(single_layer.hybrid_attention_config.hybrid_attention_types.empty());
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigRejectsLegacyHybridWithoutAttentionTypes) {
-    auto config                                            = makeTestModelConfig(/*num_layers=*/2);
-    config.hybrid_attention_config.enable_hybrid_attention = true;
-    config.hybrid_attention_config.hybrid_attention_types  = {};
+TEST_F(SingleTypeKVCacheAllocatorTest, SingleLayerMtpConfigSupportsEmptyAttentionTypes) {
+    auto config                                           = makeTestModelConfig(/*num_layers=*/2);
+    config.hybrid_attention_config.hybrid_attention_types = {};
 
-    EXPECT_THROW(makeSingleLayerMTPModelConfig(config, /*source_layer=*/0), std::runtime_error);
+    const auto single_layer = makeSingleLayerMTPModelConfig(config, /*source_layer=*/0);
+    EXPECT_TRUE(single_layer.hybrid_attention_config.hybrid_attention_types.empty());
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, ActiveMtpCacheLayoutValidationOnlyChecksModule0) {
-    auto config                                            = makeTestModelConfig(/*num_layers=*/2);
-    config.hybrid_attention_config.enable_hybrid_attention = true;
-    config.hybrid_attention_config.hybrid_attention_types  = {HybridAttentionType::NONE, HybridAttentionType::NONE};
+    auto config                                           = makeTestModelConfig(/*num_layers=*/2);
+    config.hybrid_attention_config.hybrid_attention_types = {HybridAttentionType::NONE, HybridAttentionType::NONE};
 
     auto module0 = makeSingleLayerMTPModelConfig(config, 0);
     EXPECT_NO_THROW(validateActiveMTPCacheLayout(module0));

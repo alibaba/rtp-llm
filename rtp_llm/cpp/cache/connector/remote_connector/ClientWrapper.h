@@ -16,9 +16,17 @@ class Subscriber;
 
 class ClientWrapper: public std::enable_shared_from_this<ClientWrapper> {
 public:
-    using ConfigMap = std::map<std::string, RemoteConnectorConfigPtr>;
+    struct TransferRegistration {
+        void*       address    = nullptr;
+        size_t      size_bytes = 0;
+        std::string location_spec_name;
+    };
+    using ConfigMap               = std::map<std::string, RemoteConnectorConfigPtr>;
+    using TransferRegistrationMap = std::map<std::string, TransferRegistration>;
     virtual ~ClientWrapper();
-    bool init(const ConfigMap& config_str_map, const kv_cache_manager::InitParams& init_params);
+    bool init(const ConfigMap&               config_map,
+              kv_cache_manager::RoleType     role_type,
+              const TransferRegistrationMap& registrations);
     // for meta client
     std::pair<bool, kv_cache_manager::Locations> match(const std::string&                      unique_id,
                                                        const std::string&                      trace_id,
@@ -42,12 +50,14 @@ public:
                      const kv_cache_manager::Locations& locations);
 
     // for transfer client
-    bool loadKvCaches(const kv_cache_manager::UriStrVec&                          uri_str_vec,
+    bool loadKvCaches(const std::vector<std::string>&                             tags,
+                      const kv_cache_manager::UriStrVec&                          uri_str_vec,
                       kv_cache_manager::BlockBuffers&                             block_buffers,
                       const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
 
     std::pair<bool, kv_cache_manager::UriStrVec>
-    saveKvCaches(const kv_cache_manager::UriStrVec&                          uri_str_vec,
+    saveKvCaches(const std::vector<std::string>&                             tags,
+                 const kv_cache_manager::UriStrVec&                          uri_str_vec,
                  const kv_cache_manager::BlockBuffers&                       block_buffers,
                  const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info = nullptr);
 
@@ -75,9 +85,9 @@ private:
     // when slaver reaches 3, need reinitAllMetaClients
     std::atomic<int> grpc_error_count_{0};
 
-    static std::unique_ptr<ClientFactory>                    client_factory_;
-    static std::unique_ptr<kv_cache_manager::TransferClient> transfer_client_;
-    static std::unique_ptr<remote_connector::Subscriber>     subscriber_;
+    static std::unique_ptr<ClientFactory>                                    client_factory_;
+    std::map<std::string, std::unique_ptr<kv_cache_manager::TransferClient>> transfer_clients_;
+    static std::unique_ptr<remote_connector::Subscriber>                     subscriber_;
 };
 
 }  // namespace remote_connector

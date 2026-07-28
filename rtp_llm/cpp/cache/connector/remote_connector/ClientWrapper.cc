@@ -14,6 +14,36 @@ namespace remote_connector {
 
 namespace {
 
+using TaggedRequestIndices = std::map<std::string, std::vector<size_t>>;
+
+TaggedRequestIndices groupRequestIndicesByTag(const std::vector<std::string>& tags) {
+    TaggedRequestIndices result;
+    for (size_t i = 0; i < tags.size(); ++i) {
+        RTP_LLM_CHECK_WITH_INFO(!tags[i].empty(), "remote cache request has empty tag at index=%zu", i);
+        result[tags[i]].push_back(i);
+    }
+    return result;
+}
+
+std::shared_ptr<kv_cache_manager::TransferTraceInfo>
+selectTraceInfo(const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info,
+                const std::vector<size_t>&                                  indices) {
+    if (!trace_info) {
+        return nullptr;
+    }
+    auto selected        = std::make_shared<kv_cache_manager::TransferTraceInfo>();
+    selected->need_print = trace_info->need_print;
+    selected->block_ids.reserve(indices.size());
+    for (const auto index : indices) {
+        RTP_LLM_CHECK_WITH_INFO(index < trace_info->block_ids.size(),
+                                "remote cache trace block index=%zu out of range=%zu",
+                                index,
+                                trace_info->block_ids.size());
+        selected->block_ids.push_back(trace_info->block_ids[index]);
+    }
+    return selected;
+}
+
 class ReinitPolicy {
 public:
     ReinitPolicy(): rd_(), gen_(rd_()), jitter_dist_(jitter_min_, jitter_max_) {}
@@ -39,15 +69,23 @@ private:
 
 }  // namespace
 
-std::unique_ptr<kv_cache_manager::TransferClient> ClientWrapper::transfer_client_;
-std::unique_ptr<Subscriber>                       ClientWrapper::subscriber_;
-std::unique_ptr<ClientFactory>                    ClientWrapper::client_factory_ = std::make_unique<ClientFactory>();
+std::unique_ptr<Subscriber>    ClientWrapper::subscriber_;
+std::unique_ptr<ClientFactory> ClientWrapper::client_factory_ = std::make_unique<ClientFactory>();
 
 ClientWrapper::~ClientWrapper() = default;
 
-bool ClientWrapper::init(const ConfigMap& config_map, const kv_cache_manager::InitParams& init_params) {
-    RTP_LLM_CHECK_WITH_INFO(!config_map.empty(), "no invalid config");
-    init_params_ = init_params;
+bool ClientWrapper::init(const ConfigMap&               config_map,
+                         kv_cache_manager::RoleType     role_type,
+                         const TransferRegistrationMap& registrations) {
+    RTP_LLM_CHECK_WITH_INFO(!config_map.empty(), "no valid remote connector config");
+    RTP_LLM_CHECK_WITH_INFO(!registrations.empty(), "no KV cache transfer registrations");
+    transfer_clients_.clear();
+    const auto& first_registration = registrations.begin()->second;
+    RTP_LLM_CHECK_WITH_INFO(!registrations.begin()->first.empty() && first_registration.address != nullptr
+                                && first_registration.size_bytes > 0 && !first_registration.location_spec_name.empty(),
+                            "invalid KV cache transfer registration for tag=%s",
+                            registrations.begin()->first.c_str());
+    init_params_ = kv_cache_manager::InitParams{role_type, nullptr, first_registration.location_spec_name};
     // init all meta_client
     if (init_params_.role_type == kv_cache_manager::RoleType::HYBRID) {
         for (auto& [unique_id, config] : config_map) {
@@ -55,33 +93,40 @@ bool ClientWrapper::init(const ConfigMap& config_map, const kv_cache_manager::In
                 return false;
             }
         }
-        if (transfer_client_ != nullptr) {
-            RTP_LLM_LOG_INFO("transfer client has been inited");
-            return true;
-        }
     } else {
-        if (transfer_client_ != nullptr) {
-            RTP_LLM_LOG_INFO("transfer client has been inited");
-            return true;
-        }
         init_params_.role_type = kv_cache_manager::RoleType::SCHEDULER;
         const auto& item       = *config_map.begin();
         if (!initMetaClient(item.first, item.second)) {
             return false;
         }
     }
-    // init static transfer client
     init_params_.storage_configs = meta_client_map_.begin()->second->GetStorageConfig();
     RTP_LLM_LOG_INFO("transfer client storage config [%s]", init_params_.storage_configs.c_str());
     if (init_params_.role_type == kv_cache_manager::RoleType::SCHEDULER) {
         meta_client_map_.clear();
         init_params_.role_type = kv_cache_manager::RoleType::WORKER;
     }
-    transfer_client_ =
-        client_factory_->CreateTransferClient(autil::legacy::ToJsonString(config_map_.begin()->second), init_params_);
-    if (!transfer_client_) {
-        RTP_LLM_LOG_ERROR("init trasfer client failed");
-        return false;
+    const auto transfer_role = init_params_.role_type;
+    for (const auto& [tag, registration] : registrations) {
+        RTP_LLM_CHECK_WITH_INFO(!tag.empty() && registration.address != nullptr && registration.size_bytes > 0
+                                    && !registration.location_spec_name.empty(),
+                                "invalid KV cache transfer registration for tag=%s",
+                                tag.c_str());
+        kv_cache_manager::RegistSpan regist_span{registration.address, registration.size_bytes};
+        kv_cache_manager::InitParams transfer_init_params{transfer_role, &regist_span, registration.location_spec_name};
+        transfer_init_params.storage_configs = init_params_.storage_configs;
+        auto transfer_client                 = client_factory_->CreateTransferClient(
+            autil::legacy::ToJsonString(config_map_.begin()->second), transfer_init_params);
+        if (!transfer_client) {
+            RTP_LLM_LOG_ERROR("init transfer client failed for tag=%s", tag.c_str());
+            transfer_clients_.clear();
+            return false;
+        }
+        if (!transfer_clients_.emplace(tag, std::move(transfer_client)).second) {
+            RTP_LLM_LOG_ERROR("duplicate transfer client tag=%s", tag.c_str());
+            transfer_clients_.clear();
+            return false;
+        }
     }
     return true;
 }
@@ -316,35 +361,109 @@ void ClientWrapper::reinitAllMetaClients() {
     rr_other_working_.store(false, std::memory_order_release);
 }
 
-bool ClientWrapper::loadKvCaches(const kv_cache_manager::UriStrVec&                          uri_str_vec,
+bool ClientWrapper::loadKvCaches(const std::vector<std::string>&                             tags,
+                                 const kv_cache_manager::UriStrVec&                          uri_str_vec,
                                  kv_cache_manager::BlockBuffers&                             block_buffers,
                                  const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
-    if (transfer_client_ == nullptr) {
-        RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
+    if (tags.size() != uri_str_vec.size() || tags.size() != block_buffers.size()
+        || (trace_info && trace_info->block_ids.size() != tags.size())) {
+        RTP_LLM_LOG_ERROR("remote cache transfer count mismatch: tags=%zu uris=%zu buffers=%zu trace_blocks=%zu",
+                          tags.size(),
+                          uri_str_vec.size(),
+                          block_buffers.size(),
+                          trace_info ? trace_info->block_ids.size() : 0);
         return false;
     }
-    auto ec = transfer_client_->LoadKvCaches(uri_str_vec, block_buffers, trace_info);
-    if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
-        RTP_LLM_LOG_ERROR("kvcm client loadKvCaches fail, ec [%d]", ec);
-        return false;
+    for (const auto& tag : tags) {
+        if (tag.empty() || transfer_clients_.find(tag) == transfer_clients_.end()) {
+            RTP_LLM_LOG_ERROR("kvcm client not find transfer client for tag=%s", tag.c_str());
+            return false;
+        }
+    }
+    for (const auto& [tag, indices] : groupRequestIndicesByTag(tags)) {
+        const auto client_it = transfer_clients_.find(tag);
+        if (client_it == transfer_clients_.end()) {
+            RTP_LLM_LOG_ERROR("kvcm client not find transfer client for tag=%s", tag.c_str());
+            return false;
+        }
+        kv_cache_manager::UriStrVec    tagged_uris;
+        kv_cache_manager::BlockBuffers tagged_buffers;
+        tagged_uris.reserve(indices.size());
+        tagged_buffers.reserve(indices.size());
+        for (const auto index : indices) {
+            tagged_uris.push_back(uri_str_vec[index]);
+            tagged_buffers.push_back(block_buffers[index]);
+        }
+        const auto ec =
+            client_it->second->LoadKvCaches(tagged_uris, tagged_buffers, selectTraceInfo(trace_info, indices));
+        if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
+            RTP_LLM_LOG_ERROR("kvcm client loadKvCaches fail for tag=%s, ec [%d]", tag.c_str(), ec);
+            return false;
+        }
     }
     return true;
 }
 
 std::pair<bool, kv_cache_manager::UriStrVec>
-ClientWrapper::saveKvCaches(const kv_cache_manager::UriStrVec&                          uri_str_vec,
+ClientWrapper::saveKvCaches(const std::vector<std::string>&                             tags,
+                            const kv_cache_manager::UriStrVec&                          uri_str_vec,
                             const kv_cache_manager::BlockBuffers&                       block_buffers,
                             const std::shared_ptr<kv_cache_manager::TransferTraceInfo>& trace_info) {
-    if (transfer_client_ == nullptr) {
-        RTP_LLM_LOG_ERROR("kvcm client not find transfer client");
+    if (tags.size() != uri_str_vec.size() || tags.size() != block_buffers.size()
+        || (trace_info && trace_info->block_ids.size() != tags.size())) {
+        RTP_LLM_LOG_ERROR("remote cache transfer count mismatch: tags=%zu uris=%zu buffers=%zu trace_blocks=%zu",
+                          tags.size(),
+                          uri_str_vec.size(),
+                          block_buffers.size(),
+                          trace_info ? trace_info->block_ids.size() : 0);
         return {false, {}};
     }
-    auto [ec, result] = transfer_client_->SaveKvCaches(uri_str_vec, block_buffers, trace_info);
-    if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
-        RTP_LLM_LOG_ERROR("kvcm client saveKvCaches fail, ec [%d]", ec);
-        return {false, {}};
+    for (const auto& tag : tags) {
+        if (tag.empty() || transfer_clients_.find(tag) == transfer_clients_.end()) {
+            RTP_LLM_LOG_ERROR("kvcm client not find transfer client for tag=%s", tag.c_str());
+            return {false, {}};
+        }
     }
-    return {true, std::move(result)};
+    auto resolved_uris  = uri_str_vec;
+    bool has_actual_uri = false;
+    for (const auto& [tag, indices] : groupRequestIndicesByTag(tags)) {
+        const auto client_it = transfer_clients_.find(tag);
+        if (client_it == transfer_clients_.end()) {
+            RTP_LLM_LOG_ERROR("kvcm client not find transfer client for tag=%s", tag.c_str());
+            return {false, {}};
+        }
+        kv_cache_manager::UriStrVec    tagged_uris;
+        kv_cache_manager::BlockBuffers tagged_buffers;
+        tagged_uris.reserve(indices.size());
+        tagged_buffers.reserve(indices.size());
+        for (const auto index : indices) {
+            tagged_uris.push_back(uri_str_vec[index]);
+            tagged_buffers.push_back(block_buffers[index]);
+        }
+        auto [ec, actual_uris] =
+            client_it->second->SaveKvCaches(tagged_uris, tagged_buffers, selectTraceInfo(trace_info, indices));
+        if (ec != kv_cache_manager::ClientErrorCode::ER_OK) {
+            RTP_LLM_LOG_ERROR("kvcm client saveKvCaches fail for tag=%s, ec [%d]", tag.c_str(), ec);
+            return {false, {}};
+        }
+        if (actual_uris.empty()) {
+            continue;
+        }
+        if (actual_uris.size() != indices.size()) {
+            RTP_LLM_LOG_ERROR("kvcm client returned invalid URI count for tag=%s: expected=%zu actual=%zu",
+                              tag.c_str(),
+                              indices.size(),
+                              actual_uris.size());
+            return {false, {}};
+        }
+        for (size_t i = 0; i < indices.size(); ++i) {
+            if (resolved_uris[indices[i]] != actual_uris[i]) {
+                resolved_uris[indices[i]] = std::move(actual_uris[i]);
+                has_actual_uri            = true;
+            }
+        }
+    }
+    return {true, has_actual_uri ? std::move(resolved_uris) : kv_cache_manager::UriStrVec{}};
 }
 
 }  // namespace remote_connector

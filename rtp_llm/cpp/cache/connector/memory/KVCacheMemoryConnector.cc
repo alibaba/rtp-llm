@@ -545,7 +545,7 @@ bool KVCacheMemoryConnector::supportsTypedPrefixCacheLayout(const std::vector<La
         return false;
     }
     if (!cache_config_.use_typed_cache_regions || !cache_config_.use_opaque_kv_cache_store
-        || !cache_config_.use_independent_block_pools) {
+        || cache_config_.isStandardSingleTopology()) {
         return false;
     }
     const auto group_num       = static_cast<size_t>(cache_config_.groupNums());

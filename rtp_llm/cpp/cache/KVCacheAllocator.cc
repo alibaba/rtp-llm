@@ -33,6 +33,27 @@ bool KVCacheAllocator::init() {
     return true;
 }
 
+BlockPoolPtr KVCacheAllocator::blockPoolForTag(const std::string& tag) const {
+    RTP_LLM_CHECK_WITH_INFO(block_pool_ != nullptr, "cache allocator has no single block pool for tag=%s", tag.c_str());
+    RTP_LLM_CHECK_WITH_INFO(config_.groupNums() == 1,
+                            "single block pool lookup requires exactly one cache group, got=%d",
+                            config_.groupNums());
+    const auto& expected_tag = config_.tagForGroup(0);
+    RTP_LLM_CHECK_WITH_INFO(tag == expected_tag,
+                            "cache allocator tag mismatch: requested=%s expected=%s",
+                            tag.c_str(),
+                            expected_tag.c_str());
+    return block_pool_;
+}
+
+std::vector<TaggedPoolRegion> KVCacheAllocator::taggedPoolRegions() const {
+    RTP_LLM_CHECK_WITH_INFO(block_pool_ != nullptr, "cache allocator has no initialized block pool");
+    RTP_LLM_CHECK_WITH_INFO(config_.groupNums() == 1,
+                            "single block pool region requires exactly one cache group, got=%d",
+                            config_.groupNums());
+    return {{config_.tagForGroup(0), block_pool_->getBaseAddress(), block_pool_->getTotalSizeBytes()}};
+}
+
 size_t KVCacheAllocator::reservableAvailableBlocksNum() const {
     return availableBlocksNum();
 }

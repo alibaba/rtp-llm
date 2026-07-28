@@ -96,20 +96,35 @@ class RemoteConnectorMockTestBase: public ::testing::Test {
 public:
     static void SetUpTestSuite() {
         autil::EnvUtil::setEnv("KVCM_SDK_CHECK", "1");
-        ClientWrapper::client_factory_  = std::make_unique<MockClientFactory>();
-        mock_client_factory_            = dynamic_cast<MockClientFactory*>(ClientWrapper::client_factory_.get());
-        auto transfer_client            = std::make_unique<kv_cache_manager::MockTransferClient>();
-        transfer_client_                = transfer_client.get();
-        ClientWrapper::transfer_client_ = std::move(transfer_client);
+        ClientWrapper::client_factory_ = std::make_unique<MockClientFactory>();
+        mock_client_factory_           = dynamic_cast<MockClientFactory*>(ClientWrapper::client_factory_.get());
+        EXPECT_CALL(*mock_client_factory_, CreateTransferClient(_, _))
+            .WillRepeatedly(Invoke([](const std::string&, const kv_cache_manager::InitParams& init_params) {
+                auto       client      = std::make_unique<kv_cache_manager::MockTransferClient>();
+                auto*      raw         = client.get();
+                const auto separator   = init_params.self_location_spec_name.find('_');
+                const auto group_name  = separator == std::string::npos ?
+                                             init_params.self_location_spec_name :
+                                             init_params.self_location_spec_name.substr(separator + 1);
+                const auto tag         = group_name.empty() ? group_name : group_name.substr(1);
+                transfer_clients_[tag] = raw;
+                if (transfer_client_ == nullptr || tag == "default") {
+                    transfer_client_ = raw;
+                }
+                return client;
+            }));
     }
 
     static void TearDownTestSuite() {
-        ClientWrapper::transfer_client_.reset();
         ClientWrapper::client_factory_.reset();
+        transfer_clients_.clear();
+        transfer_client_ = nullptr;
     }
 
     void SetUp() override {
         rtp_llm::initLogger();
+        transfer_clients_.clear();
+        transfer_client_                     = nullptr;
         kv_cache_config_.reco_server_address = fake_address_;
         initDevice();
         initServer();
@@ -140,6 +155,13 @@ protected:
             servers_.push_back(std::move(server));
         }
         runtime_config_.worker_grpc_addrs = server_addrs_;
+    }
+
+    void registerAllocatorBuffers(const std::shared_ptr<RemoteConnector>&  connector,
+                                  const std::shared_ptr<KVCacheAllocator>& allocator) {
+        for (const auto& region : allocator->taggedPoolRegions()) {
+            ASSERT_TRUE(connector->registerBuffer(region.tag, region.base, region.size));
+        }
     }
 
     UriStrVec genUris(const CacheKeysType&       cache_keys,
@@ -215,14 +237,16 @@ protected:
     ParallelismConfig          parallelism_config_;
     SpeculativeExecutionConfig sp_config_;
 
-    std::vector<std::shared_ptr<RemoteConnector>>       remote_connectors_;
-    std::vector<std::unique_ptr<FakeRpcServer>>         servers_;
-    std::vector<std::string>                            server_addrs_;
-    inline static MockClientFactory*                    mock_client_factory_ = nullptr;
-    std::vector<kv_cache_manager::MockMetaClient*>      meta_clients_;
-    inline static kv_cache_manager::MockTransferClient* transfer_client_ = nullptr;
-    inline static const std::vector<int32_t>            full_group_ids_  = {0};
-    std::vector<int32_t>                                other_group_ids_ = {};
+    std::vector<std::shared_ptr<RemoteConnector>>                              remote_connectors_;
+    std::vector<std::unique_ptr<FakeRpcServer>>                                servers_;
+    std::vector<std::string>                                                   server_addrs_;
+    inline static MockClientFactory*                                           mock_client_factory_ = nullptr;
+    std::vector<kv_cache_manager::MockMetaClient*>                             meta_clients_;
+    inline static kv_cache_manager::MockTransferClient*                        transfer_client_ = nullptr;
+    inline static std::map<std::string, kv_cache_manager::MockTransferClient*> transfer_clients_;
+    inline static const std::vector<int32_t>                                   full_group_ids_  = {0};
+    inline static const std::string                                            storage_config_  = "mock_storage_config";
+    std::vector<int32_t>                                                       other_group_ids_ = {};
 
     constexpr static const char* fake_address_ = "fake_address";
     using MatchLocationReturnType              = std::pair<ClientErrorCode, Locations>;

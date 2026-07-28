@@ -41,10 +41,6 @@ inline ModelConfig makeSingleLayerMTPModelConfig(const ModelConfig& model_config
                                 source_layer,
                                 attention_types.size());
         single_layer_config.hybrid_attention_config.hybrid_attention_types = {attention_types[source_layer]};
-    } else {
-        RTP_LLM_CHECK_WITH_INFO(!model_config.hybrid_attention_config.enable_hybrid_attention
-                                    || model_config.hybrid_attention_config.enable_independent_kv_cache_pools,
-                                "MTP legacy hybrid attention config requires one attention type per layer");
     }
     return single_layer_config;
 }

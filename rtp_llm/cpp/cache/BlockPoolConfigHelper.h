@@ -26,8 +26,7 @@ public:
         auto        layer_num = is_hybrid ? cache_config.group_layer_num : cache_config.layer_num;
         const auto& main_spec = cache_config.specForGroup(0);
         // linear block size is same with full block block size
-        MemoryLayoutConfig main_layout = createMemoryLayoutConfig(is_hybrid,
-                                                                  layer_num,
+        MemoryLayoutConfig main_layout = createMemoryLayoutConfig(layer_num,
                                                                   cache_config.kv_block_stride_bytes,
                                                                   cache_config.kv_scale_stride_bytes,
                                                                   main_spec,
@@ -65,8 +64,7 @@ public:
             // MTP group that owns a layer; target-aligned placeholder groups
             // must not affect the sub-model memory layout.
             MemoryLayoutConfig mtp_layout =
-                createMemoryLayoutConfig(false,
-                                         mtp_layer_num,
+                createMemoryLayoutConfig(mtp_layer_num,
                                          mtp_spec->block_size_bytes(),
                                          mtp_spec->scale_block_size_bytes(),
                                          mtp_spec,
@@ -132,8 +130,7 @@ public:
         CacheConfig group_cache_config = cache_config;
         group_cache_config.block_num   = config.block_num;
 
-        MemoryLayoutConfig layout    = createMemoryLayoutConfig(false,
-                                                             layer_num,
+        MemoryLayoutConfig layout    = createMemoryLayoutConfig(layer_num,
                                                              kv_stride,
                                                              scale_stride,
                                                              spec,
@@ -176,8 +173,7 @@ public:
     }
 
 private:
-    static MemoryLayoutConfig createMemoryLayoutConfig(bool                               enable_hybrid_attention,
-                                                       uint32_t                           layer_num,
+    static MemoryLayoutConfig createMemoryLayoutConfig(uint32_t                           layer_num,
                                                        size_t                             kv_block_stride_bytes,
                                                        size_t                             kv_scale_stride_bytes,
                                                        std::shared_ptr<const KVCacheSpec> spec,
@@ -195,10 +191,9 @@ private:
         cfg.k_scale_stride_bytes  = spec->k_scale_block_size_bytes();
         cfg.v_scale_stride_bytes  = spec->v_scale_block_size_bytes();
 
-        cfg.enable_kv_scale         = cfg.kv_scale_stride_bytes > 0;
-        cfg.dtype                   = spec->memoryLayoutDType();
-        cfg.local_head_num_kv       = local_kv_head_num;
-        cfg.enable_hybrid_attention = enable_hybrid_attention;
+        cfg.enable_kv_scale   = cfg.kv_scale_stride_bytes > 0;
+        cfg.dtype             = spec->memoryLayoutDType();
+        cfg.local_head_num_kv = local_kv_head_num;
         // Scale 3D layout for MLA and indexer; KV 3D only for MLA (concat_and_cache_mla)
         cfg.is_mla                     = cache_config.use_mla || cache_config.is_sparse;
         cfg.use_mla                    = cache_config.use_mla;

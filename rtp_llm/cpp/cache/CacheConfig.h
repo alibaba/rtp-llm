@@ -27,7 +27,6 @@ private:
 public:
     std::vector<int> layer_to_block_stride_bytes;
     bool             group_block_layout_initialized           = false;
-    bool             use_independent_block_pools              = false;
     bool             use_typed_cache_regions                  = false;
     bool             use_opaque_kv_cache_store                = false;
     bool             disable_decode_first_malloc_device_reuse = false;
@@ -301,12 +300,12 @@ public:
     std::shared_ptr<CacheConfig>
     mergeMTPModule(const CacheConfig& propose_config, int module_index, uint32_t main_layer_num);
 
-    uint32_t explicitIndependentBlocks(size_t gid) const {
+    uint32_t explicitBlocks(size_t gid) const {
         return policyForGroup(gid).explicit_block_num;
     }
 
-    bool usesExplicitIndependentBlocks(size_t gid) const {
-        return explicitIndependentBlocks(gid) > 0;
+    bool usesExplicitBlocks(size_t gid) const {
+        return explicitBlocks(gid) > 0;
     }
 
     CacheGroupPolicy policyForGroup(size_t gid) const {
@@ -334,6 +333,9 @@ public:
     }
 
     static bool samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs);
+
+    bool        isStandardSingleTopology() const;
+    std::string topologyDescriptor() const;
 
     void        setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers);
     void        fromGroupedSpecs(const std::vector<KVCacheSpecPtr>&   specs,

@@ -2,6 +2,7 @@
 #include <gtest/gtest.h>
 
 #include <cstdint>
+#include <limits>
 #include <numeric>
 #include <tuple>
 
@@ -254,7 +255,7 @@ private:
         auto                 allocator =
             std::make_shared<FakeKVCacheAllocator>(cache_config_, full_group_ids, linear_group_ids, layer_num_);
         return std::shared_ptr<RemoteConnector>(new RemoteConnector(
-            cache_config_, kv_cache_config_, runtime_config_, parallelism_config_, sp_config_, nullptr, 0, allocator));
+            cache_config_, kv_cache_config_, runtime_config_, parallelism_config_, sp_config_, allocator));
     }
 
     CacheConfig                cache_config_;
@@ -282,6 +283,54 @@ TEST_F(RemoteConnectorInternalTest, test_genClientConfig) {
         auto config_map_2 = connector->genClientConfig();
         autil::EnvUtil::unsetEnv("BIZ_NAME");
     }
+}
+
+TEST_F(RemoteConnectorInternalTest, RegisterBufferRejectsInvalidAndDuplicateRegistrations) {
+    auto connector = getFullLinearPolicyConnector();
+    EXPECT_FALSE(connector->registerBuffer("", reinterpret_cast<void*>(0x1000), 64));
+    EXPECT_FALSE(connector->registerBuffer("0", nullptr, 64));
+    EXPECT_FALSE(connector->registerBuffer("0", reinterpret_cast<void*>(0x1000), 0));
+    EXPECT_FALSE(connector->registerBuffer("0", reinterpret_cast<void*>(std::numeric_limits<uintptr_t>::max() - 3), 8));
+    EXPECT_TRUE(connector->registerBuffer("0", reinterpret_cast<void*>(0x1000), 64));
+    EXPECT_FALSE(connector->registerBuffer("0", reinterpret_cast<void*>(0x2000), 32));
+    ASSERT_EQ(connector->registrations_.size(), 1u);
+    EXPECT_EQ(connector->registrations_.at("0").address, reinterpret_cast<void*>(0x1000));
+    EXPECT_EQ(connector->registrations_.at("0").size_bytes, 64u);
+}
+
+TEST_F(RemoteConnectorInternalTest, RegistrationIdentityDoesNotDependOnCallOrder) {
+    auto first  = getFullLinearPolicyConnector();
+    auto second = getFullLinearPolicyConnector();
+    ASSERT_TRUE(first->registerBuffer("0", reinterpret_cast<void*>(0x1000), 64));
+    ASSERT_TRUE(first->registerBuffer("1", reinterpret_cast<void*>(0x2000), 32));
+    ASSERT_TRUE(first->registerBuffer("2", reinterpret_cast<void*>(0x3000), 16));
+    ASSERT_TRUE(second->registerBuffer("2", reinterpret_cast<void*>(0x3000), 16));
+    ASSERT_TRUE(second->registerBuffer("0", reinterpret_cast<void*>(0x1000), 64));
+    ASSERT_TRUE(second->registerBuffer("1", reinterpret_cast<void*>(0x2000), 32));
+
+    ASSERT_EQ(first->registrations_.size(), second->registrations_.size());
+    for (const auto& [tag, registration] : first->registrations_) {
+        ASSERT_EQ(second->registrations_.count(tag), 1u);
+        EXPECT_EQ(second->registrations_.at(tag).address, registration.address);
+        EXPECT_EQ(second->registrations_.at(tag).size_bytes, registration.size_bytes);
+    }
+}
+
+TEST_F(RemoteConnectorInternalTest, InitRejectsMissingOrExtraTagBeforeCreatingClient) {
+    auto missing = getFullLinearPolicyConnector();
+    ASSERT_TRUE(missing->registerBuffer("0", reinterpret_cast<void*>(0x1000), 64));
+    ASSERT_TRUE(missing->registerBuffer("1", reinterpret_cast<void*>(0x2000), 32));
+    EXPECT_FALSE(missing->init());
+    EXPECT_EQ(missing->client_wrapper_, nullptr);
+    EXPECT_FALSE(missing->registerBuffer("2", reinterpret_cast<void*>(0x3000), 16));
+
+    auto extra = getFullLinearPolicyConnector();
+    ASSERT_TRUE(extra->registerBuffer("0", reinterpret_cast<void*>(0x1000), 64));
+    ASSERT_TRUE(extra->registerBuffer("1", reinterpret_cast<void*>(0x2000), 32));
+    ASSERT_TRUE(extra->registerBuffer("2", reinterpret_cast<void*>(0x3000), 16));
+    ASSERT_TRUE(extra->registerBuffer("extra", reinterpret_cast<void*>(0x4000), 8));
+    EXPECT_FALSE(extra->init());
+    EXPECT_EQ(extra->client_wrapper_, nullptr);
 }
 
 TEST_F(RemoteConnectorInternalTest, test_genLocationSpecInfoMapAndGroups) {
@@ -324,14 +373,8 @@ TEST_F(RemoteConnectorInternalTest, PublishesTagLocalHeterogeneousGroupBlockSize
     std::vector<int32_t> linear_group_ids({1, 2});
     auto                 allocator =
         std::make_shared<FakeKVCacheAllocator>(heterogeneous_config, full_group_ids, linear_group_ids, layer_num_);
-    auto connector = std::shared_ptr<RemoteConnector>(new RemoteConnector(heterogeneous_config,
-                                                                          kv_cache_config_,
-                                                                          runtime_config_,
-                                                                          parallelism_config_,
-                                                                          sp_config_,
-                                                                          nullptr,
-                                                                          0,
-                                                                          allocator));
+    auto connector = std::shared_ptr<RemoteConnector>(new RemoteConnector(
+        heterogeneous_config, kv_cache_config_, runtime_config_, parallelism_config_, sp_config_, allocator));
     ASSERT_TRUE(connector->group_policy_->init());
     auto [spec_info_map, spec_groups] = connector->genLocationSpecInfoMapAndGroups(/*tp_size=*/1);
     EXPECT_EQ(spec_info_map->at("tp0_F0"), byte_size_per_block_);
@@ -373,8 +416,8 @@ TEST_F(RemoteConnectorInternalTest, test_genLocationSpecGroupsScalesLinearly) {
 
     auto allocator =
         std::make_shared<FakeKVCacheAllocator>(config, full_group_ids, linear_group_ids, /*per_group_layer_num=*/1);
-    auto connector = std::shared_ptr<RemoteConnector>(new RemoteConnector(
-        config, kv_cache_config_, runtime_config_, parallelism_config_, sp_config_, nullptr, 0, allocator));
+    auto connector = std::shared_ptr<RemoteConnector>(
+        new RemoteConnector(config, kv_cache_config_, runtime_config_, parallelism_config_, sp_config_, allocator));
     ASSERT_TRUE(connector->group_policy_->init());
 
     auto [spec_info_map, spec_groups] = connector->genLocationSpecInfoMapAndGroups(/*tp_size=*/1);
@@ -499,7 +542,7 @@ TEST(RemoteConnectorTopologyInvariantTest, ConstructorRejectsMissingTopology) {
         std::make_shared<FakeKVCacheAllocator>(cache_config, std::vector<int32_t>{}, std::vector<int32_t>{}, 0);
 
     EXPECT_ANY_THROW((void)new RemoteConnector(
-        cache_config, kv_cache_config, runtime_config, parallelism_config, sp_config, nullptr, 0, allocator));
+        cache_config, kv_cache_config, runtime_config, parallelism_config, sp_config, allocator));
 }
 
 }  // namespace test

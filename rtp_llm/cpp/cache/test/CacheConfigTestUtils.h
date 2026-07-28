@@ -505,6 +505,21 @@ inline CacheConfig makeSimpleLinearCacheConfig(int               layer_num,
     return config;
 }
 
+inline void enableIndependentBlockPoolsForTest(CacheConfig& config) {
+    RTP_LLM_CHECK_WITH_INFO(config.groupNums() > 0, "independent test config requires cache groups");
+    const auto            group_num = static_cast<size_t>(config.groupNums());
+    std::vector<uint32_t> block_nums(group_num, config.block_num);
+    std::vector<size_t>   kv_strides;
+    std::vector<size_t>   scale_strides;
+    kv_strides.reserve(group_num);
+    scale_strides.reserve(group_num);
+    for (size_t gid = 0; gid < group_num; ++gid) {
+        kv_strides.push_back(config.kvBlockStrideBytesForGroup(gid));
+        scale_strides.push_back(config.kvScaleStrideBytesForGroup(gid));
+    }
+    config.setGroupBlockLayout(block_nums, kv_strides, scale_strides);
+}
+
 inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
                                                   int               block_num,
                                                   size_t            tokens_per_block,
@@ -554,11 +569,12 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
         } else {
             specs.push_back(full_spec);
             types.push_back(CacheGroupType::FULL);
-            tags.push_back("full" + std::to_string(gid));
+            tags.push_back(gid == 1 ? "full" : "full" + std::to_string(gid));
         }
         layers_by_group.push_back(std::move(group_layers));
     }
     config.fromGroupedSpecs(specs, layers_by_group, types, tags);
+    enableIndependentBlockPoolsForTest(config);
 
     config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
     config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;

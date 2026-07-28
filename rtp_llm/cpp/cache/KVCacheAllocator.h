@@ -22,6 +22,12 @@ struct KVCacheTokenCapacity {
     size_t available_tokens = 0;
 };
 
+struct TaggedPoolRegion {
+    std::string tag;
+    void*       base = nullptr;
+    size_t      size = 0;
+};
+
 struct KVCachePoolMetricsSnapshot {
     size_t      pool_index           = 0;
     std::string pool_name            = "unnamed";
@@ -90,6 +96,9 @@ public:
     virtual void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end);
     virtual void blockBatchCopy(const torch::Tensor& copy_mapping);
     virtual void blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping);
+
+    virtual BlockPoolPtr                  blockPoolForTag(const std::string& tag) const;
+    virtual std::vector<TaggedPoolRegion> taggedPoolRegions() const;
 
     BlockPoolPtr getBlockPool() const {
         return block_pool_;

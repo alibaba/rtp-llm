@@ -173,7 +173,10 @@ class KimiLinear(BaseModel):
         if model_config.kv_cache_spec_descs:
             return
 
-        if model_config.attn_config.use_mla and model_config.mla_ops_type != MlaOpsType.MHA:
+        if (
+            model_config.attn_config.use_mla
+            and model_config.mla_ops_type != MlaOpsType.MHA
+        ):
             full_cache_type = KVCacheSpecType.MLA
         else:
             full_cache_type = KVCacheSpecType.MHA

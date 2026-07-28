@@ -803,7 +803,7 @@ def apply_layer_num_override(model_config: ModelConfig, num_layers: int) -> None
         )
 
     hybrid_config = model_config.hybrid_attention_config
-    if hybrid_config.enable_hybrid_attention:
+    if hybrid_config.hybrid_attention_types:
         hybrid_attention_types = hybrid_config.hybrid_attention_types
         if len(hybrid_attention_types) != old_num_layers:
             raise ValueError(

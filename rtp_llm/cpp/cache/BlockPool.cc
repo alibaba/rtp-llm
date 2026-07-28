@@ -12,6 +12,7 @@
 #include <cstdint>
 #include <cstring>
 #include <exception>
+#include <limits>
 #include <string>
 #include <utility>
 
@@ -193,7 +194,8 @@ void BlockPool::initializeCacheBuffer() {
     const bool              is_pinned   = !is_cuda && cache_aligned_buffer_.is_pinned();
     static constexpr double kBytesPerMB = 1024.0 * 1024.0;
     RTP_LLM_LOG_INFO("BlockPool backing selected: pool_name=%s allocation_type=%s requested_backing=%s "
-                     "actual_backing=%s is_cuda=%d is_pinned=%d ptr=%p total_size=%zu bytes total_size_mb=%.2f "
+                     "actual_backing=%s is_cuda=%d is_pinned=%d ptr=%p total_size=%zu bytes "
+                     "total_size_mb=%.2f "
                      "block_num=%u memory_layouts=%zu",
                      config_.pool_name.c_str(),
                      allocationTypeName(allocation_type_),

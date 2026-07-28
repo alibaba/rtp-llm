@@ -64,7 +64,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
     def test_cp_cache_store_uses_each_layer_tag_metadata(self):
         expected = {}
         layer_inputs = {}
-        for index, tag in enumerate(("full", "linear0", "linear1"), start=1):
+        for index, tag in enumerate(("full", "linear"), start=1):
             actual_lengths = torch.tensor([index], dtype=torch.int32)
             prefix_lengths = torch.tensor([index + 10], dtype=torch.int32)
             block_ids = torch.tensor([[index + 20]], dtype=torch.int32)
@@ -92,13 +92,11 @@ class AttentionInputRoutingTest(unittest.TestCase):
         with patch(
             "rtp_llm.models_py.model_desc.qwen3_next.compute_ops.write_cache_store"
         ) as write_cache_store:
-            for tag in ("full", "linear0", "linear1"):
+            for tag in ("full", "linear"):
                 _write_cp_cache_store(*layer_inputs[tag])
 
-        self.assertEqual(write_cache_store.call_count, 3)
-        for call, tag in zip(
-            write_cache_store.call_args_list, ("full", "linear0", "linear1")
-        ):
+        self.assertEqual(write_cache_store.call_count, 2)
+        for call, tag in zip(write_cache_store.call_args_list, ("full", "linear")):
             for actual, wanted in zip(call.args, expected[tag]):
                 self.assertIs(actual, wanted)
 
@@ -108,24 +106,24 @@ class AttentionInputRoutingTest(unittest.TestCase):
         with patch(
             "rtp_llm.models_py.model_desc.qwen3_next.compute_ops.write_cache_store"
         ) as write_cache_store:
-            _write_cp_cache_store(attention_inputs, SimpleNamespace(tag="linear0"))
+            _write_cp_cache_store(attention_inputs, SimpleNamespace(tag="linear"))
 
         write_cache_store.assert_not_called()
 
     def test_cp_cache_store_requires_context_parallel_metadata(self):
         attention_inputs = SimpleNamespace(
-            cache_store_inputs=SimpleNamespace(tag="linear0"),
+            cache_store_inputs=SimpleNamespace(tag="linear"),
             context_parallel_info=None,
         )
 
         with self.assertRaisesRegex(
             RuntimeError, "CP cache store requires context_parallel_info"
         ):
-            _write_cp_cache_store(attention_inputs, SimpleNamespace(tag="linear0"))
+            _write_cp_cache_store(attention_inputs, SimpleNamespace(tag="linear"))
 
     def test_non_cp_linear_attention_does_not_write_cache_store(self):
         attention_inputs = SimpleNamespace(
-            cache_store_inputs=SimpleNamespace(tag="linear0"),
+            cache_store_inputs=SimpleNamespace(tag="linear"),
             context_parallel_info=SimpleNamespace(
                 prefill_actual_input_lengths_cpu=torch.tensor([1], dtype=torch.int32)
             ),
@@ -138,22 +136,21 @@ class AttentionInputRoutingTest(unittest.TestCase):
         ) as write_cache_store:
             _maybe_write_cp_cache_store(
                 attention_inputs,
-                SimpleNamespace(tag="linear0"),
+                SimpleNamespace(tag="linear"),
                 Qwen3NextMetadata(),
             )
 
         write_cache_store.assert_not_called()
 
     def test_get_group_tags_for_model_selected_layers(self):
-        kv_cache = FakeKVCache([["full"], ["linear0"], ["linear1"], ["full", "aux"]])
+        kv_cache = FakeKVCache([["full"], ["linear"], ["linear"], ["full", "aux"]])
 
         self.assertEqual(get_group_tags_for_layers(kv_cache, [0, 3]), ["full", "aux"])
 
     def test_prepare_fmha_impl_only_for_model_selected_tags(self):
         inputs_by_tag = {
             "full": object(),
-            "linear0": object(),
-            "linear1": object(),
+            "linear": object(),
         }
         inputs = SimpleNamespace(attention_inputs=inputs_by_tag)
         model = RoutingModel(["full"])

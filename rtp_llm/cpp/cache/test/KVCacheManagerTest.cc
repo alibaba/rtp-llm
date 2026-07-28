@@ -117,8 +117,6 @@ static ModelConfig makeDSV4ManagerFlashModelConfig() {
         ratios.push_back((i % 2 == 0) ? 4 : 128);
     }
     ratios.push_back(0);
-    mc.hybrid_attention_config.enable_hybrid_attention           = true;
-    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
     setDsv4KvCacheSpecs(mc, ratios);
     return mc;
 }
@@ -300,14 +298,17 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
     EXPECT_EQ(cache_manager->freeBlocksNum(), 0);
 }
 
-TEST_F(KVCacheManagerTest, InitRejectsSingleLinearGroup) {
+TEST_F(KVCacheManagerTest, InitAcceptsSingleLinearIndependentPool) {
     auto cache_config = makeSimpleLinearCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_BF16);
+    enableIndependentBlockPoolsForTest(cache_config);
 
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
-    EXPECT_THROW(cache_manager->init(), std::runtime_error);
-    ASSERT_NE(cache_manager->allocator_, nullptr);
-    EXPECT_EQ(cache_manager->allocator_->getBlockPool(), nullptr);
+    ASSERT_TRUE(cache_manager->init());
+    auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(cache_manager->allocator_);
+    ASSERT_NE(allocator, nullptr);
+    ASSERT_EQ(allocator->groupBlockPools().size(), 1u);
+    EXPECT_NE(cache_manager->convertIndexToAddr(/*block_index=*/1, /*layer_id=*/0).kv_addr, nullptr);
 }
 
 TEST_F(KVCacheManagerTest, InitAcceptsFullAndLinearGroups) {

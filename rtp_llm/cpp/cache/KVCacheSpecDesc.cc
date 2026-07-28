@@ -87,4 +87,9 @@ CacheGroupPolicy SpecBuilder::groupPolicy(const KVCacheSpecDesc& desc) {
     return policy;
 }
 
+bool SpecBuilder::hasExplicitPolicy(const KVCacheSpecDesc& desc) {
+    return desc.group_type.has_value() || desc.reuse.has_value() || desc.capacity.has_value() || desc.memory.has_value()
+           || desc.tail.has_value() || desc.cp.has_value();
+}
+
 }  // namespace rtp_llm

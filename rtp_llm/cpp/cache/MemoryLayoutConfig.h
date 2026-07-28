@@ -44,8 +44,7 @@ struct MemoryLayoutConfig {
     // kernel view sees per-kernel-block strides.
     size_t kernel_blocks_per_kv_block = 1;
 
-    bool enable_kv_scale         = false;
-    bool enable_hybrid_attention = false;
+    bool enable_kv_scale = false;
 
     bool hasScale() const {
         return enable_kv_scale && kv_scale_pool_size_bytes > 0;

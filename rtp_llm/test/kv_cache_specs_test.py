@@ -2,7 +2,6 @@ from unittest import TestCase, main
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.models.deepseek_v2 import DeepSeekV3Mtp
-from rtp_llm.models.hybrid_kv_cache import calculate_hybrid_group_layer_num
 from rtp_llm.models.kimi_linear.kimi_linear import KimiLinear
 from rtp_llm.models.qwen2_vl import QWen2_VL
 from rtp_llm.models.qwen3_next.qwen3_next import Qwen3Next, Qwen35Moe
@@ -16,7 +15,6 @@ class HybridKVCacheSpecTest(TestCase):
     def _build_model_config(self, layer_types):
         config = ModelConfig()
         config.num_layers = len(layer_types)
-        config.hybrid_attention_config.enable_hybrid_attention = True
         config.hybrid_attention_config.hybrid_attention_types = layer_types
         return config
 
@@ -73,13 +71,7 @@ class HybridKVCacheSpecTest(TestCase):
             config.kv_cache_spec_descs[0][0].cache_type, KVCacheSpecType.MHA
         )
 
-    def test_calculate_group_layer_num_uses_full_count_fallback(self):
-        self.assertEqual(calculate_hybrid_group_layer_num(30, 10), 10)
-        self.assertEqual(calculate_hybrid_group_layer_num(4, 6), 6)
-        self.assertEqual(calculate_hybrid_group_layer_num(3, 0), 3)
-        self.assertEqual(calculate_hybrid_group_layer_num(0, 3), 3)
-
-    def test_qwen3_next_40_layers_uses_contiguous_linear_split(self):
+    def test_qwen3_next_40_layers_uses_semantic_full_and_linear_tags(self):
         layer_types = [
             HybridAttentionType.NONE if (i + 1) % 4 == 0 else HybridAttentionType.LINEAR
             for i in range(40)
@@ -90,12 +82,10 @@ class HybridKVCacheSpecTest(TestCase):
 
         tags = [layer_descs[0].tag for layer_descs in config.kv_cache_spec_descs]
         self.assertEqual(tags.count("full"), 10)
-        self.assertEqual(tags.count("linear0"), 10)
-        self.assertEqual(tags.count("linear1"), 10)
-        self.assertEqual(tags.count("linear2"), 10)
+        self.assertEqual(tags.count("linear"), 30)
         self.assertEqual(tags[11], "full")
-        self.assertEqual(tags[12], "linear0")
-        self.assertEqual(tags[13], "linear1")
+        self.assertEqual(tags[12], "linear")
+        self.assertEqual(tags[13], "linear")
 
     def test_qwen35_defaults_missing_mrope_interleaved_to_true(self):
         config = ModelConfig()
@@ -267,7 +257,7 @@ class HybridKVCacheSpecTest(TestCase):
                 },
             )
 
-    def test_kimi_linear_uses_contiguous_tags_across_hybrid_cycles(self):
+    def test_kimi_linear_uses_semantic_tags_across_hybrid_cycles(self):
         tags = self._kimi_post_build_tags(
             [
                 HybridAttentionType.LINEAR,
@@ -283,18 +273,18 @@ class HybridKVCacheSpecTest(TestCase):
         self.assertEqual(
             tags,
             [
-                "linear0",
-                "linear0",
-                "linear1",
+                "linear",
+                "linear",
+                "linear",
                 "full",
-                "linear1",
-                "linear2",
-                "linear2",
+                "linear",
+                "linear",
+                "linear",
                 "full",
             ],
         )
 
-    def test_kimi_linear_group_layer_num_fallback_keeps_sparse_linear_contiguous(self):
+    def test_kimi_linear_sparse_pattern_keeps_one_linear_tag(self):
         tags = self._kimi_post_build_tags(
             [
                 HybridAttentionType.LINEAR,
@@ -312,16 +302,16 @@ class HybridKVCacheSpecTest(TestCase):
         self.assertEqual(
             tags,
             [
-                "linear0",
+                "linear",
                 "full",
                 "full",
-                "linear0",
+                "linear",
                 "full",
                 "full",
-                "linear0",
+                "linear",
                 "full",
                 "full",
-                "linear0",
+                "linear",
             ],
         )
 

@@ -75,7 +75,7 @@ protected:
                                         RoleType                role_type) {
         cache_manager_ = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr);
         ASSERT_TRUE(cache_manager_->init());
-        ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
+        ASSERT_EQ(cache_manager_->freeBlocksNum(), cache_manager_->totalBlocksNum());
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager_;
         resource_context.reuse_cache   = reuse_cache;
@@ -155,14 +155,14 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
     CHECK_BLOCK(blocks, 2, 4);
 
     stream_->releaseResource();
-    ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
+    ASSERT_EQ(cache_manager_->freeBlocksNum(), cache_manager_->totalBlocksNum());
 
     CHECK_BLOCK(blocks, 2, 0);
 }
 
 // TEST_F(StreamCacheResourceTest, testFallbackWithFastGen) {
 //     prepareResource();
-//     ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
+//     ASSERT_EQ(cache_manager_->freeBlocksNum(), cache_manager_->totalBlocksNum());
 //     auto& resource            = stream_->streamCacheResource();
 //     stream_->enable_fast_gen_ = true;
 
@@ -176,7 +176,7 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
 //     stream_->setPaused();
 
 //     ASSERT_EQ(released, old_max_blocks);
-//     ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
+//     ASSERT_EQ(cache_manager_->freeBlocksNum(), cache_manager_->totalBlocksNum());
 //     // fast_gen 模式下，fallback 之后 chunk 长度会被重置为 0
 //     ASSERT_EQ(stream_->currentChunkLen(), 0);
 // }
@@ -197,7 +197,7 @@ TEST_F(StreamCacheResourceTest, testAllocateResource) {
 
 //     auto status = resource.releaseSequenceKVCache(7, 7);
 //     ASSERT_TRUE(status.ok());
-//     ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
+//     ASSERT_EQ(cache_manager_->freeBlocksNum(), cache_manager_->totalBlocksNum());
 // }
 
 // TEST_F(StreamCacheResourceTest, testQueryLevelReuseCacheControl) {
@@ -524,7 +524,7 @@ TEST_F(StreamCacheResourceTest, testTryReleaseKVBlock_TieredMemoryCache_EvictsDe
     EXPECT_TRUE(captured_ctxs[1]->meta()->enableMemoryCache());
     EXPECT_FALSE(captured_ctxs[1]->meta()->enableRemoteCache());
     EXPECT_FALSE(captured_ctxs[1]->kvCacheResource().cacheKeys().empty());
-    EXPECT_EQ(cache_manager_->freeBlocksNum(), 8u);
+    EXPECT_EQ(cache_manager_->freeBlocksNum(), cache_manager_->totalBlocksNum());
 }
 
 // ============================================================================

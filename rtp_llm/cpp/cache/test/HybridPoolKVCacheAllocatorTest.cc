@@ -35,21 +35,22 @@ namespace test {
 // Helpers
 // ---------------------------------------------------------------------------
 
-// Build a tiny multi-pool config with two groups: gid=0 LINEAR(layers 0,1)
-// and gid=1 FULL(layers 2,3). Each group has its own per-group block budget,
-// so HybridPoolKVCacheAllocator creates two independent BlockPools.
+// Build a tiny multi-pool config with gid=0 LINEAR and gid=1 FULL/SWA.
+// Layer counts are configurable so tests can cover uneven semantic groups.
 static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t       linear_block_num = 6,
                                                  uint32_t       full_block_num   = 8,
-                                                 CacheGroupType second_type      = CacheGroupType::FULL) {
+                                                 CacheGroupType second_type      = CacheGroupType::FULL,
+                                                 uint32_t       linear_layer_num = 2,
+                                                 uint32_t       second_layer_num = 2) {
     CacheConfig config;
     config.dtype                     = rtp_llm::DataType::TYPE_FP16;
-    config.layer_num                 = 4;
-    config.layer_all_num             = 4;
+    config.layer_num                 = linear_layer_num + second_layer_num;
+    config.layer_all_num             = config.layer_num;
     config.block_num                 = std::max(linear_block_num, full_block_num);
     config.seq_size_per_block        = 4;
     config.kernel_seq_size_per_block = 4;
     config.linear_step               = 2;
-    config.group_layer_num           = 2;
+    config.group_layer_num           = static_cast<int>(std::max(linear_layer_num, second_layer_num));
 
     auto linear_spec = makeResolvedLinearSpec(config.dtype,
                                               1,
@@ -63,18 +64,24 @@ static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t       linear_block_num
                                               "linear");
     auto full_spec = makeResolvedMhaSpec(config.dtype, 1, 1, static_cast<uint32_t>(config.seq_size_per_block), "full");
 
-    config.use_independent_block_pools = true;
+    std::vector<int> linear_layers;
+    std::vector<int> second_layers;
+    for (uint32_t layer_id = 0; layer_id < linear_layer_num; ++layer_id) {
+        linear_layers.push_back(static_cast<int>(layer_id));
+    }
+    for (uint32_t layer_id = 0; layer_id < second_layer_num; ++layer_id) {
+        second_layers.push_back(static_cast<int>(linear_layer_num + layer_id));
+    }
     config.fromGroupedSpecs({linear_spec, full_spec},
-                            {{0, 1}, {2, 3}},
+                            {linear_layers, second_layers},
                             {CacheGroupType::LINEAR, second_type},
                             {"linear", second_type == CacheGroupType::SWA ? "swa" : "full"});
 
-    // Same tokens per block for both groups.
     config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
     config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
     config.kv_scale_stride_bytes = 0;
     config.kv_scale_size_bytes   = 0;
-    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+    config.block_size_bytes      = config.kv_block_size_bytes;
     config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
                                               static_cast<int>(config.kv_block_stride_bytes));
     const auto linear_stride = linear_spec->block_size_bytes();
@@ -89,18 +96,16 @@ static CacheConfig makeTinySwaMultiPoolHybridConfig(uint32_t linear_block_num = 
 
 static ModelConfig makeTinyDSV4ModelConfig() {
     ModelConfig mc;
-    mc.num_layers                                                = 5;
-    mc.hidden_size                                               = 32;
-    mc.attn_config.head_num                                      = 4;
-    mc.attn_config.kv_head_num                                   = 1;
-    mc.attn_config.size_per_head                                 = 8;
-    mc.attn_config.rope_head_dim                                 = 4;
-    mc.attn_config.indexer_head_dim                              = 8;
-    mc.attn_config.indexer_head_num                              = 2;
-    mc.attn_config.indexer_topk                                  = 16;
-    mc.attn_config.tokens_per_block                              = 128;
-    mc.hybrid_attention_config.enable_hybrid_attention           = true;
-    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    mc.num_layers                   = 5;
+    mc.hidden_size                  = 32;
+    mc.attn_config.head_num         = 4;
+    mc.attn_config.kv_head_num      = 1;
+    mc.attn_config.size_per_head    = 8;
+    mc.attn_config.rope_head_dim    = 4;
+    mc.attn_config.indexer_head_dim = 8;
+    mc.attn_config.indexer_head_num = 2;
+    mc.attn_config.indexer_topk     = 16;
+    mc.attn_config.tokens_per_block = 128;
     setDsv4KvCacheSpecs(mc, {4, 128, 4, 128, 0});
     return mc;
 }
@@ -128,11 +133,9 @@ static ModelConfig makeProModelConfig() {
     return mc;
 }
 
-// Build a DSV4 7-pool CacheConfig (uses use_independent_block_pools=true).
+// Build a DSV4 7-pool CacheConfig.
 static CacheConfig makeDSV4HybridPoolConfig(uint32_t block_num = 200) {
-    auto mc                                                      = makeProModelConfig();
-    mc.hybrid_attention_config.enable_hybrid_attention           = true;
-    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    auto              mc = makeProModelConfig();
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
     config.finalizeBlockNums(block_num, RuntimeConfig{});
@@ -407,6 +410,61 @@ TEST_F(HybridPoolKVCacheAllocatorTest, GetBlockPoolReturnsNullptrInHybridPoolMod
     EXPECT_EQ(allocator->getBlockPool(), nullptr);
 }
 
+TEST_F(HybridPoolKVCacheAllocatorTest, EachTagOwnsAnIndependentDeviceBacking) {
+    auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    ASSERT_EQ(allocator->groupBlockPools().size(), 2u);
+    const auto& linear_pool = allocator->groupBlockPools()[0];
+    const auto& full_pool   = allocator->groupBlockPools()[1];
+    EXPECT_EQ(allocator->blockPoolForTag(config.tagForGroup(0)), linear_pool);
+    EXPECT_EQ(allocator->blockPoolForTag(config.tagForGroup(1)), full_pool);
+    EXPECT_NE(linear_pool->getBaseAddress(), full_pool->getBaseAddress());
+
+    const auto linear_begin = reinterpret_cast<uintptr_t>(linear_pool->getBaseAddress());
+    const auto linear_end   = linear_begin + linear_pool->getTotalSizeBytes();
+    const auto full_begin   = reinterpret_cast<uintptr_t>(full_pool->getBaseAddress());
+    const auto full_end     = full_begin + full_pool->getTotalSizeBytes();
+    EXPECT_TRUE(linear_end <= full_begin || full_end <= linear_begin);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, CudaMallocGroupBackingOutlivesAllocatorOwner) {
+    auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
+    auto allocator = makeAllocator(config);
+    allocator->setUseCudaMallocBlockPool(true);
+    ASSERT_TRUE(allocator->init());
+
+    auto       retained_pool = allocator->groupBlockPools().front();
+    const auto retained_base = retained_pool->getBaseAddress();
+    ASSERT_NE(retained_base, nullptr);
+
+    allocator.reset();
+    EXPECT_EQ(retained_pool->getBaseAddress(), retained_base);
+    const auto block = retained_pool->convertIndexToBuffer(/*layer_id=*/0, /*block_id=*/1);
+    ASSERT_FALSE(block.empty());
+    EXPECT_TRUE(block.front().is_cuda);
+    EXPECT_NE(block.front().addr, nullptr);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, MixedPlacementKeepsTagLocalBacking) {
+    auto                          config = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/6, /*full_block_num=*/8);
+    std::vector<CacheGroupPolicy> policies;
+    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
+        policies.push_back(config.policyForGroup(gid));
+    }
+    policies[1].memory_placement = CacheMemoryPlacement::HOST;
+    config.setGroupPolicies(policies);
+
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    ASSERT_EQ(allocator->groupBlockPools().size(), 2u);
+    EXPECT_EQ(allocator->groupBlockPools()[0]->where(), MemoryType::MEMORY_GPU);
+    EXPECT_NE(allocator->groupBlockPools()[1]->where(), MemoryType::MEMORY_GPU);
+    EXPECT_EQ(allocator->blockPoolForTag(config.tagForGroup(0)), allocator->groupBlockPools()[0]);
+    EXPECT_EQ(allocator->blockPoolForTag(config.tagForGroup(1)), allocator->groupBlockPools()[1]);
+}
+
 // ---------------------------------------------------------------------------
 // Aggregated counters
 // ---------------------------------------------------------------------------
@@ -539,6 +597,28 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ConvertIndexToAddrAndBufferDefault) {
         ASSERT_FALSE(bufs.empty());
         EXPECT_NE(bufs[0].addr, nullptr);
     }
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, UnevenGroupsUseDistinctBlockPoolsAndAddresses) {
+    auto config = makeTinyMultiPoolHybridConfig(
+        /*linear_block_num=*/8,
+        /*full_block_num=*/8,
+        CacheGroupType::FULL,
+        /*linear_layer_num=*/3,
+        /*second_layer_num=*/2);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    ASSERT_EQ(allocator->groupBlockPools().size(), 2u);
+    EXPECT_NE(allocator->groupBlockPools()[0].get(), allocator->groupBlockPools()[1].get());
+    EXPECT_EQ(config.layerIdsForGroup(0), std::vector<int>({0, 1, 2}));
+    EXPECT_EQ(config.layerIdsForGroup(1), std::vector<int>({3, 4}));
+
+    const auto linear_addr = allocator->convertIndexToAddr(/*layer_id=*/0, /*group_id=*/0, /*block_id=*/1);
+    const auto full_addr   = allocator->convertIndexToAddr(/*layer_id=*/3, /*group_id=*/1, /*block_id=*/1);
+    ASSERT_NE(linear_addr.kv_addr, nullptr);
+    ASSERT_NE(full_addr.kv_addr, nullptr);
+    EXPECT_NE(linear_addr.kv_addr, full_addr.kv_addr);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, ConvertIndexToBufferPartitionDefault) {
@@ -982,6 +1062,144 @@ TEST_F(HybridPoolKVCacheAllocatorTest, MallocAndFreeCycleAcrossPerGroupPools) {
 }
 
 // ---------------------------------------------------------------------------
+TEST_F(HybridPoolKVCacheAllocatorTest, UpdateKVBlockForksAndCopiesPerGroupTails) {
+    auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/8, /*full_block_num=*/8);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    const size_t free_before   = allocator->freeBlocksNum();
+    auto         linear_blocks = allocator->groupBlockPools()[0]->malloc(3);
+    auto         full_blocks   = allocator->groupBlockPools()[1]->malloc(3);
+    ASSERT_EQ(linear_blocks.size(), 3u);
+    ASSERT_EQ(full_blocks.size(), 3u);
+
+    auto batch_res = makeBatchResource(/*batch_size=*/2, config);
+    batch_res->mutableBlockIds(/*batch_id=*/0, /*gid=*/0).assign({linear_blocks[0], NULL_BLOCK_IDX, linear_blocks[1]});
+    batch_res->mutableBlockIds(/*batch_id=*/0, /*gid=*/1).assign({full_blocks[0], full_blocks[1]});
+    batch_res->mutableBlockIds(/*batch_id=*/1, /*gid=*/0).assign({linear_blocks[2]});
+    batch_res->mutableBlockIds(/*batch_id=*/1, /*gid=*/1).assign({full_blocks[2]});
+
+    std::vector<TaggedBlockIdPair> update_mapping{{"stale", 1, 2}};
+    ASSERT_TRUE(allocator->updateKVBlock(
+        batch_res, /*block_src_batch=*/std::vector<int>{0, 0}, /*copy_last_block=*/true, update_mapping));
+
+    ASSERT_EQ(update_mapping.size(), 2u);
+    EXPECT_EQ(update_mapping[0].tag, "linear");
+    EXPECT_EQ(update_mapping[1].tag, "full");
+    allocator->blockBatchCopyByTag(update_mapping);
+
+    ASSERT_EQ(batch_res->batchSize(), 2);
+    EXPECT_EQ(batch_res->blocks(1, 0), (BlockIndicesType{linear_blocks[0], NULL_BLOCK_IDX, linear_blocks[1]}));
+    EXPECT_EQ(batch_res->blocks(1, 1), (BlockIndicesType{full_blocks[0], full_blocks[1]}));
+    EXPECT_EQ(batch_res->blocks(0, 0)[0], linear_blocks[0]);
+    EXPECT_NE(batch_res->blocks(0, 0).back(), linear_blocks[1]);
+    EXPECT_EQ(batch_res->blocks(0, 1)[0], full_blocks[0]);
+    EXPECT_NE(batch_res->blocks(0, 1).back(), full_blocks[1]);
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before - 6);
+
+    allocator->free(FreeInfo{batch_res, nullptr});
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, IncrDecrKVCacheRefTracksValidBlocksPerPool) {
+    auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/8, /*full_block_num=*/8);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    const size_t free_before   = allocator->freeBlocksNum();
+    auto         linear_blocks = allocator->groupBlockPools()[0]->malloc(2);
+    auto         full_blocks   = allocator->groupBlockPools()[1]->malloc(2);
+    ASSERT_EQ(linear_blocks.size(), 2u);
+    ASSERT_EQ(full_blocks.size(), 2u);
+
+    KVCacheResource resource;
+    resource.initGroups(config.topologyPtr());
+    resource.cacheKeys() = CacheKeysType{100, 101, 102};
+    resource.mutableBlockIds(/*gid=*/0).assign({linear_blocks[0], 0, linear_blocks[1]});
+    resource.mutableBlockIds(/*gid=*/1).assign({full_blocks[0], full_blocks[1], 0});
+
+    auto ref = allocator->incrKVCacheRef(resource, CacheKeysType{101, 999, 102});
+    ASSERT_NE(ref, nullptr);
+    EXPECT_EQ(ref->cacheKeys(), (CacheKeysType{101, 102}));
+    EXPECT_EQ(ref->blocks(0), (BlockIndicesType{0, linear_blocks[1]}));
+    EXPECT_EQ(ref->blocks(1), (BlockIndicesType{full_blocks[1], 0}));
+
+    allocator->groupBlockPools()[0]->requestFree(linear_blocks);
+    allocator->groupBlockPools()[1]->requestFree(full_blocks);
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before - 2);
+
+    ref.reset();
+    EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, SemanticHybridPrefixInsertThenReuse) {
+    auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/8, /*full_block_num=*/8);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+    ASSERT_TRUE(config.policyForGroup(/*gid=*/0).enable_prefix_reuse);
+
+    auto seed_res = makeBatchResource(/*batch_size=*/1, config);
+    seed_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102});
+    auto seed_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+
+    MallocInfo seed_malloc{seed_res, seed_tokens};
+    seed_malloc.enable_device_cache = false;
+    seed_malloc.reuse_cache         = false;
+    ASSERT_TRUE(allocator->malloc(seed_malloc).success);
+    allocator->insertIntoCache(InsertInfo{seed_res, seed_tokens, /*is_resident=*/false});
+    allocator->free(FreeInfo{seed_res, seed_tokens});
+
+    EXPECT_FALSE(isNullBlockIdx(allocator->sharedBlockCache()->matchGroup(102, /*group_id=*/0)));
+    EXPECT_FALSE(isNullBlockIdx(allocator->sharedBlockCache()->matchGroup(102, /*group_id=*/1)));
+
+    auto hit_res = makeBatchResource(/*batch_size=*/1, config);
+    hit_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});
+    auto hit_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
+
+    MallocInfo hit_malloc{hit_res, hit_tokens};
+    hit_malloc.enable_device_cache = true;
+    hit_malloc.reuse_cache         = true;
+    auto result                    = allocator->malloc(hit_malloc);
+    ASSERT_TRUE(result.success);
+    EXPECT_EQ(result.reuse_len, 12);
+
+    allocator->free(FreeInfo{hit_res, hit_tokens});
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, DecodeSparseCleanupOnlyPrunesLinearPool) {
+    auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/8, /*full_block_num=*/8);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    auto linear_blocks = allocator->groupBlockPools()[0]->malloc(6);
+    auto full_blocks   = allocator->groupBlockPools()[1]->malloc(6);
+    ASSERT_EQ(linear_blocks.size(), 6u);
+    ASSERT_EQ(full_blocks.size(), 6u);
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1, config);
+    batch_res->mutableBlockIds(0, /*gid=*/0).assign(linear_blocks);
+    batch_res->mutableBlockIds(0, /*gid=*/1).assign(full_blocks);
+    auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/24, /*seq_size_per_block=*/4);
+
+    MallocInfo info{batch_res, token_ids};
+    info.enable_device_cache          = false;
+    info.reuse_cache                  = true;
+    info.enable_remove_skipped_blocks = true;
+    ASSERT_TRUE(allocator->malloc(info).success);
+
+    const auto& linear_out = batch_res->blocks(0, /*gid=*/0);
+    ASSERT_EQ(linear_out.size(), 6u);
+    EXPECT_TRUE(isNullBlockIdx(linear_out[0]));
+    EXPECT_FALSE(isNullBlockIdx(linear_out[1]));
+    EXPECT_TRUE(isNullBlockIdx(linear_out[2]));
+    EXPECT_FALSE(isNullBlockIdx(linear_out[3]));
+    EXPECT_FALSE(isNullBlockIdx(linear_out[4]));
+    EXPECT_FALSE(isNullBlockIdx(linear_out[5]));
+    EXPECT_EQ(batch_res->blocks(0, /*gid=*/1), full_blocks);
+
+    allocator->free(FreeInfo{batch_res, token_ids});
+}
+
 // DSV4 7-group HybridPool: covers per-tag addressing and SWA tail
 // ---------------------------------------------------------------------------
 
@@ -1083,8 +1301,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4ConfigUsesGroupOwnedBytesForPagedBloc
             config.layerIdsForGroup(gid).size()
             * (config.kvBlockStrideBytesForGroup(gid) + config.kvScaleStrideBytesForGroup(gid));
         EXPECT_EQ(config.blockSizeBytesForGroup(gid), expected_group_bytes) << "gid=" << gid;
-        if (!config.usesExplicitIndependentBlocks(gid)
-            && (type == CacheGroupType::FULL || type == CacheGroupType::LINEAR)) {
+        if (!config.usesExplicitBlocks(gid) && (type == CacheGroupType::FULL || type == CacheGroupType::LINEAR)) {
             expected_paged_bytes += expected_group_bytes;
         } else {
             expected_non_paged_bytes += expected_group_bytes;
@@ -1110,7 +1327,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveRatioExcludesExplicitIndependentPo
     for (size_t gid = 0; gid < allocator->groupBlockPools().size(); ++gid) {
         const size_t available = allocator->groupBlockPools()[gid]->availableBlocksNum();
         all_available += available;
-        if (!config.usesExplicitIndependentBlocks(gid)) {
+        if (!config.usesExplicitBlocks(gid)) {
             reservable_available += available;
         }
     }
@@ -1169,9 +1386,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4GpuHcaStatePoolIncludesFixedReserve) 
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, DSV4StateSwaPoolsWithoutExplicitBlocksScaleWithLinearStep) {
-    auto mc                                                      = makeProModelConfig();
-    mc.hybrid_attention_config.enable_hybrid_attention           = true;
-    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    auto              mc = makeProModelConfig();
     ParallelismConfig pc;
     setDsv4ExplicitPoolBlocks(mc, "hca_state", 0);
     auto config        = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);

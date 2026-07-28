@@ -226,14 +226,12 @@ cc_library(
     srcs = [
         "HybridKVCacheAllocator.cc",
         "HybridPoolKVCacheAllocator.cc",
-        "HybridTypeKVCacheAllocator.cc",
         "KVCacheAllocator.cc",
         "SingleTypeKVCacheAllocator.cc",
     ],
     hdrs = [
         "HybridKVCacheAllocator.h",
         "HybridPoolKVCacheAllocator.h",
-        "HybridTypeKVCacheAllocator.h",
         "KVCacheAllocator.h",
         "SingleTypeKVCacheAllocator.h",
     ],
@@ -268,7 +266,6 @@ cc_library(
     name = "cache_core",
     srcs = [
         "CacheConfigCreator.cc",
-        "HybridConfigCreator.cc",
         "HybridPoolConfigCreator.cc",
         "KVCacheHashUtil.cc",
         "MemoryEvaluationHelper.cc",
@@ -276,7 +273,6 @@ cc_library(
     ],
     hdrs = [
         "CacheConfigCreator.h",
-        "HybridConfigCreator.h",
         "HybridPoolConfigCreator.h",
         "KVCacheHashUtil.h",
         "MemoryEvaluationHelper.h",

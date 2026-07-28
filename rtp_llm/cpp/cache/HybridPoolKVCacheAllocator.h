@@ -31,7 +31,9 @@ public:
     void blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end) override;
     void blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping) override;
 
-    GroupedCacheLayerLayout allLayerCacheBase() const override;
+    GroupedCacheLayerLayout       allLayerCacheBase() const override;
+    BlockPoolPtr                  blockPoolForTag(const std::string& tag) const override;
+    std::vector<TaggedPoolRegion> taggedPoolRegions() const override;
 
     size_t                  freeBlocksNum() const override;
     size_t                  availableBlocksNum() const override;

@@ -20,7 +20,6 @@ class WeightsConvertLayerOverrideTest(unittest.TestCase):
         model_config.attn_config.kv_head_num = 2
         model_config.attn_config.size_per_head = 16
         model_config.attn_config.tokens_per_block = 4
-        model_config.hybrid_attention_config.enable_hybrid_attention = True
         model_config.hybrid_attention_config.hybrid_attention_types = [
             HybridAttentionType.LINEAR,
             HybridAttentionType.NONE,
@@ -58,7 +57,7 @@ class WeightsConvertLayerOverrideTest(unittest.TestCase):
         self.assertEqual(len(result.kv_cache_spec_descs), 2)
         self.assertEqual(
             [layer_descs[0].tag for layer_descs in result.kv_cache_spec_descs],
-            ["linear0", "full"],
+            ["linear", "full"],
         )
         self.assertEqual(
             [layer_descs[0].cache_type for layer_descs in result.kv_cache_spec_descs],
@@ -72,7 +71,7 @@ class WeightsConvertLayerOverrideTest(unittest.TestCase):
     def test_kimi_real_post_build_replaces_stale_layer_metadata(self):
         self._assert_real_post_build(KimiLinear)
 
-    def test_qwen3_next_linear_only_override_is_rejected_by_cpp_creator(self):
+    def test_qwen3_next_linear_only_override_uses_independent_pool_creator(self):
         model_config = self._model_config()
         model_config.hybrid_attention_config.hybrid_attention_types = [
             HybridAttentionType.LINEAR,
@@ -84,10 +83,15 @@ class WeightsConvertLayerOverrideTest(unittest.TestCase):
             model_config, Qwen3Next, {"HACK_LAYER_NUM": "2"}
         )
 
-        with self.assertRaisesRegex(
-            RuntimeError, "exactly one FULL MHA/MLA cache group"
-        ):
-            validate_basic_config(result)
+        self.assertEqual(
+            [layer_descs[0].tag for layer_descs in result.kv_cache_spec_descs],
+            ["linear", "linear"],
+        )
+        self.assertEqual(
+            [layer_descs[0].cache_type for layer_descs in result.kv_cache_spec_descs],
+            [KVCacheSpecType.LINEAR, KVCacheSpecType.LINEAR],
+        )
+        validate_basic_config(result)
 
     def test_invalid_layer_override_preserves_metadata_and_can_retry(self):
         model_config = self._model_config()

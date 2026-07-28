@@ -2,6 +2,8 @@
 
 #include <algorithm>
 #include <chrono>
+#include <cstring>
+#include <limits>
 #include <numeric>
 #include <unordered_set>
 
@@ -9,7 +11,6 @@
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
@@ -218,16 +219,12 @@ bool KVCacheManager::init() {
                                                    && kv_cache_config_.enable_prefix_tree_memory_cache
                                                    && kv_cache_config_.enable_independent_group_eviction;
 
-    const bool is_hybrid = config_.groupNums() > 1;
-    if (config_.use_independent_block_pools) {
+    if (!config_.isStandardSingleTopology()) {
         allocator_ = std::make_shared<rtp_llm::HybridPoolKVCacheAllocator>(config_,
                                                                            AllocationType::DEVICE,
                                                                            metrics_reporter_,
                                                                            kv_cache_config_.reserve_block_ratio,
                                                                            pd_sep_config_.role_type);
-    } else if (is_hybrid) {
-        allocator_ = std::make_shared<rtp_llm::HybridTypeKVCacheAllocator>(
-            config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
     } else {
         allocator_ = std::make_shared<rtp_llm::SingleTypeKVCacheAllocator>(
             config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
@@ -586,24 +583,89 @@ void KVCacheManager::initConnectorCoordinator() {
 
 void KVCacheManager::allocateAndSync() {
     RTP_LLM_LOG_INFO("allocateAndSync start, block_num=%d", config_.block_num);
-    size_t world_size = parallelism_config_.tp_size * parallelism_config_.dp_size;
-    if (world_size > 1) {
-        size_t local_rank    = parallelism_config_.tp_size * parallelism_config_.dp_rank + parallelism_config_.tp_rank;
-        auto   block_num_t   = torch::empty({(int64_t)world_size}, torch::kInt32).pin_memory();
-        auto   block_num_ptr = block_num_t.data_ptr<int>();
-        block_num_ptr[local_rank] = config_.block_num;
-        execAllGather({{block_num_t}, ParallelMode::DP_AND_TP});
+    const size_t world_size = parallelism_config_.tp_size * parallelism_config_.dp_size;
+    if (world_size == 1) {
+        config_.finalizeBlockNums(static_cast<uint32_t>(config_.block_num), runtime_config_);
+        return;
+    }
+
+    const size_t local_rank = parallelism_config_.tp_size * parallelism_config_.dp_rank + parallelism_config_.tp_rank;
+    const auto   topology_descriptor   = config_.topologyDescriptor();
+    auto         descriptor_lengths    = torch::zeros({static_cast<int64_t>(world_size)}, torch::kInt64).pin_memory();
+    auto*        descriptor_length_ptr = descriptor_lengths.data_ptr<int64_t>();
+    descriptor_length_ptr[local_rank]  = static_cast<int64_t>(topology_descriptor.size());
+    execAllGather({{descriptor_lengths}, ParallelMode::DP_AND_TP});
+    execSyncCommunication(false);
+    cudaSyncAndCheck();
+
+    const auto max_descriptor_length = *std::max_element(descriptor_length_ptr, descriptor_length_ptr + world_size);
+    RTP_LLM_CHECK_WITH_INFO(max_descriptor_length > 0, "cache topology descriptor must not be empty");
+    auto descriptor_bytes =
+        torch::zeros({static_cast<int64_t>(world_size), max_descriptor_length}, torch::kUInt8).pin_memory();
+    auto* descriptor_bytes_ptr = descriptor_bytes.data_ptr<uint8_t>();
+    std::memcpy(descriptor_bytes_ptr + local_rank * static_cast<size_t>(max_descriptor_length),
+                topology_descriptor.data(),
+                topology_descriptor.size());
+    execAllGather({{descriptor_bytes}, ParallelMode::DP_AND_TP});
+    execSyncCommunication(false);
+    cudaSyncAndCheck();
+
+    for (size_t rank = 0; rank < world_size; ++rank) {
+        RTP_LLM_CHECK_WITH_INFO(descriptor_length_ptr[rank] == static_cast<int64_t>(topology_descriptor.size()),
+                                "cache topology mismatch at rank=%zu: local descriptor bytes=%zu remote=%ld",
+                                rank,
+                                topology_descriptor.size(),
+                                descriptor_length_ptr[rank]);
+        const auto* rank_descriptor = descriptor_bytes_ptr + rank * static_cast<size_t>(max_descriptor_length);
+        RTP_LLM_CHECK_WITH_INFO(std::memcmp(rank_descriptor, topology_descriptor.data(), topology_descriptor.size())
+                                    == 0,
+                                "cache topology mismatch at rank=%zu",
+                                rank);
+    }
+
+    auto  block_num_t         = torch::zeros({static_cast<int64_t>(world_size)}, torch::kInt32).pin_memory();
+    auto* block_num_ptr       = block_num_t.data_ptr<int>();
+    block_num_ptr[local_rank] = config_.block_num;
+    execAllGather({{block_num_t}, ParallelMode::DP_AND_TP});
+    execSyncCommunication(false);
+    cudaSyncAndCheck();
+    config_.block_num = parallelism_config_.ffn_disaggregate_config.is_ffn_service() ?
+                            1 :
+                            *std::min_element(block_num_ptr, block_num_ptr + world_size);
+
+    if (config_.isStandardSingleTopology()) {
+        config_.finalizeBlockNums(static_cast<uint32_t>(config_.block_num), runtime_config_);
+    } else {
+        auto tags = config_.groupTagsSnapshot();
+        std::sort(tags.begin(), tags.end());
+        const size_t group_num = tags.size();
+        auto         group_block_nums =
+            torch::zeros({static_cast<int64_t>(world_size), static_cast<int64_t>(group_num)}, torch::kInt32)
+                .pin_memory();
+        auto* group_block_num_ptr = group_block_nums.data_ptr<int>();
+        for (size_t tag_index = 0; tag_index < group_num; ++tag_index) {
+            const auto gid = static_cast<size_t>(config_.groupIdForTag(tags[tag_index]));
+            group_block_num_ptr[local_rank * group_num + tag_index] = static_cast<int>(config_.blockNumForGroup(gid));
+        }
+        execAllGather({{group_block_nums}, ParallelMode::DP_AND_TP});
         execSyncCommunication(false);
         cudaSyncAndCheck();
 
-        if (parallelism_config_.ffn_disaggregate_config.is_ffn_service()) {
-            config_.block_num = 1;
-        } else {
-            config_.block_num = *std::min_element(block_num_ptr, block_num_ptr + world_size);
+        auto groups = config_.topology().groups();
+        for (size_t tag_index = 0; tag_index < group_num; ++tag_index) {
+            uint32_t synced_block_num = std::numeric_limits<uint32_t>::max();
+            for (size_t rank = 0; rank < world_size; ++rank) {
+                synced_block_num = std::min(synced_block_num,
+                                            static_cast<uint32_t>(group_block_num_ptr[rank * group_num + tag_index]));
+            }
+            if (parallelism_config_.ffn_disaggregate_config.is_ffn_service()) {
+                synced_block_num = 1;
+            }
+            groups[static_cast<size_t>(config_.groupIdForTag(tags[tag_index]))].block_num = synced_block_num;
         }
+        config_.setTopology(std::move(groups), config_.topology().layers());
     }
-    config_.finalizeBlockNums(static_cast<uint32_t>(config_.block_num), runtime_config_);
-    RTP_LLM_LOG_INFO("block_num is %d after tp sync", config_.block_num);
+    RTP_LLM_LOG_INFO("block_num is %d after tp/dp topology sync", config_.block_num);
 }
 
 void KVCacheManager::reportMetricsLoop() {

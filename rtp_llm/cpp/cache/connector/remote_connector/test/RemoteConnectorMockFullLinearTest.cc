@@ -2,7 +2,7 @@
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/test/RemoteConnectorMockTestBase.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
-#include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
 
@@ -153,6 +153,92 @@ public:
         RemoteConnectorMockTestBase::TearDown();
     }
 
+protected:
+    std::string tagForUri(const std::string& uri) const {
+        for (const auto& group : cache_config_.topology().groups()) {
+            const auto prefix = group.policy.group_type == CacheGroupType::FULL ? "F" : "L";
+            if (uri.find("_" + std::string(prefix) + group.tag + "_") != std::string::npos) {
+                return group.tag;
+            }
+        }
+        return {};
+    }
+
+    std::map<std::string, std::vector<size_t>> partitionUriIndices(const UriStrVec& uris) const {
+        std::map<std::string, std::vector<size_t>> result;
+        for (size_t i = 0; i < uris.size(); ++i) {
+            const auto tag = tagForUri(uris[i]);
+            RTP_LLM_CHECK_WITH_INFO(!tag.empty(), "cannot determine tag for uri=%s", uris[i].c_str());
+            result[tag].push_back(i);
+        }
+        return result;
+    }
+
+    void expectLoadByTag(const UriStrVec& uris, const std::vector<std::string>& block_ids, ClientErrorCode result) {
+        ASSERT_EQ(uris.size(), block_ids.size());
+        for (const auto& [tag, indices] : partitionUriIndices(uris)) {
+            UriStrVec                tagged_uris;
+            std::vector<std::string> tagged_block_ids;
+            for (const auto index : indices) {
+                tagged_uris.push_back(uris[index]);
+                tagged_block_ids.push_back(block_ids[index]);
+            }
+            const auto buffer_expect = makeBlockBuffersExpect(tagged_uris, cache_config_, kFakeLayerNum);
+            auto&      call          = EXPECT_CALL(*transfer_clients_.at(tag),
+                                     LoadKvCaches(Eq(tagged_uris),
+                                                  BlockBuffersMatcher(buffer_expect),
+                                                  TransferTraceInfoMatcher(tagged_block_ids)));
+            if (result == ClientErrorCode::ER_OK) {
+                call.WillOnce(Return(result));
+            } else {
+                call.Times(Between(0, 1)).WillRepeatedly(Return(result));
+            }
+        }
+    }
+
+    void expectSaveByTag(const UriStrVec&                uris,
+                         const std::vector<std::string>& block_ids,
+                         ClientErrorCode                 result,
+                         const UriStrVec&                actual_uris = {}) {
+        ASSERT_EQ(uris.size(), block_ids.size());
+        ASSERT_TRUE(actual_uris.empty() || actual_uris.size() == uris.size());
+        for (const auto& [tag, indices] : partitionUriIndices(uris)) {
+            UriStrVec                tagged_uris;
+            UriStrVec                tagged_actual_uris;
+            std::vector<std::string> tagged_block_ids;
+            for (const auto index : indices) {
+                tagged_uris.push_back(uris[index]);
+                tagged_block_ids.push_back(block_ids[index]);
+                if (!actual_uris.empty()) {
+                    tagged_actual_uris.push_back(actual_uris[index]);
+                }
+            }
+            const auto buffer_expect = makeBlockBuffersExpect(tagged_uris, cache_config_, kFakeLayerNum);
+            auto&      call          = EXPECT_CALL(*transfer_clients_.at(tag),
+                                     SaveKvCaches(Eq(tagged_uris),
+                                                  BlockBuffersMatcher(buffer_expect),
+                                                  TransferTraceInfoMatcher(tagged_block_ids)));
+            const auto sdk_result    = SaveKvCachesReturnType({result, tagged_actual_uris});
+            if (result == ClientErrorCode::ER_OK) {
+                call.WillOnce(Return(sdk_result));
+            } else {
+                call.Times(Between(0, 1)).WillRepeatedly(Return(sdk_result));
+            }
+        }
+    }
+
+    void expectNoLoad() {
+        for (const auto& entry : transfer_clients_) {
+            EXPECT_CALL(*entry.second, LoadKvCaches(_, _, _)).Times(0);
+        }
+    }
+
+    void expectNoSave() {
+        for (const auto& entry : transfer_clients_) {
+            EXPECT_CALL(*entry.second, SaveKvCaches(_, _, _)).Times(0);
+        }
+    }
+
 private:
     void initConnector() {
         int block_num          = 40;
@@ -161,19 +247,16 @@ private:
         for (int i = 0; i < tp_size_; i++) {
             auto meta_client = std::make_unique<kv_cache_manager::MockMetaClient>();
             meta_clients_.push_back(meta_client.get());
+            ON_CALL(*meta_client, GetStorageConfig()).WillByDefault(ReturnRef(storage_config_));
             EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _))
                 .WillOnce(Invoke(
                     [&](const std::string&, const kv_cache_manager::InitParams&) { return std::move(meta_client); }));
-            auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(cache_config_);
+            auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(cache_config_);
             ASSERT_TRUE(allocator->init());
-            remote_connectors_.push_back(std::make_shared<RemoteConnector>(cache_config_,
-                                                                           kv_cache_config_,
-                                                                           runtime_config_,
-                                                                           parallelism_config_,
-                                                                           sp_config_,
-                                                                           nullptr,
-                                                                           0,
-                                                                           allocator));
+            auto connector = std::make_shared<RemoteConnector>(
+                cache_config_, kv_cache_config_, runtime_config_, parallelism_config_, sp_config_, allocator);
+            registerAllocatorBuffers(connector, allocator);
+            remote_connectors_.push_back(std::move(connector));
             ASSERT_TRUE(remote_connectors_[i]->init());
             servers_[i]->set_remote_connector(remote_connectors_[i]);
         }
@@ -228,8 +311,43 @@ private:
         const size_t per_layer_stride_bytes = cache_config_.kv_block_stride_bytes + cache_config_.kv_scale_stride_bytes;
         cache_config_.layer_to_block_stride_bytes.assign(static_cast<size_t>(cache_config_.layer_all_num),
                                                          static_cast<int>(per_layer_stride_bytes));
+        std::vector<uint32_t> group_block_nums(all_group_num, static_cast<uint32_t>(block_num));
+        std::vector<size_t>   group_kv_strides;
+        std::vector<size_t>   group_scale_strides;
+        group_kv_strides.reserve(all_group_num);
+        group_scale_strides.reserve(all_group_num);
+        for (size_t group_id = 0; group_id < all_group_num; ++group_id) {
+            group_kv_strides.push_back(specs[group_id]->block_size_bytes());
+            group_scale_strides.push_back(specs[group_id]->scale_block_size_bytes());
+        }
+        cache_config_.setGroupBlockLayout(group_block_nums, group_kv_strides, group_scale_strides);
     }
 };
+
+TEST_F(RemoteConnectorMockFullLinearTest, same_numeric_block_id_routes_to_distinct_pools_and_clients) {
+    void*                          full_address   = nullptr;
+    void*                          linear_address = nullptr;
+    const std::vector<std::string> block_ids{"7"};
+
+    EXPECT_CALL(*transfer_clients_.at("full0"),
+                LoadKvCaches(Eq(UriStrVec{"uri_full"}), _, TransferTraceInfoMatcher(block_ids)))
+        .WillOnce(Invoke([&](const UriStrVec&, const BlockBuffers& buffers, const std::shared_ptr<TransferTraceInfo>&) {
+            full_address = buffers.at(0).iovs.at(0).base;
+            return ClientErrorCode::ER_OK;
+        }));
+    EXPECT_CALL(*transfer_clients_.at("linear1"),
+                LoadKvCaches(Eq(UriStrVec{"uri_linear"}), _, TransferTraceInfoMatcher(block_ids)))
+        .WillOnce(Invoke([&](const UriStrVec&, const BlockBuffers& buffers, const std::shared_ptr<TransferTraceInfo>&) {
+            linear_address = buffers.at(0).iovs.at(0).base;
+            return ClientErrorCode::ER_OK;
+        }));
+
+    EXPECT_TRUE(
+        remote_connectors_.at(0)->Read("same_block_id", {"full0", "linear1"}, {7, 7}, {"uri_full", "uri_linear"}));
+    EXPECT_NE(full_address, nullptr);
+    EXPECT_NE(linear_address, nullptr);
+    EXPECT_NE(full_address, linear_address);
+}
 
 TEST_F(RemoteConnectorMockFullLinearTest, test_async_match_and_async_read_with_gpu_reuse_len_zero) {
     // match
@@ -260,14 +378,9 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_async_match_and_async_read_with_g
 
     // read
     {
-        UriStrVec expected_uris        = genUris({1, 2, 3}, {2});
-        auto      block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
+        UriStrVec                expected_uris = genUris({1, 2, 3}, {2});
         std::vector<std::string> expect_block_ids({"1", "2", "3", "13", "23"});
-        EXPECT_CALL(*transfer_client_,
-                    LoadKvCaches(Eq(expected_uris),
-                                 BlockBuffersMatcher(block_buffers_expect),
-                                 TransferTraceInfoMatcher(expect_block_ids)))
-            .WillOnce(Return(ClientErrorCode::ER_OK));
+        expectLoadByTag(expected_uris, expect_block_ids, ClientErrorCode::ER_OK);
 
         const int gpu_reuse_num = static_cast<int>(kv_cache_resouce->reuseBlockNum());   // 0
         const int matched_num   = static_cast<int>(match_context->matchedBlockCount());  // 3
@@ -282,14 +395,9 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_async_match_and_async_read_with_g
         kv_cache_resouce->setRemoteReuseBlockNum(0);
     }
     {
-        UriStrVec expected_uris        = genUris({2, 3}, {1});
-        auto      block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
+        UriStrVec                expected_uris = genUris({2, 3}, {1});
         std::vector<std::string> expect_block_ids({"2", "3", "13", "23"});
-        EXPECT_CALL(*transfer_client_,
-                    LoadKvCaches(Eq(expected_uris),
-                                 BlockBuffersMatcher(block_buffers_expect),
-                                 TransferTraceInfoMatcher(expect_block_ids)))
-            .WillOnce(Return(ClientErrorCode::ER_OK));
+        expectLoadByTag(expected_uris, expect_block_ids, ClientErrorCode::ER_OK);
 
         const int gpu_reuse_num          = static_cast<int>(kv_cache_resouce->reuseBlockNum());   // 0
         const int matched_num            = static_cast<int>(match_context->matchedBlockCount());  // 3
@@ -343,14 +451,9 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_async_match_and_async_read_with_g
     ASSERT_TRUE(match_context->success());
     ASSERT_EQ(match_context->matchedBlockCount(), 3);
     {
-        UriStrVec expected_uris        = genUris({2, 3}, {1});
-        auto      block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
+        UriStrVec                expected_uris = genUris({2, 3}, {1});
         std::vector<std::string> expect_block_ids({"2", "3", "13", "23"});
-        EXPECT_CALL(*transfer_client_,
-                    LoadKvCaches(Eq(expected_uris),
-                                 BlockBuffersMatcher(block_buffers_expect),
-                                 TransferTraceInfoMatcher(expect_block_ids)))
-            .WillOnce(Return(ClientErrorCode::ER_OK));
+        expectLoadByTag(expected_uris, expect_block_ids, ClientErrorCode::ER_OK);
 
         const int gpu_reuse_num          = static_cast<int>(kv_cache_resouce->reuseBlockNum());   // 1
         const int matched_num            = static_cast<int>(match_context->matchedBlockCount());  // 3
@@ -364,14 +467,9 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_async_match_and_async_read_with_g
         kv_cache_resouce->setRemoteReuseBlockNum(0);
     }
     {
-        UriStrVec expected_uris        = genUris({3}, {0});
-        auto      block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
+        UriStrVec                expected_uris = genUris({3}, {0});
         std::vector<std::string> expect_block_ids({"3", "13", "23"});
-        EXPECT_CALL(*transfer_client_,
-                    LoadKvCaches(Eq(expected_uris),
-                                 BlockBuffersMatcher(block_buffers_expect),
-                                 TransferTraceInfoMatcher(expect_block_ids)))
-            .WillOnce(Return(ClientErrorCode::ER_OK));
+        expectLoadByTag(expected_uris, expect_block_ids, ClientErrorCode::ER_OK);
 
         const int gpu_reuse_num          = static_cast<int>(kv_cache_resouce->reuseBlockNum());   // 1
         const int matched_num            = static_cast<int>(match_context->matchedBlockCount());  // 3
@@ -420,14 +518,9 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_read_success_broadcast_success_wi
                               ))
         .WillOnce(Return(MatchLocationReturnType({ClientErrorCode::ER_OK, expected_locations})));
 
-    UriStrVec                expected_uris        = genUris({2, 3}, {1});
-    auto                     block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
+    UriStrVec                expected_uris = genUris({2, 3}, {1});
     std::vector<std::string> expect_block_ids({"2", "3", "13", "23"});
-    EXPECT_CALL(*transfer_client_,
-                LoadKvCaches(Eq(expected_uris),
-                             BlockBuffersMatcher(block_buffers_expect),
-                             TransferTraceInfoMatcher(expect_block_ids)))
-        .WillOnce(Return(ClientErrorCode::ER_OK));
+    expectLoadByTag(expected_uris, expect_block_ids, ClientErrorCode::ER_OK);
 
     auto match_context = remote_connectors_[tp_rank]->asyncMatch(kv_cache_resouce, meta);
     waitAsyncContextDone(match_context);
@@ -466,7 +559,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_read_success_broadcast_success_wi
                               ))
         .WillOnce(Return(MatchLocationReturnType({ClientErrorCode::ER_OK, expected_locations})));
 
-    EXPECT_CALL(*transfer_client_, LoadKvCaches(_, _, _)).Times(0);
+    expectNoLoad();
 
     auto match_context = remote_connectors_[tp_rank]->asyncMatch(kv_cache_resouce, meta);
     waitAsyncContextDone(match_context);
@@ -508,13 +601,8 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_a
     UriStrVec expected_uris = genUris({1, 2, 3}, {0, 1, 2});
     UriStrVec actual_uris   = genUris({1, 2, 3}, {0, 1, 2}, "actual_");
 
-    auto                     block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
     std::vector<std::string> expect_block_ids({"1", "11", "21", "2", "12", "22", "3", "13", "23"});
-    EXPECT_CALL(*transfer_client_,
-                SaveKvCaches(Eq(expected_uris),
-                             BlockBuffersMatcher(block_buffers_expect),
-                             TransferTraceInfoMatcher(expect_block_ids)))
-        .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_OK, actual_uris})));
+    expectSaveByTag(expected_uris, expect_block_ids, ClientErrorCode::ER_OK, actual_uris);
 
     Locations expected_actual_locations = genFullotherLocations({1, 2, 3}, {0, 1, 2}, "actual_");
     EXPECT_CALL(*meta_clients_[tp_rank],
@@ -557,13 +645,8 @@ TEST_F(RemoteConnectorMockFullLinearTest,
     UriStrVec expected_uris = genUris({2, 3}, {0, 1});
     UriStrVec actual_uris   = genUris({2, 3}, {0, 1}, "actual_");
 
-    auto                     block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
     std::vector<std::string> expect_block_ids({"2", "12", "22", "3", "13", "23"});
-    EXPECT_CALL(*transfer_client_,
-                SaveKvCaches(Eq(expected_uris),
-                             BlockBuffersMatcher(block_buffers_expect),
-                             TransferTraceInfoMatcher(expect_block_ids)))
-        .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_OK, actual_uris})));
+    expectSaveByTag(expected_uris, expect_block_ids, ClientErrorCode::ER_OK, actual_uris);
 
     Locations expected_actual_locations = genFullotherLocations({2, 3}, {0, 1}, "actual_");
     EXPECT_CALL(*meta_clients_[tp_rank],
@@ -605,13 +688,8 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_last_block_not_aligned) {
     UriStrVec expected_uris = genUris({2}, {0});
     UriStrVec actual_uris   = genUris({2}, {0}, "actual_");
 
-    auto                     block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
     std::vector<std::string> expect_block_ids({"2", "12", "22"});
-    EXPECT_CALL(*transfer_client_,
-                SaveKvCaches(Eq(expected_uris),
-                             BlockBuffersMatcher(block_buffers_expect),
-                             TransferTraceInfoMatcher(expect_block_ids)))
-        .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_OK, actual_uris})));
+    expectSaveByTag(expected_uris, expect_block_ids, ClientErrorCode::ER_OK, actual_uris);
 
     Locations expected_actual_locations = genFullotherLocations({2}, {0}, "actual_");
     EXPECT_CALL(*meta_clients_[tp_rank],
@@ -651,7 +729,7 @@ TEST_F(RemoteConnectorMockFullLinearTest,
                            ))
         .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, write_location})));
 
-    EXPECT_CALL(*transfer_client_, SaveKvCaches(_, _, _)).Times(0);
+    expectNoSave();
     EXPECT_CALL(*meta_clients_[tp_rank], FinishWrite(_, _, _, _)).Times(0);
 
     auto async_context = remote_connectors_[tp_rank]->asyncWrite(kv_cache_resouce, meta);
@@ -688,13 +766,8 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_w
     UriStrVec expected_uris = genUris({2, 3, 4}, {1, 2});
     UriStrVec actual_uris   = genUris({2, 3, 4}, {1, 2}, "actual_");
 
-    auto                     block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
     std::vector<std::string> expect_block_ids({"2", "3", "13", "23", "4", "14", "24"});
-    EXPECT_CALL(*transfer_client_,
-                SaveKvCaches(Eq(expected_uris),
-                             BlockBuffersMatcher(block_buffers_expect),
-                             TransferTraceInfoMatcher(expect_block_ids)))
-        .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_OK, actual_uris})));
+    expectSaveByTag(expected_uris, expect_block_ids, ClientErrorCode::ER_OK, actual_uris);
 
     Locations expected_actual_locations = genFullotherLocations({2, 3, 4}, {1, 2}, "actual_");
     EXPECT_CALL(*meta_clients_[tp_rank],
@@ -738,13 +811,8 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_w
     UriStrVec expected_uris = genUris({2, 3, 4}, {});
     UriStrVec actual_uris   = genUris({2, 3, 4}, {}, "actual_");
 
-    auto                     block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
     std::vector<std::string> expect_block_ids({"2", "3", "4"});
-    EXPECT_CALL(*transfer_client_,
-                SaveKvCaches(Eq(expected_uris),
-                             BlockBuffersMatcher(block_buffers_expect),
-                             TransferTraceInfoMatcher(expect_block_ids)))
-        .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_OK, actual_uris})));
+    expectSaveByTag(expected_uris, expect_block_ids, ClientErrorCode::ER_OK, actual_uris);
 
     Locations expected_actual_locations = genFullotherLocations({2, 3, 4}, {}, "actual_");
     EXPECT_CALL(*meta_clients_[tp_rank],
@@ -784,13 +852,8 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_a
 
     UriStrVec expected_uris = genUris({1, 2, 3}, {0, 1, 2});
 
-    auto                     block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
     std::vector<std::string> expect_block_ids({"1", "11", "21", "2", "12", "22", "3", "13", "23"});
-    EXPECT_CALL(*transfer_client_,
-                SaveKvCaches(Eq(expected_uris),
-                             BlockBuffersMatcher(block_buffers_expect),
-                             TransferTraceInfoMatcher(expect_block_ids)))
-        .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_OK, expected_uris})));
+    expectSaveByTag(expected_uris, expect_block_ids, ClientErrorCode::ER_OK, expected_uris);
 
     EXPECT_CALL(*meta_clients_[tp_rank],
                 FinishWrite(Eq("finish_write_trace_2"),             // trace_id
@@ -825,7 +888,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_match_fail) {
                               ))
         .WillOnce(Return(MatchLocationReturnType({ClientErrorCode::ER_INVALID_GRPCSTATUS, {}})));
 
-    EXPECT_CALL(*transfer_client_, LoadKvCaches(_, _, _)).Times(0);
+    expectNoLoad();
 
     auto match_context = remote_connectors_[tp_rank]->asyncMatch(kv_cache_resouce, meta);
     waitAsyncContextDone(match_context);
@@ -855,14 +918,9 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_match_success_load_fail) {
                               _                                       // location_spec_names
                               ))
         .WillOnce(Return(MatchLocationReturnType({ClientErrorCode::ER_OK, expected_locations})));
-    UriStrVec                expected_uris        = genUris({1, 2, 3}, {2});
-    auto                     block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
+    UriStrVec                expected_uris = genUris({1, 2, 3}, {2});
     std::vector<std::string> expect_block_ids({"1", "2", "3", "13", "23"});
-    EXPECT_CALL(*transfer_client_,
-                LoadKvCaches(Eq(expected_uris),
-                             BlockBuffersMatcher(block_buffers_expect),
-                             TransferTraceInfoMatcher(expect_block_ids)))
-        .WillOnce(Return(ClientErrorCode::ER_SDK_TIMEOUT));
+    expectLoadByTag(expected_uris, expect_block_ids, ClientErrorCode::ER_SDK_TIMEOUT);
 
     auto match_context = remote_connectors_[tp_rank]->asyncMatch(kv_cache_resouce, meta);
     waitAsyncContextDone(match_context);
@@ -943,7 +1001,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_fail) {
                            ))
         .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_INVALID_GRPCSTATUS, {}})));
 
-    EXPECT_CALL(*transfer_client_, SaveKvCaches(_, _, _)).Times(0);
+    expectNoSave();
     EXPECT_CALL(*meta_clients_[tp_rank], FinishWrite(_, _, _, _)).Times(0);
 
     auto async_context = remote_connectors_[tp_rank]->asyncWrite(kv_cache_resouce, meta);
@@ -965,7 +1023,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_invalid_block_ids) {
     auto   meta    = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t tp_rank = 0;
     EXPECT_CALL(*meta_clients_[tp_rank], StartWrite(_, _, _, _, _)).Times(0);
-    EXPECT_CALL(*transfer_client_, SaveKvCaches(_, _, _)).Times(0);
+    expectNoSave();
     EXPECT_CALL(*meta_clients_[tp_rank], FinishWrite(_, _, _, _)).Times(0);
 
     auto async_context = remote_connectors_[tp_rank]->asyncWrite(kv_cache_resouce, meta);
@@ -998,14 +1056,9 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_success_broadcast_suc
                            ))
         .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, write_location})));
 
-    UriStrVec                expected_uris        = genUris({1, 2, 3}, {0, 1, 2});
-    auto                     block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
+    UriStrVec                expected_uris = genUris({1, 2, 3}, {0, 1, 2});
     std::vector<std::string> expect_block_ids({"1", "11", "21", "2", "12", "22", "3", "13", "23"});
-    EXPECT_CALL(*transfer_client_,
-                SaveKvCaches(Eq(expected_uris),
-                             BlockBuffersMatcher(block_buffers_expect),
-                             TransferTraceInfoMatcher(expect_block_ids)))
-        .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_OK, expected_uris})));
+    expectSaveByTag(expected_uris, expect_block_ids, ClientErrorCode::ER_OK, expected_uris);
 
     EXPECT_CALL(*meta_clients_[tp_rank],
                 FinishWrite(Eq("finish_write_trace_2"),             // trace_id
@@ -1045,14 +1098,9 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_success_broadcast_suc
                            ))
         .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, write_location})));
 
-    UriStrVec                expected_uris        = genUris({1, 2, 3}, {0, 1, 2});
-    auto                     block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
+    UriStrVec                expected_uris = genUris({1, 2, 3}, {0, 1, 2});
     std::vector<std::string> expect_block_ids({"1", "11", "21", "2", "12", "22", "3", "13", "23"});
-    EXPECT_CALL(*transfer_client_,
-                SaveKvCaches(Eq(expected_uris),
-                             BlockBuffersMatcher(block_buffers_expect),
-                             TransferTraceInfoMatcher(expect_block_ids)))
-        .WillOnce(Return(SaveKvCachesReturnType({ClientErrorCode::ER_SDK_TIMEOUT, UriStrVec({})})));
+    expectSaveByTag(expected_uris, expect_block_ids, ClientErrorCode::ER_SDK_TIMEOUT);
 
     EXPECT_CALL(*meta_clients_[tp_rank],
                 FinishWrite(Eq("finish_write_trace_2"),             // trace_id
@@ -1092,7 +1140,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_success_broadcast_grp
                            ))
         .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, write_location})));
 
-    EXPECT_CALL(*transfer_client_, SaveKvCaches(_, _, _)).Times(0);
+    expectNoSave();
 
     EXPECT_CALL(*meta_clients_[tp_rank],
                 FinishWrite(Eq("finish_write_trace_2"),             // trace_id
@@ -1139,7 +1187,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_threadpool_ec) {
         ASSERT_EQ(nullptr, remote_connectors_[tp_rank]->asyncMatch(kv_cache_resouce, meta));
 
         EXPECT_CALL(*meta_clients_[tp_rank], StartWrite(_, _, _, _, _)).Times(0);
-        EXPECT_CALL(*transfer_client_, SaveKvCaches(_, _, _)).Times(0);
+        expectNoSave();
         EXPECT_CALL(*meta_clients_[tp_rank], FinishWrite(_, _, _, _)).Times(0);
         kv_cache_resouce->setLastBlockAligned(true);
         ASSERT_EQ(nullptr, remote_connectors_[tp_rank]->asyncWrite(kv_cache_resouce, meta));

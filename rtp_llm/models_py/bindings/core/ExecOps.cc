@@ -182,23 +182,30 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     const CacheGroupPolicy group_policy                    = policy_it->second;
     const bool             use_group_cache_transfer_policy = param.kv_cache_group_policies.size() > 1;
 
-    const auto seq_it = param.tokens_per_block_by_tag.find(param.tag);
+    const bool has_tagged_metadata =
+        !param.tokens_per_block_by_tag.empty() || !param.kv_block_stride_bytes_by_tag.empty()
+        || !param.kv_scale_stride_bytes_by_tag.empty() || !param.kv_block_transfer_bytes_by_tag.empty()
+        || !param.kv_scale_transfer_bytes_by_tag.empty();
+    if (has_tagged_metadata) {
+        RTP_LLM_CHECK_WITH_INFO(param.tokens_per_block_by_tag.count(param.tag) == 1
+                                    && param.kv_block_stride_bytes_by_tag.count(param.tag) == 1
+                                    && param.kv_scale_stride_bytes_by_tag.count(param.tag) == 1
+                                    && param.kv_block_transfer_bytes_by_tag.count(param.tag) == 1
+                                    && param.kv_scale_transfer_bytes_by_tag.count(param.tag) == 1,
+                                "cache-store tag=%s is missing required physical metadata",
+                                param.tag.c_str());
+    }
+
     const auto seq_size_per_block =
-        seq_it != param.tokens_per_block_by_tag.end() ? seq_it->second : param.tokens_per_block;
-    const auto kv_stride_it = param.kv_block_stride_bytes_by_tag.find(param.tag);
+        has_tagged_metadata ? param.tokens_per_block_by_tag.at(param.tag) : param.tokens_per_block;
     const auto kv_block_stride_bytes =
-        kv_stride_it != param.kv_block_stride_bytes_by_tag.end() ? kv_stride_it->second : param.kv_block_stride_bytes;
-    const auto scale_stride_it       = param.kv_scale_stride_bytes_by_tag.find(param.tag);
-    const auto kv_scale_stride_bytes = scale_stride_it != param.kv_scale_stride_bytes_by_tag.end() ?
-                                           scale_stride_it->second :
-                                           param.kv_scale_stride_bytes;
-    const auto kv_transfer_it        = param.kv_block_transfer_bytes_by_tag.find(param.tag);
+        has_tagged_metadata ? param.kv_block_stride_bytes_by_tag.at(param.tag) : param.kv_block_stride_bytes;
+    const auto kv_scale_stride_bytes =
+        has_tagged_metadata ? param.kv_scale_stride_bytes_by_tag.at(param.tag) : param.kv_scale_stride_bytes;
     const auto kv_block_transfer_bytes =
-        kv_transfer_it != param.kv_block_transfer_bytes_by_tag.end() ? kv_transfer_it->second : kv_block_stride_bytes;
-    const auto scale_transfer_it       = param.kv_scale_transfer_bytes_by_tag.find(param.tag);
-    const auto kv_scale_transfer_bytes = scale_transfer_it != param.kv_scale_transfer_bytes_by_tag.end() ?
-                                             scale_transfer_it->second :
-                                             kv_scale_stride_bytes;
+        has_tagged_metadata ? param.kv_block_transfer_bytes_by_tag.at(param.tag) : kv_block_stride_bytes;
+    const auto kv_scale_transfer_bytes =
+        has_tagged_metadata ? param.kv_scale_transfer_bytes_by_tag.at(param.tag) : kv_scale_stride_bytes;
     RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0, "cache-store tag=%s has zero tokens_per_block", param.tag.c_str());
     RTP_LLM_CHECK_WITH_INFO(
         kv_block_stride_bytes > 0, "cache-store tag=%s has zero kv block stride", param.tag.c_str());
@@ -214,10 +221,20 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                             param.tag.c_str(),
                             kv_scale_transfer_bytes,
                             kv_scale_stride_bytes);
-    auto       kv_cache_data  = (uint64_t*)kv_cache.kv_cache_buffer.data_ptr();
-    auto       kv_cache_owner = std::make_shared<torch::Tensor>(kv_cache.kv_cache_buffer);
-    const bool kv_gpu_mem     = kv_cache.kv_cache_buffer.is_cuda();
-    const bool has_kv_scale   = kv_cache.kv_scale_buffer.defined() && kv_cache.kv_scale_buffer.numel() > 0
+    auto       kv_cache_data         = (uint64_t*)kv_cache.kv_cache_buffer.data_ptr();
+    auto       kv_cache_owner        = std::make_shared<torch::Tensor>(kv_cache.kv_cache_buffer);
+    const bool kv_gpu_mem            = kv_cache.kv_cache_buffer.is_cuda();
+    const auto storageAvailableBytes = [](const torch::Tensor& tensor) {
+        const auto storage_offset_bytes = static_cast<size_t>(tensor.storage_offset()) * tensor.element_size();
+        const auto storage_bytes        = tensor.storage().nbytes();
+        RTP_LLM_CHECK_WITH_INFO(storage_offset_bytes <= storage_bytes,
+                                "cache-store tensor storage offset=%zu exceeds storage bytes=%zu",
+                                storage_offset_bytes,
+                                storage_bytes);
+        return storage_bytes - storage_offset_bytes;
+    };
+    const size_t kv_available_bytes = storageAvailableBytes(kv_cache.kv_cache_buffer);
+    const bool   has_kv_scale       = kv_cache.kv_scale_buffer.defined() && kv_cache.kv_scale_buffer.numel() > 0
                               && kv_scale_stride_bytes > 0 && kv_scale_transfer_bytes > 0;
     uint64_t*                      kv_scale_data = nullptr;
     std::shared_ptr<torch::Tensor> kv_scale_owner;
@@ -225,7 +242,8 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
         kv_scale_data  = (uint64_t*)kv_cache.kv_scale_buffer.data_ptr();
         kv_scale_owner = std::make_shared<torch::Tensor>(kv_cache.kv_scale_buffer);
     }
-    const bool kv_scale_gpu_mem = has_kv_scale && kv_cache.kv_scale_buffer.is_cuda();
+    const bool   kv_scale_gpu_mem         = has_kv_scale && kv_cache.kv_scale_buffer.is_cuda();
+    const size_t kv_scale_available_bytes = has_kv_scale ? storageAvailableBytes(kv_cache.kv_scale_buffer) : 0;
 
     RTP_LLM_CHECK_WITH_INFO(param.context_batch_size == static_cast<size_t>(param.request_pd_separation.numel()),
                             "size not same");
@@ -310,6 +328,32 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                     offset_index,
                     block_id);
                 return;
+            }
+            RTP_LLM_CHECK_WITH_INFO(
+                block_id >= 0, "cache-store tag=%s has invalid negative block_id=%d", param.tag.c_str(), block_id);
+            const auto physical_block_id = static_cast<size_t>(block_id);
+            RTP_LLM_CHECK_WITH_INFO(
+                kv_block_transfer_bytes <= kv_available_bytes
+                    && physical_block_id <= (kv_available_bytes - kv_block_transfer_bytes) / kv_block_stride_bytes,
+                "cache-store tag=%s block_id=%d transfer range exceeds registered KV pool bytes=%zu "
+                "(stride=%zu transfer=%zu)",
+                param.tag.c_str(),
+                block_id,
+                kv_available_bytes,
+                kv_block_stride_bytes,
+                kv_block_transfer_bytes);
+            if (has_kv_scale) {
+                RTP_LLM_CHECK_WITH_INFO(
+                    kv_scale_transfer_bytes <= kv_scale_available_bytes
+                        && physical_block_id
+                               <= (kv_scale_available_bytes - kv_scale_transfer_bytes) / kv_scale_stride_bytes,
+                    "cache-store tag=%s block_id=%d transfer range exceeds registered scale pool bytes=%zu "
+                    "(stride=%zu transfer=%zu)",
+                    param.tag.c_str(),
+                    block_id,
+                    kv_scale_available_bytes,
+                    kv_scale_stride_bytes,
+                    kv_scale_transfer_bytes);
             }
             const bool has_policy_cp_slice = param.cp_size > 1 && group_policy.cp_slice != CpBlockSliceMode::NONE;
             if (has_policy_cp_slice) {

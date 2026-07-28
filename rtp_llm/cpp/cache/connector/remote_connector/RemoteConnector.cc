@@ -2,6 +2,8 @@
 
 #include <atomic>
 #include <algorithm>
+#include <cstdint>
+#include <limits>
 #include <sstream>
 #include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
@@ -166,19 +168,12 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                                  const RuntimeConfig&                      runtime_config,
                                  const ParallelismConfig&                  parallelism_config,
                                  const SpeculativeExecutionConfig&         sp_config,
-                                 void*                                     register_buffer_addr,
-                                 size_t                                    register_buffer_size,
                                  std::shared_ptr<KVCacheAllocator>         allocator,
                                  const kmonitor::MetricsReporterPtr        metrics_reporter,
                                  const std::map<std::string, std::string>& lora_info_map):
     metrics_reporter_(metrics_reporter) {
-    RemoteConnector::InitParams init_params{cache_config,
-                                            kv_cache_config,
-                                            runtime_config,
-                                            parallelism_config,
-                                            sp_config,
-                                            register_buffer_addr,
-                                            register_buffer_size};
+    RemoteConnector::InitParams init_params{
+        cache_config, kv_cache_config, runtime_config, parallelism_config, sp_config, allocator};
     init_params_ = std::make_shared<RemoteConnector::InitParams>(std::move(init_params));
     RTP_LLM_CHECK_WITH_INFO(cache_config.groupNums() > 0,
                             "remote connector requires an initialized cache topology with at least one group");
@@ -206,6 +201,33 @@ RemoteConnector::~RemoteConnector() {
         thread_pool_.reset();
     }
     broadcaster_.reset();
+}
+
+bool RemoteConnector::registerBuffer(const std::string& tag, void* register_buffer_addr, size_t register_buffer_size) {
+    if (init_started_) {
+        RTP_LLM_LOG_ERROR("cannot register remote cache buffer after initialization has started, tag=%s", tag.c_str());
+        return false;
+    }
+    if (tag.empty() || register_buffer_addr == nullptr || register_buffer_size == 0) {
+        RTP_LLM_LOG_ERROR("invalid remote cache buffer registration, tag=%s address=%p size=%zu",
+                          tag.c_str(),
+                          register_buffer_addr,
+                          register_buffer_size);
+        return false;
+    }
+    const auto address = reinterpret_cast<uintptr_t>(register_buffer_addr);
+    if (address > std::numeric_limits<uintptr_t>::max() - register_buffer_size) {
+        RTP_LLM_LOG_ERROR("remote cache buffer registration address overflows, tag=%s address=%p size=%zu",
+                          tag.c_str(),
+                          register_buffer_addr,
+                          register_buffer_size);
+        return false;
+    }
+    if (!registrations_.emplace(tag, BufferRegistration{register_buffer_addr, register_buffer_size}).second) {
+        RTP_LLM_LOG_ERROR("duplicate remote cache buffer registration, tag=%s", tag.c_str());
+        return false;
+    }
+    return true;
 }
 
 std::pair<std::shared_ptr<RemoteConnectorConfig::LocationSpecInfoMap>,
@@ -341,6 +363,11 @@ remote_connector::ClientWrapper::ConfigMap RemoteConnector::genClientConfig() {
 
 bool RemoteConnector::init() {
     RTP_LLM_LOG_INFO("start init remote connector");
+    if (init_started_) {
+        RTP_LLM_LOG_ERROR("remote connector initialization has already started");
+        return false;
+    }
+    init_started_ = true;
     if (!group_policy_->init()) {
         RTP_LLM_LOG_ERROR("init group policy failed");
         return false;
@@ -358,24 +385,39 @@ bool RemoteConnector::init() {
             "parse RECO_CLIENT_CONFIG [%s] fail.\n %s, exception: [%s]", client_config_map_str.c_str(), e.what());
         return false;
     }
-    auto tp_rank    = init_params_->parallelism_config.tp_rank;
-    client_wrapper_ = std::make_shared<remote_connector::ClientWrapper>();
-    kv_cache_manager::RegistSpan regist_span{init_params_->register_buffer_addr, init_params_->register_buffer_size};
+    auto tp_rank = init_params_->parallelism_config.tp_rank;
     RTP_LLM_CHECK_WITH_INFO(!group_policy_->groups().empty(), "remote connector requires at least one cache group");
-    const auto registration_group_it = std::min_element(
-        group_policy_->groups().begin(), group_policy_->groups().end(), [](const auto& lhs, const auto& rhs) {
-            return std::make_pair(!lhs.second.is_full, lhs.second.group_name)
-                   < std::make_pair(!rhs.second.is_full, rhs.second.group_name);
-        });
-    const auto&                  registration_group = registration_group_it->second;
-    kv_cache_manager::InitParams client_init_params{tp_rank == 0 ? kv_cache_manager::RoleType::HYBRID :
-                                                                   kv_cache_manager::RoleType::WORKER,
-                                                    &regist_span,
-                                                    genLocationSpecName(tp_rank, registration_group.group_name)};
+    remote_connector::ClientWrapper::TransferRegistrationMap registrations;
+    for (const auto& [group_id, group] : group_policy_->groups()) {
+        const auto registration_it = registrations_.find(group.tag);
+        if (registration_it == registrations_.end()) {
+            RTP_LLM_LOG_ERROR(
+                "remote connector missing buffer registration for tag=%s group_id=%d", group.tag.c_str(), group_id);
+            return false;
+        }
+        const auto [_, inserted] = registrations.emplace(
+            group.tag,
+            remote_connector::ClientWrapper::TransferRegistration{registration_it->second.address,
+                                                                  registration_it->second.size_bytes,
+                                                                  genLocationSpecName(tp_rank, group.group_name)});
+        if (!inserted) {
+            RTP_LLM_LOG_ERROR("remote connector topology contains duplicate tag=%s", group.tag.c_str());
+            return false;
+        }
+    }
+    if (registrations.size() != registrations_.size()) {
+        RTP_LLM_LOG_ERROR("remote connector topology/registration tag set mismatch: topology=%zu registrations=%zu",
+                          registrations.size(),
+                          registrations_.size());
+        return false;
+    }
     int cur_device = -1;
     check_cuda_value(cudaGetDevice(&cur_device));
     RTP_LLM_LOG_INFO("cuda cur device: %d", cur_device);
-    if (!client_wrapper_->init(client_config_map, client_init_params)) {
+    client_wrapper_ = std::make_shared<remote_connector::ClientWrapper>();
+    if (!client_wrapper_->init(client_config_map,
+                               tp_rank == 0 ? kv_cache_manager::RoleType::HYBRID : kv_cache_manager::RoleType::WORKER,
+                               registrations)) {
         RTP_LLM_LOG_ERROR("create remote kv cache client failed");
         return false;
     }
@@ -926,7 +968,7 @@ bool RemoteConnector::Read(const std::string&                 trace_id,
             trace_info->block_ids.push_back(std::to_string(block_id));
         }
     }
-    if (!client_wrapper_->loadKvCaches(uri_str_vec, block_buffers, trace_info)) {
+    if (!client_wrapper_->loadKvCaches(group_tags, uri_str_vec, block_buffers, trace_info)) {
         return false;
     }
     helper.collector.remote_sdk_fail_qps = false;
@@ -957,21 +999,12 @@ bool RemoteConnector::Write(const std::string&                 trace_id,
             trace_info->block_ids.push_back(std::to_string(block_id));
         }
     }
-    auto result = client_wrapper_->saveKvCaches(uri_str_vec, block_buffers, trace_info);
+    auto result = client_wrapper_->saveKvCaches(group_tags, uri_str_vec, block_buffers, trace_info);
     if (!result.first) {
         return false;
     }
     if (!result.second.empty()) {
-        if (uri_str_vec.size() != result.second.size()) {
-            RTP_LLM_LOG_WARNING("some internal error happens in saveKvCaches, expectd [%lu], actual [%lu]",
-                                uri_str_vec.size(),
-                                result.second.size());
-            return false;
-        }
-
-        if (uri_str_vec != result.second) {
-            out_uri_str_vec = std::move(result.second);
-        }
+        out_uri_str_vec = std::move(result.second);
     }
     helper.collector.remote_sdk_fail_qps = false;
     return true;

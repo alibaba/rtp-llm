@@ -113,19 +113,16 @@ private:
         for (int i = 0; i < tp_size_; i++) {
             auto meta_client = std::make_unique<kv_cache_manager::MockMetaClient>();
             meta_clients_.push_back(meta_client.get());
+            ON_CALL(*meta_client, GetStorageConfig()).WillByDefault(ReturnRef(storage_config_));
             EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _))
                 .WillOnce(Invoke(
                     [&](const std::string&, const kv_cache_manager::InitParams&) { return std::move(meta_client); }));
             auto allocator = std::make_shared<SingleTypeKVCacheAllocator>(cache_config_);
             ASSERT_TRUE(allocator->init());
-            remote_connectors_.push_back(std::make_shared<RemoteConnector>(cache_config_,
-                                                                           kv_cache_config_,
-                                                                           runtime_config_,
-                                                                           parallelism_config_,
-                                                                           sp_config_,
-                                                                           nullptr,
-                                                                           0,
-                                                                           allocator));
+            auto connector = std::make_shared<RemoteConnector>(
+                cache_config_, kv_cache_config_, runtime_config_, parallelism_config_, sp_config_, allocator);
+            registerAllocatorBuffers(connector, allocator);
+            remote_connectors_.push_back(std::move(connector));
             ASSERT_TRUE(remote_connectors_[i]->init());
             servers_[i]->set_remote_connector(remote_connectors_[i]);
         }

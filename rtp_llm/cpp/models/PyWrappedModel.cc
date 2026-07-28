@@ -314,31 +314,32 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
         cache_store_inputs.cp_rank =
             device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_rank) : 0;
 
-        // Shared-pool allocators pad every group to the runtime layout carried
-        // by GptModelInputs.  The topology keeps the group's logical/spec
-        // layout, which is only the physical layout for independent pools.
-        // Cache-store metadata must describe the actual backing tensor on both
-        // the prefill and decode side (including CP-local slicing).
-        const bool use_group_local_storage_layout = cache_config.use_independent_block_pools;
         for (const auto& group : topology.groups()) {
             cache_store_inputs.kv_cache_group_policies.emplace(group.tag, group.policy);
-            cache_store_inputs.tokens_per_block_by_tag.emplace(
-                group.tag,
-                use_group_local_storage_layout ? group.seq_size_per_block : cache_store_inputs.tokens_per_block);
-            cache_store_inputs.kv_block_stride_bytes_by_tag.emplace(group.tag,
-                                                                    use_group_local_storage_layout ?
-                                                                        group.kv_block_stride_bytes :
-                                                                        cache_store_inputs.kv_block_stride_bytes);
-            cache_store_inputs.kv_scale_stride_bytes_by_tag.emplace(group.tag,
-                                                                    use_group_local_storage_layout ?
-                                                                        group.kv_scale_stride_bytes :
-                                                                        cache_store_inputs.kv_scale_stride_bytes);
-            // The decode-side allocator registers the tag-local logical block,
-            // even when the shared backing pool spaces blocks by the maximum
-            // group stride. Keep transfer length separate from address stride.
+            cache_store_inputs.tokens_per_block_by_tag.emplace(group.tag, group.seq_size_per_block);
+            cache_store_inputs.kv_block_stride_bytes_by_tag.emplace(group.tag, group.kv_block_stride_bytes);
+            cache_store_inputs.kv_scale_stride_bytes_by_tag.emplace(group.tag, group.kv_scale_stride_bytes);
             cache_store_inputs.kv_block_transfer_bytes_by_tag.emplace(group.tag, group.kv_block_stride_bytes);
             cache_store_inputs.kv_scale_transfer_bytes_by_tag.emplace(group.tag, group.kv_scale_stride_bytes);
         }
+        const auto expected_tag_count = topology.groups().size();
+        const auto validate_tag_map   = [expected_tag_count, &topology](const auto& values, const char* name) {
+            RTP_LLM_CHECK_WITH_INFO(values.size() == expected_tag_count,
+                                    "cache-store %s tag count %zu != topology tag count %zu",
+                                    name,
+                                    values.size(),
+                                    expected_tag_count);
+            for (const auto& group : topology.groups()) {
+                RTP_LLM_CHECK_WITH_INFO(
+                    values.count(group.tag) == 1, "cache-store %s missing topology tag=%s", name, group.tag.c_str());
+            }
+        };
+        validate_tag_map(cache_store_inputs.kv_cache_group_policies, "group policies");
+        validate_tag_map(cache_store_inputs.tokens_per_block_by_tag, "tokens per block");
+        validate_tag_map(cache_store_inputs.kv_block_stride_bytes_by_tag, "KV physical strides");
+        validate_tag_map(cache_store_inputs.kv_scale_stride_bytes_by_tag, "scale physical strides");
+        validate_tag_map(cache_store_inputs.kv_block_transfer_bytes_by_tag, "KV transfer bytes");
+        validate_tag_map(cache_store_inputs.kv_scale_transfer_bytes_by_tag, "scale transfer bytes");
         params = cache_store_inputs;
     }
     return params;

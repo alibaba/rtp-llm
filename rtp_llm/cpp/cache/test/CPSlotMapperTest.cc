@@ -1,4 +1,7 @@
 #include <gtest/gtest.h>
+#include <memory>
+#include <utility>
+#include <vector>
 #include <stdexcept>
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
@@ -6,6 +9,44 @@
 
 namespace rtp_llm {
 namespace test {
+
+namespace {
+
+CacheConfig makeSemanticHybridConfig() {
+    CacheConfig config;
+    config.seq_size_per_block = 4;
+    config.layer_num          = 2;
+    config.layer_all_num      = 2;
+
+    auto linear_spec = std::make_shared<MHAKVCacheSpec>();
+    linear_spec->tag = "linear";
+    GroupBase linear_group;
+    linear_group.tag       = linear_spec->tag;
+    linear_group.spec      = linear_spec;
+    linear_group.layer_ids = {0};
+    linear_group.policy    = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+
+    auto full_spec = std::make_shared<MHAKVCacheSpec>();
+    full_spec->tag = "full";
+    GroupBase full_group;
+    full_group.tag       = full_spec->tag;
+    full_group.spec      = full_spec;
+    full_group.layer_ids = {1};
+    full_group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+
+    config.setTopology({std::move(linear_group), std::move(full_group)}, {{0, {"linear"}}, {1, {"full"}}});
+    return config;
+}
+
+void expectStorePlan(const std::vector<CacheStoreBlockPair>& plan, const std::vector<std::pair<int, int>>& expected) {
+    ASSERT_EQ(plan.size(), expected.size());
+    for (size_t i = 0; i < expected.size(); ++i) {
+        EXPECT_EQ(plan[i].key_index, expected[i].first) << i;
+        EXPECT_EQ(plan[i].offset_index, expected[i].second) << i;
+    }
+}
+
+}  // namespace
 
 class CPSlotMapperTest: public ::testing::Test {};
 
@@ -177,6 +218,63 @@ TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
     EXPECT_EQ(mapper.layoutForGroup(config, 0).mapping, CpBlockMappingMode::BLOCK_ROUND_ROBIN);
     EXPECT_EQ(mapper.layoutForGroup(config, 0).slice, CpBlockSliceMode::NONE);
     EXPECT_EQ(mapper.layoutForGroup(config, 1).slice, CpBlockSliceMode::EQUAL_BYTES);
+}
+
+TEST_F(CPSlotMapperTest, GroupAwareStorePlansKeepLinearUnshardedAtCp2AndCp4) {
+    const auto config = makeSemanticHybridConfig();
+
+    CPSlotMapper cp2_rank0(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4);
+    expectStorePlan(cp2_rank0.buildStorePlan(config,
+                                             /*gid=*/0,
+                                             /*total_logical_blocks=*/8,
+                                             /*reuse_block_size=*/0,
+                                             /*use_hybrid=*/true),
+                    {{7, 7}});
+    expectStorePlan(cp2_rank0.buildStorePlan(config,
+                                             /*gid=*/1,
+                                             /*total_logical_blocks=*/8,
+                                             /*reuse_block_size=*/0,
+                                             /*use_hybrid=*/true),
+                    {{0, 0}, {2, 1}, {4, 2}, {6, 3}});
+
+    CPSlotMapper cp4_rank2(/*cp_rank=*/2, /*cp_size=*/4, /*block_size=*/4);
+    expectStorePlan(cp4_rank2.buildStorePlan(config,
+                                             /*gid=*/0,
+                                             /*total_logical_blocks=*/8,
+                                             /*reuse_block_size=*/0,
+                                             /*use_hybrid=*/true),
+                    {{7, 7}});
+    expectStorePlan(cp4_rank2.buildStorePlan(config,
+                                             /*gid=*/1,
+                                             /*total_logical_blocks=*/8,
+                                             /*reuse_block_size=*/0,
+                                             /*use_hybrid=*/true),
+                    {{2, 0}, {6, 1}});
+}
+
+TEST_F(CPSlotMapperTest, ConnectorProjectionUsesEachSemanticGroupsBlockNamespace) {
+    const auto config = makeSemanticHybridConfig();
+
+    KVCacheResource source;
+    source.initGroups(config.topologyPtr());
+    source.setCacheKeys(CacheKeysType{100, 101, 102, 103, 104, 105, 106, 107});
+    source.mutableBlockIds(/*gid=*/0).assign(BlockIndicesType{20, 21, 22, 23, 24, 25, 26, 27});
+    source.mutableBlockIds(/*gid=*/1).assign(BlockIndicesType{10, 11, 12, 13, 14, 15, 16, 17});
+    source.setLastBlockAligned(true);
+
+    CPSlotMapper cp2(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4);
+    const auto   cp2_keys      = cp2.canonicalCacheKeys(source.cacheKeys());
+    auto         cp2_projected = cp2.projectConnectorResource(source, config, cp2_keys);
+    EXPECT_EQ(cp2_projected.cacheKeys(), (CacheKeysType{101, 103, 105, 107}));
+    EXPECT_EQ(cp2_projected.blocks(/*gid=*/0), (BlockIndicesType{21, 23, 25, 27}));
+    EXPECT_EQ(cp2_projected.blocks(/*gid=*/1), (BlockIndicesType{11, 13, 15, 17}));
+
+    CPSlotMapper cp4(/*cp_rank=*/0, /*cp_size=*/4, /*block_size=*/4);
+    const auto   cp4_keys      = cp4.canonicalCacheKeys(source.cacheKeys());
+    auto         cp4_projected = cp4.projectConnectorResource(source, config, cp4_keys);
+    EXPECT_EQ(cp4_projected.cacheKeys(), (CacheKeysType{103, 107}));
+    EXPECT_EQ(cp4_projected.blocks(/*gid=*/0), (BlockIndicesType{23, 27}));
+    EXPECT_EQ(cp4_projected.blocks(/*gid=*/1), (BlockIndicesType{13, 17}));
 }
 
 }  // namespace test

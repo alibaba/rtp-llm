@@ -95,6 +95,7 @@ public:
     static KVCacheSpecPtr   build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx);
     static CacheGroupType   groupType(const KVCacheSpecDesc& desc);
     static CacheGroupPolicy groupPolicy(const KVCacheSpecDesc& desc);
+    static bool             hasExplicitPolicy(const KVCacheSpecDesc& desc);
 };
 
 }  // namespace rtp_llm
