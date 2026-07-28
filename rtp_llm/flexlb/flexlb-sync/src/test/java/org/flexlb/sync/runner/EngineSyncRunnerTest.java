@@ -27,6 +27,7 @@ import java.util.concurrent.atomic.LongAdder;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.never;
@@ -354,6 +355,22 @@ class EngineSyncRunnerTest {
                         + "the gap ride-out only protects workers that were alive when discovery broke");
         assertTrue(alive.getStatusLastUpdateTime().get() >= beforeGapUs,
                 "the still-alive worker is the one the gap ride-out exists for and must be refreshed");
+    }
+
+    @Test
+    void empty_discovery_over_an_empty_fleet_does_not_stamp_the_grace_clock() {
+        // Cold start: discovery returns empty and nothing is known yet. That is a zero/absent fleet,
+        // not a success, so it must not seed lastDiscoverySuccessUs — otherwise a later genuine
+        // outage would measure its grace window from a fabricated "success".
+        when(workerAddressService.getEngineWorkerList(modelName, roleType))
+                .thenReturn(List.of());
+
+        engineSyncRunner.run();
+
+        assertTrue(workerStatusMap.isEmpty(), "nothing was discovered, so nothing is known");
+        assertNull(lastDiscoverySuccessUs.get(modelName + "/" + roleType),
+                "an empty discovery over an empty fleet is an outage, not a success — it must not "
+                        + "stamp the grace clock");
     }
 
     @Test

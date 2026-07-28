@@ -15,6 +15,7 @@ import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.util.CollectionUtils;
 
+import java.util.ArrayList;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
@@ -128,7 +129,12 @@ public class EngineSyncRunner implements Runnable {
                 rideOutDiscoveryGap("empty worker list while " + workerStatusMap.size() + " workers are known");
                 return;
             }
-            lastDiscoverySuccessUs.put(discoveryKey(), System.nanoTime() / 1000);
+            // Only a genuinely non-empty discovery is a "success" for the grace clock. An empty
+            // result that reaches here (nothing known yet) is still an outage, not a success — the
+            // same principle rideOutDiscoveryGap applies above — so it must not stamp the clock.
+            if (!CollectionUtils.isEmpty(latestEngineWorkerList)) {
+                lastDiscoverySuccessUs.put(discoveryKey(), System.nanoTime() / 1000);
+            }
 
             Set<String> latestValidIpPorts = latestEngineWorkerList.stream()
                     .map(WorkerHost::getIpPort)
@@ -311,18 +317,23 @@ public class EngineSyncRunner implements Runnable {
     }
 
     private void reportLatencyVariance() {
-        int size = workerStatusMap.size();
         if (engineType == EngineType.EMBEDDING) {
             // Embedding workers are never probed, so latency fields stay 0 — variance is noise.
             return;
         }
+        // Snapshot the live map once: the mean and the sum-of-squared-diffs passes must run over the
+        // same worker set and divide by that set's size. Iterating workerStatusMap.values() twice
+        // while it churns could otherwise pair a mean of one set with squared diffs of another over a
+        // stale divisor, skewing the reported variance.
+        List<WorkerStatus> workers = new ArrayList<>(workerStatusMap.values());
+        int size = workers.size();
         if (size < 2) {
             logger.debug("Less than 2 workers, skipping variance calculation for model: {}", modelName);
             return;
         }
         double sumStepLatency = 0.0;
         double sumRunningQueryTime = 0.0;
-        for (WorkerStatus workerStatus : workerStatusMap.values()) {
+        for (WorkerStatus workerStatus : workers) {
             sumStepLatency += workerStatus.getStepLatencyMs();
             sumRunningQueryTime += workerStatus.getRunningQueueTime().get();
         }
@@ -332,7 +343,7 @@ public class EngineSyncRunner implements Runnable {
         // Sample variance (Bessel correction)
         double sumStepLatencyOfSquaredDiffs = 0.0;
         double sumRunningQueryLenOfSquaredDiffs = 0.0;
-        for (WorkerStatus workerStatus : workerStatusMap.values()) {
+        for (WorkerStatus workerStatus : workers) {
             double diff = workerStatus.getStepLatencyMs() - meanStepLatency;
             double diff2 = workerStatus.getRunningQueueTime().get() - meanRunningQueryLen;
             sumStepLatencyOfSquaredDiffs += diff * diff;
