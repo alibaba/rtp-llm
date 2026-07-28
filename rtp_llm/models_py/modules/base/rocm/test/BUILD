@@ -84,12 +84,13 @@ py_test(
     srcs = ["test_trt_allreduce_graph_replay.py"],
     deps = [
         "//rtp_llm:testlib",
+        "//rtp_llm/models_py/distributed:collective_torch",
         "//rtp_llm/models_py/modules/base/rocm:trt_allreduce",
     ],
     timeout = "moderate",
-    env = {"GPU_COUNT": "2"},
+    env = {"GPU_COUNT": "4"},
     tags = ["rocm"],
-    exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'2'},
+    exec_properties = {'gpu':'MI308X-ROCM7', 'gpu_count':'4'},
 )
 
 py_test(

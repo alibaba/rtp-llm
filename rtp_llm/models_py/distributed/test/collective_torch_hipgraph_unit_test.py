@@ -17,6 +17,7 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
         self._orig_rccl_comm = hr._rccl_comm
         self._orig_rccl_world_size = hr._rccl_world_size
         self._orig_rccl_lib = hr._rccl_lib
+        self._orig_rccl_comm_owned_by_python = hr._rccl_comm_owned_by_python
         self._orig_cache = dict(hr._hipgraph_allgather_outputs)
         hr._hipgraph_allgather_outputs.clear()
 
@@ -25,8 +26,70 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
         hr._rccl_comm = self._orig_rccl_comm
         hr._rccl_world_size = self._orig_rccl_world_size
         hr._rccl_lib = self._orig_rccl_lib
+        hr._rccl_comm_owned_by_python = self._orig_rccl_comm_owned_by_python
         hr._hipgraph_allgather_outputs.clear()
         hr._hipgraph_allgather_outputs.update(self._orig_cache)
+
+    def test_set_current_device_is_rocm_only(self):
+        config = SimpleNamespace(local_rank=1)
+        with patch.object(hr, "is_available_runtime", return_value=False), patch(
+            "torch.cuda.is_available", return_value=True
+        ), patch("torch.cuda.set_device") as set_device:
+            ct._set_current_device_from_local_rank(config)
+
+        set_device.assert_not_called()
+
+    def test_set_current_device_from_valid_rocm_local_rank(self):
+        config = SimpleNamespace(local_rank=1)
+        with patch.object(hr, "is_available_runtime", return_value=True), patch(
+            "torch.cuda.is_available", return_value=True
+        ), patch("torch.cuda.device_count", return_value=2), patch(
+            "torch.cuda.set_device"
+        ) as set_device:
+            ct._set_current_device_from_local_rank(config)
+
+        set_device.assert_called_once_with(1)
+
+    def test_set_current_device_rejects_invalid_rocm_local_rank(self):
+        with patch.object(hr, "is_available_runtime", return_value=True), patch(
+            "torch.cuda.is_available", return_value=True
+        ), patch("torch.cuda.device_count", return_value=2), patch(
+            "torch.cuda.set_device"
+        ) as set_device:
+            for local_rank in (-1, 2):
+                with self.subTest(local_rank=local_rank), self.assertRaisesRegex(
+                    RuntimeError, "local_rank.*device count"
+                ):
+                    ct._set_current_device_from_local_rank(
+                        SimpleNamespace(local_rank=local_rank)
+                    )
+
+        set_device.assert_not_called()
+
+    def test_ensure_rccl_comm_uses_device_backend_fallback(self):
+        hr._rccl_comm = None
+        hr._rccl_world_size = 1
+        hr._rccl_comm_owned_by_python = False
+        backend = unittest.mock.MagicMock()
+        backend._comm_ptr.return_value = 456
+        process_group = unittest.mock.MagicMock()
+        process_group._comm_ptr.side_effect = RuntimeError("direct API unavailable")
+        process_group._get_backend.return_value = backend
+        fake_lib = object()
+
+        with patch("torch.cuda.current_device", return_value=1), patch.object(
+            hr, "_load_rccl", return_value=fake_lib
+        ), patch.object(hr, "_setup_rccl_api") as setup_api, patch(
+            "torch.distributed.get_world_size", return_value=2
+        ):
+            self.assertTrue(hr._ensure_rccl_comm_from_process_group(process_group))
+
+        process_group._get_backend.assert_called_once_with(torch.device("cuda", 1))
+        backend._comm_ptr.assert_called_once_with()
+        setup_api.assert_called_once_with(fake_lib)
+        self.assertEqual(hr._rccl_comm.value, 456)
+        self.assertEqual(hr._rccl_world_size, 2)
+        self.assertFalse(hr._rccl_comm_owned_by_python)
 
     def test_should_use_hipgraph_capture_rccl(self):
         hr._is_rocm_runtime = True
@@ -125,12 +188,36 @@ class TestCollectiveTorchHipGraphUnit(unittest.TestCase):
         parallelism_config = SimpleNamespace(tp_size=2, world_size=2)
         tp_group = object()
         with patch.object(
+            hr, "_ensure_rccl_comm_from_process_group", return_value=False
+        ), patch.object(
             hr, "bootstrap_hipgraph_capture_rccl_comm_from_tp_group"
-        ) as bootstrap:
+        ) as bootstrap, patch.object(
+            hr, "_pre_init_trtllm_allreduce"
+        ) as pre_init:
             hr.prepare_hipgraph_capture_rccl_comm_if_needed(
                 parallelism_config, tp_group
             )
         bootstrap.assert_called_once_with(tp_group)
+        pre_init.assert_called_once_with(tp_group)
+
+    def test_prepare_hipgraph_capture_reuses_native_process_group_comm(self):
+        hr._is_rocm_runtime = True
+        parallelism_config = SimpleNamespace(tp_size=2, world_size=2)
+        tp_group = object()
+        with patch.object(
+            hr, "_ensure_rccl_comm_from_process_group", return_value=True
+        ) as ensure, patch.object(
+            hr, "bootstrap_hipgraph_capture_rccl_comm_from_tp_group"
+        ) as bootstrap, patch.object(
+            hr, "_pre_init_trtllm_allreduce"
+        ) as pre_init:
+            hr.prepare_hipgraph_capture_rccl_comm_if_needed(
+                parallelism_config, tp_group
+            )
+
+        ensure.assert_called_once_with(tp_group)
+        bootstrap.assert_not_called()
+        pre_init.assert_called_once_with(tp_group)
 
     def test_all_gather_fail_fast_when_capture_has_no_rccl_comm(self):
         hr._is_rocm_runtime = True

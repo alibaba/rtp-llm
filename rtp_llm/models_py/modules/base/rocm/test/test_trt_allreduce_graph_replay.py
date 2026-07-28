@@ -192,6 +192,134 @@ def _worker_graph_fused_rmsnorm(rank, world_size, port, num_replays):
         _teardown()
 
 
+def _worker_collective_torch_tp_capture(rank, world_size, port, num_replays):
+    """Exercise the production TP group and native ProcessGroup communicator."""
+    capture_state_checker = None
+    collective_torch = None
+    graph = None
+
+    try:
+        _setup(rank, world_size, port)
+
+        from rtp_llm.models_py.distributed import collective_torch, rocm_rccl
+        from rtp_llm.ops import NcclCommConfig, ParallelismConfig
+
+        # Prove that externally initialized torch.distributed callers are rebound
+        # to their configured local ROCm device before TP groups are created.
+        torch.cuda.set_device((rank + 1) % world_size)
+        parallelism_config = ParallelismConfig()
+        parallelism_config.world_rank = rank
+        parallelism_config.world_size = world_size
+        parallelism_config.local_rank = rank
+        parallelism_config.tp_size = 2
+        parallelism_config.dp_size = world_size // parallelism_config.tp_size
+        nccl_comm_config = NcclCommConfig(
+            nccl_ip="127.0.0.1",
+            tp_nccl_port=port + 9,
+            dp_tp_nccl_port=port + 1,
+            ffn_tp_nccl_port=port + 6,
+        )
+        collective_torch.init_distributed_environment(
+            parallelism_config,
+            nccl_comm_config=nccl_comm_config,
+            nccl_init_port=port,
+            backend="nccl",
+            timeout=60,
+        )
+
+        assert torch.cuda.current_device() == rank
+        tp_group = collective_torch._get_group(collective_torch.Group.TP)
+        tp_ranks = dist.get_process_group_ranks(tp_group)
+        assert len(tp_ranks) == parallelism_config.tp_size
+        assert parallelism_config.dp_size > 1
+        assert rocm_rccl._rccl_comm is not None
+        assert rocm_rccl._rccl_comm.value is not None
+        assert rocm_rccl._rccl_world_size == parallelism_config.tp_size
+        assert not rocm_rccl._rccl_comm_owned_by_python
+
+        device = torch.device(f"cuda:{rank}")
+        # Warm up the real TP ProcessGroup before stream capture.
+        warmup = torch.full((2, 7), rank + 1, dtype=torch.float32, device=device)
+        dist.all_reduce(warmup, group=tp_group)
+        warmup_gather = torch.empty(
+            (parallelism_config.tp_size * 2, 7),
+            dtype=torch.float32,
+            device=device,
+        )
+        dist.all_gather_into_tensor(warmup_gather, warmup, group=tp_group)
+        torch.cuda.synchronize(device)
+
+        graph_stream = torch.cuda.Stream(device=device)
+        graph = torch.cuda.CUDAGraph()
+        graph_allreduce_input = torch.empty((2, 7), dtype=torch.float32, device=device)
+        graph_allgather_input = torch.empty((2, 7), dtype=torch.float32, device=device)
+
+        # The production capture-state flag is normally owned by C++ graph
+        # orchestration. This integration test controls only that flag while
+        # exercising the real Python dispatch, RCCL communicator, and kernels.
+        capture_state_checker = rocm_rccl._is_hipgraph_capture_active
+        rocm_rccl._is_hipgraph_capture_active = lambda: True
+        with torch.cuda.stream(graph_stream):
+            with torch.cuda.graph(graph, stream=graph_stream):
+                graph_allreduce_output = collective_torch.all_reduce(
+                    graph_allreduce_input, collective_torch.Group.TP
+                )
+                graph_allgather_output = collective_torch.all_gather(
+                    graph_allgather_input, collective_torch.Group.TP
+                )
+        graph_stream.synchronize()
+
+        for replay in range(num_replays):
+            with torch.cuda.stream(graph_stream):
+                graph_allreduce_input.fill_(rank + replay + 1)
+                graph_allgather_input.fill_(rank + replay * 10)
+                graph.replay()
+            graph_stream.synchronize()
+
+            expected_sum = sum(tp_rank + replay + 1 for tp_rank in tp_ranks)
+            expected_gather = torch.cat(
+                [
+                    torch.full(
+                        (2, 7),
+                        tp_rank + replay * 10,
+                        dtype=torch.float32,
+                        device=device,
+                    )
+                    for tp_rank in tp_ranks
+                ]
+            )
+            torch.testing.assert_close(
+                graph_allreduce_output,
+                torch.full_like(graph_allreduce_output, expected_sum),
+            )
+            torch.testing.assert_close(graph_allgather_output, expected_gather)
+
+        if rank == 0:
+            print(
+                "  [collective_torch_tp_capture] "
+                f"dp={parallelism_config.dp_size} tp={parallelism_config.tp_size} "
+                f"{num_replays} replays passed"
+            )
+    except Exception as e:
+        print(f"[Rank {rank}] FAILED: {e}", file=sys.stderr)
+        import traceback
+
+        traceback.print_exc()
+        raise
+    finally:
+        # A captured raw RCCL operation retains the ProcessGroup communicator.
+        # Destroy the graph before collective_torch tears that communicator down.
+        if graph is not None:
+            graph.reset()
+        if capture_state_checker is not None:
+            from rtp_llm.models_py.distributed import rocm_rccl
+
+            rocm_rccl._is_hipgraph_capture_active = capture_state_checker
+        if collective_torch is not None and dist.is_initialized():
+            collective_torch.destroy_distributed_environment()
+        _teardown()
+
+
 class TestTrtAllReduceGraphReplay(unittest.TestCase):
 
     def setUp(self):
@@ -209,6 +337,15 @@ class TestTrtAllReduceGraphReplay(unittest.TestCase):
 
     def test_graph_replay_fused_rmsnorm(self):
         _launch(_worker_graph_fused_rmsnorm, num_replays=REPLAY_ROUNDS)
+
+    def test_collective_torch_tp_capture_with_dp_and_external_init(self):
+        if torch.cuda.device_count() < 4:
+            self.skipTest("Need >= 4 GPUs for dp_size=2 and tp_size=2")
+        _launch(
+            _worker_collective_torch_tp_capture,
+            world_size=4,
+            num_replays=3,
+        )
 
 
 if __name__ == "__main__":
