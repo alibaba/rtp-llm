@@ -1601,24 +1601,27 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
         model_input_copy.combo_tokens =
             torch::empty({static_cast<int64_t>(batch_size * (propose_step_ + 1))}, cuda_i32);
 #if USING_CUDA
-        torch::Tensor sequence_lengths_for_prepare = model_input.sequence_lengths;
-        if ((!sequence_lengths_for_prepare.defined()
-             || sequence_lengths_for_prepare.numel() < static_cast<int64_t>(batch_size))
-            && model_input.prefix_lengths.defined()) {
-            sequence_lengths_for_prepare = model_input.prefix_lengths;
+        // Multi-step MTP carries adjacent positions here: sequence_lengths is
+        // the draft decode position, while prefix_lengths is the number of
+        // initialized target-KV rows. Target verification starts at the latter.
+        torch::Tensor target_prefix_lengths_for_prepare = model_input.prefix_lengths;
+        if ((!target_prefix_lengths_for_prepare.defined()
+             || target_prefix_lengths_for_prepare.numel() < static_cast<int64_t>(batch_size))
+            && model_input.sequence_lengths.defined()) {
+            target_prefix_lengths_for_prepare = model_input.sequence_lengths - 1;
         }
         const bool can_fuse_target_prepare =
-            sequence_lengths_for_prepare.defined() && sequence_lengths_for_prepare.is_cuda()
-            && sequence_lengths_for_prepare.scalar_type() == torch::kInt32
-            && sequence_lengths_for_prepare.is_contiguous()
-            && sequence_lengths_for_prepare.numel() >= static_cast<int64_t>(batch_size);
+            target_prefix_lengths_for_prepare.defined() && target_prefix_lengths_for_prepare.is_cuda()
+            && target_prefix_lengths_for_prepare.scalar_type() == torch::kInt32
+            && target_prefix_lengths_for_prepare.is_contiguous()
+            && target_prefix_lengths_for_prepare.numel() >= static_cast<int64_t>(batch_size);
         if (can_fuse_target_prepare) {
             model_input_copy.input_lengths           = torch::empty({static_cast<int64_t>(batch_size)}, cuda_i32);
             model_input_copy.prefix_lengths          = torch::empty({static_cast<int64_t>(batch_size)}, cuda_i32);
             model_input_copy.sequence_lengths_plus_1 = torch::empty({static_cast<int64_t>(batch_size)}, cuda_i32);
             model_input_copy.lm_output_indexes       = torch::empty({static_cast<int64_t>(batch_size)}, cuda_i32);
             RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_target_verify_input_fused)");
-            invokeMtpTargetVerifyPrepare(sequence_lengths_for_prepare,
+            invokeMtpTargetVerifyPrepare(target_prefix_lengths_for_prepare,
                                          model_input_copy.input_lengths,
                                          model_input_copy.prefix_lengths,
                                          model_input_copy.sequence_lengths_plus_1,
@@ -1635,14 +1638,16 @@ void MtpExecutor::launchTargetVerifyPrepareAsync(const GptModelInputs& model_inp
                                                                static_cast<int64_t>(batch_size * (propose_step_ + 1)),
                                                                static_cast<int64_t>(propose_step_ + 1),
                                                                cuda_i32);
-            const auto& sequence_lengths =
-                sequence_lengths_for_prepare.defined() ? sequence_lengths_for_prepare : model_input.sequence_lengths;
-            model_input_copy.prefix_lengths          = toCudaInt32WithHostHold(sequence_lengths, buffer_holder_);
+            const auto& target_prefix_lengths = target_prefix_lengths_for_prepare.defined() ?
+                                                    target_prefix_lengths_for_prepare :
+                                                    model_input.prefix_lengths;
+            model_input_copy.prefix_lengths =
+                toCudaInt32WithHostHold(target_prefix_lengths, buffer_holder_);
             model_input_copy.sequence_lengths_plus_1 = model_input_copy.prefix_lengths + 1;
         }
     }
     populateTargetVerifyHostMetadata(model_input_copy,
-                                     model_input.sequence_lengths_host_for_log,
+                                     model_input.prefix_lengths_host_for_log,
                                      batch_size,
                                      static_cast<int32_t>(propose_step_ + 1));
     model_input_copy.last_hidden_states = torch::Tensor();
@@ -2136,7 +2141,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     GptModelOutputs            draft_decode_model_output;
     std::vector<torch::Tensor> draft_token_columns;
     torch::Tensor              spec_prefix_lengths;
-    const torch::Tensor        spec_prefix_lengths_host = model_input.sequence_lengths_host_for_log;
+    const torch::Tensor        spec_prefix_lengths_host = model_input.prefix_lengths_host_for_log;
 
     // update TP > 0 batch_size
     size_t     batch_size       = model_input.combo_tokens.size(0);
@@ -2146,9 +2151,16 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         tensor_d      = tensor_d.reshape({static_cast<int64_t>(batch_size)});
         return tensor_d.is_contiguous() ? tensor_d : tensor_d.contiguous();
     };
-    spec_prefix_lengths = model_input.sequence_lengths.defined() ?
-                              toCudaInt32WithHostHold(model_input.sequence_lengths, buffer_holder_) :
-                              torch::Tensor();
+    spec_prefix_lengths = model_input.prefix_lengths.defined() && model_input.prefix_lengths.numel() > 0 ?
+                              toCudaInt32WithHostHold(model_input.prefix_lengths, buffer_holder_) :
+                              (model_input.sequence_lengths.defined() ?
+                                   (toCudaInt32WithHostHold(model_input.sequence_lengths, buffer_holder_) - 1)
+                                       .to(torch::kInt32) :
+                                   torch::Tensor());
+    // prefix_lengths belongs to the eventual target verify input. Draft decode
+    // attention metadata must be driven only by sequence_lengths.
+    model_input.prefix_lengths              = torch::empty({0}, cuda_i32);
+    model_input.prefix_lengths_host_for_log = torch::Tensor();
 
     torch::Tensor pre_propose_token_t_raw;
     {

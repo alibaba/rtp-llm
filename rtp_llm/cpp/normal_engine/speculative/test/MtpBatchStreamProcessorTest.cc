@@ -753,9 +753,10 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     auto         model_input_status = processor.gatherDecodeModelInput(stream_groups, holder);
     EXPECT_TRUE(model_input_status.ok());
 
-    auto& model_input                   = model_input_status.value();
-    model_input.sequence_lengths        = torch::tensor({1, 2}, torch::kInt32);
-    model_input.sequence_lengths_plus_1 = torch::tensor({2, 3}, torch::kInt32).to(torch::kCUDA);
+    auto& model_input                         = model_input_status.value();
+    model_input.sequence_lengths              = torch::tensor({1, 2}, torch::kInt32);
+    model_input.sequence_lengths_plus_1       = torch::tensor({2, 3}, torch::kInt32).to(torch::kCUDA);
+    model_input.sequence_lengths_host_for_log = torch::tensor({1, 2}, torch::kInt32).pin_memory();
 
     processor.prepareDecodeDraftModelInput(stream_groups, model_input, holder);
     EXPECT_FALSE(model_input.sequence_lengths_plus_1.defined());
@@ -769,17 +770,36 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     EXPECT_TRUE(lm_output_indexes.is_cuda());
     EXPECT_EQ(expect_lm_output_indexes, toVec<int>(lm_output_indexes));
 
-    model_input.sequence_lengths_plus_1 = torch::tensor({2, 3}, torch::kInt32).to(torch::kCUDA);
-    model_input.sequence_lengths_host_for_log = torch::tensor({1, 2}, torch::kInt32).pin_memory();
-    auto original_sequence_lengths_host       = model_input.sequence_lengths_host_for_log;
+    auto expect_positions = [](const GptModelInputs& input,
+                               const vector<int>&    expected_prefix,
+                               const vector<int>&    expected_sequence) {
+        EXPECT_TRUE(input.prefix_lengths.is_cuda());
+        EXPECT_TRUE(input.sequence_lengths.is_cuda());
+        EXPECT_EQ(torch::kInt32, input.prefix_lengths.scalar_type());
+        EXPECT_EQ(torch::kInt32, input.sequence_lengths.scalar_type());
+        EXPECT_EQ(expected_prefix, toVec<int>(input.prefix_lengths));
+        EXPECT_EQ(expected_sequence, toVec<int>(input.sequence_lengths));
+        EXPECT_EQ(expected_sequence, toVec<int>(input.prefix_lengths + 1));
+        EXPECT_EQ(expected_prefix, toVec<int>(input.prefix_lengths_host_for_log));
+        EXPECT_EQ(expected_sequence, toVec<int>(input.sequence_lengths_host_for_log));
+        EXPECT_TRUE(input.prefix_lengths_host_for_log.is_pinned());
+        EXPECT_TRUE(input.sequence_lengths_host_for_log.is_pinned());
+    };
+    expect_positions(model_input, {1, 2}, {2, 3});
+
+    model_input.sequence_lengths_plus_1       = torch::tensor({2, 3}, torch::kInt32).to(torch::kCUDA);
+    model_input.sequence_lengths_host_for_log = torch::tensor({2, 3}, torch::kInt32).pin_memory();
+    auto original_sequence_lengths_host    = model_input.sequence_lengths_host_for_log;
     GptModelOutputs model_output;
     model_output.all_hidden_states = torch::zeros({2, 4}, torch::kFloat32).to(torch::kCUDA);
     processor.updateDecodeDraftModelInput(
         model_input, model_output, torch::tensor({1, 2}, torch::kInt32).to(torch::kCUDA), holder);
     EXPECT_FALSE(model_input.sequence_lengths_plus_1.defined());
-    EXPECT_EQ(std::vector<int>({2, 3}), toVec<int>(model_input.sequence_lengths));
-    EXPECT_EQ(std::vector<int>({2, 3}), toVec<int>(model_input.sequence_lengths_host_for_log));
-    EXPECT_EQ(std::vector<int>({1, 2}), toVec<int>(original_sequence_lengths_host));
+    EXPECT_EQ(std::vector<int>({1, 2}), toVec<int>(model_input.prefix_lengths));
+    EXPECT_EQ(std::vector<int>({1, 2}), toVec<int>(model_input.prefix_lengths_host_for_log));
+    EXPECT_EQ(std::vector<int>({3, 4}), toVec<int>(model_input.sequence_lengths));
+    EXPECT_EQ(std::vector<int>({3, 4}), toVec<int>(model_input.sequence_lengths_host_for_log));
+    EXPECT_EQ(std::vector<int>({2, 3}), toVec<int>(original_sequence_lengths_host));
     EXPECT_TRUE(model_input.sequence_lengths_host_for_log.is_pinned());
 
     // Exercise the legacy CPU fallback as well. It must publish the new pinned
@@ -787,13 +807,42 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     model_input.sequence_lengths              = torch::tensor({3, 4}, torch::kInt32);
     model_input.sequence_lengths_plus_1       = torch::tensor({4, 5}, torch::kInt32).to(torch::kCUDA);
     model_input.sequence_lengths_host_for_log = torch::tensor({3, 4}, torch::kInt32).pin_memory();
-    auto fallback_original_sequence_lengths_host  = model_input.sequence_lengths_host_for_log;
+    auto fallback_original_sequence_lengths_host = model_input.sequence_lengths_host_for_log;
     processor.updateDecodeDraftModelInput(
         model_input, model_output, torch::tensor({1, 2}, torch::kInt32).to(torch::kCUDA), holder);
     EXPECT_EQ(std::vector<int>({4, 5}), toVec<int>(model_input.sequence_lengths));
     EXPECT_EQ(std::vector<int>({4, 5}), toVec<int>(model_input.sequence_lengths_host_for_log));
     EXPECT_EQ(std::vector<int>({3, 4}), toVec<int>(fallback_original_sequence_lengths_host));
     EXPECT_TRUE(model_input.sequence_lengths_host_for_log.is_pinned());
+
+    // Legacy GPU propose-token path receives the normal decode position.
+    stream1->getSPOutputBuffer()->propose_tokens_gpu = torch::tensor({{3}}, torch::kInt32).to(torch::kCUDA);
+    stream2->getSPOutputBuffer()->propose_tokens_gpu = torch::tensor({{1}}, torch::kInt32).to(torch::kCUDA);
+    model_input.sequence_lengths              = torch::tensor({4, 5}, torch::kInt32);
+    model_input.sequence_lengths_host_for_log = torch::tensor({4, 5}, torch::kInt32).pin_memory();
+    processor.prepareDecodeDraftModelInput(stream_groups, model_input, holder);
+
+    expect_positions(model_input, {4, 5}, {5, 6});
+
+    // Device state publishes the committed length, which is already the draft
+    // decode position and one greater than the target prefix.
+    GenerateStream::MtpAsyncDeviceState state1;
+    state1.propose_tokens_gpu = torch::tensor({{3}}, torch::kInt32).to(torch::kCUDA);
+    state1.next_seq_len_gpu   = torch::tensor({7}, torch::kInt32).to(torch::kCUDA);
+    state1.next_seq_len_host  = torch::tensor({7}, torch::kInt32).pin_memory();
+    stream1->setMtpAsyncDeviceState(std::move(state1));
+
+    GenerateStream::MtpAsyncDeviceState state2;
+    state2.propose_tokens_gpu = torch::tensor({{1}}, torch::kInt32).to(torch::kCUDA);
+    state2.next_seq_len_gpu   = torch::tensor({4}, torch::kInt32).to(torch::kCUDA);
+    state2.next_seq_len_host  = torch::tensor({4}, torch::kInt32).pin_memory();
+    stream2->setMtpAsyncDeviceState(std::move(state2));
+
+    model_input.sequence_lengths              = torch::tensor({99, 99}, torch::kInt32);
+    model_input.sequence_lengths_host_for_log = torch::tensor({6, 3}, torch::kInt32).pin_memory();
+    processor.prepareDecodeDraftModelInput(stream_groups, model_input, holder);
+
+    expect_positions(model_input, {6, 3}, {7, 4});
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {

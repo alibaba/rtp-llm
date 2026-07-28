@@ -156,6 +156,49 @@ torch::Tensor makeCudaInt32Range(int64_t end) {
     return torch::arange(0, end, cudaInt32Options());
 }
 
+torch::Tensor committedLenToDraftDecodePosition(const torch::Tensor& committed_len, TensorHolder& host_holder) {
+    return toCudaInt32(committed_len, host_holder);
+}
+
+torch::Tensor normalDecodePositionToDraftDecodePosition(const torch::Tensor& normal_decode_position,
+                                                        TensorHolder&        host_holder) {
+    auto position = toCudaInt32(normal_decode_position, host_holder);
+    if (!position.defined() || position.numel() == 0) {
+        return position;
+    }
+    return (position + 1).to(torch::kInt32);
+}
+
+void separateDraftDecodeHostPositions(GptModelInputs& model_input, size_t batch_size) {
+    const auto& normal_decode_position = model_input.sequence_lengths_host_for_log;
+    if (!normal_decode_position.defined() || normal_decode_position.numel() == 0) {
+        model_input.prefix_lengths_host_for_log = torch::Tensor();
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(!normal_decode_position.is_cuda()
+                                && normal_decode_position.scalar_type() == torch::kInt32
+                                && normal_decode_position.numel() >= static_cast<int64_t>(batch_size),
+                            "invalid normal decode position host mirror: device=%s dtype=%s numel=%ld batch=%zu",
+                            normal_decode_position.device().str().c_str(),
+                            normal_decode_position.dtype().name(),
+                            normal_decode_position.numel(),
+                            batch_size);
+
+    auto target_prefix = normal_decode_position.slice(0, 0, static_cast<int64_t>(batch_size)).contiguous();
+    if (!target_prefix.is_pinned()) {
+        target_prefix = target_prefix.pin_memory();
+    }
+    auto draft_position = torch::empty({static_cast<int64_t>(batch_size)},
+                                       torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true));
+    const auto* src      = target_prefix.data_ptr<int32_t>();
+    auto*       dst      = draft_position.data_ptr<int32_t>();
+    for (size_t i = 0; i < batch_size; ++i) {
+        dst[i] = src[i] + 1;
+    }
+    model_input.prefix_lengths_host_for_log   = std::move(target_prefix);
+    model_input.sequence_lengths_host_for_log = std::move(draft_position);
+}
+
 void setVerifyPairInputs(GptModelInputs& model_input,
                          torch::Tensor   combo_tokens,
                          size_t          batch_size,
@@ -550,7 +593,7 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
         model_input.input_lengths     = emptyInt32OnCuda({0});
         model_input.sequence_lengths  = emptyInt32OnCuda({0});
         model_input.sequence_lengths_plus_1 = torch::Tensor();
-        model_input.prefix_lengths    = emptyInt32OnCuda({0});
+        model_input.prefix_lengths           = emptyInt32OnCuda({0});
         model_input.lm_output_indexes = emptyInt32OnCuda({0});
         return;
     }
@@ -564,18 +607,26 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
         sequence_lengths_gpu.reserve(batch_size);
         if (!all_streams.empty()
             && collectMtpStateProposeSlices(all_streams, propose_slices_gpu, &sequence_lengths_gpu)) {
-            auto sequence_lengths_host = collectMtpStatePrefixLengthsHost(all_streams);
-            if (sequence_lengths_host.defined()) {
+            auto target_prefix_lengths_host = collectMtpStatePrefixLengthsHost(all_streams);
+            if (target_prefix_lengths_host.defined()) {
                 auto combo_tokens_gpu         = torch::cat(propose_slices_gpu, 0).to(torch::kInt32);
                 model_input.combo_tokens      = std::move(combo_tokens_gpu);
                 model_input.lm_output_indexes = makeCudaInt32Range(model_input.combo_tokens.numel());
-                model_input.prefix_lengths    = emptyInt32OnCuda({0});
                 if (sequence_lengths_gpu.size() == batch_size) {
-                    model_input.sequence_lengths = (torch::cat(sequence_lengths_gpu, 0) - 1).to(torch::kInt32);
-                } else if (model_input.sequence_lengths.defined() && !model_input.sequence_lengths.is_cuda()) {
-                    model_input.sequence_lengths = toCudaInt32(model_input.sequence_lengths, host_holder);
+                    // next_seq_len includes the target token carried by the stream.
+                    // Draft decode consumes the following position, while target
+                    // verification must first write that carried token.
+                    auto committed_len           = torch::cat(sequence_lengths_gpu, 0);
+                    model_input.sequence_lengths = committedLenToDraftDecodePosition(committed_len, host_holder);
+                    model_input.prefix_lengths   = (model_input.sequence_lengths - 1).to(torch::kInt32);
+                } else if (model_input.sequence_lengths.defined()) {
+                    auto target_prefix_lengths   = toCudaInt32(model_input.sequence_lengths, host_holder);
+                    model_input.prefix_lengths   = target_prefix_lengths;
+                    model_input.sequence_lengths =
+                        normalDecodePositionToDraftDecodePosition(target_prefix_lengths, host_holder);
                 }
-                model_input.sequence_lengths_host_for_log = std::move(sequence_lengths_host);
+                model_input.sequence_lengths_host_for_log = std::move(target_prefix_lengths_host);
+                separateDraftDecodeHostPositions(model_input, batch_size);
                 // The multi-step draft path mutates sequence_lengths between
                 // forwards. Do not reuse the normal-decode next-length snapshot.
                 model_input.sequence_lengths_plus_1       = torch::Tensor();
@@ -585,6 +636,8 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
         }
     }
 
+    separateDraftDecodeHostPositions(model_input, batch_size);
+
     std::vector<torch::Tensor> propose_slices_gpu;
     if (legacyGpuProposePathEnabled(batch_size)
         && collectLegacyProposeSlices(stream_groups.allStreams(), propose_slices_gpu)) {
@@ -592,9 +645,11 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
         model_input.combo_tokens      = std::move(combo_tokens_gpu);
         model_input.lm_output_indexes = makeCudaInt32Range(model_input.combo_tokens.numel());
         model_input.input_lengths     = toCudaInt32(model_input.input_lengths, host_holder);
-        model_input.sequence_lengths  = toCudaInt32(model_input.sequence_lengths, host_holder);
+        auto target_prefix_lengths        = toCudaInt32(model_input.sequence_lengths, host_holder);
+        model_input.prefix_lengths        = target_prefix_lengths;
+        model_input.sequence_lengths      =
+            normalDecodePositionToDraftDecodePosition(target_prefix_lengths, host_holder);
         model_input.sequence_lengths_plus_1 = torch::Tensor();
-        model_input.prefix_lengths    = toCudaInt32(model_input.prefix_lengths, host_holder);
         return;
     }
 
@@ -609,10 +664,12 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
 
     model_input.combo_tokens      = toCudaInt32(combo_tokens, host_holder);
     model_input.input_lengths     = toCudaInt32(model_input.input_lengths, host_holder);
-    model_input.sequence_lengths  = toCudaInt32(model_input.sequence_lengths, host_holder);
+    auto target_prefix_lengths        = toCudaInt32(model_input.sequence_lengths, host_holder);
+    model_input.prefix_lengths        = target_prefix_lengths;
+    model_input.sequence_lengths      =
+        normalDecodePositionToDraftDecodePosition(target_prefix_lengths, host_holder);
     model_input.sequence_lengths_plus_1 = torch::Tensor();
-    model_input.prefix_lengths    = toCudaInt32(model_input.prefix_lengths, host_holder);
-    model_input.lm_output_indexes = makeCudaInt32Range(static_cast<int64_t>(batch_size));
+    model_input.lm_output_indexes       = makeCudaInt32Range(static_cast<int64_t>(batch_size));
 }
 
 bool MtpBatchStreamProcessor::gatherMtpDecodeModelInputFromDeviceState(const StreamGroups& stream_groups,
