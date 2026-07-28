@@ -33,12 +33,14 @@ public:
     ~CacheStoreAsyncWriter() override;
 
     void init();
-    void submit(std::function<void()> task);
     void waitAllDone();
     void write(const torch_ext::PyCacheStoreInputs& cache_store_inputs,
                const torch_ext::LayerKVCache&       layer_kv) override;
 
 private:
+    // Test-only convenience; production goes through write(). Tests reach it
+    // via -fno-access-control.
+    void submit(std::function<void()> task);
     void enqueueLocked(std::function<void()> task);
 
     class PendingTaskGuard {

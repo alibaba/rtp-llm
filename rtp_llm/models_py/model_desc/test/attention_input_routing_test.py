@@ -83,14 +83,44 @@ class AttentionInputRoutingTest(unittest.TestCase):
                 attention_inputs.cache_store_inputs, kv_cache
             )
 
-    def test_cp_cache_store_skips_layer_without_store_pair(self):
+    def test_cp_cache_store_skips_when_pair_incomplete(self):
+        # PyWrappedModel attaches cache_store_inputs and cache_store_writer together only
+        # when the C++ boundary accepts eligibility, so any half pair reaching python is a
+        # contract break by an upstream that bypassed prepareWriteCacheParams. Regardless of
+        # cause, _write_cp_cache_store must not write on any half/none pairing.
+        cases = [
+            ("neither", None, None),
+            ("inputs_only", SimpleNamespace(tag="linear0"), None),
+            ("writer_only", None, Mock()),
+        ]
+        for label, cache_store_inputs, cache_store_writer in cases:
+            with self.subTest(pairing=label):
+                attention_inputs = SimpleNamespace(
+                    is_prefill=True,
+                    cache_store_inputs=cache_store_inputs,
+                    cache_store_writer=cache_store_writer,
+                )
+
+                _write_cp_cache_store(attention_inputs, SimpleNamespace(tag="linear0"))
+
+                if cache_store_writer is not None:
+                    cache_store_writer.write.assert_not_called()
+
+    def test_write_cp_cache_store_helper_skips_when_not_prefill(self):
+        # Helper-level guard: even with a complete pair attached, decode passes must never
+        # publish KV. The equivalent forward-level guarantee comes from PyWrappedModel's
+        # prepareWriteCacheParams (warmup / decode-only exit early); this test locks the
+        # helper contract in isolation, matching the helper's name.
+        cache_store_writer = Mock()
         attention_inputs = SimpleNamespace(
-            is_prefill=True,
-            cache_store_inputs=None,
-            cache_store_writer=None,
+            is_prefill=False,
+            cache_store_inputs=SimpleNamespace(tag="linear0"),
+            cache_store_writer=cache_store_writer,
         )
 
         _write_cp_cache_store(attention_inputs, SimpleNamespace(tag="linear0"))
+
+        cache_store_writer.write.assert_not_called()
 
     def test_non_cp_linear_attention_does_not_write_cache_store(self):
         attention_inputs = SimpleNamespace(

@@ -313,6 +313,10 @@ cc_library(
     name = "cache_store_async_writer",
     hdrs = ["CacheStoreAsyncWriter.h"],
     srcs = ["CacheStoreAsyncWriter.cc"],
+    # Intentionally underlinked: runtimeCreateEvent/runtimeWriteCacheStore are
+    # declared by exec_ops_hdr only. Every consumer's final binary must link
+    # exactly one implementation provider (exec_ctx_state, exec_ops_test_lib,
+    # or exec_ctx_rocm); non-CUDA/ROCm builds compile write() to a hard error.
     deps = [
         ":exec_ops_hdr",
         "//rtp_llm/cpp/cache:cache",

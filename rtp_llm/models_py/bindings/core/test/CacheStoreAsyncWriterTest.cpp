@@ -220,11 +220,25 @@ TEST_F(CacheStoreAsyncWriterTest, WriteOutsideActiveCycleThrows) {
     layer_cache.layer_id = 4;
     layer_cache.tag      = "linear";
 
-    EXPECT_THROW(writer_->write(inputs, layer_cache), std::runtime_error);
+    // The IDLE writer must reject write() with the RUNNING-cycle contract message so
+    // reviewers/log readers see why the call was rejected, not just that it threw.
+    try {
+        writer_->write(inputs, layer_cache);
+        FAIL() << "expected write() before init() to fail";
+    } catch (const std::runtime_error& e) {
+        const std::string message = e.what();
+        EXPECT_NE(message.find("requires an active RUNNING forward cycle"), std::string::npos);
+    }
 
     writer_->init();
     writer_->waitAllDone();
-    EXPECT_THROW(writer_->write(inputs, layer_cache), std::runtime_error);
+    try {
+        writer_->write(inputs, layer_cache);
+        FAIL() << "expected write() after waitAllDone() to fail";
+    } catch (const std::runtime_error& e) {
+        const std::string message = e.what();
+        EXPECT_NE(message.find("requires an active RUNNING forward cycle"), std::string::npos);
+    }
 }
 
 TEST_F(CacheStoreAsyncWriterTest, InitWhileRunningThrows) {

@@ -363,12 +363,29 @@ PyWrappedModel::prepareWriteCacheParams(const GptModelInputs& inputs,
                             inputs.request_id.numel(),
                             context_batch_size);
     // request_id identifies mandatory PD work; missing cache_keys remains a warned no-op
-    // until all producers guarantee it.
+    // for producer compatibility (empty cache_keys is not yet a proven contract violation).
+    // Escalate to fail-fast once no producer emits an empty cache_keys tensor for pd_separation
+    // eligible batches; the warning already surfaces every affected request_id for that audit.
     if (!inputs.cache_keys.defined() || inputs.cache_keys.numel() == 0) {
+        // Build the affected-id list lazily so the accessor + string join only run once per
+        // 60-second window, not per forward. Use accessor<int64_t,1> to stay stride-safe when
+        // request_id is a non-contiguous view (matches runtimeWriteCacheStore).
+        auto build_affected_ids = [&]() {
+            const auto  request_ids = inputs.request_id.accessor<int64_t, 1>();
+            std::string joined;
+            for (int64_t i = 0; i < context_batch_size; ++i) {
+                if (i > 0) {
+                    joined += ",";
+                }
+                joined += std::to_string(request_ids[i]);
+            }
+            return joined;
+        };
         RTP_LLM_INTERVAL_LOG(60,
                              WARN,
-                             "pd prefill request [%ld] has no cache_keys; skip cache-store write for context batch=%ld",
-                             inputs.request_id[0].item<int64_t>(),
+                             "pd prefill requests [%s] have no cache_keys; skip cache-store write for context "
+                             "batch=%ld",
+                             build_affected_ids().c_str(),
                              context_batch_size);
         return std::nullopt;
     }
@@ -575,9 +592,22 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         if (device_props_.enable_prefill_cp) {
             context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
             if (cache_store_inputs.has_value()) {
+                // CP rewrites inputs.input_lengths to rank-local chunk lengths in place; the
+                // cache-store must publish by the original request lengths, so re-prepare with
+                // the pre-chunk lengths and fail fast if CP did not provide them.
+                RTP_LLM_CHECK_WITH_INFO(cp_params.prefill_actual_input_lengths_cpu.defined(),
+                                        "prefill CP must provide original pre-chunk input lengths "
+                                        "for eligible cache-store work");
                 cache_store_inputs = prepareWriteCacheParams(inputs, cp_params.prefill_actual_input_lengths_cpu);
                 RTP_LLM_CHECK_WITH_INFO(cache_store_inputs.has_value(),
                                         "cache-store eligibility changed during context-parallel input preparation");
+                // Postcondition: what we hand to CacheStore must be the CP pre-chunk lengths, not
+                // the in-place-rewritten rank-local chunk. Compare tensor identity (is_same) so
+                // an accidental fallback to inputs.input_lengths (rank-local after CP) or a stale
+                // reference from the first prepareWriteCacheParams() call fails deterministically.
+                RTP_LLM_CHECK_WITH_INFO(
+                    cache_store_inputs->input_lengths_host.is_same(cp_params.prefill_actual_input_lengths_cpu),
+                    "cache-store input_lengths_host must be the CP pre-chunk tensor, not rank-local input_lengths");
             }
         }
 
