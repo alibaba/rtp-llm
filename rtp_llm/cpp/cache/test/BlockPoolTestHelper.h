@@ -4,7 +4,7 @@
 #include <numeric>
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/DeviceBlockPoolConfigHelper.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"

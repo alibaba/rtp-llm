@@ -8,7 +8,7 @@
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/KVCacheGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/GroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 

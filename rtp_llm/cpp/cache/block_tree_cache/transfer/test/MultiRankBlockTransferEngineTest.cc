@@ -5,7 +5,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"

@@ -11,12 +11,12 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/FullGroupSet.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/LinearGroupSet.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/SWAGroupSet.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 
 namespace rtp_llm {

@@ -5,7 +5,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/GroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadTicket.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 

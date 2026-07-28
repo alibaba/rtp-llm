@@ -6,7 +6,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 
 namespace rtp_llm {

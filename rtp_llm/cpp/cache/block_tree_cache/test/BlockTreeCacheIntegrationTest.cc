@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 

@@ -2,7 +2,7 @@
 
 #include <vector>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/GroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
 

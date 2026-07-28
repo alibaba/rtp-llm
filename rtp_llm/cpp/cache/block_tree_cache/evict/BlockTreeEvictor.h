@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/GroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionHeap.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"

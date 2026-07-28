@@ -9,7 +9,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadJoinRegistry.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/GroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadTicket.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadTaskRunner.h"
 

@@ -15,7 +15,7 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/BufferTypes.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 
 namespace rtp_llm {
 

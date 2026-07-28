@@ -1,7 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/HostDiskTransferExecutor.h"
 
-#include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {

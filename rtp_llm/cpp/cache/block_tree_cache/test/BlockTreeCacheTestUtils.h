@@ -9,12 +9,12 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockIO.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockIO.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
 
 namespace rtp_llm {
 class BroadcastManager;

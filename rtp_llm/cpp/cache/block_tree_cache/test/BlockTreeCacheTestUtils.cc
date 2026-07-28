@@ -1,8 +1,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/LinearGroupSet.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/SWAGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
 

@@ -36,14 +36,6 @@ cc_test(
     ],
 )
 
-cc_test(
-    name = "group_set_test",
-    srcs = ["GroupSetTest.cc"],
-    copts = test_copts,
-    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils"],
-    env = {},
-)
-
 pool_test_copts = [
     "-fno-access-control",
 ] + copts()
@@ -62,14 +54,6 @@ pool_test_deps = [
 ] + cuda13_torch_link_deps + torch_deps()
 
 cc_test(
-    name = "i_block_pool_test",
-    srcs = ["IBlockPoolTest.cc"],
-    copts = pool_test_copts,
-    deps = pool_test_deps + [":block_tree_cache_test_utils"],
-    env = {},
-)
-
-cc_test(
     name = "block_tree_cache_factory_test",
     testonly = True,
     srcs = ["BlockTreeCacheFactoryTest.cc"],
@@ -85,15 +69,6 @@ cc_test(
 )
 
 cc_test(
-    name = "device_block_pool_test",
-    srcs = ["DeviceBlockPoolTest.cc"],
-    copts = pool_test_copts,
-    tags = ["exclusive"],
-    deps = pool_test_deps,
-    env = {},
-)
-
-cc_test(
     name = "block_tree_test",
     srcs = ["BlockTreeTest.cc"],
     copts = test_copts,
@@ -105,33 +80,6 @@ cc_test(
     name = "block_tree_matcher_test",
     testonly = True,
     srcs = ["BlockTreeMatcherTest.cc"],
-    copts = test_copts,
-    tags = ["exclusive"],
-    deps = test_deps + [":block_tree_cache_test_utils"],
-    env = {},
-)
-
-cc_test(
-    name = "full_group_set_test",
-    srcs = ["FullGroupSetTest.cc"],
-    copts = test_copts,
-    tags = ["exclusive"],
-    deps = test_deps + [":block_tree_cache_test_utils"],
-    env = {},
-)
-
-cc_test(
-    name = "swa_group_set_test",
-    srcs = ["SWAGroupSetTest.cc"],
-    copts = test_copts,
-    tags = ["exclusive"],
-    deps = test_deps + [":block_tree_cache_test_utils"],
-    env = {},
-)
-
-cc_test(
-    name = "linear_group_set_test",
-    srcs = ["LinearGroupSetTest.cc"],
     copts = test_copts,
     tags = ["exclusive"],
     deps = test_deps + [":block_tree_cache_test_utils"],
@@ -179,4 +127,78 @@ cc_test(
     tags = ["exclusive"],
     deps = test_deps + [":block_tree_cache_test_utils"],
     env = {},
+)
+
+cc_test(
+    name = "device_full_kv_cache_group_test",
+    srcs = [
+        "DeviceFullKVCacheGroupTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache/test:block_pool_test_helper",
+    ],
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "device_linear_kv_cache_group_test",
+    srcs = [
+        "DeviceLinearKVCacheGroupTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache/test:block_pool_test_helper",
+    ],
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "device_swa_kv_cache_group_test",
+    srcs = [
+        "DeviceSWAKVCacheGroupTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache/test:block_pool_test_helper",
+    ],
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "full_kv_cache_group_materialize_positions_test",
+    srcs = [
+        "FullKVCacheGroupMaterializePositionsTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache/test:block_pool_test_helper",
+    ],
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
+    name = "device_swa_kv_cache_group_malloc_range_test",
+    srcs = [
+        "DeviceSWAKVCacheGroupMallocRangeTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/cache:cache_types",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps() + cuda13_torch_link_deps,
+    env = {
+        "RTP_LLM_PIN_HOST_BLOCK_POOL": "0",
+    },
 )

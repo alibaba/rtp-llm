@@ -4,8 +4,8 @@
 #include <map>
 #include <utility>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 

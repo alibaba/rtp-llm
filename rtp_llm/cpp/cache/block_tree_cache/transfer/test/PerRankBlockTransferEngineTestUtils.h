@@ -8,9 +8,9 @@
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockIO.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockIO.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
 
 namespace rtp_llm::block_transfer_engine_test {
 

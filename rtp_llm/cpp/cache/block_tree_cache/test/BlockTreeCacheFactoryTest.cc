@@ -14,7 +14,7 @@
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/SWAGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"

@@ -9,7 +9,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/GroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 
 namespace kmonitor {
 class MetricsReporter;

@@ -13,8 +13,8 @@
 #include <cuda_runtime.h>
 #include <torch/torch.h>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyStrategy.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"

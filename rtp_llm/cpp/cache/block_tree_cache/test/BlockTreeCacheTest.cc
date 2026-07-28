@@ -11,9 +11,9 @@
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/FullGroupSet.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/LinearGroupSet.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/SWAGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
