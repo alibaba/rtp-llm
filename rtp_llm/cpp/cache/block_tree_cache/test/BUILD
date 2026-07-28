@@ -102,6 +102,16 @@ cc_test(
 )
 
 cc_test(
+    name = "block_tree_matcher_test",
+    testonly = True,
+    srcs = ["BlockTreeMatcherTest.cc"],
+    copts = test_copts,
+    tags = ["exclusive"],
+    deps = test_deps + [":block_tree_cache_test_utils"],
+    env = {},
+)
+
+cc_test(
     name = "full_group_set_test",
     srcs = ["FullGroupSetTest.cc"],
     copts = test_copts,

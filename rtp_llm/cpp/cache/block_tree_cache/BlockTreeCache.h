@@ -8,6 +8,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeMatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/BlockTreeLoader.h"
@@ -226,30 +227,19 @@ private:
     void reserveInFlightDeviceReleaseCreditsLocked(const std::vector<EvictionReleaseCredit>& release_credits);
     void settleInFlightDeviceReleaseCreditsLocked(const std::vector<EvictionReleaseCredit>& release_credits) noexcept;
 
-    void                            validateMatchedResource(const MultiNodeResource& resource) const;
-    void                            prepareMatchedBlocks(const std::vector<TreeNode*>& matched_path,
-                                                         const std::vector<bool>&      candidate_logically_valid,
-                                                         BlockTreeMatchResult&         result);
-    size_t                          computeReadyMatchedBlockCount(const std::vector<TreeNode*>& matched_path,
-                                                                  const std::vector<bool>&      candidate_logically_valid) const;
-
-    struct GroupLocation {
-        size_t group_set_id{0};
-        size_t local_group_index{0};
-    };
-
     BlockTreeCacheConfig       config_;
     std::unique_ptr<BlockTree> tree_;
     std::vector<GroupSetPtr>   group_sets_;
     // Reusable topology group_id -> GroupSet/local position. Non-reusable groups
     // never enter this index or the BlockTree resource space.
-    std::unordered_map<size_t, GroupLocation> reusable_group_locations_;
+    ReusableGroupLocations                    reusable_group_locations_;
     std::shared_ptr<StorageBackend>           storage_backend_;
     std::unique_ptr<BlockTransferDispatcher>  transfer_dispatcher_;
     std::unique_ptr<BlockTreeTaskPool>        task_pool_;
     BlockTreeCacheMetricsReporter             metrics_reporter_;
     mutable std::mutex                        mutex_;
     BlockTreeEvictor                          evictor_;
+    BlockTreeMatcher                          matcher_;
     bool                                      initialized_{false};
     // Protected by mutex_. Credits remain reserved from async queue acceptance
     // until the matching plan completes or rolls back.
