@@ -1,8 +1,11 @@
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 
 #include <algorithm>
+#include <sstream>
 #include <unordered_map>
 #include <unordered_set>
+
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
@@ -14,6 +17,31 @@ CacheGroupType groupTypeForSpec(const KVCacheSpec& spec) {
 
 bool isFullAttentionSpec(KVCacheSpecType type) {
     return type == KVCacheSpecType::MultiHeadAttention || type == KVCacheSpecType::MultiHeadLatentAttention;
+}
+
+std::string targetGroupSummary(const CacheConfig& target_config) {
+    std::ostringstream os;
+    os << '[';
+    for (size_t target_gid = 0; target_gid < static_cast<size_t>(target_config.groupNums()); ++target_gid) {
+        if (target_gid > 0) {
+            os << ", ";
+        }
+        const auto& group = target_config.topology().groupById(target_gid);
+        os << "{tag=" << group.tag << ", group_type=" << cacheGroupTypeName(group.policy.group_type);
+        if (group.spec != nullptr) {
+            os << ", spec_type=" << static_cast<int>(group.spec->type)
+               << ", dtype=" << static_cast<int>(group.spec->memoryLayoutDType())
+               << ", block_size_bytes=" << group.spec->block_size_bytes()
+               << ", scale_block_size_bytes=" << group.spec->scale_block_size_bytes();
+        } else {
+            os << ", spec=null";
+        }
+        os << ", seq_size_per_block=" << group.seq_size_per_block
+           << ", kv_block_stride_bytes=" << group.kv_block_stride_bytes
+           << ", kv_scale_stride_bytes=" << group.kv_scale_stride_bytes << '}';
+    }
+    os << ']';
+    return os.str();
 }
 
 size_t resolveDefaultMTPGroupAlias(const CacheConfig& target_config, const CacheConfig& propose_config) {
@@ -37,19 +65,41 @@ size_t resolveDefaultMTPGroupAlias(const CacheConfig& target_config, const Cache
     std::vector<size_t> candidates;
     for (size_t target_gid = 0; target_gid < static_cast<size_t>(target_config.groupNums()); ++target_gid) {
         const auto& target_group = target_config.topology().groupById(target_gid);
+        // The aliased draft layer uses its own MTP memory layout. Group-tag APIs still expose it as the target
+        // group, however, so both logical block granularity and physical block shape must remain compatible.
         if (target_group.policy.group_type == source_group.policy.group_type && target_group.spec != nullptr
             && target_group.spec->type == source_group.spec->type
-            && target_group.seq_size_per_block == source_group.seq_size_per_block) {
+            && target_group.spec->memoryLayoutDType() == source_group.spec->memoryLayoutDType()
+            && target_group.spec->block_size_bytes() == source_group.spec->block_size_bytes()
+            && target_group.spec->scale_block_size_bytes() == source_group.spec->scale_block_size_bytes()
+            && target_group.seq_size_per_block == source_group.seq_size_per_block
+            && target_group.kv_block_stride_bytes == source_group.kv_block_stride_bytes
+            && target_group.kv_scale_stride_bytes == source_group.kv_scale_stride_bytes) {
             candidates.push_back(target_gid);
         }
     }
 
+    const auto target_summary = targetGroupSummary(target_config);
+    RTP_LLM_CHECK_WITH_INFO(!candidates.empty(),
+                            "CacheConfig::mergeMTPModule no compatible target group for sole propose tag=default: "
+                            "source_spec_type=%d source_dtype=%d source_seq_size_per_block=%zu "
+                            "source_block_size_bytes=%zu source_scale_block_size_bytes=%zu "
+                            "source_kv_block_stride_bytes=%zu source_kv_scale_stride_bytes=%zu target_groups=%s",
+                            static_cast<int>(source_group.spec->type),
+                            static_cast<int>(source_group.spec->memoryLayoutDType()),
+                            source_group.seq_size_per_block,
+                            source_group.spec->block_size_bytes(),
+                            source_group.spec->scale_block_size_bytes(),
+                            source_group.kv_block_stride_bytes,
+                            source_group.kv_scale_stride_bytes,
+                            target_summary.c_str());
     RTP_LLM_CHECK_WITH_INFO(candidates.size() <= 1,
                             "CacheConfig::mergeMTPModule ambiguous default FULL group mapping: "
-                            "compatible target groups=%zu spec_type=%d",
+                            "compatible target groups=%zu spec_type=%d target_groups=%s",
                             candidates.size(),
-                            static_cast<int>(source_group.spec->type));
-    return candidates.empty() ? invalid_gid : candidates.front();
+                            static_cast<int>(source_group.spec->type),
+                            target_summary.c_str());
+    return candidates.front();
 }
 
 }  // namespace
@@ -234,6 +284,16 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
         GroupBase sub_group = source_group;
         sub_group.layer_ids.clear();
         if (uses_default_alias) {
+            RTP_LLM_LOG_INFO("CacheConfig::mergeMTPModule aliases propose tag=default to target tag=%s: "
+                             "module=%d spec_type=%d dtype=%d seq_size_per_block=%zu "
+                             "kv_block_stride_bytes=%zu kv_scale_stride_bytes=%zu",
+                             tag.c_str(),
+                             module_index,
+                             static_cast<int>(source_group.spec->type),
+                             static_cast<int>(source_group.spec->memoryLayoutDType()),
+                             source_group.seq_size_per_block,
+                             source_group.kv_block_stride_bytes,
+                             source_group.kv_scale_stride_bytes);
             auto aliased_spec = source_group.spec->clone();
             aliased_spec->tag = tag;
             sub_group.tag     = tag;
