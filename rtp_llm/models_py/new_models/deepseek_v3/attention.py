@@ -180,6 +180,25 @@ def _fp8_scale_parameter(linear: nn.Module) -> Optional[nn.Parameter]:
     return scale
 
 
+def _release_parameter_storage(
+    module: nn.Module,
+    parameter_names: tuple[str, ...],
+) -> None:
+    """Replace checkpoint-only parameters with zero-sized device tensors."""
+    parameters = dict(module.named_parameters(recurse=False))
+    for name in parameter_names:
+        parameter = parameters.get(name)
+        if parameter is None:
+            continue
+        module.register_parameter(
+            name,
+            nn.Parameter(
+                parameter.detach().new_empty(0),
+                requires_grad=False,
+            ),
+        )
+
+
 def _kernel_fp8_weight_and_scale(
     weight: torch.Tensor,
     scale: torch.Tensor,
@@ -317,18 +336,14 @@ class DeepSeekV32MlaAttention(RtpModule):
         self.kv_a_layernorm = RMSNorm(
             kv_lora_rank, eps=layernorm_eps, params_dtype=params_dtype
         )
-        # q_b_proj: q_lora_rank → num_heads * q_head_dim
-        # It is unused when q_lora_rank == 0. Keep the empty [N, 0] placeholder
-        # unquantized so online FP8 methods do not launch a CUDA kernel with a
-        # zero-sized input dimension.
-        q_b_quant_config = quant_config if q_lora_rank > 0 else a_proj_quant_config
+        # q_b_proj exists only for Q-LoRA checkpoints.
         self.q_b_proj = (
             ColumnParallelLinear(
                 input_size=q_lora_rank,
                 output_size=num_heads * self.q_head_dim,
                 tp_size=tp_size,
                 tp_rank=tp_rank,
-                quant_config=q_b_quant_config,
+                quant_config=quant_config,
                 prefix="q_b_proj",
                 bias=False,
                 params_dtype=params_dtype,
@@ -558,6 +573,25 @@ class DeepSeekV32MlaAttention(RtpModule):
         weights[W.mla_kc] = self._kc_w
         weights[W.mla_vc] = self._vc_w
         return weights
+
+    def release_checkpoint_only_weights(self) -> None:
+        """Free projection parameters superseded by MLA runtime views.
+
+        NewModelLoader validation and every child quantization post-load hook
+        must finish before this method runs. The top-level model therefore
+        calls it only after `_build_mla_kernel_weights()` has captured the
+        runtime tensors consumed by attention factories.
+        """
+        if self._fused_qkv_a_w is None:
+            raise RuntimeError("MLA runtime weights must be built before release")
+        parameter_names = ("weight", "weight_scale", "weight_scale_inv")
+        _release_parameter_storage(self.q_a_proj, parameter_names)
+        _release_parameter_storage(self.kv_a_proj_with_mqa, parameter_names)
+        # BF16 prefill consumes the transposed `_kv_b_w` copy. FP8 prefill
+        # consumes kv_b_proj weight/scale directly through the kernel layout,
+        # so that storage must remain live.
+        if _fp8_scale_parameter(self.kv_b_proj) is None:
+            _release_parameter_storage(self.kv_b_proj, parameter_names)
 
     def _run_sparse_indexer(
         self,

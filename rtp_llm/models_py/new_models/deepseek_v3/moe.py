@@ -26,6 +26,17 @@ from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 
 from .mlp import DeepSeekV32MLP
 
+_VALID_TOPK_METHODS = {"greedy", "group_limited_greedy", "noaux_tc"}
+
+
+def _normalize_topk_method(topk_method: str) -> str:
+    if not isinstance(topk_method, str):
+        raise TypeError(f"topk_method must be a string, got {topk_method!r}")
+    normalized = "greedy" if topk_method == "gready" else topk_method
+    if normalized not in _VALID_TOPK_METHODS:
+        raise ValueError(f"unsupported DeepSeek topk_method={topk_method!r}")
+    return normalized
+
 
 def _validate_routing_args(
     *,
@@ -61,7 +72,13 @@ def _select_deepseek_topk(
     renormalize: bool,
     routed_scaling_factor: float,
 ) -> tuple[torch.Tensor, torch.Tensor]:
-    """Reference-correct DeepSeek-V2 routing for the non-noaux path."""
+    """Reference-correct DeepSeek-V2 routing for the non-noaux path.
+
+    DeepSeek-V2 normalizes top-k weights *or* applies routed scaling. Public
+    V2 configurations do not combine non-unit scaling with normalization, but
+    keeping the reference branch explicit avoids silently adopting V3 noaux
+    semantics for a future V2 variant.
+    """
     if router_logits_fp32.dim() != 2:
         raise ValueError(
             "router logits must have shape [tokens, experts], got "
@@ -110,7 +127,9 @@ def _select_deepseek_topk(
         topk_weights = topk_weights / topk_weights.sum(dim=-1, keepdim=True).clamp_min(
             1e-20
         )
-    return topk_weights * routed_scaling_factor, topk_ids
+    else:
+        topk_weights = topk_weights * routed_scaling_factor
+    return topk_weights, topk_ids
 
 
 def _select_deepseek_noaux_topk(
@@ -273,10 +292,7 @@ class DeepSeekV32MoEBlock(RtpModule):
             raise TypeError("moe_config.fake_balance_expert must be a bool")
         if scoring_func not in (0, 1):
             raise ValueError(f"unsupported DeepSeek scoring_func={scoring_func}")
-        if topk_method == "gready":
-            topk_method = "greedy"
-        if topk_method not in {"greedy", "group_limited_greedy", "noaux_tc"}:
-            raise ValueError(f"unsupported DeepSeek topk_method={topk_method!r}")
+        topk_method = _normalize_topk_method(topk_method)
         if correction_bias != (topk_method == "noaux_tc"):
             raise ValueError(
                 "correction_bias must be enabled exactly for noaux_tc routing"
@@ -302,6 +318,22 @@ class DeepSeekV32MoEBlock(RtpModule):
         self.has_moe_norm = has_moe_norm
         self.correction_bias = correction_bias
         self.group_limited = topk_method == "group_limited_greedy"
+        routing_config = {
+            "hidden_size": (model_config.hidden_size, hidden_size),
+            "expert_num": (model_config.expert_num, num_experts),
+            "moe_k": (model_config.moe_k, top_k),
+            "has_moe_norm": (model_config.has_moe_norm, has_moe_norm),
+        }
+        mismatches = [
+            f"{name}=ModelConfig({actual!r})/constructor({expected!r})"
+            for name, (actual, expected) in routing_config.items()
+            if actual != expected
+        ]
+        if mismatches:
+            raise ValueError(
+                f"DeepSeek routing config mismatch at layer {layer_idx}: "
+                + ", ".join(mismatches)
+            )
         fast_select_topk_candidate = (
             get_device_type() == DeviceType.Cuda
             and not correction_bias
@@ -309,16 +341,10 @@ class DeepSeekV32MoEBlock(RtpModule):
             and not self.group_limited
             and routed_scaling_factor == 1.0
         )
-        # SelectTopk reads these values from the pybind ModelConfig while the
-        # reference path uses the canonical config.json-derived constructor
-        # values above. A stale ModelConfig must never size or normalize the
-        # fused output with a different contract; safely use the reference
-        # implementation when either source disagrees.
-        self._use_fast_select_topk = fast_select_topk_candidate and (
-            model_config.expert_num == num_experts
-            and model_config.moe_k == top_k
-            and model_config.has_moe_norm == has_moe_norm
-        )
+        # SelectTopk and FusedMoe both consume ModelConfig. The equality check
+        # above keeps their sizing/normalization contract identical to the
+        # canonical config.json-derived constructor arguments.
+        self._use_fast_select_topk = fast_select_topk_candidate
 
         # Router gate: hidden → num_experts (not TP-sharded, small).
         # Custom wrapper owns `weight` AND `e_score_correction_bias` so the
@@ -339,17 +365,22 @@ class DeepSeekV32MoEBlock(RtpModule):
             correction_bias and get_device_type() == DeviceType.Cuda
         )
         self.group_topk = GroupTopK() if self._use_fast_group_topk else None
-        self.fake_balance_expert = (
-            FakeBalanceExpert(
+        if fake_balance_expert:
+            if parallelism_config is None:
+                raise ValueError(
+                    "fake_balance_expert requires a complete parallelism_config"
+                )
+            if get_device_type() != DeviceType.Cuda:
+                raise RuntimeError("fake_balance_expert is supported only on CUDA")
+            self.fake_balance_expert = FakeBalanceExpert(
                 expert_num=num_experts,
                 moe_k=top_k,
                 dp_rank=parallelism_config.dp_rank,
                 dp_size=parallelism_config.dp_size,
                 ep_size=ep_size,
             )
-            if fake_balance_expert
-            else None
-        )
+        else:
+            self.fake_balance_expert = None
 
         # Routed experts
         self.experts = DeepSeekV32Experts(

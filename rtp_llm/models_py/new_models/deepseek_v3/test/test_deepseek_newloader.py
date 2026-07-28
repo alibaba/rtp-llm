@@ -119,16 +119,23 @@ def _load_config():
 
 def _router_model_config(
     *,
+    hidden_size=8,
     expert_num=4,
     moe_k=2,
     has_moe_norm=False,
 ):
-    return types.SimpleNamespace(
-        quant_config=None,
-        expert_num=expert_num,
-        moe_k=moe_k,
-        has_moe_norm=has_moe_norm,
-    )
+    config = ModelConfig()
+    config.attn_config.head_num = 1
+    config.attn_config.size_per_head = 128
+    config.num_layers = 1
+    config.max_seq_len = 128
+    config.vocab_size = 16
+    config.hidden_size = hidden_size
+    config.expert_num = expert_num
+    config.moe_k = moe_k
+    config.has_moe_norm = has_moe_norm
+    config.quant_config = None
+    return config
 
 
 def _dense_loader_model_config(checkpoint_path):
@@ -415,6 +422,12 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertIsNone(model._mla_kernel_layout)
         model._ensure_mla_kernel_layout()
         self.assertIsNotNone(model._mla_kernel_layout)
+        self.assertEqual(model.layers[0].self_attn.q_a_proj.weight.numel(), 0)
+        self.assertEqual(
+            model.layers[0].self_attn.kv_a_proj_with_mqa.weight.numel(),
+            0,
+        )
+        self.assertEqual(model.layers[0].self_attn.kv_b_proj.weight.numel(), 0)
 
         class TorchSiluAndMul(torch.nn.Module):
             @staticmethod
@@ -538,6 +551,12 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             weights["model.layers.1.shared_head.head.weight"],
         )
         self.assertIsNotNone(model.layers[0].mlp.experts.fused_moe)
+        model._ensure_mla_kernel_layout()
+        self.assertEqual(model.layers[0].self_attn.q_a_proj.weight.numel(), 0)
+        self.assertEqual(
+            model.layers[0].self_attn.kv_a_proj_with_mqa.weight.numel(),
+            0,
+        )
 
     def test_rotary_cache_is_valid_immediately_after_construction(self):
         rotary = DeepseekV3RotaryEmbedding(
@@ -973,6 +992,16 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         )
         self.assertNotIn(W.mla_fusedqkrope_s, weights)
         self.assertNotIn(W.mla_q_b_s, weights)
+        fused_qkv_a_ptr = weights[W.mla_fusedqkrope_w].data_ptr()
+        kv_b_ptr = weights[W.mla_kv_b_w].data_ptr()
+        attention.release_checkpoint_only_weights()
+        self.assertEqual(attention.q_a_proj.weight.numel(), 0)
+        self.assertEqual(attention.kv_a_proj_with_mqa.weight.numel(), 0)
+        self.assertEqual(attention.kv_b_proj.weight.numel(), 0)
+        self.assertGreater(attention.q_b_proj.weight.numel(), 0)
+        self.assertGreater(attention.o_proj.weight.numel(), 0)
+        self.assertEqual(weights[W.mla_fusedqkrope_w].data_ptr(), fused_qkv_a_ptr)
+        self.assertEqual(weights[W.mla_kv_b_w].data_ptr(), kv_b_ptr)
 
     def test_mla_fp8_kernel_views_keep_scales_without_bf16_qb_copy(self):
         attention = DeepSeekV32MlaAttention(
@@ -1026,6 +1055,10 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             (1, 2),
         )
         self.assertEqual(weights[W.mla_q_b_w].dtype, torch.float8_e4m3fn)
+        attention.release_checkpoint_only_weights()
+        self.assertEqual(attention.q_a_proj.weight.numel(), 0)
+        self.assertEqual(attention.kv_a_proj_with_mqa.weight.numel(), 0)
+        self.assertGreater(attention.kv_b_proj.weight.numel(), 0)
 
     def test_non_noaux_router_preserves_scoring_grouping_and_scaling(self):
         logits = torch.tensor(
@@ -1055,11 +1088,9 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             float("-inf"),
         )
         expected_weights, expected_ids = masked.topk(2, dim=-1, sorted=False)
-        expected_weights = (
-            expected_weights
-            / expected_weights.sum(dim=-1, keepdim=True).clamp_min(1e-20)
-            * 2.5
-        )
+        expected_weights = expected_weights / expected_weights.sum(
+            dim=-1, keepdim=True
+        ).clamp_min(1e-20)
         self.assertTrue(torch.equal(ids, expected_ids))
         self.assertTrue(torch.equal(weights, expected_weights))
 
@@ -1134,10 +1165,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         )
 
     def test_noaux_router_device_selection_is_explicit(self):
-        parallelism_config = types.SimpleNamespace(
-            dp_rank=0,
-            dp_size=1,
-        )
+        parallelism_config = _single_rank_parallelism_config()
         moe_config = types.SimpleNamespace(fake_balance_expert=False)
         model_config = _router_model_config()
         for device_type, expect_fast in (
@@ -1183,7 +1211,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             self.assertEqual(group_topk.call_count, int(expect_fast))
 
     def test_non_noaux_router_avoids_cuda_select_topk_on_other_devices(self):
-        parallelism_config = types.SimpleNamespace(dp_rank=0, dp_size=1)
+        parallelism_config = _single_rank_parallelism_config()
         moe_config = types.SimpleNamespace(fake_balance_expert=False)
         model_config = _router_model_config()
         with (
@@ -1223,8 +1251,13 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertIsNone(block.select_topk)
         select_topk.assert_not_called()
 
-    def test_fast_select_topk_falls_back_on_model_config_mismatch(self):
-        model_config = _router_model_config(has_moe_norm=True)
+    def test_moe_rejects_model_config_routing_mismatch(self):
+        mismatch_configs = {
+            "hidden_size": _router_model_config(hidden_size=16),
+            "expert_num": _router_model_config(expert_num=8),
+            "moe_k": _router_model_config(moe_k=1),
+            "has_moe_norm": _router_model_config(has_moe_norm=True),
+        }
         with (
             mock.patch(
                 "rtp_llm.models_py.new_models.deepseek_v3.moe.get_device_type",
@@ -1235,39 +1268,42 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             ) as select_topk,
             torch.device("cpu"),
         ):
-            block = DeepSeekV32MoEBlock(
-                hidden_size=8,
-                moe_intermediate_size=4,
-                num_experts=4,
-                top_k=2,
-                layer_idx=0,
-                tp_size=1,
-                tp_rank=0,
-                ep_size=1,
-                ep_rank=0,
-                model_config=model_config,
-                parallelism_config=types.SimpleNamespace(dp_rank=0, dp_size=1),
-                moe_config=types.SimpleNamespace(fake_balance_expert=False),
-                quant_config=None,
-                params_dtype=torch.float32,
-                has_shared_expert=False,
-                scoring_func=0,
-                routed_scaling_factor=1.0,
-                n_group=1,
-                topk_group=1,
-                topk_method="greedy",
-                has_moe_norm=False,
-                correction_bias=False,
-            )
-        self.assertFalse(block._use_fast_select_topk)
-        self.assertIsNone(block.select_topk)
+            for field, model_config in mismatch_configs.items():
+                with (
+                    self.subTest(field=field),
+                    self.assertRaisesRegex(
+                        ValueError,
+                        field,
+                    ),
+                ):
+                    DeepSeekV32MoEBlock(
+                        hidden_size=8,
+                        moe_intermediate_size=4,
+                        num_experts=4,
+                        top_k=2,
+                        layer_idx=0,
+                        tp_size=1,
+                        tp_rank=0,
+                        ep_size=1,
+                        ep_rank=0,
+                        model_config=model_config,
+                        parallelism_config=_single_rank_parallelism_config(),
+                        moe_config=types.SimpleNamespace(fake_balance_expert=False),
+                        quant_config=None,
+                        params_dtype=torch.float32,
+                        has_shared_expert=False,
+                        scoring_func=0,
+                        routed_scaling_factor=1.0,
+                        n_group=1,
+                        topk_group=1,
+                        topk_method="greedy",
+                        has_moe_norm=False,
+                        correction_bias=False,
+                    )
         select_topk.assert_not_called()
 
     def test_moe_forward_uses_reference_noaux_routing_on_cpu(self):
-        parallelism_config = types.SimpleNamespace(
-            dp_rank=0,
-            dp_size=1,
-        )
+        parallelism_config = _single_rank_parallelism_config()
         with torch.device("cpu"):
             block = DeepSeekV32MoEBlock(
                 hidden_size=4,
@@ -1279,7 +1315,10 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 tp_rank=0,
                 ep_size=1,
                 ep_rank=0,
-                model_config=_router_model_config(has_moe_norm=True),
+                model_config=_router_model_config(
+                    hidden_size=4,
+                    has_moe_norm=True,
+                ),
                 parallelism_config=parallelism_config,
                 moe_config=types.SimpleNamespace(fake_balance_expert=False),
                 quant_config=None,
@@ -1355,8 +1394,8 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             tp_rank=0,
             ep_size=1,
             ep_rank=0,
-            model_config=_router_model_config(),
-            parallelism_config=types.SimpleNamespace(dp_rank=0, dp_size=1),
+            model_config=_router_model_config(hidden_size=4),
+            parallelism_config=_single_rank_parallelism_config(),
             quant_config=None,
             params_dtype=torch.float32,
             has_shared_expert=False,
@@ -1370,6 +1409,30 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         with self.assertRaisesRegex(TypeError, "fake_balance_expert"):
             DeepSeekV32MoEBlock(
                 moe_config=types.SimpleNamespace(fake_balance_expert=1),
+                **kwargs,
+            )
+        no_parallelism = dict(kwargs)
+        no_parallelism["parallelism_config"] = None
+        with (
+            mock.patch(
+                "rtp_llm.models_py.new_models.deepseek_v3.moe.get_device_type",
+                return_value=DeviceType.Cuda,
+            ),
+            self.assertRaisesRegex(ValueError, "parallelism_config"),
+        ):
+            DeepSeekV32MoEBlock(
+                moe_config=types.SimpleNamespace(fake_balance_expert=True),
+                **no_parallelism,
+            )
+        with (
+            mock.patch(
+                "rtp_llm.models_py.new_models.deepseek_v3.moe.get_device_type",
+                return_value=DeviceType.ROCm,
+            ),
+            self.assertRaisesRegex(RuntimeError, "only on CUDA"),
+        ):
+            DeepSeekV32MoEBlock(
+                moe_config=types.SimpleNamespace(fake_balance_expert=True),
                 **kwargs,
             )
 
@@ -1398,10 +1461,11 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 ep_size=1,
                 ep_rank=0,
                 model_config=_router_model_config(
+                    hidden_size=4,
                     expert_num=8,
                     has_moe_norm=True,
                 ),
-                parallelism_config=types.SimpleNamespace(dp_rank=0, dp_size=1),
+                parallelism_config=_single_rank_parallelism_config(),
                 moe_config=types.SimpleNamespace(fake_balance_expert=False),
                 quant_config=None,
                 params_dtype=torch.float32,
@@ -1494,6 +1558,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         model_config.num_layers = 1
         model_config.max_seq_len = 1
         model_config.vocab_size = 16
+        model_config.hidden_size = 4
         model_config.expert_num = 8
         model_config.moe_k = 2
         model_config.has_moe_norm = True
@@ -1509,7 +1574,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 ep_size=1,
                 ep_rank=0,
                 model_config=model_config,
-                parallelism_config=types.SimpleNamespace(dp_rank=0, dp_size=1),
+                parallelism_config=_single_rank_parallelism_config(),
                 moe_config=types.SimpleNamespace(fake_balance_expert=False),
                 quant_config=None,
                 params_dtype=torch.float32,
@@ -1591,10 +1656,11 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 ep_size=1,
                 ep_rank=0,
                 model_config=_router_model_config(
+                    hidden_size=4,
                     expert_num=8,
                     has_moe_norm=True,
                 ),
-                parallelism_config=types.SimpleNamespace(dp_rank=0, dp_size=1),
+                parallelism_config=_single_rank_parallelism_config(),
                 moe_config=types.SimpleNamespace(fake_balance_expert=False),
                 quant_config=None,
                 params_dtype=torch.float32,

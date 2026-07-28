@@ -30,6 +30,7 @@ from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 from .model import DeepSeekV32DecoderLayer
+from .moe import _normalize_topk_method
 from .rotary_embedding import DeepseekV3RotaryEmbedding, DeepseekV3YarnRotaryEmbedding
 
 logger = logging.getLogger(__name__)
@@ -55,6 +56,21 @@ class MlaKernelWeightLayout:
         if name == W.rope_cos_sin_cache:
             return self._cos_sin_cache
         return None
+
+
+def _build_mla_runtime_layout(
+    layers: nn.ModuleList,
+    cos_sin_cache: torch.Tensor,
+) -> MlaKernelWeightLayout:
+    """Capture MLA runtime tensors, then free superseded checkpoint storage."""
+    attentions = [layer.self_attn for layer in layers]
+    layout = MlaKernelWeightLayout(
+        [attention._build_mla_kernel_weights() for attention in attentions],
+        cos_sin_cache,
+    )
+    for attention in attentions:
+        attention.release_checkpoint_only_weights()
+    return layout
 
 
 # ------------------------------------------------------------------ #
@@ -184,7 +200,9 @@ def _partition(load_config: Any, prefix: str) -> tuple[int, int]:
 
 
 def _extract_config_values(
-    model_config: Any, load_config: Any, config_json: dict = None
+    model_config: Any,
+    load_config: Any,
+    config_json: Optional[Dict[str, Any]] = None,
 ) -> Dict[str, Any]:
     """Read config from either ModelConfig (C++ pybind) or HF dict.
 
@@ -344,10 +362,7 @@ def _extract_config_values(
             "routed_scaling_factor", routed_scaling_factor
         )
     topk_method = config_json.get("topk_method", "greedy") if config_json else "greedy"
-    if topk_method == "gready":
-        topk_method = "greedy"
-    if topk_method not in {"greedy", "group_limited_greedy", "noaux_tc"}:
-        raise ValueError(f"unsupported topk_method={topk_method!r}")
+    topk_method = _normalize_topk_method(topk_method)
     # has_e_score_correction is not a ModelConfig field — the legacy loader
     # detects it from ckpt key presence on the weight class side. Derive it
     # here from config.json's topk_method ("noaux_tc" => correction bias).
@@ -762,8 +777,8 @@ class DeepSeekV32ForCausalLM(GptModelBase):
         """
         if self._mla_kernel_layout is not None:
             return
-        self._mla_kernel_layout = MlaKernelWeightLayout(
-            [layer.self_attn._build_mla_kernel_weights() for layer in self.layers],
+        self._mla_kernel_layout = _build_mla_runtime_layout(
+            self.layers,
             self.cos_sin_cache,
         )
 

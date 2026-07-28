@@ -28,7 +28,7 @@ from rtp_llm.models_py.layers.norm import RMSResNorm
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.models_py.new_models.deepseek_v3.language import (
-    MlaKernelWeightLayout,
+    _build_mla_runtime_layout,
     _build_rope_cache,
     _extract_config_values,
     _nonnegative_int,
@@ -304,8 +304,8 @@ class DeepSeekV32MTPForCausalLM(GptModelBase):
         """Reconstruct only the W.* tensor views required by MLA kernels."""
         if self._mla_kernel_layout is not None:
             return
-        self._mla_kernel_layout = MlaKernelWeightLayout(
-            [layer.self_attn._build_mla_kernel_weights() for layer in self.layers],
+        self._mla_kernel_layout = _build_mla_runtime_layout(
+            self.layers,
             self.cos_sin_cache,
         )
 

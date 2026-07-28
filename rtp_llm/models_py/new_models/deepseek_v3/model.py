@@ -38,7 +38,7 @@ class DeepSeekV32Indexer(RtpModule):
     Projection ownership differs deliberately: this class owns independently
     loadable RtpModule children, while the legacy implementation consumes a
     W.* dictionary. Keep algorithm changes synchronized with that reference;
-    both paths are exercised by the sparse-indexer GPU parity/smoke coverage.
+    the integrated sparse path is covered by the DeepSeek/GLM GPU smoke.
 
     HF ckpt keys (per layer):
       model.layers.{i}.self_attn.indexer.wq_b.weight
@@ -77,7 +77,6 @@ class DeepSeekV32Indexer(RtpModule):
         self.softmax_scale = index_head_dim**-0.5
         self.weights_scale = index_n_heads**-0.5
         self.blocksize = blocksize
-        self.indexer_size = index_head_dim / 2 + index_head_dim / 128 * 2
         self.is_neox_style = is_neox_style
         self.parallelism_config = parallelism_config
 
