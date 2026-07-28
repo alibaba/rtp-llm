@@ -53,13 +53,21 @@ class LocalStandbyCacheIndex {
                 continue;
             }
 
-            blockToEnginesMap.compute(blockCacheKey, (blockHash, workers) -> {
-                ConcurrentHashMap<String, Long> currentWorkers = workers;
+            // Most updates only extend the TTL of an existing mapping. Keep this path outside
+            // outer-map compute(), which serializes all updates for the same popular block.
+            ConcurrentHashMap<String, Long> existingWorkers = blockToEnginesMap.get(blockCacheKey);
+            if (existingWorkers != null && existingWorkers.replace(workerIpPort, expiresAtNanos) != null) {
+                continue;
+            }
+
+            blockToEnginesMap.compute(blockCacheKey, (blockHash, mappedWorkers) -> {
+                ConcurrentHashMap<String, Long> currentWorkers = mappedWorkers;
                 if (currentWorkers == null) {
                     currentWorkers = new ConcurrentHashMap<>();
                 }
-                if (currentWorkers.containsKey(workerIpPort)) {
-                    currentWorkers.put(workerIpPort, expiresAtNanos);
+                // The mapping may have changed after the fast-path lookup. Recheck it while
+                // performing the structural update so capacity accounting remains correct.
+                if (currentWorkers.replace(workerIpPort, expiresAtNanos) != null) {
                     return currentWorkers;
                 }
                 // The capacity limit is approximate; avoid synchronization on the write path.
