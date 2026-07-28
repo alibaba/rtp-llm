@@ -22,7 +22,7 @@ inline int64_t thinkBodyTokenBudget(int max_thinking_tokens, size_t begin_tag_to
     if (max_thinking_tokens <= 0) {
         return 0;
     }
-    return std::max<int64_t>(0,
+    return std::max<int64_t>(1,
                              static_cast<int64_t>(max_thinking_tokens) - static_cast<int64_t>(begin_tag_tokens)
                                  - static_cast<int64_t>(end_tag_tokens));
 }
@@ -31,8 +31,8 @@ inline int64_t thinkGeneratedTokenBudget(int max_thinking_tokens, size_t begin_t
     if (max_thinking_tokens <= 0) {
         return 0;
     }
-    const int64_t generated_budget = static_cast<int64_t>(max_thinking_tokens) - static_cast<int64_t>(begin_tag_tokens);
-    return std::max<int64_t>(static_cast<int64_t>(end_tag_tokens), generated_budget);
+    return thinkBodyTokenBudget(max_thinking_tokens, begin_tag_tokens, end_tag_tokens)
+           + static_cast<int64_t>(end_tag_tokens);
 }
 
 struct StreamThinkInfo {

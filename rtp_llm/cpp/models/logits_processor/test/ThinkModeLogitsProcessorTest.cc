@@ -9,6 +9,20 @@ using namespace std;
 
 namespace rtp_llm {
 
+TEST(ThinkModeTokenBudgetTest, PositiveBudgetAlwaysKeepsOneBodyToken) {
+    EXPECT_EQ(0, thinkBodyTokenBudget(0, 1, 1));
+    EXPECT_EQ(0, thinkGeneratedTokenBudget(0, 1, 1));
+
+    EXPECT_EQ(1, thinkBodyTokenBudget(1, 1, 1));
+    EXPECT_EQ(2, thinkGeneratedTokenBudget(1, 1, 1));
+    EXPECT_EQ(1, thinkBodyTokenBudget(2, 1, 1));
+    EXPECT_EQ(2, thinkGeneratedTokenBudget(2, 1, 1));
+    EXPECT_EQ(1, thinkBodyTokenBudget(3, 1, 1));
+    EXPECT_EQ(2, thinkGeneratedTokenBudget(3, 1, 1));
+    EXPECT_EQ(2, thinkBodyTokenBudget(4, 1, 1));
+    EXPECT_EQ(3, thinkGeneratedTokenBudget(4, 1, 1));
+}
+
 class SamplerDataBuilder {
 public:
     SamplerDataBuilder() = default;
