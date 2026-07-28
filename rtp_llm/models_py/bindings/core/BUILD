@@ -316,7 +316,8 @@ cc_library(
     # Intentionally underlinked: runtimeCreateEvent/runtimeWriteCacheStore are
     # declared by exec_ops_hdr only. Every consumer's final binary must link
     # exactly one implementation provider (exec_ctx_state, exec_ops_test_lib,
-    # or exec_ctx_rocm); non-CUDA/ROCm builds compile write() to a hard error.
+    # or exec_ctx_rocm). Non-CUDA/ROCm builds do not reference those symbols:
+    # write() compiles to an unconditional runtime error on such builds.
     deps = [
         ":exec_ops_hdr",
         "//rtp_llm/cpp/cache:cache",

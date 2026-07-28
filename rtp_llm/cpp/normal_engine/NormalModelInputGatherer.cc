@@ -384,7 +384,24 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             copyKvCacheBlocksToModelInput(
                 model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num, config_.kernel_blocks_per_kv_block);
 
-            if (ctx.max_blocks_num && config_.role_type == RoleType::PREFILL && stream->hasCacheKeys()) {
+            // Per-row cache_keys contract: PD prefill rows must always carry cache_keys.
+            // KVCacheManager::malloc unconditionally derives them for every scheduled stream
+            // (initCacheKeys covers even the final partial block), so a miss here is a real
+            // producer bug. stream->hasCacheKeys() is any-row semantics and also guards the
+            // empty-resource case (streams without KV cache), so it must stay in front of the
+            // row-local cacheKeys(i) access; the row-local check is what prevents a
+            // zero-filled row from being published as real keys (visible only as decode-side
+            // load timeouts).
+            const bool row_has_cache_keys = stream->hasCacheKeys() && !stream->cacheKeys(i).empty();
+            if (config_.role_type == RoleType::PREFILL && stream->queryPdSep()) {
+                RTP_LLM_CHECK_WITH_INFO(row_has_cache_keys,
+                                        "pd prefill stream %ld batch row %d must provide cache_keys "
+                                        "(queryPdSep=true, max_blocks_num=%zu)",
+                                        stream->streamId(),
+                                        i,
+                                        ctx.max_blocks_num);
+            }
+            if (ctx.max_blocks_num && config_.role_type == RoleType::PREFILL && row_has_cache_keys) {
                 RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(stream->cacheKeys(i).size())
                                             <= model_input.cache_keys.size(1),
                                         "cache_keys overflow: stream keys=%zu tensor width=%ld",

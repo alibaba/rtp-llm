@@ -13,6 +13,7 @@ from rtp_llm.models_py.model_desc.qwen3_next import (
     _maybe_write_cp_cache_store,
     _write_cp_cache_store,
 )
+from rtp_llm.models_py.modules.factory.attention import common as attention_common
 
 
 class FakeKVCache:
@@ -87,7 +88,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
         # PyWrappedModel attaches cache_store_inputs and cache_store_writer together only
         # when the C++ boundary accepts eligibility, so any half pair reaching python is a
         # contract break by an upstream that bypassed prepareWriteCacheParams. Regardless of
-        # cause, _write_cp_cache_store must not write on any half/none pairing.
+        # cause, no pairing below may produce a write op or a writer call.
         cases = [
             ("neither", None, None),
             ("inputs_only", SimpleNamespace(tag="linear0"), None),
@@ -99,6 +100,11 @@ class AttentionInputRoutingTest(unittest.TestCase):
                     is_prefill=True,
                     cache_store_inputs=cache_store_inputs,
                     cache_store_writer=cache_store_writer,
+                )
+
+                # Observable skip decision through the public factory surface.
+                self.assertIsNone(
+                    attention_common.create_write_cache_store_impl(attention_inputs)
                 )
 
                 _write_cp_cache_store(attention_inputs, SimpleNamespace(tag="linear0"))

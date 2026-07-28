@@ -465,9 +465,10 @@ TEST_F(ExecOpsTest, testWriteCacheStoreRejectsUndefinedRequestId) {
 
 TEST_F(ExecOpsTest, testWriteCacheStoreMlaBf16UsesPhysicalPageSizeAndExplicitStride) {
     // Four physical blocks, each containing four kernel blocks. The old shape heuristic treated the leading
-    // dimension as kernel-block count and inflated the physical stride by 4x.
+    // dimension as kernel-block count and inflated the physical stride by 4x. Write two blocks so the
+    // per-block address assertion also verifies the cross-block stride for the BF16 layout.
     auto kv_cache_base = torch::zeros({4, 8, 16}, torch::kBFloat16);
-    expectMlaPhysicalViewUsesExplicitStride(kv_cache_base, /*blocks_to_write=*/1);
+    expectMlaPhysicalViewUsesExplicitStride(kv_cache_base, /*blocks_to_write=*/2);
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreMlaFp8PackedPhysicalViewUsesExplicitStride) {

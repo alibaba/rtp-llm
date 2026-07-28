@@ -234,12 +234,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     LogitsProcessorFactory::init(params.model_config_.ckpt_path, params.sp_config.tree_decode_config);
     cudaProfilerBegin();
 
-    // The hardcoded mtp_cache_config_index=0 and single draft layout below assume
-    // exactly one MTP module; make that assumption explicit instead of silently
-    // reusing module 0 state for extra modules.
-    RTP_LLM_CHECK_WITH_INFO(propose_params->mtp_model_params_->size() <= 1,
-                            "MtpExecutor supports a single MTP module, got %zu",
-                            propose_params->mtp_model_params_->size());
+    // buildMTPModuleConfigPlan intentionally replicates module entries when
+    // gen_num_per_cycle > 1 with a single weight set (RtpLLMOp already warns once
+    // about it); runtime execution and cache loading use module 0 only, so the
+    // extra entries below are legal and skipped by the loop's break.
     for (auto& mtp_params : *propose_params->mtp_model_params_) {
         auto model_params =
             GptModelInitParams({mtp_params->gpt_weights,

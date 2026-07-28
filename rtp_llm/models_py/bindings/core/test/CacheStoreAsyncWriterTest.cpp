@@ -201,7 +201,7 @@ TEST_F(CacheStoreAsyncWriterTest, InitWithoutCacheStoreFailsAndCanRetryAfterInje
     } catch (const std::runtime_error& e) {
         const std::string message = e.what();
         EXPECT_NE(message.find("CacheStore"), std::string::npos);
-        EXPECT_NE(message.find("setCacheStore"), std::string::npos);
+        EXPECT_NE(message.find("initCacheStore"), std::string::npos);
         EXPECT_NE(message.find("model_id=19"), std::string::npos);
         EXPECT_NE(message.find("device_id=2"), std::string::npos);
     }
@@ -220,14 +220,19 @@ TEST_F(CacheStoreAsyncWriterTest, WriteOutsideActiveCycleThrows) {
     layer_cache.layer_id = 4;
     layer_cache.tag      = "linear";
 
-    // The IDLE writer must reject write() with the RUNNING-cycle contract message so
-    // reviewers/log readers see why the call was rejected, not just that it threw.
+    // CUDA/ROCm builds must reject an out-of-cycle write() with the RUNNING-cycle
+    // contract message; CPU-only builds hit the build guard before any state check.
+#if USING_CUDA || USING_ROCM
+    const char* expected_message = "requires an active RUNNING forward cycle";
+#else
+    const char* expected_message = "requires a CUDA or ROCm build";
+#endif
+
     try {
         writer_->write(inputs, layer_cache);
         FAIL() << "expected write() before init() to fail";
     } catch (const std::runtime_error& e) {
-        const std::string message = e.what();
-        EXPECT_NE(message.find("requires an active RUNNING forward cycle"), std::string::npos);
+        EXPECT_NE(std::string(e.what()).find(expected_message), std::string::npos);
     }
 
     writer_->init();
@@ -236,8 +241,7 @@ TEST_F(CacheStoreAsyncWriterTest, WriteOutsideActiveCycleThrows) {
         writer_->write(inputs, layer_cache);
         FAIL() << "expected write() after waitAllDone() to fail";
     } catch (const std::runtime_error& e) {
-        const std::string message = e.what();
-        EXPECT_NE(message.find("requires an active RUNNING forward cycle"), std::string::npos);
+        EXPECT_NE(std::string(e.what()).find(expected_message), std::string::npos);
     }
 }
 

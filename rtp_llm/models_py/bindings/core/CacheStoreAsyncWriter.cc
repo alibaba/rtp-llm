@@ -98,6 +98,9 @@ CacheStoreAsyncWriter::~CacheStoreAsyncWriter() {
 }
 
 // IDLE -> RUNNING. Resets bookkeeping for a new forward-pass cycle.
+// On failure the writer stays IDLE and init() can be called again once the
+// CacheStore is injected (RemoteRpcServer::initCacheStore() ->
+// KVCacheManager::setCacheStore()); no partially initialized state survives.
 void CacheStoreAsyncWriter::init() {
     std::lock_guard<std::mutex> lock(state_mutex_);
     RTP_LLM_CHECK_WITH_INFO(state_ == State::IDLE,
@@ -117,8 +120,8 @@ void CacheStoreAsyncWriter::init() {
     auto cache_store = cache_manager_->getCacheStore();
     RTP_LLM_CHECK_WITH_INFO(cache_store != nullptr,
                             "CacheStoreAsyncWriter::init() cannot start cache-store work because CacheStore is "
-                            "unavailable (model_id=%zu, device_id=%d). Ensure RemoteRpcServer::setCacheStore() "
-                            "completes before PD prefill.",
+                            "unavailable (model_id=%zu, device_id=%d). Ensure RemoteRpcServer::initCacheStore() "
+                            "has injected the CacheStore before PD prefill.",
                             cache_model_id_,
                             device_id_);
 

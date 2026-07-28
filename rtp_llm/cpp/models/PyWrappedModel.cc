@@ -362,14 +362,12 @@ PyWrappedModel::prepareWriteCacheParams(const GptModelInputs& inputs,
                             "cache-store request_id count=%ld does not match context batch=%ld",
                             inputs.request_id.numel(),
                             context_batch_size);
-    // request_id identifies mandatory PD work; missing cache_keys remains a warned no-op
-    // for producer compatibility (empty cache_keys is not yet a proven contract violation).
-    // Escalate to fail-fast once no producer emits an empty cache_keys tensor for pd_separation
-    // eligible batches; the warning already surfaces every affected request_id for that audit.
+    // Per-row cache_keys enforcement lives in NormalModelInputGatherer (PD prefill rows
+    // fail fast there when a row lacks keys, because the gatherer zero-fills the batch
+    // tensor and a key-less row would otherwise publish zeros as real keys). This branch
+    // only covers a whole-batch-missing tensor from non-standard producers and keeps the
+    // legacy warned no-op for that case.
     if (!inputs.cache_keys.defined() || inputs.cache_keys.numel() == 0) {
-        // Build the affected-id list lazily so the accessor + string join only run once per
-        // 60-second window, not per forward. Use accessor<int64_t,1> to stay stride-safe when
-        // request_id is a non-contiguous view (matches runtimeWriteCacheStore).
         auto build_affected_ids = [&]() {
             const auto  request_ids = inputs.request_id.accessor<int64_t, 1>();
             std::string joined;
