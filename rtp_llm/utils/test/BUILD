@@ -44,6 +44,13 @@ py_test(
 )
 
 py_test(
+    name = "multicast_keeper_generation_test",
+    srcs = ["multicast_keeper_generation_test.py"],
+    deps = ["//rtp_llm:utils"],
+    timeout = "short",
+)
+
+py_test(
     name = "ckpt_database_test",
     srcs = [
         "ckpt_database_test.py",

@@ -146,6 +146,7 @@ class BackendValidationOrderingTest(unittest.TestCase):
         manager = BackendManager.__new__(BackendManager)
         manager.py_env_configs = py_env_configs
         manager._distributed_server = MagicMock()
+        manager._multicast_generation_guard = None
 
         with self.assertRaisesRegex(ValueError, "incompatible"):
             manager.start()

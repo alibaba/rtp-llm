@@ -40,10 +40,14 @@ heuristic is used. Applications requiring multiple identical-property local
 creators need an explicit communicator identity API before enabling this shim.
 
 Single-node POSIX multicast requires `numDevices` to equal the holder's complete
-local GPU list. Cross-machine FABRIC additionally requires
-`--fabric-team-size N`; every request must use exactly that global `numDevices`.
-The generated `keeper.env` exports the same local list and global size, and the
-shim rejects a rank unless its visible GPU list exactly matches the holder list.
+local GPU list. FABRIC multicast requires `--fabric-team-size N`; every request
+must use exactly that global `numDevices`. FABRIC is not limited to cross-node
+jobs: GB200/GB300 may select it for a complete single-node team as well. The
+runtime therefore always supplies the global `world_size` as the FABRIC team
+contract while the actual request `handleTypes` selects POSIX or FABRIC. The
+generated backend environment exports the same local list and global size, and
+the shim rejects a rank unless its visible GPU list exactly matches the holder
+list.
 These checks keep incomplete or mixed NVLink partitions from reaching a CUDA
 bind/map that waits for missing team members. `flags` must be zero and
 `handleTypes` may only contain POSIX FD and FABRIC.
@@ -136,11 +140,37 @@ multicast objects.
 
 The independent Python entry point is
 `rtp_llm.utils.multicast_keeper.MulticastKeeperRuntime`. It selects
-`single_node_posix` when `world_size == local_world_size`, otherwise
-`cross_node_fabric`. The latter starts one holder on each node and injects the
-global FABRIC team size while retaining only that node's physical GPU list.
-Cross-node handle publication and barriers use the existing RTP-LLM lifecycle
-TCPStore; holders remain node-local and never form a second control plane.
+`single_node` when `world_size == local_world_size`, otherwise
+`cross_node_fabric`. The mode describes process placement, not the only allowed
+CUDA handle type: both modes inject the global FABRIC team size, allowing
+single-node GB200/GB300 jobs to use FABRIC while preserving POSIX operation on
+other systems. Cross-node mode starts one holder on each node while retaining
+only that node's physical GPU list. Cross-node handle publication and barriers
+use the existing RTP-LLM lifecycle TCPStore; holders remain node-local and
+never form a second control plane.
+
+The holder is intentionally started empty before NCCL and SymmetricMemory
+initialization. The shim captures multicast objects as CUDA creates/imports
+them; starting the holder after NCCL would miss those objects because CUDA has
+no API to enumerate an already-created process multicast set.
+
+Before NCCL starts, a keeper-only restart fence uses the existing TCPStore to
+create an epoch and atomically claim one incarnation per rank slot. A restarted
+peer that finds its slot occupied publishes ABORT and exits before it can call
+`cuMulticastAddDevice`. Surviving ranks monitor ABORT and exit, allowing an
+unchanged per-part deployment controller to eventually restart the complete
+group with a new TCPStore and FABRIC object. There is no keeper membership,
+READY, or COMMIT barrier.
+
+Logs carry `epoch` and `incarnation`; shim owner logs also carry `gang_epoch`.
+A FABRIC `already attached` error with two different epochs is therefore a
+stale/mixed deployment, not a signal to treat duplicate AddDevice as success.
+
+This generation guard is keeper-specific. It exists only when sleep mode is
+enabled at Level 3 and `RTP_LLM_CUDA_CKPT_MULTICAST_KEEPER=1`; it uses a private
+TCPStore key namespace without changing `DistributedServer` registration or
+bootstrap. Sleep disabled, Level 1, and Level 2 follow the original distributed
+startup and failure behavior and do not write generation keys.
 
 The architecture-neutral runtime test starts the native holder in both modes,
 checks its protocol identity, verifies every ELF matches the current host, and
@@ -166,9 +196,10 @@ bazelisk test //rtp_llm/utils/test:multicast_keeper_runtime_test \
 6. Rebuild NCCL and symmetric-memory resources. The shim reimports the cached
    multicast object from the surviving holder.
 
-The creator GPU list uses physical CUDA ordinals. The launcher removes
-`CUDA_VISIBLE_DEVICES` from the holder process so a rank-specific logical
-visibility mapping cannot reinterpret those ordinals.
+The production container exposes exactly the GPUs assigned to the instance.
+The supervisor therefore derives the creator list as the dense container-local
+CUDA ordinals `0..local_world_size-1`; no GPU-list environment variable is
+required.
 
 ## Configuration
 
@@ -178,9 +209,8 @@ visibility mapping cannot reinterpret those ordinals.
 | `NEKYIA_KEEPER_DIR` | Directory containing `mcsk.sock` |
 | `RTP_LLM_CUDA_CKPT_MULTICAST_SOCKET` | Optional exact socket override |
 | `RTP_LLM_CUDA_CKPT_MULTICAST_KEEPER_DEBUG=1` | Verbose shim logging |
-| `RTP_LLM_MC_KEEPER_GPUS` | Optional physical GPU-list override for the supervisor |
 | `RTP_LLM_MC_LOCAL_GPUS` | Exact holder GPU list injected into ranks for FABRIC validation |
-| `RTP_LLM_MC_FABRIC_TEAM_SIZE` | Exact global FABRIC `numDevices`, injected for cross-node runs |
+| `RTP_LLM_MC_FABRIC_TEAM_SIZE` | Exact global FABRIC `numDevices`, injected automatically for single- and cross-node runs |
 | `RTP_LLM_MC_CREATOR_TIMEOUT_MS` | Creator timeout, default 120 seconds |
 | `RTP_LLM_MC_HOLDER_IO_TIMEOUT_MS` | Holder request/reply I/O timeout, default 1 second |
 | `RTP_LLM_MC_REQUEST_TIMEOUT_MS` | Shim FETCH/connect deadline, default 5 seconds |

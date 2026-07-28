@@ -392,10 +392,15 @@ static void init_owner_identity(void) {
         generation = random_nonzero_u64();
     }
     g_owner_generation = generation;
+    const char* gang_epoch = getenv("RTP_LLM_MC_GANG_EPOCH");
+    if (gang_epoch == NULL || gang_epoch[0] == '\0') {
+        gang_epoch = "unset";
+    }
     log_message(0,
-                "owner identity owner_id=%llu generation=%llu",
+                "owner identity owner_id=%llu generation=%llu gang_epoch=%s",
                 (unsigned long long)g_owner_id,
-                (unsigned long long)g_owner_generation);
+                (unsigned long long)g_owner_generation,
+                gang_epoch);
 }
 
 static void ensure_owner_identity(void) {
@@ -534,11 +539,16 @@ keeper_request(const rtp_mc_request* request, const unsigned char* trailing_fabr
         if (received_fd >= 0) {
             close(received_fd);
         }
+        const char* gang_epoch = getenv("RTP_LLM_MC_GANG_EPOCH");
         log_message(1,
-                    "keeper request failed opcode=%u status=%d object=%llu",
+                    "keeper request failed opcode=%u status=%d object=%llu "
+                    "owner=%llu generation=%llu gang_epoch=%s",
                     request->opcode,
                     response->status,
-                    (unsigned long long)request->object_id);
+                    (unsigned long long)request->object_id,
+                    (unsigned long long)g_owner_id,
+                    (unsigned long long)g_owner_generation,
+                    gang_epoch != NULL && gang_epoch[0] != '\0' ? gang_epoch : "unset");
         errno = EPROTO;
         return -1;
     }

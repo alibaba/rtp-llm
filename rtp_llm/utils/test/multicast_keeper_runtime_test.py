@@ -25,7 +25,6 @@ from rtp_llm.utils.multicast_keeper import (
     MulticastKeeperRuntime,
     discover_artifacts,
     is_enabled,
-    parse_gpu_list,
 )
 
 _FAKE_HOLDER = r"""
@@ -211,14 +210,9 @@ class MulticastKeeperRuntimeTest(unittest.TestCase):
                 return candidate.resolve()
         raise unittest.SkipTest(f"native keeper artifact is unavailable: {name}")
 
-    def test_opt_in_and_gpu_list_validation(self):
+    def test_opt_in_gate(self):
         self.assertFalse(is_enabled({ENABLE_ENV: "true"}))
         self.assertTrue(is_enabled({ENABLE_ENV: "1"}))
-        self.assertEqual((0, 2, 17), parse_gpu_list("0, 2,17"))
-        for value in ("", "0,", "GPU-a", "0,0", "-1", "1.5"):
-            with self.subTest(value=value):
-                with self.assertRaises(MulticastKeeperConfigError):
-                    parse_gpu_list(value)
 
         disabled = SimpleNamespace(
             parallelism_config=SimpleNamespace(world_size=2),
@@ -228,15 +222,7 @@ class MulticastKeeperRuntimeTest(unittest.TestCase):
             MulticastKeeperRuntime.from_config(disabled, env={ENABLE_ENV: "0"})
         )
 
-    def test_config_rejects_gpu_world_mismatch(self):
-        with self.assertRaisesRegex(MulticastKeeperConfigError, "local_world_size"):
-            MulticastKeeperRuntime(
-                2,
-                1,
-                "decode",
-                env=self._env(),
-                artifacts=self.artifacts,
-            )
+    def test_config_rejects_invalid_world_topology(self):
         with self.assertRaisesRegex(MulticastKeeperConfigError, "greater than"):
             MulticastKeeperRuntime(
                 1,
@@ -254,6 +240,30 @@ class MulticastKeeperRuntimeTest(unittest.TestCase):
         )
         self.assertEqual(MulticastKeeperMode.CROSS_NODE_FABRIC, uneven.mode)
         self.assertEqual(3, uneven.fabric_team_size)
+
+    def test_config_always_uses_dense_container_local_gpu_ordinals(self):
+        for visible_value in (None, "", "7,9,11,13"):
+            with self.subTest(visible_value=visible_value):
+                env = self._env()
+                if visible_value is None:
+                    env.pop("CUDA_VISIBLE_DEVICES", None)
+                else:
+                    env["CUDA_VISIBLE_DEVICES"] = visible_value
+
+                runtime = MulticastKeeperRuntime(
+                    4,
+                    4,
+                    "decode",
+                    env=env,
+                    artifacts=self.artifacts,
+                    state_root=self.root,
+                )
+
+                self.assertEqual((0, 1, 2, 3), runtime.gpus)
+                self.assertEqual(
+                    MulticastKeeperMode.SINGLE_NODE, runtime.mode
+                )
+                self.assertEqual(4, runtime.fabric_team_size)
 
     def test_from_config_prefers_configured_local_world_size(self):
         config = SimpleNamespace(
@@ -326,7 +336,7 @@ class MulticastKeeperRuntimeTest(unittest.TestCase):
             self.assertEqual("custom", child["TORCH_SYMM_MEM_DISABLE_MULTICAST"])
             self.assertEqual("77", child["RTP_LLM_MC_REQUEST_TIMEOUT_MS"])
             self.assertEqual("125000", child["RTP_LLM_MC_CREATE_TIMEOUT_MS"])
-            self.assertEqual("0,2", child["RTP_LLM_MC_LOCAL_GPUS"])
+            self.assertEqual("0,1", child["RTP_LLM_MC_LOCAL_GPUS"])
             self.assertEqual("8", child["RTP_LLM_MC_FABRIC_TEAM_SIZE"])
             self.assertEqual(
                 str(runtime.socket_path), child["RTP_LLM_CUDA_CKPT_MULTICAST_SOCKET"]
@@ -335,18 +345,22 @@ class MulticastKeeperRuntimeTest(unittest.TestCase):
         finally:
             runtime.stop()
 
-    def test_single_node_removes_stale_fabric_team_and_context_restores_env(self):
+    def test_single_node_overrides_stale_fabric_team_and_context_restores_env(self):
         runtime = self._runtime()
-        self.assertEqual(MulticastKeeperMode.SINGLE_NODE_POSIX, runtime.mode)
-        self.assertIsNone(runtime.fabric_team_size)
+        self.assertEqual(MulticastKeeperMode.SINGLE_NODE, runtime.mode)
+        self.assertEqual(2, runtime.fabric_team_size)
         original = dict(os.environ)
         os.environ["RTP_LLM_MC_FABRIC_TEAM_SIZE"] = "99"
         expected = dict(os.environ)
         try:
             runtime.start()
             with runtime.configure_subprocess() as configured:
-                self.assertNotIn("RTP_LLM_MC_FABRIC_TEAM_SIZE", configured)
-                self.assertNotIn("RTP_LLM_MC_FABRIC_TEAM_SIZE", os.environ)
+                self.assertEqual(
+                    "2", configured["RTP_LLM_MC_FABRIC_TEAM_SIZE"]
+                )
+                self.assertEqual(
+                    "2", os.environ["RTP_LLM_MC_FABRIC_TEAM_SIZE"]
+                )
                 self.assertEqual("1", os.environ[ENABLE_ENV])
                 self.assertTrue(
                     os.environ["LD_PRELOAD"].endswith(str(self.artifacts.shim))
@@ -423,7 +437,7 @@ class MulticastKeeperRuntimeTest(unittest.TestCase):
             shim=self._native_artifact("mc_shim_unified.so"),
         )
         cases = (
-            (2, MulticastKeeperMode.SINGLE_NODE_POSIX, None),
+            (2, MulticastKeeperMode.SINGLE_NODE, 2),
             (4, MulticastKeeperMode.CROSS_NODE_FABRIC, 4),
         )
         for world_size, expected_mode, expected_team_size in cases:

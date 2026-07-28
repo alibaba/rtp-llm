@@ -31,7 +31,6 @@ HOLDER_ENV = "RTP_LLM_MC_HOLDER_BIN"
 CREATOR_ENV = "RTP_LLM_MC_CREATOR_BIN"
 SHIM_ENV = "RTP_LLM_MC_SHIM"
 BIN_DIR_ENV = "RTP_LLM_MC_KEEPER_BIN_DIR"
-GPU_ENV = "RTP_LLM_MC_KEEPER_GPUS"
 LOCAL_GPU_ENV = "RTP_LLM_MC_LOCAL_GPUS"
 FABRIC_TEAM_ENV = "RTP_LLM_MC_FABRIC_TEAM_SIZE"
 SOCKET_ENV = "RTP_LLM_CUDA_CKPT_MULTICAST_SOCKET"
@@ -69,7 +68,10 @@ class MulticastKeeperHealthError(MulticastKeeperError):
 class MulticastKeeperMode(str, Enum):
     """Transport selected from the global and node-local worker topology."""
 
-    SINGLE_NODE_POSIX = "single_node_posix"
+    SINGLE_NODE = "single_node"
+    # Compatibility alias for callers that imported the old, overly specific
+    # name. Single-node placement can use either POSIX or FABRIC handles.
+    SINGLE_NODE_POSIX = "single_node"
     CROSS_NODE_FABRIC = "cross_node_fabric"
 
 
@@ -97,24 +99,6 @@ def is_enabled(env: Optional[Mapping[str, str]] = None) -> bool:
 
     source = os.environ if env is None else env
     return source.get(ENABLE_ENV) == "1"
-
-
-def parse_gpu_list(value: str, *, source: str = GPU_ENV) -> Tuple[int, ...]:
-    """Parse a physical CUDA ordinal list, rejecting UUIDs and duplicates."""
-
-    if not value or not value.strip():
-        raise MulticastKeeperConfigError(f"{source} must be a non-empty GPU list")
-    fields = value.split(",")
-    if any(not re.fullmatch(r"[0-9]+", field.strip()) for field in fields):
-        raise MulticastKeeperConfigError(
-            f"{source} must contain only comma-separated integer CUDA ordinals: {value!r}"
-        )
-    gpus = tuple(int(field.strip()) for field in fields)
-    if len(set(gpus)) != len(gpus):
-        raise MulticastKeeperConfigError(
-            f"{source} contains duplicate CUDA ordinals: {value!r}"
-        )
-    return gpus
 
 
 def _artifact_ok(kind: str, path: Path) -> bool:
@@ -266,14 +250,15 @@ class MulticastKeeperRuntime:
             raise MulticastKeeperConfigError(
                 "world_size must be greater than or equal to local_world_size"
             )
-        gpu_source = GPU_ENV if self._env.get(GPU_ENV) else "CUDA_VISIBLE_DEVICES"
-        gpu_value = self._env.get(GPU_ENV) or self._env.get("CUDA_VISIBLE_DEVICES", "")
-        self.gpus = parse_gpu_list(gpu_value, source=gpu_source)
-        if len(self.gpus) != local_world_size:
-            raise MulticastKeeperConfigError(
-                f"{gpu_source} has {len(self.gpus)} GPUs, but local_world_size="
-                f"{local_world_size}"
-            )
+        # The production container exposes exactly the GPUs assigned to this
+        # instance, densely numbered in its CUDA device namespace. Keeper and
+        # backend ranks therefore share [0, local_world_size) unconditionally;
+        # no CUDA_VISIBLE_DEVICES or keeper-specific GPU override is needed.
+        self.gpus = tuple(range(local_world_size))
+        _LOGGER.info(
+            "multicast keeper using container-local GPU ordinals: %s",
+            ",".join(str(gpu) for gpu in self.gpus),
+        )
 
         self.world_size = int(world_size)
         self.local_world_size = int(local_world_size)
@@ -281,13 +266,15 @@ class MulticastKeeperRuntime:
         self.mode = (
             MulticastKeeperMode.CROSS_NODE_FABRIC
             if self.world_size > self.local_world_size
-            else MulticastKeeperMode.SINGLE_NODE_POSIX
+            else MulticastKeeperMode.SINGLE_NODE
         )
-        self.fabric_team_size = (
-            self.world_size
-            if self.mode == MulticastKeeperMode.CROSS_NODE_FABRIC
-            else None
-        )
+        # Process placement determines holder locality; it does not determine
+        # the CUDA multicast handle type. GB200/GB300 can request FABRIC
+        # handles even when the complete TP/CP team is on one node. Always
+        # advertise the exact global team size so both POSIX and FABRIC
+        # requests are valid. Request handleTypes still selects the actual
+        # path, so this does not force FABRIC on single-node POSIX users.
+        self.fabric_team_size = self.world_size
         self.artifacts = artifacts or discover_artifacts(self._env)
         self._state_root = Path(state_root) if state_root is not None else None
 
@@ -619,10 +606,7 @@ class MulticastKeeperRuntime:
         child_env[KEEPER_DIR_ENV] = str(self.state_dir)
         child_env[SOCKET_ENV] = str(self.socket_path)
         child_env[LOCAL_GPU_ENV] = ",".join(str(gpu) for gpu in self.gpus)
-        if self.fabric_team_size is None:
-            child_env.pop(FABRIC_TEAM_ENV, None)
-        else:
-            child_env[FABRIC_TEAM_ENV] = str(self.fabric_team_size)
+        child_env[FABRIC_TEAM_ENV] = str(self.fabric_team_size)
         child_env.setdefault("NCCL_NVLS_ENABLE", "1")
         child_env.setdefault("TORCH_SYMM_MEM_DISABLE_MULTICAST", "0")
         child_env.setdefault(
@@ -743,5 +727,4 @@ __all__ = [
     "MulticastKeeperRuntime",
     "discover_artifacts",
     "is_enabled",
-    "parse_gpu_list",
 ]

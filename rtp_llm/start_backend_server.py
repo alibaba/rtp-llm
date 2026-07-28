@@ -229,6 +229,14 @@ def local_rank_start(
         error_msg = f"start server error: {e}"
         error_trace = traceback.format_exc()
         logging.error(f"{error_msg}, trace: {error_trace}")
+        if backend_manager is not None:
+            try:
+                backend_manager.abort_startup(error_msg)
+            except Exception:
+                logging.exception(
+                    "failed to abort multicast keeper generation after "
+                    "backend rank failure"
+                )
 
         # Send startup failure message
         if pipe_writer is not None:

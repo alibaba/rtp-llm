@@ -21,6 +21,7 @@ from rtp_llm.models_py.distributed.collective_torch import init_distributed_envi
 from rtp_llm.ops import TaskType, VitSeparation
 from rtp_llm.utils.concurrency_controller import get_global_controller
 from rtp_llm.utils.gpu_mem_probe import log_gpu_mem
+from rtp_llm.utils.multicast_keeper_generation import MulticastGenerationGuard
 
 if TYPE_CHECKING:
     from rtp_llm.async_decoder_engine.base_engine import BaseEngine
@@ -38,6 +39,12 @@ class BackendManager(object):
             py_env_configs.server_config.frontend_server_id,
         )
         self._distributed_server = DistributedServer(py_env_configs)
+        self._multicast_generation_guard = MulticastGenerationGuard.from_config(
+            py_env_configs,
+            store=self._distributed_server.store,
+            rank=self._distributed_server.rank,
+            world_size=self._distributed_server.world_size,
+        )
         self.thread_lock_ = threading.Lock()
         self._global_controller = get_global_controller()
         # just rank 0 report metric
@@ -51,6 +58,8 @@ class BackendManager(object):
         # [InitMem] baseline: CUDA context + torch runtime only, before NCCL /
         # symm / weights. Anchors the sleep-residual decomposition.
         log_gpu_mem("start/baseline")
+        if self._multicast_generation_guard is not None:
+            self._multicast_generation_guard.join()
         self._distributed_server.start(self.py_env_configs)
         # Create EngineConfig from py_env_configs (server/distribute config already adjusted for this rank)
         engine_config = EngineConfig.create(
@@ -176,10 +185,23 @@ class BackendManager(object):
         gc.freeze()
         logging.info("BackendManager entering serve_forever loop")
         while not self._shutdown_requested.is_set():
+            if (
+                self._multicast_generation_guard is not None
+                and self._multicast_generation_guard.is_aborted()
+            ):
+                raise RuntimeError(
+                    "multicast keeper generation aborted after commit: "
+                    f"epoch={self._multicast_generation_guard.epoch} "
+                    f"reason={self._multicast_generation_guard.abort_reason}"
+                )
             time.sleep(0.1)  # Check shutdown flag more frequently
         logging.info("Shutdown requested, stopping BackendManager...")
         self.stop()
         logging.info("BackendManager stopped successfully")
+
+    def abort_startup(self, reason: str) -> None:
+        if self._multicast_generation_guard is not None:
+            self._multicast_generation_guard.abort(reason)
 
     def request_shutdown(self):
         """Request graceful shutdown of the backend manager"""
@@ -188,6 +210,8 @@ class BackendManager(object):
 
     def stop(self) -> None:
         """Stop the backend manager and cleanup resources"""
+        if self._multicast_generation_guard is not None:
+            self._multicast_generation_guard.stop()
         if self.engine is not None:
             from rtp_llm.utils.fuser import _nfs_manager
 
