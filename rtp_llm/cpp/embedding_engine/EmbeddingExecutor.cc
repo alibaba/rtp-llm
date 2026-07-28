@@ -18,38 +18,6 @@ using namespace at::indexing;
 
 namespace rtp_llm {
 
-namespace HandlerArgs {
-
-static const char* names[] = {
-    "input_lengths",
-    "hidden_states",
-    "input_ids",
-    "attention_mask",
-    "moe_gating",
-};
-static_assert(sizeof(names) / sizeof(names[0]) <= NUM_INPUT_TYPES, "redundant handler arg name");
-static_assert(sizeof(names) / sizeof(names[0]) >= NUM_INPUT_TYPES, "missing handler arg name");
-
-static bool set_by_str(Flag& flag, const char* name) {
-    for (size_t i = 0; i < NUM_INPUT_TYPES; ++i) {
-        if (std::strcmp(names[i], name) == 0) {
-            flag.set(i);
-            return true;
-        }
-    }
-    return false;
-}
-
-static const char* get_name(Arg idx) {
-    return names[static_cast<size_t>(idx)];
-}
-
-static bool has_arg(const Flag& flag, Arg idx) {
-    return flag.test(static_cast<size_t>(idx));
-}
-
-}  // namespace HandlerArgs
-
 EmbeddingExecutor::EmbeddingExecutor(const EngineInitParams& params, py::object handler):
     handler_(handler),
     handler_args_(),
