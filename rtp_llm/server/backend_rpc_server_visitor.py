@@ -2,7 +2,8 @@ import asyncio
 import logging
 import os
 import time
-from typing import TYPE_CHECKING, AsyncGenerator, List, Optional, Set
+from dataclasses import replace
+from typing import TYPE_CHECKING, AsyncGenerator, Callable, List, Optional, Set
 
 import torch
 
@@ -125,10 +126,14 @@ class BackendRPCServerVisitor:
         )
         self.recent_cache_key_window = RecentCacheKeyWindow()
         self.pd_route_retry_on_unavailable = self._pd_route_retry_on_unavailable()
+        self.request_id_factory: Optional[Callable[[], int]] = None
 
     async def close(self):
         await self.model_rpc_client.close()
         await self.master_client.close()
+
+    def set_request_id_factory(self, factory: Callable[[], int]) -> None:
+        self.request_id_factory = factory
 
     @staticmethod
     def _pd_route_retry_on_unavailable() -> int:
@@ -508,20 +513,19 @@ class BackendRPCServerVisitor:
             set_aux_info(e)
             raise
 
-        async def route_and_enqueue(attempt: int):
-            if attempt > 0:
-                input.generate_config.role_addrs = []
+        async def route_and_enqueue(attempt_input: GenerateInput):
             if self.host_service.service_available:
-                await self.route_ips(input)
-            return self.model_rpc_client.enqueue(input)
+                await self.route_ips(attempt_input)
+            return self.model_rpc_client.enqueue(attempt_input)
 
         async def stream_with_aux_info():
             attempt = 0
+            attempt_input = input
             is_streaming = bool(getattr(input.generate_config, "is_streaming", False))
             while True:
                 yielded_output = False
                 try:
-                    stream = await route_and_enqueue(attempt)
+                    stream = await route_and_enqueue(attempt_input)
                     if is_streaming:
                         async for output in stream:
                             yielded_output = True
@@ -542,11 +546,22 @@ class BackendRPCServerVisitor:
                         or not self._is_retryable_route_rpc_error(e)
                     ):
                         raise
+                    request_id_factory = getattr(self, "request_id_factory", None)
+                    if request_id_factory is None:
+                        raise
                     attempt += 1
+                    attempt_input = replace(
+                        input,
+                        request_id=request_id_factory(),
+                        generate_config=input.generate_config.model_copy(
+                            update={"role_addrs": []}
+                        ),
+                        enqueued_by_master=False,
+                    )
                     route_logger.warning(
                         "retrying PD route after retryable RPC error, "
                         "request_id=%s, attempt=%s/%s, error=%s",
-                        input.request_id,
+                        attempt_input.request_id,
                         attempt,
                         self.pd_route_retry_on_unavailable,
                         e,
