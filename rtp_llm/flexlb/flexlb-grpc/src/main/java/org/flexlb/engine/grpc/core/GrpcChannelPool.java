@@ -1,5 +1,6 @@
 package org.flexlb.engine.grpc.core;
 
+import io.grpc.ConnectivityState;
 import io.grpc.ManagedChannel;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
@@ -28,12 +29,16 @@ public class GrpcChannelPool<K> {
     }
 
     public PooledChannel getOrCreate(K key) {
-        return channels.compute(key, (ignored, current) -> {
-            if (current != null && current.isUsable()) {
-                return current;
+        PooledChannel current = channels.get(key);
+        if (current != null && current.isUsable()) {
+            return current;
+        }
+        return channels.compute(key, (ignored, existing) -> {
+            if (existing != null && existing.isUsable()) {
+                return existing;
             }
-            if (current != null) {
-                current.shutdown();
+            if (existing != null) {
+                existing.shutdown();
             }
             return create(key);
         });
@@ -120,7 +125,11 @@ public class GrpcChannelPool<K> {
         }
 
         public boolean isUsable() {
-            return !shutdown.get() && !channel.isShutdown() && !channel.isTerminated();
+            if (shutdown.get() || channel.isShutdown() || channel.isTerminated()) {
+                return false;
+            }
+            ConnectivityState state = channel.getState(true);
+            return state != ConnectivityState.SHUTDOWN && state != ConnectivityState.TRANSIENT_FAILURE;
         }
 
         public void markUsed() {

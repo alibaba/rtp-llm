@@ -1,5 +1,6 @@
 package org.flexlb.engine.grpc.core;
 
+import io.grpc.ConnectivityState;
 import io.grpc.ManagedChannel;
 import org.junit.jupiter.api.Test;
 
@@ -20,6 +21,7 @@ class GrpcChannelPoolTest {
     @Test
     void reusesUsableChannel() {
         ManagedChannel channel = mock(ManagedChannel.class);
+        when(channel.getState(true)).thenReturn(ConnectivityState.READY);
         GrpcChannelPool<String> pool = new GrpcChannelPool<>(ignored -> channel);
 
         GrpcChannelPool.PooledChannel first = pool.getOrCreate("target");
@@ -27,6 +29,25 @@ class GrpcChannelPoolTest {
 
         assertSame(first, second);
         assertEquals(1, pool.size());
+    }
+
+    @Test
+    void recreatesChannelInTransientFailure() {
+        ManagedChannel firstChannel = mock(ManagedChannel.class);
+        ManagedChannel secondChannel = mock(ManagedChannel.class);
+        when(firstChannel.getState(true)).thenReturn(ConnectivityState.TRANSIENT_FAILURE);
+        when(secondChannel.getState(true)).thenReturn(ConnectivityState.READY);
+        AtomicInteger created = new AtomicInteger();
+        GrpcChannelPool<String> pool = new GrpcChannelPool<>(ignored ->
+                created.getAndIncrement() == 0 ? firstChannel : secondChannel);
+
+        GrpcChannelPool.PooledChannel first = pool.getOrCreate("target");
+        GrpcChannelPool.PooledChannel second = pool.getOrCreate("target");
+
+        assertNotSame(first, second);
+        assertSame(secondChannel, second.getChannel());
+        assertSame(second, pool.getOrCreate("target"));
+        verify(firstChannel).shutdown();
     }
 
     @Test
