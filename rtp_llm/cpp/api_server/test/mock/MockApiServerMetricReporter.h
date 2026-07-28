@@ -25,10 +25,6 @@ public:
     MOCK_METHOD1(reportResponseIterateLatencyMs, void(double));
     MOCK_METHOD1(reportResponseIterateCountMetric, void(int32_t));
 
-    MOCK_METHOD0(reportUpdateQpsMetric, void());
-    MOCK_METHOD0(reportErrorUpdateTargetQpsMetric, void());
-    MOCK_METHOD1(reportUpdateLatencyMs, void(double));
-
     MOCK_METHOD1(reportFTIterateCountMetric, void(double));
     MOCK_METHOD1(reportFTInputTokenLengthMetric, void(double));
     MOCK_METHOD1(reportFTOutputTokenLengthMetric, void(double));

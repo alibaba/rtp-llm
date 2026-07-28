@@ -30,14 +30,11 @@ class AccMetrics(Enum):
     ERROR_QPS_METRIC = "py_rtp_framework_error_qps"
     CONFLICT_QPS_METRIC = "py_rtp_framework_concurrency_exception_qps"
     ITER_QPS_METRIC = "py_rtp_response_iterate_qps"
-    UPDATE_QPS_METRIC = "py_rtp_update_qps_metric"
-    ERROR_UPDATE_QPS_METRIC = "py_rtp_error_update_target_qps"
 
     # worker_status
     WORKER_STATUS_QPS_METRIC = "py_rtp_worker_status_qps"
     CACHE_STATUS_QPS_METRIC = "py_rtp_cache_status_qps"
     # route:
-    ROUTE_QPS_METRIC = "py_rtp_route_qps"
     MASTER_ROUTE_QPS_METRIC = "py_rtp_master_route_qps"
     DOMAIN_ROUTE_QPS_METRIC = "py_rtp_domain_route_qps"
     MASTER_ROUTE_ERROR_QPS_METRIC = "py_rtp_master_route_error_qps"
@@ -88,8 +85,6 @@ class GaugeMetrics(Enum):
     PRE_PIPELINE_RT_METRIC = "ft_pre_pipeline_rt"
     POST_PIPELINE_RT_METRIC = "ft_post_pipeline_rt"
     NUM_BEAMS_METRIC = "ft_num_beams"
-
-    UPDATE_LANTENCY_METRIC = "py_rtp_update_framework_rt"
 
     # worker_status
     WORKER_STATUS_QPS_LANTENCY_METRIC = "py_rtp_worker_status_rt"

@@ -79,3 +79,9 @@ docs/index/dist/
 
 # Local analysis reports
 *_analysis_report.md
+
+# vllm 参考仓库
+/vllm/
+
+# AI 指导文档目录
+/skills/

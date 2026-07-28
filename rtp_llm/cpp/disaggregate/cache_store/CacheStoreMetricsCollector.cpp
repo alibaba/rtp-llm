@@ -58,10 +58,9 @@ CacheStoreServerLoadMetricsCollector::CacheStoreServerLoadMetricsCollector(const
 }
 
 CacheStoreServerLoadMetricsCollector::~CacheStoreServerLoadMetricsCollector() {
-    collector_.latency_us                   = subZeroOrAbove(end_time_us_, start_time_us_);
-    collector_.first_block_ready_latency_us = subZeroOrAbove(first_block_ready_time_us_, start_time_us_);
-    collector_.all_block_ready_latency_us   = subZeroOrAbove(all_block_ready_time_us_, start_time_us_);
-    collector_.transfer_gap_latency_us      = subZeroOrAbove(end_time_us_, all_block_ready_time_us_);
+    collector_.latency_us                 = subZeroOrAbove(end_time_us_, start_time_us_);
+    collector_.all_block_ready_latency_us = subZeroOrAbove(all_block_ready_time_us_, start_time_us_);
+    collector_.transfer_gap_latency_us    = subZeroOrAbove(end_time_us_, all_block_ready_time_us_);
 
     if (reporter_ != nullptr) {
         reporter_->report<RtpLLMCacheStoreMetrics, RtpLLMCacheStoreLoadServerMetricsCollector>(nullptr, &collector_);

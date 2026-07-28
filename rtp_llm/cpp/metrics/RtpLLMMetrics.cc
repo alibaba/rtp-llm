@@ -23,11 +23,9 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMExecutorMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMTokenPSMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMWallClockTokenPSMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMEngineMetrics);
-AUTIL_LOG_SETUP(rtp_llm, RtpLLMKernelMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMSpeculativeEngineMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLmEplbMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheStoreMetrics);
-AUTIL_LOG_SETUP(rtp_llm, RtpLLMKVCacheInfoMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMMemoryCacheMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMDiskCacheMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMRemoteCacheMatchMetrics);
@@ -77,12 +75,6 @@ bool RpcMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(load_cache_min_rt_us_metric, "rtp_llm_rpc_load_cache_min_rt_us");
     REGISTER_GAUGE_MUTABLE_METRIC(load_cache_max_rt_us_metric, "rtp_llm_rpc_load_cache_max_rt_us");
     REGISTER_GAUGE_MUTABLE_METRIC(load_cache_polling_cost_us_metric, "rtp_llm_rpc_load_cache_polling_cost_us");
-
-    REGISTER_GAUGE_MUTABLE_METRIC(notify_store_cache_rt_us_metric, "rtp_llm_rpc_notify_store_cache_rt_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(generate_first_token_rt_us_metric, "rtp_llm_rpc_generate_first_token_rt_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(wait_store_cache_rt_us_metric, "rtp_llm_rpc_wait_store_cache_rt_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(min_response_done_time_us_metric, "rtp_llm_rpc_min_response_done_time_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(max_response_done_time_us_metric, "rtp_llm_rpc_max_response_done_time_us");
 
     return true;
 }
@@ -187,12 +179,6 @@ void RpcMetrics::report(const kmonitor::MetricsTags* tags, RpcMetricsCollector* 
     REPORT_GAUGE(load_cache_min_rt_us);
     REPORT_GAUGE(load_cache_max_rt_us);
     REPORT_GAUGE(load_cache_polling_cost_us);
-
-    REPORT_GAUGE(notify_store_cache_rt_us);
-    REPORT_GAUGE(generate_first_token_rt_us);
-    REPORT_GAUGE(wait_store_cache_rt_us);
-    REPORT_GAUGE(min_response_done_time_us);
-    REPORT_GAUGE(max_response_done_time_us);
 }
 
 bool RtpLLMStreamMetrics::init(kmonitor::MetricsGroupManager* manager) {
@@ -299,7 +285,6 @@ void RtpEmbeddingStreamMetrics::report(const kmonitor::MetricsTags*        tags,
 bool RtpLLMSchedulerMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(wait_stream_size_metric, "rtp_llm_wait_stream_size");
     REGISTER_GAUGE_MUTABLE_METRIC(running_stream_size_metric, "rtp_llm_running_stream_size");
-    REGISTER_GAUGE_MUTABLE_METRIC(remote_running_stream_size_metric, "rtp_llm_remote_running_stream_size");
     REGISTER_GAUGE_MUTABLE_METRIC(loading_cache_stream_size_metric, "rtp_llm_loading_cache_stream_size");
     REGISTER_GAUGE_MUTABLE_METRIC(pending_decode_stream_size_metric, "rtp_llm_pending_decode_stream_size");
     REGISTER_GAUGE_MUTABLE_METRIC(decode_since_prefill_metric, "rtp_llm_decode_since_prefill");
@@ -316,7 +301,6 @@ bool RtpLLMSchedulerMetrics::init(kmonitor::MetricsGroupManager* manager) {
 void RtpLLMSchedulerMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMSchedulerMetricsCollector* collector) {
     REPORT_MUTABLE_METRIC(wait_stream_size_metric, collector->wait_stream_size);
     REPORT_MUTABLE_METRIC(running_stream_size_metric, collector->running_stream_size);
-    REPORT_MUTABLE_METRIC(remote_running_stream_size_metric, collector->remote_running_stream_size);
     REPORT_MUTABLE_METRIC(loading_cache_stream_size_metric, collector->loading_cache_stream_size);
     REPORT_MUTABLE_METRIC(pending_decode_stream_size_metric, collector->pending_decode_stream_size);
     REPORT_MUTABLE_METRIC(decode_since_prefill_metric, collector->decode_since_prefill);
@@ -383,9 +367,6 @@ void RtpLLMExecutorMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMExec
 
 bool RtpLLMSpeculativeEngineMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(step_latency_us_metric, "rtp_llm_sp_step_latency_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(propose_step_latency_us_metric, "rtp_llm_sp_propose_step_latency_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(score_step_latency_us_metric, "rtp_llm_sp_score_step_latency_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(speculative_sampler_latency_us_metric, "rtp_llm_sp_speculative_sampler_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(total_propose_token_num_metric, "rtp_llm_sp_total_propose_token_num");
     REGISTER_GAUGE_MUTABLE_METRIC(total_accepted_token_num_metric, "rtp_llm_sp_total_accepted_token_num");
     REGISTER_GAUGE_MUTABLE_METRIC(sp_avg_accept_token_num_metric, "rtp_llm_sp_avg_accept_token_num");
@@ -398,9 +379,6 @@ bool RtpLLMSpeculativeEngineMetrics::init(kmonitor::MetricsGroupManager* manager
 void RtpLLMSpeculativeEngineMetrics::report(const kmonitor::MetricsTags*             tags,
                                             RtpLLMSpeculativeEngineMetricsCollector* collector) {
     REPORT_MUTABLE_METRIC(step_latency_us_metric, collector->step_latency_us);
-    REPORT_MUTABLE_METRIC(propose_step_latency_us_metric, collector->propose_step_latency_us);
-    REPORT_MUTABLE_METRIC(score_step_latency_us_metric, collector->score_step_latency_us);
-    REPORT_MUTABLE_METRIC(speculative_sampler_latency_us_metric, collector->speculative_sampler_latency_us);
 
     if (collector->total_propose_token_num > 0 && collector->total_stream_num > 0) {
         REPORT_MUTABLE_METRIC(total_propose_token_num_metric, collector->total_propose_token_num);
@@ -627,15 +605,6 @@ void RtpLLMDeviceCacheReuseMetrics::report(const kmonitor::MetricsTags*         
     REPORT_MUTABLE_METRIC(device_cache_hit_rate, collector->device_cache_hit_rate);
 }
 
-bool RtpLLMKernelMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    REGISTER_GAUGE_MUTABLE_METRIC(kernel_exec_time_metric, "rtp_llm_kenrel_exec_time");
-    return true;
-}
-
-void RtpLLMKernelMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMKernelMetricsCollector* collector) {
-    REPORT_MUTABLE_METRIC(kernel_exec_time_metric, collector->kernel_exec_time);
-}
-
 bool RtpLLmEplbMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(update_weights_qps_metric, "rtp_llm_update_weights_qps");
     REGISTER_QPS_MUTABLE_METRIC(update_layer_weights_qps_metric, "rtp_llm_update_layer_weights_qps");
@@ -672,17 +641,6 @@ void RtpLLmEplbMetrics::report(const kmonitor::MetricsTags* tags, RtpLLmEplbMetr
     }
 }
 
-void RtpLLMKVCacheInfoMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMKVCacheInfoMetricsCollector* collector) {
-    REPORT_QPS(qps);
-    REPORT_GAUGE(total_latency_us);
-}
-
-bool RtpLLMKVCacheInfoMetrics::init(kmonitor::MetricsGroupManager* manager) {
-    REGISTER_QPS_MUTABLE_METRIC(qps_metric, "rtp_llm_kv_cache_info_qps");
-    REGISTER_GAUGE_MUTABLE_METRIC(total_latency_us_metric, "rtp_llm_kv_cache_info_total_latency_us");
-    return true;
-}
-
 bool RtpLLMCacheStoreMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_QPS_MUTABLE_METRIC(load_client_qps_metric, "rtp_llm.cache_store.load.client.qps");
     REGISTER_QPS_MUTABLE_METRIC(load_client_error_qps_metric, "rtp_llm.cache_store.load.client.error_qps");
@@ -707,8 +665,6 @@ bool RtpLLMCacheStoreMetrics::init(kmonitor::MetricsGroupManager* manager) {
     REGISTER_GAUGE_MUTABLE_METRIC(load_server_latency_us_metric, "rtp_llm.cache_store.load.server.latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(load_server_request_send_cost_us_metric,
                                   "rtp_llm.cache_store.load.server.request_send_cost_us");
-    REGISTER_GAUGE_MUTABLE_METRIC(load_server_first_block_ready_latency_us_metric,
-                                  "rtp_llm.cache_store.load.server.first_block_ready_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(load_server_all_block_ready_latency_us_metric,
                                   "rtp_llm.cache_store.load.server.all_block_ready_latency_us");
     REGISTER_GAUGE_MUTABLE_METRIC(load_server_transfer_gap_latency_us_metric,

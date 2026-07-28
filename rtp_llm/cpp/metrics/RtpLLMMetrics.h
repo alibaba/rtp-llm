@@ -52,13 +52,6 @@ public:
     int64_t load_cache_from_prefill_rt_us  = 0;
     int64_t local_generate_rt_us           = 0;
 
-    // pd-sep prefill metrics(decode entrance)
-    int64_t notify_store_cache_rt_us   = 0;
-    int64_t generate_first_token_rt_us = 0;
-    int64_t wait_store_cache_rt_us     = 0;
-    int64_t min_response_done_time_us  = 1lu << 60;
-    int64_t max_response_done_time_us  = 0;
-
     // for decode tp
     int64_t load_cache_min_rt_us       = 0;
     int64_t load_cache_max_rt_us       = 0;
@@ -101,12 +94,6 @@ public:
     kmonitor::MutableMetric* load_cache_min_rt_us_metric       = nullptr;
     kmonitor::MutableMetric* load_cache_max_rt_us_metric       = nullptr;
     kmonitor::MutableMetric* load_cache_polling_cost_us_metric = nullptr;
-
-    kmonitor::MutableMetric* notify_store_cache_rt_us_metric   = nullptr;
-    kmonitor::MutableMetric* generate_first_token_rt_us_metric = nullptr;
-    kmonitor::MutableMetric* wait_store_cache_rt_us_metric     = nullptr;
-    kmonitor::MutableMetric* min_response_done_time_us_metric  = nullptr;
-    kmonitor::MutableMetric* max_response_done_time_us_metric  = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -1070,42 +1057,6 @@ private:
     AUTIL_LOG_DECLARE();
 };
 
-class RtpLLMKernelMetricsCollector final {
-public:
-    float kernel_exec_time = 0;
-};
-
-class RtpLLMKernelMetrics: public kmonitor::MetricsGroup {
-public:
-    bool init(kmonitor::MetricsGroupManager* manager) override;
-    void report(const kmonitor::MetricsTags* tags, RtpLLMKernelMetricsCollector* collector);
-
-public:
-    kmonitor::MutableMetric* kernel_exec_time_metric = nullptr;
-
-private:
-    AUTIL_LOG_DECLARE();
-};
-
-class RtpLLMKVCacheInfoMetricsCollector final {
-public:
-    bool    qps              = false;
-    int64_t total_latency_us = 0;
-};
-
-class RtpLLMKVCacheInfoMetrics: public kmonitor::MetricsGroup {
-public:
-    bool init(kmonitor::MetricsGroupManager* manager) override;
-    void report(const kmonitor::MetricsTags* tags, RtpLLMKVCacheInfoMetricsCollector* collector);
-
-public:
-    kmonitor::MutableMetric* qps_metric              = nullptr;
-    kmonitor::MutableMetric* total_latency_us_metric = nullptr;
-
-private:
-    AUTIL_LOG_DECLARE();
-};
-
 class RtpLLMSpeculativeEngineMetricsCollector final {
 public:
     int64_t step_latency_us                = 0;
@@ -1179,14 +1130,13 @@ public:
 
 class RtpLLMCacheStoreLoadServerMetricsCollector final {
 public:
-    bool    success                      = true;
-    int64_t block_count                  = 0;
-    int64_t total_block_size             = 0;
-    int64_t latency_us                   = 0;  // 从接收到请求 到 最后一个 block 传输完的时间
-    int64_t request_send_cost_us         = 0;  // load 请求从 client 发送到 server 耗时
-    int64_t first_block_ready_latency_us = 0;  // 等待第一block可以传输的耗时
-    int64_t all_block_ready_latency_us   = 0;  // 从接收到请求到最后一个block ready 可以传输的时间.
-    int64_t transfer_gap_latency_us      = 0;  // 从最后一个block ready 可以传输 到 最后一个 block 传输完成的时间差.
+    bool    success                    = true;
+    int64_t block_count                = 0;
+    int64_t total_block_size           = 0;
+    int64_t latency_us                 = 0;  // 从接收到请求 到 最后一个 block 传输完的时间
+    int64_t request_send_cost_us       = 0;  // load 请求从 client 发送到 server 耗时
+    int64_t all_block_ready_latency_us = 0;  // 从接收到请求到最后一个block ready 可以传输的时间.
+    int64_t transfer_gap_latency_us    = 0;  // 从最后一个block ready 可以传输 到 最后一个 block 传输完成的时间差.
 
     std::vector<int64_t> write_block_count;       // 调用write的block数量
     std::vector<int64_t> write_total_block_size;  //  调用write的block size
@@ -1241,18 +1191,17 @@ public:
     kmonitor::MutableMetric* load_client_server_call_latency_us_metric   = nullptr;
     kmonitor::MutableMetric* load_client_response_send_cost_us_metric    = nullptr;
 
-    kmonitor::MutableMetric* load_server_qps_metric                          = nullptr;
-    kmonitor::MutableMetric* load_server_error_qps_metric                    = nullptr;
-    kmonitor::MutableMetric* load_server_block_count_metric                  = nullptr;
-    kmonitor::MutableMetric* load_server_total_block_size_metric             = nullptr;
-    kmonitor::MutableMetric* load_server_latency_us_metric                   = nullptr;
-    kmonitor::MutableMetric* load_server_request_send_cost_us_metric         = nullptr;
-    kmonitor::MutableMetric* load_server_first_block_ready_latency_us_metric = nullptr;
-    kmonitor::MutableMetric* load_server_all_block_ready_latency_us_metric   = nullptr;
-    kmonitor::MutableMetric* load_server_transfer_gap_latency_us_metric      = nullptr;
-    kmonitor::MutableMetric* load_server_write_block_count_metric            = nullptr;
-    kmonitor::MutableMetric* load_server_write_total_block_size              = nullptr;
-    kmonitor::MutableMetric* load_server_write_latency_us_metric             = nullptr;
+    kmonitor::MutableMetric* load_server_qps_metric                        = nullptr;
+    kmonitor::MutableMetric* load_server_error_qps_metric                  = nullptr;
+    kmonitor::MutableMetric* load_server_block_count_metric                = nullptr;
+    kmonitor::MutableMetric* load_server_total_block_size_metric           = nullptr;
+    kmonitor::MutableMetric* load_server_latency_us_metric                 = nullptr;
+    kmonitor::MutableMetric* load_server_request_send_cost_us_metric       = nullptr;
+    kmonitor::MutableMetric* load_server_all_block_ready_latency_us_metric = nullptr;
+    kmonitor::MutableMetric* load_server_transfer_gap_latency_us_metric    = nullptr;
+    kmonitor::MutableMetric* load_server_write_block_count_metric          = nullptr;
+    kmonitor::MutableMetric* load_server_write_total_block_size            = nullptr;
+    kmonitor::MutableMetric* load_server_write_latency_us_metric           = nullptr;
 
     kmonitor::MutableMetric* store_qps_metric                        = nullptr;
     kmonitor::MutableMetric* store_error_qps_metric                  = nullptr;
@@ -1272,7 +1221,6 @@ public:
     kmonitor::MutableMetric* remote_store_transfer_gap_latency_us_metric      = nullptr;
 
     kmonitor::MutableMetric* transfer_qps_metric              = nullptr;
-    kmonitor::MutableMetric* transfer_error_qps_metric        = nullptr;
     kmonitor::MutableMetric* transfer_block_count_metric      = nullptr;
     kmonitor::MutableMetric* transfer_total_block_size_metric = nullptr;
     kmonitor::MutableMetric* transfer_latency_us_metric       = nullptr;

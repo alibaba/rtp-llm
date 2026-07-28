@@ -34,10 +34,6 @@ public:
     virtual void reportResponseIterateLatencyMs(double val);
     virtual void reportResponseIterateCountMetric(int32_t val);
 
-    virtual void reportUpdateQpsMetric();
-    virtual void reportErrorUpdateTargetQpsMetric();
-    virtual void reportUpdateLatencyMs(double val);
-
     virtual void reportFTIterateCountMetric(double val);
     virtual void reportFTInputTokenLengthMetric(double val);
     virtual void reportFTOutputTokenLengthMetric(double val);
@@ -61,11 +57,6 @@ private:
     std::unique_ptr<kmonitor::MutableMetric> response_first_token_rt_metric_;
     std::unique_ptr<kmonitor::MutableMetric> response_iterate_rt_metric_;
     std::unique_ptr<kmonitor::MutableMetric> response_iterate_count_metric_;
-
-    // update
-    std::unique_ptr<kmonitor::MutableMetric> update_qps_metric_;
-    std::unique_ptr<kmonitor::MutableMetric> error_update_target_qps_metric_;
-    std::unique_ptr<kmonitor::MutableMetric> update_framework_rt_metric_;
 
     // token_processor
     std::unique_ptr<kmonitor::MutableMetric> ft_iterate_count_metric_;
