@@ -7,6 +7,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include <cstdint>
+#include "rtp_llm/cpp/utils/Logger.h"
 #include <memory>
 #include <cstdlib>
 
@@ -16,6 +17,13 @@ class Executor {
 public:
     Executor() {};
     virtual absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) = 0;
+
+    // Deployment-registered post-layers CustomHandler (generate path).
+    // Executors that do not run post layers ignore it; deployments combining
+    // a handler with such executors are rejected at startup on the Python side.
+    virtual void setPostLayersProcessor(const std::shared_ptr<PostLayersProcessor>& processor) {
+        RTP_LLM_LOG_WARNING("post-layers processor is not supported by this executor, handler ignored");
+    }
 
     static GptModelDescription genModelDescription(const ModelConfig&       model_config,
                                                    const ParallelismConfig& parallelism_config,

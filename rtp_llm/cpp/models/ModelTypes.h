@@ -141,6 +141,8 @@ struct TensorHolder {
     }
 };
 
+class PostLayersProcessor;
+
 class ModelBase {
 public:
     virtual ~ModelBase()                                          = default;
@@ -159,6 +161,10 @@ public:
     virtual torch::Tensor getMtpLastHiddenStates(int64_t /*num_tokens*/) {
         return torch::Tensor();
     }
+
+    // Deployment-registered post-layers CustomHandler (generate path);
+    // models that do not run post layers ignore it.
+    virtual void setPostLayersProcessor(const std::shared_ptr<PostLayersProcessor>& processor) {}
 
     rtp_llm::Weights            weights_;
     rtp_llm::OverallExpertStats overall_expert_stats_;

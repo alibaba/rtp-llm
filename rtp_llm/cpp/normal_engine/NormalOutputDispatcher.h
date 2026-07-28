@@ -29,7 +29,8 @@ private:
                               bool                 return_all_probs,
                               const torch::Tensor& new_tokens_all,
                               const torch::Tensor& token_ids_cpu,
-                              const torch::Tensor& success_cpu) const;
+                              const torch::Tensor& success_cpu,
+                              const torch::Tensor& batch_custom_output = {}) const;
 };
 
 }  // namespace rtp_llm

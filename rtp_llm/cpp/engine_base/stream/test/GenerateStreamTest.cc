@@ -320,6 +320,7 @@ TEST_F(GenerateStreamTest, pdUpdatePublishesOutputBeforeRemoteHandoffCompletion)
                     torch::Tensor(),
                     torch::Tensor(),
                     torch::Tensor(),
+                    torch::Tensor(),
                     true,
                     false});
 

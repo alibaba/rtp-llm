@@ -106,6 +106,8 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     bool                need_d2h_sync = false;
     const torch::Tensor token_ids_cpu = copyToPinnedCpuAsync(token_ids_for_copy, need_d2h_sync);
     const torch::Tensor success_cpu   = copyToPinnedCpuAsync(sampler_output.success, need_d2h_sync);
+    const torch::Tensor custom_output_cpu =
+        copyToPinnedCpuAsync(merge_outputs.model_output.custom_output, need_d2h_sync);
     syncPinnedCpuCopies(need_d2h_sync);
     RTP_LLM_LOG_DEBUG("new_all_token_ids = [%s]", tensorDebugStringWithData<int32_t>(token_ids_cpu).c_str());
     int  batch_idx_in     = 0;
@@ -114,10 +116,19 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     bool return_all_probs = stream_groups.needReturnAllProbs() != ReturnAllProbsMode::NONE;
     auto new_tokens_all   = torch::empty({(int64_t)total_batch_size_out, 1}, torch::kInt32);
 
+    const int total_decode_batch_size = static_cast<int>(stream_groups.totalDecodeBatchSize());
     for (auto& stream : stream_groups.allStreams()) {
         auto cur_batch_size  = stream->currentBatchSize();
         auto next_batch_size = stream->nextBatchSize();
         auto token_size      = stream->currentExecuteTokenSize();
+
+        // custom_output rows cover context streams only (decode streams come
+        // first in the batch), so index them relative to the decode tail.
+        torch::Tensor batch_custom_output;
+        if (custom_output_cpu.defined() && batch_idx_in >= total_decode_batch_size
+            && batch_idx_in - total_decode_batch_size + cur_batch_size <= custom_output_cpu.size(0)) {
+            batch_custom_output = custom_output_cpu.narrow(0, batch_idx_in - total_decode_batch_size, cur_batch_size);
+        }
 
         dispatchSingleStream(stream,
                              merge_outputs,
@@ -127,7 +138,8 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                              return_all_probs,
                              new_tokens_all,
                              token_ids_cpu,
-                             success_cpu);
+                             success_cpu,
+                             batch_custom_output);
 
         batch_idx_in += cur_batch_size;
         batch_idx_out += next_batch_size;
@@ -146,7 +158,8 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                                   bool                 return_all_probs,
                                                   const torch::Tensor& new_tokens_all,
                                                   const torch::Tensor& token_ids_cpu,
-                                                  const torch::Tensor& success_cpu) const {
+                                                  const torch::Tensor& success_cpu,
+                                                  const torch::Tensor& batch_custom_output) const {
 
     const auto&  model_output      = merge_outputs.model_output;
     const auto&  sampler_output    = merge_outputs.sampler_output;
@@ -318,6 +331,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                  loss,
                                  src_batch_indices,
                                  all_hidden_states,
+                                 batch_custom_output,
                                  /*update_remote_generate=*/true,
                                  /*force_update_info=*/false,
                                  std::move(prompt_logits_output),

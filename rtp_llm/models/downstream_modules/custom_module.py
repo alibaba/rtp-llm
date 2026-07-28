@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from enum import Enum
 from typing import TYPE_CHECKING, Any, Dict, List, Union
 
 import torch
@@ -17,6 +18,20 @@ if TYPE_CHECKING:
 """
 用于多种多样的下游任务
 """
+
+
+class Trigger(str, Enum):
+    """When the generate engine invokes CustomHandler.extend_forward.
+
+    CONTEXT: on each request's prefill step, batched over the last-token
+        hidden states of the context streams. The only implemented mode.
+    FINAL_STEP / EVERY_STEP: protocol placeholders, not implemented yet;
+        declaring them fails deployment startup.
+    """
+
+    CONTEXT = "context"
+    FINAL_STEP = "final_step"
+    EVERY_STEP = "every_step"
 
 
 class CustomModule(object):
@@ -83,6 +98,11 @@ class CustomHandler(object):
     # specify required args for extended_forward
     def extend_forward_args(self) -> List[str]:
         return ["input_lengths", "input_ids", "hidden_states"]
+
+    # generate path only (deployment-registered post-layers handler): when the
+    # engine invokes extend_forward. The embedding engine ignores this.
+    def trigger_mode(self) -> Trigger:
+        return Trigger.CONTEXT
 
     # extended_forward
     # input_lengths: [batch_size]

@@ -379,6 +379,7 @@ class ChatCompletionExtraOutputs(BaseModel):
     logits: Optional[Union[List[float], List[List[float]]]] = None
     output_ids: Optional[List[List[int]]] = None
     input_ids: Optional[List[List[int]]] = None
+    custom_output: Optional[Union[List[float], List[List[float]]]] = None
 
 
 class ChatCompletionResponse(BaseModel):

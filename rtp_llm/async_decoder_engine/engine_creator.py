@@ -3,7 +3,7 @@ from __future__ import annotations
 import logging
 from typing import TYPE_CHECKING, Optional
 
-from rtp_llm.ops import TaskType
+from rtp_llm.ops import RoleType, TaskType
 from rtp_llm.utils.time_util import timer_wrapper
 
 if TYPE_CHECKING:
@@ -45,6 +45,18 @@ def create_engine(
     if model.model_config.task_type == TaskType.LANGUAGE_MODEL:
         from rtp_llm.async_decoder_engine.rpc_engine import LanguageCppEngine
 
+        if model.custom_module is not None:
+            # v1 of the post-layers handler: no speculative decoding, no PD
+            # disaggregation. Reject the combination at startup instead of
+            # silently not scoring.
+            if propose_model is not None:
+                raise RuntimeError(
+                    "CUSTOM_OUTPUT_PROCESSOR does not support speculative decoding yet"
+                )
+            if engine_config.pd_sep_config.role_type != RoleType.PDFUSION:
+                raise RuntimeError(
+                    "CUSTOM_OUTPUT_PROCESSOR does not support PD disaggregation yet"
+                )
         logging.info("create llm engine")
         return LanguageCppEngine(
             model=model,

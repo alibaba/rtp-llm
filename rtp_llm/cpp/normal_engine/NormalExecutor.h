@@ -46,6 +46,10 @@ public:
         model_ = std::move(model);
     }
 
+    void setPostLayersProcessor(const std::shared_ptr<PostLayersProcessor>& processor) override {
+        model_->setPostLayersProcessor(processor);
+    }
+
     // Test hook: if set, used to create model when py_model is None
     using ModelFactory = std::function<std::unique_ptr<ModelBase>(const GptModelInitParams&)>;
     static ModelFactory test_model_factory;

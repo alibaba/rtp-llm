@@ -135,6 +135,10 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
                 generate_output.loss = loss_;
             }
         }
+        if (custom_output_.defined()) {
+            generate_output.custom_output =
+                custom_output_.size(0) == 1 ? custom_output_ : custom_output_.narrow(0, i, 1);
+        }
 
         if (update_info.prompt_logits.has_value()) {
             generate_output.prompt_logits = update_info.prompt_logits;
@@ -213,6 +217,10 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
 
     if (update_info.loss.defined()) {
         setLoss(update_info.loss);
+    }
+
+    if (update_info.custom_output.defined()) {
+        setCustomOutput(update_info.custom_output);
     }
 
     // TODO(wangyin.yx): check behaviour of update_info.hidden_states under mtp/eagle model
