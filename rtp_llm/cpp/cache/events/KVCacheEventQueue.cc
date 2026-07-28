@@ -41,9 +41,11 @@ QueuePushResult KVCacheEventQueue::tryPush(KVCacheEvent event) noexcept {
 std::vector<KVCacheEvent> KVCacheEventQueue::waitPop(size_t max_batch_size, std::chrono::milliseconds timeout) {
     const size_t max_count = std::max<size_t>(max_batch_size, 1);
     if (published_size_.load(std::memory_order_acquire) == 0) {
+        const size_t                 wake_generation = wake_generation_.load(std::memory_order_acquire);
         std::unique_lock<std::mutex> lock(wait_mu_);
-        cv_.wait_for(lock, timeout, [this] {
-            return stopped_.load(std::memory_order_acquire) || published_size_.load(std::memory_order_acquire) > 0;
+        cv_.wait_for(lock, timeout, [this, wake_generation] {
+            return stopped_.load(std::memory_order_acquire) || published_size_.load(std::memory_order_acquire) > 0
+                   || wake_generation_.load(std::memory_order_acquire) != wake_generation;
         });
     }
 
@@ -70,7 +72,8 @@ void KVCacheEventQueue::discardPending() {
 }
 
 void KVCacheEventQueue::wake() {
-    cv_.notify_one();
+    wake_generation_.fetch_add(1, std::memory_order_release);
+    cv_.notify_all();
 }
 
 void KVCacheEventQueue::stop() {

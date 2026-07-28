@@ -84,6 +84,9 @@ pages. It uses a separate, longer request timeout from control and incremental t
 and timeout from the deployment's maximum logical-key count and KVCM capacity; keep the KVCM heartbeat expiry longer
 than the maximum accepted snapshot processing time. The KVCM endpoint must support `EVENT_BLOCK_SNAPSHOT` with
 per-scope in-flight fencing and crash-safe commit semantics.
+During shutdown, the built-in HTTP reporter cancels an in-flight snapshot transfer before joining the worker. A
+control or incremental request already in flight remains bounded by `kv_cache_event_request_timeout_ms`; a best-effort
+`EVENT_HOST_DOWN` is sent only when the worker still has a registered session.
 
 The first implementation publishes the device `BlockCache` as the `hbm` medium. DRAM cache events are not included.
 
@@ -113,7 +116,11 @@ disables the publisher while leaving inference available. `log` mode does not re
 The manager endpoint must be a resolved HTTP endpoint; this version does not perform KVCM service discovery or
 leader switching inside RTP-LLM.
 Publisher type values are case-sensitive for both CLI arguments and environment variables; invalid values are rejected
-during argument parsing.
+during argument parsing. In mixed CLI + environment mode, this validation now applies to every server argument with
+`choices`, including the existing PDFusion scheduler mode, cache-store RDMA mode, KV-cache dtype, and MoE backend
+selectors. Clear any stale invalid environment value before upgrading. Environment values that cannot be converted to
+their declared numeric or boolean type retain the legacy fallback-to-default behavior and now emit a warning naming
+the ignored variable.
 
 `KVCacheConfig` pickle state supports the legacy 43- and 54-element layouts plus the current 68-element layout. The
 current layout cannot be deserialized by an older binary, so processes that exchange pickled configuration during

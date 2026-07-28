@@ -4,6 +4,7 @@
 #include <chrono>
 #include <exception>
 #include <numeric>
+#include <stdexcept>
 #include <unordered_set>
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
@@ -678,7 +679,12 @@ void KVCacheManager::initCacheEventPublisher() {
         publisher_context.dp_rank = static_cast<int32_t>(parallelism_config_.dp_rank);
         publisher_context.use_mla = config_.use_mla;
 
-        auto snapshot_provider = [shared_cache = publisher_shared_cache_]() {
+        std::weak_ptr<SharedBlockCache> weak_shared_cache = publisher_shared_cache_;
+        auto                            snapshot_provider = [weak_shared_cache]() {
+            const auto shared_cache = weak_shared_cache.lock();
+            if (!shared_cache) {
+                throw std::runtime_error("SharedBlockCache is no longer available");
+            }
             const auto      logical_snapshot = shared_cache->logicalCacheSnapshot();
             KVCacheSnapshot snapshot;
             snapshot.version = logical_snapshot.version;

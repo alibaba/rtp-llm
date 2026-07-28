@@ -166,7 +166,11 @@ cc_test(
     ],
     data = [],
     copts = test_copts,
-    deps = block_cache_test_deps,
+    deps = [
+        "//rtp_llm/cpp/cache:block_pool",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
     env = {},
     exec_properties = {'gpu':'H20'},
 )

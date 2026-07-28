@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <chrono>
+#include <future>
 #include <gtest/gtest.h>
 #include <thread>
 #include <vector>
@@ -72,6 +73,34 @@ TEST(KVCacheEventQueueTest, CapacityDiscardAndStopHaveExplicitResults) {
 
     queue.stop();
     EXPECT_EQ(QueuePushResult::STOPPED, queue.tryPush({KVCacheEventType::BLOCK_ADD, 50, 0}));
+}
+
+TEST(KVCacheEventQueueTest, WakeInterruptsEmptyWaitPop) {
+    KVCacheEventQueue queue(2);
+    auto              waiter =
+        std::async(std::launch::async, [&] { return queue.waitPop(/*max_batch_size=*/1, std::chrono::seconds(2)); });
+
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(1);
+    while (waiter.wait_for(std::chrono::milliseconds(0)) != std::future_status::ready
+           && std::chrono::steady_clock::now() < deadline) {
+        queue.wake();
+        std::this_thread::sleep_for(std::chrono::milliseconds(1));
+    }
+
+    ASSERT_EQ(std::future_status::ready, waiter.wait_for(std::chrono::milliseconds(0)));
+    EXPECT_TRUE(waiter.get().empty());
+}
+
+TEST(KVCacheEventQueueTest, WaitForStopTimesOutAndReturnsImmediatelyAfterStop) {
+    KVCacheEventQueue queue(2);
+    auto timed_wait = std::async(std::launch::async, [&] { queue.waitForStop(std::chrono::milliseconds(10)); });
+    ASSERT_EQ(std::future_status::ready, timed_wait.wait_for(std::chrono::seconds(1)));
+    timed_wait.get();
+
+    queue.stop();
+    auto stopped_wait = std::async(std::launch::async, [&] { queue.waitForStop(std::chrono::seconds(2)); });
+    ASSERT_EQ(std::future_status::ready, stopped_wait.wait_for(std::chrono::seconds(1)));
+    stopped_wait.get();
 }
 
 TEST(KVCacheEventQueueTest, SmallRingWrapsUnderConcurrentProducerConsumerLoad) {

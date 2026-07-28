@@ -3,6 +3,10 @@ import os
 import sys
 from unittest import TestCase, main
 
+from rtp_llm.config.test.kv_cache_event_test_values import (
+    KV_CACHE_EVENT_ENV_CASES,
+)
+
 
 class ServerArgsPyEnvConfigsTest(TestCase):
     """Test that environment variables and command line arguments are correctly set to py_env_configs structure."""
@@ -330,33 +334,61 @@ class ServerArgsSetTest(TestCase):
             rtp_llm.server.server_args.server_args.setup_args()
 
     def test_kv_cache_event_env_vars_bind_to_config(self):
-        os.environ["KV_CACHE_EVENT_PUBLISHER_TYPE"] = "kvcm"
-        os.environ["KV_CACHE_EVENT_QUEUE_CAPACITY"] = "2048"
-        sys.argv = ["prog"]
+        for env_name, _, raw_value, _ in KV_CACHE_EVENT_ENV_CASES:
+            os.environ[env_name] = raw_value
+        # Exercise the mixed CLI + environment path rather than argparse's
+        # environment-to-argv fallback.
+        sys.argv = ["prog", "--model_type", "qwen"]
 
         import rtp_llm.server.server_args.server_args
 
         importlib.reload(rtp_llm.server.server_args.server_args)
         py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
 
-        self.assertEqual(
-            "kvcm",
-            py_env_configs.kv_cache_config.kv_cache_event_publisher_type,
-        )
-        self.assertEqual(
-            2048,
-            py_env_configs.kv_cache_config.kv_cache_event_queue_capacity,
-        )
+        for _, field_name, _, expected_value in KV_CACHE_EVENT_ENV_CASES:
+            with self.subTest(field_name=field_name):
+                self.assertEqual(
+                    expected_value,
+                    getattr(py_env_configs.kv_cache_config, field_name),
+                )
 
     def test_kv_cache_event_env_rejects_unknown_publisher_type(self):
         os.environ["KV_CACHE_EVENT_PUBLISHER_TYPE"] = "KVCM"
-        sys.argv = ["prog"]
+        sys.argv = ["prog", "--model_type", "qwen"]
 
         import rtp_llm.server.server_args.server_args
 
         importlib.reload(rtp_llm.server.server_args.server_args)
         with self.assertRaises(SystemExit):
             rtp_llm.server.server_args.server_args.setup_args()
+
+    def test_existing_env_choice_rejects_unknown_value_in_mixed_mode(self):
+        os.environ["PDFUSION_SCHEDULER_MODE"] = "unknown"
+        sys.argv = ["prog", "--model_type", "qwen"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        with self.assertRaises(SystemExit):
+            rtp_llm.server.server_args.server_args.setup_args()
+
+    def test_invalid_typed_env_value_warns_and_uses_default_in_mixed_mode(self):
+        os.environ["KV_CACHE_EVENT_QUEUE_CAPACITY"] = "not-an-integer"
+        sys.argv = ["prog", "--model_type", "qwen"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        with self.assertLogs(level="WARNING") as logs:
+            py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(
+            100000,
+            py_env_configs.kv_cache_config.kv_cache_event_queue_capacity,
+        )
+        self.assertTrue(
+            any("KV_CACHE_EVENT_QUEUE_CAPACITY" in message for message in logs.output)
+        )
 
     def test_gpu_batch_vit_args_parse(self):
         from rtp_llm.config.py_config_modules import PyEnvConfigs

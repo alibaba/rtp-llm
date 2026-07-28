@@ -5,13 +5,20 @@
 #include "rtp_llm/cpp/cache/events/LogPublisher.h"
 #include "rtp_llm/cpp/cache/events/NullPublisher.h"
 
+#include <arpa/inet.h>
 #include <atomic>
+#include <cerrno>
 #include <condition_variable>
+#include <cstring>
+#include <future>
 #include <gtest/gtest.h>
 #include <mutex>
+#include <netinet/in.h>
 #include <stdexcept>
 #include <string>
+#include <sys/socket.h>
 #include <thread>
+#include <unistd.h>
 #include <utility>
 #include <vector>
 
@@ -191,6 +198,168 @@ private:
     std::condition_variable cv_;
 };
 
+class LocalHttpStub {
+public:
+    LocalHttpStub() {
+        listen_fd_ = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (listen_fd_ < 0) {
+            throw std::runtime_error("socket failed: " + std::string(std::strerror(errno)));
+        }
+        int reuse = 1;
+        (void)::setsockopt(listen_fd_, SOL_SOCKET, SO_REUSEADDR, &reuse, sizeof(reuse));
+
+        sockaddr_in address{};
+        address.sin_family      = AF_INET;
+        address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+        address.sin_port        = 0;
+        if (::bind(listen_fd_, reinterpret_cast<sockaddr*>(&address), sizeof(address)) != 0
+            || ::listen(listen_fd_, 8) != 0) {
+            const auto message = std::string(std::strerror(errno));
+            ::close(listen_fd_);
+            throw std::runtime_error("HTTP stub setup failed: " + message);
+        }
+
+        socklen_t address_size = sizeof(address);
+        if (::getsockname(listen_fd_, reinterpret_cast<sockaddr*>(&address), &address_size) != 0) {
+            const auto message = std::string(std::strerror(errno));
+            ::close(listen_fd_);
+            throw std::runtime_error("getsockname failed: " + message);
+        }
+        port_   = ntohs(address.sin_port);
+        worker_ = std::thread([this] { serve(); });
+    }
+
+    ~LocalHttpStub() {
+        releaseSnapshot();
+        stopping_.store(true, std::memory_order_release);
+
+        const int wake_fd = ::socket(AF_INET, SOCK_STREAM, 0);
+        if (wake_fd >= 0) {
+            sockaddr_in address{};
+            address.sin_family      = AF_INET;
+            address.sin_addr.s_addr = htonl(INADDR_LOOPBACK);
+            address.sin_port        = htons(port_);
+            (void)::connect(wake_fd, reinterpret_cast<sockaddr*>(&address), sizeof(address));
+            ::close(wake_fd);
+        }
+        if (worker_.joinable()) {
+            worker_.join();
+        }
+        ::close(listen_fd_);
+    }
+
+    std::string endpoint() const {
+        return "127.0.0.1:" + std::to_string(port_);
+    }
+
+    bool waitUntilSnapshotIsInFlight(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mu_);
+        return cv_.wait_for(lock, timeout, [this] { return snapshot_in_flight_; });
+    }
+
+    void releaseSnapshot() {
+        {
+            std::lock_guard<std::mutex> lock(mu_);
+            release_snapshot_ = true;
+        }
+        cv_.notify_all();
+    }
+
+    std::vector<std::string> requestBodies() const {
+        std::lock_guard<std::mutex> lock(mu_);
+        return request_bodies_;
+    }
+
+private:
+    static bool readRequest(int fd, std::string& body) {
+        std::string request;
+        char        buffer[4096];
+        size_t      header_end     = std::string::npos;
+        size_t      content_length = 0;
+        while (header_end == std::string::npos) {
+            const auto bytes = ::recv(fd, buffer, sizeof(buffer), 0);
+            if (bytes <= 0) {
+                return false;
+            }
+            request.append(buffer, static_cast<size_t>(bytes));
+            header_end = request.find("\r\n\r\n");
+        }
+
+        const auto content_length_pos = request.find("Content-Length:");
+        if (content_length_pos != std::string::npos) {
+            const auto value_start = content_length_pos + std::strlen("Content-Length:");
+            const auto value_end   = request.find("\r\n", value_start);
+            content_length = static_cast<size_t>(std::stoull(request.substr(value_start, value_end - value_start)));
+        }
+
+        const size_t body_start = header_end + 4;
+        while (request.size() < body_start + content_length) {
+            const auto bytes = ::recv(fd, buffer, sizeof(buffer), 0);
+            if (bytes <= 0) {
+                return false;
+            }
+            request.append(buffer, static_cast<size_t>(bytes));
+        }
+        body = request.substr(body_start, content_length);
+        return true;
+    }
+
+    static void writeSuccess(int fd) {
+        const std::string body     = R"({"header":{"status":{"code":"OK"}}})";
+        const std::string response = "HTTP/1.1 200 OK\r\nContent-Type: application/json\r\nContent-Length: "
+                                     + std::to_string(body.size()) + "\r\nConnection: close\r\n\r\n" + body;
+        size_t sent = 0;
+        while (sent < response.size()) {
+            const auto bytes = ::send(fd, response.data() + sent, response.size() - sent, 0);
+            if (bytes <= 0) {
+                return;
+            }
+            sent += static_cast<size_t>(bytes);
+        }
+    }
+
+    void serve() {
+        while (!stopping_.load(std::memory_order_acquire)) {
+            const int client_fd = ::accept(listen_fd_, nullptr, nullptr);
+            if (client_fd < 0) {
+                continue;
+            }
+            if (stopping_.load(std::memory_order_acquire)) {
+                ::close(client_fd);
+                break;
+            }
+
+            std::string body;
+            if (readRequest(client_fd, body)) {
+                {
+                    std::lock_guard<std::mutex> lock(mu_);
+                    request_bodies_.push_back(body);
+                }
+                if (body.find("EVENT_BLOCK_SNAPSHOT") != std::string::npos) {
+                    std::unique_lock<std::mutex> lock(mu_);
+                    snapshot_in_flight_ = true;
+                    cv_.notify_all();
+                    cv_.wait(lock, [this] { return release_snapshot_ || stopping_.load(std::memory_order_acquire); });
+                } else {
+                    writeSuccess(client_fd);
+                }
+            }
+            ::close(client_fd);
+        }
+    }
+
+private:
+    int                      listen_fd_{-1};
+    uint16_t                 port_{0};
+    std::thread              worker_;
+    std::atomic<bool>        stopping_{false};
+    mutable std::mutex       mu_;
+    std::condition_variable  cv_;
+    std::vector<std::string> request_bodies_;
+    bool                     snapshot_in_flight_{false};
+    bool                     release_snapshot_{false};
+};
+
 size_t countOccurrences(const std::string& text, const std::string& pattern) {
     size_t count = 0;
     size_t pos   = 0;
@@ -251,6 +420,21 @@ TEST(KVCacheEventPublisherTest, FactorySelectsConfiguredPublisherWithoutLeakingC
     ASSERT_NE(nullptr, publisher);
     EXPECT_TRUE(publisher->enabled());
 
+    config.type   = "kvcm";
+    auto reporter = std::make_shared<RecordingReporter>();
+    publisher     = createKVCacheEventPublisher(
+        config,
+        context,
+        [] {
+            return KVCacheSnapshot{1, {}};
+        },
+        reporter);
+    ASSERT_NE(nullptr, publisher);
+    EXPECT_TRUE(publisher->enabled());
+    ASSERT_TRUE(publisher->start());
+    ASSERT_TRUE(reporter->waitForBody("EVENT_BLOCK_SNAPSHOT", std::chrono::seconds(2)));
+    publisher->stop();
+
     config.type = "unsupported";
     publisher   = createKVCacheEventPublisher(config, context);
     ASSERT_NE(nullptr, publisher);
@@ -298,12 +482,49 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherRejectsIncompleteIdentity) {
     auto context = makeContext();
     context.instance_id.clear();
     auto          reporter = std::make_shared<RecordingReporter>();
-    KVCMPublisher publisher(config, context, [] { return KVCacheSnapshot{}; }, reporter);
+    KVCMPublisher publisher(
+        config, context, [] { return KVCacheSnapshot{}; }, reporter);
 
     EXPECT_FALSE(publisher.start());
     EXPECT_EQ(PublisherState::DEGRADED, publisher.status().state);
     EXPECT_EQ(PublishResult::NOT_RUNNING, publisher.tryPublish({KVCacheEventType::BLOCK_ADD, 1, 0}));
     EXPECT_TRUE(reporter->requests().empty());
+}
+
+TEST(KVCacheEventPublisherTest, RealCurlSnapshotRequestIsCancelledDuringStop) {
+    LocalHttpStub               server;
+    KVCacheEventPublisherConfig config;
+    config.type                  = "kvcm";
+    config.manager_endpoint      = server.endpoint();
+    config.queue_capacity        = 8;
+    config.report_batch_size     = 8;
+    config.flush_interval_ms     = 1;
+    config.heartbeat_interval_ms = 60000;
+    config.request_timeout_ms    = 2000;
+    config.snapshot_timeout_ms   = 30000;
+    config.retry_interval_ms     = 1;
+    config.snapshot_interval_ms  = 60000;
+
+    auto publisher = createKVCacheEventPublisher(config, makeContext(), [] { return KVCacheSnapshot{1, {10}}; });
+    ASSERT_TRUE(publisher->enabled());
+    ASSERT_TRUE(publisher->start());
+    if (!server.waitUntilSnapshotIsInFlight(std::chrono::seconds(5))) {
+        publisher->stop();
+        FAIL() << "real curl snapshot request did not reach the local HTTP stub";
+    }
+
+    auto       stopped     = std::async(std::launch::async, [&] { publisher->stop(); });
+    const auto stop_status = stopped.wait_for(std::chrono::seconds(5));
+    server.releaseSnapshot();
+    ASSERT_EQ(std::future_status::ready, stop_status)
+        << "stop waited for the 30 second snapshot timeout instead of cancelling curl";
+    stopped.get();
+
+    const auto request_bodies = server.requestBodies();
+    ASSERT_GE(request_bodies.size(), 3u);
+    EXPECT_NE(std::string::npos, request_bodies[0].find("\"instance_group\""));
+    EXPECT_NE(std::string::npos, request_bodies[1].find("EVENT_NODE_REGISTER"));
+    EXPECT_NE(std::string::npos, request_bodies[2].find("EVENT_BLOCK_SNAPSHOT"));
 }
 
 TEST(KVCacheEventPublisherTest, LogPublisherAcceptsEventsAsynchronously) {
@@ -350,7 +571,13 @@ TEST(KVCacheEventPublisherTest, PublisherLifecycleIsIdempotent) {
     kvcm_config.retry_interval_ms     = 1;
 
     auto          reporter = std::make_shared<RecordingReporter>();
-    KVCMPublisher kvcm_publisher(kvcm_config, makeContext(), [] { return KVCacheSnapshot{1, {}}; }, reporter);
+    KVCMPublisher kvcm_publisher(
+        kvcm_config,
+        makeContext(),
+        [] {
+            return KVCacheSnapshot{1, {}};
+        },
+        reporter);
     EXPECT_TRUE(kvcm_publisher.start());
     EXPECT_TRUE(kvcm_publisher.start());
     ASSERT_TRUE(reporter->waitForBody("EVENT_BLOCK_SNAPSHOT", std::chrono::seconds(2)));
@@ -406,9 +633,14 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherRegistersSnapshotsAndReportsDeltas)
     config.snapshot_interval_ms  = 60000;
     config.retry_interval_ms     = 1;
 
-    auto reporter = std::make_shared<RecordingReporter>();
-    auto publisher =
-        std::make_shared<KVCMPublisher>(config, makeContext(), [] { return KVCacheSnapshot{7, {10, 20}}; }, reporter);
+    auto reporter  = std::make_shared<RecordingReporter>();
+    auto publisher = std::make_shared<KVCMPublisher>(
+        config,
+        makeContext(),
+        [] {
+            return KVCacheSnapshot{7, {10, 20}};
+        },
+        reporter);
 
     ASSERT_TRUE(publisher->start());
     ASSERT_TRUE(reporter->waitForBody("EVENT_BLOCK_SNAPSHOT", std::chrono::seconds(2)));
@@ -467,7 +699,13 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherRecoversFromRegistrationFailure) {
 
     auto reporter = std::make_shared<RecordingReporter>();
     reporter->failNextBodyContaining("\"instance_group\"");
-    KVCMPublisher publisher(config, makeContext(), [] { return KVCacheSnapshot{1, {10}}; }, reporter);
+    KVCMPublisher publisher(
+        config,
+        makeContext(),
+        [] {
+            return KVCacheSnapshot{1, {10}};
+        },
+        reporter);
 
     ASSERT_TRUE(publisher.start());
     ASSERT_TRUE(reporter->waitForBodyCount("\"instance_group\"", 2, std::chrono::seconds(2)));
@@ -517,7 +755,13 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherRecoversFromHeartbeatFailure) {
     config.retry_interval_ms     = 1;
 
     auto          reporter = std::make_shared<RecordingReporter>();
-    KVCMPublisher publisher(config, makeContext(), [] { return KVCacheSnapshot{1, {10}}; }, reporter);
+    KVCMPublisher publisher(
+        config,
+        makeContext(),
+        [] {
+            return KVCacheSnapshot{1, {10}};
+        },
+        reporter);
 
     ASSERT_TRUE(publisher.start());
     ASSERT_TRUE(reporter->waitForBodyCount("EVENT_BLOCK_SNAPSHOT", 1, std::chrono::seconds(2)));
@@ -539,7 +783,13 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherPreservesMutationsCreatedWhileSnaps
     config.retry_interval_ms     = 1;
 
     auto          reporter = std::make_shared<BlockingReporter>();
-    KVCMPublisher publisher(config, makeContext(), [] { return KVCacheSnapshot{1, {10}}; }, reporter);
+    KVCMPublisher publisher(
+        config,
+        makeContext(),
+        [] {
+            return KVCacheSnapshot{1, {10}};
+        },
+        reporter);
 
     ASSERT_TRUE(publisher.start());
     ASSERT_TRUE(reporter->waitForBodyCount("EVENT_BLOCK_SNAPSHOT", 1, std::chrono::seconds(2)));
@@ -567,7 +817,13 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherCoalescesEachKeyToItsLastMutation) 
     config.retry_interval_ms     = 1;
 
     auto          reporter = std::make_shared<BlockingReporter>();
-    KVCMPublisher publisher(config, makeContext(), [] { return KVCacheSnapshot{1, {}}; }, reporter);
+    KVCMPublisher publisher(
+        config,
+        makeContext(),
+        [] {
+            return KVCacheSnapshot{1, {}};
+        },
+        reporter);
     ASSERT_TRUE(publisher.start());
     ASSERT_TRUE(reporter->waitForBodyCount("EVENT_BLOCK_SNAPSHOT", 1, std::chrono::seconds(2)));
 
@@ -622,7 +878,13 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherQueueDoesNotDropConcurrentProducers
     config.retry_interval_ms     = 1;
 
     auto          reporter = std::make_shared<CountingReporter>();
-    KVCMPublisher publisher(config, makeContext(), [] { return KVCacheSnapshot{1, {}}; }, reporter);
+    KVCMPublisher publisher(
+        config,
+        makeContext(),
+        [] {
+            return KVCacheSnapshot{1, {}};
+        },
+        reporter);
     ASSERT_TRUE(publisher.start());
     const auto ready_deadline = std::chrono::steady_clock::now() + std::chrono::seconds(2);
     while (publisher.status().state != PublisherState::READY && std::chrono::steady_clock::now() < ready_deadline) {

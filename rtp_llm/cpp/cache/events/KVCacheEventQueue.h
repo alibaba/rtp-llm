@@ -48,6 +48,7 @@ private:
     std::atomic<size_t>     dequeue_pos_{0};
     std::atomic<size_t>     size_{0};
     std::atomic<size_t>     published_size_{0};
+    std::atomic<size_t>     wake_generation_{0};
     std::atomic<bool>       stopped_{false};
     mutable std::mutex      wait_mu_;
     std::condition_variable cv_;

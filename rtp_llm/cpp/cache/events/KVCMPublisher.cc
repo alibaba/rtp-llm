@@ -83,9 +83,11 @@ size_t appendCurlResponse(char* data, size_t size, size_t count, void* user_data
     try {
         static_cast<std::string*>(user_data)->append(data, bytes);
         return bytes;
-    } catch (...) {
-        return 0;
-    }
+    } catch (...) { return 0; }
+}
+
+int abortCancelledCurlTransfer(void* user_data, curl_off_t, curl_off_t, curl_off_t, curl_off_t) {
+    return static_cast<std::atomic<bool>*>(user_data)->load(std::memory_order_acquire) ? 1 : 0;
 }
 
 class CurlKVCacheEventReporter final: public KVCacheEventReporter {
@@ -102,11 +104,17 @@ public:
     }
 
     bool post(const std::string& route, const std::string& request, std::string& response) noexcept override {
-        try {
-            return postImpl(route, request, response);
-        } catch (...) {
+        if (cancelled_.load(std::memory_order_acquire)) {
             return false;
         }
+        try {
+            response.clear();
+            return postImpl(route, request, response);
+        } catch (...) { return false; }
+    }
+
+    void cancel() noexcept override {
+        cancelled_.store(true, std::memory_order_release);
     }
 
 private:
@@ -142,6 +150,9 @@ private:
         curl_easy_setopt(curl, CURLOPT_WRITEFUNCTION, appendCurlResponse);
         curl_easy_setopt(curl, CURLOPT_WRITEDATA, &response);
         curl_easy_setopt(curl, CURLOPT_ERRORBUFFER, error_buffer);
+        curl_easy_setopt(curl, CURLOPT_NOPROGRESS, 0L);
+        curl_easy_setopt(curl, CURLOPT_XFERINFOFUNCTION, abortCancelledCurlTransfer);
+        curl_easy_setopt(curl, CURLOPT_XFERINFODATA, &cancelled_);
 
         const CURLcode result      = curl_easy_perform(curl);
         long           status_code = 0;
@@ -165,8 +176,9 @@ private:
         return true;
     }
 
-    std::string endpoint_;
-    int         request_timeout_ms_;
+    std::string       endpoint_;
+    int               request_timeout_ms_;
+    std::atomic<bool> cancelled_{false};
 };
 
 void writeString(JsonWriter& writer, const char* key, const std::string& value) {
@@ -454,6 +466,11 @@ public:
             return;
         }
         stopping_.store(true, std::memory_order_relaxed);
+        if (snapshot_reporter_) {
+            snapshot_reporter_->cancel();
+        }
+        RTP_LLM_LOG_INFO(
+            "KVCMPublisher stopping; cancelling any in-flight snapshot request and waiting for the worker");
         queue_.stop();
         if (worker_.joinable()) {
             worker_.join();

@@ -328,18 +328,18 @@ struct VitConfig {
 };
 
 struct CacheStoreConfig {
-    bool    cache_store_rdma_mode               = false;
-    int     wrr_available_ratio                 = 80;
-    int     rank_factor                         = 0;
-    int     thread_count                        = 16;
-    int     rdma_connect_timeout_ms             = 250;
-    int     rdma_qp_count_per_connection        = 2;
-    int     rdma_io_thread_count                = 4;
-    int     rdma_worker_thread_count            = 2;
-    int     messager_io_thread_count            = 2;
-    int     messager_worker_thread_count        = 16;
-    int64_t rdma_transfer_wait_timeout_ms       = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
-    int     rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
+    bool    cache_store_rdma_mode         = false;
+    int     wrr_available_ratio           = 80;
+    int     rank_factor                   = 0;
+    int     thread_count                  = 16;
+    int     rdma_connect_timeout_ms       = 250;
+    int     rdma_qp_count_per_connection  = 2;
+    int     rdma_io_thread_count          = 4;
+    int     rdma_worker_thread_count      = 2;
+    int     messager_io_thread_count      = 2;
+    int     messager_worker_thread_count  = 16;
+    int64_t rdma_transfer_wait_timeout_ms = 180 * 1000;  // RDMA 传输完成最大等待超时时间，默认 180 秒
+    int rdma_max_block_pairs_per_connection = 0;  // 每条 RDMA 连接可处理的最大 block_pair 数量，0 表示不限制
     int64_t p2p_read_steal_before_deadline_ms =
         250;  // Decode read：在此距 deadline 时从 recv store steal，阻止新 transfer 匹配
     int64_t p2p_read_return_before_deadline_ms = 100;  // Decode read 与 Prefill send：transfer 层 deadline / worker
@@ -558,7 +558,7 @@ struct ArpcConfig {
 struct GrpcConfig {
     std::map<std::string, int> client_config;
     std::map<std::string, int> server_config;
-    GrpcConfig() {};
+    GrpcConfig(){};
     GrpcConfig(const std::string& json_str);
     std::string                to_string() const;
     void                       from_json(const std::string& json_str);

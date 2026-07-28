@@ -15,16 +15,19 @@ enum class PublishResult {
     QUEUE_FULL,
 };
 
+// Values are exported through metrics and documented for alerting. New states
+// must be appended without renumbering existing entries.
 enum class PublisherState {
-    DISABLED,
-    STARTING,
-    LOGGING,
-    REGISTERING,
-    RESYNCING,
-    READY,
-    DEGRADED,
-    STOPPED,
+    DISABLED    = 0,
+    STARTING    = 1,
+    LOGGING     = 2,
+    REGISTERING = 3,
+    RESYNCING   = 4,
+    READY       = 5,
+    DEGRADED    = 6,
+    STOPPED     = 7,
 };
+static_assert(static_cast<int>(PublisherState::STOPPED) == 7);
 
 struct PublisherStatus {
     PublisherState state          = PublisherState::DISABLED;

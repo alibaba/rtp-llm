@@ -236,6 +236,26 @@ class EnvArgumentParser(argparse.ArgumentParser):
 
         EnvArgumentParser._env_mappings[action.dest] = full_env_name
 
+    def _validate_env_choice(
+        self, action: argparse.Action, value: Any, env_name: str
+    ) -> None:
+        if action.choices is None or value in action.choices:
+            return
+
+        option = (
+            action.option_strings[0] if action.option_strings else action.dest
+        )
+        choices = ", ".join(repr(choice) for choice in action.choices)
+        logging.error(
+            "Invalid value for environment variable %s (argument %s)",
+            env_name,
+            option,
+        )
+        self.error(
+            f"argument {option}: invalid choice: "
+            f"{value!r} (choose from {choices})"
+        )
+
     def parse_args(
         self,
         args: Optional[Sequence[str]] = None,
@@ -346,44 +366,26 @@ class EnvArgumentParser(argparse.ArgumentParser):
                                 try:
                                     converted_value = action.type(env_value)
                                 except (ValueError, TypeError):
-                                    # If conversion fails, skip this value
-                                    pass
+                                    # Preserve the legacy fallback-to-default behavior,
+                                    # but make the ignored configuration discoverable.
+                                    logging.warning(
+                                        "Ignoring environment variable %s because it "
+                                        "cannot be converted for argument %s",
+                                        env_name,
+                                        action.option_strings[0]
+                                        if action.option_strings
+                                        else action.dest,
+                                    )
                                 else:
-                                    if (
-                                        action.choices is not None
-                                        and converted_value not in action.choices
-                                    ):
-                                        option = (
-                                            action.option_strings[0]
-                                            if action.option_strings
-                                            else action.dest
-                                        )
-                                        choices = ", ".join(
-                                            repr(choice) for choice in action.choices
-                                        )
-                                        self.error(
-                                            f"argument {option}: invalid choice: "
-                                            f"{converted_value!r} (choose from {choices})"
-                                        )
+                                    self._validate_env_choice(
+                                        action, converted_value, env_name
+                                    )
                                     setattr(parsed_args, dest, converted_value)
                             else:
                                 # No type converter, use as string
-                                if (
-                                    action.choices is not None
-                                    and env_value not in action.choices
-                                ):
-                                    option = (
-                                        action.option_strings[0]
-                                        if action.option_strings
-                                        else action.dest
-                                    )
-                                    choices = ", ".join(
-                                        repr(choice) for choice in action.choices
-                                    )
-                                    self.error(
-                                        f"argument {option}: invalid choice: "
-                                        f"{env_value!r} (choose from {choices})"
-                                    )
+                                self._validate_env_choice(
+                                    action, env_value, env_name
+                                )
                                 setattr(parsed_args, dest, env_value)
 
         # 应用所有配置绑定

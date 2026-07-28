@@ -110,6 +110,17 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
         UnifiedCacheItem evicted_item;
         if (removeItemLocked(evicted_key, &evicted_item)) {
             removeAllTreeAliasesForCacheKeyLocked(evicted_key);
+            // Unlike selectAndEvict(), this capacity replacement has no
+            // EvictResult through which the caller can release block-cache
+            // references, so release the evicted item's references here.
+            for (size_t gid = 0; gid < evicted_item.group_block_ids.size() && gid < group_pools_.size()
+                                 && gid < static_cast<size_t>(group_num_);
+                 ++gid) {
+                const auto block_id = evicted_item.group_block_ids[gid];
+                if (!isNullBlockIdx(block_id)) {
+                    group_pools_[gid]->blockCacheFree(block_id);
+                }
+            }
         }
     }
     lru_cache_.put(cache_key, item);
@@ -467,10 +478,18 @@ SharedBlockCache::LogicalCacheSnapshot SharedBlockCache::logicalCacheSnapshot() 
     {
         std::lock_guard<std::mutex> lock(mu_);
         snapshot.version = cache_event_version_;
-        snapshot.cache_keys.reserve(lru_cache_.size());
-        for (const auto& [cache_key, item] : lru_cache_.items()) {
-            if (isLogicallyCompleteLocked(item)) {
-                snapshot.cache_keys.push_back(cache_key);
+        if (event_publisher_) {
+            // Incremental publication and authoritative snapshots use the
+            // same locked completeness set once a publisher is installed.
+            snapshot.cache_keys.reserve(published_keys_.size());
+            snapshot.cache_keys.insert(snapshot.cache_keys.end(), published_keys_.begin(), published_keys_.end());
+        } else {
+            // Keep this API useful before publisher installation.
+            snapshot.cache_keys.reserve(lru_cache_.size());
+            for (const auto& [cache_key, item] : lru_cache_.items()) {
+                if (isLogicallyCompleteLocked(item)) {
+                    snapshot.cache_keys.push_back(cache_key);
+                }
             }
         }
     }

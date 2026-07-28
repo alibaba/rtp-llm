@@ -527,6 +527,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.prefix_tree_memory_state_swa_pool_ratio,
                                       self.enable_independent_group_eviction,
                                       self.load_cache_retry_times,
+                                      // Pickle field positions are append-only. snapshot_timeout_ms was added
+                                      // after the other event fields and therefore intentionally remains at
+                                      // index 67 even though its declaration appears earlier.
                                       self.kv_cache_event_publisher_type,
                                       self.kv_cache_event_manager_endpoint,
                                       self.kv_cache_event_instance_group,
@@ -604,6 +607,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.load_cache_retry_times                  = t[53].cast<int>();
                     }
                     if (t.size() == 68) {
+                        // Keep these indices aligned with the append-only order in __getstate__;
+                        // snapshot_timeout_ms intentionally occupies the final slot.
                         c.kv_cache_event_publisher_type        = t[54].cast<std::string>();
                         c.kv_cache_event_manager_endpoint      = t[55].cast<std::string>();
                         c.kv_cache_event_instance_group        = t[56].cast<std::string>();

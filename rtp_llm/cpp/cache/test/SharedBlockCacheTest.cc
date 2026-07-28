@@ -400,9 +400,14 @@ TEST(SharedBlockCacheTest, CanonicalAliasOwnsEvictionWhenLogicalAliasIsOlder) {
 TEST(SharedBlockCacheTest, FlatFallbackKeepsCanonicalDependencyWhenLogicalAliasUpdatesSameKey) {
     SharedBlockCache cache;
     cache.setPrefixTreeEnabled(false);
+    auto publisher = std::make_shared<RecordingPublisher>();
+    ASSERT_TRUE(publisher->start());
+    cache.setEventPublisher(publisher, /*required_group_count=*/1);
 
     putOne(cache, 8, 108, rootDep(0), SharedBlockCache::kGpuCpCanonicalNamespace);
     putOne(cache, 8, NULL_BLOCK_IDX, childDep(7, 7), SharedBlockCache::kGpuLogicalNamespace);
+    ASSERT_EQ(1u, publisher->events.size());
+    EXPECT_EQ(KVCacheEventType::BLOCK_ADD, publisher->events.front().type);
 
     auto evicted = cache.selectAndEvict(/*min_blocks=*/1);
 
@@ -412,6 +417,9 @@ TEST(SharedBlockCacheTest, FlatFallbackKeepsCanonicalDependencyWhenLogicalAliasU
     EXPECT_EQ(evicted.evicted_dependencies.at(8).ordinal, 0u);
     ASSERT_TRUE(evicted.evicted_namespaces.count(8));
     EXPECT_EQ(evicted.evicted_namespaces.at(8), SharedBlockCache::kGpuCpCanonicalNamespace);
+    ASSERT_EQ(2u, publisher->events.size());
+    EXPECT_EQ(KVCacheEventType::BLOCK_DELETE, publisher->events.back().type);
+    EXPECT_EQ(8, publisher->events.back().block_key);
 }
 
 TEST(SharedBlockCacheTest, NonMatchableSlotStillEvictsButDoesNotMatchGroup) {
