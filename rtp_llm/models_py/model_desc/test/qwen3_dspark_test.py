@@ -775,5 +775,60 @@ class TpVocabShardMergeTest(unittest.TestCase):
         )
 
 
+class MarkovCorrectAliasTest(unittest.TestCase):
+    """markov_correct must never mutate the caller's base_logits.
+
+    The golden tests above run bf16, where .float() always copies; this pins
+    the fp32 path (enable_fp32_lm_head), where .float() returns an alias and
+    only the explicit clone protects the caller. Pure CPU, no ckpt needed.
+    """
+
+    BATCH, K, VOCAB, RANK = 2, 3, 11, 4
+
+    def _make_fake_model(self):
+        from types import SimpleNamespace
+
+        from rtp_llm.models_py.model_desc.qwen3_dspark import DSparkMarkovHead
+
+        torch.manual_seed(3)
+        head = DSparkMarkovHead(
+            torch.randn(self.VOCAB, self.RANK), torch.randn(self.VOCAB, self.RANK)
+        )
+        return SimpleNamespace(markov_head=head)
+
+    def _run(self, dtype: torch.dtype):
+        from rtp_llm.models_py.model_desc.qwen3_dspark import Qwen3DSparkModel
+
+        torch.manual_seed(5)
+        base_logits = torch.randn(self.BATCH, self.K, self.VOCAB, dtype=dtype)
+        anchor_ids = torch.randint(0, self.VOCAB, (self.BATCH,))
+        snapshot = base_logits.clone()
+        tokens, corrected = Qwen3DSparkModel.markov_correct(
+            self._make_fake_model(), base_logits, anchor_ids
+        )
+        return base_logits, snapshot, tokens, corrected
+
+    def test_fp32_input_not_mutated(self):
+        base_logits, snapshot, tokens, corrected = self._run(torch.float32)
+        self.assertIsNot(corrected, base_logits)
+        self.assertNotEqual(
+            corrected.untyped_storage().data_ptr(),
+            base_logits.untyped_storage().data_ptr(),
+            "corrected must not alias the caller's base_logits storage",
+        )
+        torch.testing.assert_close(base_logits, snapshot, rtol=0, atol=0)
+        # The correction must still have applied (bias is nonzero a.s.).
+        self.assertFalse(torch.equal(corrected, snapshot.float()))
+        self.assertEqual(tuple(tokens.shape), (self.BATCH, self.K))
+
+    def test_bf16_input_not_mutated(self):
+        base_logits, snapshot, _, corrected = self._run(torch.bfloat16)
+        self.assertNotEqual(
+            corrected.untyped_storage().data_ptr(),
+            base_logits.untyped_storage().data_ptr(),
+        )
+        torch.testing.assert_close(base_logits, snapshot, rtol=0, atol=0)
+
+
 if __name__ == "__main__":
     unittest.main()
