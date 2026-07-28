@@ -1948,7 +1948,9 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
     // load-bearing clone in PyWrappedModel::forward copies it out of the
     // static graph buffers, the eager path returns a fresh softmax), so the
     // published per-stream views can alias it directly.  If that wrapper-side
-    // clone is ever removed, this skip becomes a use-after-replay bug.
+    // clone is ever removed, this skip becomes a use-after-replay bug — which
+    // the wrapper now turns into a hard failure via its
+    // aliasesGraphStaticStorage check right after the clone loop.
     // The MTP path keeps the clone — its all_probs comes from the fast_topk
     // sampler, whose buffers are not guaranteed step-local.
     torch::Tensor draft_probs_all;

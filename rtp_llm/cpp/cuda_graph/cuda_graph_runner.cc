@@ -187,53 +187,6 @@ void addStridedD2DCopy(FusedStridedCopyParams& strided_copies,
                        dst.stride(0) * dst.element_size());
 }
 
-void copyStridedHost(const torch::Tensor& src, torch::Tensor& dst) {
-    if (!src.defined() || src.numel() <= 0) {
-        return;
-    }
-    RTP_LLM_PROFILE_SCOPE("stridedCopyHost");
-    if (src.dim() < 2) {
-        memcpy(dst.data_ptr(), src.data_ptr(), src.numel() * src.element_size());
-        return;
-    }
-    const size_t nrows      = src.size(0);
-    const size_t row_bytes  = src.size(1) * src.element_size();
-    const size_t src_stride = src.stride(0) * src.element_size();
-    const size_t dst_stride = dst.stride(0) * dst.element_size();
-    const char*  src_ptr    = reinterpret_cast<const char*>(src.data_ptr());
-    char*        dst_ptr    = reinterpret_cast<char*>(dst.data_ptr());
-    for (size_t r = 0; r < nrows; ++r) {
-        memcpy(dst_ptr + r * dst_stride, src_ptr + r * src_stride, row_bytes);
-    }
-}
-
-// Zero dst's rows beyond what copyStridedHost refreshed from src. Replay-padded
-// rows would otherwise keep the previous (larger) batch's entries, which for the
-// dspark injection table means writing into a block that may since have been
-// freed and re-allocated to another stream; a zeroed row resolves to reserved
-// block 0, matching the kernel block table's full per-replay clear.
-void zeroStridedHostTail(const torch::Tensor& src, torch::Tensor& dst) {
-    if (!dst.defined() || dst.numel() <= 0) {
-        return;
-    }
-    if (dst.dim() < 2) {
-        const int64_t from = (src.defined() && src.numel() > 0) ? src.numel() : 0;
-        if (from < dst.numel()) {
-            memset(reinterpret_cast<char*>(dst.data_ptr()) + from * dst.element_size(),
-                   0,
-                   (dst.numel() - from) * dst.element_size());
-        }
-        return;
-    }
-    const int64_t from_row   = (src.defined() && src.dim() >= 2) ? src.size(0) : 0;
-    const size_t  row_bytes  = dst.size(1) * dst.element_size();
-    const size_t  dst_stride = dst.stride(0) * dst.element_size();
-    char*         dst_ptr    = reinterpret_cast<char*>(dst.data_ptr());
-    for (int64_t r = from_row; r < dst.size(0); ++r) {
-        memset(dst_ptr + r * dst_stride, 0, row_bytes);
-    }
-}
-
 size_t hybridCacheGroup(const PyModelInputs& src_inputs, const PyModelInputs& dst_inputs, bool require_equal = true) {
     const auto src_group = src_inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.size();
     const auto dst_group = dst_inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.size();
@@ -547,11 +500,14 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         // this static pinned buffer; refresh it here so the H2D sees fresh ids,
         // and zero the padded [real_bs, graph_bs) rows so their injection lands
         // in reserved block 0 instead of a stale, possibly re-allocated block.
+        // Bounded to the selected graph's read window: rows past it are not
+        // read by this replay, and a later, larger graph zeroes its own tail.
         if (is_dspark_ && !is_target_verify_ && py_model_inputs_.attention_inputs.kv_cache_block_id_host.defined()) {
             copyStridedHost(inputs.attention_inputs.kv_cache_block_id_host,
                             py_model_inputs_.attention_inputs.kv_cache_block_id_host);
             zeroStridedHostTail(inputs.attention_inputs.kv_cache_block_id_host,
-                                py_model_inputs_.attention_inputs.kv_cache_block_id_host);
+                                py_model_inputs_.attention_inputs.kv_cache_block_id_host,
+                                state.current_real_graph_bs);
         }
 
         optimizedCopyAsync(inputs.attention_inputs.kv_cache_layer_to_group,
@@ -832,6 +788,27 @@ void CudaGraphRunner::initKernelInternalMemory() {
 
 int CudaGraphRunner::getCurrentRealGraphBs(const CudaGraphState& state) const {
     return state.current_real_graph_bs;
+}
+
+bool CudaGraphRunner::aliasesGraphStaticStorage(const torch::Tensor& t, const CudaGraphState& state) const {
+    if (!t.defined()) {
+        return false;
+    }
+    const auto it = graph_instances_.find(state.current_real_graph_bs);
+    if (it == graph_instances_.end()) {
+        return false;
+    }
+    const auto& hold = it->second.mem_hold_;
+    const void* p    = t.storage().data();
+    for (const at::Tensor* s : {&hold.dspark_draft_tokens_,
+                                &hold.dspark_draft_probs_,
+                                &hold.decoder_layer_hidden_states_,
+                                &hold.decoder_layer_aux_hidden_states_}) {
+        if (s->defined() && s->storage().data() == p) {
+            return true;
+        }
+    }
+    return false;
 }
 
 void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs) {

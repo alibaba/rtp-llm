@@ -77,6 +77,13 @@ public:
         return false;
     }
 
+    // True when t still aliases the selected graph instance's reusable static
+    // output buffers (overwritten by the next replay). Lets the wrapper turn
+    // its "outputs must be cloned out of graph storage" contract into a check.
+    virtual bool aliasesGraphStaticStorage(const torch::Tensor& t, const CudaGraphState& state) const {
+        return false;
+    }
+
     py::object py_instance_;
 };
 }  // namespace rtp_llm

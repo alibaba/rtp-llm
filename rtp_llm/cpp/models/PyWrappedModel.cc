@@ -844,6 +844,14 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                     *t = t->clone();
                 }
             }
+            // Executable side of the contract above: if a refactor ever drops
+            // the clone, fail here instead of shipping probs that the next
+            // replay silently overwrites.
+            RTP_LLM_CHECK_WITH_INFO(
+                !graph_runner_->aliasesGraphStaticStorage(py_model_outputs.draft_probs, graph_state_)
+                    && !graph_runner_->aliasesGraphStaticStorage(py_model_outputs.draft_tokens, graph_state_),
+                "dspark draft outputs must be cloned out of the reusable graph buffers "
+                "(publishSyncMtpDeviceState aliases them without its own clone)");
         } else {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");

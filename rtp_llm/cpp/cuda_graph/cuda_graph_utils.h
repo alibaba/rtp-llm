@@ -14,6 +14,15 @@ namespace rtp_llm {
 void printTensorInfo(const std::string& name, const torch::Tensor& tensor, int max_print_size = 20);
 void debugPrintPyModelInputs(const torch_ext::PyModelInputs& inputs);
 
+// Host-side strided helpers for pinned block-table mirrors. Both expect src
+// and dst to share dimensionality (checked); a 1-D src refreshing a 2-D dst
+// would otherwise make zeroStridedHostTail wipe the rows copyStridedHost just
+// wrote.
+void copyStridedHost(const torch::Tensor& src, torch::Tensor& dst);
+// Zero dst's rows in [src.size(0), row_limit) — the replay-padded tail of the
+// current graph's read window. row_limit < 0 means dst.size(0) (full buffer).
+void zeroStridedHostTail(const torch::Tensor& src, torch::Tensor& dst, int64_t row_limit = -1);
+
 }  // namespace rtp_llm
 
 class CaptureMemoryHold {

@@ -108,6 +108,13 @@ public:
         return capture_draft_tail_;
     }
 
+    // Executable side of the wrapper-clone contract: true when t still aliases
+    // the selected graph instance's reusable static output buffers (which the
+    // next replay overwrites). PyWrappedModel checks this after cloning the
+    // dspark outputs; MtpExecutor::publishSyncMtpDeviceState skips its own
+    // all_probs clone on the strength of that check.
+    bool aliasesGraphStaticStorage(const torch::Tensor& t, const CudaGraphState& state) const override;
+
     // Factory methods for test: take GraphParams so callers can reuse the same struct
     static CudaGraphRunner* createForPrefill(py::object py_instance, GraphParams params);
     static CudaGraphRunner* createForDecode(py::object py_instance, GraphParams params);

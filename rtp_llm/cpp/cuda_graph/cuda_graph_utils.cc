@@ -1,7 +1,74 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_utils.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/ProfilingScope.h"
+#include <algorithm>
+#include <cstring>
 #include <iostream>
 
 namespace rtp_llm {
+
+void copyStridedHost(const torch::Tensor& src, torch::Tensor& dst) {
+    if (!src.defined() || src.numel() <= 0) {
+        return;
+    }
+    RTP_LLM_PROFILE_SCOPE("stridedCopyHost");
+    RTP_LLM_CHECK_WITH_INFO(src.dim() == dst.dim(),
+                            "copyStridedHost expects same-rank src/dst, got %ld vs %ld",
+                            (long)src.dim(),
+                            (long)dst.dim());
+    if (src.dim() < 2) {
+        memcpy(dst.data_ptr(), src.data_ptr(), src.numel() * src.element_size());
+        return;
+    }
+    const size_t nrows      = src.size(0);
+    const size_t row_bytes  = src.size(1) * src.element_size();
+    const size_t src_stride = src.stride(0) * src.element_size();
+    const size_t dst_stride = dst.stride(0) * dst.element_size();
+    const char*  src_ptr    = reinterpret_cast<const char*>(src.data_ptr());
+    char*        dst_ptr    = reinterpret_cast<char*>(dst.data_ptr());
+    for (size_t r = 0; r < nrows; ++r) {
+        memcpy(dst_ptr + r * dst_stride, src_ptr + r * src_stride, row_bytes);
+    }
+}
+
+// Zero dst's rows beyond what copyStridedHost refreshed from src. Replay-padded
+// rows would otherwise keep the previous (larger) batch's entries, which for the
+// dspark injection table means writing into a block that may since have been
+// freed and re-allocated to another stream; a zeroed row resolves to reserved
+// block 0, matching the kernel block table's full per-replay clear.
+//
+// row_limit bounds the zeroing to the current graph's captured read window
+// ([0, graph_bs) rows): rows beyond it are never read by this replay, and any
+// later replay with a larger window zeroes its own tail, so clearing past the
+// limit would be wasted host memset on the decode hot path.
+void zeroStridedHostTail(const torch::Tensor& src, torch::Tensor& dst, int64_t row_limit) {
+    if (!dst.defined() || dst.numel() <= 0) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(!src.defined() || src.numel() == 0 || src.dim() == dst.dim(),
+                            "zeroStridedHostTail expects same-rank src/dst, got %ld vs %ld",
+                            (long)src.dim(),
+                            (long)dst.dim());
+    if (dst.dim() < 2) {
+        const int64_t from  = (src.defined() && src.numel() > 0) ? src.numel() : 0;
+        const int64_t limit = (row_limit < 0) ? dst.numel() : std::min<int64_t>(row_limit, dst.numel());
+        if (from < limit) {
+            memset(reinterpret_cast<char*>(dst.data_ptr()) + from * dst.element_size(),
+                   0,
+                   (limit - from) * dst.element_size());
+        }
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(dst.dim() == 2, "zeroStridedHostTail supports at most 2-D dst, got %ld", (long)dst.dim());
+    const int64_t from_row   = (src.defined() && src.dim() >= 2) ? src.size(0) : 0;
+    const int64_t limit_row  = (row_limit < 0) ? dst.size(0) : std::min<int64_t>(row_limit, dst.size(0));
+    const size_t  row_bytes  = dst.size(1) * dst.element_size();
+    const size_t  dst_stride = dst.stride(0) * dst.element_size();
+    char*         dst_ptr    = reinterpret_cast<char*>(dst.data_ptr());
+    for (int64_t r = from_row; r < limit_row; ++r) {
+        memset(dst_ptr + r * dst_stride, 0, row_bytes);
+    }
+}
 
 // Helper function to print tensor info and data
 void printTensorInfo(const std::string& name, const torch::Tensor& tensor, int max_print_size) {
