@@ -8,7 +8,7 @@
 #include <unordered_set>
 #include <utility>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockCacheTaskPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
@@ -59,7 +59,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
                                BlockTreeCacheConfig                     config,
                                std::shared_ptr<StorageBackend>          storage_backend,
                                std::unique_ptr<BlockTransferDispatcher> transfer_dispatcher,
-                               std::unique_ptr<BlockCacheTaskPool>      task_pool):
+                               std::unique_ptr<BlockTreeTaskPool>       task_pool):
     config_(std::move(config)),
     tree_(std::move(tree)),
     group_sets_(std::move(group_sets)),

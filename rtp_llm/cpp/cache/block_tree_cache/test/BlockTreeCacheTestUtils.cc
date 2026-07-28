@@ -1,6 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockCacheTaskPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/LinearGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
@@ -253,7 +253,7 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::unique_ptr<BlockT
     }
     auto transfer_dispatcher =
         std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine), std::move(multi_rank_engine));
-    auto task_pool = std::make_unique<BlockCacheTaskPool>(
+    auto task_pool = std::make_unique<BlockTreeTaskPool>(
         static_cast<size_t>(config.eviction_thread_pool_size), 1000, "BlockTreeEvictionPool");
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
                                                   std::move(group_sets),
@@ -414,7 +414,7 @@ bool BlockTreeCacheTestPeer::armQueueRejectionForTest(BlockTreeCache& cache) {
 
 bool BlockTreeCacheTestPeer::restoreQueueAfterRejectionForTest(BlockTreeCache& cache) {
     try {
-        auto replacement = std::make_unique<BlockCacheTaskPool>(
+        auto replacement = std::make_unique<BlockTreeTaskPool>(
             static_cast<size_t>(cache.config_.eviction_thread_pool_size), 1000, "BlockTreeEvictionPool");
         if (!replacement->start()) {
             ADD_FAILURE() << "queue-rejection guard failed to start replacement task pool";

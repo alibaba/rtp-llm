@@ -503,7 +503,7 @@ TEST(BlockTreeCacheConstructionTest, OutOfRangeGroupSetIdFailsInitializationWith
     std::vector<GroupSetPtr> groups          = {full};
     auto                     per_rank_engine = std::make_shared<PerRankBlockTransferEngine>(groups);
     auto transfer_dispatcher                 = std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine));
-    auto task_pool                           = std::make_unique<BlockCacheTaskPool>(2, 1000, "BlockTreeEvictionPool");
+    auto task_pool                           = std::make_unique<BlockTreeTaskPool>(2, 1000, "BlockTreeEvictionPool");
 
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
                                                   std::move(groups),
@@ -523,7 +523,7 @@ TEST(BlockTreeCacheConstructionTest, NullGroupSetFailsInitializationAndDestructi
     std::vector<GroupSetPtr> groups          = {nullptr};
     auto                     per_rank_engine = std::make_shared<PerRankBlockTransferEngine>(groups);
     auto transfer_dispatcher                 = std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine));
-    auto task_pool                           = std::make_unique<BlockCacheTaskPool>(2, 1000, "BlockTreeEvictionPool");
+    auto task_pool                           = std::make_unique<BlockTreeTaskPool>(2, 1000, "BlockTreeEvictionPool");
 
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
                                                   std::move(groups),

@@ -14,13 +14,13 @@ class LockFreeThreadPool;
 
 namespace rtp_llm {
 
-class BlockCacheTaskPool {
+class BlockTreeTaskPool {
 public:
-    BlockCacheTaskPool(size_t thread_count, size_t queue_size, std::string thread_name);
-    ~BlockCacheTaskPool();
+    BlockTreeTaskPool(size_t thread_count, size_t queue_size, std::string thread_name);
+    ~BlockTreeTaskPool();
 
-    BlockCacheTaskPool(const BlockCacheTaskPool&)            = delete;
-    BlockCacheTaskPool& operator=(const BlockCacheTaskPool&) = delete;
+    BlockTreeTaskPool(const BlockTreeTaskPool&)            = delete;
+    BlockTreeTaskPool& operator=(const BlockTreeTaskPool&) = delete;
 
     bool start();
     bool submit(std::function<void()> task);

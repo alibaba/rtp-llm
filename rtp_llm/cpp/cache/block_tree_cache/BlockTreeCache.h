@@ -17,7 +17,7 @@
 
 namespace rtp_llm {
 
-class BlockCacheTaskPool;
+class BlockTreeTaskPool;
 class BlockTransferDispatcher;
 class HybridKVCacheAllocator;
 struct CacheStats {
@@ -126,7 +126,7 @@ public:
                    BlockTreeCacheConfig                     config,
                    std::shared_ptr<StorageBackend>          storage_backend,
                    std::unique_ptr<BlockTransferDispatcher> transfer_dispatcher,
-                   std::unique_ptr<BlockCacheTaskPool>      task_pool);
+                   std::unique_ptr<BlockTreeTaskPool>       task_pool);
 
     ~BlockTreeCache();
     bool init();
@@ -278,7 +278,7 @@ private:
     std::shared_ptr<LoadBackTicketRegistry>   load_back_ticket_registry_;
     std::shared_ptr<StorageBackend>           storage_backend_;
     std::unique_ptr<BlockTransferDispatcher>  transfer_dispatcher_;
-    std::unique_ptr<BlockCacheTaskPool>       task_pool_;
+    std::unique_ptr<BlockTreeTaskPool>        task_pool_;
     BlockTreeCacheMetricsReporter             metrics_reporter_;
     BlockTreeEvictor                          evictor_;
     bool                                      initialized_{false};

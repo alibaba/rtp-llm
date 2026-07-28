@@ -26,11 +26,11 @@ test_deps = [
 ] + cuda13_torch_link_deps + torch_deps() + no_block_copy_link_deps()
 
 cc_test(
-    name = "block_cache_task_pool_test",
-    srcs = ["BlockCacheTaskPoolTest.cc"],
+    name = "block_tree_task_pool_test",
+    srcs = ["BlockTreeTaskPoolTest.cc"],
     copts = test_copts,
     deps = [
-        "//rtp_llm/cpp/cache/block_tree_cache:block_cache_task_pool",
+        "//rtp_llm/cpp/cache/block_tree_cache:block_tree_task_pool",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],

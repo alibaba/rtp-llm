@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockCacheTaskPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 
 #include <utility>
 
@@ -28,14 +28,14 @@ private:
 
 }  // namespace
 
-BlockCacheTaskPool::BlockCacheTaskPool(size_t thread_count, size_t queue_size, std::string thread_name):
+BlockTreeTaskPool::BlockTreeTaskPool(size_t thread_count, size_t queue_size, std::string thread_name):
     thread_count_(thread_count), queue_size_(queue_size), thread_name_(std::move(thread_name)) {}
 
-BlockCacheTaskPool::~BlockCacheTaskPool() {
+BlockTreeTaskPool::~BlockTreeTaskPool() {
     shutdown();
 }
 
-bool BlockCacheTaskPool::start() {
+bool BlockTreeTaskPool::start() {
     std::lock_guard<std::mutex> lock(lifecycle_mutex_);
     if (started_ || shutdown_ || thread_count_ == 0 || queue_size_ == 0) {
         return false;
@@ -51,7 +51,7 @@ bool BlockCacheTaskPool::start() {
     return true;
 }
 
-bool BlockCacheTaskPool::submit(std::function<void()> task) {
+bool BlockTreeTaskPool::submit(std::function<void()> task) {
     if (!task) {
         return false;
     }
@@ -78,7 +78,7 @@ bool BlockCacheTaskPool::submit(std::function<void()> task) {
     return true;
 }
 
-void BlockCacheTaskPool::waitForIdle() {
+void BlockTreeTaskPool::waitForIdle() {
     std::unique_lock<std::mutex> lock(wait_mutex_);
     bool                         wait_observer_invoked = false;
     wait_cv_.wait(lock, [this, &wait_observer_invoked] {
@@ -94,7 +94,7 @@ void BlockCacheTaskPool::waitForIdle() {
     });
 }
 
-void BlockCacheTaskPool::shutdown() {
+void BlockTreeTaskPool::shutdown() {
     std::shared_ptr<autil::LockFreeThreadPool> thread_pool;
     bool                                       was_started = false;
     {
@@ -113,11 +113,11 @@ void BlockCacheTaskPool::shutdown() {
     }
 }
 
-void BlockCacheTaskPool::taskStarted() {
+void BlockTreeTaskPool::taskStarted() {
     pending_tasks_.fetch_add(1);
 }
 
-void BlockCacheTaskPool::taskFinished() {
+void BlockTreeTaskPool::taskFinished() {
     const int remaining = pending_tasks_.fetch_sub(1) - 1;
     if (remaining <= 0) {
         std::lock_guard<std::mutex> lock(wait_mutex_);

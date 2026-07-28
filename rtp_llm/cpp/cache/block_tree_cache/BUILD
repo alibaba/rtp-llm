@@ -33,9 +33,9 @@ cc_library(
 )
 
 cc_library(
-    name = "block_cache_task_pool",
-    srcs = ["BlockCacheTaskPool.cc"],
-    hdrs = ["BlockCacheTaskPool.h"],
+    name = "block_tree_task_pool",
+    srcs = ["BlockTreeTaskPool.cc"],
+    hdrs = ["BlockTreeTaskPool.h"],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
@@ -106,7 +106,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
-        ":block_cache_task_pool",
+        ":block_tree_task_pool",
         ":device_block_pool",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
         "//rtp_llm/cpp/cache:cache_group_type",

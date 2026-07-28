@@ -3,19 +3,19 @@
 #include <atomic>
 #include <stdexcept>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockCacheTaskPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 
 namespace rtp_llm {
 namespace {
 
-TEST(BlockCacheTaskPoolTest, StartOnlySucceedsOnce) {
-    BlockCacheTaskPool pool(1, 8, "BlockCacheTaskPoolTest");
+TEST(BlockTreeTaskPoolTest, StartOnlySucceedsOnce) {
+    BlockTreeTaskPool pool(1, 8, "BlockTreeTaskPoolTest");
     EXPECT_TRUE(pool.start());
     EXPECT_FALSE(pool.start());
 }
 
-TEST(BlockCacheTaskPoolTest, SubmitAndWaitForIdleTrackAcceptedTasks) {
-    BlockCacheTaskPool pool(2, 8, "BlockCacheTaskPoolTest");
+TEST(BlockTreeTaskPoolTest, SubmitAndWaitForIdleTrackAcceptedTasks) {
+    BlockTreeTaskPool pool(2, 8, "BlockTreeTaskPoolTest");
     ASSERT_TRUE(pool.start());
 
     std::atomic<int> completed{0};
@@ -27,8 +27,8 @@ TEST(BlockCacheTaskPoolTest, SubmitAndWaitForIdleTrackAcceptedTasks) {
     EXPECT_EQ(pool.pending_tasks_.load(), 0);
 }
 
-TEST(BlockCacheTaskPoolTest, ThrowingTaskStillSettlesPendingCount) {
-    BlockCacheTaskPool pool(1, 8, "BlockCacheTaskPoolTest");
+TEST(BlockTreeTaskPoolTest, ThrowingTaskStillSettlesPendingCount) {
+    BlockTreeTaskPool pool(1, 8, "BlockTreeTaskPoolTest");
     ASSERT_TRUE(pool.start());
     ASSERT_TRUE(pool.submit([] { throw std::runtime_error("expected"); }));
 
@@ -36,8 +36,8 @@ TEST(BlockCacheTaskPoolTest, ThrowingTaskStillSettlesPendingCount) {
     EXPECT_EQ(pool.pending_tasks_.load(), 0);
 }
 
-TEST(BlockCacheTaskPoolTest, ShutdownRejectsNewTasksAndIsIdempotent) {
-    BlockCacheTaskPool pool(1, 8, "BlockCacheTaskPoolTest");
+TEST(BlockTreeTaskPoolTest, ShutdownRejectsNewTasksAndIsIdempotent) {
+    BlockTreeTaskPool pool(1, 8, "BlockTreeTaskPoolTest");
     ASSERT_TRUE(pool.start());
     pool.shutdown();
     pool.shutdown();

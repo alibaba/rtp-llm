@@ -10,7 +10,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheGroup.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockCacheTaskPool.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/LinearGroupSet.h"
@@ -452,7 +452,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     }
     auto transfer_dispatcher =
         std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine), std::move(multi_rank_engine));
-    auto task_pool = std::make_unique<BlockCacheTaskPool>(
+    auto task_pool = std::make_unique<BlockTreeTaskPool>(
         static_cast<size_t>(config.eviction_thread_pool_size), 1000, "BlockTreeEvictionPool");
 
     auto result = std::make_shared<BlockTreeCache>(std::move(tree),
