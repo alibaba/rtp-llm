@@ -19,6 +19,7 @@ import java.util.concurrent.ConcurrentMap;
 import java.util.concurrent.Executors;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.function.Supplier;
 
@@ -48,6 +49,12 @@ public class FeHealthChecker {
     private final String probePath;
     private final DispatcherMetricsReporter metricsReporter;
     private final ConcurrentMap<String, AtomicInteger> consecFails = new ConcurrentHashMap<>();
+    // Single-flight guard for the probe loop: probeOnce() only hands work off to reactor, so
+    // scheduleAtFixedRate's "runs never overlap" guarantee does not bound the async probes. Without
+    // this, a slow round can still be in flight when the next tick fires, and a stale late 2xx
+    // (getAndSet(0)) could reset a failure counter the newer round just incremented — corrupting the
+    // one signal this component produces. Mirrors the sync side's SingleFlightGate.
+    private final AtomicBoolean roundInFlight = new AtomicBoolean(false);
     private ScheduledExecutorService scheduler;
 
     public FeHealthChecker(DispatcherFePoolRefresher refresher,
@@ -160,9 +167,17 @@ public class FeHealthChecker {
         // ScheduledExecutorService silently cancel the task — once the loop dies all hosts
         // stay optimistically isAlive=true and dead-host filtering quietly stops working.
         scheduler.scheduleAtFixedRate(() -> {
+            // Skip this tick if the previous round has not finished; overlapping rounds can let a
+            // late reply from the older round clobber the newer round's counter update.
+            if (!roundInFlight.compareAndSet(false, true)) {
+                return;
+            }
             try {
-                probeOnce().subscribe();
+                probeOnce()
+                        .doFinally(sig -> roundInFlight.set(false))
+                        .subscribe();
             } catch (Throwable t) {
+                roundInFlight.set(false);
                 Logger.warn("FE health probe round threw, scheduler kept alive: err={}: {}",
                         t.getClass().getSimpleName(), t.getMessage());
             }
