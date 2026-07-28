@@ -32,6 +32,7 @@ public class EngineStatusConverter {
         response.setDpSize(workerStatusPB.getDpSize());
         response.setTpSize(workerStatusPB.getTpSize());
         response.setBlockHashLookaheadTokens(workerStatusPB.getBlockHashLookaheadTokens());
+        response.setCacheMatchRollbackBlocks(workerStatusPB.getCacheMatchRollbackBlocks());
         response.setKvCacheGroupMode(convertKvCacheGroupMode(workerStatusPB.getKvCacheGroupMode()));
         response.setStatusVersion(workerStatusPB.getStatusVersion());
         response.setLatestFinishedVersion(workerStatusPB.getLatestFinishedVersion());

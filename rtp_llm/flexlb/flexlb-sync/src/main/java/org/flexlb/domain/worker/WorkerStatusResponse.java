@@ -63,6 +63,9 @@ public class WorkerStatusResponse {
     @JsonProperty("block_hash_lookahead_tokens")
     private int blockHashLookaheadTokens;
 
+    @JsonProperty("cache_match_rollback_blocks")
+    private int cacheMatchRollbackBlocks;
+
     @JsonProperty("kv_cache_group_mode")
     private KvCacheGroupMode kvCacheGroupMode = KvCacheGroupMode.UNSPECIFIED;
 

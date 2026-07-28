@@ -60,6 +60,7 @@ class GrpcWorkerStatusCheckRunnerTest {
                 .setTotalKvCache(1000)
                 .setBlockSize(64)
                 .setBlockHashLookaheadTokens(1)
+                .setCacheMatchRollbackBlocks(1)
                 .setKvCacheGroupMode(EngineRpcService.KvCacheGroupModePB.KV_CACHE_GROUP_MODE_WITH_MAMBA)
                 .build();
 
@@ -78,6 +79,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         assertEquals(800, workerStatus.getAvailableKvCacheTokens().get());
         assertEquals(200, workerStatus.getUsedKvCacheTokens().get());
         assertEquals(1, workerStatus.getBlockHashLookaheadTokens());
+        assertEquals(1, workerStatus.getCacheMatchRollbackBlocks());
         assertEquals(KvCacheGroupMode.WITH_MAMBA, workerStatus.getKvCacheGroupMode());
     }
 

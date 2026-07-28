@@ -70,14 +70,16 @@ class EngineStatusConverterTest {
     }
 
     @Test
-    void preservesBlockHashLookaheadTokensFromWorkerStatus() {
+    void preservesCacheMatchMetadataFromWorkerStatus() {
         EngineRpcService.WorkerStatusPB workerStatus = EngineRpcService.WorkerStatusPB.newBuilder()
                 .setBlockHashLookaheadTokens(1)
+                .setCacheMatchRollbackBlocks(1)
                 .build();
 
         WorkerStatusResponse response =
                 EngineStatusConverter.convertToWorkerStatusResponse(workerStatus);
 
         assertEquals(1, response.getBlockHashLookaheadTokens());
+        assertEquals(1, response.getCacheMatchRollbackBlocks());
     }
 }

@@ -45,6 +45,7 @@ public class WorkerStatus {
     private long dpSize;
     private long tpSize;
     private int blockHashLookaheadTokens;
+    private int cacheMatchRollbackBlocks;
     private KvCacheGroupMode kvCacheGroupMode = KvCacheGroupMode.UNSPECIFIED;
 
     private AtomicLong statusLastUpdateTime = new AtomicLong(-1); // Last status update time (microseconds)

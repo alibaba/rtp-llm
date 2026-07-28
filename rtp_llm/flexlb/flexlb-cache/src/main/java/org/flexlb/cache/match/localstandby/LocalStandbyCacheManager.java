@@ -9,7 +9,6 @@ import org.flexlb.dao.master.WorkerStatusProvider;
 import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
-import org.flexlb.enums.KvCacheGroupMode;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -76,7 +75,7 @@ public class LocalStandbyCacheManager {
             return Collections.emptyMap();
         }
         Map<String, Integer> prefixMatches = calculatePrefixMatchBlockCounts(blockCacheKeys, workerStatuses);
-        applyPdFusionMambaRollback(prefixMatches, workerStatuses, roleType);
+        applyCacheMatchRollback(prefixMatches, workerStatuses);
         return prefixMatches;
     }
 
@@ -133,22 +132,17 @@ public class LocalStandbyCacheManager {
         return prefixMatches;
     }
 
-    private void applyPdFusionMambaRollback(Map<String, Integer> prefixMatches,
-                                            Collection<WorkerStatus> workerStatuses,
-                                            RoleType roleType) {
-        if (roleType != RoleType.PDFUSION) {
-            return;
-        }
-
-        // Keep Local Standby consistent with KVCM's WITH_MAMBA prefix-match semantics.
+    private void applyCacheMatchRollback(Map<String, Integer> prefixMatches,
+                                         Collection<WorkerStatus> workerStatuses) {
         for (WorkerStatus workerStatus : workerStatuses) {
-            if (workerStatus == null || workerStatus.getKvCacheGroupMode() != KvCacheGroupMode.WITH_MAMBA) {
+            if (workerStatus == null || workerStatus.getCacheMatchRollbackBlocks() <= 0) {
                 continue;
             }
             String workerIpPort = workerStatus.getIpPort();
             Integer matchedBlocks = prefixMatches.get(workerIpPort);
-            if (matchedBlocks != null && matchedBlocks > 0) {
-                prefixMatches.put(workerIpPort, matchedBlocks - 1);
+            if (matchedBlocks != null) {
+                prefixMatches.put(workerIpPort,
+                        Math.max(matchedBlocks - workerStatus.getCacheMatchRollbackBlocks(), 0));
             }
         }
     }

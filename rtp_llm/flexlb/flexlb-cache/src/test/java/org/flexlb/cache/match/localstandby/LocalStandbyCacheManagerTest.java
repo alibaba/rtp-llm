@@ -12,7 +12,6 @@ import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.dao.route.ServiceRoute;
-import org.flexlb.enums.KvCacheGroupMode;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
@@ -52,10 +51,10 @@ class LocalStandbyCacheManagerTest {
     }
 
     @Test
-    void rollsBackOneBlockForPdFusionWithMamba() {
+    void appliesWorkerReportedCacheMatchRollback() {
         WorkerStatusProvider workerStatusProvider = mock(WorkerStatusProvider.class);
         WorkerStatus worker = worker("10.0.0.1", 8080);
-        worker.setKvCacheGroupMode(KvCacheGroupMode.WITH_MAMBA);
+        worker.setCacheMatchRollbackBlocks(1);
         when(workerStatusProvider.getWorkerStatuses(RoleType.PDFUSION, "default"))
                 .thenReturn(List.of(worker));
         LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
@@ -79,11 +78,9 @@ class LocalStandbyCacheManagerTest {
     }
 
     @Test
-    void keepsFullPrefixForPrefillOrFullAttention() {
+    void doesNotInferCacheMatchRollbackFromRole() {
         WorkerStatusProvider workerStatusProvider = mock(WorkerStatusProvider.class);
         WorkerStatus worker = worker("10.0.0.1", 8080);
-        when(workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, "default"))
-                .thenReturn(List.of(worker));
         when(workerStatusProvider.getWorkerStatuses(RoleType.PDFUSION, "default"))
                 .thenReturn(List.of(worker));
         LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
@@ -92,14 +89,6 @@ class LocalStandbyCacheManagerTest {
                 mock(CacheMetricsReporter.class));
         manager.addRoutedRequestBlocks(worker.getIpPort(), List.of(11L, 22L, 33L));
 
-        worker.setKvCacheGroupMode(KvCacheGroupMode.WITH_MAMBA);
-        assertEquals(
-                3,
-                manager.findMatchingEngines(
-                                List.of(11L, 22L, 33L), RoleType.PREFILL, "default")
-                        .get(worker.getIpPort()));
-
-        worker.setKvCacheGroupMode(KvCacheGroupMode.FULL_ATTENTION_ONLY);
         assertEquals(
                 3,
                 manager.findMatchingEngines(

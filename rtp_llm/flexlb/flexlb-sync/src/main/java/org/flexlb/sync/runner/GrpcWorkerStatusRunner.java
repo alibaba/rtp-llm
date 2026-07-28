@@ -121,6 +121,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             workerStatus.setGroup(group);
             workerStatus.setRole(newWorkerStatus.getRole());
             workerStatus.setBlockHashLookaheadTokens(newWorkerStatus.getBlockHashLookaheadTokens());
+            workerStatus.setCacheMatchRollbackBlocks(newWorkerStatus.getCacheMatchRollbackBlocks());
             updateKvCacheGroupMode(newWorkerStatus.getKvCacheGroupMode());
             updateCacheStatus(newWorkerStatus.getCacheStatus());
 

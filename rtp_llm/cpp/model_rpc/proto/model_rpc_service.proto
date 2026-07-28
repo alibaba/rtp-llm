@@ -437,6 +437,8 @@ message WorkerStatusPB {
     // Number of tokens after each full block included in its cache hash.
     int32 block_hash_lookahead_tokens = 21;
     KvCacheGroupModePB kv_cache_group_mode = 22;
+    // Number of matched cache blocks that must be recomputed by the engine.
+    int32 cache_match_rollback_blocks = 23;
 }
 
 message KvCacheGroupMetadataPB {
