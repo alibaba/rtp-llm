@@ -398,23 +398,13 @@ def build_kv_page_indices(req_to_token, seq_lens, block_size_k):
 
 _HEUR_topk_to_block_table_kernel = {
     "BLOCK_SIZE_T": lambda args: triton.next_power_of_2(args["topk"]),
+    "BLOCK_SIZE_K": lambda args: 2 * triton.next_power_of_2(args["topk"]),
 }
+
+_TOPK_BT_PINNED_NUM_WARPS = 1
 
 
 @triton.heuristics(_HEUR_topk_to_block_table_kernel)
-@triton.autotune(
-    configs=[
-        triton.Config({"BLOCK_SIZE_K": 2048}, num_warps=8, num_stages=2),
-        triton.Config({"BLOCK_SIZE_K": 1024}, num_warps=8, num_stages=2),
-        triton.Config({"BLOCK_SIZE_K": 512}, num_warps=8, num_stages=2),
-        triton.Config({"BLOCK_SIZE_K": 256}, num_warps=8, num_stages=2),
-        triton.Config({"BLOCK_SIZE_K": 256}, num_warps=4, num_stages=2),
-        triton.Config({"BLOCK_SIZE_K": 128}, num_warps=4, num_stages=2),
-        triton.Config({"BLOCK_SIZE_K": 128}, num_warps=4, num_stages=3),
-        triton.Config({"BLOCK_SIZE_K": 64}, num_warps=2, num_stages=2),
-    ],
-    key=["BLOCK_SIZE_T"],
-)
 @triton.jit
 def _topk_to_block_table_kernel(
     s_ptr,  # Score: h x n x max_seqblock
@@ -552,6 +542,181 @@ def _topk_to_block_table_kernel(
             mask=off_t < topk,
         )
 
+_MULTIROW_BLOCK_Q = 16
+_MULTIROW_NUM_WARPS = 4
+_MULTIROW_MIN_KV_BLOCKS = 128
+
+
+@triton.heuristics(_HEUR_topk_to_block_table_kernel)
+@triton.jit
+def _topk_to_block_table_multirow_kernel(
+    s_ptr,  # Score: h x n x max_seqblock
+    bt_ptr,  # block_tables: (n*NKV) x topk
+    seqlen_ptr,  # seq_lens: (n*NKV)
+    ti_ptr,  # topk_idx: NKV x n x topk (raw block indices, -1 padding)
+    sample_interval: tl.constexpr,
+    block_size: tl.constexpr,
+    cu_seqlens,
+    cu_seqblocks_q,
+    prefix_lens,
+    topk,
+    init_blocks: tl.constexpr,
+    local_blocks: tl.constexpr,
+    num_pages,
+    stride_s_h,
+    stride_s_n,
+    stride_s_k,
+    stride_bt_r,
+    stride_bt_t,
+    stride_ti_h,
+    stride_ti_n,
+    stride_ti_t,
+    NKV: tl.constexpr,
+    BLOCK_Q: tl.constexpr,
+    BLOCK_SIZE_K: tl.constexpr,
+    BLOCK_SIZE_T: tl.constexpr,
+    MASK_INIT: tl.constexpr,
+    MASK_LOCAL: tl.constexpr,
+    EMIT_BLOCK_TABLE: tl.constexpr,
+    EMIT_TOPK_IDX: tl.constexpr,
+):
+    tl.static_assert(BLOCK_SIZE_K > BLOCK_SIZE_T)
+    pid_qg = tl.program_id(0)
+    pid_b = tl.program_id(1)
+    pid_h = tl.program_id(2)
+    seq_start = tl.load(cu_seqlens + pid_b)
+    block_start = tl.load(cu_seqblocks_q + pid_b)
+    block_num = tl.load(cu_seqblocks_q + pid_b + 1) - block_start
+    prefix_len = tl.load(prefix_lens + pid_b)
+    q_lo = pid_qg * BLOCK_Q
+    if q_lo >= block_num:
+        return
+    off_q = q_lo + tl.arange(0, BLOCK_Q)
+    off_k = tl.arange(0, BLOCK_SIZE_K)
+    off_t = tl.arange(0, BLOCK_SIZE_T)
+    row_ok = off_q < block_num
+    valid_blocks = tl.where(
+        row_ok, (prefix_len + off_q * sample_interval + block_size) // block_size, 0
+    )
+    s_row = (
+        s_ptr
+        + (seq_start + off_q * sample_interval).to(tl.int64) * stride_s_n
+        + pid_h.to(tl.int64) * stride_s_h
+    )
+    topk_score = tl.full((BLOCK_Q, BLOCK_SIZE_K), -1e30, dtype=tl.float32)
+    topk_idx = tl.zeros((BLOCK_Q, BLOCK_SIZE_K), dtype=tl.int32)
+    left_half_mask = (off_k < BLOCK_SIZE_K // 2)[None, :].to(tl.int32)
+    for i in tl.range(0, tl.max(valid_blocks), BLOCK_SIZE_K):
+        k = i + off_k
+        causal_mask = k[None, :] < valid_blocks[:, None]
+        local_mask = k[None, :] >= tl.maximum(0, valid_blocks[:, None] - local_blocks)
+        init_mask = (k < init_blocks)[None, :]
+        score = tl.load(
+            s_row[:, None] + k[None, :] * stride_s_k, mask=causal_mask, other=-1e30
+        ).to(tl.float32)
+        score = tl.where(score != score, -1e30, score)
+        if MASK_INIT:
+            score = tl.where(causal_mask & init_mask, score - 1e29, score)
+        else:
+            score = tl.where(causal_mask & init_mask, 1e30, score)
+        if MASK_LOCAL:
+            score = tl.where(causal_mask & local_mask, score - 1e28, score)
+        else:
+            score = tl.where(causal_mask & local_mask, 1e29, score)
+        topk_score, last_topk_score = score, topk_score
+        topk_idx, last_topk_idx = tl.where(causal_mask, k[None, :] + 1, 0), topk_idx
+        n_dims: tl.constexpr = tl.standard._log2(BLOCK_SIZE_K)
+        for j in tl.static_range(1, n_dims):
+            topk_score, topk_idx = _bitonic_merge(
+                topk_score, topk_idx.to(tl.int32), j, 2, n_dims
+            )
+        if i != 0:
+            topk_score, topk_idx = _bitonic_merge(
+                topk_score, topk_idx.to(tl.int32), n_dims, False, n_dims
+            )
+            topk_score_new = last_topk_score * left_half_mask + topk_score * (
+                1 - left_half_mask
+            )
+            topk_idx_new = last_topk_idx * left_half_mask + topk_idx * (
+                1 - left_half_mask
+            )
+            topk_score, topk_idx = _bitonic_merge(
+                topk_score_new, topk_idx_new.to(tl.int32), n_dims, True, n_dims
+            )
+        else:
+            topk_score, topk_idx = _bitonic_merge(
+                topk_score, topk_idx.to(tl.int32), n_dims, True, n_dims
+            )
+    sel_mask = (tl.arange(0, BLOCK_SIZE_K // BLOCK_SIZE_T) == 0)[None, :, None]
+    t = tl.sum(
+        sel_mask
+        * tl.reshape(
+            topk_idx - 1, [BLOCK_Q, BLOCK_SIZE_K // BLOCK_SIZE_T, BLOCK_SIZE_T]
+        ),
+        axis=1,
+    )
+
+    n_sel = tl.minimum(topk, valid_blocks)
+    valid = (off_t[None, :] < n_sel[:, None]) & (t >= 0) & row_ok[:, None]
+    if EMIT_BLOCK_TABLE:
+        local_blk = ((prefix_len + off_q * sample_interval) // block_size)[:, None]
+        nvalid = tl.sum(valid.to(tl.int32), axis=1)[:, None]
+        is_local = valid & (t == local_blk)
+        has_local = tl.sum(is_local.to(tl.int32), axis=1)[:, None] > 0
+        non_local = valid & (t != local_blk)
+        rank = tl.cumsum(non_local.to(tl.int32), axis=1) - 1
+        out_pos = tl.where(is_local, nvalid - 1, rank)
+        page = pid_h * num_pages + t
+        row = ((block_start + off_q) * NKV + pid_h)[:, None]
+        tl.store(bt_ptr + row * stride_bt_r + out_pos * stride_bt_t, page, mask=valid)
+        partial = ((prefix_len + off_q * sample_interval) % block_size + 1)[:, None]
+        sl_val = tl.where(
+            has_local, (nvalid - 1) * block_size + partial, nvalid * block_size
+        )
+        tl.store(seqlen_ptr + row, sl_val, mask=row_ok[:, None])
+    if EMIT_TOPK_IDX:
+        ti_val = tl.where(valid, t, -1)
+        ti_offset = (
+            (block_start + off_q)[:, None] * stride_ti_n
+            + pid_h * stride_ti_h
+            + off_t[None, :] * stride_ti_t
+        )
+        tl.store(
+            ti_ptr + ti_offset,
+            ti_val.to(ti_ptr.dtype.element_ty),
+            mask=(off_t[None, :] < topk) & row_ok[:, None],
+        )
+
+
+def _launch_topk_to_block_table(
+    max_seqblock_q: int,
+    batch_size: int,
+    num_heads: int,
+    max_seqblock_k: int,
+    *args,
+    **kwargs,
+):
+    if max_seqblock_k >= _MULTIROW_MIN_KV_BLOCKS:
+        grid = (
+            triton.cdiv(max_seqblock_q, _MULTIROW_BLOCK_Q),
+            batch_size,
+            num_heads,
+        )
+        _topk_to_block_table_multirow_kernel[grid](
+            *args,
+            **kwargs,
+            BLOCK_Q=_MULTIROW_BLOCK_Q,
+            num_warps=_MULTIROW_NUM_WARPS,
+            num_stages=2,
+        )
+    else:
+        _topk_to_block_table_kernel[(max_seqblock_q, batch_size, num_heads)](
+            *args,
+            **kwargs,
+            num_warps=_TOPK_BT_PINNED_NUM_WARPS,
+            num_stages=2,
+        )
+
 
 @torch.no_grad()
 def flash_prefill_topk_to_block_tables(
@@ -671,8 +836,11 @@ def flash_prefill_topk_to_block_tables(
     topk_idx = torch.full(
         (num_kv_heads, total_q, topk), -1, dtype=torch.int32, device=idx_q.device
     )
-    grid2 = (max_seqblock_q, batch_size, num_heads)
-    _topk_to_block_table_kernel[grid2](
+    _launch_topk_to_block_table(
+        max_seqblock_q,
+        batch_size,
+        num_heads,
+        max_seqblock_k,
         score,
         bt,
         sl,
@@ -1288,8 +1456,11 @@ def flash_prefill_with_fused_topk_index(
     # bt/sl unused; tiny dummies as non-null pointer placeholders
     bt_dummy = torch.empty(1, 1, dtype=torch.int32, device=idx_q.device)
     sl_dummy = torch.empty(1, dtype=torch.int32, device=idx_q.device)
-    grid2 = (max_seqblock_q, batch_size, num_heads)
-    _topk_to_block_table_kernel[grid2](
+    _launch_topk_to_block_table(
+        max_seqblock_q,
+        batch_size,
+        num_heads,
+        max_seqblock_k,
         score,
         bt_dummy,
         sl_dummy,
