@@ -447,10 +447,11 @@ class GenerateConfig(BaseModel):
           - 若用户在同一次 update 中显式传入 enable_cross_sequence_ban，视为用户重新表态，
             自动重启用启发式不会覆盖其显式意图。
         """
-        for key, value in new.items():
-            if hasattr(self, key):
-                setattr(self, key, value)
-        # setattr 不会触发 field_validator / model_validator，手动补偿：
+        model_fields = type(self).model_fields
+        field_updates = {k: v for k, v in new.items() if k in model_fields}
+        self.__dict__.update(field_updates)
+        self.model_fields_set.update(field_updates)
+        # 直接更新字段不会触发 field_validator / model_validator，手动补偿：
         # 1) cross_seq_diverge_start_combo 的 clamp/类型兜底
         if "cross_seq_diverge_start_combo" in new:
             self.cross_seq_diverge_start_combo = self._sanitize_diverge_start_combo(
@@ -467,12 +468,11 @@ class GenerateConfig(BaseModel):
 
     def update_and_pop(self, new: Dict[str, Any]):
         """批量更新字段并返回未被消费的 key。校验策略同 update()。"""
-        to_remove: List[str] = []
-        for key, value in new.items():
-            if hasattr(self, key):
-                setattr(self, key, value)
-                to_remove.append(key)
-        # setattr 不会触发 field_validator / model_validator，手动补偿：
+        model_fields = type(self).model_fields
+        field_updates = {k: v for k, v in new.items() if k in model_fields}
+        self.__dict__.update(field_updates)
+        self.model_fields_set.update(field_updates)
+        # 直接更新字段不会触发 field_validator / model_validator，手动补偿：
         if "cross_seq_diverge_start_combo" in new:
             self.cross_seq_diverge_start_combo = self._sanitize_diverge_start_combo(
                 self.cross_seq_diverge_start_combo
@@ -482,7 +482,7 @@ class GenerateConfig(BaseModel):
         if "enable_cross_sequence_ban" in new:
             self._ban_auto_downgraded = False
         self._check_cross_seq_ban_compatibility()
-        return {k: v for k, v in new.items() if k not in to_remove}
+        return {k: v for k, v in new.items() if k not in field_updates}
 
     @staticmethod
     def create_generate_config(
@@ -520,15 +520,10 @@ class GenerateConfig(BaseModel):
         self,
         tokenizer,
         generate_env_config,
-        normalize_response_format: bool = True,
         enable_thinking: Optional[bool] = None,
-    ):
-        """Add thinking parameters from generate_env_config.
-
-        Args:
-            tokenizer: Tokenizer instance.
-            generate_env_config: GenerateEnvConfig object.
-        """
+        reasoning_format: Optional[Any] = None,
+    ) -> None:
+        """Resolve thinking parameters, validate config, and finalize grammar."""
 
         end_think_token_id = generate_env_config.think_end_token_id
         in_think_mode = (
@@ -539,11 +534,7 @@ class GenerateConfig(BaseModel):
         self.end_think_token_ids = (
             [end_think_token_id] if end_think_token_id != -1 else []
         )
-        if (
-            in_think_mode
-            and tokenizer
-            and end_think_token_id == -1
-        ):
+        if in_think_mode and tokenizer and end_think_token_id == -1:
             think_end_tag: str = generate_env_config.think_end_tag.encode(
                 "utf-8"
             ).decode("unicode_escape")
@@ -552,20 +543,14 @@ class GenerateConfig(BaseModel):
             )
             self.end_think_token_ids = tokenized_result
         self.in_think_mode = in_think_mode
-        if normalize_response_format:
-            self.apply_response_format(generate_env_config=generate_env_config)
+        self.validate()
 
-    def apply_response_format(
-        self,
-        generate_env_config: Optional[Any] = None,
-        reasoning_format: Optional[Any] = None,
-    ) -> None:
         from rtp_llm.config.response_format_builder import (
             ReasoningFormat,
             ResponseFormatBuilder,
         )
 
-        if reasoning_format is None and generate_env_config is not None:
+        if self.in_think_mode and reasoning_format is None:
             reasoning_format = ReasoningFormat.from_generate_env_config(
                 generate_env_config
             )

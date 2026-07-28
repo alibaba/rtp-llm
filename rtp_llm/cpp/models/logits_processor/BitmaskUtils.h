@@ -2,10 +2,24 @@
 
 #include <cstddef>
 #include <cstdint>
+#include <new>
 
 #include <dlpack/dlpack.h>
 
+#include "rtp_llm/cpp/utils/ErrorCode.h"
+
+namespace c10 {
+class Error;
+}
+
 namespace rtp_llm {
+
+namespace detail {
+
+ErrorInfo grammarMaskBuildError(const char* op, const std::bad_alloc& error);
+ErrorInfo grammarMaskBuildError(const char* op, const c10::Error& error);
+
+}  // namespace detail
 
 // Single-row bitmask view backed by a contiguous int32 buffer of `words` words.
 // shape_out must outlive the returned DLTensor (it stores the shape pointer).

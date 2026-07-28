@@ -538,6 +538,75 @@ bool specMaskAllows(const SpecLogitsVerifyRunner::LaunchResult& result, int64_t 
     return true;
 }
 
+TEST_F(MtpExecutorTest, testApplySpecVerifyResultCapsAndCorrectsTokens) {
+    constexpr int64_t batch_size   = 4;
+    constexpr int64_t propose_step = 3;
+    constexpr int64_t token_stride = 2;
+
+    SpecLogitsVerifyRunner::LaunchResult verify_result;
+    verify_result.spec_cap_cpu = torch::tensor({0, 1, 3, 2}, torch::kInt32);
+    verify_result.processor_errors = {
+        ErrorInfo(ErrorCode::GRAMMAR_VERIFY_EXCEPTION, "grammar verify failed"),
+        std::nullopt,
+        std::nullopt,
+        std::nullopt,
+    };
+
+    std::vector<int32_t> target_values;
+    target_values.reserve(batch_size * (propose_step + 1) * token_stride);
+    for (int32_t row = 0; row < batch_size * (propose_step + 1); ++row) {
+        target_values.push_back(-1);
+        target_values.push_back(1000 + row);
+    }
+    SamplerOutput target_sampler_output;
+    target_sampler_output.token_ids =
+        torch::from_blob(target_values.data(),
+                         {batch_size * (propose_step + 1), token_stride},
+                         torch::TensorOptions(torch::kInt32))
+            .clone();
+
+    speculative::SpeculativeSamplerOutput output;
+    output.accept_len = {4, 4, 4, 1};
+    output.accept_tokens = {
+        torch::tensor({10, 11, 12, 13}, torch::kInt32).reshape({1, 4}),
+        torch::tensor({20, 21, 22, 23}, torch::kInt32).reshape({1, 4}),
+        torch::tensor({30, 31, 32, 33}, torch::kInt32).reshape({1, 4}),
+        torch::tensor({40}, torch::kInt32).reshape({1, 1}),
+    };
+
+    MtpExecutor::applySpecVerifyResult(verify_result, target_sampler_output, output, propose_step);
+
+    EXPECT_EQ(output.accept_len, (std::vector<int>{1, 2, 4, 1}));
+    EXPECT_EQ(toVec<int32_t>(output.accept_tokens[0]), (std::vector<int32_t>{1000}));
+    EXPECT_EQ(toVec<int32_t>(output.accept_tokens[1]), (std::vector<int32_t>{20, 1005}));
+    EXPECT_EQ(toVec<int32_t>(output.accept_tokens[2]), (std::vector<int32_t>{30, 31, 32, 33}));
+    EXPECT_EQ(toVec<int32_t>(output.accept_tokens[3]), (std::vector<int32_t>{40}));
+    ASSERT_EQ(output.processor_errors.size(), batch_size);
+    ASSERT_TRUE(output.processor_errors[0].has_value());
+    EXPECT_EQ(output.processor_errors[0]->code(), ErrorCode::GRAMMAR_VERIFY_EXCEPTION);
+    EXPECT_EQ(output.processor_errors[0]->ToString(), "grammar verify failed");
+}
+
+TEST_F(MtpExecutorTest, testApplySpecVerifyResultPassesErrorsWithoutCap) {
+    SpecLogitsVerifyRunner::LaunchResult verify_result;
+    verify_result.processor_errors = {
+        ErrorInfo(ErrorCode::GRAMMAR_VERIFY_EXCEPTION, "grammar verify failed"),
+    };
+
+    SamplerOutput                         target_sampler_output;
+    speculative::SpeculativeSamplerOutput output;
+    output.accept_len    = {2};
+    output.accept_tokens = {torch::tensor({7, 8}, torch::kInt32).reshape({1, 2})};
+
+    MtpExecutor::applySpecVerifyResult(verify_result, target_sampler_output, output, /*propose_step=*/3);
+
+    EXPECT_EQ(output.accept_len, (std::vector<int>{2}));
+    EXPECT_EQ(toVec<int32_t>(output.accept_tokens[0]), (std::vector<int32_t>{7, 8}));
+    ASSERT_EQ(output.processor_errors.size(), 1);
+    ASSERT_TRUE(output.processor_errors[0].has_value());
+    EXPECT_EQ(output.processor_errors[0]->code(), ErrorCode::GRAMMAR_VERIFY_EXCEPTION);
+}
+
 TEST_F(MtpExecutorTest, testSpecLogitsVerifyRunnerMergesGrammarMasksAndCaps) {
     const size_t batch_size   = 2;
     const int    propose_step = 2;
@@ -608,10 +677,15 @@ TEST_F(MtpExecutorTest, testSpecLogitsVerifyRunnerAllocatesOnlyActiveStreamRows)
     ASSERT_EQ(result.packed_allow_mask_cpu_lifetime.dim(), 2);
     EXPECT_EQ(result.packed_allow_mask_cpu_lifetime.size(0), 3);
     EXPECT_EQ(result.packed_allow_mask_cpu_lifetime.size(1), 3);
+#if USING_CUDA
     ASSERT_EQ(result.packed_allow_mask_gpu.dim(), 2);
     EXPECT_EQ(result.packed_allow_mask_gpu.size(0), 3);
     EXPECT_EQ(result.packed_allow_mask_gpu.size(1), 3);
     EXPECT_EQ(result.logits_row_indices_gpu.numel(), 3);
+#else
+    EXPECT_FALSE(result.packed_allow_mask_gpu.defined());
+    EXPECT_FALSE(result.logits_row_indices_gpu.defined());
+#endif
     EXPECT_EQ(toVec<int32_t>(result.logits_row_indices_cpu_lifetime), (std::vector<int32_t>{9, 10, 11}));
     EXPECT_EQ(toVec<int32_t>(result.spec_cap_cpu), (std::vector<int32_t>{2, 2, 2, 2}));
     EXPECT_TRUE(specMaskAllows(result, 0, 0));

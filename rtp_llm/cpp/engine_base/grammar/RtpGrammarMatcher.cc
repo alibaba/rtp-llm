@@ -1,11 +1,11 @@
 #include "rtp_llm/cpp/engine_base/grammar/RtpGrammarMatcher.h"
 
 #include <algorithm>
+#include <optional>
 #include <stdexcept>
 #include <string>
 #include <type_traits>
 #include <utility>
-#include <vector>
 
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -43,11 +43,9 @@ auto matcherCall(const char* op, Fn&& fn) -> MatcherCallResult<Fn> {
 }  // namespace
 
 RtpGrammarMatcher::RtpGrammarMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
-                                     std::optional<std::vector<int32_t>>        override_stop_tokens,
                                      bool                                       terminate_without_stop_token,
                                      int                                        max_rollback_tokens):
     compiled_(std::move(compiled)),
-    override_stop_tokens_(std::move(override_stop_tokens)),
     terminate_without_stop_token_(terminate_without_stop_token),
     max_rollback_tokens_(max_rollback_tokens) {
     if (!compiled_) {
@@ -55,7 +53,7 @@ RtpGrammarMatcher::RtpGrammarMatcher(std::shared_ptr<xgrammar::CompiledGrammar> 
     }
 
     matcher_ = std::make_unique<xgrammar::GrammarMatcher>(
-        *compiled_, override_stop_tokens_, terminate_without_stop_token_, max_rollback_tokens_);
+        *compiled_, std::nullopt, terminate_without_stop_token_, max_rollback_tokens_);
 }
 
 ErrorResult<bool> RtpGrammarMatcher::acceptToken(int32_t token_id) {
@@ -72,19 +70,6 @@ ErrorResult<bool> RtpGrammarMatcher::acceptToken(int32_t token_id) {
         ++num_accepted_;
         return true;
     });
-}
-
-ErrorResult<bool> RtpGrammarMatcher::acceptTokens(const std::vector<int32_t>& tokens) {
-    for (int32_t token_id : tokens) {
-        auto accepted = acceptToken(token_id);
-        if (!accepted.ok()) {
-            return accepted.status();
-        }
-        if (!accepted.value()) {
-            return false;
-        }
-    }
-    return true;
 }
 
 ErrorResult<bool> RtpGrammarMatcher::fillBitmask(DLTensor* bitmask, int32_t idx) {

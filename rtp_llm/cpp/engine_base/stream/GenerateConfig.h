@@ -237,6 +237,7 @@ public:
         JSONIZE_OPTIONAL(ebnf);
         JSONIZE_OPTIONAL(structural_tag);
         JSONIZE_OPTIONAL(response_format);
+        JSONIZE(grammar_terminate_without_stop_token);
         try {
             std::string adapter_name_;
             json.Jsonize("adapter_name", adapter_name_);

@@ -203,7 +203,7 @@ RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t start
                     continue;
                 // 从预计算的 batch topk indices 中裁剪前 k 个位置进行遮蔽
                 // topk_indices 行号 = i-1（因为 narrow 排除了 row 0）
-                logits[i].index_put_({topk_indices[i - 1].slice(0, 0, k)}, -std::numeric_limits<float>::infinity());
+                logits[i].index_put_({topk_indices[i - 1].slice(0, 0, k)}, BaseLogitsProcessor::neg_inf);
             }
         }
     }
@@ -241,7 +241,7 @@ RecommendationLogitsProcessor::process(const SamplerInputs& inputs, size_t start
         if (!rows.empty()) {
             auto rows_t = torch::tensor(rows, torch::kLong).to(logits.device());
             auto cols_t = torch::tensor(cols, torch::kLong).to(logits.device());
-            logits.index_put_({rows_t, cols_t}, -std::numeric_limits<float>::infinity());
+            logits.index_put_({rows_t, cols_t}, BaseLogitsProcessor::neg_inf);
         }
     }
     return std::nullopt;

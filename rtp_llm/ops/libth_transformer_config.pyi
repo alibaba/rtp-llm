@@ -4,8 +4,8 @@ import typing
 
 import torch
 
-__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
-                      'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once', 'serialize_grammar_tokenizer_info']
+__all__: list[str] = ['ALLTOALL', 'ALL_GATHER', 'ALL_GATHER_WITH_OVERLAP', 'ActivationType', 'ArpcConfig', 'AttentionConfigs', 'BatchDecodeSchedulerConfig', 'CPRotateMethod', 'CacheStoreConfig', 'ConcurrencyConfig', 'DISABLED', 'DataType', 'DeviceResourceConfig', 'EPLBConfig', 'EplbMode', 'FIFOSchedulerConfig', 'FMHAConfig', 'FMHAType', 'FfnDisAggregateConfig', 'GrammarConfig', 'GrpcConfig', 'HWKernelConfig', 'HybridAttentionConfig', 'HybridAttentionType', 'KVCacheConfig', 'KvCacheDataType', 'LayerNormType', 'LinearAttentionConfig', 'MMModelConfig',
+                      'MiscellaneousConfig', 'MlaOpsType', 'ModelConfig', 'ModelSpecificConfig', 'MoeConfig', 'NcclCommConfig', 'NormType', 'PDSepConfig', 'PREFILL_CP', 'ParallelismConfig', 'PrefillCPConfig', 'ProfilingDebugLoggingConfig', 'QuantAlgo', 'QuantMethod', 'RoleSpecialTokens', 'RoleType', 'RopeCache', 'RopeConfig', 'RopeStyle', 'RuntimeConfig', 'SpecialTokens', 'SpeculativeExecutionConfig', 'SpeculativeType', 'TaskType', 'UNKNOWN', 'VitConfig', 'VitSeparation', 'check_rope_cache', 'get_block_cache_keys', 'get_rope_cache', 'get_rope_cache_once']
 
 
 class ActivationType:
@@ -541,6 +541,16 @@ class FfnDisAggregateConfig:
         ...
     def to_string(self) -> str:
         ...
+class GrammarConfig:
+    compiler_cache_bytes: int
+    constrained_json_disable_any_whitespace: bool
+    num_workers: int
+    def __getstate__(self) -> tuple:
+        ...
+    def __init__(self) -> None:
+        ...
+    def __setstate__(self, arg0: tuple) -> None:
+        ...
 class GrpcConfig:
     def __getstate__(self) -> tuple:
         ...
@@ -1024,6 +1034,7 @@ class ModelConfig:
     scoring_func: int
     special_tokens: SpecialTokens
     tokenizer_path: str
+    tokenizer_info_json: str
     type_vocab_size: int
     use_attention_linear_bias: bool
     use_fp32_to_compute_logit: bool
@@ -1773,8 +1784,6 @@ def get_rope_cache_once(rope_config: RopeConfig, max_position_embeddings: int, i
     """
     Get RoPE cache object once (singleton pattern)
     """
-def serialize_grammar_tokenizer_info(encoded_vocab: list[str], tokenizer_metadata_json: str) -> str:
-    ...
 ALLTOALL: CPRotateMethod  # value = <CPRotateMethod.ALLTOALL: 3>
 ALL_GATHER: CPRotateMethod  # value = <CPRotateMethod.ALL_GATHER: 1>
 ALL_GATHER_WITH_OVERLAP: CPRotateMethod  # value = <CPRotateMethod.ALL_GATHER_WITH_OVERLAP: 2>

@@ -259,13 +259,23 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputAppliesGrammarMask
 
     SpecLogitsVerifyRunner::LaunchResult spec_logits_result;
     spec_logits_result.has_active_processor = true;
-    spec_logits_result.packed_allow_mask_gpu =
-        torch::tensor({0b1011, 0b1110, 0b0111}, torch::kInt32).reshape({3, 1}).to(torch::kCUDA);
-    spec_logits_result.logits_row_indices_gpu = torch::tensor({0, 1, 2}, torch::kInt32).to(torch::kCUDA);
+    spec_logits_result.packed_allow_mask_cpu_lifetime =
+        torch::tensor({0b1011, 0b1110, 0b0111}, torch::kInt32).reshape({3, 1});
+    spec_logits_result.logits_row_indices_cpu_lifetime = torch::tensor({0, 1, 2}, torch::kInt32);
+#if USING_CUDA
+    spec_logits_result.packed_allow_mask_gpu  = spec_logits_result.packed_allow_mask_cpu_lifetime.to(torch::kCUDA);
+    spec_logits_result.logits_row_indices_gpu = spec_logits_result.logits_row_indices_cpu_lifetime.to(torch::kCUDA);
+#endif
 
     auto sampler_inputs =
         processor.gatherSpecSamplerInput(stream_groups, model_input, model_output, spec_logits_result);
     ASSERT_TRUE(sampler_inputs.ok());
+
+    const auto& finished_mask = sampler_inputs.value().finished_mask;
+    ASSERT_EQ(finished_mask.numel(), 3);
+    for (int64_t i = 0; i < finished_mask.numel(); ++i) {
+        EXPECT_FALSE(finished_mask.data_ptr<bool>()[i]);
+    }
 
     auto logits = sampler_inputs.value().logits.cpu().contiguous();
     EXPECT_FLOAT_EQ(logits.data_ptr<float>()[0], 0.1f);

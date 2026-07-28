@@ -85,11 +85,17 @@ def _has_mergeable_ranks(tokenizer: Any) -> bool:
 
 
 def _is_byte_level_tokenizer(tokenizer: Any) -> bool:
-    new_ids = tokenizer.encode(r" ")
+    try:
+        new_ids = tokenizer.encode(r" ", add_special_tokens=False)
+    except TypeError:
+        # Some tiktoken-backed wrappers do not expose the Hugging Face
+        # add_special_tokens keyword. In that case, ignore any prefix tokens
+        # below instead of assuming the first encoded id represents the space.
+        new_ids = tokenizer.encode(r" ")
     if len(new_ids) < 1:
         return False
     new_tokens = tokenizer.convert_ids_to_tokens(new_ids)
-    return new_tokens[0] == "\u0120"
+    return "\u0120" in new_tokens
 
 
 def _is_sentencepiece_tokenizer(tokenizer: Any) -> bool:

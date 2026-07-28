@@ -1,5 +1,7 @@
 #include "rtp_llm/models_py/bindings/common/kernels/mask_logits.h"
 
+#include <cfloat>
+
 #if USING_CUDA
 #include <cuda_runtime.h>
 #include <cuda_fp16.h>  // For half
@@ -37,18 +39,19 @@ namespace rtp_llm {
 #define CUDART_INF_BF16 HIP_INF_BF16
 #endif
 
+// Match BaseLogitsProcessor::neg_inf after conversion to the logits dtype.
 template<typename T>
-__device__ T NegativeInfinity() {
-    return -INFINITY;
+__device__ T MaskedLogitValue() {
+    return -FLT_MAX;
 }
 
 template<>
-__device__ __half NegativeInfinity<__half>() {
+__device__ __half MaskedLogitValue<__half>() {
     return -CUDART_INF_FP16;
 }
 
 template<>
-__device__ __nv_bfloat16 NegativeInfinity<__nv_bfloat16>() {
+__device__ __nv_bfloat16 MaskedLogitValue<__nv_bfloat16>() {
     return -CUDART_INF_BF16;
 }
 
@@ -62,7 +65,7 @@ mask_logits(const int batch_size, const int vocab_size, T* logits_batch, const u
     if (batch_idx < batch_size && vocab_idx < vocab_size) {
         int global_idx = batch_idx * vocab_size + vocab_idx;
         if (mask_batch[global_idx]) {
-            logits_batch[global_idx] = NegativeInfinity<T>();
+            logits_batch[global_idx] = MaskedLogitValue<T>();
         }
     }
 }
@@ -92,11 +95,15 @@ __global__ void packed_mask_logits(T* __restrict__ logits_batch,
     const int word_idx = vocab_idx / 32;
     bool      allowed  = false;
     if (word_idx < bitmask_words) {
-        const uint32_t word = static_cast<uint32_t>(packed_allow_mask[compact_row * bitmask_row_stride + word_idx]);
+        const int64_t mask_offset =
+            static_cast<int64_t>(compact_row) * static_cast<int64_t>(bitmask_row_stride) + word_idx;
+        const uint32_t word = static_cast<uint32_t>(packed_allow_mask[mask_offset]);
         allowed             = (word & (1u << (vocab_idx % 32))) != 0u;
     }
     if (!allowed) {
-        logits_batch[logits_row * logits_row_stride + vocab_idx] = NegativeInfinity<T>();
+        const int64_t logits_offset =
+            static_cast<int64_t>(logits_row) * static_cast<int64_t>(logits_row_stride) + vocab_idx;
+        logits_batch[logits_offset] = MaskedLogitValue<T>();
     }
 }
 #endif

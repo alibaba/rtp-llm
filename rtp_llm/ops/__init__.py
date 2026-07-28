@@ -158,7 +158,6 @@ try:
         check_rope_cache,
         get_rope_cache,
         get_rope_cache_once,
-        serialize_grammar_tokenizer_info,
         CPRotateMethod,
         PrefillCPConfig,
     )
@@ -189,6 +188,17 @@ try:
 except BaseException as e:
     logging.info(f"Exception: {e}, traceback: {traceback.format_exc()}")
     raise e
+
+
+def serialize_grammar_tokenizer_info(
+    encoded_vocab: List[str],
+    tokenizer_metadata_json: str,
+) -> str:
+    from libth_grammar_tokenizer_info import (
+        serialize_grammar_tokenizer_info as serialize,
+    )
+
+    return serialize(encoded_vocab, tokenizer_metadata_json)
 
 
 def get_block_cache_keys(token_ids: List[int], block_size: int) -> List[int]:

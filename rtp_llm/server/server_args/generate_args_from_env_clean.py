@@ -68,9 +68,13 @@ def read_env_value(env_name: str, default_value: Any, arg_type: type) -> Any:
             return int(env_value)
         elif arg_type == float:
             return float(env_value)
+        elif arg_type == str2bool:
+            return str2bool(env_value)
+        elif callable(arg_type):
+            return arg_type(env_value)
         else:
             return str(env_value)
-    except (ValueError, TypeError):
+    except (argparse.ArgumentTypeError, ValueError, TypeError):
         # 如果转换失败，返回默认值
         return default_value
 
@@ -84,6 +88,8 @@ def format_argument_value(value: Any) -> str:
         return ""
     elif isinstance(value, bool):
         return "1" if value else "0"
+    elif isinstance(value, list):
+        return ",".join(map(str, value))
     else:
         return str(value)
 
@@ -95,6 +101,8 @@ def format_argument_pair(long_option: str, value: Any) -> List[str]:
     """
     # 跳过字符串类型的参数
     if isinstance(value, str):
+        return []
+    if isinstance(value, list) and not value:
         return []
 
     formatted_value = format_argument_value(value)
@@ -152,6 +160,8 @@ def generate_args_list(only_env_vars: bool = False) -> List[str]:
                             env_value = float(env_value_str)
                         elif arg_type == str2bool:
                             env_value = str2bool(env_value_str)
+                        elif callable(arg_type):
+                            env_value = arg_type(env_value_str)
                         else:
                             env_value = str(env_value_str)
 
@@ -160,7 +170,7 @@ def generate_args_list(only_env_vars: bool = False) -> List[str]:
                             continue
 
                         args_list.extend(format_argument_pair(long_option, env_value))
-                    except (ValueError, TypeError):
+                    except (argparse.ArgumentTypeError, ValueError, TypeError):
                         # 如果转换失败，跳过这个参数
                         continue
         else:

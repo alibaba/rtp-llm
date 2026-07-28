@@ -1,10 +1,33 @@
 #include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
 
 #include <algorithm>
+#include <string>
+
+#include <c10/util/Exception.h>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm {
+
+namespace {
+
+ErrorInfo makeGrammarMaskBuildError(ErrorCode code, const char* op, const char* message) {
+    return ErrorInfo(code, std::string("grammar mask ") + op + " build failed: " + message);
+}
+
+}  // namespace
+
+namespace detail {
+
+ErrorInfo grammarMaskBuildError(const char* op, const std::bad_alloc& error) {
+    return makeGrammarMaskBuildError(ErrorCode::MALLOC_FAILED, op, error.what());
+}
+
+ErrorInfo grammarMaskBuildError(const char* op, const c10::Error& error) {
+    return makeGrammarMaskBuildError(ErrorCode::EXECUTION_EXCEPTION, op, error.what());
+}
+
+}  // namespace detail
 
 DLTensor makeSingleRowBitmaskView(int32_t* data, int32_t words, int64_t shape_out[2]) {
     DLTensor dl;

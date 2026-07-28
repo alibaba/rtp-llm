@@ -2,6 +2,7 @@ import json
 import os
 from typing import Any, List, Optional
 from unittest import TestCase, main
+from unittest.mock import patch
 
 from transformers import AutoTokenizer
 
@@ -608,10 +609,9 @@ class ResponseFormatProjectionTest(TestCase):
         generate_env_config.think_mode = 1
         generate_env_config.think_end_token_id = think_end_token_id
         generate_env_config.think_end_tag = think_end_tag
-        cfg.add_thinking_params(
-            None,
-            generate_env_config,
-            normalize_response_format=False,
+        cfg.in_think_mode = True
+        cfg.end_think_token_ids = (
+            [think_end_token_id] if think_end_token_id != -1 else []
         )
         return ReasoningFormat.from_generate_env_config(generate_env_config)
 
@@ -677,6 +677,24 @@ class ResponseFormatProjectionTest(TestCase):
         self.assertEqual(cfg.regex, r"[a-z]+")
         self.assertFalse(self._terminate_without_stop_token(cfg))
 
+    def test_response_format_recursion_error_is_reported_as_input_error(self):
+        cfg = GenerateConfig(
+            response_format=(
+                '{"type":"structural_tag","structural_tag":'
+                '{"type":"structural_tag","format":{}}}'
+            )
+        )
+
+        with patch(
+            "rtp_llm.config.response_format_builder.parse_response_format",
+            side_effect=RecursionError("maximum JSON nesting depth exceeded"),
+        ):
+            with self.assertRaises(FtRuntimeException) as ctx:
+                self._validate(cfg)
+        self.assertEqual(
+            ctx.exception.exception_type, ExceptionType.ERROR_INPUT_FORMAT_ERROR
+        )
+
     def test_direct_grammar_dict_normalized(self):
         cfg = GenerateConfig(json_schema={"type": "object"})
         self._validate(cfg)
@@ -686,7 +704,12 @@ class ResponseFormatProjectionTest(TestCase):
         cfg = GenerateConfig(
             response_format={
                 "type": "json_schema",
-                "json_schema": {"schema": {"type": "object"}},
+                "json_schema": {
+                    "schema": {
+                        "type": "object",
+                        "examples": [{"type": "any_text", "max_tokens": 1}],
+                    }
+                },
             },
             max_thinking_tokens=64,
         )
@@ -707,7 +730,13 @@ class ResponseFormatProjectionTest(TestCase):
         self.assertEqual(elements[0]["end"], "</think>\n\n")
         self.assertEqual(elements[0]["content"], {"type": "any_text", "max_tokens": 64})
         self.assertEqual(elements[1]["type"], "json_schema")
-        self.assertEqual(elements[1]["json_schema"], {"type": "object"})
+        self.assertEqual(
+            elements[1]["json_schema"],
+            {
+                "type": "object",
+                "examples": [{"type": "any_text", "max_tokens": 1}],
+            },
+        )
         self.assertEqual(elements[1]["style"], "json")
 
     def test_reasoning_uses_token_end_when_think_end_token_id_is_configured(self):
@@ -755,6 +784,20 @@ class ResponseFormatProjectionTest(TestCase):
             ctx.exception.exception_type, ExceptionType.UNSUPPORTED_OPERATION
         )
 
+    def test_deeply_nested_structural_tag_is_reported_as_input_error(self):
+        depth = 2000
+        nested_format = '{"child":' * depth + "{}" + "}" * depth
+        cfg = GenerateConfig(
+            structural_tag=('{"type":"structural_tag","format":' + nested_format + "}")
+        )
+        reasoning_format = self._enable_thinking(cfg)
+
+        with self.assertRaises(FtRuntimeException) as ctx:
+            self._validate(cfg, reasoning_format=reasoning_format)
+        self.assertEqual(
+            ctx.exception.exception_type, ExceptionType.ERROR_INPUT_FORMAT_ERROR
+        )
+
 
 class RawUpdateAndGrammarConflictTest(TestCase):
     """Raw request updates still coerce response_format and reject grammar conflicts."""
@@ -781,6 +824,31 @@ class RawUpdateAndGrammarConflictTest(TestCase):
             "grammar_terminate_without_stop_token", GenerateConfig.model_fields
         )
         self.assertNotIn("grammar_terminate_without_stop_token", cfg.model_dump())
+
+    def test_update_ignores_method_name(self):
+        cfg = GenerateConfig()
+        cfg.update(
+            {
+                "grammar_terminate_without_stop_token": True,
+                "max_new_tokens": 42,
+            }
+        )
+        self.assertEqual(cfg.max_new_tokens, 42)
+        self.assertIn("max_new_tokens", cfg.model_fields_set)
+        self.assertFalse(cfg.grammar_terminate_without_stop_token())
+
+    def test_update_and_pop_preserves_method_name(self):
+        cfg = GenerateConfig()
+        remain = cfg.update_and_pop(
+            {
+                "grammar_terminate_without_stop_token": True,
+                "max_new_tokens": 42,
+            }
+        )
+        self.assertEqual(remain, {"grammar_terminate_without_stop_token": True})
+        self.assertEqual(cfg.max_new_tokens, 42)
+        self.assertIn("max_new_tokens", cfg.model_fields_set)
+        self.assertFalse(cfg.grammar_terminate_without_stop_token())
 
     def test_update_rejects_malformed_envelope(self):
         cfg = GenerateConfig()

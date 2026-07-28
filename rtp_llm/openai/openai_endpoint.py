@@ -266,20 +266,14 @@ class OpenaiEndpoint(object):
             and isinstance(request.extra_configs.max_thinking_tokens, int)
         ):
             config.max_thinking_tokens = request.extra_configs.max_thinking_tokens
-        # add_thinking_params now accepts generate_env_config parameter
-        config.add_thinking_params(
-            self.tokenizer,
-            self.generate_env_config,
-            normalize_response_format=False,
-        )
         if request.thinking_budget is not None:
             budget = int(request.thinking_budget)
             config.max_thinking_tokens = _INT32_MAX if budget < 0 else budget
+        enable_thinking = bool(self.generate_env_config.think_mode)
         if request.enable_thinking_requested() and config.max_thinking_tokens != 0:
-            config.in_think_mode = True
-            self._ensure_think_end_token_ids(config)
+            enable_thinking = True
         if request.disable_thinking():
-            config.in_think_mode = False
+            enable_thinking = False
             config.max_thinking_tokens = 0
         max_completion_tokens = _positive_int_or_none(request.max_completion_tokens)
         max_tokens_cap = _positive_int_or_none(request.max_tokens)
@@ -291,8 +285,12 @@ class OpenaiEndpoint(object):
         elif request.max_tokens != None:
             config.max_new_tokens = request.max_tokens
         reasoning_format = self.chat_renderer.get_reasoning_format()
-        config.validate()
-        config.apply_response_format(reasoning_format=reasoning_format)
+        config.add_thinking_params(
+            self.tokenizer,
+            self.generate_env_config,
+            enable_thinking=enable_thinking,
+            reasoning_format=reasoning_format,
+        )
         if request.debug_info:
             config.return_output_ids = True
         return config

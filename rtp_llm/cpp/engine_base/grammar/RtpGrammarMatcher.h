@@ -2,8 +2,6 @@
 
 #include <cstdint>
 #include <memory>
-#include <optional>
-#include <vector>
 
 #include <dlpack/dlpack.h>
 #include <xgrammar/compiler.h>
@@ -17,17 +15,15 @@ namespace rtp_llm {
 class RtpGrammarMatcher final {
 public:
     RtpGrammarMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compiled,
-                      std::optional<std::vector<int32_t>>        override_stop_tokens         = std::nullopt,
                       bool                                       terminate_without_stop_token = false,
                       int                                        max_rollback_tokens          = 200);
 
     RtpGrammarMatcher(const RtpGrammarMatcher&) = delete;
     RtpGrammarMatcher& operator=(const RtpGrammarMatcher&) = delete;
-    RtpGrammarMatcher(RtpGrammarMatcher&&)                 = default;
-    RtpGrammarMatcher& operator=(RtpGrammarMatcher&&) = default;
+    RtpGrammarMatcher(RtpGrammarMatcher&&) = delete;
+    RtpGrammarMatcher& operator=(RtpGrammarMatcher&&) = delete;
 
     [[nodiscard]] ErrorResult<bool> acceptToken(int32_t token_id);
-    [[nodiscard]] ErrorResult<bool> acceptTokens(const std::vector<int32_t>& tokens);
 
     [[nodiscard]] ErrorResult<bool> fillBitmask(DLTensor* bitmask, int32_t idx);
 
@@ -49,9 +45,8 @@ public:
 private:
     std::shared_ptr<xgrammar::CompiledGrammar> compiled_;
     std::unique_ptr<xgrammar::GrammarMatcher>  matcher_;
-    std::optional<std::vector<int32_t>>         override_stop_tokens_;
-    bool                                         terminate_without_stop_token_ = false;
-    int                                          max_rollback_tokens_          = 200;
+    bool                                        terminate_without_stop_token_ = false;
+    int                                         max_rollback_tokens_          = 200;
 
     int64_t num_accepted_ = 0;
     bool    finished_     = false;

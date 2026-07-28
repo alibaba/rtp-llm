@@ -275,7 +275,7 @@ public:
         reportEventWithoutLock(StreamEvents::Error, error_code, std::forward<T>(error_msg));
     }
 
-    // 无锁版本的 reportError，供已持有 mutex_ 的内部路径（dispatch/process/acceptTokens）使用，
+    // 无锁版本的 reportError，供已持有 mutex_ 的内部路径（dispatch/process/updateStatus）使用，
     // 构造期对象尚未发布的路径使用，避免在非递归 mutex 上自死锁。语义上等价于
     // reportEventWithoutLock(Error, code, msg)，提供独立 API 仅为调用方意图更清晰。
     void         reportErrorWithoutLock(ErrorCode error_code, const std::string& error_msg);

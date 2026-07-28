@@ -12,7 +12,6 @@
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
-#include "rtp_llm/cpp/engine_base/grammar/XGrammarTokenizerInfo.h"
 #include "rtp_llm/cpp/model_utils/RopeCache.h"
 #include "pybind11/pybind11.h"
 #include "pybind11/cast.h"
@@ -95,10 +94,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     // Register get_block_cache_keys function
     registerCommon(m);
     registerMultimodal(m);
-    m.def("serialize_grammar_tokenizer_info",
-          &rtp_llm::xgrammar_impl::serializeTokenizerInfo,
-          py::arg("encoded_vocab"),
-          py::arg("tokenizer_metadata_json"));
 
     // Register enums
     py::enum_<RoleType>(m, "RoleType")
@@ -1339,13 +1334,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                  oss << "GrammarConfig(grammar_backend=" << c.grammar_backend
                      << ", constrained_json_disable_any_whitespace="
                      << c.constrained_json_disable_any_whitespace << ", num_workers=" << c.num_workers
-                     << ", compiler_cache_bytes=" << c.compiler_cache_bytes << ", override_stop_tokens=[";
-                 for (size_t i = 0; i < c.override_stop_tokens.size(); ++i) {
-                     if (i)
-                         oss << ",";
-                     oss << c.override_stop_tokens[i];
-                 }
-                 oss << "])";
+                     << ", compiler_cache_bytes=" << c.compiler_cache_bytes << ")";
                  return oss.str();
              })
         .def(py::pickle(

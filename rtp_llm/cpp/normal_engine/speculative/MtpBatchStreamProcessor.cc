@@ -119,6 +119,7 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
 
     SamplerInputs sampler_inputs =
         allocateSamplerInputs(stream_groups, total_batch_size, total_batch_size, propose_step_);
+    sampler_inputs.finished_mask.zero_();
     fillSamplerCommonInputs(sampler_inputs, all_streams, true, propose_step_);
 
     int batch_idx = 0;
@@ -149,10 +150,7 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
 
     sampler_inputs.logits = model_output.logits.clone();
     if (spec_logits_result.has_active_processor) {
-        SpecLogitsVerifyRunner::applyMaskToLogits(sampler_inputs.logits,
-                                                  spec_logits_result.packed_allow_mask_gpu,
-                                                  spec_logits_result.logits_row_indices_gpu,
-                                                  sampler_inputs.vocab_size);
+        SpecLogitsVerifyRunner::applyMaskToLogits(sampler_inputs.logits, spec_logits_result, sampler_inputs.vocab_size);
     }
 
     RTP_LLM_LOG_DEBUG("sampler inputs logits [%s]",

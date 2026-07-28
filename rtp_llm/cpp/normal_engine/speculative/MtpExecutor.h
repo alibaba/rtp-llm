@@ -114,6 +114,11 @@ private:
     GptModelOutputs forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role);
     void            releaseModelBuffers();
 
+    static void applySpecVerifyResult(SpecLogitsVerifyRunner::LaunchResult&  verify_result,
+                                      const SamplerOutput&                   target_sampler_output,
+                                      speculative::SpeculativeSamplerOutput& output,
+                                      int64_t                                propose_step);
+
     SpecLogitsVerifyRunner::LaunchResult runSpecLogitsVerify(const std::list<GenerateStreamPtr>& streams,
                                                              const torch::Tensor&                draft_tokens);
 

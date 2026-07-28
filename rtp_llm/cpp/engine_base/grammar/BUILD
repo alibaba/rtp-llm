@@ -18,6 +18,20 @@ cc_library(
     copts = copts(),
 )
 
+# Keep xgrammar tokenizer serialization out of libth_transformer_config.
+cc_library(
+    name = "grammar_tokenizer_info_python",
+    srcs = [
+        "PyGrammarTokenizerInfo.cc",
+    ],
+    deps = [
+        ":xgrammar_tokenizer_info",
+        "@local_config_python//:python_headers",
+    ],
+    copts = copts(),
+    alwayslink = True,
+)
+
 # xgrammar-specific impl; only Tier 0 (this package) and Tier 1 (logits_processor) may depend.
 cc_library(
     name = "grammar_xgrammar",

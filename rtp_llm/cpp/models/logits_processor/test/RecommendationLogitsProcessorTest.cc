@@ -52,7 +52,7 @@ TEST_F(RecommendationLogitsProcessorTest, testProcessNoMaskWhenNotLastPosition) 
 
     auto logits_cpu = sampler_inputs.logits.cpu();
     auto data       = logits_cpu.data_ptr<float>();
-    // 所有位置都应仍然是 1.0f，没有被置为 -inf
+    // 所有位置都应仍然是 1.0f，没有被屏蔽
     for (size_t j = 0; j < vocab_size; ++j) {
         ASSERT_FLOAT_EQ(data[j], 1.0f);
     }
@@ -76,7 +76,7 @@ TEST_F(RecommendationLogitsProcessorTest, testProcessMaskAtLastPosition) {
 
     auto logits_cpu = sampler_inputs.logits.cpu();
     auto data       = logits_cpu.data_ptr<float>();
-    ASSERT_TRUE(data[30] == -std::numeric_limits<float>::max() || data[30] == -INFINITY);
+    ASSERT_FLOAT_EQ(BaseLogitsProcessor::neg_inf, data[30]);
     ASSERT_FLOAT_EQ(data[29], 1.0f);
     ASSERT_FLOAT_EQ(data[31], 1.0f);
     // 未匹配前缀的 35 不应被屏蔽
@@ -138,7 +138,7 @@ TEST_F(RecommendationLogitsProcessorTest, testDedupBlockRepeatedCombo) {
 
     auto logits_cpu = sampler_inputs.logits.cpu();
     auto data       = logits_cpu.data_ptr<float>();
-    ASSERT_TRUE(data[9] == -std::numeric_limits<float>::max() || data[9] == -INFINITY);
+    ASSERT_FLOAT_EQ(BaseLogitsProcessor::neg_inf, data[9]);
     ASSERT_FLOAT_EQ(data[8], 1.0f);
 }
 
@@ -280,13 +280,13 @@ TEST_F(RecommendationLogitsProcessorTest, testTopKDivergeMasking) {
     EXPECT_FLOAT_EQ(5.0f, result[0][1].item<float>());
     EXPECT_FLOAT_EQ(4.0f, result[0][3].item<float>());
 
-    // 序列 1：遮蔽 top-1 (col1)，col1 应为 -inf
-    EXPECT_TRUE(std::isinf(result[1][1].item<float>()) && result[1][1].item<float>() < 0);
+    // 序列 1：遮蔽 top-1 (col1)
+    EXPECT_FLOAT_EQ(BaseLogitsProcessor::neg_inf, result[1][1].item<float>());
     EXPECT_FLOAT_EQ(4.0f, result[1][3].item<float>());  // top-2 不受影响
 
-    // 序列 2：遮蔽 top-1,2 (col1, col3)，两者应为 -inf
-    EXPECT_TRUE(std::isinf(result[2][1].item<float>()) && result[2][1].item<float>() < 0);
-    EXPECT_TRUE(std::isinf(result[2][3].item<float>()) && result[2][3].item<float>() < 0);
+    // 序列 2：遮蔽 top-1,2 (col1, col3)
+    EXPECT_FLOAT_EQ(BaseLogitsProcessor::neg_inf, result[2][1].item<float>());
+    EXPECT_FLOAT_EQ(BaseLogitsProcessor::neg_inf, result[2][3].item<float>());
 }
 
 // 场景 11：diverge_start_combo 延迟分叉——前 N 个商品不遮蔽
@@ -327,7 +327,7 @@ TEST_F(RecommendationLogitsProcessorTest, testDivergeStartComboDelay) {
 
     auto result2 = sampler_inputs2.logits.cpu();
     // 序列 1 的 top-1 (col1) 现在应被遮蔽
-    EXPECT_TRUE(std::isinf(result2[1][1].item<float>()) && result2[1][1].item<float>() < 0);
+    EXPECT_FLOAT_EQ(BaseLogitsProcessor::neg_inf, result2[1][1].item<float>());
     // 序列 0 不受影响
     EXPECT_FLOAT_EQ(5.0f, result2[0][1].item<float>());
 }
@@ -379,7 +379,7 @@ TEST_F(RecommendationLogitsProcessorTest, testDivergeAndBanSimultaneous) {
     // vocab_size=50，在 CUDA 上分配
     const size_t vocab_size     = 50;
     auto         sampler_inputs = allocateSamplerInputs(3, vocab_size, processor);
-    // 每行填充为 1.0，方便观察哪些位置被置为 -inf
+    // 每行填充为 1.0，方便观察哪些位置被屏蔽
     sampler_inputs.logits.fill_(1.0f);
 
     processor->process(sampler_inputs, 0, 3);
@@ -394,17 +394,17 @@ TEST_F(RecommendationLogitsProcessorTest, testDivergeAndBanSimultaneous) {
         EXPECT_FLOAT_EQ(1.0f, data0[j]);
     }
 
-    // 序列 1：diverge 遮蔽 top-1（所有值都是 1.0，topk 选出第一个），应有恰好 1 个位置被置为 -inf
+    // 序列 1：diverge 遮蔽 top-1（所有值都是 1.0，topk 选出第一个），应有恰好 1 个位置被屏蔽
     int inf_count_seq1 = 0;
     for (size_t j = 0; j < vocab_size; ++j) {
-        if (std::isinf(data1[j]) && data1[j] < 0)
+        if (data1[j] == BaseLogitsProcessor::neg_inf)
             inf_count_seq1++;
     }
     EXPECT_EQ(1, inf_count_seq1);  // top-1 遮蔽
 
     // 序列 2：ban 屏蔽 token 30（前缀 {10,20} 匹配 banned combo {10,20,30}）
     // 序列 2 在 pos=2 不触发 diverge（diverge 仅在 pos=0），仅触发 ban
-    EXPECT_TRUE(std::isinf(data2[30]) && data2[30] < 0);
+    EXPECT_FLOAT_EQ(BaseLogitsProcessor::neg_inf, data2[30]);
     // 其他位置不受影响
     EXPECT_FLOAT_EQ(1.0f, data2[29]);
     EXPECT_FLOAT_EQ(1.0f, data2[31]);
@@ -848,7 +848,7 @@ TEST_F(RecommendationLogitsProcessorTest, testSingleSequenceCrossSeqBanNoOp) {
     // ban 应该正常工作：token 2 被封锁
     auto logits_cpu = inputs.logits.cpu();
     auto acc        = logits_cpu.accessor<float, 2>();
-    EXPECT_FLOAT_EQ(-std::numeric_limits<float>::infinity(), acc[0][2]);
+    EXPECT_FLOAT_EQ(BaseLogitsProcessor::neg_inf, acc[0][2]);
     // 其他 token 不受影响
     EXPECT_FLOAT_EQ(1.0f, acc[0][0]);
     EXPECT_FLOAT_EQ(1.0f, acc[0][1]);
@@ -997,7 +997,7 @@ TEST_F(RecommendationLogitsProcessorTest, testThinkModeSkipsDiverge) {
     logits_cpu = inputs.logits.cpu();
     acc        = logits_cpu.accessor<float, 2>();
     // 序列 1 的 token 0 应被遮蔽（diverge k=1）
-    EXPECT_FLOAT_EQ(-std::numeric_limits<float>::infinity(), acc[1][0]);
+    EXPECT_FLOAT_EQ(BaseLogitsProcessor::neg_inf, acc[1][0]);
 }
 
 // 场景 24：多流合批路径——start_idx > 0 时 diverge 和 ban 都正确工作
@@ -1045,16 +1045,16 @@ TEST_F(RecommendationLogitsProcessorTest, testProcessWithNonZeroStartIdx) {
     EXPECT_FLOAT_EQ(10.0f, acc[0][0]);
     EXPECT_FLOAT_EQ(10.0f, acc[1][0]);
 
-    // row 2 (本 processor 的序列 0，主序列): banned combo [1,2,3] 匹配前缀 [1,2]，应将 col 3 置为 -inf
-    EXPECT_FLOAT_EQ(-std::numeric_limits<float>::infinity(), acc[2][3]);
+    // row 2 (本 processor 的序列 0，主序列): banned combo [1,2,3] 匹配前缀 [1,2]，应屏蔽 col 3
+    EXPECT_FLOAT_EQ(BaseLogitsProcessor::neg_inf, acc[2][3]);
     // col 0 不受 diverge 影响（主序列不遮蔽）
     EXPECT_FLOAT_EQ(10.0f, acc[2][0]);
 
     // row 3 (本 processor 的序列 1): diverge 应遮蔽 top-1 (col 0)
-    EXPECT_FLOAT_EQ(-std::numeric_limits<float>::infinity(), acc[3][0]);
+    EXPECT_FLOAT_EQ(BaseLogitsProcessor::neg_inf, acc[3][0]);
 
     // row 4 (本 processor 的序列 2): diverge 应遮蔽 top-1,2 (col 0 和次高)
-    EXPECT_FLOAT_EQ(-std::numeric_limits<float>::infinity(), acc[4][0]);
+    EXPECT_FLOAT_EQ(BaseLogitsProcessor::neg_inf, acc[4][0]);
 }
 
 // 场景 25：启用条件真值表 —— SYNC with Python TestCrossLanguageConstantSync::test_enable_conditions_sync

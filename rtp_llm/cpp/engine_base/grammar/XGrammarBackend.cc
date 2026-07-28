@@ -4,7 +4,6 @@
 #include <chrono>
 #include <exception>
 #include <new>
-#include <optional>
 #include <string>
 #include <utility>
 #include <variant>
@@ -17,17 +16,6 @@
 namespace rtp_llm {
 
 namespace {
-XGrammarBackendOptions backendOptionsFromConfig(const GrammarConfig& cfg) {
-    XGrammarBackendOptions opts;
-    opts.any_whitespace       = !cfg.constrained_json_disable_any_whitespace;
-    opts.strict_mode          = true;
-    opts.max_compiler_threads = std::max(1, cfg.num_workers);
-    opts.compiler_cache_bytes = cfg.compiler_cache_bytes > 0 ? cfg.compiler_cache_bytes : -1;
-    if (!cfg.override_stop_tokens.empty()) {
-        opts.override_stop_tokens = cfg.override_stop_tokens;
-    }
-    return opts;
-}
 
 template<typename CompileFn>
 absl::StatusOr<std::shared_ptr<xgrammar::CompiledGrammar>> compileWithErrorClassification(CompileFn compile_fn) {
@@ -79,19 +67,30 @@ std::shared_ptr<XGrammarBackend> XGrammarBackend::create(const std::string&   to
             RTP_LLM_LOG_INFO("XGrammarBackend::create: structured output disabled (TokenizerInfo empty)");
             return nullptr;
         }
-        XGrammarBackendOptions opts   = backendOptionsFromConfig(cfg);
-        auto                   result = xgrammar::TokenizerInfo::DeserializeJSON(tokenizer_info_json);
+        Options opts   = optionsFromConfig(cfg);
+        auto    result = xgrammar::TokenizerInfo::DeserializeJSON(tokenizer_info_json);
         if (std::holds_alternative<xgrammar::SerializationError>(result)) {
             RTP_LLM_LOG_ERROR("XGrammarBackend::create: tokenizer info deserialize failed (%s); disabling grammar",
                               serializationErrorToString(std::get<xgrammar::SerializationError>(result)).c_str());
             return nullptr;
         }
-        const auto& tokenizer_info = std::get<xgrammar::TokenizerInfo>(result);
-        auto        backend        = std::make_shared<XGrammarBackend>(tokenizer_info, opts);
+        const auto& serialized_tokenizer_info = std::get<xgrammar::TokenizerInfo>(result);
+        // xgrammar derives its token-id lookup in the constructor but does not serialize it.
+        // Rebuild from the already-decoded vocabulary so token-level grammar works after the
+        // Python-to-C++ JSON boundary without decoding BYTE_LEVEL/BYTE_FALLBACK tokens twice.
+        const xgrammar::TokenizerInfo tokenizer_info(serialized_tokenizer_info.GetDecodedVocab(),
+                                                     xgrammar::VocabType::RAW,
+                                                     serialized_tokenizer_info.GetVocabSize(),
+                                                     serialized_tokenizer_info.GetStopTokenIds(),
+                                                     serialized_tokenizer_info.GetAddPrefixSpace());
+        if (tokenizer_info.GetVocabSize() <= 0) {
+            RTP_LLM_LOG_ERROR("XGrammarBackend::create: tokenizer vocab is empty; disabling grammar");
+            return nullptr;
+        }
+        auto backend = std::shared_ptr<XGrammarBackend>(new XGrammarBackend(tokenizer_info, opts));
         RTP_LLM_LOG_INFO("XGrammarBackend::create: ready with serialized TokenizerInfo "
-                         "(json_bytes=%zu, override_stop_tokens=%zu, threads=%d)",
+                         "(json_bytes=%zu, threads=%d)",
                          tokenizer_info_json.size(),
-                         cfg.override_stop_tokens.size(),
                          opts.max_compiler_threads);
         return backend;
     } catch (const std::exception& e) {
@@ -100,7 +99,16 @@ std::shared_ptr<XGrammarBackend> XGrammarBackend::create(const std::string&   to
     }
 }
 
-XGrammarBackend::XGrammarBackend(const xgrammar::TokenizerInfo& tokenizer_info, const XGrammarBackendOptions& options):
+XGrammarBackend::Options XGrammarBackend::optionsFromConfig(const GrammarConfig& cfg) {
+    Options opts;
+    opts.any_whitespace       = !cfg.constrained_json_disable_any_whitespace;
+    opts.strict_mode          = true;
+    opts.max_compiler_threads = std::max(1, cfg.num_workers);
+    opts.compiler_cache_bytes = cfg.compiler_cache_bytes > 0 ? cfg.compiler_cache_bytes : -1;
+    return opts;
+}
+
+XGrammarBackend::XGrammarBackend(const xgrammar::TokenizerInfo& tokenizer_info, const XGrammarBackend::Options& options):
     options_(options),
     tokenizer_info_(tokenizer_info),
     compiler_(tokenizer_info_,
@@ -118,10 +126,6 @@ XGrammarBackend::XGrammarBackend(const xgrammar::TokenizerInfo& tokenizer_info, 
 
 XGrammarBackend::~XGrammarBackend() = default;
 
-bool XGrammarBackend::isEnabled() const noexcept {
-    return tokenizer_info_.GetVocabSize() > 0;
-}
-
 // Thread-safe via xgrammar::GrammarCompiler's internal cache.
 absl::StatusOr<std::shared_ptr<xgrammar::CompiledGrammar>> XGrammarBackend::compile(const GrammarKeyCpp& key) {
     const auto  t_start = std::chrono::steady_clock::now();
@@ -130,11 +134,7 @@ absl::StatusOr<std::shared_ptr<xgrammar::CompiledGrammar>> XGrammarBackend::comp
     absl::StatusOr<std::shared_ptr<xgrammar::CompiledGrammar>> result =
         absl::InvalidArgumentError("Unknown grammar key_type: " + key.key_type);
     if (key.key_type == "json") {
-        // "$$ANY$$" → any JSON value (response_format=json_object).
         result = compileWithErrorClassification([&] {
-            if (s == "$$ANY$$") {
-                return compiler_.CompileBuiltinJSONGrammar();
-            }
             return compiler_.CompileJSONSchema(
                 s, options_.any_whitespace, std::nullopt, std::nullopt, options_.strict_mode);
         });
@@ -172,19 +172,13 @@ XGrammarBackend::createMatcher(std::shared_ptr<xgrammar::CompiledGrammar> compil
         return absl::InvalidArgumentError("createMatcher requires a non-null CompiledGrammar");
     }
     try {
-        return std::make_shared<RtpGrammarMatcher>(
-            std::move(compiled), options_.override_stop_tokens, terminate_without_stop_token);
+        return std::make_shared<RtpGrammarMatcher>(std::move(compiled), terminate_without_stop_token);
     } catch (const std::exception& e) {
         return absl::InvalidArgumentError(std::string("grammar matcher install failed: ") + e.what());
     } catch (...) {
         const auto error = absl::UnknownError("grammar matcher install failed: unknown");
         return error;
     }
-}
-
-void XGrammarBackend::clear() {
-    compiler_.ClearCache();
-    RTP_LLM_LOG_INFO("XGrammarBackend clear: compiler cache dropped");
 }
 
 }  // namespace rtp_llm

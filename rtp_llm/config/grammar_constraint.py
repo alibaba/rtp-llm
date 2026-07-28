@@ -13,7 +13,13 @@ GrammarFieldName: TypeAlias = Literal[
 
 
 def dump_compact_json(value: Any) -> str:
-    return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    try:
+        return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
+    except RecursionError as e:
+        raise FtRuntimeException(
+            ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+            "JSON value exceeds the supported nesting depth",
+        ) from e
 
 
 def load_json_field(name: str, value: Any) -> Any:
@@ -21,6 +27,11 @@ def load_json_field(name: str, value: Any) -> Any:
         return value
     try:
         return json.loads(value)
+    except RecursionError as e:
+        raise FtRuntimeException(
+            ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+            f"{name} exceeds the supported JSON nesting depth",
+        ) from e
     except (json.JSONDecodeError, TypeError) as e:
         raise FtRuntimeException(
             ExceptionType.ERROR_INPUT_FORMAT_ERROR,
@@ -35,14 +46,21 @@ def normalize_grammar_value(name: GrammarFieldName, value: Any) -> Any:
 
 
 def has_bounded_region(node: Any) -> bool:
-    if isinstance(node, dict):
-        node_type = node["type"] if "type" in node else None
-        max_tokens = node["max_tokens"] if "max_tokens" in node else None
-        if node_type in ("any_text", "any_tokens") and max_tokens is not None:
-            return True
-        return any(has_bounded_region(value) for value in node.values())
-    if isinstance(node, list):
-        return any(has_bounded_region(item) for item in node)
+    pending = [node]
+    while pending:
+        current = pending.pop()
+        if isinstance(current, dict):
+            # JSON Schema is opaque data, not part of the structural grammar AST.
+            if current.get("type") == "json_schema":
+                continue
+            if (
+                current.get("type") in ("any_text", "any_tokens")
+                and current.get("max_tokens") is not None
+            ):
+                return True
+            pending.extend(current.values())
+        elif isinstance(current, list):
+            pending.extend(current)
     return False
 
 
@@ -100,11 +118,7 @@ class GrammarConstraint:
             )
 
     def _json_schema_format_node(self) -> Dict[str, Any]:
-        schema: Any
-        if self.value == "$$ANY$$":
-            schema = True
-        else:
-            schema = load_json_field("json_schema", self.value)
+        schema = load_json_field("json_schema", self.value)
         if not isinstance(schema, (dict, bool)):
             raise FtRuntimeException(
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,

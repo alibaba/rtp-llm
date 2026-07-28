@@ -33,13 +33,15 @@ xgrammar::TokenizerInfo makeAsciiTokenizerInfo() {
                                    /*stop_token_ids=*/std::vector<int32_t>{0});
 }
 
-XGrammarBackendOptions defaultOptions() {
-    XGrammarBackendOptions opts;
-    opts.any_whitespace       = true;
-    opts.strict_mode          = true;
-    opts.max_compiler_threads = 2;
-    opts.compiler_cache_bytes = -1;
-    return opts;
+GrammarConfig defaultGrammarConfig() {
+    GrammarConfig cfg;
+    cfg.num_workers          = 2;
+    cfg.compiler_cache_bytes = -1;
+    return cfg;
+}
+
+std::shared_ptr<XGrammarBackend> makeBackend() {
+    return XGrammarBackend::create(makeAsciiTokenizerInfo().SerializeJSON(), defaultGrammarConfig());
 }
 
 struct ProcessorBundle {
@@ -52,25 +54,26 @@ struct ProcessorBundle {
 };
 
 ProcessorBundle
-makeProcessorFromKey(XGrammarBackend& backend, const GrammarKeyCpp& key, bool terminate_without_stop_token = true) {
-    auto compiled_or = backend.compile(key);
-    EXPECT_TRUE(compiled_or.ok()) << compiled_or.status().ToString();
-    if (!compiled_or.ok()) {
+makeProcessorFromKey(const std::shared_ptr<XGrammarBackend>& backend,
+                     const GrammarKeyCpp&                    key,
+                     bool                                    terminate_without_stop_token = true,
+                     int64_t                                 eos_token_id = 0) {
+    EXPECT_TRUE(backend);
+    if (!backend) {
         return {};
     }
-    auto compiled   = compiled_or.value();
-    auto matcher_or = backend.createMatcher(compiled, terminate_without_stop_token);
+    auto matcher_or = backend->createMatcherFromKey(key, terminate_without_stop_token);
     EXPECT_TRUE(matcher_or.ok()) << matcher_or.status().ToString();
     if (!matcher_or.ok()) {
         return {};
     }
     auto matcher = matcher_or.value();
-    auto proc    = std::make_shared<GrammarLogitsProcessor>(matcher);
+    auto proc    = std::make_shared<GrammarLogitsProcessor>(matcher, eos_token_id);
     return {std::move(proc), std::move(matcher)};
 }
 
 // terminate_without_stop_token=true so the matcher flips IsTerminated() the moment the regex completes.
-ProcessorBundle makeProcessor(XGrammarBackend& backend, const std::string& regex) {
+ProcessorBundle makeProcessor(const std::shared_ptr<XGrammarBackend>& backend, const std::string& regex) {
     return makeProcessorFromKey(backend, {"regex", regex});
 }
 
@@ -145,7 +148,8 @@ int expectCapOk(ErrorResult<int>&& result) {
 }  // namespace
 
 TEST(GrammarLogitsProcessorTest, ProcessMasksInitialDecodeState) {
-    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
     auto            proc = makeProcessor(backend, "ab");
 
     auto logits = torch::zeros({1, 128}, torch::kFloat32);
@@ -159,8 +163,21 @@ TEST(GrammarLogitsProcessorTest, ProcessMasksInitialDecodeState) {
     EXPECT_FALSE(error.has_value());
 }
 
+TEST(GrammarLogitsProcessorTest, ProcessRejectsGrammarVocabExceedingModelVocab) {
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
+    auto            proc = makeProcessor(backend, "ab");
+
+    auto logits = torch::zeros({1, 127}, torch::kFloat32);
+    auto error  = proc->process(makeSamplerInputs(logits), 0, 1);
+
+    ASSERT_TRUE(error.has_value());
+    EXPECT_EQ(error->code(), ErrorCode::GRAMMAR_VOCAB_EXCEEDS_MODEL_VOCAB);
+}
+
 TEST(GrammarLogitsProcessorTest, ProcessAppliesPackedMaskOnGpuAcrossLogitDtypes) {
-    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
 
     for (const auto dtype : {torch::kFloat32, torch::kFloat16, torch::kBFloat16}) {
         auto proc   = makeProcessor(backend, "ab");
@@ -176,7 +193,8 @@ TEST(GrammarLogitsProcessorTest, ProcessAppliesPackedMaskOnGpuAcrossLogitDtypes)
 }
 
 TEST(GrammarLogitsProcessorTest, ProcessKeepsReasoningFreeUntilBudgetThenAppliesFinalGrammarOnGpu) {
-    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
     auto            proc = makeProcessorFromKey(backend, {"structural_tag", makeReasoningStructuralTag(/*budget=*/1)});
 
     auto reasoning_logits = torch::zeros({1, 128}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
@@ -200,7 +218,8 @@ TEST(GrammarLogitsProcessorTest, ProcessKeepsReasoningFreeUntilBudgetThenApplies
 }
 
 TEST(GrammarLogitsProcessorTest, AllTrueXGrammarMaskIsANoopRatherThanFailure) {
-    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
     auto            proc = makeProcessorFromKey(backend,
                                      {"structural_tag", makeUnboundedAnyTextStructuralTag()},
                                      /*terminate_without_stop_token=*/false);
@@ -222,7 +241,8 @@ TEST(GrammarLogitsProcessorTest, AllTrueXGrammarMaskIsANoopRatherThanFailure) {
 }
 
 TEST(GrammarLogitsProcessorTest, InstanceDeclaresMtpAndCommittedStateContract) {
-    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
     auto            incremental = makeProcessor(backend, "ab");
 
     EXPECT_EQ(incremental->mtpCapability().mode, MtpProcessorMode::SPEC_VERIFY);
@@ -232,7 +252,8 @@ TEST(GrammarLogitsProcessorTest, InstanceDeclaresMtpAndCommittedStateContract) {
 }
 
 TEST(GrammarLogitsProcessorTest, UpdateStatusAdvancesDecodeMaskState) {
-    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
     auto            proc = makeProcessor(backend, "ab");
 
     auto token_a      = torch::tensor({kA}, torch::kInt32).reshape({1, 1});
@@ -252,7 +273,8 @@ TEST(GrammarLogitsProcessorTest, UpdateStatusAdvancesDecodeMaskState) {
 }
 
 TEST(GrammarLogitsProcessorTest, ProcessForcesEosAfterGrammarTerminates) {
-    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
     auto            proc = makeProcessor(backend, "ab");
 
     ASSERT_FALSE(proc->updateStatus(torch::tensor({kA}, torch::kInt32).reshape({1, 1}), 1).has_value());
@@ -286,8 +308,27 @@ TEST(GrammarLogitsProcessorTest, ProcessForcesEosAfterGrammarTerminates) {
     EXPECT_EQ(proc.matcher->numAcceptedTokens(), 2);
 }
 
+TEST(GrammarLogitsProcessorTest, ProcessRejectsOutOfVocabEosAfterGrammarTerminates) {
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
+    auto proc = makeProcessorFromKey(
+        backend, {"regex", "ab"}, /*terminate_without_stop_token=*/true, /*eos_token_id=*/128);
+
+    ASSERT_FALSE(proc->updateStatus(torch::tensor({kA, kB}, torch::kInt32).reshape({1, 2}), 2).has_value());
+    ASSERT_TRUE(matcherTerminated(*proc.matcher));
+
+    auto logits = torch::zeros({1, 128}, torch::kFloat32);
+    auto error  = proc->process(makeSamplerInputs(logits), 0, 1);
+
+    ASSERT_TRUE(error.has_value());
+    EXPECT_EQ(error->code(), ErrorCode::GRAMMAR_EOS_OUT_OF_VOCAB);
+    EXPECT_NE(error->ToString().find("eos_token_id (128)"), std::string::npos);
+    EXPECT_NE(error->ToString().find("vocab=128"), std::string::npos);
+}
+
 TEST(GrammarLogitsProcessorTest, UpdateStatusReportsInvalidCommittedToken) {
-    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
     auto            proc = makeProcessor(backend, "ab");
 
     auto error = proc->updateStatus(torch::tensor({kX}, torch::kInt32).reshape({1, 1}), 1);
@@ -298,7 +339,8 @@ TEST(GrammarLogitsProcessorTest, UpdateStatusReportsInvalidCommittedToken) {
 }
 
 TEST(GrammarLogitsProcessorTest, UpdateStatusRollsBackEntireRejectedBatch) {
-    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
     auto            proc = makeProcessor(backend, "ab");
 
     auto initial_logits = torch::zeros({1, 128}, torch::kFloat32);
@@ -326,7 +368,8 @@ TEST(GrammarLogitsProcessorTest, UpdateStatusRollsBackEntireRejectedBatch) {
 // regex "ab": legal sequence is 'a' then 'b'. A fully-legal draft chain should
 // return cap == propose_step with each row constraining to the expected token.
 TEST(GrammarLogitsProcessorTest, AcceptsLegalDraftChain) {
-    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
     auto            proc = makeProcessor(backend, "ab");
 
     const int            propose_step = 2;
@@ -349,7 +392,8 @@ TEST(GrammarLogitsProcessorTest, AcceptsLegalDraftChain) {
 }
 
 TEST(GrammarLogitsProcessorTest, SpecVerifyKeepsAllTrueXGrammarRowsUnconstrained) {
-    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
     auto            proc = makeProcessorFromKey(backend,
                                      {"structural_tag", makeUnboundedAnyTextStructuralTag()},
                                      /*terminate_without_stop_token=*/false);
@@ -375,7 +419,8 @@ TEST(GrammarLogitsProcessorTest, SpecVerifyKeepsAllTrueXGrammarRowsUnconstrained
 
 // A draft token that violates the grammar caps at that offset.
 TEST(GrammarLogitsProcessorTest, CapsAtFirstIllegalDraftToken) {
-    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
     auto            proc = makeProcessor(backend, "ab");
 
     const int            propose_step = 2;
@@ -398,7 +443,8 @@ TEST(GrammarLogitsProcessorTest, CapsAtFirstIllegalDraftToken) {
 // (after "ab"), verify must stop with cap == 2 and must NOT call acceptToken on
 // the already-terminated matcher for trailing draft tokens (including EOS).
 TEST(GrammarLogitsProcessorTest, TerminatedMatcherLeavesAllowAllWithoutCrash) {
-    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
     auto            proc = makeProcessor(backend, "ab");
 
     const int            propose_step = 3;  // one past the grammar's natural end
@@ -427,7 +473,8 @@ TEST(GrammarLogitsProcessorTest, TerminatedMatcherLeavesAllowAllWithoutCrash) {
 }
 
 TEST(GrammarLogitsProcessorTest, VerifyCapStopsWhenDraftContinuesWithEos) {
-    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
     auto            proc = makeProcessor(backend, "ab");
 
     const int            propose_step = 3;
@@ -448,7 +495,8 @@ TEST(GrammarLogitsProcessorTest, VerifyCapStopsWhenDraftContinuesWithEos) {
 }
 
 TEST(GrammarLogitsProcessorTest, VerifyCapZeroWhenGrammarAlreadyComplete) {
-    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
     auto            proc = makeProcessor(backend, "ab");
 
     ASSERT_TRUE(acceptMatcherToken(*proc.matcher, kA));
@@ -472,7 +520,8 @@ TEST(GrammarLogitsProcessorTest, VerifyCapZeroWhenGrammarAlreadyComplete) {
 }
 
 TEST(GrammarLogitsProcessorTest, SpecVerifyCountsEosCommittedAcrossTerminatedRounds) {
-    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
     auto            proc = makeProcessor(backend, "ab");
 
     ASSERT_FALSE(proc->updateStatus(torch::tensor({kA, kB}, torch::kInt32).reshape({1, 2}), 2).has_value());
@@ -507,7 +556,8 @@ TEST(GrammarLogitsProcessorTest, SpecVerifyCountsEosCommittedAcrossTerminatedRou
 // (it rolls back any provisional accepts): a second identical call yields the
 // same cap.
 TEST(GrammarLogitsProcessorTest, RollsBackProvisionalAccepts) {
-    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
     auto            proc = makeProcessor(backend, "ab");
 
     const int            propose_step = 2;
@@ -528,7 +578,8 @@ TEST(GrammarLogitsProcessorTest, RollsBackProvisionalAccepts) {
 }
 
 TEST(GrammarLogitsProcessorTest, VerifyCapIsDraftRejectIndex) {
-    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
     auto            proc = makeProcessor(backend, "ab");
 
     const int            propose_step = 2;
@@ -548,7 +599,8 @@ TEST(GrammarLogitsProcessorTest, VerifyCapIsDraftRejectIndex) {
 
 // Undersized bitmask buffer must error out as GRAMMAR_BITMASK_BUFFER_TOO_SMALL, not corrupt the caller's heap.
 TEST(GrammarLogitsProcessorTest, RejectsUndersizedBitmaskBuffer) {
-    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
     auto            proc = makeProcessor(backend, "ab");
 
     const int propose_step = 1;
@@ -569,6 +621,30 @@ TEST(GrammarLogitsProcessorTest, RejectsUndersizedBitmaskBuffer) {
     EXPECT_EQ(cap_or.status().code(), ErrorCode::GRAMMAR_BITMASK_BUFFER_TOO_SMALL);
 }
 
+TEST(GrammarLogitsProcessorTest, SpecVerifyRejectsGrammarVocabExceedingModelVocabInSameBitmaskWord) {
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
+    auto            proc = makeProcessor(backend, "ab");
+
+    const int            propose_step = 1;
+    const size_t         words        = SpecLogitsProcessorRequest::bitmaskWordCount(127);
+    std::vector<int32_t> bm(static_cast<size_t>(propose_step + 1) * words, 0);
+    std::vector<int32_t> draft{kA};
+
+    SpecLogitsProcessorRequest req;
+    req.draft_tokens       = draft.data();
+    req.propose_step       = propose_step;
+    req.bitmask_cpu_out    = bm.data();
+    req.bitmask_size_int32 = words;
+    req.vocab_size         = 127;
+
+    auto cap_or = proc->prepareSpeculative(req);
+    ASSERT_FALSE(cap_or.ok());
+    EXPECT_EQ(cap_or.status().code(), ErrorCode::GRAMMAR_VOCAB_EXCEEDS_MODEL_VOCAB);
+    EXPECT_TRUE(rowAllows(bm, words, 0, kEos));
+    EXPECT_FALSE(rowAllows(bm, words, 0, kA));
+}
+
 TEST(GrammarLogitsProcessorTest, ClearBitmaskTokenRangeClearsFullWordsAndEdges) {
     const size_t         words = SpecLogitsProcessorRequest::bitmaskWordCount(96);
     std::vector<int32_t> bm(words, SpecLogitsProcessorRequest::kBitmaskAllowAll);
@@ -584,7 +660,8 @@ TEST(GrammarLogitsProcessorTest, ClearBitmaskTokenRangeClearsFullWordsAndEdges) 
 }
 
 TEST(GrammarLogitsProcessorTest, StructuralTagReasoningBudgetForcesEndAndFinalGrammar) {
-    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
     auto            proc = makeProcessorFromKey(backend, {"structural_tag", makeReasoningStructuralTag(/*budget=*/1)});
 
     const int            propose_step = 3;
@@ -620,7 +697,8 @@ TEST(GrammarLogitsProcessorTest, StructuralTagReasoningBudgetForcesEndAndFinalGr
 }
 
 TEST(GrammarLogitsProcessorTest, StructuralTagReasoningBudgetForcesTokenEndAndFinalGrammar) {
-    XGrammarBackend backend(makeAsciiTokenizerInfo(), defaultOptions());
+    auto backend = makeBackend();
+    ASSERT_TRUE(backend);
     auto            proc =
         makeProcessorFromKey(backend, {"structural_tag", makeReasoningStructuralTagWithTokenEnd(/*budget=*/1, kZ)});
 

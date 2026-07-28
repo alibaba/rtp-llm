@@ -395,9 +395,7 @@ class ServerArgsSetTest(TestCase):
 
 class ServerArgsGrammarConfigTest(TestCase):
     """Cover every CLI-wired field on GrammarConfig (--grammar_* /
-    --constrained_json_*): default value and CLI binding. Env binding and
-    CLI-overrides-env are exercised generically by the rest of this suite,
-    so per-field repetition here is unnecessary."""
+    --constrained_json_*): default values and CLI binding."""
 
     def setUp(self):
         environ_backup = os.environ.copy()
@@ -427,10 +425,14 @@ class ServerArgsGrammarConfigTest(TestCase):
         Regression guard for the wiring in init_grammar_group_args."""
         py_env_configs = self._setup()
         g = py_env_configs.grammar_config
+        expected = type(g)()
 
-        self.assertEqual(g.constrained_json_disable_any_whitespace, False)
-        self.assertEqual(g.num_workers, 8)
-        self.assertEqual(g.compiler_cache_bytes, 512 * 1024 * 1024)
+        self.assertEqual(
+            g.constrained_json_disable_any_whitespace,
+            expected.constrained_json_disable_any_whitespace,
+        )
+        self.assertEqual(g.num_workers, expected.num_workers)
+        self.assertEqual(g.compiler_cache_bytes, expected.compiler_cache_bytes)
 
     def test_grammar_cmd_args(self):
         """Every CLI flag binds to the right config field, with correct types."""

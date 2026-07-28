@@ -2,7 +2,12 @@
 
 #include <algorithm>
 #include <limits>
+#include <new>
+#include <utility>
 
+#include <c10/util/Exception.h>
+
+#include "rtp_llm/cpp/models/logits_processor/BitmaskUtils.h"
 #include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -32,16 +37,33 @@ bool has2DCapacity(const torch::Tensor& tensor, int64_t rows, int64_t cols) {
     return tensor.defined() && tensor.dim() == 2 && tensor.size(0) >= rows && tensor.size(1) == cols;
 }
 
+SpecLogitsVerifyRunner::LaunchResult makeFailureResultForActiveStreams(
+    const SpecLogitsVerifyRunner::LaunchTask& task, const ErrorInfo& error) {
+    SpecLogitsVerifyRunner::LaunchResult result;
+    result.has_active_processor = !task.active.empty();
+    result.processor_errors.resize(task.total_streams);
+    for (const auto& item : task.active) {
+        if (item.stream_idx < task.total_streams && !result.processor_errors[item.stream_idx].has_value()) {
+            result.processor_errors[item.stream_idx] = error;
+        }
+    }
+    return result;
+}
+
 }  // namespace
 
-void SpecLogitsVerifyRunner::applyMaskToLogits(torch::Tensor&       logits,
-                                               const torch::Tensor& packed_allow_mask_gpu,
-                                               const torch::Tensor& logits_row_indices_gpu,
-                                               size_t               vocab_size) {
-    if (!packed_allow_mask_gpu.defined()) {
+void SpecLogitsVerifyRunner::applyMaskToLogits(torch::Tensor& logits, const LaunchResult& result, size_t vocab_size) {
+#if USING_CUDA
+    const auto& packed_allow_mask  = result.packed_allow_mask_gpu;
+    const auto& logits_row_indices = result.logits_row_indices_gpu;
+#else
+    const auto& packed_allow_mask  = result.packed_allow_mask_cpu_lifetime;
+    const auto& logits_row_indices = result.logits_row_indices_cpu_lifetime;
+#endif
+    if (!packed_allow_mask.defined()) {
         return;
     }
-    runtimeApplyPackedMaskLogits(logits, packed_allow_mask_gpu, logits_row_indices_gpu, vocab_size);
+    runtimeApplyPackedMaskLogits(logits, packed_allow_mask, logits_row_indices, vocab_size);
 }
 
 SpecLogitsVerifyRunner::ActiveStreamLayout
@@ -73,7 +95,6 @@ void SpecLogitsVerifyRunner::ensureBuffersFit(const VerifyShape& shape) {
 
     auto cpu_i32    = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCPU);
     auto pinned_i32 = cpu_i32.pinned_memory(true);
-    auto device_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
 
     if (!has2DCapacity(draft_tokens_cpu_, B, P)) {
         draft_tokens_cpu_ = torch::empty({B, P}, pinned_i32);
@@ -84,15 +105,18 @@ void SpecLogitsVerifyRunner::ensureBuffersFit(const VerifyShape& shape) {
     if (!has2DCapacity(merged_bitmask_cpu_, rows, W)) {
         merged_bitmask_cpu_ = torch::empty({rows, W}, pinned_i32);
     }
-    if (!has2DCapacity(merged_bitmask_gpu_, rows, W)) {
-        merged_bitmask_gpu_ = torch::empty({rows, W}, device_i32);
-    }
     if (!has1DCapacity(logits_row_indices_cpu_, rows)) {
         logits_row_indices_cpu_ = torch::empty({rows}, pinned_i32);
+    }
+#if USING_CUDA
+    auto device_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    if (!has2DCapacity(merged_bitmask_gpu_, rows, W)) {
+        merged_bitmask_gpu_ = torch::empty({rows, W}, device_i32);
     }
     if (!has1DCapacity(logits_row_indices_gpu_, rows)) {
         logits_row_indices_gpu_ = torch::empty({rows}, device_i32);
     }
+#endif
     if (!has1DCapacity(spec_cap_cpu_, B)) {
         spec_cap_cpu_ = torch::empty({B}, pinned_i32);
     }
@@ -178,21 +202,33 @@ SpecLogitsVerifyRunner::MergeProcessorMasksResult SpecLogitsVerifyRunner::mergeP
 SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::makeResult(const VerifyShape& shape) {
     auto packed_mask_cpu = merged_bitmask_cpu_.narrow(0, 0, static_cast<int64_t>(shape.compact_rows))
                                .narrow(1, 0, static_cast<int64_t>(shape.bitmask_words));
+    auto row_indices_cpu = logits_row_indices_cpu_.narrow(0, 0, static_cast<int64_t>(shape.compact_rows));
+
+    LaunchResult result;
+#if USING_CUDA
     auto packed_mask_gpu = merged_bitmask_gpu_.narrow(0, 0, static_cast<int64_t>(shape.compact_rows))
                                .narrow(1, 0, static_cast<int64_t>(shape.bitmask_words));
-    auto row_indices_cpu = logits_row_indices_cpu_.narrow(0, 0, static_cast<int64_t>(shape.compact_rows));
     auto row_indices_gpu = logits_row_indices_gpu_.narrow(0, 0, static_cast<int64_t>(shape.compact_rows));
     packed_mask_gpu.copy_(packed_mask_cpu, /*non_blocking=*/true);
     row_indices_gpu.copy_(row_indices_cpu, /*non_blocking=*/true);
-
-    LaunchResult result;
-    result.packed_allow_mask_gpu           = std::move(packed_mask_gpu);
-    result.logits_row_indices_gpu          = std::move(row_indices_gpu);
+    pending_host_upload_          = runtimeCreateEvent();
+    result.packed_allow_mask_gpu  = std::move(packed_mask_gpu);
+    result.logits_row_indices_gpu = std::move(row_indices_gpu);
+#endif
     result.has_active_processor            = true;
     result.packed_allow_mask_cpu_lifetime  = std::move(packed_mask_cpu);
     result.logits_row_indices_cpu_lifetime = std::move(row_indices_cpu);
     result.spec_cap_cpu                    = spec_cap_cpu_.narrow(0, 0, static_cast<int64_t>(shape.batch_size));
     return result;
+}
+
+void SpecLogitsVerifyRunner::waitForPendingHostUploads() {
+#if USING_CUDA
+    if (pending_host_upload_) {
+        pending_host_upload_->synchronize();
+        pending_host_upload_.reset();
+    }
+#endif
 }
 
 SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::run(const LaunchTask& task) {
@@ -201,37 +237,48 @@ SpecLogitsVerifyRunner::LaunchResult SpecLogitsVerifyRunner::run(const LaunchTas
     if (task.active.empty()) {
         return LaunchResult{};
     }
+    try {
+        // merged_bitmask_cpu_ and logits_row_indices_cpu_ back non-blocking H2D
+        // copies from the previous launch. Do not mutate them until those reads end.
+        waitForPendingHostUploads();
 
-    const size_t B = task.total_streams;
-    const int    P = task.propose_step;
-    const size_t V = task.vocab_size;
-    RTP_LLM_CHECK_WITH_INFO(B > 0 && P > 0 && V > 0, "invalid MTP spec logits verify task");
-    RTP_LLM_CHECK_WITH_INFO(P < std::numeric_limits<int32_t>::max(),
-                            "MTP spec logits verify propose_step exceeds int32 row-stride capacity");
-    RTP_LLM_CHECK_WITH_INFO(V <= static_cast<size_t>(std::numeric_limits<int32_t>::max()),
-                            "MTP spec logits verify vocab_size exceeds kernel int32 capacity");
-    const size_t rows_per_stream = static_cast<size_t>(P) + 1;
-    RTP_LLM_CHECK_WITH_INFO(B <= static_cast<size_t>(std::numeric_limits<int32_t>::max()) / rows_per_stream,
-                            "MTP spec logits verify row count exceeds int32 row-index capacity");
-    auto         layout = buildActiveStreamLayout(task);
-    const size_t W      = SpecLogitsProcessorRequest::bitmaskWordCount(V);
-    VerifyShape  shape{
-        B,
-        P,
-        V,
-        W,
-        layout.stream_indices.size() * rows_per_stream,
-        rows_per_stream * W,
-    };
+        const size_t B = task.total_streams;
+        const int    P = task.propose_step;
+        const size_t V = task.vocab_size;
+        RTP_LLM_CHECK_WITH_INFO(B > 0 && P > 0 && V > 0, "invalid MTP spec logits verify task");
+        RTP_LLM_CHECK_WITH_INFO(P < std::numeric_limits<int32_t>::max(),
+                                "MTP spec logits verify propose_step exceeds int32 row-stride capacity");
+        RTP_LLM_CHECK_WITH_INFO(V <= static_cast<size_t>(std::numeric_limits<int32_t>::max()),
+                                "MTP spec logits verify vocab_size exceeds kernel int32 capacity");
+        const size_t rows_per_stream = static_cast<size_t>(P) + 1;
+        RTP_LLM_CHECK_WITH_INFO(B <= static_cast<size_t>(std::numeric_limits<int32_t>::max()) / rows_per_stream,
+                                "MTP spec logits verify row count exceeds int32 row-index capacity");
+        auto         layout = buildActiveStreamLayout(task);
+        const size_t W      = SpecLogitsProcessorRequest::bitmaskWordCount(V);
+        VerifyShape  shape{
+            B,
+            P,
+            V,
+            W,
+            layout.stream_indices.size() * rows_per_stream,
+            rows_per_stream * W,
+        };
 
-    ensureBuffersFit(shape);
-    std::fill_n(spec_cap_cpu_.data_ptr<int32_t>(), B, P);
-    materializeDraftTokensToCpu(task);
-    initializeCompactRows(layout, shape);
-    auto merge_result       = mergeProcessorMasks(task, layout, shape);
-    auto result             = makeResult(shape);
-    result.processor_errors = std::move(merge_result.processor_errors);
-    return result;
+        ensureBuffersFit(shape);
+        std::fill_n(spec_cap_cpu_.data_ptr<int32_t>(), B, P);
+        materializeDraftTokensToCpu(task);
+        initializeCompactRows(layout, shape);
+        auto merge_result       = mergeProcessorMasks(task, layout, shape);
+        auto result             = makeResult(shape);
+        result.processor_errors = std::move(merge_result.processor_errors);
+        return result;
+    } catch (const std::bad_alloc& e) {
+        return makeFailureResultForActiveStreams(
+            task, detail::grammarMaskBuildError("MTP verify", e));
+    } catch (const c10::Error& e) {
+        return makeFailureResultForActiveStreams(
+            task, detail::grammarMaskBuildError("MTP verify", e));
+    }
 }
 
 }  // namespace rtp_llm

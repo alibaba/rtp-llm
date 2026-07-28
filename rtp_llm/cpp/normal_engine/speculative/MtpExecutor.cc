@@ -54,10 +54,12 @@ std::optional<ErrorInfo> validateMtpCompatibility(const std::vector<BaseLogitsPr
     return std::nullopt;
 }
 
-void applySpecVerifyResult(SpecLogitsVerifyRunner::LaunchResult&  verify_result,
-                           const SamplerOutput&                   target_sampler_output,
-                           speculative::SpeculativeSamplerOutput& output,
-                           int64_t                                propose_step) {
+}  // namespace
+
+void MtpExecutor::applySpecVerifyResult(SpecLogitsVerifyRunner::LaunchResult&  verify_result,
+                                        const SamplerOutput&                   target_sampler_output,
+                                        speculative::SpeculativeSamplerOutput& output,
+                                        int64_t                                propose_step) {
     output.processor_errors = std::move(verify_result.processor_errors);
     if (!verify_result.spec_cap_cpu.defined()) {
         return;
@@ -71,7 +73,7 @@ void applySpecVerifyResult(SpecLogitsVerifyRunner::LaunchResult&  verify_result,
                             output.accept_tokens.size());
 
     auto cap_cpu          = toCpuInt32(verify_result.spec_cap_cpu);
-    auto target_token_ids = toCpuInt32(target_sampler_output.token_ids);
+    auto target_token_ids = target_sampler_output.token_ids;
     RTP_LLM_CHECK_WITH_INFO(target_token_ids.dim() == 2,
                             "spec verify cap target token_ids must be 2D, dim=%lld",
                             static_cast<long long>(target_token_ids.dim()));
@@ -79,12 +81,19 @@ void applySpecVerifyResult(SpecLogitsVerifyRunner::LaunchResult&  verify_result,
                             "spec verify cap target token_ids rows=%lld < batch_size*(propose_step+1)=%lld",
                             static_cast<long long>(target_token_ids.size(0)),
                             static_cast<long long>(batch_size * (propose_step + 1)));
-
     const int64_t token_stride = target_token_ids.size(1);
-    const auto*   cap_ptr      = cap_cpu.data_ptr<int32_t>();
-    const auto*   target_ptr   = target_token_ids.data_ptr<int32_t>();
-    const int     max_cap      = static_cast<int>(propose_step);
-    const int     max_len      = max_cap + 1;
+    RTP_LLM_CHECK_WITH_INFO(token_stride > 0, "spec verify cap target token_ids stride must be positive");
+
+    auto target_last_token_ids = toCpuInt32(target_token_ids.select(1, token_stride - 1));
+    RTP_LLM_CHECK_WITH_INFO(cap_cpu.numel() >= batch_size,
+                            "spec verify cap size=%lld < batch_size=%lld",
+                            static_cast<long long>(cap_cpu.numel()),
+                            static_cast<long long>(batch_size));
+
+    const auto* cap_ptr    = cap_cpu.data_ptr<int32_t>();
+    const auto* target_ptr = target_last_token_ids.data_ptr<int32_t>();
+    const int   max_cap    = static_cast<int>(propose_step);
+    const int   max_len    = max_cap + 1;
     for (int64_t i = 0; i < batch_size; ++i) {
         const int token_cap = std::max(0, std::min<int>(cap_ptr[i], max_cap));
         const int old_len   = output.accept_len[i];
@@ -95,7 +104,7 @@ void applySpecVerifyResult(SpecLogitsVerifyRunner::LaunchResult&  verify_result,
                                 max_len);
         if (token_cap < max_cap && old_len > token_cap) {
             output.accept_tokens[i].data_ptr<int32_t>()[token_cap] =
-                target_ptr[(i * (propose_step + 1) + token_cap) * token_stride + token_stride - 1];
+                target_ptr[i * (propose_step + 1) + token_cap];
         }
 
         const int new_len    = std::min(old_len, token_cap + 1);
@@ -105,8 +114,6 @@ void applySpecVerifyResult(SpecLogitsVerifyRunner::LaunchResult&  verify_result,
         }
     }
 }
-
-}  // namespace
 
 bool MtpExecutor::isTpRank0() const {
     return tp_rank_ == 0;

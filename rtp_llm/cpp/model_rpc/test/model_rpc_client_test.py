@@ -162,32 +162,42 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(request_info_pb.trace_id, "header-trace")
         self.assertEqual(request_info_pb.request_id, "header-request-id")
 
-    def test_trans_input_serializes_jsonable_generate_config_options(self):
-        input_py = GenerateInput(
-            request_id=123,
-            token_ids=torch.tensor([1, 2]),
+    @staticmethod
+    def _make_generate_input(generate_config: GenerateConfig) -> GenerateInput:
+        return GenerateInput(
+            request_id=1,
+            token_ids=torch.tensor([1], dtype=torch.int32),
             mm_inputs=[],
-            generate_config=GenerateConfig(
-                json_schema={"type": "object"},
-                regex="[a-z]+",
-                structural_tag={"format": {"type": "json_schema"}},
-                response_format='{"type":"json_object"}',
+            generate_config=generate_config,
+        )
+
+    def test_trans_input_writes_typed_grammar_fields_consistently(self):
+        grammar_fields = ("json_schema", "regex", "ebnf", "structural_tag")
+        cases = [
+            ("json_schema", '{"type":"object"}', '{"type":"object"}'),
+            ("regex", r"[a-z]+", r"[a-z]+"),
+            ("ebnf", 'root ::= "a"', 'root ::= "a"'),
+            (
+                "structural_tag",
+                '{"type":"structural_tag","format":{"type":"regex","pattern":"a"}}',
+                '{"type":"structural_tag","format":{"type":"regex","pattern":"a"}}',
             ),
-        )
+        ]
 
-        generate_config_pb = trans_input(input_py).generate_config
+        for field, value, expected in cases:
+            with self.subTest(field=field):
+                config = GenerateConfig(**{field: value})
+                config_before_rpc = config.model_dump()
+                input_pb = trans_input(self._make_generate_input(config))
 
-        self.assertEqual(generate_config_pb.json_schema.value, '{"type":"object"}')
-        self.assertEqual(generate_config_pb.regex.value, "[a-z]+")
-        self.assertFalse(generate_config_pb.HasField("ebnf"))
-        self.assertEqual(
-            generate_config_pb.structural_tag.value,
-            '{"format":{"type":"json_schema"}}',
-        )
-        self.assertEqual(
-            generate_config_pb.response_format.value,
-            '{"type":"json_object"}',
-        )
+                self.assertEqual(config.model_dump(), config_before_rpc)
+                self.assertTrue(input_pb.generate_config.HasField(field))
+                self.assertEqual(
+                    getattr(input_pb.generate_config, field).value, expected
+                )
+                for other_field in grammar_fields:
+                    if other_field != field:
+                        self.assertFalse(input_pb.generate_config.HasField(other_field))
 
     @unittest.skip("need fix")
     def test_generate_stream(self):

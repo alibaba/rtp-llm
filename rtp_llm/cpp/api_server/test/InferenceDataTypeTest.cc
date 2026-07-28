@@ -62,6 +62,16 @@ TEST(InferenceDataTypeTest, RawRequest_GenerateConfig_HiddenStates_True) {
     ASSERT_EQ(req.generate_config.value().return_hidden_states, true);
 }
 
+TEST(InferenceDataTypeTest, RawRequest_GenerateConfig_GrammarTerminateWithoutStopToken) {
+    std::string jsonStr =
+        R"({"generate_config": {"structural_tag": "{}", "grammar_terminate_without_stop_token": true}})";
+    RawRequest req;
+    FromJsonString(req, jsonStr);
+    ASSERT_TRUE(req.generate_config.has_value());
+    EXPECT_EQ(req.generate_config->structural_tag, "{}");
+    EXPECT_TRUE(req.generate_config->grammar_terminate_without_stop_token);
+}
+
 TEST(InferenceDataTypeTest, RawRequest_Images_Vector) {
     std::string jsonStr = R"({"images": ["prompt1", "prompt2", "prompt3"]})";
     RawRequest  req;
