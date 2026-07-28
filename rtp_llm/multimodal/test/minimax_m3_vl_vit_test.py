@@ -4,6 +4,9 @@ import torch
 import torch.nn.functional as F
 
 from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl import (
+    minimax_m3_vl_rope as rope_module,
+)
+from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl import (
     minimax_m3_vl_vit as vit_module,
 )
 from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.minimax_m3_vl_mixin import (
@@ -28,10 +31,14 @@ class MiniMaxM3VLVisionAttentionTest(unittest.TestCase):
             intermediate_size=64,
         )
 
-    def _position_embeddings(self, sequence_length, device=None, head_dim=None):
+    def _position_embeddings(
+        self, sequence_length, device=None, head_dim=None, rotary_dim=None
+    ):
         if head_dim is None:
             head_dim = self.config.hidden_size // self.config.num_attention_heads
-        angles = torch.randn(sequence_length, 1, head_dim // 2, device=device)
+        if rotary_dim is None:
+            rotary_dim = head_dim
+        angles = torch.randn(sequence_length, 1, rotary_dim // 2, device=device)
         return (
             angles.cos().repeat(1, 1, 2),
             angles.sin().repeat(1, 1, 2),
@@ -86,6 +93,42 @@ class MiniMaxM3VLVisionAttentionTest(unittest.TestCase):
         self.assertEqual(attention.last_backend, "sdpa")
 
     @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_cuda_fused_qkv_rope_matches_eager_and_packs_outputs(self):
+        sequence_length = 11
+        num_heads = 2
+        head_dim = 80
+        rotary_dim = 78
+        qkv = torch.randn(
+            sequence_length,
+            3,
+            num_heads,
+            head_dim,
+            device="cuda",
+            dtype=torch.bfloat16,
+        )
+        angles = torch.randn(
+            sequence_length,
+            1,
+            rotary_dim // 2,
+            device="cuda",
+        )
+        cos = angles.cos().repeat(1, 1, 2)
+        sin = angles.sin().repeat(1, 1, 2)
+
+        expected_q, expected_k = _apply_rope(qkv[:, 0], qkv[:, 1], cos, sin)
+        expected_v = qkv[:, 2].contiguous()
+        actual = rope_module.fused_qkv_rope(qkv, cos, sin)
+        self.assertIsNotNone(actual)
+        actual_q, actual_k, actual_v = actual
+
+        torch.testing.assert_close(actual_q, expected_q, rtol=2e-2, atol=2e-2)
+        torch.testing.assert_close(actual_k, expected_k, rtol=2e-2, atol=2e-2)
+        torch.testing.assert_close(actual_v, expected_v, rtol=0, atol=0)
+        self.assertTrue(actual_q.is_contiguous())
+        self.assertTrue(actual_k.is_contiguous())
+        self.assertTrue(actual_v.is_contiguous())
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
     def test_cuda_packed_attention_matches_segmented_sdpa(self):
         config = VisionConfig(
             hidden_size=160,
@@ -107,7 +150,10 @@ class MiniMaxM3VLVisionAttentionTest(unittest.TestCase):
         offsets = (0, 7, 16)
         cu_seqlens = torch.tensor(offsets, device="cuda", dtype=torch.int32)
         position_embeddings = self._position_embeddings(
-            16, device="cuda", head_dim=attention.head_dim
+            16,
+            device="cuda",
+            head_dim=attention.head_dim,
+            rotary_dim=78,
         )
 
         expected = self._unfused_reference(
@@ -148,7 +194,10 @@ class MiniMaxM3VLVisionAttentionTest(unittest.TestCase):
         offsets = (0, sequence_length)
         cu_seqlens = torch.tensor(offsets, device="cuda", dtype=torch.int32)
         position_embeddings = self._position_embeddings(
-            sequence_length, device="cuda", head_dim=attention.head_dim
+            sequence_length,
+            device="cuda",
+            head_dim=attention.head_dim,
+            rotary_dim=78,
         )
         vision_model = MiniMaxM3VLVisionModel(config).cuda().to(torch.bfloat16)
         attention_context = vision_model._prepare_attention_context(
