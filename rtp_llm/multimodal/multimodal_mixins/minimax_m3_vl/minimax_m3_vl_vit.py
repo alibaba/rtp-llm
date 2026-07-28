@@ -45,6 +45,7 @@ except Exception:
     pass
 
 _FLASHINFER_RAGGED_WRAPPER = None
+_FLASHINFER_IMPORT_ERROR = None
 try:
     # Bazel does not process the wheel's .pth file for subprocesses.
     import nvidia_cutlass_dsl
@@ -56,8 +57,15 @@ try:
     from flashinfer.prefill import (
         BatchPrefillWithRaggedKVCacheWrapper as _FLASHINFER_RAGGED_WRAPPER,
     )
+except Exception as error:
+    _FLASHINFER_IMPORT_ERROR = f"{type(error).__name__}: {error}"
+
+try:
+    from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.minimax_m3_vl_rope import (
+        fused_qkv_rope,
+    )
 except Exception:
-    pass
+    fused_qkv_rope = None
 
 
 def get_fused_qkv_checkpoint_names(
@@ -92,6 +100,7 @@ def _select_attention_backend(tensor: torch.Tensor) -> str:
 class PackedAttentionContext:
     backend: str
     flashinfer_wrapper: Optional[Any] = None
+    fallback_reason: Optional[str] = None
 
 
 # ---------------------------------------------------------------------------
@@ -170,6 +179,21 @@ def _apply_rope(
     return q, k
 
 
+def _prepare_qkv(
+    qkv: torch.Tensor,
+    cos: torch.Tensor,
+    sin: torch.Tensor,
+) -> Tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
+    if fused_qkv_rope is not None:
+        fused = fused_qkv_rope(qkv, cos, sin)
+        if fused is not None:
+            return fused
+
+    q, k, v = qkv.unbind(dim=1)
+    q, k = _apply_rope(q, k, cos, sin)
+    return q, k, v.contiguous()
+
+
 # ---------------------------------------------------------------------------
 # Embeddings
 # ---------------------------------------------------------------------------
@@ -241,6 +265,7 @@ class CLIPAttention(nn.Module):
         # only because of its TP RowParallelLinear wrapper).
         self.out_proj = nn.Linear(self.embed_dim, self.embed_dim, bias=True)
         self.last_backend = "uninitialized"
+        self.last_backend_error: Optional[str] = None
 
     @staticmethod
     def _segmented_sdpa(
@@ -279,6 +304,7 @@ class CLIPAttention(nn.Module):
     ) -> torch.Tensor:
         backend = attention_context.backend
         self.last_backend = backend
+        self.last_backend_error = attention_context.fallback_reason
         if backend == "fa4":
             out = _FA4_VARLEN_FUNC(
                 q,
@@ -296,11 +322,7 @@ class CLIPAttention(nn.Module):
             wrapper = attention_context.flashinfer_wrapper
             if wrapper is not None:
                 try:
-                    out = wrapper.run(
-                        q.contiguous(),
-                        k.contiguous(),
-                        v.contiguous(),
-                    )
+                    out = wrapper.run(q, k, v)
                     return out[0] if isinstance(out, tuple) else out
                 except (AssertionError, RuntimeError, ValueError) as error:
                     if "out of memory" in str(error).lower():
@@ -310,8 +332,12 @@ class CLIPAttention(nn.Module):
                         "falling back to segmented SDPA: %s",
                         error,
                     )
+                    attention_context.fallback_reason = (
+                        f"FlashInfer run failed: {type(error).__name__}: {error}"
+                    )
             attention_context.backend = "sdpa"
             self.last_backend = "sdpa"
+            self.last_backend_error = attention_context.fallback_reason
         if backend == "flash_attn":
             out = _FLASH_ATTN_VARLEN_FUNC(
                 q,
@@ -342,10 +368,8 @@ class CLIPAttention(nn.Module):
         qkv = self.qkv_proj(hidden_states).view(
             seq_len, 3, self.num_heads, self.head_dim
         )
-        q, k, v = qkv.unbind(dim=1)
-
         cos, sin = position_embeddings  # [seq, 1, rot_dim]
-        q, k = _apply_rope(q, k, cos, sin)
+        q, k, v = _prepare_qkv(qkv, cos, sin)
 
         if attention_context is None:
             attention_context = PackedAttentionContext(
@@ -611,7 +635,19 @@ class MiniMaxM3VLVisionModel(nn.Module):
     ) -> PackedAttentionContext:
         backend = _select_attention_backend(hidden_states)
         if backend != "flashinfer":
-            return PackedAttentionContext(backend=backend)
+            fallback_reason = None
+            if (
+                backend == "sdpa"
+                and hidden_states.is_cuda
+                and _FLASHINFER_IMPORT_ERROR is not None
+            ):
+                fallback_reason = (
+                    f"FlashInfer import failed: {_FLASHINFER_IMPORT_ERROR}"
+                )
+            return PackedAttentionContext(
+                backend=backend,
+                fallback_reason=fallback_reason,
+            )
 
         try:
             if (
@@ -656,7 +692,12 @@ class MiniMaxM3VLVisionModel(nn.Module):
                 "falling back to segmented SDPA: %s",
                 error,
             )
-            return PackedAttentionContext(backend="sdpa")
+            return PackedAttentionContext(
+                backend="sdpa",
+                fallback_reason=(
+                    f"FlashInfer plan failed: {type(error).__name__}: {error}"
+                ),
+            )
 
     # ------------------------------------------------------------------ forward
 

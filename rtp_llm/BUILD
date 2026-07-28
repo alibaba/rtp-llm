@@ -226,6 +226,7 @@ py_library(
         ":nest_asyncio",
         ":matplotlib",
         ":torchvision",
+        ":triton",
         ":protobuf",
         ":pyOpenSSL",
     ] + select({
