@@ -3,7 +3,6 @@ py_library(
     srcs = ["fused_moe_executor_test_util.py"],
     deps = [
         "//rtp_llm/models_py:modules",
-        "//rtp_llm/models_py:kernels",
         "//rtp_llm:config",
     ]
 )
@@ -92,6 +91,7 @@ py_test (
     name = "cutedsl_fp4_executor_test",
     srcs = ["cutedsl_fp4_executor_test.py"],
     deps = [
+        "//rtp_llm/models_py:kernels",
         "//rtp_llm/models_py:modules",
         "//rtp_llm:config",
         "//rtp_llm:testlib",

@@ -8,7 +8,7 @@ load("@pip_cuda13_arm_torch//:requirements.bzl", requirement_cuda13_arm="require
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
 load("@rtp_llm//bazel:defs.bzl", "copy_so")
 
-_CUDA13_DEFERRED = ["flash_attn", "flash-attn-3", "fast-hadamard-transform"]
+_CUDA13_DEFERRED = ["flash_attn", "flash-attn-3", "flashinfer-cubin", "flashinfer-jit-cache", "fast-hadamard-transform"]
 _GPU_ONLY_REQUIREMENTS = [
     "deep_ep",
     "deep_gemm",

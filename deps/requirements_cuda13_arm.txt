@@ -28,7 +28,7 @@ https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/tilelang-0.1.9%
 https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/z3_solver-4.13.0.0%2Blocal.ali-py2.py3-none-manylinux2014_aarch64.whl
 https://search-ad.oss-cn-hangzhou-zmf.aliyuncs.com/rtp-llm-deps/arm_pkg/tile_kernels-0.1.dev0%2Bali.git36d9e45-py3-none-any.whl
 
-safetensors==0.7.0
+safetensors==0.6.2
 tabulate==0.9.0
 
 # flash_attn / flash_attn_3 / flashinfer_* / fast_hadamard /
