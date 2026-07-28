@@ -96,6 +96,13 @@ public class DispatcherInspectionHandler {
             if (!spec.isSplittableBatch(body, arr)) {
                 return passthroughDiagnostic(spec, arr);
             }
+            // Mirror BatchHandler's guard: a non-object generate_config is a deterministic client
+            // error. Without this the JSONException from chunk assembly falls into the catch-all and
+            // is reported as a 500 — the exact production/dry-run drift this diagnostic must not have.
+            Object generateConfig = body.get("generate_config");
+            if (generateConfig != null && !(generateConfig instanceof JSONObject)) {
+                return badRequest("generate_config must be a JSON object");
+            }
             return buildDryRunResponse(spec, body, arr, effectivePreAssign);
         }).onErrorResume(this::handleDryRunException);
     }

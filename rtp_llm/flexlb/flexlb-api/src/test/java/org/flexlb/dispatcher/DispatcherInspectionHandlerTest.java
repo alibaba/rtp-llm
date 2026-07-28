@@ -322,6 +322,26 @@ class DispatcherInspectionHandlerTest {
         }
 
         @Test
+        void nonObjectGenerateConfigReturns400NotInternalError() {
+            // A string generate_config is a caller error, exactly as in production (BatchHandler).
+            // Before the guard it fell into chunk assembly, threw JSONException, and surfaced as a
+            // 500 dryrun_internal_error — a drift from what /batch_infer actually returns.
+            BatchScheduleClient client = mock(BatchScheduleClient.class);
+            DispatcherInspectionHandler handler = handlerWith(false, client);
+
+            byte[] body = "{\"prompt_batch\":[\"a\"],\"generate_config\":\"oops\"}"
+                    .getBytes(StandardCharsets.UTF_8);
+            MockServerRequest req = MockServerRequest.builder()
+                    .method(HttpMethod.POST)
+                    .uri(URI.create("http://x/dispatcher/_dryrun/batch_infer"))
+                    .body(Mono.just(body));
+
+            assertResponse(handler.dryRun(req), HttpStatus.BAD_REQUEST, out ->
+                    assertEquals("invalid_inspection_request", out.get("error").asText()));
+            verify(client, never()).requestTargets(anyInt());
+        }
+
+        @Test
         void missingArrayFieldReportsPassthrough() {
             BatchScheduleClient client = mock(BatchScheduleClient.class);
             DispatcherInspectionHandler handler = handlerWith(false, client);
