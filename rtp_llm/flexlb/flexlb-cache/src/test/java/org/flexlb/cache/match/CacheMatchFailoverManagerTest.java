@@ -12,6 +12,7 @@ import org.flexlb.engine.grpc.client.KvcmGrpcClient;
 import org.junit.jupiter.api.Test;
 import org.mockito.ArgumentCaptor;
 
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -45,10 +46,12 @@ class CacheMatchFailoverManagerTest {
     @Test
     void keepsKvcmActiveUntilManualFailoverWhenAutoSwitchIsDisabled() {
         KvcmGrpcClient client = mock(KvcmGrpcClient.class);
-        when(client.healthSnapshot())
-                .thenReturn(health(KvcmHealthState.UNHEALTHY, 3, 0, 10, "query failure"));
+        AtomicReference<KvcmHealthSnapshot> currentHealth = new AtomicReference<>(
+                health(KvcmHealthState.UNHEALTHY, 3, 0, 10, "query failure"));
+        when(client.healthSnapshot()).thenAnswer(ignored -> currentHealth.get());
         CacheMatchFailoverManager manager =
                 new CacheMatchFailoverManager(configuration(false), client);
+        Consumer<KvcmHealthSnapshot> healthSnapshotListener = healthSnapshotListener(client);
 
         assertEquals(CacheMatchSource.KVCM, manager.activeSource());
 
@@ -57,6 +60,14 @@ class CacheMatchFailoverManagerTest {
 
         assertThrows(IllegalStateException.class, manager::recoverPrimaryManually);
         assertEquals(CacheMatchSource.LOCAL_STANDBY, manager.activeSource());
+
+        currentHealth.set(
+                health(KvcmHealthState.HEALTHY, 0, 3, 0, "heartbeat recovery"));
+        healthSnapshotListener.accept(currentHealth.get());
+        assertEquals(CacheMatchSource.LOCAL_STANDBY, manager.activeSource());
+
+        manager.recoverPrimaryManually();
+        assertEquals(CacheMatchSource.KVCM, manager.activeSource());
     }
 
     @Test
@@ -76,21 +87,25 @@ class CacheMatchFailoverManagerTest {
     }
 
     @Test
-    void manualRecoveryDefersToAutomaticFailoverForUnhealthyKvcm() {
+    void rejectsManualRecoveryForUnhealthyKvcmWhenAutoSwitchIsEnabled() {
         KvcmGrpcClient client = mock(KvcmGrpcClient.class);
-        when(client.healthSnapshot())
-                .thenReturn(health(KvcmHealthState.UNHEALTHY, 3, 0, 0, "heartbeat failure"));
+        AtomicReference<KvcmHealthSnapshot> currentHealth = new AtomicReference<>(
+                health(KvcmHealthState.UNHEALTHY, 3, 0, 0, "heartbeat failure"));
+        when(client.healthSnapshot()).thenAnswer(ignored -> currentHealth.get());
         CacheMatchFailoverManager manager =
                 new CacheMatchFailoverManager(configuration(true), client);
         Consumer<KvcmHealthSnapshot> healthSnapshotListener = healthSnapshotListener(client);
 
         manager.activateFallbackManually();
-        manager.recoverPrimaryManually();
-
+        assertThrows(IllegalStateException.class, manager::recoverPrimaryManually);
         assertEquals(CacheMatchSource.LOCAL_STANDBY, manager.activeSource());
 
-        healthSnapshotListener.accept(
+        currentHealth.set(
                 health(KvcmHealthState.HEALTHY, 0, 3, 0, "heartbeat recovery"));
+        healthSnapshotListener.accept(currentHealth.get());
+        assertEquals(CacheMatchSource.LOCAL_STANDBY, manager.activeSource());
+
+        manager.recoverPrimaryManually();
         assertEquals(CacheMatchSource.KVCM, manager.activeSource());
     }
 

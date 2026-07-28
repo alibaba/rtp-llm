@@ -75,8 +75,8 @@ public class CacheMatchFailoverManager {
 
     public void recoverPrimaryManually() {
         KvcmHealthSnapshot health = kvcmGrpcClient.healthSnapshot();
-        if (!health.isHealthy() && !autoSwitchEnabled) {
-            throw new IllegalStateException("cannot recover KVCM primary while KVCM is unhealthy and automatic failover is disabled");
+        if (!health.isHealthy()) {
+            throw new IllegalStateException("cannot recover KVCM primary while KVCM is unhealthy");
         }
         manualFallbackActive.set(false);
         updateFromKvcmHealth(health);
