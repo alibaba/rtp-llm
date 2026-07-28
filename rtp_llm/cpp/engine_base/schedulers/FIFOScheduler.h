@@ -50,7 +50,7 @@ private:
     bool                         checkInputLength(const GenerateStreamPtr& stream);
     void                         admitWaitingUnits();
     bool                         canAdmitUnit(size_t              admitted_count,
-                                              size_t              admitted_total_tokens,
+                                              size_t              admitted_max_tokens,
                                               size_t              running_count,
                                               const ScheduleUnit& unit) const;
     std::list<GenerateStreamPtr> flattenRunning() const;

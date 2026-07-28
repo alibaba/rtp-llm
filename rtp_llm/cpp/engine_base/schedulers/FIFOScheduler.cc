@@ -207,7 +207,7 @@ std::list<GenerateStreamPtr> FIFOScheduler::flattenRunning() const {
 }
 
 bool FIFOScheduler::canAdmitUnit(size_t              admitted_count,
-                                 size_t              admitted_total_tokens,
+                                 size_t              admitted_max_tokens,
                                  size_t              running_count,
                                  const ScheduleUnit& unit) const {
     if (cp_force_single_prefill_ && pd_sep_config_.role_type != RoleType::DECODE && admitted_count > 0) {
@@ -222,18 +222,19 @@ bool FIFOScheduler::canAdmitUnit(size_t              admitted_count,
     if (admitted_count + unit.size() > max_generate_batch_size_) {
         return false;
     }
-    size_t unit_tokens = 0;
+    size_t unit_max_token = 0;
     for (const auto& s : unit.streams) {
-        unit_tokens += s->contextLength();
+        unit_max_token = std::max(unit_max_token, (size_t)s->contextLength());
     }
-    return admitted_total_tokens + unit_tokens < max_batch_tokens_size_;
+    size_t combined_max = std::max(admitted_max_tokens, unit_max_token);
+    return combined_max * (admitted_count + unit.size()) < max_batch_tokens_size_;
 }
 
 void FIFOScheduler::admitWaitingUnits() {
-    size_t  admitted_count        = 0;
-    size_t  admitted_total_tokens = 0;
-    size_t  running_count         = countStreams(running_);
-    int64_t admitted_group_id     = -1;
+    size_t  admitted_count      = 0;
+    size_t  admitted_max_tokens = 0;
+    size_t  running_count       = countStreams(running_);
+    int64_t admitted_group_id   = -1;
 
     // Remove units with pre-existing errors to avoid zombie entries
     for (auto it = waiting_.begin(); it != waiting_.end();) {
@@ -263,14 +264,14 @@ void FIFOScheduler::admitWaitingUnits() {
                 continue;
             }
         }
-        if (!canAdmitUnit(admitted_count, admitted_total_tokens, running_count, unit)) {
+        if (!canAdmitUnit(admitted_count, admitted_max_tokens, running_count, unit)) {
             // Fast-fail: group whose own tokens exceed the cap can never be admitted
             if (unit.isGroup()) {
-                size_t group_tokens = 0;
+                size_t group_max_token = 0;
                 for (const auto& s : unit.streams) {
-                    group_tokens += s->contextLength();
+                    group_max_token = std::max(group_max_token, (size_t)s->contextLength());
                 }
-                if (group_tokens >= max_batch_tokens_size_) {
+                if (group_max_token * unit.size() >= max_batch_tokens_size_) {
                     for (auto& s : unit.streams) {
                         s->reportError(ErrorCode::GENERATE_TIMEOUT, "group total tokens exceed max_batch_tokens_size");
                     }
@@ -306,7 +307,7 @@ void FIFOScheduler::admitWaitingUnits() {
         }
         admitted_count += unit.size();
         for (const auto& s : unit.streams) {
-            admitted_total_tokens += s->contextLength();
+            admitted_max_tokens = std::max(admitted_max_tokens, (size_t)s->contextLength());
         }
         if (needs_loading) {
             loading_.splice(loading_.end(), waiting_, it++);
@@ -363,14 +364,14 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
     //    (asyncLoadCache returns true based on cache connector configuration).
     //    Use activated_count to track streams moved to running in this cycle,
     //    so the batch size check accounts for previously activated units.
-    //    Similarly, accumulate admitted_total_tokens for token budget checking
+    //    Similarly, accumulate admitted_max_tokens for token budget checking
     //    (relevant for PREFILL units with prefix caching).
-    size_t running_at_step2      = countStreams(running_);
-    size_t activated_count       = 0;
-    size_t admitted_total_tokens = 0;
+    size_t running_at_step2    = countStreams(running_);
+    size_t activated_count     = 0;
+    size_t admitted_max_tokens = 0;
     for (auto it = loading_.begin(); it != loading_.end();) {
         if (it->isReady()) {
-            if (!canAdmitUnit(activated_count, admitted_total_tokens, running_at_step2, *it)) {
+            if (!canAdmitUnit(activated_count, admitted_max_tokens, running_at_step2, *it)) {
                 ++it;
                 continue;
             }
@@ -386,7 +387,7 @@ absl::StatusOr<list<GenerateStreamPtr>> FIFOScheduler::schedule() {
                         RTP_LLM_ACCESS_LOG_INFO(
                             "request_activated: %s role=decode seq_len=%d", s->streamLogTag().c_str(), s->seqLength());
                     }
-                    admitted_total_tokens += s->contextLength();
+                    admitted_max_tokens = std::max(admitted_max_tokens, (size_t)s->contextLength());
                     accountBatchMetrics(s);
                 }
                 running_.splice(running_.end(), loading_, it++);
