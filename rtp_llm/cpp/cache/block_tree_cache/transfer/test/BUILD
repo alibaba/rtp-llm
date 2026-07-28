@@ -32,6 +32,7 @@ cc_library(
     visibility = ["//rtp_llm/cpp/cache/block_tree_cache:__subpackages__"],
     deps = [
         "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "@com_google_googletest//:gtest",
     ],
 )

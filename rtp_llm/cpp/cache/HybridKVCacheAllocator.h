@@ -35,7 +35,6 @@ public:
     int                          singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                        int                            seq_len,
                                                        int                            reserve_step) const override;
-    std::vector<int>             independentEvictionGroupIds() const override;
     std::vector<KVCacheGroupPtr> cacheGroups() const override {
         return kv_cache_groups_;
     }
@@ -65,20 +64,20 @@ protected:
                     std::vector<BlockIndicesType>&       referenced_blocks);
     bool preflightLoadMappings(const std::shared_ptr<LoadTicket>& ticket) const;
 
-    virtual void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, BlockRefType ref_type) const = 0;
-    virtual void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, BlockRefType ref_type)            = 0;
+    virtual void referenceBlocksInGroup(int group_id, const BlockIndicesType& blocks, BlockRefType ref_type) const = 0;
+    virtual void freeBlocksInGroup(int group_id, const BlockIndicesType& blocks, BlockRefType ref_type)            = 0;
     virtual bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const;
-    bool         skipReuseCacheGroup(int gid) const;
-    bool         cpCompactSwaGroup(int gid, const std::shared_ptr<CPSlotMapper>& mapper) const;
-    void         rollbackBlockIdsToSize(int gid, BlockIds& block_ids, size_t original_size);
+    bool         skipReuseCacheGroup(int group_id) const;
+    bool         cpCompactSwaGroup(int group_id, const std::shared_ptr<CPSlotMapper>& mapper) const;
+    void         rollbackBlockIdsToSize(int group_id, BlockIds& block_ids, size_t original_size);
     void         rollbackInitMalloc(BatchKVCacheResource&                kv_resource,
                                     const std::vector<BlockIndicesType>& referenced_blocks,
                                     const std::vector<size_t>&           original_sizes);
     void         rollbackIncrMalloc(BatchKVCacheResource&                   kv_resource,
                                     const std::vector<std::vector<size_t>>& original_sizes,
                                     int                                     failed_batch);
-    virtual void copyBlockMappingForGroup(int gid, const std::vector<BlockIdPair>& block_update_mapping) const;
-    virtual MemoryType memoryTypeForGroup(int gid) const;
+    virtual void copyBlockMappingForGroup(int group_id, const std::vector<BlockIdPair>& block_update_mapping) const;
+    virtual MemoryType memoryTypeForGroup(int group_id) const;
 
     std::vector<KVCacheGroupPtr> kv_cache_groups_;
     std::vector<int>             full_group_ids_;

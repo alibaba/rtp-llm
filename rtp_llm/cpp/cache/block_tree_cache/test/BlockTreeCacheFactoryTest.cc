@@ -60,9 +60,8 @@ CacheConfig makeSwaConfig() {
     config.use_independent_block_pools = true;
 
     auto spec = test::makeResolvedMhaSpec(
-        DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4, "swa");
+        DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4);
     auto policy                  = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    policy.evict_policy          = CacheEvictPolicy::INDEPENDENT;
     policy.enable_prefix_reuse   = true;
     policy.sliding_window_size   = 128;
     const size_t stride          = spec->block_size_bytes();
@@ -70,7 +69,7 @@ CacheConfig makeSwaConfig() {
     config.kv_block_size_bytes   = stride;
     config.block_size_bytes      = stride;
     config.layer_to_block_stride_bytes.assign(2, static_cast<int>(stride));
-    config.fromGroupedSpecs({spec}, {{0, 1}}, {CacheGroupType::SWA}, {"swa"}, {policy});
+    test::configureIndexedTestGroups(config, {spec}, {{0, 1}}, {CacheGroupType::SWA}, {policy});
     config.setGroupBlockLayout({8}, {stride}, {0});
     return config;
 }
@@ -95,19 +94,18 @@ CacheConfig makeHybridConfig(bool independent_pools, bool disable_linear_reuse =
                                                     /*conv_kernel_dim=*/2,
                                                     /*seq_size_per_block=*/4,
                                                     DataType::TYPE_FP16,
-                                                    DataType::TYPE_FP16,
-                                                    "linear");
+                                                    DataType::TYPE_FP16);
     auto full_spec   = test::makeResolvedMhaSpec(
-        DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4, "full");
+        DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4);
 
     auto linear_policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
     linear_policy.enable_prefix_reuse = !disable_linear_reuse;
     auto full_policy                  = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    config.fromGroupedSpecs({linear_spec, full_spec},
-                            {{1, 3}, {0, 2}},
-                            {CacheGroupType::LINEAR, CacheGroupType::FULL},
-                            {"linear", "full"},
-                            {linear_policy, full_policy});
+    test::configureIndexedTestGroups(config,
+                                     {linear_spec, full_spec},
+                                     {{1, 3}, {0, 2}},
+                                     {CacheGroupType::LINEAR, CacheGroupType::FULL},
+                                     {linear_policy, full_policy});
 
     const size_t linear_stride   = linear_spec->block_size_bytes();
     const size_t full_stride     = full_spec->block_size_bytes();
@@ -137,11 +135,11 @@ CacheConfig makeSharedBackingCascadeConfig() {
 
     // Put FULL first so a watermark primary plan cascades to LINEAR. Both
     // logical groups still use HybridType's one physical DeviceBlockPool.
-    config.fromGroupedSpecs(reordered_specs,
-                            {{0, 2}, {1, 3}},
-                            {CacheGroupType::FULL, CacheGroupType::LINEAR},
-                            {"full", "linear"},
-                            {full_policy, linear_policy});
+    test::configureIndexedTestGroups(config,
+                                     reordered_specs,
+                                     {{0, 2}, {1, 3}},
+                                     {CacheGroupType::FULL, CacheGroupType::LINEAR},
+                                     {full_policy, linear_policy});
     config.setGroupBlockLayout({8, 8}, {full_stride, linear_stride}, {0, 0});
     return config;
 }
@@ -158,17 +156,16 @@ CacheConfig makeIncompatibleFullGroupsConfig() {
     config.use_independent_block_pools = true;
 
     auto first = test::makeResolvedMhaSpec(
-        DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/4, /*seq_size_per_block=*/4, "full_a");
+        DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/4, /*seq_size_per_block=*/4);
     auto second = test::makeResolvedMhaSpec(
-        DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/2, "full_b");
-    auto first_policy          = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    auto second_policy         = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    second_policy.evict_policy = CacheEvictPolicy::INDEPENDENT;
-    config.fromGroupedSpecs({first, second},
-                            {{0}, {1}},
-                            {CacheGroupType::FULL, CacheGroupType::FULL},
-                            {"full_a", "full_b"},
-                            {first_policy, second_policy});
+        DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/2);
+    auto first_policy  = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    auto second_policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    test::configureIndexedTestGroups(config,
+                                     {first, second},
+                                     {{0}, {1}},
+                                     {CacheGroupType::FULL, CacheGroupType::FULL},
+                                     {first_policy, second_policy});
 
     const size_t first_stride    = first->block_size_bytes();
     const size_t second_stride   = second->block_size_bytes();
@@ -180,7 +177,7 @@ CacheConfig makeIncompatibleFullGroupsConfig() {
     return config;
 }
 
-CacheConfig makeCompatibleFullGroupsConfig(CacheEvictPolicy first_evict_policy, CacheEvictPolicy second_evict_policy) {
+CacheConfig makeCompatibleFullGroupsConfig() {
     CacheConfig config;
     config.dtype                       = DataType::TYPE_FP16;
     config.layer_num                   = 2;
@@ -192,18 +189,16 @@ CacheConfig makeCompatibleFullGroupsConfig(CacheEvictPolicy first_evict_policy, 
     config.use_independent_block_pools = true;
 
     auto first = test::makeResolvedMhaSpec(
-        DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4, "full_a");
+        DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4);
     auto second = test::makeResolvedMhaSpec(
-        DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4, "full_b");
-    auto first_policy          = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    auto second_policy         = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    first_policy.evict_policy  = first_evict_policy;
-    second_policy.evict_policy = second_evict_policy;
-    config.fromGroupedSpecs({first, second},
-                            {{0}, {1}},
-                            {CacheGroupType::FULL, CacheGroupType::FULL},
-                            {"full_a", "full_b"},
-                            {first_policy, second_policy});
+        DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4);
+    auto first_policy  = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    auto second_policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    test::configureIndexedTestGroups(config,
+                                     {first, second},
+                                     {{0}, {1}},
+                                     {CacheGroupType::FULL, CacheGroupType::FULL},
+                                     {first_policy, second_policy});
 
     const size_t stride          = first->block_size_bytes();
     config.kv_block_stride_bytes = stride;
@@ -212,10 +207,6 @@ CacheConfig makeCompatibleFullGroupsConfig(CacheEvictPolicy first_evict_policy, 
     config.layer_to_block_stride_bytes.assign(2, static_cast<int>(stride));
     config.setGroupBlockLayout({8, 8}, {stride, stride}, {0, 0});
     return config;
-}
-
-CacheConfig makeCompatibleFullGroupsConfig(CacheEvictPolicy evict_policy) {
-    return makeCompatibleFullGroupsConfig(evict_policy, evict_policy);
 }
 
 CacheConfig makeCompatibleSwaGroupsConfig(int second_window) {
@@ -230,22 +221,17 @@ CacheConfig makeCompatibleSwaGroupsConfig(int second_window) {
     config.use_independent_block_pools = true;
 
     auto first = test::makeResolvedMhaSpec(
-        DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4, "swa_a");
+        DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4);
     auto second = test::makeResolvedMhaSpec(
-        DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4, "swa_b");
+        DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4);
     auto first_policy                 = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    first_policy.evict_policy         = CacheEvictPolicy::CHAIN;
     first_policy.enable_prefix_reuse  = true;
     first_policy.sliding_window_size  = 128;
     auto second_policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    second_policy.evict_policy        = CacheEvictPolicy::CHAIN;
     second_policy.enable_prefix_reuse = true;
     second_policy.sliding_window_size = second_window;
-    config.fromGroupedSpecs({first, second},
-                            {{0}, {1}},
-                            {CacheGroupType::SWA, CacheGroupType::SWA},
-                            {"swa_a", "swa_b"},
-                            {first_policy, second_policy});
+    test::configureIndexedTestGroups(
+        config, {first, second}, {{0}, {1}}, {CacheGroupType::SWA, CacheGroupType::SWA}, {first_policy, second_policy});
 
     const size_t stride          = first->block_size_bytes();
     config.kv_block_stride_bytes = stride;
@@ -256,7 +242,7 @@ CacheConfig makeCompatibleSwaGroupsConfig(int second_window) {
     return config;
 }
 
-CacheConfig makeReusableGroupsAroundDisabledConfig(bool reverse_reusable_tags) {
+CacheConfig makeReusableGroupsAroundDisabledConfig() {
     CacheConfig config;
     config.dtype                       = DataType::TYPE_FP16;
     config.layer_num                   = 3;
@@ -267,24 +253,17 @@ CacheConfig makeReusableGroupsAroundDisabledConfig(bool reverse_reusable_tags) {
     config.group_layer_num             = 1;
     config.use_independent_block_pools = true;
 
-    const std::vector<std::string>            tags = reverse_reusable_tags ?
-                                                         std::vector<std::string>{"full_b", "disabled", "full_a"} :
-                                                         std::vector<std::string>{"full_a", "disabled", "full_b"};
     std::vector<std::shared_ptr<KVCacheSpec>> specs;
     std::vector<CacheGroupPolicy>             policies;
-    for (const auto& tag : tags) {
+    for (size_t group_id = 0; group_id < 3; ++group_id) {
         specs.push_back(test::makeResolvedMhaSpec(
-            DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4, tag));
+            DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/4));
         auto policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
-        policy.evict_policy        = CacheEvictPolicy::CHAIN;
-        policy.enable_prefix_reuse = tag != "disabled";
+        policy.enable_prefix_reuse = group_id != 1;
         policies.push_back(policy);
     }
-    config.fromGroupedSpecs(std::move(specs),
-                            {{0}, {1}, {2}},
-                            {CacheGroupType::FULL, CacheGroupType::FULL, CacheGroupType::FULL},
-                            tags,
-                            std::move(policies));
+    test::configureIndexedTestGroups(
+        config, specs, {{0}, {1}, {2}}, {CacheGroupType::FULL, CacheGroupType::FULL, CacheGroupType::FULL}, policies);
 
     const size_t stride          = config.specForGroup(0)->block_size_bytes();
     config.kv_block_stride_bytes = stride;
@@ -324,13 +303,24 @@ std::shared_ptr<GroupViewHybridPoolAllocator> initViewAllocator(const CacheConfi
     return allocator;
 }
 
-KVCacheGroupPtr cloneGroupWithTag(const KVCacheGroupPtr& source, std::string tag) {
+KVCacheGroupPtr cloneGroupWithId(const KVCacheGroupPtr& source, int group_id) {
+    GroupBase group  = source->config();
+    auto      result = std::make_shared<FullKVCacheGroup>(std::move(group), source->blockPool(), group_id);
+    EXPECT_TRUE(result->init());
+    return result;
+}
+
+KVCacheGroupPtr cloneGroupWithBlockNum(const KVCacheGroupPtr& source, uint32_t block_num) {
     GroupBase group = source->config();
-    auto      spec  = group.spec->clone();
-    spec->tag       = tag;
-    group.tag       = std::move(tag);
-    group.spec      = std::move(spec);
-    auto result     = std::make_shared<FullKVCacheGroup>(std::move(group), source->blockPool(), /*group_id=*/99);
+    group.block_num = block_num;
+    auto result     = std::make_shared<FullKVCacheGroup>(std::move(group), source->blockPool(), source->group_id());
+    EXPECT_TRUE(result->init());
+    return result;
+}
+
+KVCacheGroupPtr cloneGroupWithPool(const KVCacheGroupPtr& source, const DeviceBlockPoolPtr& pool) {
+    GroupBase group  = source->config();
+    auto      result = std::make_shared<FullKVCacheGroup>(std::move(group), pool, source->group_id());
     EXPECT_TRUE(result->init());
     return result;
 }
@@ -347,15 +337,14 @@ void expectFactoryRejects(const CacheConfig&                       config,
     EXPECT_EQ(allocator->blockTreeCache(), nullptr);
 }
 
-void expectTargetGroupsBoundByTag(const BlockTreeCachePtr& cache, const KVCacheAllocatorPtr& allocator) {
+void expectTargetGroupsBoundById(const BlockTreeCachePtr& cache, const KVCacheAllocatorPtr& allocator) {
     ASSERT_NE(cache, nullptr);
     const auto groups = allocator->cacheGroups();
     ASSERT_FALSE(cache->groupSets().empty());
-    const auto topology = cache->groupSets().front()->topology();
-    ASSERT_NE(topology, nullptr);
     for (const auto& target_group : groups) {
         ASSERT_NE(target_group, nullptr);
-        const size_t group_id = topology->groupIdForTag(target_group->tag());
+        ASSERT_GE(target_group->group_id(), 0);
+        const size_t group_id = static_cast<size_t>(target_group->group_id());
         if (!target_group->prefixReuseEnabled()) {
             continue;
         }
@@ -366,13 +355,12 @@ void expectTargetGroupsBoundByTag(const BlockTreeCachePtr& cache, const KVCacheA
                        && std::find(group_set->groupIds().begin(), group_set->groupIds().end(), group_id)
                               != group_set->groupIds().end();
             });
-        ASSERT_NE(group_set_it, cache->groupSets().end()) << target_group->tag();
+        ASSERT_NE(group_set_it, cache->groupSets().end()) << group_id;
         const auto local_it =
             std::find((*group_set_it)->groupIds().begin(), (*group_set_it)->groupIds().end(), group_id);
         ASSERT_NE(local_it, (*group_set_it)->groupIds().end());
-        const size_t local_group_index =
-            static_cast<size_t>(std::distance((*group_set_it)->groupIds().begin(), local_it));
-        const auto& device_pool = (*group_set_it)->devicePools()[local_group_index];
+        const size_t member_index = static_cast<size_t>(std::distance((*group_set_it)->groupIds().begin(), local_it));
+        const auto&  device_pool  = (*group_set_it)->devicePools()[member_index];
         ASSERT_NE(device_pool, nullptr);
         EXPECT_EQ(device_pool.get(), target_group->blockPool().get());
     }
@@ -388,16 +376,16 @@ insertOneKeyThroughAllocator(const CacheConfig& config, const KVCacheAllocatorPt
     std::vector<BlockIdxType> blocks(static_cast<size_t>(config.groupNums()), NULL_BLOCK_IDX);
     const auto                groups = allocator->cacheGroups();
     EXPECT_EQ(groups.size(), blocks.size());
-    for (size_t gid = 0; gid < groups.size(); ++gid) {
-        const auto& pool      = groups[gid]->blockPool();
+    for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
+        const auto& pool      = groups[group_id]->blockPool();
         const auto  allocated = pool->malloc(1);
         EXPECT_TRUE(allocated.has_value());
         if (!allocated.has_value()) {
             continue;
         }
         pool->incRef(*allocated, BlockRefType::REQUEST);
-        blocks[gid] = allocated->front();
-        resource->setBatchBlocks(0, static_cast<int>(gid), BlockIndicesType{allocated->front()});
+        blocks[group_id] = allocated->front();
+        resource->setBatchBlocks(0, static_cast<int>(group_id), BlockIndicesType{allocated->front()});
     }
     allocator->insertIntoCache(InsertInfo{resource, nullptr, /*is_resident=*/false});
     return blocks;
@@ -406,9 +394,9 @@ insertOneKeyThroughAllocator(const CacheConfig& config, const KVCacheAllocatorPt
 void releaseInsertedRequestBlocks(const KVCacheAllocatorPtr& allocator, const std::vector<BlockIdxType>& blocks) {
     const auto groups = allocator->cacheGroups();
     ASSERT_EQ(groups.size(), blocks.size());
-    for (size_t gid = 0; gid < groups.size(); ++gid) {
-        if (!isNullBlockIdx(blocks[gid])) {
-            groups[gid]->blockPool()->decRef(blocks[gid], BlockRefType::REQUEST);
+    for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
+        if (!isNullBlockIdx(blocks[group_id])) {
+            groups[group_id]->blockPool()->decRef(blocks[group_id], BlockRefType::REQUEST);
         }
     }
 }
@@ -476,7 +464,7 @@ TEST_F(BlockTreeCacheFactoryTest, SingleTypeBindsExistingTargetGroupAndPool) {
     auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
 
     ASSERT_EQ(allocator->cacheGroups().size(), 1u);
-    expectTargetGroupsBoundByTag(cache, allocator);
+    expectTargetGroupsBoundById(cache, allocator);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, SwaGroupSetUsesDeclaredPolicyWindow) {
@@ -489,17 +477,17 @@ TEST_F(BlockTreeCacheFactoryTest, SwaGroupSetUsesDeclaredPolicyWindow) {
     ASSERT_EQ(cache->groupSets().size(), 1u);
     auto swa_group = std::dynamic_pointer_cast<SWAGroupSet>(cache->groupSets().front());
     ASSERT_NE(swa_group, nullptr);
-    EXPECT_EQ(swa_group->groupTags(), (std::vector<std::string>{"swa"}));
+    EXPECT_EQ(swa_group->groupIds(), (std::vector<size_t>{0}));
     EXPECT_EQ(swa_group->slidingWindowSize(), 128u);
 }
 
-TEST_F(BlockTreeCacheFactoryTest, HybridTypeBindsExistingTargetGroupsByTag) {
+TEST_F(BlockTreeCacheFactoryTest, HybridTypeBindsExistingTargetGroupsById) {
     const auto config    = makeHybridConfig(/*independent_pools=*/false);
     auto       allocator = initAllocator<HybridTypeKVCacheAllocator>(config);
     auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
 
     ASSERT_EQ(allocator->cacheGroups().size(), 2u);
-    expectTargetGroupsBoundByTag(cache, allocator);
+    expectTargetGroupsBoundById(cache, allocator);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, HybridPoolBindsIndependentPoolsAndNonContiguousLayerViews) {
@@ -509,7 +497,7 @@ TEST_F(BlockTreeCacheFactoryTest, HybridPoolBindsIndependentPoolsAndNonContiguou
 
     ASSERT_EQ(allocator->cacheGroups().size(), 2u);
     ASSERT_NE(allocator->cacheGroups()[0]->blockPool(), allocator->cacheGroups()[1]->blockPool());
-    expectTargetGroupsBoundByTag(cache, allocator);
+    expectTargetGroupsBoundById(cache, allocator);
 
     for (const auto& group : allocator->cacheGroups()) {
         const auto& pool  = group->blockPool();
@@ -537,17 +525,14 @@ TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguo
     ASSERT_NE(cache, nullptr);
 
     const auto target_groups = allocator->cacheGroups();
-    const auto full_group_it =
-        std::find_if(target_groups.begin(), target_groups.end(), [](const KVCacheGroupPtr& group) {
-            return group != nullptr && group->tag() == "full";
-        });
-    ASSERT_NE(full_group_it, target_groups.end());
-    const auto& full_group = *full_group_it;
+    ASSERT_EQ(target_groups.size(), 2u);
+    const auto& full_group = target_groups[1];
+    ASSERT_NE(full_group, nullptr);
     ASSERT_EQ(full_group->config().layer_ids, (std::vector<int>{0, 2}));
 
     const auto group_set_it =
         std::find_if(cache->groupSets().begin(), cache->groupSets().end(), [](const GroupSetPtr& group_set) {
-            return group_set != nullptr && group_set->groupTags() == std::vector<std::string>{"full"};
+            return group_set != nullptr && group_set->groupIds() == std::vector<size_t>{1};
         });
     ASSERT_NE(group_set_it, cache->groupSets().end());
     const auto& group_set = *group_set_it;
@@ -581,7 +566,7 @@ TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguo
     full_group->blockPool()->decRef(*device_blocks, BlockRefType::REQUEST);
 }
 
-TEST_F(BlockTreeCacheFactoryTest, ReorderedAllocatorGroupsStillMapByStableTag) {
+TEST_F(BlockTreeCacheFactoryTest, ReorderedAllocatorGroupsStillMapByEmbeddedGroupId) {
     const auto config    = makeHybridConfig(/*independent_pools=*/true);
     auto       allocator = initViewAllocator(config);
     auto       groups    = allocator->HybridPoolKVCacheAllocator::cacheGroups();
@@ -590,13 +575,13 @@ TEST_F(BlockTreeCacheFactoryTest, ReorderedAllocatorGroupsStillMapByStableTag) {
     allocator->overrideGroups(groups);
 
     auto cache = createBlockTreeCache(config, KVCacheConfig{}, allocator);
-    expectTargetGroupsBoundByTag(cache, allocator);
+    expectTargetGroupsBoundById(cache, allocator);
     ASSERT_EQ(cache->groupSets().size(), 2u);
-    EXPECT_EQ(cache->groupSets()[0]->groupTags(), (std::vector<std::string>{"linear"}));
-    EXPECT_EQ(cache->groupSets()[1]->groupTags(), (std::vector<std::string>{"full"}));
+    EXPECT_EQ(cache->groupSets()[0]->groupIds(), (std::vector<size_t>{0}));
+    EXPECT_EQ(cache->groupSets()[1]->groupIds(), (std::vector<size_t>{1}));
 }
 
-TEST_F(BlockTreeCacheFactoryTest, DuplicateMissingUnknownEmptyAndNonExactViewsFailClosed) {
+TEST_F(BlockTreeCacheFactoryTest, DuplicateMissingAndOutOfRangeGroupIdsFailClosed) {
     const auto config = makeHybridConfig(/*independent_pools=*/true);
 
     {
@@ -614,19 +599,38 @@ TEST_F(BlockTreeCacheFactoryTest, DuplicateMissingUnknownEmptyAndNonExactViewsFa
     {
         auto allocator = initViewAllocator(config);
         auto groups    = allocator->HybridPoolKVCacheAllocator::cacheGroups();
-        allocator->overrideGroups({groups[0], cloneGroupWithTag(groups[1], "unknown")});
+        allocator->overrideGroups({groups[0], cloneGroupWithId(groups[1], 2)});
         expectFactoryRejects(config, allocator);
     }
     {
         auto allocator = initViewAllocator(config);
         auto groups    = allocator->HybridPoolKVCacheAllocator::cacheGroups();
-        allocator->overrideGroups({groups[0], cloneGroupWithTag(groups[1], "")});
+        allocator->overrideGroups({groups[0], cloneGroupWithId(groups[1], -1)});
         expectFactoryRejects(config, allocator);
     }
     {
         auto allocator = initViewAllocator(config);
         auto groups    = allocator->HybridPoolKVCacheAllocator::cacheGroups();
-        allocator->overrideGroups({cloneGroupWithTag(groups[0], "unknown_linear"), groups[1]});
+        allocator->overrideGroups({cloneGroupWithId(groups[0], 1), groups[1]});
+        expectFactoryRejects(config, allocator);
+    }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, AllocatorConfigAndDirectPoolMismatchesFailClosed) {
+    const auto config = makeHybridConfig(/*independent_pools=*/true);
+
+    {
+        auto allocator = initViewAllocator(config);
+        auto groups    = allocator->HybridPoolKVCacheAllocator::cacheGroups();
+        ASSERT_EQ(groups.size(), 2u);
+        allocator->overrideGroups({groups[0], cloneGroupWithBlockNum(groups[1], groups[1]->config().block_num + 1)});
+        expectFactoryRejects(config, allocator);
+    }
+    {
+        auto allocator = initViewAllocator(config);
+        auto groups    = allocator->HybridPoolKVCacheAllocator::cacheGroups();
+        ASSERT_EQ(groups.size(), 2u);
+        allocator->overrideGroups({groups[0], cloneGroupWithPool(groups[1], groups[0]->blockPool())});
         expectFactoryRejects(config, allocator);
     }
 }
@@ -639,8 +643,7 @@ TEST_F(BlockTreeCacheFactoryTest, PrefixReuseDisabledGroupStaysAllocatorOwnedBut
     ASSERT_NE(cache, nullptr);
     ASSERT_EQ(allocator->cacheGroups().size(), 2u);
     ASSERT_EQ(cache->groupSets().size(), 1u);
-    EXPECT_EQ(cache->groupSets()[0]->groupTags(), (std::vector<std::string>{"full"}));
-    EXPECT_EQ(cache->groupSets()[0]->groupIds(), (std::vector<size_t>{config.topology().groupIdForTag("full")}));
+    EXPECT_EQ(cache->groupSets()[0]->groupIds(), (std::vector<size_t>{1}));
 }
 
 TEST_F(BlockTreeCacheFactoryTest, SameTypeGroupsWithDifferentPolicyShapeSeqAndStrideAreNeverAggregated) {
@@ -650,13 +653,13 @@ TEST_F(BlockTreeCacheFactoryTest, SameTypeGroupsWithDifferentPolicyShapeSeqAndSt
 
     ASSERT_NE(cache, nullptr);
     ASSERT_EQ(cache->groupSets().size(), 2u);
-    EXPECT_EQ(cache->groupSets()[0]->groupTags(), (std::vector<std::string>{"full_a"}));
-    EXPECT_EQ(cache->groupSets()[1]->groupTags(), (std::vector<std::string>{"full_b"}));
+    EXPECT_EQ(cache->groupSets()[0]->groupIds(), (std::vector<size_t>{0}));
+    EXPECT_EQ(cache->groupSets()[1]->groupIds(), (std::vector<size_t>{1}));
     EXPECT_NE(cache->groupSets()[0]->devicePools()[0], cache->groupSets()[1]->devicePools()[0]);
 }
 
-TEST_F(BlockTreeCacheFactoryTest, OnlyCompatibleChainGroupsAggregate) {
-    const auto    config    = makeCompatibleFullGroupsConfig(CacheEvictPolicy::CHAIN);
+TEST_F(BlockTreeCacheFactoryTest, CompatibleGroupsAggregate) {
+    const auto    config    = makeCompatibleFullGroupsConfig();
     auto          allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
     KVCacheConfig legacy_conflict;
     legacy_conflict.enable_independent_group_eviction = true;
@@ -664,8 +667,7 @@ TEST_F(BlockTreeCacheFactoryTest, OnlyCompatibleChainGroupsAggregate) {
 
     ASSERT_NE(cache, nullptr);
     ASSERT_EQ(cache->groupSets().size(), 1u);
-    EXPECT_EQ(cache->groupSets()[0]->evictPolicy(), CacheEvictPolicy::CHAIN);
-    EXPECT_EQ(cache->groupSets()[0]->groupTags(), (std::vector<std::string>{"full_a", "full_b"}));
+    EXPECT_EQ(cache->groupSets()[0]->groupIds(), (std::vector<size_t>{0, 1}));
     ASSERT_EQ(cache->groupSets()[0]->devicePools().size(), 2u);
 }
 
@@ -680,23 +682,23 @@ TEST_F(BlockTreeCacheFactoryTest, CompatibleSwaGroupsAggregateOnlyWhenPolicyWind
         const size_t expected_group_count = second_window == 128 ? 1u : 2u;
         ASSERT_EQ(cache->groupSets().size(), expected_group_count);
         if (second_window == 128) {
-            EXPECT_EQ(cache->groupSets().front()->groupTags(), (std::vector<std::string>{"swa_a", "swa_b"}));
+            EXPECT_EQ(cache->groupSets().front()->groupIds(), (std::vector<size_t>{0, 1}));
         } else {
-            EXPECT_EQ(cache->groupSets()[0]->groupTags(), (std::vector<std::string>{"swa_a"}));
-            EXPECT_EQ(cache->groupSets()[1]->groupTags(), (std::vector<std::string>{"swa_b"}));
+            EXPECT_EQ(cache->groupSets()[0]->groupIds(), (std::vector<size_t>{0}));
+            EXPECT_EQ(cache->groupSets()[1]->groupIds(), (std::vector<size_t>{1}));
         }
     }
 }
 
-TEST_F(BlockTreeCacheFactoryTest, CompatibleChainInsertPacksOneGroupSetResourceInStableTagOrder) {
-    const auto config    = makeCompatibleFullGroupsConfig(CacheEvictPolicy::CHAIN);
+TEST_F(BlockTreeCacheFactoryTest, CompatibleInsertPacksOneGroupSetResourceInGroupIdOrder) {
+    const auto config    = makeCompatibleFullGroupsConfig();
     auto       allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
     auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
     ASSERT_NE(cache, nullptr);
     allocator->setBlockTreeCache(cache.get());
 
     ASSERT_EQ(cache->groupSets().size(), 1u);
-    EXPECT_EQ(cache->groupSets()[0]->groupTags(), (std::vector<std::string>{"full_a", "full_b"}));
+    EXPECT_EQ(cache->groupSets()[0]->groupIds(), (std::vector<size_t>{0, 1}));
     const auto blocks = insertOneKeyThroughAllocator(config, allocator, /*key=*/700);
 
     auto match = cache->match(CacheKeysType{700});
@@ -709,35 +711,28 @@ TEST_F(BlockTreeCacheFactoryTest, CompatibleChainInsertPacksOneGroupSetResourceI
     allocator->setBlockTreeCache(nullptr);
 }
 
-TEST_F(BlockTreeCacheFactoryTest, MiddleDisabledTagIsExcludedWithoutShiftingReorderedReusableTags) {
-    for (const bool reverse_reusable_tags : {false, true}) {
-        SCOPED_TRACE(reverse_reusable_tags ? "reversed" : "declared");
-        const auto config    = makeReusableGroupsAroundDisabledConfig(reverse_reusable_tags);
-        auto       allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
-        auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
-        ASSERT_NE(cache, nullptr);
-        allocator->setBlockTreeCache(cache.get());
+TEST_F(BlockTreeCacheFactoryTest, MiddleDisabledGroupIsExcludedWithoutShiftingReusableGroupIds) {
+    const auto config    = makeReusableGroupsAroundDisabledConfig();
+    auto       allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
+    auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
+    ASSERT_NE(cache, nullptr);
+    allocator->setBlockTreeCache(cache.get());
 
-        const std::vector<std::string> expected_tags = reverse_reusable_tags ?
-                                                           std::vector<std::string>{"full_b", "full_a"} :
-                                                           std::vector<std::string>{"full_a", "full_b"};
-        ASSERT_EQ(cache->groupSets().size(), 1u);
-        EXPECT_EQ(cache->groupSets()[0]->groupTags(), expected_tags);
+    ASSERT_EQ(cache->groupSets().size(), 1u);
+    EXPECT_EQ(cache->groupSets()[0]->groupIds(), (std::vector<size_t>{0, 2}));
 
-        const auto blocks = insertOneKeyThroughAllocator(config, allocator, /*key=*/701);
-        auto       match  = cache->match(CacheKeysType{701});
-        ASSERT_EQ(match.matched_blocks, 1u);
-        const size_t disabled_gid = config.topology().groupIdForTag("disabled");
-        EXPECT_TRUE(cache->matchedBlocksForGroup(disabled_gid, match.matched_resources).empty());
-        for (const auto& tag : expected_tags) {
-            const size_t gid = config.topology().groupIdForTag(tag);
-            ASSERT_EQ(cache->matchedBlocksForGroup(gid, match.matched_resources), (BlockIndicesType{blocks[gid]}));
-        }
-        cache->releaseMatchedResources(match.matched_resources);
-
-        releaseInsertedRequestBlocks(allocator, blocks);
-        allocator->setBlockTreeCache(nullptr);
+    const auto blocks = insertOneKeyThroughAllocator(config, allocator, /*key=*/701);
+    auto       match  = cache->match(CacheKeysType{701});
+    ASSERT_EQ(match.matched_blocks, 1u);
+    EXPECT_TRUE(cache->matchedBlocksForGroup(1, match.matched_resources).empty());
+    for (const size_t group_id : {0u, 2u}) {
+        ASSERT_EQ(cache->matchedBlocksForGroup(group_id, match.matched_resources),
+                  (BlockIndicesType{blocks[group_id]}));
     }
+    cache->releaseMatchedResources(match.matched_resources);
+
+    releaseInsertedRequestBlocks(allocator, blocks);
+    allocator->setBlockTreeCache(nullptr);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkCountsPrimaryAndCascadeCreditsOnce) {
@@ -844,72 +839,8 @@ TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesO
     allocator->setBlockTreeCache(nullptr);
 }
 
-TEST_F(BlockTreeCacheFactoryTest, IndependentGroupsNeverAggregateOrEnterAnotherGroupsCascade) {
-    const auto    config    = makeCompatibleFullGroupsConfig(CacheEvictPolicy::INDEPENDENT);
-    auto          allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
-    KVCacheConfig legacy_conflict;
-    legacy_conflict.enable_independent_group_eviction = false;
-    auto cache                                        = createBlockTreeCache(config, legacy_conflict, allocator);
-
-    ASSERT_NE(cache, nullptr);
-    ASSERT_EQ(cache->groupSets().size(), 2u);
-    EXPECT_EQ(cache->groupSets()[0]->evictPolicy(), CacheEvictPolicy::INDEPENDENT);
-    EXPECT_EQ(cache->groupSets()[1]->evictPolicy(), CacheEvictPolicy::INDEPENDENT);
-    EXPECT_EQ(cache->groupSets()[0]->groupTags(), (std::vector<std::string>{"full_a"}));
-    EXPECT_EQ(cache->groupSets()[1]->groupTags(), (std::vector<std::string>{"full_b"}));
-}
-
-TEST_F(BlockTreeCacheFactoryTest, EvictPolicyNoneNeverReclaimedByPublicPaths) {
-    const auto config    = makeCompatibleFullGroupsConfig(CacheEvictPolicy::CHAIN, CacheEvictPolicy::NONE);
-    auto       allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
-    auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
-    ASSERT_NE(cache, nullptr);
-    allocator->setBlockTreeCache(cache.get());
-
-    ASSERT_EQ(cache->groupSets().size(), 2u);
-    ASSERT_EQ(cache->groupSets()[0]->groupTags(), (std::vector<std::string>{"full_a"}));
-    ASSERT_EQ(cache->groupSets()[1]->groupTags(), (std::vector<std::string>{"full_b"}));
-    EXPECT_EQ(cache->groupSets()[0]->evictPolicy(), CacheEvictPolicy::CHAIN);
-    EXPECT_EQ(cache->groupSets()[1]->evictPolicy(), CacheEvictPolicy::NONE);
-
-    const auto blocks = insertOneKeyThroughAllocator(config, allocator, /*key=*/820);
-    ASSERT_EQ(blocks.size(), 2u);
-    const auto normal_pool = allocator->cacheGroups()[0]->blockPool();
-    const auto none_pool   = allocator->cacheGroups()[1]->blockPool();
-    releaseInsertedRequestBlocks(allocator, blocks);
-    cache->onBlocksReleased();
-    ASSERT_EQ(cache->getStats().device_heap_total_size, 1u);
-    ASSERT_EQ(normal_pool->refCount(blocks[0]), 1u);
-    ASSERT_EQ(none_pool->refCount(blocks[1]), 1u);
-
-    EXPECT_EQ(
-        block_tree_cache_test::BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, /*num_blocks=*/100, Tier::DEVICE),
-        1);
-    cache->waitForPendingTasks();
-    EXPECT_FALSE(normal_pool->isAllocated(blocks[0]));
-    EXPECT_TRUE(none_pool->isAllocated(blocks[1]));
-    EXPECT_EQ(none_pool->refCount(blocks[1]), 1u);
-    EXPECT_EQ(cache->evictForTag("full_b", 1), 0);
-    EXPECT_TRUE(none_pool->isAllocated(blocks[1]));
-
-    const size_t remaining_free = none_pool->freeBlocksNum();
-    const auto   pressure_holds = none_pool->malloc(remaining_free);
-    ASSERT_TRUE(pressure_holds.has_value());
-    none_pool->incRef(*pressure_holds, BlockRefType::REQUEST);
-    EXPECT_EQ(none_pool->freeBlocksNum(), 0u);
-    EXPECT_FALSE(allocator->cacheGroups()[1]->ensureFreeBlocks(1));
-    EXPECT_EQ(none_pool->freeBlocksNum(), 0u);
-    EXPECT_TRUE(none_pool->isAllocated(blocks[1]));
-    EXPECT_EQ(none_pool->refCount(blocks[1]), 1u);
-
-    none_pool->decRef(*pressure_holds, BlockRefType::REQUEST);
-    allocator->setBlockTreeCache(nullptr);
-    cache.reset();
-    EXPECT_EQ(none_pool->freeBlocksNum(), none_pool->totalBlocksNum());
-}
-
-TEST_F(BlockTreeCacheFactoryTest, IndependentInsertKeepsSeparateGroupSetResources) {
-    const auto config    = makeCompatibleFullGroupsConfig(CacheEvictPolicy::INDEPENDENT);
+TEST_F(BlockTreeCacheFactoryTest, IncompatibleGroupsKeepSeparateGroupSetResources) {
+    const auto config    = makeIncompatibleFullGroupsConfig();
     auto       allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
     auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
     ASSERT_NE(cache, nullptr);
@@ -933,8 +864,8 @@ TEST_F(BlockTreeCacheFactoryTest, IndependentInsertKeepsSeparateGroupSetResource
     allocator->setBlockTreeCache(nullptr);
 }
 
-TEST_F(BlockTreeCacheFactoryTest, IndependentReinsertRefillsOnlyEmptyIdleGroupSetResource) {
-    const auto    config    = makeCompatibleFullGroupsConfig(CacheEvictPolicy::INDEPENDENT);
+TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) {
+    const auto    config    = makeIncompatibleFullGroupsConfig();
     auto          allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_memory_cache        = true;
@@ -947,8 +878,8 @@ TEST_F(BlockTreeCacheFactoryTest, IndependentReinsertRefillsOnlyEmptyIdleGroupSe
     ASSERT_EQ(cache->groupSets().size(), 2u);
     const auto& group_set_a = cache->groupSets()[0];
     const auto& group_set_b = cache->groupSets()[1];
-    ASSERT_EQ(group_set_a->groupTags(), (std::vector<std::string>{"full_a"}));
-    ASSERT_EQ(group_set_b->groupTags(), (std::vector<std::string>{"full_b"}));
+    ASSERT_EQ(group_set_a->groupIds(), (std::vector<size_t>{0}));
+    ASSERT_EQ(group_set_b->groupIds(), (std::vector<size_t>{1}));
     ASSERT_EQ(group_set_a->devicePools().size(), 1u);
     ASSERT_EQ(group_set_b->devicePools().size(), 1u);
     ASSERT_NE(group_set_a->hostPool(), nullptr);
@@ -970,7 +901,7 @@ TEST_F(BlockTreeCacheFactoryTest, IndependentReinsertRefillsOnlyEmptyIdleGroupSe
     writeDevicePattern(
         allocator->cacheGroups()[1]->convertIndexToAddr(b_layer, original_blocks[1]).kv_addr, b_bytes, 0x5a);
 
-    ASSERT_EQ(cache->evictForTag("full_a", 1), 1);
+    ASSERT_EQ(cache->evictForGroup(0, 1), 1);
     cache->waitForPendingTasks();
     ASSERT_TRUE(node->group_set_resources[0].is_empty());
     ASSERT_EQ(node->group_set_resources[1].device_blocks, (BlockIndicesType{original_blocks[1]}));
@@ -986,8 +917,8 @@ TEST_F(BlockTreeCacheFactoryTest, IndependentReinsertRefillsOnlyEmptyIdleGroupSe
     incoming_a.device_blocks = {refill_a->front()};
     GroupSetResource incoming_b;
     incoming_b.device_blocks = {original_blocks[1]};
-    const std::vector<std::vector<GroupSetResource>> refill_slots{{incoming_a, incoming_b}};
-    cache->insert(nullptr, CacheKeysType{703}, refill_slots);
+    const std::vector<std::vector<GroupSetResource>> refill_resources{{incoming_a, incoming_b}};
+    cache->insert(nullptr, CacheKeysType{703}, refill_resources);
 
     const auto after_refill = cache->getKeySnapshot(/*limit=*/16);
     EXPECT_EQ(after_refill.version, before_refill.version + 1);
@@ -1009,7 +940,7 @@ TEST_F(BlockTreeCacheFactoryTest, IndependentReinsertRefillsOnlyEmptyIdleGroupSe
 
     const size_t a_ref_before_duplicate = group_set_a->devicePools()[0]->refCount(refill_a->front());
     const auto   before_duplicate       = cache->getKeySnapshot(/*limit=*/16);
-    cache->insert(nullptr, CacheKeysType{703}, refill_slots);
+    cache->insert(nullptr, CacheKeysType{703}, refill_resources);
     const auto after_duplicate = cache->getKeySnapshot(/*limit=*/16);
     EXPECT_EQ(after_duplicate.version, before_duplicate.version);
     EXPECT_EQ(group_set_a->devicePools()[0]->refCount(refill_a->front()), a_ref_before_duplicate);
@@ -1029,7 +960,7 @@ TEST_F(BlockTreeCacheFactoryTest, IndependentReinsertRefillsOnlyEmptyIdleGroupSe
     EXPECT_EQ(group_set_a->devicePools()[0]->refCount(refill_a->front()), a_ref_before_duplicate);
     allocator->cacheGroups()[0]->blockPool()->decRef(*nonempty_replacement, BlockRefType::REQUEST);
 
-    ASSERT_EQ(cache->evictForTag("full_a", 1), 1);
+    ASSERT_EQ(cache->evictForGroup(0, 1), 1);
     cache->waitForPendingTasks();
     ASSERT_TRUE(node->group_set_resources[0].is_empty());
 
@@ -1070,7 +1001,7 @@ TEST_F(BlockTreeCacheFactoryTest, IndependentReinsertRefillsOnlyEmptyIdleGroupSe
 }
 
 TEST_F(BlockTreeCacheFactoryTest, InsertRejectsWrongShapeAndFailsFastOnInvalidGroupPayloads) {
-    const auto config    = makeCompatibleFullGroupsConfig(CacheEvictPolicy::CHAIN);
+    const auto config    = makeCompatibleFullGroupsConfig();
     auto       allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
     auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
     ASSERT_NE(cache, nullptr);
@@ -1088,9 +1019,10 @@ TEST_F(BlockTreeCacheFactoryTest, InsertRejectsWrongShapeAndFailsFastOnInvalidGr
     groups[0]->blockPool()->incRef(*first, BlockRefType::REQUEST);
     groups[1]->blockPool()->incRef(*second, BlockRefType::REQUEST);
 
-    auto expect_rejected_without_mutation = [&](CacheKeyType key, std::vector<std::vector<GroupSetResource>> slots) {
+    auto expect_rejected_without_mutation = [&](CacheKeyType                               key,
+                                                std::vector<std::vector<GroupSetResource>> resources) {
         const auto before = cache->getKeySnapshot(/*limit=*/32);
-        cache->insert(nullptr, CacheKeysType{key}, slots);
+        cache->insert(nullptr, CacheKeysType{key}, resources);
         const auto after = cache->getKeySnapshot(/*limit=*/32);
         EXPECT_EQ(after.version, before.version);
         EXPECT_EQ(after.keys, before.keys);
@@ -1102,11 +1034,12 @@ TEST_F(BlockTreeCacheFactoryTest, InsertRejectsWrongShapeAndFailsFastOnInvalidGr
     valid.device_blocks = {first->front(), second->front()};
     expect_rejected_without_mutation(/*key=*/711, {{valid, valid}});
 
-    auto expect_failfast_without_cache_hold = [&](CacheKeyType key, std::vector<std::vector<GroupSetResource>> slots) {
+    auto expect_failfast_without_cache_hold = [&](CacheKeyType                               key,
+                                                  std::vector<std::vector<GroupSetResource>> resources) {
         const auto before          = cache->getKeySnapshot(/*limit=*/32);
         const auto first_refcount  = groups[0]->blockPool()->refCount(first->front());
         const auto second_refcount = groups[1]->blockPool()->refCount(second->front());
-        EXPECT_ANY_THROW(cache->insert(nullptr, CacheKeysType{key}, slots));
+        EXPECT_ANY_THROW(cache->insert(nullptr, CacheKeysType{key}, resources));
         const auto after = cache->getKeySnapshot(/*limit=*/32);
         EXPECT_EQ(after.version, before.version);
         EXPECT_EQ(after.keys, before.keys);
@@ -1131,17 +1064,6 @@ TEST_F(BlockTreeCacheFactoryTest, InsertRejectsWrongShapeAndFailsFastOnInvalidGr
     groups[1]->blockPool()->decRef(*second, BlockRefType::REQUEST);
 }
 
-TEST_F(BlockTreeCacheFactoryTest, NoneEvictionPolicyIsNotSilentlyTreatedAsChain) {
-    const auto config    = makeCompatibleFullGroupsConfig(CacheEvictPolicy::NONE);
-    auto       allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
-    auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
-
-    ASSERT_NE(cache, nullptr);
-    ASSERT_EQ(cache->groupSets().size(), 2u);
-    EXPECT_EQ(cache->groupSets()[0]->groupTags(), (std::vector<std::string>{"full_a"}));
-    EXPECT_EQ(cache->groupSets()[1]->groupTags(), (std::vector<std::string>{"full_b"}));
-}
-
 TEST_F(BlockTreeCacheFactoryTest, SharedPoolGroupSetPayloadUsesTopologyLogicalStrides) {
     auto config = makeHybridConfig(/*independent_pools=*/false);
     ASSERT_EQ(config.layer_to_block_stride_bytes.size(), 4u);
@@ -1160,7 +1082,7 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPoolGroupSetPayloadUsesTopologyLogicalSt
         EXPECT_EQ(group_set->payloadBytes(), expected_payload);
     }
 
-    const auto& linear = config.topology().group("linear");
+    const auto& linear = config.topology().groupById(0);
     ASSERT_FALSE(linear.layer_ids.empty());
     EXPECT_NE(static_cast<size_t>(config.layer_to_block_stride_bytes[static_cast<size_t>(linear.layer_ids[0])]),
               linear.kv_block_stride_bytes + linear.kv_scale_stride_bytes);
@@ -1273,14 +1195,13 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
     cache_config.kernel_seq_size_per_block   = 1;
     cache_config.use_independent_block_pools = true;
 
-    std::vector<KVCacheSpecPtr>    specs;
-    const std::vector<std::string> group_tags = {"full_kv", "full_aux", "swa_kv"};
-    for (const auto& tag : group_tags) {
+    std::vector<KVCacheSpecPtr> specs;
+    for (size_t group_id = 0; group_id < 3; ++group_id) {
         specs.push_back(test::makeResolvedMhaSpec(
-            DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/1, tag));
+            DataType::TYPE_FP16, /*local_head_num_kv=*/1, /*size_per_head=*/8, /*seq_size_per_block=*/1));
     }
-    cache_config.fromGroupedSpecs(
-        specs, {{0}, {1}, {2}}, {CacheGroupType::FULL, CacheGroupType::FULL, CacheGroupType::SWA}, group_tags);
+    test::configureIndexedTestGroups(
+        cache_config, specs, {{0}, {1}, {2}}, {CacheGroupType::FULL, CacheGroupType::FULL, CacheGroupType::SWA});
     auto policies                   = cache_config.groupPoliciesSnapshot();
     policies[2].enable_prefix_reuse = true;
     policies[2].sliding_window_size = 2;

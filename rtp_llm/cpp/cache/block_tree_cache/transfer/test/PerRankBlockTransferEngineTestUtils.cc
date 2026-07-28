@@ -12,6 +12,7 @@
 #include <unistd.h>
 
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
@@ -45,45 +46,35 @@ void removeTempDir(const std::string& path) {
 
 }  // namespace
 
-std::shared_ptr<const CacheTopology> makeTestTopology(std::vector<TestGroupSpec> specs) {
-    RTP_LLM_CHECK(!specs.empty());
-    size_t layer_count = 0;
-    for (const auto& spec : specs) {
-        RTP_LLM_CHECK(!spec.tag.empty());
-        RTP_LLM_CHECK(!spec.layer_ids.empty());
-        for (int layer_id : spec.layer_ids) {
-            RTP_LLM_CHECK(layer_id >= 0);
-            layer_count = std::max(layer_count, static_cast<size_t>(layer_id) + 1);
-        }
-    }
+GroupBase makeTestGroupBase(CacheGroupPolicy policy,
+                            std::vector<int> layer_ids,
+                            size_t           kv_block_stride_bytes,
+                            size_t           kv_scale_stride_bytes,
+                            uint32_t         block_num,
+                            size_t           seq_size_per_block) {
+    GroupBase group;
+    group.spec                      = std::make_shared<MHAKVCacheSpec>();
+    group.policy                    = policy;
+    group.layer_ids                 = std::move(layer_ids);
+    group.block_num                 = block_num;
+    group.local_kv_head_num         = 1;
+    group.seq_size_per_block        = seq_size_per_block;
+    group.kernel_seq_size_per_block = seq_size_per_block;
+    group.kv_block_stride_bytes     = kv_block_stride_bytes;
+    group.kv_scale_stride_bytes     = kv_scale_stride_bytes;
+    return group;
+}
 
-    std::vector<GroupBase> groups;
-    std::vector<LayerBase> layers(layer_count);
-    for (size_t layer_id = 0; layer_id < layers.size(); ++layer_id) {
-        layers[layer_id].layer_id = static_cast<int>(layer_id);
-    }
-    groups.reserve(specs.size());
-    for (auto& test_spec : specs) {
-        auto cache_spec = std::make_shared<MHAKVCacheSpec>();
-        cache_spec->tag = test_spec.tag;
-
-        GroupBase group;
-        group.tag                       = test_spec.tag;
-        group.spec                      = std::move(cache_spec);
-        group.policy                    = test_spec.policy;
-        group.layer_ids                 = std::move(test_spec.layer_ids);
-        group.block_num                 = test_spec.block_num;
-        group.local_kv_head_num         = 1;
-        group.seq_size_per_block        = test_spec.seq_size_per_block;
-        group.kernel_seq_size_per_block = test_spec.seq_size_per_block;
-        group.kv_block_stride_bytes     = test_spec.kv_block_stride_bytes;
-        group.kv_scale_stride_bytes     = test_spec.kv_scale_stride_bytes;
+std::shared_ptr<const CacheTopology> makeTestTopology(std::vector<GroupBase> groups) {
+    RTP_LLM_CHECK(!groups.empty());
+    for (const auto& group : groups) {
+        RTP_LLM_CHECK(group.spec != nullptr);
+        RTP_LLM_CHECK(!group.layer_ids.empty());
         for (int layer_id : group.layer_ids) {
-            layers[static_cast<size_t>(layer_id)].group_tags.push_back(group.tag);
+            RTP_LLM_CHECK(layer_id >= 0);
         }
-        groups.push_back(std::move(group));
     }
-    return CacheTopology::create(std::move(groups), std::move(layers));
+    return test::makeIndexedTestTopology(std::move(groups));
 }
 
 GroupSetPtr makeTestGroupSet(size_t                               group_set_id,

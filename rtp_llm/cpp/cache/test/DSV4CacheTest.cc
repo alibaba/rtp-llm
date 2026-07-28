@@ -562,23 +562,21 @@ TEST(HybridPoolConfigCreatorTest, Dsv4GroupPoliciesMatchLegacyBehavior) {
     auto              config = CacheConfigCreator::createBasicConfig(makeFlashModelConfig(), pc, false, 0);
 
     ASSERT_EQ(config.groupPoliciesSnapshot().size(), static_cast<size_t>(config.groupNums()));
-    auto expect_policy =
-        [&](const std::string& tag, bool enable_prefix_reuse, CacheEvictPolicy evict_policy, int active_tail_blocks) {
-            const auto group_tags = config.groupTagsSnapshot();
-            auto       it         = std::find(group_tags.begin(), group_tags.end(), tag);
-            ASSERT_NE(it, group_tags.end()) << tag;
-            const auto gid = static_cast<size_t>(std::distance(group_tags.begin(), it));
-            EXPECT_EQ(config.policyForGroup(gid).enable_prefix_reuse, enable_prefix_reuse) << tag;
-            EXPECT_EQ(config.policyForGroup(gid).evict_policy, evict_policy) << tag;
-            EXPECT_EQ(config.policyForGroup(gid).active_tail_blocks, active_tail_blocks) << tag;
-        };
+    auto expect_policy = [&](const std::string& tag, bool enable_prefix_reuse, int active_tail_blocks) {
+        const auto group_tags = config.groupTagsSnapshot();
+        auto       it         = std::find(group_tags.begin(), group_tags.end(), tag);
+        ASSERT_NE(it, group_tags.end()) << tag;
+        const auto gid = static_cast<size_t>(std::distance(group_tags.begin(), it));
+        EXPECT_EQ(config.policyForGroup(gid).enable_prefix_reuse, enable_prefix_reuse) << tag;
+        EXPECT_EQ(config.policyForGroup(gid).active_tail_blocks, active_tail_blocks) << tag;
+    };
 
-    expect_policy("hca_state", false, CacheEvictPolicy::INDEPENDENT, 1);
-    expect_policy("swa_kv", true, CacheEvictPolicy::INDEPENDENT, 2);
-    expect_policy("csa_state", true, CacheEvictPolicy::INDEPENDENT, 2);
-    expect_policy("csa_kv", true, CacheEvictPolicy::CHAIN, 0);
-    expect_policy("hca_kv", true, CacheEvictPolicy::CHAIN, 0);
-    expect_policy("indexer_kv", true, CacheEvictPolicy::CHAIN, 0);
+    expect_policy("hca_state", false, 1);
+    expect_policy("swa_kv", true, 2);
+    expect_policy("csa_state", true, 2);
+    expect_policy("csa_kv", true, 0);
+    expect_policy("hca_kv", true, 0);
+    expect_policy("indexer_kv", true, 0);
 }
 
 TEST(HybridPoolConfigCreatorTest, SlidingWindowPolicyPropagatesAndSurvivesAggregation) {
@@ -1181,8 +1179,8 @@ TEST(HybridPoolConfigCreatorTest, AllPagedPoolsShareBlockNum) {
     auto              config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
     config.block_num         = 100;
 
-    // Paged groups derive their block count from the global block_num; explicit
-    // independent groups may override it with per-group fixed block counts.
+    // Paged groups derive their block count from the global block_num; explicitly
+    // sized groups may override it with per-group fixed block counts.
     EXPECT_EQ(config.groupNums(), 7);
     for (int i = 0; i < 7; i++) {
         EXPECT_GT(config.specForGroup(i)->block_size_bytes(), 0u) << "pool " << i;
@@ -2550,9 +2548,9 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresSWATailHit) {
         if (group_set->groupType() == CacheGroupType::FULL) {
             continue;
         }
-        ASSERT_FALSE(group_set->groupTags().empty());
+        ASSERT_FALSE(group_set->groupIds().empty());
         evicted_tail_blocks += static_cast<size_t>(
-            allocator->blockTreeCacheOwner()->evictForTag(group_set->groupTags().front(), cached_keys.size()));
+            allocator->blockTreeCacheOwner()->evictForGroup(group_set->groupIds().front(), cached_keys.size()));
     }
     ASSERT_GT(evicted_tail_blocks, 0u);
 
@@ -2633,8 +2631,8 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseAcceptsSingleLatestSWATailHit) {
         if (group_set->groupType() == CacheGroupType::FULL) {
             continue;
         }
-        ASSERT_FALSE(group_set->groupTags().empty());
-        EXPECT_EQ(allocator->blockTreeCacheOwner()->evictForTag(group_set->groupTags().front(), 2), 2);
+        ASSERT_FALSE(group_set->groupIds().empty());
+        EXPECT_EQ(allocator->blockTreeCacheOwner()->evictForGroup(group_set->groupIds().front(), 2), 2);
     }
 
     auto batch_res = std::make_shared<BatchKVCacheResource>();

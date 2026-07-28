@@ -31,10 +31,9 @@ message IntMatrix {
 // peers that exchange KV-cache RPCs must run the same build. Mixed-version
 // rollout across this protocol change is intentionally unsupported; no legacy
 // dual-read/write fallback is provided.
-message TaggedBlockPB {
-    string tag = 1;
+message GroupBlockPB {
+    int32 group_id = 1;
     int32 block_id = 2;
-    int32 layer_id = 3;
 }
 
 message TaggedBlockIdsPB {
@@ -510,8 +509,8 @@ message MemoryOperationRequestPB {
         oneof src_disk_slot_presence {
             int32 src_disk_slot = 10;
         }
-        repeated TaggedBlockPB tagged_gpu_blocks = 11;
-        repeated string group_set_tags = 12;
+        repeated GroupBlockPB group_blocks = 11;
+        uint64 group_set_id = 12;
     }
     enum CopyDirection {
         H2D = 0;

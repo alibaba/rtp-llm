@@ -13,15 +13,11 @@ BlockTreeMatcher::BlockTreeMatcher(BlockTree*                    tree,
                                    std::vector<GroupSetPtr>&     group_sets,
                                    const ReusableGroupLocations& reusable_group_locations,
                                    BlockTreeEvictor&             evictor):
-    tree_(tree),
-    group_sets_(group_sets),
-    reusable_group_locations_(reusable_group_locations),
-    evictor_(evictor) {}
+    tree_(tree), group_sets_(group_sets), reusable_group_locations_(reusable_group_locations), evictor_(evictor) {}
 
-std::pair<BlockTreeMatchResult, std::vector<TreeNode*>>
-BlockTreeMatcher::matchLocked(const CacheKeysType& cache_keys) {
+std::pair<BlockTreeMatchResult, std::vector<TreeNode*>> BlockTreeMatcher::matchLocked(const CacheKeysType& cache_keys) {
     BlockTreeMatchResult result;
-    BlockTreeFindResult tree_find_result = tree_->findNode(cache_keys);
+    BlockTreeFindResult  tree_find_result = tree_->findNode(cache_keys);
     if (tree_find_result.matched_node == nullptr) {
         RTP_LLM_LOG_DEBUG("no match found for %zu cache_keys", cache_keys.size());
         return {std::move(result), {}};
@@ -65,9 +61,9 @@ BlockTreeMatcher::matchLocked(const CacheKeysType& cache_keys) {
         candidate_logically_valid.push_back(all_groups_valid);
     }
 
-    std::vector<TreeNode*> logical_matched_path(
-        tree_find_result.path.begin(),
-        tree_find_result.path.begin() + static_cast<ptrdiff_t>(valid_matched_block_count));
+    std::vector<TreeNode*> logical_matched_path(tree_find_result.path.begin(),
+                                                tree_find_result.path.begin()
+                                                    + static_cast<ptrdiff_t>(valid_matched_block_count));
     candidate_logically_valid.resize(valid_matched_block_count);
     prepareReadyMatchedResourcesLocked(logical_matched_path, candidate_logically_valid, result);
 
@@ -108,7 +104,7 @@ BlockTreeMatcher::matchedBlocksForGroup(size_t                                gr
         BlockIndicesType blocks;
         blocks.reserve(resource.per_node.size());
         for (const auto& node_blocks : resource.per_node) {
-            blocks.push_back(node_blocks[location.local_group_index]);
+            blocks.push_back(node_blocks[location.member_index]);
         }
         return blocks;
     }
@@ -189,9 +185,8 @@ void BlockTreeMatcher::prepareReadyMatchedResourcesLocked(const std::vector<Tree
     }
 }
 
-size_t
-BlockTreeMatcher::computeReadyMatchedBlockCount(const std::vector<TreeNode*>& matched_path,
-                                                const std::vector<bool>&      candidate_logically_valid) const {
+size_t BlockTreeMatcher::computeReadyMatchedBlockCount(const std::vector<TreeNode*>& matched_path,
+                                                       const std::vector<bool>&      candidate_logically_valid) const {
     for (size_t candidate_count = matched_path.size(); candidate_count > 0; --candidate_count) {
         if (!candidate_logically_valid[candidate_count - 1]) {
             continue;
@@ -203,10 +198,10 @@ BlockTreeMatcher::computeReadyMatchedBlockCount(const std::vector<TreeNode*>& ma
                 std::min(group_set->computeReuseBlockCount(candidate_count, matched_path), candidate_count);
             for (size_t path_index = candidate_count - reuse_count; path_index < candidate_count; ++path_index) {
                 TreeNode*               path_node = matched_path[path_index];
-                const GroupSetResource& slot      = path_node->group_set_resources[group_set_id];
-                // A DEMOTING slot still carries device blocks but is owned by an
-                // in-flight transfer; ready reuse must only consume usable slots.
-                if (!slot.isMatchUsable() || !group_set->hasCompleteDeviceValue(slot)) {
+                const GroupSetResource& resource  = path_node->group_set_resources[group_set_id];
+                // A DEMOTING resource still carries device blocks but is owned by an
+                // in-flight transfer; ready reuse must only consume usable resources.
+                if (!resource.isMatchUsable() || !group_set->hasCompleteDeviceValue(resource)) {
                     all_groups_ready = false;
                     break;
                 }

@@ -8,8 +8,8 @@
 namespace rtp_llm {
 namespace {
 
+using block_transfer_engine_test::makeTestGroupBase;
 using block_transfer_engine_test::makeTestTopology;
-using block_transfer_engine_test::TestGroupSpec;
 
 class SWAGroupSetTest: public ::testing::Test {
 protected:
@@ -19,14 +19,11 @@ protected:
         group_ = std::make_shared<SWAGroupSet>(
             /*sliding_window_size=*/128,
             /*seq_size_per_block=*/64);
-        TestGroupSpec spec;
-        spec.tag                        = "tag_0";
-        spec.policy                     = defaultCacheGroupPolicy(CacheGroupType::SWA);
-        spec.policy.enable_prefix_reuse = true;
-        spec.policy.sliding_window_size = 128;
-        spec.kv_block_stride_bytes      = 1;
-        spec.seq_size_per_block         = 64;
-        group_->initialize(0, makeTestTopology({std::move(spec)}), {0}, {pool_});
+        auto policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
+        policy.enable_prefix_reuse = true;
+        policy.sliding_window_size = 128;
+        auto group                 = makeTestGroupBase(std::move(policy), {0}, 1, 0, 128, 64);
+        group_->initialize(0, makeTestTopology({std::move(group)}), {0}, {pool_});
     }
 
     void TearDown() override {
@@ -42,7 +39,7 @@ protected:
         return node;
     }
 
-    BlockIdxType setDeviceBlock(TreeNode* node, int gid) {
+    BlockIdxType setDeviceBlock(TreeNode* node, int group_set_id) {
         const auto block = pool_->malloc();
         EXPECT_TRUE(block.has_value());
         if (!block.has_value()) {
@@ -50,16 +47,16 @@ protected:
         }
         pool_->incRef(block.value(), BlockRefType::REQUEST);
         held_blocks_.insert(block.value());
-        node->group_set_resources[static_cast<size_t>(gid)].device_blocks = {block.value()};
+        node->group_set_resources[static_cast<size_t>(group_set_id)].device_blocks = {block.value()};
         return block.value();
     }
 
-    void clearDeviceBlock(TreeNode* node, int gid) {
-        node->group_set_resources[static_cast<size_t>(gid)].device_blocks = {NULL_BLOCK_IDX};
+    void clearDeviceBlock(TreeNode* node, int group_set_id) {
+        node->group_set_resources[static_cast<size_t>(group_set_id)].device_blocks = {NULL_BLOCK_IDX};
     }
 
-    void setHostBlock(TreeNode* node, int gid, BlockIdxType block) {
-        node->group_set_resources[static_cast<size_t>(gid)].host_block = block;
+    void setHostBlock(TreeNode* node, int group_set_id, BlockIdxType block) {
+        node->group_set_resources[static_cast<size_t>(group_set_id)].host_block = block;
     }
 
     DeviceBlockPoolPtr               pool_;
@@ -67,7 +64,7 @@ protected:
     std::shared_ptr<SWAGroupSet>     group_;
 };
 
-TEST_F(SWAGroupSetTest, AnyNodeWithDataIsSlotEvictable) {
+TEST_F(SWAGroupSetTest, AnyNodeWithDataIsEvictable) {
     // SWA allows any node holding data at the tier to be a candidate (not just leaves).
     auto* a          = makeNode(100);
     auto* b          = makeNode(200);
@@ -78,8 +75,8 @@ TEST_F(SWAGroupSetTest, AnyNodeWithDataIsSlotEvictable) {
     setDeviceBlock(b, 0);
 
     // Both A and B are candidate-eligible even though A has a child holding data.
-    EXPECT_TRUE(group_->isSlotEvictable(*a, Tier::DEVICE));
-    EXPECT_TRUE(group_->isSlotEvictable(*b, Tier::DEVICE));
+    EXPECT_TRUE(group_->isEvictable(*a, Tier::DEVICE));
+    EXPECT_TRUE(group_->isEvictable(*b, Tier::DEVICE));
 
     delete a;
     delete b;
@@ -193,7 +190,7 @@ TEST_F(SWAGroupSetTest, ComputeReferenceCountCountsHostAndDiskBlocks) {
     delete d;
 }
 
-TEST_F(SWAGroupSetTest, WindowValidatorBusySlotResetsLikeHole) {
+TEST_F(SWAGroupSetTest, WindowValidatorBusyResourceResetsLikeHole) {
     for (GroupSetTransferState state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOAD_PENDING}) {
         std::unique_ptr<MatchValidator> validator     = group_->createMatchValidator();
         SWAMatchValidator*              swa_validator = dynamic_cast<SWAMatchValidator*>(validator.get());
@@ -210,7 +207,7 @@ TEST_F(SWAGroupSetTest, WindowValidatorBusySlotResetsLikeHole) {
 
         EXPECT_TRUE(validator->validate(a, a->group_set_resources[0]));
 
-        // Busy slot has data but is owned by an in-flight transfer: it must
+        // Busy resource has data but is owned by an in-flight transfer: it must
         // behave exactly like a hole and reset the window accumulation.
         EXPECT_FALSE(validator->validate(b, b->group_set_resources[0]));
         EXPECT_FALSE(swa_validator->connectedToRoot());
@@ -227,7 +224,7 @@ TEST_F(SWAGroupSetTest, WindowValidatorBusySlotResetsLikeHole) {
     }
 }
 
-TEST_F(SWAGroupSetTest, WindowValidatorAllowsLoadingSlot) {
+TEST_F(SWAGroupSetTest, WindowValidatorAllowsLoadingResource) {
     std::unique_ptr<MatchValidator> validator = group_->createMatchValidator();
 
     TreeNode* node = makeNode(100);
@@ -239,14 +236,14 @@ TEST_F(SWAGroupSetTest, WindowValidatorAllowsLoadingSlot) {
     delete node;
 }
 
-TEST_F(SWAGroupSetTest, ComputeReuseBlockCountSkipsBusySlots) {
+TEST_F(SWAGroupSetTest, ComputeReuseBlockCountSkipsBusyResources) {
     TreeNode* a = makeNode(100);
     TreeNode* b = makeNode(200);
     setHostBlock(a, 0, 10);
     setHostBlock(b, 0, 20);
     b->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
 
-    // The busy tail slot cannot be locked for reuse; only A counts.
+    // The busy tail resource cannot be locked for reuse; only A counts.
     std::vector<TreeNode*> path = {a, b};
     EXPECT_EQ(group_->computeReuseBlockCount(path.size(), path), 1u);
 
@@ -271,16 +268,16 @@ TEST_F(SWAGroupSetTest, IndependentEvictionDoesNotAffectFull) {
     delete node;
 }
 
-TEST_F(SWAGroupSetTest, SlotEvictabilityRequiresTierDataButNotLeafTopology) {
+TEST_F(SWAGroupSetTest, EvictabilityRequiresTierDataButNotLeafTopology) {
     auto* a          = makeNode(100);
     auto* b          = makeNode(200);
     a->children[200] = b;
     b->parent        = a;
     setDeviceBlock(a, 0);
 
-    EXPECT_TRUE(group_->isSlotEvictable(*a, Tier::DEVICE));
-    EXPECT_FALSE(group_->isSlotEvictable(*a, Tier::HOST));
-    EXPECT_FALSE(group_->isSlotEvictable(*b, Tier::DEVICE));
+    EXPECT_TRUE(group_->isEvictable(*a, Tier::DEVICE));
+    EXPECT_FALSE(group_->isEvictable(*a, Tier::HOST));
+    EXPECT_FALSE(group_->isEvictable(*b, Tier::DEVICE));
 
     delete a;
     delete b;

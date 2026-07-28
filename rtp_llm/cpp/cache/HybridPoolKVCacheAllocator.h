@@ -53,15 +53,15 @@ private:
     bool   doInit() override;
     size_t reservableFreeBlocksNum() const override;
 
-    void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, BlockRefType ref_type) const override;
-    void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, BlockRefType ref_type) override;
+    void referenceBlocksInGroup(int group_id, const BlockIndicesType& blocks, BlockRefType ref_type) const override;
+    void freeBlocksInGroup(int group_id, const BlockIndicesType& blocks, BlockRefType ref_type) override;
     bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const override;
 
     int    validateGroupIdForLayer(int layer_id, int group_id) const;
     int    defaultGroupIdForLayer(int layer_id) const;
     size_t minTokenCapacity(bool use_free_blocks, bool full_groups_only) const;
     size_t totalReservableFreeBlocks() const;
-    size_t reserveBlocksForPool(size_t gid, size_t reserve_blocks, size_t total_reservable_free_blocks) const;
+    size_t reserveBlocksForPool(size_t group_id, size_t reserve_blocks, size_t total_reservable_free_blocks) const;
 
     std::vector<DeviceBlockPoolPtr> group_block_pools_;
     RoleType                        role_type_{RoleType::PDFUSION};

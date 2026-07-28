@@ -250,10 +250,10 @@ std::string disabledLoadTierLayoutName(const ::testing::TestParamInfo<DisabledLo
 
 void demoteTo(FullSWAEnvironment& environment, Tier target_tier) {
     environment.demoteAll(Tier::DEVICE);
-    ASSERT_TRUE(environment.allSlotsAtTier(Tier::HOST));
+    ASSERT_TRUE(environment.allResourcesAtTier(Tier::HOST));
     if (target_tier == Tier::DISK) {
         environment.demoteAll(Tier::HOST);
-        ASSERT_TRUE(environment.allSlotsAtTier(Tier::DISK));
+        ASSERT_TRUE(environment.allResourcesAtTier(Tier::DISK));
     }
 }
 
@@ -282,15 +282,16 @@ void expectAggregatedReadyResult(const BlockTreeCache&       cache,
 
 void expectPlanningSourceRefCounts(const FullSWAEnvironment& environment, Tier tier) {
     for (size_t path_index = 0; path_index < environment.keys.size(); ++path_index) {
-        const std::vector<GroupSetResource> slots = environment.slotsForPathNode(path_index);
-        ASSERT_EQ(slots.size(), 2u);
-        for (size_t group_id = 0; group_id < slots.size(); ++group_id) {
-            const BlockIdxType block = tier == Tier::HOST ? slots[group_id].host_block : slots[group_id].disk_slot;
-            const IBlockPool&  pool  = tier == Tier::HOST ?
-                                           static_cast<const IBlockPool&>(*environment.host_pools[group_id]) :
-                                           static_cast<const IBlockPool&>(*environment.disk_pools[group_id]);
-            const bool         in_swa_window = group_id == 0 || path_index + 2 >= environment.keys.size();
-            const uint32_t     expected      = in_swa_window ? 2u : 1u;
+        const std::vector<GroupSetResource> resources = environment.resourcesForPathNode(path_index);
+        ASSERT_EQ(resources.size(), 2u);
+        for (size_t group_id = 0; group_id < resources.size(); ++group_id) {
+            const BlockIdxType block =
+                tier == Tier::HOST ? resources[group_id].host_block : resources[group_id].disk_slot;
+            const IBlockPool& pool          = tier == Tier::HOST ?
+                                                  static_cast<const IBlockPool&>(*environment.host_pools[group_id]) :
+                                                  static_cast<const IBlockPool&>(*environment.disk_pools[group_id]);
+            const bool        in_swa_window = group_id == 0 || path_index + 2 >= environment.keys.size();
+            const uint32_t    expected      = in_swa_window ? 2u : 1u;
             EXPECT_EQ(pool.refCount(block), expected);
         }
     }
@@ -369,7 +370,7 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     full->setDiskPool(disk_pool);
     auto device_pool = makeDevicePool({{256, 0}}, 8, "watermark_host_to_disk");
     auto topology    = block_transfer_engine_test::makeTestTopology(
-        {{"watermark_kv", defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 256, 0}});
+        {block_transfer_engine_test::makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 256)});
     full->initialize(0, topology, {0}, {device_pool});
     const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
@@ -386,9 +387,9 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     auto scripted_copy = std::make_shared<ScriptedPerRankBlockTransferEngine>(std::vector<GroupSetPtr>{full});
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, scripted_copy);
 
-    std::vector<std::vector<GroupSetResource>> slots(1, std::vector<GroupSetResource>(1));
-    slots[0][0].host_block = host_block;
-    ASSERT_TRUE(insertGroupSetSlots(*cache, nullptr, {100}, slots));
+    std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+    resources[0][0].host_block = host_block;
+    ASSERT_TRUE(insertGroupSetResources(*cache, nullptr, {100}, resources));
 
     auto before = cache->tree()->findNode({100});
     ASSERT_NE(before.matched_node, nullptr);
@@ -408,18 +409,18 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
 
     auto after_failure = cache->tree()->findNode({100});
     ASSERT_NE(after_failure.matched_node, nullptr);
-    const auto& failed_slot = after_failure.matched_node->group_set_resources[0];
-    EXPECT_EQ(failed_slot.transfer_state, GroupSetTransferState::IDLE);
-    EXPECT_EQ(failed_slot.host_block, host_block);
-    EXPECT_FALSE(failed_slot.hasTier(Tier::DISK));
+    const auto& failed_resource = after_failure.matched_node->group_set_resources[0];
+    EXPECT_EQ(failed_resource.transfer_state, GroupSetTransferState::IDLE);
+    EXPECT_EQ(failed_resource.host_block, host_block);
+    EXPECT_FALSE(failed_resource.hasTier(Tier::DISK));
     EXPECT_TRUE(host_pool->isAllocated(host_block));
     EXPECT_EQ(host_pool->refCount(host_block), 1u);
     EXPECT_EQ(host_pool->freeBlocksNum(), 7u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 8u);
     EXPECT_EQ(cache->getStats().host_heap_total_size, 1u);
-    EXPECT_EQ(failed_slot.candidate_meta.last_access_seq, before_meta.last_access_seq);
-    EXPECT_EQ(failed_slot.candidate_meta.admission_seq, before_meta.admission_seq);
-    EXPECT_EQ(failed_slot.candidate_meta.hit_count, before_meta.hit_count);
+    EXPECT_EQ(failed_resource.candidate_meta.last_access_seq, before_meta.last_access_seq);
+    EXPECT_EQ(failed_resource.candidate_meta.admission_seq, before_meta.admission_seq);
+    EXPECT_EQ(failed_resource.candidate_meta.hit_count, before_meta.hit_count);
     const auto snapshot_after_failure = cache->getKeySnapshot(/*limit=*/8);
     EXPECT_EQ(snapshot_after_failure.version, snapshot_before.version);
     EXPECT_EQ(snapshot_after_failure.keys, snapshot_before.keys);
@@ -431,14 +432,14 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
 
     auto find = cache->tree()->findNode({100});
     ASSERT_NE(find.matched_node, nullptr);
-    const auto& slot = find.matched_node->group_set_resources[0];
-    EXPECT_EQ(slot.transfer_state, GroupSetTransferState::IDLE);
-    EXPECT_FALSE(slot.hasTier(Tier::HOST));
-    EXPECT_TRUE(slot.hasTier(Tier::DISK));
-    EXPECT_NE(slot.disk_slot, NULL_BLOCK_IDX);
+    const auto& resource = find.matched_node->group_set_resources[0];
+    EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+    EXPECT_FALSE(resource.hasTier(Tier::HOST));
+    EXPECT_TRUE(resource.hasTier(Tier::DISK));
+    EXPECT_NE(resource.disk_slot, NULL_BLOCK_IDX);
     EXPECT_FALSE(host_pool->isAllocated(host_block));
-    EXPECT_TRUE(disk_pool->isAllocated(slot.disk_slot));
-    EXPECT_EQ(disk_pool->refCount(slot.disk_slot), 1u);
+    EXPECT_TRUE(disk_pool->isAllocated(resource.disk_slot));
+    EXPECT_EQ(disk_pool->refCount(resource.disk_slot), 1u);
     EXPECT_EQ(host_pool->freeBlocksNum(), 8u);
     EXPECT_EQ(disk_pool->freeBlocksNum(), 7u);
     EXPECT_EQ(cache->getStats().host_heap_total_size, 0u);
@@ -466,14 +467,14 @@ TEST_F(BlockTreeCacheIntegrationTest, OneShotCascadeFailureRollsBackSWAAndRetrie
     ASSERT_NE(environment, nullptr);
     environment->insertRequestPath();
     environment->releaseRequestRefs();
-    ASSERT_TRUE(environment->allSlotsAtTier(Tier::DEVICE));
+    ASSERT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
 
-    const std::vector<GroupSetResource> initial_slots = environment->slotsForPathNode(0);
-    ASSERT_EQ(initial_slots.size(), 2u);
-    ASSERT_EQ(initial_slots[0].device_blocks.size(), 2u);
-    ASSERT_EQ(initial_slots[1].device_blocks.size(), 1u);
-    const std::vector<BlockIdxType> full_sources = initial_slots[0].device_blocks;
-    const BlockIdxType              swa_source   = initial_slots[1].device_blocks[0];
+    const std::vector<GroupSetResource> initial_resources = environment->resourcesForPathNode(0);
+    ASSERT_EQ(initial_resources.size(), 2u);
+    ASSERT_EQ(initial_resources[0].device_blocks.size(), 2u);
+    ASSERT_EQ(initial_resources[1].device_blocks.size(), 1u);
+    const std::vector<BlockIdxType> full_sources = initial_resources[0].device_blocks;
+    const BlockIdxType              swa_source   = initial_resources[1].device_blocks[0];
 
     environment->scripted_per_rank_transfer_engine->clear();
     environment->scripted_per_rank_transfer_engine->enqueue(/*success=*/true);
@@ -493,7 +494,7 @@ TEST_F(BlockTreeCacheIntegrationTest, OneShotCascadeFailureRollsBackSWAAndRetrie
     EXPECT_EQ(first_descriptors[1].device_blocks, (std::vector<BlockIdxType>{swa_source}));
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 2u);
 
-    const std::vector<GroupSetResource> after_failure = environment->slotsForPathNode(0);
+    const std::vector<GroupSetResource> after_failure = environment->resourcesForPathNode(0);
     ASSERT_EQ(after_failure.size(), 2u);
     EXPECT_EQ(after_failure[0].transfer_state, GroupSetTransferState::IDLE);
     EXPECT_FALSE(after_failure[0].hasTier(Tier::DEVICE));
@@ -522,7 +523,7 @@ TEST_F(BlockTreeCacheIntegrationTest, OneShotCascadeFailureRollsBackSWAAndRetrie
     EXPECT_EQ(retry_descriptors[0].device_blocks, (std::vector<BlockIdxType>{swa_source}));
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 1u);
 
-    const std::vector<GroupSetResource> after_retry = environment->slotsForPathNode(0);
+    const std::vector<GroupSetResource> after_retry = environment->resourcesForPathNode(0);
     ASSERT_EQ(after_retry.size(), 2u);
     EXPECT_EQ(after_retry[0].transfer_state, GroupSetTransferState::IDLE);
     EXPECT_TRUE(after_retry[0].hasTier(Tier::HOST));
@@ -555,10 +556,10 @@ TEST_F(BlockTreeCacheIntegrationTest, UncommittedLoadTicketReleasesSourceReferen
 
     result.load_ticket.reset();
     for (size_t path_index = 0; path_index < environment->keys.size(); ++path_index) {
-        const std::vector<GroupSetResource> slots = environment->slotsForPathNode(path_index);
-        ASSERT_EQ(slots.size(), 2u);
-        for (size_t group_id = 0; group_id < slots.size(); ++group_id) {
-            EXPECT_EQ(environment->host_pools[group_id]->refCount(slots[group_id].host_block), 1u);
+        const std::vector<GroupSetResource> resources = environment->resourcesForPathNode(path_index);
+        ASSERT_EQ(resources.size(), 2u);
+        for (size_t group_id = 0; group_id < resources.size(); ++group_id) {
+            EXPECT_EQ(environment->host_pools[group_id]->refCount(resources[group_id].host_block), 1u);
         }
     }
 
@@ -577,19 +578,19 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettleme
 
         constexpr size_t  kBlockBytes = 16;
         constexpr size_t  kPoolSize   = 2;
-        const std::string pool_name          = copy_success ? "shutdown_load_success" : "shutdown_load_failure";
-        auto         device_pool        = makeDevicePool({{kBlockBytes, 0}}, kPoolSize, pool_name);
-        auto         host_pool          = makeHostPool(kBlockBytes, kPoolSize);
-        auto         disk_pool          = makeDiskPool(kBlockBytes, kPoolSize, std::make_unique<MemoryDiskBlockIO>());
-        const size_t device_free_before = device_pool->freeBlocksNum();
-        const size_t host_free_before   = host_pool->freeBlocksNum();
-        const size_t disk_free_before   = disk_pool->freeBlocksNum();
+        const std::string pool_name   = copy_success ? "shutdown_load_success" : "shutdown_load_failure";
+        auto              device_pool = makeDevicePool({{kBlockBytes, 0}}, kPoolSize, pool_name);
+        auto              host_pool   = makeHostPool(kBlockBytes, kPoolSize);
+        auto              disk_pool   = makeDiskPool(kBlockBytes, kPoolSize, std::make_unique<MemoryDiskBlockIO>());
+        const size_t      device_free_before = device_pool->freeBlocksNum();
+        const size_t      host_free_before   = host_pool->freeBlocksNum();
+        const size_t      disk_free_before   = disk_pool->freeBlocksNum();
 
         auto full = std::make_shared<FullGroupSet>();
         full->setHostPool(host_pool);
         full->setDiskPool(disk_pool);
-        auto topology = block_transfer_engine_test::makeTestTopology(
-            {{"shutdown_kv", defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, kBlockBytes, 0}});
+        auto topology = block_transfer_engine_test::makeTestTopology({block_transfer_engine_test::makeTestGroupBase(
+            defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, kBlockBytes)});
         full->initialize(0, topology, {0}, {device_pool});
         std::vector<GroupSetPtr> groups = {full};
         BlockTreeCacheConfig     config;
@@ -606,9 +607,9 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettleme
 
         const BlockIdxType source_block = full->allocateSingleBlock(Tier::DISK, BlockRefType::BLOCK_CACHE);
         ASSERT_NE(source_block, NULL_BLOCK_IDX);
-        std::vector<std::vector<GroupSetResource>> source_slots(1, std::vector<GroupSetResource>(1));
-        source_slots[0][0].disk_slot = source_block;
-        ASSERT_TRUE(insertGroupSetSlots(*cache, nullptr, {100}, source_slots));
+        std::vector<std::vector<GroupSetResource>> source_resources(1, std::vector<GroupSetResource>(1));
+        source_resources[0][0].disk_slot = source_block;
+        ASSERT_TRUE(insertGroupSetResources(*cache, nullptr, {100}, source_resources));
 
         BlockTreeMatchResult result = cache->match({100});
         ASSERT_NE(result.load_ticket, nullptr);
@@ -703,20 +704,20 @@ TEST_F(BlockTreeCacheIntegrationTest, Evictor_SkipsRequestPinnedBlock) {
 
     auto environment = FullSWAEnvironment::create();
     environment->insertRequestPath();
-    ASSERT_TRUE(environment->allSlotsAtTier(Tier::DEVICE));
+    ASSERT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
     environment->expectPayloads();
     environment->expectPoolFreeCounts({12, 12, 12}, {16, 16}, {16, 16});
 
     environment->scripted_per_rank_transfer_engine->clear();
     environment->demoteAll(Tier::DEVICE);
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
-    EXPECT_TRUE(environment->allSlotsAtTier(Tier::DEVICE));
+    EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
     environment->expectPayloads();
     environment->expectPoolFreeCounts({12, 12, 12}, {16, 16}, {16, 16});
 
     environment->releaseRequestRefs();
     environment->demoteAll(Tier::DEVICE);
-    EXPECT_TRUE(environment->allSlotsAtTier(Tier::HOST));
+    EXPECT_TRUE(environment->allResourcesAtTier(Tier::HOST));
     EXPECT_GT(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
     environment->expectPayloads();
     environment->expectPoolFreeCounts({16, 16, 16}, {12, 12}, {16, 16});
@@ -739,12 +740,12 @@ TEST_P(BlockTreeCacheDemotionFailureTest, Evictor_DemotionFailure_RestoresSource
     const Tier target_tier = GetParam() == DemotionFailureStage::D2H ? Tier::HOST : Tier::DISK;
     if (source_tier == Tier::HOST) {
         environment->demoteAll(Tier::DEVICE);
-        ASSERT_TRUE(environment->allSlotsAtTier(Tier::HOST));
+        ASSERT_TRUE(environment->allResourcesAtTier(Tier::HOST));
     }
 
-    std::vector<std::vector<GroupSetResource>> slots_before_failure;
+    std::vector<std::vector<GroupSetResource>> resources_before_failure;
     for (size_t path_index = 0; path_index < environment->keys.size(); ++path_index) {
-        slots_before_failure.push_back(environment->slotsForPathNode(path_index));
+        resources_before_failure.push_back(environment->resourcesForPathNode(path_index));
     }
 
     environment->scripted_per_rank_transfer_engine->clear();
@@ -753,7 +754,7 @@ TEST_P(BlockTreeCacheDemotionFailureTest, Evictor_DemotionFailure_RestoresSource
     }
     environment->demoteAll(source_tier);
 
-    EXPECT_TRUE(environment->allSlotsAtTier(source_tier));
+    EXPECT_TRUE(environment->allResourcesAtTier(source_tier));
     EXPECT_GT(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
     const std::vector<TransferDescriptor> failure_descriptors =
         environment->scripted_per_rank_transfer_engine->descriptors();
@@ -762,11 +763,11 @@ TEST_P(BlockTreeCacheDemotionFailureTest, Evictor_DemotionFailure_RestoresSource
         EXPECT_EQ(descriptor.target_tier, target_tier);
     }
     for (size_t path_index = 0; path_index < environment->keys.size(); ++path_index) {
-        const auto slots_after_failure = environment->slotsForPathNode(path_index);
-        ASSERT_EQ(slots_after_failure.size(), slots_before_failure[path_index].size());
-        for (size_t group_id = 0; group_id < slots_after_failure.size(); ++group_id) {
-            const CandidateMeta& before = slots_before_failure[path_index][group_id].candidate_meta;
-            const CandidateMeta& after  = slots_after_failure[group_id].candidate_meta;
+        const auto resources_after_failure = environment->resourcesForPathNode(path_index);
+        ASSERT_EQ(resources_after_failure.size(), resources_before_failure[path_index].size());
+        for (size_t group_id = 0; group_id < resources_after_failure.size(); ++group_id) {
+            const CandidateMeta& before = resources_before_failure[path_index][group_id].candidate_meta;
+            const CandidateMeta& after  = resources_after_failure[group_id].candidate_meta;
             EXPECT_EQ(after.last_access_seq, before.last_access_seq);
             EXPECT_EQ(after.admission_seq, before.admission_seq);
             EXPECT_EQ(after.hit_count, before.hit_count);
@@ -783,7 +784,7 @@ TEST_P(BlockTreeCacheDemotionFailureTest, Evictor_DemotionFailure_RestoresSource
 
     environment->scripted_per_rank_transfer_engine->clear();
     environment->demoteAll(source_tier);
-    EXPECT_TRUE(environment->allSlotsAtTier(target_tier));
+    EXPECT_TRUE(environment->allResourcesAtTier(target_tier));
     EXPECT_GT(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
     const std::vector<TransferDescriptor> retry_descriptors =
         environment->scripted_per_rank_transfer_engine->descriptors();
@@ -835,10 +836,10 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
         environment->releaseRequestRefs();
 
         std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> device_sources;
-        for (size_t tag_id = 0; tag_id < environment->device_pools.size(); ++tag_id) {
-            const auto blocks = environment->blocksForTag(tag_id);
+        for (size_t pool_id = 0; pool_id < environment->device_pools.size(); ++pool_id) {
+            const auto blocks = environment->blocksForDevicePool(pool_id);
             ASSERT_EQ(blocks.size(), 1u);
-            device_sources.emplace_back(environment->device_pools[tag_id], blocks.front());
+            device_sources.emplace_back(environment->device_pools[pool_id], blocks.front());
         }
 
         environment->cache->setTierWatermark(Tier::DEVICE, 0.01, 0);
@@ -849,10 +850,10 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
             pausable_copy->release();  // never leave a paused engine blocking teardown
         }
         ASSERT_TRUE(d2h_copy_entered);
-        const std::vector<GroupSetResource> demoting_slots = environment->slotsForPathNode(0);
-        ASSERT_EQ(demoting_slots.size(), environment->groups.size());
-        for (const GroupSetResource& slot : demoting_slots) {
-            EXPECT_EQ(slot.transfer_state, GroupSetTransferState::DEMOTING);
+        const std::vector<GroupSetResource> demoting_resources = environment->resourcesForPathNode(0);
+        ASSERT_EQ(demoting_resources.size(), environment->groups.size());
+        for (const GroupSetResource& resource : demoting_resources) {
+            EXPECT_EQ(resource.transfer_state, GroupSetTransferState::DEMOTING);
         }
 
         // Racing match while the node is DEMOTING: hard-stop, no reusable prefix,
@@ -869,7 +870,7 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
 
         pausable_copy->release();
         environment->cache->waitForPendingTasks();
-        EXPECT_TRUE(environment->allSlotsAtTier(Tier::HOST));
+        EXPECT_TRUE(environment->allResourcesAtTier(Tier::HOST));
         for (const auto& [pool, block] : device_sources) {
             EXPECT_FALSE(pool->isAllocated(block));  // source freed exactly once on commit
         }
@@ -882,7 +883,7 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
         for (const PendingLoadItem& item : after.load_ticket->items()) {
             EXPECT_EQ(item.source_tier, Tier::HOST);
         }
-        after.load_ticket.reset();  // abort the uncommitted ticket -> slot back to IDLE
+        after.load_ticket.reset();  // abort the uncommitted ticket -> resource back to IDLE
         environment->cache->releaseMatchedResources(after.matched_resources);
 
         environment->reclaimAll();
@@ -932,10 +933,10 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
             pausable_copy->release();  // never leave a paused engine blocking teardown
         }
         ASSERT_TRUE(h2d_copy_entered);
-        const std::vector<GroupSetResource> loading_slots = environment->slotsForPathNode(0);
-        ASSERT_EQ(loading_slots.size(), environment->groups.size());
-        for (const GroupSetResource& slot : loading_slots) {
-            EXPECT_EQ(slot.transfer_state, GroupSetTransferState::LOADING);
+        const std::vector<GroupSetResource> loading_resources = environment->resourcesForPathNode(0);
+        ASSERT_EQ(loading_resources.size(), environment->groups.size());
+        for (const GroupSetResource& resource : loading_resources) {
+            EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOADING);
         }
         for (const auto& [pool, block] : host_sources) {
             EXPECT_TRUE(pool->isAllocated(block));
@@ -995,7 +996,7 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
         EXPECT_TRUE(context->success());
         ASSERT_TRUE(joined_context->done());
         EXPECT_TRUE(joined_context->success());
-        EXPECT_TRUE(environment->allSlotsAtTier(Tier::DEVICE));
+        EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
         for (const auto& [pool, block] : host_sources) {
             EXPECT_FALSE(pool->isAllocated(block));  // stale Host source released once on completion
         }
@@ -1043,9 +1044,9 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
     // both SWA and its reverse-selected FULL sibling without publishing Host.
     environment->scripted_per_rank_transfer_engine->clear();
     environment->scripted_per_rank_transfer_engine->enqueue(/*success=*/false);
-    ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupForTest(*environment->cache, 1, Tier::DEVICE));
+    ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, 1, Tier::DEVICE));
     environment->cache->waitForPendingTasks();
-    EXPECT_TRUE(environment->allSlotsAtTier(Tier::DEVICE));
+    EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
     const auto failed_descriptors = environment->scripted_per_rank_transfer_engine->descriptors();
     ASSERT_EQ(failed_descriptors.size(), 1u);
     EXPECT_EQ(failed_descriptors[0].group_set_id, 1);
@@ -1053,9 +1054,9 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
     EXPECT_EQ(failed_descriptors[0].target_tier, Tier::HOST);
 
     environment->scripted_per_rank_transfer_engine->clear();
-    ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupForTest(*environment->cache, 1, Tier::DEVICE));
+    ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, 1, Tier::DEVICE));
     environment->cache->waitForPendingTasks();
-    EXPECT_TRUE(environment->allSlotsAtTier(Tier::HOST));
+    EXPECT_TRUE(environment->allResourcesAtTier(Tier::HOST));
     const auto host_descriptors = environment->scripted_per_rank_transfer_engine->descriptors();
     ASSERT_EQ(host_descriptors.size(), 2u);
     EXPECT_EQ(host_descriptors[0].group_set_id, 1);
@@ -1067,9 +1068,9 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
     environment->expectPayloads();
 
     environment->scripted_per_rank_transfer_engine->clear();
-    ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupForTest(*environment->cache, 1, Tier::HOST));
+    ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, 1, Tier::HOST));
     environment->cache->waitForPendingTasks();
-    EXPECT_TRUE(environment->allSlotsAtTier(Tier::DISK));
+    EXPECT_TRUE(environment->allResourcesAtTier(Tier::DISK));
     const auto disk_descriptors = environment->scripted_per_rank_transfer_engine->descriptors();
     ASSERT_EQ(disk_descriptors.size(), 2u);
     EXPECT_EQ(disk_descriptors[0].group_set_id, 1);
@@ -1101,7 +1102,7 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
     context->waitDone();
     ASSERT_TRUE(context->done());
     EXPECT_TRUE(context->success());
-    EXPECT_TRUE(environment->allSlotsAtTier(Tier::DEVICE));
+    EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
     environment->expectPayloads();
 
     BlockTreeMatchResult rematch = environment->cache->match(environment->keys);
@@ -1224,7 +1225,7 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesTicketAndReleasesAll
     environment->insertRequestPath();
     environment->releaseRequestRefs();
     demoteTo(*environment, GetParam());
-    ASSERT_TRUE(environment->allSlotsAtTier(GetParam()));
+    ASSERT_TRUE(environment->allResourcesAtTier(GetParam()));
     throwing_engine->enableThrow();
 
     std::vector<size_t> device_free_before;
@@ -1268,9 +1269,9 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesTicketAndReleasesAll
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*environment->cache), 0);
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
-    ASSERT_TRUE(environment->allSlotsAtTier(GetParam()));
-    for (const GroupSetResource& slot : environment->slotsForPathNode(0)) {
-        EXPECT_EQ(slot.transfer_state, GroupSetTransferState::IDLE);
+    ASSERT_TRUE(environment->allResourcesAtTier(GetParam()));
+    for (const GroupSetResource& resource : environment->resourcesForPathNode(0)) {
+        EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
     }
     for (size_t item_index = 0; item_index < result.load_ticket->itemCount(); ++item_index) {
         const size_t group_set_id = result.load_ticket->groupSetId(item_index);
@@ -1481,7 +1482,7 @@ TEST_P(BlockTreeCacheLowerTierTest, CancelCompletionRaceSettlesExactlyOnce) {
     ASSERT_TRUE(context->done());
     EXPECT_EQ(cancellation_won, !context->success());
     EXPECT_FALSE(environment->cache->cancelLoad(context));
-    EXPECT_TRUE(environment->allSlotsAtTier(Tier::DEVICE));
+    EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
     for (const SourceRef& source : source_refs) {
         EXPECT_FALSE(source.pool->isAllocated(source.block));
     }
@@ -1504,7 +1505,7 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesLoadAndRestoresCandi
         GTEST_SKIP() << "CUDA not available";
     }
 
-    auto environment                       = FullSWAEnvironment::create();
+    auto environment = FullSWAEnvironment::create();
     auto pausable_per_rank_transfer_engine =
         std::make_shared<PausablePerRankBlockTransferEngine>(environment->groups,
                                                              /*succeed=*/true,
@@ -1518,10 +1519,10 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesLoadAndRestoresCandi
     demoteTo(*environment, GetParam());
     environment->expectPayloads();
 
-    std::vector<std::vector<GroupSetResource>> slots_before;
-    slots_before.reserve(environment->keys.size());
+    std::vector<std::vector<GroupSetResource>> resources_before;
+    resources_before.reserve(environment->keys.size());
     for (size_t path_index = 0; path_index < environment->keys.size(); ++path_index) {
-        slots_before.push_back(environment->slotsForPathNode(path_index));
+        resources_before.push_back(environment->resourcesForPathNode(path_index));
     }
     const CacheStats          candidates_before = environment->cache->getStats();
     const std::vector<size_t> host_free_before  = {environment->host_pools[0]->freeBlocksNum(),
@@ -1612,13 +1613,13 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesLoadAndRestoresCandi
         EXPECT_EQ(environment->cache->getStats().disk_heap_total_size, candidates_before.disk_heap_total_size);
     }
     for (size_t path_index = 0; path_index < environment->keys.size(); ++path_index) {
-        const std::vector<GroupSetResource> slots_after = environment->slotsForPathNode(path_index);
-        ASSERT_EQ(slots_after.size(), slots_before[path_index].size());
-        for (size_t group_id = 0; group_id < slots_after.size(); ++group_id) {
-            EXPECT_EQ(slots_after[group_id].device_blocks, slots_before[path_index][group_id].device_blocks);
-            EXPECT_EQ(slots_after[group_id].host_block, slots_before[path_index][group_id].host_block);
-            EXPECT_EQ(slots_after[group_id].disk_slot, slots_before[path_index][group_id].disk_slot);
-            EXPECT_EQ(slots_after[group_id].transfer_state, GroupSetTransferState::IDLE);
+        const std::vector<GroupSetResource> resources_after = environment->resourcesForPathNode(path_index);
+        ASSERT_EQ(resources_after.size(), resources_before[path_index].size());
+        for (size_t group_id = 0; group_id < resources_after.size(); ++group_id) {
+            EXPECT_EQ(resources_after[group_id].device_blocks, resources_before[path_index][group_id].device_blocks);
+            EXPECT_EQ(resources_after[group_id].host_block, resources_before[path_index][group_id].host_block);
+            EXPECT_EQ(resources_after[group_id].disk_slot, resources_before[path_index][group_id].disk_slot);
+            EXPECT_EQ(resources_after[group_id].transfer_state, GroupSetTransferState::IDLE);
         }
     }
     for (const SourceRef& source : source_refs) {
@@ -1663,7 +1664,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadHostToDeviceExceptionReleasesStagi
     demoteTo(*environment, Tier::DISK);
     environment->expectPayloads();
 
-    const std::vector<GroupSetResource> slots_before     = environment->slotsForPathNode(0);
+    const std::vector<GroupSetResource> resources_before = environment->resourcesForPathNode(0);
     const std::vector<size_t>           host_free_before = {environment->host_pools[0]->freeBlocksNum(),
                                                             environment->host_pools[1]->freeBlocksNum()};
     BlockTreeMatchResult                result           = environment->cache->match(environment->keys);
@@ -1709,13 +1710,13 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadHostToDeviceExceptionReleasesStagi
     EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(), disk_to_host_submit_count + 1);
     EXPECT_EQ(environment->host_pools[0]->freeBlocksNum(), host_free_before[0]);
     EXPECT_EQ(environment->host_pools[1]->freeBlocksNum(), host_free_before[1]);
-    const std::vector<GroupSetResource> slots_after = environment->slotsForPathNode(0);
-    ASSERT_EQ(slots_after.size(), slots_before.size());
-    for (size_t group_id = 0; group_id < slots_after.size(); ++group_id) {
-        EXPECT_EQ(slots_after[group_id].device_blocks, slots_before[group_id].device_blocks);
-        EXPECT_EQ(slots_after[group_id].host_block, slots_before[group_id].host_block);
-        EXPECT_EQ(slots_after[group_id].disk_slot, slots_before[group_id].disk_slot);
-        EXPECT_EQ(slots_after[group_id].transfer_state, GroupSetTransferState::IDLE);
+    const std::vector<GroupSetResource> resources_after = environment->resourcesForPathNode(0);
+    ASSERT_EQ(resources_after.size(), resources_before.size());
+    for (size_t group_id = 0; group_id < resources_after.size(); ++group_id) {
+        EXPECT_EQ(resources_after[group_id].device_blocks, resources_before[group_id].device_blocks);
+        EXPECT_EQ(resources_after[group_id].host_block, resources_before[group_id].host_block);
+        EXPECT_EQ(resources_after[group_id].disk_slot, resources_before[group_id].disk_slot);
+        EXPECT_EQ(resources_after[group_id].transfer_state, GroupSetTransferState::IDLE);
     }
     for (const SourceRef& source : source_refs) {
         EXPECT_EQ(source.pool->refCount(source.block), 1u);
@@ -1774,17 +1775,17 @@ TEST_P(BlockTreeCacheLoadDisabledTest, LoadDisabled_DoesNotReportLowerTierHit) {
     EXPECT_EQ(result.disk_load_blocks, 0u);
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
     if (GetParam() == DisabledLoadTierLayout::HOST_ONLY) {
-        EXPECT_TRUE(environment->allSlotsAtTier(Tier::HOST));
+        EXPECT_TRUE(environment->allResourcesAtTier(Tier::HOST));
     } else if (GetParam() == DisabledLoadTierLayout::DISK_ONLY) {
-        EXPECT_TRUE(environment->allSlotsAtTier(Tier::DISK));
+        EXPECT_TRUE(environment->allResourcesAtTier(Tier::DISK));
     } else {
         bool saw_host = false;
         bool saw_disk = false;
         for (size_t path_index = 0; path_index < environment->keys.size(); ++path_index) {
-            for (const GroupSetResource& slot : environment->slotsForPathNode(path_index)) {
-                EXPECT_FALSE(slot.hasTier(Tier::DEVICE));
-                saw_host = saw_host || slot.hasTier(Tier::HOST);
-                saw_disk = saw_disk || slot.hasTier(Tier::DISK);
+            for (const GroupSetResource& resource : environment->resourcesForPathNode(path_index)) {
+                EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
+                saw_host = saw_host || resource.hasTier(Tier::HOST);
+                saw_disk = saw_disk || resource.hasTier(Tier::DISK);
             }
         }
         EXPECT_TRUE(saw_host);
@@ -1821,14 +1822,14 @@ TEST_F(BlockTreeCacheIntegrationTest, FullSWA_MatchPublishesOnlyReadyBoundary) {
     environment->releaseMatch(prefix_hold);
 
     for (size_t path_index = 0; path_index < kPathLength; ++path_index) {
-        const std::vector<GroupSetResource> slots = environment->slotsForPathNode(path_index);
-        ASSERT_EQ(slots.size(), 2u);
-        EXPECT_TRUE(slots[0].hasTier(Tier::DEVICE));
+        const std::vector<GroupSetResource> resources = environment->resourcesForPathNode(path_index);
+        ASSERT_EQ(resources.size(), 2u);
+        EXPECT_TRUE(resources[0].hasTier(Tier::DEVICE));
         if (path_index < 2) {
-            EXPECT_TRUE(slots[1].hasTier(Tier::DEVICE));
+            EXPECT_TRUE(resources[1].hasTier(Tier::DEVICE));
         } else {
-            EXPECT_TRUE(slots[1].hasTier(Tier::HOST));
-            EXPECT_FALSE(slots[1].hasTier(Tier::DEVICE));
+            EXPECT_TRUE(resources[1].hasTier(Tier::HOST));
+            EXPECT_FALSE(resources[1].hasTier(Tier::DEVICE));
         }
     }
 
@@ -1874,8 +1875,8 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadExplicitAbortImmediatelyRestores
         }
         const auto& device_pools = environment->groups.at(item.group_set_id)->devicePools();
         ASSERT_EQ(device_pools.size(), item.source_blocks.size());
-        for (size_t local_pool_index = 0; local_pool_index < item.source_blocks.size(); ++local_pool_index) {
-            device_sources.emplace_back(device_pools[local_pool_index], item.source_blocks[local_pool_index]);
+        for (size_t member_index = 0; member_index < item.source_blocks.size(); ++member_index) {
+            device_sources.emplace_back(device_pools[member_index], item.source_blocks[member_index]);
         }
     }
     ASSERT_EQ(device_sources.size(), 4u);
@@ -1903,7 +1904,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadExplicitAbortImmediatelyRestores
 
     ticket.reset();
     EXPECT_EQ(environment->cache->getStats().device_heap_total_size, device_candidates_after_abort);
-    EXPECT_EQ(environment->cache->evictForTag("tag_0", 2), 2);
+    EXPECT_EQ(environment->cache->evictForGroup(0, 2), 2);
     for (const auto& [pool, block] : device_sources) {
         EXPECT_FALSE(pool->isAllocated(block));
     }
@@ -1935,8 +1936,8 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadAsyncCompletionRefreshesBeforeTe
         if (item.source_tier == Tier::DEVICE) {
             ASSERT_EQ(device_pools.size(), item.source_blocks.size());
             item.target_device_blocks = item.source_blocks;
-            for (size_t local_pool_index = 0; local_pool_index < item.source_blocks.size(); ++local_pool_index) {
-                device_sources.emplace_back(device_pools[local_pool_index], item.source_blocks[local_pool_index]);
+            for (size_t member_index = 0; member_index < item.source_blocks.size(); ++member_index) {
+                device_sources.emplace_back(device_pools[member_index], item.source_blocks[member_index]);
             }
             continue;
         }
@@ -1990,7 +1991,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadAsyncCompletionRefreshesBeforeTe
     }
     EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(), 2u);
 
-    EXPECT_EQ(environment->cache->evictForTag("tag_0", 2), 2);
+    EXPECT_EQ(environment->cache->evictForGroup(0, 2), 2);
     for (const auto& [pool, block] : device_sources) {
         EXPECT_FALSE(pool->isAllocated(block));
     }
@@ -2022,17 +2023,18 @@ TEST_F(BlockTreeCacheIntegrationTest, SparseDisconnectedSWADoesNotPublishVacuous
     ASSERT_EQ(find.path.size(), kPathLength);
     std::vector<BlockIdxType> swa_host_blocks;
     for (size_t path_index = 0; path_index < kPathLength; ++path_index) {
-        GroupSetResource& swa_slot = find.path[path_index]->group_set_resources[1];
-        ASSERT_TRUE(swa_slot.hasTier(Tier::DEVICE));
-        const std::vector<BlockIdxType> old_device_blocks = environment->groups[1]->getBlocks(swa_slot, Tier::DEVICE);
+        GroupSetResource& swa_resource = find.path[path_index]->group_set_resources[1];
+        ASSERT_TRUE(swa_resource.hasTier(Tier::DEVICE));
+        const std::vector<BlockIdxType> old_device_blocks =
+            environment->groups[1]->getBlocks(swa_resource, Tier::DEVICE);
         environment->groups[1]->unreferenceBlocks(MultiNodeResource{1, Tier::DEVICE, {old_device_blocks}},
                                                   BlockRefType::BLOCK_CACHE);
-        environment->groups[1]->setBlocks(swa_slot, Tier::DEVICE, {});
+        environment->groups[1]->setBlocks(swa_resource, Tier::DEVICE, {});
         if (path_index >= 2) {
             const BlockIdxType host_block =
                 environment->groups[1]->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
             ASSERT_NE(host_block, NULL_BLOCK_IDX);
-            environment->groups[1]->setBlocks(swa_slot, Tier::HOST, {host_block});
+            environment->groups[1]->setBlocks(swa_resource, Tier::HOST, {host_block});
             swa_host_blocks.push_back(host_block);
         }
     }

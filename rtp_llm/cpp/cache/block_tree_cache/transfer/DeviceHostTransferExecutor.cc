@@ -19,23 +19,24 @@ DeviceHostTransferExecutor::DeviceHostTransferExecutor(DeviceHostCopyOptions opt
 
 DeviceHostTransferExecutor::~DeviceHostTransferExecutor() = default;
 
-TransferStatus DeviceHostTransferExecutor::execute(const TransferDescriptor& desc, const GroupSet& group) {
+TransferStatus DeviceHostTransferExecutor::execute(const TransferDescriptor& desc, const GroupSet& group_set) {
     bool device_to_host = (desc.source_tier == Tier::DEVICE && desc.target_tier == Tier::HOST);
-    return lowerAndExecute(desc, group, device_to_host);
+    return lowerAndExecute(desc, group_set, device_to_host);
 }
 
 TransferStatus DeviceHostTransferExecutor::lowerAndExecute(const TransferDescriptor& desc,
-                                                           const GroupSet&           group,
+                                                           const GroupSet&           group_set,
                                                            bool                      device_to_host) {
     TransferStatus lower_status = TransferStatus::OK;
-    auto           plan         = lowerPlan(desc, group, device_to_host, lower_status);
+    auto           plan         = lowerPlan(desc, group_set, device_to_host, lower_status);
     if (lower_status != TransferStatus::OK) {
         return lower_status;
     }
 
     if (plan.copy_tiles.empty()) {
-        RTP_LLM_LOG_WARNING(
-            "%s copy plan has no copyable device block group=%zu", device_to_host ? "D2H" : "H2D", desc.group_set_id);
+        RTP_LLM_LOG_WARNING("%s copy plan has no copyable device block group_set=%zu",
+                            device_to_host ? "D2H" : "H2D",
+                            desc.group_set_id);
         return TransferStatus::INVALID_ARGS;
     }
 
@@ -54,7 +55,7 @@ TransferStatus DeviceHostTransferExecutor::lowerAndExecute(const TransferDescrip
 }
 
 DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescriptor& desc,
-                                                         const GroupSet&           group,
+                                                         const GroupSet&           group_set,
                                                          bool                      device_to_host,
                                                          TransferStatus&           out_status) const {
     DeviceHostCopyPlan plan;
@@ -63,7 +64,7 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
     out_status          = TransferStatus::OK;
 
     const auto host_block = desc.host_block;
-    auto&      host_pool  = *group.hostPool();
+    auto&      host_pool  = *group_set.hostPool();
 
     void* host_base = host_pool.blockBuffer(host_block).addr;
     if (!host_base) {
@@ -72,23 +73,23 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
         return plan;
     }
 
-    const size_t required_host_bytes = group.payloadBytes();
+    const size_t required_host_bytes = group_set.payloadBytes();
 
     plan.host.base          = host_base;
     plan.host.payload_bytes = required_host_bytes;
 
     const auto& device_blocks = desc.device_blocks;
-    const auto& device_pools  = group.devicePools();
+    const auto& device_pools  = group_set.devicePools();
 
     int  first_device_index = -1;
     bool single_device      = true;
 
     size_t host_offset = 0;
-    for (size_t local_group_index = 0; local_group_index < group.groupIds().size(); ++local_group_index) {
-        const auto& group_base        = group.groupAt(local_group_index);
-        const auto  device_block      = device_blocks[local_group_index];
+    for (size_t member_index = 0; member_index < group_set.groupIds().size(); ++member_index) {
+        const auto& group_base        = group_set.groupAt(member_index);
+        const auto  device_block      = device_blocks[member_index];
         const bool  has_device_block  = !isNullBlockIdx(device_block);
-        auto&       device_pool       = *device_pools[local_group_index];
+        auto&       device_pool       = *device_pools[member_index];
         const int   pool_device_index = device_pool.deviceIndex();
 
         if (has_device_block) {
@@ -120,11 +121,12 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
                 }
                 if (buffer_index >= buffers.size() || buffers[buffer_index].addr == nullptr
                     || buffers[buffer_index].size_bytes < logical_bytes) {
-                    RTP_LLM_LOG_WARNING("physical buffer cannot cover logical payload group_set=%zu local_group=%zu "
-                                        "group_id=%zu local_layer=%zu buffer=%zu physical=%zu logical=%zu block=%d",
+                    RTP_LLM_LOG_WARNING("physical buffer cannot cover logical payload group_set_id=%zu "
+                                        "member_index=%zu group_id=%zu local_layer=%zu buffer=%zu physical=%zu "
+                                        "logical=%zu block=%d",
                                         desc.group_set_id,
-                                        local_group_index,
-                                        group.groupIds()[local_group_index],
+                                        member_index,
+                                        group_set.groupIds()[member_index],
                                         local_layer_index,
                                         buffer_index,
                                         buffer_index < buffers.size() ? buffers[buffer_index].size_bytes : 0,
@@ -138,7 +140,7 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
                 tile.host_offset       = host_offset + layer_offset;
                 tile.bytes             = logical_bytes;
                 tile.device_index      = pool_device_index;
-                tile.local_group_index = local_group_index;
+                tile.member_index      = member_index;
                 tile.local_layer_index = local_layer_index;
                 plan.copy_tiles.push_back(tile);
                 return true;
@@ -176,7 +178,7 @@ TransferStatus DeviceHostTransferExecutor::executeStrategies(const DeviceHostCop
                 continue;
         }
     }
-    RTP_LLM_LOG_WARNING("no strategy handled copy plan group=%zu", plan.group_set_id);
+    RTP_LLM_LOG_WARNING("no strategy handled copy plan group_set=%zu", plan.group_set_id);
     return TransferStatus::DEVICE_IO_ERROR;
 }
 

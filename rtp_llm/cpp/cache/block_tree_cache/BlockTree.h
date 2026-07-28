@@ -23,7 +23,7 @@ struct BlockTreeInsertedNode {
     size_t    input_index{0};
 };
 
-struct BlockTreeAdoptedSlot {
+struct BlockTreeAdoptedResource {
     TreeNode* node{nullptr};
     size_t    input_index{0};
     size_t    group_set_id{0};
@@ -31,10 +31,10 @@ struct BlockTreeAdoptedSlot {
 
 // Result of insertNode: newly created nodes and exact existing GroupSetResources adopted from the input.
 struct BlockTreeInsertResult {
-    TreeNode*                          leaf{nullptr};
-    std::vector<BlockTreeInsertedNode> inserted_nodes;
-    std::vector<BlockTreeAdoptedSlot>  adopted_slots;
-    std::vector<bool>                  inserted_mask;  // size == cache_keys.size()
+    TreeNode*                             leaf{nullptr};
+    std::vector<BlockTreeInsertedNode>    inserted_nodes;
+    std::vector<BlockTreeAdoptedResource> adopted_resources;
+    std::vector<bool>                     inserted_mask;  // size == cache_keys.size()
 };
 
 // BlockTree: pure tree topology data structure.
@@ -49,19 +49,19 @@ public:
 
     // Find the deepest node matching the cache_keys sequence from root.
     // The walk is purely topological: per-group transfer-state usability is
-    // judged by the MatchValidators so one busy group slot does not truncate
+    // judged by the MatchValidators so one busy group resource does not truncate
     // the whole path. Structural invariants are still enforced per node.
     BlockTreeFindResult findNode(const CacheKeysType& cache_keys) const;
 
     // Insert nodes along the cache_keys path starting from parent (nullptr = root).
     // Existing nodes are reused, new nodes are created for unmatched suffix.
-    // slots[i] provides sanitized GroupSetResources for cache_keys[i]. An
-    // existing IDLE, empty group adopts only a complete DEVICE vector (the
-    // caller validates pool cardinality). Returns new nodes and groups actually
+    // resources[i] provides sanitized GroupSetResources for cache_keys[i]. An
+    // existing IDLE, empty resource adopts only a complete DEVICE vector (the
+    // caller validates pool cardinality). Returns new nodes and resources actually
     // filled on existing nodes so callers can add cache holds exactly once.
     BlockTreeInsertResult insertNode(TreeNode*                                         parent,
                                      const CacheKeysType&                              cache_keys,
-                                     const std::vector<std::vector<GroupSetResource>>& slots);
+                                     const std::vector<std::vector<GroupSetResource>>& resources);
 
     // Remove a node from the tree. The node must have no children.
     // The node's parent link is updated accordingly.
@@ -70,7 +70,7 @@ public:
     // Walk up from start_node, removing empty ancestors (no children
     // and all GroupSetResources empty). Returns the first ancestor that was not
     // removed (a non-empty node, a node with children, root, or nullptr).
-    // group_ids: all group IDs (node deletion
+    // group_set_ids: all GroupSet IDs (node deletion
     // only considers these when checking emptiness).
     TreeNode* removeEmptyAncestors(TreeNode* start_node, const std::vector<size_t>& group_set_ids);
 

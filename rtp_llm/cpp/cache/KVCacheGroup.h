@@ -100,7 +100,6 @@ public:
     int                     group_id() const;
     const CacheGroupPolicy& policy() const;
     bool                    prefixReuseEnabled() const;
-    CacheEvictPolicy        evictPolicy() const;
     DeviceBlockPoolPtr      blockPool() const {
         return block_pool_;
     }

@@ -14,13 +14,11 @@ namespace {
 GroupSetPtr makeTaskRunnerTestGroupSet() {
     using namespace block_transfer_engine_test;
 
-    TestGroupSpec spec;
-    spec.tag                                            = "load_task_runner";
-    spec.policy                                         = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    spec.policy.enable_prefix_reuse                     = true;
-    spec.layer_ids                                      = {0};
-    const std::shared_ptr<const CacheTopology> topology = makeTestTopology({spec});
-    DeviceBlockPoolPtr pool = makeTestDevicePool({{spec.kv_block_stride_bytes, spec.kv_scale_stride_bytes}},
+    auto policy                                         = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    policy.enable_prefix_reuse                          = true;
+    const GroupBase                            group    = makeTestGroupBase(policy);
+    const std::shared_ptr<const CacheTopology> topology = makeTestTopology({group});
+    DeviceBlockPoolPtr pool = makeTestDevicePool({{group.kv_block_stride_bytes, group.kv_scale_stride_bytes}},
                                                  /*usable_count=*/1,
                                                  "load_task_runner");
     return makeTestGroupSet(0, topology, {0}, {std::move(pool)});

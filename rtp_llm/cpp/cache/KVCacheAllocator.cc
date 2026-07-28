@@ -43,8 +43,8 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
         return init_result;
     }
 
-    auto pending_load_ticket      = std::move(init_result.load_ticket);
-    auto incr_result              = incrMalloc(malloc_info);
+    auto pending_load_ticket = std::move(init_result.load_ticket);
+    auto incr_result         = incrMalloc(malloc_info);
     if (!incr_result.success) {
         pending_load_ticket.reset();
         FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};
@@ -151,9 +151,12 @@ void KVCacheAllocator::setBlockTreeCache(BlockTreeCache* block_tree_cache) {
         if (!group) {
             continue;
         }
-        const std::string stable_tag = group->tag();
-        group->setEvictCallback([block_tree_cache, stable_tag](size_t need_blocks) {
-            const int reclaimed = block_tree_cache->evictForTag(stable_tag, need_blocks);
+        RTP_LLM_CHECK_WITH_INFO(group->group_id() >= 0,
+                                "cannot register BlockTree eviction callback for invalid group_id=%d",
+                                group->group_id());
+        const size_t group_id = static_cast<size_t>(group->group_id());
+        group->setEvictCallback([block_tree_cache, group_id](size_t need_blocks) {
+            const int reclaimed = block_tree_cache->evictForGroup(group_id, need_blocks);
             return reclaimed > 0 ? static_cast<size_t>(reclaimed) : 0;
         });
     }
@@ -380,10 +383,6 @@ KVCacheTokenCapacity KVCacheAllocator::tokenCapacity(size_t default_seq_size_per
 }
 
 std::vector<KVCachePoolMetricsSnapshot> KVCacheAllocator::poolMetricsSnapshots() const {
-    return {};
-}
-
-std::vector<int> KVCacheAllocator::independentEvictionGroupIds() const {
     return {};
 }
 

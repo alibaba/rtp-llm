@@ -46,7 +46,6 @@ from rtp_llm.models.deepseek_v2 import (
 from rtp_llm.ops import (
     CacheCapacityPolicyDesc,
     CacheCpPolicyDesc,
-    CacheEvictPolicy,
     CacheReusePolicyDesc,
     CacheTailPolicyDesc,
     CpBlockSliceMode,
@@ -132,7 +131,6 @@ def _dsv4_kv_cache_desc_for_tag(
             desc.cp.slice = CpBlockSliceMode.PAYLOAD_BYTES
             desc.reuse = CacheReusePolicyDesc()
             desc.reuse.enable_prefix_reuse = False
-            desc.reuse.evict_policy = CacheEvictPolicy.INDEPENDENT
             desc.capacity = CacheCapacityPolicyDesc()
             desc.capacity.explicit_block_num = 256
             desc.tail = CacheTailPolicyDesc()
@@ -152,8 +150,6 @@ def _dsv4_kv_cache_desc_for_tag(
         desc.is_state_cache = True
         if desc.reuse is None:
             desc.reuse = CacheReusePolicyDesc()
-        if desc.reuse.evict_policy is None:
-            desc.reuse.evict_policy = CacheEvictPolicy.INDEPENDENT
     return desc
 
 

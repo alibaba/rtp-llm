@@ -8,20 +8,17 @@
 namespace rtp_llm {
 namespace {
 
+using block_transfer_engine_test::makeTestGroupBase;
 using block_transfer_engine_test::makeTestTopology;
-using block_transfer_engine_test::TestGroupSpec;
 
 class LinearGroupSetTest: public ::testing::Test {
 protected:
     void SetUp() override {
         pool_ = block_tree_cache_test::makeDevicePool({{1, 0}}, 128, "linear_group_set_test");
         ASSERT_NE(pool_, nullptr);
-        group_ = std::make_shared<LinearGroupSet>();
-        TestGroupSpec spec;
-        spec.tag                   = "tag_0";
-        spec.policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
-        spec.kv_block_stride_bytes = 1;
-        group_->initialize(0, makeTestTopology({std::move(spec)}), {0}, {pool_});
+        group_     = std::make_shared<LinearGroupSet>();
+        auto group = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::LINEAR), {0}, 1);
+        group_->initialize(0, makeTestTopology({std::move(group)}), {0}, {pool_});
     }
 
     void TearDown() override {
@@ -37,7 +34,7 @@ protected:
         return node;
     }
 
-    BlockIdxType setDeviceBlock(TreeNode* node, int gid) {
+    BlockIdxType setDeviceBlock(TreeNode* node, int group_set_id) {
         const auto block = pool_->malloc();
         EXPECT_TRUE(block.has_value());
         if (!block.has_value()) {
@@ -45,7 +42,7 @@ protected:
         }
         pool_->incRef(block.value(), BlockRefType::REQUEST);
         held_blocks_.insert(block.value());
-        node->group_set_resources[static_cast<size_t>(gid)].device_blocks = {block.value()};
+        node->group_set_resources[static_cast<size_t>(group_set_id)].device_blocks = {block.value()};
         return block.value();
     }
 
@@ -54,7 +51,7 @@ protected:
     std::shared_ptr<LinearGroupSet>  group_;
 };
 
-TEST_F(LinearGroupSetTest, AnyNodeWithDataIsSlotEvictable) {
+TEST_F(LinearGroupSetTest, AnyNodeWithDataIsEvictable) {
     auto* a          = makeNode(100);
     auto* b          = makeNode(200);
     a->children[200] = b;
@@ -64,8 +61,8 @@ TEST_F(LinearGroupSetTest, AnyNodeWithDataIsSlotEvictable) {
     setDeviceBlock(b, 0);
 
     // LINEAR has no leaf/topology requirement; both nodes are eligible.
-    EXPECT_TRUE(group_->isSlotEvictable(*a, Tier::DEVICE));
-    EXPECT_TRUE(group_->isSlotEvictable(*b, Tier::DEVICE));
+    EXPECT_TRUE(group_->isEvictable(*a, Tier::DEVICE));
+    EXPECT_TRUE(group_->isEvictable(*b, Tier::DEVICE));
 
     delete a;
     delete b;
@@ -97,7 +94,7 @@ TEST_F(LinearGroupSetTest, MatchValidatorHasData) {
     delete node_empty;
 }
 
-TEST_F(LinearGroupSetTest, MatchValidatorBusySlotInvalidWithoutLatch) {
+TEST_F(LinearGroupSetTest, MatchValidatorBusyResourceInvalidWithoutLatch) {
     for (GroupSetTransferState state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOAD_PENDING}) {
         auto validator = group_->createMatchValidator();
 
@@ -118,11 +115,11 @@ TEST_F(LinearGroupSetTest, MatchValidatorBusySlotInvalidWithoutLatch) {
     }
 }
 
-TEST_F(LinearGroupSetTest, MatchValidatorAllowsLoadingSlot) {
+TEST_F(LinearGroupSetTest, MatchValidatorAllowsLoadingResource) {
     auto validator = group_->createMatchValidator();
 
-    auto* node = makeNode(100);
-    node->group_set_resources[0].host_block    = 15;
+    auto* node                                  = makeNode(100);
+    node->group_set_resources[0].host_block     = 15;
     node->group_set_resources[0].transfer_state = GroupSetTransferState::LOADING;
 
     EXPECT_TRUE(validator->validate(node, node->group_set_resources[0]));
@@ -130,10 +127,10 @@ TEST_F(LinearGroupSetTest, MatchValidatorAllowsLoadingSlot) {
     delete node;
 }
 
-TEST_F(LinearGroupSetTest, EmptySlotIsNotEvictable) {
+TEST_F(LinearGroupSetTest, EmptyResourceIsNotEvictable) {
     auto* node = makeNode(100);
-    EXPECT_FALSE(group_->isSlotEvictable(*node, Tier::DEVICE));
-    EXPECT_FALSE(group_->isSlotEvictable(*node, Tier::HOST));
+    EXPECT_FALSE(group_->isEvictable(*node, Tier::DEVICE));
+    EXPECT_FALSE(group_->isEvictable(*node, Tier::HOST));
     delete node;
 }
 

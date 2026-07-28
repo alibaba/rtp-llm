@@ -113,6 +113,50 @@ inline std::shared_ptr<const CacheTopology> makeTestCacheTopology(int           
     return CacheTopology::create(std::move(groups), std::move(layers));
 }
 
+inline std::shared_ptr<const CacheTopology> makeIndexedTestTopology(std::vector<GroupBase> groups) {
+    RTP_LLM_CHECK_WITH_INFO(!groups.empty(), "indexed test topology requires at least one group");
+
+    size_t layer_count = 0;
+    for (const auto& group : groups) {
+        RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "indexed test topology group has null spec");
+        RTP_LLM_CHECK_WITH_INFO(!group.layer_ids.empty(), "indexed test topology group has no layers");
+        for (const int layer_id : group.layer_ids) {
+            RTP_LLM_CHECK_WITH_INFO(layer_id >= 0, "indexed test topology has negative layer id");
+            layer_count = std::max(layer_count, static_cast<size_t>(layer_id) + 1);
+        }
+    }
+
+    std::vector<LayerBase> layers(layer_count);
+    for (size_t layer_id = 0; layer_id < layers.size(); ++layer_id) {
+        layers[layer_id].layer_id = static_cast<int>(layer_id);
+    }
+    for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
+        auto&             group    = groups[group_id];
+        const std::string identity = "group" + std::to_string(group_id);
+        auto              spec     = group.spec->clone();
+        spec->tag                  = identity;
+        group.tag                  = identity;
+        group.spec                 = std::move(spec);
+        for (const int layer_id : group.layer_ids) {
+            layers[static_cast<size_t>(layer_id)].group_tags.push_back(identity);
+        }
+    }
+    return CacheTopology::create(std::move(groups), std::move(layers));
+}
+
+inline void configureIndexedTestGroups(CacheConfig&                         config,
+                                       const std::vector<KVCacheSpecPtr>&   specs,
+                                       const std::vector<std::vector<int>>& layers_by_group,
+                                       const std::vector<CacheGroupType>&   types,
+                                       const std::vector<CacheGroupPolicy>& policies = {}) {
+    std::vector<std::string> identities;
+    identities.reserve(specs.size());
+    for (size_t group_id = 0; group_id < specs.size(); ++group_id) {
+        identities.push_back("group" + std::to_string(group_id));
+    }
+    config.fromGroupedSpecs(specs, layers_by_group, types, identities, policies);
+}
+
 inline std::shared_ptr<MLAKVCacheSpec> makeResolvedMlaSpec(rtp_llm::DataType  dtype,
                                                            uint32_t           kv_lora_rank,
                                                            uint32_t           rope_head_dim,
@@ -207,6 +251,11 @@ inline KVCacheSpecPtr makeResolvedOpaqueSpec(bool               state_cache,
     return SpecBuilder::build(desc, ctx);
 }
 
+inline std::shared_ptr<FixedStateCacheSpec> makeTestFixedStateSpec(uint32_t seq_size_per_block) {
+    return std::dynamic_pointer_cast<FixedStateCacheSpec>(makeResolvedOpaqueSpec(
+        true, "test_fixed_state", DataType::TYPE_FP32, 1024u * 128u * sizeof(float), seq_size_per_block));
+}
+
 inline KVCacheSpecDesc makeDsv4Desc(const std::string& tag,
                                     const std::string& kind,
                                     uint32_t           entry_elems,
@@ -228,12 +277,11 @@ inline KVCacheSpecDesc makeDsv4Desc(const std::string& tag,
         return desc;
     }
 
-    desc.cache_type          = KVCacheSpecType::OpaqueState;
-    desc.is_state_cache      = true;
-    desc.entry_count_mode    = OpaqueBlockEntryCountMode::STATE_RING;
-    desc.reuse               = CacheReusePolicyDesc{};
-    desc.reuse->evict_policy = CacheEvictPolicy::INDEPENDENT;
-    desc.cp                  = CacheCpPolicyDesc{};
+    desc.cache_type       = KVCacheSpecType::OpaqueState;
+    desc.is_state_cache   = true;
+    desc.entry_count_mode = OpaqueBlockEntryCountMode::STATE_RING;
+    desc.reuse            = CacheReusePolicyDesc{};
+    desc.cp               = CacheCpPolicyDesc{};
     if (desc.tag == "indexer_state" || desc.tag == "csa_state") {
         desc.compression_ratio        = 4;
         desc.state_ring_overlap       = 1;

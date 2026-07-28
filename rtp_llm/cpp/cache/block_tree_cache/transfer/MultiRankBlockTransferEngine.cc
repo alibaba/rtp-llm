@@ -22,7 +22,7 @@ bool MultiRankBlockTransferEngine::execute(const std::vector<TransferDescriptor>
     for (const TransferDescriptor& descriptor : descriptors) {
         if (!BlockTransferRequestConverter::appendTransfer(descriptor, group_sets_, request)) {
             RTP_LLM_LOG_WARNING("failed to encode transfer, "
-                                "group=%zu source=%s target=%s",
+                                "group_set=%zu source=%s target=%s",
                                 descriptor.group_set_id,
                                 tierName(descriptor.source_tier),
                                 tierName(descriptor.target_tier));

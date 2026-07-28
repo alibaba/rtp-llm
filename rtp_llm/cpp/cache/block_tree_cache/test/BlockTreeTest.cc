@@ -6,18 +6,18 @@ namespace rtp_llm {
 namespace {
 
 // Helper: create 2D resources — each node gets one GroupSetResource with incrementing block_idx.
-// slots[i][0].device_blocks = {start_block + i}
-std::vector<std::vector<GroupSetResource>> make2DSlots(int group_count, int path_len, BlockIdxType start_block) {
-    std::vector<std::vector<GroupSetResource>> slots(static_cast<size_t>(path_len));
+// resources[i][0].device_blocks = {start_block + i}
+std::vector<std::vector<GroupSetResource>> make2DResources(int group_count, int path_len, BlockIdxType start_block) {
+    std::vector<std::vector<GroupSetResource>> resources(static_cast<size_t>(path_len));
     for (int i = 0; i < path_len; ++i) {
-        slots[i].resize(static_cast<size_t>(group_count));
-        slots[i][0].device_blocks = {static_cast<BlockIdxType>(start_block + i)};
+        resources[i].resize(static_cast<size_t>(group_count));
+        resources[i][0].device_blocks = {static_cast<BlockIdxType>(start_block + i)};
     }
-    return slots;
+    return resources;
 }
 
-// Helper: create 2D slots with empty inner vectors (no data assigned to nodes).
-std::vector<std::vector<GroupSetResource>> makeEmpty2DSlots(int path_len) {
+// Helper: create 2D resources with empty inner vectors (no data assigned to nodes).
+std::vector<std::vector<GroupSetResource>> makeEmpty2DResources(int path_len) {
     return std::vector<std::vector<GroupSetResource>>(static_cast<size_t>(path_len));
 }
 
@@ -31,16 +31,16 @@ TEST(BlockTreeTest, EmptyTreeFindReturnsEmpty) {
 
 TEST(BlockTreeTest, InsertSinglePath) {
     BlockTree     tree(1);
-    CacheKeysType keys  = {100, 200, 300};
-    auto          slots = make2DSlots(1, 3, 42);
+    CacheKeysType keys      = {100, 200, 300};
+    auto          resources = make2DResources(1, 3, 42);
 
-    TreeNode* leaf = tree.insertNode(nullptr, keys, slots).leaf;
+    TreeNode* leaf = tree.insertNode(nullptr, keys, resources).leaf;
     ASSERT_NE(leaf, nullptr);
     EXPECT_EQ(leaf->cache_key, 300);
     EXPECT_EQ(leaf->group_set_resources[0].device_blocks[0], 44);  // start_block + 2
     EXPECT_EQ(tree.nodeCount(), 3u);                               // 3 nodes created (not counting root)
 
-    // Verify tree structure and per-node slots
+    // Verify tree structure and per-node resources
     auto* root = tree.root();
     EXPECT_EQ(root->children.size(), 1u);
     auto* a = root->children.at(100);
@@ -58,11 +58,11 @@ TEST(BlockTreeTest, InsertForkPath) {
     BlockTree tree(1);
 
     // Insert root → 100 → 200 → 300
-    tree.insertNode(nullptr, {100, 200, 300}, make2DSlots(1, 3, 1));
+    tree.insertNode(nullptr, {100, 200, 300}, make2DResources(1, 3, 1));
     // Insert root → 100 → 200 → 400 (fork at 200)
-    tree.insertNode(nullptr, {100, 200, 400}, make2DSlots(1, 3, 10));
+    tree.insertNode(nullptr, {100, 200, 400}, make2DResources(1, 3, 10));
     // Insert root → 100 → 500 (fork at 100)
-    tree.insertNode(nullptr, {100, 500}, make2DSlots(1, 2, 20));
+    tree.insertNode(nullptr, {100, 500}, make2DResources(1, 2, 20));
 
     EXPECT_EQ(tree.nodeCount(), 5u);  // 100, 200, 300, 400, 500
 
@@ -75,7 +75,7 @@ TEST(BlockTreeTest, InsertForkPath) {
 
 TEST(BlockTreeTest, FindExistingPath) {
     BlockTree tree(1);
-    tree.insertNode(nullptr, {100, 200, 300}, make2DSlots(1, 3, 42));
+    tree.insertNode(nullptr, {100, 200, 300}, make2DResources(1, 3, 42));
 
     auto result = tree.findNode({100, 200, 300});
     EXPECT_EQ(result.matched_blocks, 3u);
@@ -86,7 +86,7 @@ TEST(BlockTreeTest, FindExistingPath) {
 
 TEST(BlockTreeTest, FindPartialMatch) {
     BlockTree tree(1);
-    tree.insertNode(nullptr, {100, 200, 300}, make2DSlots(1, 3, 42));
+    tree.insertNode(nullptr, {100, 200, 300}, make2DResources(1, 3, 42));
 
     // Search for a longer path — only first 2 match
     auto result = tree.findNode({100, 200, 999});
@@ -97,7 +97,7 @@ TEST(BlockTreeTest, FindPartialMatch) {
 
 TEST(BlockTreeTest, FindAllowsLoadingNode) {
     BlockTree                   tree(2);
-    const BlockTreeInsertResult insert_result = tree.insertNode(nullptr, {100, 200, 300}, make2DSlots(2, 3, 42));
+    const BlockTreeInsertResult insert_result = tree.insertNode(nullptr, {100, 200, 300}, make2DResources(2, 3, 42));
     ASSERT_NE(insert_result.leaf, nullptr);
 
     TreeNode* loading_node                              = tree.root()->children.at(100)->children.at(200);
@@ -111,10 +111,10 @@ TEST(BlockTreeTest, FindAllowsLoadingNode) {
 
 TEST(BlockTreeTest, FindTraversesBusyNodeAndItsDescendants) {
     // Transfer-state gating moved to the per-group MatchValidators: the tree
-    // walk is purely topological and must not truncate at busy slots.
+    // walk is purely topological and must not truncate at busy resources.
     for (GroupSetTransferState state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOAD_PENDING}) {
         BlockTree tree(1);
-        tree.insertNode(nullptr, {100, 200, 300}, make2DSlots(1, 3, 42));
+        tree.insertNode(nullptr, {100, 200, 300}, make2DResources(1, 3, 42));
 
         TreeNode* busy_node                              = tree.root()->children.at(100)->children.at(200);
         busy_node->group_set_resources[0].transfer_state = state;
@@ -129,7 +129,7 @@ TEST(BlockTreeTest, FindTraversesBusyNodeAndItsDescendants) {
 
 TEST(BlockTreeTest, FindFailsFastOnMalformedGroupSetResourceCount) {
     BlockTree tree(2);
-    tree.insertNode(nullptr, {100, 200}, make2DSlots(2, 2, 42));
+    tree.insertNode(nullptr, {100, 200}, make2DResources(2, 2, 42));
 
     TreeNode* malformed_node = tree.root()->children.at(100)->children.at(200);
     malformed_node->group_set_resources.pop_back();
@@ -139,7 +139,7 @@ TEST(BlockTreeTest, FindFailsFastOnMalformedGroupSetResourceCount) {
 
 TEST(BlockTreeTest, FindEmptyKeys) {
     BlockTree tree(1);
-    tree.insertNode(nullptr, {100}, make2DSlots(1, 1, 1));
+    tree.insertNode(nullptr, {100}, make2DResources(1, 1, 1));
 
     auto result = tree.findNode({});
     EXPECT_EQ(result.matched_node, nullptr);
@@ -148,7 +148,7 @@ TEST(BlockTreeTest, FindEmptyKeys) {
 
 TEST(BlockTreeTest, RemoveLeafNode) {
     BlockTree tree(1);
-    tree.insertNode(nullptr, {100, 200, 300}, make2DSlots(1, 3, 42));
+    tree.insertNode(nullptr, {100, 200, 300}, make2DResources(1, 3, 42));
     EXPECT_EQ(tree.nodeCount(), 3u);
 
     // Find and remove leaf node (300)
@@ -166,12 +166,12 @@ TEST(BlockTreeTest, RemoveLeafNode) {
 TEST(BlockTreeTest, RemoveEmptyAncestors) {
     BlockTree tree(1);
     // Insert root → 100 → 200 with empty group_set_resources (no data)
-    tree.insertNode(nullptr, {100, 200}, makeEmpty2DSlots(2));
+    tree.insertNode(nullptr, {100, 200}, makeEmpty2DResources(2));
     // Insert root → 100 → 200 → 300 with data only on the new leaf.
-    auto leaf_slots = makeEmpty2DSlots(3);
-    leaf_slots[2].resize(1);
-    leaf_slots[2][0].device_blocks = {42};
-    TreeNode* leaf                 = tree.insertNode(nullptr, {100, 200, 300}, leaf_slots).leaf;
+    auto leaf_resources = makeEmpty2DResources(3);
+    leaf_resources[2].resize(1);
+    leaf_resources[2][0].device_blocks = {42};
+    TreeNode* leaf                     = tree.insertNode(nullptr, {100, 200, 300}, leaf_resources).leaf;
     EXPECT_EQ(tree.nodeCount(), 3u);
 
     TreeNode* first_empty_ancestor = leaf->parent;
@@ -188,9 +188,9 @@ TEST(BlockTreeTest, RemoveEmptyAncestors) {
 TEST(BlockTreeTest, RemoveEmptyAncestorsStopsAtData) {
     BlockTree tree(1);
     // Insert 100 with data
-    tree.insertNode(nullptr, {100}, make2DSlots(1, 1, 10));
+    tree.insertNode(nullptr, {100}, make2DResources(1, 1, 10));
     // Insert 100 → 200 with data (100 already exists, only 200 is new)
-    TreeNode* leaf = tree.insertNode(nullptr, {100, 200}, make2DSlots(1, 2, 20)).leaf;
+    TreeNode* leaf = tree.insertNode(nullptr, {100, 200}, make2DResources(1, 2, 20)).leaf;
 
     // Remove leaf 200
     tree.removeNode(leaf);
@@ -209,8 +209,8 @@ TEST(BlockTreeTest, RemoveEmptyAncestorsStopsAtData) {
 
 TEST(BlockTreeTest, RemoveEmptyAncestorsReturnsFirstSurvivorAfterPruning) {
     BlockTree tree(1);
-    tree.insertNode(nullptr, {100}, make2DSlots(1, 1, 10));
-    TreeNode* leaf = tree.insertNode(nullptr, {100, 200, 300}, makeEmpty2DSlots(3)).leaf;
+    tree.insertNode(nullptr, {100}, make2DResources(1, 1, 10));
+    TreeNode* leaf = tree.insertNode(nullptr, {100, 200, 300}, makeEmpty2DResources(3)).leaf;
     ASSERT_NE(leaf, nullptr);
     TreeNode* first_empty_ancestor = leaf->parent;
 
@@ -226,11 +226,11 @@ TEST(BlockTreeTest, RemoveEmptyAncestorsReturnsFirstSurvivorAfterPruning) {
 
 TEST(BlockTreeTest, RepeatedInsertDoesNotDuplicate) {
     BlockTree tree(1);
-    tree.insertNode(nullptr, {100, 200}, make2DSlots(1, 2, 1));
+    tree.insertNode(nullptr, {100, 200}, make2DResources(1, 2, 1));
     EXPECT_EQ(tree.nodeCount(), 2u);
 
     // Insert same path again — should reuse existing nodes
-    tree.insertNode(nullptr, {100, 200}, make2DSlots(1, 2, 50));
+    tree.insertNode(nullptr, {100, 200}, make2DResources(1, 2, 50));
     EXPECT_EQ(tree.nodeCount(), 2u);
 
     // After Bug 3 fix: existing nodes are NOT overwritten.
@@ -250,14 +250,14 @@ TEST(BlockTreeTest, InsertEmptyKeys) {
 TEST(BlockTreeTest, InsertWithParent) {
     BlockTree tree(1);
     // First insert: root → 100 → 200
-    tree.insertNode(nullptr, {100, 200}, make2DSlots(1, 2, 10));
+    tree.insertNode(nullptr, {100, 200}, make2DResources(1, 2, 10));
 
     // Find node 200 and use it as parent to insert 300
     auto      find   = tree.findNode({100, 200});
     TreeNode* parent = find.matched_node;
     ASSERT_NE(parent, nullptr);
 
-    TreeNode* leaf = tree.insertNode(parent, {300}, make2DSlots(1, 1, 50)).leaf;
+    TreeNode* leaf = tree.insertNode(parent, {300}, make2DResources(1, 1, 50)).leaf;
     ASSERT_NE(leaf, nullptr);
     EXPECT_EQ(leaf->cache_key, 300);
     EXPECT_EQ(leaf->group_set_resources[0].device_blocks[0], 50);
@@ -268,17 +268,17 @@ TEST(BlockTreeTest, InsertWithParent) {
     EXPECT_EQ(result.matched_blocks, 3u);
 }
 
-TEST(BlockTreeTest, MultipleGroups) {
+TEST(BlockTreeTest, MultipleGroupSets) {
     BlockTree tree(3);  // 3 group sets
 
-    // Create 2D slots for a single node with 3 groups
-    std::vector<std::vector<GroupSetResource>> slots(1);
-    slots[0].resize(3);
-    slots[0][0].device_blocks = {10};
-    slots[0][1].device_blocks = {20, 21};
-    slots[0][2].device_blocks = {30};
+    // Create 2D resources for a single node with 3 group sets.
+    std::vector<std::vector<GroupSetResource>> resources(1);
+    resources[0].resize(3);
+    resources[0][0].device_blocks = {10};
+    resources[0][1].device_blocks = {20, 21};
+    resources[0][2].device_blocks = {30};
 
-    TreeNode* leaf = tree.insertNode(nullptr, {100}, slots).leaf;
+    TreeNode* leaf = tree.insertNode(nullptr, {100}, resources).leaf;
     ASSERT_NE(leaf, nullptr);
     EXPECT_EQ(leaf->group_set_resources.size(), 3u);
     EXPECT_EQ(leaf->group_set_resources[0].device_blocks[0], 10);
@@ -287,14 +287,14 @@ TEST(BlockTreeTest, MultipleGroups) {
 }
 
 // UT-1: Verify insertNode does not overwrite existing node's group_set_resources (Bug 3 fix)
-TEST(BlockTreeTest, InsertDoesNotOverwriteExistingNodeSlots) {
+TEST(BlockTreeTest, InsertDoesNotOverwriteExistingNodeResources) {
     BlockTree tree(1);
 
     // First insert: 100 -> 200, with device_blocks={42, 43}
-    tree.insertNode(nullptr, {100, 200}, make2DSlots(1, 2, 42));
+    tree.insertNode(nullptr, {100, 200}, make2DResources(1, 2, 42));
 
     // Second insert: 100 -> 200 -> 300, with device_blocks={99, 100, 101}
-    tree.insertNode(nullptr, {100, 200, 300}, make2DSlots(1, 3, 99));
+    tree.insertNode(nullptr, {100, 200, 300}, make2DResources(1, 3, 99));
 
     // Verify: nodes 100 and 200 retain original values, only 300 gets new value
     auto result = tree.findNode({100, 200, 300});
@@ -318,10 +318,10 @@ TEST(BlockTreeTest, InsertFillsOnlyCompleteEmptyIdleGroupsOnExistingNode) {
 
     const BlockTreeInsertResult result = tree.insertNode(nullptr, {100}, replacement);
     EXPECT_TRUE(result.inserted_nodes.empty());
-    ASSERT_EQ(result.adopted_slots.size(), 1u);
-    EXPECT_EQ(result.adopted_slots[0].node, node);
-    EXPECT_EQ(result.adopted_slots[0].input_index, 0u);
-    EXPECT_EQ(result.adopted_slots[0].group_set_id, 1);
+    ASSERT_EQ(result.adopted_resources.size(), 1u);
+    EXPECT_EQ(result.adopted_resources[0].node, node);
+    EXPECT_EQ(result.adopted_resources[0].input_index, 0u);
+    EXPECT_EQ(result.adopted_resources[0].group_set_id, 1);
     EXPECT_EQ(node->group_set_resources[0].device_blocks, (BlockIndicesType{10}));
     EXPECT_EQ(node->group_set_resources[1].device_blocks, (BlockIndicesType{30}));
 }
@@ -334,8 +334,8 @@ TEST(BlockTreeTest, InsertSkipsBusyEmptyGroupOnExistingNode) {
     ASSERT_NE(node, nullptr);
     node->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
 
-    const BlockTreeInsertResult result = tree.insertNode(nullptr, {100}, make2DSlots(1, 1, 20));
-    EXPECT_TRUE(result.adopted_slots.empty());
+    const BlockTreeInsertResult result = tree.insertNode(nullptr, {100}, make2DResources(1, 1, 20));
+    EXPECT_TRUE(result.adopted_resources.empty());
     EXPECT_EQ(node->group_set_resources[0].device_blocks, (BlockIndicesType{NULL_BLOCK_IDX}));
     EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::DEMOTING);
 }
@@ -356,8 +356,8 @@ TEST(BlockTreeTest, InsertSkipsBusyGroupButFillsOtherIdleGroupAndAddsSuffix) {
     replacement[1][1].device_blocks    = {31};
     const BlockTreeInsertResult result = tree.insertNode(nullptr, {100, 200}, replacement);
 
-    ASSERT_EQ(result.adopted_slots.size(), 1u);
-    EXPECT_EQ(result.adopted_slots[0].group_set_id, 1);
+    ASSERT_EQ(result.adopted_resources.size(), 1u);
+    EXPECT_EQ(result.adopted_resources[0].group_set_id, 1);
     ASSERT_EQ(result.inserted_nodes.size(), 1u);
     EXPECT_EQ(result.inserted_nodes[0].node->cache_key, 200);
     EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::LOADING);
@@ -378,11 +378,11 @@ TEST(BlockTreeTest, InsertAdoptsCompleteDeviceValueWithoutPoolTopologyKnowledge)
     replacement[0][0].device_blocks    = {20};
     const BlockTreeInsertResult result = tree.insertNode(nullptr, {100}, replacement);
 
-    ASSERT_EQ(result.adopted_slots.size(), 1u);
+    ASSERT_EQ(result.adopted_resources.size(), 1u);
     EXPECT_EQ(node->group_set_resources[0].device_blocks, (BlockIndicesType{20}));
 }
 
-TEST(BlockTreeTest, InsertFailsFastOnMalformedNewNodeSlots) {
+TEST(BlockTreeTest, InsertFailsFastOnMalformedNewNodeResources) {
     BlockTree                                  tree(2);
     std::vector<std::vector<GroupSetResource>> malformed(1, std::vector<GroupSetResource>(1));
     malformed[0][0].device_blocks = {10};
@@ -393,7 +393,7 @@ TEST(BlockTreeTest, InsertFailsFastOnMalformedNewNodeSlots) {
 
 TEST(BlockTreeTest, RemoveEmptyAncestorsStopsAtBusyEmptyNode) {
     BlockTree tree(1);
-    TreeNode* node = tree.insertNode(nullptr, {100}, makeEmpty2DSlots(1)).leaf;
+    TreeNode* node = tree.insertNode(nullptr, {100}, makeEmpty2DResources(1)).leaf;
     ASSERT_NE(node, nullptr);
     node->group_set_resources[0].transfer_state = GroupSetTransferState::LOAD_PENDING;
 

@@ -25,7 +25,7 @@ public:
 
 private:
     TransferStatus execute(const TransferDescriptor& desc);
-    TransferStatus validateRequest(const TransferDescriptor& desc, const GroupSet*& group) const;
+    TransferStatus validateRequest(const TransferDescriptor& desc, const GroupSet*& group_set) const;
 
     std::vector<GroupSetPtr> group_sets_;
 

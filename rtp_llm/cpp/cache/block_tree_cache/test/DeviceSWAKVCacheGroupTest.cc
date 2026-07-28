@@ -43,16 +43,14 @@ private:
     bool        had_value_ = false;
 };
 
-std::shared_ptr<FixedStateCacheSpec> makeDsv4StateSpec(const std::string& tag, int seq_size_per_block) {
-    return std::dynamic_pointer_cast<FixedStateCacheSpec>(
-        makeResolvedOpaqueSpec(true, tag, DataType::TYPE_FP32, 1024u * 128u * sizeof(float), seq_size_per_block));
+std::shared_ptr<FixedStateCacheSpec> makeDsv4StateSpec(int seq_size_per_block) {
+    return makeTestFixedStateSpec(static_cast<uint32_t>(seq_size_per_block));
 }
 
-CacheGroupPolicy makePolicy(const KVCacheSpecPtr& spec) {
+CacheGroupPolicy makePolicy(bool enable_prefix_reuse = true) {
     auto policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    policy.enable_prefix_reuse = true;
-    if (spec != nullptr && spec->tag == "hca_state") {
-        policy.enable_prefix_reuse  = false;
+    policy.enable_prefix_reuse = enable_prefix_reuse;
+    if (!enable_prefix_reuse) {
         policy.active_tail_blocks   = 1;
         policy.validate_tail_blocks = false;
     }
@@ -89,7 +87,7 @@ protected:
     DeviceSWAKVCacheGroup makeGroupWithStep(int seq_size_per_block, int linear_step) {
         auto spec                = std::make_shared<MHAKVCacheSpec>();
         spec->seq_size_per_block = seq_size_per_block;
-        return DeviceSWAKVCacheGroup({}, spec, block_pool_, 0, linear_step, nullptr, makePolicy(spec));
+        return DeviceSWAKVCacheGroup({}, spec, block_pool_, 0, linear_step, nullptr, makePolicy());
     }
 
     DeviceBlockPoolPtr block_pool_;
@@ -164,8 +162,8 @@ TEST_F(DeviceSWAKVCacheGroupTest, GetNeedBlocks_ReuseEnabledUsesSparse) {
 }
 
 TEST_F(DeviceSWAKVCacheGroupTest, GetNeedBlocks_HCAStateReuseEnabledCountsTailOnly) {
-    auto spec  = makeDsv4StateSpec("hca_state", 4);
-    auto group = DeviceSWAKVCacheGroup({}, spec, block_pool_, 5, /*linear_step=*/3, nullptr, makePolicy(spec));
+    auto spec  = makeDsv4StateSpec(4);
+    auto group = DeviceSWAKVCacheGroup({}, spec, block_pool_, 5, /*linear_step=*/3, nullptr, makePolicy(false));
 
     // seq_len=40 => seq_slots=10. If reuse sparse allocation were enabled, step hits
     // would keep positions 2/5/8 plus tail position 9. HCA_STATE skips reuse and keeps only tail 9.
@@ -175,8 +173,8 @@ TEST_F(DeviceSWAKVCacheGroupTest, GetNeedBlocks_HCAStateReuseEnabledCountsTailOn
 }
 
 TEST_F(DeviceSWAKVCacheGroupTest, GetNeedBlocks_CSAStateReuseEnabledStillUsesSparse) {
-    auto spec  = makeDsv4StateSpec("csa_state", 4);
-    auto group = DeviceSWAKVCacheGroup({}, spec, block_pool_, 4, /*linear_step=*/3, nullptr, makePolicy(spec));
+    auto spec  = makeDsv4StateSpec(4);
+    auto group = DeviceSWAKVCacheGroup({}, spec, block_pool_, 4, /*linear_step=*/3, nullptr, makePolicy());
 
     auto need = group.getNeedBlocks(0, 40, 0, 0, true);
     EXPECT_EQ(need.common_blocks, 0);
@@ -270,8 +268,8 @@ TEST_F(DeviceSWAKVCacheGroupTest, Malloc_NoOpWhenEnoughBlocks) {
 
 TEST_F(DeviceSWAKVCacheGroupTest, Malloc_DSV4TrapSkipsHCAStateNullTail) {
     ScopedEnvVar env("DSV4_TRAP_INVALID_KV_ACCESS", "1");
-    auto         spec  = makeDsv4StateSpec("hca_state", 4);
-    auto         group = DeviceSWAKVCacheGroup({}, spec, block_pool_, 5, 0, nullptr, makePolicy(spec));
+    auto         spec  = makeDsv4StateSpec(4);
+    auto         group = DeviceSWAKVCacheGroup({}, spec, block_pool_, 5, 0, nullptr, makePolicy(false));
     BlockIds     block_ids(1);
     block_ids.assign(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
 
@@ -279,8 +277,8 @@ TEST_F(DeviceSWAKVCacheGroupTest, Malloc_DSV4TrapSkipsHCAStateNullTail) {
 }
 
 TEST_F(DeviceSWAKVCacheGroupTest, Malloc_HCAStateReuseEnabledAllocatesTailOnly) {
-    auto     spec  = makeDsv4StateSpec("hca_state", 4);
-    auto     group = DeviceSWAKVCacheGroup({}, spec, block_pool_, 5, /*linear_step=*/3, nullptr, makePolicy(spec));
+    auto     spec  = makeDsv4StateSpec(4);
+    auto     group = DeviceSWAKVCacheGroup({}, spec, block_pool_, 5, /*linear_step=*/3, nullptr, makePolicy(false));
     BlockIds block_ids(1);
 
     ASSERT_TRUE(group.malloc(block_ids, 40, /*enable_reuse_cache=*/true, /*reserve_step=*/0));
@@ -293,8 +291,8 @@ TEST_F(DeviceSWAKVCacheGroupTest, Malloc_HCAStateReuseEnabledAllocatesTailOnly) 
 }
 
 TEST_F(DeviceSWAKVCacheGroupTest, Malloc_CSAStateReuseEnabledKeepsSparseBlocks) {
-    auto     spec  = makeDsv4StateSpec("csa_state", 4);
-    auto     group = DeviceSWAKVCacheGroup({}, spec, block_pool_, 4, /*linear_step=*/3, nullptr, makePolicy(spec));
+    auto     spec  = makeDsv4StateSpec(4);
+    auto     group = DeviceSWAKVCacheGroup({}, spec, block_pool_, 4, /*linear_step=*/3, nullptr, makePolicy());
     BlockIds block_ids(1);
 
     ASSERT_TRUE(group.malloc(block_ids, 40, /*enable_reuse_cache=*/true, /*reserve_step=*/0));
@@ -310,8 +308,8 @@ TEST_F(DeviceSWAKVCacheGroupTest, Malloc_CSAStateReuseEnabledKeepsSparseBlocks) 
 
 TEST_F(DeviceSWAKVCacheGroupTest, Malloc_DSV4TrapChecksSWAKVNullTail) {
     ScopedEnvVar env("DSV4_TRAP_INVALID_KV_ACCESS", "1");
-    auto         spec  = makeDsv4StateSpec("swa_kv", 4);
-    auto         group = DeviceSWAKVCacheGroup({}, spec, block_pool_, 6, 0, nullptr, makePolicy(spec));
+    auto         spec  = makeDsv4StateSpec(4);
+    auto         group = DeviceSWAKVCacheGroup({}, spec, block_pool_, 6, 0, nullptr, makePolicy());
     BlockIds     block_ids(1);
     block_ids.assign(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
 
@@ -320,8 +318,8 @@ TEST_F(DeviceSWAKVCacheGroupTest, Malloc_DSV4TrapChecksSWAKVNullTail) {
 
 TEST_F(DeviceSWAKVCacheGroupTest, Malloc_DSV4TrapChecksNonSkipStateNullTail) {
     ScopedEnvVar env("DSV4_TRAP_INVALID_KV_ACCESS", "1");
-    auto         spec  = makeDsv4StateSpec("csa_state", 4);
-    auto         group = DeviceSWAKVCacheGroup({}, spec, block_pool_, 4, 0, nullptr, makePolicy(spec));
+    auto         spec  = makeDsv4StateSpec(4);
+    auto         group = DeviceSWAKVCacheGroup({}, spec, block_pool_, 4, 0, nullptr, makePolicy());
     BlockIds     block_ids(1);
     block_ids.assign(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
 
@@ -464,7 +462,7 @@ TEST_F(DeviceSWAKVCacheGroupTest, RemoveSkippedBlocks_WithStep_FreesNonStepBlock
 
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->seq_size_per_block = 4;
-    DeviceSWAKVCacheGroup group({}, spec, block_pool, 0, 2, nullptr, makePolicy(spec));
+    DeviceSWAKVCacheGroup group({}, spec, block_pool, 0, 2, nullptr, makePolicy());
 
     // Start with 6 allocated blocks (no NULLs). malloc() reserves capacity with refCount 0;
     // incRef gives each a single holder so removeSkippedBlocks' decRef can free them.
@@ -501,8 +499,8 @@ TEST_F(DeviceSWAKVCacheGroupTest, RemoveSkippedBlocks_HCAStateReuseEnabledKeepsT
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
-    auto spec  = makeDsv4StateSpec("hca_state", 4);
-    auto group = DeviceSWAKVCacheGroup({}, spec, block_pool, 5, /*linear_step=*/2, nullptr, makePolicy(spec));
+    auto spec  = makeDsv4StateSpec(4);
+    auto group = DeviceSWAKVCacheGroup({}, spec, block_pool, 5, /*linear_step=*/2, nullptr, makePolicy(false));
 
     auto allocated = block_pool->malloc(6).value();
     ASSERT_EQ(allocated.size(), 6u);

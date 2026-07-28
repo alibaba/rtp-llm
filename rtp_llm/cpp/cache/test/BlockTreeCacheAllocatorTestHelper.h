@@ -71,13 +71,13 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
         return result;
     }
 
-    const auto&                         group_sets = cache->groupSets();
+    const auto&                                group_sets = cache->groupSets();
     std::vector<std::vector<GroupSetResource>> slots(keys.size(), std::vector<GroupSetResource>(group_sets.size()));
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIndicesType>> request_holds;
 
     for (const auto& group_set : group_sets) {
         if (!group_set || group_set->groupSetId() >= group_sets.size()
-            || group_set->groupTags().size() != group_set->devicePools().size()) {
+            || group_set->groupIds().size() != group_set->devicePools().size()) {
             for (const auto& [pool, blocks] : request_holds) {
                 pool->decRef(blocks, BlockRefType::REQUEST);
             }
@@ -112,7 +112,8 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
                 device_blocks.resize(group_set->devicePools().size(), NULL_BLOCK_IDX);
                 device_blocks[pool_index] = blocks[path_index];
             }
-            result.blocks_by_tag.emplace(group_set->groupTags()[pool_index], blocks);
+            const size_t group_id = group_set->groupIds()[pool_index];
+            result.blocks_by_tag.emplace(group_set->topology()->groupById(group_id).tag, blocks);
             request_holds.emplace_back(device_pool, std::move(blocks));
         }
     }

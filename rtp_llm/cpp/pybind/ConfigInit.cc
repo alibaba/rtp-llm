@@ -126,15 +126,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("FULL", CacheGroupType::FULL)
         .value("SWA", CacheGroupType::SWA);
 
-    py::enum_<CacheReusePolicy>(m, "CacheReusePolicy")
-        .value("REUSABLE", CacheReusePolicy::REUSABLE)
-        .value("NON_REUSABLE", CacheReusePolicy::NON_REUSABLE);
-
-    py::enum_<CacheEvictPolicy>(m, "CacheEvictPolicy")
-        .value("CHAIN", CacheEvictPolicy::CHAIN)
-        .value("INDEPENDENT", CacheEvictPolicy::INDEPENDENT)
-        .value("NONE", CacheEvictPolicy::NONE);
-
     py::enum_<CacheMemoryPlacement>(m, "CacheMemoryPlacement")
         .value("DEVICE", CacheMemoryPlacement::DEVICE)
         .value("HOST", CacheMemoryPlacement::HOST)
@@ -1557,19 +1548,14 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<CacheReusePolicyDesc>(m, "CacheReusePolicyDesc")
         .def(py::init<>())
         .def_readwrite("enable_prefix_reuse", &CacheReusePolicyDesc::enable_prefix_reuse)
-        .def_readwrite("evict_policy", &CacheReusePolicyDesc::evict_policy)
-        .def(py::pickle(
-            [](const CacheReusePolicyDesc& self) {
-                return py::make_tuple(self.enable_prefix_reuse, self.evict_policy);
-            },
-            [](py::tuple t) {
-                CacheReusePolicyDesc c;
-                if (t.size() != 2)
-                    throw std::runtime_error("Invalid CacheReusePolicyDesc state!");
-                c.enable_prefix_reuse = t[0].cast<std::optional<bool>>();
-                c.evict_policy        = t[1].cast<std::optional<CacheEvictPolicy>>();
-                return c;
-            }));
+        .def(py::pickle([](const CacheReusePolicyDesc& self) { return py::make_tuple(self.enable_prefix_reuse); },
+                        [](py::tuple t) {
+                            CacheReusePolicyDesc c;
+                            if (t.size() != 1)
+                                throw std::runtime_error("Invalid CacheReusePolicyDesc state!");
+                            c.enable_prefix_reuse = t[0].cast<std::optional<bool>>();
+                            return c;
+                        }));
 
     py::class_<CacheCapacityPolicyDesc>(m, "CacheCapacityPolicyDesc")
         .def(py::init<>())

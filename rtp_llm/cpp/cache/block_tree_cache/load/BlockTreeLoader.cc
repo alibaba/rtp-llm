@@ -94,9 +94,9 @@ void BlockTreeLoader::prepareMatchedLoadItem(TreeNode*                     path_
                                              BlockTreeLoadResult&          result,
                                              LoadTicket::PendingLoadItems& pending_load_items) {
     // DEMOTING/LOAD_PENDING sources belong to another in-flight operation and
-    // can neither be referenced nor joined; skip them like empty slots.
+    // can neither be referenced nor joined; skip them like empty resources.
     if (!group_set_resource.isMatchUsable()) {
-        RTP_LLM_LOG_DEBUG("skip busy slot for load planning, node_key=%ld group_set=%zu state=%d",
+        RTP_LLM_LOG_DEBUG("skip busy resource for load planning, node_key=%ld group_set=%zu state=%d",
                           path_node->cache_key,
                           group_set->groupSetId(),
                           static_cast<int>(group_set_resource.transfer_state));
@@ -126,7 +126,7 @@ void BlockTreeLoader::prepareMatchedLoadItem(TreeNode*                     path_
         result.load_blocks++;
     }
 
-    RTP_LLM_LOG_DEBUG("planned logical settlement from %s group[%zu] node_key=%ld",
+    RTP_LLM_LOG_DEBUG("planned logical settlement from %s group_set[%zu] node_key=%ld",
                       tierName(source_tier),
                       group_set->groupSetId(),
                       path_node->cache_key);
@@ -198,8 +198,8 @@ bool BlockTreeLoader::reserveLoadItems(const LoadTicket::PendingLoadItems& items
             || (item.source_tier != Tier::DEVICE && item.source_tier != Tier::HOST && item.source_tier != Tier::DISK)) {
             return false;
         }
-        const GroupSetPtr& group = group_sets_[item.group_set_id];
-        if (group == nullptr || item.group_set_id >= item.node->group_set_resources.size()) {
+        const GroupSetPtr& group_set = group_sets_[item.group_set_id];
+        if (group_set == nullptr || item.group_set_id >= item.node->group_set_resources.size()) {
             return false;
         }
         const GroupSetTransferState expected_state =
@@ -207,10 +207,10 @@ bool BlockTreeLoader::reserveLoadItems(const LoadTicket::PendingLoadItems& items
         if (item.node->group_set_resources[item.group_set_id].transfer_state != expected_state) {
             return false;
         }
-        const size_t expected_source_count = item.source_tier == Tier::DEVICE ? group->devicePoolCount() : 1;
+        const size_t expected_source_count = item.source_tier == Tier::DEVICE ? group_set->devicePoolCount() : 1;
         if (item.source_blocks.size() != expected_source_count
-            || group->getTopTier(item.node->group_set_resources[item.group_set_id]) != item.source_tier
-            || group->getBlocks(item.node->group_set_resources[item.group_set_id], item.source_tier)
+            || group_set->getTopTier(item.node->group_set_resources[item.group_set_id]) != item.source_tier
+            || group_set->getBlocks(item.node->group_set_resources[item.group_set_id], item.source_tier)
                    != item.source_blocks) {
             return false;
         }
@@ -257,7 +257,7 @@ std::shared_ptr<AsyncContext> BlockTreeLoader::commitLoad(const LoadTicket& tick
         for (size_t item_index = 0; item_index < task->items.size(); ++item_index) {
             const LoadTicket::PendingLoadItem& item = task->items[item_index];
             if (item.source_tier != Tier::DEVICE
-                && !task->item_groups[item_index]->hasAllocatedDeviceBlocks(item.target_device_blocks)) {
+                && !task->item_group_sets[item_index]->hasAllocatedDeviceBlocks(item.target_device_blocks)) {
                 RTP_LLM_LOG_WARNING("invalid load target blocks, group_set=%zu", item.group_set_id);
                 return nullptr;
             }
@@ -282,7 +282,7 @@ std::shared_ptr<AsyncContext> BlockTreeLoader::commitLoad(const LoadTicket& tick
             return nullptr;
         }
         // Add an in-flight copy holder. It becomes a cache holder only after
-        // the target blocks are installed into the tree slot.
+        // the target blocks are installed into the tree resource.
         group_sets_[item.group_set_id]->referenceBlocks(
             MultiNodeResource{item.group_set_id, Tier::DEVICE, {item.target_device_blocks}}, BlockRefType::REQUEST);
         ++prepared_item_count;
@@ -324,9 +324,9 @@ void BlockTreeLoader::abortLoadUnsafe(const LoadTicket::PendingLoadItems&      i
 
     bool device_refs_released = false;
     for (size_t item_index = 0; item_index < items.size(); ++item_index) {
-        const auto&  item            = items[item_index];
-        const size_t group_set_index = item.group_set_id;
-        if (group_set_index >= group_sets_.size() || group_sets_[group_set_index] == nullptr) {
+        const auto&  item         = items[item_index];
+        const size_t group_set_id = item.group_set_id;
+        if (group_set_id >= group_sets_.size() || group_sets_[group_set_id] == nullptr) {
             continue;
         }
         const bool fully_prepared = item_index < prepared_item_count;
@@ -338,7 +338,7 @@ void BlockTreeLoader::abortLoadUnsafe(const LoadTicket::PendingLoadItems&      i
                 }
             }
             if (!item.target_device_blocks.empty()) {
-                group_sets_[group_set_index]->unreferenceBlocks(
+                group_sets_[group_set_id]->unreferenceBlocks(
                     MultiNodeResource{item.group_set_id, Tier::DEVICE, {item.target_device_blocks}},
                     BlockRefType::REQUEST);
                 device_refs_released = true;
@@ -352,7 +352,7 @@ void BlockTreeLoader::abortLoadUnsafe(const LoadTicket::PendingLoadItems&      i
                     RTP_LLM_LOG_WARNING("failed to erase aborted load context, group_set=%zu", item.group_set_id);
                 }
             }
-            group_sets_[group_set_index]->unreferenceBlocks(
+            group_sets_[group_set_id]->unreferenceBlocks(
                 MultiNodeResource{item.group_set_id, Tier::DEVICE, {item.target_device_blocks}}, BlockRefType::REQUEST);
         }
 
@@ -360,17 +360,18 @@ void BlockTreeLoader::abortLoadUnsafe(const LoadTicket::PendingLoadItems&      i
         if (item.node != nullptr) {
             source_set.tree_nodes = {item.node};
         }
-        group_sets_[group_set_index]->unreferenceBlocks(source_set, BlockRefType::REQUEST);
+        group_sets_[group_set_id]->unreferenceBlocks(source_set, BlockRefType::REQUEST);
         if (item.source_tier != Tier::DEVICE) {
             if (fully_prepared) {
                 if (!finishLoad(item.node, item.group_set_id, item.source_tier, false)) {
-                    RTP_LLM_LOG_WARNING(
-                        "loading state mismatch, group=%zu source=%s", item.group_set_id, tierName(item.source_tier));
+                    RTP_LLM_LOG_WARNING("loading state mismatch, group_set=%zu source=%s",
+                                        item.group_set_id,
+                                        tierName(item.source_tier));
                 }
             } else {
                 if (!abortPendingLoad(item.node, item.group_set_id, item.source_tier, item.source_blocks)) {
                     RTP_LLM_LOG_WARNING("reservation state mismatch, "
-                                        "group=%zu source=%s",
+                                        "group_set=%zu source=%s",
                                         item.group_set_id,
                                         tierName(item.source_tier));
                 }
@@ -415,9 +416,9 @@ void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
         copy_success = load_task_runner_.runTransfer(
             *task, *transfer_dispatcher_, metrics_reporter_, disk_timeout_ms_, host_timeout_ms_, prepared);
     } catch (const std::exception& error) {
-        RTP_LLM_LOG_ERROR("load worker failed with exception: %s", error.what());
+        RTP_LLM_LOG_ERROR("load task runner failed with exception: %s", error.what());
     } catch (...) {
-        RTP_LLM_LOG_ERROR("load worker failed with unknown exception");
+        RTP_LLM_LOG_ERROR("load task runner failed with unknown exception");
     }
 
     // Commit the copied batch only while every stateful item still belongs
@@ -437,23 +438,24 @@ bool BlockTreeLoader::settleLoadNolock(LoadTaskRunner::Task& task, bool copy_suc
     bool tree_data_mutated    = false;
     bool device_refs_released = false;
 
-    RTP_LLM_CHECK_WITH_INFO(task.items.size() == task.item_groups.size()
+    RTP_LLM_CHECK_WITH_INFO(task.items.size() == task.item_group_sets.size()
                                 && task.items.size() == task.target_installed.size(),
-                            "malformed load task: items=%zu groups=%zu targets=%zu",
+                            "malformed load task: items=%zu group_sets=%zu targets=%zu",
                             task.items.size(),
-                            task.item_groups.size(),
+                            task.item_group_sets.size(),
                             task.target_installed.size());
     for (size_t item_index = 0; item_index < task.items.size(); ++item_index) {
-        const LoadTicket::PendingLoadItem& item  = task.items[item_index];
-        const GroupSetPtr&                 group = task.item_groups[item_index];
-        RTP_LLM_CHECK_WITH_INFO(group != nullptr && group->groupSetId() == item.group_set_id && item.node != nullptr
+        const LoadTicket::PendingLoadItem& item      = task.items[item_index];
+        const GroupSetPtr&                 group_set = task.item_group_sets[item_index];
+        RTP_LLM_CHECK_WITH_INFO(group_set != nullptr && group_set->groupSetId() == item.group_set_id
+                                    && item.node != nullptr
                                     && item.group_set_id < item.node->group_set_resources.size(),
                                 "malformed load item: index=%zu group_set_id=%zu node=%p",
                                 item_index,
                                 item.group_set_id,
                                 static_cast<void*>(item.node));
         if (settlement_success && item.source_tier != Tier::DEVICE
-            && (item.target_device_blocks.size() != group->devicePoolCount()
+            && (item.target_device_blocks.size() != group_set->devicePoolCount()
                 || item.node->group_set_resources[item.group_set_id].transfer_state
                        != GroupSetTransferState::LOADING)) {
             RTP_LLM_LOG_WARNING("completion state mismatch, group_set=%zu", item.group_set_id);
@@ -463,12 +465,12 @@ bool BlockTreeLoader::settleLoadNolock(LoadTaskRunner::Task& task, bool copy_suc
 
     for (size_t item_index = 0; item_index < task.items.size(); ++item_index) {
         const LoadTicket::PendingLoadItem& item         = task.items[item_index];
-        const GroupSetPtr&                 group        = task.item_groups[item_index];
+        const GroupSetPtr&                 group_set    = task.item_group_sets[item_index];
         const size_t                       group_set_id = item.group_set_id;
 
         MultiNodeResource source_protection{group_set_id, item.source_tier, {item.source_blocks}};
         source_protection.tree_nodes = {item.node};
-        group->unreferenceBlocks(source_protection, BlockRefType::REQUEST);
+        group_set->unreferenceBlocks(source_protection, BlockRefType::REQUEST);
 
         if (item.source_tier == Tier::DEVICE) {
             evictor_.refreshCandidatesAfterRelease(source_protection);
@@ -478,12 +480,12 @@ bool BlockTreeLoader::settleLoadNolock(LoadTaskRunner::Task& task, bool copy_suc
         GroupSetResource& resource = item.node->group_set_resources[group_set_id];
         if (settlement_success) {
             MultiNodeResource target_holder{group_set_id, Tier::DEVICE, {item.target_device_blocks}};
-            group->setBlocks(resource, Tier::DEVICE, item.target_device_blocks);
-            group->referenceBlocks(target_holder, BlockRefType::BLOCK_CACHE);
-            group->unreferenceBlocks(target_holder, BlockRefType::REQUEST);
-            group->unreferenceBlocks(MultiNodeResource{group_set_id, item.source_tier, {item.source_blocks}},
-                                     BlockRefType::BLOCK_CACHE);
-            group->evictFromTier(item.node, resource, item.source_tier);
+            group_set->setBlocks(resource, Tier::DEVICE, item.target_device_blocks);
+            group_set->referenceBlocks(target_holder, BlockRefType::BLOCK_CACHE);
+            group_set->unreferenceBlocks(target_holder, BlockRefType::REQUEST);
+            group_set->unreferenceBlocks(MultiNodeResource{group_set_id, item.source_tier, {item.source_blocks}},
+                                         BlockRefType::BLOCK_CACHE);
+            group_set->evictFromTier(item.node, resource, item.source_tier);
             task.target_installed[item_index] = true;
             tree_data_mutated                 = true;
             RTP_LLM_CHECK_WITH_INFO(finishLoad(item.node, group_set_id, item.source_tier, true),
@@ -524,14 +526,14 @@ bool BlockTreeLoader::reserveLoad(TreeNode*                        node,
     if (node == nullptr || group_set_id >= group_sets_.size() || group_set_id >= node->group_set_resources.size()) {
         return false;
     }
-    const GroupSetPtr& group = group_sets_[group_set_id];
-    GroupSetResource&  slot  = node->group_set_resources[group_set_id];
-    if (group == nullptr || (source != Tier::HOST && source != Tier::DISK)
-        || slot.transfer_state != GroupSetTransferState::IDLE || group->getTopTier(slot) != source
-        || group->getBlocks(slot, source) != source_blocks) {
+    const GroupSetPtr& group_set = group_sets_[group_set_id];
+    GroupSetResource&  resource  = node->group_set_resources[group_set_id];
+    if (group_set == nullptr || (source != Tier::HOST && source != Tier::DISK)
+        || resource.transfer_state != GroupSetTransferState::IDLE || group_set->getTopTier(resource) != source
+        || group_set->getBlocks(resource, source) != source_blocks) {
         return false;
     }
-    slot.transfer_state = GroupSetTransferState::LOAD_PENDING;
+    resource.transfer_state = GroupSetTransferState::LOAD_PENDING;
     evictor_.refreshCandidate(node, group_set_id);
     return true;
 }
@@ -543,14 +545,14 @@ bool BlockTreeLoader::abortPendingLoad(TreeNode*                        node,
     if (node == nullptr || group_set_id >= group_sets_.size() || group_set_id >= node->group_set_resources.size()) {
         return false;
     }
-    const GroupSetPtr& group = group_sets_[group_set_id];
-    GroupSetResource&  slot  = node->group_set_resources[group_set_id];
-    if (group == nullptr || slot.transfer_state != GroupSetTransferState::LOAD_PENDING
-        || group->getTopTier(slot) != source || group->getBlocks(slot, source) != source_blocks) {
+    const GroupSetPtr& group_set = group_sets_[group_set_id];
+    GroupSetResource&  resource  = node->group_set_resources[group_set_id];
+    if (group_set == nullptr || resource.transfer_state != GroupSetTransferState::LOAD_PENDING
+        || group_set->getTopTier(resource) != source || group_set->getBlocks(resource, source) != source_blocks) {
         return false;
     }
-    slot.transfer_state = GroupSetTransferState::IDLE;
-    RTP_LLM_CHECK_WITH_INFO(group->isValidSteadyState(slot),
+    resource.transfer_state = GroupSetTransferState::IDLE;
+    RTP_LLM_CHECK_WITH_INFO(group_set->isValidSteadyState(resource),
                             "load abort produced invalid steady state: group_set_id=%zu node_key=%ld",
                             group_set_id,
                             node->cache_key);
@@ -562,13 +564,14 @@ bool BlockTreeLoader::beginLoad(TreeNode* node, size_t group_set_id, Tier source
     if (node == nullptr || group_set_id >= group_sets_.size() || group_set_id >= node->group_set_resources.size()) {
         return false;
     }
-    const GroupSetPtr& group = group_sets_[group_set_id];
-    GroupSetResource&  slot  = node->group_set_resources[group_set_id];
-    if (group == nullptr || (source != Tier::HOST && source != Tier::DISK) || group->getTopTier(slot) != source
-        || slot.transfer_state != GroupSetTransferState::LOAD_PENDING) {
+    const GroupSetPtr& group_set = group_sets_[group_set_id];
+    GroupSetResource&  resource  = node->group_set_resources[group_set_id];
+    if (group_set == nullptr || (source != Tier::HOST && source != Tier::DISK)
+        || group_set->getTopTier(resource) != source
+        || resource.transfer_state != GroupSetTransferState::LOAD_PENDING) {
         return false;
     }
-    slot.transfer_state = GroupSetTransferState::LOADING;
+    resource.transfer_state = GroupSetTransferState::LOADING;
     evictor_.refreshCandidate(node, group_set_id);
     return true;
 }
@@ -577,17 +580,17 @@ bool BlockTreeLoader::finishLoad(TreeNode* node, size_t group_set_id, Tier sourc
     if (node == nullptr || group_set_id >= group_sets_.size() || group_set_id >= node->group_set_resources.size()) {
         return false;
     }
-    const GroupSetPtr& group = group_sets_[group_set_id];
-    GroupSetResource&  slot  = node->group_set_resources[group_set_id];
-    if (group == nullptr || slot.transfer_state != GroupSetTransferState::LOADING) {
-        RTP_LLM_LOG_WARNING("state mismatch, group=%zu node_key=%ld state=%d",
+    const GroupSetPtr& group_set = group_sets_[group_set_id];
+    GroupSetResource&  resource  = node->group_set_resources[group_set_id];
+    if (group_set == nullptr || resource.transfer_state != GroupSetTransferState::LOADING) {
+        RTP_LLM_LOG_WARNING("state mismatch, group_set=%zu node_key=%ld state=%d",
                             group_set_id,
                             node->cache_key,
-                            static_cast<int>(slot.transfer_state));
+                            static_cast<int>(resource.transfer_state));
         return false;
     }
-    slot.transfer_state = GroupSetTransferState::IDLE;
-    RTP_LLM_CHECK_WITH_INFO(group->isValidSteadyState(slot),
+    resource.transfer_state = GroupSetTransferState::IDLE;
+    RTP_LLM_CHECK_WITH_INFO(group_set->isValidSteadyState(resource),
                             "load settlement produced invalid steady state: group_set_id=%zu node_key=%ld",
                             group_set_id,
                             node->cache_key);

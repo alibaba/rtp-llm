@@ -33,8 +33,8 @@ void GroupSet::initialize(size_t                               group_set_id,
     const auto&                first = topology->groupById(group_ids.front());
     std::unordered_set<size_t> unique_group_ids;
     size_t                     payload_bytes = 0;
-    for (size_t local_group_index = 0; local_group_index < group_ids.size(); ++local_group_index) {
-        const size_t group_id = group_ids[local_group_index];
+    for (size_t member_index = 0; member_index < group_ids.size(); ++member_index) {
+        const size_t group_id = group_ids[member_index];
         RTP_LLM_CHECK_WITH_INFO(group_id < topology_groups.size(),
                                 "GroupSet %zu invalid group_id=%zu topology_size=%zu",
                                 group_set_id,
@@ -42,17 +42,14 @@ void GroupSet::initialize(size_t                               group_set_id,
                                 topology_groups.size());
         RTP_LLM_CHECK_WITH_INFO(
             unique_group_ids.emplace(group_id).second, "GroupSet %zu duplicate group_id=%zu", group_set_id, group_id);
-        RTP_LLM_CHECK_WITH_INFO(device_pools[local_group_index] != nullptr,
-                                "GroupSet %zu device pool[%zu] is null",
-                                group_set_id,
-                                local_group_index);
+        RTP_LLM_CHECK_WITH_INFO(
+            device_pools[member_index] != nullptr, "GroupSet %zu device pool[%zu] is null", group_set_id, member_index);
 
         const auto& group = topology->groupById(group_id);
         RTP_LLM_CHECK_WITH_INFO(group.policy.enable_prefix_reuse,
-                                "GroupSet %zu contains non-reusable group_id=%zu tag=%s",
+                                "GroupSet %zu contains non-reusable group_id=%zu",
                                 group_set_id,
-                                group_id,
-                                group.tag.c_str());
+                                group_id);
         RTP_LLM_CHECK_WITH_INFO(
             !group.layer_ids.empty(), "GroupSet %zu group_id=%zu has no layers", group_set_id, group_id);
         RTP_LLM_CHECK_WITH_INFO(CacheConfig::samePolicy(group.policy, first.policy)
@@ -64,10 +61,9 @@ void GroupSet::initialize(size_t                               group_set_id,
                                     && group.kv_scale_stride_bytes == first.kv_scale_stride_bytes
                                     && (group.spec == nullptr) == (first.spec == nullptr)
                                     && (group.spec == nullptr || group.spec->type == first.spec->type),
-                                "GroupSet %zu incompatible group_id=%zu tag=%s",
+                                "GroupSet %zu incompatible group_id=%zu",
                                 group_set_id,
-                                group_id,
-                                group.tag.c_str());
+                                group_id);
 
         RTP_LLM_CHECK_WITH_INFO(group.kv_block_stride_bytes
                                     <= std::numeric_limits<size_t>::max() - group.kv_scale_stride_bytes,
@@ -101,37 +97,28 @@ size_t GroupSet::groupSetId() const {
     return group_set_id_;
 }
 
-const GroupBase& GroupSet::groupAt(size_t local_group_index) const {
-    RTP_LLM_CHECK_WITH_INFO(topology_ != nullptr && local_group_index < group_ids_.size(),
-                            "GroupSet %zu invalid local_group_index=%zu size=%zu",
+const GroupBase& GroupSet::groupAt(size_t member_index) const {
+    RTP_LLM_CHECK_WITH_INFO(topology_ != nullptr && member_index < group_ids_.size(),
+                            "GroupSet %zu invalid member_index=%zu size=%zu",
                             group_set_id_,
-                            local_group_index,
+                            member_index,
                             group_ids_.size());
-    return topology_->groupById(group_ids_[local_group_index]);
+    return topology_->groupById(group_ids_[member_index]);
 }
 
-std::vector<std::string> GroupSet::groupTags() const {
-    std::vector<std::string> tags;
-    tags.reserve(group_ids_.size());
-    for (size_t local_group_index = 0; local_group_index < group_ids_.size(); ++local_group_index) {
-        tags.push_back(groupAt(local_group_index).tag);
-    }
-    return tags;
-}
-
-void GroupSet::evictFromTier(TreeNode* node, GroupSetResource& slot, Tier tier) {
+void GroupSet::evictFromTier(TreeNode* node, GroupSetResource& resource, Tier tier) {
     // Clear only the tier's block fields; heap membership is owned by BlockTreeEvictor.
     switch (tier) {
         case Tier::DEVICE:
-            for (auto& block : slot.device_blocks) {
+            for (auto& block : resource.device_blocks) {
                 block = NULL_BLOCK_IDX;
             }
             break;
         case Tier::HOST:
-            slot.host_block = NULL_BLOCK_IDX;
+            resource.host_block = NULL_BLOCK_IDX;
             break;
         case Tier::DISK:
-            slot.disk_slot = NULL_BLOCK_IDX;
+            resource.disk_slot = NULL_BLOCK_IDX;
             break;
         default:
             break;
@@ -139,17 +126,17 @@ void GroupSet::evictFromTier(TreeNode* node, GroupSetResource& slot, Tier tier) 
 }
 
 TransferDescriptor GroupSet::buildTransfer(TreeNode* node, TransferType type) {
-    auto& slot = node->group_set_resources[groupSetId()];
+    auto& resource = node->group_set_resources[groupSetId()];
 
     switch (type) {
         case TransferType::DEVICE_TO_HOST:
-            return TransferDescriptor::deviceToHost(groupSetId(), slot.device_blocks, NULL_BLOCK_IDX);
+            return TransferDescriptor::deviceToHost(groupSetId(), resource.device_blocks, NULL_BLOCK_IDX);
         case TransferType::HOST_TO_DEVICE:
-            return TransferDescriptor::hostToDevice(groupSetId(), slot.host_block, slot.device_blocks);
+            return TransferDescriptor::hostToDevice(groupSetId(), resource.host_block, resource.device_blocks);
         case TransferType::HOST_TO_DISK:
-            return TransferDescriptor::hostToDisk(groupSetId(), slot.host_block, NULL_BLOCK_IDX);
+            return TransferDescriptor::hostToDisk(groupSetId(), resource.host_block, NULL_BLOCK_IDX);
         case TransferType::DISK_TO_HOST:
-            return TransferDescriptor::diskToHost(groupSetId(), slot.disk_slot, NULL_BLOCK_IDX);
+            return TransferDescriptor::diskToHost(groupSetId(), resource.disk_slot, NULL_BLOCK_IDX);
         default:
             return {};
     }
@@ -160,18 +147,18 @@ bool GroupSet::isLeafAtTier(const TreeNode* node, Tier tier) const {
     RTP_LLM_CHECK_WITH_INFO(node != nullptr && group_set_id < node->group_set_resources.size(),
                             "GroupSet::isLeafAtTier invalid node/group_set_id=%zu",
                             group_set_id);
-    auto& slot = node->group_set_resources[group_set_id];
+    auto& resource = node->group_set_resources[group_set_id];
 
     bool has_value = false;
     switch (tier) {
         case Tier::DEVICE:
-            has_value = hasCompleteDeviceValue(slot);
+            has_value = hasCompleteDeviceValue(resource);
             break;
         case Tier::HOST:
-            has_value = slot.hasTier(Tier::HOST);
+            has_value = resource.hasTier(Tier::HOST);
             break;
         case Tier::DISK:
-            has_value = slot.hasTier(Tier::DISK);
+            has_value = resource.hasTier(Tier::DISK);
             break;
         default:
             RTP_LLM_CHECK_WITH_INFO(
@@ -186,23 +173,23 @@ bool GroupSet::isLeafAtTier(const TreeNode* node, Tier tier) const {
         RTP_LLM_CHECK_WITH_INFO(child != nullptr && group_set_id < child->group_set_resources.size(),
                                 "GroupSet::isLeafAtTier invalid child/group_set_id=%zu",
                                 group_set_id);
-        auto& child_slot = child->group_set_resources[group_set_id];
-        if (child_slot.hasTier(tier)) {
+        auto& child_resource = child->group_set_resources[group_set_id];
+        if (child_resource.hasTier(tier)) {
             return false;
         }
     }
     return true;
 }
 
-bool GroupSet::hasCompleteDeviceValue(const GroupSetResource& slot) const {
-    return slot.device_blocks.size() == device_pools_.size()
-           && std::all_of(slot.device_blocks.begin(), slot.device_blocks.end(), [](BlockIdxType block) {
+bool GroupSet::hasCompleteDeviceValue(const GroupSetResource& resource) const {
+    return resource.device_blocks.size() == device_pools_.size()
+           && std::all_of(resource.device_blocks.begin(), resource.device_blocks.end(), [](BlockIdxType block) {
                   return !isNullBlockIdx(block);
               });
 }
 
-bool GroupSet::isValidSteadyState(const GroupSetResource& slot) const {
-    return slot.isValidSteadyState() && (slot.hasTier(Tier::DEVICE) == hasCompleteDeviceValue(slot));
+bool GroupSet::isValidSteadyState(const GroupSetResource& resource) const {
+    return resource.isValidSteadyState() && (resource.hasTier(Tier::DEVICE) == hasCompleteDeviceValue(resource));
 }
 
 bool GroupSet::hasAllocatedDeviceBlocks(const std::vector<BlockIdxType>& blocks) const {
@@ -369,57 +356,57 @@ void GroupSet::releaseSingleBlock(Tier tier, BlockIdxType block, BlockRefType re
     }
 }
 
-std::vector<BlockIdxType> GroupSet::getBlocks(const GroupSetResource& slot, Tier tier) const {
-    if (!slot.hasTier(tier)) {
+std::vector<BlockIdxType> GroupSet::getBlocks(const GroupSetResource& resource, Tier tier) const {
+    if (!resource.hasTier(tier)) {
         return {};
     }
     switch (tier) {
         case Tier::DEVICE:
-            return slot.device_blocks;
+            return resource.device_blocks;
         case Tier::HOST:
-            return {slot.host_block};
+            return {resource.host_block};
         case Tier::DISK:
-            return {slot.disk_slot};
+            return {resource.disk_slot};
         default:
             return {};
     }
 }
 
-Tier GroupSet::getTopTier(const GroupSetResource& slot) const {
-    if (slot.hasTier(Tier::DEVICE)) {
+Tier GroupSet::getTopTier(const GroupSetResource& resource) const {
+    if (resource.hasTier(Tier::DEVICE)) {
         return Tier::DEVICE;
     }
-    if (slot.hasTier(Tier::HOST)) {
+    if (resource.hasTier(Tier::HOST)) {
         return Tier::HOST;
     }
-    if (slot.hasTier(Tier::DISK)) {
+    if (resource.hasTier(Tier::DISK)) {
         return Tier::DISK;
     }
     return Tier::NONE;
 }
 
-void GroupSet::setBlocks(GroupSetResource& slot, Tier tier, const std::vector<BlockIdxType>& blocks) {
+void GroupSet::setBlocks(GroupSetResource& resource, Tier tier, const std::vector<BlockIdxType>& blocks) {
     switch (tier) {
         case Tier::DEVICE:
-            slot.device_blocks = blocks;
+            resource.device_blocks = blocks;
             break;
         case Tier::HOST:
-            slot.host_block = blocks.empty() ? NULL_BLOCK_IDX : blocks[0];
+            resource.host_block = blocks.empty() ? NULL_BLOCK_IDX : blocks[0];
             break;
         case Tier::DISK:
-            slot.disk_slot = blocks.empty() ? NULL_BLOCK_IDX : blocks[0];
+            resource.disk_slot = blocks.empty() ? NULL_BLOCK_IDX : blocks[0];
             break;
         default:
             break;
     }
 }
 
-bool GroupSet::isSlotEvictable(const TreeNode& node, Tier tier) const {
+bool GroupSet::isEvictable(const TreeNode& node, Tier tier) const {
     const size_t group_set_id = groupSetId();
     if (group_set_id >= node.group_set_resources.size()) {
         return false;
     }
-    const auto& slot = node.group_set_resources[group_set_id];
+    const auto& resource = node.group_set_resources[group_set_id];
 
     // A block is evictable only when its sole holder is the cache reference
     // (refCount == 1). When no pool owns the block, treat it as evictable.
@@ -432,20 +419,20 @@ bool GroupSet::isSlotEvictable(const TreeNode& node, Tier tier) const {
 
     switch (tier) {
         case Tier::DEVICE:
-            if (!hasCompleteDeviceValue(slot)) {
+            if (!hasCompleteDeviceValue(resource)) {
                 return false;
             }
-            for (size_t i = 0; i < slot.device_blocks.size(); ++i) {
+            for (size_t i = 0; i < resource.device_blocks.size(); ++i) {
                 const auto& pool = i < device_pools_.size() ? device_pools_[i] : nullptr;
-                if (!pool_evictable(pool, slot.device_blocks[i])) {
+                if (!pool_evictable(pool, resource.device_blocks[i])) {
                     return false;
                 }
             }
             return true;
         case Tier::HOST:
-            return slot.hasTier(Tier::HOST) && pool_evictable(host_pool_, slot.host_block);
+            return resource.hasTier(Tier::HOST) && pool_evictable(host_pool_, resource.host_block);
         case Tier::DISK:
-            return slot.hasTier(Tier::DISK) && pool_evictable(disk_pool_, slot.disk_slot);
+            return resource.hasTier(Tier::DISK) && pool_evictable(disk_pool_, resource.disk_slot);
         default:
             return false;
     }

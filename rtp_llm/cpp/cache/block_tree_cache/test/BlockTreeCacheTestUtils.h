@@ -63,10 +63,10 @@ makeBlockTreeCacheForTest(std::unique_ptr<BlockTree>        tree,
                           std::shared_ptr<StorageBackend>   storage_backend   = nullptr,
                           std::shared_ptr<BroadcastManager> broadcast_manager = nullptr);
 
-bool insertGroupSetSlots(BlockTreeCache&                                   cache,
-                         TreeNode*                                         parent,
-                         const CacheKeysType&                              cache_keys,
-                         const std::vector<std::vector<GroupSetResource>>& resources);
+bool insertGroupSetResources(BlockTreeCache&                                   cache,
+                             TreeNode*                                         parent,
+                             const CacheKeysType&                              cache_keys,
+                             const std::vector<std::vector<GroupSetResource>>& resources);
 
 class BlockTreeCacheTestPeer {
 public:
@@ -91,7 +91,7 @@ public:
     static void setPerRankBlockTransferEngineForTest(BlockTreeCache&               cache,
                                                      PerRankBlockTransferEnginePtr per_rank_transfer_engine);
     static void runMaintenanceForTest(BlockTreeCache& cache);
-    static bool demoteOneForGroupForTest(BlockTreeCache& cache, size_t group_set_id, Tier tier);
+    static bool demoteOneForGroupSetForTest(BlockTreeCache& cache, size_t group_set_id, Tier tier);
     static int  reclaimBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier = Tier::DEVICE);
     static int  pendingTasksForTest(const BlockTreeCache& cache);
 
@@ -142,15 +142,15 @@ public:
     void runMaintenance();
     void reclaimAll();
 
-    bool allSlotsAtTier(Tier tier) const;
+    bool allResourcesAtTier(Tier tier) const;
     void expectPayloads() const;
     void expectFullyReclaimed() const;
     void expectPoolFreeCounts(const std::vector<size_t>& device_free,
                               const std::vector<size_t>& host_free,
                               const std::vector<size_t>& disk_free) const;
 
-    std::vector<BlockIdxType>     blocksForTag(size_t tag_id) const;
-    std::vector<GroupSetResource> slotsForPathNode(size_t path_index) const;
+    std::vector<BlockIdxType>     blocksForDevicePool(size_t pool_id) const;
+    std::vector<GroupSetResource> resourcesForPathNode(size_t path_index) const;
 
     CacheKeysType                                        keys;
     std::vector<GroupSetPtr>                             groups;

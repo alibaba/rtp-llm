@@ -4,7 +4,6 @@
 #include <algorithm>
 #include <limits>
 #include <string>
-#include <unordered_map>
 #include <unordered_set>
 #include <utility>
 #include <vector>
@@ -49,19 +48,18 @@ int checkedTimeout(int64_t timeout_ms, const char* name) {
     return static_cast<int>(timeout_ms);
 }
 
-int slidingWindowSize(const GroupBase& group) {
-    RTP_LLM_CHECK_WITH_INFO(group.policy.group_type == CacheGroupType::SWA,
-                            "sliding window requested for non-SWA tag %s",
-                            group.tag.c_str());
-    RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "SWA tag %s has null cache spec", group.tag.c_str());
+int slidingWindowSize(const GroupBase& group, size_t group_id) {
+    RTP_LLM_CHECK_WITH_INFO(
+        group.policy.group_type == CacheGroupType::SWA, "sliding window requested for non-SWA group_id=%zu", group_id);
+    RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "SWA group_id=%zu has null cache spec", group_id);
     RTP_LLM_CHECK_WITH_INFO(group.policy.sliding_window_size >= 0,
-                            "SWA tag %s has invalid sliding window=%d",
-                            group.tag.c_str(),
+                            "SWA group_id=%zu has invalid sliding window=%d",
+                            group_id,
                             group.policy.sliding_window_size);
     return group.policy.sliding_window_size;
 }
 
-GroupSetPtr createGroupSet(const GroupBase& group) {
+GroupSetPtr createGroupSet(const GroupBase& group, size_t group_id) {
     GroupSetPtr result;
     switch (group.policy.group_type) {
         case CacheGroupType::FULL:
@@ -73,14 +71,14 @@ GroupSetPtr createGroupSet(const GroupBase& group) {
         case CacheGroupType::SWA: {
             const auto seq_size = group.seq_size_per_block;
             RTP_LLM_CHECK_WITH_INFO(seq_size > 0 && seq_size <= static_cast<size_t>(std::numeric_limits<int>::max()),
-                                    "SWA tag %s has invalid seq_size_per_block=%zu",
-                                    group.tag.c_str(),
+                                    "SWA group_id=%zu has invalid seq_size_per_block=%zu",
+                                    group_id,
                                     seq_size);
-            result = std::make_shared<SWAGroupSet>(slidingWindowSize(group), static_cast<int>(seq_size));
+            result = std::make_shared<SWAGroupSet>(slidingWindowSize(group, group_id), static_cast<int>(seq_size));
             break;
         }
     }
-    RTP_LLM_CHECK_WITH_INFO(result != nullptr, "unsupported cache group type for tag %s", group.tag.c_str());
+    RTP_LLM_CHECK_WITH_INFO(result != nullptr, "unsupported cache group type for group_id=%zu", group_id);
     return result;
 }
 
@@ -99,50 +97,44 @@ std::vector<KVCacheGroupPtr> alignAllocatorGroups(const CacheConfig&         cac
         return {};
     }
 
-    std::unordered_map<std::string, KVCacheGroupPtr> by_tag;
-    by_tag.reserve(allocator_groups.size());
+    std::vector<KVCacheGroupPtr> aligned(group_count);
     for (const auto& group : allocator_groups) {
-        if (!group || group->tag().empty() || !group->blockPool()) {
-            RTP_LLM_LOG_ERROR("createBlockTreeCache: allocator group/tag/direct pool must be non-null");
+        if (!group || !group->blockPool()) {
+            RTP_LLM_LOG_ERROR("createBlockTreeCache: allocator group/direct pool must be non-null");
             return {};
         }
-        if (!by_tag.emplace(group->tag(), group).second) {
-            RTP_LLM_LOG_ERROR("createBlockTreeCache: duplicate allocator group tag %s", group->tag().c_str());
+        const int group_id = group->group_id();
+        if (group_id < 0 || static_cast<size_t>(group_id) >= group_count) {
+            RTP_LLM_LOG_ERROR(
+                "createBlockTreeCache: allocator group_id=%d out of range [0, %zu)", group_id, group_count);
             return {};
         }
+        auto& aligned_group = aligned[static_cast<size_t>(group_id)];
+        if (aligned_group != nullptr) {
+            RTP_LLM_LOG_ERROR("createBlockTreeCache: duplicate allocator group_id=%d", group_id);
+            return {};
+        }
+        aligned_group = group;
     }
 
-    std::vector<KVCacheGroupPtr> aligned;
-    aligned.reserve(group_count);
-    std::unordered_set<std::string> topology_tags;
-    topology_tags.reserve(group_count);
-    for (const auto& declared : cache_config.topology().groups()) {
-        if (declared.tag.empty() || !topology_tags.emplace(declared.tag).second) {
-            RTP_LLM_LOG_ERROR("createBlockTreeCache: topology contains an empty or duplicate stable tag");
+    for (size_t group_id = 0; group_id < group_count; ++group_id) {
+        const auto& group = aligned[group_id];
+        if (group == nullptr) {
+            RTP_LLM_LOG_ERROR("createBlockTreeCache: allocator is missing group_id=%zu", group_id);
             return {};
         }
-        const auto it = by_tag.find(declared.tag);
-        if (it == by_tag.end()) {
-            RTP_LLM_LOG_ERROR("createBlockTreeCache: allocator is missing topology tag %s", declared.tag.c_str());
-            return {};
-        }
-        const auto& actual = it->second->config();
-        if (actual.tag != declared.tag || actual.spec != declared.spec
-            || !CacheConfig::samePolicy(actual.policy, declared.policy) || actual.layer_ids != declared.layer_ids
-            || actual.block_num != declared.block_num || actual.local_kv_head_num != declared.local_kv_head_num
+        const auto& actual   = group->config();
+        const auto& declared = cache_config.topology().groupById(group_id);
+        if (actual.spec != declared.spec || !CacheConfig::samePolicy(actual.policy, declared.policy)
+            || actual.layer_ids != declared.layer_ids || actual.block_num != declared.block_num
+            || actual.local_kv_head_num != declared.local_kv_head_num
             || actual.seq_size_per_block != declared.seq_size_per_block
             || actual.kernel_seq_size_per_block != declared.kernel_seq_size_per_block
             || actual.kv_block_stride_bytes != declared.kv_block_stride_bytes
             || actual.kv_scale_stride_bytes != declared.kv_scale_stride_bytes) {
-            RTP_LLM_LOG_ERROR("createBlockTreeCache: allocator group does not exactly match topology tag %s",
-                              declared.tag.c_str());
+            RTP_LLM_LOG_ERROR("createBlockTreeCache: allocator group_id=%zu does not exactly match topology", group_id);
             return {};
         }
-        aligned.push_back(it->second);
-    }
-    if (topology_tags.size() != by_tag.size()) {
-        RTP_LLM_LOG_ERROR("createBlockTreeCache: allocator contains an unknown stable tag");
-        return {};
     }
     return aligned;
 }
@@ -204,11 +196,10 @@ struct AggregationPlan {
     std::vector<std::vector<int>> members;
 };
 
-bool aggregationCompatible(const CacheConfig& cache_config, int lhs_gid, int rhs_gid) {
-    const auto& lhs = cache_config.topology().groupById(static_cast<size_t>(lhs_gid));
-    const auto& rhs = cache_config.topology().groupById(static_cast<size_t>(rhs_gid));
-    if (lhs.policy.evict_policy != CacheEvictPolicy::CHAIN || rhs.policy.evict_policy != CacheEvictPolicy::CHAIN
-        || !CacheConfig::samePolicy(lhs.policy, rhs.policy) || lhs.block_num != rhs.block_num
+bool aggregationCompatible(const CacheConfig& cache_config, int lhs_group_id, int rhs_group_id) {
+    const auto& lhs = cache_config.topology().groupById(static_cast<size_t>(lhs_group_id));
+    const auto& rhs = cache_config.topology().groupById(static_cast<size_t>(rhs_group_id));
+    if (!CacheConfig::samePolicy(lhs.policy, rhs.policy) || lhs.block_num != rhs.block_num
         || lhs.local_kv_head_num != rhs.local_kv_head_num || lhs.seq_size_per_block != rhs.seq_size_per_block
         || lhs.kernel_seq_size_per_block != rhs.kernel_seq_size_per_block
         || lhs.kv_block_stride_bytes != rhs.kv_block_stride_bytes
@@ -217,7 +208,8 @@ bool aggregationCompatible(const CacheConfig& cache_config, int lhs_gid, int rhs
         return false;
     }
     if (lhs.policy.group_type == CacheGroupType::SWA) {
-        return slidingWindowSize(lhs) == slidingWindowSize(rhs);
+        return slidingWindowSize(lhs, static_cast<size_t>(lhs_group_id))
+               == slidingWindowSize(rhs, static_cast<size_t>(rhs_group_id));
     }
     return true;
 }
@@ -347,20 +339,20 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
         const auto&                     members = plan.members[aggregate_index];
         const auto&                     first = cache_config.topology().groupById(static_cast<size_t>(members.front()));
         const size_t                    group_set_id = aggregate_index;
-        auto                            group_set    = createGroupSet(first);
+        auto                            group_set    = createGroupSet(first, static_cast<size_t>(members.front()));
         std::vector<DeviceBlockPoolPtr> device_pools;
         std::vector<size_t>             group_ids;
         device_pools.reserve(members.size());
         group_ids.reserve(members.size());
 
-        for (size_t local_pool = 0; local_pool < members.size(); ++local_pool) {
-            const int group_id = members[local_pool];
+        for (size_t member_index = 0; member_index < members.size(); ++member_index) {
+            const int group_id = members[member_index];
             device_pools.push_back(group_pools[static_cast<size_t>(group_id)]);
             group_ids.push_back(static_cast<size_t>(group_id));
         }
 
         group_set->initialize(group_set_id, cache_config.topologyPtr(), std::move(group_ids), std::move(device_pools));
-        RTP_LLM_LOG_INFO("createBlockTreeCache: group[%zu] membership sealed: payload_bytes=%zu",
+        RTP_LLM_LOG_INFO("createBlockTreeCache: group_set[%zu] membership sealed: payload_bytes=%zu",
                          group_set_id,
                          group_set->payloadBytes());
         group_sets.push_back(std::move(group_set));

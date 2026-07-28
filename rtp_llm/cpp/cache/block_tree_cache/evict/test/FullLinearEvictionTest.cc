@@ -10,7 +10,7 @@ namespace {
 using block_tree_cache_test::BlockTreeCacheTestPeer;
 using block_tree_cache_test::makeBlockTreeCacheForTest;
 
-// Helper: build BlockTreeCache with Full(REUSABLE, gid=0) + Linear(REUSABLE, gid=1).
+// Helper: build BlockTreeCache with Full(REUSABLE, group_set_id=0) + Linear(REUSABLE, group_set_id=1).
 class FullLinearEvictionTest: public ::testing::Test {
 protected:
     void SetUp() override {
@@ -23,12 +23,12 @@ protected:
     }
 
     void insertPath(const CacheKeysType& keys, BlockIdxType full_block, BlockIdxType linear_block) {
-        std::vector<std::vector<GroupSetResource>> slots(keys.size(), std::vector<GroupSetResource>(2));
+        std::vector<std::vector<GroupSetResource>> resources(keys.size(), std::vector<GroupSetResource>(2));
         for (size_t i = 0; i < keys.size(); ++i) {
-            slots[i][0].device_blocks = {static_cast<BlockIdxType>(full_block + i)};
-            slots[i][1].device_blocks = {static_cast<BlockIdxType>(linear_block + i)};
+            resources[i][0].device_blocks = {static_cast<BlockIdxType>(full_block + i)};
+            resources[i][1].device_blocks = {static_cast<BlockIdxType>(linear_block + i)};
         }
-        cache_->insert(nullptr, keys, slots);
+        cache_->insert(nullptr, keys, resources);
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -75,11 +75,11 @@ TEST_F(FullLinearEvictionTest, LinearOnlySequentialDrain) {
     std::unique_ptr<BlockTreeCache> lin_cache = makeBlockTreeCacheForTest(
         std::move(tree), std::move(groups), BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
 
-    std::vector<std::vector<GroupSetResource>> slots(3, std::vector<GroupSetResource>(1));
-    slots[0][0].device_blocks = {30};
-    slots[1][0].device_blocks = {31};
-    slots[2][0].device_blocks = {32};
-    lin_cache->insert(nullptr, {100, 200, 300}, slots);
+    std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(1));
+    resources[0][0].device_blocks = {30};
+    resources[1][0].device_blocks = {31};
+    resources[2][0].device_blocks = {32};
+    lin_cache->insert(nullptr, {100, 200, 300}, resources);
 
     EXPECT_EQ(lin_cache->getStats().device_heap_total_size, 3u);
 

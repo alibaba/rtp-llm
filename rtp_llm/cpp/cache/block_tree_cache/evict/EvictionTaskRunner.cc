@@ -101,15 +101,15 @@ EvictionTaskRunner::collectReleaseCredits(const BlockTreeEvictor::EvictionPlan& 
         if (move.source_tier != Tier::DEVICE) {
             return;
         }
-        const size_t group_set_index = move.group_set_id;
-        RTP_LLM_CHECK_WITH_INFO(group_set_index < group_sets_->size(),
+        const size_t group_set_id = move.group_set_id;
+        RTP_LLM_CHECK_WITH_INFO(group_set_id < group_sets_->size(),
                                 "eviction plan has invalid group_set_id=%zu group_set_count=%zu",
-                                group_set_index,
+                                group_set_id,
                                 group_sets_->size());
-        const auto& pools = (*group_sets_)[group_set_index]->devicePools();
+        const auto& pools = (*group_sets_)[group_set_id]->devicePools();
         RTP_LLM_CHECK_WITH_INFO(move.source_blocks.size() == pools.size(),
                                 "eviction plan DEVICE width mismatch: group_set_id=%zu expected=%zu actual=%zu",
-                                group_set_index,
+                                group_set_id,
                                 pools.size(),
                                 move.source_blocks.size());
         for (size_t i = 0; i < pools.size(); ++i) {
@@ -248,7 +248,7 @@ BlockTreeEvictor::CopyResultSet EvictionTaskRunner::performCopy(const BlockTreeE
         results.primary_success = executeTierCopy(plan.primary);
         if (!results.primary_success) {
             RTP_LLM_LOG_WARNING("primary copy FAILED "
-                                "group[%zu] node_key=%ld %s->%s",
+                                "group_set[%zu] node_key=%ld %s->%s",
                                 plan.primary.group_set_id,
                                 plan.primary.node ? plan.primary.node->cache_key : 0,
                                 tierName(plan.primary.source_tier),
@@ -257,7 +257,7 @@ BlockTreeEvictor::CopyResultSet EvictionTaskRunner::performCopy(const BlockTreeE
             return results;
         }
         RTP_LLM_LOG_DEBUG("primary copy OK "
-                          "group[%zu] node_key=%ld %s->%s",
+                          "group_set[%zu] node_key=%ld %s->%s",
                           plan.primary.group_set_id,
                           plan.primary.node ? plan.primary.node->cache_key : 0,
                           tierName(plan.primary.source_tier),
@@ -274,14 +274,14 @@ BlockTreeEvictor::CopyResultSet EvictionTaskRunner::performCopy(const BlockTreeE
 
         if (!copy_ok) {
             RTP_LLM_LOG_WARNING("cascade copy FAILED "
-                                "group[%zu] node_key=%ld %s->%s",
+                                "group_set[%zu] node_key=%ld %s->%s",
                                 cascade_move.group_set_id,
                                 cascade_move.node ? cascade_move.node->cache_key : 0,
                                 tierName(cascade_move.source_tier),
                                 tierName(cascade_move.target_tier));
         } else if (cascade_move.target_tier != Tier::NONE) {
             RTP_LLM_LOG_DEBUG("cascade copy OK "
-                              "group[%zu] node_key=%ld %s->%s",
+                              "group_set[%zu] node_key=%ld %s->%s",
                               cascade_move.group_set_id,
                               cascade_move.node ? cascade_move.node->cache_key : 0,
                               tierName(cascade_move.source_tier),

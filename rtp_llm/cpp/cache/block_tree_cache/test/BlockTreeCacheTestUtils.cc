@@ -156,7 +156,7 @@ size_t treeCachedBlocksNum(const IBlockPool& pool) {
 
 namespace {
 
-DeviceBlockPoolPtr makeStructuralDevicePool(const std::string& tag) {
+DeviceBlockPoolPtr makeStructuralDevicePool(size_t group_set_id) {
     constexpr size_t physical_block_count = 1024;
     constexpr size_t block_bytes          = 1;
 
@@ -175,7 +175,7 @@ DeviceBlockPoolPtr makeStructuralDevicePool(const std::string& tag) {
 
     auto config                     = std::make_shared<DeviceBlockPoolConfig>();
     config->pool_type               = BlockPoolType::DEVICE;
-    config->pool_name               = "block_tree_cache_test_" + tag;
+    config->pool_name               = "block_tree_cache_test_" + std::to_string(group_set_id);
     config->physical_block_count    = physical_block_count;
     config->total_size_bytes        = layout.total_size_bytes;
     config->memory_layouts          = {layout};
@@ -196,10 +196,10 @@ void prepareGroupSets(std::vector<GroupSetPtr>& group_sets) {
         return;
     }
 
-    std::vector<block_transfer_engine_test::TestGroupSpec> specs;
-    specs.reserve(group_sets.size());
-    for (size_t group_set_index = 0; group_set_index < group_sets.size(); ++group_set_index) {
-        const GroupSetPtr& group_set = group_sets[group_set_index];
+    std::vector<GroupBase> groups;
+    groups.reserve(group_sets.size());
+    for (size_t group_set_id = 0; group_set_id < group_sets.size(); ++group_set_id) {
+        const GroupSetPtr& group_set = group_sets[group_set_id];
         RTP_LLM_CHECK(group_set != nullptr && group_set->topology() == nullptr);
 
         CacheGroupType type               = CacheGroupType::FULL;
@@ -221,20 +221,14 @@ void prepareGroupSets(std::vector<GroupSetPtr>& group_sets) {
         } else if (group_set->diskPool() != nullptr) {
             payload_bytes = group_set->diskPool()->payloadBytes();
         }
-        specs.push_back({"tag_" + std::to_string(group_set_index),
-                         policy,
-                         {static_cast<int>(group_set_index)},
-                         payload_bytes,
-                         0,
-                         128,
-                         seq_size_per_block});
+        groups.push_back(block_transfer_engine_test::makeTestGroupBase(
+            policy, {static_cast<int>(group_set_id)}, payload_bytes, 0, 128, seq_size_per_block));
     }
 
-    auto topology = block_transfer_engine_test::makeTestTopology(std::move(specs));
-    for (size_t group_set_index = 0; group_set_index < group_sets.size(); ++group_set_index) {
-        const std::string tag = "tag_" + std::to_string(group_set_index);
-        group_sets[group_set_index]->initialize(
-            group_set_index, topology, {group_set_index}, {makeStructuralDevicePool(tag)});
+    auto topology = block_transfer_engine_test::makeTestTopology(std::move(groups));
+    for (size_t group_set_id = 0; group_set_id < group_sets.size(); ++group_set_id) {
+        group_sets[group_set_id]->initialize(
+            group_set_id, topology, {group_set_id}, {makeStructuralDevicePool(group_set_id)});
     }
 }
 
@@ -267,10 +261,10 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::unique_ptr<BlockT
     return cache;
 }
 
-bool insertGroupSetSlots(BlockTreeCache&                                   cache,
-                         TreeNode*                                         parent,
-                         const CacheKeysType&                              cache_keys,
-                         const std::vector<std::vector<GroupSetResource>>& resources) {
+bool insertGroupSetResources(BlockTreeCache&                                   cache,
+                             TreeNode*                                         parent,
+                             const CacheKeysType&                              cache_keys,
+                             const std::vector<std::vector<GroupSetResource>>& resources) {
     BlockTree* tree = cache.tree();
     if (tree == nullptr) {
         return false;
@@ -298,7 +292,7 @@ bool insertGroupSetSlots(BlockTreeCache&                                   cache
             group->referenceBlocks(MultiNodeResource{group_set_id, Tier::DEVICE, {blocks}}, BlockRefType::BLOCK_CACHE);
         }
     }
-    for (const BlockTreeAdoptedSlot& adopted : insert_result.adopted_slots) {
+    for (const BlockTreeAdoptedResource& adopted : insert_result.adopted_resources) {
         if (adopted.node == nullptr || adopted.group_set_id >= group_sets.size()
             || group_sets[adopted.group_set_id] == nullptr
             || adopted.group_set_id >= adopted.node->group_set_resources.size()) {
@@ -334,7 +328,7 @@ void BlockTreeCacheTestPeer::runMaintenanceForTest(BlockTreeCache& cache) {
     cache.checkWatermark();
 }
 
-bool BlockTreeCacheTestPeer::demoteOneForGroupForTest(BlockTreeCache& cache, size_t group_set_id, Tier tier) {
+bool BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(BlockTreeCache& cache, size_t group_set_id, Tier tier) {
     std::lock_guard<std::mutex> lock(cache.mutex_);
     if (!cache.config_.isTierEnabled(tier)) {
         return false;
@@ -477,8 +471,8 @@ namespace {
 
 constexpr size_t kGroupPayloadBytes = 16;
 
-uint8_t payloadPattern(size_t tag_id, size_t path_index) {
-    return static_cast<uint8_t>(0x10 + tag_id * 0x20 + path_index);
+uint8_t payloadPattern(size_t pool_id, size_t path_index) {
+    return static_cast<uint8_t>(0x10 + pool_id * 0x20 + path_index);
 }
 
 void fillDeviceBlock(const DeviceBlockPoolPtr& pool, BlockIdxType block, uint8_t pattern) {
@@ -561,9 +555,9 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
     swa_policy.enable_prefix_reuse  = true;
     swa_policy.sliding_window_size  = 2;
     environment->topology           = block_transfer_engine_test::makeTestTopology({
-        {"tag_0", full_policy, {0}, kGroupPayloadBytes, 0},
-        {"tag_1", full_policy, {0}, kGroupPayloadBytes, 0},
-        {"tag_2", swa_policy, {0}, kGroupPayloadBytes, 0},
+        block_transfer_engine_test::makeTestGroupBase(full_policy, {0}, kGroupPayloadBytes),
+        block_transfer_engine_test::makeTestGroupBase(full_policy, {0}, kGroupPayloadBytes),
+        block_transfer_engine_test::makeTestGroupBase(swa_policy, {0}, kGroupPayloadBytes),
     });
 
     auto full = block_transfer_engine_test::makeTestGroupSet(
@@ -616,12 +610,12 @@ void FullSWAEnvironment::insertRequestPath() {
     request_refs_released_.assign(2, false);
     fillRequestPayloads();
 
-    std::vector<std::vector<GroupSetResource>> slots(options_.path_length, std::vector<GroupSetResource>(2));
+    std::vector<std::vector<GroupSetResource>> resources(options_.path_length, std::vector<GroupSetResource>(2));
     for (size_t path_index = 0; path_index < options_.path_length; ++path_index) {
-        slots[path_index][0].device_blocks = request_blocks[0].per_node[path_index];
-        slots[path_index][1].device_blocks = request_blocks[1].per_node[path_index];
+        resources[path_index][0].device_blocks = request_blocks[0].per_node[path_index];
+        resources[path_index][1].device_blocks = request_blocks[1].per_node[path_index];
     }
-    cache->insert(nullptr, keys, slots);
+    cache->insert(nullptr, keys, resources);
 }
 
 void FullSWAEnvironment::releaseRequestRefs() {
@@ -666,8 +660,8 @@ void FullSWAEnvironment::demoteAll(Tier tier) {
         runMaintenance();
         bool source_present = false;
         for (size_t path_index = 0; path_index < options_.path_length; ++path_index) {
-            for (const GroupSetResource& slot : slotsForPathNode(path_index)) {
-                source_present = source_present || slot.hasTier(tier);
+            for (const GroupSetResource& resource : resourcesForPathNode(path_index)) {
+                source_present = source_present || resource.hasTier(tier);
             }
         }
         if (!source_present) {
@@ -690,10 +684,10 @@ void FullSWAEnvironment::reclaimAll() {
     cache->waitForPendingTasks();
 }
 
-bool FullSWAEnvironment::allSlotsAtTier(Tier tier) const {
+bool FullSWAEnvironment::allResourcesAtTier(Tier tier) const {
     for (size_t path_index = 0; path_index < options_.path_length; ++path_index) {
-        for (const GroupSetResource& slot : slotsForPathNode(path_index)) {
-            if (!slot.hasTier(tier)) {
+        for (const GroupSetResource& resource : resourcesForPathNode(path_index)) {
+            if (!resource.hasTier(tier)) {
                 return false;
             }
         }
@@ -701,20 +695,20 @@ bool FullSWAEnvironment::allSlotsAtTier(Tier tier) const {
     return true;
 }
 
-std::vector<BlockIdxType> FullSWAEnvironment::blocksForTag(size_t tag_id) const {
+std::vector<BlockIdxType> FullSWAEnvironment::blocksForDevicePool(size_t pool_id) const {
     std::vector<BlockIdxType> result;
-    if (tag_id >= 3 || request_blocks.size() != 2) {
+    if (pool_id >= 3 || request_blocks.size() != 2) {
         return result;
     }
-    const size_t group_id   = tag_id < 2 ? 0 : 1;
-    const size_t pool_index = tag_id < 2 ? tag_id : 0;
+    const size_t group_id   = pool_id < 2 ? 0 : 1;
+    const size_t pool_index = pool_id < 2 ? pool_id : 0;
     for (const auto& node_blocks : request_blocks[group_id].per_node) {
         result.push_back(node_blocks[pool_index]);
     }
     return result;
 }
 
-std::vector<GroupSetResource> FullSWAEnvironment::slotsForPathNode(size_t path_index) const {
+std::vector<GroupSetResource> FullSWAEnvironment::resourcesForPathNode(size_t path_index) const {
     if (path_index >= keys.size()) {
         return {};
     }
@@ -726,46 +720,47 @@ std::vector<GroupSetResource> FullSWAEnvironment::slotsForPathNode(size_t path_i
 }
 
 void FullSWAEnvironment::fillRequestPayloads() {
-    for (size_t tag_id = 0; tag_id < 3; ++tag_id) {
-        const std::vector<BlockIdxType> blocks = blocksForTag(tag_id);
+    for (size_t pool_id = 0; pool_id < 3; ++pool_id) {
+        const std::vector<BlockIdxType> blocks = blocksForDevicePool(pool_id);
         for (size_t path_index = 0; path_index < blocks.size(); ++path_index) {
-            fillDeviceBlock(device_pools[tag_id], blocks[path_index], payloadPattern(tag_id, path_index));
+            fillDeviceBlock(device_pools[pool_id], blocks[path_index], payloadPattern(pool_id, path_index));
         }
     }
 }
 
 void FullSWAEnvironment::expectPayloads() const {
     for (size_t path_index = 0; path_index < options_.path_length; ++path_index) {
-        const std::vector<GroupSetResource> node_slots = slotsForPathNode(path_index);
-        ASSERT_EQ(node_slots.size(), 2u);
-        for (size_t group_id = 0; group_id < node_slots.size(); ++group_id) {
-            const GroupSetResource& slot = node_slots[group_id];
-            if (slot.hasTier(Tier::DEVICE)) {
-                const size_t tag_begin = group_id == 0 ? 0 : 2;
-                for (size_t pool_index = 0; pool_index < slot.device_blocks.size(); ++pool_index) {
-                    const size_t tag_id = tag_begin + pool_index;
-                    expectDeviceBlock(
-                        device_pools[tag_id], slot.device_blocks[pool_index], payloadPattern(tag_id, path_index));
+        const std::vector<GroupSetResource> node_resources = resourcesForPathNode(path_index);
+        ASSERT_EQ(node_resources.size(), 2u);
+        for (size_t group_id = 0; group_id < node_resources.size(); ++group_id) {
+            const GroupSetResource& resource = node_resources[group_id];
+            if (resource.hasTier(Tier::DEVICE)) {
+                const size_t device_pool_begin = group_id == 0 ? 0 : 2;
+                for (size_t pool_index = 0; pool_index < resource.device_blocks.size(); ++pool_index) {
+                    const size_t device_pool_id = device_pool_begin + pool_index;
+                    expectDeviceBlock(device_pools[device_pool_id],
+                                      resource.device_blocks[pool_index],
+                                      payloadPattern(device_pool_id, path_index));
                 }
-            } else if (slot.hasTier(Tier::HOST)) {
-                const auto   buffer    = host_pools[group_id]->blockBuffer(slot.host_block);
-                const auto*  data      = static_cast<const uint8_t*>(buffer.addr);
-                const size_t tag_begin = group_id == 0 ? 0 : 2;
-                const size_t tag_count = group_id == 0 ? 2 : 1;
-                for (size_t local = 0; local < tag_count; ++local) {
+            } else if (resource.hasTier(Tier::HOST)) {
+                const auto   buffer            = host_pools[group_id]->blockBuffer(resource.host_block);
+                const auto*  data              = static_cast<const uint8_t*>(buffer.addr);
+                const size_t device_pool_begin = group_id == 0 ? 0 : 2;
+                const size_t device_pool_count = group_id == 0 ? 2 : 1;
+                for (size_t local = 0; local < device_pool_count; ++local) {
                     expectBytes(data + local * kGroupPayloadBytes,
                                 kGroupPayloadBytes,
-                                payloadPattern(tag_begin + local, path_index));
+                                payloadPattern(device_pool_begin + local, path_index));
                 }
-            } else if (slot.hasTier(Tier::DISK)) {
+            } else if (resource.hasTier(Tier::DISK)) {
                 std::vector<uint8_t> data(disk_pools[group_id]->payloadBytes());
-                ASSERT_EQ(disk_pools[group_id]->read(slot.disk_slot, data.data(), data.size()), BlockIOStatus::OK);
-                const size_t tag_begin = group_id == 0 ? 0 : 2;
-                const size_t tag_count = group_id == 0 ? 2 : 1;
-                for (size_t local = 0; local < tag_count; ++local) {
+                ASSERT_EQ(disk_pools[group_id]->read(resource.disk_slot, data.data(), data.size()), BlockIOStatus::OK);
+                const size_t device_pool_begin = group_id == 0 ? 0 : 2;
+                const size_t device_pool_count = group_id == 0 ? 2 : 1;
+                for (size_t local = 0; local < device_pool_count; ++local) {
                     expectBytes(data.data() + local * kGroupPayloadBytes,
                                 kGroupPayloadBytes,
-                                payloadPattern(tag_begin + local, path_index));
+                                payloadPattern(device_pool_begin + local, path_index));
                 }
             } else {
                 ADD_FAILURE() << "node " << path_index << " group " << group_id << " has no resident tier";

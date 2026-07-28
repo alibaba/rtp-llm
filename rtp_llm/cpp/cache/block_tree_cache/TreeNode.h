@@ -44,12 +44,12 @@ struct CandidateMeta {
     int64_t  tier_enter_time_us{0};
 };
 
-// Real data-transfer state; a slot is excluded from all heaps while != IDLE.
+// Real data-transfer state; a resource is excluded from all heaps while != IDLE.
 enum class GroupSetTransferState : uint8_t {
     IDLE,
-    DEMOTING,           // Device -> Host, or Host -> Disk
-    LOAD_PENDING,       // Host/Disk source reserved by a deferred load ticket
-    LOADING             // Host/Disk -> Device
+    DEMOTING,      // Device -> Host, or Host -> Disk
+    LOAD_PENDING,  // Host/Disk source reserved by a deferred load ticket
+    LOADING        // Host/Disk -> Device
 };
 
 // Per-GroupSet data location across storage tiers.
@@ -59,7 +59,7 @@ struct GroupSetResource {
     std::vector<BlockIdxType> device_blocks;
     // L2: CPU Host — one packed block
     BlockIdxType host_block{NULL_BLOCK_IDX};
-    // L3: Disk — one disk slot
+    // L3: Disk — one disk resource
     BlockIdxType disk_slot{NULL_BLOCK_IDX};
 
     // Async migration state and the single sorting-metadata copy (current serving tier).
@@ -92,7 +92,7 @@ struct GroupSetResource {
     bool is_removable() const {
         return transfer_state == GroupSetTransferState::IDLE && is_empty();
     }
-    // A match may consume or join this slot only while no exclusive migration
+    // A match may consume or join this resource only while no exclusive migration
     // owns it: IDLE serves normally, LOADING is joinable, while DEMOTING and
     // LOAD_PENDING sources are reserved by an in-flight transfer.
     bool isMatchUsable() const {

@@ -12,21 +12,21 @@ size_t FullGroupSet::computeReuseBlockCount(size_t matched_block_count, const st
     return matched_block_count;
 }
 
-bool FullGroupSet::isSlotEvictable(const TreeNode& node, Tier tier) const {
+bool FullGroupSet::isEvictable(const TreeNode& node, Tier tier) const {
     if (groupSetId() >= node.group_set_resources.size()) {
         return false;
     }
     if (!isLeafAtTier(&node, tier)) {
         return false;
     }
-    return GroupSet::isSlotEvictable(node, tier);
+    return GroupSet::isEvictable(node, tier);
 }
 
 // FullMatchValidator
-bool FullMatchValidator::validate(const TreeNode* node, const GroupSetResource& slot) {
-    // A busy slot (DEMOTING/LOAD_PENDING) is as unusable as a hole; the prefix
+bool FullMatchValidator::validate(const TreeNode* node, const GroupSetResource& resource) {
+    // A busy resource (DEMOTING/LOAD_PENDING) is as unusable as a hole; the prefix
     // latch keeps FULL reuse contiguous from the root.
-    prefix_valid_ = prefix_valid_ && slot.isMatchUsable() && !slot.is_empty();
+    prefix_valid_ = prefix_valid_ && resource.isMatchUsable() && !resource.is_empty();
     return prefix_valid_;
 }
 

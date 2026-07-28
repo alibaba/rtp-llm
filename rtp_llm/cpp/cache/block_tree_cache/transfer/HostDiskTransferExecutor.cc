@@ -40,17 +40,17 @@ TransferStatus HostDiskTransferExecutor::blockIOStatusToTransferStatus(BlockIOSt
     return TransferStatus::DISK_IO_ERROR;
 }
 
-TransferStatus HostDiskTransferExecutor::hostToDisk(const TransferDescriptor& desc, const GroupSet& group) const {
+TransferStatus HostDiskTransferExecutor::hostToDisk(const TransferDescriptor& desc, const GroupSet& group_set) const {
     const auto  host_block = desc.host_block;
     const auto  disk_block = desc.disk_block;
-    auto&       host_pool  = *group.hostPool();
-    auto&       disk_pool  = *group.diskPool();
+    auto&       host_pool  = *group_set.hostPool();
+    auto&       disk_pool  = *group_set.diskPool();
     const void* host_base  = host_pool.blockBuffer(host_block).addr;
     if (!host_base) {
         RTP_LLM_LOG_WARNING("null host buffer");
         return TransferStatus::DISK_IO_ERROR;
     }
-    const size_t bytes  = group.payloadBytes();
+    const size_t bytes  = group_set.payloadBytes();
     const auto   status = disk_pool.write(disk_block, host_base, bytes);
     if (status != BlockIOStatus::OK) {
         RTP_LLM_LOG_WARNING(
@@ -60,17 +60,17 @@ TransferStatus HostDiskTransferExecutor::hostToDisk(const TransferDescriptor& de
     return TransferStatus::OK;
 }
 
-TransferStatus HostDiskTransferExecutor::diskToHost(const TransferDescriptor& desc, const GroupSet& group) const {
+TransferStatus HostDiskTransferExecutor::diskToHost(const TransferDescriptor& desc, const GroupSet& group_set) const {
     const auto disk_block = desc.disk_block;
     const auto host_block = desc.host_block;
-    auto&      host_pool  = *group.hostPool();
-    auto&      disk_pool  = *group.diskPool();
+    auto&      host_pool  = *group_set.hostPool();
+    auto&      disk_pool  = *group_set.diskPool();
     void*      host_base  = host_pool.blockBuffer(host_block).addr;
     if (!host_base) {
         RTP_LLM_LOG_WARNING("null host buffer");
         return TransferStatus::DISK_IO_ERROR;
     }
-    const size_t bytes  = group.payloadBytes();
+    const size_t bytes  = group_set.payloadBytes();
     const auto   status = disk_pool.read(disk_block, host_base, bytes);
     if (status != BlockIOStatus::OK) {
         RTP_LLM_LOG_WARNING(

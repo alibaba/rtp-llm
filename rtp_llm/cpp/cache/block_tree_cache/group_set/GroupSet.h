@@ -3,7 +3,6 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
-#include <string>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheTopology.h"
@@ -44,8 +43,8 @@ struct BlockTreeMatchResult {
 
 class MatchValidator {
 public:
-    virtual ~MatchValidator()                                                 = default;
-    virtual bool validate(const TreeNode* node, const GroupSetResource& slot) = 0;
+    virtual ~MatchValidator()                                                     = default;
+    virtual bool validate(const TreeNode* node, const GroupSetResource& resource) = 0;
 };
 
 enum class TransferType {
@@ -84,21 +83,16 @@ public:
     const std::vector<size_t>& groupIds() const {
         return group_ids_;
     }
-    const GroupBase&         groupAt(size_t local_group_index) const;
-    std::vector<std::string> groupTags() const;
-    size_t                   payloadBytes() const {
+    const GroupBase& groupAt(size_t member_index) const;
+    size_t           payloadBytes() const {
         return payload_bytes_;
     }
     CacheGroupType groupType() const {
         return groupAt(0).policy.group_type;
     }
-    CacheEvictPolicy evictPolicy() const {
-        return groupAt(0).policy.evict_policy;
-    }
-
     virtual std::unique_ptr<MatchValidator> createMatchValidator() = 0;
 
-    virtual void evictFromTier(TreeNode* node, GroupSetResource& slot, Tier tier);
+    virtual void evictFromTier(TreeNode* node, GroupSetResource& resource, Tier tier);
 
     virtual TransferDescriptor buildTransfer(TreeNode* node, TransferType type);
 
@@ -116,8 +110,8 @@ public:
     const std::vector<DeviceBlockPoolPtr>& devicePools() const {
         return device_pools_;
     }
-    bool                           hasCompleteDeviceValue(const GroupSetResource& slot) const;
-    bool                           isValidSteadyState(const GroupSetResource& slot) const;
+    bool                           hasCompleteDeviceValue(const GroupSetResource& resource) const;
+    bool                           isValidSteadyState(const GroupSetResource& resource) const;
     std::shared_ptr<HostBlockPool> hostPool() const {
         return host_pool_;
     }
@@ -194,12 +188,12 @@ public:
     BlockIdxType allocateSingleBlock(Tier tier, BlockRefType ref_type);
     void         releaseSingleBlock(Tier tier, BlockIdxType block, BlockRefType ref_type) const;
 
-    std::vector<BlockIdxType> getBlocks(const GroupSetResource& slot, Tier tier) const;
-    void                      setBlocks(GroupSetResource& slot, Tier tier, const std::vector<BlockIdxType>& blocks);
-    // Highest tier (DEVICE > HOST > DISK) holding this slot's data, else NONE.
-    Tier getTopTier(const GroupSetResource& slot) const;
+    std::vector<BlockIdxType> getBlocks(const GroupSetResource& resource, Tier tier) const;
+    void                      setBlocks(GroupSetResource& resource, Tier tier, const std::vector<BlockIdxType>& blocks);
+    // Highest tier (DEVICE > HOST > DISK) holding this resource's data, else NONE.
+    Tier getTopTier(const GroupSetResource& resource) const;
 
-    virtual bool isSlotEvictable(const TreeNode& node, Tier tier) const;
+    virtual bool isEvictable(const TreeNode& node, Tier tier) const;
 
 protected:
     std::vector<DeviceBlockPoolPtr>         device_pools_;

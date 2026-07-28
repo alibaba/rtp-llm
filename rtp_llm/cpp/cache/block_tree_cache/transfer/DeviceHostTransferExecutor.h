@@ -15,13 +15,13 @@ public:
     explicit DeviceHostTransferExecutor(DeviceHostCopyOptions options = {});
     ~DeviceHostTransferExecutor();
 
-    TransferStatus execute(const TransferDescriptor& desc, const GroupSet& group);
+    TransferStatus execute(const TransferDescriptor& desc, const GroupSet& group_set);
 
 private:
-    TransferStatus lowerAndExecute(const TransferDescriptor& desc, const GroupSet& group, bool device_to_host);
+    TransferStatus lowerAndExecute(const TransferDescriptor& desc, const GroupSet& group_set, bool device_to_host);
 
     DeviceHostCopyPlan lowerPlan(const TransferDescriptor& desc,
-                                 const GroupSet&           group,
+                                 const GroupSet&           group_set,
                                  bool                      device_to_host,
                                  TransferStatus&           out_status) const;
 

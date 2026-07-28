@@ -32,7 +32,7 @@ class SWAMatchValidator: public MatchValidator {
 public:
     explicit SWAMatchValidator(size_t sliding_window_size, size_t seq_size_per_block);
 
-    bool validate(const TreeNode* node, const GroupSetResource& slot) override;
+    bool validate(const TreeNode* node, const GroupSetResource& resource) override;
 
     bool connectedToRoot() const {
         return connected_to_root_;

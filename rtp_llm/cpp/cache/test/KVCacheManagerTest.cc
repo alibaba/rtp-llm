@@ -1006,14 +1006,14 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsEmptyMemoryRequestWithoutCoordi
     EXPECT_FALSE(response.mem_response().success());
 }
 
-static void appendValidTaggedTransfer(const std::shared_ptr<KVCacheManager>& manager, FunctionRequestPB& request) {
+static void appendValidGroupedTransfer(const std::shared_ptr<KVCacheManager>& manager, FunctionRequestPB& request) {
     ASSERT_NE(manager->blockTreeCache(), nullptr);
     const TransferDescriptor descriptor = TransferDescriptor::deviceToHost(/*group_id=*/0, {1}, /*host_block=*/1);
     ASSERT_TRUE(BlockTransferRequestConverter::appendTransfer(
         descriptor, manager->blockTreeCache()->groupSets(), *request.mutable_mem_request()));
 }
 
-TEST_F(KVCacheManagerTest, ExecuteFunctionRoutesAllTaggedMemoryItemsOnlyToTieredBlockTree) {
+TEST_F(KVCacheManagerTest, ExecuteFunctionRoutesAllGroupedMemoryItemsOnlyToTieredBlockTree) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_memory_cache        = true;
@@ -1023,14 +1023,14 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionRoutesAllTaggedMemoryItemsOnlyToTiered
     ASSERT_TRUE(manager->init());
 
     FunctionRequestPB request;
-    appendValidTaggedTransfer(manager, request);
+    appendValidGroupedTransfer(manager, request);
     FunctionResponsePB response;
     EXPECT_TRUE(manager->executeFunction(request, response));
     ASSERT_TRUE(response.has_mem_response());
     EXPECT_TRUE(response.mem_response().success());
 }
 
-TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsMixedPartialUnavailableAndOutOfRangeTaggedItems) {
+TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsMixedPartialUnavailableAndOutOfRangeGroupedItems) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig tiered_config;
     tiered_config.enable_memory_cache        = true;
@@ -1041,18 +1041,18 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsMixedPartialUnavailableAndOutOf
 
     {
         FunctionRequestPB request;
-        appendValidTaggedTransfer(tiered_manager, request);
+        appendValidGroupedTransfer(tiered_manager, request);
         auto* mixed = request.mutable_mem_request()->add_copy_items();
         mixed->CopyFrom(request.mem_request().copy_items(0));
-        mixed->clear_group_set_tags();
+        mixed->set_group_set_id(tiered_manager->blockTreeCache()->groupSets().size());
         FunctionResponsePB response;
         EXPECT_FALSE(tiered_manager->executeFunction(request, response));
         EXPECT_FALSE(response.mem_response().success());
     }
     {
         FunctionRequestPB request;
-        appendValidTaggedTransfer(tiered_manager, request);
-        request.mutable_mem_request()->mutable_copy_items(0)->clear_tagged_gpu_blocks();
+        appendValidGroupedTransfer(tiered_manager, request);
+        request.mutable_mem_request()->mutable_copy_items(0)->clear_group_blocks();
         FunctionResponsePB response;
         EXPECT_FALSE(tiered_manager->executeFunction(request, response));
         EXPECT_FALSE(response.mem_response().success());
@@ -1062,23 +1062,23 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsMixedPartialUnavailableAndOutOf
         auto unavailable_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, unavailable_config);
         ASSERT_TRUE(unavailable_manager->init());
         FunctionRequestPB request;
-        // Build a physically valid tagged transfer from the tiered topology, then
+        // Build a physically valid grouped transfer from the tiered topology, then
         // verify that a manager without the requested HOST tier rejects it.
-        appendValidTaggedTransfer(tiered_manager, request);
+        appendValidGroupedTransfer(tiered_manager, request);
         FunctionResponsePB response;
         EXPECT_FALSE(unavailable_manager->executeFunction(request, response));
         EXPECT_FALSE(response.mem_response().success());
     }
     {
         FunctionRequestPB request;
-        appendValidTaggedTransfer(tiered_manager, request);
+        appendValidGroupedTransfer(tiered_manager, request);
         auto*              item   = request.mutable_mem_request()->mutable_copy_items(0);
         const BlockIdxType usable = static_cast<BlockIdxType>(
             tiered_manager->blockTreeCache()->groupSets().front()->devicePools().front()->totalBlocksNum());
-        ASSERT_EQ(item->tagged_gpu_blocks_size(), 1);
-        const std::string stable_tag = item->tagged_gpu_blocks(0).tag();
-        item->mutable_tagged_gpu_blocks(0)->set_block_id(usable + 1);
-        EXPECT_EQ(item->tagged_gpu_blocks(0).tag(), stable_tag);
+        ASSERT_EQ(item->group_blocks_size(), 1);
+        const int group_id = item->group_blocks(0).group_id();
+        item->mutable_group_blocks(0)->set_block_id(usable + 1);
+        EXPECT_EQ(item->group_blocks(0).group_id(), group_id);
         const auto         backing             = tiered_manager->allocator_->cacheGroups().front()->blockPool();
         const size_t       free_before         = backing->freeBlocksNum();
         const size_t       used_before         = backing->usedBlocksNum();
@@ -1115,7 +1115,7 @@ TEST_F(KVCacheManagerTest, MultiRankZeroUsesDedicatedBroadcastManager) {
     EXPECT_EQ(manager->blockTreeCache()->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_->workerNum(), 2u);
 
     FunctionRequestPB request;
-    appendValidTaggedTransfer(manager, request);
+    appendValidGroupedTransfer(manager, request);
     FunctionResponsePB response;
     EXPECT_TRUE(manager->executeFunction(request, response));
 }
@@ -1511,14 +1511,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     //   Phase 3: Decode-phase incrKVBlock triggers further FULL/SWA eviction + removeSkippedBlocks
     //   Phase 4: Free and verify pool recovery
     auto manager_config = makeDSV4ConfigWithConcurrencyPool(/*full_block_num=*/16, /*swa_batch_size=*/3);
-    auto group_policies = manager_config.groupPoliciesSnapshot();
-    for (auto& policy : group_policies) {
-        if (policy.group_type == CacheGroupType::SWA) {
-            policy.evict_policy = CacheEvictPolicy::INDEPENDENT;
-        }
-    }
-    manager_config.setGroupPolicies(group_policies);
-    auto manager = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
+    auto manager        = std::make_shared<KVCacheManager>(manager_config, /*warmup=*/false);
     ASSERT_TRUE(manager->init());
 
     const int spb     = static_cast<int>(manager_config.seq_size_per_block);
@@ -1618,8 +1611,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
             swa_group_set_ids.push_back(group_set_id);
             for (const auto& pool : group_set->devicePools()) {
                 ASSERT_LT(pool->freeBlocksNum(), 2u)
-                    << "SWA pool must not satisfy the next request without eviction, group_set_id="
-                    << group_set_id;
+                    << "SWA pool must not satisfy the next request without eviction, group_set_id=" << group_set_id;
             }
             for (const auto* path : {&find_a.path, &find_b.path}) {
                 for (TreeNode* node : *path) {
@@ -1700,8 +1692,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
                     continue;
                 }
                 EXPECT_LT(evicted.last_access_seq, survivor.last_access_seq)
-                    << "evicted SWA slot must be LRU-older than every survivor, group_set_id="
-                    << evicted.group_set_id;
+                    << "evicted SWA slot must be LRU-older than every survivor, group_set_id=" << evicted.group_set_id;
             }
         }
     }

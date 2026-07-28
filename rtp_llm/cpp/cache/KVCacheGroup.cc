@@ -161,10 +161,6 @@ bool KVCacheGroup::prefixReuseEnabled() const {
     return policy().enable_prefix_reuse;
 }
 
-CacheEvictPolicy KVCacheGroup::evictPolicy() const {
-    return policy().evict_policy;
-}
-
 uint32_t KVCacheGroup::explicitBlockNum() const {
     return policy().explicit_block_num;
 }

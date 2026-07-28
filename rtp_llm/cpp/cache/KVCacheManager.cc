@@ -28,19 +28,19 @@ namespace rtp_llm {
 namespace {
 
 struct CachePoolMetricsSnapshot {
-    size_t                      total_blocks              = 0;
-    size_t                      free_blocks               = 0;
-    size_t                      active_tree_cached_blocks = 0;
+    size_t      total_blocks              = 0;
+    size_t      free_blocks               = 0;
+    size_t      active_tree_cached_blocks = 0;
     std::string tier;
     std::string pool_name;
-    size_t      block_size_bytes          = 0;
-    size_t      available_blocks          = 0;
-    size_t      reserve_blocks            = 0;
-    size_t      request_ref_count         = 0;
-    size_t      connector_ref_count       = 0;
-    size_t      block_cache_ref_count     = 0;
-    size_t      eviction_ref_count        = 0;
-    float       used_ratio                = 0.0f;
+    size_t      block_size_bytes      = 0;
+    size_t      available_blocks      = 0;
+    size_t      reserve_blocks        = 0;
+    size_t      request_ref_count     = 0;
+    size_t      connector_ref_count   = 0;
+    size_t      block_cache_ref_count = 0;
+    size_t      eviction_ref_count    = 0;
+    float       used_ratio            = 0.0f;
 };
 
 RtpLLMCacheMetricsCollector collectGlobalCacheMetrics(const KVCacheAllocatorPtr& allocator) {
@@ -49,7 +49,7 @@ RtpLLMCacheMetricsCollector collectGlobalCacheMetrics(const KVCacheAllocatorPtr&
     collector.kv_cache_item_num =
         block_tree_cache ? static_cast<int64_t>(block_tree_cache->getStats().tree_node_count) : 0;
     collector.kv_cache_left_seq = static_cast<int64_t>(allocator->availableTokensNum());
-    collector.mr_cost_time_ms      = allocator->getMrCostTimeMs();
+    collector.mr_cost_time_ms   = allocator->getMrCostTimeMs();
 
     return collector;
 }
@@ -85,16 +85,16 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
 
     RtpLLMCachePoolMetricsCollector pool_collector;
     pool_collector.block_size_bytes      = static_cast<int64_t>(pool_snapshot.block_size_bytes);
-    pool_collector.free_blocks = static_cast<int64_t>(pool_snapshot.free_blocks);
+    pool_collector.free_blocks           = static_cast<int64_t>(pool_snapshot.free_blocks);
     pool_collector.available_blocks      = static_cast<int64_t>(pool_snapshot.available_blocks);
-    pool_collector.active_blocks        = static_cast<int64_t>(pool_snapshot.active_tree_cached_blocks);
-    pool_collector.total_blocks   = static_cast<int64_t>(pool_snapshot.total_blocks);
-    pool_collector.reserve_blocks = static_cast<int64_t>(pool_snapshot.reserve_blocks);
+    pool_collector.active_blocks         = static_cast<int64_t>(pool_snapshot.active_tree_cached_blocks);
+    pool_collector.total_blocks          = static_cast<int64_t>(pool_snapshot.total_blocks);
+    pool_collector.reserve_blocks        = static_cast<int64_t>(pool_snapshot.reserve_blocks);
     pool_collector.request_ref_count     = static_cast<int64_t>(pool_snapshot.request_ref_count);
     pool_collector.connector_ref_count   = static_cast<int64_t>(pool_snapshot.connector_ref_count);
     pool_collector.block_cache_ref_count = static_cast<int64_t>(pool_snapshot.block_cache_ref_count);
     pool_collector.eviction_ref_count    = static_cast<int64_t>(pool_snapshot.eviction_ref_count);
-    pool_collector.used_ratio     = pool_snapshot.used_ratio;
+    pool_collector.used_ratio            = pool_snapshot.used_ratio;
 
     kmonitor::MetricsTags pool_tags("pool_name", pool_snapshot.pool_name);
     pool_tags.AddTag("tier", pool_snapshot.tier);
@@ -615,11 +615,11 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
         TransferDescriptor descriptor;
         if (!BlockTransferRequestConverter::decodeTransfer(
                 memory_request, item_index, block_tree_cache_->groupSets(), descriptor)) {
-            RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: invalid tagged transfer item, index=%d", item_index);
+            RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: invalid grouped transfer item, index=%d", item_index);
             return false;
         }
         if (!block_tree_cache_->executeTransfer(descriptor)) {
-            RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: tagged transfer failed, index=%d", item_index);
+            RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: grouped transfer failed, index=%d", item_index);
             return false;
         }
     }
@@ -717,16 +717,16 @@ void KVCacheManager::reportMetricsLoop() {
                 continue;
             }
             CachePoolMetricsSnapshot report_snapshot;
-            report_snapshot.tier                  = tierName(snapshot.tier);
-            report_snapshot.pool_name             = snapshot.pool_name;
-            report_snapshot.block_size_bytes      = snapshot.block_size_bytes;
-            report_snapshot.total_blocks          = snapshot.total_blocks;
-            report_snapshot.free_blocks           = snapshot.free_blocks;
-            report_snapshot.available_blocks      = snapshot.available_blocks;
-            report_snapshot.request_ref_count     = snapshot.request_ref_count;
-            report_snapshot.connector_ref_count   = snapshot.connector_ref_count;
-            report_snapshot.block_cache_ref_count = snapshot.block_cache_ref_count;
-            report_snapshot.eviction_ref_count    = snapshot.eviction_ref_count;
+            report_snapshot.tier                      = tierName(snapshot.tier);
+            report_snapshot.pool_name                 = snapshot.pool_name;
+            report_snapshot.block_size_bytes          = snapshot.block_size_bytes;
+            report_snapshot.total_blocks              = snapshot.total_blocks;
+            report_snapshot.free_blocks               = snapshot.free_blocks;
+            report_snapshot.available_blocks          = snapshot.available_blocks;
+            report_snapshot.request_ref_count         = snapshot.request_ref_count;
+            report_snapshot.connector_ref_count       = snapshot.connector_ref_count;
+            report_snapshot.block_cache_ref_count     = snapshot.block_cache_ref_count;
+            report_snapshot.eviction_ref_count        = snapshot.eviction_ref_count;
             report_snapshot.active_tree_cached_blocks = snapshot.active_tree_cached_blocks;
             report_snapshot.used_ratio                = snapshot.total_blocks == 0 ?
                                                             0.0f :

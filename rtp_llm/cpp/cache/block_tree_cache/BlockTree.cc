@@ -50,7 +50,7 @@ BlockTreeFindResult BlockTree::findNode(const CacheKeysType& cache_keys) const {
         }
         // Transfer-state usability is judged per group by the MatchValidators;
         // the tree walk only enforces structural invariants so one busy group
-        // slot cannot truncate the whole topological path.
+        // resource cannot truncate the whole topological path.
         validateNodeInvariants(*candidate);
         current               = candidate;
         result.matched_blocks = i + 1;
@@ -67,9 +67,9 @@ void BlockTree::validateNodeInvariants(const TreeNode& node) const {
                             node.cache_key,
                             group_set_resource_count_,
                             node.group_set_resources.size());
-    for (const GroupSetResource& slot : node.group_set_resources) {
-        if (slot.transfer_state == GroupSetTransferState::IDLE) {
-            RTP_LLM_CHECK_WITH_INFO(slot.isValidSteadyState(),
+    for (const GroupSetResource& resource : node.group_set_resources) {
+        if (resource.transfer_state == GroupSetTransferState::IDLE) {
+            RTP_LLM_CHECK_WITH_INFO(resource.isValidSteadyState(),
                                     "BlockTree encountered invalid IDLE multi-tier resource, node_key=%ld",
                                     node.cache_key);
         }
@@ -78,20 +78,20 @@ void BlockTree::validateNodeInvariants(const TreeNode& node) const {
 
 BlockTreeInsertResult BlockTree::insertNode(TreeNode*                                         parent,
                                             const CacheKeysType&                              cache_keys,
-                                            const std::vector<std::vector<GroupSetResource>>& slots) {
+                                            const std::vector<std::vector<GroupSetResource>>& resources) {
     BlockTreeInsertResult result;
     if (cache_keys.empty()) {
         result.leaf = parent ? parent : root_.get();
         return result;
     }
-    RTP_LLM_CHECK_WITH_INFO(slots.size() == cache_keys.size(),
-                            "BlockTree::insertNode: slots.size() must equal cache_keys.size()");
-    for (size_t i = 0; i < slots.size(); ++i) {
-        RTP_LLM_CHECK_WITH_INFO(slots[i].empty() || slots[i].size() == group_set_resource_count_,
+    RTP_LLM_CHECK_WITH_INFO(resources.size() == cache_keys.size(),
+                            "BlockTree::insertNode: resources.size() must equal cache_keys.size()");
+    for (size_t i = 0; i < resources.size(); ++i) {
+        RTP_LLM_CHECK_WITH_INFO(resources[i].empty() || resources[i].size() == group_set_resource_count_,
                                 "BlockTree input resource count mismatch: key=%ld expected=%zu actual=%zu",
                                 cache_keys[i],
                                 group_set_resource_count_,
-                                slots[i].size());
+                                resources[i].size());
     }
 
     result.inserted_mask.assign(cache_keys.size(), false);
@@ -113,16 +113,16 @@ BlockTreeInsertResult BlockTree::insertNode(TreeNode*                           
                                     group_set_resource_count_,
                                     current->group_set_resources.size());
             // An empty per-node input means this topology position carries no
-            // group payload. Keep traversing so callers can append a suffix
+            // resource payload. Keep traversing so callers can append a suffix
             // without manufacturing placeholder GroupSetResources for every existing
             // prefix node.
-            if (slots[i].empty()) {
+            if (resources[i].empty()) {
                 continue;
             }
-            const auto& incoming_slots = slots[i];
-            for (size_t group_set_index = 0; group_set_index < group_set_resource_count_; ++group_set_index) {
-                GroupSetResource&       existing     = current->group_set_resources[group_set_index];
-                const GroupSetResource& incoming     = incoming_slots[group_set_index];
+            const auto& incoming_resources = resources[i];
+            for (size_t group_set_id = 0; group_set_id < group_set_resource_count_; ++group_set_id) {
+                GroupSetResource&       existing     = current->group_set_resources[group_set_id];
+                const GroupSetResource& incoming     = incoming_resources[group_set_id];
                 const bool              source_valid = !incoming.device_blocks.empty()
                                           && std::all_of(incoming.device_blocks.begin(),
                                                          incoming.device_blocks.end(),
@@ -135,14 +135,14 @@ BlockTreeInsertResult BlockTree::insertNode(TreeNode*                           
                 existing.disk_slot      = NULL_BLOCK_IDX;
                 existing.transfer_state = GroupSetTransferState::IDLE;
                 existing.candidate_meta = {};
-                result.adopted_slots.push_back(BlockTreeAdoptedSlot{current, i, group_set_index});
+                result.adopted_resources.push_back(BlockTreeAdoptedResource{current, i, group_set_id});
             }
         } else {
             TreeNode* child        = createNode(key, current);
             current->children[key] = child;
             current                = child;
-            if (slots[i].size() == group_set_resource_count_) {
-                current->group_set_resources = slots[i];
+            if (resources[i].size() == group_set_resource_count_) {
+                current->group_set_resources = resources[i];
             }
             result.inserted_mask[i] = true;
             result.inserted_nodes.push_back(BlockTreeInsertedNode{current, i});

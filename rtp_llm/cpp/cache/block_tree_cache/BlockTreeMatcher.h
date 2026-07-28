@@ -13,7 +13,7 @@ namespace rtp_llm {
 
 struct ReusableGroupLocation {
     size_t group_set_id{0};
-    size_t local_group_index{0};
+    size_t member_index{0};
 };
 
 using ReusableGroupLocations = std::unordered_map<size_t, ReusableGroupLocation>;

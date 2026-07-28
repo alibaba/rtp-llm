@@ -620,7 +620,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCachePublishesOnlyBatchZero) {
     resource->setBatchCacheKeys(1, CacheKeysType{200});
     allocator_->insertIntoCache(InsertInfo{resource, nullptr, /*is_resident=*/false});
 
-    auto        batch_zero_match = allocator_->blockTreeCacheOwner()->match(CacheKeysType{100});
+    auto batch_zero_match = allocator_->blockTreeCacheOwner()->match(CacheKeysType{100});
     ASSERT_EQ(batch_zero_match.matched_blocks, 1u);
     ASSERT_EQ(allocator_->blockTreeCacheOwner()->matchedBlocksForGroup(0, batch_zero_match.matched_resources),
               (BlockIndicesType{blocks[0]}));
@@ -655,7 +655,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, CPInsertAndAllocatorMatchShareLastRankCan
     EXPECT_EQ(noncanonical_match.matched_blocks, 0u);
     allocator_->blockTreeCacheOwner()->releaseMatchedResources(noncanonical_match.matched_resources);
 
-    auto        canonical_match = allocator_->blockTreeCacheOwner()->match(CacheKeysType{101, 103});
+    auto canonical_match = allocator_->blockTreeCacheOwner()->match(CacheKeysType{101, 103});
     ASSERT_EQ(canonical_match.matched_blocks, 2u);
     EXPECT_EQ(allocator_->blockTreeCacheOwner()->matchedBlocksForGroup(0, canonical_match.matched_resources),
               seed_blocks);
@@ -866,7 +866,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SuccessfulOuterAllocationCommitsLoadExact
     cache->waitForPendingTasks();
     EXPECT_EQ(cache->getKeySnapshot(/*limit=*/16).version, before_watermark_retry.version);
     EXPECT_EQ(find.matched_node->group_set_resources.front().device_blocks, (BlockIndicesType{published_target}));
-    EXPECT_EQ(cache->evictForTag(config.tagForGroup(0), 1), 0);
+    EXPECT_EQ(cache->evictForGroup(0, 1), 0);
 
     allocator_->free(FreeInfo{resource, token_ids});
     registry->commit_callback_ = std::move(original_commit);

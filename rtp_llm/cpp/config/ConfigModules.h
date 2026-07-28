@@ -177,10 +177,10 @@ struct KVCacheConfig {
     bool    enable_prefix_tree_memory_cache         = false;
     bool    enable_legacy_memory_connector_fallback = true;
     int64_t prefix_tree_memory_state_swa_pool_ratio = 0;
-    // Deprecated/no-op: per-group CacheGroupPolicy::evict_policy is the sole runtime authority.
-    bool    enable_independent_group_eviction       = false;
-    int64_t device_cache_min_free_blocks            = 0;
-    int     load_cache_retry_times                  = 1;  // Maximum retry attempts for load cache transfer failures
+    // Deprecated/no-op retained for configuration compatibility.
+    bool    enable_independent_group_eviction = false;
+    int64_t device_cache_min_free_blocks      = 0;
+    int     load_cache_retry_times            = 1;  // Maximum retry attempts for load cache transfer failures
 
     // Remote connector configuration fields
     bool        reco_enable_vipserver                = false;

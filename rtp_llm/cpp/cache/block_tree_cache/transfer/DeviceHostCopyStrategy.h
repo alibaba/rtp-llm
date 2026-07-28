@@ -21,7 +21,7 @@ struct DeviceHostCopyTile {
     size_t host_offset{0};
     size_t bytes{0};
     int    device_index{-1};
-    size_t local_group_index{0};
+    size_t member_index{0};
     size_t local_layer_index{0};
 };
 

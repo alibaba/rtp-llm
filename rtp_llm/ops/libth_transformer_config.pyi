@@ -895,15 +895,6 @@ class CacheGroupType:
     FULL: typing.ClassVar[CacheGroupType]
     SWA: typing.ClassVar[CacheGroupType]
 
-class CacheReusePolicy:
-    REUSABLE: typing.ClassVar[CacheReusePolicy]
-    NON_REUSABLE: typing.ClassVar[CacheReusePolicy]
-
-class CacheEvictPolicy:
-    CHAIN: typing.ClassVar[CacheEvictPolicy]
-    INDEPENDENT: typing.ClassVar[CacheEvictPolicy]
-    NONE: typing.ClassVar[CacheEvictPolicy]
-
 class CacheMemoryPlacement:
     DEVICE: typing.ClassVar[CacheMemoryPlacement]
     HOST: typing.ClassVar[CacheMemoryPlacement]
@@ -931,7 +922,6 @@ class CpPrefillSliceLayout:
 
 class CacheReusePolicyDesc:
     enable_prefix_reuse: typing.Any
-    evict_policy: typing.Any
     def __init__(self) -> None: ...
 
 class CacheCapacityPolicyDesc:

@@ -30,17 +30,6 @@ inline const char* metricCacheGroupTypeName(CacheGroupType group_type) {
     return "unknown";
 }
 
-enum class CacheReusePolicy : int8_t {
-    REUSABLE     = 0,
-    NON_REUSABLE = 1,
-};
-
-enum class CacheEvictPolicy : int8_t {
-    CHAIN       = 0,
-    INDEPENDENT = 1,
-    NONE        = 2,
-};
-
 enum class CacheMemoryPlacement : int8_t {
     DEVICE      = 0,
     HOST        = 1,
@@ -62,7 +51,6 @@ enum class CpBlockSliceMode : int8_t {
 struct CacheGroupPolicy {
     CacheGroupType       group_type             = CacheGroupType::FULL;
     bool                 enable_prefix_reuse    = true;
-    CacheEvictPolicy     evict_policy           = CacheEvictPolicy::CHAIN;
     bool                 reservable             = true;
     uint32_t             explicit_block_num     = 0;
     bool                 charge_to_paged_budget = false;
@@ -142,18 +130,6 @@ inline const char* cacheGroupTypeName(CacheGroupType group_type) {
             return "SWA";
     }
     return "UNKNOWN";
-}
-
-inline const char* cacheEvictPolicyName(CacheEvictPolicy evict_policy) {
-    switch (evict_policy) {
-        case CacheEvictPolicy::CHAIN:
-            return "chain";
-        case CacheEvictPolicy::INDEPENDENT:
-            return "independent";
-        case CacheEvictPolicy::NONE:
-            return "none";
-    }
-    return "unknown";
 }
 
 inline CacheGroupPolicy defaultCacheGroupPolicy(CacheGroupType group_type) {

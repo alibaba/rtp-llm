@@ -228,7 +228,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "enable_independent_group_eviction"),
         type=str2bool,
         default=False,
-        help="已废弃且不生效；请通过每个 KV cache group 的 evict_policy 配置驱逐策略。",
+        help="已废弃且不生效，仅为配置兼容保留。",
     )
     kv_cache_group.add_argument(
         "--write_cache_sync",

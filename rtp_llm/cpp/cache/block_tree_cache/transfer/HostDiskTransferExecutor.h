@@ -12,8 +12,8 @@ enum class BlockIOStatus;
 // maps BlockIOStatus to TransferStatus.
 class HostDiskTransferExecutor {
 public:
-    TransferStatus hostToDisk(const TransferDescriptor& desc, const GroupSet& group) const;
-    TransferStatus diskToHost(const TransferDescriptor& desc, const GroupSet& group) const;
+    TransferStatus hostToDisk(const TransferDescriptor& desc, const GroupSet& group_set) const;
+    TransferStatus diskToHost(const TransferDescriptor& desc, const GroupSet& group_set) const;
 
 private:
     static TransferStatus blockIOStatusToTransferStatus(BlockIOStatus status);

@@ -56,8 +56,8 @@ struct BlockTreeCacheConfig {
     bool enable_load{false};
 
     // ---- Reverse (leaf) cascade eviction control ----
-    // When true, evicting any group on a leaf node cascades to all other groups,
-    // regardless of group priority.
+    // When true, evicting any group set on a leaf node cascades to all other
+    // group sets, regardless of group priority.
     bool enable_reverse_eviction{false};
 
     // ---- Per-tier eviction policy ----
@@ -132,11 +132,12 @@ public:
     bool init();
 
     BlockTreeMatchResult match(const CacheKeysType& cache_keys);
-    void
-    insert(TreeNode* parent, const CacheKeysType& cache_keys, const std::vector<std::vector<GroupSetResource>>& slots);
+    void                 insert(TreeNode*                                         parent,
+                                const CacheKeysType&                              cache_keys,
+                                const std::vector<std::vector<GroupSetResource>>& resources);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
-    int evictForTag(const std::string& tag, size_t num_blocks);
+    int evictForGroup(size_t group_id, size_t num_blocks);
 
     CacheStats                                getStats() const;
     std::vector<BlockTreePoolMetricsSnapshot> poolMetricsSnapshots() const;
@@ -213,34 +214,33 @@ public:
 private:
     friend class HybridKVCacheAllocator;
 
-    bool initializeConfiguration();
     void insertSparse(TreeNode*                                         parent,
                       const CacheKeysType&                              cache_keys,
-                      const std::vector<std::vector<GroupSetResource>>& slots);
+                      const std::vector<std::vector<GroupSetResource>>& resources);
     void insertImpl(TreeNode*                                         parent,
                     const CacheKeysType&                              cache_keys,
-                    const std::vector<std::vector<GroupSetResource>>& slots,
-                    bool                                              allow_sparse_slots);
+                    const std::vector<std::vector<GroupSetResource>>& resources,
+                    bool                                              allow_sparse_resources);
     void drainTreeHolds();
     void checkWatermark();
-    bool reclaimOneForGroup(size_t group_set_id, Tier tier);
+    bool reclaimOneForGroupSet(size_t group_set_id, Tier tier);
     void reserveInFlightDeviceReleaseCreditsLocked(const std::vector<EvictionReleaseCredit>& release_credits);
     void settleInFlightDeviceReleaseCreditsLocked(const std::vector<EvictionReleaseCredit>& release_credits) noexcept;
 
     BlockTreeCacheConfig       config_;
     std::unique_ptr<BlockTree> tree_;
     std::vector<GroupSetPtr>   group_sets_;
-    // Reusable topology group_id -> GroupSet/local position. Non-reusable groups
+    // Reusable topology group_id -> GroupSet/member position. Non-reusable groups
     // never enter this index or the BlockTree resource space.
-    ReusableGroupLocations                    reusable_group_locations_;
-    std::shared_ptr<StorageBackend>           storage_backend_;
-    std::unique_ptr<BlockTransferDispatcher>  transfer_dispatcher_;
-    std::unique_ptr<BlockTreeTaskPool>        task_pool_;
-    BlockTreeCacheMetricsReporter             metrics_reporter_;
-    mutable std::mutex                        mutex_;
-    BlockTreeEvictor                          evictor_;
-    BlockTreeMatcher                          matcher_;
-    bool                                      initialized_{false};
+    ReusableGroupLocations                   reusable_group_locations_;
+    std::shared_ptr<StorageBackend>          storage_backend_;
+    std::unique_ptr<BlockTransferDispatcher> transfer_dispatcher_;
+    std::unique_ptr<BlockTreeTaskPool>       task_pool_;
+    BlockTreeCacheMetricsReporter            metrics_reporter_;
+    mutable std::mutex                       mutex_;
+    BlockTreeEvictor                         evictor_;
+    BlockTreeMatcher                         matcher_;
+    bool                                     initialized_{false};
     // Protected by mutex_. Credits remain reserved from async queue acceptance
     // until the matching plan completes or rolls back.
     std::unordered_map<DeviceBlockPoolPtr, size_t> in_flight_device_release_credits_;

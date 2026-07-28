@@ -17,7 +17,7 @@ public:
 
 class LinearMatchValidator: public MatchValidator {
 public:
-    bool validate(const TreeNode* node, const GroupSetResource& slot) override;
+    bool validate(const TreeNode* node, const GroupSetResource& resource) override;
 };
 
 }  // namespace rtp_llm

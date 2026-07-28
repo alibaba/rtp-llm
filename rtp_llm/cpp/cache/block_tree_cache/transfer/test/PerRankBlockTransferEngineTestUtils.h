@@ -14,17 +14,14 @@
 
 namespace rtp_llm::block_transfer_engine_test {
 
-struct TestGroupSpec {
-    std::string      tag;
-    CacheGroupPolicy policy;
-    std::vector<int> layer_ids{0};
-    size_t           kv_block_stride_bytes{16};
-    size_t           kv_scale_stride_bytes{0};
-    uint32_t         block_num{128};
-    size_t           seq_size_per_block{1};
-};
+GroupBase makeTestGroupBase(CacheGroupPolicy policy                = defaultCacheGroupPolicy(CacheGroupType::FULL),
+                            std::vector<int> layer_ids             = {0},
+                            size_t           kv_block_stride_bytes = 16,
+                            size_t           kv_scale_stride_bytes = 0,
+                            uint32_t         block_num             = 128,
+                            size_t           seq_size_per_block    = 1);
 
-std::shared_ptr<const CacheTopology> makeTestTopology(std::vector<TestGroupSpec> specs);
+std::shared_ptr<const CacheTopology> makeTestTopology(std::vector<GroupBase> groups);
 
 GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
                              std::shared_ptr<const CacheTopology> topology,

@@ -11,18 +11,18 @@ namespace {
 using block_tree_cache_test::BlockTreeCacheTestPeer;
 using block_tree_cache_test::makeBlockTreeCacheForTest;
 
-// Test double that records which nodes FullGroupSet::isSlotEvictable is
+// Test double that records which nodes FullGroupSet::isEvictable is
 // asked about while recording is enabled, then forwards to the base class.
 // During a no-eviction insert, refreshCandidate is the only caller of
-// isSlotEvictable, so recording these evaluations lets a test verify exactly
+// isEvictable, so recording these evaluations lets a test verify exactly
 // which nodes the evictor re-evaluates -- without any production-side hook.
 class CountingFullGroupSet: public FullGroupSet {
 public:
-    bool isSlotEvictable(const TreeNode& node, Tier tier) const override {
+    bool isEvictable(const TreeNode& node, Tier tier) const override {
         if (recording_) {
             checked_nodes_.push_back(&node);
         }
-        return FullGroupSet::isSlotEvictable(node, tier);
+        return FullGroupSet::isEvictable(node, tier);
     }
 
     mutable bool                         recording_{false};
@@ -43,11 +43,11 @@ protected:
 
     // Insert a path with given device block for group 0.
     void insertPath(const CacheKeysType& keys, BlockIdxType dev_block) {
-        std::vector<std::vector<GroupSetResource>> slots(keys.size(), std::vector<GroupSetResource>(1));
+        std::vector<std::vector<GroupSetResource>> resources(keys.size(), std::vector<GroupSetResource>(1));
         for (size_t i = 0; i < keys.size(); ++i) {
-            slots[i][0].device_blocks = {static_cast<BlockIdxType>(dev_block + i)};
+            resources[i][0].device_blocks = {static_cast<BlockIdxType>(dev_block + i)};
         }
-        cache_->insert(nullptr, keys, slots);
+        cache_->insert(nullptr, keys, resources);
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -86,12 +86,12 @@ TEST_F(FullEvictionTest, ExtendingExistingLeafRefreshesDirectParent) {
     const TreeNode* const        direct_parent             = before.path.back();
     const CandidateMeta          direct_parent_meta_before = direct_parent->group_set_resources[0].candidate_meta;
 
-    // Record every isSlotEvictable evaluation during the extending insert.
+    // Record every isEvictable evaluation during the extending insert.
     // Metadata alone cannot distinguish "refresh only the direct parent" from
     // "scan every ancestor": refreshCandidate does not mutate CandidateMeta and
     // interior FULL nodes are heap-ineligible anyway, so a regression that
     // re-walks the whole prefix would keep the other assertions green. With no
-    // eviction pressure, refreshCandidate is the sole caller of isSlotEvictable,
+    // eviction pressure, refreshCandidate is the sole caller of isEvictable,
     // so the counting double captures exactly the re-evaluated nodes.
     counting_full_->checked_nodes_.clear();
     counting_full_->recording_ = true;

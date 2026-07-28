@@ -29,7 +29,7 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
     environment->insertRequestPath();
     environment->releaseRequestRefs();
     environment->demoteAll(Tier::DEVICE);
-    ASSERT_TRUE(environment->allSlotsAtTier(Tier::HOST));
+    ASSERT_TRUE(environment->allResourcesAtTier(Tier::HOST));
 
     BlockTreeMatchResult result = environment->cache->match(environment->keys);
     EXPECT_EQ(result.matched_blocks, 0u);
@@ -57,7 +57,7 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
     context->waitDone();
     ASSERT_TRUE(context->done());
     EXPECT_TRUE(context->success());
-    EXPECT_TRUE(environment->allSlotsAtTier(Tier::DEVICE));
+    EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
     environment->expectPayloads();
 
     result.load_ticket.reset();
@@ -89,19 +89,19 @@ TEST(BlockTreeLoaderTest, LoadStateMachineRejectsDuplicateBeginAndRestoresSource
 
     constexpr size_t                group_set_id  = 0;
     const GroupSetPtr&              group         = environment->groups.at(group_set_id);
-    GroupSetResource&               slot          = find_result.matched_node->group_set_resources[group_set_id];
-    const std::vector<BlockIdxType> source_blocks = group->getBlocks(slot, Tier::HOST);
+    GroupSetResource&               resource      = find_result.matched_node->group_set_resources[group_set_id];
+    const std::vector<BlockIdxType> source_blocks = group->getBlocks(resource, Tier::HOST);
 
     ASSERT_TRUE(
         environment->cache->loader_.reserveLoad(find_result.matched_node, group_set_id, Tier::HOST, source_blocks));
-    EXPECT_EQ(slot.transfer_state, GroupSetTransferState::LOAD_PENDING);
+    EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOAD_PENDING);
     ASSERT_TRUE(environment->cache->loader_.beginLoad(find_result.matched_node, group_set_id, Tier::HOST));
-    EXPECT_EQ(slot.transfer_state, GroupSetTransferState::LOADING);
+    EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOADING);
     EXPECT_FALSE(environment->cache->loader_.beginLoad(find_result.matched_node, group_set_id, Tier::HOST));
-    EXPECT_EQ(slot.transfer_state, GroupSetTransferState::LOADING);
+    EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOADING);
 
     ASSERT_TRUE(environment->cache->loader_.finishLoad(find_result.matched_node, group_set_id, Tier::HOST, false));
-    EXPECT_EQ(slot.transfer_state, GroupSetTransferState::IDLE);
+    EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
 
     environment->reclaimAll();
     environment->expectFullyReclaimed();
@@ -124,12 +124,12 @@ TEST(BlockTreeLoaderTest, FinishLoadDoesNotOverwriteForeignTransferState) {
     BlockTreeFindResult find_result = environment->cache->tree()->findNode(environment->keys);
     ASSERT_NE(find_result.matched_node, nullptr);
 
-    GroupSetResource& slot = find_result.matched_node->group_set_resources[0];
-    slot.transfer_state    = GroupSetTransferState::DEMOTING;
+    GroupSetResource& resource = find_result.matched_node->group_set_resources[0];
+    resource.transfer_state    = GroupSetTransferState::DEMOTING;
     EXPECT_FALSE(environment->cache->loader_.finishLoad(find_result.matched_node, 0, Tier::HOST, false));
-    EXPECT_EQ(slot.transfer_state, GroupSetTransferState::DEMOTING);
+    EXPECT_EQ(resource.transfer_state, GroupSetTransferState::DEMOTING);
 
-    slot.transfer_state = GroupSetTransferState::IDLE;
+    resource.transfer_state = GroupSetTransferState::IDLE;
     environment->reclaimAll();
     environment->expectFullyReclaimed();
 }

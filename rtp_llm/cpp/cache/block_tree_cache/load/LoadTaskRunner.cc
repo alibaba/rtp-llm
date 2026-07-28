@@ -19,31 +19,31 @@ bool LoadTaskRunner::createTask(const LoadTicket::PendingLoadItems&      items,
         return false;
     }
 
-    LoadTicket::PendingLoadItems         task_items;
-    std::vector<GroupSetPtr>             task_item_groups;
+    LoadTicket::PendingLoadItems task_items;
+    std::vector<GroupSetPtr>     task_item_group_sets;
     for (const LoadTicket::PendingLoadItem& item : items) {
         if (item.group_set_id >= group_sets.size()) {
-            RTP_LLM_LOG_ERROR("invalid load task group, group_set=%zu", item.group_set_id);
+            RTP_LLM_LOG_ERROR("invalid load task group set, group_set_id=%zu", item.group_set_id);
             return false;
         }
-        const GroupSetPtr& group = group_sets[item.group_set_id];
-        if (group == nullptr || group->groupSetId() != item.group_set_id) {
-            RTP_LLM_LOG_ERROR("mismatched load task group, group_set=%zu", item.group_set_id);
+        const GroupSetPtr& group_set = group_sets[item.group_set_id];
+        if (group_set == nullptr || group_set->groupSetId() != item.group_set_id) {
+            RTP_LLM_LOG_ERROR("mismatched load task group set, group_set_id=%zu", item.group_set_id);
             return false;
         }
         if (item.joined_load) {
             continue;
         }
         task_items.push_back(item);
-        task_item_groups.push_back(group);
+        task_item_group_sets.push_back(group_set);
     }
     if (task_items.empty()) {
         return true;
     }
 
-    task              = std::make_shared<Task>();
-    task->items       = std::move(task_items);
-    task->item_groups = std::move(task_item_groups);
+    task                  = std::make_shared<Task>();
+    task->items           = std::move(task_items);
+    task->item_group_sets = std::move(task_item_group_sets);
     task->staging_host_blocks.assign(task->items.size(), NULL_BLOCK_IDX);
     task->target_installed.assign(task->items.size(), false);
     task->context = context;
@@ -51,21 +51,21 @@ bool LoadTaskRunner::createTask(const LoadTicket::PendingLoadItems&      items,
 }
 
 LoadTaskRunner::PrepareStatus LoadTaskRunner::prepareTransferItem(Task& task, size_t item_index) {
-    if (item_index >= task.items.size() || item_index >= task.item_groups.size()) {
+    if (item_index >= task.items.size() || item_index >= task.item_group_sets.size()) {
         RTP_LLM_LOG_WARNING("invalid load item index, index=%zu count=%zu", item_index, task.items.size());
         return PrepareStatus::FAILED;
     }
 
-    const LoadTicket::PendingLoadItem&         item  = task.items[item_index];
-    const GroupSetPtr&                         group = task.item_groups[item_index];
-    if (group == nullptr || group->groupSetId() != item.group_set_id) {
+    const LoadTicket::PendingLoadItem& item      = task.items[item_index];
+    const GroupSetPtr&                 group_set = task.item_group_sets[item_index];
+    if (group_set == nullptr || group_set->groupSetId() != item.group_set_id) {
         RTP_LLM_LOG_WARNING("invalid group set id, group_set=%zu", item.group_set_id);
         return PrepareStatus::FAILED;
     }
-    if (item.target_device_blocks.size() != group->devicePoolCount()) {
+    if (item.target_device_blocks.size() != group_set->devicePoolCount()) {
         RTP_LLM_LOG_WARNING("target block count mismatch, group_set=%zu expected=%zu actual=%zu",
                             item.group_set_id,
-                            group->devicePoolCount(),
+                            group_set->devicePoolCount(),
                             item.target_device_blocks.size());
         return PrepareStatus::FAILED;
     }
@@ -87,10 +87,10 @@ LoadTaskRunner::PrepareStatus LoadTaskRunner::prepareTransferItem(Task& task, si
     }
 
     BlockIdxType source_host_block = NULL_BLOCK_IDX;
-    if (item.source_tier == Tier::HOST && group->hostPool() != nullptr) {
+    if (item.source_tier == Tier::HOST && group_set->hostPool() != nullptr) {
         source_host_block = item.source_blocks[0];
-    } else if (item.source_tier == Tier::DISK && group->hostPool() != nullptr && group->diskPool() != nullptr) {
-        source_host_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::REQUEST);
+    } else if (item.source_tier == Tier::DISK && group_set->hostPool() != nullptr && group_set->diskPool() != nullptr) {
+        source_host_block = group_set->allocateSingleBlock(Tier::HOST, BlockRefType::REQUEST);
         if (isNullBlockIdx(source_host_block)) {
             return PrepareStatus::NEED_HOST_RECLAIM;
         }
@@ -180,9 +180,9 @@ void LoadTaskRunner::releaseTaskResources(Task& task) {
 
 void LoadTaskRunner::releaseStagingBlocks(Task& task) {
     for (size_t item_index = 0; item_index < task.items.size(); ++item_index) {
-        const GroupSetPtr& group = task.item_groups[item_index];
-        if (group != nullptr && !isNullBlockIdx(task.staging_host_blocks[item_index])) {
-            group->releaseSingleBlock(Tier::HOST, task.staging_host_blocks[item_index], BlockRefType::REQUEST);
+        const GroupSetPtr& group_set = task.item_group_sets[item_index];
+        if (group_set != nullptr && !isNullBlockIdx(task.staging_host_blocks[item_index])) {
+            group_set->releaseSingleBlock(Tier::HOST, task.staging_host_blocks[item_index], BlockRefType::REQUEST);
             task.staging_host_blocks[item_index] = NULL_BLOCK_IDX;
         }
     }
@@ -190,13 +190,13 @@ void LoadTaskRunner::releaseStagingBlocks(Task& task) {
 
 void LoadTaskRunner::releaseUninstalledTargetHolders(const Task& task) {
     for (size_t item_index = 0; item_index < task.items.size(); ++item_index) {
-        const LoadTicket::PendingLoadItem&         item  = task.items[item_index];
-        const GroupSetPtr&                         group = task.item_groups[item_index];
-        if (item.source_tier == Tier::DEVICE || task.target_installed[item_index] || group == nullptr) {
+        const LoadTicket::PendingLoadItem& item      = task.items[item_index];
+        const GroupSetPtr&                 group_set = task.item_group_sets[item_index];
+        if (item.source_tier == Tier::DEVICE || task.target_installed[item_index] || group_set == nullptr) {
             continue;
         }
-        group->unreferenceBlocks(MultiNodeResource{item.group_set_id, Tier::DEVICE, {item.target_device_blocks}},
-                                 BlockRefType::REQUEST);
+        group_set->unreferenceBlocks(MultiNodeResource{item.group_set_id, Tier::DEVICE, {item.target_device_blocks}},
+                                     BlockRefType::REQUEST);
     }
 }
 

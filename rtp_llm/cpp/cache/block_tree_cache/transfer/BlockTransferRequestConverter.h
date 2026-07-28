@@ -22,18 +22,16 @@ public:
 private:
     using CopyItem = MemoryOperationRequestPB::CopyItem;
 
-    static bool                     hasSourceMemory(const CopyItem& item);
-    static bool                     hasSourceDisk(const CopyItem& item);
-    static bool                     hasTargetDisk(const CopyItem& item);
-    static std::vector<std::string> normalizedTags(const CopyItem& item);
-    static const GroupSet*          findGroupSet(const std::vector<std::string>& normalized_tags,
-                                                 const std::vector<GroupSetPtr>& group_sets);
-    static bool validDeviceBlocks(const std::vector<BlockIdxType>& blocks, const GroupSet& group_set);
-    static bool validHostBlock(BlockIdxType block, const GroupSet& group_set);
-    static bool validDiskBlock(BlockIdxType block, const GroupSet& group_set);
-    static bool directionFor(const TransferDescriptor&                descriptor,
-                             const GroupSet&                          group_set,
-                             MemoryOperationRequestPB::CopyDirection& request_direction);
+    static bool            hasSourceMemory(const CopyItem& item);
+    static bool            hasSourceDisk(const CopyItem& item);
+    static bool            hasTargetDisk(const CopyItem& item);
+    static const GroupSet* findGroupSet(const CopyItem& item, const std::vector<GroupSetPtr>& group_sets);
+    static bool            validDeviceBlocks(const std::vector<BlockIdxType>& blocks, const GroupSet& group_set);
+    static bool            validHostBlock(BlockIdxType block, const GroupSet& group_set);
+    static bool            validDiskBlock(BlockIdxType block, const GroupSet& group_set);
+    static bool            directionFor(const TransferDescriptor&                descriptor,
+                                        const GroupSet&                          group_set,
+                                        MemoryOperationRequestPB::CopyDirection& request_direction);
     static void setDeviceBlocks(const std::vector<BlockIdxType>& blocks, const GroupSet& group_set, CopyItem& item);
     static bool decodeDeviceBlocks(const CopyItem& item, const GroupSet& group_set, std::vector<BlockIdxType>& blocks);
     static bool decodeDeviceHostTransfer(const MemoryOperationRequestPB& request,
