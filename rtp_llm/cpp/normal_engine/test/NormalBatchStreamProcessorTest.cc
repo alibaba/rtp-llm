@@ -1046,6 +1046,137 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     EXPECT_NEAR(2.25525, *(torch::mean(loss4).exp().data_ptr<float>()), 0.0001);
 }
 
+TEST_F(NormalBatchStreamProcessorTest, testCustomOutputDispatch) {
+    // custom_output rows cover the context streams of the step, in stream
+    // order; dispatch slices one row per stream and stages it to CPU.
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 2048;
+    model_config.num_layers  = 2;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    initFullCacheConfig(cache_config, model_config.num_layers);
+    RuntimeConfig runtime_config;
+
+    std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
+    query1->input_ids                     = hostIntBuffer({1});
+    query1->generate_config               = make_shared<GenerateConfig>();
+    GenerateStreamPtr stream1 =
+        make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
+    BatchKVCacheResource addr1;
+    addr1.resetBatchSize(1);
+    addr1.initGroups(cache_config.topologyPtr());
+    addr1.setBatchBlocks(0, 0, {1});
+    stream1->setKVCache(addr1);
+
+    std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
+    query2->input_ids                     = hostIntBuffer({0, 1});
+    query2->generate_config               = make_shared<GenerateConfig>();
+    GenerateStreamPtr stream2 =
+        make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
+    BatchKVCacheResource addr2;
+    addr2.resetBatchSize(1);
+    addr2.initGroups(cache_config.topologyPtr());
+    addr2.setBatchBlocks(0, 0, {9});
+    stream2->setKVCache(addr2);
+
+    std::list<GenerateStreamPtr> streams;
+    streams.emplace_back(stream1);
+    streams.emplace_back(stream2);
+    for (const auto& stream : streams) {
+        stream->generate_status_->status = StreamState::RUNNING;
+    }
+
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+    StreamGroups stream_groups(streams);
+    auto         merge_input_status = processor.gatherModelInput(stream_groups);
+    EXPECT_TRUE(merge_input_status.ok());
+
+    MergedOutput merge_outputs;
+    merge_outputs.model_output.custom_output =
+        torch::tensor({1.0f, 2.0f, 3.0f, 4.0f}).reshape({2, 2}).to(torch::kCUDA);
+    merge_outputs.sampler_output.token_ids = torch::tensor({0, 1, 0, 1}, torch::kInt32).reshape({2, 2});
+    auto status                            = processor.dispatch(stream_groups, merge_outputs);
+    EXPECT_TRUE(status.ok());
+
+    auto out1 = stream1->getCustomOutput();
+    ASSERT_TRUE(out1.defined());
+    EXPECT_FALSE(out1.is_cuda());
+    EXPECT_EQ(toVec<float>(out1), (std::vector<float>{1.0f, 2.0f}));
+    auto out2 = stream2->getCustomOutput();
+    ASSERT_TRUE(out2.defined());
+    EXPECT_EQ(toVec<float>(out2), (std::vector<float>{3.0f, 4.0f}));
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testCustomOutputSkipsDecodeRows) {
+    // Decode streams come first in the batch and have no custom_output row;
+    // the context tail must still map to the right rows.
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 2048;
+    model_config.num_layers  = 2;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    initFullCacheConfig(cache_config, model_config.num_layers);
+    RuntimeConfig runtime_config;
+
+    // decode stream: constructed with 2 tokens, then rewound to input_len 1.
+    std::shared_ptr<GenerateInput> query1 = make_shared<GenerateInput>();
+    query1->input_ids                     = hostIntBuffer({1, 2});
+    query1->generate_config               = make_shared<GenerateConfig>();
+    GenerateStreamPtr stream1 =
+        make_shared<NormalGenerateStream>(query1, model_config, runtime_config, resource_context, nullptr);
+    query1->input_ids = hostIntBuffer({1});
+    BatchKVCacheResource addr1;
+    addr1.resetBatchSize(1);
+    addr1.initGroups(cache_config.topologyPtr());
+    addr1.setBatchBlocks(0, 0, {1, 2});
+    stream1->setKVCache(addr1);
+    stream1->setIsContextStream(false);
+
+    std::shared_ptr<GenerateInput> query2 = make_shared<GenerateInput>();
+    query2->input_ids                     = hostIntBuffer({0, 1});
+    query2->generate_config               = make_shared<GenerateConfig>();
+    GenerateStreamPtr stream2 =
+        make_shared<NormalGenerateStream>(query2, model_config, runtime_config, resource_context, nullptr);
+    BatchKVCacheResource addr2;
+    addr2.resetBatchSize(1);
+    addr2.initGroups(cache_config.topologyPtr());
+    addr2.setBatchBlocks(0, 0, {9});
+    stream2->setKVCache(addr2);
+
+    std::list<GenerateStreamPtr> streams;
+    streams.emplace_back(stream1);
+    streams.emplace_back(stream2);
+    for (const auto& stream : streams) {
+        stream->generate_status_->status = StreamState::RUNNING;
+    }
+
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+    StreamGroups stream_groups(streams);
+    EXPECT_EQ(1u, stream_groups.totalDecodeBatchSize());
+    auto merge_input_status = processor.gatherModelInput(stream_groups);
+    EXPECT_TRUE(merge_input_status.ok());
+
+    MergedOutput merge_outputs;
+    // one context stream -> one custom_output row
+    merge_outputs.model_output.custom_output = torch::tensor({5.0f, 6.0f}).reshape({1, 2}).to(torch::kCUDA);
+    merge_outputs.sampler_output.token_ids   = torch::tensor({0, 1, 0, 1}, torch::kInt32).reshape({2, 2});
+    auto status                              = processor.dispatch(stream_groups, merge_outputs);
+    EXPECT_TRUE(status.ok());
+
+    EXPECT_FALSE(stream1->getCustomOutput().defined());
+    auto out2 = stream2->getCustomOutput();
+    ASSERT_TRUE(out2.defined());
+    EXPECT_EQ(toVec<float>(out2), (std::vector<float>{5.0f, 6.0f}));
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testMultimodalGatherBatch) {
     ResourceContext resource_context;
     ModelConfig     model_config;

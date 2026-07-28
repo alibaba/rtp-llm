@@ -140,9 +140,11 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     }
     const torch::Tensor new_tokens_for_copy = torch::cat(new_token_views, 0).contiguous();
 
-    bool                need_d2h_sync  = false;
-    const torch::Tensor new_tokens_all = copyToPinnedCpuAsync(new_tokens_for_copy, need_d2h_sync);
-    const torch::Tensor success_cpu    = copyToPinnedCpuAsync(sampler_output.success, need_d2h_sync);
+    bool                need_d2h_sync     = false;
+    const torch::Tensor new_tokens_all    = copyToPinnedCpuAsync(new_tokens_for_copy, need_d2h_sync);
+    const torch::Tensor success_cpu       = copyToPinnedCpuAsync(sampler_output.success, need_d2h_sync);
+    const torch::Tensor custom_output_cpu =
+        copyToPinnedCpuAsync(merge_outputs.model_output.custom_output, need_d2h_sync);
     syncPinnedCpuCopies(need_d2h_sync);
     batch_idx_out = 0;
     RTP_LLM_LOG_DEBUG("new_tokens = [%s]", tensorDebugStringWithData<int32_t>(new_tokens_all).c_str());
@@ -153,12 +155,21 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
     }
     const auto dispatch_stream = cuda_graph::graphGetCurrentStream();
 
+    const int total_decode_batch_size = static_cast<int>(stream_groups.totalDecodeBatchSize());
     for (auto& stream : stream_groups.allStreams()) {
         auto cur_batch_size  = stream->currentBatchSize();
         auto next_batch_size = stream->nextBatchSize();
         auto token_size      = stream->currentExecuteTokenSize();
 
-        auto task = [&, stream, batch_idx_in, batch_idx_out, token_offset, dispatch_stream]() {
+        // custom_output contains context rows only; decode streams are placed
+        // before context streams in the merged model batch.
+        torch::Tensor batch_custom_output;
+        if (custom_output_cpu.defined() && batch_idx_in >= total_decode_batch_size
+            && batch_idx_in - total_decode_batch_size + cur_batch_size <= custom_output_cpu.size(0)) {
+            batch_custom_output = custom_output_cpu.narrow(0, batch_idx_in - total_decode_batch_size, cur_batch_size);
+        }
+
+        auto task = [&, stream, batch_idx_in, batch_idx_out, token_offset, dispatch_stream, batch_custom_output]() {
             c10::InferenceMode           inference_guard(true);
             cuda_graph::GraphStreamGuard stream_guard(dispatch_stream);
             dispatchSingleStream(stream,
@@ -168,7 +179,8 @@ absl::Status NormalOutputDispatcher::dispatch(const StreamGroups& stream_groups,
                                  token_offset,
                                  return_all_probs,
                                  new_tokens_all,
-                                 success_cpu);
+                                 success_cpu,
+                                 batch_custom_output);
         };
 
         if (thread_pool_) {
@@ -197,7 +209,8 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                                   int                  token_offset,
                                                   bool                 return_all_probs,
                                                   const torch::Tensor& new_tokens_all,
-                                                  const torch::Tensor& success_cpu) const {
+                                                  const torch::Tensor& success_cpu,
+                                                  const torch::Tensor& batch_custom_output) const {
 
     const auto&  model_output   = merge_outputs.model_output;
     const auto&  sampler_output = merge_outputs.sampler_output;
@@ -402,6 +415,7 @@ void NormalOutputDispatcher::dispatchSingleStream(GenerateStreamPtr    stream,
                                  loss,
                                  src_batch_indices,
                                  all_hidden_states,
+                                 batch_custom_output,
                                  /*update_remote_generate=*/true,
                                  /*force_update_info=*/false,
                                  std::move(prompt_logits_output),

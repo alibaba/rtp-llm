@@ -152,6 +152,8 @@ public:
     std::optional<torch::Tensor>      all_hidden_states;
     std::optional<torch::Tensor>      logits;
     std::optional<torch::Tensor>      loss;
+    // Output of the deployment-registered post-layers CustomHandler.
+    std::optional<torch::Tensor>      custom_output;
     std::optional<PromptLogitsOutput> prompt_logits;
 };
 

@@ -22,6 +22,10 @@ std::shared_ptr<GenerateStream> EngineBase::makeStream(const std::shared_ptr<Gen
     throw std::runtime_error("not implemeted");
 }
 
+void EngineBase::setHiddenStatesProcessor(pybind11::object handler) {
+    RTP_LLM_LOG_WARNING("setHiddenStatesProcessor is not supported by this engine, handler ignored");
+}
+
 void EngineBase::initRuntime(const EngineInitParams& params) {
     const auto rank =
         params.parallelism_config.dp_rank * params.parallelism_config.tp_size + params.parallelism_config.tp_rank;

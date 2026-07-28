@@ -1069,6 +1069,7 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
                   torch::Tensor(),
                   torch::Tensor(),
                   torch::Tensor(),
+                  torch::Tensor(),
                   update_info.update_remote_generate,
                   update_info.force_update_info});
 }
@@ -1220,6 +1221,13 @@ void GenerateStream::setLoss(const torch::Tensor& loss) {
     RTP_LLM_CHECK(loss_index_ + loss_size < inputLength());
     memcpy(loss_.data_ptr<float>() + loss_index_, loss_cpu.data_ptr<float>(), loss_size * sizeof(float));
     loss_index_ += loss_size;
+}
+
+void GenerateStream::setCustomOutput(const torch::Tensor& custom_output) {
+    // The dispatcher stages custom_output to pinned CPU together with
+    // token_ids (one D2H sync for both); clone here releases the shared
+    // pinned staging buffer instead of pinning it for the stream's lifetime.
+    custom_output_ = custom_output.is_cuda() ? custom_output.cpu() : custom_output.clone();
 }
 
 void GenerateStream::setSoftmaxProbs(const torch::Tensor& softmax_probs,

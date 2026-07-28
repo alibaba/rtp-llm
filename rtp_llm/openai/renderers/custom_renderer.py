@@ -681,6 +681,9 @@ class CustomChatRenderer:
             result().output_ids = output.output_ids.tolist()
         if generate_config.return_input_ids and output.input_ids is not None:
             result().input_ids = output.input_ids.tolist()
+        # deployment-level gate (post-layers CustomHandler), no per-request flag
+        if output.custom_output is not None:
+            result().custom_output = output.custom_output.tolist()
 
         return final_result
 

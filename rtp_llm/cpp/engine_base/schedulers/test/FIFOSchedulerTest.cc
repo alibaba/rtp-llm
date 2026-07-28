@@ -2262,6 +2262,7 @@ TEST_F(FIFOSchedulerTest, testMaxNewTokensOneDoesNotReserveFinalTokenKVBlock) {
                        torch::Tensor(),
                        torch::Tensor(),
                        torch::Tensor(),
+                       torch::Tensor(),
                        /*update_remote_generate=*/false,
                        /*force_update_info=*/false});
     ASSERT_TRUE(candidate->hasEvent(StreamEvents::GenerateDone));

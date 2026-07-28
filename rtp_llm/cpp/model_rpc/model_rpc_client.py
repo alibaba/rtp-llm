@@ -404,6 +404,13 @@ def trans_output(
         and output_pb.all_probs.shape[0] > 0
         else None
     )
+    all_custom_output = (
+        trans_tensor(output_pb.custom_output)
+        if output_pb.HasField("custom_output")
+        and len(output_pb.custom_output.shape) > 0
+        and output_pb.custom_output.shape[0] > 0
+        else None
+    )
 
     prompt_logits_data = None
     if output_pb.HasField("prompt_logits") and output_pb.prompt_logits.HasField(
@@ -505,6 +512,9 @@ def trans_output(
 
         if prompt_logits_data is not None:
             output_py.prompt_logits = prompt_logits_data
+
+        if all_custom_output is not None:
+            output_py.custom_output = all_custom_output[i]
 
         if (
             logits_index is not None
