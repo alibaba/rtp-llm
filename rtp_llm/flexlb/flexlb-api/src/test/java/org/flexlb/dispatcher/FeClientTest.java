@@ -139,6 +139,27 @@ class FeClientTest {
     }
 
     @Test
+    void fanoutSkipDropsEveryHopByHopHeaderThePassthroughPathStrips() {
+        // FANOUT_SKIP is derived from HOP_BY_HOP (plus content-type/accept-encoding) so the fanout
+        // path can never forward a hop-by-hop header the passthrough path strips — an inbound Host or
+        // Connection would misroute or double-frame the chunk request. Pin the derivation as an
+        // invariant so a broken caseInsensitiveSet(base, ...) (e.g. dropping addAll(base)) fails here
+        // instead of silently leaking framing headers to FE.
+        Assertions.assertTrue(DispatcherHeaders.FANOUT_SKIP.containsAll(DispatcherHeaders.HOP_BY_HOP),
+                "FANOUT_SKIP must contain every hop-by-hop name");
+
+        HttpHeaders inbound = new HttpHeaders();
+        inbound.add("Connection", "keep-alive");
+        inbound.add("Host", "caller-supplied-host");
+        HttpHeaders copied = new HttpHeaders();
+        DispatcherHeaders.copyEndToEnd(inbound, copied, DispatcherHeaders.FANOUT_SKIP);
+        Assertions.assertNull(copied.getFirst("Connection"),
+                "an inbound hop-by-hop header must not reach FE on the fanout path");
+        Assertions.assertNull(copied.getFirst("Host"),
+                "an inbound Host must not be relayed — it would misroute the chunk request");
+    }
+
+    @Test
     void feNon2xxResponseErrorsWithExtractableStatus() {
         // .retrieve() turns a 5xx into a WebClientResponseException; the fanout path relies on
         // DispatcherResponses.httpStatusOf recovering the status so a chunk degrades to a failed

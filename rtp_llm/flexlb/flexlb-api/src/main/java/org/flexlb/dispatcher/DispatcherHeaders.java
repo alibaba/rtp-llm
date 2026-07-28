@@ -48,19 +48,7 @@ final class DispatcherHeaders {
      *       by {@link FeClient}; {@code content-length} is already hop-by-hop).</li>
      * </ul>
      */
-    static final Set<String> FANOUT_SKIP = caseInsensitiveSet(
-            "connection",
-            "keep-alive",
-            "proxy-authenticate",
-            "proxy-authorization",
-            "te",
-            "trailer",
-            "transfer-encoding",
-            "upgrade",
-            "host",
-            "content-length",
-            "content-type",
-            "accept-encoding");
+    static final Set<String> FANOUT_SKIP = caseInsensitiveSet(HOP_BY_HOP, "content-type", "accept-encoding");
 
     /** Copy every header from {@code source} into {@code sink} except the names in {@code skip}. */
     static void copyEndToEnd(HttpHeaders source, HttpHeaders sink, Set<String> skip) {
@@ -75,6 +63,14 @@ final class DispatcherHeaders {
     private static Set<String> caseInsensitiveSet(String... names) {
         Set<String> set = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
         set.addAll(Arrays.asList(names));
+        return Collections.unmodifiableSet(set);
+    }
+
+    /** Same as above but seeded from {@code base}, so a derived set cannot drift from its parent. */
+    private static Set<String> caseInsensitiveSet(Set<String> base, String... extra) {
+        Set<String> set = new TreeSet<>(String.CASE_INSENSITIVE_ORDER);
+        set.addAll(base);
+        set.addAll(Arrays.asList(extra));
         return Collections.unmodifiableSet(set);
     }
 }
