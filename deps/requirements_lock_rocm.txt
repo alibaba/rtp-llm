@@ -135,7 +135,7 @@ aiosignal==1.4.0 \
     --hash=sha256:053243f8b92b990551949e63930a839ff0cf0b0ebbe0597b0f3fb19e1a0fe82e \
     --hash=sha256:f47eecd9468083c2029cc99945502cb7708b082c232f9aca65da147157b251c7
     # via aiohttp
-aiter @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/aiter/aiter-0.1.17.dev79%2Bg2570b35f9.d20260623-cp310-cp310-linux_x86_64.whl \
+aiter==0.1.17.dev79+g2570b35f9.d20260623 \
     --hash=sha256:23c2fd22ea8130aa70750dee3fb3dfe08a0bcb60592188a26d64d84b0b6caa25
     # via -r requirements_rocm.txt
 aliyun-python-sdk-core==2.16.0 \
@@ -3628,10 +3628,10 @@ transformers==5.2.0 \
     # via
     #   -r requirements_base.txt
     #   sentence-transformers
-triton @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton-3.7.0%2Bamd.rocm7.2.0.gitd0d77a509-cp310-cp310-linux_x86_64.whl \
+triton==3.7.0+amd.rocm7.2.0.gitd0d77a509 \
     --hash=sha256:3a8acacdfb4723c8bb71844c427f4d3ce047658bf97fbdc23065c06205231687
     # via -r requirements_rocm.txt
-triton-kernels @ https://sinian-metrics-platform.oss-cn-hangzhou.aliyuncs.com/kis/AMD/triton/triton_kernels-1.0.0%2Bamd.rocm7.2.0.gitd0d77a509-py3-none-any.whl \
+triton-kernels==1.0.0+amd.rocm7.2.0.gitd0d77a509 \
     --hash=sha256:df8b42ebf098767c0d31a3916913bd7557a623903aefa26602e7c6818c34b84a
     # via -r requirements_rocm.txt
 typer==0.26.8 \
