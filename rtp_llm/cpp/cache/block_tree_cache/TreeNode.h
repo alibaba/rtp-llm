@@ -48,8 +48,8 @@ struct CandidateMeta {
 enum class GroupSetTransferState : uint8_t {
     IDLE,
     DEMOTING,           // Device -> Host, or Host -> Disk
-    LOAD_BACK_PENDING,  // Host/Disk source reserved by a deferred load-back ticket
-    LOADING_BACK        // Host/Disk -> Device
+    LOAD_PENDING,       // Host/Disk source reserved by a deferred load ticket
+    LOADING             // Host/Disk -> Device
 };
 
 // Per-GroupSet data location across storage tiers.

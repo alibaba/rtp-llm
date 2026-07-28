@@ -16,7 +16,7 @@
 
 namespace rtp_llm {
 
-class LoadBackTicket;
+class LoadTicket;
 
 struct MultiNodeResource {
     size_t                                 group_set_id{0};
@@ -34,12 +34,12 @@ struct BlockTreeMatchResult {
     std::vector<MultiNodeResource> matched_resources;
 
     std::shared_ptr<AsyncContext> async_context;
-    size_t                        load_back_blocks{0};
-    size_t                        host_load_back_blocks{0};
-    size_t                        disk_load_back_blocks{0};
-    size_t                        remote_load_back_blocks{0};
+    size_t                        load_blocks{0};
+    size_t                        host_load_blocks{0};
+    size_t                        disk_load_blocks{0};
+    size_t                        remote_load_blocks{0};
 
-    std::shared_ptr<LoadBackTicket> load_back_ticket;
+    std::shared_ptr<LoadTicket> load_ticket;
 };
 
 class MatchValidator {

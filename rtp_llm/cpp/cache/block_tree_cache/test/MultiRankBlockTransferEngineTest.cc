@@ -249,7 +249,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastTransferFailsOnMissingMemoryRe
         cache->transfer_dispatcher_->multi_rank_engine_->execute(makeBroadcastDescriptors(), /*timeout_ms=*/500));
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadBackCommitsDeviceSlot) {
+TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadCommitsDeviceSlot) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -265,14 +265,14 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadBackCommitsDeviceSlot)
     std::shared_ptr<HostBlockPool> host_pool = makeHostPool(256, 4);
     std::shared_ptr<FullGroupSet>  group     = std::make_shared<FullGroupSet>();
     group->setHostPool(host_pool);
-    const BlockIdxType device_block = prepareDeviceTarget(group, "broadcast_host_load_back_success");
+    const BlockIdxType device_block = prepareDeviceTarget(group, "broadcast_host_load_success");
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
     const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
     BlockTreeCacheConfig config;
     config.enable_memory_cache                        = true;
-    config.enable_load_back                           = true;
+    config.enable_load                                = true;
     std::vector<GroupSetPtr>                   groups = {group};
     std::unique_ptr<BlockTreeCache>            cache  = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1),
                                                                       std::move(groups),
@@ -283,10 +283,10 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadBackCommitsDeviceSlot)
     slots[0][0].host_block = host_block;
     ASSERT_TRUE(insertGroupSetSlots(*cache, nullptr, {100}, slots));
     BlockTreeMatchResult match = cache->match({100});
-    ASSERT_NE(match.load_back_ticket, nullptr);
-    ASSERT_EQ(match.load_back_ticket->items().size(), 1u);
-    ASSERT_TRUE(match.load_back_ticket->bindTargetDeviceBlocks(0, {device_block}));
-    const auto context = match.load_back_ticket->commit();
+    ASSERT_NE(match.load_ticket, nullptr);
+    ASSERT_EQ(match.load_ticket->items().size(), 1u);
+    ASSERT_TRUE(match.load_ticket->bindTargetDeviceBlocks(0, {device_block}));
+    const auto context = match.load_ticket->commit();
     ASSERT_NE(context, nullptr);
     context->waitDone();
     ASSERT_TRUE(context->success());
@@ -315,7 +315,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadBackCommitsDeviceSlot)
     }
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadBackFailureKeepsSourceSlot) {
+TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadFailureKeepsSourceSlot) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -331,14 +331,14 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadBackFailureKeepsSource
     std::shared_ptr<HostBlockPool> host_pool = makeHostPool(256, 4);
     std::shared_ptr<FullGroupSet>  group     = std::make_shared<FullGroupSet>();
     group->setHostPool(host_pool);
-    const BlockIdxType device_block = prepareDeviceTarget(group, "broadcast_host_load_back_failure");
+    const BlockIdxType device_block = prepareDeviceTarget(group, "broadcast_host_load_failure");
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
     const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
 
     BlockTreeCacheConfig config;
     config.enable_memory_cache                        = true;
-    config.enable_load_back                           = true;
+    config.enable_load                                = true;
     std::vector<GroupSetPtr>                   groups = {group};
     std::unique_ptr<BlockTreeCache>            cache  = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1),
                                                                       std::move(groups),
@@ -349,10 +349,10 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadBackFailureKeepsSource
     slots[0][0].host_block = host_block;
     ASSERT_TRUE(insertGroupSetSlots(*cache, nullptr, {100}, slots));
     BlockTreeMatchResult match = cache->match({100});
-    ASSERT_NE(match.load_back_ticket, nullptr);
-    ASSERT_EQ(match.load_back_ticket->items().size(), 1u);
-    ASSERT_TRUE(match.load_back_ticket->bindTargetDeviceBlocks(0, {device_block}));
-    const auto context = match.load_back_ticket->commit();
+    ASSERT_NE(match.load_ticket, nullptr);
+    ASSERT_EQ(match.load_ticket->items().size(), 1u);
+    ASSERT_TRUE(match.load_ticket->bindTargetDeviceBlocks(0, {device_block}));
+    const auto context = match.load_ticket->commit();
     ASSERT_NE(context, nullptr);
     context->waitDone();
     ASSERT_FALSE(context->success());
@@ -380,7 +380,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadBackFailureKeepsSource
     group->devicePools().front()->decRef(device_block, BlockRefType::REQUEST);
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, LoadBackCompletionStateMismatchDoesNotInstallTargetOrClearSource) {
+TEST_F(MultiRankBlockTransferEngineTest, LoadCompletionStateMismatchDoesNotInstallTargetOrClearSource) {
     std::shared_ptr<MultiRankBlockTransferRpcState>    state   = std::make_shared<MultiRankBlockTransferRpcState>();
     const std::vector<MultiRankBlockTransferRpcConfig> configs = {
         {true, true, grpc::Status::OK, state},
@@ -393,7 +393,7 @@ TEST_F(MultiRankBlockTransferEngineTest, LoadBackCompletionStateMismatchDoesNotI
     std::shared_ptr<HostBlockPool> host_pool = makeHostPool(256, 4);
     std::shared_ptr<FullGroupSet>  group     = std::make_shared<FullGroupSet>();
     group->setHostPool(host_pool);
-    const BlockIdxType device_block = prepareDeviceTarget(group, "load_back_completion_state_mismatch");
+    const BlockIdxType device_block = prepareDeviceTarget(group, "load_completion_state_mismatch");
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
     const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
@@ -413,23 +413,23 @@ TEST_F(MultiRankBlockTransferEngineTest, LoadBackCompletionStateMismatchDoesNotI
     ASSERT_NE(find_result.matched_node, nullptr);
 
     group->referenceBlocks(MultiNodeResource{0, Tier::HOST, {{host_block}}}, BlockRefType::REQUEST);
-    ASSERT_TRUE(cache->evictor_.reserveLoadBack(find_result.matched_node, 0, Tier::HOST, {host_block}));
-    ASSERT_TRUE(cache->evictor_.beginLoadBack(find_result.matched_node, 0, Tier::HOST));
+    ASSERT_TRUE(cache->loader_.reserveLoad(find_result.matched_node, 0, Tier::HOST, {host_block}));
+    ASSERT_TRUE(cache->loader_.beginLoad(find_result.matched_node, 0, Tier::HOST));
 
-    LoadBackTicket::PendingLoadBackItem item;
+    LoadTicket::PendingLoadItem item;
     item.node                                           = find_result.matched_node;
     item.group_set_id                                   = 0;
     item.source_tier                                    = Tier::HOST;
     item.source_blocks                                  = {host_block};
     item.target_device_blocks                           = {device_block};
-    const std::shared_ptr<LoadBackAsyncContext> context = std::make_shared<LoadBackAsyncContext>(1);
-    LoadBackWorker::TaskPtr                     task;
-    ASSERT_TRUE(cache->load_back_worker_.createTask({item}, {group}, context, task));
+    const std::shared_ptr<LoadAsyncContext> context     = std::make_shared<LoadAsyncContext>(1);
+    LoadWorker::TaskPtr                     task;
+    ASSERT_TRUE(cache->loader_.load_worker_.createTask({item}, {group}, context, task));
     ASSERT_NE(task, nullptr);
-    ASSERT_TRUE(
-        cache->load_back_worker_.startLoading(find_result.matched_node, 0, item.target_device_blocks, task->context));
+    ASSERT_TRUE(cache->loader_.load_worker_.startLoading(
+        find_result.matched_node, 0, item.target_device_blocks, task->context));
     find_result.matched_node->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
-    cache->runLoadBackTask(task);
+    cache->loader_.runLoadTask(task);
 
     GroupSetResource& slot = find_result.matched_node->group_set_resources[0];
     EXPECT_EQ(slot.transfer_state, GroupSetTransferState::DEMOTING);
@@ -443,7 +443,7 @@ TEST_F(MultiRankBlockTransferEngineTest, LoadBackCompletionStateMismatchDoesNotI
     slot.transfer_state = GroupSetTransferState::IDLE;
 }
 
-TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadBackUsesTwoTransferStages) {
+TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadUsesTwoTransferStages) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -461,7 +461,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadBackUsesTwoTransferSta
     std::shared_ptr<FullGroupSet>           group     = std::make_shared<FullGroupSet>();
     group->setHostPool(host_pool);
     group->setDiskPool(disk_pool);
-    const BlockIdxType device_block = prepareDeviceTarget(group, "broadcast_disk_load_back");
+    const BlockIdxType device_block = prepareDeviceTarget(group, "broadcast_disk_load");
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
     const BlockIdxType disk_block = group->allocateSingleBlock(Tier::DISK, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
@@ -469,7 +469,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadBackUsesTwoTransferSta
     BlockTreeCacheConfig config;
     config.enable_memory_cache                        = true;
     config.enable_disk_cache                          = true;
-    config.enable_load_back                           = true;
+    config.enable_load                                = true;
     std::vector<GroupSetPtr>                   groups = {group};
     std::unique_ptr<BlockTreeCache>            cache  = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1),
                                                                       std::move(groups),
@@ -480,10 +480,10 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadBackUsesTwoTransferSta
     slots[0][0].disk_slot = disk_block;
     ASSERT_TRUE(insertGroupSetSlots(*cache, nullptr, {100}, slots));
     BlockTreeMatchResult match = cache->match({100});
-    ASSERT_NE(match.load_back_ticket, nullptr);
-    ASSERT_EQ(match.load_back_ticket->items().size(), 1u);
-    ASSERT_TRUE(match.load_back_ticket->bindTargetDeviceBlocks(0, {device_block}));
-    const auto context = match.load_back_ticket->commit();
+    ASSERT_NE(match.load_ticket, nullptr);
+    ASSERT_EQ(match.load_ticket->items().size(), 1u);
+    ASSERT_TRUE(match.load_ticket->bindTargetDeviceBlocks(0, {device_block}));
+    const auto context = match.load_ticket->commit();
     ASSERT_NE(context, nullptr);
     context->waitDone();
     ASSERT_TRUE(context->success());

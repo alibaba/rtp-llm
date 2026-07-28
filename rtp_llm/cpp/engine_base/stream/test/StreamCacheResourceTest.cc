@@ -367,7 +367,7 @@ TEST_F(StreamCacheResourceTest, testAsyncLoadCache_WithoutAllocatorContext_Retur
     prepareResource(/*reuse_cache=*/false);
     auto& resource = stream_->streamCacheResource();
 
-    // No allocator-owned load-back context is in flight.
+    // No allocator-owned load context is in flight.
     ASSERT_FALSE(resource.asyncLoadCache());
 }
 

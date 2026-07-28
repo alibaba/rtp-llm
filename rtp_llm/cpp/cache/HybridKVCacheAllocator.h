@@ -10,7 +10,7 @@
 
 namespace rtp_llm {
 
-class LoadBackTicket;
+class LoadTicket;
 
 class HybridKVCacheAllocator: public KVCacheAllocator, public std::enable_shared_from_this<HybridKVCacheAllocator> {
 public:
@@ -61,9 +61,9 @@ protected:
     int  reuseCache(const CacheKeysType&                 cache_keys,
                     BatchKVCacheResource&                kv_resource,
                     const std::shared_ptr<CPSlotMapper>& cp_mapper,
-                    std::shared_ptr<LoadBackTicket>&     ticket,
+                    std::shared_ptr<LoadTicket>&         ticket,
                     std::vector<BlockIndicesType>&       referenced_blocks);
-    bool preflightLoadBackMappings(const std::shared_ptr<LoadBackTicket>& ticket) const;
+    bool preflightLoadMappings(const std::shared_ptr<LoadTicket>& ticket) const;
 
     virtual void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, BlockRefType ref_type) const = 0;
     virtual void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, BlockRefType ref_type)            = 0;

@@ -571,8 +571,8 @@ TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguo
         cache->executeTransfer(TransferDescriptor::deviceToHost(group_set->groupSetId(), {device_block}, host_block)));
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x00);
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x00);
-    EXPECT_TRUE(cache->executeTransfer(
-        TransferDescriptor::hostToDevice(group_set->groupSetId(), host_block, {device_block})));
+    EXPECT_TRUE(
+        cache->executeTransfer(TransferDescriptor::hostToDevice(group_set->groupSetId(), host_block, {device_block})));
 
     expectDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x31);
     expectDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x72);
@@ -1051,8 +1051,8 @@ TEST_F(BlockTreeCacheFactoryTest, IndependentReinsertRefillsOnlyEmptyIdleGroupSe
     node->group_set_resources[0].host_block = NULL_BLOCK_IDX;
     group_set_a->releaseSingleBlock(Tier::HOST, host_a, BlockRefType::BLOCK_CACHE);
 
-    for (const auto state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOADING_BACK}) {
-        SCOPED_TRACE(state == GroupSetTransferState::DEMOTING ? "demoting" : "loading_back");
+    for (const auto state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOADING}) {
+        SCOPED_TRACE(state == GroupSetTransferState::DEMOTING ? "demoting" : "loading");
         node->group_set_resources[0].transfer_state = state;
         const auto before_in_flight                 = cache->getKeySnapshot(/*limit=*/16);
         cache->insert(nullptr, CacheKeysType{703}, {{blocked_incoming_a, incoming_b}});

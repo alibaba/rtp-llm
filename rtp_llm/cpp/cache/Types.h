@@ -14,7 +14,7 @@
 namespace rtp_llm {
 
 class AsyncContext;
-class LoadBackTicket;
+class LoadTicket;
 
 class CompleteTokenIds;
 using CompleteTokenIdsPtr = std::shared_ptr<CompleteTokenIds>;
@@ -87,7 +87,7 @@ struct MallocResult {
 
     int64_t                         match_cost_time_us = 0;
     std::shared_ptr<AsyncContext>   async_context      = nullptr;
-    std::shared_ptr<LoadBackTicket> load_back_ticket   = nullptr;
+    std::shared_ptr<LoadTicket>     load_ticket        = nullptr;
 
     int memory_reuse_len = 0;
     int disk_reuse_len   = 0;

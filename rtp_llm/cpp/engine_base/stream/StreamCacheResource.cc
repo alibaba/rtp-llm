@@ -74,7 +74,7 @@ void StreamCacheResource::releaseResource() {
         abort();
     }
     if (allocator_load_context_) {
-        resource_context_.cache_manager->cancelLoadBack(allocator_load_context_);
+        resource_context_.cache_manager->cancelLoad(allocator_load_context_);
         allocator_load_context_.reset();
     }
     // do not reuse cache from stopped beam search streams, whose states are likely corrupted
@@ -213,8 +213,7 @@ absl::Status StreamCacheResource::waitForAllocatorLoad() {
         return absl::OkStatus();
     }
     const std::string error_text = error.ToString();
-    return absl::InternalError(error_text.empty() ? "allocator load-back failed" :
-                                                    "allocator load-back failed: " + error_text);
+    return absl::InternalError(error_text.empty() ? "allocator load failed" : "allocator load failed: " + error_text);
 }
 
 absl::Status StreamCacheResource::incrKVBlock() {
@@ -248,7 +247,7 @@ absl::Status StreamCacheResource::incrKVBlock() {
         stream_->setDiskReuseLength(result.disk_reuse_len);
     }
     if (result.async_context) {
-        resource_context_.cache_manager->cancelLoadBack(result.async_context);
+        resource_context_.cache_manager->cancelLoad(result.async_context);
         return absl::FailedPreconditionError("async incremental KV block allocation is unsupported");
     }
 
@@ -268,10 +267,10 @@ bool StreamCacheResource::loadCacheDone() {
         if (!allocator_load_context_->success()) {
             const ErrorInfo error = allocator_load_context_->errorInfo();
             RTP_LLM_LOG_WARNING(
-                "block tree load-back failed, stream=%ld error=%s", stream_->streamId(), error.ToString().c_str());
+                "block tree load failed, stream=%ld error=%s", stream_->streamId(), error.ToString().c_str());
             allocator_load_context_.reset();
             stream_->reportEventWithoutLock(
-                StreamEvents::Error, ErrorCode::LOAD_CACHE_TIMEOUT, "block tree cache load-back failed");
+                StreamEvents::Error, ErrorCode::LOAD_CACHE_TIMEOUT, "block tree cache load failed");
             return true;
         }
         allocator_load_context_.reset();

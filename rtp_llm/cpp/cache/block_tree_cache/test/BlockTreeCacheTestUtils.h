@@ -125,7 +125,7 @@ struct FullSWAEnvironmentOptions {
     size_t usable_host_blocks{16};
     size_t usable_disk_blocks{16};
     bool   enable_disk{true};
-    bool   enable_load_back{true};
+    bool   enable_load{true};
     bool   enable_reverse_eviction{true};
 };
 

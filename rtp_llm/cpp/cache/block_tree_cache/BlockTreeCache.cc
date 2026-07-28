@@ -10,6 +10,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeEvictor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
@@ -18,41 +19,6 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
-
-namespace {
-
-template<typename Cleanup>
-class ScopeRollback {
-public:
-    explicit ScopeRollback(Cleanup cleanup): cleanup_(std::move(cleanup)) {}
-
-    ~ScopeRollback() {
-        run();
-    }
-
-    ScopeRollback(const ScopeRollback&)            = delete;
-    ScopeRollback& operator=(const ScopeRollback&) = delete;
-    ScopeRollback(ScopeRollback&&)                 = delete;
-    ScopeRollback& operator=(ScopeRollback&&)      = delete;
-
-    void run() {
-        if (!active_) {
-            return;
-        }
-        active_ = false;
-        cleanup_();
-    }
-
-    void dismiss() noexcept {
-        active_ = false;
-    }
-
-private:
-    Cleanup cleanup_;
-    bool    active_{true};
-};
-
-}  // anonymous namespace
 
 BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
                                std::vector<GroupSetPtr>                 group_sets,
@@ -63,16 +29,31 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
     config_(std::move(config)),
     tree_(std::move(tree)),
     group_sets_(std::move(group_sets)),
-    load_back_ticket_registry_(std::make_shared<LoadBackTicketRegistry>(
-        [this](const LoadBackTicket& ticket) { return commitLoadBack(ticket); },
-        [this](const LoadBackTicket& ticket) { abortLoadBack(ticket); })),
     storage_backend_(std::move(storage_backend)),
     transfer_dispatcher_(std::move(transfer_dispatcher)),
     task_pool_(std::move(task_pool)),
     evictor_(
         group_sets_,
         [this](const TransferDescriptor& descriptor) { return executeTransfer(descriptor); },
-        config_.enable_reverse_eviction) {}
+        config_.enable_reverse_eviction),
+    loader_(
+        group_sets_,
+        evictor_,
+        transfer_dispatcher_.get(),
+        task_pool_.get(),
+        metrics_reporter_,
+        mutex_,
+        config_.memory_cache_disk_sync_timeout_ms,
+        config_.memory_cache_sync_timeout_ms,
+        [this](size_t group_set_id, Tier tier) { return reclaimOneForGroup(group_set_id, tier); },
+        [this](bool tree_data_mutated, bool check_watermark) {
+            if (tree_data_mutated) {
+                ++mutation_version_;
+            }
+            if (check_watermark) {
+                checkWatermark();
+            }
+        }) {}
 
 bool BlockTreeCache::init() {
     if (initialized_) {
@@ -131,8 +112,8 @@ bool BlockTreeCache::initializeConfiguration() {
         RTP_LLM_LOG_ERROR("disk cache requires memory cache");
         return false;
     }
-    if (config_.enable_load_back && !config_.enable_memory_cache) {
-        RTP_LLM_LOG_ERROR("load back requires memory cache");
+    if (config_.enable_load && !config_.enable_memory_cache) {
+        RTP_LLM_LOG_ERROR("load requires memory cache");
         return false;
     }
 
@@ -201,13 +182,13 @@ bool BlockTreeCache::initializeConfiguration() {
 }
 
 BlockTreeCache::~BlockTreeCache() {
-    RTP_LLM_LOG_INFO("destroying, closing load-back tickets...");
-    load_back_ticket_registry_->shutdown();
+    RTP_LLM_LOG_INFO("destroying, closing load tickets...");
+    loader_.shutdown();
     if (!initialized_) {
         RTP_LLM_LOG_INFO("destroyed");
         return;
     }
-    RTP_LLM_LOG_INFO("load-back tickets closed, waiting for pending tasks...");
+    RTP_LLM_LOG_INFO("load tickets closed, waiting for pending tasks...");
     waitForPendingTasks();
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -330,15 +311,13 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
                                         tree_find_result.path.begin()
                                             + static_cast<ptrdiff_t>(valid_matched_block_count));
     candidate_logically_valid.resize(valid_matched_block_count);
-    LoadBackTicket::PendingLoadBackItems pending_load_back_items;
-    prepareMatchedBlocks(matched_path, candidate_logically_valid, result, pending_load_back_items);
-    if (config_.enable_load_back && !pending_load_back_items.empty()) {
-        result.load_back_ticket = prepareLoadBackTicket(pending_load_back_items, valid_matched_block_count);
-        if (result.load_back_ticket == nullptr) {
-            result.load_back_blocks      = 0;
-            result.host_load_back_blocks = 0;
-            result.disk_load_back_blocks = 0;
-        }
+    prepareMatchedBlocks(matched_path, candidate_logically_valid, result);
+    if (config_.enable_load) {
+        BlockTreeLoadResult load_result = loader_.prepareLoadLocked(matched_path, result.matched_blocks);
+        result.load_blocks              = load_result.load_blocks;
+        result.host_load_blocks         = load_result.host_load_blocks;
+        result.disk_load_blocks         = load_result.disk_load_blocks;
+        result.load_ticket              = std::move(load_result.load_ticket);
     }
 
     RTP_LLM_LOG_DEBUG("matched %zu blocks, cache_keys=%zu, tree_nodes=%zu",
@@ -402,7 +381,7 @@ void BlockTreeCache::insertImpl(TreeNode*                                       
     BlockTreeInsertResult insert_result = tree_->insertNode(parent, cache_keys, slots);
 
     // incRef cache-hold on new nodes' device blocks (balanced by unreferenceBlocks on
-    // eviction). Reused nodes keep theirs; their demoted data comes from load_back.
+    // eviction). Reused nodes keep theirs; their demoted data comes from load.
     for (const BlockTreeInsertedNode& inserted : insert_result.inserted_nodes) {
         TreeNode* node = inserted.node;
         RTP_LLM_CHECK_WITH_INFO(
@@ -643,15 +622,14 @@ void BlockTreeCache::onBlocksReleased() {
     checkWatermark();
 }
 
-bool BlockTreeCache::cancelLoadBack(const std::shared_ptr<AsyncContext>& context) {
+bool BlockTreeCache::cancelLoad(const std::shared_ptr<AsyncContext>& context) {
     std::lock_guard<std::mutex> lock(mutex_);
-    return load_back_worker_.cancelLoadBackNolock(context);
+    return loader_.cancelLoadLocked(context);
 }
 
-void BlockTreeCache::prepareMatchedBlocks(const std::vector<TreeNode*>&         matched_path,
-                                          const std::vector<bool>&              candidate_logically_valid,
-                                          BlockTreeMatchResult&                 result,
-                                          LoadBackTicket::PendingLoadBackItems& pending_load_back_items) {
+void BlockTreeCache::prepareMatchedBlocks(const std::vector<TreeNode*>& matched_path,
+                                          const std::vector<bool>&      candidate_logically_valid,
+                                          BlockTreeMatchResult&         result) {
     const size_t logical_matched_block_count = matched_path.size();
     if (logical_matched_block_count == 0) {
         return;
@@ -688,20 +666,6 @@ void BlockTreeCache::prepareMatchedBlocks(const std::vector<TreeNode*>&         
             group_set->referenceBlocks(matched_device_blocks, BlockRefType::REQUEST);
             result.matched_resources.push_back(std::move(matched_device_blocks));
         }
-
-        if (!config_.enable_load_back) {
-            continue;
-        }
-        const size_t logical_reuse_count = std::min(
-            group_set->computeReuseBlockCount(logical_matched_block_count, matched_path), logical_matched_block_count);
-        for (size_t i = logical_matched_block_count - logical_reuse_count; i < logical_matched_block_count; ++i) {
-            if (i >= ready_reuse_begin && i < ready_matched_block_count) {
-                continue;
-            }
-            TreeNode*         path_node          = matched_path[i];
-            GroupSetResource& group_set_resource = path_node->group_set_resources[group_set_id];
-            prepareMatchedLoadBackItem(path_node, group_set, group_set_resource, i, result, pending_load_back_items);
-        }
     }
 }
 
@@ -733,440 +697,6 @@ size_t BlockTreeCache::computeReadyMatchedBlockCount(const std::vector<TreeNode*
     }
     return 0;
 }
-
-void BlockTreeCache::prepareMatchedLoadBackItem(TreeNode*                             path_node,
-                                                const GroupSetPtr&                    group_set,
-                                                const GroupSetResource&               group_set_resource,
-                                                size_t                                path_index,
-                                                BlockTreeMatchResult&                 result,
-                                                LoadBackTicket::PendingLoadBackItems& pending_load_back_items) {
-    const Tier source_tier = group_set->getTopTier(group_set_resource);
-    if (source_tier == Tier::NONE) {
-        return;
-    }
-
-    const std::vector<BlockIdxType> source_blocks = group_set->getBlocks(group_set_resource, source_tier);
-
-    LoadBackTicket::PendingLoadBackItem pending_item;
-    pending_item.node             = path_node;
-    pending_item.group_set_id     = group_set->groupSetId();
-    pending_item.path_index       = path_index;
-    pending_item.source_tier      = source_tier;
-    pending_item.source_blocks    = source_blocks;
-    pending_item.joined_load_back = group_set_resource.transfer_state == GroupSetTransferState::LOADING_BACK;
-    pending_load_back_items.push_back(std::move(pending_item));
-
-    if (source_tier == Tier::HOST) {
-        result.host_load_back_blocks++;
-        result.load_back_blocks++;
-    } else if (source_tier == Tier::DISK) {
-        result.disk_load_back_blocks++;
-        result.load_back_blocks++;
-    }
-
-    RTP_LLM_LOG_DEBUG("planned logical settlement from %s group[%zu] node_key=%ld",
-                      tierName(source_tier),
-                      group_set->groupSetId(),
-                      path_node->cache_key);
-    if (group_set_resource.transfer_state == GroupSetTransferState::LOADING_BACK) {
-        RTP_LLM_LOG_DEBUG(
-            "match joined LOADING_BACK, node_key=%ld group_set=%zu", path_node->cache_key, group_set->groupSetId());
-    }
-}
-
-std::shared_ptr<LoadBackTicket> BlockTreeCache::prepareLoadBackTicket(LoadBackTicket::PendingLoadBackItems& items,
-                                                                      size_t logical_matched_blocks) {
-    if (!reserveLoadBackItems(items)) {
-        return nullptr;
-    }
-
-    size_t pending_transfer_count = 0;
-    for (const LoadBackTicket::PendingLoadBackItem& item : items) {
-        if (item.source_tier == Tier::HOST || item.source_tier == Tier::DISK) {
-            ++pending_transfer_count;
-        }
-    }
-    const std::shared_ptr<LoadBackAsyncContext> context =
-        std::make_shared<LoadBackAsyncContext>(pending_transfer_count);
-    for (LoadBackTicket::PendingLoadBackItem& item : items) {
-        if (!item.joined_load_back) {
-            continue;
-        }
-        if (!prepareJoinedLoadBackItem(item, context)) {
-            abortLoadBackUnsafe(items, 0, context);
-            return nullptr;
-        }
-    }
-
-    std::shared_ptr<LoadBackTicket> ticket =
-        load_back_ticket_registry_->createTicket(items, logical_matched_blocks, context);
-    if (ticket == nullptr) {
-        abortLoadBackUnsafe(items, 0, context);
-    }
-    return ticket;
-}
-
-bool BlockTreeCache::prepareJoinedLoadBackItem(LoadBackTicket::PendingLoadBackItem&         item,
-                                               const std::shared_ptr<LoadBackAsyncContext>& context) {
-    const std::optional<std::vector<BlockIdxType>> target_blocks =
-        load_back_worker_.joinLoading(item.node, item.group_set_id, context);
-    if (!target_blocks.has_value()) {
-        RTP_LLM_LOG_WARNING("failed to join active load-back, group_set=%zu", item.group_set_id);
-        return false;
-    }
-    item.target_device_blocks = target_blocks.value();
-    if (item.target_device_blocks.size() != group_sets_[item.group_set_id]->devicePoolCount()) {
-        item.target_device_blocks.clear();
-        return false;
-    }
-    group_sets_[item.group_set_id]->referenceBlocks(
-        MultiNodeResource{item.group_set_id, Tier::DEVICE, {item.target_device_blocks}}, BlockRefType::REQUEST);
-    return true;
-}
-
-bool BlockTreeCache::reserveLoadBackItems(const LoadBackTicket::PendingLoadBackItems& items) {
-    const bool has_lower_tier_item =
-        std::any_of(items.begin(), items.end(), [](const LoadBackTicket::PendingLoadBackItem& item) {
-            return item.source_tier == Tier::HOST || item.source_tier == Tier::DISK;
-        });
-    if (items.empty() || !has_lower_tier_item) {
-        return false;
-    }
-
-    for (const auto& item : items) {
-        if (item.node == nullptr || item.group_set_id >= group_sets_.size()
-            || (item.source_tier != Tier::DEVICE && item.source_tier != Tier::HOST && item.source_tier != Tier::DISK)) {
-            return false;
-        }
-        const GroupSetPtr& group = group_sets_[item.group_set_id];
-        if (group == nullptr || item.group_set_id >= item.node->group_set_resources.size()) {
-            return false;
-        }
-        const GroupSetTransferState expected_state =
-            item.joined_load_back ? GroupSetTransferState::LOADING_BACK : GroupSetTransferState::IDLE;
-        if (item.node->group_set_resources[item.group_set_id].transfer_state != expected_state) {
-            return false;
-        }
-        const size_t expected_source_count = item.source_tier == Tier::DEVICE ? group->devicePoolCount() : 1;
-        if (item.source_blocks.size() != expected_source_count
-            || group->getTopTier(item.node->group_set_resources[item.group_set_id]) != item.source_tier
-            || group->getBlocks(item.node->group_set_resources[item.group_set_id], item.source_tier)
-                   != item.source_blocks) {
-            return false;
-        }
-    }
-
-    for (const LoadBackTicket::PendingLoadBackItem& item : items) {
-        if (item.joined_load_back) {
-            continue;
-        }
-        group_sets_[item.group_set_id]->referenceBlocks(
-            MultiNodeResource{item.group_set_id, item.source_tier, {item.source_blocks}}, BlockRefType::REQUEST);
-    }
-
-    for (const LoadBackTicket::PendingLoadBackItem& item : items) {
-        if (item.source_tier == Tier::DEVICE || item.joined_load_back) {
-            continue;
-        }
-        if (!evictor_.reserveLoadBack(item.node, item.group_set_id, item.source_tier, item.source_blocks)) {
-            abortLoadBackUnsafe(items, /*prepared_item_count=*/0, nullptr);
-            return false;
-        }
-    }
-    return true;
-}
-
-std::shared_ptr<AsyncContext> BlockTreeCache::commitLoadBack(const LoadBackTicket& ticket) {
-    std::lock_guard<std::mutex>                 lock(mutex_);
-    const LoadBackTicket::PendingLoadBackItems& items = ticket.items();
-
-    size_t                                      prepared_item_count = 0;
-    const std::shared_ptr<LoadBackAsyncContext> context             = ticket.context();
-    ScopeRollback                               rollback_guard(
-        [this, &items, &prepared_item_count, &context]() { abortLoadBackUnsafe(items, prepared_item_count, context); });
-    if (context == nullptr) {
-        RTP_LLM_LOG_WARNING("load-back ticket has no context");
-        return nullptr;
-    }
-
-    LoadBackWorker::TaskPtr task;
-    if (!load_back_worker_.createTask(items, group_sets_, context, task)) {
-        return nullptr;
-    }
-    if (task != nullptr) {
-        for (size_t item_index = 0; item_index < task->items.size(); ++item_index) {
-            const LoadBackTicket::PendingLoadBackItem& item = task->items[item_index];
-            if (item.source_tier != Tier::DEVICE
-                && !task->item_groups[item_index]->hasAllocatedDeviceBlocks(item.target_device_blocks)) {
-                RTP_LLM_LOG_WARNING("invalid load-back target blocks, group_set=%zu", item.group_set_id);
-                return nullptr;
-            }
-        }
-    }
-
-    for (const LoadBackTicket::PendingLoadBackItem& item : items) {
-        if (item.source_tier == Tier::DEVICE || item.joined_load_back) {
-            ++prepared_item_count;
-            continue;
-        }
-        if (!load_back_worker_.startLoading(item.node, item.group_set_id, item.target_device_blocks, context)) {
-            RTP_LLM_LOG_WARNING("failed to create loading record, group_set=%zu", item.group_set_id);
-            return nullptr;
-        }
-        if (!evictor_.beginLoadBack(item.node, item.group_set_id, item.source_tier)) {
-            const bool erased = load_back_worker_.eraseLoadingForOneContext(item.node, item.group_set_id, context);
-            if (!erased) {
-                RTP_LLM_LOG_ERROR("failed to erase load-back context, group_set=%zu", item.group_set_id);
-            }
-            RTP_LLM_LOG_WARNING("pending-to-loading transition failed, rolled back all %zu load_back items",
-                                items.size());
-            return nullptr;
-        }
-        // Add an in-flight copy holder. It becomes a cache holder only after
-        // the target blocks are installed into the tree slot.
-        group_sets_[item.group_set_id]->referenceBlocks(
-            MultiNodeResource{item.group_set_id, Tier::DEVICE, {item.target_device_blocks}}, BlockRefType::REQUEST);
-        ++prepared_item_count;
-    }
-
-    if (task != nullptr) {
-        const bool submitted = task_pool_->submit([this, task]() { runLoadBackTask(task); });
-        if (!submitted) {
-            rollback_guard.run();
-            const bool completed = context->onTaskFail();
-            if (!completed) {
-                RTP_LLM_LOG_ERROR("failed to complete rejected load-back task");
-            }
-            return context;
-        }
-    }
-
-    for (const LoadBackTicket::PendingLoadBackItem& item : items) {
-        if (item.joined_load_back) {
-            group_sets_[item.group_set_id]->unreferenceBlocks(
-                MultiNodeResource{item.group_set_id, Tier::DEVICE, {item.target_device_blocks}}, BlockRefType::REQUEST);
-        }
-    }
-    rollback_guard.dismiss();
-    return context;
-}
-
-void BlockTreeCache::abortLoadBack(const LoadBackTicket& ticket) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    abortLoadBackUnsafe(ticket.items(), 0, ticket.context());
-}
-
-void BlockTreeCache::abortLoadBackUnsafe(const LoadBackTicket::PendingLoadBackItems&  items,
-                                         size_t                                       prepared_item_count,
-                                         const std::shared_ptr<LoadBackAsyncContext>& context) {
-    if (prepared_item_count > 0 && context == nullptr) {
-        RTP_LLM_LOG_ERROR("missing context while aborting %zu prepared load-back items", prepared_item_count);
-    }
-
-    bool device_refs_released = false;
-    for (size_t item_index = 0; item_index < items.size(); ++item_index) {
-        const auto&  item            = items[item_index];
-        const size_t group_set_index = item.group_set_id;
-        if (group_set_index >= group_sets_.size() || group_sets_[group_set_index] == nullptr) {
-            continue;
-        }
-        const bool fully_prepared = item_index < prepared_item_count;
-        if (item.joined_load_back) {
-            if (context != nullptr) {
-                const bool erased = load_back_worker_.eraseLoadingForOneContext(item.node, item.group_set_id, context);
-                if (!erased) {
-                    RTP_LLM_LOG_DEBUG("joined load-back context is no longer registered, group_set=%zu",
-                                      item.group_set_id);
-                }
-            }
-            if (!item.target_device_blocks.empty()) {
-                group_sets_[group_set_index]->unreferenceBlocks(
-                    MultiNodeResource{item.group_set_id, Tier::DEVICE, {item.target_device_blocks}},
-                    BlockRefType::REQUEST);
-                device_refs_released = true;
-            }
-            continue;
-        }
-        if (item.source_tier != Tier::DEVICE && fully_prepared) {
-            if (context != nullptr) {
-                const bool erased = load_back_worker_.eraseLoadingForOneContext(item.node, item.group_set_id, context);
-                if (!erased) {
-                    RTP_LLM_LOG_WARNING("failed to erase aborted load-back context, group_set=%zu", item.group_set_id);
-                }
-            }
-            group_sets_[group_set_index]->unreferenceBlocks(
-                MultiNodeResource{item.group_set_id, Tier::DEVICE, {item.target_device_blocks}}, BlockRefType::REQUEST);
-        }
-
-        MultiNodeResource source_set{item.group_set_id, item.source_tier, {item.source_blocks}};
-        if (item.node != nullptr) {
-            source_set.tree_nodes = {item.node};
-        }
-        group_sets_[group_set_index]->unreferenceBlocks(source_set, BlockRefType::REQUEST);
-        if (item.source_tier != Tier::DEVICE) {
-            if (fully_prepared) {
-                if (!evictor_.finishLoadBack(item.node, item.group_set_id, item.source_tier, false)) {
-                    RTP_LLM_LOG_WARNING(
-                        "loading state mismatch, group=%zu source=%s", item.group_set_id, tierName(item.source_tier));
-                }
-            } else {
-                if (!evictor_.abortPendingLoadBack(
-                        item.node, item.group_set_id, item.source_tier, item.source_blocks)) {
-                    RTP_LLM_LOG_WARNING("reservation state mismatch, "
-                                        "group=%zu source=%s",
-                                        item.group_set_id,
-                                        tierName(item.source_tier));
-                }
-                evictor_.refreshCandidatesAfterRelease(source_set);
-            }
-        } else {
-            evictor_.refreshCandidatesAfterRelease(source_set);
-            device_refs_released = true;
-        }
-    }
-    if (device_refs_released) {
-        checkWatermark();
-    }
-}
-
-void BlockTreeCache::runLoadBackTask(const LoadBackWorker::TaskPtr& task) {
-    if (task == nullptr || task->context == nullptr) {
-        RTP_LLM_LOG_ERROR("invalid load-back task");
-        return;
-    }
-
-    bool copy_success = false;
-    try {
-        bool prepared = !task->items.empty();
-        for (size_t item_index = 0; item_index < task->items.size(); ++item_index) {
-            LoadBackWorker::PrepareStatus status = load_back_worker_.prepareTransferItem(*task, item_index);
-            if (status == LoadBackWorker::PrepareStatus::NEED_HOST_RECLAIM) {
-                const size_t group_set_id = task->items[item_index].group_set_id;
-                if (reclaimOneForGroup(group_set_id, Tier::HOST)) {
-                    status = load_back_worker_.prepareTransferItem(*task, item_index);
-                }
-            }
-            if (status != LoadBackWorker::PrepareStatus::READY) {
-                if (status == LoadBackWorker::PrepareStatus::NEED_HOST_RECLAIM) {
-                    RTP_LLM_LOG_WARNING("failed to prepare host staging block, group_set=%zu",
-                                        task->items[item_index].group_set_id);
-                }
-                prepared = false;
-            }
-        }
-
-        copy_success = load_back_worker_.runTransfer(*task,
-                                                     *transfer_dispatcher_,
-                                                     metrics_reporter_,
-                                                     config_.memory_cache_disk_sync_timeout_ms,
-                                                     config_.memory_cache_sync_timeout_ms,
-                                                     prepared);
-    } catch (const std::exception& error) {
-        RTP_LLM_LOG_ERROR("load-back worker failed with exception: %s", error.what());
-    } catch (...) {
-        RTP_LLM_LOG_ERROR("load-back worker failed with unknown exception");
-    }
-
-    // Commit the copied batch only while every stateful item still belongs
-    // to this load-back operation.
-    {
-        std::lock_guard<std::mutex> lock(mutex_);
-        const bool                  settlement_success = settleLoadBackNolock(*task, copy_success);
-        if (!settlement_success) {
-            RTP_LLM_LOG_DEBUG("load-back task settled unsuccessfully");
-        }
-    }
-}
-
-bool BlockTreeCache::settleLoadBackNolock(LoadBackWorker::Task& task, bool copy_success) {
-    bool settlement_success   = copy_success && task.context != nullptr;
-    bool state_settled        = false;
-    bool tree_data_mutated    = false;
-    bool device_refs_released = false;
-
-    RTP_LLM_CHECK_WITH_INFO(task.items.size() == task.item_groups.size()
-                                && task.items.size() == task.target_installed.size(),
-                            "malformed load-back task: items=%zu groups=%zu targets=%zu",
-                            task.items.size(),
-                            task.item_groups.size(),
-                            task.target_installed.size());
-    for (size_t item_index = 0; item_index < task.items.size(); ++item_index) {
-        const LoadBackTicket::PendingLoadBackItem& item  = task.items[item_index];
-        const GroupSetPtr&                         group = task.item_groups[item_index];
-        RTP_LLM_CHECK_WITH_INFO(group != nullptr && group->groupSetId() == item.group_set_id && item.node != nullptr
-                                    && item.group_set_id < item.node->group_set_resources.size(),
-                                "malformed load-back item: index=%zu group_set_id=%zu node=%p",
-                                item_index,
-                                item.group_set_id,
-                                static_cast<void*>(item.node));
-        if (settlement_success && item.source_tier != Tier::DEVICE
-            && (item.target_device_blocks.size() != group->devicePoolCount()
-                || item.node->group_set_resources[item.group_set_id].transfer_state
-                       != GroupSetTransferState::LOADING_BACK)) {
-            RTP_LLM_LOG_WARNING("completion state mismatch, group_set=%zu", item.group_set_id);
-            settlement_success = false;
-        }
-    }
-
-    for (size_t item_index = 0; item_index < task.items.size(); ++item_index) {
-        const LoadBackTicket::PendingLoadBackItem& item         = task.items[item_index];
-        const GroupSetPtr&                         group        = task.item_groups[item_index];
-        const size_t                               group_set_id = item.group_set_id;
-
-        MultiNodeResource source_protection{group_set_id, item.source_tier, {item.source_blocks}};
-        source_protection.tree_nodes = {item.node};
-        group->unreferenceBlocks(source_protection, BlockRefType::REQUEST);
-
-        if (item.source_tier == Tier::DEVICE) {
-            evictor_.refreshCandidatesAfterRelease(source_protection);
-            device_refs_released = true;
-            continue;
-        }
-        GroupSetResource& resource = item.node->group_set_resources[group_set_id];
-        if (settlement_success) {
-            MultiNodeResource target_holder{group_set_id, Tier::DEVICE, {item.target_device_blocks}};
-            group->setBlocks(resource, Tier::DEVICE, item.target_device_blocks);
-            group->referenceBlocks(target_holder, BlockRefType::BLOCK_CACHE);
-            group->unreferenceBlocks(target_holder, BlockRefType::REQUEST);
-            group->unreferenceBlocks(MultiNodeResource{group_set_id, item.source_tier, {item.source_blocks}},
-                                     BlockRefType::BLOCK_CACHE);
-            group->evictFromTier(item.node, resource, item.source_tier);
-            task.target_installed[item_index] = true;
-            tree_data_mutated                 = true;
-            RTP_LLM_CHECK_WITH_INFO(evictor_.finishLoadBack(item.node, group_set_id, item.source_tier, true),
-                                    "load-back state changed after locked preflight, group_set_id=%zu",
-                                    group_set_id);
-            state_settled = true;
-            continue;
-        }
-
-        // On copy/batch-settlement failure, leave the source data untouched.
-        if (!evictor_.finishLoadBack(item.node, group_set_id, item.source_tier, false)) {
-            RTP_LLM_LOG_WARNING(
-                "loading state mismatch, group_set=%zu source=%s", group_set_id, tierName(item.source_tier));
-        } else {
-            state_settled = true;
-        }
-    }
-    if (tree_data_mutated) {
-        ++mutation_version_;
-    }
-    if (device_refs_released || state_settled) {
-        checkWatermark();
-    }
-    load_back_worker_.releaseTaskResources(task);
-    for (const LoadBackTicket::PendingLoadBackItem& item : task.items) {
-        if (item.source_tier == Tier::DEVICE) {
-            continue;
-        }
-        const bool completed = load_back_worker_.finishLoading(item.node, item.group_set_id, settlement_success);
-        if (!completed) {
-            RTP_LLM_LOG_WARNING("failed to finish loading record, group_set=%zu", item.group_set_id);
-        }
-    }
-    return settlement_success;
-}
-
 bool BlockTreeCache::reclaimOneForGroup(size_t group_set_id, Tier tier) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (group_set_id >= group_sets_.size()) {
@@ -1311,7 +841,8 @@ void BlockTreeCache::performEvictionCopy(const BlockTreeEvictor::EvictionPlan&  
             std::lock_guard<std::mutex> lock(mutex_);
             settleInFlightDeviceReleaseCreditsLocked(release_credits);
         };
-        ScopeRollback<decltype(credit_settlement_action)> credit_settlement_guard(std::move(credit_settlement_action));
+        block_tree_cache_detail::ScopeRollback<decltype(credit_settlement_action)> credit_settlement_guard(
+            std::move(credit_settlement_action));
 
         bool completion_succeeded = false;
         bool plan_terminalized    = false;
@@ -1387,7 +918,7 @@ void BlockTreeCache::performEvictionCopy(const BlockTreeEvictor::EvictionPlan&  
             }
         }
     };
-    ScopeRollback<decltype(worker_finalization_action)> worker_finalization_guard(
+    block_tree_cache_detail::ScopeRollback<decltype(worker_finalization_action)> worker_finalization_guard(
         std::move(worker_finalization_action));
 
     try {

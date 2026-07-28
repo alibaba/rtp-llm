@@ -100,7 +100,7 @@ TEST_F(DeviceFullKVCacheGroupTest, MallocFreeTest) {
     ASSERT_FALSE(group1.malloc(block_ids2, 180));
 }
 
-TEST_F(DeviceFullKVCacheGroupTest, MallocBackfillsMatchedLoadBackPlaceholder) {
+TEST_F(DeviceFullKVCacheGroupTest, MallocBackfillsMatchedLoadPlaceholder) {
     auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
 

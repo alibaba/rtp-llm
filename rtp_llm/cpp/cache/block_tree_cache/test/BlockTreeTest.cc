@@ -95,13 +95,13 @@ TEST(BlockTreeTest, FindPartialMatch) {
     EXPECT_EQ(result.matched_node->cache_key, 200);
 }
 
-TEST(BlockTreeTest, FindAllowsLoadingBackNode) {
+TEST(BlockTreeTest, FindAllowsLoadingNode) {
     BlockTree                   tree(2);
     const BlockTreeInsertResult insert_result = tree.insertNode(nullptr, {100, 200, 300}, make2DSlots(2, 3, 42));
     ASSERT_NE(insert_result.leaf, nullptr);
 
     TreeNode* loading_node                              = tree.root()->children.at(100)->children.at(200);
-    loading_node->group_set_resources[1].transfer_state = GroupSetTransferState::LOADING_BACK;
+    loading_node->group_set_resources[1].transfer_state = GroupSetTransferState::LOADING;
 
     const BlockTreeFindResult result = tree.findNode({100, 200, 300});
     ASSERT_EQ(result.path.size(), 3u);
@@ -110,7 +110,7 @@ TEST(BlockTreeTest, FindAllowsLoadingBackNode) {
 }
 
 TEST(BlockTreeTest, FindStopsBeforeUnavailableNodeAndItsDescendants) {
-    for (GroupSetTransferState state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOAD_BACK_PENDING}) {
+    for (GroupSetTransferState state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOAD_PENDING}) {
         BlockTree tree(1);
         tree.insertNode(nullptr, {100, 200, 300}, make2DSlots(1, 3, 42));
 
@@ -344,7 +344,7 @@ TEST(BlockTreeTest, InsertSkipsBusyGroupButFillsOtherIdleGroupAndAddsSuffix) {
     original[0][1].device_blocks = {NULL_BLOCK_IDX};
     TreeNode* node               = tree.insertNode(nullptr, {100}, original).leaf;
     ASSERT_NE(node, nullptr);
-    node->group_set_resources[0].transfer_state = GroupSetTransferState::LOADING_BACK;
+    node->group_set_resources[0].transfer_state = GroupSetTransferState::LOADING;
 
     std::vector<std::vector<GroupSetResource>> replacement(2, std::vector<GroupSetResource>(2));
     replacement[0][0].device_blocks    = {20};
@@ -357,7 +357,7 @@ TEST(BlockTreeTest, InsertSkipsBusyGroupButFillsOtherIdleGroupAndAddsSuffix) {
     EXPECT_EQ(result.adopted_slots[0].group_set_id, 1);
     ASSERT_EQ(result.inserted_nodes.size(), 1u);
     EXPECT_EQ(result.inserted_nodes[0].node->cache_key, 200);
-    EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::LOADING_BACK);
+    EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::LOADING);
     EXPECT_EQ(node->group_set_resources[0].device_blocks, (BlockIndicesType{NULL_BLOCK_IDX}));
     EXPECT_EQ(node->group_set_resources[1].device_blocks, (BlockIndicesType{30}));
     EXPECT_EQ(result.inserted_nodes[0].node->group_set_resources[0].device_blocks, (BlockIndicesType{21}));
@@ -392,7 +392,7 @@ TEST(BlockTreeTest, RemoveEmptyAncestorsStopsAtBusyEmptyNode) {
     BlockTree tree(1);
     TreeNode* node = tree.insertNode(nullptr, {100}, makeEmpty2DSlots(1)).leaf;
     ASSERT_NE(node, nullptr);
-    node->group_set_resources[0].transfer_state = GroupSetTransferState::LOAD_BACK_PENDING;
+    node->group_set_resources[0].transfer_state = GroupSetTransferState::LOAD_PENDING;
 
     EXPECT_EQ(tree.removeEmptyAncestors(node, {0}), node);
     EXPECT_EQ(tree.nodeCount(), 1u);

@@ -187,6 +187,15 @@ cc_test(
 )
 
 cc_test(
+    name = "block_tree_loader_test",
+    srcs = ["BlockTreeLoaderTest.cc"],
+    copts = test_copts,
+    tags = ["exclusive"],
+    deps = test_deps + [":block_tree_cache_test_utils"],
+    env = {},
+)
+
+cc_test(
     name = "full_group_set_test",
     srcs = ["FullGroupSetTest.cc"],
     copts = test_copts,
@@ -214,15 +223,15 @@ cc_test(
 )
 
 cc_test(
-    name = "load_back_async_context_test",
-    srcs = ["LoadBackAsyncContextTest.cc"],
+    name = "load_async_context_test",
+    srcs = ["LoadAsyncContextTest.cc"],
     copts = test_copts,
     deps = test_deps,
 )
 
 cc_test(
-    name = "load_back_worker_test",
-    srcs = ["LoadBackWorkerTest.cc"],
+    name = "load_worker_test",
+    srcs = ["LoadWorkerTest.cc"],
     copts = test_copts,
     deps = test_deps + [":block_transfer_engine_test_utils"],
 )

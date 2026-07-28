@@ -1,15 +1,14 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/LoadBackAsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/LoadAsyncContext.h"
 
 namespace rtp_llm {
 
-LoadBackAsyncContext::LoadBackAsyncContext(size_t pending_transfer_count):
-    remaining_transfer_count_(pending_transfer_count) {
+LoadAsyncContext::LoadAsyncContext(size_t pending_transfer_count): remaining_transfer_count_(pending_transfer_count) {
     if (remaining_transfer_count_ == 0) {
         state_.store(State::SUCCEEDED);
     }
 }
 
-bool LoadBackAsyncContext::requestCancel() {
+bool LoadAsyncContext::requestCancel() {
     std::lock_guard<std::mutex> lock(mutex_);
     const State                 state = state_.load();
     if (state == State::PENDING) {
@@ -19,12 +18,12 @@ bool LoadBackAsyncContext::requestCancel() {
     return state == State::CANCEL_REQUESTED;
 }
 
-bool LoadBackAsyncContext::isRequestCanceled() const {
+bool LoadAsyncContext::isRequestCanceled() const {
     const State state = state_.load();
     return state == State::CANCEL_REQUESTED || state == State::CANCELLED;
 }
 
-bool LoadBackAsyncContext::completeOne(bool success) {
+bool LoadAsyncContext::completeOne(bool success) {
     bool notify = false;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -51,7 +50,7 @@ bool LoadBackAsyncContext::completeOne(bool success) {
     return true;
 }
 
-bool LoadBackAsyncContext::onTaskFail() {
+bool LoadAsyncContext::onTaskFail() {
     {
         std::lock_guard<std::mutex> lock(mutex_);
         const State                 state = state_.load();
@@ -69,17 +68,17 @@ bool LoadBackAsyncContext::onTaskFail() {
     return true;
 }
 
-void LoadBackAsyncContext::waitDone() {
+void LoadAsyncContext::waitDone() {
     std::unique_lock<std::mutex> lock(mutex_);
     cv_.wait(lock, [this] { return done(); });
 }
 
-bool LoadBackAsyncContext::done() const {
+bool LoadAsyncContext::done() const {
     const State state = state_.load();
     return state == State::SUCCEEDED || state == State::FAILED || state == State::CANCELLED;
 }
 
-bool LoadBackAsyncContext::success() const {
+bool LoadAsyncContext::success() const {
     return state_.load() == State::SUCCEEDED;
 }
 

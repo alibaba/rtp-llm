@@ -9,7 +9,7 @@
 
 namespace rtp_llm {
 
-class LoadBackAsyncContext: public AsyncContext {
+class LoadAsyncContext: public AsyncContext {
 public:
     enum class State : int {
         PENDING          = 0,
@@ -19,8 +19,8 @@ public:
         CANCELLED        = 4
     };
 
-    explicit LoadBackAsyncContext(size_t pending_transfer_count);
-    ~LoadBackAsyncContext() override = default;
+    explicit LoadAsyncContext(size_t pending_transfer_count);
+    ~LoadAsyncContext() override = default;
 
     bool requestCancel();
     bool isRequestCanceled() const;

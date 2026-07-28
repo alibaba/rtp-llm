@@ -79,7 +79,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
 
     int64_t                         match_cost_time_us = 0;
     size_t                          reuse_blocks       = 0;
-    std::shared_ptr<LoadBackTicket> load_back_ticket;
+    std::shared_ptr<LoadTicket>         load_ticket;
     std::vector<MultiNodeResource>      matched_resources;
     bool                            matched_blocks_released = false;
     auto                            release_matched_blocks  = [&]() {
@@ -89,7 +89,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         }
     };
     auto rollback = [&]() -> MallocResult {
-        load_back_ticket.reset();
+        load_ticket.reset();
         release_matched_blocks();
         BlockIndicesType valid_blocks;
         for (const auto block : block_ids_0.blocks()) {
@@ -113,11 +113,10 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         const auto    match_begin_time_us = currentTimeUs();
         auto          match_result        = block_tree_cache_->match(match_keys);
         match_cost_time_us                = currentTimeUs() - match_begin_time_us;
-        load_back_ticket                  = match_result.load_back_ticket;
+        load_ticket                       = match_result.load_ticket;
         matched_resources                = std::move(match_result.matched_resources);
         const size_t ready_blocks         = match_result.matched_blocks;
-        reuse_blocks =
-            load_back_ticket && !load_back_ticket->empty() ? load_back_ticket->logicalMatchedBlocks() : ready_blocks;
+        reuse_blocks = load_ticket && !load_ticket->empty() ? load_ticket->logicalMatchedBlocks() : ready_blocks;
         BlockIndicesType ready_group_blocks = block_tree_cache_->matchedBlocksForGroup(0, matched_resources);
         if (ready_group_blocks.size() != ready_blocks || ready_blocks > reuse_blocks) {
             return rollback();
@@ -130,19 +129,18 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
             block_ids_0.setAt(i, ready_group_blocks[i]);
         }
 
-        if (load_back_ticket && !load_back_ticket->empty()) {
-            for (size_t item_index = 0; item_index < load_back_ticket->itemCount(); ++item_index) {
-                const size_t group_set_id  = load_back_ticket->groupSetId(item_index);
-                const auto& source_blocks = load_back_ticket->sourceBlocks(item_index);
-                const auto  path_index    = load_back_ticket->pathIndex(item_index);
+        if (load_ticket && !load_ticket->empty()) {
+            for (size_t item_index = 0; item_index < load_ticket->itemCount(); ++item_index) {
+                const size_t group_set_id  = load_ticket->groupSetId(item_index);
+                const auto&  source_blocks = load_ticket->sourceBlocks(item_index);
+                const auto   path_index    = load_ticket->pathIndex(item_index);
                 if (group_set_id >= block_tree_cache_->groupSets().size()
-                    || block_tree_cache_->groupSets()[group_set_id]->groupIds()
-                           != std::vector<size_t>{0}
+                    || block_tree_cache_->groupSets()[group_set_id]->groupIds() != std::vector<size_t>{0}
                     || path_index >= reuse_blocks || source_blocks.size() != 1
                     || isNullBlockIdx(source_blocks.front())) {
                     return rollback();
                 }
-                if (load_back_ticket->sourceTier(item_index) == Tier::DEVICE) {
+                if (load_ticket->sourceTier(item_index) == Tier::DEVICE) {
                     const auto current = block_ids_0.blocks()[path_index];
                     if (!isNullBlockIdx(current) && current != source_blocks.front()) {
                         return rollback();
@@ -150,9 +148,8 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
                     block_ids_0.setAt(path_index, source_blocks.front());
                     continue;
                 }
-                if (load_back_ticket->joinedLoadBack(item_index)) {
-                    const std::vector<BlockIdxType>& joined_targets =
-                        load_back_ticket->targetDeviceBlocks(item_index);
+                if (load_ticket->joinedLoad(item_index)) {
+                    const std::vector<BlockIdxType>& joined_targets = load_ticket->targetDeviceBlocks(item_index);
                     if (joined_targets.size() != 1 || isNullBlockIdx(joined_targets.front())) {
                         return rollback();
                     }
@@ -181,15 +178,15 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     }
 
     std::vector<size_t> materialize_positions;
-    if (load_back_ticket && !load_back_ticket->empty()) {
-        for (size_t item_index = 0; item_index < load_back_ticket->itemCount(); ++item_index) {
-            if (load_back_ticket->sourceTier(item_index) == Tier::DEVICE) {
+    if (load_ticket && !load_ticket->empty()) {
+        for (size_t item_index = 0; item_index < load_ticket->itemCount(); ++item_index) {
+            if (load_ticket->sourceTier(item_index) == Tier::DEVICE) {
                 continue;
             }
-            if (load_back_ticket->joinedLoadBack(item_index)) {
+            if (load_ticket->joinedLoad(item_index)) {
                 continue;
             }
-            const size_t path_index = load_back_ticket->pathIndex(item_index);
+            const size_t path_index = load_ticket->pathIndex(item_index);
             if (std::find(materialize_positions.begin(), materialize_positions.end(), path_index)
                 == materialize_positions.end()) {
                 materialize_positions.push_back(path_index);
@@ -226,25 +223,25 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         return rollback();
     }
 
-    if (load_back_ticket && !load_back_ticket->empty()) {
-        for (size_t item_index = 0; item_index < load_back_ticket->itemCount(); ++item_index) {
-            const size_t path_index = load_back_ticket->pathIndex(item_index);
+    if (load_ticket && !load_ticket->empty()) {
+        for (size_t item_index = 0; item_index < load_ticket->itemCount(); ++item_index) {
+            const size_t path_index = load_ticket->pathIndex(item_index);
             if (path_index >= block_ids_0.blocksNum() || isNullBlockIdx(block_ids_0.blocks()[path_index])) {
                 return rollback();
             }
             const auto target = block_ids_0.blocks()[path_index];
-            if (load_back_ticket->sourceTier(item_index) == Tier::DEVICE
-                && target != load_back_ticket->sourceBlocks(item_index).front()) {
+            if (load_ticket->sourceTier(item_index) == Tier::DEVICE
+                && target != load_ticket->sourceBlocks(item_index).front()) {
                 return rollback();
             }
-            if (load_back_ticket->joinedLoadBack(item_index)) {
-                const std::vector<BlockIdxType>& joined_targets = load_back_ticket->targetDeviceBlocks(item_index);
+            if (load_ticket->joinedLoad(item_index)) {
+                const std::vector<BlockIdxType>& joined_targets = load_ticket->targetDeviceBlocks(item_index);
                 if (joined_targets.size() != 1 || target != joined_targets.front()) {
                     return rollback();
                 }
                 continue;
             }
-            if (!load_back_ticket->bindTargetDeviceBlocks(item_index, {target})) {
+            if (!load_ticket->bindTargetDeviceBlocks(item_index, {target})) {
                 return rollback();
             }
         }
@@ -253,18 +250,15 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     for (int batch_id = 1; batch_id < kv_resource->batchSize(); ++batch_id) {
         full_kv_cache_group_->reference(kv_resource->mutableBlockIds(batch_id, 0), block_ids_0.blocks());
     }
-    const int reuse_len =
-            static_cast<int>(reuse_blocks
-                             * (cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?
-                                    cp_slot_mapper_->logicalSeqSizePerBlock(config_, 0) :
-                                static_cast<size_t>(full_kv_cache_group_->seqSizePerBlock())));
-    MallocResult result{true, reuse_len, match_cost_time_us, nullptr, load_back_ticket};
-    if (load_back_ticket != nullptr && reuse_blocks > 0) {
+    const int    reuse_len = static_cast<int>(reuse_blocks
+                                           * (cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?
+                                                     cp_slot_mapper_->logicalSeqSizePerBlock(config_, 0) :
+                                                     static_cast<size_t>(full_kv_cache_group_->seqSizePerBlock())));
+    MallocResult result{true, reuse_len, match_cost_time_us, nullptr, load_ticket};
+    if (load_ticket != nullptr && reuse_blocks > 0) {
         const int reuse_unit_tokens = reuse_len / static_cast<int>(reuse_blocks);
-        result.memory_reuse_len =
-            static_cast<int>(load_back_ticket->logicalMatchedBlocks(Tier::HOST)) * reuse_unit_tokens;
-        result.disk_reuse_len =
-            static_cast<int>(load_back_ticket->logicalMatchedBlocks(Tier::DISK)) * reuse_unit_tokens;
+        result.memory_reuse_len = static_cast<int>(load_ticket->logicalMatchedBlocks(Tier::HOST)) * reuse_unit_tokens;
+        result.disk_reuse_len   = static_cast<int>(load_ticket->logicalMatchedBlocks(Tier::DISK)) * reuse_unit_tokens;
     }
     return result;
 }

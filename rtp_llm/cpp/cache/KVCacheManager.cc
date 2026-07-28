@@ -341,8 +341,8 @@ void KVCacheManager::free(const FreeInfo& free_info) {
     reportCacheOperationLatency(metrics_reporter_, RtpLLMCacheOperationMetricsCollector::OpType::FREE, begin_time_us);
 }
 
-bool KVCacheManager::cancelLoadBack(const std::shared_ptr<AsyncContext>& context) {
-    return allocator_ != nullptr && allocator_->cancelLoadBack(context);
+bool KVCacheManager::cancelLoad(const std::shared_ptr<AsyncContext>& context) {
+    return allocator_ != nullptr && allocator_->cancelLoad(context);
 }
 
 void KVCacheManager::insertIntoCache(const InsertInfo& insert_info) {
@@ -728,11 +728,10 @@ void KVCacheManager::reportMetricsLoop() {
             report_snapshot.block_cache_ref_count = snapshot.block_cache_ref_count;
             report_snapshot.eviction_ref_count    = snapshot.eviction_ref_count;
             report_snapshot.active_tree_cached_blocks = snapshot.active_tree_cached_blocks;
-            report_snapshot.used_ratio =
-                snapshot.total_blocks == 0 ?
-                    0.0f :
-                    static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.free_blocks)
-                                       / static_cast<double>(snapshot.total_blocks));
+            report_snapshot.used_ratio                = snapshot.total_blocks == 0 ?
+                                                            0.0f :
+                                                            static_cast<float>(100.0 * (snapshot.total_blocks - snapshot.free_blocks)
+                                                                / static_cast<double>(snapshot.total_blocks));
             reportPoolCacheMetrics(metrics_reporter_, report_snapshot, should_log);
         }
 

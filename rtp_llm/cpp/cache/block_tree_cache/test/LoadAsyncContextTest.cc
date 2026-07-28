@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/LoadBackAsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/LoadAsyncContext.h"
 
 #include <memory>
 
@@ -6,8 +6,8 @@
 
 namespace rtp_llm {
 
-TEST(LoadBackAsyncContextTest, CompleteSingleWork) {
-    const std::shared_ptr<LoadBackAsyncContext> context = std::make_shared<LoadBackAsyncContext>(1);
+TEST(LoadAsyncContextTest, CompleteSingleWork) {
+    const std::shared_ptr<LoadAsyncContext> context = std::make_shared<LoadAsyncContext>(1);
     ASSERT_NE(context, nullptr);
     EXPECT_FALSE(context->done());
 
@@ -18,8 +18,8 @@ TEST(LoadBackAsyncContextTest, CompleteSingleWork) {
     context->waitDone();
 }
 
-TEST(LoadBackAsyncContextTest, CompleteAfterEveryTransfer) {
-    const std::shared_ptr<LoadBackAsyncContext> context = std::make_shared<LoadBackAsyncContext>(3);
+TEST(LoadAsyncContextTest, CompleteAfterEveryTransfer) {
+    const std::shared_ptr<LoadAsyncContext> context = std::make_shared<LoadAsyncContext>(3);
     ASSERT_NE(context, nullptr);
 
     EXPECT_TRUE(context->completeOne(true));
@@ -32,8 +32,8 @@ TEST(LoadBackAsyncContextTest, CompleteAfterEveryTransfer) {
     EXPECT_FALSE(context->success());
 }
 
-TEST(LoadBackAsyncContextTest, CancellationWaitsForEveryTransfer) {
-    const std::shared_ptr<LoadBackAsyncContext> context = std::make_shared<LoadBackAsyncContext>(2);
+TEST(LoadAsyncContextTest, CancellationWaitsForEveryTransfer) {
+    const std::shared_ptr<LoadAsyncContext> context = std::make_shared<LoadAsyncContext>(2);
     ASSERT_NE(context, nullptr);
 
     EXPECT_TRUE(context->requestCancel());
@@ -47,16 +47,16 @@ TEST(LoadBackAsyncContextTest, CancellationWaitsForEveryTransfer) {
     EXPECT_FALSE(context->success());
 }
 
-TEST(LoadBackAsyncContextTest, RejectCompletionAfterTerminalState) {
-    const std::shared_ptr<LoadBackAsyncContext> context = std::make_shared<LoadBackAsyncContext>(1);
+TEST(LoadAsyncContextTest, RejectCompletionAfterTerminalState) {
+    const std::shared_ptr<LoadAsyncContext> context = std::make_shared<LoadAsyncContext>(1);
     ASSERT_NE(context, nullptr);
 
     EXPECT_TRUE(context->completeOne(true));
     EXPECT_FALSE(context->completeOne(true));
 }
 
-TEST(LoadBackAsyncContextTest, TaskFailureCompletesAllPendingTransfers) {
-    const std::shared_ptr<LoadBackAsyncContext> context = std::make_shared<LoadBackAsyncContext>(3);
+TEST(LoadAsyncContextTest, TaskFailureCompletesAllPendingTransfers) {
+    const std::shared_ptr<LoadAsyncContext> context = std::make_shared<LoadAsyncContext>(3);
     ASSERT_NE(context, nullptr);
 
     EXPECT_TRUE(context->completeOne(true));
@@ -69,8 +69,8 @@ TEST(LoadBackAsyncContextTest, TaskFailureCompletesAllPendingTransfers) {
     EXPECT_FALSE(context->onTaskFail());
 }
 
-TEST(LoadBackAsyncContextTest, TaskFailureCompletesCanceledContext) {
-    const std::shared_ptr<LoadBackAsyncContext> context = std::make_shared<LoadBackAsyncContext>(2);
+TEST(LoadAsyncContextTest, TaskFailureCompletesCanceledContext) {
+    const std::shared_ptr<LoadAsyncContext> context = std::make_shared<LoadAsyncContext>(2);
     ASSERT_NE(context, nullptr);
 
     EXPECT_TRUE(context->requestCancel());
@@ -82,8 +82,8 @@ TEST(LoadBackAsyncContextTest, TaskFailureCompletesCanceledContext) {
     EXPECT_FALSE(context->success());
 }
 
-TEST(LoadBackAsyncContextTest, ZeroTransferContextIsImmediatelySuccessful) {
-    const std::shared_ptr<LoadBackAsyncContext> context = std::make_shared<LoadBackAsyncContext>(0);
+TEST(LoadAsyncContextTest, ZeroTransferContextIsImmediatelySuccessful) {
+    const std::shared_ptr<LoadAsyncContext> context = std::make_shared<LoadAsyncContext>(0);
     ASSERT_NE(context, nullptr);
 
     EXPECT_TRUE(context->done());

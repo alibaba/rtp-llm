@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/LoadBackWorker.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/LoadWorker.h"
 
 #include <memory>
 #include <optional>
@@ -15,38 +15,38 @@ GroupSetPtr makeWorkerTestGroupSet() {
     using namespace block_transfer_engine_test;
 
     TestGroupSpec spec;
-    spec.tag                                            = "load_back_worker";
+    spec.tag                                            = "load_worker";
     spec.policy                                         = defaultCacheGroupPolicy(CacheGroupType::FULL);
     spec.policy.enable_prefix_reuse                     = true;
     spec.layer_ids                                      = {0};
     const std::shared_ptr<const CacheTopology> topology = makeTestTopology({spec});
     DeviceBlockPoolPtr pool = makeTestDevicePool({{spec.kv_block_stride_bytes, spec.kv_scale_stride_bytes}},
                                                  /*usable_count=*/1,
-                                                 "load_back_worker");
+                                                 "load_worker");
     return makeTestGroupSet(0, topology, {0}, {std::move(pool)});
 }
 
-TEST(LoadBackWorkerTest, CreateTaskAllowsNoTransferItems) {
-    LoadBackWorker worker;
+TEST(LoadWorkerTest, CreateTaskAllowsNoTransferItems) {
+    LoadWorker     worker;
     GroupSetPtr    group = makeWorkerTestGroupSet();
 
-    LoadBackTicket::PendingLoadBackItem joined_item;
+    LoadTicket::PendingLoadItem joined_item;
     joined_item.group_set_id                            = 0;
     joined_item.source_tier                             = Tier::HOST;
-    joined_item.joined_load_back                        = true;
-    const std::shared_ptr<LoadBackAsyncContext> context = std::make_shared<LoadBackAsyncContext>(1);
-    LoadBackWorker::TaskPtr                     task    = std::make_shared<LoadBackWorker::Task>();
+    joined_item.joined_load                             = true;
+    const std::shared_ptr<LoadAsyncContext> context     = std::make_shared<LoadAsyncContext>(1);
+    LoadWorker::TaskPtr                     task        = std::make_shared<LoadWorker::Task>();
 
     ASSERT_TRUE(worker.createTask({joined_item}, {group}, context, task));
     EXPECT_EQ(task, nullptr);
 }
 
-TEST(LoadBackWorkerTest, FinishLoadingNotifiesJoinedContext) {
-    LoadBackWorker                              worker;
+TEST(LoadWorkerTest, FinishLoadingNotifiesJoinedContext) {
+    LoadWorker                                  worker;
     TreeNode                                    node;
     const std::vector<BlockIdxType>             target_blocks{1, 2};
-    const std::shared_ptr<LoadBackAsyncContext> first_context  = std::make_shared<LoadBackAsyncContext>(1);
-    const std::shared_ptr<LoadBackAsyncContext> joined_context = std::make_shared<LoadBackAsyncContext>(1);
+    const std::shared_ptr<LoadAsyncContext>     first_context  = std::make_shared<LoadAsyncContext>(1);
+    const std::shared_ptr<LoadAsyncContext>     joined_context = std::make_shared<LoadAsyncContext>(1);
 
     ASSERT_TRUE(worker.startLoading(&node, 0, target_blocks, first_context));
     const std::optional<std::vector<BlockIdxType>> joined_blocks = worker.joinLoading(&node, 0, joined_context);
@@ -63,11 +63,11 @@ TEST(LoadBackWorkerTest, FinishLoadingNotifiesJoinedContext) {
     EXPECT_FALSE(worker.finishLoading(&node, 0, true));
 }
 
-TEST(LoadBackWorkerTest, DuplicateJoinOnlyCompletesOnce) {
-    LoadBackWorker                              worker;
+TEST(LoadWorkerTest, DuplicateJoinOnlyCompletesOnce) {
+    LoadWorker                                  worker;
     TreeNode                                    node;
     const std::vector<BlockIdxType>             target_blocks{3};
-    const std::shared_ptr<LoadBackAsyncContext> context = std::make_shared<LoadBackAsyncContext>(1);
+    const std::shared_ptr<LoadAsyncContext>     context = std::make_shared<LoadAsyncContext>(1);
 
     ASSERT_TRUE(worker.startLoading(&node, 1, target_blocks, context));
     ASSERT_TRUE(worker.joinLoading(&node, 1, context).has_value());
@@ -78,11 +78,11 @@ TEST(LoadBackWorkerTest, DuplicateJoinOnlyCompletesOnce) {
     EXPECT_TRUE(context->success());
 }
 
-TEST(LoadBackWorkerTest, CancelingFirstContextDoesNotFailJoinedContext) {
-    LoadBackWorker                              worker;
+TEST(LoadWorkerTest, CancelingFirstContextDoesNotFailJoinedContext) {
+    LoadWorker                                  worker;
     TreeNode                                    node;
-    const std::shared_ptr<LoadBackAsyncContext> first_context  = std::make_shared<LoadBackAsyncContext>(1);
-    const std::shared_ptr<LoadBackAsyncContext> joined_context = std::make_shared<LoadBackAsyncContext>(1);
+    const std::shared_ptr<LoadAsyncContext>     first_context  = std::make_shared<LoadAsyncContext>(1);
+    const std::shared_ptr<LoadAsyncContext>     joined_context = std::make_shared<LoadAsyncContext>(1);
 
     ASSERT_TRUE(worker.startLoading(&node, 0, {4}, first_context));
     ASSERT_TRUE(worker.joinLoading(&node, 0, joined_context).has_value());
@@ -95,11 +95,11 @@ TEST(LoadBackWorkerTest, CancelingFirstContextDoesNotFailJoinedContext) {
     EXPECT_TRUE(joined_context->success());
 }
 
-TEST(LoadBackWorkerTest, CancelingJoinedContextDoesNotFailFirstContext) {
-    LoadBackWorker                              worker;
+TEST(LoadWorkerTest, CancelingJoinedContextDoesNotFailFirstContext) {
+    LoadWorker                                  worker;
     TreeNode                                    node;
-    const std::shared_ptr<LoadBackAsyncContext> first_context  = std::make_shared<LoadBackAsyncContext>(1);
-    const std::shared_ptr<LoadBackAsyncContext> joined_context = std::make_shared<LoadBackAsyncContext>(1);
+    const std::shared_ptr<LoadAsyncContext>     first_context  = std::make_shared<LoadAsyncContext>(1);
+    const std::shared_ptr<LoadAsyncContext>     joined_context = std::make_shared<LoadAsyncContext>(1);
 
     ASSERT_TRUE(worker.startLoading(&node, 0, {5}, first_context));
     ASSERT_TRUE(worker.joinLoading(&node, 0, joined_context).has_value());
@@ -112,10 +112,10 @@ TEST(LoadBackWorkerTest, CancelingJoinedContextDoesNotFailFirstContext) {
     EXPECT_FALSE(joined_context->success());
 }
 
-TEST(LoadBackWorkerTest, ContextAggregatesMultipleLoadingRecords) {
-    LoadBackWorker                              worker;
+TEST(LoadWorkerTest, ContextAggregatesMultipleLoadingRecords) {
+    LoadWorker                                  worker;
     TreeNode                                    node;
-    const std::shared_ptr<LoadBackAsyncContext> context = std::make_shared<LoadBackAsyncContext>(2);
+    const std::shared_ptr<LoadAsyncContext>     context = std::make_shared<LoadAsyncContext>(2);
 
     ASSERT_TRUE(worker.startLoading(&node, 0, {5}, context));
     ASSERT_TRUE(worker.startLoading(&node, 1, {6}, context));
@@ -129,11 +129,11 @@ TEST(LoadBackWorkerTest, ContextAggregatesMultipleLoadingRecords) {
     EXPECT_FALSE(context->success());
 }
 
-TEST(LoadBackWorkerTest, ContextWaitsForJoinedAndNewLoadingRecords) {
-    LoadBackWorker                              worker;
+TEST(LoadWorkerTest, ContextWaitsForJoinedAndNewLoadingRecords) {
+    LoadWorker                                  worker;
     TreeNode                                    node;
-    const std::shared_ptr<LoadBackAsyncContext> first_context = std::make_shared<LoadBackAsyncContext>(1);
-    const std::shared_ptr<LoadBackAsyncContext> mixed_context = std::make_shared<LoadBackAsyncContext>(2);
+    const std::shared_ptr<LoadAsyncContext>     first_context = std::make_shared<LoadAsyncContext>(1);
+    const std::shared_ptr<LoadAsyncContext>     mixed_context = std::make_shared<LoadAsyncContext>(2);
 
     ASSERT_TRUE(worker.startLoading(&node, 0, {7}, first_context));
     ASSERT_TRUE(worker.joinLoading(&node, 0, mixed_context).has_value());
@@ -148,12 +148,12 @@ TEST(LoadBackWorkerTest, ContextWaitsForJoinedAndNewLoadingRecords) {
     EXPECT_TRUE(mixed_context->success());
 }
 
-TEST(LoadBackWorkerTest, EraseLoadingOnlyRemovesSelectedContext) {
-    LoadBackWorker                              worker;
+TEST(LoadWorkerTest, EraseLoadingOnlyRemovesSelectedContext) {
+    LoadWorker                                  worker;
     TreeNode                                    node;
     const std::vector<BlockIdxType>             target_blocks{7};
-    const std::shared_ptr<LoadBackAsyncContext> first_context  = std::make_shared<LoadBackAsyncContext>(1);
-    const std::shared_ptr<LoadBackAsyncContext> second_context = std::make_shared<LoadBackAsyncContext>(1);
+    const std::shared_ptr<LoadAsyncContext>     first_context  = std::make_shared<LoadAsyncContext>(1);
+    const std::shared_ptr<LoadAsyncContext>     second_context = std::make_shared<LoadAsyncContext>(1);
 
     ASSERT_TRUE(worker.startLoading(&node, 0, target_blocks, first_context));
     EXPECT_FALSE(worker.startLoading(&node, 0, target_blocks, first_context));
@@ -170,10 +170,10 @@ TEST(LoadBackWorkerTest, EraseLoadingOnlyRemovesSelectedContext) {
     EXPECT_TRUE(second_context->onTaskFail());
 }
 
-TEST(LoadBackWorkerTest, EraseLastLoadingContextRemovesRecord) {
-    LoadBackWorker                              worker;
+TEST(LoadWorkerTest, EraseLastLoadingContextRemovesRecord) {
+    LoadWorker                                  worker;
     TreeNode                                    node;
-    const std::shared_ptr<LoadBackAsyncContext> context = std::make_shared<LoadBackAsyncContext>(1);
+    const std::shared_ptr<LoadAsyncContext>     context = std::make_shared<LoadAsyncContext>(1);
 
     ASSERT_TRUE(worker.startLoading(&node, 0, {8}, context));
     ASSERT_TRUE(worker.joinLoading(&node, 0, context).has_value());

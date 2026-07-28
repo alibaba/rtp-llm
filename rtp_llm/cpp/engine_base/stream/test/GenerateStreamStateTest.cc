@@ -25,24 +25,22 @@ thread_local size_t              tracked_cancel_count   = 0;
 
 }  // namespace
 
-// KVCacheManager::cancelLoadBack is intentionally non-virtual. This target-local
+// KVCacheManager::cancelLoad is intentionally non-virtual. This target-local
 // GNU ld --wrap seam counts only the AsyncContext selected by the current test
 // and forwards every call to the real implementation. The Itanium ABI symbol is
-// _ZN7rtp_llm14KVCacheManager14cancelLoadBackERKSt10shared_ptrINS_12AsyncContextEE.
-extern "C" bool
-realKVCacheManagerCancelLoadBack(KVCacheManager* manager, const std::shared_ptr<AsyncContext>& context) asm(
-    "__real__ZN7rtp_llm14KVCacheManager14cancelLoadBackERKSt10shared_ptrINS_12AsyncContextEE");
+// _ZN7rtp_llm14KVCacheManager10cancelLoadERKSt10shared_ptrINS_12AsyncContextEE.
+extern "C" bool realKVCacheManagerCancelLoad(KVCacheManager* manager, const std::shared_ptr<AsyncContext>& context) asm(
+    "__real__ZN7rtp_llm14KVCacheManager10cancelLoadERKSt10shared_ptrINS_12AsyncContextEE");
 
 extern "C" bool
-wrappedKVCacheManagerCancelLoadBack(KVCacheManager* manager, const std::shared_ptr<AsyncContext>& context) asm(
-    "__wrap__ZN7rtp_llm14KVCacheManager14cancelLoadBackERKSt10shared_ptrINS_12AsyncContextEE");
+wrappedKVCacheManagerCancelLoad(KVCacheManager* manager, const std::shared_ptr<AsyncContext>& context) asm(
+    "__wrap__ZN7rtp_llm14KVCacheManager10cancelLoadERKSt10shared_ptrINS_12AsyncContextEE");
 
-extern "C" bool wrappedKVCacheManagerCancelLoadBack(KVCacheManager*                      manager,
-                                                    const std::shared_ptr<AsyncContext>& context) {
+extern "C" bool wrappedKVCacheManagerCancelLoad(KVCacheManager* manager, const std::shared_ptr<AsyncContext>& context) {
     if (context.get() == tracked_cancel_context) {
         ++tracked_cancel_count;
     }
-    return realKVCacheManagerCancelLoadBack(manager, context);
+    return realKVCacheManagerCancelLoad(manager, context);
 }
 
 class GenerateStreamStateTest: public DeviceTestBase {
@@ -345,7 +343,7 @@ TEST_F(GenerateStreamStateTest, testLoadInitiatedSkipsAsyncLoadCache) {
     ASSERT_TRUE(resource.initKVBlock().ok());
     stream->reportEvent(StreamEvents::LoadInitiated);
 
-    // No allocator-owned load-back is in flight.
+    // No allocator-owned load is in flight.
     ASSERT_FALSE(resource.allocator_load_context_);
 
     // moveToNext should not trigger asyncLoadCache because LoadInitiated is set
@@ -353,7 +351,7 @@ TEST_F(GenerateStreamStateTest, testLoadInitiatedSkipsAsyncLoadCache) {
     auto new_state = stream->moveToNext();
     ASSERT_EQ(new_state, StreamState::RUNNING);
 
-    // Still no allocator load-back context.
+    // Still no allocator load context.
     ASSERT_FALSE(resource.allocator_load_context_);
 }
 
@@ -400,7 +398,7 @@ TEST_F(GenerateStreamStateTest, testIncrementalAsyncAllocationTerminatesBeforeMo
                                       /*reuse_len=*/0,
                                       /*match_cost_time_us=*/0,
                                       async_context,
-                                      /*load_back_ticket=*/nullptr}));
+                                      /*load_ticket=*/nullptr}));
     EXPECT_CALL(*mock_allocator, free(_)).WillOnce([&](const FreeInfo& free_info) {
         ++free_count;
         real_allocator->free(free_info);

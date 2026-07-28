@@ -68,7 +68,7 @@ bool BlockTree::isNodeMatchReady(const TreeNode& node) const {
                             node.group_set_resources.size());
     for (const GroupSetResource& slot : node.group_set_resources) {
         if (slot.transfer_state != GroupSetTransferState::IDLE
-            && slot.transfer_state != GroupSetTransferState::LOADING_BACK) {
+            && slot.transfer_state != GroupSetTransferState::LOADING) {
             return false;
         }
         if (slot.transfer_state == GroupSetTransferState::IDLE) {

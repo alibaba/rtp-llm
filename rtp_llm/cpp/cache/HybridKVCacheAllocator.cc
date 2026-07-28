@@ -92,7 +92,7 @@ HybridKVCacheAllocator::HybridKVCacheAllocator(const CacheConfig&               
                                                int64_t                            reserve_block_ratio):
     KVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio) {}
 
-bool HybridKVCacheAllocator::preflightLoadBackMappings(const std::shared_ptr<LoadBackTicket>& ticket) const {
+bool HybridKVCacheAllocator::preflightLoadMappings(const std::shared_ptr<LoadTicket>& ticket) const {
     if (ticket == nullptr || ticket->empty()) {
         return true;
     }
@@ -113,7 +113,7 @@ bool HybridKVCacheAllocator::preflightLoadBackMappings(const std::shared_ptr<Loa
 int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cache_keys,
                                        BatchKVCacheResource&                kv_resource,
                                        const std::shared_ptr<CPSlotMapper>& cp_mapper,
-                                       std::shared_ptr<LoadBackTicket>&     ticket,
+                                       std::shared_ptr<LoadTicket>&         ticket,
                                        std::vector<BlockIndicesType>&       referenced_blocks) {
     ticket.reset();
     if (!block_tree_cache_ || cache_keys.empty()) {
@@ -121,14 +121,14 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
     }
     const int cp_scale     = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
     auto      match_result = block_tree_cache_->match(cache_keys);
-    ticket                 = match_result.load_back_ticket;
+    ticket                 = match_result.load_ticket;
     auto fail_match        = [&]() {
         ticket.reset();
         auto matched_resources = std::move(match_result.matched_resources);
         block_tree_cache_->releaseMatchedResources(matched_resources);
         return -1;
     };
-    if (!preflightLoadBackMappings(ticket)) {
+    if (!preflightLoadMappings(ticket)) {
         return fail_match();
     }
     const int ready_reuse_blocks = static_cast<int>(match_result.matched_blocks);
@@ -182,13 +182,13 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
 
     if (ticket != nullptr) {
         for (size_t item_index = 0; item_index < ticket->itemCount(); ++item_index) {
-            if (ticket->sourceTier(item_index) != Tier::DEVICE && !ticket->joinedLoadBack(item_index)) {
+            if (ticket->sourceTier(item_index) != Tier::DEVICE && !ticket->joinedLoad(item_index)) {
                 continue;
             }
             const auto& source_blocks = ticket->sourceBlocks(item_index);
             const auto* group_ids     = groupIdsForGroupSet(block_tree_cache_, ticket->groupSetId(item_index));
             const BlockIndicesType& reusable_blocks =
-                ticket->joinedLoadBack(item_index) ? ticket->targetDeviceBlocks(item_index) : source_blocks;
+                ticket->joinedLoad(item_index) ? ticket->targetDeviceBlocks(item_index) : source_blocks;
             if (group_ids == nullptr || reusable_blocks.size() != group_ids->size() || reusable_blocks.empty()) {
                 return fail_match();
             }
@@ -250,9 +250,9 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     const size_t                    reserve_blocks     = reserveBlocksNum();
     int                             reuse_blocks       = 0;
     std::vector<BlockIndicesType>   referenced_blocks(static_cast<size_t>(kv_resource->groupNums()));
-    std::shared_ptr<LoadBackTicket> load_back_ticket;
+    std::shared_ptr<LoadTicket>     load_ticket;
     auto                            rollback = [&](const std::vector<size_t>& original_sizes) -> MallocResult {
-        load_back_ticket.reset();
+        load_ticket.reset();
         rollbackInitMalloc(*kv_resource, referenced_blocks, original_sizes);
         return {false, 0};
     };
@@ -263,27 +263,26 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         CacheKeysType match_keys(cp_keys.begin(),
                                  cp_active ? cp_keys.end() : (cp_keys.empty() ? cp_keys.end() : cp_keys.end() - 1));
         const auto    begin_us = currentTimeUs();
-        reuse_blocks           = reuseCache(match_keys, *kv_resource, cp_mapper, load_back_ticket, referenced_blocks);
+        reuse_blocks           = reuseCache(match_keys, *kv_resource, cp_mapper, load_ticket, referenced_blocks);
         match_cost_time_us     = currentTimeUs() - begin_us;
         if (reuse_blocks < 0) {
-            load_back_ticket.reset();
+            load_ticket.reset();
             kv_resource->clearBlocks();
             return {false, 0};
         }
         kv_resource->cacheResource(0).setDeviceReuseBlockNum(static_cast<size_t>(reuse_blocks));
     }
 
-    std::vector<std::vector<size_t>> load_back_positions(static_cast<size_t>(kv_resource->groupNums()));
-    if (load_back_ticket != nullptr && !load_back_ticket->empty()) {
-        for (size_t item_index = 0; item_index < load_back_ticket->itemCount(); ++item_index) {
-            if (load_back_ticket->sourceTier(item_index) == Tier::DEVICE) {
+    std::vector<std::vector<size_t>> load_positions(static_cast<size_t>(kv_resource->groupNums()));
+    if (load_ticket != nullptr && !load_ticket->empty()) {
+        for (size_t item_index = 0; item_index < load_ticket->itemCount(); ++item_index) {
+            if (load_ticket->sourceTier(item_index) == Tier::DEVICE) {
                 continue;
             }
-            if (load_back_ticket->joinedLoadBack(item_index)) {
+            if (load_ticket->joinedLoad(item_index)) {
                 continue;
             }
-            const auto* group_ids =
-                groupIdsForGroupSet(block_tree_cache_, load_back_ticket->groupSetId(item_index));
+            const auto* group_ids = groupIdsForGroupSet(block_tree_cache_, load_ticket->groupSetId(item_index));
             if (group_ids == nullptr) {
                 return rollback({});
             }
@@ -296,9 +295,9 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
                 const size_t target_position =
                     type == CacheGroupType::LINEAR
                             || (type == CacheGroupType::SWA && !cpCompactSwaGroup(gid, cp_mapper)) ?
-                        (load_back_ticket->pathIndex(item_index) + 1) * static_cast<size_t>(cp_scale) - 1 :
-                        load_back_ticket->pathIndex(item_index);
-                auto& positions = load_back_positions[static_cast<size_t>(gid)];
+                        (load_ticket->pathIndex(item_index) + 1) * static_cast<size_t>(cp_scale) - 1 :
+                        load_ticket->pathIndex(item_index);
+                auto& positions = load_positions[static_cast<size_t>(gid)];
                 if (std::find(positions.begin(), positions.end(), target_position) == positions.end()) {
                     positions.push_back(target_position);
                 }
@@ -308,7 +307,7 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         size_t pending_targets = 0;
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
             const auto& blocks = kv_resource->blocks(0, gid);
-            for (const size_t position : load_back_positions[static_cast<size_t>(gid)]) {
+            for (const size_t position : load_positions[static_cast<size_t>(gid)]) {
                 if (position >= blocks.size()) {
                     return rollback({});
                 }
@@ -324,7 +323,7 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         }
 
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
-            const auto& positions = load_back_positions[static_cast<size_t>(gid)];
+            const auto& positions = load_positions[static_cast<size_t>(gid)];
             if (positions.empty()) {
                 continue;
             }
@@ -355,11 +354,10 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
             return rollback(original_sizes);
         }
     }
-    if (load_back_ticket != nullptr && !load_back_ticket->empty()) {
-        for (size_t item_index = 0; item_index < load_back_ticket->itemCount(); ++item_index) {
-            const auto* group_ids =
-                groupIdsForGroupSet(block_tree_cache_, load_back_ticket->groupSetId(item_index));
-            const auto& source_blocks = load_back_ticket->sourceBlocks(item_index);
+    if (load_ticket != nullptr && !load_ticket->empty()) {
+        for (size_t item_index = 0; item_index < load_ticket->itemCount(); ++item_index) {
+            const auto*      group_ids = groupIdsForGroupSet(block_tree_cache_, load_ticket->groupSetId(item_index));
+            const auto&      source_blocks = load_ticket->sourceBlocks(item_index);
             BlockIndicesType target_device_blocks;
             bool             valid = group_ids != nullptr && !group_ids->empty();
             for (size_t local = 0; valid && local < group_ids->size(); ++local) {
@@ -369,13 +367,14 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
                     break;
                 }
                 const auto   type     = config_.typeForGroup(static_cast<size_t>(gid));
-                const size_t position = type == CacheGroupType::LINEAR
-                                                || (type == CacheGroupType::SWA && !cpCompactSwaGroup(gid, cp_mapper)) ?
-                                            (load_back_ticket->pathIndex(item_index) + 1) * static_cast<size_t>(cp_scale) - 1 :
-                                            load_back_ticket->pathIndex(item_index);
+                const size_t position =
+                    type == CacheGroupType::LINEAR
+                            || (type == CacheGroupType::SWA && !cpCompactSwaGroup(gid, cp_mapper)) ?
+                        (load_ticket->pathIndex(item_index) + 1) * static_cast<size_t>(cp_scale) - 1 :
+                        load_ticket->pathIndex(item_index);
                 const auto&  blocks   = kv_resource->blocks(0, gid);
                 if (position >= blocks.size() || isNullBlockIdx(blocks[position])
-                    || (load_back_ticket->sourceTier(item_index) == Tier::DEVICE
+                    || (load_ticket->sourceTier(item_index) == Tier::DEVICE
                         && (local >= source_blocks.size() || blocks[position] != source_blocks[local]))) {
                     valid = false;
                     break;
@@ -385,15 +384,15 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
             if (!valid) {
                 return rollback(original_sizes);
             }
-            if (load_back_ticket->joinedLoadBack(item_index)) {
-                if (target_device_blocks != load_back_ticket->targetDeviceBlocks(item_index)) {
+            if (load_ticket->joinedLoad(item_index)) {
+                if (target_device_blocks != load_ticket->targetDeviceBlocks(item_index)) {
                     return rollback(original_sizes);
                 }
                 continue;
             }
-            if ((load_back_ticket->sourceTier(item_index) == Tier::DEVICE
+            if ((load_ticket->sourceTier(item_index) == Tier::DEVICE
                  && source_blocks.size() != target_device_blocks.size())
-                || !load_back_ticket->bindTargetDeviceBlocks(item_index, std::move(target_device_blocks))) {
+                || !load_ticket->bindTargetDeviceBlocks(item_index, std::move(target_device_blocks))) {
                 return rollback(original_sizes);
             }
         }
@@ -405,12 +404,10 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
                                                                   kv_resource->blocks(0, gid));
         }
     }
-    MallocResult result{true, reuse_blocks * reuse_unit_tokens, match_cost_time_us, nullptr, load_back_ticket};
-    if (load_back_ticket != nullptr) {
-        result.memory_reuse_len =
-            static_cast<int>(load_back_ticket->logicalMatchedBlocks(Tier::HOST)) * reuse_unit_tokens;
-        result.disk_reuse_len =
-            static_cast<int>(load_back_ticket->logicalMatchedBlocks(Tier::DISK)) * reuse_unit_tokens;
+    MallocResult result{true, reuse_blocks * reuse_unit_tokens, match_cost_time_us, nullptr, load_ticket};
+    if (load_ticket != nullptr) {
+        result.memory_reuse_len = static_cast<int>(load_ticket->logicalMatchedBlocks(Tier::HOST)) * reuse_unit_tokens;
+        result.disk_reuse_len   = static_cast<int>(load_ticket->logicalMatchedBlocks(Tier::DISK)) * reuse_unit_tokens;
     }
     return result;
 }
@@ -541,12 +538,13 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
             continue;
         }
         const auto&                         group_sets = block_tree_cache_->groupSets();
-        std::vector<std::vector<GroupSetResource>> slots(insert_keys.size(), std::vector<GroupSetResource>(group_sets.size()));
+        std::vector<std::vector<GroupSetResource>> slots(insert_keys.size(),
+                                                         std::vector<GroupSetResource>(group_sets.size()));
         bool                                mapping_valid = true;
         for (size_t group_set_index = 0; group_set_index < group_sets.size(); ++group_set_index) {
             const auto& group_set = group_sets[group_set_index];
-            if (!group_set || group_set->groupSetId() != group_set_index
-                || group_set->groupIds().empty() || group_set->groupIds().size() != group_set->devicePoolCount()) {
+            if (!group_set || group_set->groupSetId() != group_set_index || group_set->groupIds().empty()
+                || group_set->groupIds().size() != group_set->devicePoolCount()) {
                 mapping_valid = false;
                 break;
             }

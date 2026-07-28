@@ -43,25 +43,25 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
         return init_result;
     }
 
-    auto pending_load_back_ticket = std::move(init_result.load_back_ticket);
+    auto pending_load_ticket      = std::move(init_result.load_ticket);
     auto incr_result              = incrMalloc(malloc_info);
     if (!incr_result.success) {
-        pending_load_back_ticket.reset();
+        pending_load_ticket.reset();
         FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};
         free(free_info);
         return incr_result;
     }
 
-    if (pending_load_back_ticket && !pending_load_back_ticket->empty()) {
-        init_result.async_context = pending_load_back_ticket->commit();
-        pending_load_back_ticket.reset();
+    if (pending_load_ticket && !pending_load_ticket->empty()) {
+        init_result.async_context = pending_load_ticket->commit();
+        pending_load_ticket.reset();
         if (!init_result.async_context) {
             FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};
             free(free_info);
             return {false, 0};
         }
     }
-    init_result.load_back_ticket.reset();
+    init_result.load_ticket.reset();
 
     if (metrics_reporter_ && malloc_info.enable_device_cache) {
         int64_t device_input_length = 0;
@@ -159,8 +159,8 @@ void KVCacheAllocator::setBlockTreeCache(BlockTreeCache* block_tree_cache) {
     }
 }
 
-bool KVCacheAllocator::cancelLoadBack(const std::shared_ptr<AsyncContext>& context) {
-    return block_tree_cache_ != nullptr && block_tree_cache_->cancelLoadBack(context);
+bool KVCacheAllocator::cancelLoad(const std::shared_ptr<AsyncContext>& context) {
+    return block_tree_cache_ != nullptr && block_tree_cache_->cancelLoad(context);
 }
 
 uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t model_id, int local_layer_id) const {

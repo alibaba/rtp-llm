@@ -102,7 +102,7 @@ bool KVCacheGroup::materializePositions(BlockIds& block_ids, const std::vector<s
     missing_positions.reserve(positions.size());
     for (const size_t position : positions) {
         if (position >= block_ids.blocksNum()) {
-            RTP_LLM_LOG_WARNING("load-back target position out of range: tag=%s position=%zu blocks=%zu",
+            RTP_LLM_LOG_WARNING("load target position out of range: tag=%s position=%zu blocks=%zu",
                                 tag().c_str(),
                                 position,
                                 block_ids.blocksNum());

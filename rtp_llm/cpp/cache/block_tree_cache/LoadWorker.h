@@ -8,9 +8,9 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/LoadBackAsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/GroupSet.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/LoadBackTicket.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/LoadTicket.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
@@ -18,16 +18,16 @@ namespace rtp_llm {
 class BlockTreeCacheMetricsReporter;
 class BlockTransferDispatcher;
 
-class LoadBackWorker {
+class LoadWorker {
 public:
     struct Task {
-        LoadBackTicket::PendingLoadBackItems  items;
+        LoadTicket::PendingLoadItems          items;
         std::vector<GroupSetPtr>              item_groups;
         std::vector<BlockIdxType>             staging_host_blocks;
         std::vector<TransferDescriptor>       disk_to_host_descriptors;
         std::vector<TransferDescriptor>       host_to_device_descriptors;
         std::vector<bool>                     target_installed;
-        std::shared_ptr<LoadBackAsyncContext> context;
+        std::shared_ptr<LoadAsyncContext>     context;
     };
     using TaskPtr = std::shared_ptr<Task>;
 
@@ -37,10 +37,10 @@ public:
         FAILED,
     };
 
-    bool          createTask(const LoadBackTicket::PendingLoadBackItems&  items,
-                             const std::vector<GroupSetPtr>&              group_sets,
-                             const std::shared_ptr<LoadBackAsyncContext>& context,
-                             TaskPtr&                                     task);
+    bool          createTask(const LoadTicket::PendingLoadItems&      items,
+                             const std::vector<GroupSetPtr>&          group_sets,
+                             const std::shared_ptr<LoadAsyncContext>& context,
+                             TaskPtr&                                 task);
     PrepareStatus prepareTransferItem(Task& task, size_t item_index);
     bool          runTransfer(Task&                          task,
                               const BlockTransferDispatcher& transfer_dispatcher,
@@ -49,19 +49,18 @@ public:
                               int                            host_timeout_ms,
                               bool                           prepared);
     void          releaseTaskResources(Task& task);
-    bool          cancelLoadBackNolock(const std::shared_ptr<AsyncContext>& context);
+    bool          cancelLoadNolock(const std::shared_ptr<AsyncContext>& context);
 
     // Registry operations rely on the BlockTreeCache mutex.
-    bool startLoading(TreeNode*                                    node,
-                      size_t                                       group_set_id,
-                      const std::vector<BlockIdxType>&             target_blocks,
-                      const std::shared_ptr<LoadBackAsyncContext>& context);
+    bool startLoading(TreeNode*                                node,
+                      size_t                                   group_set_id,
+                      const std::vector<BlockIdxType>&         target_blocks,
+                      const std::shared_ptr<LoadAsyncContext>& context);
     std::optional<std::vector<BlockIdxType>>
-         joinLoading(TreeNode* node, size_t group_set_id, const std::shared_ptr<LoadBackAsyncContext>& context);
+         joinLoading(TreeNode* node, size_t group_set_id, const std::shared_ptr<LoadAsyncContext>& context);
     bool finishLoading(TreeNode* node, size_t group_set_id, bool success);
-    bool eraseLoadingForOneContext(TreeNode*                                    node,
-                                   size_t                                       group_set_id,
-                                   const std::shared_ptr<LoadBackAsyncContext>& context);
+    bool
+    eraseLoadingForOneContext(TreeNode* node, size_t group_set_id, const std::shared_ptr<LoadAsyncContext>& context);
 
 private:
     struct LoadingKey {
@@ -83,7 +82,7 @@ private:
 
     struct LoadingRecord {
         std::vector<BlockIdxType>                          target_blocks;
-        std::vector<std::shared_ptr<LoadBackAsyncContext>> contexts;
+        std::vector<std::shared_ptr<LoadAsyncContext>>     contexts;
     };
     using LoadingRecordMap = std::unordered_map<LoadingKey, LoadingRecord, LoadingKeyHash>;
 

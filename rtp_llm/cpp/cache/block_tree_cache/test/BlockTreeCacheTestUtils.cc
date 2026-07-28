@@ -583,7 +583,7 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
     config.enable_device_cache     = true;
     config.enable_memory_cache     = true;
     config.enable_disk_cache       = options.enable_disk;
-    config.enable_load_back        = options.enable_load_back;
+    config.enable_load             = options.enable_load;
     config.enable_reverse_eviction = options.enable_reverse_eviction;
 
     environment->scripted_per_rank_transfer_engine =

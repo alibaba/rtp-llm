@@ -84,15 +84,10 @@ public:
                                                    size_t                                 group_set_id);
     static bool buildTransferDescriptor(const EvictionMove& eviction_move, TransferDescriptor& descriptor);
 
-    // ---- Load-back state transitions (owned here; driven by BlockTreeCache) ----
-    bool
-    reserveLoadBack(TreeNode* node, size_t group_set_id, Tier source, const std::vector<BlockIdxType>& source_blocks);
-    bool abortPendingLoadBack(TreeNode*                        node,
-                              size_t                           group_set_id,
-                              Tier                             source,
-                              const std::vector<BlockIdxType>& source_blocks);
-    bool beginLoadBack(TreeNode* node, size_t group_set_id, Tier source);
-    bool finishLoadBack(TreeNode* node, size_t group_set_id, Tier source, bool copy_ok);
+    // Refresh one node after an external owner changes its transfer state.
+    void refreshCandidate(TreeNode* node, size_t group_set_id);
+    // Record successful entry into a tier and refresh eviction candidacy.
+    void onTierEntered(TreeNode* node, size_t group_set_id, Tier tier);
 
 private:
     struct GroupTierHeaps {

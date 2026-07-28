@@ -1,19 +1,19 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/LoadBackTicket.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/LoadTicket.h"
 
 namespace rtp_llm {
 
-LoadBackTicket::LoadBackTicket(std::shared_ptr<LoadBackTicketRegistry> registry,
-                               uint64_t                                ticket_id,
-                               PendingLoadBackItems                    items,
-                               size_t                                  logical_matched_blocks,
-                               std::shared_ptr<LoadBackAsyncContext>   context):
+LoadTicket::LoadTicket(std::shared_ptr<LoadTicketRegistry> registry,
+                       uint64_t                            ticket_id,
+                       PendingLoadItems                    items,
+                       size_t                              logical_matched_blocks,
+                       std::shared_ptr<LoadAsyncContext>   context):
     registry_(std::move(registry)),
     ticket_id_(ticket_id),
     items_(std::move(items)),
     logical_matched_blocks_(logical_matched_blocks),
     context_(std::move(context)) {
     std::unordered_map<size_t, Tier> reuse_tier_by_path;
-    for (const PendingLoadBackItem& item : items_) {
+    for (const PendingLoadItem& item : items_) {
         if (item.source_tier < Tier::DEVICE || item.source_tier > Tier::DISK) {
             continue;
         }
@@ -30,38 +30,37 @@ LoadBackTicket::LoadBackTicket(std::shared_ptr<LoadBackTicketRegistry> registry,
     }
 }
 
-LoadBackTicket::~LoadBackTicket() {
+LoadTicket::~LoadTicket() {
     if (registry_ != nullptr && ticket_id_ != 0) {
         registry_->abort(ticket_id_);
     }
 }
 
-std::shared_ptr<AsyncContext> LoadBackTicket::commit() {
+std::shared_ptr<AsyncContext> LoadTicket::commit() {
     if (registry_ == nullptr || ticket_id_ == 0 || items_.empty()) {
         return nullptr;
     }
     return registry_->commit(ticket_id_, *this);
 }
 
-size_t LoadBackTicket::logicalMatchedBlocks(Tier tier) const {
+size_t LoadTicket::logicalMatchedBlocks(Tier tier) const {
     if (tier < Tier::DEVICE || tier > Tier::DISK) {
         return 0;
     }
     return logical_matched_blocks_by_tier_[static_cast<size_t>(tier)];
 }
 
-LoadBackTicketRegistry::LoadBackTicketRegistry(CommitCallback commit_callback, AbortCallback abort_callback):
+LoadTicketRegistry::LoadTicketRegistry(CommitCallback commit_callback, AbortCallback abort_callback):
     commit_callback_(std::move(commit_callback)), abort_callback_(std::move(abort_callback)) {}
 
-std::shared_ptr<LoadBackTicket>
-LoadBackTicketRegistry::createTicket(const LoadBackTicket::PendingLoadBackItems&  items,
-                                     size_t                                       logical_matched_blocks,
-                                     const std::shared_ptr<LoadBackAsyncContext>& context) {
-    std::shared_ptr<LoadBackTicket> ticket(new LoadBackTicket(shared_from_this(),
-                                                              /*ticket_id=*/0,
-                                                              LoadBackTicket::PendingLoadBackItems(items),
-                                                              logical_matched_blocks,
-                                                              context));
+std::shared_ptr<LoadTicket> LoadTicketRegistry::createTicket(const LoadTicket::PendingLoadItems& items,
+                                                             size_t                              logical_matched_blocks,
+                                                             const std::shared_ptr<LoadAsyncContext>& context) {
+    std::shared_ptr<LoadTicket> ticket(new LoadTicket(shared_from_this(),
+                                                      /*ticket_id=*/0,
+                                                      LoadTicket::PendingLoadItems(items),
+                                                      logical_matched_blocks,
+                                                      context));
     if (items.empty()) {
         return ticket;
     }
@@ -78,7 +77,7 @@ LoadBackTicketRegistry::createTicket(const LoadBackTicket::PendingLoadBackItems&
     return ticket;
 }
 
-std::shared_ptr<AsyncContext> LoadBackTicketRegistry::commit(uint64_t ticket_id, const LoadBackTicket& ticket) {
+std::shared_ptr<AsyncContext> LoadTicketRegistry::commit(uint64_t ticket_id, const LoadTicket& ticket) {
     CommitCallback commit_callback;
     {
         std::lock_guard<std::mutex> lock(mutex_);
@@ -95,7 +94,7 @@ std::shared_ptr<AsyncContext> LoadBackTicketRegistry::commit(uint64_t ticket_id,
     return commit_callback ? commit_callback(ticket) : nullptr;
 }
 
-void LoadBackTicketRegistry::abort(uint64_t ticket_id) {
+void LoadTicketRegistry::abort(uint64_t ticket_id) {
     AbortCallback abort_callback;
     PendingTicket abort_payload;
     {
@@ -112,16 +111,16 @@ void LoadBackTicketRegistry::abort(uint64_t ticket_id) {
 
     ActiveCallbackLease active_callback(this);
     if (abort_callback) {
-        LoadBackTicket abort_ticket(nullptr,
-                                    /*ticket_id=*/0,
-                                    std::move(abort_payload.items),
-                                    /*logical_matched_blocks=*/0,
-                                    std::move(abort_payload.context));
+        LoadTicket abort_ticket(nullptr,
+                                /*ticket_id=*/0,
+                                std::move(abort_payload.items),
+                                /*logical_matched_blocks=*/0,
+                                std::move(abort_payload.context));
         abort_callback(abort_ticket);
     }
 }
 
-void LoadBackTicketRegistry::retireActiveCallback() {
+void LoadTicketRegistry::retireActiveCallback() {
     std::lock_guard<std::mutex> lock(mutex_);
     --active_callbacks_;
     if (active_callbacks_ == 0) {
@@ -129,7 +128,7 @@ void LoadBackTicketRegistry::retireActiveCallback() {
     }
 }
 
-void LoadBackTicketRegistry::shutdown() {
+void LoadTicketRegistry::shutdown() {
     AbortCallback              abort_callback;
     std::vector<PendingTicket> detached_payloads;
     {
@@ -154,11 +153,11 @@ void LoadBackTicketRegistry::shutdown() {
         ActiveCallbackLease active_callback(this);
         if (abort_callback) {
             for (PendingTicket& abort_payload : detached_payloads) {
-                LoadBackTicket abort_ticket(nullptr,
-                                            /*ticket_id=*/0,
-                                            std::move(abort_payload.items),
-                                            /*logical_matched_blocks=*/0,
-                                            std::move(abort_payload.context));
+                LoadTicket abort_ticket(nullptr,
+                                        /*ticket_id=*/0,
+                                        std::move(abort_payload.items),
+                                        /*logical_matched_blocks=*/0,
+                                        std::move(abort_payload.context));
                 abort_callback(abort_ticket);
             }
         }

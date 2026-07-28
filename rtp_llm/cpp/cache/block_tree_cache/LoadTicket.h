@@ -15,39 +15,39 @@
 namespace rtp_llm {
 
 namespace block_tree_cache_test {
-class LoadBackShutdownTestPeer;
+class LoadShutdownTestPeer;
 }
 
 class AsyncContext;
-class LoadBackAsyncContext;
-class LoadBackTicketRegistry;
+class LoadAsyncContext;
+class LoadTicketRegistry;
 
-class LoadBackTicket {
+class LoadTicket {
 public:
-    struct PendingLoadBackItem {
+    struct PendingLoadItem {
         TreeNode*                 node{nullptr};
         size_t                    group_set_id{0};
         size_t                    path_index{0};
         Tier                      source_tier{Tier::NONE};
         std::vector<BlockIdxType> source_blocks;
         // This ticket joins an existing transfer and does not own its source or state.
-        bool joined_load_back{false};
+        bool joined_load{false};
         // DEVICE denotes an already-resident logical coordinate that lies outside
         // the public ready boundary. It is ticket-owned and settled asynchronously
         // without a copy; target_device_blocks must preserve source identity.
         std::vector<BlockIdxType> target_device_blocks;
     };
-    using PendingLoadBackItems = std::vector<PendingLoadBackItem>;
+    using PendingLoadItems = std::vector<PendingLoadItem>;
 
-    ~LoadBackTicket();
+    ~LoadTicket();
 
-    LoadBackTicket(const LoadBackTicket&)            = delete;
-    LoadBackTicket& operator=(const LoadBackTicket&) = delete;
-    LoadBackTicket(LoadBackTicket&&)                 = delete;
-    LoadBackTicket& operator=(LoadBackTicket&&)      = delete;
+    LoadTicket(const LoadTicket&)            = delete;
+    LoadTicket& operator=(const LoadTicket&) = delete;
+    LoadTicket(LoadTicket&&)                 = delete;
+    LoadTicket& operator=(LoadTicket&&)      = delete;
 
     // Submits copies into allocator-owned targets. Every target must already be
-    // present in the request block table; BlockTreeCache never allocates a second
+    // present in the request block table; BlockTreeLoader never allocates a second
     // private target set. Returns null on synchronous preparation/submission failure
     // and on repeated or empty commits.
     std::shared_ptr<AsyncContext> commit();
@@ -82,8 +82,8 @@ public:
         return items_.at(item_index).source_blocks;
     }
 
-    bool joinedLoadBack(size_t item_index) const {
-        return items_.at(item_index).joined_load_back;
+    bool joinedLoad(size_t item_index) const {
+        return items_.at(item_index).joined_load;
     }
 
     const std::vector<BlockIdxType>& targetDeviceBlocks(size_t item_index) const {
@@ -94,60 +94,60 @@ public:
         if (item_index >= items_.size()) {
             return false;
         }
-        PendingLoadBackItem& item = items_[item_index];
-        if (item.joined_load_back || (item.source_tier == Tier::DEVICE && item.source_blocks != target_device_blocks)) {
+        PendingLoadItem& item = items_[item_index];
+        if (item.joined_load || (item.source_tier == Tier::DEVICE && item.source_blocks != target_device_blocks)) {
             return false;
         }
         item.target_device_blocks = std::move(target_device_blocks);
         return true;
     }
 
-    const PendingLoadBackItems& items() const {
+    const PendingLoadItems& items() const {
         return items_;
     }
 
-    const std::shared_ptr<LoadBackAsyncContext>& context() const {
+    const std::shared_ptr<LoadAsyncContext>& context() const {
         return context_;
     }
 
 private:
-    friend class LoadBackTicketRegistry;
+    friend class LoadTicketRegistry;
 
-    LoadBackTicket(std::shared_ptr<LoadBackTicketRegistry> registry,
-                   uint64_t                                ticket_id,
-                   PendingLoadBackItems                    items,
-                   size_t                                  logical_matched_blocks,
-                   std::shared_ptr<LoadBackAsyncContext>   context);
+    LoadTicket(std::shared_ptr<LoadTicketRegistry> registry,
+               uint64_t                            ticket_id,
+               PendingLoadItems                    items,
+               size_t                              logical_matched_blocks,
+               std::shared_ptr<LoadAsyncContext>   context);
 
-    std::shared_ptr<LoadBackTicketRegistry> registry_;
+    std::shared_ptr<LoadTicketRegistry>     registry_;
     uint64_t                                ticket_id_{0};
-    PendingLoadBackItems                    items_;
+    PendingLoadItems                        items_;
     const size_t                            logical_matched_blocks_{0};
     std::array<size_t, 3>                   logical_matched_blocks_by_tier_{};
-    std::shared_ptr<LoadBackAsyncContext>   context_;
+    std::shared_ptr<LoadAsyncContext>       context_;
 };
 
-class LoadBackTicketRegistry: public std::enable_shared_from_this<LoadBackTicketRegistry> {
+class LoadTicketRegistry: public std::enable_shared_from_this<LoadTicketRegistry> {
 public:
-    using CommitCallback = std::function<std::shared_ptr<AsyncContext>(const LoadBackTicket& ticket)>;
-    using AbortCallback  = std::function<void(const LoadBackTicket& ticket)>;
+    using CommitCallback = std::function<std::shared_ptr<AsyncContext>(const LoadTicket& ticket)>;
+    using AbortCallback  = std::function<void(const LoadTicket& ticket)>;
 
-    LoadBackTicketRegistry(CommitCallback commit_callback, AbortCallback abort_callback);
+    LoadTicketRegistry(CommitCallback commit_callback, AbortCallback abort_callback);
 
     void shutdown();
 
 private:
-    friend class BlockTreeCache;
-    friend class LoadBackTicket;
-    friend class block_tree_cache_test::LoadBackShutdownTestPeer;
+    friend class BlockTreeLoader;
+    friend class LoadTicket;
+    friend class block_tree_cache_test::LoadShutdownTestPeer;
 
-    std::shared_ptr<LoadBackTicket> createTicket(const LoadBackTicket::PendingLoadBackItems&  items,
-                                                 size_t                                       logical_matched_blocks,
-                                                 const std::shared_ptr<LoadBackAsyncContext>& context);
+    std::shared_ptr<LoadTicket> createTicket(const LoadTicket::PendingLoadItems&      items,
+                                             size_t                                   logical_matched_blocks,
+                                             const std::shared_ptr<LoadAsyncContext>& context);
 
     class ActiveCallbackLease {
     public:
-        explicit ActiveCallbackLease(LoadBackTicketRegistry* registry): registry_(registry) {}
+        explicit ActiveCallbackLease(LoadTicketRegistry* registry): registry_(registry) {}
         ~ActiveCallbackLease() {
             registry_->retireActiveCallback();
         }
@@ -156,16 +156,16 @@ private:
         ActiveCallbackLease& operator=(const ActiveCallbackLease&) = delete;
 
     private:
-        LoadBackTicketRegistry* registry_;
+        LoadTicketRegistry* registry_;
     };
 
-    std::shared_ptr<AsyncContext> commit(uint64_t ticket_id, const LoadBackTicket& ticket);
+    std::shared_ptr<AsyncContext> commit(uint64_t ticket_id, const LoadTicket& ticket);
     void                          abort(uint64_t ticket_id);
     void                          retireActiveCallback();
 
     struct PendingTicket {
-        LoadBackTicket::PendingLoadBackItems  items;
-        std::shared_ptr<LoadBackAsyncContext> context;
+        LoadTicket::PendingLoadItems      items;
+        std::shared_ptr<LoadAsyncContext> context;
     };
 
     std::mutex                                  mutex_;
