@@ -1,5 +1,20 @@
-load("//:def.bzl", "copts")
+load("//:def.bzl", "cc_test_wrapper", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
+
+cc_test = cc_test_wrapper
+
+# Pure host-side coverage for the pinned block-table copy/zero helpers
+# (batch-shrink replay padding); no GPU compute involved.
+cc_test(
+    name = "cuda_graph_host_utils_test",
+    srcs = ["cuda_graph_host_utils_test.cc"],
+    copts = copts(),
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_host_utils",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+)
 
 cc_library(
     name = "test_cuda_graph_runner_libs",
