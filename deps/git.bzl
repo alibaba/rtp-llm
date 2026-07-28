@@ -54,13 +54,6 @@ def git_deps():
     )
 
     new_git_repository(
-        name = "cutlass_cu13",
-        remote = "https://github.com/NVIDIA/cutlass.git",
-        commit = "b84e9802d84b16bcb4e92338fcf0a04785df9236",
-        build_file = str(Label("@rtp_llm//3rdparty/cutlass:cutlass.BUILD")),
-    )
-
-    new_git_repository(
         name = "cutlass3.6_cu13",
         remote = "https://github.com/NVIDIA/cutlass.git",
         commit = "b84e9802d84b16bcb4e92338fcf0a04785df9236",
@@ -109,19 +102,6 @@ def git_deps():
             "@rtp_llm//3rdparty/flashinfer:0010-silu-mul-vec-size.patch",
             "@rtp_llm//3rdparty/flashinfer:0011-cuda13-cub-compat.patch",
             "@rtp_llm//3rdparty/flashinfer:0012-pymoduledef-missing-fields.patch",
-            "@rtp_llm//3rdparty/flashinfer:0013-cuda13-kernel-visibility-scheduler.patch",
-            "@rtp_llm//3rdparty/flashinfer:0014-cuda13-kernel-visibility-decode.patch",
-            "@rtp_llm//3rdparty/flashinfer:0015-cuda13-occupancy-skip.patch",
-        ],
-    )
-
-    new_git_repository(
-        name = "flashmla",
-        remote = "https://github.com/deepseek-ai/FlashMLA.git",
-        commit = "b31bfe72a83ea205467b3271a5845440a03ed7cb",
-        build_file = str(Label("@rtp_llm//3rdparty/flashmla:flashmla.BUILD")),
-        patches = [
-            "@rtp_llm//3rdparty/flashmla:0001-add-interface.patch",
         ],
     )
 

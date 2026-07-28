@@ -1,7 +1,7 @@
 -r requirements_base.txt
 
 # CUDA 13.2 / torch 2.11+cu130 / triton 3.6.0 dep set.
-# First-version scope: torch + torchvision + triton + deep_gemm + flash_mla
+# First-version scope: torch + torchvision + triton + deep_gemm + deep_ep + flash_mla
 # + tilelang + fast_safetensors + fastsafetensors (the last two rebuilt against
 # torch 2.11+cu130 and mirrored to oss://rtp-maga/0502/).  Other
 # torch-ABI-bound wheels (flash_attn, flashinfer-cubin, flashinfer-jit-cache,
@@ -17,9 +17,10 @@ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2B
 # Triton 3.6.0 supports CUDA 13.x ptxas natively (no wrapper needed).
 triton==3.6.0
 
-# Self-built wheels (built from GitHub deepseek-ai/{DeepGEMM,FlashMLA} main
-# against torch 2.11+cu130 with gcc-toolset-12; SHAs encoded in filename).
-http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_b200/deep_gemm-2.5.0%2B8a4dfba-cp310-cp310-linux_x86_64.whl
+# Self-built CUDA 13 wheels against torch 2.11+cu130 with gcc-toolset-12;
+# source revisions are encoded in the filenames.
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_b200/deep_gemm-2.5.0%2B8a4dfba-cp310-cp310-linux_x86_64.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/deepep/deep_ep-1.2.1.12%2B37fda1c.base-cp310-cp310-linux_x86_64.whl
 https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl
 
 # DSV4 mHC uses TileLang by default.  Keep the same version as cuda12_9.

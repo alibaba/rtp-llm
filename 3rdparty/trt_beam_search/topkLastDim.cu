@@ -119,7 +119,7 @@ __host__ __device__ int round(int num, int round_value)
  * NB: Use pass=-1 for calc_mask().
  */
 template <typename T, int BitsPerPass>
-__device__ constexpr int calc_start_bit(int pass)
+__host__ __device__ constexpr int calc_start_bit(int pass)
 {
     int start_bit = static_cast<int>(sizeof(T) * 8) - (pass + 1) * BitsPerPass;
     if (start_bit < 0)
@@ -339,6 +339,21 @@ __device__ void vectorized_process(T const* in, idxT len, Func f, int sync_width
             valid = remain_i < len;
             value = valid ? in[remain_i] : T();
             f(value, remain_i, valid);
+        }
+    }
+}
+
+template <bool EnableVec, typename T, typename idxT, typename Func>
+__device__ void may_vectorized_process(size_t thread_rank, size_t num_threads, T const* in, idxT len, Func f){
+    if constexpr (EnableVec)
+    {
+        vectorized_process(thread_rank, num_threads, in, len, f);
+    }
+    else
+    {
+        for (idxT i = thread_rank; i < len; i += num_threads)
+        {
+            f(in[i], i);
         }
     }
 }
@@ -578,9 +593,15 @@ __device__ void last_filter(T const* in_buf, IdxT const* in_idx_buf, T* out, Idx
     IdxT* p_out_back_cnt = &counter->out_back_cnt;
     IdxT* p_equal = out_idx + k - num_of_kth_needed;
     cuda::atomic_ref<IdxT, cuda::thread_scope_block> ref_last(p_equal[num_of_kth_needed - 1]);
-    for (IdxT i = threadIdx.x; i < current_len; i += blockDim.x)
+
+#ifdef USING_ROCM
+    constexpr bool ENABLE_VEC = true;
+#else
+    constexpr bool ENABLE_VEC = false;
+#endif
+    auto f = [in_idx_buf, out, out_idx, select_min, start_bit, kth_value_bits, num_of_kth_needed, k, p_out_cnt,
+        p_out_back_cnt, p_equal, ref_last, has_mask, mask_full_bits](T value, IdxT i)
     {
-        const T value = in_buf[i];
         auto const full_bits = twiddle_in(value, select_min);
         auto const bits = (full_bits >> start_bit) << start_bit;
         if (bits < kth_value_bits)
@@ -605,9 +626,12 @@ __device__ void last_filter(T const* in_buf, IdxT const* in_idx_buf, T* out, Idx
                 {
                     out_idx[pos] = new_idx;
                 }
-                else if (skip_reorder)
+                else
                 {
-                    out_idx[pos] = new_idx;
+                    if (skip_reorder)
+                    {
+                        out_idx[pos] = new_idx;
+                    }
                 }
             }
             if constexpr (prioritize_smaller_indice)
@@ -625,7 +649,8 @@ __device__ void last_filter(T const* in_buf, IdxT const* in_idx_buf, T* out, Idx
                 }
             }
         }
-    }
+    };
+    may_vectorized_process<ENABLE_VEC>(threadIdx.x, blockDim.x, in_buf, current_len, f);
 }
 
 template <typename T, typename IdxT, int BitsPerPass, bool prioritize_smaller_indice = false>
@@ -689,9 +714,12 @@ __global__ void last_filter_kernel(T const* in, IdxT const* in_idx, T const* in_
                 {
                     out_idx[pos] = new_idx;
                 }
-                else if (skip_reorder)
+                else
                 {
-                    out_idx[pos] = new_idx;
+                    if (skip_reorder)
+                    {
+                        out_idx[pos] = new_idx;
+                    }
                 }
             }
             if constexpr (prioritize_smaller_indice)
@@ -1042,31 +1070,39 @@ __device__ void filter_and_histogram_for_one_block(T const* in_buf, IdxT const* 
     }
     else if (!out_buf)
     {
-        // not use vectorized_process here because it increases #registers a lot
         auto const kth_value_bits = counter->kth_value_bits;
         int const previous_start_bit = calc_start_bit<T, BitsPerPass>(pass - 1);
 
-        for (IdxT i = threadIdx.x; i < previous_len; i += blockDim.x)
+        // Use vectorized reads on ROCm — larger register file makes this worthwhile
+#ifdef USING_ROCM
+        constexpr bool ENABLE_VEC = true;
+#else
+        constexpr bool ENABLE_VEC = false;
+#endif
+        auto f = [histogram, select_min, start_bit, mask, previous_start_bit, kth_value_bits](T value, IdxT)
         {
-            const T value = in_buf[i];
             auto const previous_bits = (twiddle_in(value, select_min) >> previous_start_bit) << previous_start_bit;
             if (previous_bits == kth_value_bits)
             {
                 int bucket = calc_bucket<T, BitsPerPass>(value, start_bit, mask, select_min);
                 atomicAdd(histogram + bucket, static_cast<IdxT>(1));
             }
-        }
+        };
+        may_vectorized_process<ENABLE_VEC>(threadIdx.x, blockDim.x, in_buf, previous_len, f);
     }
     else
     {
-        // not use vectorized_process here because it increases #registers a lot
         IdxT* p_out_cnt = &counter->out_cnt;
         auto const kth_value_bits = counter->kth_value_bits;
         int const previous_start_bit = calc_start_bit<T, BitsPerPass>(pass - 1);
-
-        for (IdxT i = threadIdx.x; i < previous_len; i += blockDim.x)
+#ifdef USING_ROCM
+        constexpr bool ENABLE_VEC = true;
+#else
+        constexpr bool ENABLE_VEC = false;
+#endif
+        auto f = [in_idx_buf, out_buf, out_idx_buf, out, out_idx, histogram, select_min,
+                     start_bit, mask, previous_start_bit, kth_value_bits, p_filter_cnt, p_out_cnt](T value, IdxT i)
         {
-            const T value = in_buf[i];
             auto const previous_bits = (twiddle_in(value, select_min) >> previous_start_bit) << previous_start_bit;
             if (previous_bits == kth_value_bits)
             {
@@ -1088,7 +1124,8 @@ __device__ void filter_and_histogram_for_one_block(T const* in_buf, IdxT const* 
                 out[pos] = value;
                 out_idx[pos] = in_idx_buf ? in_idx_buf[i] : i;
             }
-        }
+        };
+        may_vectorized_process<ENABLE_VEC>(threadIdx.x, blockDim.x, in_buf, previous_len, f);
     }
 }
 
@@ -1163,7 +1200,7 @@ __global__ void radix_topk_one_block_kernel(T const* in, IdxT const* in_idx, con
         }
         __syncthreads();
 
-        if ((pass == num_passes - 1))
+        if (pass == num_passes - 1)
         {
             if constexpr (prioritize_smaller_indice)
             {
@@ -1230,6 +1267,7 @@ void standalone_stable_radix_topk_(void* buf, size_t& buf_size, T const* in, Idx
 {
     static_assert(air_topk_stable::calc_num_passes<T, BitsPerPass>() > 1);
     constexpr int num_buckets = air_topk_stable::calc_num_buckets<BitsPerPass>();
+
     const bool has_mask = mask_val.has_value();
     const T mask_val_ = mask_val.value_or(T(0));
 
@@ -1267,7 +1305,7 @@ void standalone_stable_radix_topk_(void* buf, size_t& buf_size, T const* in, Idx
                 out_idx, k * batch_size, batch_size, transform_iter, transform_iter + 1, stream);
         }
     }
-    temp_storage_bytes = max(temp_storage_bytes, temp_storage_bytes_sort);
+    temp_storage_bytes = std::max(temp_storage_bytes, temp_storage_bytes_sort);
 
     {
         IdxT len_candidates = air_topk_stable::calc_buf_len<T>(len);
@@ -1371,6 +1409,7 @@ void standalone_stable_radix_topk_one_block_(void* buf, size_t& buf_size, T cons
     cudaStream_t stream, bool sorted = false)
 {
     static_assert(air_topk_stable::calc_num_passes<T, BitsPerPass>() > 1);
+
     const bool has_mask = mask_val.has_value();
     const T mask_val_ = mask_val.value_or(T(0));
 
@@ -1406,7 +1445,7 @@ void standalone_stable_radix_topk_one_block_(void* buf, size_t& buf_size, T cons
         }
     }
 
-    temp_storage_bytes = max(temp_storage_bytes, temp_storage_bytes_sort);
+    temp_storage_bytes = std::max(temp_storage_bytes, temp_storage_bytes_sort);
     {
         size_t total_size = 0;
         size_t sort_buffer_size = 0;
@@ -1440,8 +1479,8 @@ void standalone_stable_radix_topk_one_block_(void* buf, size_t& buf_size, T cons
     check_cuda_error();
 
     air_topk_stable::radix_topk_one_block_kernel<T, IdxT, BitsPerPass, BlockSize, true>
-        <<<batch_size, BlockSize, 0, stream>>>(
-            in, in_idx, len, k, topk_out, topk_out_idx, select_min, bufs, has_mask, mask_val_);
+        <<<batch_size, BlockSize, 0, stream>>>(in, in_idx, len, k,
+            topk_out, topk_out_idx, select_min, bufs, has_mask, mask_val_);
     check_cuda_error();
 
     T* idx_sort_out = sorted ? sort_in : out;
@@ -1473,21 +1512,25 @@ void standalone_stable_radix_11bits(void* buf, size_t& buf_size, T const* in, in
     constexpr int items_per_thread = 32;
     constexpr int block_dim = 512;
     constexpr bool fused_last_filter = false;
+    constexpr int topk_bits = 11;
     if (len <= block_dim * items_per_thread)
     {
-        standalone_stable_radix_topk_one_block_<T, idxT, 11, block_dim>(
-            buf, buf_size, in, static_cast<idxT*>(nullptr), batch_size, len, k, out, out_idx, !greater, mask_val,
-            stream, sorted);
+        standalone_stable_radix_topk_one_block_<T, idxT, topk_bits, block_dim>(buf, buf_size, in,
+            static_cast<idxT*>(nullptr), batch_size, len, k, out, out_idx, !greater, mask_val, stream, sorted);
     }
     else
     {
         int sm_cnt = tensorrt_llm::common::getMultiProcessorCount();
-        unsigned grid_dim = air_topk_stable::calc_grid_dim<T, idxT, 11, block_dim>(batch_size, len, sm_cnt);
+        unsigned grid_dim = air_topk_stable::calc_grid_dim<T, idxT, topk_bits, block_dim>(batch_size, len, sm_cnt);
 
 #if USING_ROCM
+        // On ROCm, the one-block kernel with vectorized reads is faster than the
+        // multi-block path for small grid_dim values, because the multi-block path
+        // has inter-block sync overhead and multiple kernel launches (3 passes +
+        // last_filter + sort). Force one-block when grid_dim is small.
         if (grid_dim <= 4)
         {
-            standalone_stable_radix_topk_one_block_<T, idxT, 11, block_dim>(buf, buf_size, in,
+            standalone_stable_radix_topk_one_block_<T, idxT, topk_bits, block_dim>(buf, buf_size, in,
                 static_cast<idxT*>(nullptr), batch_size, len, k, out, out_idx, !greater, mask_val, stream, sorted);
             return;
         }
@@ -1495,12 +1538,12 @@ void standalone_stable_radix_11bits(void* buf, size_t& buf_size, T const* in, in
 
         if (grid_dim == 1)
         {
-            standalone_stable_radix_topk_one_block_<T, idxT, 11, block_dim>(buf, buf_size, in,
+            standalone_stable_radix_topk_one_block_<T, idxT, topk_bits, block_dim>(buf, buf_size, in,
                 static_cast<idxT*>(nullptr), batch_size, len, k, out, out_idx, !greater, mask_val, stream, sorted);
         }
         else
         {
-            standalone_stable_radix_topk_<T, idxT, 11, block_dim>(buf, buf_size, in, static_cast<idxT*>(nullptr),
+            standalone_stable_radix_topk_<T, idxT, topk_bits, block_dim>(buf, buf_size, in, static_cast<idxT*>(nullptr),
                 batch_size, len, k, out, out_idx, !greater, fused_last_filter, grid_dim, mask_val, stream, sorted);
         }
     }
@@ -1514,47 +1557,40 @@ void standalone_stable_radix_11bits(void* buf, size_t& buf_size, T const* in, in
 #include "efficient_topk/warp_topk.hpp"
 
 template <typename T>
-size_t rocm_efficient_topk_workspace_size(int batch_size, SizeType32 len, SizeType32 k, bool is_largest)
-{
+size_t rocm_efficient_topk_workspace_size(int batch_size, SizeType32 len, SizeType32 k, bool is_largest) {
     size_t buf_size = 0;
-    if (is_largest)
-    {
-        HipKernels::WarpSortTopk<true, T, SizeType32>(nullptr, buf_size, static_cast<T const*>(nullptr), batch_size,
-            len, k, static_cast<T*>(nullptr), static_cast<SizeType32*>(nullptr), 0);
-    }
-    else
-    {
-        HipKernels::WarpSortTopk<false, T, SizeType32>(nullptr, buf_size, static_cast<T const*>(nullptr), batch_size,
-            len, k, static_cast<T*>(nullptr), static_cast<SizeType32*>(nullptr), 0);
+    if (is_largest) {
+        HipKernels::WarpSortTopk<true, T, SizeType32>(
+            nullptr, buf_size, static_cast<T const*>(nullptr),
+            batch_size, len, k, static_cast<T*>(nullptr), static_cast<SizeType32*>(nullptr), 0);
+    } else {
+        HipKernels::WarpSortTopk<false, T, SizeType32>(
+            nullptr, buf_size, static_cast<T const*>(nullptr),
+            batch_size, len, k, static_cast<T*>(nullptr), static_cast<SizeType32*>(nullptr), 0);
     }
     return buf_size;
 }
 
 template <typename T>
-void rocm_efficient_topk(SizeType32 batchSize, SizeType32 inputLength, SizeType32 k, bool is_largest, T const* in,
-    T* out_val, SizeType32* out_idx, void* workspace, hipStream_t stream)
-{
+void rocm_efficient_topk(SizeType32 batchSize, SizeType32 inputLength, SizeType32 k, bool is_largest,
+    T const* in, T* out_val, SizeType32* out_idx, void* workspace, hipStream_t stream) {
     size_t buf_size = 0;
-    if (is_largest)
-    {
+    if (is_largest) {
         HipKernels::WarpSortTopk<true, T, SizeType32>(
             workspace, buf_size, in, batchSize, inputLength, k, out_val, out_idx, stream);
-    }
-    else
-    {
+    } else {
         HipKernels::WarpSortTopk<false, T, SizeType32>(
             workspace, buf_size, in, batchSize, inputLength, k, out_val, out_idx, stream);
     }
 }
-#endif
+#endif // USING_ROCM
 
 template <typename T>
 size_t invokeComputeTopkLastDimWorkspaceSize(
     SizeType32 batchSize, SizeType32 inputLength, SizeType32 k, bool is_largest)
 {
 #if USING_ROCM
-    if (k <= 512)
-    {
+    if (k <= 512) {
         return rocm_efficient_topk_workspace_size<T>(batchSize, inputLength, k, is_largest);
     }
 #endif
@@ -1564,7 +1600,7 @@ size_t invokeComputeTopkLastDimWorkspaceSize(
     T* out_val = nullptr;
     SizeType32* out_idx = nullptr;
     standalone_stable_radix_11bits<T, SizeType32, true>(
-        workspace, buf_size, in, batchSize, inputLength, k, out_val, out_idx, is_largest, std::nullopt, 0);
+        workspace, buf_size, in, batchSize, inputLength, k, out_val, out_idx, is_largest, 0);
     return buf_size;
 }
 
@@ -1575,7 +1611,7 @@ size_t invokeComputeTopkLastDimWorkspaceSize(
 INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE(int);
 INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE(float);
 INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE(half);
-#ifdef ENABLE_BF16
+#if defined(ENABLE_BF16)
 INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE(__nv_bfloat16);
 #endif
 #undef INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE
@@ -1586,33 +1622,32 @@ INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE(__nv_bfloat16);
 
 template <typename T>
 void invokeTopkLastDim(SizeType32 batchSize, SizeType32 inputLength, SizeType32 k, bool is_largest,
-    std::optional<T> mask_val, void const* __restrict__ input, void* __restrict__ out_val,
-    void* __restrict__ out_idx, void* workspace, cudaStream_t stream)
+    std::optional<T> mask_val, void const* __restrict__ input, void* __restrict__ out_val, void* __restrict__ out_idx,
+    void* workspace, cudaStream_t stream)
 {
-    size_t buf_size = 0; // will be overwritten by the kernel
     T const* in = reinterpret_cast<T const*>(input);
     T* out_val_ = reinterpret_cast<T*>(out_val);
     SizeType32* out_idx_ = reinterpret_cast<SizeType32*>(out_idx);
 #if USING_ROCM
-    if (k <= 512)
-    {
+    if (k <= 512) {
         rocm_efficient_topk<T>(batchSize, inputLength, k, is_largest, in, out_val_, out_idx_, workspace, stream);
         return;
     }
 #endif
+    size_t buf_size = 0;
     standalone_stable_radix_11bits<T, SizeType32, true>(
         workspace, buf_size, in, batchSize, inputLength, k, out_val_, out_idx_, is_largest, mask_val, stream);
 }
 
 #define INSTANTIATE_TOPK_LastDim_DATA_TYPE(T)                                                                          \
     template void invokeTopkLastDim<T>(SizeType32 batchSize, SizeType32 inputLength, SizeType32 k, bool is_largest,    \
-        std::optional<T> mask_val, void const* __restrict__ input, void* __restrict__ out_val,                         \
-        void* __restrict__ out_idx, void* workspace, cudaStream_t stream)
+        std::optional<T> mask_val, void const* __restrict__ input, void* __restrict__ out_val, void* __restrict__ out_idx, \
+        void* workspace, cudaStream_t stream)
 
 INSTANTIATE_TOPK_LastDim_DATA_TYPE(int);
 INSTANTIATE_TOPK_LastDim_DATA_TYPE(float);
 INSTANTIATE_TOPK_LastDim_DATA_TYPE(half);
-#ifdef ENABLE_BF16
+#if defined(ENABLE_BF16)
 INSTANTIATE_TOPK_LastDim_DATA_TYPE(__nv_bfloat16);
 #endif
 #undef INSTANTIATE_TOPK_LastDim_DATA_TYPE

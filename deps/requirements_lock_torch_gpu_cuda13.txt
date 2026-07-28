@@ -601,10 +601,10 @@ decord==0.6.0 ; platform_machine == "x86_64" \
     --hash=sha256:9c20674964fb1490c677bd911d2023d2a09fec7a58a4bb0b7ddf1ccc269f107a \
     --hash=sha256:a0eb1258beade34dceb29d97856a7764d179db1b5182899b61874f3418a1abc8
     # via -r deps/requirements_base.txt
-deep-ep @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/deepep/deep_ep-1.2.1.12%2B37fda1c.base-cp310-cp310-linux_x86_64.whl \
+deep-ep @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/deepep/deep_ep-1.2.1.12%2B37fda1c.base-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:1bf4bbe43e3dd23bcbd0bdb281e6f6ae926d060cb0e3a51d44424a2066abd778
     # via -r deps/requirements_torch_gpu_cuda13.txt
-deep-gemm @ http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_b200/deep_gemm-2.5.0%2B8a4dfba-cp310-cp310-linux_x86_64.whl \
+deep-gemm @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_b200/deep_gemm-2.5.0%2B8a4dfba-cp310-cp310-linux_x86_64.whl \
     --hash=sha256:5844fee49160525128ca49b0e8ae73aac1eb4db44da108ede222cc85e9aac50a
     # via -r deps/requirements_torch_gpu_cuda13.txt
 distro==1.9.0 \

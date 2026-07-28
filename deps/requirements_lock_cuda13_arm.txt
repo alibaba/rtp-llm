@@ -636,7 +636,7 @@ exceptiongroup==1.3.0 \
     --hash=sha256:4d111e6e0c13d0644cad6ddaa7ed0261a0b36971f6d23e7ec9b4b9097da78a10 \
     --hash=sha256:b241f5885f560bc56a59ee63ca4c6a8bfa46ae4ad651af316d4e81817bb9fd88
     # via anyio
-fast-safetensors @ http://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_aarch64.whl \
+fast-safetensors @ https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0513/arm_pkg/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_aarch64.whl \
     --hash=sha256:46355b2e6b138248677f5306060a3eee5d05d9baf1d9c026ef069c84b2ea5a99
     # via -r deps/requirements_cuda13_arm.txt
 fastapi==0.115.6 \

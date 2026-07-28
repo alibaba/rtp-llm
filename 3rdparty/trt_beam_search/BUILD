@@ -1,4 +1,5 @@
 load("//:def.bzl", "rpm_library", "copts", "cuda_copts", "rocm_copts", "any_cuda_copts")
+load("@arch_config//:arch_select.bzl", "torch_deps")
 package(default_visibility = ["//visibility:public"])
 
 cc_library(
@@ -35,7 +36,6 @@ cc_library(
     visibility = ["//:__subpackages__"],
     alwayslink = True,
 )
-
 
 cc_library(
     name = "trt_beam_search_header",

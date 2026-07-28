@@ -82,8 +82,8 @@ def whl_deps():
         "@rtp_llm//:using_cuda13_x86": [
             "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
             "torchvision@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
-            "deep_gemm@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_b200/deep_gemm-2.5.0%2B8a4dfba-cp310-cp310-linux_x86_64.whl",
-            "deep_ep@http://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/deepep/deep_ep-1.2.1.12%2B37fda1c.base-cp310-cp310-linux_x86_64.whl",
+            "deep_gemm@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/deep_gemm/cuda13_b200/deep_gemm-2.5.0%2B8a4dfba-cp310-cp310-linux_x86_64.whl",
+            "deep_ep@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/whls/deepep/deep_ep-1.2.1.12%2B37fda1c.base-cp310-cp310-linux_x86_64.whl",
             "flash-mla@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/flash_mla-1.0.0%2B9241ae3-cp310-cp310-linux_x86_64.whl",
             "rtp-kernel@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/rtp_kernel-0.1.0%2Bcu13.4a1a7e3-cp310-cp310-linux_x86_64.whl",
             "fast-safetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0507/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_x86_64.whl",
@@ -98,7 +98,7 @@ def whl_deps():
             "deep_ep@https://search-ad.oss-cn-hangzhou-zmf.aliyuncs.com/lyh437841/acclep/deep_ep-1.2.1.12%2B37fda1c.base-cp310-cp310-linux_aarch64.whl",
             "flash-mla@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0530/arm_pkg/sglang/flash_mla-1.0.0%2B92fd68b-cp310-cp310-linux_aarch64.whl",
             "rtp-kernel@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp-kernel/rtp_kernel_260722/rtp_kernel-0.1.0-49c379b-cp310-cp310-linux_aarch64.whl",
-            "fast-safetensors@http://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_aarch64.whl",
+            "fast-safetensors@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/0513/arm_pkg/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_aarch64.whl",
             "fastsafetensors@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/0513/arm_pkg/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_aarch64.whl",
             "flashinfer-python==0.6.9",
             "tilelang@https://rtp-maga.cn-zhangjiakou.oss.aliyuncs.com/rtp_llm/arm_pkg/tilelang-0.1.9%2Bcuda.git441c3b06-cp38-abi3-linux_aarch64.whl",
@@ -173,12 +173,6 @@ def flashinfer_deps():
             "@rtp_llm//:using_cuda13_x86": "@flashinfer_cpp_cu13//:flashinfer",
             "//conditions:default": "@flashinfer_cpp//:flashinfer",
         })
-    )
-
-def flashmla_deps():
-    native.alias(
-        name = "flashmla",
-        actual = "@flashmla//:flashmla"
     )
 
 def deep_ep_py_deps():
