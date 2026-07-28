@@ -745,6 +745,44 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     vector<int> expect_lm_output_indexes = {0, 1};
     EXPECT_TRUE(lm_output_indexes.is_cuda());
     EXPECT_EQ(expect_lm_output_indexes, toVec<int>(lm_output_indexes));
+
+    auto expect_positions = [](const GptModelInputs& input,
+                               const vector<int>&    expected_prefix,
+                               const vector<int>&    expected_sequence) {
+        EXPECT_TRUE(input.prefix_lengths.is_cuda());
+        EXPECT_TRUE(input.sequence_lengths.is_cuda());
+        EXPECT_EQ(torch::kInt32, input.prefix_lengths.scalar_type());
+        EXPECT_EQ(torch::kInt32, input.sequence_lengths.scalar_type());
+        EXPECT_EQ(expected_prefix, toVec<int>(input.prefix_lengths));
+        EXPECT_EQ(expected_sequence, toVec<int>(input.sequence_lengths));
+        EXPECT_EQ(expected_sequence, toVec<int>(input.prefix_lengths + 1));
+    };
+    expect_positions(model_input, {1, 2}, {2, 3});
+
+    // Legacy GPU propose-token path receives the normal decode position.
+    stream1->getSPOutputBuffer()->propose_tokens_gpu = torch::tensor({{3}}, torch::kInt32).to(torch::kCUDA);
+    stream2->getSPOutputBuffer()->propose_tokens_gpu = torch::tensor({{1}}, torch::kInt32).to(torch::kCUDA);
+    model_input.sequence_lengths                     = torch::tensor({4, 5}, torch::kInt32);
+    processor.prepareDecodeDraftModelInput(stream_groups, model_input, holder);
+
+    expect_positions(model_input, {4, 5}, {5, 6});
+
+    // Device state publishes the committed length, which is already the draft
+    // decode position and one greater than the target prefix.
+    GenerateStream::MtpAsyncDeviceState state1;
+    state1.propose_tokens_gpu = torch::tensor({{3}}, torch::kInt32).to(torch::kCUDA);
+    state1.next_seq_len_gpu   = torch::tensor({7}, torch::kInt32).to(torch::kCUDA);
+    stream1->setMtpAsyncDeviceState(std::move(state1));
+
+    GenerateStream::MtpAsyncDeviceState state2;
+    state2.propose_tokens_gpu = torch::tensor({{1}}, torch::kInt32).to(torch::kCUDA);
+    state2.next_seq_len_gpu   = torch::tensor({4}, torch::kInt32).to(torch::kCUDA);
+    stream2->setMtpAsyncDeviceState(std::move(state2));
+
+    model_input.sequence_lengths = torch::tensor({99, 99}, torch::kInt32);
+    processor.prepareDecodeDraftModelInput(stream_groups, model_input, holder);
+
+    expect_positions(model_input, {6, 3}, {7, 4});
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
