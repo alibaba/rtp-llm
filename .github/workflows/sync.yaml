@@ -5,11 +5,16 @@ on:
     # UTC timezone 01:00-14:00 (Beijing timezone Mon-Fri 9:00-22:00), every 10 minutes
     - cron: '*/10 1-14 * * 1-5'
   workflow_dispatch:
+    inputs:                                                    
+      force_sync:                                              
+        description: "Force sync even if already synced"       
+        type: boolean                                        
+        default: false                                         
 
 concurrency:
   group: ${{ github.workflow }}-${{ github.ref }}
   cancel-in-progress: ${{ github.event_name != 'workflow_dispatch' }}
-  
+
 jobs:
   sync-main:
     runs-on: cpu-only
@@ -54,23 +59,35 @@ jobs:
     - name: Create and checkout main if not exists
       if: steps.check_main.outputs.exists == 'false'
       run: |
+        if [ "${{ github.event.inputs.force_sync }}" = "true" ]; then
+          echo "Force sync requested via workflow_dispatch"
+          echo "needs_sync=true" >> $GITHUB_OUTPUT
+          exit 0
+        fi
+        git fetch upstream main
+        UPSTREAM_COMMIT=$(git rev-parse upstream/main)
         git checkout -b main
     
     - name: Check if sync is needed
       id: check_sync
       run: |
+        if [ "${{ github.event.inputs.force_sync }}" = "true" ]; then    
+          echo "Force sync requested via workflow_dispatch"              
+          echo "needs_sync=true" >> $GITHUB_OUTPUT                       
+          exit 0                                                         
+        fi                                                               
         git fetch upstream main
         UPSTREAM_COMMIT=$(git rev-parse upstream/main)
         CURRENT_COMMIT=$(git rev-parse HEAD)
         echo "UPSTREAM_COMMIT: $UPSTREAM_COMMIT"
-        
+
         # Check if current HEAD is already at upstream/main
         if [ "$CURRENT_COMMIT" = "$UPSTREAM_COMMIT" ]; then
           echo "Already synced with upstream/main"
           echo "needs_sync=false" >> $GITHUB_OUTPUT
           exit 0
         fi
-        
+
         # Check if current HEAD is upstream/main + one CI commit
         PARENT_COMMIT=$(git rev-parse --verify HEAD^ 2>/dev/null || echo "")
         echo "PARENT_COMMIT: $PARENT_COMMIT"
@@ -84,7 +101,7 @@ jobs:
             exit 0
           fi
         fi
-        
+
         echo "Need to sync with upstream/main"
         echo "needs_sync=true" >> $GITHUB_OUTPUT
     
