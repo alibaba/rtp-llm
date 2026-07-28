@@ -151,6 +151,11 @@ def parse_args() -> argparse.Namespace:
         "--concurrencies",
         default="1,2,4,8,16,32,64",
     )
+    parser.add_argument(
+        "--image-cases",
+        default="small_448,1080p,2k_1440p",
+        help="Comma-separated subset of: small_448,1080p,2k_1440p",
+    )
     parser.add_argument("--requests-per-point", type=int, default=128)
     parser.add_argument("--min-waves", type=int, default=4)
     parser.add_argument("--minimum-point-seconds", type=float, default=10.0)
@@ -615,11 +620,21 @@ def main() -> None:
     if not torch.cuda.is_available():
         raise RuntimeError("CUDA is required")
 
-    image_cases = [
+    all_image_cases = [
         ImageCase("small_448", 448, 448),
         ImageCase("1080p", 1920, 1080),
         ImageCase("2k_1440p", 2560, 1440),
     ]
+    selected_case_names = {
+        value.strip() for value in args.image_cases.split(",") if value.strip()
+    }
+    known_case_names = {case.name for case in all_image_cases}
+    unknown_case_names = selected_case_names - known_case_names
+    if unknown_case_names:
+        raise ValueError(f"unknown --image-cases: {sorted(unknown_case_names)}")
+    image_cases = [case for case in all_image_cases if case.name in selected_case_names]
+    if not image_cases:
+        raise ValueError("--image-cases must select at least one case")
     concurrencies = [
         int(value) for value in args.concurrencies.split(",") if value.strip()
     ]
@@ -767,6 +782,13 @@ def main() -> None:
     vision_model = mm.visual.vision_tower.vision_model
     metadata["attention_backends"] = sorted(
         {layer.self_attn.last_backend for layer in vision_model.encoder.layers}
+    )
+    metadata["attention_backend_errors"] = sorted(
+        {
+            layer.self_attn.last_backend_error
+            for layer in vision_model.encoder.layers
+            if layer.self_attn.last_backend_error
+        }
     )
 
     output_dir = Path(args.output_dir)
