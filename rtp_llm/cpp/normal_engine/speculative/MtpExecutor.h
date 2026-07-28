@@ -27,24 +27,6 @@ struct MtpMetricsCollector {
     bool not_skip = false;
 };
 
-class MtpBufferHolder {
-public:
-    void hold(const GptModelInputs& model_input) {
-        tensor_holder_.push_back(model_input.combo_tokens);
-        tensor_holder_.push_back(model_input.input_lengths);
-        tensor_holder_.push_back(model_input.sequence_lengths);
-        tensor_holder_.push_back(model_input.lm_output_indexes);
-        tensor_holder_.push_back(model_input.prefix_lengths);
-    }
-
-    void release() {
-        tensor_holder_.clear();
-    }
-
-private:
-    std::vector<torch::Tensor> tensor_holder_;
-};
-
 class MtpExecutor: public Executor {
 public:
     explicit MtpExecutor(const EngineInitParams&                        params,
@@ -63,6 +45,10 @@ public:
 
     void setDraftModel(std::unique_ptr<ModelBase> model) {
         draft_model_ = std::move(model);
+    }
+
+    void setSpPrefillDraftModel(std::shared_ptr<ModelBase> model) {
+        sp_prefill_draft_model_ = std::move(model);
     }
 
     void setBatchProcessor(std::unique_ptr<MtpBatchStreamProcessor> processor) {
@@ -110,6 +96,8 @@ protected:
                         std::list<GenerateStreamPtr>&       decode_streams);
 
 private:
+    void releaseAllModelBuffers();
+
     GptModelOutputs forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role);
 
     std::unique_ptr<ModelBase>               model_;
@@ -134,9 +122,6 @@ private:
     std::shared_ptr<ModelBase>                       sp_prefill_draft_model_;
     std::unique_ptr<speculative::SpeculativeSampler> speculative_sampler_;
     std::unique_ptr<speculative::FastTopKSampler>    fast_topk_sampler_;
-
-    // holder for host buffers to avoid early free before H2D copy kernel execution
-    MtpBufferHolder buffer_holder_;
 
     bool     warm_up_;
     RoleType role_type_;

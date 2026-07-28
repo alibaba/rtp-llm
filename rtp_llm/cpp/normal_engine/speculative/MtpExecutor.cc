@@ -24,6 +24,17 @@
 
 namespace rtp_llm {
 
+void MtpExecutor::releaseAllModelBuffers() {
+    // Keep every model forwarded by this executor registered here. Their host
+    // buffers back asynchronous H2D copies and may only be released at the
+    // executor's synchronization-safe points, not at the next forward entry.
+    model_->releaseBuffers();
+    draft_model_->releaseBuffers();
+    if (sp_prefill_draft_model_) {
+        sp_prefill_draft_model_->releaseBuffers();
+    }
+}
+
 GptModelOutputs MtpExecutor::forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role) {
     RTP_LLM_CHECK_WITH_INFO(model != nullptr, "model is null before forward");
     if (model_inputs_logger_) {
@@ -355,8 +366,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     metrics_collector.not_skip = true;
 
     // release model input before forward
-    model_->releaseBuffers();
-    draft_model_->releaseBuffers();
+    releaseAllModelBuffers();
 
     // target model prefill
     {
@@ -399,8 +409,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
         cudaSyncAndCheck();
-        model_->releaseBuffers();
-        draft_model_->releaseBuffers();
+        releaseAllModelBuffers();
         return absl::OkStatus();
     }
 
@@ -436,8 +445,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                                                      {std::move(draft_model_output), std::move(draft_sampler_output)});
         RTP_LLM_LOG_DEBUG("dispatch done");
 
-        model_->releaseBuffers();
-        draft_model_->releaseBuffers();
+        releaseAllModelBuffers();
 
         return result;
     }
@@ -589,8 +597,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     // release hold buffers before draft model forward
-    draft_model_->releaseBuffers();
-    model_->releaseBuffers();
+    releaseAllModelBuffers();
 
     if (propose_step_ > 1) {
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
@@ -691,8 +698,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
         cudaSyncAndCheck();
-        draft_model_->releaseBuffers();
-        model_->releaseBuffers();
+        releaseAllModelBuffers();
         return absl::OkStatus();
     }
 
@@ -735,8 +741,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             stream->getSPOutputBuffer()->tensors_holder.clear();
         }
 
-        draft_model_->releaseBuffers();
-        model_->releaseBuffers();
+        releaseAllModelBuffers();
 
         return result;
     }
@@ -826,9 +831,6 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                                    std::vector<torch::Tensor>& draft_probs_list,
                                    torch::Tensor&              draft_token_ids_t) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(batch_size=%zu)", model_input.combo_tokens.size(0));
-
-    // clear host buffers holder
-    buffer_holder_.release();
 
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
     applyCacheStrideToModelInput(model_input, mtp_cache_cfg);

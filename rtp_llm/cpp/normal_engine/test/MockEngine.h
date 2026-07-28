@@ -4,7 +4,6 @@
 #include <c10/util/Half.h>
 #include <cstring>
 #include <memory>
-#include <cuda_fp16.h>
 #include "c10/util/intrusive_ptr.h"
 #include "torch/all.h"
 

@@ -6,7 +6,6 @@
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 
-#define private public
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
@@ -130,6 +129,14 @@ public:
         return forward_count_;
     }
 
+    void releaseBuffers() override {
+        ++release_count_;
+    }
+
+    size_t releaseCount() const {
+        return release_count_;
+    }
+
     void checkTensorField(const char* name, const torch::Tensor& actual, const torch::Tensor& expected) {
         RTP_LLM_LOG_INFO("check %s", name);
         checkTensorEqual(actual, expected);
@@ -158,6 +165,7 @@ private:
     TestDataHolder<GptModelInputs>  input_holder;
     TestDataHolder<GptModelOutputs> output_holder;
     size_t                          forward_count_ = 0;
+    size_t                          release_count_ = 0;
 };
 
 class FakeFastTopKSampler: public spec::FastTopKSampler {
@@ -251,10 +259,23 @@ private:
     TestDataHolder<SamplerOutput> output_holder;
 };
 
+class TestableMtpExecutor: public MtpExecutor {
+public:
+    using MtpExecutor::MtpExecutor;
+
+    void draftModelDecodeForTest(GptModelInputs&             model_input,
+                                 const StreamGroups&         stream_groups,
+                                 std::vector<torch::Tensor>& draft_probs_list,
+                                 torch::Tensor&              draft_token_ids_t) {
+        draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t);
+    }
+};
+
 struct MtpExecutorComponents {
-    std::unique_ptr<MtpExecutor>            executor;
+    std::unique_ptr<TestableMtpExecutor>    executor;
     std::unique_ptr<FakeModel>              fake_target_model;
     std::unique_ptr<FakeModel>              fake_draft_model;
+    std::shared_ptr<FakeModel>              fake_sp_prefill_draft_model;
     std::unique_ptr<FakeFastTopKSampler>    fake_fast_topk_sampler;
     std::unique_ptr<FakeSpeculativeSampler> fake_speculative_sampler;
     std::unique_ptr<FakeSampler>            fake_sampler;
@@ -396,7 +417,7 @@ public:
         cache_manager->init();
 
         // Create MtpExecutor
-        auto executor = std::make_unique<MtpExecutor>(params, propose_params, cache_manager);
+        auto executor = std::make_unique<TestableMtpExecutor>(params, propose_params, cache_manager);
 
         // Create fake models
         GptModelInitParams target_model_params(
@@ -415,22 +436,24 @@ public:
              params.model_id,
              params.parallelism_config});
 
-        auto fake_target_model        = std::make_unique<FakeModel>(target_model_params);
-        auto fake_draft_model         = std::make_unique<FakeModel>(draft_model_params);
-        auto fake_fast_topk_sampler   = std::make_unique<FakeFastTopKSampler>();
-        auto fake_speculative_sampler = std::make_unique<FakeSpeculativeSampler>(sp_config.gen_num_per_cycle);
-        auto fake_sampler             = std::make_unique<FakeSampler>(SamplerInitParams{});
+        auto fake_target_model           = std::make_unique<FakeModel>(target_model_params);
+        auto fake_draft_model            = std::make_unique<FakeModel>(draft_model_params);
+        auto fake_sp_prefill_draft_model = std::make_shared<FakeModel>(draft_model_params);
+        auto fake_fast_topk_sampler      = std::make_unique<FakeFastTopKSampler>();
+        auto fake_speculative_sampler    = std::make_unique<FakeSpeculativeSampler>(sp_config.gen_num_per_cycle);
+        auto fake_sampler                = std::make_unique<FakeSampler>(SamplerInitParams{});
 
         MtpExecutorComponents components;
-        components.executor                 = std::move(executor);
-        components.fake_target_model        = std::move(fake_target_model);
-        components.fake_draft_model         = std::move(fake_draft_model);
-        components.fake_fast_topk_sampler   = std::move(fake_fast_topk_sampler);
-        components.fake_speculative_sampler = std::move(fake_speculative_sampler);
-        components.fake_sampler             = std::move(fake_sampler);
-        components.model_config             = model_config;
-        components.runtime_config           = runtime_config;
-        components.resource_context         = resource_context;
+        components.executor                    = std::move(executor);
+        components.fake_target_model           = std::move(fake_target_model);
+        components.fake_draft_model            = std::move(fake_draft_model);
+        components.fake_sp_prefill_draft_model = std::move(fake_sp_prefill_draft_model);
+        components.fake_fast_topk_sampler      = std::move(fake_fast_topk_sampler);
+        components.fake_speculative_sampler    = std::move(fake_speculative_sampler);
+        components.fake_sampler                = std::move(fake_sampler);
+        components.model_config                = model_config;
+        components.runtime_config              = runtime_config;
+        components.resource_context            = resource_context;
 
         return components;
     }
@@ -440,9 +463,11 @@ public:
                          std::unique_ptr<FakeModel>              fake_draft_model,
                          std::unique_ptr<FakeFastTopKSampler>    fake_fast_topk_sampler,
                          std::unique_ptr<FakeSpeculativeSampler> fake_speculative_sampler,
-                         std::unique_ptr<FakeSampler>            fake_sampler) {
+                         std::unique_ptr<FakeSampler>            fake_sampler,
+                         std::shared_ptr<FakeModel>              fake_sp_prefill_draft_model = nullptr) {
         executor->setTargetModel(std::move(fake_target_model));
         executor->setDraftModel(std::move(fake_draft_model));
+        executor->setSpPrefillDraftModel(std::move(fake_sp_prefill_draft_model));
         executor->setFastTopKSampler(std::move(fake_fast_topk_sampler));
         executor->setSpeculativeSampler(std::move(fake_speculative_sampler));
         executor->setSampler(std::move(fake_sampler));
@@ -510,17 +535,25 @@ TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     components.fake_fast_topk_sampler->setInputs({draft_output.logits});
     components.fake_fast_topk_sampler->setOutputs({fast_topk_sampler_output});
 
+    auto* target_model           = components.fake_target_model.get();
+    auto* draft_model            = components.fake_draft_model.get();
+    auto* sp_prefill_draft_model = components.fake_sp_prefill_draft_model.get();
+
     // Replace models with fake models
     setupFakeModels(components.executor.get(),
                     std::move(components.fake_target_model),
                     std::move(components.fake_draft_model),
                     std::move(components.fake_fast_topk_sampler),
                     std::move(components.fake_speculative_sampler),
-                    std::move(components.fake_sampler));
+                    std::move(components.fake_sampler),
+                    std::move(components.fake_sp_prefill_draft_model));
 
     // Verify executor was created successfully
     auto status = components.executor->process({stream1});
     ASSERT_TRUE(status.ok());
+    EXPECT_EQ(target_model->releaseCount(), 2);
+    EXPECT_EQ(draft_model->releaseCount(), 2);
+    EXPECT_EQ(sp_prefill_draft_model->releaseCount(), 2);
 
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.17, 0.18});
@@ -669,8 +702,10 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     next_draft_input.lm_output_indexes  = torch::tensor({2}, torch::kInt32);
     next_draft_input.last_hidden_states = torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f}).reshape({3, 2});
 
-    components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
-    components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});
+    components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3});
+    components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3});
+    components.fake_sp_prefill_draft_model->setInputs({next_draft_input});
+    components.fake_sp_prefill_draft_model->setOutputs({next_draft_output});
 
     // set fake model outputs
     auto target_input              = GptModelInputs{};
@@ -738,9 +773,9 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     components.fake_speculative_sampler->setInputs({draft_spec_sample_input, target_spec_sample_input});
     components.fake_speculative_sampler->setOutputs({speculative_sampler_output});
 
-    // A single active draft model must execute every proposal step, even
-    // though the init plan retains one physical slot per configured module.
-    auto* active_draft_model = components.fake_draft_model.get();
+    auto* target_model           = components.fake_target_model.get();
+    auto* active_draft_model     = components.fake_draft_model.get();
+    auto* sp_prefill_draft_model = components.fake_sp_prefill_draft_model.get();
 
     // Replace models with fake models
     setupFakeModels(components.executor.get(),
@@ -748,12 +783,17 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
                     std::move(components.fake_draft_model),
                     std::move(components.fake_fast_topk_sampler),
                     std::move(components.fake_speculative_sampler),
-                    std::move(components.fake_sampler));
+                    std::move(components.fake_sampler),
+                    std::move(components.fake_sp_prefill_draft_model));
 
     // Verify executor was created successfully
     auto status = components.executor->process({stream1});
     ASSERT_TRUE(status.ok());
-    EXPECT_EQ(active_draft_model->forwardCount(), propose_step);
+    EXPECT_EQ(active_draft_model->forwardCount(), propose_step - 1);
+    EXPECT_EQ(sp_prefill_draft_model->forwardCount(), 1);
+    EXPECT_EQ(target_model->releaseCount(), 2);
+    EXPECT_EQ(active_draft_model->releaseCount(), 2);
+    EXPECT_EQ(sp_prefill_draft_model->releaseCount(), 2);
 
     // check stream result
     checkOutput(stream1, {0, 1, 2, 3, 2, 0}, {0, 1}, {0.0, 1.0, 0.0, 0.0}, {0.3, 0.33});
@@ -1028,7 +1068,7 @@ TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {
 
     std::vector<torch::Tensor> draft_probs_list;
     torch::Tensor              draft_token_ids_t;
-    components.executor->draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t);
+    components.executor->draftModelDecodeForTest(model_input, stream_groups, draft_probs_list, draft_token_ids_t);
 
     EXPECT_EQ((std::vector<int>{10, 11, 12, 13, 14, 20, 21, 22, 23, 24}), toVec<int>(model_input.combo_tokens));
     EXPECT_EQ((std::vector<int>{5, 5}), toVec<int>(model_input.input_lengths));
