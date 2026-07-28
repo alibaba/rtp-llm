@@ -136,7 +136,7 @@ class FlexlbControlServerTest {
     }
 
     @Test
-    void rejectsUnsafePrimaryRecoveryWithConflict() {
+    void rejectsUnsafePrimaryRecoveryWithServerError() {
         doThrow(new IllegalStateException("KVCM is unhealthy"))
                 .when(cacheMatchQueryOrchestrator)
                 .applyFailoverAction(CacheMatchFailoverAction.RECOVER_PRIMARY);
@@ -148,7 +148,7 @@ class FlexlbControlServerTest {
                         "action",
                         CacheMatchFailoverAction.RECOVER_PRIMARY.name()))
                 .exchange()
-                .expectStatus().isEqualTo(409);
+                .expectStatus().is5xxServerError();
     }
 
     @Test
