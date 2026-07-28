@@ -82,6 +82,33 @@ private:
 
 }  // namespace
 
+TEST(AsyncContextTest, CompletedAsyncContext_SuccessStatus) {
+    CompletedAsyncContext context(ErrorInfo::OkStatus());
+    EXPECT_TRUE(context.done());
+    EXPECT_TRUE(context.success());
+    EXPECT_TRUE(context.errorInfo().ok());
+
+    context.waitDone();
+    EXPECT_TRUE(context.done());
+    EXPECT_TRUE(context.success());
+    EXPECT_TRUE(context.errorInfo().ok());
+}
+
+TEST(AsyncContextTest, CompletedAsyncContext_FailureStatusPreservesErrorInfo) {
+    CompletedAsyncContext context(ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid block transfer request"));
+    EXPECT_TRUE(context.done());
+    EXPECT_FALSE(context.success());
+    EXPECT_FALSE(context.errorInfo().ok());
+    EXPECT_EQ(context.errorInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(context.errorInfo().ToString(), "invalid block transfer request");
+
+    context.waitDone();
+    EXPECT_TRUE(context.done());
+    EXPECT_FALSE(context.success());
+    EXPECT_EQ(context.errorInfo().code(), ErrorCode::INVALID_PARAMS);
+    EXPECT_EQ(context.errorInfo().ToString(), "invalid block transfer request");
+}
+
 TEST(AsyncContextTest, FusedAsyncContext_DoneTrue_WhenEmptyOrAllDoneOrNull) {
     auto c1 = std::make_shared<testing::NiceMock<MockAsyncContext>>();
     auto c2 = std::shared_ptr<AsyncContext>{nullptr};

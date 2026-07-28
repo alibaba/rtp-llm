@@ -1,10 +1,30 @@
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 
+#include <utility>
+
 #include "rtp_llm/cpp/cache/Meta.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 
 namespace rtp_llm {
+
+// --------------------------------- CompletedAsyncContext ---------------------------------
+
+CompletedAsyncContext::CompletedAsyncContext(ErrorInfo error_info): error_info_(std::move(error_info)) {}
+
+void CompletedAsyncContext::waitDone() {}
+
+bool CompletedAsyncContext::done() const {
+    return true;
+}
+
+bool CompletedAsyncContext::success() const {
+    return error_info_.ok();
+}
+
+ErrorInfo CompletedAsyncContext::errorInfo() const {
+    return error_info_;
+}
 
 // --------------------------------- FusedAsyncContext ---------------------------------
 

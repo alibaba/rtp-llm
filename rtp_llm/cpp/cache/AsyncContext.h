@@ -27,6 +27,21 @@ public:
     }
 };
 
+// Immutable context for an already-completed operation.
+class CompletedAsyncContext final: public AsyncContext {
+public:
+    explicit CompletedAsyncContext(ErrorInfo error_info);
+    ~CompletedAsyncContext() override = default;
+
+    void      waitDone() override;
+    bool      done() const override;
+    bool      success() const override;
+    ErrorInfo errorInfo() const override;
+
+private:
+    ErrorInfo error_info_;
+};
+
 class AsyncMatchContext: public AsyncContext {
 public:
     ~AsyncMatchContext() override = default;

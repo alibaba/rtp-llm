@@ -270,7 +270,7 @@ void BlockTreeCache::drainTreeHolds() {
     }
 }
 
-TransferStatus BlockTreeCache::executeTransfer(const TransferDescriptor& descriptor) {
+bool BlockTreeCache::executeTransfer(const TransferDescriptor& descriptor) {
     return transfer_dispatcher_->executePerRank(descriptor);
 }
 

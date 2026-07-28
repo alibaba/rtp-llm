@@ -24,6 +24,7 @@ using block_transfer_engine_test::makeTestDevicePool;
 using block_transfer_engine_test::makeTestGroupSet;
 using block_transfer_engine_test::makeTestTopology;
 using block_transfer_engine_test::poolMalloc;
+using block_transfer_engine_test::submitSucceeded;
 
 class StatusDiskBlockIO: public DiskBlockIO {
 public:
@@ -104,12 +105,12 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostToDiskRoundTrip) {
     int32_t disk_slot = disk_slot_opt.value();
 
     auto host_to_disk = makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_slot);
-    ASSERT_TRUE(per_rank_transfer_engine_->submit(host_to_disk).ok());
+    ASSERT_TRUE(submitSucceeded(per_rank_transfer_engine_, host_to_disk));
 
     std::memset(host_data, 0, host_block_size_);
 
     auto disk_to_host = makeDescriptor(Tier::DISK, Tier::HOST, {}, host_block, disk_slot);
-    ASSERT_TRUE(per_rank_transfer_engine_->submit(disk_to_host).ok());
+    ASSERT_TRUE(submitSucceeded(per_rank_transfer_engine_, disk_to_host));
 
     for (size_t i = 0; i < host_block_size_; ++i)
         EXPECT_EQ(host_data[i], static_cast<uint8_t>(i & 0xFF)) << "byte " << i;

@@ -1,8 +1,6 @@
 #pragma once
 
 #include <cstddef>
-#include <functional>
-#include <memory>
 #include <string>
 #include <utility>
 #include <vector>
@@ -18,41 +16,11 @@ enum class TransferStatus {
     DISK_IO_ERROR,
 };
 
-using TransferCompletionCallback = std::function<void(TransferStatus)>;
-
 struct DeviceHostCopyOptions {
     size_t staged_sm_min_tile_count{16};
     size_t staged_sm_min_bytes{64 * 1024};
     bool   staged_sm_copy_enabled{false};
     bool   cuda_batch_copy_enabled{true};
-};
-
-class TransferHandle {
-public:
-    TransferHandle() = default;
-
-    static TransferHandle completed(TransferStatus status, uint64_t request_id = 0);
-
-    uint64_t       requestId() const;
-    void           wait() const;
-    bool           done() const;
-    TransferStatus status() const;
-    bool           ok() const {
-        return status() == TransferStatus::OK;
-    }
-    void onComplete(TransferCompletionCallback callback) const;
-    bool valid() const {
-        return state_ != nullptr;
-    }
-
-private:
-    struct State;
-
-    explicit TransferHandle(std::shared_ptr<State> state): state_(std::move(state)) {}
-
-    std::shared_ptr<State> state_;
-
-    friend class PerRankBlockTransferEngine;
 };
 
 struct TransferDescriptor {

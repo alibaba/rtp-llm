@@ -10,6 +10,7 @@
 #include <dirent.h>
 #include <unistd.h>
 #include "rtp_llm/cpp/utils/Logger.h"
+#include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
@@ -38,9 +39,9 @@ public:
     explicit CountingSingleTypePerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups):
         PerRankBlockTransferEngine(groups) {}
 
-    TransferHandle submit(const TransferDescriptor&) override {
+    std::shared_ptr<AsyncContext> submit(const TransferDescriptor&) override {
         ++submit_count_;
-        return TransferHandle::completed(TransferStatus::OK);
+        return std::make_shared<CompletedAsyncContext>(ErrorInfo::OkStatus());
     }
 
     size_t submitCount() const {

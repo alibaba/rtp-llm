@@ -6,6 +6,7 @@
 #include <utility>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockIO.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
@@ -61,6 +62,8 @@ TransferDescriptor makeDescriptor(Tier                             source_tier,
                                   BlockIdxType                     host_block   = NULL_BLOCK_IDX,
                                   BlockIdxType                     disk_block   = NULL_BLOCK_IDX,
                                   size_t                           group_set_id = 0);
+
+bool submitSucceeded(const std::shared_ptr<PerRankBlockTransferEngine>& engine, const TransferDescriptor& desc);
 
 void expectStatus(const std::shared_ptr<PerRankBlockTransferEngine>& engine,
                   const TransferDescriptor&                          desc,

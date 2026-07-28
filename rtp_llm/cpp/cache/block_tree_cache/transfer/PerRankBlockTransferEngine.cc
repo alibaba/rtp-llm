@@ -1,7 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 
-#include <condition_variable>
-#include <mutex>
+#include <memory>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/DeviceBlockPool.h"
@@ -13,6 +12,24 @@
 
 namespace rtp_llm {
 
+namespace {
+
+ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
+    switch (status) {
+        case TransferStatus::OK:
+            return ErrorInfo::OkStatus();
+        case TransferStatus::INVALID_ARGS:
+            return ErrorInfo(ErrorCode::INVALID_PARAMS, "invalid block transfer request");
+        case TransferStatus::DEVICE_IO_ERROR:
+            return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "device block transfer failed");
+        case TransferStatus::DISK_IO_ERROR:
+            return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "disk block transfer failed");
+    }
+    return ErrorInfo(ErrorCode::UNKNOWN_ERROR, "unknown block transfer status");
+}
+
+}  // namespace
+
 PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> group_sets,
                                                        DeviceHostCopyOptions    device_host_options):
     group_sets_(std::move(group_sets)),
@@ -21,90 +38,9 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
 
 PerRankBlockTransferEngine::~PerRankBlockTransferEngine() = default;
 
-// ---- TransferHandle ----
-
-struct TransferHandle::State {
-    explicit State(uint64_t id): request_id(id) {}
-
-    uint64_t       request_id{0};
-    bool           done{false};
-    TransferStatus status{TransferStatus::OK};
-
-    std::vector<TransferCompletionCallback> callbacks;
-
-    mutable std::mutex      mutex;
-    std::condition_variable cv;
-};
-
-TransferHandle TransferHandle::completed(TransferStatus status, uint64_t request_id) {
-    auto state    = std::make_shared<TransferHandle::State>(request_id);
-    state->status = status;
-    state->done   = true;
-    return TransferHandle(std::move(state));
-}
-
-uint64_t TransferHandle::requestId() const {
-    return state_ ? state_->request_id : 0;
-}
-
-void TransferHandle::wait() const {
-    auto state = state_;
-    if (!state) {
-        return;
-    }
-
-    std::unique_lock<std::mutex> lock(state->mutex);
-    state->cv.wait(lock, [&state] { return state->done; });
-}
-
-bool TransferHandle::done() const {
-    auto state = state_;
-    if (!state) {
-        return false;
-    }
-
-    std::lock_guard<std::mutex> lock(state->mutex);
-    return state->done;
-}
-
-TransferStatus TransferHandle::status() const {
-    auto state = state_;
-    if (!state) {
-        RTP_LLM_LOG_WARNING("invalid transfer handle");
-        return TransferStatus::INVALID_ARGS;
-    }
-
-    wait();
-    std::lock_guard<std::mutex> lock(state->mutex);
-    return state->status;
-}
-
-void TransferHandle::onComplete(TransferCompletionCallback callback) const {
-    auto state = state_;
-    if (!state || !callback) {
-        return;
-    }
-
-    TransferStatus completed_status = TransferStatus::OK;
-    bool           run_now          = false;
-    {
-        std::lock_guard<std::mutex> lock(state->mutex);
-        if (state->done) {
-            completed_status = state->status;
-            run_now          = true;
-        } else {
-            state->callbacks.push_back(std::move(callback));
-        }
-    }
-
-    if (run_now) {
-        callback(completed_status);
-    }
-}
-
-TransferHandle PerRankBlockTransferEngine::submit(const TransferDescriptor& desc) {
-    const uint64_t request_id = next_request_id_.fetch_add(1);
-    return TransferHandle::completed(execute(desc), request_id);
+std::shared_ptr<AsyncContext> PerRankBlockTransferEngine::submit(const TransferDescriptor& desc) {
+    const TransferStatus status = execute(desc);
+    return std::make_shared<CompletedAsyncContext>(transferStatusToErrorInfo(status));
 }
 
 TransferStatus PerRankBlockTransferEngine::execute(const TransferDescriptor& desc) {

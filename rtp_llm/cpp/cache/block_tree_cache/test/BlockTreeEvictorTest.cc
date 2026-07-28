@@ -282,12 +282,12 @@ public:
             groups_,
             [this](const TransferDescriptor& descriptor) {
                 transfer_group_set_ids_.push_back(descriptor.group_set_id);
-                if (transfer_statuses_.empty()) {
-                    return TransferStatus::OK;
+                if (transfer_results_.empty()) {
+                    return true;
                 }
-                const TransferStatus status = transfer_statuses_.front();
-                transfer_statuses_.pop_front();
-                return status;
+                const bool success = transfer_results_.front();
+                transfer_results_.pop_front();
+                return success;
             },
             enable_reverse_eviction);
         if (!initEvictor(*evictor_)) {
@@ -323,8 +323,8 @@ public:
         return MultiNodeResource{group_id, Tier::HOST, {{host_blocks_[static_cast<size_t>(group_id)]}}, {node_}};
     }
 
-    void setTransferStatuses(std::initializer_list<TransferStatus> statuses) {
-        transfer_statuses_.assign(statuses.begin(), statuses.end());
+    void setTransferResults(std::initializer_list<bool> results) {
+        transfer_results_.assign(results.begin(), results.end());
         transfer_group_set_ids_.clear();
     }
 
@@ -358,7 +358,7 @@ public:
     std::unique_ptr<BlockTree>                           tree_;
     std::unique_ptr<BlockTreeEvictor>                    evictor_;
     TreeNode*                                            node_{nullptr};
-    std::deque<TransferStatus>                           transfer_statuses_;
+    std::deque<bool>                                     transfer_results_;
     std::vector<size_t>                                  transfer_group_set_ids_;
 };
 
@@ -377,7 +377,7 @@ protected:
             groups_,
             [this](const TransferDescriptor&) {
                 ++transfer_calls_;
-                return TransferStatus::OK;
+                return true;
             },
             false);
         ASSERT_TRUE(initEvictor(*evictor_));
@@ -1110,7 +1110,7 @@ TEST(BlockTreeEvictorCascadeTest, CascadeTargetExhaustionRestoresOnlyFailedSibli
 TEST(BlockTreeEvictorCascadeTest, PrimaryCopyFailureSuppressesCascadesAndRollsBackFullPlan) {
     CascadeTestEnvironment environment;
     ASSERT_TRUE(environment.init());
-    environment.setTransferStatuses({TransferStatus::DEVICE_IO_ERROR, TransferStatus::OK, TransferStatus::OK});
+    environment.setTransferResults({false, true, true});
 
     auto plan = environment.buildPlan(0);
     ASSERT_TRUE(plan.has_value());
@@ -1137,7 +1137,7 @@ TEST(BlockTreeEvictorCascadeTest, PrimaryCopyFailureSuppressesCascadesAndRollsBa
 TEST(BlockTreeEvictorCascadeTest, CascadeCopyResultsPublishAndRollbackIndependently) {
     CascadeTestEnvironment environment;
     ASSERT_TRUE(environment.init());
-    environment.setTransferStatuses({TransferStatus::OK, TransferStatus::DEVICE_IO_ERROR, TransferStatus::OK});
+    environment.setTransferResults({true, false, true});
 
     auto plan = environment.buildPlan(0);
     ASSERT_TRUE(plan.has_value());

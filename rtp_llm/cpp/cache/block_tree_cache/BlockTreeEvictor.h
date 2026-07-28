@@ -27,7 +27,7 @@ struct CandidateStats {
 // provides group-specific evictability and block/slot lifecycle operations.
 class BlockTreeEvictor {
 public:
-    using ExecuteTransferFn = std::function<TransferStatus(const TransferDescriptor&)>;
+    using ExecuteTransferFn = std::function<bool(const TransferDescriptor&)>;
 
     struct EvictionPlan {
         EvictionMove              primary;

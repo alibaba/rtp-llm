@@ -43,15 +43,15 @@ using PendingLoadBackItem = LoadBackTicket::PendingLoadBackItem;
 class PausablePerRankBlockTransferEngine: public PerRankBlockTransferEngine {
 public:
     PausablePerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups,
-                                       TransferStatus                  result,
+                                       bool                            succeed,
                                        bool                            pause_enabled   = true,
                                        size_t                          throw_on_submit = 0):
         PerRankBlockTransferEngine(groups),
         pause_enabled_(pause_enabled),
         throw_on_submit_(throw_on_submit),
-        result_(result) {}
+        succeed_(succeed) {}
 
-    TransferHandle submit(const TransferDescriptor& descriptor) override {
+    std::shared_ptr<AsyncContext> submit(const TransferDescriptor& descriptor) override {
         size_t submit_index = 0;
         {
             std::unique_lock<std::mutex> lock(mutex_);
@@ -69,8 +69,9 @@ public:
         if (submit_index == throw_on_submit_) {
             throw std::runtime_error("injected transfer failure");
         }
-        if (result_ != TransferStatus::OK) {
-            return TransferHandle::completed(result_);
+        if (!succeed_) {
+            return std::make_shared<CompletedAsyncContext>(
+                ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
         }
         return PerRankBlockTransferEngine::submit(descriptor);
     }
@@ -129,7 +130,7 @@ private:
     bool                            released_{false};
     size_t                          submit_count_{0};
     std::vector<TransferDescriptor> descriptors_;
-    TransferStatus                  result_{TransferStatus::OK};
+    bool                            succeed_{true};
 };
 
 class PausableTransferReleaseGuard {
@@ -150,7 +151,7 @@ public:
     explicit ThrowingPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups):
         PerRankBlockTransferEngine(groups) {}
 
-    TransferHandle submit(const TransferDescriptor& descriptor) override {
+    std::shared_ptr<AsyncContext> submit(const TransferDescriptor& descriptor) override {
         if (!throw_enabled_) {
             return PerRankBlockTransferEngine::submit(descriptor);
         }
@@ -400,7 +401,7 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     expectUnpublishedResult(host_match);
     EXPECT_EQ(host_match.load_back_ticket, nullptr);
 
-    scripted_copy->enqueue(TransferStatus::DISK_IO_ERROR);
+    scripted_copy->enqueue(/*success=*/false);
     cache->setTierWatermark(Tier::HOST, 0.01, 0);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     cache->waitForPendingTasks();
@@ -475,8 +476,8 @@ TEST_F(BlockTreeCacheIntegrationTest, OneShotCascadeFailureRollsBackSWAAndRetrie
     const BlockIdxType              swa_source   = initial_slots[1].device_blocks[0];
 
     environment->scripted_per_rank_transfer_engine->clear();
-    environment->scripted_per_rank_transfer_engine->enqueue(TransferStatus::OK);
-    environment->scripted_per_rank_transfer_engine->enqueue(TransferStatus::DEVICE_IO_ERROR);
+    environment->scripted_per_rank_transfer_engine->enqueue(/*success=*/true);
+    environment->scripted_per_rank_transfer_engine->enqueue(/*success=*/false);
     OneShotWatermarkTestPeer::runDevicePass(*environment->cache, 0.01);
 
     const std::vector<TransferDescriptor> first_descriptors =
@@ -509,7 +510,7 @@ TEST_F(BlockTreeCacheIntegrationTest, OneShotCascadeFailureRollsBackSWAAndRetrie
     environment->expectPayloads();
 
     environment->scripted_per_rank_transfer_engine->clear();
-    environment->scripted_per_rank_transfer_engine->enqueue(TransferStatus::OK);
+    environment->scripted_per_rank_transfer_engine->enqueue(/*success=*/true);
     OneShotWatermarkTestPeer::runDevicePass(*environment->cache, 0.01);
 
     const std::vector<TransferDescriptor> retry_descriptors =
@@ -571,13 +572,13 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadBackSett
         GTEST_SKIP() << "CUDA not available";
     }
 
-    for (TransferStatus copy_result : {TransferStatus::OK, TransferStatus::DEVICE_IO_ERROR}) {
-        SCOPED_TRACE(copy_result == TransferStatus::OK ? "copy_success" : "copy_failure");
+    for (bool copy_success : {true, false}) {
+        SCOPED_TRACE(copy_success ? "copy_success" : "copy_failure");
 
         constexpr size_t  kBlockBytes = 16;
         constexpr size_t  kPoolSize   = 2;
         const std::string pool_name =
-            copy_result == TransferStatus::OK ? "shutdown_load_back_success" : "shutdown_load_back_failure";
+            copy_success ? "shutdown_load_back_success" : "shutdown_load_back_failure";
         auto         device_pool        = makeDevicePool({{kBlockBytes, 0}}, kPoolSize, pool_name);
         auto         host_pool          = makeHostPool(kBlockBytes, kPoolSize);
         auto         disk_pool          = makeDiskPool(kBlockBytes, kPoolSize, std::make_unique<MemoryDiskBlockIO>());
@@ -600,8 +601,8 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadBackSett
         auto cache = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1), std::move(groups), std::move(config));
         ASSERT_NE(cache, nullptr);
 
-        auto pausable_per_rank_transfer_engine =
-            std::make_shared<PausablePerRankBlockTransferEngine>(std::vector<GroupSetPtr>{full}, copy_result);
+        auto pausable_per_rank_transfer_engine = std::make_shared<PausablePerRankBlockTransferEngine>(
+            std::vector<GroupSetPtr>{full}, copy_success);
         BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, pausable_per_rank_transfer_engine);
 
         const BlockIdxType source_block = full->allocateSingleBlock(Tier::DISK, BlockRefType::BLOCK_CACHE);
@@ -674,8 +675,8 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadBackSett
         EXPECT_TRUE(destruction.finished());
         context->waitDone();
         EXPECT_TRUE(context->done());
-        EXPECT_EQ(context->success(), copy_result == TransferStatus::OK);
-        EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(), copy_result == TransferStatus::OK ? 2u : 1u);
+        EXPECT_EQ(context->success(), copy_success);
+        EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(), copy_success ? 2u : 1u);
         EXPECT_FALSE(host_pool->isAllocated(staging_block));
         EXPECT_FALSE(disk_pool->isAllocated(source_block));
         EXPECT_EQ(host_pool->freeBlocksNum(), host_free_before);
@@ -749,8 +750,7 @@ TEST_P(BlockTreeCacheDemotionFailureTest, Evictor_DemotionFailure_RestoresSource
 
     environment->scripted_per_rank_transfer_engine->clear();
     for (size_t attempt = 0; attempt < 128; ++attempt) {
-        environment->scripted_per_rank_transfer_engine->enqueue(
-            GetParam() == DemotionFailureStage::D2H ? TransferStatus::DEVICE_IO_ERROR : TransferStatus::DISK_IO_ERROR);
+        environment->scripted_per_rank_transfer_engine->enqueue(/*success=*/false);
     }
     environment->demoteAll(source_tier);
 
@@ -828,8 +828,8 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoadBa
         options.enable_disk = false;
         auto environment    = FullSWAEnvironment::create(options);
         ASSERT_NE(environment, nullptr);
-        auto pausable_copy =
-            std::make_shared<PausablePerRankBlockTransferEngine>(environment->groups, TransferStatus::OK);
+        auto pausable_copy = std::make_shared<PausablePerRankBlockTransferEngine>(
+            environment->groups, /*succeed=*/true);
         PausableTransferReleaseGuard release_guard(pausable_copy);
         BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache, pausable_copy);
         environment->insertRequestPath();
@@ -899,7 +899,7 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoadBa
         auto environment    = FullSWAEnvironment::create(options);
         ASSERT_NE(environment, nullptr);
         auto pausable_copy = std::make_shared<PausablePerRankBlockTransferEngine>(
-            environment->groups, TransferStatus::OK, /*pause_enabled=*/false);
+            environment->groups, /*succeed=*/true, /*pause_enabled=*/false);
         PausableTransferReleaseGuard release_guard(pausable_copy);
         BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache, pausable_copy);
         environment->insertRequestPath();
@@ -1043,7 +1043,7 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
     // Start from the lower-priority SWA group. A failed primary copy rolls back
     // both SWA and its reverse-selected FULL sibling without publishing Host.
     environment->scripted_per_rank_transfer_engine->clear();
-    environment->scripted_per_rank_transfer_engine->enqueue(TransferStatus::DEVICE_IO_ERROR);
+    environment->scripted_per_rank_transfer_engine->enqueue(/*success=*/false);
     ASSERT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupForTest(*environment->cache, 1, Tier::DEVICE));
     environment->cache->waitForPendingTasks();
     EXPECT_TRUE(environment->allSlotsAtTier(Tier::DEVICE));
@@ -1328,7 +1328,7 @@ TEST_P(BlockTreeCacheLowerTierTest, CancelPausedLoadBackStillInstallsTransferred
 
     auto environment                       = FullSWAEnvironment::create();
     auto pausable_per_rank_transfer_engine = std::make_shared<PausablePerRankBlockTransferEngine>(
-        environment->groups, TransferStatus::OK, /*pause_enabled=*/false);
+        environment->groups, /*succeed=*/true, /*pause_enabled=*/false);
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache,
                                                                  pausable_per_rank_transfer_engine);
     environment->insertRequestPath();
@@ -1426,7 +1426,7 @@ TEST_P(BlockTreeCacheLowerTierTest, CancelCompletionRaceSettlesExactlyOnce) {
     auto environment    = FullSWAEnvironment::create(options);
     ASSERT_NE(environment, nullptr);
     auto pausable_per_rank_transfer_engine = std::make_shared<PausablePerRankBlockTransferEngine>(
-        environment->groups, TransferStatus::OK, /*pause_enabled=*/false);
+        environment->groups, /*succeed=*/true, /*pause_enabled=*/false);
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache,
                                                                  pausable_per_rank_transfer_engine);
     environment->insertRequestPath();
@@ -1505,12 +1505,12 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesLoadBackAndRestoresC
         GTEST_SKIP() << "CUDA not available";
     }
 
-    auto environment = FullSWAEnvironment::create();
-    auto pausable_per_rank_transfer_engine =
-        std::make_shared<PausablePerRankBlockTransferEngine>(environment->groups,
-                                                             TransferStatus::OK,
-                                                             /*pause_enabled=*/false,
-                                                             /*throw_on_submit=*/1);
+    auto environment                       = FullSWAEnvironment::create();
+    auto pausable_per_rank_transfer_engine = std::make_shared<PausablePerRankBlockTransferEngine>(
+        environment->groups,
+        /*succeed=*/true,
+        /*pause_enabled=*/false,
+        /*throw_on_submit=*/1);
     PausableTransferReleaseGuard release_guard(pausable_per_rank_transfer_engine);
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache,
                                                                  pausable_per_rank_transfer_engine);
@@ -1657,7 +1657,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadBackHostToDeviceExceptionReleasesS
     auto environment    = FullSWAEnvironment::create(options);
     ASSERT_NE(environment, nullptr);
     auto pausable_per_rank_transfer_engine = std::make_shared<PausablePerRankBlockTransferEngine>(
-        environment->groups, TransferStatus::OK, /*pause_enabled=*/false);
+        environment->groups, /*succeed=*/true, /*pause_enabled=*/false);
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache,
                                                                  pausable_per_rank_transfer_engine);
     environment->insertRequestPath();
@@ -1923,7 +1923,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadBackAsyncCompletionRefreshesBefo
     auto environment = FullSWAEnvironment::create();
     ASSERT_NE(environment, nullptr);
     auto pausable_per_rank_transfer_engine = std::make_shared<PausablePerRankBlockTransferEngine>(
-        environment->groups, TransferStatus::OK, /*pause_enabled=*/false);
+        environment->groups, /*succeed=*/true, /*pause_enabled=*/false);
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache,
                                                                  pausable_per_rank_transfer_engine);
     BlockTreeMatchResult result = makePartialReadyDeviceTicket(*environment);

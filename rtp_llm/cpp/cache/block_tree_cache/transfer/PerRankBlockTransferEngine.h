@@ -1,11 +1,10 @@
 #pragma once
 
-#include <atomic>
 #include <cstddef>
-#include <cstdint>
 #include <memory>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
@@ -21,16 +20,14 @@ public:
     PerRankBlockTransferEngine() = delete;
     virtual ~PerRankBlockTransferEngine();
 
-    // Descriptor-based facade. Executes synchronously, returns completed handle.
-    // TODO: change to async later
-    virtual TransferHandle submit(const TransferDescriptor& desc);
+    // Currently executes synchronously on the calling thread and returns a non-null completed context.
+    virtual std::shared_ptr<AsyncContext> submit(const TransferDescriptor& desc);
 
 private:
     TransferStatus execute(const TransferDescriptor& desc);
     TransferStatus validateRequest(const TransferDescriptor& desc, const GroupSet*& group) const;
 
     std::vector<GroupSetPtr> group_sets_;
-    std::atomic<uint64_t>    next_request_id_{1};
 
     std::unique_ptr<DeviceHostTransferExecutor> device_host_executor_;
     std::unique_ptr<HostDiskTransferExecutor>   host_disk_executor_;

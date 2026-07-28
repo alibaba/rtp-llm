@@ -618,11 +618,8 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
             RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: invalid tagged transfer item, index=%d", item_index);
             return false;
         }
-        const TransferStatus status = block_tree_cache_->executeTransfer(descriptor);
-        if (status != TransferStatus::OK) {
-            RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: tagged transfer failed, index=%d status=%d",
-                                item_index,
-                                static_cast<int>(status));
+        if (!block_tree_cache_->executeTransfer(descriptor)) {
+            RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: tagged transfer failed, index=%d", item_index);
             return false;
         }
     }

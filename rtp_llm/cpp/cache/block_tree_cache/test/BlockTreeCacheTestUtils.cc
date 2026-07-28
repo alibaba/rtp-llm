@@ -435,30 +435,31 @@ bool BlockTreeCacheTestPeer::restoreQueueAfterRejectionForTest(BlockTreeCache& c
 ScriptedPerRankBlockTransferEngine::ScriptedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups):
     PerRankBlockTransferEngine(groups) {}
 
-TransferHandle ScriptedPerRankBlockTransferEngine::submit(const TransferDescriptor& descriptor) {
-    TransferStatus status = TransferStatus::OK;
+std::shared_ptr<AsyncContext> ScriptedPerRankBlockTransferEngine::submit(const TransferDescriptor& descriptor) {
+    bool success = true;
     {
         std::lock_guard<std::mutex> lock(mutex_);
         descriptors_.push_back(descriptor);
-        if (!statuses_.empty()) {
-            status = statuses_.front();
-            statuses_.pop_front();
+        if (!results_.empty()) {
+            success = results_.front();
+            results_.pop_front();
         }
     }
-    if (status == TransferStatus::OK) {
+    if (success) {
         return PerRankBlockTransferEngine::submit(descriptor);
     }
-    return TransferHandle::completed(status);
+    return std::make_shared<CompletedAsyncContext>(
+        ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "scripted transfer failure"));
 }
 
-void ScriptedPerRankBlockTransferEngine::enqueue(TransferStatus status) {
+void ScriptedPerRankBlockTransferEngine::enqueue(bool success) {
     std::lock_guard<std::mutex> lock(mutex_);
-    statuses_.push_back(status);
+    results_.push_back(success);
 }
 
 void ScriptedPerRankBlockTransferEngine::clear() {
     std::lock_guard<std::mutex> lock(mutex_);
-    statuses_.clear();
+    results_.clear();
     descriptors_.clear();
 }
 

@@ -233,14 +233,33 @@ TransferDescriptor makeDescriptor(Tier                             source_tier,
     return desc;
 }
 
+bool submitSucceeded(const std::shared_ptr<PerRankBlockTransferEngine>& engine, const TransferDescriptor& desc) {
+    auto context = engine->submit(desc);
+    context->waitDone();
+    return context->success();
+}
+
 void expectStatus(const std::shared_ptr<PerRankBlockTransferEngine>& engine,
                   const TransferDescriptor&                          desc,
                   TransferStatus                                     expected) {
-    auto handle = engine->submit(desc);
-    EXPECT_TRUE(handle.valid());
-    EXPECT_TRUE(handle.done());
-    EXPECT_EQ(handle.status(), expected);
-    EXPECT_EQ(handle.ok(), expected == TransferStatus::OK);
+    auto context = engine->submit(desc);
+    ASSERT_NE(context, nullptr);
+    EXPECT_TRUE(context->done());
+    context->waitDone();
+    EXPECT_EQ(context->success(), expected == TransferStatus::OK);
+
+    const ErrorInfo error_info = context->errorInfo();
+    if (expected == TransferStatus::OK) {
+        EXPECT_TRUE(error_info.ok());
+    } else {
+        EXPECT_FALSE(error_info.ok());
+        EXPECT_FALSE(error_info.ToString().empty());
+        if (expected == TransferStatus::INVALID_ARGS) {
+            EXPECT_EQ(error_info.code(), ErrorCode::INVALID_PARAMS);
+        } else {
+            EXPECT_EQ(error_info.code(), ErrorCode::EXECUTION_EXCEPTION);
+        }
+    }
 }
 
 }  // namespace rtp_llm::block_transfer_engine_test

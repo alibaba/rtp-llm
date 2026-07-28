@@ -104,9 +104,10 @@ class ScriptedPerRankBlockTransferEngine: public PerRankBlockTransferEngine {
 public:
     explicit ScriptedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups);
 
-    TransferHandle submit(const TransferDescriptor& descriptor) override;
+    std::shared_ptr<AsyncContext> submit(const TransferDescriptor& descriptor) override;
 
-    void enqueue(TransferStatus status);
+    // Scripts the outcome of upcoming submits; an empty queue delegates to the real engine.
+    void enqueue(bool success);
     void clear();
 
     std::vector<TransferDescriptor> descriptors() const;
@@ -114,7 +115,7 @@ public:
 
 private:
     mutable std::mutex              mutex_;
-    std::deque<TransferStatus>      statuses_;
+    std::deque<bool>                results_;
     std::vector<TransferDescriptor> descriptors_;
 };
 

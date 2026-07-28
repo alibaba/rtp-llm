@@ -1,9 +1,12 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 
+#include <memory>
 #include <utility>
 
+#include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
+#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
@@ -11,8 +14,14 @@ BlockTransferDispatcher::BlockTransferDispatcher(std::shared_ptr<PerRankBlockTra
                                                  std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine):
     per_rank_engine_(std::move(per_rank_engine)), multi_rank_engine_(std::move(multi_rank_engine)) {}
 
-TransferStatus BlockTransferDispatcher::executePerRank(const TransferDescriptor& descriptor) const {
-    return per_rank_engine_->submit(descriptor).status();
+bool BlockTransferDispatcher::executePerRank(const TransferDescriptor& descriptor) const {
+    const std::shared_ptr<AsyncContext> context = per_rank_engine_->submit(descriptor);
+    context->waitDone();
+    if (!context->success()) {
+        RTP_LLM_LOG_WARNING("per-rank block transfer failed: %s", context->errorInfo().ToString().c_str());
+        return false;
+    }
+    return true;
 }
 
 bool BlockTransferDispatcher::executeMultiRank(const std::vector<TransferDescriptor>& descriptors,
@@ -24,7 +33,7 @@ bool BlockTransferDispatcher::executeMultiRank(const std::vector<TransferDescrip
         return multi_rank_engine_->execute(descriptors, timeout_ms);
     }
     for (const TransferDescriptor& descriptor : descriptors) {
-        if (executePerRank(descriptor) != TransferStatus::OK) {
+        if (!executePerRank(descriptor)) {
             return false;
         }
     }

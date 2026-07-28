@@ -192,7 +192,7 @@ public:
                                               std::shared_ptr<CallbackBarrier> barrier):
         PerRankBlockTransferEngine(groups), barrier_(std::move(barrier)) {}
 
-    TransferHandle submit(const TransferDescriptor&) override {
+    std::shared_ptr<AsyncContext> submit(const TransferDescriptor&) override {
         barrier_->enterAndWait();
         throw std::runtime_error("injected copy failure");
     }

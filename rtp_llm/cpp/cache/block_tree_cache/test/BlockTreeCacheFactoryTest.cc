@@ -567,14 +567,12 @@ TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguo
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x31);
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x72);
 
-    EXPECT_EQ(
-        cache->executeTransfer(TransferDescriptor::deviceToHost(group_set->groupSetId(), {device_block}, host_block)),
-        TransferStatus::OK);
+    EXPECT_TRUE(
+        cache->executeTransfer(TransferDescriptor::deviceToHost(group_set->groupSetId(), {device_block}, host_block)));
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x00);
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x00);
-    EXPECT_EQ(
-        cache->executeTransfer(TransferDescriptor::hostToDevice(group_set->groupSetId(), host_block, {device_block})),
-        TransferStatus::OK);
+    EXPECT_TRUE(cache->executeTransfer(
+        TransferDescriptor::hostToDevice(group_set->groupSetId(), host_block, {device_block})));
 
     expectDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x31);
     expectDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x72);
@@ -821,7 +819,7 @@ TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesO
     auto scripted_copy =
         std::make_shared<block_tree_cache_test::ScriptedPerRankBlockTransferEngine>(cache->groupSets());
     block_tree_cache_test::BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, scripted_copy);
-    scripted_copy->enqueue(TransferStatus::DEVICE_IO_ERROR);
+    scripted_copy->enqueue(/*success=*/false);
 
     const auto blocks  = insertOneKeyThroughAllocator(config, allocator, /*key=*/810);
     auto       backing = allocator->cacheGroups().front()->blockPool();
@@ -1342,12 +1340,10 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
         ASSERT_NE(host_block, NULL_BLOCK_IDX);
         ASSERT_NE(disk_block, NULL_BLOCK_IDX);
 
-        EXPECT_EQ(factory_cache->executeTransfer(
-                      TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks.per_node[0], host_block)),
-                  TransferStatus::OK);
-        EXPECT_EQ(
-            factory_cache->executeTransfer(TransferDescriptor::hostToDisk(group->groupSetId(), host_block, disk_block)),
-            TransferStatus::OK);
+        EXPECT_TRUE(factory_cache->executeTransfer(
+            TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks.per_node[0], host_block)));
+        EXPECT_TRUE(factory_cache->executeTransfer(
+            TransferDescriptor::hostToDisk(group->groupSetId(), host_block, disk_block)));
 
         group->unreferenceBlocks(device_blocks, BlockRefType::REQUEST);
         group->releaseSingleBlock(Tier::HOST, host_block, BlockRefType::REQUEST);
