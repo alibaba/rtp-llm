@@ -197,6 +197,39 @@ TEST_F(FullGroupSetTest, MatchValidatorEmptyInvalid) {
     delete node;
 }
 
+TEST_F(FullGroupSetTest, MatchValidatorBusySlotBreaksPrefixLikeHole) {
+    for (GroupSetTransferState state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOAD_PENDING}) {
+        auto validator = group_->createMatchValidator();
+
+        auto* busy_node = makeNode(100);
+        setDeviceBlock(busy_node, 0);
+        busy_node->group_set_resources[0].transfer_state = state;
+
+        auto* usable_node = makeNode(200);
+        setDeviceBlock(usable_node, 0);
+
+        // Busy slot is unusable, and the FULL prefix latch keeps later usable
+        // nodes invalid so device reuse stays contiguous from the root.
+        EXPECT_FALSE(validator->validate(busy_node, busy_node->group_set_resources[0]));
+        EXPECT_FALSE(validator->validate(usable_node, usable_node->group_set_resources[0]));
+
+        delete busy_node;
+        delete usable_node;
+    }
+}
+
+TEST_F(FullGroupSetTest, MatchValidatorAllowsLoadingSlot) {
+    auto validator = group_->createMatchValidator();
+
+    auto* node = makeNode(100);
+    setHostBlock(node, 0, 15);
+    node->group_set_resources[0].transfer_state = GroupSetTransferState::LOADING;
+
+    EXPECT_TRUE(validator->validate(node, node->group_set_resources[0]));
+
+    delete node;
+}
+
 TEST_F(FullGroupSetTest, BuildTransferD2H) {
     auto*              node         = makeNode(100);
     const BlockIdxType device_block = setDeviceBlock(node, 0);

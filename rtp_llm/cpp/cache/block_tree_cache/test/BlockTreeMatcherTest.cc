@@ -129,6 +129,106 @@ TEST_F(BlockTreeMatcherTest, SwaGapRequiresACompleteWindowForLogicalMatch) {
     matcher.releaseMatchedResourcesLocked(full_result.matched_resources);
 }
 
+TEST_F(BlockTreeMatcherTest, BusySwaSlotOutsideWindowDoesNotTruncateLogicalMatch) {
+    for (GroupSetTransferState state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOAD_PENDING}) {
+        auto                            full   = std::make_shared<FullGroupSet>();
+        auto                            swa    = std::make_shared<SWAGroupSet>(2, 1);
+        std::vector<GroupSetPtr>        groups = {full, swa};
+        std::unique_ptr<BlockTreeCache> cache =
+            makeBlockTreeCacheForTest(std::make_unique<BlockTree>(2), std::move(groups));
+        ASSERT_NE(cache, nullptr);
+
+        std::vector<std::vector<GroupSetResource>> slots(4, std::vector<GroupSetResource>(2));
+        for (size_t i = 0; i < slots.size(); ++i) {
+            slots[i][0].device_blocks = {static_cast<BlockIdxType>(10 + i)};
+            slots[i][1].device_blocks = {static_cast<BlockIdxType>(20 + i)};
+        }
+        cache->insert(nullptr, {100, 200, 300, 400}, slots);
+
+        const std::vector<TreeNode*> path = cache->tree()->findNode({100, 200, 300, 400}).path;
+        ASSERT_EQ(path.size(), 4u);
+        path[1]->group_set_resources[1].transfer_state = state;
+
+        BlockTreeMatcher matcher = makeMatcher(*cache);
+        {
+            std::lock_guard<std::mutex> lock(cache->mutex_);
+            auto [result, logical_matched_path] = matcher.matchLocked({100, 200, 300, 400});
+
+            EXPECT_EQ(logical_matched_path.size(), 4u);
+            EXPECT_EQ(result.matched_blocks, 4u);
+            EXPECT_EQ(matcher.matchedBlocksForGroup(0, result.matched_resources), (BlockIndicesType{10, 11, 12, 13}));
+            EXPECT_EQ(matcher.matchedBlocksForGroup(1, result.matched_resources), (BlockIndicesType{22, 23}));
+
+            matcher.releaseMatchedResourcesLocked(result.matched_resources);
+            path[1]->group_set_resources[1].transfer_state = GroupSetTransferState::IDLE;
+        }
+    }
+}
+
+TEST_F(BlockTreeMatcherTest, BusyLinearSlotDoesNotTruncateLaterPointState) {
+    for (GroupSetTransferState state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOAD_PENDING}) {
+        auto                            full   = std::make_shared<FullGroupSet>();
+        auto                            linear = std::make_shared<LinearGroupSet>();
+        std::vector<GroupSetPtr>        groups = {full, linear};
+        std::unique_ptr<BlockTreeCache> cache =
+            makeBlockTreeCacheForTest(std::make_unique<BlockTree>(2), std::move(groups));
+        ASSERT_NE(cache, nullptr);
+
+        std::vector<std::vector<GroupSetResource>> slots(3, std::vector<GroupSetResource>(2));
+        for (size_t i = 0; i < slots.size(); ++i) {
+            slots[i][0].device_blocks = {static_cast<BlockIdxType>(10 + i)};
+            slots[i][1].device_blocks = {static_cast<BlockIdxType>(20 + i)};
+        }
+        cache->insert(nullptr, {100, 200, 300}, slots);
+
+        const std::vector<TreeNode*> path = cache->tree()->findNode({100, 200, 300}).path;
+        ASSERT_EQ(path.size(), 3u);
+        path[1]->group_set_resources[1].transfer_state = state;
+
+        BlockTreeMatcher matcher = makeMatcher(*cache);
+        {
+            std::lock_guard<std::mutex> lock(cache->mutex_);
+            auto [result, logical_matched_path] = matcher.matchLocked({100, 200, 300});
+
+            EXPECT_EQ(logical_matched_path.size(), 3u);
+            EXPECT_EQ(result.matched_blocks, 3u);
+            EXPECT_EQ(matcher.matchedBlocksForGroup(0, result.matched_resources), (BlockIndicesType{10, 11, 12}));
+            EXPECT_EQ(matcher.matchedBlocksForGroup(1, result.matched_resources), (BlockIndicesType{22}));
+
+            matcher.releaseMatchedResourcesLocked(result.matched_resources);
+            path[1]->group_set_resources[1].transfer_state = GroupSetTransferState::IDLE;
+        }
+    }
+}
+
+TEST_F(BlockTreeMatcherTest, BusyFullSlotTruncatesLogicalMatch) {
+    std::vector<std::vector<GroupSetResource>> slots(3, std::vector<GroupSetResource>(1));
+    for (size_t i = 0; i < slots.size(); ++i) {
+        slots[i][0].device_blocks = {static_cast<BlockIdxType>(10 + i)};
+    }
+    cache_->insert(nullptr, {100, 200, 300}, slots);
+
+    const std::vector<TreeNode*> path = cache_->tree()->findNode({100, 200, 300}).path;
+    ASSERT_EQ(path.size(), 3u);
+    path[1]->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
+
+    BlockTreeMatcher matcher = makeMatcher(*cache_);
+    {
+        std::lock_guard<std::mutex> lock(cache_->mutex_);
+        auto [result, logical_matched_path] = matcher.matchLocked({100, 200, 300});
+
+        EXPECT_EQ(logical_matched_path.size(), 1u);
+        if (!logical_matched_path.empty()) {
+            EXPECT_EQ(logical_matched_path.front()->cache_key, 100);
+        }
+        EXPECT_EQ(result.matched_blocks, 1u);
+        EXPECT_EQ(matcher.matchedBlocksForGroup(0, result.matched_resources), (BlockIndicesType{10}));
+
+        matcher.releaseMatchedResourcesLocked(result.matched_resources);
+        path[1]->group_set_resources[0].transfer_state = GroupSetTransferState::IDLE;
+    }
+}
+
 TEST_F(BlockTreeMatcherTest, MatchFailsFastForPartialDeviceResource) {
     std::vector<std::vector<GroupSetResource>> slots(1, std::vector<GroupSetResource>(1));
     slots[0][0].device_blocks = {10};

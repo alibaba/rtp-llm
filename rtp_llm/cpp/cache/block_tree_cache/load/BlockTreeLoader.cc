@@ -93,6 +93,15 @@ void BlockTreeLoader::prepareMatchedLoadItem(TreeNode*                     path_
                                              size_t                        path_index,
                                              BlockTreeLoadResult&          result,
                                              LoadTicket::PendingLoadItems& pending_load_items) {
+    // DEMOTING/LOAD_PENDING sources belong to another in-flight operation and
+    // can neither be referenced nor joined; skip them like empty slots.
+    if (!group_set_resource.isMatchUsable()) {
+        RTP_LLM_LOG_DEBUG("skip busy slot for load planning, node_key=%ld group_set=%zu state=%d",
+                          path_node->cache_key,
+                          group_set->groupSetId(),
+                          static_cast<int>(group_set_resource.transfer_state));
+        return;
+    }
     const Tier source_tier = group_set->getTopTier(group_set_resource);
     if (source_tier == Tier::NONE) {
         return;

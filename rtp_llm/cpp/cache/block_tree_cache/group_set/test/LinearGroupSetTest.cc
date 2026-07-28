@@ -97,6 +97,39 @@ TEST_F(LinearGroupSetTest, MatchValidatorHasData) {
     delete node_empty;
 }
 
+TEST_F(LinearGroupSetTest, MatchValidatorBusySlotInvalidWithoutLatch) {
+    for (GroupSetTransferState state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOAD_PENDING}) {
+        auto validator = group_->createMatchValidator();
+
+        auto* busy_node = makeNode(100);
+        setDeviceBlock(busy_node, 0);
+        busy_node->group_set_resources[0].transfer_state = state;
+
+        auto* usable_node = makeNode(200);
+        setDeviceBlock(usable_node, 0);
+
+        // Point-state semantics: a busy node is unusable on its own but must
+        // not poison later nodes.
+        EXPECT_FALSE(validator->validate(busy_node, busy_node->group_set_resources[0]));
+        EXPECT_TRUE(validator->validate(usable_node, usable_node->group_set_resources[0]));
+
+        delete busy_node;
+        delete usable_node;
+    }
+}
+
+TEST_F(LinearGroupSetTest, MatchValidatorAllowsLoadingSlot) {
+    auto validator = group_->createMatchValidator();
+
+    auto* node = makeNode(100);
+    node->group_set_resources[0].host_block    = 15;
+    node->group_set_resources[0].transfer_state = GroupSetTransferState::LOADING;
+
+    EXPECT_TRUE(validator->validate(node, node->group_set_resources[0]));
+
+    delete node;
+}
+
 TEST_F(LinearGroupSetTest, EmptySlotIsNotEvictable) {
     auto* node = makeNode(100);
     EXPECT_FALSE(group_->isSlotEvictable(*node, Tier::DEVICE));

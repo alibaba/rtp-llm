@@ -19,6 +19,7 @@ size_t SWAGroupSet::computeReuseBlockCount(size_t matched_block_count, const std
     for (size_t i = matched_block_count; i > 0; --i) {
         const TreeNode* node = path[i - 1];
         if (group_set_index < node->group_set_resources.size()
+            && node->group_set_resources[group_set_index].isMatchUsable()
             && !node->group_set_resources[group_set_index].is_empty()) {
             count++;
             accumulated += seq_size_per_block_;
@@ -35,7 +36,9 @@ SWAMatchValidator::SWAMatchValidator(size_t sliding_window_size, size_t seq_size
     sliding_window_size_(sliding_window_size), seq_size_per_block_(seq_size_per_block) {}
 
 bool SWAMatchValidator::validate(const TreeNode* node, const GroupSetResource& slot) {
-    const bool has_swa_data = !slot.is_empty();
+    // A busy slot (DEMOTING/LOAD_PENDING) counts as a hole: it cannot serve
+    // this match, so the window accumulation restarts behind it.
+    const bool has_swa_data = slot.isMatchUsable() && !slot.is_empty();
 
     if (!has_swa_data) {
         connected_to_root_  = false;

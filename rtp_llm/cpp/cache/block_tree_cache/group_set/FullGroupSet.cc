@@ -24,7 +24,9 @@ bool FullGroupSet::isSlotEvictable(const TreeNode& node, Tier tier) const {
 
 // FullMatchValidator
 bool FullMatchValidator::validate(const TreeNode* node, const GroupSetResource& slot) {
-    prefix_valid_ = prefix_valid_ && !slot.is_empty();
+    // A busy slot (DEMOTING/LOAD_PENDING) is as unusable as a hole; the prefix
+    // latch keeps FULL reuse contiguous from the root.
+    prefix_valid_ = prefix_valid_ && slot.isMatchUsable() && !slot.is_empty();
     return prefix_valid_;
 }
 

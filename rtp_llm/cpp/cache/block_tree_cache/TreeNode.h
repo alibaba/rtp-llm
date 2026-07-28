@@ -92,6 +92,12 @@ struct GroupSetResource {
     bool is_removable() const {
         return transfer_state == GroupSetTransferState::IDLE && is_empty();
     }
+    // A match may consume or join this slot only while no exclusive migration
+    // owns it: IDLE serves normally, LOADING is joinable, while DEMOTING and
+    // LOAD_PENDING sources are reserved by an in-flight transfer.
+    bool isMatchUsable() const {
+        return transfer_state == GroupSetTransferState::IDLE || transfer_state == GroupSetTransferState::LOADING;
+    }
 };
 
 // Tree node in the BlockTree radix tree.

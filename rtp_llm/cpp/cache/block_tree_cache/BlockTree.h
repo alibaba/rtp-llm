@@ -48,6 +48,9 @@ public:
     ~BlockTree();
 
     // Find the deepest node matching the cache_keys sequence from root.
+    // The walk is purely topological: per-group transfer-state usability is
+    // judged by the MatchValidators so one busy group slot does not truncate
+    // the whole path. Structural invariants are still enforced per node.
     BlockTreeFindResult findNode(const CacheKeysType& cache_keys) const;
 
     // Insert nodes along the cache_keys path starting from parent (nullptr = root).
@@ -89,7 +92,7 @@ public:
     }
 
 private:
-    bool      isNodeMatchReady(const TreeNode& node) const;
+    void      validateNodeInvariants(const TreeNode& node) const;
     TreeNode* createNode(CacheKeyType key, TreeNode* parent);
 
     std::unique_ptr<TreeNode>              root_;

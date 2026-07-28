@@ -13,7 +13,8 @@ size_t LinearGroupSet::computeReuseBlockCount(size_t matched_block_count, const 
 }
 
 bool LinearMatchValidator::validate(const TreeNode* node, const GroupSetResource& slot) {
-    return !slot.is_empty();
+    // Point-state: each node is judged on its own; a busy slot is unusable.
+    return slot.isMatchUsable() && !slot.is_empty();
 }
 
 }  // namespace rtp_llm

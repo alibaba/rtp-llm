@@ -193,6 +193,67 @@ TEST_F(SWAGroupSetTest, ComputeReferenceCountCountsHostAndDiskBlocks) {
     delete d;
 }
 
+TEST_F(SWAGroupSetTest, WindowValidatorBusySlotResetsLikeHole) {
+    for (GroupSetTransferState state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOAD_PENDING}) {
+        std::unique_ptr<MatchValidator> validator     = group_->createMatchValidator();
+        SWAMatchValidator*              swa_validator = dynamic_cast<SWAMatchValidator*>(validator.get());
+
+        TreeNode* a = makeNode(100);
+        TreeNode* b = makeNode(200);
+        TreeNode* c = makeNode(300);
+        TreeNode* d = makeNode(400);
+        setDeviceBlock(a, 0);
+        setDeviceBlock(b, 0);
+        setDeviceBlock(c, 0);
+        setDeviceBlock(d, 0);
+        b->group_set_resources[0].transfer_state = state;
+
+        EXPECT_TRUE(validator->validate(a, a->group_set_resources[0]));
+
+        // Busy slot has data but is owned by an in-flight transfer: it must
+        // behave exactly like a hole and reset the window accumulation.
+        EXPECT_FALSE(validator->validate(b, b->group_set_resources[0]));
+        EXPECT_FALSE(swa_validator->connectedToRoot());
+        EXPECT_EQ(swa_validator->accumulatedLength(), 0u);
+
+        EXPECT_FALSE(validator->validate(c, c->group_set_resources[0]));
+        EXPECT_TRUE(validator->validate(d, d->group_set_resources[0]));
+        EXPECT_EQ(swa_validator->accumulatedLength(), 128u);
+
+        delete a;
+        delete b;
+        delete c;
+        delete d;
+    }
+}
+
+TEST_F(SWAGroupSetTest, WindowValidatorAllowsLoadingSlot) {
+    std::unique_ptr<MatchValidator> validator = group_->createMatchValidator();
+
+    TreeNode* node = makeNode(100);
+    setHostBlock(node, 0, 15);
+    node->group_set_resources[0].transfer_state = GroupSetTransferState::LOADING;
+
+    EXPECT_TRUE(validator->validate(node, node->group_set_resources[0]));
+
+    delete node;
+}
+
+TEST_F(SWAGroupSetTest, ComputeReuseBlockCountSkipsBusySlots) {
+    TreeNode* a = makeNode(100);
+    TreeNode* b = makeNode(200);
+    setHostBlock(a, 0, 10);
+    setHostBlock(b, 0, 20);
+    b->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
+
+    // The busy tail slot cannot be locked for reuse; only A counts.
+    std::vector<TreeNode*> path = {a, b};
+    EXPECT_EQ(group_->computeReuseBlockCount(path.size(), path), 1u);
+
+    delete a;
+    delete b;
+}
+
 TEST_F(SWAGroupSetTest, IndependentEvictionDoesNotAffectFull) {
     // SWA eviction only affects SWA group data, not Full group
     auto*              node       = makeNode(100, 2);         // 2 groups: 0=Full, 1=SWA

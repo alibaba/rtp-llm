@@ -44,13 +44,14 @@ BlockTreeFindResult BlockTree::findNode(const CacheKeysType& cache_keys) const {
             break;
         }
         TreeNode* candidate = it->second;
-        if (candidate == nullptr || !isNodeMatchReady(*candidate)) {
-            RTP_LLM_LOG_DEBUG("stop matching at depth=%zu, cache_key=%ld, reason=%s",
-                              i,
-                              cache_keys[i],
-                              candidate == nullptr ? "null candidate" : "node not match ready");
+        if (candidate == nullptr) {
+            RTP_LLM_LOG_DEBUG("stop matching at depth=%zu, cache_key=%ld, reason=null candidate", i, cache_keys[i]);
             break;
         }
+        // Transfer-state usability is judged per group by the MatchValidators;
+        // the tree walk only enforces structural invariants so one busy group
+        // slot cannot truncate the whole topological path.
+        validateNodeInvariants(*candidate);
         current               = candidate;
         result.matched_blocks = i + 1;
         result.matched_node   = current;
@@ -60,24 +61,19 @@ BlockTreeFindResult BlockTree::findNode(const CacheKeysType& cache_keys) const {
     return result;
 }
 
-bool BlockTree::isNodeMatchReady(const TreeNode& node) const {
+void BlockTree::validateNodeInvariants(const TreeNode& node) const {
     RTP_LLM_CHECK_WITH_INFO(node.group_set_resources.size() == group_set_resource_count_,
                             "BlockTree node resource count mismatch: node_key=%ld expected=%zu actual=%zu",
                             node.cache_key,
                             group_set_resource_count_,
                             node.group_set_resources.size());
     for (const GroupSetResource& slot : node.group_set_resources) {
-        if (slot.transfer_state != GroupSetTransferState::IDLE
-            && slot.transfer_state != GroupSetTransferState::LOADING) {
-            return false;
-        }
         if (slot.transfer_state == GroupSetTransferState::IDLE) {
             RTP_LLM_CHECK_WITH_INFO(slot.isValidSteadyState(),
                                     "BlockTree encountered invalid IDLE multi-tier resource, node_key=%ld",
                                     node.cache_key);
         }
     }
-    return true;
 }
 
 BlockTreeInsertResult BlockTree::insertNode(TreeNode*                                         parent,

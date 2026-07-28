@@ -202,8 +202,11 @@ BlockTreeMatcher::computeReadyMatchedBlockCount(const std::vector<TreeNode*>& ma
             const size_t       reuse_count =
                 std::min(group_set->computeReuseBlockCount(candidate_count, matched_path), candidate_count);
             for (size_t path_index = candidate_count - reuse_count; path_index < candidate_count; ++path_index) {
-                TreeNode* path_node = matched_path[path_index];
-                if (!group_set->hasCompleteDeviceValue(path_node->group_set_resources[group_set_id])) {
+                TreeNode*               path_node = matched_path[path_index];
+                const GroupSetResource& slot      = path_node->group_set_resources[group_set_id];
+                // A DEMOTING slot still carries device blocks but is owned by an
+                // in-flight transfer; ready reuse must only consume usable slots.
+                if (!slot.isMatchUsable() || !group_set->hasCompleteDeviceValue(slot)) {
                     all_groups_ready = false;
                     break;
                 }

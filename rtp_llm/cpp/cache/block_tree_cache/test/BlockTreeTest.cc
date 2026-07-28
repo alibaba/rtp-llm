@@ -109,7 +109,9 @@ TEST(BlockTreeTest, FindAllowsLoadingNode) {
     EXPECT_EQ(result.matched_node, tree.root()->children.at(100)->children.at(200)->children.at(300));
 }
 
-TEST(BlockTreeTest, FindStopsBeforeUnavailableNodeAndItsDescendants) {
+TEST(BlockTreeTest, FindTraversesBusyNodeAndItsDescendants) {
+    // Transfer-state gating moved to the per-group MatchValidators: the tree
+    // walk is purely topological and must not truncate at busy slots.
     for (GroupSetTransferState state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOAD_PENDING}) {
         BlockTree tree(1);
         tree.insertNode(nullptr, {100, 200, 300}, make2DSlots(1, 3, 42));
@@ -118,9 +120,10 @@ TEST(BlockTreeTest, FindStopsBeforeUnavailableNodeAndItsDescendants) {
         busy_node->group_set_resources[0].transfer_state = state;
 
         const BlockTreeFindResult result = tree.findNode({100, 200, 300});
-        ASSERT_EQ(result.path.size(), 1u);
-        EXPECT_EQ(result.matched_blocks, 1u);
-        EXPECT_EQ(result.matched_node, tree.root()->children.at(100));
+        ASSERT_EQ(result.path.size(), 3u);
+        EXPECT_EQ(result.matched_blocks, 3u);
+        EXPECT_EQ(result.path[1], busy_node);
+        EXPECT_EQ(result.matched_node, busy_node->children.at(300));
     }
 }
 
