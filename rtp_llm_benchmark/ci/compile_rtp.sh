@@ -47,6 +47,8 @@ compile_rtp(){
     # /opt/conda310/bin/python3 -m pip install /mnt/raid0/yuzho/BACKUPS/flash_attn-2.8.3-cp310-cp310-linux_x86_64.whl # flash attn whl
     /opt/conda310/bin/python -m pip install ninja -i https://pypi.org/simple/
     /opt/conda310/bin/python -m pip install flash_attn --no-build-isolation --index-url https://pypi.org/simple
+ # [test] force transformers to 5.2.0 to verify Qwen3VLConfig fix
+ /opt/conda310/bin/python -m pip install --no-cache-dir --force-reinstall --no-deps "transformers==5.2.0" --index-url https://pypi.org/simple
 
     # try to build
     bazelisk build //rtp_llm:rtp_llm --jobs 150 --verbose_failures --config=rocm 2>&1 | tee "${LOG_DIR}/bazelbuild.log"
