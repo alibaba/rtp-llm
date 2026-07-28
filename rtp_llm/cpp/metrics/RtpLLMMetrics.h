@@ -409,14 +409,18 @@ private:
 
 class RtpLLMCacheMetricsCollector final {
 public:
-    int64_t kv_cache_item_num             = 0;
-    int64_t kv_cache_free_blocks          = 0;
-    int64_t kv_cache_available_blocks     = 0;
-    int64_t kv_cache_request_ref_blocks   = 0;
-    int64_t kv_cache_connector_ref_blocks = 0;
-    int64_t kv_cache_left_seq             = 0;
-    float   kv_cache_used_ratio           = 0;
-    int64_t mr_cost_time_ms               = 0;
+    int64_t kv_cache_item_num              = 0;
+    int64_t kv_cache_free_blocks           = 0;
+    int64_t kv_cache_available_blocks      = 0;
+    int64_t kv_cache_request_ref_blocks    = 0;
+    int64_t kv_cache_connector_ref_blocks  = 0;
+    int64_t kv_cache_left_seq              = 0;
+    float   kv_cache_used_ratio            = 0;
+    int64_t mr_cost_time_ms                = 0;
+    int64_t kv_cache_event_publisher_state = 0;
+    int64_t kv_cache_event_queue_size      = 0;
+    int64_t kv_cache_event_accepted_count  = 0;
+    int64_t kv_cache_event_dropped_count   = 0;
 };
 
 class RtpLLMCacheMetrics: public kmonitor::MetricsGroup {
@@ -425,14 +429,18 @@ public:
     void report(const kmonitor::MetricsTags* tags, RtpLLMCacheMetricsCollector* collector);
 
 public:
-    kmonitor::MutableMetric* kv_cache_item_num_metric             = nullptr;
-    kmonitor::MutableMetric* kv_cache_free_blocks_metric          = nullptr;
-    kmonitor::MutableMetric* kv_cache_available_blocks_metric     = nullptr;
-    kmonitor::MutableMetric* kv_cache_request_ref_blocks_metric   = nullptr;
-    kmonitor::MutableMetric* kv_cache_connector_ref_blocks_metric = nullptr;
-    kmonitor::MutableMetric* kv_cache_left_seq_metric             = nullptr;
-    kmonitor::MutableMetric* kv_cache_used_ratio_metric           = nullptr;
-    kmonitor::MutableMetric* mr_cost_time_ms_metric               = nullptr;
+    kmonitor::MutableMetric* kv_cache_item_num_metric              = nullptr;
+    kmonitor::MutableMetric* kv_cache_free_blocks_metric           = nullptr;
+    kmonitor::MutableMetric* kv_cache_available_blocks_metric      = nullptr;
+    kmonitor::MutableMetric* kv_cache_request_ref_blocks_metric    = nullptr;
+    kmonitor::MutableMetric* kv_cache_connector_ref_blocks_metric  = nullptr;
+    kmonitor::MutableMetric* kv_cache_left_seq_metric              = nullptr;
+    kmonitor::MutableMetric* kv_cache_used_ratio_metric            = nullptr;
+    kmonitor::MutableMetric* mr_cost_time_ms_metric                = nullptr;
+    kmonitor::MutableMetric* kv_cache_event_publisher_state_metric = nullptr;
+    kmonitor::MutableMetric* kv_cache_event_queue_size_metric      = nullptr;
+    kmonitor::MutableMetric* kv_cache_event_accepted_count_metric  = nullptr;
+    kmonitor::MutableMetric* kv_cache_event_dropped_count_metric   = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();

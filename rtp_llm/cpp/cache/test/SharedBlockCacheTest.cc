@@ -28,11 +28,85 @@ void putOne(SharedBlockCache&             cache,
     cache.put(key, std::vector<BlockIdxType>{block}, resident, namespace_id, dep);
 }
 
+class RecordingPublisher final: public KVCacheEventPublisher {
+public:
+    bool start() noexcept override {
+        running_ = true;
+        return true;
+    }
+
+    PublishResult tryPublish(KVCacheEvent event) noexcept override {
+        if (!running_) {
+            return PublishResult::NOT_RUNNING;
+        }
+        events.push_back(std::move(event));
+        return PublishResult::ACCEPTED;
+    }
+
+    void stop() noexcept override {
+        running_ = false;
+    }
+
+    PublisherStatus status() const noexcept override {
+        return {};
+    }
+
+    bool enabled() const noexcept override {
+        return true;
+    }
+
+    std::vector<KVCacheEvent> events;
+
+private:
+    bool running_{false};
+};
+
 }  // namespace
 
 TEST(SharedBlockCacheTest, EmptyCacheKeepsLegacyVersion) {
     SharedBlockCache cache;
     EXPECT_EQ(cache.version(), -1);
+}
+
+TEST(SharedBlockCacheTest, PublisherTracksCompleteLogicalKeysOnly) {
+    SharedBlockCache cache;
+    auto             publisher = std::make_shared<RecordingPublisher>();
+    ASSERT_TRUE(publisher->start());
+    cache.setEventPublisher(publisher, /*required_group_count=*/2);
+
+    cache.put(1,
+              std::vector<BlockIdxType>{101, 201},
+              /*is_resident=*/false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              rootDep(),
+              std::vector<bool>{true, false});
+    EXPECT_TRUE(publisher->events.empty());
+    EXPECT_TRUE(cache.logicalCacheSnapshot().cache_keys.empty());
+
+    cache.put(1,
+              std::vector<BlockIdxType>{NULL_BLOCK_IDX, 201},
+              /*is_resident=*/false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              rootDep(),
+              std::vector<bool>{true, true});
+    ASSERT_EQ(publisher->events.size(), 1u);
+    EXPECT_EQ(publisher->events[0].type, KVCacheEventType::BLOCK_ADD);
+    EXPECT_EQ(publisher->events[0].block_key, 1);
+    EXPECT_EQ(cache.logicalCacheSnapshot().cache_keys, (std::vector<CacheKeyType>{1}));
+
+    cache.put(1,
+              std::vector<BlockIdxType>{NULL_BLOCK_IDX, 201},
+              /*is_resident=*/false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              rootDep(),
+              std::vector<bool>{true, true});
+    EXPECT_EQ(publisher->events.size(), 1u);
+
+    ASSERT_TRUE(cache.remove(1).has_value());
+    ASSERT_EQ(publisher->events.size(), 2u);
+    EXPECT_EQ(publisher->events[1].type, KVCacheEventType::BLOCK_DELETE);
+    EXPECT_EQ(publisher->events[1].block_key, 1);
+    EXPECT_TRUE(cache.logicalCacheSnapshot().cache_keys.empty());
 }
 
 TEST(SharedBlockCacheTest, PrefixTreeEvictsCollectedChainInParentFirstOrderWithDependencies) {
