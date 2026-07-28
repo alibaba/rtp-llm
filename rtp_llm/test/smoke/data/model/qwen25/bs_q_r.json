@@ -15,7 +15,7 @@
             "result": {
                 "response_batch": [
                     {
-                        "response": "并提供答案。 1. What is the main idea of the passage?\n2. What is the main idea of the passage?\n3. What is the main idea of the passage?\n4. What is the main idea",
+                        "response": "，并提供答案。\n1. What is the main idea of the passage?\n2. What is the main idea of the passage?\n3. What is the main idea of the passage?\n4. What is the main idea of",
                         "response_alternatives": null,
                         "hidden_states": null,
                         "logits": null,
@@ -41,14 +41,14 @@
                             "step_output_len": 45,
                             "iter_count": 45,
                             "cum_log_probs": [
-                                -21.996397018432617
+                                -20.700117111206055
                             ],
                             "beam_responses": [
-                                "并提供答案。 1. What is the main idea of the passage?\n2. What is the main idea of the passage?\n3. What is the main idea of the passage?\n4. What is the main idea",
-                                "并提供答案。 1. What is the main idea of the passage? \n2. What is the main idea of the passage? \n3. What is the main idea of the passage? \n4. What is",
-                                "并提供答案。 1. What is the main idea of the passage? \n 2. What is the main idea of the passage? \n 3. What is the main idea of the passage? \n 4",
-                                "并提供答案。 1. What is the main idea of the passage? \n2. What is the main idea of the passage?\n3. What is the main idea of the passage?\n4. What is the main",
-                                "并提供答案。 1. What is the main idea of the passage? \n2. What is the main idea of the passage? \n3. What is the main idea of the passage?\n4. What is the"
+                                "，并提供答案。\n1. What is the main idea of the passage?\n2. What is the main idea of the passage?\n3. What is the main idea of the passage?\n4. What is the main idea of",
+                                "，并提供答案。\n1. What is the main idea of the passage?\n2. What is the main idea of the passage?\n3. What is the main idea of the passage? 1. What is the main idea",
+                                "，并提供答案。\n1. What is the main idea of the passage?\n2. What is the main idea of the passage?\n3. What is the main idea of the passage? 4. What is the main idea",
+                                "，并提供答案。\n1. What is the main idea of the passage?\n2. What is the main idea of the passage?\n3. What is the purpose of the passage?\n4. What is the purpose of the passage",
+                                "，并提供答案。\n1. What is the main idea of the passage?\n2. What is the main idea of the passage?\n3. What is the main idea of the passage?\n4. What are the main ideas of"
                             ],
                             "pd_sep": false,
                             "softmax_probs": []

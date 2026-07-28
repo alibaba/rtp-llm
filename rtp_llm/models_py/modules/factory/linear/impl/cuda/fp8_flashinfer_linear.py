@@ -6,16 +6,8 @@ import torch
 
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import sgl_per_token_group_quant_fp8
 from rtp_llm.models_py.modules.factory.linear import LinearBase
-from rtp_llm.models_py.utils.arch import get_sm
+from rtp_llm.models_py.utils.arch import is_sm90
 from rtp_llm.ops import HWKernelConfig
-
-
-def is_sm90() -> bool:
-    try:
-        major, _ = get_sm()
-    except Exception:
-        return False
-    return major == 9
 
 
 def _has_flashinfer_sm90_fp8_gemm() -> bool:

@@ -105,6 +105,7 @@ cc_library(
     ], exclude = [
         "RegisterRocmOps.cc",
         "hip_host_utils.cc",
+        "mrope_config_validation_test.cc",
     ]),
     hdrs = glob([
         "*.h",
@@ -117,6 +118,7 @@ cc_library(
     ]),
     copts = rocm_copts(),
     deps = torch_deps() + [
+        ":mrope_config_validation",
         "//rtp_llm/models_py/bindings/core:types_hdr",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_kv_cache",
         "//rtp_llm/models_py/bindings/rocm/kernels:rocm_atrex_pa",
@@ -125,6 +127,21 @@ cc_library(
         "//rtp_llm/models_py/bindings/common:common",
         "//rtp_llm/models_py/bindings/rocm/kernels:rocm_trtllm_allreduce_fusion",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_moe",
+    ],
+)
+
+cc_library(
+    name = "mrope_config_validation",
+    hdrs = ["mrope_config_validation.h"],
+)
+
+cc_test(
+    name = "mrope_config_validation_test",
+    srcs = ["mrope_config_validation_test.cc"],
+    copts = copts(),
+    deps = [
+        ":mrope_config_validation",
+        "@com_google_googletest//:gtest_main",
     ],
 )
 

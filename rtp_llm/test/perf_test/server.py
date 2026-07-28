@@ -15,18 +15,27 @@ class EngineServer:
         self._remaining_args = remaining_args
         self._server: Optional[MagaServerManager] = None
 
-    def start(self, max_seq_len: int, max_concurrency: int) -> None:
+    def start(
+        self,
+        max_seq_len: int,
+        max_concurrency: int,
+        server_start_timeout: int = 1600,
+        use_batch_decode_scheduler: Optional[bool] = True,
+    ) -> None:
         """Assemble CLI args and start MagaServerManager."""
         engine_cli = self._build_engine_cli(max_seq_len, max_concurrency)
 
         env: Dict[str, str] = {
-            "USE_BATCH_DECODE_SCHEDULER": "1",
             "FAKE_BALANCE_EXPERT": "1",
             "BATCH_DECODE_SCHEDULER_WARMUP_TYPE": (
                 "0" if self._args.partial in (0, 1) else "1"
             ),
             "TORCH_CUDA_PROFILER_DIR": self._args.result_dir,
         }
+        if use_batch_decode_scheduler is not None:
+            env["USE_BATCH_DECODE_SCHEDULER"] = (
+                "1" if use_batch_decode_scheduler else "0"
+            )
 
         logging.info(f"Starting server with engine CLI: {engine_cli}")
         logging.info(f"remaining_args (raw list): {self._remaining_args}")
@@ -35,15 +44,21 @@ class EngineServer:
             process_file_name="process.log",
             smoke_args_str=engine_cli,
         )
-        if not self._server.start_server():
-            self._server.print_process_log()
-            raise RuntimeError(
-                "Engine server failed to start. Check process.log above for details."
-            )
+        try:
+            if not self._server.start_server(timeout=server_start_timeout):
+                self._server.print_process_log()
+                raise RuntimeError(
+                    "Engine server failed to start. Check process.log above for details."
+                )
+        except Exception:
+            self.stop()
+            raise
 
     def stop(self) -> None:
-        if self._server is not None:
-            self._server.stop_server()
+        server = self._server
+        self._server = None
+        if server is not None:
+            server.stop_server()
 
     @property
     def port(self) -> int:

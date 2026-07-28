@@ -9,18 +9,27 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import (
 from rtp_llm.ops import (
     AttentionConfigs,
     FMHAConfig,
-    FMHAType,
     KvCacheDataType,
     ParallelismConfig,
+    RopeStyle,
 )
 from rtp_llm.ops.compute_ops import PyAttentionInputs
 from rtp_llm.utils.model_weight import W
+
+AttentionImpl = Union[FMHAImplBase, MlaImplBase]
+AttentionImplFactory = Callable[..., AttentionImpl]
 
 # Lists to store registered implementations
 PREFILL_MHA_IMPS: List[type[FMHAImplBase]] = []
 DECODE_MHA_IMPS: List[type[FMHAImplBase]] = []
 PREFILL_MLA_IMPS: List[type[MlaImplBase]] = []
 DECODE_MLA_IMPS: List[type[MlaImplBase]] = []
+
+FLASHINFER_TRTLLM_GEN_IMPLS = {
+    "FlashInferTRTLLMPrefillImpl",
+    "FlashInferTRTLLMSpecDecodeImpl",
+    "FlashInferTRTLLMDecodeImpl",
+}
 
 
 def get_mla_impl(
@@ -44,7 +53,8 @@ def get_mla_impl(
         # TODO: support fast path for cp prefill
         use_fast_path = (
             attn_inputs.is_prefill
-            and attn_inputs.cu_kv_seqlens_device.max().item() <= attn_configs.indexer_topk
+            and attn_inputs.cu_kv_seqlens_device.max().item()
+            <= attn_configs.indexer_topk
             and not (
                 parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
             )
@@ -100,17 +110,17 @@ def _is_fmha_impl_disabled(
     # XQA implementations
     if "XQA" in impl_class_name:
         return not fmha_config.enable_xqa
-    # TRT implementations
-    elif impl_class_name == "TRTMHAImpl":
-        return not fmha_config.enable_trt_fmha
-    elif impl_class_name == "TRTPagedMHAImpl":
-        return not fmha_config.enable_paged_trt_fmha
-    # FlashInfer TRTLLM implementations
-    elif "FlashInferTRTLLM" in impl_class_name:
-        return fmha_config.disable_flash_infer
-    # FlashInfer implementations
+    # FlashInfer TRT-LLM FMHA v2 implementations
+    elif impl_class_name == "FlashInferTRTLLMFMHAv2PrefillImpl":
+        return not fmha_config.enable_flashinfer_trt_fmha_v2
+    elif impl_class_name == "FlashInferTRTLLMFMHAv2PagedPrefillImpl":
+        return not fmha_config.enable_paged_flashinfer_trt_fmha_v2
+    # FlashInfer TRT-LLM Gen implementations (SM100)
+    elif impl_class_name in FLASHINFER_TRTLLM_GEN_IMPLS:
+        return not fmha_config.enable_flashinfer_trtllm_gen
+    # FlashInfer native implementations
     elif "FlashInfer" in impl_class_name or "Flashinfer" in impl_class_name:
-        return fmha_config.disable_flash_infer
+        return fmha_config.disable_flashinfer_native
     # Aiter ASM / Paged prefill
     elif (
         "AiterPrefillImplAsm" in impl_class_name
@@ -174,20 +184,24 @@ def get_fmha_impl(
             # If instantiation fails, continue to next impl
             logging.warning(f"Failed to instantiate {impl_class_name}: {e}")
             continue
-    raise Exception(f"can not find mha type")
+    if (
+        attn_configs.rope_config.style == RopeStyle.Mrope
+        and not attn_configs.rope_config.mrope_interleaved
+    ):
+        raise ValueError(
+            "No registered attention implementation supports non-interleaved MRoPE "
+            "on this backend. Qwen2-VL/Qwen2.5-VL checkpoints use the "
+            "non-interleaved layout by default; do not flip mrope_interleaved because "
+            "that changes RoPE semantics. Use a CUDA backend for these checkpoints."
+        )
+    raise Exception("can not find mha type")
 
 
 class AttnImplFactory(object):
     """Factory class for creating FMHA implementations based on attention_type."""
 
     # FMHA implementation registry - maps attention_type to impl method
-    FMHA_IMPL_REGISTRY: Dict[
-        str,
-        Callable[
-            [AttentionConfigs, ModelWeights, PyAttentionInputs, Optional[FMHAConfig]],
-            Union[FMHAImplBase, MlaImplBase],
-        ],
-    ] = {
+    FMHA_IMPL_REGISTRY: Dict[str, AttentionImplFactory] = {
         "mha": get_fmha_impl,
         "mla": get_mla_impl,
     }
@@ -201,7 +215,7 @@ class AttnImplFactory(object):
         attn_inputs: PyAttentionInputs,
         fmha_config: Optional[FMHAConfig] = None,
         is_cuda_graph: bool = False,
-    ) -> FMHAImplBase:
+    ) -> AttentionImpl:
         # Extract AttentionConfigs from ModelConfig
         attn_configs = model_config.getAttentionConfigs(
             parallelism_config.get_attn_tp_size()
@@ -223,7 +237,7 @@ class AttnImplFactory(object):
         return instance
 
     @classmethod
-    def get_fmha_impl_method(cls, attention_type: str) -> str:
+    def get_fmha_impl_method(cls, attention_type: str) -> AttentionImplFactory:
         """
         Get the appropriate FMHA implementation method based on attention_type.
 

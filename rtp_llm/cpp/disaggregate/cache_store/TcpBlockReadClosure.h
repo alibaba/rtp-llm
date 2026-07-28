@@ -13,7 +13,8 @@ public:
                         TransferConnection::ReadDoneCallback                 callback,
                         BlockReadRequest*                                    request,
                         BlockReadResponse*                                   response,
-                        arpc::ANetRPCController*                             controller);
+                        arpc::ANetRPCController*                             controller,
+                        int                                                  device_id);
     ~TcpBlockReadClosure();
 
 public:
@@ -30,5 +31,6 @@ private:
     BlockReadRequest*        request_;
     BlockReadResponse*       response_;
     arpc::ANetRPCController* controller_;
+    int                      device_id_{-1};
 };
 }  // namespace rtp_llm

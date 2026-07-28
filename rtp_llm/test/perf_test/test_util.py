@@ -3,13 +3,27 @@ import os
 from concurrent.futures import ProcessPoolExecutor
 from typing import Any, Dict, List, Optional, Tuple
 
-from transformers import AutoTokenizer, PreTrainedTokenizerBase
+from transformers import AutoTokenizer
 
 from rtp_llm.utils.fuser import fetch_remote_file_to_local
 
 
-def _load_tokenizer(tokenizer_path: str) -> PreTrainedTokenizerBase:
+def _load_tokenizer(
+    tokenizer_path: str,
+    checkpoint_path: str = "",
+    model_type: str = "",
+) -> Any:
     local_path = fetch_remote_file_to_local(os.path.expanduser(tokenizer_path.strip()))
+    if model_type:
+        from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import (
+            TokenizerFactory,
+        )
+
+        local_checkpoint_path = checkpoint_path or local_path
+        local_checkpoint_path = fetch_remote_file_to_local(
+            os.path.expanduser(local_checkpoint_path.strip())
+        )
+        return TokenizerFactory.create(local_checkpoint_path, local_path, model_type)
     return AutoTokenizer.from_pretrained(local_path, trust_remote_code=True)
 
 

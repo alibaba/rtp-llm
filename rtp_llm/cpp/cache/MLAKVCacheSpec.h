@@ -5,92 +5,94 @@
 #include <string>
 
 #include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
-#include "rtp_llm/cpp/config/ConfigModules.h"
-#include "rtp_llm/models_py/bindings/core/Types.h"
-#include "rtp_llm/cpp/model_utils/AttentionConfig.h"
+#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 
 namespace rtp_llm {
 
 struct MLAKVCacheSpec: public KVCacheSpec {
-    uint32_t kv_lora_rank;
-    uint32_t rope_head_dim;
+    MLAKVCacheSpec() {
+        type = KVCacheSpecType::MultiHeadLatentAttention;
+    }
 
-    MLAKVCacheSpec() = default;
+    static KVCacheSpecPtr build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
+        RTP_LLM_CHECK_WITH_INFO(ctx.attn_config != nullptr,
+                                "KVCacheSpecDesc tag=%s cache_type=%d requires SpecBuildContext.attn_config",
+                                desc.tag.c_str(),
+                                static_cast<int>(desc.cache_type));
 
-    MLAKVCacheSpec(const AttentionConfigs& attn_config, const ParallelismConfig& parallelism_config) {
-        type               = KVCacheSpecType::MultiHeadLatentAttention;
-        layer_num          = 1;  // Will be set by caller
-        local_head_num_kv  = 1;  // mla set local_head_num_kv to 1
-        seq_size_per_block = static_cast<uint32_t>(attn_config.tokens_per_block);
-        kv_lora_rank       = static_cast<uint32_t>(attn_config.kv_lora_rank);
-        rope_head_dim      = static_cast<uint32_t>(attn_config.rope_head_dim);
+        const auto& attn = *ctx.attn_config;
+        RTP_LLM_CHECK_WITH_INFO(attn.kv_lora_rank > 0,
+                                "MLA KVCacheSpecDesc tag=%s requires positive attn_config.kv_lora_rank",
+                                desc.tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(attn.rope_head_dim > 0,
+                                "MLA KVCacheSpecDesc tag=%s requires positive attn_config.rope_head_dim",
+                                desc.tag.c_str());
+
+        auto spec                = std::make_shared<MLAKVCacheSpec>();
+        spec->tag                = desc.tag;
+        spec->seq_size_per_block = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
+        spec->dtype_             = desc.dtype != DataType::TYPE_INVALID ? desc.dtype : ctx.dtype;
+        RTP_LLM_CHECK_WITH_INFO(spec->dtype_ != DataType::TYPE_INVALID,
+                                "KVCacheSpecDesc tag=%s cache_type=%d requires valid dtype",
+                                desc.tag.c_str(),
+                                static_cast<int>(desc.cache_type));
+
+        const bool   is_fp8     = spec->dtype_ == DataType::TYPE_FP8_E4M3 || spec->dtype_ == DataType::TYPE_FP8_E8M0;
+        const size_t no_pe      = static_cast<size_t>(attn.kv_lora_rank);
+        const size_t rope       = static_cast<size_t>(attn.rope_head_dim);
+        spec->nope_per_token = no_pe;
+        spec->rope_per_token = rope;
+        spec->elems_per_token = is_fp8 ? no_pe + no_pe / 128 * 4 + rope * 2 : no_pe + rope;
+
+        return spec;
     }
 
     size_t block_size() const override {
-        auto is_fp8      = (dtype == DataType::TYPE_FP8_E4M3 || dtype == DataType::TYPE_FP8_E8M0);
-        auto single_size = local_head_num_kv * (kv_lora_rank + rope_head_dim);
-        if (is_fp8) {
-            // First 512 bytes: The "quantized NoPE" part, containing 512 float8_e4m3 values.
-            // Next 16 bytes: Scale factors, containing 4 float32 values. The first float32 is the scale for the first
-            // 128 float8_e4m3 values, the second for the next 128, and so on. Last 128 bytes: The "RoPE" part,
-            // containing 64 bfloat16 values. This part is not quantized for accuracy.
-            single_size = local_head_num_kv * (kv_lora_rank + kv_lora_rank / 128 * 4 + rope_head_dim * 2);
-        }
-        return single_size * seq_size_per_block;
+        return elems_per_token * seq_size_per_block;
     }
+
     size_t k_block_size() const override {
-        return local_head_num_kv * kv_lora_rank * seq_size_per_block;
+        return nope_per_token * seq_size_per_block;
     }
+
     size_t v_block_size() const override {
-        return local_head_num_kv * rope_head_dim * seq_size_per_block;
+        return rope_per_token * seq_size_per_block;
     }
 
     size_t block_size_bytes() const override {
-        return block_size() * rtp_llm::getTypeSize(dtype);
+        return block_size() * getTypeSize(dtype_);
     }
+
     size_t k_block_size_bytes() const override {
-        return k_block_size() * rtp_llm::getTypeSize(dtype);
+        return k_block_size() * getTypeSize(dtype_);
     }
+
     size_t v_block_size_bytes() const override {
-        return v_block_size() * rtp_llm::getTypeSize(dtype);
+        return v_block_size() * getTypeSize(dtype_);
     }
 
-    // Static helper function for MLA - no head partitioning
-    static KVPartitionBytes splitKVPartitionBytes(size_t      full_block_bytes,
-                                                  size_t      k_block_bytes,
-                                                  size_t      v_block_bytes,
-                                                  int         heads,
-                                                  int         partition_count,
-                                                  int         partition_id,
-                                                  const char* debug_name) {
-        // Validate basic parameters
-        RTP_LLM_CHECK_WITH_INFO(partition_count > 0, "partition_count must be > 0");
-        RTP_LLM_CHECK_WITH_INFO(partition_id >= 0 && partition_id < partition_count,
-                                "partition_id out of range: %d / %d",
-                                partition_id,
-                                partition_count);
-        RTP_LLM_CHECK_WITH_INFO(heads > 0, "heads must be > 0, got=%d (%s)", heads, debug_name);
-        RTP_LLM_CHECK_WITH_INFO(k_block_bytes + v_block_bytes == full_block_bytes,
-                                "block bytes mismatch (%s): full=%zu k_partition=%zu v_partition=%zu",
-                                debug_name,
-                                full_block_bytes,
-                                k_block_bytes,
-                                v_block_bytes);
+    rtp_llm::DataType memoryLayoutDType() const override {
+        return dtype_;
+    }
 
-        // For MLA implementation, return the full blocks without any head-based partitioning
-        return {0, k_block_bytes, k_block_bytes, v_block_bytes};
+    KVCacheSpecPtr clone() const override {
+        return std::make_shared<MLAKVCacheSpec>(*this);
     }
 
     std::string debugString(size_t indent = 0) const override {
-        const std::string indent_str = std::string(indent, ' ');
-        const std::string indent1    = indent_str + "  ";
-
         std::ostringstream os;
+        os << std::string(indent, ' ') << "MLAKVCacheSpec{\n";
         os << commonDebugString(indent);
-        os << indent1 << "kv_lora_rank=" << kv_lora_rank << "\n";
-        os << indent1 << "rope_head_dim=" << rope_head_dim << "\n";
+        os << std::string(indent, ' ') << "}\n";
         return os.str();
     }
+
+private:
+    DataType dtype_ = DataType::TYPE_INVALID;
+
+    size_t elems_per_token = 0;
+    size_t nope_per_token  = 0;
+    size_t rope_per_token  = 0;
 };
 
 }  // namespace rtp_llm

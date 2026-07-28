@@ -1,5 +1,7 @@
 #include "rtp_llm/models_py/bindings/common/kernels/sm_copy_kernel.h"
 
+#include <stdint.h>
+
 namespace sDevMPS {
 
 // 这部分宏和全局函数调整到这里，避免和RTP冲突
@@ -127,19 +129,62 @@ __global__ void gather_copy_split_kernel(const void** src_kv_cache_ptrs,
     }
 }
 
-// ==================== 优化版：GPU端 offset=0 的变长 Gather/Scatter Kernel ====================
+// ==================== DSV4 memory-cache GPU端 offset=0 的变长 Gather/Scatter Kernel ====================
 
-__global__ void gather_copy_var_nooffset_kernel(const void**  src_ptrs,
-                                                const size_t* sizes,        // 每个源要拷贝的字节数
-                                                const size_t* dst_offsets,  // 目标内存中的前缀和偏移量
-                                                void*         dst,
-                                                int           num_srcs) {
+template<typename T>
+__device__ __forceinline__ void dsv4_copy_typed_region(
+    const char* src_base, char* dst_base, size_t region_size, const size_t tid, const size_t num_threads) {
+    const size_t vec_bytes   = sizeof(T);
+    const size_t vec_num     = region_size / vec_bytes;
+    const size_t vec_payload = vec_num * vec_bytes;
+
+    size_t element_idx = tid;
+#pragma unroll 4
+    while (element_idx < vec_num) {
+        reinterpret_cast<T*>(dst_base)[element_idx] = reinterpret_cast<const T*>(src_base)[element_idx];
+        element_idx += num_threads;
+    }
+
+    for (size_t byte_idx = vec_payload + tid; byte_idx < region_size; byte_idx += num_threads) {
+        dst_base[byte_idx] = src_base[byte_idx];
+    }
+}
+
+__device__ __forceinline__ void
+dsv4_copy_region(const char* src_base, char* dst_base, size_t region_size, const size_t tid, const size_t num_threads) {
+    const auto addr_mask = reinterpret_cast<uintptr_t>(src_base) | reinterpret_cast<uintptr_t>(dst_base);
+    if ((addr_mask & (sizeof(int4) - 1)) == 0) {
+        dsv4_copy_typed_region<int4>(src_base, dst_base, region_size, tid, num_threads);
+        return;
+    }
+    if ((addr_mask & (sizeof(int2) - 1)) == 0) {
+        dsv4_copy_typed_region<int2>(src_base, dst_base, region_size, tid, num_threads);
+        return;
+    }
+    if ((addr_mask & (sizeof(unsigned int) - 1)) == 0) {
+        dsv4_copy_typed_region<unsigned int>(src_base, dst_base, region_size, tid, num_threads);
+        return;
+    }
+    if ((addr_mask & (sizeof(unsigned short) - 1)) == 0) {
+        dsv4_copy_typed_region<unsigned short>(src_base, dst_base, region_size, tid, num_threads);
+        return;
+    }
+
+    for (size_t byte_idx = tid; byte_idx < region_size; byte_idx += num_threads) {
+        dst_base[byte_idx] = src_base[byte_idx];
+    }
+}
+
+__global__ void
+dsv4_memory_cache_gather_copy_var_nooffset_kernel(const void**  src_ptrs,
+                                                  const size_t* sizes,        // 每个源要拷贝的字节数
+                                                  const size_t* dst_offsets,  // 目标内存中的前缀和偏移量
+                                                  void*         dst,
+                                                  int           num_srcs) {
     if (blockIdx.x >= num_srcs)
         return;
     const size_t tid         = threadIdx.x;
     const size_t num_threads = blockDim.x;
-
-    const int bytes_int4 = sizeof(int4);
 
     for (int src_idx = blockIdx.x; src_idx < num_srcs; src_idx += gridDim.x) {
         const size_t cur_size       = sizes[src_idx];
@@ -148,53 +193,19 @@ __global__ void gather_copy_var_nooffset_kernel(const void**  src_ptrs,
         const char* src_base = reinterpret_cast<const char*>(src_ptrs[src_idx]);
         char*       dst_base = reinterpret_cast<char*>(dst) + cur_dst_offset;
 
-        const size_t num_elements_int4 = cur_size / bytes_int4;
-        const size_t total_bytes_int4  = bytes_int4 * num_elements_int4;
-        const size_t remaining_bytes   = cur_size - total_bytes_int4;
-
-        const int    bytes_int2           = sizeof(int2);
-        const size_t num_elements_int2    = remaining_bytes / bytes_int2;
-        const size_t total_bytes_int2     = bytes_int2 * num_elements_int2;
-        const size_t remaining_bytes_char = remaining_bytes - total_bytes_int2;
-
-        size_t element_idx = tid;
-#pragma unroll 4
-        while (element_idx < num_elements_int4) {
-            reinterpret_cast<int4*>(dst_base)[element_idx] = reinterpret_cast<const int4*>(src_base)[element_idx];
-            element_idx += num_threads;
-        }
-
-        if (remaining_bytes == 0)
-            continue;
-
-        char*       dst_base_int2 = dst_base + total_bytes_int4;
-        const char* src_base_int2 = src_base + total_bytes_int4;
-
-        element_idx = tid;
-#pragma unroll 2
-        while (element_idx < num_elements_int2) {
-            reinterpret_cast<int2*>(dst_base_int2)[element_idx] =
-                reinterpret_cast<const int2*>(src_base_int2)[element_idx];
-            element_idx += num_threads;
-        }
-
-        if (tid < remaining_bytes_char) {
-            dst_base_int2[total_bytes_int2 + tid] = src_base_int2[total_bytes_int2 + tid];
-        }
+        dsv4_copy_region(src_base, dst_base, cur_size, tid, num_threads);
     }
 }
 
-__global__ void scatter_copy_var_nooffset_kernel(const void*   src,
-                                                 const size_t* src_offsets,  // 源内存中的前缀和偏移量
-                                                 const size_t* sizes,        // 每个目标要拷贝的字节数
-                                                 void**        dst_ptrs,
-                                                 int           num_dsts) {
+__global__ void dsv4_memory_cache_scatter_copy_var_nooffset_kernel(const void*   src,
+                                                                   const size_t* src_offsets,  // 源内存中的前缀和偏移量
+                                                                   const size_t* sizes,        // 每个目标要拷贝的字节数
+                                                                   void**        dst_ptrs,
+                                                                   int           num_dsts) {
     if (blockIdx.x >= num_dsts)
         return;
     const size_t tid         = threadIdx.x;
     const size_t num_threads = blockDim.x;
-
-    const int bytes_int4 = sizeof(int4);
 
     for (int dst_idx = blockIdx.x; dst_idx < num_dsts; dst_idx += gridDim.x) {
         const size_t cur_size       = sizes[dst_idx];
@@ -203,39 +214,7 @@ __global__ void scatter_copy_var_nooffset_kernel(const void*   src,
         const char* src_base = reinterpret_cast<const char*>(src) + cur_src_offset;
         char*       dst_base = reinterpret_cast<char*>(dst_ptrs[dst_idx]);
 
-        const size_t num_elements_int4 = cur_size / bytes_int4;
-        const size_t total_bytes_int4  = bytes_int4 * num_elements_int4;
-        const size_t remaining_bytes   = cur_size - total_bytes_int4;
-
-        const int    bytes_int2           = sizeof(int2);
-        const size_t num_elements_int2    = remaining_bytes / bytes_int2;
-        const size_t total_bytes_int2     = bytes_int2 * num_elements_int2;
-        const size_t remaining_bytes_char = remaining_bytes - total_bytes_int2;
-
-        size_t element_idx = tid;
-#pragma unroll 4
-        while (element_idx < num_elements_int4) {
-            reinterpret_cast<int4*>(dst_base)[element_idx] = reinterpret_cast<const int4*>(src_base)[element_idx];
-            element_idx += num_threads;
-        }
-
-        if (remaining_bytes == 0)
-            continue;
-
-        char*       dst_base_int2 = dst_base + total_bytes_int4;
-        const char* src_base_int2 = src_base + total_bytes_int4;
-
-        element_idx = tid;
-#pragma unroll 2
-        while (element_idx < num_elements_int2) {
-            reinterpret_cast<int2*>(dst_base_int2)[element_idx] =
-                reinterpret_cast<const int2*>(src_base_int2)[element_idx];
-            element_idx += num_threads;
-        }
-
-        if (tid < remaining_bytes_char) {
-            dst_base_int2[total_bytes_int2 + tid] = src_base_int2[total_bytes_int2 + tid];
-        }
+        dsv4_copy_region(src_base, dst_base, cur_size, tid, num_threads);
     }
 }
 
@@ -271,31 +250,33 @@ void launch_gather_copy_split(const void** src_kv_cache_ptrs,
         src_kv_cache_ptrs, src_kv_scale_ptrs, kv_cache_size, kv_scale_size, dst, num_srcs);
 }
 
-void launch_gather_copy_var_nooffset(const void**  src_ptrs,     // 源指针数组（每个指针已指向实际数据起始位置）
-                                     const size_t* sizes,        // 每个源要拷贝的字节数数组
-                                     const size_t* dst_offsets,  // 目标内存中的前缀和偏移量数组
-                                     void*         dst,          // 目标内存起始地址
-                                     int           num_srcs,     // 源数量
-                                     int           block_num,
-                                     cudaStream_t  stream) {
+void launch_dsv4_memory_cache_gather_copy_var_nooffset(
+    const void**  src_ptrs,     // 源指针数组（每个指针已指向实际数据起始位置）
+    const size_t* sizes,        // 每个源要拷贝的字节数数组
+    const size_t* dst_offsets,  // 目标内存中的前缀和偏移量数组
+    void*         dst,          // 目标内存起始地址
+    int           num_srcs,     // 源数量
+    int           block_num,
+    cudaStream_t  stream) {
     if (block_num == 0) {
         block_num = num_srcs;
     }
-    gather_copy_var_nooffset_kernel<<<block_num, THREADS_PER_BLOCK, 0, stream>>>(
+    dsv4_memory_cache_gather_copy_var_nooffset_kernel<<<block_num, THREADS_PER_BLOCK, 0, stream>>>(
         src_ptrs, sizes, dst_offsets, dst, num_srcs);
 }
 
-void launch_scatter_copy_var_nooffset(const void*   src,          // 源内存起始地址
-                                      const size_t* src_offsets,  // 源内存中的前缀和偏移量数组
-                                      const size_t* sizes,        // 每个目标要拷贝的字节数数组
-                                      void**        dst_ptrs,     // 目标指针数组（每个指针已指向实际写入起始位置）
-                                      int           num_dsts,     // 目标数量
-                                      int           block_num,
-                                      cudaStream_t  stream) {
+void launch_dsv4_memory_cache_scatter_copy_var_nooffset(
+    const void*   src,          // 源内存起始地址
+    const size_t* src_offsets,  // 源内存中的前缀和偏移量数组
+    const size_t* sizes,        // 每个目标要拷贝的字节数数组
+    void**        dst_ptrs,     // 目标指针数组（每个指针已指向实际写入起始位置）
+    int           num_dsts,     // 目标数量
+    int           block_num,
+    cudaStream_t  stream) {
     if (block_num == 0) {
         block_num = num_dsts;
     }
-    scatter_copy_var_nooffset_kernel<<<block_num, THREADS_PER_BLOCK, 0, stream>>>(
+    dsv4_memory_cache_scatter_copy_var_nooffset_kernel<<<block_num, THREADS_PER_BLOCK, 0, stream>>>(
         src, src_offsets, sizes, dst_ptrs, num_dsts);
 }
 
@@ -473,21 +454,21 @@ bool warmup_sm_copy_var_nooffset_kernels(cudaStream_t stream) {
         return false;
     }
 
-    launch_scatter_copy_var_nooffset(d_src,
-                                     reinterpret_cast<const size_t*>(d_prefix),
-                                     reinterpret_cast<const size_t*>(d_sizes),
-                                     reinterpret_cast<void**>(d_dst_ptrs),
-                                     nseg,
-                                     block_num,
-                                     stream);
+    launch_dsv4_memory_cache_scatter_copy_var_nooffset(d_src,
+                                                       reinterpret_cast<const size_t*>(d_prefix),
+                                                       reinterpret_cast<const size_t*>(d_sizes),
+                                                       reinterpret_cast<void**>(d_dst_ptrs),
+                                                       nseg,
+                                                       block_num,
+                                                       stream);
 
-    launch_gather_copy_var_nooffset(reinterpret_cast<const void**>(d_src_ptrs),
-                                    reinterpret_cast<const size_t*>(d_sizes),
-                                    reinterpret_cast<const size_t*>(d_prefix),
-                                    d_dst,
-                                    nseg,
-                                    block_num,
-                                    stream);
+    launch_dsv4_memory_cache_gather_copy_var_nooffset(reinterpret_cast<const void**>(d_src_ptrs),
+                                                      reinterpret_cast<const size_t*>(d_sizes),
+                                                      reinterpret_cast<const size_t*>(d_prefix),
+                                                      d_dst,
+                                                      nseg,
+                                                      block_num,
+                                                      stream);
 
     if (cudaStreamSynchronize(stream) != cudaSuccess) {
         free_var();

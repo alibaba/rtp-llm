@@ -27,4 +27,11 @@ struct BlockInfoPair {
     BlockInfo kv_scale;
 };
 
+struct KVPartitionBytes {
+    size_t k_off = 0;
+    size_t k_sz  = 0;
+    size_t v_off = 0;
+    size_t v_sz  = 0;
+};
+
 }  // namespace rtp_llm

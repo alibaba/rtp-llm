@@ -5,7 +5,10 @@ import unittest
 from typing import List
 
 import torch
+import triton
+import triton.language as tl
 
+from rtp_llm.models_py.triton_kernels.common.offset import linear_offset_64
 from rtp_llm.models_py.triton_kernels.fla import (
     load_initial_state_from_block_map,
     store_ssm_state_to_block_map,
@@ -21,7 +24,32 @@ SSM_STATE_DTYPES = [torch.bfloat16, torch.float32]
 INTERMEDIATE_DTYPE = torch.float32
 
 
+@triton.jit
+def _linear_offset_test_kernel(output, index, stride):
+    tl.store(output, linear_offset_64(index, stride))
+
+
+@triton.jit
+def _constexpr_linear_offset_test_kernel(output, stride):
+    tl.store(output, linear_offset_64(8192, stride))
+
+
 class BlockTest(unittest.TestCase):
+    def test_large_chunk_state_offset_uses_int64(self):
+        output = torch.empty(1, dtype=torch.int64, device="cuda")
+        cases = [
+            (8192, 16 * 128 * 128),
+            (4096, 32 * 128 * 128),
+        ]
+        for chunk_index, ssm_per_chunk in cases:
+            with self.subTest(chunk_index=chunk_index, ssm_per_chunk=ssm_per_chunk):
+                _linear_offset_test_kernel[(1,)](output, chunk_index, ssm_per_chunk)
+                self.assertEqual(output.item(), chunk_index * ssm_per_chunk)
+                self.assertEqual(output.item(), 1 << 31)
+
+        _constexpr_linear_offset_test_kernel[(1,)](output, 16 * 128 * 128)
+        self.assertEqual(output.item(), 1 << 31)
+
     def test_load_initial_state_from_block_map(self):
         device = torch.device("cuda")
         head_nums = [1, 4, 8, 16]
@@ -31,7 +59,11 @@ class BlockTest(unittest.TestCase):
         seq_size_per_block = 16
 
         def test_one_case(
-            k_size: int, head_num: int, bs: int, ssm_state_dtype: torch.dtype
+            k_size: int,
+            head_num: int,
+            bs: int,
+            ssm_state_dtype: torch.dtype,
+            use_narrow_block_map: bool = False,
         ):
             logging.info(
                 f"test_load_initial_state_from_block_map: k_size={k_size} head_num={head_num} bs={bs} "
@@ -66,7 +98,8 @@ class BlockTest(unittest.TestCase):
             )
 
             max_block_num = max(block_num)
-            block_map = torch.ones([bs, max_block_num], dtype=torch.int32)
+            storage_width = max_block_num + int(use_narrow_block_map)
+            block_map = torch.ones([bs, storage_width], dtype=torch.int32)
             offset = 0
             for i in range(bs):
                 block_map[i, : block_num[i]] = torch.arange(
@@ -74,6 +107,8 @@ class BlockTest(unittest.TestCase):
                 )
                 offset += block_num[i]
             block_map = block_map.to(device)
+            if use_narrow_block_map:
+                block_map = block_map[:, :max_block_num]
             prefix_length_t = torch.tensor(
                 prefix_length, device=device, dtype=torch.int32
             )
@@ -101,6 +136,7 @@ class BlockTest(unittest.TestCase):
                 for head_num in head_nums:
                     for bs in batch_size:
                         test_one_case(k_size, head_num, bs, ssm_state_dtype)
+        test_one_case(128, 4, 4, torch.float32, use_narrow_block_map=True)
 
     def test_store_ssm_state_to_block_map(self):
         device = torch.device("cuda")
@@ -118,6 +154,7 @@ class BlockTest(unittest.TestCase):
             prefix_lengths: List[int],
             input_lengths: List[int],
             ssm_state_dtype: torch.dtype,
+            use_narrow_block_map: bool = False,
         ):
             logging.info(
                 f"test_store_ssm_state_to_block_map: k_size={k_size} head_num={head_num} bs={bs} "
@@ -132,7 +169,9 @@ class BlockTest(unittest.TestCase):
             ]
             total_block_num = sum(block_num)
             total_chunk_size = sum(chunk_lengths)
-            block_map = torch.ones([bs, max(block_num)], dtype=torch.int32)
+            map_width = max(block_num)
+            storage_width = map_width + int(use_narrow_block_map)
+            block_map = torch.ones([bs, storage_width], dtype=torch.int32)
             offset = 0
             for i in range(bs):
                 block_map[i, : block_num[i]] = torch.arange(
@@ -176,6 +215,8 @@ class BlockTest(unittest.TestCase):
                 cu_seq_len.append(cu_seq_len[-1] + length)
             cu_seq_len = torch.tensor(cu_seq_len, device=device, dtype=torch.int32)
             block_map_gpu = block_map.to(device)
+            if use_narrow_block_map:
+                block_map_gpu = block_map_gpu[:, :map_width]
             store_ssm_state_to_block_map(
                 h,
                 final_states,
@@ -221,29 +262,36 @@ class BlockTest(unittest.TestCase):
                             prefix_lengths = [
                                 random.randint(1, 10) * seq_size_per_block
                             ]
-                            input_lengths = [
-                                random.randint(10, 1024) for _ in range(bs)
-                            ]
-                            _test_one_case(
-                                k_size,
-                                head_num,
-                                bs,
-                                prefix_lengths,
-                                input_lengths,
-                                ssm_state_dtype,
-                            )
-                            input_lengths = [
-                                random.randint(1, 10) * seq_size_per_block
-                                for _ in range(bs)
-                            ]
-                            _test_one_case(
-                                k_size,
-                                head_num,
-                                bs,
-                                prefix_lengths,
-                                input_lengths,
-                                ssm_state_dtype,
-                            )
+                        input_lengths = [random.randint(10, 1024) for _ in range(bs)]
+                        _test_one_case(
+                            k_size,
+                            head_num,
+                            bs,
+                            prefix_lengths,
+                            input_lengths,
+                            ssm_state_dtype,
+                        )
+                        input_lengths = [
+                            random.randint(1, 10) * seq_size_per_block
+                            for _ in range(bs)
+                        ]
+                        _test_one_case(
+                            k_size,
+                            head_num,
+                            bs,
+                            prefix_lengths,
+                            input_lengths,
+                            ssm_state_dtype,
+                        )
+        _test_one_case(
+            128,
+            4,
+            4,
+            [128, 256, 384, 0],
+            [64, 128, 192, 256],
+            torch.float32,
+            use_narrow_block_map=True,
+        )
 
 
 if __name__ == "__main__":

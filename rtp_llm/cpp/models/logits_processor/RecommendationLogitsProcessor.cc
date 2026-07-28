@@ -43,7 +43,9 @@ RecommendationLogitsProcessor::fromGenerateInput(std::shared_ptr<GenerateInput> 
         }
     }
 
-    const bool needs_token_offset = config->hasNumBeams() || config->num_return_sequences > 1;
+    // Token layout is decided per updateStatus() call from new_tokens shape, not from config.
+    // Keep this legacy flag false for construction/insert compatibility; it must not drive runtime offset.
+    const bool needs_token_offset = false;
     // beam search 与跨序列去重互斥：updateMultiSeqStatus 会重排序列身份，破坏主序列不变量
     // combo_token_size == 1 时 diverge 与 ban 在同一步叠加，易导致采样退化，仅 combo_token_size >= 2 时启用
     // C++ 自校验：num<=1 时 diverge 逻辑天然 no-op（i>0 分支不可达），但仍显式禁用以避免布尔开关处于「已置位但部分配置」状态
@@ -328,13 +330,33 @@ void RecommendationLogitsProcessor::updateStatus(const torch::Tensor& new_tokens
             continue;
         }
 
-        const int64_t offset = info.needs_token_offset ? (info.current_output_length + info.input_length) : 0;
+        const int64_t stride = new_tokens.size(1);
+        RTP_LLM_CHECK_WITH_INFO(
+            stride >= num_new_tokens,
+            "updateStatus token shape mismatch: num_new_tokens=%d, new_tokens.size(1)=%ld",
+            num_new_tokens,
+            stride);
 
-        if (!info.needs_token_offset) {
-            RTP_LLM_CHECK(num_new_tokens == new_tokens.size(1));
+        // Recommendation processor accepts two token layouts from GenerateStream::update:
+        // 1) incremental tokens: [batch, num_new_tokens], used by non-beam sampling and n>1 returns;
+        // 2) full-position tokens: [batch, input_length + output_length], used by beam/variable-beam steps.
+        // The current call's tensor shape is the local contract, avoiding config->hasNumBeams() guessing
+        // which is too coarse for variable beam before expansion.
+        const bool    use_token_offset = stride > num_new_tokens;
+        const int64_t offset = use_token_offset ? (info.current_output_length + info.input_length) : 0;
+
+        if (use_token_offset) {
+            RTP_LLM_CHECK_WITH_INFO(
+                offset + num_new_tokens <= stride,
+                "updateStatus full-position token offset out of range: offset=%ld, num_new_tokens=%d, "
+                "new_tokens.size(1)=%ld, input_length=%d, current_output_length=%d",
+                offset,
+                num_new_tokens,
+                stride,
+                info.input_length,
+                info.current_output_length);
         }
 
-        const int64_t stride = new_tokens.size(1);
         for (int32_t j = 0; j < num_new_tokens; ++j) {
             const int token_id = new_tokens.data_ptr<int>()[i * stride + j + offset];
             if (advanceOneToken(info, token_id, need_broadcast ? &new_combos_per_seq[i] : nullptr)) {

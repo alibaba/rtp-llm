@@ -294,6 +294,9 @@ void runtimeBatchCopy(const BatchCopyParams& params) {
 
                 check_cuda_value(cudaEventSynchronize(copy_params_done));
                 check_cuda_value(cudaEventDestroy(copy_params_done));
+                // The batch-copy kernel reads pointer/size tables from the temporary workspace above.
+                // Keep the workspace alive until the copy is complete before returning to the caller.
+                check_cuda_value(cudaStreamSynchronize(stream));
 
                 check_cuda_error();
             } break;

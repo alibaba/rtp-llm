@@ -26,6 +26,7 @@ class ExceptionType(IntEnum):
     OUTPUT_QUEUE_FULL = 8102
     OUTPUT_QUEUE_IS_EMPTY = 8103
     FINISHED = 8104
+    OUTPUT_QUEUE_NO_UPDATE = 8105
 
     # rpc error
     GET_HOST_FAILED = 8200

@@ -29,13 +29,15 @@ protected:
     }
 
     GenerateStreamPtr createStream(const std::vector<int>& input_tokens = {1, 2, 3, 4, 5, 6},
-                                   bool                    reuse_cache  = false) {
+                                   bool                    reuse_cache  = false,
+                                   RoleType                role_type    = RoleType::PDFUSION) {
         cache_manager_ =
             std::make_shared<KVCacheManager>(init_config(), /*warmup=*/false, /*metrics_reporter=*/nullptr);
         EXPECT_TRUE(cache_manager_->init());
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager_;
         resource_context.reuse_cache   = reuse_cache;
+        resource_context.role_type     = role_type;
 
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
@@ -324,6 +326,23 @@ TEST_F(GenerateStreamStateTest, testLoadInitiatedSkipsAsyncLoadCache) {
 
     // Still no asyncLoadCache context
     ASSERT_FALSE(resource.load_cache_context_);
+}
+
+TEST_F(GenerateStreamStateTest, testPrefillFallbackDecodeGrowsBlocksAfterContext) {
+    auto stream = createStream({1, 2}, /*reuse_cache=*/false, RoleType::PREFILL);
+
+    stream->reportEvent(StreamEvents::CanRun);
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    ASSERT_TRUE(stream->isContextStream());
+    ASSERT_EQ(stream->curBlocksNum(), 1u);
+
+    // PD fallback can continue decoding in the PREFILL role. The next decode
+    // token crosses the two-token test block boundary and needs another column.
+    stream->setIsContextStream(false);
+    stream->setSeqLength(3);
+
+    ASSERT_EQ(stream->moveToNext(), StreamState::RUNNING);
+    EXPECT_EQ(stream->curBlocksNum(), 2u);
 }
 
 TEST_F(GenerateStreamStateTest, testNormalPathTriggersAsyncLoadCache) {

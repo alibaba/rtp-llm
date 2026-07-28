@@ -25,7 +25,7 @@
                         "index": 0,
                         "message": {
                             "role": "assistant",
-                            "content": "当然可以！英语听力方法是一个非常重要的技能",
+                            "content": "当然可以！以下是几个英语听力方法的听力",
                             "partial": false
                         },
                         "finish_reason": "length"

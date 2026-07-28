@@ -55,6 +55,28 @@ cc_library(
 )
 
 cc_library(
+    name = "device_pin",
+    hdrs = [
+        "DevicePin.h",
+    ],
+    deps = [
+        ":core_utils",
+    ] + torch_deps() + select({
+        "//:using_cuda": [
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "@//:using_rocm": [
+            "@local_config_rocm//rocm:rocm_headers",
+            "@local_config_rocm//rocm:rocm",
+        ],
+        "//conditions:default": [],
+    }),
+    copts = copts(),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "error_code",
     hdrs = [
         "ErrorCode.h",

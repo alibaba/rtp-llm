@@ -1,6 +1,18 @@
 load("//:def.bzl", "copts")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
+cc_test(
+    name = "combo_position_ids_validation_test",
+    srcs = ["combo_position_ids_validation_test.cc"],
+    copts = copts(),
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+    deps = [
+        "//rtp_llm/cpp/cuda_graph:combo_position_ids_validation",
+        "@com_google_googletest//:gtest_main",
+    ] + torch_deps(),
+)
+
 cc_library(
     name = "test_cuda_graph_runner_libs",
     srcs = [
@@ -29,6 +41,7 @@ py_library(
     name = "cuda_graph_test_utils",
     srcs = ["cuda_graph_test_utils.py"],
     deps = [
+        "//rtp_llm/models_py:utils",
         "//rtp_llm/test/model_test/test_util:test_util",
     ],
     visibility = ["//visibility:public"],
@@ -78,6 +91,26 @@ py_test(
         "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
         "SEQ_SIZE_PER_BLOCK": "64",
         "ACT_TYPE": "BF16",
+    },
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
+py_test(
+    name = "cuda_graph_tagged_cache_test",
+    srcs = ["cuda_graph_tagged_cache_test.py"],
+    data = [
+        ":test_cuda_graph_runner",
+        "//:th_transformer",
+    ],
+    deps = [
+        ":cuda_graph_test_utils",
+        "//rtp_llm/test/model_test/test_util:test_util",
+    ],
+    env = {
+        "ENABLE_CUDA_GRAPH_DEBUG_MODE": "1",
+        "NOT_USE_DEFAULT_STREAM": "1",
+        "TEST_USING_DEVICE": "CUDA",
     },
     tags = ["H20"],
     exec_properties = {"gpu": "H20"},

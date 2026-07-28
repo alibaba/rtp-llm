@@ -230,6 +230,10 @@ class EngineConfig:
 
         # role_config.role_type property automatically converts string to RoleType enum
         pd_sep_config.role_type = py_env_configs.role_config.role_type
+        # Cache topology construction consumes the role from ParallelismConfig.
+        # Keep it aligned with the PD role so prefill CP builds rank-local
+        # STATE/SWA layouts while decode builds the corresponding full layout.
+        parallelism_config.role_type = pd_sep_config.role_type
 
         if nccl_comm_config is None:
             nccl_comm_config = NcclCommConfig(

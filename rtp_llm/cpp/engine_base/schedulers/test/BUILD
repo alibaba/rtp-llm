@@ -29,7 +29,9 @@ cc_test(
     ],
     data = [],
     copts = copts() + ["-fno-access-control"],
-    deps = test_deps,
+    deps = test_deps + [
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
+    ],
     env = {
         "TEST_USING_DEVICE": "CUDA",
     },

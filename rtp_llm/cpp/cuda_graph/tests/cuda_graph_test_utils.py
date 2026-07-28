@@ -15,13 +15,8 @@ from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
-from rtp_llm.ops.compute_ops import (
-    CacheGroupType,
-    KVCache,
-    PyModelInputs,
-    get_scalar_type,
-    init_exec_ctx,
-)
+from rtp_llm.models_py.utils.kvcache import SingleGroupKVCacheAdapter
+from rtp_llm.ops.compute_ops import PyModelInputs, get_scalar_type, init_exec_ctx
 from rtp_llm.tools.api.hf_model_helper import get_model_info_from_hf
 
 
@@ -46,7 +41,7 @@ class ModelBuildResult:
     model: GptModelBase
     model_config: object
     compute_dtype: torch.dtype
-    kv_cache: Optional[KVCache] = None
+    kv_cache: Optional[SingleGroupKVCacheAdapter] = None
     layer_num: int = 0
     block_nums: int = 0
     kv_head_num: int = 0
@@ -176,7 +171,6 @@ class CudaGraphTestModelBuilder:
 
     def _init_kv_cache(self, result: ModelBuildResult, model_config) -> None:
         """Initialize KV cache, similar to auto_model.py"""
-        result.kv_cache = KVCache()
         result.layer_num = model_config.num_layers
         result.kv_head_num = model_config.attn_config.kv_head_num
         result.size_per_head = model_config.attn_config.size_per_head
@@ -184,11 +178,6 @@ class CudaGraphTestModelBuilder:
         result.kernel_tokens_per_block = (
             model_config.attn_config.kernel_tokens_per_block
         )
-
-        result.kv_cache.seq_size_per_block = result.tokens_per_block
-        result.kv_cache.kernel_seq_size_per_block = result.kernel_tokens_per_block
-        result.kv_cache.num_kv_heads = result.kv_head_num
-        result.kv_cache.head_dim = result.size_per_head
 
         result.block_nums = math.ceil(
             self.config.max_total_tokens / result.kernel_tokens_per_block
@@ -212,12 +201,10 @@ class CudaGraphTestModelBuilder:
             kv_shape, dtype=result.compute_dtype, device=self.config.device
         )
 
-        result.kv_cache.layer_attn_types = [
-            CacheGroupType.FULL for _ in range(result.layer_num)
-        ]
-        result.kv_cache.kv_cache_base_by_layer = [
-            kv_cache_total[i] for i in range(result.layer_num)
-        ]
+        result.kv_cache = SingleGroupKVCacheAdapter(
+            [kv_cache_total[i] for i in range(result.layer_num)],
+            result.kernel_tokens_per_block,
+        )
 
 
 def profile_normal_forward(
@@ -324,10 +311,10 @@ def print_py_model_inputs_full(
     print_tensor_int("sequence_lengths", getattr(a, "sequence_lengths", None), 32)
     print_tensor_int("prefix_lengths", getattr(a, "prefix_lengths", None), 32)
     print_tensor_int("cu_seqlens_device", getattr(a, "cu_seqlens_device", None), 32)
-    print_tensor_int("cu_kv_seqlens_device", getattr(a, "cu_kv_seqlens_device", None), 32)
     print_tensor_int(
-        "decode_cu_seqlens", getattr(a, "decode_cu_seqlens", None), 32
+        "cu_kv_seqlens_device", getattr(a, "cu_kv_seqlens_device", None), 32
     )
+    print_tensor_int("decode_cu_seqlens", getattr(a, "decode_cu_seqlens", None), 32)
     print_tensor_int("padding_offset", getattr(a, "padding_offset", None), 256)
     print(
         f"  attention_inputs.kv_cache_block_id: defined={a.kv_cache_block_id is not None} sizes=[{sizes(a.kv_cache_block_id)}]"
@@ -335,12 +322,20 @@ def print_py_model_inputs_full(
     print(
         f"  attention_inputs.kv_cache_block_id_device: defined={a.kv_cache_block_id_device is not None} sizes=[{sizes(a.kv_cache_block_id_device)}]"
     )
-    print_tensor_int("prefix_lengths_device", getattr(a, "prefix_lengths_device", None), 32)
     print_tensor_int(
-        "sequence_lengths_plus_1_device", getattr(a, "sequence_lengths_plus_1_device", None), 32
+        "prefix_lengths_device", getattr(a, "prefix_lengths_device", None), 32
     )
-    print_tensor_int("input_lengths_device", getattr(a, "input_lengths_device", None), 32)
-    print_tensor_int("decode_cu_seqlens_device", getattr(a, "decode_cu_seqlens_device", None), 32)
+    print_tensor_int(
+        "sequence_lengths_plus_1_device",
+        getattr(a, "sequence_lengths_plus_1_device", None),
+        32,
+    )
+    print_tensor_int(
+        "input_lengths_device", getattr(a, "input_lengths_device", None), 32
+    )
+    print_tensor_int(
+        "decode_cu_seqlens_device", getattr(a, "decode_cu_seqlens_device", None), 32
+    )
     dtype_obj = getattr(a, "dtype", None)
     if dtype_obj is not None:
         try:

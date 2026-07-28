@@ -440,65 +440,43 @@ TEST_F(RecommendationLogitsProcessorTest, testUpdateMultiSeqStatusWorksWhenCross
     EXPECT_EQ(processor->infos().size(), 2u);
 }
 
-// 场景 16：通过 fromGenerateInput 走生产路径（needs_token_offset=true, enable_cross_seq_ban=true）
-// 验证 updateStatus 在 offset = current_output_length + input_length 路径下正确工作
+// 场景 16：通过 fromGenerateInput 走多返回生产路径（num_return_sequences>1 但非 beam）
+// 验证普通多返回序列按增量 token [N, num_new_tokens] 读取，不触发 full-position offset。
 TEST_F(RecommendationLogitsProcessorTest, testFromGenerateInputProductionPath) {
-    // 配置：combo_token_size=3, num_return_sequences=3, enable_cross_sequence_ban=true
-    // 生产中 needs_token_offset = hasNumBeams() || num_return_sequences > 1 = true
-    // 注意：needs_token_offset 与 enable_cross_sequence_ban 不互斥，
-    // 互斥的是 hasNumBeams()（即真正的 beam search），这里 num_return_sequences>1 触发 offset 但不是 beam search。
     auto generate_input             = std::make_shared<GenerateInput>();
     generate_input->generate_config = std::make_shared<GenerateConfig>();
-    generate_input->generate_config->combo_token_size          = 3;
-    generate_input->generate_config->num_return_sequences      = 3;
-    generate_input->generate_config->enable_cross_sequence_ban = true;
+    generate_input->generate_config->combo_token_size              = 3;
+    generate_input->generate_config->num_return_sequences          = 3;
+    generate_input->generate_config->enable_cross_sequence_ban     = true;
     generate_input->generate_config->cross_seq_diverge_start_combo = 0;
-    generate_input->generate_config->banned_combo_token_ids    = {};
+    generate_input->generate_config->banned_combo_token_ids        = {};
     generate_input->input_ids = torch::zeros({4}, torch::kInt32);  // input_length=4
 
     auto p = RecommendationLogitsProcessor::fromGenerateInput(generate_input, 3);
     ASSERT_NE(nullptr, p);
     ASSERT_EQ(3u, p->size());
 
-    // 验证 needs_token_offset=true 和 enable_cross_sequence_ban=true
     for (const auto& info : p->infos()) {
-        EXPECT_TRUE(info.needs_token_offset);
+        EXPECT_FALSE(info.needs_token_offset);
         EXPECT_TRUE(info.enable_cross_sequence_ban);
         EXPECT_EQ(4, info.input_length);
     }
 
-    // 模拟 updateStatus （needs_token_offset=true 路径）
-    // tensor 形状 [N, input_length + total_output_length]
-    // 第一步：output_length=0，offset=0+4=4，张量的第 4 列是新 token
-    int input_len = 4;
-    auto tokens_step1 = torch::zeros({3, input_len + 1}, torch::kInt32);
-    // 序列 0 生成 token 10，序列 1 生成 token 20，序列 2 生成 token 30
-    tokens_step1[0][input_len] = 10;
-    tokens_step1[1][input_len] = 20;
-    tokens_step1[2][input_len] = 30;
+    auto tokens_step1 = torch::tensor({{10}, {20}, {30}}, torch::kInt32);
     p->updateStatus(tokens_step1, 1);
 
-    // 每个序列 pos_in_combo 应该前进到 1
     for (const auto& info : p->infos()) {
         EXPECT_EQ(1, info.pos_in_combo);
     }
 
-    // 第二步：output_length=1，offset=1+4=5
-    auto tokens_step2 = torch::zeros({3, input_len + 2}, torch::kInt32);
-    tokens_step2[0][input_len + 1] = 11;
-    tokens_step2[1][input_len + 1] = 21;
-    tokens_step2[2][input_len + 1] = 31;
+    auto tokens_step2 = torch::tensor({{11}, {21}, {31}}, torch::kInt32);
     p->updateStatus(tokens_step2, 1);
 
     for (const auto& info : p->infos()) {
         EXPECT_EQ(2, info.pos_in_combo);
     }
 
-    // 第三步：output_length=2，offset=2+4=6，combo 完成
-    auto tokens_step3 = torch::zeros({3, input_len + 3}, torch::kInt32);
-    tokens_step3[0][input_len + 2] = 12;
-    tokens_step3[1][input_len + 2] = 22;
-    tokens_step3[2][input_len + 2] = 32;
+    auto tokens_step3 = torch::tensor({{12}, {22}, {32}}, torch::kInt32);
     p->updateStatus(tokens_step3, 1);
 
     // combo 完成，非对称广播：序列 0 仅有自己的，序列 1/2 有所有的
@@ -511,60 +489,47 @@ TEST_F(RecommendationLogitsProcessorTest, testFromGenerateInputProductionPath) {
     EXPECT_TRUE(p->infos()[1].banned_combos.count({30, 31, 32}));
 }
 
-// 场景 17：needs_token_offset=true + num_new_tokens>1 组合路径
-// 验证 updateStatus 在 offset>0 且 j>0 时索引算术 [i*stride + j + offset] 正确
+// 场景 17：beam search 下保留 full-position token 矩阵路径
+// 验证 updateStatus 基于 new_tokens shape 动态启用 offset，曝光过滤/生成去重仍兼容 beam。
 TEST_F(RecommendationLogitsProcessorTest, testOffsetWithMultiTokenAdvance) {
-    // 配置：combo_token_size=2, num_return_sequences=2, enable_cross_sequence_ban=true
-    // needs_token_offset=true (num_return_sequences > 1)
     auto generate_input             = std::make_shared<GenerateInput>();
     generate_input->generate_config = std::make_shared<GenerateConfig>();
-    generate_input->generate_config->combo_token_size          = 2;
-    generate_input->generate_config->num_return_sequences      = 2;
-    generate_input->generate_config->enable_cross_sequence_ban = true;
+    generate_input->generate_config->combo_token_size              = 2;
+    generate_input->generate_config->num_beams                     = 2;
+    generate_input->generate_config->num_return_sequences          = 2;
+    generate_input->generate_config->enable_cross_sequence_ban     = false;
     generate_input->generate_config->cross_seq_diverge_start_combo = 0;
-    generate_input->generate_config->banned_combo_token_ids    = {};
+    generate_input->generate_config->banned_combo_token_ids        = {};
     generate_input->input_ids = torch::zeros({3}, torch::kInt32);  // input_length=3
 
     auto p = RecommendationLogitsProcessor::fromGenerateInput(generate_input, 2);
     ASSERT_NE(nullptr, p);
     ASSERT_EQ(2u, p->size());
     for (const auto& info : p->infos()) {
-        EXPECT_TRUE(info.needs_token_offset);
+        EXPECT_FALSE(info.needs_token_offset);
+        EXPECT_FALSE(info.enable_cross_sequence_ban);
         EXPECT_EQ(3, info.input_length);
     }
 
-    // 一次推进 2 个 token (num_new_tokens=2)
-    // 当前状态：current_output_length=0，offset = 0 + 3 = 3
-    // tensor 形状 [2, input_length + num_new_tokens] = [2, 5]
-    // 序列 i 的 token 在 row i，列 offset+j = 3+0, 3+1
     const int input_len = 3;
     const int num_new = 2;
     auto tokens = torch::zeros({2, input_len + num_new}, torch::kInt32);
-    // 序列 0: token at col 3 = 10, col 4 = 11 → combo [10,11] 完成
     tokens[0][input_len + 0] = 10;
     tokens[0][input_len + 1] = 11;
-    // 序列 1: token at col 3 = 20, col 4 = 21 → combo [20,21] 完成
     tokens[1][input_len + 0] = 20;
     tokens[1][input_len + 1] = 21;
 
     p->updateStatus(tokens, num_new);
 
-    // 两个序列各完成 1 个 combo
-    EXPECT_EQ(0, p->infos()[0].pos_in_combo);  // combo 完成后重置为 0
+    EXPECT_EQ(0, p->infos()[0].pos_in_combo);
     EXPECT_EQ(1, p->infos()[0].completed_combo_count);
     EXPECT_TRUE(p->infos()[0].banned_combos.count({10, 11}));
 
     EXPECT_EQ(0, p->infos()[1].pos_in_combo);
     EXPECT_EQ(1, p->infos()[1].completed_combo_count);
     EXPECT_TRUE(p->infos()[1].banned_combos.count({20, 21}));
+    EXPECT_FALSE(p->infos()[1].banned_combos.count({10, 11}));
 
-    // 跨序列广播：序列 1 收到序列 0 的 combo，序列 0（主序列）不收
-    EXPECT_TRUE(p->infos()[1].banned_combos.count({10, 11}));
-    EXPECT_FALSE(p->infos()[0].banned_combos.count({20, 21}));
-
-    // 第二步：current_output_length=2，offset = 2 + 3 = 5
-    // tensor 形状 [2, input_length + total_output_length] = [2, 7]
-    // 新 token 在列 5, 6
     auto tokens2 = torch::zeros({2, input_len + num_new + num_new}, torch::kInt32);
     tokens2[0][input_len + num_new + 0] = 30;
     tokens2[0][input_len + num_new + 1] = 31;
@@ -573,14 +538,58 @@ TEST_F(RecommendationLogitsProcessorTest, testOffsetWithMultiTokenAdvance) {
 
     p->updateStatus(tokens2, num_new);
 
-    // 序列 0: 第 2 个 combo [30,31] 完成
     EXPECT_EQ(2, p->infos()[0].completed_combo_count);
     EXPECT_TRUE(p->infos()[0].banned_combos.count({30, 31}));
-    // 序列 1: 第 2 个 combo [40,41] 完成
     EXPECT_EQ(2, p->infos()[1].completed_combo_count);
     EXPECT_TRUE(p->infos()[1].banned_combos.count({40, 41}));
-    // 序列 1 收到序列 0 的 [30,31]
-    EXPECT_TRUE(p->infos()[1].banned_combos.count({30, 31}));
+    EXPECT_FALSE(p->infos()[1].banned_combos.count({30, 31}));
+}
+
+// 场景 17b：variable beam 扩束前可能仍传增量 token，不能因 config->hasNumBeams() 误走 offset。
+// 第一轮用 [N,1] 增量 token，扩束后再用 full-position 矩阵，验证两种布局可在同一 processor 生命周期内切换。
+TEST_F(RecommendationLogitsProcessorTest, testDynamicTokenLayoutBeforeAndAfterBeamExpansion) {
+    auto generate_input             = std::make_shared<GenerateInput>();
+    generate_input->generate_config = std::make_shared<GenerateConfig>();
+    generate_input->generate_config->combo_token_size              = 2;
+    generate_input->generate_config->num_beams                     = 1;
+    generate_input->generate_config->variable_num_beams            = {1, 2};
+    generate_input->generate_config->num_return_sequences          = 2;
+    generate_input->generate_config->enable_cross_sequence_ban     = false;
+    generate_input->generate_config->cross_seq_diverge_start_combo = 0;
+    generate_input->generate_config->banned_combo_token_ids        = {};
+    generate_input->input_ids = torch::zeros({3}, torch::kInt32);  // input_length=3
+
+    auto p = RecommendationLogitsProcessor::fromGenerateInput(generate_input, 1);
+    ASSERT_NE(nullptr, p);
+    ASSERT_EQ(1u, p->size());
+    EXPECT_FALSE(p->infos()[0].needs_token_offset);
+    EXPECT_FALSE(p->infos()[0].enable_cross_sequence_ban);
+
+    // 扩束前：虽然 config.hasNumBeams() 为 true，但本轮 new_tokens 仍是增量 [N,1]。
+    auto incremental_tokens = torch::tensor({{10}}, torch::kInt32);
+    p->updateStatus(incremental_tokens, 1);
+    EXPECT_EQ(1, p->infos()[0].pos_in_combo);
+    EXPECT_EQ(1, p->infos()[0].current_output_length);
+
+    // 模拟 beam 扩束重排：两个 beam 都继承扩束前的前缀状态。
+    p->updateMultiSeqStatus({0, 0});
+    ASSERT_EQ(2u, p->size());
+    EXPECT_EQ(1, p->infos()[0].pos_in_combo);
+    EXPECT_EQ(1, p->infos()[1].pos_in_combo);
+
+    const int input_len = 3;
+    auto full_position_tokens = torch::zeros({2, input_len + 2}, torch::kInt32);
+    full_position_tokens[0][input_len + 1] = 11;
+    full_position_tokens[1][input_len + 1] = 21;
+
+    p->updateStatus(full_position_tokens, 1);
+
+    EXPECT_EQ(0, p->infos()[0].pos_in_combo);
+    EXPECT_EQ(1, p->infos()[0].completed_combo_count);
+    EXPECT_TRUE(p->infos()[0].banned_combos.count({10, 11}));
+    EXPECT_EQ(0, p->infos()[1].pos_in_combo);
+    EXPECT_EQ(1, p->infos()[1].completed_combo_count);
+    EXPECT_TRUE(p->infos()[1].banned_combos.count({10, 21}));
 }
 
 // 场景 18：top-K 遮蔽深度上界保护 —— num_return_sequences=12 时，序列 11 的遮蔽深度

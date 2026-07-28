@@ -6,7 +6,7 @@ from torch import nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, all_reduce
-from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
+from rtp_llm.models_py.model_desc.block_map import select_fmha_impl_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     CausalAttention,
@@ -99,7 +99,15 @@ class GenericMoeLayer(nn.Module):
             self.shared_expert = None
         if weights.get(W.shared_expert_gate, None) is not None:
             self.shared_expert_gate = LinearFactory.create_linear_from_weights(
-                weights, W.shared_expert_gate, None, None, config
+                weights,
+                W.shared_expert_gate,
+                None,
+                None,
+                quant_config=quant_config,
+                # For ROCm devices shared_expert_gate is not pre-swizzled during weight
+                # loading and its single output column does not satisfy the SwizzleA
+                # layout. Keep this scalar projection on the no-swizzle backend.
+                hw_kernel_config=None,
             )
             self.sigmoid_gate_scale_add = SigmoidGateScaleAdd()
         else:
@@ -250,7 +258,11 @@ class GenericMoeDecoderLayer(nn.Module):
         # Determine if this is a Dense layer (before first MoE layer or dense only)
         if layer_idx not in config.moe_layer_index:
             self.mlp = DenseMLP(
-                config.activation_type, parallelism_config, weights, quant_config
+                config.activation_type,
+                parallelism_config,
+                weights,
+                quant_config,
+                hw_kernel_config=hw_kernel_config,
             )
         else:
             self.mlp = GenericMoeLayer(
@@ -355,11 +367,11 @@ class GenericMoeModel(GptModelBase):
             )  # pyright: ignore[reportUnreachable]
         residual = torch.zeros_like(hidden_states)
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
-            select_block_map_for_layer(inputs.attention_inputs, i)
+            layer_fmha_impl = select_fmha_impl_for_layer(fmha_impl, self.kv_cache, i)
             output = decoder_layer(
                 hidden_states,
                 residual,
-                fmha_impl,
+                layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
             )
             hidden_states = output.hidden_states
@@ -367,7 +379,7 @@ class GenericMoeModel(GptModelBase):
 
         hidden_states, _ = self.norm(hidden_states, residual)
 
-        return PyModelOutputs(hidden_states, fmha_impl.fmha_params)
+        return PyModelOutputs(hidden_states)
 
 
 __all__ = [

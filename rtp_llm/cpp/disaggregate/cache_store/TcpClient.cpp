@@ -77,12 +77,13 @@ std::shared_ptr<arpc::RPCChannelBase> TcpClient::openChannel(const std::string& 
         dynamic_cast<arpc::RPCChannelBase*>(rpc_channel_manager_->OpenChannel(spec, false, 1000ul)));
 }
 
-std::shared_ptr<TransferConnection> TcpClient::getTransferConnection(const std::string& ip, uint32_t port) {
+std::shared_ptr<TransferConnection>
+TcpClient::getTransferConnection(const std::string& ip, uint32_t port, int device_id) {
     auto channel = getChannel(ip, port);
     if (channel == nullptr) {
         return nullptr;
     }
-    return std::make_shared<TcpTransferConnection>(channel);
+    return std::make_shared<TcpTransferConnection>(channel, device_id);
 }
 
 }  // namespace rtp_llm

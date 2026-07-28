@@ -93,6 +93,22 @@ def init_parallel_group_args(
         help="指定用于上下文并行通信的缓冲区大小，单位为字节。默认值为 512MB。",
     )
     parallel_group.add_argument(
+        "--prefill_cp_kv_cache_sharded",
+        env_name="PREFILL_CP_KV_CACHE_SHARDED",
+        bind_to=(prefill_cp_config, "kv_cache_sharded"),
+        type=str2bool,
+        default=False,
+        help="开启后 prefill 节点的 paged KV pool 按 logical block round-robin 切到各 CP rank，每卡只存 1/cp_size。需 PD 分离 + reuse cache。",
+    )
+    parallel_group.add_argument(
+        "--prefill_cp_size",
+        env_name="PREFILL_CP_SIZE",
+        bind_to=(prefill_cp_config, "prefill_cp_size"),
+        type=int,
+        default=0,
+        help="显式指定 prefill CP size，供 decode 侧 fixed/SWA cache ring sizing 使用。",
+    )
+    parallel_group.add_argument(
         "--use_ub_comm",
         env_name="USE_UB_COMM",
         bind_to=(parallelism_config, "use_ub_comm"),

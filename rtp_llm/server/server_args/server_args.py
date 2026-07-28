@@ -481,7 +481,14 @@ def init_all_group_args(
     init_grpc_group_args(parser, py_env_configs.grpc_config)
 
 
-def setup_args() -> PyEnvConfigs:
+def setup_args(args: Optional[Sequence[str]] = None) -> PyEnvConfigs:
+    """Parse engine arguments into the canonical ``PyEnvConfigs`` object.
+
+    ``args=None`` preserves the server entry point behavior (parse ``sys.argv``).
+    Supplying an explicit sequence lets in-process tools, such as the offline
+    capacity estimator, reuse the exact same parser and config bindings without
+    temporarily replacing global process arguments.
+    """
     parser = EnvArgumentParser(description="RTP LLM")
 
     # 先创建配置对象
@@ -494,6 +501,6 @@ def setup_args() -> PyEnvConfigs:
     init_all_group_args(parser, py_env_configs)
 
     # 解析参数（会自动应用所有配置绑定）
-    parsed_args = parser.parse_args()
+    parser.parse_args(args)
 
     return py_env_configs

@@ -34,7 +34,7 @@ FIFOScheduler::~FIFOScheduler() {
 }
 
 bool FIFOScheduler::evaluateRunningMemory(const list<GenerateStreamPtr>& streams,
-                                          const GenerateStreamPtr&       new_stream) const {
+                                          const GenerateStreamPtr&       new_stream) {
     RTP_LLM_PROFILE_FUNCTION();
     if (pd_sep_config_.role_type == RoleType::DECODE) {
         if (running_streams_.size() + streams.size() + 1 < max_generate_batch_size_) {

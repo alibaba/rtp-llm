@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <unordered_map>
 #include <vector>
 #include <pybind11/embed.h>
@@ -34,8 +35,7 @@ public:
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         model_data_type_(graph_params.model_data_type),
-        kv_cache_layer_to_group_(graph_params.kv_cache_layer_to_group),
-        kv_cache_group_num_(graph_params.kv_cache_group_num),
+        kv_cache_group_tags_(graph_params.kv_cache_group_tags),
         position_id_len_factor_(graph_params.position_id_len_factor) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
@@ -116,6 +116,11 @@ private:
     bool tryGetRealGraphDecodeBatchSize(const PyModelInputs& inputs, CudaGraphState& state);
     /// Select graph key for prefill; false if capture_range_ empty or seq_len above max captured (lower_bound hit end).
     bool                    tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, CudaGraphState& state);
+    bool                    validateComboPositionIds(const PyModelInputs&  inputs,
+                                                     const CudaGraphState& state,
+                                                     const torch::Tensor&  captured_position_ids,
+                                                     size_t&               copy_numel) const;
+    bool                    canReplaySelectedGraph(const PyModelInputs& inputs, const CudaGraphState& state) const;
     void                    initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs);
     void                    initCaptureBertEmbeddingInputs(PyModelInputs& inputs, int max_bs, int max_num_token);
     void                    initCaptureAttentionInputsPost();
@@ -150,9 +155,9 @@ private:
     at::TensorOptions                      options_cuda_float_;
     cuda_graph::GraphPoolHandle            shared_graph_pool_{};
 
-    std::vector<int32_t> kv_cache_layer_to_group_;
-    int32_t              kv_cache_group_num_     = 0;
-    int                  position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
+    std::vector<std::string>      kv_cache_group_tags_;
+    int                           position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
+    mutable std::atomic<uint64_t> combo_position_fallback_count_{0};
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();

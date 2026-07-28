@@ -22,11 +22,12 @@ enum class ErrorCode {
     MM_DOWNLOAD_FAILED     = 906,
 
     // Error codes starting from 8000 can be retried
-    CANCELLED             = 8100,
-    OUT_OF_VOCAB_RANGE    = 8101,
-    OUTPUT_QUEUE_FULL     = 8102,
-    OUTPUT_QUEUE_IS_EMPTY = 8103,
-    FINISHED              = 8104,
+    CANCELLED              = 8100,
+    OUT_OF_VOCAB_RANGE     = 8101,
+    OUTPUT_QUEUE_FULL      = 8102,
+    OUTPUT_QUEUE_IS_EMPTY  = 8103,
+    FINISHED               = 8104,
+    OUTPUT_QUEUE_NO_UPDATE = 8105,
 
     // rpc error
     GET_HOST_FAILED                       = 8200,
@@ -108,6 +109,8 @@ inline std::string ErrorCodeToString(ErrorCode code) {
             return "OUTPUT_QUEUE_IS_EMPTY";
         case ErrorCode::FINISHED:
             return "FINISHED";
+        case ErrorCode::OUTPUT_QUEUE_NO_UPDATE:
+            return "OUTPUT_QUEUE_NO_UPDATE";
         case ErrorCode::EXCEEDS_KV_CACHE_MAX_LEN:
             return "EXCEEDS_KV_CACHE_MAX_LEN";
         case ErrorCode::GET_HOST_FAILED:
@@ -215,14 +218,11 @@ class ErrorInfo {
 public:
     ErrorInfo() {}
     ErrorInfo(ErrorCode code, const std::string& message): code_(code), message_(message) {}
-    ErrorInfo(const ErrorInfo& other): code_(other.code_), message_(other.message_) {}
-    ErrorInfo& operator=(const ErrorInfo& other) {
-        if (this != &other) {
-            code_    = other.code_;
-            message_ = other.message_;
-        }
-        return *this;
-    }
+    ErrorInfo(ErrorCode code, std::string&& message): code_(code), message_(std::move(message)) {}
+    ErrorInfo(const ErrorInfo& other)            = default;
+    ErrorInfo(ErrorInfo&& other)                 = default;
+    ErrorInfo& operator=(const ErrorInfo& other) = default;
+    ErrorInfo& operator=(ErrorInfo&& other)      = default;
 
     const std::string& ToString() const {
         return message_;

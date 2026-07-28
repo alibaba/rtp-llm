@@ -27,7 +27,8 @@ bool TcpMessager::init(MessagerInitParams params) {
                                                           metrics_reporter_,
                                                           timer_manager_,
                                                           locked_block_buffer_manager_,
-                                                          tcp_client_);
+                                                          tcp_client_,
+                                                          init_params_.device_id);
     if (!tcp_server_->registerService(service_.get())) {
         RTP_LLM_LOG_WARNING("messager init failed, tcp server register service failed");
         return false;
@@ -70,7 +71,8 @@ void TcpMessager::load(const std::shared_ptr<LoadRequest>&                      
                                                         load_request,
                                                         load_response,
                                                         request->callback,
-                                                        collector);
+                                                        collector,
+                                                        init_params_.device_id);
 
     collector->markRequestCallBegin();
     KvCacheStoreService_Stub stub((::google::protobuf::RpcChannel*)(channel.get()),

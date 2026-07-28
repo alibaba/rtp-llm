@@ -1,5 +1,5 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
+load("//bazel:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
@@ -29,6 +29,7 @@ cc_test(
         "//rtp_llm/cpp/cache/connector:connector",
         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
         "//rtp_llm/cpp/cache/connector/memory/test/mock:mock_memory_connector_lib",
+        "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
         "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
     ],

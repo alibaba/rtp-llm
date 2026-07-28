@@ -1,15 +1,36 @@
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 #include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/utils/DevicePin.h"
 
 namespace rtp_llm {
 
-CacheStoreAsyncWriter::CacheStoreAsyncWriter() {
+CacheStoreAsyncWriter::PendingTaskGuard::PendingTaskGuard(CacheStoreAsyncWriter& writer): writer_(writer) {}
+
+CacheStoreAsyncWriter::PendingTaskGuard::~PendingTaskGuard() {
+    writer_.completePendingTask();
+}
+
+CacheStoreAsyncWriter::CacheStoreAsyncWriter(int device_id): device_id_(device_id) {
     constexpr size_t kThreadCount = 3;
     constexpr size_t kQueueSize   = 10000;
     auto pool = std::make_shared<autil::LockFreeThreadPool>(kThreadCount, kQueueSize, nullptr, "CacheStoreAsync");
     RTP_LLM_CHECK_WITH_INFO(pool->start(), "CacheStoreAsyncWriter: failed to start thread pool");
     thread_pool_ = std::move(pool);
+}
+
+void CacheStoreAsyncWriter::completePendingTask() {
+    if (pending_count_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        std::lock_guard<std::mutex> lock(wait_mutex_);
+        wait_cv_.notify_all();
+    }
+}
+
+void CacheStoreAsyncWriter::storeCurrentException() {
+    std::lock_guard<std::mutex> ex_lock(exception_mutex_);
+    if (!stored_exception_) {
+        stored_exception_ = std::current_exception();
+    }
 }
 
 CacheStoreAsyncWriter::~CacheStoreAsyncWriter() {
@@ -43,26 +64,19 @@ void CacheStoreAsyncWriter::submit(std::function<void()> task) {
     pending_count_.fetch_add(1, std::memory_order_acq_rel);
 
     auto wrapped = [this, task = std::move(task)]() {
+        PendingTaskGuard pending_task_guard(*this);
         try {
+            setCurrentThreadDeviceIfNeeded(device_id_);
             task();
         } catch (...) {
-            {
-                std::lock_guard<std::mutex> ex_lock(exception_mutex_);
-                if (!stored_exception_) {
-                    stored_exception_ = std::current_exception();
-                }
-            }
+            storeCurrentException();
             RTP_LLM_LOG_ERROR("CacheStoreAsyncWriter: background task threw an exception");
-        }
-        if (pending_count_.fetch_sub(1, std::memory_order_acq_rel) == 1) {
-            std::lock_guard<std::mutex> lock(wait_mutex_);
-            wait_cv_.notify_all();
         }
     };
 
     auto rc = thread_pool_->pushTask(std::move(wrapped));
     if (rc != autil::ThreadPoolBase::ERROR_NONE) {
-        pending_count_.fetch_sub(1, std::memory_order_acq_rel);
+        completePendingTask();
         RTP_LLM_CHECK_WITH_INFO(false,
                                 "CacheStoreAsyncWriter: pushTask failed (rc=%d). "
                                 "Queue full or thread pool in bad state.",

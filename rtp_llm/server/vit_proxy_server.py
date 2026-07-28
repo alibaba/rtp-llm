@@ -35,6 +35,12 @@ from rtp_llm.multimodal.mm_profiler import MMProfiler
 # Per-request override comes from MMPreprocessConfigPB.mm_timeout_ms if set (>0).
 DEFAULT_PROXY_RPC_TIMEOUT_SECONDS = 30.0
 STATUS_CHECK_TIMEOUT_SEC = 1.0
+# Only UNAVAILABLE triggers worker failover (and marking the worker unhealthy).
+# RESOURCE_EXHAUSTED (scheduler queue backpressure) is deliberately NOT here: by
+# design it is returned directly to the client (no failover to another worker),
+# and — because it is not in this set — the overloaded worker is NOT marked
+# unhealthy, so it keeps receiving traffic once it drains. The client decides
+# whether to retry or back off.
 RETRYABLE_WORKER_RPC_CODES = {
     grpc.StatusCode.UNAVAILABLE,
 }
@@ -289,6 +295,22 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
             context.set_details(details)
         raise RuntimeError(details)
 
+    @staticmethod
+    def _abort_with_worker_status(context, error: grpc.RpcError):
+        """Propagate a worker's non-retryable status (e.g. RESOURCE_EXHAUSTED
+        overload) to the proxy's caller verbatim. A bare re-raise of the
+        client-side RpcError would surface as UNKNOWN. Mirrors _abort_unavailable
+        so both real and test contexts carry the exact code/details."""
+        code = error.code()
+        details = error.details()
+        abort = getattr(context, "abort", None) if context is not None else None
+        if abort is not None:
+            abort(code, details)
+        if context is not None:
+            context.set_code(code)
+            context.set_details(details)
+        raise error
+
     def RemoteMultimodalEmbedding(
         self, request: MultimodalInputsPB, context
     ) -> MultimodalOutputPB:
@@ -401,7 +423,11 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
                     if worker_address and _is_retryable_worker_rpc_error(e):
                         self.load_balancer.set_worker_alive(worker_address, False)
                         continue
-                    raise
+                    # Non-retryable (e.g. RESOURCE_EXHAUSTED overload): propagate the
+                    # worker's exact status to our caller instead of a bare re-raise
+                    # (which the framework downgrades to UNKNOWN). Do NOT retry
+                    # another worker or mark this one unhealthy.
+                    self._abort_with_worker_status(context, e)
                 except Exception as e:
                     logging.error(
                         "Error forwarding request to worker %s: %s",

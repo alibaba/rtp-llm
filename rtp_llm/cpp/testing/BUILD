@@ -6,6 +6,14 @@ test_copts = [
 ] + copts()
 
 cc_library(
+    name = "test_log_capture",
+    hdrs = ["TestLogCapture.h"],
+    deps = ["//rtp_llm/cpp/utils:core_utils"],
+    visibility = ["//visibility:public"],
+    copts = copts(),
+)
+
+cc_library(
     name = "device_test_utils",
     hdrs = glob([
         "*.h",

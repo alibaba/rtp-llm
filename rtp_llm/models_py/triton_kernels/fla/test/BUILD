@@ -39,6 +39,26 @@ py_test(
 )
 
 py_test(
+    name = "test_gdn_block_prefill_rocm",
+    srcs = ["test_gdn_block_prefill.py"],
+    main = "test_gdn_block_prefill.py",
+    deps = ["//rtp_llm/models_py/triton_kernels:fla"] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X-ROCM7'},
+)
+
+py_test(
+    name = "test_gdn_decode_rocm",
+    srcs = ["test_gdn_decode.py"],
+    main = "test_gdn_decode.py",
+    deps = ["//rtp_llm/models_py/triton_kernels:fla"] + [":triton", ":torch", ":numpy", ":einops", ":packaging"],
+    visibility = ["//visibility:public"],
+    tags = ["rocm"],
+    exec_properties = {'gpu':'MI308X-ROCM7'},
+)
+
+py_test(
     name = "test_chunk_prefill",
     srcs = [
         "test_chunk_prefill.py"

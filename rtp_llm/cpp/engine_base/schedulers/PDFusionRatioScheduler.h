@@ -3,7 +3,6 @@
 #include <list>
 #include <memory>
 #include <string>
-#include <vector>
 
 #include "kmonitor/client/MetricsReporter.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -45,7 +44,7 @@ private:
         return "PDFusionRatioScheduler";
     }
     bool      evaluateRunningMemory(const std::list<GenerateStreamPtr>& streams,
-                                    const GenerateStreamPtr&            new_stream) const override;
+                                    const GenerateStreamPtr&            new_stream) override;
     bool      waitPredicate() override;
     void      cancelExtraStreams() override;
     bool      hasExtraStreams() const override;
@@ -55,12 +54,21 @@ private:
     size_t    reapFinished(std::list<GenerateStreamPtr>& streams);
     size_t    promotePendingDecodeStreams();
     RoundType chooseRound();
+    bool      tryAdmitKVForPrefill(const GenerateStreamPtr& new_stream);
+
+    struct AdmissionPeakState;
+    void buildAdmissionPeakState();
+    bool tryAddToAdmissionPeakState(const GenerateStreamPtr& new_stream,
+                                    int64_t                  initial_capacity,
+                                    int64_t                  lifecycle_capacity);
 
 private:
     std::list<GenerateStreamPtr> pending_decode_streams_;
-    int64_t                      decode_prefill_step_  = 1;
-    int64_t                      decode_since_prefill_ = 0;
-    int64_t                      prefill_since_decode_ = 0;
+    // Per-prefill-round scratch state, guarded by the scheduler lock.
+    std::unique_ptr<AdmissionPeakState> admission_peak_state_;
+    int64_t                             decode_prefill_step_  = 1;
+    int64_t                             decode_since_prefill_ = 0;
+    int64_t                             prefill_since_decode_ = 0;
 };
 
 }  // namespace rtp_llm

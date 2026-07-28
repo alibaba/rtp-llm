@@ -408,13 +408,13 @@ class FIFOSchedulerConfig:
         ...
 class FMHAConfig:
     absorb_opt_len: int
-    disable_flash_infer: bool
+    disable_flashinfer_native: bool
+    enable_flashinfer_trtllm_gen: bool
+    enable_flashinfer_trt_fmha_v2: bool
     enable_fmha: bool
     enable_open_source_fmha: bool
+    enable_paged_flashinfer_trt_fmha_v2: bool
     enable_paged_open_source_fmha: bool
-    enable_paged_trt_fmha: bool
-    enable_trt_fmha: bool
-    enable_trtv1_fmha: bool
     enable_xqa: bool
     use_aiter_pa: bool
     use_asm_pa: bool
@@ -439,11 +439,9 @@ class FMHAType:
     
       PAGED_OPEN_SOURCE
     
-      PAGED_TRT_V2
+      PAGED_FLASHINFER_TRT_FMHA_V2
     
-      TRT_V1
-    
-      TRT_V2
+      FLASHINFER_TRT_FMHA_V2
     
       XQA
     
@@ -474,30 +472,32 @@ class FMHAType:
       SPARSE_FLASHMLA
 
       CP_SPARSE_FLASHMLA
+
+      HEADWISE
     """
-    AITER_ASM_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_ASM_DECODE: 12>
-    AITER_ASM_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_ASM_PREFILL: 9>
-    AITER_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_DECODE: 11>
-    AITER_PAGED_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_PAGED_PREFILL: 10>
-    AITER_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_PREFILL: 8>
-    AITER_TRITON_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_TRITON_DECODE: 13>
-    CP_FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.CP_FLASH_INFER: 20>
-    CP_SPARSE_FLASHMLA: typing.ClassVar[FMHAType]  # value = <FMHAType.CP_SPARSE_FLASHMLA: 21>
-    FLASHINFER_MLA_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_MLA_DECODE: 18>
-    FLASHINFER_MLA_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_MLA_PREFILL: 17>
+    AITER_ASM_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_ASM_DECODE: 11>
+    AITER_ASM_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_ASM_PREFILL: 8>
+    AITER_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_DECODE: 10>
+    AITER_PAGED_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_PAGED_PREFILL: 9>
+    AITER_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_PREFILL: 7>
+    AITER_TRITON_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.AITER_TRITON_DECODE: 12>
+    CP_FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.CP_FLASH_INFER: 19>
+    CP_SPARSE_FLASHMLA: typing.ClassVar[FMHAType]  # value = <FMHAType.CP_SPARSE_FLASHMLA: 20>
+    FLASHINFER_TRT_FMHA_V2: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_TRT_FMHA_V2: 5>
+    FLASHINFER_MLA_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_MLA_DECODE: 17>
+    FLASHINFER_MLA_PREFILL: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASHINFER_MLA_PREFILL: 16>
     FLASH_INFER: typing.ClassVar[FMHAType]  # value = <FMHAType.FLASH_INFER: 0>
+    HEADWISE: typing.ClassVar[FMHAType]  # value = <FMHAType.HEADWISE: 21>
     NONE: typing.ClassVar[FMHAType]  # value = <FMHAType.NONE: 1>
     OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.OPEN_SOURCE: 2>
     PAGED_OPEN_SOURCE: typing.ClassVar[FMHAType]  # value = <FMHAType.PAGED_OPEN_SOURCE: 3>
-    PAGED_TRT_V2: typing.ClassVar[FMHAType]  # value = <FMHAType.PAGED_TRT_V2: 4>
-    PY_FLASHINFER_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.PY_FLASHINFER_DECODE: 16>
-    PY_FLASHINFER_PREFILL_PAGED: typing.ClassVar[FMHAType]  # value = <FMHAType.PY_FLASHINFER_PREFILL_PAGED: 14>
-    PY_FLASHINFER_PREFILL_RAGGED: typing.ClassVar[FMHAType]  # value = <FMHAType.PY_FLASHINFER_PREFILL_RAGGED: 15>
-    SPARSE_FLASHMLA: typing.ClassVar[FMHAType]  # value = <FMHAType.SPARSE_FLASHMLA: 19>
-    TRT_V1: typing.ClassVar[FMHAType]  # value = <FMHAType.TRT_V1: 5>
-    TRT_V2: typing.ClassVar[FMHAType]  # value = <FMHAType.TRT_V2: 6>
-    XQA: typing.ClassVar[FMHAType]  # value = <FMHAType.XQA: 7>
-    __members__: typing.ClassVar[dict[str, FMHAType]]  # value = {'FLASH_INFER': <FMHAType.FLASH_INFER: 0>, 'NONE': <FMHAType.NONE: 1>, 'OPEN_SOURCE': <FMHAType.OPEN_SOURCE: 2>, 'PAGED_OPEN_SOURCE': <FMHAType.PAGED_OPEN_SOURCE: 3>, 'PAGED_TRT_V2': <FMHAType.PAGED_TRT_V2: 4>, 'TRT_V1': <FMHAType.TRT_V1: 5>, 'TRT_V2': <FMHAType.TRT_V2: 6>, 'XQA': <FMHAType.XQA: 7>, 'AITER_PREFILL': <FMHAType.AITER_PREFILL: 8>, 'AITER_ASM_PREFILL': <FMHAType.AITER_ASM_PREFILL: 9>, 'AITER_PAGED_PREFILL': <FMHAType.AITER_PAGED_PREFILL: 10>, 'AITER_DECODE': <FMHAType.AITER_DECODE: 11>, 'AITER_ASM_DECODE': <FMHAType.AITER_ASM_DECODE: 12>, 'AITER_TRITON_DECODE': <FMHAType.AITER_TRITON_DECODE: 13>, 'PY_FLASHINFER_PREFILL_PAGED': <FMHAType.PY_FLASHINFER_PREFILL_PAGED: 14>, 'PY_FLASHINFER_PREFILL_RAGGED': <FMHAType.PY_FLASHINFER_PREFILL_RAGGED: 15>, 'PY_FLASHINFER_DECODE': <FMHAType.PY_FLASHINFER_DECODE: 16>, 'FLASHINFER_MLA_PREFILL': <FMHAType.FLASHINFER_MLA_PREFILL: 17>, 'FLASHINFER_MLA_DECODE': <FMHAType.FLASHINFER_MLA_DECODE: 18>, 'SPARSE_FLASHMLA': <FMHAType.SPARSE_FLASHMLA: 19>, 'CP_FLASH_INFER': <FMHAType.CP_FLASH_INFER: 20>, 'CP_SPARSE_FLASHMLA': <FMHAType.CP_SPARSE_FLASHMLA: 21>}
+    PAGED_FLASHINFER_TRT_FMHA_V2: typing.ClassVar[FMHAType]  # value = <FMHAType.PAGED_FLASHINFER_TRT_FMHA_V2: 4>
+    PY_FLASHINFER_DECODE: typing.ClassVar[FMHAType]  # value = <FMHAType.PY_FLASHINFER_DECODE: 15>
+    PY_FLASHINFER_PREFILL_PAGED: typing.ClassVar[FMHAType]  # value = <FMHAType.PY_FLASHINFER_PREFILL_PAGED: 13>
+    PY_FLASHINFER_PREFILL_RAGGED: typing.ClassVar[FMHAType]  # value = <FMHAType.PY_FLASHINFER_PREFILL_RAGGED: 14>
+    SPARSE_FLASHMLA: typing.ClassVar[FMHAType]  # value = <FMHAType.SPARSE_FLASHMLA: 18>
+    XQA: typing.ClassVar[FMHAType]  # value = <FMHAType.XQA: 6>
+    __members__: typing.ClassVar[dict[str, FMHAType]]  # value = {'FLASH_INFER': <FMHAType.FLASH_INFER: 0>, 'NONE': <FMHAType.NONE: 1>, 'OPEN_SOURCE': <FMHAType.OPEN_SOURCE: 2>, 'PAGED_OPEN_SOURCE': <FMHAType.PAGED_OPEN_SOURCE: 3>, 'PAGED_FLASHINFER_TRT_FMHA_V2': <FMHAType.PAGED_FLASHINFER_TRT_FMHA_V2: 4>, 'FLASHINFER_TRT_FMHA_V2': <FMHAType.FLASHINFER_TRT_FMHA_V2: 5>, 'XQA': <FMHAType.XQA: 6>, 'AITER_PREFILL': <FMHAType.AITER_PREFILL: 7>, 'AITER_ASM_PREFILL': <FMHAType.AITER_ASM_PREFILL: 8>, 'AITER_PAGED_PREFILL': <FMHAType.AITER_PAGED_PREFILL: 9>, 'AITER_DECODE': <FMHAType.AITER_DECODE: 10>, 'AITER_ASM_DECODE': <FMHAType.AITER_ASM_DECODE: 11>, 'AITER_TRITON_DECODE': <FMHAType.AITER_TRITON_DECODE: 12>, 'PY_FLASHINFER_PREFILL_PAGED': <FMHAType.PY_FLASHINFER_PREFILL_PAGED: 13>, 'PY_FLASHINFER_PREFILL_RAGGED': <FMHAType.PY_FLASHINFER_PREFILL_RAGGED: 14>, 'PY_FLASHINFER_DECODE': <FMHAType.PY_FLASHINFER_DECODE: 15>, 'FLASHINFER_MLA_PREFILL': <FMHAType.FLASHINFER_MLA_PREFILL: 16>, 'FLASHINFER_MLA_DECODE': <FMHAType.FLASHINFER_MLA_DECODE: 17>, 'SPARSE_FLASHMLA': <FMHAType.SPARSE_FLASHMLA: 18>, 'CP_FLASH_INFER': <FMHAType.CP_FLASH_INFER: 19>, 'CP_SPARSE_FLASHMLA': <FMHAType.CP_SPARSE_FLASHMLA: 20>, 'HEADWISE': <FMHAType.HEADWISE: 21>}
     def __eq__(self, other: typing.Any) -> bool:
         ...
     def __getstate__(self) -> int:
@@ -590,8 +590,13 @@ class HWKernelConfig:
         ...
 class HybridAttentionConfig:
     enable_hybrid_attention: bool
+    enable_independent_kv_cache_pools: bool
     hybrid_attention_types: list[HybridAttentionType]
-    def __init__(self, enable_hybrid_attention: bool = False, hybrid_attention_types: list[HybridAttentionType] = []) -> None:
+    @typing.overload
+    def __init__(self) -> None:
+        ...
+    @typing.overload
+    def __init__(self, enable_hybrid_attention: bool, enable_independent_kv_cache_pools: bool, hybrid_attention_types: list[HybridAttentionType]) -> None:
         ...
     def to_string(self) -> str:
         ...
@@ -646,6 +651,11 @@ class KVCacheConfig:
     max_block_size_per_item: int
     memory_cache_size_mb: int
     memory_cache_sync_timeout_ms: int
+    enable_memory_cache_disk: bool
+    memory_cache_disk_paths: str
+    memory_cache_disk_size_mb: int
+    memory_cache_disk_buffered_io: bool
+    memory_cache_disk_sync_timeout_ms: int
     multi_task_prompt: str
     multi_task_prompt_str: str
     multi_task_prompt_tokens: dict[str, list[int]]
@@ -673,6 +683,14 @@ class KVCacheConfig:
     reuse_cache: bool
     seq_size_per_block: int
     kernel_seq_size_per_block: int
+    enable_tiered_memory_cache: bool
+    enable_gpu_prefix_tree: bool
+    enable_prefix_tree_memory_cache: bool
+    enable_legacy_memory_connector_fallback: bool
+    prefix_tree_memory_state_swa_pool_ratio: int
+    enable_independent_group_eviction: bool
+    device_cache_min_free_blocks: int
+    load_cache_retry_times: int
     ssm_state_dtype: str
     test_block_num: int
     use_block_cache: int
@@ -856,6 +874,108 @@ class MlaOpsType:
     @property
     def value(self) -> int:
         ...
+class KVCacheSpecType:
+    MHA: typing.ClassVar[KVCacheSpecType]
+    MLA: typing.ClassVar[KVCacheSpecType]
+    LINEAR: typing.ClassVar[KVCacheSpecType]
+    OPAQUE_KV: typing.ClassVar[KVCacheSpecType]
+    OPAQUE_STATE: typing.ClassVar[KVCacheSpecType]
+    @property
+    def name(self) -> str: ...
+    @property
+    def value(self) -> int: ...
+
+class CacheGroupType:
+    LINEAR: typing.ClassVar[CacheGroupType]
+    FULL: typing.ClassVar[CacheGroupType]
+    SWA: typing.ClassVar[CacheGroupType]
+
+class CacheReusePolicy:
+    REUSABLE: typing.ClassVar[CacheReusePolicy]
+    NON_REUSABLE: typing.ClassVar[CacheReusePolicy]
+
+class CacheEvictPolicy:
+    CHAIN: typing.ClassVar[CacheEvictPolicy]
+    INDEPENDENT: typing.ClassVar[CacheEvictPolicy]
+    NONE: typing.ClassVar[CacheEvictPolicy]
+
+class CacheMemoryPlacement:
+    DEVICE: typing.ClassVar[CacheMemoryPlacement]
+    HOST: typing.ClassVar[CacheMemoryPlacement]
+    HOST_PINNED: typing.ClassVar[CacheMemoryPlacement]
+
+class CpBlockMappingMode:
+    NONE: typing.ClassVar[CpBlockMappingMode]
+    BLOCK_ROUND_ROBIN: typing.ClassVar[CpBlockMappingMode]
+    COMPACT_LAST_RANK: typing.ClassVar[CpBlockMappingMode]
+
+class CpBlockSliceMode:
+    NONE: typing.ClassVar[CpBlockSliceMode]
+    EQUAL_BYTES: typing.ClassVar[CpBlockSliceMode]
+    PAYLOAD_BYTES: typing.ClassVar[CpBlockSliceMode]
+
+class OpaqueBlockEntryCountMode:
+    EXPLICIT: typing.ClassVar[OpaqueBlockEntryCountMode]
+    KERNEL_BLOCK_COMPRESSED: typing.ClassVar[OpaqueBlockEntryCountMode]
+    STATE_RING: typing.ClassVar[OpaqueBlockEntryCountMode]
+
+class CpPrefillSliceLayout:
+    NONE: typing.ClassVar[CpPrefillSliceLayout]
+    PAYLOAD: typing.ClassVar[CpPrefillSliceLayout]
+    BLOCK_STRIDE: typing.ClassVar[CpPrefillSliceLayout]
+
+class CacheReusePolicyDesc:
+    enable_prefix_reuse: typing.Any
+    evict_policy: typing.Any
+    def __init__(self) -> None: ...
+
+class CacheCapacityPolicyDesc:
+    reservable: typing.Any
+    explicit_block_num: typing.Any
+    charge_to_paged_budget: typing.Any
+    def __init__(self) -> None: ...
+
+class CacheMemoryPolicyDesc:
+    placement: typing.Any
+    def __init__(self) -> None: ...
+
+class CacheTailPolicyDesc:
+    active_tail_blocks: typing.Any
+    validate_tail_blocks: typing.Any
+    def __init__(self) -> None: ...
+
+class CacheCpPolicyDesc:
+    mapping: typing.Any
+    slice: typing.Any
+    scale_seq_size: typing.Any
+    align_payload: typing.Any
+    prefill_slice_layout: typing.Any
+    def __init__(self) -> None: ...
+
+class KVCacheSpecDesc:
+    tag: str
+    cache_type: KVCacheSpecType
+    dtype: DataType
+    is_state_cache: bool
+    entry_elems: int
+    entry_dtype: DataType
+    entry_count_mode: OpaqueBlockEntryCountMode
+    explicit_entry_count: int
+    compression_ratio: int
+    state_ring_overlap: int
+    state_ring_include_gen_num_per_cycle: bool
+    block_stride_bytes_override: int
+    block_stride_bytes_alignment: int
+    block_stride_alignment_min_entries: int
+    group_type: typing.Any
+    reuse: typing.Any
+    capacity: typing.Any
+    memory: typing.Any
+    tail: typing.Any
+    cp: typing.Any
+    def __init__(self) -> None: ...
+
+
 class ModelConfig:
     add_bias_linear: bool
     attn_config: AttentionConfigs
@@ -864,6 +984,7 @@ class ModelConfig:
     deepseek_rope_mscale: float
     embedding_size: int
     eplb_config: EPLBConfig
+    kv_cache_spec_descs: list[list[KVCacheSpecDesc]]
     expert_num: int
     extra_data_path: str
     has_lm_head: bool
@@ -1102,6 +1223,7 @@ class ParallelismConfig:
     local_world_size: int
     pp_size: int
     prefill_cp_config: ...
+    role_type: RoleType
     tp_rank: int
     tp_size: int
     world_rank: int
@@ -1124,7 +1246,9 @@ class ParallelismConfig:
         ...
 class PrefillCPConfig:
     comm_buffer_size: int
+    kv_cache_sharded: bool
     method: CPRotateMethod
+    prefill_cp_size: int
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
@@ -1143,6 +1267,7 @@ class ProfilingDebugLoggingConfig:
     debug_start_fake_process: bool
     enable_detail_log: bool
     enable_device_perf: bool
+    enable_model_inputs_log: bool
     ft_alog_conf_path: str
     ft_core_dump_on_exception: bool
     gen_timeline_sync: bool
@@ -1343,6 +1468,7 @@ class RopeConfig:
     mrope_dim1: int
     mrope_dim2: int
     mrope_dim3: int
+    mrope_interleaved: bool
     mscale: float
     offset: int
     scale: float

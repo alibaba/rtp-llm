@@ -15,6 +15,10 @@ using namespace std;
 
 namespace rtp_llm {
 
+namespace {
+constexpr int64_t kRpcOutputWaitTimeoutMs = 500;
+}
+
 grpc::Status LocalRpcServer::init(const EngineInitParams&                       maga_init_params,
                                   std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                                   py::object                                    mm_process_engine) {
@@ -78,11 +82,17 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
                                               WriterInterface*                 writer,
                                               std::shared_ptr<GenerateStream>& stream) {
     RTP_LLM_PROFILE_FUNCTION();
-    // 需要检查 !hasError(): 之前 finished() 表示完成且无错，现在 FINISHED 状态可能包含错误
-    // 如果流有错误，应该停止消费输出
-    while (stream->isActive() || stream->hasOutput()) {
-        const auto result = stream->nextOutput();
+    while (true) {
+        const auto result = stream->nextOutput(kRpcOutputWaitTimeoutMs);
+        if (isCancelled(context)) {
+            stream->reportError(ErrorCode::CANCELLED, "request cancelled by user");
+            RTP_LLM_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());
+            return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
+        }
         if (!result.ok()) {
+            if (result.status().code() == ErrorCode::OUTPUT_QUEUE_NO_UPDATE) {
+                continue;
+            }
             if (result.status().code() != ErrorCode::FINISHED) {
                 return serializeErrorMsg(request_key, result.status());
             } else {
@@ -97,21 +107,12 @@ grpc::Status LocalRpcServer::pollStreamOutput(grpc::ServerContext*             c
                                       stream->generateConfig()->aux_info,
                                       maga_init_params_.misc_config.aux_string,
                                       stream->specialTokens().eos_token_id);
-        if (context->IsCancelled()) {
-            stream->reportError(ErrorCode::CANCELLED, "request cancelled by user");
-            RTP_LLM_LOG_WARNING("request [%s] cancelled by user", request_key.c_str());
-            return grpc::Status(grpc::StatusCode::CANCELLED, "request cancelled by user");
-        }
         if (!writer->Write(outputs_pb)) {
             stream->reportError(ErrorCode::CANCELLED, "write outputs pb failed");
             RTP_LLM_LOG_WARNING("request [%s] write outputs pb failed", request_key.c_str());
             return grpc::Status(grpc::StatusCode::INTERNAL, "request write outputs pb failed");
         }
         if (stream->hasEvent(StreamEvents::NeedRemoteGenerate)) {
-            break;
-        }
-        if (stream->queryPdSep()) {
-            stream->waitForRemoteGenerate();
             break;
         }
     }
@@ -136,13 +137,16 @@ ErrorInfo LocalRpcServer::collectStreamOutput(grpc::ServerContext*              
                                               std::shared_ptr<GenerateStream>&      stream,
                                               const std::shared_ptr<GenerateInput>& input,
                                               GenerateOutputs&                      last_outputs) {
-    while (!stream->isFinished() || stream->hasOutput()) {
-        if (context->IsCancelled()) {
+    while (true) {
+        const auto output_result = stream->nextOutput(kRpcOutputWaitTimeoutMs);
+        if (isCancelled(context)) {
             stream->reportError(ErrorCode::CANCELLED, "request cancelled by client");
             return ErrorInfo(ErrorCode::CANCELLED, "request cancelled by client");
         }
-        const auto output_result = stream->nextOutput();
         if (!output_result.ok()) {
+            if (output_result.status().code() == ErrorCode::OUTPUT_QUEUE_NO_UPDATE) {
+                continue;
+            }
             if (output_result.status().code() != ErrorCode::FINISHED) {
                 return output_result.status();
             }

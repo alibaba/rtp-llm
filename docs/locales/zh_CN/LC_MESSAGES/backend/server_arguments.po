@@ -145,7 +145,7 @@ msgid "[Attention Optimization](./attention_backend.md)"
 msgstr ""
 
 #: ../../backend/server_arguments.md
-msgid "`--enable-fmha`"
+msgid "`--enable_fmha`"
 msgstr ""
 
 #: ../../backend/server_arguments.md
@@ -157,23 +157,31 @@ msgid "True"
 msgstr ""
 
 #: ../../backend/server_arguments.md
-msgid "`--enable-trt-fmha`"
+msgid "`--enable_flashinfer_trtllm_gen`"
 msgstr ""
 
 #: ../../backend/server_arguments.md
-msgid "Enables TensorRT optimized FMHA feature."
+msgid "Enables FlashInfer TRT-LLM Gen attention on SM100."
 msgstr ""
 
 #: ../../backend/server_arguments.md
-msgid "`--enable-paged-trt-fmha`"
+msgid "`--enable_flashinfer_trt_fmha_v2`"
 msgstr ""
 
 #: ../../backend/server_arguments.md
-msgid "Enables Paged TensorRT FMHA."
+msgid "Enables FlashInfer TRT-LLM FMHA v2 contiguous prefill."
 msgstr ""
 
 #: ../../backend/server_arguments.md
-msgid "`--enable-open-source-fmha`"
+msgid "`--enable_paged_flashinfer_trt_fmha_v2`"
+msgstr ""
+
+#: ../../backend/server_arguments.md
+msgid "Enables FlashInfer TRT-LLM FMHA v2 paged prefill."
+msgstr ""
+
+#: ../../backend/server_arguments.md
+msgid "`--enable_open_source_fmha`"
 msgstr ""
 
 #: ../../backend/server_arguments.md
@@ -181,7 +189,7 @@ msgid "Enables open-source FMHA implementation."
 msgstr ""
 
 #: ../../backend/server_arguments.md
-msgid "`--enable-paged-open-source-fmha`"
+msgid "`--enable_paged_open_source_fmha`"
 msgstr ""
 
 #: ../../backend/server_arguments.md
@@ -189,39 +197,15 @@ msgid "Enables Paged open-source FMHA implementation."
 msgstr ""
 
 #: ../../backend/server_arguments.md
-msgid "`--enable-trtv1-fmha`"
+msgid "`--disable_flashinfer_native`"
 msgstr ""
 
 #: ../../backend/server_arguments.md
-msgid "Enables TRTv1-style FMHA."
+msgid "Disables FlashInfer native attention backends."
 msgstr ""
 
 #: ../../backend/server_arguments.md
-msgid "`--fmha-perf-instrument`"
-msgstr ""
-
-#: ../../backend/server_arguments.md
-msgid "Enables NVTX performance profiling for FMHA."
-msgstr ""
-
-#: ../../backend/server_arguments.md
-msgid "`--fmha-show-params`"
-msgstr ""
-
-#: ../../backend/server_arguments.md
-msgid "Displays FMHA parameter information."
-msgstr ""
-
-#: ../../backend/server_arguments.md
-msgid "`--disable-flash-infer`"
-msgstr ""
-
-#: ../../backend/server_arguments.md
-msgid "Disables FlashInfer Attention mechanism."
-msgstr ""
-
-#: ../../backend/server_arguments.md
-msgid "`--enable-xqa`"
+msgid "`--enable_xqa`"
 msgstr ""
 
 #: ../../backend/server_arguments.md
@@ -941,4 +925,3 @@ msgstr ""
 #: ../../backend/server_arguments.md
 msgid "auto"
 msgstr ""
-

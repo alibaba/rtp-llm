@@ -56,6 +56,7 @@ void SyncContext::updateResult(bool                                       succes
     if (!success) {
         auto error_code = transCacheStoreErrorCode(ec);
         error_info_     = ErrorInfo(error_code, ErrorCodeToString(error_code));
+        failed_request_block_buffers_.push_back(request_block_buffer);
         RTP_LLM_LOG_WARNING("request %s call finished, state:[%s], error code[%s], cost time %ldms",
                             request_block_buffer->getRequestKey().c_str(),
                             success ? "success" : "failed",
@@ -84,6 +85,7 @@ void SyncContext::waitDone() {
         if (autil::TimeUtility::currentTimeInMilliSeconds() >= deadline_ms_) {
             auto error_code = ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT;
             error_info_     = ErrorInfo(error_code, ErrorCodeToString(error_code));
+            timed_out_      = true;
             RTP_LLM_LOG_INFO("load context wait done on timeout");
             return;
         }
@@ -117,6 +119,22 @@ std::string SyncContext::getErrorInfoString() const {
 const ErrorInfo& SyncContext::getErrorInfo() const {
     std::unique_lock<std::mutex> lock(mutex_);
     return error_info_;
+}
+
+std::vector<std::string> SyncContext::failedBlockDebugInfos() const {
+    std::unique_lock<std::mutex> lock(mutex_);
+    if (error_info_.ok() || error_info_.code() == ErrorCode::CANCELLED) {
+        return {};
+    }
+
+    const auto& buffers =
+        (timed_out_ || failed_request_block_buffers_.empty()) ? request_block_buffers_ : failed_request_block_buffers_;
+    std::vector<std::string> debug_infos;
+    debug_infos.reserve(buffers.size());
+    for (const auto& buffer : buffers) {
+        debug_infos.push_back(buffer == nullptr ? "null" : buffer->debugInfo());
+    }
+    return debug_infos;
 }
 
 LoadContext::LoadContext(const std::shared_ptr<CacheStore>& cache_store, bool combine_load):

@@ -108,18 +108,16 @@ def copy_kv_cache_offset(old_offset: torch.Tensor, new_offset: torch.Tensor) -> 
         dst_slice.copy_(src_slice, non_blocking=True)
 
 
-def update_trt_params(
+def update_attention_params(
     fmha_impl: Any,
     rope_kvcache_impl: Any,
     fmha_params: Any,
     rope_params: Any,
     attn_inputs: PyAttentionInputs,
 ) -> None:
-    """Update TRT-related parameters.
+    """Update attention and RoPE parameters for CUDA graph replay.
 
     Updates FMHA and RoPE parameters based on new input parameters, maintaining KV Cache offset consistency.
-    Mainly used for CUDA graph parameter update scenarios.
-
     Args:
         fmha_impl: FMHA implementation object
         rope_kvcache_impl: RoPE KV Cache implementation object

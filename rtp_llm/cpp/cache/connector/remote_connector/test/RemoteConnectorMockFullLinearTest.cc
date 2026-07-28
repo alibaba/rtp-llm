@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/test/RemoteConnectorMockTestBase.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
@@ -12,6 +13,91 @@ using namespace rtp_llm::remote_connector;
 
 namespace rtp_llm {
 namespace test {
+namespace {
+
+KVCacheSpecPtr makeTestMhaSpec(const std::string& tag, uint32_t seq_size_per_block) {
+    AttentionConfigs attn_config;
+    attn_config.kv_head_num      = 8;
+    attn_config.size_per_head    = 128;
+    attn_config.tokens_per_block = seq_size_per_block;
+
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = 1;
+
+    KVCacheSpecDesc desc;
+    desc.tag        = tag;
+    desc.cache_type = KVCacheSpecType::MultiHeadAttention;
+    desc.dtype      = rtp_llm::DataType::TYPE_FP16;
+
+    SpecBuildContext ctx;
+    ctx.dtype              = rtp_llm::DataType::TYPE_FP16;
+    ctx.seq_size_per_block = seq_size_per_block;
+    ctx.attn_config        = &attn_config;
+    ctx.parallelism_config = &parallelism_config;
+    return SpecBuilder::build(desc, ctx);
+}
+
+KVCacheSpecPtr makeTestLinearSpec(const std::string& tag, uint32_t seq_size_per_block) {
+    LinearAttentionConfig linear_config;
+    linear_config.linear_conv_kernel_dim = 2;
+    linear_config.linear_key_head_dim    = 1;
+    linear_config.linear_value_head_dim  = 1;
+    linear_config.linear_num_key_heads   = 1;
+    linear_config.linear_num_value_heads = 1;
+
+    ParallelismConfig parallelism_config;
+    parallelism_config.tp_size = 1;
+
+    KVCacheSpecDesc desc;
+    desc.tag        = tag;
+    desc.cache_type = KVCacheSpecType::LinearAttention;
+    desc.dtype      = rtp_llm::DataType::TYPE_FP16;
+
+    SpecBuildContext ctx;
+    ctx.dtype                   = rtp_llm::DataType::TYPE_FP16;
+    ctx.seq_size_per_block      = seq_size_per_block;
+    ctx.linear_attention_config = &linear_config;
+    ctx.parallelism_config      = &parallelism_config;
+    return SpecBuilder::build(desc, ctx);
+}
+
+void initializeResourceTopology(KVCacheResource& resource, const CacheConfig& config) {
+    std::vector<BlockIndicesType> blocks_by_group;
+    blocks_by_group.reserve(resource.groupBlocks().size());
+    for (const auto& block_ids : resource.groupBlocks()) {
+        blocks_by_group.push_back(block_ids->blocks());
+    }
+
+    resource.initGroups(config.topologyPtr());
+    ASSERT_EQ(static_cast<size_t>(resource.groupNums()), blocks_by_group.size());
+    for (size_t group_id = 0; group_id < blocks_by_group.size(); ++group_id) {
+        resource.mutableBlockIds(static_cast<int>(group_id)).assign(std::move(blocks_by_group[group_id]));
+    }
+}
+
+BlockBuffersExpect makeBlockBuffersExpect(const UriStrVec& uris, const CacheConfig& config, size_t iov_vec_size) {
+    BlockBuffersExpect result;
+    result.block_buffers_size = uris.size();
+    result.iov_vec_size       = iov_vec_size;
+    result.iov_sizes.reserve(uris.size());
+    for (const auto& uri : uris) {
+        bool matched = false;
+        for (size_t group_id = 0; group_id < config.topology().groups().size(); ++group_id) {
+            const auto& group  = config.topology().groupById(group_id);
+            const auto  prefix = group.policy.group_type == CacheGroupType::FULL ? "F" : "L";
+            if (uri.find("_" + std::string(prefix) + group.tag + "_") == std::string::npos) {
+                continue;
+            }
+            RTP_LLM_CHECK_WITH_INFO(!matched, "uri [%s] matches multiple cache groups", uri.c_str());
+            result.iov_sizes.push_back(config.kvBlockStrideBytesForGroup(group_id));
+            matched = true;
+        }
+        RTP_LLM_CHECK_WITH_INFO(matched, "uri [%s] does not match a cache group", uri.c_str());
+    }
+    return result;
+}
+
+}  // namespace
 void waitAsyncContextDone(const std::shared_ptr<rtp_llm::AsyncContext>& ctx) {
     ASSERT_NE(ctx, nullptr);
     const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(30);
@@ -94,63 +180,37 @@ private:
     }
 
     void initHybridLayerCacheConfig(int layer_num = 4, int block_num = 10, int seq_size_per_block = 8) {
-        cache_config_.linear_group_num = other_group_ids_.size();
-        cache_config_.full_group_num   = full_group_ids_.size();
-        size_t all_group_num           = cache_config_.linear_group_num + cache_config_.full_group_num;
-        cache_config_.layer_num        = all_group_num * layer_num;
-        cache_config_.layer_all_num    = all_group_num * layer_num;
-        cache_config_.group_layer_num  = layer_num;
-        int unique_layer_id            = 0;
+        const size_t all_group_num    = full_group_ids_.size() + other_group_ids_.size();
+        cache_config_.layer_num       = all_group_num * layer_num;
+        cache_config_.layer_all_num   = all_group_num * layer_num;
+        cache_config_.group_layer_num = layer_num;
 
-        auto full_spec                = std::make_shared<MHAKVCacheSpec>();
-        full_spec->layer_num          = layer_num;
-        full_spec->local_head_num_kv  = 8;
-        full_spec->size_per_head      = 128;
-        full_spec->seq_size_per_block = seq_size_per_block;
-        full_spec->dtype              = rtp_llm::DataType::TYPE_FP16;
-        full_spec->type               = KVCacheSpecType::MultiHeadAttention;
+        auto full_spec   = makeTestMhaSpec("full", static_cast<uint32_t>(seq_size_per_block));
+        auto linear_spec = makeTestLinearSpec("linear", static_cast<uint32_t>(seq_size_per_block));
 
-        auto linear_spec                = std::make_shared<LinearKVCacheSpec>();
-        linear_spec->type               = KVCacheSpecType::LinearAttention;
-        linear_spec->dtype              = rtp_llm::DataType::TYPE_FP16;
-        linear_spec->layer_num          = layer_num;
-        linear_spec->local_num_k_heads  = 1;
-        linear_spec->local_num_v_heads  = 1;
-        linear_spec->head_k_dim         = 1;
-        linear_spec->head_v_dim         = 1;
-        linear_spec->conv_kernel_dim    = 2;
-        linear_spec->local_head_num_kv  = 1;
-        linear_spec->seq_size_per_block = seq_size_per_block;
-
-        for (int i = 0; i < cache_config_.full_group_num; i++) {
-            cache_config_.global_layer_ids.push_back({});
-            cache_config_.layer_ids.push_back({});
-            cache_config_.group_types.push_back(CacheGroupType::FULL);
-            cache_config_.cache_specs.push_back(full_spec);
-            cache_config_.full_groups.push_back({});
+        std::vector<KVCacheSpecPtr>   specs(all_group_num);
+        std::vector<std::vector<int>> layers_by_group(all_group_num);
+        std::vector<CacheGroupType>   group_types(all_group_num);
+        std::vector<std::string>      tags(all_group_num);
+        int                           unique_layer_id = 0;
+        for (int32_t group_id : full_group_ids_) {
+            specs[static_cast<size_t>(group_id)]       = full_spec;
+            group_types[static_cast<size_t>(group_id)] = CacheGroupType::FULL;
+            tags[static_cast<size_t>(group_id)]        = "full" + std::to_string(group_id);
             for (int j = 0; j < layer_num; j++) {
-                cache_config_.layer_to_group_id.push_back(full_group_ids_[i]);
-                cache_config_.global_layer_ids.back().push_back(unique_layer_id);
-                cache_config_.layer_ids.back().push_back(unique_layer_id);
-                unique_layer_id++;
+                layers_by_group[static_cast<size_t>(group_id)].push_back(unique_layer_id++);
             }
         }
-
-        for (int i = 0; i < cache_config_.linear_group_num; i++) {
-            cache_config_.global_layer_ids.push_back({});
-            cache_config_.layer_ids.push_back({});
-            cache_config_.group_types.push_back(CacheGroupType::LINEAR);
-            cache_config_.cache_specs.push_back(linear_spec);
-            cache_config_.linear_groups.push_back({});
+        for (int32_t group_id : other_group_ids_) {
+            specs[static_cast<size_t>(group_id)]       = linear_spec;
+            group_types[static_cast<size_t>(group_id)] = CacheGroupType::LINEAR;
+            tags[static_cast<size_t>(group_id)]        = "linear" + std::to_string(group_id);
             for (int j = 0; j < layer_num; j++) {
-                cache_config_.layer_to_group_id.push_back(other_group_ids_[i]);
-                cache_config_.global_layer_ids.back().push_back(unique_layer_id);
-                cache_config_.layer_ids.back().push_back(unique_layer_id);
-                unique_layer_id++;
+                layers_by_group[static_cast<size_t>(group_id)].push_back(unique_layer_id++);
             }
         }
+        cache_config_.fromGroupedSpecs(specs, layers_by_group, group_types, tags);
 
-        cache_config_.layer_ids          = cache_config_.global_layer_ids;
         cache_config_.block_num          = block_num;
         cache_config_.seq_size_per_block = seq_size_per_block;
         cache_config_.dtype              = rtp_llm::DataType::TYPE_FP16;
@@ -178,6 +238,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_async_match_and_async_read_with_g
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3, 4}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, 12, 13, 14}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({21, 22, 23, 24}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
     auto      meta               = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t    tp_rank            = 0;
     Locations expected_locations = genFullotherLocations({1, 2, 3}, {0, 1, 2});
@@ -199,8 +260,8 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_async_match_and_async_read_with_g
 
     // read
     {
-        UriStrVec                expected_uris        = genUris({1, 2, 3}, {2});
-        BlockBuffersExpect       block_buffers_expect = {5, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+        UriStrVec expected_uris        = genUris({1, 2, 3}, {2});
+        auto      block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
         std::vector<std::string> expect_block_ids({"1", "2", "3", "13", "23"});
         EXPECT_CALL(*transfer_client_,
                     LoadKvCaches(Eq(expected_uris),
@@ -221,8 +282,8 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_async_match_and_async_read_with_g
         kv_cache_resouce->setRemoteReuseBlockNum(0);
     }
     {
-        UriStrVec                expected_uris        = genUris({2, 3}, {1});
-        BlockBuffersExpect       block_buffers_expect = {4, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+        UriStrVec expected_uris        = genUris({2, 3}, {1});
+        auto      block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
         std::vector<std::string> expect_block_ids({"2", "3", "13", "23"});
         EXPECT_CALL(*transfer_client_,
                     LoadKvCaches(Eq(expected_uris),
@@ -262,6 +323,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_async_match_and_async_read_with_g
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3, 4}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, 12, 13, 14}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({21, 22, 23, 24}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
     kv_cache_resouce->setDeviceReuseBlockNum(1);
     auto      meta               = std::make_shared<MetaImpl>(false, true, "trace_2");
     size_t    tp_rank            = 0;
@@ -281,8 +343,8 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_async_match_and_async_read_with_g
     ASSERT_TRUE(match_context->success());
     ASSERT_EQ(match_context->matchedBlockCount(), 3);
     {
-        UriStrVec                expected_uris        = genUris({2, 3}, {1});
-        BlockBuffersExpect       block_buffers_expect = {4, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+        UriStrVec expected_uris        = genUris({2, 3}, {1});
+        auto      block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
         std::vector<std::string> expect_block_ids({"2", "3", "13", "23"});
         EXPECT_CALL(*transfer_client_,
                     LoadKvCaches(Eq(expected_uris),
@@ -302,8 +364,8 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_async_match_and_async_read_with_g
         kv_cache_resouce->setRemoteReuseBlockNum(0);
     }
     {
-        UriStrVec                expected_uris        = genUris({3}, {0});
-        BlockBuffersExpect       block_buffers_expect = {3, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+        UriStrVec expected_uris        = genUris({3}, {0});
+        auto      block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
         std::vector<std::string> expect_block_ids({"3", "13", "23"});
         EXPECT_CALL(*transfer_client_,
                     LoadKvCaches(Eq(expected_uris),
@@ -342,6 +404,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_read_success_broadcast_success_wi
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3, 4, 5}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, 12, 13, 14, 15}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({21, 22, 23, 24, 25}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
     kv_cache_resouce->setDeviceReuseBlockNum(1);
     auto      meta               = std::make_shared<MetaImpl>(false, true, "trace_2");
     size_t    tp_rank            = 0;
@@ -358,7 +421,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_read_success_broadcast_success_wi
         .WillOnce(Return(MatchLocationReturnType({ClientErrorCode::ER_OK, expected_locations})));
 
     UriStrVec                expected_uris        = genUris({2, 3}, {1});
-    BlockBuffersExpect       block_buffers_expect = {4, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+    auto                     block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
     std::vector<std::string> expect_block_ids({"2", "3", "13", "23"});
     EXPECT_CALL(*transfer_client_,
                 LoadKvCaches(Eq(expected_uris),
@@ -387,6 +450,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_read_success_broadcast_success_wi
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3, 4, 5}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, 12, 13, 14, 15}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({21, 22, 23, 24, 25}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
     kv_cache_resouce->setDeviceReuseBlockNum(1);
     auto      meta               = std::make_shared<MetaImpl>(false, true, "trace_2");
     size_t    tp_rank            = 0;
@@ -426,6 +490,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_a
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, 12, 13}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({21, 22, 23}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t        tp_rank = 0;
     std::string   write_session_id("write_session_id_1");
@@ -443,7 +508,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_a
     UriStrVec expected_uris = genUris({1, 2, 3}, {0, 1, 2});
     UriStrVec actual_uris   = genUris({1, 2, 3}, {0, 1, 2}, "actual_");
 
-    BlockBuffersExpect       block_buffers_expect = {9, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+    auto                     block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
     std::vector<std::string> expect_block_ids({"1", "11", "21", "2", "12", "22", "3", "13", "23"});
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),
@@ -473,6 +538,7 @@ TEST_F(RemoteConnectorMockFullLinearTest,
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, 12, 13}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({21, 22, 23}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
 
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t        tp_rank = 0;
@@ -491,7 +557,7 @@ TEST_F(RemoteConnectorMockFullLinearTest,
     UriStrVec expected_uris = genUris({2, 3}, {0, 1});
     UriStrVec actual_uris   = genUris({2, 3}, {0, 1}, "actual_");
 
-    BlockBuffersExpect       block_buffers_expect = {6, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+    auto                     block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
     std::vector<std::string> expect_block_ids({"2", "12", "22", "3", "13", "23"});
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),
@@ -520,6 +586,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_last_block_not_aligned) {
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, 12, 13}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({21, 22, 23}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
 
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t        tp_rank = 0;
@@ -538,7 +605,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_last_block_not_aligned) {
     UriStrVec expected_uris = genUris({2}, {0});
     UriStrVec actual_uris   = genUris({2}, {0}, "actual_");
 
-    BlockBuffersExpect       block_buffers_expect = {3, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+    auto                     block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
     std::vector<std::string> expect_block_ids({"2", "12", "22"});
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),
@@ -568,6 +635,7 @@ TEST_F(RemoteConnectorMockFullLinearTest,
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, 12, 13}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({21, 22, 23}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
 
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t        tp_rank = 0;
@@ -598,26 +666,29 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_w
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3, 4}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, -1, 13, 14}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({21, -1, 23, 24}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
 
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t        tp_rank = 0;
     std::string   write_session_id("write_session_id_1");
     Locations     expected_write_locations = genFullotherLocations({2, 3, 4}, {1, 2});
     WriteLocation write_location({write_session_id, static_cast<size_t>(1), expected_write_locations});
-    EXPECT_CALL(
-        *meta_clients_[tp_rank],
-        StartWrite(Eq("start_write_trace_1"),                                           // trace_id
-                   std::vector<int64_t>({1, 2, 3, 4}),                                  // keys
-                   _,                                                                   // tokens
-                   Eq(std::vector<std::string>({"F0L1L2", "F0", "F0L1L2", "F0L1L2"})),  // location_spec_group_names
-                   _                                                                    // write_timeout_seconds
-                   ))
+    EXPECT_CALL(*meta_clients_[tp_rank],
+                StartWrite(Eq("start_write_trace_1"),           // trace_id
+                           std::vector<int64_t>({1, 2, 3, 4}),  // keys
+                           _,                                   // tokens
+                           Eq(std::vector<std::string>({"Ffull0Llinear1Llinear2",
+                                                        "Ffull0",
+                                                        "Ffull0Llinear1Llinear2",
+                                                        "Ffull0Llinear1Llinear2"})),  // location_spec_group_names
+                           _                                                          // write_timeout_seconds
+                           ))
         .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, write_location})));
 
     UriStrVec expected_uris = genUris({2, 3, 4}, {1, 2});
     UriStrVec actual_uris   = genUris({2, 3, 4}, {1, 2}, "actual_");
 
-    BlockBuffersExpect       block_buffers_expect = {7, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+    auto                     block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
     std::vector<std::string> expect_block_ids({"2", "3", "13", "23", "4", "14", "24"});
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),
@@ -647,6 +718,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_w
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3, 4}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({-1, -1, -1, -1}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({-1, -1, -1, -1}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
 
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t        tp_rank = 0;
@@ -654,18 +726,19 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_w
     Locations     expected_write_locations = genFullotherLocations({2, 3, 4}, {});
     WriteLocation write_location({write_session_id, static_cast<size_t>(1), expected_write_locations});
     EXPECT_CALL(*meta_clients_[tp_rank],
-                StartWrite(Eq("start_write_trace_1"),                               // trace_id
-                           std::vector<int64_t>({1, 2, 3, 4}),                      // keys
-                           _,                                                       // tokens
-                           Eq(std::vector<std::string>({"F0", "F0", "F0", "F0"})),  // location_spec_group_names
-                           _                                                        // write_timeout_seconds
+                StartWrite(Eq("start_write_trace_1"),           // trace_id
+                           std::vector<int64_t>({1, 2, 3, 4}),  // keys
+                           _,                                   // tokens
+                           Eq(std::vector<std::string>({"Ffull0", "Ffull0", "Ffull0", "Ffull0"})),
+                           // location_spec_group_names
+                           _  // write_timeout_seconds
                            ))
         .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, write_location})));
 
     UriStrVec expected_uris = genUris({2, 3, 4}, {});
     UriStrVec actual_uris   = genUris({2, 3, 4}, {}, "actual_");
 
-    BlockBuffersExpect       block_buffers_expect = {3, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+    auto                     block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
     std::vector<std::string> expect_block_ids({"2", "3", "4"});
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),
@@ -694,6 +767,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_a
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, 12, 13}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({21, 22, 23}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_2");
     size_t        tp_rank = 0;
     std::string   write_session_id("write_session_id_2");
@@ -710,7 +784,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_success_broadcast_success_a
 
     UriStrVec expected_uris = genUris({1, 2, 3}, {0, 1, 2});
 
-    BlockBuffersExpect       block_buffers_expect = {9, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+    auto                     block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
     std::vector<std::string> expect_block_ids({"1", "11", "21", "2", "12", "22", "3", "13", "23"});
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),
@@ -737,6 +811,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_match_fail) {
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3, 4}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, 12, 13, 14}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({21, 22, 23, 24}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
     auto   meta    = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t tp_rank = 0;
     EXPECT_CALL(*meta_clients_[tp_rank],
@@ -766,6 +841,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_match_success_load_fail) {
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3, 4}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, 12, 13, 14}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({21, 22, 23, 24}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
     auto      meta               = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t    tp_rank            = 0;
     Locations expected_locations = genFullotherLocations({1, 2, 3}, {0, 1, 2});
@@ -780,7 +856,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_match_success_load_fail) {
                               ))
         .WillOnce(Return(MatchLocationReturnType({ClientErrorCode::ER_OK, expected_locations})));
     UriStrVec                expected_uris        = genUris({1, 2, 3}, {2});
-    BlockBuffersExpect       block_buffers_expect = {5, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+    auto                     block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
     std::vector<std::string> expect_block_ids({"1", "2", "3", "13", "23"});
     EXPECT_CALL(*transfer_client_,
                 LoadKvCaches(Eq(expected_uris),
@@ -852,6 +928,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_fail) {
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, 12, 13}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({21, 22, 23}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t        tp_rank = 0;
     std::string   write_session_id("write_session_id_1");
@@ -884,6 +961,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_write_invalid_block_ids) {
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, -1, 13}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({21, 22, 23}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
     auto   meta    = std::make_shared<MetaImpl>(false, true, "trace_1");
     size_t tp_rank = 0;
     EXPECT_CALL(*meta_clients_[tp_rank], StartWrite(_, _, _, _, _)).Times(0);
@@ -905,6 +983,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_success_broadcast_suc
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, 12, 13}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({21, 22, 23}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_2");
     size_t        tp_rank = 0;
     std::string   write_session_id("write_session_id_2");
@@ -920,7 +999,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_success_broadcast_suc
         .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, write_location})));
 
     UriStrVec                expected_uris        = genUris({1, 2, 3}, {0, 1, 2});
-    BlockBuffersExpect       block_buffers_expect = {9, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+    auto                     block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
     std::vector<std::string> expect_block_ids({"1", "11", "21", "2", "12", "22", "3", "13", "23"});
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),
@@ -951,6 +1030,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_success_broadcast_suc
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, 12, 13}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({21, 22, 23}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_2");
     size_t        tp_rank = 0;
     std::string   write_session_id("write_session_id_2");
@@ -966,7 +1046,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_success_broadcast_suc
         .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, write_location})));
 
     UriStrVec                expected_uris        = genUris({1, 2, 3}, {0, 1, 2});
-    BlockBuffersExpect       block_buffers_expect = {9, kFakeLayerNum, cache_config_.kv_block_stride_bytes};
+    auto                     block_buffers_expect = makeBlockBuffersExpect(expected_uris, cache_config_, kFakeLayerNum);
     std::vector<std::string> expect_block_ids({"1", "11", "21", "2", "12", "22", "3", "13", "23"});
     EXPECT_CALL(*transfer_client_,
                 SaveKvCaches(Eq(expected_uris),
@@ -997,6 +1077,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_start_write_success_broadcast_grp
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, 12, 13}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({21, 22, 23}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
     auto          meta    = std::make_shared<MetaImpl>(false, true, "trace_2");
     size_t        tp_rank = 0;
     std::string   write_session_id("write_session_id_2");
@@ -1036,6 +1117,7 @@ TEST_F(RemoteConnectorMockFullLinearTest, test_threadpool_ec) {
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({1, 2, 3, 4}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({11, 12, 13, 14}));
     kv_cache_resouce->group_block_ids.push_back(makeGroupBlockIds({21, 22, 23, 24}));
+    initializeResourceTopology(*kv_cache_resouce, cache_config_);
     auto   meta    = std::make_shared<MetaImpl>(false, true, "trace");
     size_t tp_rank = 0;
     remote_connectors_[tp_rank]->thread_pool_->stop();

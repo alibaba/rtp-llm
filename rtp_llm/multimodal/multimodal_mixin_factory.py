@@ -55,4 +55,5 @@ class MultimodalMixinFactory:
             engine_config.profiling_debug_logging_config,
             server_id,
             is_proxy_mode,
+            device=device,
         )

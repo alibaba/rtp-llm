@@ -61,6 +61,14 @@ class RpcUnavailable(grpc.RpcError):
         return "unavailable"
 
 
+class RpcResourceExhausted(grpc.RpcError):
+    def code(self):
+        return grpc.StatusCode.RESOURCE_EXHAUSTED
+
+    def details(self):
+        return "MMScheduler queue full"
+
+
 class FakeGrpcFuture:
     def __init__(self, response=None, error=None, done=True):
         self.response = response
@@ -622,6 +630,37 @@ class VitProxyRpcServerForwardingTest(TestCase):
         live_stub.RemoteMultimodalEmbedding.assert_not_called()
         self.assertEqual(
             server.load_balancer.get_alive_worker_addresses(), ["timeout", "live"]
+        )
+
+    def test_forwarding_overload_returns_resource_exhausted_grpc_status(self):
+        """A worker's RESOURCE_EXHAUSTED (overload) must reach the external client
+        as RESOURCE_EXHAUSTED through the real gRPC framework — not downgraded to
+        UNKNOWN — and must NOT retry another worker or mark the worker unhealthy."""
+        overloaded_stub = MagicMock()
+        overloaded_stub.RemoteMultimodalEmbedding.side_effect = RpcResourceExhausted()
+        load_balancer = LoadBalancer(["overloaded"])
+        connection_pool = MagicMock()
+        connection_pool.get_stub.side_effect = lambda addr: overloaded_stub
+        server = VitProxyRpcServer(load_balancer, connection_pool)
+
+        grpc_server = grpc.server(futures.ThreadPoolExecutor(max_workers=1))
+        add_MultimodalRpcServiceServicer_to_server(server, grpc_server)
+        port = grpc_server.add_insecure_port("127.0.0.1:0")
+        grpc_server.start()
+        channel = grpc.insecure_channel(f"127.0.0.1:{port}")
+        stub = MultimodalRpcServiceStub(channel)
+
+        try:
+            with self.assertRaises(grpc.RpcError) as error:
+                stub.RemoteMultimodalEmbedding(MultimodalInputsPB(), timeout=5)
+        finally:
+            channel.close()
+            grpc_server.stop(0)
+
+        self.assertEqual(error.exception.code(), grpc.StatusCode.RESOURCE_EXHAUSTED)
+        overloaded_stub.RemoteMultimodalEmbedding.assert_called_once()
+        self.assertEqual(
+            server.load_balancer.get_alive_worker_addresses(), ["overloaded"]
         )
 
 

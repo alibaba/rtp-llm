@@ -107,6 +107,20 @@ class CaseRunner(object):
                 return str_to_bool(tokens[i + 1])
         return default
 
+    @staticmethod
+    def _extract_int_arg(args_str: str, arg_name: str, default: int) -> int:
+        """Extract an integer argument from a smoke argument string."""
+        if not args_str:
+            return default
+        tokens = args_str.split()
+        for i, token in enumerate(tokens):
+            if token == arg_name and i + 1 < len(tokens):
+                try:
+                    return int(tokens[i + 1])
+                except ValueError:
+                    return default
+        return default
+
     def run(self):
         self._dmesg_baseline = snapshot_dmesg()
         env_dict = self.create_env_from_args(self.env_args)

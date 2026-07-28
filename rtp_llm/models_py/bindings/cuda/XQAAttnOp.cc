@@ -1,7 +1,8 @@
 
 #ifdef USING_CUDA12
 #include "rtp_llm/models_py/bindings/cuda/XQAAttnOp.h"
-#include "rtp_llm/models_py/bindings/cuda/cufmha/TrtV2FmhaRunner.h"
+#include "rtp_llm/models_py/bindings/common/kernels/kv_cache_kernels.h"
+#include "rtp_llm/models_py/bindings/cuda/cuda_host_utils.h"
 #include <ATen/cuda/CUDAContext.h>
 
 namespace rtp_llm {
@@ -9,7 +10,7 @@ namespace rtp_llm {
 XQAAttnOp::XQAAttnOp(const AttentionConfigs& attn_configs): attn_configs_(attn_configs) {}
 
 bool XQAAttnOp::support(torch_ext::PyAttentionInputs attn_inputs) {
-    return get_sm() >= tensorrt_llm::kernels::kSM_90
+    return get_sm() >= 90
            && supportXqa(DataType::TYPE_BF16,
                          DataType::TYPE_BF16,
                          DataType::TYPE_FP8_E4M3,
@@ -25,18 +26,38 @@ ParamsBasePtr XQAAttnOp::prepare(torch_ext::PyAttentionInputs attn_inputs) {
                                 && attn_inputs.kv_cache_kernel_block_id_device.defined(),
                             "decode should have kv cache block id.");
 
-    // 使用独立的工具函数准备 TRT attention 参数
-    auto run_stream   = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
-    bool use_fp8_fmha = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
-    auto trt_params   = prepareTrtAttnParams(
-        attn_configs_, attn_inputs.kv_cache_kernel_block_id_device, batch_size, use_fp8_fmha, run_stream, false);
+    const auto& block_ids = attn_inputs.kv_cache_kernel_block_id_device;
+    RTP_LLM_CHECK_WITH_INFO(block_ids.size(0) == batch_size,
+                            "XQA kv blocks batch size expected [%d] but got [%d]",
+                            batch_size,
+                            static_cast<int>(block_ids.size(0)));
+    const size_t max_blocks_per_seq = block_ids.size(1);
+    const bool   use_fp8_cache      = attn_configs_.kv_cache_dtype == KvCacheDataType::FP8;
+    const int    element_size       = use_fp8_cache ? 1 : 2;
 
-    params->kv_block_array            = ((TRTAttn*)trt_params.get())->kv_block_array;
-    params->kv_cache_offset           = ((TRTAttn*)trt_params.get())->kv_cache_offset.clone();
-    params->batch_size                = batch_size;
-    params->max_seq_len               = attn_inputs.sequence_lengths.max().item<int32_t>();
-    params->sequence_lengths          = attn_inputs.sequence_lengths;
-    params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
+    params->kv_cache_offset           = torch::empty({batch_size, 1, 2, static_cast<int64_t>(max_blocks_per_seq)},
+                                           torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    params->kv_block_array            = KVBlockArray(batch_size,
+                                          max_blocks_per_seq,
+                                          attn_configs_.kernel_tokens_per_block,
+                                          attn_configs_.kv_head_num * attn_configs_.size_per_head * element_size,
+                                          0,
+                                          0,
+                                          nullptr,
+                                          nullptr,
+                                          reinterpret_cast<KVCacheIndex*>(params->kv_cache_offset.data_ptr<int>()));
+    params->kv_block_array.cache_type = use_fp8_cache ? KvCacheDataType::FP8 : KvCacheDataType::BASE;
+    params->kv_block_array.mScaleBytesPerBlock =
+        attn_configs_.kernel_tokens_per_block * attn_configs_.kv_head_num * sizeof(float);
+
+    auto run_stream = at::cuda::getCurrentCUDAStream(at::cuda::current_device()).stream();
+    invokeConvertOffsetToBlockArrayData(
+        params->kv_cache_offset.data_ptr<int>(), block_ids.data_ptr<int>(), batch_size, max_blocks_per_seq, run_stream);
+    check_cuda_error();
+
+    params->batch_size       = batch_size;
+    params->max_seq_len      = attn_inputs.sequence_lengths.max().item<int32_t>();
+    params->sequence_lengths = attn_inputs.sequence_lengths;
 
     return ParamsBasePtr(params);
 }

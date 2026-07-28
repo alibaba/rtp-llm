@@ -180,19 +180,20 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                                             register_buffer_addr,
                                             register_buffer_size};
     init_params_ = std::make_shared<RemoteConnector::InitParams>(std::move(init_params));
+    RTP_LLM_CHECK_WITH_INFO(cache_config.groupNums() > 0,
+                            "remote connector requires an initialized cache topology with at least one group");
     std::vector<int32_t> full_group_ids, linear_group_ids;
-    if (cache_config.linear_group_num == 0) {
-        full_group_ids.push_back(0);
+    for (int32_t group_id = 0; group_id < cache_config.groupNums(); group_id++) {
+        if (cache_config.typeForGroup(static_cast<size_t>(group_id)) == CacheGroupType::FULL) {
+            full_group_ids.push_back(group_id);
+        } else {
+            linear_group_ids.push_back(group_id);
+        }
+    }
+    if (linear_group_ids.empty()) {
         group_policy_ =
             std::make_unique<remote_connector::FullLayerGroupPolicy>(allocator, full_group_ids, linear_group_ids);
     } else {
-        for (int32_t group_id = 0; static_cast<size_t>(group_id) < cache_config.group_types.size(); group_id++) {
-            if (cache_config.group_types[group_id] == CacheGroupType::FULL) {
-                full_group_ids.push_back(group_id);
-            } else {
-                linear_group_ids.push_back(group_id);
-            }
-        }
         group_policy_ = std::make_unique<remote_connector::FullLinearLayerGroupPolicy>(
             allocator, full_group_ids, linear_group_ids, std::max(1, cache_config.linear_step));
     }
@@ -210,67 +211,50 @@ RemoteConnector::~RemoteConnector() {
 std::pair<std::shared_ptr<RemoteConnectorConfig::LocationSpecInfoMap>,
           std::shared_ptr<RemoteConnectorConfig::LocationSpecGroups>>
 RemoteConnector::genLocationSpecInfoMapAndGroups(int64_t tp_size) {
-    auto   location_spec_groups_ptr = std::make_shared<RemoteConnectorConfig::LocationSpecGroups>();
-    size_t group_size               = group_policy_->groups().size();
-    assert(group_size > 0);
+    auto location_spec_groups_ptr = std::make_shared<RemoteConnectorConfig::LocationSpecGroups>();
+    RTP_LLM_CHECK_WITH_INFO(!group_policy_->groups().empty(), "remote connector requires at least one cache group");
     auto location_spec_info_map_ptr = std::make_shared<RemoteConnectorConfig::LocationSpecInfoMap>();
-    // TODO : support different byte_size_per_block (transfer client not support now)
-    size_t                   byte_size_per_block = init_params_->cache_config.block_size_bytes;
-    std::vector<std::string> all_group_names;
-    std::vector<uint64_t>    all_group_name_bithashs;
-    all_group_names.reserve(group_size);
     for (const auto& entry : group_policy_->groups()) {
-        const auto& group = entry.second;
-        all_group_names.push_back(group.group_name);
-        all_group_name_bithashs.push_back(group.group_name_bithash);
-        auto [iter, success] = location_spec_groups_ptr->insert({group.group_name, {}});
+        const auto  group_id         = static_cast<size_t>(entry.first);
+        const auto  group_block_size = init_params_->cache_config.blockSizeBytesForGroup(group_id);
+        const auto& group            = entry.second;
+        auto [iter, success]         = location_spec_groups_ptr->insert({group.group_name, {}});
         assert(success);
         group_policy_->addLocationSpecGroup(group.group_name_bithash, group.group_name);
         for (int r = 0; r < tp_size; ++r) {
             std::string location_spec_name = genLocationSpecName(r, group.group_name);
-            location_spec_info_map_ptr->emplace(location_spec_name, byte_size_per_block);
+            location_spec_info_map_ptr->emplace(location_spec_name, group_block_size);
             iter->second.push_back(location_spec_name);
             group_policy_->addSpecInfo(location_spec_name, entry.first, r);
         }
     }
-    for (int sub_group = 2; sub_group <= group_size; ++sub_group) {
-        std::string bitmask(sub_group, 1);
-        bitmask.resize(group_size, 0);
-        do {
-            std::stringstream        ss_group_name;
-            std::vector<std::string> spec_names;
-            uint64_t                 groups_name_bithash = 0;
-            for (int i = 0; i < group_size; ++i) {
-                if (static_cast<bool>(bitmask[i])) {
-                    ss_group_name << all_group_names[i];
-                    groups_name_bithash |= all_group_name_bithashs[i];
-                    const auto& sub_group_names = location_spec_groups_ptr->at(all_group_names[i]);
-                    spec_names.insert(spec_names.end(), sub_group_names.begin(), sub_group_names.end());
-                }
+    for (const auto aggregate_mask : group_policy_->reachableAggregateMasks()) {
+        std::stringstream                                             group_name_stream;
+        std::vector<std::string>                                      spec_names;
+        std::vector<std::pair<std::string, std::vector<std::string>>> selected_groups;
+        uint64_t                                                      matched_mask = 0;
+        for (const auto& entry : group_policy_->groups()) {
+            const auto& group = entry.second;
+            if ((aggregate_mask & group.group_name_bithash) == 0) {
+                continue;
             }
-            std::string groups_name = ss_group_name.str();
-            group_policy_->addLocationSpecGroup(groups_name_bithash, groups_name);
-            location_spec_groups_ptr->insert({groups_name, std::move(spec_names)});
-        } while (std::prev_permutation(bitmask.begin(), bitmask.end()));
-    }
-    /*
-        location_spec_groups has all combinations of groups, which means:
-        location_spec_groups.size() == Sum(Comb(group_size, i)), i = [1, 2, ..., group_size]
-
-        example:
-        tp_size = 2, one full attn group F0, two linear attn groups L1, L2;
-        location_spec_groups.size() == Comb(3, 1) +  Comb(3, 2) +  Comb(3, 3) == 7
-        location_spec_groups ==
-        {
-            "F0" : ["tp0_F0", "tp1_F0"],
-            "L1" : ["tp0_L1", "tp1_L1"],
-            "L2" : ["tp0_L2", "tp1_L2"],
-            "F0L1" : ["tp0_F0", "tp1_F0", "tp0_L1", "tp1_L1"],
-            "F0L2" : ["tp0_F0", "tp1_F0", "tp0_L2", "tp1_L2"],
-            "L1L2" : ["tp0_L1", "tp1_L1", "tp0_L2", "tp1_L2"],
-            "F0L1L2" : ["tp0_F0", "tp1_F0", "tp0_L1", "tp1_L1", "tp0_L2", "tp1_L2"]
+            matched_mask |= group.group_name_bithash;
+            const auto& singleton_specs = location_spec_groups_ptr->at(group.group_name);
+            selected_groups.emplace_back(group.group_name, singleton_specs);
         }
-    */
+        RTP_LLM_CHECK_WITH_INFO(aggregate_mask != 0 && matched_mask == aggregate_mask,
+                                "invalid reachable aggregate mask %lu (matched %lu)",
+                                aggregate_mask,
+                                matched_mask);
+        std::sort(selected_groups.begin(), selected_groups.end());
+        for (const auto& [group_name, singleton_specs] : selected_groups) {
+            group_name_stream << group_name;
+            spec_names.insert(spec_names.end(), singleton_specs.begin(), singleton_specs.end());
+        }
+        const auto group_name = group_name_stream.str();
+        group_policy_->addLocationSpecGroup(aggregate_mask, group_name);
+        location_spec_groups_ptr->emplace(group_name, std::move(spec_names));
+    }
     return {location_spec_info_map_ptr, location_spec_groups_ptr};
 }
 
@@ -377,11 +361,17 @@ bool RemoteConnector::init() {
     auto tp_rank    = init_params_->parallelism_config.tp_rank;
     client_wrapper_ = std::make_shared<remote_connector::ClientWrapper>();
     kv_cache_manager::RegistSpan regist_span{init_params_->register_buffer_addr, init_params_->register_buffer_size};
-    constexpr int32_t            full_group_idx = 0;  // TODO : transfer client not support diffent spec size
-    kv_cache_manager::InitParams client_init_params{
-        tp_rank == 0 ? kv_cache_manager::RoleType::HYBRID : kv_cache_manager::RoleType::WORKER,
-        &regist_span,
-        genLocationSpecName(tp_rank, group_policy_->groups().at(full_group_idx).group_name)};
+    RTP_LLM_CHECK_WITH_INFO(!group_policy_->groups().empty(), "remote connector requires at least one cache group");
+    const auto registration_group_it = std::min_element(
+        group_policy_->groups().begin(), group_policy_->groups().end(), [](const auto& lhs, const auto& rhs) {
+            return std::make_pair(!lhs.second.is_full, lhs.second.group_name)
+                   < std::make_pair(!rhs.second.is_full, rhs.second.group_name);
+        });
+    const auto&                  registration_group = registration_group_it->second;
+    kv_cache_manager::InitParams client_init_params{tp_rank == 0 ? kv_cache_manager::RoleType::HYBRID :
+                                                                   kv_cache_manager::RoleType::WORKER,
+                                                    &regist_span,
+                                                    genLocationSpecName(tp_rank, registration_group.group_name)};
     int cur_device = -1;
     check_cuda_value(cudaGetDevice(&cur_device));
     RTP_LLM_LOG_INFO("cuda cur device: %d", cur_device);
@@ -519,12 +509,14 @@ RemoteConnector::asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheCo
 
 bool RemoteConnector::copyCache(const RemoteOperationRequestPB& request, RemoteOperationResponsePB& response) {
     const auto&                 trace_id = request.trace_id();
-    std::vector<int32_t>        group_ids(request.group_ids().begin(), request.group_ids().end());
+    std::vector<std::string>    group_tags(request.group_tags().begin(), request.group_tags().end());
     std::vector<int32_t>        block_ids(request.block_ids().begin(), request.block_ids().end());
     kv_cache_manager::UriStrVec uris(request.uris().begin(), request.uris().end());
+    RTP_LLM_CHECK_WITH_INFO(group_tags.size() == block_ids.size() && block_ids.size() == uris.size(),
+                            "remote cache tag/block/uri count mismatch");
     switch (request.op()) {
         case ::RemoteOpType::REMOTE_OPERATION_READ: {
-            if (!Read(trace_id, group_ids, block_ids, uris)) {
+            if (!Read(trace_id, group_tags, block_ids, uris)) {
                 RTP_LLM_LOG_WARNING("broadcastTp Read failed");
                 return false;
             }
@@ -532,7 +524,7 @@ bool RemoteConnector::copyCache(const RemoteOperationRequestPB& request, RemoteO
         }
         case ::RemoteOpType::REMOTE_OPERATION_WRITE: {
             kv_cache_manager::UriStrVec out_uris;
-            if (!Write(trace_id, group_ids, block_ids, uris, out_uris)) {
+            if (!Write(trace_id, group_tags, block_ids, uris, out_uris)) {
                 RTP_LLM_LOG_WARNING("broadcastTp Write failed");
                 return false;
             }
@@ -810,8 +802,8 @@ bool RemoteConnector::genReadRequest(size_t                                   tp
             }
             const auto& spec_info      = iter->second;
             auto        remote_request = requests[spec_info.tp_rank].mutable_remote_request();
-            remote_request->add_group_ids(spec_info.group_id);
-            const auto& block_indices = resource->groupBlocks().at(spec_info.group_id)->blocks();
+            remote_request->add_group_tags(spec_info.tag);
+            const auto& block_indices = resource->blocks(spec_info.tag);
             if (block_indices.size() <= block_idx) {
                 RTP_LLM_LOG_ERROR("trace_id [%s], group_id [%d] bad block_indices size[%lu], block_idx [%zu]",
                                   trace_id.c_str(),
@@ -879,8 +871,8 @@ bool RemoteConnector::genWriteRequest(size_t                                  tp
             }
             const auto& spec_info      = iter->second;
             auto        remote_request = requests[spec_info.tp_rank].mutable_remote_request();
-            remote_request->add_group_ids(spec_info.group_id);
-            const auto& block_indices = resource->groupBlocks().at(spec_info.group_id)->blocks();
+            remote_request->add_group_tags(spec_info.tag);
+            const auto& block_indices = resource->blocks(spec_info.tag);
             if (block_indices.size() <= cache_key_idx) {
                 RTP_LLM_LOG_ERROR("trace_id [%s], group_id [%d] bad block_indices size[%lu]",
                                   trace_id.c_str(),
@@ -912,7 +904,7 @@ int RemoteConnector::SetCudaDeviceOnce() const {
 }
 
 bool RemoteConnector::Read(const std::string&                 trace_id,
-                           const std::vector<int32_t>&        group_ids,
+                           const std::vector<std::string>&    group_tags,
                            const std::vector<int32_t>&        block_ids,
                            const kv_cache_manager::UriStrVec& uri_str_vec) {
     [[maybe_unused]] thread_local auto _ = SetCudaDeviceOnce();
@@ -921,7 +913,7 @@ bool RemoteConnector::Read(const std::string&                 trace_id,
     SdkMetricsHelper helper(trace_id, true, metrics_reporter_);
     helper.collector.remote_sdk_block_num = block_ids.size();
     kv_cache_manager::BlockBuffers block_buffers;
-    if (!group_policy_->genBlockBuffers(group_ids, block_ids, block_buffers)) {
+    if (!group_policy_->genBlockBuffersByTag(group_tags, block_ids, block_buffers)) {
         return false;
     }
     static bool kvcm_sdk_check = autil::EnvUtil::getEnv("KVCM_SDK_CHECK", false);
@@ -942,7 +934,7 @@ bool RemoteConnector::Read(const std::string&                 trace_id,
 }
 
 bool RemoteConnector::Write(const std::string&                 trace_id,
-                            const std::vector<int32_t>&        group_ids,
+                            const std::vector<std::string>&    group_tags,
                             const std::vector<int32_t>&        block_ids,
                             const kv_cache_manager::UriStrVec& uri_str_vec,
                             kv_cache_manager::UriStrVec&       out_uri_str_vec) {
@@ -952,7 +944,7 @@ bool RemoteConnector::Write(const std::string&                 trace_id,
     SdkMetricsHelper helper(trace_id, false, metrics_reporter_);
     helper.collector.remote_sdk_block_num = block_ids.size();
     kv_cache_manager::BlockBuffers block_buffers;
-    if (!group_policy_->genBlockBuffers(group_ids, block_ids, block_buffers)) {
+    if (!group_policy_->genBlockBuffersByTag(group_tags, block_ids, block_buffers)) {
         return false;
     }
     static bool kvcm_sdk_check = autil::EnvUtil::getEnv("KVCM_SDK_CHECK", false);

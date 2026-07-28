@@ -39,6 +39,10 @@ struct P2PConnectorWorkerConfig {
     int64_t  tp_size       = 1;
     int64_t  tp_rank       = 0;
     uint32_t layer_all_num = 0;
+    // Prefill page-RR shard geometry. cp_size==1 disables RR remap.
+    int  cp_rank          = 0;
+    int  cp_size          = 1;
+    bool kv_cache_sharded = false;
 
     static P2PConnectorWorkerConfig create(const CacheStoreConfig&  cache_store_config,
                                            const PDSepConfig&       pd_sep_config,
@@ -62,6 +66,11 @@ struct P2PConnectorWorkerConfig {
         config.tp_size                                 = parallelism_config.tp_size;
         config.tp_rank                                 = parallelism_config.tp_rank;
         config.layer_all_num                           = layer_all_num;
+        config.kv_cache_sharded                        = parallelism_config.prefill_cp_config.kv_cache_sharded;
+        if (config.kv_cache_sharded && parallelism_config.tp_size > 1) {
+            config.cp_size = static_cast<int>(parallelism_config.tp_size);
+            config.cp_rank = static_cast<int>(parallelism_config.tp_rank);
+        }
         return config;
     }
 };

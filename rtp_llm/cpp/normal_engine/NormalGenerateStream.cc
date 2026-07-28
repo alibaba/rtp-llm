@@ -1,28 +1,73 @@
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 
+#include <algorithm>
+#include <chrono>
+
 namespace rtp_llm {
 
-ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput() {
-    // TODO(xinfei.sxf) 某些case下会出现1s的等待
-    while ((!hasError()) && getStatus() != StreamState::FINISHED && generate_outputs_queue_.isEmpty()) {
-        checkTimeout();
-        generate_outputs_queue_.waitNotEmpty();
+ErrorResult<GenerateOutputs> NormalGenerateStream::nextOutput(int64_t wait_timeout_ms) {
+    RTP_LLM_CHECK_WITH_INFO(wait_timeout_ms >= 0, "nextOutput wait_timeout_ms must be non-negative");
+
+    const auto stream_timeout_ms = getTimeoutMs();
+    auto       stream_deadline   = std::chrono::steady_clock::time_point::max();
+
+    std::unique_lock<std::mutex> lock(*mutex_);
+
+    if (stream_timeout_ms > 0) {
+        const auto elapsed_us   = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+        const auto remaining_us = std::max<int64_t>(stream_timeout_ms * 1000 - elapsed_us, 0);
+        stream_deadline         = std::chrono::steady_clock::now() + std::chrono::microseconds(remaining_us);
     }
-    if (hasError()) {
-        return statusInfo();
-    }
-    if (generate_outputs_queue_.isEmpty()) {
-        if (isFinished()) {
-            return ErrorInfo(ErrorCode::FINISHED, "finished");
+
+    if (!consumerReadyWithoutLock()) {
+        if (wait_timeout_ms == 0 && stream_timeout_ms <= 0) {
+            consumer_cv_->wait(lock, [this] { return consumerReadyWithoutLock(); });
         } else {
-            return ErrorInfo(ErrorCode::OUTPUT_QUEUE_IS_EMPTY, "output queue is empty");
+            auto wait_deadline = stream_deadline;
+            if (wait_timeout_ms > 0) {
+                wait_deadline = std::min(stream_deadline,
+                                         std::chrono::steady_clock::now() + std::chrono::milliseconds(wait_timeout_ms));
+            }
+
+            if (!consumer_cv_->wait_until(lock, wait_deadline, [this] { return consumerReadyWithoutLock(); })) {
+                if (stream_timeout_ms > 0 && std::chrono::steady_clock::now() >= stream_deadline) {
+                    const auto running_time_ms =
+                        (autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_) / 1000;
+                    reportTimeoutWithoutLock(running_time_ms, stream_timeout_ms);
+                } else {
+                    return ErrorInfo(ErrorCode::OUTPUT_QUEUE_NO_UPDATE,
+                                     "output queue has no update within " + std::to_string(wait_timeout_ms) + " ms");
+                }
+            }
         }
     }
-    return generate_outputs_queue_.getAndPopFront();
+
+    // Preserve existing precedence: terminal errors override queued output.
+    if (hasErrorWithoutLock()) {
+        return statusInfoWithoutLock();
+    }
+
+    // Normal completion is reported only after the final output is drained.
+    if (!generate_outputs_.empty()) {
+        auto output = std::move(generate_outputs_.front());
+        generate_outputs_.pop_front();
+        return output;
+    }
+
+    if (consumerFinishedWithoutLock()) {
+        return ErrorInfo(ErrorCode::FINISHED, "finished");
+    }
+
+    RTP_LLM_FAIL("consumer is ready without an error, output, or finished state");
 }
 
 bool NormalGenerateStream::hasOutput() {
-    return !generate_outputs_queue_.isEmpty();
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return !generate_outputs_.empty();
+}
+
+bool NormalGenerateStream::consumerReadyWithoutLock() const {
+    return hasErrorWithoutLock() || !generate_outputs_.empty() || consumerFinishedWithoutLock();
 }
 
 GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateInfo& update_info) {
@@ -152,12 +197,13 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
 }
 
 void NormalGenerateStream::enqueueGenerateOutput(GenerateOutputs&& generate_results) {
-    if (generate_outputs_queue_.getSize() >= generate_outputs_queue_.getCapacity()) {
+    if (generate_outputs_.size() >= kOutputCapacity) {
         /* No matter if the queue is full for any reason,
            the stream will be set to stop directly to prevent the push to queue from getting stuck. */
         reportEventWithoutLock(StreamEvents::Error, ErrorCode::OUTPUT_QUEUE_FULL, "output queue is full");
     } else {
-        generate_outputs_queue_.push(std::move(generate_results));
+        generate_outputs_.push_back(std::move(generate_results));
+        consumer_cv_->notify_all();
     }
 }
 
@@ -219,7 +265,7 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
     RTP_LLM_LOG_DEBUG("stream [%ld] enqueue generate output", streamId());
     enqueueGenerateOutput(prepareGenerateOutput(update_info));
 
-    if (hasError()) {
+    if (hasErrorWithoutLock()) {
         return;
     }
 

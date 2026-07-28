@@ -1,5 +1,8 @@
 #pragma once
 
+#include <type_traits>
+#include <utility>
+
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -25,11 +28,12 @@ public:
 
     // 统一的事件上报接口
     // 注意：此方法非线程安全，外部应当仅通过GenerateStream在持锁路径下调用
+    template<typename T = std::string>
     void reportEvent(StreamEvents::EventType event,
                      ErrorCode               error_code = ErrorCode::NONE_ERROR,
-                     const std::string&      error_msg  = "") {
+                     T&&                     error_msg  = std::decay_t<T>{}) {
         if (error_info.ok() && event == StreamEvents::Error) {
-            error_info = ErrorInfo(error_code, error_msg);
+            error_info = ErrorInfo(error_code, std::forward<T>(error_msg));
         }
         events_.append(event);
     }

@@ -6,12 +6,11 @@ import torch
 
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.models_py.utils.arch import get_num_device_sms
+from rtp_llm.models_py.utils.arch import get_num_device_sms, get_sm, is_sm12x
 from rtp_llm.ops import (
     AttentionConfigs,
     FMHAConfig,
     FMHAType,
-    KvCacheDataType,
     ParallelismConfig,
 )
 from rtp_llm.ops.compute_ops import (
@@ -84,6 +83,13 @@ class XQAImpl(FMHAImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
+        # XQA cubin covers sm_90 only; sm_120a (Blackwell consumer, e.g.
+        # RTX 5000 Pro) lacks a binding and triggers cudaErrorInvalidSymbol
+        # at first forward. C++ XQAAttnOp.support gate is `>= kSM_90` and
+        # passes sm_120 erroneously — short-circuit here so dispatch falls
+        # through to PyFlashinferPaged. See blockers.md R-4.
+        if is_sm12x():
+            return False
         fmha_impl = XQAAttnOp(attn_configs)
         return fmha_impl.support(attn_inputs)
 
@@ -105,14 +111,14 @@ class XQAImpl(FMHAImplBase):
         return self.fmha_impl.forward(fmha_input, kv_cache, self.fmha_params)
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
-        common.update_trt_params(
+        common.update_attention_params(
             self.fmha_impl,
             self.rope_kvcache_impl,
             self.fmha_params,
             self.rope_params,
             attn_inputs,
         )
-        # update_trt_params only copies kv_cache_offset. The TRT XQA kernel also
+        # update_attention_params only copies kv_cache_offset. XQA also
         # reads sequence_lengths via the captured data_ptr(), so we must update
         # the data in-place at the address recorded during CUDA graph capture.
         new_seq_lens = attn_inputs.sequence_lengths
@@ -144,7 +150,14 @@ class XQADecodeImpl(FMHAImplBase):
     ) -> bool:
         if attn_inputs.is_prefill:
             return False
-        if torch.cuda.get_device_capability()[0] not in [9, 10, 12]:
+        # sm_120a consumer Blackwell: the FlashInfer xqa() build here rejects
+        # the nb_sub_seq_per_seq kwarg used in forward(), and XQA has no
+        # sm_120a binding anyway. Gate it off so decode dispatch falls through
+        # to PyFlashinferDecodeImpl (the working sm_120 path), mirroring the
+        # XQAImpl.support gate.
+        if is_sm12x():
+            return False
+        if get_sm()[0] not in [9, 10]:
             return False
         group_size = attn_configs.head_num // attn_configs.kv_head_num
         return (

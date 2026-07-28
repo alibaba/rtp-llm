@@ -272,10 +272,16 @@ bool P2PConnector::executeRead(int64_t                                 request_i
                                FunctionResponsePB&                     response) {
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
     for (const auto& layer_block_pb : p2p_request.layer_blocks()) {
-        auto layer_id           = layer_block_pb.layer_id();
-        auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id);
+        const auto  layer_id  = static_cast<int>(layer_block_pb.layer_id());
+        const auto& cache_tag = layer_block_pb.cache_tag();
+        RTP_LLM_CHECK_WITH_INFO(!cache_tag.empty(), "P2P layer block requires cache_tag for layer=%d", layer_id);
+        auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id, cache_tag);
         auto cache_keys         = layer_block_pb.cache_keys();
         auto block_ids          = layer_block_pb.block_ids();
+        RTP_LLM_CHECK_WITH_INFO(cache_keys.size() == block_ids.size(),
+                                "P2P layer block key/id size mismatch for layer=%d tag=%s",
+                                layer_id,
+                                cache_tag.c_str());
         for (size_t i = 0; i < cache_keys.size(); i++) {
             layer_cache_buffer->addBlockId(cache_keys[i], block_ids[i]);
         }

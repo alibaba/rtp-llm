@@ -11,11 +11,14 @@
 #include "rtp_llm/cpp/config/EplbConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/SpecialTokens.h"
+#include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include <vector>
 #include <string>
 #include <map>
 
 namespace rtp_llm {
+
+using LayerKVCacheSpecDescs = std::vector<std::vector<KVCacheSpecDesc>>;
 
 enum TaskType {
     DENSE_EMBEDDING    = 0,
@@ -121,6 +124,10 @@ public:
 
     // Multimodal model configuration
     MMModelConfig mm_model_config;
+
+    // Declarative per-model KV cache layout. C++ cache config consumes this
+    // and performs runtime finalization such as block/ring sizing.
+    LayerKVCacheSpecDescs kv_cache_spec_descs;
 
     // Fields merged from PyModelConfig
     std::string extra_data_path       = "";

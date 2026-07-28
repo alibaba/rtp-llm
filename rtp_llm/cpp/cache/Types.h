@@ -1,6 +1,8 @@
 #pragma once
 
 #include <cstddef>
+#include <memory>
+#include <string>
 #include <vector>
 #include <cstdint>
 
@@ -8,9 +10,11 @@
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
-#include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 
 namespace rtp_llm {
+
+class CompleteTokenIds;
+using CompleteTokenIdsPtr = std::shared_ptr<CompleteTokenIds>;
 
 typedef int32_t          GroupIdType;
 typedef std::vector<int> LayerIdsType;
@@ -33,18 +37,27 @@ struct BlockIdPair {
     BlockIdxType dst;
 };
 
+struct TaggedBlockIdPair {
+    std::string  tag;
+    BlockIdxType src;
+    BlockIdxType dst;
+};
+
+// Process-local tensor representation. group_id is resolved from a stable tag
+// immediately before execution and is never used as an external identity.
+struct GroupBlockIdPair {
+    GroupIdType  group_id;
+    BlockIdxType src;
+    BlockIdxType dst;
+};
+
+static_assert(sizeof(GroupBlockIdPair) == 3 * sizeof(int32_t),
+              "GroupBlockIdPair must match the three-column int32 tensor layout");
+
 struct MatchResult {
     size_t           reuse_length = 0;
     size_t           reuse_blocks = 0;
     BlockIndicesType block_indices;
-};
-
-// for p2p connector when TP settings of prefill & decode are different.
-struct KVPartitionBytes {
-    size_t k_off = 0;
-    size_t k_sz  = 0;
-    size_t v_off = 0;
-    size_t v_sz  = 0;
 };
 
 struct MallocInfo {
@@ -54,8 +67,15 @@ struct MallocInfo {
     bool                    verbose             = true;  // for failed log
     bool                    reuse_cache         = true;
     bool                    enable_device_cache = true;
-    // Sparse linear-block cleanup is only valid for incremental allocation.
+    // Sparse tail-group cleanup is only valid for incremental allocation.
+    // Prefill init keeps reused prefix slots intact because model-path kernels
+    // still read them by prefix_length.
     bool enable_remove_skipped_blocks = true;
+    // Override for incrMalloc's seqLength read; -1 = fall back to complete_token_ids->seqLength().
+    // Lets the state machine feed the publish-time value instead of racing with the async worker.
+    int incr_seq_len_override = -1;
+
+    int incrSeqLen() const;
 };
 
 struct MallocResult {

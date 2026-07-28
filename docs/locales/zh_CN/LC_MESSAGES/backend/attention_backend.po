@@ -60,10 +60,6 @@ msgid "**Stage**"
 msgstr ""
 
 #: ../../backend/attention_backend.md
-msgid "**TRT_V1**"
-msgstr ""
-
-#: ../../backend/attention_backend.md
 msgid "❌"
 msgstr ""
 
@@ -72,7 +68,19 @@ msgid "NV ✅<br> AMD ❌"
 msgstr ""
 
 #: ../../backend/attention_backend.md
-msgid "--enable_trtv1_fmha"
+msgid "**FLASHINFER_TRTLLM_GEN**"
+msgstr ""
+
+#: ../../backend/attention_backend.md
+msgid "NV SM100 ✅<br> AMD ❌"
+msgstr ""
+
+#: ../../backend/attention_backend.md
+msgid "--enable_flashinfer_trtllm_gen"
+msgstr ""
+
+#: ../../backend/attention_backend.md
+msgid "NV SM90/SM12x ✅<br> AMD ❌"
 msgstr ""
 
 #: ../../backend/attention_backend.md
@@ -80,15 +88,15 @@ msgid "PREFILL ✅ <br>  DECODE❌"
 msgstr ""
 
 #: ../../backend/attention_backend.md
-msgid "**TRT_V2**"
+msgid "**FLASHINFER_TRT_FMHA_V2**"
 msgstr ""
 
 #: ../../backend/attention_backend.md
-msgid "--enable_trt_fmha"
+msgid "--enable_flashinfer_trt_fmha_v2"
 msgstr ""
 
 #: ../../backend/attention_backend.md
-msgid "**PAGED_TRT_V2**"
+msgid "**PAGED_FLASHINFER_TRT_FMHA_V2**"
 msgstr ""
 
 #: ../../backend/attention_backend.md
@@ -96,7 +104,7 @@ msgid "✅"
 msgstr ""
 
 #: ../../backend/attention_backend.md
-msgid "--enable_paged_trt_fmha"
+msgid "--enable_paged_flashinfer_trt_fmha_v2"
 msgstr ""
 
 #: ../../backend/attention_backend.md
@@ -128,7 +136,7 @@ msgid "None"
 msgstr ""
 
 #: ../../backend/attention_backend.md
-msgid "**FlashInfer**"
+msgid "**FLASHINFER_NATIVE**"
 msgstr ""
 
 #: ../../backend/attention_backend.md
@@ -136,7 +144,7 @@ msgid "NV ✅<br> AMD ✅"
 msgstr ""
 
 #: ../../backend/attention_backend.md
-msgid "--disable_flash_infer"
+msgid "--disable_flashinfer_native"
 msgstr ""
 
 #: ../../backend/attention_backend.md
@@ -170,4 +178,3 @@ msgstr ""
 #: ../../backend/attention_backend.md
 msgid "**AiterPA**"
 msgstr ""
-

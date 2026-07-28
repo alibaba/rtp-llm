@@ -191,6 +191,7 @@ class BaseAttentionTest(unittest.TestCase):
         sequence_lengths: List[int],
         seq_size_per_block: int,
         dtype: torch.dtype = torch.float16,
+        with_kv_cache_block_ids: bool = True,
     ) -> PyAttentionInputs:
         """Helper to create PyAttentionInputs for prefill mode
 
@@ -199,6 +200,7 @@ class BaseAttentionTest(unittest.TestCase):
             sequence_lengths: List of sequence lengths for each batch item
             seq_size_per_block: Number of tokens per block (page size)
             dtype: Data type for attention computation (default: torch.float16)
+            with_kv_cache_block_ids: Whether to populate paged KV cache block IDs
 
         Returns:
             PyAttentionInputs configured for prefill mode
@@ -223,14 +225,16 @@ class BaseAttentionTest(unittest.TestCase):
             batch_size, dtype=torch.int32, device="cpu"
         )
 
-        # Create KV cache block IDs using the extracted helper
-        kv_cache_block_id = self._create_kv_cache_block_ids(
-            batch_size, sequence_lengths, seq_size_per_block
-        )
-        attn_inputs.kv_cache_block_id = kv_cache_block_id
-        attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
-        attn_inputs.kv_cache_kernel_block_id = kv_cache_block_id
-        attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(self.device)
+        if with_kv_cache_block_ids:
+            kv_cache_block_id = self._create_kv_cache_block_ids(
+                batch_size, sequence_lengths, seq_size_per_block
+            )
+            attn_inputs.kv_cache_block_id = kv_cache_block_id
+            attn_inputs.kv_cache_block_id_device = kv_cache_block_id.to(self.device)
+            attn_inputs.kv_cache_kernel_block_id = kv_cache_block_id
+            attn_inputs.kv_cache_kernel_block_id_device = kv_cache_block_id.to(
+                self.device
+            )
 
         # Create cu_seqlens (cumulative sequence lengths) for ragged tensor
         cu_seqlens = [0]
@@ -258,22 +262,33 @@ class BaseAttentionTest(unittest.TestCase):
         Note: For HND layout, kv_cache_base should be a 5D tensor:
         [total_blocks, 2, num_kv_heads, seq_size_per_block, head_dim]
         where dimension 1 index 0 is K cache and index 1 is V cache.
+        FP8 caches also include the scale buffer required by fused cache writes.
         """
         kv_cache = LayerKVCache()
 
         # Create combined KV cache with shape [total_blocks, 2, num_kv_heads, seq_size_per_block, head_dim]
         # where dim=1, index=0 is K and index=1 is V
+        is_fp8 = dtype == torch.float8_e4m3fn
         kv_cache_combined = torch.randn(
             total_blocks,
             2,  # K and V
             num_kv_heads,
             seq_size_per_block,
             head_dim,
-            dtype=dtype,
+            dtype=torch.bfloat16 if is_fp8 else dtype,
             device=self.device,
         )
+        if is_fp8:
+            kv_cache_combined = kv_cache_combined.to(dtype)
 
         kv_cache.kv_cache_base = kv_cache_combined
+        if is_fp8:
+            kv_cache.kv_scale_base = torch.ones(
+                total_blocks,
+                2 * num_kv_heads * seq_size_per_block,
+                dtype=torch.float32,
+                device=self.device,
+            )
 
         # Extract separate K and V for reference computation
         k_cache = kv_cache_combined[

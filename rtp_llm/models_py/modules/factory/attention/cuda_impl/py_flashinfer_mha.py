@@ -14,11 +14,11 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.kv_cache_write_op import (
     KVCacheWriteOp,
 )
-from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import is_sm_100
 from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla import (
     check_attention_inputs,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
+from rtp_llm.models_py.utils.arch import is_sm10x
 from rtp_llm.ops import (
     AttentionConfigs,
     FMHAType,
@@ -87,6 +87,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
         else:
             self.kv_datatype = self.datatype
         self.max_seq_len = attn_configs.max_seq_len
+        self.is_causal = attn_configs.is_causal
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         self.enable_cuda_graph = attn_inputs.is_cuda_graph
         self.prefill_cuda_graph_copy_params = None
@@ -181,24 +182,6 @@ class PyFlashinferPrefillPagedAttnOp(object):
             self.cu_seq_lens[: attn_inputs.cu_seqlens_device.size(0)] = (
                 attn_inputs.cu_seqlens_device
             )
-            # Build qo_indptr matching the padded Q layout produced by small2large copy.
-            # Each batch's Q tokens sit at [i*max_seq_len, i*max_seq_len + input_len_i)
-            # in the padded buffer, so qo_indptr[i] = i*max_seq_len, but we set
-            # qo_indptr[i+1] = i*max_seq_len + input_len_i to tell FlashInfer the
-            # exact number of real tokens per batch (avoiding padding token processing
-            # which causes numerical differences).
-            batch_size = attn_inputs.input_lengths.size(0)
-            max_sl = self.prefill_cuda_graph_copy_params.max_seq_len
-            offsets = (
-                torch.arange(
-                    batch_size, device=self.qo_indptr.device, dtype=self.qo_indptr.dtype
-                )
-                * max_sl
-            )
-            self.qo_indptr[0] = 0
-            self.qo_indptr[1 : batch_size + 1] = offsets + attn_inputs.input_lengths.to(
-                self.qo_indptr.device
-            )
             qo_indptr = self.qo_indptr
 
         self.prefill_wrapper.plan(
@@ -210,7 +193,7 @@ class PyFlashinferPrefillPagedAttnOp(object):
             self.local_kv_head_num,
             self.head_dim_qk,
             self.page_size,
-            causal=True,
+            causal=self.is_causal,
             q_data_type=self.datatype,
             kv_data_type=self.kv_datatype,
         )
@@ -346,6 +329,7 @@ class PyFlashinferPrefillAttnOp(object):
             backend=backend,
         )
         self.datatype = attn_configs.dtype
+        self.is_causal = attn_configs.is_causal
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
 
     def __del__(self):
@@ -365,11 +349,17 @@ class PyFlashinferPrefillAttnOp(object):
         batch_size = attn_inputs.input_lengths.size(0)
         cu_seqlens = attn_inputs.cu_seqlens_device[: batch_size + 1]
 
+        # Encoder-only models (BERT) have no paged kv cache; fill_params
+        # pybind requires a Tensor, so substitute an empty int32 tensor.
+        kv_block_id_host = attn_inputs.kv_cache_kernel_block_id
+        if kv_block_id_host is None:
+            kv_block_id_host = torch.empty(0, dtype=torch.int32)
+
         self.fmha_params.fill_params(
             attn_inputs.prefix_lengths,
             attn_inputs.sequence_lengths,
             attn_inputs.input_lengths,
-            attn_inputs.kv_cache_kernel_block_id,
+            kv_block_id_host,
             self.page_size,
         )
 
@@ -380,7 +370,7 @@ class PyFlashinferPrefillAttnOp(object):
             self.local_kv_head_num,
             self.head_dim_qk,
             self.head_dim_vo,
-            causal=True,
+            causal=self.is_causal,
             q_data_type=get_scalar_type(attn_inputs.dtype),
         )
         return self.fmha_params
@@ -569,12 +559,14 @@ class PyFlashinferPagedPrefillImpl(PyFlashinferPrefillImplBase):
         """Check if paged prefill implementation is supported.
 
         Returns True if:
-        1. Not running on SM 10.0 (Blackwell) architecture
+        1. Not running on SM10x datacenter Blackwell, where TRTLLMGen is preferred.
+           SM12x consumer Blackwell keeps this FlashInfer paged fallback because
+           TRTLLMGen/XQA do not have sm_120a support in this build.
         2. The underlying paged FMHA op supports the inputs
         3. MhaRotaryEmbeddingOp supports the inputs
         """
         return (
-            not is_sm_100()
+            not is_sm10x()
             and PyFlashinferPrefillPagedAttnOp.support(attn_inputs)
             and attn_configs.rope_config.style != RopeStyle.Mrope
         )
@@ -624,19 +616,27 @@ class PyFlashinferPrefillImpl(PyFlashinferPrefillImplBase):
 
         return qkv
 
+    def support_cuda_graph(self) -> bool:
+        return False
+
     @staticmethod
     def support(attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs) -> bool:
         """Check if ragged prefill implementation is supported.
 
         Returns True if:
-        1. Not running on SM 10.0 (Blackwell) architecture
-        2. The underlying ragged FMHA op supports the inputs
+        1. The underlying ragged FMHA op supports the inputs
            (requires prefix_lengths to be empty or zero)
-        3. MhaRotaryEmbeddingOp supports the inputs
+        2. MhaRotaryEmbeddingOp supports the inputs
+        3. Mrope is not used
+
+        Note: Unlike the paged variant, ragged prefill is kept enabled on
+        Blackwell: TRT-LLM Gen prefill requires a paged kv cache and
+        therefore does not cover BERT-style encoder-only inputs that lack
+        one. Without this fallback, sm_120 has no usable prefill impl for
+        such cases.
         """
         return (
-            not is_sm_100()
-            and PyFlashinferPrefillAttnOp.support(attn_inputs)
+            PyFlashinferPrefillAttnOp.support(attn_inputs)
             and attn_configs.rope_config.style != RopeStyle.Mrope
         )
 

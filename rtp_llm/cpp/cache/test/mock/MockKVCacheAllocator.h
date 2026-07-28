@@ -26,18 +26,26 @@ public:
                 (const KVCacheResource& kvcache_resource, const CacheKeysType& cache_keys, bool is_connector),
                 (override));
     MOCK_METHOD(void, decrKVCacheRef, (const KVCacheResource& kvcache_resource, bool is_connector), (override));
-    MOCK_METHOD(CacheLayerLayout, allLayerCacheBase, (), (const, override));
+    MOCK_METHOD(GroupedCacheLayerLayout, allLayerCacheBase, (), (const, override));
     MOCK_METHOD(bool,
                 updateKVBlock,
-                (const BatchKVCacheResourcePtr& batch_kv_cache_resource,
-                 const std::vector<int>&        block_src_batch,
-                 bool                           copy_last_block,
-                 std::vector<BlockIdPair>&      block_update_mapping),
+                (const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
+                 const std::vector<int>&         block_src_batch,
+                 bool                            copy_last_block,
+                 std::vector<TaggedBlockIdPair>& block_update_mapping),
                 (override));
     MOCK_METHOD(int, seqSizePerBlock, (), (const, override));
     MOCK_METHOD(int,
                 singleBatchNeedBlocks,
                 (const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step),
+                (const, override));
+    MOCK_METHOD(int,
+                estimatePeakNeedBlocks,
+                (const KVCacheResource& kv_cache_resource,
+                 int                    seq_len,
+                 int                    remaining_tokens,
+                 int                    reserve_step,
+                 bool                   enable_reuse_cache),
                 (const, override));
 
 protected:
@@ -45,6 +53,15 @@ protected:
     MOCK_METHOD(MallocResult, incrMalloc, (const MallocInfo&), (override));
     MOCK_METHOD(MallocResult, initMallocForCommonLen, (const MallocInfo&), (override));
     MOCK_METHOD(int, getNeedBlocks, (const MallocInfo&), (const, override));
+    MOCK_METHOD(int,
+                estimateInitialBatchPeakNeedBlocks,
+                (int  seq_len,
+                 int  common_seq_len,
+                 int  remaining_tokens,
+                 int  reserve_step,
+                 bool enable_reuse_cache,
+                 int  target_batch_size),
+                (const, override));
 };
 
 }  // namespace rtp_llm

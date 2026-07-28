@@ -9,6 +9,7 @@ test_deps = [
     "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
     "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
     "//rtp_llm/cpp/config:config_modules",
+    "//rtp_llm/cpp/cache/test:cache_config_test_utils",
     "@com_google_googletest//:gtest",
     "@com_google_googletest//:gtest_main",
     "@local_config_cuda//cuda:cuda_headers",
@@ -53,7 +54,7 @@ cc_test(
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
     # tags = ["H20"],
-    deps = [
+    deps = test_deps + [
         ":remote_connector_mock_base",
     ],
 )
@@ -66,7 +67,7 @@ cc_test(
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
     # tags = ["H20"],
-    deps = [
+    deps = test_deps + [
         ":remote_connector_mock_base",
     ],
 )

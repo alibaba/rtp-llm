@@ -16,18 +16,17 @@
 namespace rtp_llm {
 
 class KVCacheManager;
+class ModelInputsLogger;
 struct GptModelInitParams;
 
 class NormalExecutor: public Executor {
 public:
     explicit NormalExecutor(const EngineInitParams&                params,
                             const std::shared_ptr<KVCacheManager>& cache_manager,
-                            bool                                   warm_up                 = false,
-                            bool                                   is_propose              = false,
-                            int                                    propose_model_index     = 0,
-                            MlaOpsType                             mla_ops_type            = MlaOpsType::AUTO,
-                            int32_t                                kv_cache_group_num      = 1,
-                            const std::vector<int32_t>&            kv_cache_layer_to_group = {});
+                            bool                                   warm_up             = false,
+                            bool                                   is_propose          = false,
+                            int                                    propose_model_index = 0,
+                            MlaOpsType                             mla_ops_type        = MlaOpsType::AUTO);
     ~NormalExecutor();
     absl::Status process(const std::list<GenerateStreamPtr>& streams) override;
     void         reportMetrics(const StreamGroups&             stream_groups,
@@ -53,6 +52,7 @@ private:
     std::unique_ptr<Sampler>                                                 sampler_;
     std::unique_ptr<NormalBatchStreamProcessor>                              batch_stream_processor_;
     std::shared_ptr<KVCacheManager>                                          cache_manager_;
+    std::shared_ptr<ModelInputsLogger>                                       model_inputs_logger_;
     std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
     bool                                                                     warm_up_;
     bool                                                                     use_all_gather_;

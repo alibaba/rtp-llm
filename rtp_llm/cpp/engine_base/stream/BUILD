@@ -55,6 +55,7 @@ cc_library(
         "//rtp_llm/cpp/engine_base/system_prompt:system_prompt",
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/cache:cache",
+        "//rtp_llm/cpp/cache:cp_slot_mapper",
         "//rtp_llm/cpp/utils:hash_util",
         "//rtp_llm/cpp/models:dfa_utils",
         "@havenask//aios/autil:synchronized_queue",

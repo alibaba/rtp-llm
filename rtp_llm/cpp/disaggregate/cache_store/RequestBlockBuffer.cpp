@@ -134,11 +134,20 @@ void RequestBlockBuffer::triggerWatchFunc(bool ok, const std::vector<std::shared
 
 std::string RequestBlockBuffer::debugInfo() const {
     std::ostringstream stream;
-    stream << "request id: " << requestid_ << ", blocks count: " << getBlocksCount();
+    stream << "request id: " << requestid_;
+    if (!request_key_.empty()) {
+        stream << ", request key: " << request_key_;
+    }
+    stream << ", blocks count: " << getBlocksCount();
     if (!watch_funcs_.empty()) {
         stream << ", has watch func";
     } else {
         stream << ", no watch func";
+    }
+    stream << ", block keys: ";
+    auto blocks = getBlocks();
+    for (const auto& block : blocks) {
+        stream << block.first << " ";
     }
     return stream.str();
 }

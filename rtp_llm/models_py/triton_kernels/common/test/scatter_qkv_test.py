@@ -1,8 +1,16 @@
 import unittest
 
 import torch
+import triton
+import triton.language as tl
 
+from rtp_llm.models_py.triton_kernels.common.offset import linear_offset_64
 from rtp_llm.models_py.triton_kernels.common.scatter_qkv import scatter_qkv
+
+
+@triton.jit
+def _linear_offset_test_kernel(output, row, stride):
+    tl.store(output, linear_offset_64(row, stride))
 
 
 def _split_view_baseline(
@@ -78,6 +86,15 @@ class TestScatterQKV(unittest.TestCase):
         for M in (2047, 2048, 2049):
             with self.subTest(M=M):
                 self._assert_equivalent(M, 8, 16, 128, 128, torch.bfloat16)
+
+    def test_large_packed_prefill_offset_uses_int64(self) -> None:
+        """Cover Qwen3.5 TP1/TP2 rows where row * qkv_stride exceeds INT32_MAX."""
+        output = torch.empty(1, dtype=torch.int64, device=self.device)
+        for row, stride in ((209716, 10240), (419431, 5120), (524288, 4096)):
+            with self.subTest(row=row, stride=stride):
+                _linear_offset_test_kernel[(1,)](output, row, stride)
+                self.assertEqual(output.item(), row * stride)
+                self.assertGreater(output.item(), torch.iinfo(torch.int32).max)
 
     def test_dtypes(self) -> None:
         """bf16 is the production dtype; fp16/fp32 should also work."""

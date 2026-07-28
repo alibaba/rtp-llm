@@ -39,13 +39,13 @@ public:
     grpc::Status
     GetCacheStatus(grpc::ServerContext* context, const ::CacheVersionPB* request, ::CacheStatusPB* response);
 
-    grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
-                                    const GenerateInputPB*                 request,
-                                    grpc::ServerWriter<GenerateOutputsPB>* writer);
+    virtual grpc::Status GenerateStreamCall(grpc::ServerContext*                   context,
+                                            const GenerateInputPB*                 request,
+                                            grpc::ServerWriter<GenerateOutputsPB>* writer);
 
-    grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
-                                   const BatchGenerateInputPB* request,
-                                   BatchGenerateOutputsPB*     response);
+    virtual grpc::Status BatchGenerateCall(grpc::ServerContext*        context,
+                                           const BatchGenerateInputPB* request,
+                                           BatchGenerateOutputsPB*     response);
 
     grpc::Status CheckHealth(grpc::ServerContext* context, const EmptyPB* request, CheckHealthResponsePB* response);
 
@@ -102,6 +102,10 @@ public:
     typedef grpc::internal::WriterInterface<GenerateOutputsPB> WriterInterface;
 
 protected:
+    virtual bool isCancelled(grpc::ServerContext* context) const {
+        return context->IsCancelled();
+    }
+
     grpc::Status serializeErrorMsg(const std::string& request_key, ErrorInfo error_info);
     grpc::Status pollStreamOutput(grpc::ServerContext*             context,
                                   const std::string&               request_key,
