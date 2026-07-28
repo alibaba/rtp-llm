@@ -1,4 +1,5 @@
 import unittest
+from dataclasses import dataclass, field
 from unittest.mock import patch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
@@ -20,15 +21,22 @@ class _FakeGenerateConfig:
     def validate(self):
         return None
 
+    def model_copy(self, update=None):
+        copied = _FakeGenerateConfig(self.is_streaming)
+        copied.role_addrs = list(self.role_addrs)
+        for key, value in (update or {}).items():
+            setattr(copied, key, value)
+        return copied
 
+
+@dataclass
 class _FakeInput:
-    request_id = 123
-    prompt_length = 17
-    token_ids = _FakeTokenIds()
+    generate_config: _FakeGenerateConfig = field(default_factory=_FakeGenerateConfig)
+    request_id: int = 123
+    token_ids: _FakeTokenIds = field(default_factory=_FakeTokenIds)
     headers = None
-
-    def __init__(self, is_streaming=False):
-        self.generate_config = _FakeGenerateConfig(is_streaming=is_streaming)
+    enqueued_by_master: bool = False
+    prompt_length: int = 17
 
 
 class _FakeRouteTokenIds:
@@ -64,14 +72,19 @@ class _FakeMasterClient:
         self.calls = []
 
     async def get_backend_role_addrs(
-        self, block_cache_keys, input, request_id, input_pb_bytes=None
+        self,
+        block_cache_keys,
+        cache_key_block_size,
+        input,
+        request_id,
+        input_pb=None,
     ):
         self.calls.append(
             {
                 "block_cache_keys": block_cache_keys,
                 "input": input,
                 "request_id": request_id,
-                "input_pb_bytes": input_pb_bytes,
+                "input_pb": input_pb,
             }
         )
         return FlexlbResponse.ok(["prefill-role"], enqueued_by_master=True)
@@ -113,6 +126,8 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
         visitor.master_client = _FakeMasterClient()
         visitor._route_cache_keys = lambda keys: keys
         visitor._report_recent_cache_key_metrics = lambda keys: None
+        visitor._page_rr_route_cache_keys = False
+        visitor._page_rr_cp_size = 1
 
         input = _FakeRouteInput()
 
@@ -133,7 +148,8 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(visitor.master_client.calls[0]["block_cache_keys"], [11, 22])
         self.assertEqual(visitor.master_client.calls[0]["request_id"], 456)
         self.assertEqual(
-            visitor.master_client.calls[0]["input_pb_bytes"], b"serialized-input"
+            visitor.master_client.calls[0]["input_pb"].SerializeToString(),
+            b"serialized-input",
         )
 
     async def test_route_ips_preserves_master_route_error_code_on_route_error(self):
@@ -163,9 +179,11 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
 class _RetryingModelRpcClient:
     def __init__(self):
         self.attempts = 0
+        self.inputs = []
 
-    async def enqueue(self, _input):
+    async def enqueue(self, input):
         self.attempts += 1
+        self.inputs.append(input)
         attempt = self.attempts
         if attempt == 1:
             yield "partial-output-from-failed-attempt"
@@ -202,6 +220,7 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
         visitor.model_rpc_client = model_rpc_client
         visitor.host_service = _FakeHostService()
         visitor.pd_route_retry_on_unavailable = 3
+        visitor.request_id_factory = None
         visitor.fill_request_info = lambda _input: None
         visitor.check_sp_supported = lambda _input: None
         return visitor
@@ -209,18 +228,26 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
     async def test_non_streaming_discards_partial_attempt_before_retry(self):
         client = _RetryingModelRpcClient()
         visitor = self._visitor(client)
+        input = _FakeInput(_FakeGenerateConfig(is_streaming=False))
+        visitor.set_request_id_factory(lambda: 456)
 
-        stream = await visitor.enqueue(_FakeInput(is_streaming=False))
+        stream = await visitor.enqueue(input)
         outputs = [output async for output in stream]
 
         self.assertEqual(outputs, ["successful-output"])
         self.assertEqual(client.attempts, 2)
+        self.assertEqual([item.request_id for item in client.inputs], [123, 456])
+        self.assertIs(client.inputs[0], input)
+        self.assertIsNot(client.inputs[1], input)
+        self.assertIsNot(client.inputs[1].generate_config, input.generate_config)
+        self.assertIs(client.inputs[1].token_ids, input.token_ids)
+        self.assertEqual(input.request_id, 123)
 
     async def test_non_streaming_replays_successful_outputs_in_order(self):
         client = _SuccessfulModelRpcClient(["first-output", "second-output"])
         visitor = self._visitor(client)
 
-        stream = await visitor.enqueue(_FakeInput(is_streaming=False))
+        stream = await visitor.enqueue(_FakeInput(_FakeGenerateConfig(False)))
         outputs = [output async for output in stream]
 
         self.assertEqual(outputs, ["first-output", "second-output"])
@@ -232,8 +259,9 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
         )
         visitor = self._visitor(client)
         visitor.pd_route_retry_on_unavailable = 1
+        visitor.set_request_id_factory(lambda: 456)
 
-        stream = await visitor.enqueue(_FakeInput(is_streaming=False))
+        stream = await visitor.enqueue(_FakeInput(_FakeGenerateConfig(False)))
         outputs = []
         with self.assertRaisesRegex(RuntimeError, "StatusCode.UNAVAILABLE"):
             async for output in stream:
@@ -242,11 +270,21 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(outputs, [])
         self.assertEqual(client.attempts, 2)
 
+    async def test_retry_without_request_id_factory_is_disabled(self):
+        client = _RetryingModelRpcClient()
+        visitor = self._visitor(client)
+
+        stream = await visitor.enqueue(_FakeInput(_FakeGenerateConfig(False)))
+        with self.assertRaisesRegex(RuntimeError, "StatusCode.UNAVAILABLE"):
+            [output async for output in stream]
+
+        self.assertEqual(client.attempts, 1)
+
     async def test_non_streaming_non_retryable_error_does_not_retry(self):
         client = _AlwaysFailingModelRpcClient(ValueError("bad output"))
         visitor = self._visitor(client)
 
-        stream = await visitor.enqueue(_FakeInput(is_streaming=False))
+        stream = await visitor.enqueue(_FakeInput(_FakeGenerateConfig(False)))
         outputs = []
         with self.assertRaisesRegex(ValueError, "bad output"):
             async for output in stream:
@@ -259,7 +297,7 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
         client = _RetryingModelRpcClient()
         visitor = self._visitor(client)
 
-        stream = await visitor.enqueue(_FakeInput(is_streaming=True))
+        stream = await visitor.enqueue(_FakeInput(_FakeGenerateConfig(True)))
         outputs = []
         with self.assertRaisesRegex(RuntimeError, "StatusCode.UNAVAILABLE"):
             async for output in stream:
