@@ -5,6 +5,7 @@
 #include <unordered_map>
 #include "grpc++/grpc++.h"
 #include "absl/status/statusor.h"
+#include "rtp_llm/cpp/model_rpc/GrpcLimits.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -39,7 +40,9 @@ public:
         if (need_new_connection) {
             grpc::ChannelArguments args;
             args.SetInt(GRPC_ARG_MAX_SEND_MESSAGE_LENGTH, -1);
-            args.SetInt(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH, -1);
+            // Finite receive cap, kept in lockstep with the server default
+            // (see GrpcLimits.h for the payload audit).
+            args.SetInt(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH, kGrpcMaxReceiveMessageBytes);
             args.SetInt(GRPC_ARG_MAX_CONCURRENT_STREAMS, 100000);
             args.SetInt(GRPC_ARG_KEEPALIVE_TIME_MS, 10000);
             // 需配合 GRPC_CLIENT_CHANNEL_BACKUP_POLL_INTERVAL_MS 使用，例如 500

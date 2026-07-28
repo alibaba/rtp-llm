@@ -114,23 +114,29 @@ void StepWindowProfiler::configure(bool enable, const std::string& trace_name, i
         RTP_LLM_LOG_INFO("timeline profiling already active, ignoring new configure request");
         return;
     }
+    const std::string sanitized_trace_name = sanitizeTraceName(trace_name);
     {
         std::lock_guard<std::mutex> lock(mu_);
-        trace_name_ = sanitizeTraceName(trace_name);
+        trace_name_ = sanitized_trace_name;
     }
     static constexpr int kDefaultNumSteps = 3;
     // num_steps is request-supplied; bound the capture window so one request
     // cannot keep the whole engine under the profiler indefinitely.
     static constexpr int kMaxNumSteps = 100;
+    if (num_steps > kMaxNumSteps) {
+        RTP_LLM_LOG_WARNING("timeline profiling num_steps=%d exceeds the cap, clamped to %d", num_steps, kMaxNumSteps);
+    }
     start_step_.store(std::max(0, start_step));
     num_steps_.store(std::min(kMaxNumSteps, num_steps > 0 ? num_steps : kDefaultNumSteps));
     enabled_.store(enable);
     reconfigure_.store(true);
+    // Log the sanitized/clamped values actually in effect, not the request's
+    // raw input (which could also smuggle control chars into the log line).
     RTP_LLM_LOG_INFO("timeline profiling configured: enable=%d start_step=%d num_steps=%d trace=%s",
                      int(enable),
                      start_step_.load(),
                      num_steps_.load(),
-                     trace_name.c_str());
+                     sanitized_trace_name.c_str());
 }
 
 void StepWindowProfiler::tick() {

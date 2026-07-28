@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.h"
+#include "rtp_llm/cpp/model_rpc/GrpcLimits.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/WeightsConverter.h"
@@ -359,10 +360,10 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
     // [1, k, vocab] propose probs, ~4.3MB fp32 at k=7). Raise the receive cap
     // to a generous but finite bound instead of unlimited (-1) so one oversized
     // message cannot force an unbounded allocation on every deployment's RPC
-    // port. An explicit server_config entry still wins.
+    // port. Shared with the client pool (GrpcLimits.h, incl. payload audit);
+    // an explicit server_config entry still wins.
     if (server_config.find(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH) == server_config.end()) {
-        constexpr int kMaxReceiveMessageBytes              = 1 << 30;  // 1 GiB
-        server_config[GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH] = kMaxReceiveMessageBytes;
+        server_config[GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH] = kGrpcMaxReceiveMessageBytes;
     }
     for (auto it = server_config.begin(); it != server_config.end(); ++it) {
         RTP_LLM_LOG_INFO("grpc server add channel argument %s: %d", it->first.c_str(), it->second);
