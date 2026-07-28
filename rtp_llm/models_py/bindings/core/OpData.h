@@ -105,6 +105,11 @@ struct GptModelOutputs {
     torch::Tensor all_hidden_states;
     torch::Tensor all_logits;
     torch::Tensor softmax_result;
+    // Optional [context_batch, ...] output of the deployment-registered
+    // post-layers CustomHandler (undefined unless a handler is configured
+    // and this step had context requests). Rows follow the context-stream
+    // order, i.e. the tail of the lm_output rows.
+    torch::Tensor custom_output;
 
     std::vector<torch::Tensor> moe_gating;
 };

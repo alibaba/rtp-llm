@@ -18,6 +18,7 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_runner.h"
 #endif
 #include "rtp_llm/cpp/models/context_parallel/ContextParallelProcessorBase.h"
+#include "rtp_llm/cpp/engine_base/executor_base/PostLayersProcessor.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
@@ -40,6 +41,7 @@ public:
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
     void            releaseBuffers() override;
+    void            setPostLayersProcessor(const std::shared_ptr<PostLayersProcessor>& processor) override;
 
 private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
@@ -96,6 +98,7 @@ private:
 
     std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
     std::unique_ptr<CacheStoreAsyncWriter>     cache_store_async_writer_;
+    std::shared_ptr<PostLayersProcessor>       post_layers_processor_;
 
     // Accumulated H2D copies from tensorHoldHostAndToCuda(); flushed as one kernel per forward.
     FusedD2DCopyParams d2d_copies_;

@@ -127,6 +127,8 @@ class GenerateOutput:
     logits: Optional[torch.Tensor] = None
     all_probs: Optional[torch.Tensor] = None
     prompt_logits: Optional[Dict[str, Any]] = None
+    # output of the deployment-registered post-layers CustomHandler
+    custom_output: Optional[torch.Tensor] = None
 
     class Config:
         arbitrary_types_allowed = True

@@ -119,11 +119,17 @@ struct ModelBufferHolder {
     }
 };
 
+class PostLayersProcessor;
+
 class ModelBase {
 public:
     virtual ~ModelBase()                                          = default;
     virtual GptModelOutputs forward(const GptModelInputs& inputs) = 0;
     virtual void            releaseBuffers() {}
+
+    // Deployment-registered post-layers CustomHandler (generate path);
+    // models that do not run post layers ignore it.
+    virtual void setPostLayersProcessor(const std::shared_ptr<PostLayersProcessor>& processor) {}
 
     rtp_llm::Weights            weights_;
     rtp_llm::OverallExpertStats overall_expert_stats_;

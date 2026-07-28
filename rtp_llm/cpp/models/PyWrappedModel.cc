@@ -276,6 +276,17 @@ GptModelOutputs PyWrappedModel::callForwardPostLayers(torch::Tensor         hidd
                              skip_final_layernorm);
 }
 
+void PyWrappedModel::setPostLayersProcessor(const std::shared_ptr<PostLayersProcessor>& processor) {
+    post_layers_processor_ = processor;
+    if (post_layers_processor_ && post_layers_processor_->hasHandler()) {
+        RTP_LLM_CHECK_WITH_INFO(bool(weights_.lm_head), "post-layers handler requires a model with lm_head");
+        // Eat the handler's lazy initialization (cuBLAS handles, imports)
+        // before traffic; a handler that cannot run fails startup here.
+        post_layers_processor_->warmup(weights_.lm_head->kernel.size(1),
+                                       dataTypeToTorchType(description_.data_type));
+    }
+}
+
 std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const GptModelInputs& inputs) {
     RTP_LLM_PROFILE_SCOPE("py_model.prepareWriteCacheParams");
     std::optional<PyCacheStoreInputs> params;
@@ -728,6 +739,15 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
 
         printTorchTensorData(last_hidden, "last_hidden");
 
+        torch::Tensor custom_output;
+        if (post_layers_processor_ && post_layers_processor_->shouldRunOnContext(has_context_request)) {
+            // lm_output rows: decode rows first, context rows at the tail.
+            torch::Tensor lm_rows = need_all_logits ?
+                                        torch::index_select(hidden, 0, lm_output_indexes_device.to(torch::kLong)) :
+                                        last_hidden;
+            custom_output = post_layers_processor_->runOnContext(lm_rows, inputs.sequence_lengths.size(0));
+        }
+
         auto logits = torch::mm(last_hidden.to(lm_head->kernel.dtype()), lm_head->kernel.t()).to(torch::kFloat32);
         printTorchTensorData(logits, "logits");
         if (device_props_.tp_size > 1) {
@@ -739,14 +759,18 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
         }
         torch::Tensor softmax_result_t;
         if (need_all_logits) {
-            auto last_logits = torch::index_select(logits, 0, lm_output_indexes_device.to(torch::kLong));
-            return {last_logits, last_hidden, hidden, logits, softmax_result_t};
+            auto            last_logits = torch::index_select(logits, 0, lm_output_indexes_device.to(torch::kLong));
+            GptModelOutputs outputs{last_logits, last_hidden, hidden, logits, softmax_result_t};
+            outputs.custom_output = custom_output;
+            return outputs;
         }
 
         if (merged_eagle3_hidden.defined()) {
             hidden = merged_eagle3_hidden;
         }
-        return {logits, last_hidden, hidden, torch::Tensor(), softmax_result_t};
+        GptModelOutputs outputs{logits, last_hidden, hidden, torch::Tensor(), softmax_result_t};
+        outputs.custom_output = custom_output;
+        return outputs;
     } else {
         return {torch::Tensor(), torch::Tensor(), hidden};
     }

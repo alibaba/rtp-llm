@@ -36,6 +36,9 @@ struct StreamUpdateInfo {
     const torch::Tensor src_batch_indices;
     // for mtp
     const torch::Tensor all_hidden_states;
+    // [cur_batch_size, ...] post-layers CustomHandler output for this stream's
+    // prefill step (already staged to CPU); undefined otherwise.
+    const torch::Tensor custom_output;
     bool                update_remote_generate = true;
     bool                force_update_info      = false;
     // prompt scoring
@@ -289,6 +292,7 @@ public:
     const ResourceContext&      resourceContext() const;
     void                        setKVCache(const BatchKVCacheResource& kv_cache_resource);
     void                        setLoss(const torch::Tensor& loss);
+    void                        setCustomOutput(const torch::Tensor& custom_output);
     void                        setSoftmaxProbs(const torch::Tensor& softmax_probs, int start_pos);
     const BatchKVCacheResource& kvCache() const;
     BatchKVCacheResource&       kvCacheMutable();
@@ -314,6 +318,9 @@ public:
     // for test
     void          setIsContextStream(bool is_context_stream);
     torch::Tensor getLoss();
+    torch::Tensor getCustomOutput() const {
+        return custom_output_;
+    }
     torch::Tensor getLastHiddenStates() const;
     void          setLastHiddenStates(torch::Tensor hidden_states) {
         last_hidden_states_ = std::move(hidden_states);
@@ -643,6 +650,7 @@ protected:
     torch::Tensor                            softmax_probs_;
     torch::Tensor                            loss_;
     torch::Tensor                            last_hidden_states_;
+    torch::Tensor                            custom_output_;
     int                                      loss_index_ = 0;
     std::shared_ptr<std::mutex>              mutex_;
     std::shared_ptr<std::condition_variable> consumer_cv_;

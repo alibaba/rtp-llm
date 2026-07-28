@@ -130,6 +130,19 @@ void RtpLLMOp::init(py::object model,
     while (!is_server_ready_) {
         sleep(1);  // wait 1s for server ready
     }
+
+    // Deployment-registered post-layers CustomHandler (generate path): inject
+    // after the engine is up so the setter can warm the handler up on the
+    // built model. Failures propagate — a deployment that declares a handler
+    // it cannot run must not come up.
+    {
+        pybind11::gil_scoped_acquire acquire;
+        if (pybind11::hasattr(model, "custom_module") && !model.attr("custom_module").is_none()) {
+            auto engine = model_rpc_service_->getEngine();
+            RTP_LLM_CHECK_WITH_INFO(engine != nullptr, "engine not ready for post-layers handler injection");
+            engine->setHiddenStatesProcessor(model.attr("custom_module").attr("handler"));
+        }
+    }
 }
 
 EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config, py::object vit_config) {

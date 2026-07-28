@@ -11,7 +11,7 @@ from rtp_llm.config.engine_config import EngineConfig
 from rtp_llm.config.py_config_modules import ProfilingDebugLoggingConfig
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.propose_model.propose_model import ProposeModel
-from rtp_llm.ops import TaskType
+from rtp_llm.ops import RoleType, TaskType
 from rtp_llm.utils.time_util import timer_wrapper
 
 
@@ -40,6 +40,18 @@ def create_engine(
     torch.ops.rtp_llm.init_engine(alog_conf_path)
 
     if model.model_config.task_type == TaskType.LANGUAGE_MODEL:
+        if model.custom_module is not None:
+            # v1 of the post-layers handler: no speculative decoding, no PD
+            # disaggregation. Reject the combination at startup instead of
+            # silently not scoring.
+            if propose_model is not None:
+                raise RuntimeError(
+                    "CUSTOM_OUTPUT_PROCESSOR does not support speculative decoding yet"
+                )
+            if engine_config.pd_sep_config.role_type != RoleType.PDFUSION:
+                raise RuntimeError(
+                    "CUSTOM_OUTPUT_PROCESSOR does not support PD disaggregation yet"
+                )
         logging.info("create llm engine")
         return LanguageCppEngine(
             model=model,

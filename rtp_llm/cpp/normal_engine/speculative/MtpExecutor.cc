@@ -117,6 +117,7 @@ GenerateStreamPtr MtpExecutor::createMinFakeDecodeStream(int                    
                                  torch::Tensor(),
                                  torch::Tensor(),
                                  torch::Tensor(),
+                                 torch::Tensor(),
                                  false};
 
     fake_stream->update(update_info);

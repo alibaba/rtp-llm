@@ -40,6 +40,7 @@ class PipelineResponse(BaseModel):
     output_ids: Optional[List[List[int]]] = None
     input_ids: Optional[List[List[int]]] = None
     prompt_logprobs: Optional[Dict[str, Any]] = None
+    custom_output: Optional[Union[List[float], List[List[float]]]] = None
 
 
 class MultiSequencesPipelineResponse(BaseModel):
@@ -222,6 +223,11 @@ class FrontendWorker:
                         else None
                     ),
                     prompt_logprobs=prompt_logits_dict,
+                    custom_output=(
+                        out.custom_output.tolist()
+                        if out.custom_output is not None
+                        else None
+                    ),
                 )
             )
         return BatchPipelineResponse(response_batch=pipeline_responses)
@@ -312,6 +318,7 @@ class FrontendWorker:
             if generate_config.return_prompt_logits
             else None
         )
+        custom_output = gen_responses.generate_outputs.generate_outputs[0].custom_output
 
         response = PipelineResponse(
             response=generate_texts[0],
@@ -343,6 +350,9 @@ class FrontendWorker:
                 else None
             ),
             prompt_logprobs=prompt_logits_dict,
+            custom_output=(
+                custom_output.tolist() if custom_output is not None else None
+            ),
         )
 
         return response
