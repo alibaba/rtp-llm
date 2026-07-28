@@ -279,6 +279,7 @@ def _fused_split_rope_pack(
         BLOCK_NI=BLOCK_NI,
         REM=rem,
         BLOCK_REM=BLOCK_REM,
+        num_warps=1,
     )
 
 
@@ -946,67 +947,50 @@ def _fused_cp_paged_write_kernel(
     scratch_idx_ptr,
     base_flat_ptr,
     scale_flat_ptr,
-    TOTAL: tl.constexpr,
+    TOKEN_COUNT,
     NK: tl.constexpr,
     NI: tl.constexpr,
     NUM_KV_HEADS: tl.constexpr,
     HEAD_DIM: tl.constexpr,
     PAGE_SIZE: tl.constexpr,
-    BLOCK: tl.constexpr,
+    BLOCK_D: tl.constexpr,
+    BLOCK_I: tl.constexpr,
 ):
-    pid = tl.program_id(0)
-    offs = pid * BLOCK + tl.arange(0, BLOCK)
-    mask = offs < TOTAL
+    t = tl.program_id(0)
+    if t >= TOKEN_COUNT:
+        return
     per_token = 2 * NK + NI
-    token = offs // per_token
-    field = offs - token * per_token
-
-    src_token = tl.load(unpad_ptr + token, mask=mask, other=0).to(tl.int64)
-    dst_slot = tl.load(write_slots_ptr + token, mask=mask, other=0).to(tl.int64)
-    physical_slot = tl.load(slot_mapping_ptr + token, mask=mask, other=-1).to(tl.int64)
-    vals = tl.load(packed_ptr + src_token * per_token + field, mask=mask, other=0.0)
-
-    is_k = field < NK
-    is_v = (field >= NK) & (field < 2 * NK)
-    is_idx = field >= 2 * NK
-    k_field = field
-    v_field = field - NK
-    idx_field = field - 2 * NK
-
-    tl.store(scratch_k_ptr + dst_slot * NK + k_field, vals, mask=mask & is_k)
-    tl.store(scratch_v_ptr + dst_slot * NK + v_field, vals, mask=mask & is_v)
-    tl.store(scratch_idx_ptr + dst_slot * NI + idx_field, vals, mask=mask & is_idx)
+    src_row = tl.load(unpad_ptr + t).to(tl.int64) * per_token
+    dst_slot = tl.load(write_slots_ptr + t).to(tl.int64)
+    physical_slot = tl.load(slot_mapping_ptr + t).to(tl.int64)
 
     valid = physical_slot >= 0
-    block_id = physical_slot // PAGE_SIZE
-    page_off = physical_slot - block_id * PAGE_SIZE
+    safe_slot = tl.where(valid, physical_slot, 0)
+    block_id = safe_slot // PAGE_SIZE
+    page_off = safe_slot - block_id * PAGE_SIZE
     head_stride = PAGE_SIZE * HEAD_DIM
     kv_stride = NUM_KV_HEADS * head_stride
-    block_stride = 2 * kv_stride
+    paged_k = block_id * 2 * kv_stride + page_off * HEAD_DIM
 
-    k_head = k_field // HEAD_DIM
-    k_dim = k_field - k_head * HEAD_DIM
-    k_base_off = (
-        block_id * block_stride + k_head * head_stride + page_off * HEAD_DIM + k_dim
-    )
-    tl.store(base_flat_ptr + k_base_off, vals, mask=mask & is_k & valid)
+    d = tl.arange(0, BLOCK_D)
+    dmask = d < HEAD_DIM
+    for h in tl.range(0, NUM_KV_HEADS):
+        k = tl.load(packed_ptr + src_row + h * HEAD_DIM + d, mask=dmask, other=0.0)
+        v = tl.load(packed_ptr + src_row + NK + h * HEAD_DIM + d, mask=dmask, other=0.0)
+        tl.store(scratch_k_ptr + dst_slot * NK + h * HEAD_DIM + d, k, mask=dmask)
+        tl.store(scratch_v_ptr + dst_slot * NK + h * HEAD_DIM + d, v, mask=dmask)
+        tl.store(base_flat_ptr + paged_k + h * head_stride + d, k, mask=dmask & valid)
+        tl.store(
+            base_flat_ptr + paged_k + kv_stride + h * head_stride + d,
+            v,
+            mask=dmask & valid,
+        )
 
-    v_head = v_field // HEAD_DIM
-    v_dim = v_field - v_head * HEAD_DIM
-    v_base_off = (
-        block_id * block_stride
-        + kv_stride
-        + v_head * head_stride
-        + page_off * HEAD_DIM
-        + v_dim
-    )
-    tl.store(base_flat_ptr + v_base_off, vals, mask=mask & is_v & valid)
-
-    tl.store(
-        scale_flat_ptr + physical_slot * NI + idx_field,
-        vals,
-        mask=mask & is_idx & valid,
-    )
+    di = tl.arange(0, BLOCK_I)
+    imask = di < NI
+    idx = tl.load(packed_ptr + src_row + 2 * NK + di, mask=imask, other=0.0)
+    tl.store(scratch_idx_ptr + dst_slot * NI + di, idx, mask=imask)
+    tl.store(scale_flat_ptr + safe_slot * NI + di, idx, mask=imask & valid)
 
 
 def _fused_cp_paged_write(
@@ -1031,8 +1015,12 @@ def _fused_cp_paged_write(
         token_count = int(write_slots.numel())
     if token_count == 0:
         return
-    total = token_count * (2 * nk + ni)
-    _fused_cp_paged_write_kernel[(triton.cdiv(total, 256),)](
+    if nk != num_kv_heads * head_dim:
+        raise ValueError(
+            f"_fused_cp_paged_write expects nk == num_kv_heads * head_dim, got "
+            f"nk={nk}, num_kv_heads={num_kv_heads}, head_dim={head_dim}"
+        )
+    _fused_cp_paged_write_kernel[(token_count,)](
         packed,
         unpad_indices,
         write_slots,
@@ -1042,13 +1030,15 @@ def _fused_cp_paged_write(
         idx_scratch.reshape(-1, ni),
         base.reshape(-1),
         scale_flat,
-        TOTAL=total,
+        token_count,
         NK=nk,
         NI=ni,
         NUM_KV_HEADS=num_kv_heads,
         HEAD_DIM=head_dim,
         PAGE_SIZE=page_size,
-        BLOCK=256,
+        BLOCK_D=triton.next_power_of_2(head_dim),
+        BLOCK_I=triton.next_power_of_2(ni),
+        num_warps=1,
     )
 
 
@@ -1146,6 +1136,29 @@ class _IdxKScratch:
 
 
 _IDX_K_SCRATCH = _IdxKScratch()
+
+
+class _RopeDummyScratch:
+
+    def __init__(self) -> None:
+        self._t: Optional[torch.Tensor] = None
+
+    def acquire(self, rows: int, heads: int, dim: int, dtype, device):
+        t = self._t
+        if (
+            t is None
+            or t.shape[0] < rows
+            or t.shape[1] != heads
+            or t.shape[2] != dim
+            or t.dtype != dtype
+            or t.device != device
+        ):
+            t = torch.zeros(rows, heads, dim, dtype=dtype, device=device)
+            self._t = t
+        return t[:rows]
+
+
+_ROPE_DUMMY_SCRATCH = _RopeDummyScratch()
 
 
 class _Mxfp8FusedQKVIndexProj(nn.Module):
@@ -2864,7 +2877,9 @@ class MSAAttention(nn.Module):
                 }
 
         idx_k = idx_k.contiguous()
-        dummy_idx = torch.zeros_like(idx_k)
+        dummy_idx = _ROPE_DUMMY_SCRATCH.acquire(
+            idx_k.shape[0], idx_k.shape[1], idx_k.shape[2], idx_k.dtype, idx_k.device
+        )
         self._apply_rope(idx_k, dummy_idx, local_positions)
 
         can_fuse = self.cos_sin_cache is not None and not self._rope_interleave
