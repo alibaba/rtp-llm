@@ -11,6 +11,7 @@ import org.flexlb.service.monitor.FlexlbLogLevelManager;
 import org.flexlb.transport.GeneralHttpNettyService;
 import org.flexlb.util.Logger;
 import org.springframework.context.annotation.Bean;
+import org.springframework.http.HttpStatus;
 import org.springframework.http.MediaType;
 import org.springframework.stereotype.Component;
 import org.springframework.web.reactive.function.server.RouterFunction;
@@ -107,7 +108,7 @@ public class FlexlbControlServer {
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(cacheMatchQueryOrchestrator.status());
         } catch (RuntimeException e) {
-            return ServerResponse.badRequest()
+            return ServerResponse.status(HttpStatus.INTERNAL_SERVER_ERROR)
                     .contentType(MediaType.APPLICATION_JSON)
                     .bodyValue(e.getMessage());
         }

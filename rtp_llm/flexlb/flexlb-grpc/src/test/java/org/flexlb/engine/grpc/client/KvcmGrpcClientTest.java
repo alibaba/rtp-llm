@@ -171,7 +171,13 @@ class KvcmGrpcClientTest {
         KvcmHealthSnapshot recovered = client.healthSnapshot();
         assertEquals(KvcmHealthState.HEALTHY, recovered.state());
         assertEquals(3, recovered.consecutiveHeartbeatSuccesses());
-        assertEquals(List.of(KvcmHealthState.UNHEALTHY, KvcmHealthState.HEALTHY), healthSnapshots);
+        assertEquals(List.of(
+                KvcmHealthState.HEALTHY,
+                KvcmHealthState.HEALTHY,
+                KvcmHealthState.UNHEALTHY,
+                KvcmHealthState.UNHEALTHY,
+                KvcmHealthState.UNHEALTHY,
+                KvcmHealthState.HEALTHY), healthSnapshots);
     }
 
     @Test

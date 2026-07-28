@@ -25,6 +25,7 @@ import java.util.Map;
 
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
+import static org.mockito.Mockito.doThrow;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -132,6 +133,22 @@ class FlexlbControlServerTest {
 
         verify(cacheMatchQueryOrchestrator, never())
                 .applyFailoverAction(any());
+    }
+
+    @Test
+    void rejectsUnsafePrimaryRecoveryWithConflict() {
+        doThrow(new IllegalStateException("KVCM is unhealthy"))
+                .when(cacheMatchQueryOrchestrator)
+                .applyFailoverAction(CacheMatchFailoverAction.RECOVER_PRIMARY);
+
+        webTestClient.post()
+                .uri("/flexlb/cache_match/failover")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(Map.of(
+                        "action",
+                        CacheMatchFailoverAction.RECOVER_PRIMARY.name()))
+                .exchange()
+                .expectStatus().isEqualTo(409);
     }
 
     @Test

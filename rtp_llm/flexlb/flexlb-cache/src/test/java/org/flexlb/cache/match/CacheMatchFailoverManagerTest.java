@@ -15,6 +15,7 @@ import org.mockito.ArgumentCaptor;
 import java.util.function.Consumer;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -54,8 +55,8 @@ class CacheMatchFailoverManagerTest {
         manager.activateFallbackManually();
         assertEquals(CacheMatchSource.LOCAL_STANDBY, manager.activeSource());
 
-        manager.recoverPrimaryManually();
-        assertEquals(CacheMatchSource.KVCM, manager.activeSource());
+        assertThrows(IllegalStateException.class, manager::recoverPrimaryManually);
+        assertEquals(CacheMatchSource.LOCAL_STANDBY, manager.activeSource());
     }
 
     @Test
@@ -75,16 +76,21 @@ class CacheMatchFailoverManagerTest {
     }
 
     @Test
-    void manualRecoveryOverridesAutomaticFailoverForUnhealthyKvcm() {
+    void manualRecoveryDefersToAutomaticFailoverForUnhealthyKvcm() {
         KvcmGrpcClient client = mock(KvcmGrpcClient.class);
         when(client.healthSnapshot())
                 .thenReturn(health(KvcmHealthState.UNHEALTHY, 3, 0, 0, "heartbeat failure"));
         CacheMatchFailoverManager manager =
                 new CacheMatchFailoverManager(configuration(true), client);
+        Consumer<KvcmHealthSnapshot> healthSnapshotListener = healthSnapshotListener(client);
 
         manager.activateFallbackManually();
         manager.recoverPrimaryManually();
 
+        assertEquals(CacheMatchSource.LOCAL_STANDBY, manager.activeSource());
+
+        healthSnapshotListener.accept(
+                health(KvcmHealthState.HEALTHY, 0, 3, 0, "heartbeat recovery"));
         assertEquals(CacheMatchSource.KVCM, manager.activeSource());
     }
 

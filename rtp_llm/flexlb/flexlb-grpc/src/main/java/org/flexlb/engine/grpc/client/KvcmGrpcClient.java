@@ -252,6 +252,7 @@ public class KvcmGrpcClient {
         } else {
             recordHeartbeatFailure();
         }
+        notifyHealthSnapshotListener();
     }
 
     private void recordHeartbeatSuccess() {
@@ -294,6 +295,7 @@ public class KvcmGrpcClient {
             if (becameUnhealthy) {
                 consecutiveHeartbeatSuccesses.set(0);
                 recordHealthTransition("cache query failure threshold reached");
+                notifyHealthSnapshotListener();
             }
         }
     }
@@ -311,6 +313,10 @@ public class KvcmGrpcClient {
                     snapshot.consecutiveHeartbeatFailures(),
                     snapshot.consecutiveQueryFailures());
         }
+    }
+
+    private void notifyHealthSnapshotListener() {
+        KvcmHealthSnapshot snapshot = healthSnapshot();
         try {
             healthSnapshotListener.accept(snapshot);
         } catch (RuntimeException e) {
