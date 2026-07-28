@@ -553,17 +553,8 @@ class ModelRpcClient(object):
         response_iterator = None
         stream_state = StreamState()
 
-        address_list = self._addresses
-
-        for role_addr in input_py.generate_config.role_addrs:
-            if (
-                (self._decode_entrance and role_addr.role == RoleType.DECODE)
-                or role_addr.role == RoleType.PDFUSION
-                or (not self._decode_entrance and role_addr.role == RoleType.PREFILL)
-            ):
-                if role_addr.ip != "":
-                    address_list = [role_addr.ip + ":" + str(role_addr.grpc_port)]
-                    break
+        target = self._role_addr_target(input_py)
+        address_list = [target] if target is not None else self._addresses
 
         if not address_list:
             raise ValueError(f"No address found for request: {input_py.request_id}")

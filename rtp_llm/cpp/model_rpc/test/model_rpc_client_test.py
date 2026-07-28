@@ -343,6 +343,90 @@ class BatchAddressSelectionTest(TestCase):
         # fall back to the static address list exactly like an unrouted input.
         self.assertEqual("10.0.0.2:100", client._select_batch_address(inputs))
 
+    # The single-request enqueue() and the batch path now share _role_addr_target for the
+    # role->address rule; pin the helper directly so a change to either path cannot quietly
+    # diverge the two on where a pre-assigned request lands.
+    def test_role_addr_target_returns_the_pre_assigned_backend(self):
+        client = self._client(["10.0.0.99:100"])
+        target = client._role_addr_target(
+            self._input(10, [self._addr("10.0.0.7", RoleType.PDFUSION)])
+        )
+        self.assertEqual("10.0.0.7:8089", target)
+
+    def test_role_addr_target_is_none_when_nothing_pre_assigned(self):
+        client = self._client(["10.0.0.1:100"])
+        self.assertIsNone(client._role_addr_target(self._input(11)))
+
+    def test_role_addr_target_skips_an_empty_ip_placeholder(self):
+        client = self._client(["10.0.0.1:100"])
+        self.assertIsNone(
+            client._role_addr_target(self._input(12, [self._addr("", RoleType.PDFUSION)]))
+        )
+
+
+class EnqueueTargetSelectionTest(TestCase):
+    """enqueue() delegates the role->address decision to _role_addr_target and then wraps it:
+    a hit becomes a single-target list, a miss falls back to the static data-parallel list, and
+    the request_id indexes into whichever list wins. That wiring never runs in the FakeModelRpcClient
+    (it overrides enqueue outright), so drive the real body far enough to capture the chosen target
+    and stop before any gRPC I/O.
+    """
+
+    class _StopBeforeRpc(Exception):
+        pass
+
+    @staticmethod
+    def _client(addresses):
+        client = ModelRpcClient.__new__(ModelRpcClient)
+        client._addresses = addresses
+        client._decode_entrance = False
+        client._compute_grpc_timeout = lambda timeout_ms: 1.0
+        return client
+
+    @staticmethod
+    def _addr(ip, role, grpc_port=8089):
+        return SimpleNamespace(role=role, ip=ip, http_port=8088, grpc_port=grpc_port)
+
+    @staticmethod
+    def _input(request_id, role_addrs=()):
+        return SimpleNamespace(
+            request_id=request_id,
+            generate_config=SimpleNamespace(
+                role_addrs=list(role_addrs), timeout_ms=1000
+            ),
+        )
+
+    def _capture_target(self, client, input_py):
+        captured = {}
+
+        async def fake_get(address):
+            captured["address"] = address
+            raise EnqueueTargetSelectionTest._StopBeforeRpc()
+
+        client._channel_pool = SimpleNamespace(get=fake_get)
+
+        async def drive():
+            async for _ in client.enqueue(input_py):
+                pass
+
+        with patch(
+            "rtp_llm.cpp.model_rpc.model_rpc_client.trans_input", lambda x: object()
+        ):
+            with self.assertRaises(EnqueueTargetSelectionTest._StopBeforeRpc):
+                asyncio.run(drive())
+        return captured["address"]
+
+    def test_enqueue_sends_to_the_pre_assigned_backend(self):
+        client = self._client(["10.9.9.9:1"])
+        input_py = self._input(0, [self._addr("10.0.0.7", RoleType.PDFUSION)])
+        self.assertEqual("10.0.0.7:8089", self._capture_target(client, input_py))
+
+    def test_enqueue_falls_back_to_static_addresses_when_unrouted(self):
+        client = self._client(["10.0.0.1:100", "10.0.0.2:100"])
+        # request_id=1 -> index 1 in the static list, proving the fallback both selects the
+        # static list and keeps the request_id modulo indexing.
+        self.assertEqual("10.0.0.2:100", self._capture_target(client, self._input(1)))
+
 
 class BatchEnqueueRoutingTest(TestCase):
     """A batch RPC is one scheduling unit — one BatchGenerateCall to one backend. If the visitor
@@ -487,6 +571,40 @@ class BatchEnqueueRoutingTest(TestCase):
         client._decode_entrance = False
         with self.assertRaises(FtRuntimeException):
             client._select_batch_address(inputs)
+
+    def test_service_unavailable_skips_routing_but_still_dispatches(self):
+        # When the local host service is not ready, batch_enqueue must not contact the master;
+        # it still hands the (unrouted) batch to the model rpc client, which will resolve a target
+        # from its static address list.
+        visitor, route_calls, sent = self._visitor([self._addr("10.0.0.1")])
+        visitor.host_service = SimpleNamespace(service_available=False)
+        inputs = [self._input(i) for i in range(3)]
+
+        asyncio.run(visitor.batch_enqueue(inputs))
+
+        self.assertEqual(
+            0, len(route_calls), "no master round-trip when the local service is not ready"
+        )
+        self.assertIs(
+            inputs, sent["inputs"], "the batch is still dispatched, just unrouted"
+        )
+
+    def test_invalid_input_is_rejected_before_any_routing_or_dispatch(self):
+        # Validation runs over every input up front, so one bad member fails the whole batch
+        # before the master is contacted or anything reaches the model rpc client.
+        visitor, route_calls, sent = self._visitor([self._addr("10.0.0.1")])
+        bad = self._input(0)
+        bad.prompt_length = 0  # empty prompt -> _validate_input raises LONG_PROMPT_ERROR
+
+        with self.assertRaises(FtRuntimeException):
+            asyncio.run(visitor.batch_enqueue([bad, self._input(1)]))
+
+        self.assertEqual(
+            0, len(route_calls), "validation must fail before the master is contacted"
+        )
+        self.assertNotIn(
+            "inputs", sent, "a rejected batch must never reach the model rpc client"
+        )
 
 
 class BatchEnqueueDecodeSemanticsTest(TestCase):
