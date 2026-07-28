@@ -62,8 +62,7 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         DecodeEndpoint selectedEndpoint = weightedRandomSelection(survivors);
 
         if (selectedEndpoint != null) {
-            return buildServerStatus(selectedEndpoint, seqLen, roleType, balanceContext.getRequestId(),
-                    balanceContext.getScheduleMode());
+            return buildServerStatus(selectedEndpoint, seqLen, roleType, balanceContext);
         }
 
         Map<String, Integer> merged = new java.util.HashMap<>(filterResult.rejections());
@@ -109,6 +108,19 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
 
         if (ep instanceof DecodeEndpoint de) {
             de.release(requestId);
+        }
+    }
+
+    @Override
+    public void rollBack(WorkerEndpoint ep, BalanceContext balanceContext) {
+        Logger.debug("Decode rollBack - ip: {}, requestId: {}",
+                ep.ipPort(), balanceContext.getRequestId());
+        if (ep instanceof DecodeEndpoint de) {
+            DecodeEndpoint.Lease lease = de.leaseFor(
+                    balanceContext.getRequestId(), balanceContext);
+            if (lease != null) {
+                lease.release();
+            }
         }
     }
 
@@ -221,15 +233,15 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         return candidateEndpoints.get(minCacheUsedIdx);
     }
 
-    private ServerStatus buildServerStatus(DecodeEndpoint optimalEndpoint, long seqLen, RoleType roleType,
-                                           long requestId, ScheduleModeEnum scheduleMode) {
+    private ServerStatus buildServerStatus(DecodeEndpoint optimalEndpoint, long seqLen,
+                                           RoleType roleType, BalanceContext balanceContext) {
+        long requestId = balanceContext.getRequestId();
+        ScheduleModeEnum scheduleMode = balanceContext.getScheduleMode();
         ServerStatus result = new ServerStatus();
         try {
-            // DIRECT/QUEUE: no lifecycle tracking after routing — skip reserve entirely.
-            boolean skipReserve = scheduleMode == ScheduleModeEnum.DIRECT
-                    || scheduleMode == ScheduleModeEnum.QUEUE;
-            if (!skipReserve) {
-                optimalEndpoint.reserve(requestId, seqLen);
+            // Only the batch scheduler can bind and own a decode reservation.
+            if (scheduleMode == ScheduleModeEnum.BATCH) {
+                optimalEndpoint.reserve(requestId, seqLen, balanceContext);
             }
 
             result.setSuccess(true);

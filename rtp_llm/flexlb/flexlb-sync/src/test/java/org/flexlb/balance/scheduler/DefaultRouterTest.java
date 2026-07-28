@@ -28,6 +28,7 @@ import java.util.Map;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
 import static org.mockito.Mockito.any;
@@ -415,7 +416,38 @@ class DefaultRouterTest {
         // Verify
         assertFalse(response.isSuccess(), "Response should not be successful");
         assertEquals(StrategyErrorType.NO_PREFILL_WORKER.getErrorCode(), response.getCode(), "Error code should match NO_PREFILL_WORKER");
-        verify(decodeStrategy).rollBack(any(WorkerEndpoint.class), anyLong());
+        verify(decodeStrategy).rollBack(any(WorkerEndpoint.class), eq(balanceContext));
+    }
+
+    @Test
+    void shouldRollbackSelectedDecodeWhenLaterStrategyThrows() {
+        org.flexlb.dao.master.WorkerStatus decodeWorker = new org.flexlb.dao.master.WorkerStatus();
+        decodeWorker.setIp("192.168.1.2");
+        decodeWorker.setPort(8081);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap()
+                .put("192.168.1.2:8081", decodeWorker);
+        org.flexlb.dao.master.WorkerStatus prefillWorker = new org.flexlb.dao.master.WorkerStatus();
+        prefillWorker.setIp("192.168.1.1");
+        prefillWorker.setPort(8080);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPrefillStatusMap()
+                .put("192.168.1.1:8080", prefillWorker);
+
+        ServerStatus decodeStatus = new ServerStatus();
+        decodeStatus.setSuccess(true);
+        decodeStatus.setServerIp("192.168.1.2");
+        decodeStatus.setHttpPort(8081);
+        decodeStatus.setRole(RoleType.DECODE);
+        when(decodeStrategy.select(any(BalanceContext.class), eq(RoleType.DECODE), any()))
+                .thenReturn(decodeStatus);
+        when(prefillStrategy.select(any(BalanceContext.class), eq(RoleType.PREFILL), any()))
+                .thenThrow(new IllegalStateException("prefill strategy crashed"));
+        WorkerEndpoint endpoint = org.mockito.Mockito.mock(WorkerEndpoint.class);
+        when(endpointRegistry.get(RoleType.DECODE, "192.168.1.2:8081"))
+                .thenReturn(endpoint);
+
+        assertThrows(IllegalStateException.class, () -> defaultRouter.route(balanceContext));
+
+        verify(decodeStrategy).rollBack(endpoint, balanceContext);
     }
 
     @Test

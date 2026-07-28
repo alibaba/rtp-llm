@@ -7,9 +7,11 @@ import org.flexlb.util.Logger;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.IdentityHashMap;
 import java.util.List;
 import java.util.concurrent.CancellationException;
 import java.util.concurrent.PriorityBlockingQueue;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
@@ -27,8 +29,10 @@ public class WorkerBatcher {
     private final BatchDecisionHandler handler;
     private final PriorityBlockingQueue<BatchItem> queue =
             new PriorityBlockingQueue<>(11, Comparator.comparingLong(BatchItem::sortKey));
-    private final AtomicInteger queueDepth = new AtomicInteger();
-    private final AtomicLong headSortKey = new AtomicLong();
+    private final Object queueMutex = new Object();
+    private final IdentityHashMap<BatchItem, QueueHandle> handles = new IdentityHashMap<>();
+    private final AtomicInteger publishedQueueDepth = new AtomicInteger();
+    private final AtomicLong publishedHeadSortKey = new AtomicLong();
     private final Thread workerThread;
     private volatile boolean stopped;
     private final BatcherAlgorithm algorithm;
@@ -42,7 +46,8 @@ public class WorkerBatcher {
         this.handler = handler;
         this.algorithm = createAlgorithm(cfg);
         this.ctx = new BatcherContext(
-                key, prefillEp, cfg, handler, queue, queueDepth, headSortKey, reporter);
+                key, prefillEp, cfg, handler, queue, handles, queueMutex,
+                publishedQueueDepth, publishedHeadSortKey, reporter);
         this.workerThread = new Thread(this::runLoop, "flexlb-batcher-" + key);
         this.workerThread.setDaemon(true);
         this.workerThread.setUncaughtExceptionHandler((t, e) ->
@@ -62,32 +67,59 @@ public class WorkerBatcher {
         workerThread.start();
     }
 
-    public void offer(BatchItem item) {
-        if (stopped) {
-            handler.onOfferFailure(item, new IllegalStateException("FlexLB batcher stopped"));
-            return;
-        }
+    public QueueHandle offer(BatchItem item) {
         int maxSize = cfg.getFlexlbBatchQueueMaxSize();
-        if (!reserveQueueSlot(maxSize)) {
-            handler.onOfferFailure(item,
-                    new IllegalStateException("FlexLB batcher queue full, maxSize=" + maxSize));
-            return;
-        }
-        try {
-            long sortKey = algorithm.computeSortKey(ctx, item);
-            item.setSortKey(sortKey);
+        rejectIfUnavailable(maxSize);
+        long sortKey = algorithm.computeSortKey(ctx, item);
+        item.setSortKey(sortKey);
+        synchronized (queueMutex) {
+            rejectIfUnavailable(maxSize);
             algorithm.onOffer(ctx, item, System.currentTimeMillis());
+            QueueHandle handle = new QueueHandle(this, item);
+            handles.put(item, handle);
             queue.add(item);
-            ctx.refreshHeadSortKey();
-        } catch (RuntimeException | Error e) {
-            queueDepth.decrementAndGet();
-            ctx.refreshHeadSortKey();
-            throw e;
+            publishedQueueDepth.incrementAndGet();
+            ctx.publishHead();
+            queueMutex.notifyAll();
+            return handle;
         }
     }
 
+    private void rejectIfUnavailable(int maxSize) {
+        if (stopped) {
+            throw new RejectedExecutionException("FlexLB batcher stopped");
+        }
+        if (maxSize > 0 && publishedQueueDepth.get() >= maxSize) {
+            throw new RejectedExecutionException(
+                    "FlexLB batcher queue full, maxSize=" + maxSize);
+        }
+    }
+
+    public RemoveResult remove(QueueHandle handle) {
+        if (handle == null || handle.owner != this) {
+            return RemoveResult.FOREIGN;
+        }
+        synchronized (queueMutex) {
+            if (handle.state == RemoveResult.CLAIMED) {
+                return RemoveResult.CLAIMED;
+            }
+            if (handle.state == RemoveResult.REMOVED) {
+                return RemoveResult.REMOVED;
+            }
+            if (!queue.remove(handle.item)) {
+                throw new IllegalStateException("queued handle has no queue owner");
+            }
+            handles.remove(handle.item);
+            handle.state = RemoveResult.REMOVED;
+            publishedQueueDepth.decrementAndGet();
+            ctx.publishHead();
+        }
+        algorithm.onExternalRemove(ctx, handle.item);
+        return RemoveResult.REMOVED;
+    }
+
     public int queueSize() {
-        return queueDepth.get();
+        return publishedQueueDepth.get();
     }
 
     /**
@@ -95,8 +127,8 @@ public class WorkerBatcher {
      * Uses deadline semantics for SLO batching and elapsed-window semantics for fixed-window batching.
      */
     public long headWaitMs() {
-        long currentHeadSortKey = headSortKey.get();
-        if (queueDepth.get() == 0 || currentHeadSortKey == 0) {
+        long currentHeadSortKey = publishedHeadSortKey.get();
+        if (publishedQueueDepth.get() == 0 || currentHeadSortKey == 0) {
             return 0;
         }
         long now = System.currentTimeMillis();
@@ -108,7 +140,13 @@ public class WorkerBatcher {
     }
 
     public void shutdown() {
-        stopped = true;
+        synchronized (queueMutex) {
+            if (stopped) {
+                return;
+            }
+            stopped = true;
+            queueMutex.notifyAll();
+        }
         workerThread.interrupt();
         algorithm.onShutdown(ctx);
         List<BatchItem> remaining = new ArrayList<>();
@@ -136,23 +174,32 @@ public class WorkerBatcher {
     }
 
     private void waitForNonEmpty() throws InterruptedException {
-        BatchItem item = queue.take();
-        queue.put(item);
+        synchronized (queueMutex) {
+            while (!stopped && publishedQueueDepth.get() == 0) {
+                queueMutex.wait();
+            }
+            if (stopped) {
+                throw new InterruptedException("batcher stopped");
+            }
+        }
     }
 
-    private boolean reserveQueueSlot(int maxSize) {
-        if (maxSize <= 0) {
-            queueDepth.incrementAndGet();
-            return true;
+    public enum RemoveResult {
+        QUEUED,
+        REMOVED,
+        CLAIMED,
+        FOREIGN
+    }
+
+    public static final class QueueHandle {
+        private final WorkerBatcher owner;
+        private final BatchItem item;
+        RemoveResult state = RemoveResult.QUEUED;
+
+        private QueueHandle(WorkerBatcher owner, BatchItem item) {
+            this.owner = owner;
+            this.item = item;
         }
-        while (true) {
-            int current = queueDepth.get();
-            if (current >= maxSize) {
-                return false;
-            }
-            if (queueDepth.compareAndSet(current, current + 1)) {
-                return true;
-            }
-        }
+
     }
 }

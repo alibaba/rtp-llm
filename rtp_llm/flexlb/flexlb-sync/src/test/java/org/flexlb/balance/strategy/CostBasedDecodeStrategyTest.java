@@ -13,6 +13,7 @@ import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
+import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
@@ -125,11 +126,15 @@ class CostBasedDecodeStrategyTest {
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
         balanceContext.setConfig(configService.loadBalanceConfig());
+        balanceContext.setScheduleMode(ScheduleModeEnum.BATCH);
 
         ServerStatus status = costBasedDecodeStrategy.select(balanceContext, RoleType.DECODE, null);
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertNotNull(status.getServerIp());
+        DecodeEndpoint selected = registry.getDecode(status.getServerIp() + ":8080");
+        Assertions.assertNotNull(selected.leaseFor(1000L, balanceContext));
+        selected.release(1000L);
     }
 
     @Test
@@ -385,5 +390,31 @@ class CostBasedDecodeStrategyTest {
 
         Assertions.assertFalse(status.isSuccess());
         Assertions.assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), status.getCode());
+    }
+
+    @Test
+    void routeRollbackOnlyReleasesReservationOwnedByThatContext() {
+        CostBasedDecodeStrategy strategy = new CostBasedDecodeStrategy(
+                configService,
+                Mockito.mock(EngineWorkerStatus.class),
+                Mockito.mock(ResourceMeasureFactory.class));
+        DecodeEndpoint endpoint = new DecodeEndpoint(createWorkerStatus("127.0.0.1"));
+        BalanceContext staleContext = context(4000L);
+        BalanceContext replacementContext = context(4000L);
+        endpoint.reserve(4000L, 500L, replacementContext);
+
+        strategy.rollBack(endpoint, staleContext);
+        Assertions.assertEquals(1, endpoint.getInflightCount());
+
+        strategy.rollBack(endpoint, replacementContext);
+        Assertions.assertEquals(0, endpoint.getInflightCount());
+    }
+
+    private BalanceContext context(long requestId) {
+        Request request = new Request();
+        request.setRequestId(requestId);
+        BalanceContext context = new BalanceContext();
+        context.setRequest(request);
+        return context;
     }
 }

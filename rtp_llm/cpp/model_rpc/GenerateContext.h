@@ -36,6 +36,12 @@ public:
     void                                     reportMetrics(RpcMetricsCollector& collector);
     virtual void                             setStream(const std::shared_ptr<GenerateStream>& stream);
     virtual std::shared_ptr<GenerateStream>& getStream();
+    void                                     setDispatchGeneration(int64_t generation) {
+        dispatch_generation_ = generation > 0 ? generation : -1;
+    }
+    int64_t dispatchGeneration() const {
+        return dispatch_generation_;
+    }
 
 public:
     int64_t                               request_id;
@@ -55,6 +61,7 @@ public:
 
 protected:
     std::shared_ptr<GenerateStream> stream_;
+    int64_t                         dispatch_generation_ = -1;
 
 protected:
     void stopStream();

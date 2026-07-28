@@ -294,9 +294,9 @@ class ShortestTTFTStrategyTest {
             di.setHitCacheLen(hitCache);
             org.flexlb.dao.loadbalance.ServerStatus ss = new org.flexlb.dao.loadbalance.ServerStatus();
             ss.setDebugInfo(di);
-            return new BatchItem(ctx, null, null, ss, null, null, null, 0);
+            return new BatchItem(ctx, null, null, hitCache, null, 0);
         }
-        return new BatchItem(ctx, null, null, null, null, null, null, 0);
+        return new BatchItem(ctx, null, null, 0, null, 0);
     }
 
     private BalanceContext buildContext(long seqLen, long requestId) {

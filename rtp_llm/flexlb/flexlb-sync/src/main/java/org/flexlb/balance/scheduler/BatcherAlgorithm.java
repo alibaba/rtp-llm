@@ -49,6 +49,10 @@ public interface BatcherAlgorithm {
     default void onOffer(BatcherContext ctx, BatchItem item, long nowMs) {
     }
 
+    /** Called after a queued item is removed by its external queue handle. */
+    default void onExternalRemove(BatcherContext ctx, BatchItem item) {
+    }
+
     /**
      * Hook called by {@link WorkerBatcher#shutdown} before the queue is drained.
      * Gives the algorithm a chance to clean up internal state.

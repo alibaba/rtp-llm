@@ -80,7 +80,9 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         // 1. Queue size >= batchMaxCount → dispatch immediately (batch full)
         if (ctx.size() >= batchMaxCount) {
             List<BatchItem> picked = pickWithinCapacity(ctx, batchMaxCount, batchMaxTokens);
-            dispatch(ctx, picked, "batch_full");
+            if (!picked.isEmpty()) {
+                dispatch(ctx, picked, "batch_full");
+            }
             return;
         }
 

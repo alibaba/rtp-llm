@@ -456,6 +456,9 @@ void PrefillBatchRpcServer::buildSlotContexts(std::vector<BatchSlot>& slots) {
             metrics_reporter_,
             meta_,
             maga_init_params_.pd_sep_config.prefill_stop_stream_wait_timeout_ms);
+        if (slot.input->has_group_id()) {
+            pfx_ctx->setDispatchGeneration(slot.input->group_id().value());
+        }
         pfx_ctx->onflight_requests      = onflight_requests_;
         pfx_ctx->loading_cache_requests = loading_cache_requests_;
         auto guard                      = std::make_shared<AtomicGuard>(onflight_requests_);

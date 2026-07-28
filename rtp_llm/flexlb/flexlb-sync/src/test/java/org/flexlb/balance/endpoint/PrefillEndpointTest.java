@@ -3,6 +3,7 @@ package org.flexlb.balance.endpoint;
 import org.flexlb.balance.scheduler.BatchDecisionHandler;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.DispatchMeta;
+import org.flexlb.balance.strategy.PrefillTimePredictor;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
@@ -21,12 +22,15 @@ import org.junit.jupiter.api.Test;
 import java.util.HashMap;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.Set;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.when;
 
 class PrefillEndpointTest {
 
@@ -115,6 +119,24 @@ class PrefillEndpointTest {
 
         endpoint.repackBatch(1L, Set.of(1L));
         assertEquals(0, endpoint.getInflightBatchCount());
+    }
+
+    @Test
+    void repackBatchStillRemovesFailedRequestWhenPredictorThrows() throws Exception {
+        PrefillTimePredictor predictor = mock(PrefillTimePredictor.class);
+        when(predictor.predictBatchMs(org.mockito.ArgumentMatchers.anyList()))
+                .thenThrow(new IllegalStateException("predict unavailable"));
+        java.lang.reflect.Field field = PrefillEndpoint.class.getDeclaredField("predictor");
+        field.setAccessible(true);
+        field.set(endpoint, predictor);
+        endpoint.commitBatch(1L, 100, List.of(
+                createBatchItem(1L, 500, 200),
+                createBatchItem(2L, 300, 100)));
+
+        endpoint.repackBatch(1L, Set.of(2L));
+
+        assertEquals(1, endpoint.getInflightBatchCount());
+        assertEquals(1, endpoint.realPendingCount());
     }
 
     // ---- calibrate ----
@@ -314,10 +336,9 @@ class PrefillEndpointTest {
     void closeShutsDownBatcher() {
         assertNotNull(endpoint.getBatcher());
         endpoint.close();
-        // After close, offering should fail (batcher is stopped)
         BatchItem item = createBatchItem(1L, 500, 200);
-        endpoint.getBatcher().offer(item);
-        // Should not throw — batcher handles stopped state
+        assertThrows(RejectedExecutionException.class,
+                () -> endpoint.getBatcher().offer(item));
     }
 
     // ---- helpers ----
@@ -346,7 +367,7 @@ class PrefillEndpointTest {
         debugInfo.setHitCacheLen(hitCacheLen);
         prefill.setDebugInfo(debugInfo);
 
-        return new BatchItem(ctx, null, null, prefill, null, endpoint, null, System.currentTimeMillis());
+        return new BatchItem(ctx, null, null, hitCacheLen, endpoint, System.currentTimeMillis());
     }
 
     private static BatchDecisionHandler noopHandler() {

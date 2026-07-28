@@ -69,7 +69,7 @@ void GenerateContext::reportMetrics(RpcMetricsCollector& collector) {
 void GenerateContext::setStream(const std::shared_ptr<GenerateStream>& stream) {
     stream_ = stream;
     if (stream) {
-        meta->enqueue(request_id, stream_);
+        meta->enqueue(request_id, stream_, dispatch_generation_);
     }
 }
 

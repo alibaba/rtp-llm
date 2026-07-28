@@ -456,6 +456,6 @@ class FormulaPredictorTest {
         debugInfo.setHitCacheLen(hitCacheLen);
         prefill.setDebugInfo(debugInfo);
 
-        return new BatchItem(ctx, null, null, prefill, null, null, null, System.currentTimeMillis());
+        return new BatchItem(ctx, null, null, hitCacheLen, null, System.currentTimeMillis());
     }
 }

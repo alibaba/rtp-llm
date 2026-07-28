@@ -267,4 +267,23 @@ class FlexlbServiceImplTest {
         assertFalse(captor.getValue().getFound());
     }
 
+    @Test
+    void testGetRequestState_mapsInternalRoutingStateToQueued() {
+        when(routeService.getRequestState(703L, 0)).thenReturn(
+                new RequestLifecycleSnapshot(703L, RequestLifecycleState.ROUTING,
+                        0L, 10L, 0L, "routing"));
+        StreamObserver<FlexlbScheduleProtocol.GetRequestStateResponsePB> observer = mock(StreamObserver.class);
+
+        service.getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB.newBuilder()
+                .setRequestId(703L)
+                .build(), observer);
+
+        ArgumentCaptor<FlexlbScheduleProtocol.GetRequestStateResponsePB> captor =
+                ArgumentCaptor.forClass(FlexlbScheduleProtocol.GetRequestStateResponsePB.class);
+        verify(observer).onNext(captor.capture());
+        assertTrue(captor.getValue().getFound());
+        assertEquals(FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_QUEUED,
+                captor.getValue().getLifecycle().getState());
+    }
+
 }

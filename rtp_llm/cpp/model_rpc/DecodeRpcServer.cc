@@ -101,6 +101,9 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
                       "message first status != RemoteStage::ALLOCATE");
     decode_context.request_id  = allocate_request.request_id();
     decode_context.request_key = makeRequestKey(allocate_request.client_id(), allocate_request.request_id());
+    decode_context.setDispatchGeneration(allocate_request.has_dispatch_generation()
+                                             ? allocate_request.dispatch_generation().value()
+                                             : -1);
 
     for (auto& addr : allocate_request.peer_addrs()) {
         decode_context.peer_addrs.push_back(addr);
@@ -117,9 +120,10 @@ void DecodeRpcServer::prepareGenerateContext(DecodeGenerateContext& decode_conte
                                 decode_context.prefill_cp_size,
                                 configured_prefill_cp_size);
     }
-    RTP_LLM_LOG_DEBUG("request [%s] prepare generate context done, prefill_cp_size=%d",
+    RTP_LLM_LOG_DEBUG("request [%s] prepare generate context done, prefill_cp_size=%d, dispatch_generation=%ld",
                       decode_context.request_key.c_str(),
-                      decode_context.prefill_cp_size);
+                      decode_context.prefill_cp_size,
+                      decode_context.dispatchGeneration());
 }
 
 void DecodeRpcServer::allocateResource(DecodeGenerateContext& decode_context) {

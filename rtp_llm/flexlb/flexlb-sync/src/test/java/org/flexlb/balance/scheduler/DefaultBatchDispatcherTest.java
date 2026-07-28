@@ -6,6 +6,7 @@ import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
 import org.flexlb.dao.loadbalance.Request;
+import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
@@ -16,6 +17,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 
 import java.util.List;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CountDownLatch;
 import java.util.concurrent.TimeUnit;
@@ -28,6 +30,8 @@ import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.mock;
+import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 class DefaultBatchDispatcherTest {
@@ -136,6 +140,135 @@ class DefaultBatchDispatcherTest {
     }
 
     @Test
+    void rpcCompletionFallsBackInlineWhenExecutorQueueIsFull() throws Exception {
+        recreateDispatcher(1, 1);
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> firstRpc =
+                new CompletableFuture<>();
+        CountDownLatch firstStarted = new CountDownLatch(1);
+        CountDownLatch secondStarted = new CountDownLatch(1);
+        CountDownLatch releaseSecond = new CountDownLatch(1);
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+                .thenAnswer(invocation -> {
+                    EngineRpcService.EnqueueBatchRequestPB request = invocation.getArgument(2);
+                    if (request.getBatchId() == 101L) {
+                        firstStarted.countDown();
+                        return firstRpc;
+                    }
+                    if (request.getBatchId() == 102L) {
+                        secondStarted.countDown();
+                        if (!releaseSecond.await(3, TimeUnit.SECONDS)) {
+                            throw new IllegalStateException("second dispatch was not released");
+                        }
+                    }
+                    return CompletableFuture.completedFuture(
+                            ackResponse(request.getBatchId(), requestIds(request)));
+                });
+
+        TestCallback firstCallback = new TestCallback();
+        TestCallback secondCallback = new TestCallback();
+        TestCallback thirdCallback = new TestCallback();
+        BatchItem first = createBatchItem(101L, 500, 0, prefillEp);
+        BatchItem second = createBatchItem(102L, 500, 0, prefillEp);
+        BatchItem third = createBatchItem(103L, 500, 0, prefillEp);
+
+        try {
+            dispatcher.dispatch(List.of(first), prefillEp, 101L, 1, "first", firstCallback);
+            assertTrue(firstStarted.await(2, TimeUnit.SECONDS));
+            dispatcher.dispatch(List.of(second), prefillEp, 102L, 1, "second", secondCallback);
+            assertTrue(secondStarted.await(2, TimeUnit.SECONDS));
+            dispatcher.dispatch(List.of(third), prefillEp, 103L, 1, "third", thirdCallback);
+
+            firstRpc.complete(ackResponse(101L, List.of(101L)));
+
+            assertTrue(firstCallback.terminalLatch.await(2, TimeUnit.SECONDS),
+                    "completion must not be dropped when the executor queue is full");
+            assertEquals(1, firstCallback.successCount.get());
+            assertEquals(0, firstCallback.failureCount.get());
+        } finally {
+            releaseSecond.countDown();
+        }
+        assertTrue(secondCallback.terminalLatch.await(2, TimeUnit.SECONDS));
+        assertTrue(thirdCallback.terminalLatch.await(2, TimeUnit.SECONDS));
+    }
+
+    @Test
+    void rpcCompletionAfterShutdownTerminatesCallbackExactlyOnce() throws Exception {
+        recreateDispatcher(1, 1);
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpc =
+                new CompletableFuture<>();
+        CountDownLatch started = new CountDownLatch(1);
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+                .thenAnswer(invocation -> {
+                    started.countDown();
+                    return rpc;
+                });
+        TestCallback completion = new TestCallback();
+        BatchItem item = createBatchItem(111L, 500, 0, prefillEp);
+
+        dispatcher.dispatch(List.of(item), prefillEp, 111L, 1, "shutdown", completion);
+        assertTrue(started.await(2, TimeUnit.SECONDS));
+        dispatcher.shutdown();
+        rpc.complete(ackResponse(111L, List.of(111L)));
+
+        assertTrue(completion.terminalLatch.await(2, TimeUnit.SECONDS));
+        assertEquals(1, completion.successCount.get() + completion.failureCount.get());
+        assertEquals(1, completion.successCount.get(),
+                "an RPC already sent before shutdown must converge from its real completion");
+        verify(prefillEp, times(0)).releaseBatch(111L);
+    }
+
+    @Test
+    void shutdownFailsDispatchStillQueuedInExecutor() throws Exception {
+        recreateDispatcher(1, 1);
+        PrefillEndpoint prefillEp = createPrefillEndpoint();
+        CountDownLatch firstStarted = new CountDownLatch(1);
+        CountDownLatch releaseFirst = new CountDownLatch(1);
+        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(), anyLong()))
+                .thenAnswer(invocation -> {
+                    firstStarted.countDown();
+                    try {
+                        releaseFirst.await(3, TimeUnit.SECONDS);
+                    } catch (InterruptedException interrupted) {
+                        Thread.currentThread().interrupt();
+                        throw new CancellationException("dispatch interrupted by shutdown");
+                    }
+                    EngineRpcService.EnqueueBatchRequestPB request = invocation.getArgument(2);
+                    return CompletableFuture.completedFuture(
+                            ackResponse(request.getBatchId(), requestIds(request)));
+                });
+        TestCallback running = new TestCallback();
+        TestCallback queued = new TestCallback();
+
+        dispatcher.dispatch(List.of(createBatchItem(121L, 500, 0, prefillEp)),
+                prefillEp, 121L, 1, "running", running);
+        assertTrue(firstStarted.await(2, TimeUnit.SECONDS));
+        dispatcher.dispatch(List.of(createBatchItem(122L, 500, 0, prefillEp)),
+                prefillEp, 122L, 1, "queued", queued);
+
+        CountDownLatch shutdownStarted = new CountDownLatch(1);
+        CompletableFuture<Void> shutdown = CompletableFuture.runAsync(() -> {
+            shutdownStarted.countDown();
+            dispatcher.shutdown();
+        });
+        assertTrue(shutdownStarted.await(2, TimeUnit.SECONDS));
+        releaseFirst.countDown();
+        shutdown.get(2, TimeUnit.SECONDS);
+
+        assertTrue(running.terminalLatch.await(2, TimeUnit.SECONDS));
+        assertTrue(queued.terminalLatch.await(2, TimeUnit.SECONDS),
+                "shutdown must fail work removed from the executor queue");
+        assertEquals(1, running.successCount.get(),
+                "shutdown must not fail an RPC after its send side effect started");
+        assertEquals(1, queued.failureCount.get());
+        assertEquals(1, running.successCount.get() + running.failureCount.get());
+        assertEquals(1, queued.successCount.get() + queued.failureCount.get());
+        verify(prefillEp, times(0)).releaseBatch(121L);
+        verify(prefillEp, times(1)).releaseBatch(122L);
+    }
+
+    @Test
     void dispatchHandlesResponseWithErrors() throws Exception {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
@@ -214,6 +347,13 @@ class DefaultBatchDispatcherTest {
         return endpoint;
     }
 
+    private void recreateDispatcher(int poolSize, int queueSize) {
+        dispatcher.shutdown();
+        config.setFlexlbBatchDispatchPoolSize(poolSize);
+        config.setFlexlbBatchDispatchQueueSize(queueSize);
+        dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
+    }
+
     private BatchItem createBatchItem(long requestId, long seqLen, long hitCacheLen, PrefillEndpoint prefillEp) {
         Request request = new Request();
         request.setRequestId(requestId);
@@ -239,7 +379,11 @@ class DefaultBatchDispatcherTest {
         debugInfo.setHitCacheLen(hitCacheLen);
         prefill.setDebugInfo(debugInfo);
 
-        return new BatchItem(ctx, new CompletableFuture<>(), null, prefill, null, prefillEp, null, System.currentTimeMillis());
+        Response routeResponse = new Response();
+        routeResponse.setSuccess(true);
+        routeResponse.setServerStatus(List.of(prefill));
+        return new BatchItem(ctx, new CompletableFuture<>(), routeResponse,
+                hitCacheLen, prefillEp, System.currentTimeMillis());
     }
 
     private EngineRpcService.EnqueueBatchResponsePB ackResponse(long batchId, List<Long> successIds) {
@@ -253,6 +397,14 @@ class DefaultBatchDispatcherTest {
         return builder.build();
     }
 
+    private static List<Long> requestIds(EngineRpcService.EnqueueBatchRequestPB request) {
+        return request.getDpSlotsList().stream()
+                .flatMap(slot -> slot.getRequestsList().stream())
+                .map(EngineRpcService.EnqueueBatchExternalInputPB::getInput)
+                .map(EngineRpcService.GenerateInputPB::getRequestId)
+                .toList();
+    }
+
     // ---- Test callback ----
 
     private static class TestCallback implements DispatchCallback {
@@ -260,17 +412,20 @@ class DefaultBatchDispatcherTest {
         final AtomicInteger failureCount = new AtomicInteger(0);
         final CountDownLatch successLatch = new CountDownLatch(1);
         final CountDownLatch failureLatch = new CountDownLatch(1);
+        final CountDownLatch terminalLatch = new CountDownLatch(1);
 
         @Override
         public void onSuccess(BatchItem item, long batchId) {
             successCount.incrementAndGet();
             successLatch.countDown();
+            terminalLatch.countDown();
         }
 
         @Override
         public void onFailure(BatchItem item, Throwable error) {
             failureCount.incrementAndGet();
             failureLatch.countDown();
+            terminalLatch.countDown();
         }
     }
 }

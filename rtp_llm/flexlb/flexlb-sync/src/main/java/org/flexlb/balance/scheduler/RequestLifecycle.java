@@ -1,44 +1,33 @@
 package org.flexlb.balance.scheduler;
 
-import java.util.EnumSet;
-import java.util.Map;
-
 /**
  * Serialized request lifecycle. All mutations are synchronized so dispatch,
  * timeout and worker-status callbacks observe one transition order.
  */
 final class RequestLifecycle {
 
-    private static final Map<RequestLifecycleState, EnumSet<RequestLifecycleState>> ALLOWED = Map.of(
-            RequestLifecycleState.QUEUED, EnumSet.of(
-                    RequestLifecycleState.DISPATCHING,
-                    RequestLifecycleState.TIMED_OUT,
-                    RequestLifecycleState.FAILED),
-            RequestLifecycleState.DISPATCHING, EnumSet.of(
-                    RequestLifecycleState.ACKNOWLEDGED,
-                    RequestLifecycleState.TIMED_OUT,
-                    RequestLifecycleState.FAILED,
-                    RequestLifecycleState.COMPLETED),
-            RequestLifecycleState.ACKNOWLEDGED, EnumSet.of(
-                    RequestLifecycleState.TIMED_OUT,
-                    RequestLifecycleState.FAILED,
-                    RequestLifecycleState.COMPLETED),
-            RequestLifecycleState.TIMED_OUT, EnumSet.noneOf(RequestLifecycleState.class),
-            RequestLifecycleState.FAILED, EnumSet.noneOf(RequestLifecycleState.class),
-            RequestLifecycleState.COMPLETED, EnumSet.noneOf(RequestLifecycleState.class));
-
     private final long requestId;
     private final long createdAtMs;
-    private RequestLifecycleState state = RequestLifecycleState.QUEUED;
+    private RequestLifecycleState state;
     private long updatedAtMs;
     private String detail = "queued";
     private long batchId;
     private long dispatchedAtMs;
 
     RequestLifecycle(long requestId) {
+        this(requestId, RequestLifecycleState.QUEUED);
+    }
+
+    RequestLifecycle(long requestId, RequestLifecycleState initialState) {
         this.requestId = requestId;
         this.createdAtMs = System.currentTimeMillis();
         this.updatedAtMs = createdAtMs;
+        this.state = initialState;
+        this.detail = initialState == RequestLifecycleState.ROUTING ? "routing" : "queued";
+    }
+
+    synchronized void queued() {
+        transition(RequestLifecycleState.QUEUED, "queued");
     }
 
     synchronized void startDispatch(long assignedBatchId) {
@@ -110,12 +99,27 @@ final class RequestLifecycle {
         if (state == next) {
             return snapshot();
         }
-        if (!ALLOWED.get(state).contains(next)) {
+        if (!allows(state, next)) {
             throw new IllegalStateException("invalid request lifecycle transition " + state + " -> " + next);
         }
         state = next;
         detail = message == null ? "" : message;
         updatedAtMs = System.currentTimeMillis();
         return snapshot();
+    }
+
+    private static boolean allows(RequestLifecycleState from, RequestLifecycleState to) {
+        return switch (from) {
+            case ROUTING -> to == RequestLifecycleState.QUEUED || isAbort(to);
+            case QUEUED -> to == RequestLifecycleState.DISPATCHING || isAbort(to);
+            case DISPATCHING -> to == RequestLifecycleState.ACKNOWLEDGED || to.isTerminal();
+            case ACKNOWLEDGED -> to.isTerminal();
+            default -> false;
+        };
+    }
+
+    private static boolean isAbort(RequestLifecycleState state) {
+        return state == RequestLifecycleState.TIMED_OUT
+                || state == RequestLifecycleState.FAILED;
     }
 }

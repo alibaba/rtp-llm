@@ -129,7 +129,13 @@ public class DefaultRouter implements Router {
 
         for (RoleType roleType : roleTypeList) {
             LoadBalanceStrategy loadBalanceStrategy = getLoadBalanceStrategy(roleType);
-            ServerStatus serverStatus = loadBalanceStrategy.select(balanceContext, roleType, group);
+            ServerStatus serverStatus;
+            try {
+                serverStatus = loadBalanceStrategy.select(balanceContext, roleType, group);
+            } catch (RuntimeException failure) {
+                rollBackRoutingFailure(balanceContext, serverStatusList);
+                throw failure;
+            }
 
             if (!serverStatus.isSuccess()) {
                 // Selection failed, return failure result
@@ -164,11 +170,13 @@ public class DefaultRouter implements Router {
      * @param routingResult Routing result
      */
     private void rollBackRoutingFailure(BalanceContext balanceContext, RoutingResult routingResult) {
+        rollBackRoutingFailure(balanceContext, routingResult.serverStatusList());
+    }
 
-        List<ServerStatus> partialResults = routingResult.serverStatusList();
+    private void rollBackRoutingFailure(BalanceContext balanceContext,
+                                        List<ServerStatus> partialResults) {
         for (ServerStatus serverStatus : partialResults) {
             String serverIpPort = serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
-            long requestId = balanceContext.getRequestId();
             RoleType role = serverStatus.getRole();
 
             WorkerEndpoint ep = endpointRegistry.get(role, serverIpPort);
@@ -178,7 +186,7 @@ public class DefaultRouter implements Router {
             }
 
             LoadBalanceStrategy loadBalanceStrategy = getLoadBalanceStrategy(role);
-            loadBalanceStrategy.rollBack(ep, requestId);
+            loadBalanceStrategy.rollBack(ep, balanceContext);
         }
     }
 

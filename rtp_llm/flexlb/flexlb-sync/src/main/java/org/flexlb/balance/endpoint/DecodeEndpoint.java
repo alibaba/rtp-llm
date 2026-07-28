@@ -1,6 +1,7 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.InflightEvictor;
+import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -18,11 +19,11 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     private static final Logger logger = LoggerFactory.getLogger("syncLogger");
 
-    private final ConcurrentHashMap<Long, RequestInflight> inflightRequests = new ConcurrentHashMap<>();
+    private final ConcurrentHashMap<Long, Reservation> inflightRequests = new ConcurrentHashMap<>();
     private final AtomicLong inflightKvReservedTotal = new AtomicLong(0);
     private final AtomicLong reportedKvAvailable = new AtomicLong();
     private volatile int confirmedRunningCount;
-    private final InflightEvictor<Long, RequestInflight> requestEvictor;
+    private final InflightEvictor<Long, Reservation> requestEvictor;
 
     public DecodeEndpoint(WorkerStatus status) {
         super(status);
@@ -30,23 +31,37 @@ public class DecodeEndpoint extends WorkerEndpoint {
                 req -> inflightKvReservedTotal.addAndGet(-req.kvTokens()));
     }
 
-    public void reserve(long requestId, long kvTokens) {
-        RequestInflight newRi = new RequestInflight(kvTokens);
-        RequestInflight prev = inflightRequests.putIfAbsent(requestId, newRi);
-        if (prev != null) {
-            // requestId already exists — subtract the old kvTokens before overwriting,
-            // otherwise the old value is silently lost and the counter stays inflated.
-            inflightKvReservedTotal.addAndGet(-prev.kvTokens());
-            inflightRequests.put(requestId, newRi);
-        }
-        inflightKvReservedTotal.addAndGet(kvTokens);
+    public Lease reserve(long requestId, long kvTokens) {
+        return reserve(requestId, kvTokens, null);
     }
 
-    public void release(long requestId) {
-        RequestInflight removed = inflightRequests.remove(requestId);
-        if (removed != null) {
-            inflightKvReservedTotal.addAndGet(-removed.kvTokens());
+    public Lease reserve(long requestId, long kvTokens, BalanceContext routeOwner) {
+        Reservation reservation = new Reservation(requestId, kvTokens, routeOwner);
+        // Account first so the only transient view is conservative.
+        inflightKvReservedTotal.addAndGet(kvTokens);
+        Reservation existing = inflightRequests.putIfAbsent(requestId, reservation);
+        if (existing != null) {
+            inflightKvReservedTotal.addAndGet(-kvTokens);
+            throw new IllegalStateException(
+                    "decode request already reserved: " + requestId);
         }
+        return reservation;
+    }
+
+    public Lease leaseFor(long requestId) {
+        return inflightRequests.get(requestId);
+    }
+
+    public Lease leaseFor(long requestId, BalanceContext routeOwner) {
+        Reservation reservation = inflightRequests.get(requestId);
+        return reservation != null && reservation.routeOwner == routeOwner
+                ? reservation
+                : null;
+    }
+
+    public boolean release(long requestId) {
+        Reservation reservation = inflightRequests.get(requestId);
+        return reservation != null && reservation.release();
     }
 
     @Override
@@ -85,10 +100,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             for (TaskInfo task : runningTaskInfo.values()) {
                 TaskPhase phase = task.getPhase();
                 if (phase == TaskPhase.KV_ALLOCATED || phase == TaskPhase.RUNNING) {
-                    RequestInflight removed = inflightRequests.remove(task.getRequestId());
-                    if (removed != null) {
-                        inflightKvReservedTotal.addAndGet(-removed.kvTokens());
-                    }
+                    releaseForWorkerStatus(task);
                 }
             }
         }
@@ -97,12 +109,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
         if (finishedTaskInfo != null) {
             for (TaskInfo task : finishedTaskInfo.values()) {
                 if (task.getErrorCode() != 0) {
-                    RequestInflight removed = inflightRequests.remove(task.getRequestId());
-                    if (removed != null) {
-                        inflightKvReservedTotal.addAndGet(-removed.kvTokens());
-                    } else {
-                        logger.warn("Decode calibrate: finished failed request reqId={} not in inflight, error={}",
-                                task.getRequestId(), task.getErrorMessage());
+                    if (!releaseForWorkerStatus(task)) {
+                        logger.warn("Decode calibrate: failed request reqId={} batchId={} has no matching reservation, error={}",
+                                task.getRequestId(), task.getBatchId(), task.getErrorMessage());
                     }
                 }
             }
@@ -110,10 +119,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
             // Phase 3: process finished success requests
             for (TaskInfo task : finishedTaskInfo.values()) {
                 if (task.getErrorCode() == 0) {
-                    RequestInflight removed = inflightRequests.remove(task.getRequestId());
-                    if (removed != null) {
-                        inflightKvReservedTotal.addAndGet(-removed.kvTokens());
-                    }
+                    releaseForWorkerStatus(task);
                 }
             }
         }
@@ -191,6 +197,73 @@ public class DecodeEndpoint extends WorkerEndpoint {
     @Override
     public long getLoadMetric() {
         return getTotalLoad();
+    }
+
+    public interface Lease {
+        boolean release();
+
+        boolean bindBatch(long batchId);
+    }
+
+    private final class Reservation implements Lease, InflightEvictor.TtlTracked {
+        private final long requestId;
+        private final long kvTokens;
+        private final BalanceContext routeOwner;
+        private volatile long batchId;
+        private volatile long ttlBaseAtMs = System.currentTimeMillis();
+
+        private Reservation(long requestId, long kvTokens, BalanceContext routeOwner) {
+            this.requestId = requestId;
+            this.kvTokens = kvTokens;
+            this.routeOwner = routeOwner;
+        }
+
+        @Override
+        public boolean release() {
+            if (!inflightRequests.remove(requestId, this)) {
+                return false;
+            }
+            inflightKvReservedTotal.addAndGet(-kvTokens);
+            return true;
+        }
+
+        @Override
+        public synchronized boolean bindBatch(long assignedBatchId) {
+            if (assignedBatchId <= 0) {
+                throw new IllegalArgumentException("batchId must be positive");
+            }
+            if (inflightRequests.get(requestId) != this) {
+                return false;
+            }
+            if (batchId == 0) {
+                batchId = assignedBatchId;
+            }
+            if (batchId != assignedBatchId) {
+                return false;
+            }
+            ttlBaseAtMs = System.currentTimeMillis();
+            return true;
+        }
+
+        private boolean releaseForBatch(long reportedBatchId) {
+            return reportedBatchId > 0
+                    && batchId == reportedBatchId
+                    && release();
+        }
+
+        @Override
+        public long createdAtMs() {
+            return ttlBaseAtMs;
+        }
+
+        private long kvTokens() {
+            return kvTokens;
+        }
+    }
+
+    private boolean releaseForWorkerStatus(TaskInfo task) {
+        Reservation reservation = inflightRequests.get(task.getRequestId());
+        return reservation != null && reservation.releaseForBatch(task.getBatchId());
     }
 
 }

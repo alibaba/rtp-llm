@@ -12,12 +12,15 @@ import org.mockito.ArgumentCaptor;
 
 import java.util.ArrayList;
 import java.util.Comparator;
+import java.util.IdentityHashMap;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertDoesNotThrow;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyList;
@@ -122,6 +125,25 @@ class FixedWindowBatcherAlgorithmTest {
         verify(handler).onBatchReady(dispatched.capture(), meta.capture());
         assertEquals(32, dispatched.getValue().size());
         assertEquals("batch_full", meta.getValue().reason());
+    }
+
+    @Test
+    void fullQueueCancellationBeforeSnapshotDoesNotDispatchEmptyBatch() {
+        FlexlbConfig config = sloCaseConfig();
+        config.setFlexlbBatchSizeMax(1);
+        BatcherContext context = mock(BatcherContext.class);
+        BatchItem head = enqueuedItem(1L, System.currentTimeMillis());
+        when(context.isEmpty()).thenReturn(false);
+        when(context.peek()).thenReturn(head);
+        when(context.now()).thenReturn(System.currentTimeMillis());
+        when(context.cfg()).thenReturn(config);
+        when(context.batchTokenCapacity()).thenReturn(Long.MAX_VALUE);
+        when(context.size()).thenReturn(1);
+        when(context.sortedItems()).thenReturn(List.of());
+
+        assertDoesNotThrow(() -> new FixedWindowBatcherAlgorithm().processQueue(context));
+
+        verify(context, never()).dispatch(anyList(), any(DispatchMeta.class));
     }
 
     @Test
@@ -267,7 +289,7 @@ class FixedWindowBatcherAlgorithmTest {
     }
 
     private static BatchItem enqueuedItem(long requestId, long enqueuedAtMs) {
-        BatchItem item = new BatchItem(null, null, null, null, null, null, null, enqueuedAtMs);
+        BatchItem item = new BatchItem(null, null, null, 0, null, enqueuedAtMs);
         item.setSortKey(enqueuedAtMs);  // FixedWindow: sortKey = enqueuedAtMs
         return item;
     }
@@ -278,8 +300,7 @@ class FixedWindowBatcherAlgorithmTest {
         request.setSeqLen(seqLen);
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(request);
-        BatchItem item = new BatchItem(
-                balanceContext, null, null, null, null, null, null, enqueuedAtMs);
+        BatchItem item = new BatchItem(balanceContext, null, null, 0, null, enqueuedAtMs);
         item.setSortKey(enqueuedAtMs);
         return item;
     }
@@ -296,9 +317,12 @@ class FixedWindowBatcherAlgorithmTest {
                                           FlexlbConfig config, BatchDecisionHandler handler,
                                           PriorityBlockingQueue<BatchItem> queue,
                                           BatchSchedulerReporter reporter) {
-        BatchItem head = queue.peek();
+        Map<BatchItem, WorkerBatcher.QueueHandle> handles = new IdentityHashMap<>();
+        for (BatchItem item : queue) {
+            handles.put(item, mock(WorkerBatcher.QueueHandle.class));
+        }
         return new BatcherContext(key, endpoint, config, handler, queue,
-                new AtomicInteger(queue.size()),
-                new AtomicLong(head == null ? 0 : head.sortKey()), reporter);
+                handles, new Object(), new AtomicInteger(queue.size()),
+                new AtomicLong(queue.isEmpty() ? 0 : queue.peek().sortKey()), reporter);
     }
 }

@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/model_rpc/RpcServerRuntimeMeta.h"
+#include "rtp_llm/cpp/utils/TimeUtil.h"
 
 namespace rtp_llm::test {
 
@@ -42,6 +43,29 @@ TEST(RpcServerRuntimeMetaTest, EnqueueReadsBatchIdFromStreamInput) {
     ASSERT_EQ(info.running_task_info_list.size(), 1);
     EXPECT_EQ(info.running_task_info_list[0].request_id, 101);
     EXPECT_EQ(info.running_task_info_list[0].batch_id, 77);
+}
+
+TEST(RpcServerRuntimeMetaTest, DispatchGenerationOverridesStreamGroupIdAndSurvivesFinish) {
+    RpcServerRuntimeMeta meta;
+    auto                 input = std::make_shared<GenerateInput>();
+    input->request_id          = 404;
+    input->group_id            = 77;
+    input->generate_config     = std::make_shared<GenerateConfig>();
+    input->input_ids           = torch::zeros({8}, torch::kInt32);
+    input->begin_time_us       = currentTimeUs();
+    auto stream                = std::make_shared<RuntimeMetaTestStream>(input);
+
+    constexpr int64_t dispatch_generation = 987654321;
+    meta.enqueue(input->request_id, stream, dispatch_generation);
+
+    auto running_info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(running_info.running_task_info_list.size(), 1);
+    EXPECT_EQ(running_info.running_task_info_list[0].batch_id, dispatch_generation);
+
+    meta.dequeue(input->request_id, stream);
+    auto finished_info = meta.getEngineScheduleInfo(/*latest_finished_version=*/-1);
+    ASSERT_EQ(finished_info.finished_task_info_list.size(), 1);
+    EXPECT_EQ(finished_info.finished_task_info_list[0].batch_id, dispatch_generation);
 }
 
 TEST(RpcServerRuntimeMetaTest, FinishTaskWithoutPendingStillReportsFailure) {

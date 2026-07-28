@@ -17,7 +17,12 @@ public class InflightEvictor<K, V extends InflightEvictor.TtlTracked> {
 
     /** Interface required for inflight entries to be evictable by age. */
     public interface TtlTracked {
-        /** @return epoch-millis timestamp when this entry was created */
+        /**
+         * @return epoch-millis timestamp used as the current TTL base
+         *
+         * <p>Implementations that refresh this value must do so while synchronized
+         * on the entry; eviction checks the timestamp under the same monitor.
+         */
         long createdAtMs();
     }
 
@@ -44,16 +49,17 @@ public class InflightEvictor<K, V extends InflightEvictor.TtlTracked> {
         long now = System.currentTimeMillis();
         int count = 0;
         for (Map.Entry<K, V> entry : map.entrySet()) {
-            if (now - entry.getValue().createdAtMs() > ttlMs) {
-                // Use map.remove() instead of iterator.remove() to avoid race with
-                // concurrent release()/calibrate() map.remove(key). If another thread
-                // already removed the entry, map.remove() returns null and we skip
-                // the onEvict callback — preventing double-deduction of counters.
-                V removed = map.remove(entry.getKey());
-                if (removed != null) {
-                    count++;
-                    if (onEvict != null) {
-                        onEvict.accept(removed);
+            V observed = entry.getValue();
+            synchronized (observed) {
+                if (now - observed.createdAtMs() > ttlMs) {
+                    // Remove only the value whose age was checked. The same key may have
+                    // been released and re-reserved while this weakly-consistent iterator
+                    // was in flight.
+                    if (map.remove(entry.getKey(), observed)) {
+                        count++;
+                        if (onEvict != null) {
+                            onEvict.accept(observed);
+                        }
                     }
                 }
             }

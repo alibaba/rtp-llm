@@ -52,11 +52,11 @@ public:
         return info;
     }
 
-    void enqueue(int64_t request_id, const GenerateStreamPtr& stream) {
+    void enqueue(int64_t request_id, const GenerateStreamPtr& stream, int64_t batch_id = -1) {
         std::unique_lock<std::shared_mutex> lock(read_write_lock_);
         auto                                new_task = EngineScheduleInfo::TaskInfo(
             {request_id, stream->prefixLength(), stream->inputLength(), stream->getTimeInfo().wait_time_us});
-        new_task.batch_id            = stream->generateInput()->group_id;
+        new_task.batch_id = batch_id > 0 ? batch_id : stream->generateInput()->group_id;
         running_streams_[request_id] = RunningEntry{new_task, stream};
     }
 

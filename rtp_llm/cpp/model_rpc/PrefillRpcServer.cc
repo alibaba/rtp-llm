@@ -233,6 +233,9 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     alloc_request.set_stage(RemoteStage::ALLOCATE);
     alloc_request.set_client_id(process_id_);
     alloc_request.set_request_id(prefill_context.request_id);
+    if (prefill_context.dispatchGeneration() > 0) {
+        alloc_request.mutable_dispatch_generation()->set_value(prefill_context.dispatchGeneration());
+    }
     // TODO(xinfei.sxf) reduce copy
     GenerateInputPB* new_request = new GenerateInputPB(*prefill_context.rpc_context.request);
     new_request->clear_group_size();

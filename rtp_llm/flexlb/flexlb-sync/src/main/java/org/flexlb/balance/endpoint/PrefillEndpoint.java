@@ -127,7 +127,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
                 cachedWaitTimeExpireAtMs = 0;
                 return null; // removes entry from map
             }
-            long newPredMs = (long) predictor.predictBatchMs(survivors);
+            long newPredMs = old.predictTimeMs();
+            try {
+                newPredMs = (long) predictor.predictBatchMs(survivors);
+            } catch (RuntimeException predictorFailure) {
+                logger.warn("Prefill repack prediction failed batchId={}, keeping previous prediction",
+                        batchId, predictorFailure);
+            }
             BatchInflight repacked = old.repack(newPredMs, survivors);
             inflightRequestCount.addAndGet(-(old.requests().size() - survivors.size()));
             cachedWaitTimeExpireAtMs = 0;

@@ -11,7 +11,7 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
 
 class InflightEvictorTest {
 
-    private static final class TestEntry implements InflightEvictor.TtlTracked {
+    private static class TestEntry implements InflightEvictor.TtlTracked {
         private final long createdAtMs;
         TestEntry(long createdAtMs) { this.createdAtMs = createdAtMs; }
         @Override public long createdAtMs() { return createdAtMs; }
@@ -80,6 +80,26 @@ class InflightEvictorTest {
     }
 
     @Test
+    void evictionChecksTtlWhileHoldingEntryMonitor() {
+        AtomicInteger lockChecks = new AtomicInteger();
+        TestEntry entry = new TestEntry(System.currentTimeMillis() - 100_000) {
+            @Override
+            public long createdAtMs() {
+                if (Thread.holdsLock(this)) {
+                    lockChecks.incrementAndGet();
+                }
+                return super.createdAtMs();
+            }
+        };
+        Map<Long, TestEntry> map = new ConcurrentHashMap<>();
+        map.put(1L, entry);
+
+        new InflightEvictor<>(map, null).evictExpired(60_000L);
+
+        assertEquals(1, lockChecks.get());
+    }
+
+    @Test
     void evictExpiredPartialExpiryCallsCallbackOnlyForEvicted() {
         Map<Long, TestEntry> map = new ConcurrentHashMap<>();
         long now = System.currentTimeMillis();
@@ -92,6 +112,25 @@ class InflightEvictorTest {
         int evicted = evictor.evictExpired(60_000);
         assertEquals(1, evicted);
         assertEquals(1, callbackCount.get());
+    }
+
+    @Test
+    void evictExpiredDoesNotRemoveFreshReplacementForSameKey() {
+        long now = System.currentTimeMillis();
+        TestEntry expired = new TestEntry(now - 100_000);
+        TestEntry fresh = new TestEntry(now);
+        ReplaceBeforeRemoveMap map = new ReplaceBeforeRemoveMap(1L, fresh);
+        map.put(1L, expired);
+        map.armReplacement();
+        AtomicInteger callbackCount = new AtomicInteger();
+        InflightEvictor<Long, TestEntry> evictor = new InflightEvictor<>(
+                map, ignored -> callbackCount.incrementAndGet());
+
+        int evicted = evictor.evictExpired(60_000);
+
+        assertEquals(0, evicted);
+        assertEquals(0, callbackCount.get());
+        assertEquals(fresh, map.get(1L));
     }
 
     @Test
@@ -117,5 +156,40 @@ class InflightEvictorTest {
 
         assertEquals(500, evicted);
         assertEquals(500, map.size());
+    }
+
+    private static final class ReplaceBeforeRemoveMap
+            extends ConcurrentHashMap<Long, TestEntry> {
+        private final long replacementKey;
+        private final TestEntry replacement;
+        private boolean armed;
+
+        private ReplaceBeforeRemoveMap(long replacementKey, TestEntry replacement) {
+            this.replacementKey = replacementKey;
+            this.replacement = replacement;
+        }
+
+        private void armReplacement() {
+            armed = true;
+        }
+
+        private void replaceIfArmed(Object key) {
+            if (armed && replacementKey == (Long) key) {
+                armed = false;
+                super.put(replacementKey, replacement);
+            }
+        }
+
+        @Override
+        public TestEntry remove(Object key) {
+            replaceIfArmed(key);
+            return super.remove(key);
+        }
+
+        @Override
+        public boolean remove(Object key, Object value) {
+            replaceIfArmed(key);
+            return super.remove(key, value);
+        }
     }
 }

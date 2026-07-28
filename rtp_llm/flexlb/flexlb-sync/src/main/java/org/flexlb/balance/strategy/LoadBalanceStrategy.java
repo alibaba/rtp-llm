@@ -16,4 +16,8 @@ public interface LoadBalanceStrategy {
      * @param requestId the request identifier
      */
     void rollBack(WorkerEndpoint ep, long requestId);
+
+    default void rollBack(WorkerEndpoint ep, BalanceContext context) {
+        rollBack(ep, context.getRequestId());
+    }
 }

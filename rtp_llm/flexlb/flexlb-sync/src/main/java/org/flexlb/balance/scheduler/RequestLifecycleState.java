@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 /** Scheduler-owned request states. Terminal states never transition again. */
 public enum RequestLifecycleState {
+    ROUTING,
     QUEUED,
     DISPATCHING,
     ACKNOWLEDGED,

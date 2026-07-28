@@ -25,11 +25,15 @@ import java.util.HashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletionException;
+import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.locks.ReentrantReadWriteLock;
 
 /**
  * Default implementation of {@link BatchDispatcher}.
@@ -47,6 +51,10 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
     private final ConfigService configService;
     private final ThreadPoolExecutor dispatchExecutor;
     private final MeterRegistry meterRegistry;
+    private final Map<Long, Runnable> pendingFailures = new ConcurrentHashMap<>();
+    private final Set<Long> rpcStarted = ConcurrentHashMap.newKeySet();
+    private final AtomicBoolean closed = new AtomicBoolean();
+    private final ReentrantReadWriteLock sendGate = new ReentrantReadWriteLock();
 
     public DefaultBatchDispatcher(EngineGrpcClient grpcClient, ConfigService configService,
                                   @Autowired(required = false) MeterRegistry meterRegistry) {
@@ -111,50 +119,81 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
     @Override
     public void dispatch(List<BatchItem> items, PrefillEndpoint prefillEp,
                          long batchId, long predMs, String reason, DispatchCallback callback) {
+        Runnable shutdownFailure = () -> failItems(items, prefillEp, batchId,
+                new CancellationException("FlexLB dispatcher stopped"), callback);
+        if (pendingFailures.putIfAbsent(batchId, shutdownFailure) != null) {
+            IllegalStateException duplicate = new IllegalStateException(
+                    "duplicate pending FlexLB batch_id=" + batchId);
+            for (BatchItem item : items) {
+                safeOnFailure(callback, item, duplicate, batchId);
+            }
+            return;
+        }
+        if (closed.get()) {
+            failPending(batchId, shutdownFailure, items, prefillEp,
+                    new CancellationException("FlexLB dispatcher stopped"), callback);
+            return;
+        }
         try {
-            dispatchExecutor.execute(() -> doDispatch(items, prefillEp, batchId, predMs, reason, callback));
+            dispatchExecutor.execute(() -> doDispatch(
+                    items, prefillEp, batchId, predMs, reason, callback, shutdownFailure));
         } catch (RejectedExecutionException e) {
             Logger.warn("FlexLB batch dispatch rejected (executor shutdown), failing {} items", items.size());
-            prefillEp.releaseBatch(batchId);
-            for (BatchItem item : items) {
-                callback.onFailure(item, e);
-            }
+            failPending(batchId, shutdownFailure, items, prefillEp, e, callback);
         }
     }
 
+    @Override
     @PreDestroy
     public void shutdown() {
-        dispatchExecutor.shutdownNow();
+        sendGate.writeLock().lock();
+        try {
+            if (!closed.compareAndSet(false, true)) {
+                return;
+            }
+        } finally {
+            sendGate.writeLock().unlock();
+        }
+        pendingFailures.forEach((batchId, failure) -> {
+            if (!rpcStarted.contains(batchId)
+                    && pendingFailures.remove(batchId, failure)) {
+                failure.run();
+            }
+        });
+        for (Runnable abandoned : dispatchExecutor.shutdownNow()) {
+            try {
+                abandoned.run();
+            } catch (Throwable failure) {
+                Logger.error("FlexLB abandoned dispatch task failed during shutdown", failure);
+            }
+        }
     }
 
     // ==================== Internal: dispatch pipeline (runs on executor thread) ====================
 
     private void doDispatch(List<BatchItem> items, PrefillEndpoint prefillEp,
-                            long batchId, long predMs, String reason, DispatchCallback callback) {
+                            long batchId, long predMs, String reason,
+                            DispatchCallback callback, Runnable pendingFailure) {
         try {
-            doDispatchInternal(items, prefillEp, batchId, predMs, reason, callback);
+            doDispatchInternal(items, prefillEp, batchId, predMs, reason,
+                    callback, pendingFailure);
         } catch (Throwable t) {
-            // Safety net: ensure callbacks are always invoked even for unexpected errors
             Logger.error("Unexpected error in doDispatch batchId={}", batchId, t);
-            for (BatchItem item : items) {
-                try {
-                    callback.onFailure(item, t);
-                } catch (Throwable ignored) {
-                    // best-effort
-                }
-            }
+            failPending(batchId, pendingFailure, items, prefillEp, t, callback);
         }
     }
 
     private void doDispatchInternal(List<BatchItem> items, PrefillEndpoint prefillEp,
-                                    long batchId, long predMs, String reason, DispatchCallback callback) {
+                                    long batchId, long predMs, String reason,
+                                    DispatchCallback callback, Runnable pendingFailure) {
         // 1. Build gRPC request
         EngineRpcService.EnqueueBatchRequestPB request;
         try {
             request = buildBatchRequest(batchId, items);
         } catch (Exception e) {
             Logger.error("Failed to build FlexLB batch request batchId: {}", batchId, e);
-            failItems(items, prefillEp, batchId, "Batch request build failed: " + e.getMessage(), callback);
+            failPending(batchId, pendingFailure, items, prefillEp,
+                    new RuntimeException("Batch request build failed: " + e.getMessage(), e), callback);
             return;
         }
 
@@ -163,42 +202,132 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
 
         // 3. Send gRPC (async)
         long deadlineMs = configService.loadBalanceConfig().getFlexlbBatchEnqueueDeadlineMs();
-        grpcClient.batchEnqueueAsync(prefillEp.getIp(), prefillEp.getGrpcPort(), request, deadlineMs)
-                .whenCompleteAsync((response, ex) -> {
-                    try {
-                        if (ex != null) {
-                            Throwable cause = ex instanceof CompletionException ? ex.getCause() : ex;
-                            Logger.warn("EnqueueBatch failed batchId: {}, entrypoint: {}:{}, err: {}",
-                                    batchId, prefillEp.getIp(), prefillEp.getGrpcPort(), cause.getMessage());
-                            if (Status.fromThrowable(cause).getCode() == Status.Code.DEADLINE_EXCEEDED) {
-                                prefillEp.releaseBatch(batchId);
-                                for (BatchItem item : items) {
-                                    callback.onTimeout(item, cause);
-                                }
-                            } else {
-                                failItems(items, prefillEp, batchId,
-                                        "gRPC dispatch failed: " + cause.getMessage(), callback);
-                            }
-                        } else if (response == null) {
-                            failItems(items, prefillEp, batchId, "EnqueueBatch returned null response", callback);
-                        } else {
-                            handleResponse(batchId, items, response, callback);
-                        }
-                    } catch (Throwable t) {
-                        // Safety net: ensure callbacks are always invoked even for unexpected errors
-                        Logger.error("Unexpected error in EnqueueBatch callback batchId={}", batchId, t);
-                        failItems(items, prefillEp, batchId,
-                                "Unexpected callback error: " + t.getMessage(), callback);
-                    }
-                }, dispatchExecutor);
+        java.util.concurrent.CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> rpcFuture;
+        sendGate.readLock().lock();
+        try {
+            if (closed.get() || pendingFailures.get(batchId) != pendingFailure) {
+                return;
+            }
+            rpcStarted.add(batchId);
+            rpcFuture = grpcClient.batchEnqueueAsync(
+                    prefillEp.getIp(), prefillEp.getGrpcPort(), request, deadlineMs);
+        } finally {
+            sendGate.readLock().unlock();
+        }
+        rpcFuture
+                .whenComplete((response, error) -> deliverCompletion(
+                        items, prefillEp, batchId, response, error, callback, pendingFailure));
     }
 
     private void failItems(List<BatchItem> items, PrefillEndpoint prefillEp,
-                           long batchId, String message, DispatchCallback callback) {
-        prefillEp.releaseBatch(batchId);
-        RuntimeException error = new RuntimeException(message);
+                           long batchId, Throwable error, DispatchCallback callback) {
+        try {
+            prefillEp.releaseBatch(batchId);
+        } catch (Throwable releaseFailure) {
+            Logger.error("Failed to release Prefill batch {}", batchId, releaseFailure);
+        }
         for (BatchItem item : items) {
+            safeOnFailure(callback, item, error, batchId);
+        }
+    }
+
+    private void failPending(long batchId,
+                             Runnable pendingFailure,
+                             List<BatchItem> items,
+                             PrefillEndpoint prefillEp,
+                             Throwable error,
+                             DispatchCallback callback) {
+        if (pendingFailures.remove(batchId, pendingFailure)) {
+            rpcStarted.remove(batchId);
+            failItems(items, prefillEp, batchId, error, callback);
+        }
+    }
+
+    private void deliverCompletion(List<BatchItem> items,
+                                   PrefillEndpoint prefillEp,
+                                   long batchId,
+                                   EngineRpcService.EnqueueBatchResponsePB response,
+                                   Throwable error,
+                                   DispatchCallback callback,
+                                   Runnable pendingFailure) {
+        if (pendingFailures.get(batchId) != pendingFailure) {
+            return;
+        }
+        Runnable completion = () -> {
+            if (!pendingFailures.remove(batchId, pendingFailure)) {
+                return;
+            }
+            rpcStarted.remove(batchId);
+            try {
+                if (error != null) {
+                    Throwable cause = error instanceof CompletionException ? error.getCause() : error;
+                    Logger.warn("EnqueueBatch failed batchId: {}, entrypoint: {}:{}, err: {}",
+                            batchId, prefillEp.getIp(), prefillEp.getGrpcPort(), cause.getMessage());
+                    if (Status.fromThrowable(cause).getCode() == Status.Code.DEADLINE_EXCEEDED) {
+                        try {
+                            prefillEp.releaseBatch(batchId);
+                        } catch (Throwable releaseFailure) {
+                            Logger.error("Failed to release timed out Prefill batch {}",
+                                    batchId, releaseFailure);
+                        }
+                        for (BatchItem item : items) {
+                            safeOnTimeout(callback, item, cause, batchId);
+                        }
+                    } else {
+                        failItems(items, prefillEp, batchId,
+                                new RuntimeException("gRPC dispatch failed: " + cause.getMessage(), cause),
+                                callback);
+                    }
+                } else if (response == null) {
+                    failItems(items, prefillEp, batchId,
+                            new RuntimeException("EnqueueBatch returned null response"), callback);
+                } else {
+                    handleResponse(batchId, items, response, callback);
+                }
+            } catch (Throwable callbackFailure) {
+                Logger.error("Unexpected error in EnqueueBatch callback batchId={}",
+                        batchId, callbackFailure);
+                failItems(items, prefillEp, batchId, callbackFailure, callback);
+            }
+        };
+        try {
+            dispatchExecutor.execute(completion);
+        } catch (RejectedExecutionException rejected) {
+            Logger.warn("FlexLB completion executor rejected batch {}, running inline", batchId);
+            completion.run();
+        }
+    }
+
+    private static void safeOnSuccess(DispatchCallback callback, BatchItem item, long batchId) {
+        try {
+            callback.onSuccess(item, batchId);
+        } catch (Throwable callbackFailure) {
+            Logger.error("FlexLB success callback failed request_id={} batch_id={}",
+                    item.requestId(), batchId, callbackFailure);
+        }
+    }
+
+    private static void safeOnFailure(DispatchCallback callback,
+                                      BatchItem item,
+                                      Throwable error,
+                                      long batchId) {
+        try {
             callback.onFailure(item, error);
+        } catch (Throwable callbackFailure) {
+            Logger.error("FlexLB failure callback failed request_id={} batch_id={}",
+                    item.requestId(), batchId, callbackFailure);
+        }
+    }
+
+    private static void safeOnTimeout(DispatchCallback callback,
+                                      BatchItem item,
+                                      Throwable error,
+                                      long batchId) {
+        try {
+            callback.onTimeout(item, error);
+        } catch (Throwable callbackFailure) {
+            Logger.error("FlexLB timeout callback failed request_id={} batch_id={}",
+                    item.requestId(), batchId, callbackFailure);
         }
     }
 
@@ -212,7 +341,7 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
                     "EnqueueBatch batch_id mismatch: expected " + batchId
                             + " but got " + response.getBatchId());
             for (BatchItem item : items) {
-                callback.onFailure(item, mismatch);
+                safeOnFailure(callback, item, mismatch, batchId);
             }
             return;
         }
@@ -227,17 +356,17 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
 
         for (BatchItem item : items) {
             if (successIds.contains(item.requestId())) {
-                callback.onSuccess(item, batchId);
+                safeOnSuccess(callback, item, batchId);
             } else if (errorByRequestId.containsKey(item.requestId())) {
                 EngineRpcService.EnqueueBatchErrorPB error = errorByRequestId.get(item.requestId());
                 String errorMessage = error.hasErrorInfo()
                         ? error.getErrorInfo().getErrorMessage()
                         : "missing error_info";
-                callback.onFailure(item, new RuntimeException(
-                        "EnqueueBatch rejected request " + item.requestId() + ": " + errorMessage));
+                safeOnFailure(callback, item, new RuntimeException(
+                        "EnqueueBatch rejected request " + item.requestId() + ": " + errorMessage), batchId);
             } else {
-                callback.onFailure(item, new RuntimeException(
-                        "EnqueueBatch missing ack for request " + item.requestId()));
+                safeOnFailure(callback, item, new RuntimeException(
+                        "EnqueueBatch missing ack for request " + item.requestId()), batchId);
             }
         }
     }
@@ -250,7 +379,11 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
                 EngineRpcService.EnqueueBatchRequestPB.newBuilder().setBatchId(batchId);
         Map<Long, List<BatchItem>> byDpRank = new HashMap<>();
         for (BatchItem item : items) {
-            byDpRank.computeIfAbsent(item.prefill().getDpRank(), ignored -> new ArrayList<>()).add(item);
+            ServerStatus prefill = server(item, RoleType.PREFILL);
+            if (prefill == null) {
+                throw new IllegalArgumentException("prefill route is missing for request " + item.requestId());
+            }
+            byDpRank.computeIfAbsent(prefill.getDpRank(), ignored -> new ArrayList<>()).add(item);
         }
         try {
             byDpRank.entrySet().stream()
@@ -289,9 +422,21 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         }
         EngineRpcService.GenerateConfigPB.Builder config = input.getGenerateConfigBuilder();
         config.clearRoleAddrs();
-        addRoleAddr(config, item.prefill());
-        addRoleAddr(config, item.decode());
+        addRoleAddr(config, server(item, RoleType.PREFILL));
+        addRoleAddr(config, server(item, RoleType.DECODE));
         return input.build();
+    }
+
+    private static ServerStatus server(BatchItem item, RoleType role) {
+        if (item.routeResponse() == null || item.routeResponse().getServerStatus() == null) {
+            return null;
+        }
+        for (ServerStatus status : item.routeResponse().getServerStatus()) {
+            if (status != null && status.getRole() == role) {
+                return status;
+            }
+        }
+        return null;
     }
 
     private void addRoleAddr(EngineRpcService.GenerateConfigPB.Builder config, ServerStatus serverStatus) {

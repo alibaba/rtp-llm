@@ -40,4 +40,12 @@ public interface BatchDispatcher {
                   long predMs,
                   String reason,
                   DispatchCallback callback);
+
+    /**
+     * Stop accepting dispatches and fail work that has not started its RPC.
+     * RPCs already sent retain their batch callback token and converge from their
+     * completion or deadline, with inline delivery after the executor stops.
+     */
+    default void shutdown() {
+    }
 }

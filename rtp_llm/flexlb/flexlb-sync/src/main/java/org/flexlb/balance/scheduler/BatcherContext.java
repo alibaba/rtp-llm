@@ -8,6 +8,7 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import java.util.ArrayList;
 import java.util.Comparator;
 import java.util.List;
+import java.util.Map;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
 import java.util.concurrent.atomic.AtomicLong;
@@ -26,26 +27,30 @@ public class BatcherContext {
     private final FlexlbConfig cfg;
     private final BatchDecisionHandler handler;
     private final PriorityBlockingQueue<BatchItem> queue;
-    private final AtomicInteger queueDepth;
-    private final AtomicLong headSortKey;
+    private final Map<BatchItem, WorkerBatcher.QueueHandle> handles;
+    private final Object queueMutex;
+    private final AtomicInteger publishedQueueDepth;
+    private final AtomicLong publishedHeadSortKey;
     private final BatchSchedulerReporter reporter;
     BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
                    BatchDecisionHandler handler,
                    PriorityBlockingQueue<BatchItem> queue,
-                   AtomicInteger queueDepth,
-                   AtomicLong headSortKey,
+                   Map<BatchItem, WorkerBatcher.QueueHandle> handles,
+                   Object queueMutex,
+                   AtomicInteger publishedQueueDepth,
+                   AtomicLong publishedHeadSortKey,
                    BatchSchedulerReporter reporter) {
         this.key = key;
         this.prefillEp = prefillEp;
         this.cfg = cfg;
         this.handler = handler;
         this.queue = queue;
-        this.queueDepth = queueDepth;
-        this.headSortKey = headSortKey;
+        this.handles = handles;
+        this.queueMutex = queueMutex;
+        this.publishedQueueDepth = publishedQueueDepth;
+        this.publishedHeadSortKey = publishedHeadSortKey;
         this.reporter = reporter;
     }
-
-    // ---- accessors ----
 
     String key() {
         return key;
@@ -67,54 +72,72 @@ public class BatcherContext {
         return System.currentTimeMillis();
     }
 
-    // ---- queue inspection ----
-
     BatchItem peek() {
-        return queue.peek();
+        synchronized (queueMutex) {
+            return queue.peek();
+        }
     }
 
     boolean isEmpty() {
-        return queueDepth.get() == 0;
+        return publishedQueueDepth.get() == 0;
     }
 
     int size() {
-        return queueDepth.get();
+        return publishedQueueDepth.get();
     }
 
-    // ---- queue mutation ----
-
     boolean remove(BatchItem item) {
-        boolean removed = queue.remove(item);
-        if (removed) {
-            queueDepth.decrementAndGet();
-            refreshHeadSortKey();
+        synchronized (queueMutex) {
+            boolean removed = queue.remove(item);
+            if (removed) {
+                WorkerBatcher.QueueHandle handle = handles.remove(item);
+                if (handle == null) {
+                    throw new IllegalStateException("queued item has no ownership handle");
+                }
+                handle.state = WorkerBatcher.RemoveResult.CLAIMED;
+                publishedQueueDepth.decrementAndGet();
+                publishHead();
+            }
+            return removed;
         }
-        return removed;
+    }
+
+    boolean runIfQueued(BatchItem item, Runnable action) {
+        synchronized (queueMutex) {
+            if (!handles.containsKey(item)) {
+                return false;
+            }
+            action.run();
+            return true;
+        }
     }
 
     void drainTo(List<BatchItem> dst) {
-        int drained = queue.drainTo(dst);
-        if (drained > 0) {
-            queueDepth.addAndGet(-drained);
-            refreshHeadSortKey();
+        synchronized (queueMutex) {
+            int drained = queue.drainTo(dst);
+            if (drained > 0) {
+                publishedQueueDepth.addAndGet(-drained);
+                for (BatchItem item : dst) {
+                    WorkerBatcher.QueueHandle handle = handles.remove(item);
+                    if (handle != null) {
+                        handle.state = WorkerBatcher.RemoveResult.REMOVED;
+                    }
+                }
+                publishHead();
+            }
         }
     }
 
-    void refreshHeadSortKey() {
-        headSortKey.set(initialHeadSortKey(queue));
-    }
-
-    private static long initialHeadSortKey(PriorityBlockingQueue<BatchItem> queue) {
+    void publishHead() {
         BatchItem head = queue.peek();
-        return head != null ? head.sortKey() : 0;
+        publishedHeadSortKey.set(head == null ? 0 : head.sortKey());
     }
 
-    /**
-     * Items sorted by {@link BatchItem#sortKey()}, suitable for
-     * greedy-fill iteration in dispatch algorithms.
-     */
     List<BatchItem> sortedItems() {
-        List<BatchItem> candidates = new ArrayList<>(queue);
+        List<BatchItem> candidates;
+        synchronized (queueMutex) {
+            candidates = new ArrayList<>(queue);
+        }
         candidates.sort(Comparator.comparingLong(BatchItem::sortKey));
         return candidates;
     }
@@ -162,27 +185,22 @@ public class BatcherContext {
         return value > 0 ? value : Long.MAX_VALUE;
     }
 
-    // ---- dispatch helpers (shared infrastructure) ----
-
-    /**
-     * Remove items from queue and notify handler.
-     * Caller is responsible for algorithm-specific logging and state cleanup
-     * (e.g. {@code lastParkByRequest.remove()}) before calling this.
-     */
     void dispatch(List<BatchItem> items, DispatchMeta meta) {
+        List<BatchItem> claimed = new ArrayList<>(items.size());
         for (BatchItem item : items) {
-            remove(item);
+            if (remove(item)) {
+                claimed.add(item);
+            }
         }
-        handler.onBatchReady(items, meta);
+        if (!claimed.isEmpty()) {
+            handler.onBatchReady(claimed,
+                    new DispatchMeta(meta.reason(), size()));
+        }
     }
 
-    /**
-     * Remove head from queue and notify handler of expiry.
-     * Only called by algorithms that support deadline-based expiry.
-     * Caller is responsible for algorithm-specific logging and state cleanup.
-     */
     void dropHead(BatchItem head) {
-        remove(head);
-        handler.onExpired(head);
+        if (remove(head)) {
+            handler.onExpired(head);
+        }
     }
 }

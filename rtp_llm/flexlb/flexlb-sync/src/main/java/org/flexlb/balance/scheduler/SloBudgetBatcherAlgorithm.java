@@ -130,6 +130,11 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
     }
 
     @Override
+    public void onExternalRemove(BatcherContext ctx, BatchItem item) {
+        lastParkByRequest.remove(item.requestId());
+    }
+
+    @Override
     public void onShutdown(BatcherContext ctx) {
         lastParkByRequest.clear();
     }
@@ -303,12 +308,13 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
     }
 
     private void recordPark(BatcherContext ctx, BatchItem head, String reason, long budgetMs, long nowMs) {
-        lastParkByRequest.put(head.requestId(), new ParkTrace(
+        ParkTrace trace = new ParkTrace(
                 reason,
                 budgetMs,
                 nowMs - head.enqueuedAtMs(),
                 ctx.size(),
-                ctx.prefillEp().getInflightBatchCount()));
+                ctx.prefillEp().getInflightBatchCount());
+        ctx.runIfQueued(head, () -> lastParkByRequest.put(head.requestId(), trace));
     }
 
     // ==================== Drop ====================
