@@ -2189,12 +2189,18 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         captured: list[int] = []
 
         class _CaptureVisitor:
+            request_id_factory = None
+
+            def set_request_id_factory(self, factory):
+                self.request_id_factory = factory
+
             async def enqueue(self, gi):
                 captured.append(gi.request_id)
                 return _FakeAsyncStream([])
 
+        visitor = _CaptureVisitor()
         servicer = DashScInferenceServicer(
-            backend_visitor=_CaptureVisitor(),
+            backend_visitor=visitor,
             ip="10.0.0.1",
             port=12345,
             server_id="srv-xyz",
@@ -2206,9 +2212,14 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
                 )
             )
             expected = rig.generate_request_id("10.0.0.1", 12345, "srv-xyz", 1)
+            retry_id = visitor.request_id_factory()
+            expected_retry_id = rig.generate_request_id(
+                "10.0.0.1", 12345, "srv-xyz", 2
+            )
 
         self.assertEqual(len(captured), 1)
         self.assertEqual(captured[0], expected)
+        self.assertEqual(retry_id, expected_retry_id)
 
     async def test_real_mode_passes_invocation_metadata_to_generate_input(self) -> None:
         visitor = _FakeVisitor(_FakeAsyncStream([]))

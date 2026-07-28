@@ -1177,6 +1177,11 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             think_runtime if think_runtime is not None else _ThinkRuntime()
         )
         self._seq_counter = AtomicCounter()
+        set_request_id_factory = getattr(
+            self._backend_visitor, "set_request_id_factory", None
+        )
+        if set_request_id_factory is not None:
+            set_request_id_factory(self._next_rtp_llm_request_id)
         # Access-log identity, injected at construction (``DashScApp`` /
         # ``__main__`` own the rank/server identity). The two ids are the only
         # state the log + metric projections need; ``server_id`` arrives as the
