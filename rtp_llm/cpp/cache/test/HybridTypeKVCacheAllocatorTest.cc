@@ -493,6 +493,97 @@ TEST_F(HybridTypeKVCacheAllocatorTest, ConvertToGlobalLayerIdHybridWithMtpSubCon
               std::numeric_limits<uint32_t>::max());
 }
 
+TEST_F(HybridTypeKVCacheAllocatorTest, EagleMapsSoleDefaultFullDraftGroupToUniqueFullTargetGroup) {
+    auto score_model_cfg   = makeTinyModelConfig(/*num_layers=*/4);
+    auto propose_model_cfg = makeTinyModelConfig(/*num_layers=*/1);
+
+    setHybridLayerDescs(score_model_cfg,
+                        {HybridAttentionType::LINEAR,
+                         HybridAttentionType::LINEAR,
+                         HybridAttentionType::NONE,
+                         HybridAttentionType::NONE});
+    score_model_cfg.linear_attention_config.linear_conv_kernel_dim = 2;
+    score_model_cfg.linear_attention_config.linear_key_head_dim    = 8;
+    score_model_cfg.linear_attention_config.linear_value_head_dim  = 8;
+    score_model_cfg.linear_attention_config.linear_num_key_heads   = 2;
+    score_model_cfg.linear_attention_config.linear_num_value_heads = 2;
+    propose_model_cfg.kv_cache_spec_descs[0][0].tag                = "default";
+
+    ParallelismConfig parallelism_cfg;
+    parallelism_cfg.tp_size = 1;
+
+    RuntimeConfig runtime_cfg;
+    KVCacheConfig kv_cache_cfg;
+    kv_cache_cfg.test_block_num = 8;
+
+    SpeculativeExecutionConfig sp_cfg;
+    sp_cfg.type              = SP_TYPE_EAGLE;
+    sp_cfg.gen_num_per_cycle = 2;
+
+    auto config = CacheConfigCreator::createSpConfig(score_model_cfg,
+                                                     propose_model_cfg,
+                                                     parallelism_cfg,
+                                                     runtime_cfg,
+                                                     kv_cache_cfg,
+                                                     sp_cfg,
+                                                     /*warm_up_result=*/std::nullopt,
+                                                     /*is_mtp=*/true,
+                                                     /*is_eagle=*/true);
+
+    ASSERT_EQ(config.mtp_sub_configs.size(), 1u);
+    const auto& sub_config = config.mtp_sub_configs[0];
+    ASSERT_NE(sub_config, nullptr);
+    EXPECT_EQ(sub_config->groupTagsSnapshot(), config.groupTagsSnapshot());
+
+    const auto full_gid = static_cast<size_t>(config.groupIdForTag("full"));
+    EXPECT_EQ(sub_config->groupIdForLayerTag(0, "full"), static_cast<int>(full_gid));
+    EXPECT_EQ(sub_config->layerIdsForGroup(full_gid), std::vector<int>({0}));
+    EXPECT_EQ(sub_config->specForGroup(full_gid)->tag, "full");
+    EXPECT_EQ(sub_config->specForGroup(full_gid)->type, KVCacheSpecType::MultiHeadAttention);
+
+    const auto linear_gid = static_cast<size_t>(config.groupIdForTag("linear"));
+    EXPECT_TRUE(sub_config->layerIdsForGroup(linear_gid).empty());
+
+    auto manager = std::make_shared<KVCacheManager>(config);
+    ASSERT_TRUE(manager->init());
+    const auto layout = manager->getMTPModuleGroupedCacheLayerLayout(0);
+    EXPECT_TRUE(layout.at("full", 0).kv_addr.defined());
+    EXPECT_TRUE(layout.group("linear").empty());
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsAmbiguousDefaultFullGroupAlias) {
+    CacheConfig main_config;
+    main_config.layer_num       = 2;
+    main_config.layer_all_num   = 2;
+    main_config.group_layer_num = 1;
+    main_config.fromGroupedSpecs(
+        {makeMhaSpec("full0", 4, DataType::TYPE_FP16, 1, 1), makeMhaSpec("full1", 4, DataType::TYPE_FP16, 1, 1)},
+        {{0}, {1}},
+        {CacheGroupType::FULL, CacheGroupType::FULL},
+        {"full0", "full1"});
+    main_config.layer_to_block_stride_bytes.assign(3, 1);
+
+    auto propose_config = makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
+
+    try {
+        main_config.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/2);
+        FAIL() << "expected an ambiguous default FULL group mapping to be rejected";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("ambiguous default FULL group mapping"), std::string::npos);
+    }
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpDoesNotAliasDefaultFullGroupToLinearTarget) {
+    auto main_config = makeSimpleLinearCacheConfig(
+        /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
+    auto propose_config = makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
+
+    EXPECT_THROW(main_config.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/1),
+                 std::runtime_error);
+}
+
 TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsShortTargetGroup) {
     CacheConfig main_config;
     main_config.layer_num       = 5;

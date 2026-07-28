@@ -12,6 +12,46 @@ CacheGroupType groupTypeForSpec(const KVCacheSpec& spec) {
     return spec.type == KVCacheSpecType::LinearAttention ? CacheGroupType::LINEAR : CacheGroupType::FULL;
 }
 
+bool isFullAttentionSpec(KVCacheSpecType type) {
+    return type == KVCacheSpecType::MultiHeadAttention || type == KVCacheSpecType::MultiHeadLatentAttention;
+}
+
+size_t resolveDefaultMTPGroupAlias(const CacheConfig& target_config, const CacheConfig& propose_config) {
+    constexpr size_t invalid_gid = std::numeric_limits<size_t>::max();
+    if (propose_config.groupNums() != 1 || propose_config.tagForGroup(0) != "default") {
+        return invalid_gid;
+    }
+
+    for (size_t target_gid = 0; target_gid < static_cast<size_t>(target_config.groupNums()); ++target_gid) {
+        if (target_config.tagForGroup(target_gid) == "default") {
+            return invalid_gid;  // Exact tag matching remains authoritative.
+        }
+    }
+
+    const auto& source_group = propose_config.topology().groupById(0);
+    if (source_group.policy.group_type != CacheGroupType::FULL || source_group.spec == nullptr
+        || !isFullAttentionSpec(source_group.spec->type)) {
+        return invalid_gid;
+    }
+
+    std::vector<size_t> candidates;
+    for (size_t target_gid = 0; target_gid < static_cast<size_t>(target_config.groupNums()); ++target_gid) {
+        const auto& target_group = target_config.topology().groupById(target_gid);
+        if (target_group.policy.group_type == source_group.policy.group_type && target_group.spec != nullptr
+            && target_group.spec->type == source_group.spec->type
+            && target_group.seq_size_per_block == source_group.seq_size_per_block) {
+            candidates.push_back(target_gid);
+        }
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(candidates.size() <= 1,
+                            "CacheConfig::mergeMTPModule ambiguous default FULL group mapping: "
+                            "compatible target groups=%zu spec_type=%d",
+                            candidates.size(),
+                            static_cast<int>(source_group.spec->type));
+    return candidates.empty() ? invalid_gid : candidates.front();
+}
+
 }  // namespace
 
 bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs) {
@@ -142,17 +182,22 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
     for (size_t gid = 0; gid < propose_config.topology().groups().size(); ++gid) {
         propose_gid_by_tag.emplace(propose_config.tagForGroup(gid), gid);
     }
+    const size_t     default_alias_target_gid = resolveDefaultMTPGroupAlias(*this, propose_config);
+    constexpr size_t invalid_gid              = std::numeric_limits<size_t>::max();
 
     std::vector<GroupBase> sub_groups;
     std::vector<LayerBase> sub_layers(static_cast<size_t>(mtp_layer_num));
     sub_groups.reserve(target_group_num);
 
     for (size_t target_gid = 0; target_gid < target_group_num; ++target_gid) {
-        const auto&  tag               = tagForGroup(target_gid);
-        const auto   propose_it        = propose_gid_by_tag.find(tag);
-        const bool   has_propose_group = propose_it != propose_gid_by_tag.end();
+        const auto& tag             = tagForGroup(target_gid);
+        const auto  propose_it      = propose_gid_by_tag.find(tag);
+        const bool  has_exact_group = propose_it != propose_gid_by_tag.end();
+        const bool  uses_default_alias =
+            !has_exact_group && default_alias_target_gid != invalid_gid && target_gid == default_alias_target_gid;
+        const bool   has_propose_group = has_exact_group || uses_default_alias;
         const auto&  source_config     = has_propose_group ? propose_config : *this;
-        const size_t source_gid        = has_propose_group ? propose_it->second : target_gid;
+        const size_t source_gid        = has_exact_group ? propose_it->second : uses_default_alias ? 0 : target_gid;
         const auto&  source_group      = source_config.topology().groupById(source_gid);
 
         if (has_propose_group) {
@@ -188,6 +233,12 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
 
         GroupBase sub_group = source_group;
         sub_group.layer_ids.clear();
+        if (uses_default_alias) {
+            auto aliased_spec = source_group.spec->clone();
+            aliased_spec->tag = tag;
+            sub_group.tag     = tag;
+            sub_group.spec    = std::move(aliased_spec);
+        }
 
         if (!has_propose_group) {
             sub_groups.push_back(std::move(sub_group));
