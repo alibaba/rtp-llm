@@ -12,9 +12,12 @@
 
 namespace rtp_llm {
 
-// Aggregates in-flight counters from every layer (frontend, rpc, scheduler,
-// cache loading, connector, p2p, cache store) and decides whether the engine is
-// fully drained. Counter sources are injected as named providers instead of hard
+// In-process resource drain for sleep/checkpoint. This is not the control-plane
+// drain that removes an instance from routing: the control plane/frontend must
+// stop new business traffic first. This manager is the final safety barrier that
+// aggregates work the frontend cannot observe (rpc, scheduler, cache loading,
+// connector, p2p, cache store) and decides whether GPU/RDMA resources are safe
+// to release. Counter sources are injected as named providers instead of hard
 // dependencies on concrete classes, so unit tests mock them and integration
 // wires the real getters
 // (e.g. KVCacheConnectorCoordinator::inflightTransferCount,

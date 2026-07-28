@@ -448,8 +448,9 @@ void LocalRpcServer::installSleepHooks() {
     auto       vmm_backend = vmm_backend_;
     hooks.armEngineQuiesce = [engine, local_rank](const SleepOptions&) {
         OptionalSleepDeviceGuard device_guard(local_rank);
-        // Arm the collective sleep-quiesce consensus at DRAINING, before the rank-asymmetric
-        // drain, symmetrically on every rank. Multi-rank DP/EP only; single-rank no-op.
+        // The lifecycle controller calls this in commit, after the frontend has
+        // observed prepare/drain success on every rank. Multi-rank DP/EP only;
+        // single-rank no-op.
         engine->armCollectiveSleepQuiesce();
         return true;
     };

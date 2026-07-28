@@ -41,8 +41,8 @@ public:
     absl::Status                      pauseAndWaitQuiesced(int64_t timeout_ms) override;
     void                              invalidateCudaGraphs() override;
     void                              recaptureCudaGraphs() override;
-    // Arm the collective sleep-quiesce consensus at the DRAINING transition (before drain),
-    // symmetrically on every rank (DP/EP). No-op for single-rank. See definition.
+    // Arm the collective sleep-quiesce consensus during commit, after the
+    // all-rank prepare/drain barrier. No-op for single-rank. See definition.
     void armCollectiveSleepQuiesce() override;
 
     KVCacheInfo  getCacheStatusInfo(int64_t latest_version, bool need_cache_keys) override;

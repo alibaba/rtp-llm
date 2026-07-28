@@ -649,8 +649,8 @@ message SleepRequestPB {
     int64 timeout_ms = 3;
     string reason = 4;
     repeated string tags = 5;     // reserved for partial release/wake_up; MVP uses default tags.
-    bool prepare_only = 6;        // close admission + drain; do not release GPU
-    bool commit_only = 7;         // release GPU after all ranks prepared/drained
+    bool prepare_only = 6;        // close inference admission + drain; leave engine running and transfers open
+    bool commit_only = 7;         // freeze/re-drain/quiesce + release after all ranks prepared
 }
 
 message WakeUpRequestPB {

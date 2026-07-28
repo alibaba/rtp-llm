@@ -2824,11 +2824,12 @@ class GrpcClientWrapper:
             commit_request = pb2.SleepRequestPB()
             commit_request.CopyFrom(request)
             commit_request.commit_only = True
-            commit_request.timeout_ms = 0
 
             # prepare blocks on drain; leave headroom on top of drain timeout.
-            # Only after every rank is drained do we send commit, avoiding a
-            # partially sleeping instance when one rank times out.
+            # Only after every rank is drained do we send commit. Commit retains
+            # the requested timeout because it closes the transfer gate and
+            # performs a second drain for leases acquired at the gate boundary
+            # before arming collective quiesce.
             timeout_s = max(60.0, timeout_ms / 1000.0 + 30.0)
             try:
                 prepare_results = await self._broadcast_control_rpc(

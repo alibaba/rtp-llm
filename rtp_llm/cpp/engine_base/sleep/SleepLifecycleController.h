@@ -87,8 +87,8 @@ struct SleepOptions {
     int64_t                  timeout_ms = 0;
     std::string              reason;
     std::vector<std::string> tags;
-    bool                     prepare_only = false;  // DRAINING + drained, no GPU release
-    bool                     commit_only  = false;  // DRAINING -> SUSPENDING -> SLEEPING
+    bool prepare_only = false;  // DRAINING + drained; engine running and transfer gate open
+    bool commit_only  = false;  // freeze/re-drain/quiesce, then DRAINING -> SUSPENDING -> SLEEPING
 };
 
 using DrainCancellationPredicate = std::function<bool()>;
@@ -154,17 +154,15 @@ struct SleepResult {
 // restorable GPU memory, MR/engine quiesce). Hooks left empty are treated as
 // no-op success so the core state machine remains unit-testable.
 struct SleepHooks {
-    // Close the external CacheStore/P2P admission gate before drain starts on
-    // every sleep level. Existing transfers may finish, but no new transfer may
-    // race MR deregistration or KV backing release.
+    // Close the external CacheStore/P2P admission gate after every rank has
+    // completed prepare's admitted-work drain. Existing transfers may finish,
+    // but no new transfer may race MR deregistration or KV backing release.
     std::function<bool(const SleepOptions&)> freezeExternalTransfers;
-    // Arm the engine's collective sleep-quiesce consensus at the DRAINING transition,
-    // BEFORE drain, symmetrically on every rank. Needed for any multi-rank DP/EP deployment
-    // where drain is rank-asymmetric: a rank that armed only after its local drain would
-    // leave the busy rank unarmed and desync the forward/EP collective. No-op for single-rank.
-    // For Level 3, false or an exception is terminal: the controller enters ERROR without
-    // draining or releasing resources, and external transfer admission remains closed.
-    // Levels 1 and 2 retain the legacy best-effort behavior.
+    // Arm the engine's collective sleep-quiesce consensus during commit, after
+    // the instance-level coordinator has observed prepare success on every rank.
+    // At that point no admitted forward remains, so every rank can enter the
+    // collective pause without stopping work that drain still depends on.
+    // No-op for single-rank. For Level 3, false or an exception is terminal.
     std::function<bool(const SleepOptions&)> armEngineQuiesce;
     // Block until drained (or timeout/cancellation). Long waits must poll the
     // predicate so wake_up or a newer sleep retry can supersede this attempt.
@@ -190,12 +188,14 @@ struct SleepHooks {
     std::function<bool()> registerMr;
     // Restart scheduler loop without resource work.
     std::function<bool()> restartEngine;
-    // Abort a prepared sleep from DRAINING and resume the engine loop.
+    // Abort a sleep that reached engine quiesce while still in DRAINING.
+    // A prepare-only rollback does not call this because prepare leaves the
+    // engine running.
     std::function<bool()> cancelQuiesceAndRestartEngine;
     // Warmup + health self-check before going back online.
     std::function<bool()> warmupAndHealthCheck;
     // Reopen external transfer admission only after every restored resource and
-    // health check is ready. Also used to cancel a prepare-only sleep, after the
+    // health check is ready. Also used to roll back a failed commit after the
     // engine has restarted. A failed/throwing call must leave the gate closed.
     std::function<bool()> resumeExternalTransfers;
 
@@ -267,9 +267,10 @@ public:
     // already draining/suspending/sleeping. Illegal from WAKING_UP.
     //
     // prepare_only is used by the instance-level all-rank coordinator: it closes
-    // admission and waits for local drain, but deliberately leaves the rank in
-    // DRAINING so no rank releases GPU memory until every rank has prepared.
-    // commit_only then performs the release from DRAINING.
+    // admission and waits for local drain, but deliberately leaves both the
+    // engine and external transfer gate running/open in DRAINING. Once every
+    // rank has prepared, commit_only freezes transfers, re-drains the gate
+    // boundary, quiesces the engine, and performs the release.
     SleepResult sleep(const SleepOptions& opt);
 
     // Trigger wake_up: SLEEPING -> WAKING_UP -> RUNNING. Idempotent when already
@@ -326,8 +327,8 @@ private:
     // Level of the in-progress/last sleep, captured at RUNNING->DRAINING.
     std::atomic<int32_t> active_sleep_level_{0};
     // Monotonic token for the drain attempt allowed to continue into quiesce.
-    // wake_up(DRAINING) and every newer non-commit sleep retry invalidate the
-    // previous token, then join its promptly-cancelled drain hook.
+    // wake_up(DRAINING) and every newer sleep phase/retry invalidate the previous
+    // token, then join its promptly-cancelled drain hook.
     std::atomic<uint64_t> drain_generation_{0};
     // Lock ordering: transition_mutex_ -> drain_mutex_ / admission_mutex_ ->
     // hooks_mutex_ -> status_mutex_. A drain hook clears drain_active_ without
@@ -342,6 +343,12 @@ private:
 
     std::atomic<KvMemoryState> kv_memory_state_{KvMemoryState::ACTIVE};
     std::atomic<bool>          device_kv_cache_valid_{true};
+    // Phase markers let prepare rollback avoid touching an engine and transfer
+    // gate that prepare deliberately left running/open. They also make a
+    // commit-only request fail closed unless admitted work was actually drained.
+    std::atomic<bool>          admitted_work_drained_{false};
+    std::atomic<bool>          external_transfers_frozen_{false};
+    std::atomic<bool>          engine_quiesce_armed_{false};
     std::atomic<bool>          engine_quiesced_{false};
 
     mutable std::mutex status_mutex_;  // guards last_error_ and runtime_disabled_reason_

@@ -1035,25 +1035,21 @@ absl::Status NormalEngine::pauseAndWaitQuiesced(int64_t timeout_ms) {
 }
 
 void NormalEngine::armCollectiveSleepQuiesce() {
-    // DP/EP: the sleep-quiesce consensus (maybeReachCollectiveSleepQuiesce) must be armed on
-    // EVERY rank when it enters DRAINING -- i.e. BEFORE the per-rank drain wait, not after it
-    // (as the quiesceEngine hook / pauseAndWaitQuiesced does). Drain is rank-asymmetric: only
-    // the rank holding the in-flight request blocks in DrainManager.waitDrained, so if arming
-    // waited for local drain the busy rank would keep pause_=false and never arm, while its
-    // idle peers (already drained, pause_=true) would issue unmatched SLEEP_QUIESCE all-reduce
-    // rounds. Those never-matched collective rounds pin GPU collective resources indefinitely
-    // and desync the EP all-to-all until the busy rank's real forward hits a DeepEP CPU recv
-    // timeout -- the request errors, drain never completes, and the worker rank dies.
+    // DP/EP: the sleep-quiesce consensus (maybeReachCollectiveSleepQuiesce) must
+    // be armed on EVERY rank from the commit RPC. The instance-level coordinator
+    // broadcasts commit only after every rank's prepare RPC has drained admitted
+    // work with pause_=false and the transfer gate open. This two-phase barrier is
+    // essential: arming pause before drain can park a busy rank before its request
+    // completes, while letting an idle rank freeze first can reject a sibling's
+    // still-required KV transfer.
     //
-    // Arming here calls pause() (single CAS: sets pause_ + bumps pause_epoch_), so the busy
-    // rank co-steps the consensus while it drains and data[1]=onflightStreams carries its drain
-    // progress into the shared verdict; all ranks reach REACHED together once the global
-    // on-flight count is zero. The drain-time quiesceEngine hook's pause() then becomes a no-op
-    // CAS (epoch unchanged) and simply waits for the consensus to record that epoch.
+    // Arming here calls pause() (single CAS: sets pause_ + bumps pause_epoch_).
+    // With admitted forwards already gone, every rank can safely co-step the
+    // consensus until the shared REACHED verdict. The quiesceEngine hook's
+    // pause() then becomes a no-op CAS (epoch unchanged) and waits for that epoch.
     //
     // No-op unless the collective quiesce path is enabled (multi-rank DP/EP): for single-rank
-    // pause() belongs AFTER drain (inside pauseAndWaitQuiesced), because setting pause_ early
-    // would park the loop (step()) before the in-flight request completes, stranding drain.
+    // pause() is issued by pauseAndWaitQuiesced after the same admitted-work drain.
     if (collectiveSleepQuiesceEnabled()) {
         pause();
         // Keep the scheduler polling (not blocking on an empty queue) for the duration of the

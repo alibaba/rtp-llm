@@ -1488,7 +1488,9 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
             self.assertFalse(prepare_request.commit_only)
             self.assertFalse(commit_request.prepare_only)
             self.assertTrue(commit_request.commit_only)
-            self.assertEqual(commit_request.timeout_ms, 0)
+            # Commit re-drains transfers that acquired a lease at the gate-close
+            # boundary, so it retains the caller's drain timeout.
+            self.assertEqual(commit_request.timeout_ms, 1000)
 
     async def test_sleep_serving_phase_rejected_before_status_probe(self):
         wrapper, pb2 = self._build_wrapper()

@@ -573,7 +573,7 @@ TEST(SleepLifecycleControllerTest, LevelThreeArmFailureIsTerminalAndFailClosed) 
     EXPECT_EQ(controller.state(), SleepState::ERROR);
     EXPECT_FALSE(controller.admit());
     EXPECT_TRUE(transfers_frozen);
-    EXPECT_EQ(calls, (std::vector<std::string>{"freeze", "arm"}));
+    EXPECT_EQ(calls, (std::vector<std::string>{"drain", "freeze", "drain", "arm"}));
     EXPECT_NE(controller.status().last_error.find("armEngineQuiesce"), std::string::npos);
 }
 
@@ -602,7 +602,7 @@ TEST(SleepLifecycleControllerTest, LevelThreeArmExceptionIsTerminalAndFailClosed
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(controller.state(), SleepState::ERROR);
     EXPECT_TRUE(transfers_frozen);
-    EXPECT_EQ(drain_called, 0);
+    EXPECT_EQ(drain_called, 2);
     EXPECT_NE(controller.status().last_error.find("armEngineQuiesce"), std::string::npos);
 }
 
@@ -630,7 +630,7 @@ TEST(SleepLifecycleControllerTest, LevelOneAndTwoKeepBestEffortArmBehavior) {
     }
 }
 
-TEST(SleepLifecycleControllerTest, FreezeFailureStopsBeforeDrainAndCanBeCancelledOnEveryLevel) {
+TEST(SleepLifecycleControllerTest, FreezeFailureAfterInitialDrainCanBeCancelledOnEveryLevel) {
     for (const int32_t level : {1, 2, 3}) {
         SCOPED_TRACE(level);
         SleepLifecycleController controller(true);
@@ -656,7 +656,7 @@ TEST(SleepLifecycleControllerTest, FreezeFailureStopsBeforeDrainAndCanBeCancelle
         opt.level = level;
         EXPECT_FALSE(controller.sleep(opt).ok);
         EXPECT_EQ(controller.state(), SleepState::DRAINING);
-        EXPECT_EQ(drain_called.load(), 0);
+        EXPECT_EQ(drain_called.load(), 1);
         EXPECT_TRUE(controller.wakeUp().ok);
         EXPECT_EQ(resume_called.load(), 1);
         EXPECT_EQ(controller.state(), SleepState::RUNNING);
@@ -801,8 +801,7 @@ TEST(SleepLifecycleControllerTest, LevelOneAndTwoGateTransfersWithoutRunningLeve
             return true;
         };
         hooks.drain = [&transfers_frozen, &calls](const SleepOptions&, const DrainCancellationPredicate&) {
-            EXPECT_TRUE(transfers_frozen);
-            calls.push_back("drain");
+            calls.push_back(transfers_frozen ? "drain_frozen" : "drain_open");
             return true;
         };
         hooks.teardownCollectives = [&level_three_calls](const SleepOptions&) {
@@ -849,8 +848,82 @@ TEST(SleepLifecycleControllerTest, LevelOneAndTwoGateTransfersWithoutRunningLeve
         ASSERT_TRUE(controller.wakeUp().ok);
         EXPECT_FALSE(transfers_frozen);
         EXPECT_EQ(level_three_calls.load(), 0);
-        EXPECT_EQ(calls, (std::vector<std::string>{"freeze", "drain", "restart", "warmup", "resume"}));
+        EXPECT_EQ(calls,
+                  (std::vector<std::string>{
+                      "drain_open", "freeze", "drain_frozen", "restart", "warmup", "resume"}));
     }
+}
+
+TEST(SleepLifecycleControllerTest, AdmittedRequestCanFinishDependentTransferBeforeTransferGateCloses) {
+    SleepLifecycleController controller(true);
+    controller.setConfiguredLevel(1);
+
+    bool                     request_active   = true;
+    bool                     transfer_active  = false;
+    bool                     transfers_frozen = false;
+    std::vector<std::string> calls;
+    SleepHooks               hooks;
+    hooks.drain = [&](const SleepOptions&, const DrainCancellationPredicate&) {
+        calls.push_back(transfers_frozen ? "drain_frozen" : "drain_open");
+        if (!transfers_frozen) {
+            // Model the production race: inference was admitted before DRAINING,
+            // but its downstream KV transfer has not acquired a lease yet.
+            EXPECT_TRUE(request_active);
+            transfer_active = true;
+            transfer_active = false;
+            request_active  = false;
+        }
+        return !request_active && !transfer_active;
+    };
+    hooks.freezeExternalTransfers = [&](const SleepOptions&) {
+        EXPECT_FALSE(request_active);
+        EXPECT_FALSE(transfer_active);
+        transfers_frozen = true;
+        calls.push_back("freeze");
+        return true;
+    };
+    controller.setHooks(hooks);
+
+    const auto result = controller.sleep(gracefulOptions());
+    EXPECT_TRUE(result.ok) << result.message;
+    EXPECT_EQ(controller.state(), SleepState::SLEEPING);
+    EXPECT_EQ(calls, (std::vector<std::string>{"drain_open", "freeze", "drain_frozen"}));
+}
+
+TEST(SleepLifecycleControllerTest, PostFreezeDrainCatchesTransferAcquiredAtGateBoundary) {
+    SleepLifecycleController controller(true);
+    controller.setConfiguredLevel(1);
+
+    bool                     transfer_active  = false;
+    bool                     transfers_frozen = false;
+    int                      drain_calls      = 0;
+    std::vector<std::string> calls;
+    SleepHooks               hooks;
+    hooks.drain = [&](const SleepOptions&, const DrainCancellationPredicate&) {
+        ++drain_calls;
+        calls.push_back(transfers_frozen ? "drain_frozen" : "drain_open");
+        if (transfers_frozen) {
+            EXPECT_TRUE(transfer_active);
+            transfer_active = false;
+        }
+        return !transfer_active;
+    };
+    hooks.freezeExternalTransfers = [&](const SleepOptions&) {
+        // Model a transfer that acquired its lease just before close() won the
+        // admission lock. It is allowed to finish, but no later lease can start.
+        transfer_active  = true;
+        transfers_frozen = true;
+        calls.push_back("freeze");
+        return true;
+    };
+    controller.setHooks(hooks);
+
+    const auto result = controller.sleep(gracefulOptions());
+    EXPECT_TRUE(result.ok) << result.message;
+    EXPECT_EQ(controller.state(), SleepState::SLEEPING);
+    EXPECT_EQ(drain_calls, 2);
+    EXPECT_FALSE(transfer_active);
+    EXPECT_EQ(calls, (std::vector<std::string>{"drain_open", "freeze", "drain_frozen"}));
 }
 
 TEST(SleepLifecycleControllerTest, WakeResumeFailureRefreezesTransfersOnEveryLevel) {
@@ -1155,7 +1228,7 @@ TEST(SleepLifecycleControllerTest, PrepareOnlyStaysDrainingUntilCommit) {
     EXPECT_FALSE(controller.admit());
     EXPECT_EQ(controller.sleepEpoch(), 1);
     EXPECT_TRUE(controller.status().device_kv_cache_valid);
-    EXPECT_EQ(quiesce_called.load(), 1);
+    EXPECT_EQ(quiesce_called.load(), 0);
     EXPECT_EQ(sync_dereg_called.load(), 0);
     EXPECT_EQ(release_kv_called.load(), 0);
 
@@ -1194,7 +1267,7 @@ TEST(SleepLifecycleControllerTest, PrepareAndCommitCannotAcquireStragglerAdmissi
     EXPECT_EQ(controller.state(), SleepState::SLEEPING);
 }
 
-TEST(SleepLifecycleControllerTest, CommitOnlyRequiresPreparedQuiesce) {
+TEST(SleepLifecycleControllerTest, CommitOnlyRequiresSuccessfulPrepareDrain) {
     SleepLifecycleController controller(true);
     SleepHooks               hooks;
     hooks.drain = [](const SleepOptions&, const DrainCancellationPredicate&) { return false; };
@@ -1208,10 +1281,10 @@ TEST(SleepLifecycleControllerTest, CommitOnlyRequiresPreparedQuiesce) {
     const auto result   = controller.sleep(commit);
     EXPECT_FALSE(result.ok);
     EXPECT_EQ(controller.state(), SleepState::DRAINING);
-    EXPECT_NE(controller.status().last_error.find("engine is not quiesced"), std::string::npos);
+    EXPECT_NE(controller.status().last_error.find("admitted work was not drained"), std::string::npos);
 }
 
-TEST(SleepLifecycleControllerTest, WakeUpFromPreparedDrainingAbortsSleep) {
+TEST(SleepLifecycleControllerTest, WakeUpFromPreparedDrainingDoesNotRestartRunningEngine) {
     SleepLifecycleController controller(true);
     std::atomic<int>         cancel_called{0};
     SleepHooks               hooks;
@@ -1231,19 +1304,83 @@ TEST(SleepLifecycleControllerTest, WakeUpFromPreparedDrainingAbortsSleep) {
     EXPECT_EQ(controller.state(), SleepState::RUNNING);
     EXPECT_TRUE(controller.admit());
     EXPECT_EQ(controller.sleepEpoch(), 1);
-    EXPECT_EQ(cancel_called.load(), 1);
+    EXPECT_EQ(cancel_called.load(), 0);
 }
 
-TEST(SleepLifecycleControllerTest, LevelThreePreparedCancelRestartsBeforeResumingTransfers) {
+TEST(SleepLifecycleControllerTest, LevelThreePrepareRollbackLeavesEngineAndTransferGateUntouched) {
+    SleepLifecycleController controller(true);
+    controller.setConfiguredLevel(3);
+
+    int        drain_called   = 0;
+    int        freeze_called  = 0;
+    int        arm_called     = 0;
+    int        quiesce_called = 0;
+    int        restart_called = 0;
+    int        resume_called  = 0;
+    SleepHooks hooks;
+    hooks.drain = [&drain_called](const SleepOptions&, const DrainCancellationPredicate&) {
+        ++drain_called;
+        return true;
+    };
+    hooks.freezeExternalTransfers = [&freeze_called](const SleepOptions&) {
+        ++freeze_called;
+        return true;
+    };
+    hooks.armEngineQuiesce = [&arm_called](const SleepOptions&) {
+        ++arm_called;
+        return true;
+    };
+    hooks.quiesceEngine = [&quiesce_called](const SleepOptions&) {
+        ++quiesce_called;
+        return true;
+    };
+    hooks.cancelQuiesceAndRestartEngine = [&restart_called]() {
+        ++restart_called;
+        return true;
+    };
+    hooks.resumeExternalTransfers = [&resume_called]() {
+        ++resume_called;
+        return true;
+    };
+    controller.setHooks(hooks);
+
+    SleepOptions prepare = gracefulOptions();
+    prepare.level        = 3;
+    prepare.prepare_only = true;
+    ASSERT_TRUE(controller.sleep(prepare).ok);
+    EXPECT_EQ(controller.state(), SleepState::DRAINING);
+    EXPECT_EQ(drain_called, 1);
+    EXPECT_EQ(freeze_called, 0);
+    EXPECT_EQ(arm_called, 0);
+    EXPECT_EQ(quiesce_called, 0);
+
+    const auto result = controller.wakeUp();
+    EXPECT_TRUE(result.ok) << result.message;
+    EXPECT_EQ(controller.state(), SleepState::RUNNING);
+    EXPECT_EQ(restart_called, 0);
+    EXPECT_EQ(resume_called, 0);
+}
+
+TEST(SleepLifecycleControllerTest, CommitFailureRollbackRestartsBeforeResumingTransfers) {
     SleepLifecycleController controller(true);
     controller.setConfiguredLevel(3);
 
     bool                     transfers_frozen = false;
     std::vector<std::string> calls;
     SleepHooks               hooks;
-    hooks.freezeExternalTransfers = [&transfers_frozen](const SleepOptions&) {
+    hooks.drain = [](const SleepOptions&, const DrainCancellationPredicate&) { return true; };
+    hooks.freezeExternalTransfers = [&transfers_frozen, &calls](const SleepOptions&) {
         transfers_frozen = true;
+        calls.push_back("freeze");
         return true;
+    };
+    hooks.armEngineQuiesce = [&calls](const SleepOptions&) {
+        calls.push_back("arm");
+        return true;
+    };
+    hooks.quiesceEngine = [&calls](const SleepOptions&) {
+        calls.push_back("quiesce");
+        return false;
     };
     hooks.cancelQuiesceAndRestartEngine = [&transfers_frozen, &calls]() {
         EXPECT_TRUE(transfers_frozen);
@@ -1262,89 +1399,78 @@ TEST(SleepLifecycleControllerTest, LevelThreePreparedCancelRestartsBeforeResumin
     prepare.level        = 3;
     prepare.prepare_only = true;
     ASSERT_TRUE(controller.sleep(prepare).ok);
-    ASSERT_TRUE(transfers_frozen);
+
+    SleepOptions commit = gracefulOptions();
+    commit.level        = 3;
+    commit.commit_only  = true;
+    ASSERT_FALSE(controller.sleep(commit).ok);
+    ASSERT_EQ(controller.state(), SleepState::DRAINING);
 
     const auto result = controller.wakeUp();
     EXPECT_TRUE(result.ok) << result.message;
     EXPECT_EQ(controller.state(), SleepState::RUNNING);
     EXPECT_FALSE(transfers_frozen);
-    EXPECT_EQ(calls, (std::vector<std::string>{"restart", "resume"}));
+    EXPECT_EQ(calls, (std::vector<std::string>{"freeze", "arm", "quiesce", "restart", "resume"}));
 }
 
-TEST(SleepLifecycleControllerTest, LevelThreePreparedCancelRestartFailureKeepsTransfersFrozen) {
-    SleepLifecycleController controller(true);
-    controller.setConfiguredLevel(3);
-
-    bool       transfers_frozen = false;
-    int        resume_called    = 0;
-    SleepHooks hooks;
-    hooks.freezeExternalTransfers = [&transfers_frozen](const SleepOptions&) {
-        transfers_frozen = true;
-        return true;
-    };
-    hooks.cancelQuiesceAndRestartEngine = []() { return false; };
-    hooks.resumeExternalTransfers       = [&resume_called]() {
-        ++resume_called;
-        return true;
-    };
-    controller.setHooks(hooks);
-
-    SleepOptions prepare = gracefulOptions();
-    prepare.level        = 3;
-    prepare.prepare_only = true;
-    ASSERT_TRUE(controller.sleep(prepare).ok);
-
-    const auto result = controller.wakeUp();
-    EXPECT_FALSE(result.ok);
-    EXPECT_EQ(controller.state(), SleepState::ERROR);
-    EXPECT_TRUE(transfers_frozen);
-    EXPECT_EQ(resume_called, 0);
-    EXPECT_NE(controller.status().last_error.find("cancelQuiesceAndRestartEngine"), std::string::npos);
-}
-
-TEST(SleepLifecycleControllerTest, LevelThreePreparedCancelRestartExceptionKeepsTransfersFrozen) {
-    SleepLifecycleController controller(true);
-    controller.setConfiguredLevel(3);
-
-    bool       transfers_frozen = false;
-    int        resume_called    = 0;
-    SleepHooks hooks;
-    hooks.freezeExternalTransfers = [&transfers_frozen](const SleepOptions&) {
-        transfers_frozen = true;
-        return true;
-    };
-    hooks.restartEngine           = []() -> bool { throw std::runtime_error("restart failed"); };
-    hooks.resumeExternalTransfers = [&resume_called]() {
-        ++resume_called;
-        return true;
-    };
-    controller.setHooks(hooks);
-
-    SleepOptions prepare = gracefulOptions();
-    prepare.level        = 3;
-    prepare.prepare_only = true;
-    ASSERT_TRUE(controller.sleep(prepare).ok);
-
-    const auto result = controller.wakeUp();
-    EXPECT_FALSE(result.ok);
-    EXPECT_EQ(controller.state(), SleepState::ERROR);
-    EXPECT_TRUE(transfers_frozen);
-    EXPECT_EQ(resume_called, 0);
-    EXPECT_NE(controller.status().last_error.find("restartEngine"), std::string::npos);
-}
-
-TEST(SleepLifecycleControllerTest, LevelThreePreparedCancelResumeFailureRefreezesTransfers) {
+TEST(SleepLifecycleControllerTest, CommitFreezeFailureRollbackResumesGateWithoutRestart) {
     SleepLifecycleController controller(true);
     controller.setConfiguredLevel(3);
 
     bool                     transfers_frozen = false;
     std::vector<std::string> calls;
     SleepHooks               hooks;
+    hooks.drain = [](const SleepOptions&, const DrainCancellationPredicate&) { return true; };
+    hooks.freezeExternalTransfers = [&transfers_frozen, &calls](const SleepOptions&) {
+        transfers_frozen = true;
+        calls.push_back("freeze");
+        return false;
+    };
+    hooks.cancelQuiesceAndRestartEngine = [&calls]() {
+        calls.push_back("restart");
+        return true;
+    };
+    hooks.resumeExternalTransfers = [&transfers_frozen, &calls]() {
+        EXPECT_TRUE(transfers_frozen);
+        transfers_frozen = false;
+        calls.push_back("resume");
+        return true;
+    };
+    controller.setHooks(hooks);
+
+    SleepOptions prepare = gracefulOptions();
+    prepare.level        = 3;
+    prepare.prepare_only = true;
+    ASSERT_TRUE(controller.sleep(prepare).ok);
+
+    SleepOptions commit = gracefulOptions();
+    commit.level        = 3;
+    commit.commit_only  = true;
+    ASSERT_FALSE(controller.sleep(commit).ok);
+    ASSERT_EQ(controller.state(), SleepState::DRAINING);
+
+    const auto result = controller.wakeUp();
+    EXPECT_TRUE(result.ok) << result.message;
+    EXPECT_EQ(controller.state(), SleepState::RUNNING);
+    EXPECT_FALSE(transfers_frozen);
+    EXPECT_EQ(calls, (std::vector<std::string>{"freeze", "resume"}));
+}
+
+TEST(SleepLifecycleControllerTest, CommitRollbackResumeFailureRefreezesTransfers) {
+    SleepLifecycleController controller(true);
+    controller.setConfiguredLevel(3);
+
+    bool                     transfers_frozen = false;
+    std::vector<std::string> calls;
+    SleepHooks               hooks;
+    hooks.drain = [](const SleepOptions&, const DrainCancellationPredicate&) { return true; };
     hooks.freezeExternalTransfers = [&transfers_frozen, &calls](const SleepOptions&) {
         transfers_frozen = true;
         calls.push_back("freeze");
         return true;
     };
+    hooks.armEngineQuiesce = [](const SleepOptions&) { return true; };
+    hooks.quiesceEngine    = [](const SleepOptions&) { return false; };
     hooks.cancelQuiesceAndRestartEngine = [&calls]() {
         calls.push_back("restart");
         return true;
@@ -1360,6 +1486,11 @@ TEST(SleepLifecycleControllerTest, LevelThreePreparedCancelResumeFailureRefreeze
     prepare.level        = 3;
     prepare.prepare_only = true;
     ASSERT_TRUE(controller.sleep(prepare).ok);
+
+    SleepOptions commit = gracefulOptions();
+    commit.level        = 3;
+    commit.commit_only  = true;
+    ASSERT_FALSE(controller.sleep(commit).ok);
     calls.clear();
 
     const auto result = controller.wakeUp();

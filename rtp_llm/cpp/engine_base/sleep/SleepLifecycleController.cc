@@ -326,6 +326,9 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
     setLastError("");
 
     if (current == SleepState::RUNNING) {
+        admitted_work_drained_.store(false, std::memory_order_release);
+        external_transfers_frozen_.store(false, std::memory_order_release);
+        engine_quiesce_armed_.store(false, std::memory_order_release);
         engine_quiesced_.store(false, std::memory_order_release);
         // Record the level of this sleep so the wake_up restore hook knows
         // whether to reload discarded weights (level 2) or not (level 1).
@@ -335,49 +338,42 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
         }
     }
 
-    uint64_t drain_generation = 0;
-    int64_t  drain_epoch      = 0;
-    if (!opt.commit_only) {
-        drain_generation = supersedeDrainAndWaitLocked();
-        drain_epoch      = sleep_epoch_.load(std::memory_order_acquire);
-    }
+    // Every prepare, commit, and retry owns a fresh cancellation generation.
+    // In particular, commit runs a post-freeze drain and must be supersedable by
+    // wake_up just like prepare's admitted-work drain.
+    const uint64_t drain_generation = supersedeDrainAndWaitLocked();
+    const int64_t  drain_epoch      = sleep_epoch_.load(std::memory_order_acquire);
 
-    if (!opt.commit_only && hooks_.freezeExternalTransfers) {
-        if (!invokeHookNoThrow("freezeExternalTransfers", hooks_.freezeExternalTransfers, opt)) {
-            setLastError("freezeExternalTransfers failed, staying in DRAINING");
-            return SleepResult::failedPrecondition(lastError());
+    // --- DRAINING prepare: finish work admitted before RUNNING -> DRAINING. ---
+    //
+    // Inference admission and transfer admission are deliberately separate. A request may
+    // already own an inference admission lease but not yet have acquired the downstream KV
+    // transfer lease it needs. Closing the transfer gate before that request finishes would
+    // strand the request, while drain waits forever for the same request.
+    //
+    // Prepare therefore drains with transfer admission and the engine still open/running.
+    // The frontend broadcasts prepare to every rank and waits for every RPC to return. That
+    // all-rank barrier is what makes it safe for commit to close transfer gates and arm the
+    // collective engine pause; an idle rank must not do either while a busy sibling is still
+    // completing the same CP/DP request.
+    auto drain_hook = hooks_.drain;
+    DrainCancellationPredicate cancelled = [this, drain_generation, drain_epoch]() {
+        return drain_generation_.load(std::memory_order_acquire) != drain_generation
+               || sleep_epoch_.load(std::memory_order_acquire) != drain_epoch
+               || state_.load(std::memory_order_acquire) != SleepState::DRAINING;
+    };
+    auto run_drain_phase = [&](const char* phase) -> SleepResult {
+        if (!drain_hook) {
+            return SleepResult::success();
         }
-    }
 
-    // Arm the collective sleep-quiesce consensus BEFORE the (rank-asymmetric) drain, on
-    // every rank symmetrically. Only the rank holding an in-flight request blocks in the
-    // drain hook below; if arming waited until after that block, the busy rank would never
-    // arm while its idle peers issue unmatched consensus rounds -> forward/EP desync ->
-    // DeepEP timeout / worker death. Level 3 cannot safely recover from an arm failure:
-    // peers may already have issued their consensus round, so fail closed without draining
-    // or releasing resources. Levels 1 and 2 retain their legacy best-effort behavior.
-    // Placed before the drain block so it also runs on an idempotent DRAINING retry (where
-    // the underlying pause() is a no-op CAS).
-    if (!opt.commit_only && hooks_.armEngineQuiesce) {
-        const bool armed = invokeHookNoThrow("armEngineQuiesce", hooks_.armEngineQuiesce, opt);
-        if (!armed && configured_level == 3) {
-            setLastError("armEngineQuiesce failed; Level 3 cannot safely continue");
-            transitionLocked(SleepState::DRAINING, SleepState::ERROR);
-            return SleepResult::failedPrecondition(lastError());
-        }
-    }
-
-    // --- DRAINING: wait for in-flight requests and cache transfers. ---
-    if (!opt.commit_only && hooks_.drain) {
         // Drain may wait for minutes. Run it without transition_mutex_ so wake_up
         // and a newer retry can invalidate this generation. Copy the hook before
         // unlocking so setHooks() cannot race its std::function storage.
-        auto                       drain_hook = hooks_.drain;
-        DrainCancellationPredicate cancelled  = [this, drain_generation, drain_epoch]() {
-            return drain_generation_.load(std::memory_order_acquire) != drain_generation
-                   || sleep_epoch_.load(std::memory_order_acquire) != drain_epoch
-                   || state_.load(std::memory_order_acquire) != SleepState::DRAINING;
-        };
+        RTP_LLM_LOG_INFO("sleep drain phase begin: phase=%s, generation=%lu, epoch=%ld",
+                         phase,
+                         drain_generation,
+                         drain_epoch);
         {
             std::lock_guard<std::mutex> drain_lock(drain_mutex_);
             drain_active_ = true;
@@ -396,12 +392,81 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
             // Per design: graceful drain timeout keeps DRAINING and does NOT
             // release GPU. The controller stays in DRAINING; control plane can
             // retry sleep (idempotent) or escalate with mode=abort.
-            setLastError("drain not finished (timeout or aborted), staying in DRAINING");
-            return SleepResult::failedPrecondition("drain not finished, state=DRAINING");
+            setLastError(std::string("drain phase ") + phase + " not finished (timeout or aborted), staying in "
+                         "DRAINING");
+            return SleepResult::failedPrecondition(std::string("drain phase ") + phase
+                                                   + " not finished, state=DRAINING");
+        }
+        RTP_LLM_LOG_INFO("sleep drain phase completed: phase=%s, generation=%lu, epoch=%ld",
+                         phase,
+                         drain_generation,
+                         drain_epoch);
+        return SleepResult::success();
+    };
+
+    if (!opt.commit_only) {
+        const auto admitted_work_drained = run_drain_phase("admitted_work");
+        if (!admitted_work_drained.ok) {
+            return admitted_work_drained;
+        }
+        admitted_work_drained_.store(true, std::memory_order_release);
+    } else if (!admitted_work_drained_.load(std::memory_order_acquire)) {
+        setLastError("sleep commit rejected: admitted work was not drained by prepare");
+        return SleepResult::failedPrecondition(lastError());
+    }
+
+    if (opt.prepare_only) {
+        RTP_LLM_LOG_INFO(
+            "sleep prepare completed: admitted work drained, engine running, transfer gate open; "
+            "staying in DRAINING (epoch=%ld)",
+            sleep_epoch_.load());
+        return SleepResult::success();
+    }
+
+    // --- DRAINING commit: close transfer admission, re-drain the gate boundary,
+    // then pause the engine. The frontend reaches this section on every rank only
+    // after the all-rank prepare barrier above.
+    RTP_LLM_LOG_INFO("sleep commit phase begin: generation=%lu, epoch=%ld", drain_generation, drain_epoch);
+    if (hooks_.freezeExternalTransfers) {
+        RTP_LLM_LOG_INFO("sleep closing external transfer admission: generation=%lu, epoch=%ld",
+                         drain_generation,
+                         drain_epoch);
+        // Treat the gate as potentially closed as soon as the hook begins. A
+        // false/throwing hook may have made a partial change, so rollback must
+        // conservatively run resumeExternalTransfers.
+        external_transfers_frozen_.store(true, std::memory_order_release);
+        if (!invokeHookNoThrow("freezeExternalTransfers", hooks_.freezeExternalTransfers, opt)) {
+            setLastError("freezeExternalTransfers failed during commit, staying in DRAINING");
+            return SleepResult::failedPrecondition(lastError());
+        }
+
+        // Catch a transfer that acquired its lease immediately before close()
+        // won the admission lock. Existing leases may finish; no later one can
+        // start.
+        const auto closed_gate_drained = run_drain_phase("transfer_gate_closed");
+        if (!closed_gate_drained.ok) {
+            return closed_gate_drained;
         }
     }
 
-    if (!opt.commit_only && !engine_quiesced_.load(std::memory_order_acquire)) {
+    // All admitted forwards are gone before pause is armed, so the engine cannot
+    // strand work that prepare is waiting for. For a multi-rank engine the
+    // frontend's all-rank prepare barrier makes the subsequent collective pause
+    // symmetric. Level 3 still fails closed because a partially issued consensus
+    // cannot be safely unwound locally.
+    if (hooks_.armEngineQuiesce && !engine_quiesce_armed_.load(std::memory_order_acquire)) {
+        // As with the transfer gate, assume the hook may have partially changed
+        // state even if it reports failure.
+        engine_quiesce_armed_.store(true, std::memory_order_release);
+        const bool armed = invokeHookNoThrow("armEngineQuiesce", hooks_.armEngineQuiesce, opt);
+        if (!armed && configured_level == 3) {
+            setLastError("armEngineQuiesce failed; Level 3 cannot safely continue");
+            transitionLocked(SleepState::DRAINING, SleepState::ERROR);
+            return SleepResult::failedPrecondition(lastError());
+        }
+    }
+
+    if (!engine_quiesced_.load(std::memory_order_acquire)) {
         if (hooks_.quiesceEngine) {
             if (!invokeHookNoThrow("quiesceEngine", hooks_.quiesceEngine, opt)) {
                 setLastError("quiesceEngine failed, staying in DRAINING");
@@ -409,11 +474,6 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
             }
         }
         engine_quiesced_.store(true, std::memory_order_release);
-    }
-
-    if (opt.prepare_only) {
-        RTP_LLM_LOG_INFO("sleep prepare completed, staying in DRAINING (epoch=%ld)", sleep_epoch_.load());
-        return SleepResult::success();
     }
 
     if (!engine_quiesced_.load(std::memory_order_acquire)) {
@@ -530,34 +590,54 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
     if (current == SleepState::DRAINING) {
         setLastError("");
         supersedeDrainAndWaitLocked();
-        if (hooks_.cancelQuiesceAndRestartEngine) {
-            if (!invokeHookNoThrow("cancelQuiesceAndRestartEngine", hooks_.cancelQuiesceAndRestartEngine)) {
-                setLastError("cancelQuiesceAndRestartEngine failed");
-                transitionLocked(SleepState::DRAINING, SleepState::ERROR);
-                return SleepResult::failedPrecondition(lastError());
-            }
-        } else if (hooks_.restartEngine) {
-            if (!invokeHookNoThrow("restartEngine", hooks_.restartEngine)) {
-                setLastError("restartEngine failed");
-                transitionLocked(SleepState::DRAINING, SleepState::ERROR);
-                return SleepResult::failedPrecondition(lastError());
+        const bool engine_was_armed = engine_quiesce_armed_.load(std::memory_order_acquire)
+                                      || engine_quiesced_.load(std::memory_order_acquire);
+        if (engine_was_armed) {
+            if (hooks_.cancelQuiesceAndRestartEngine) {
+                if (!invokeHookNoThrow("cancelQuiesceAndRestartEngine", hooks_.cancelQuiesceAndRestartEngine)) {
+                    setLastError("cancelQuiesceAndRestartEngine failed");
+                    transitionLocked(SleepState::DRAINING, SleepState::ERROR);
+                    return SleepResult::failedPrecondition(lastError());
+                }
+            } else if (hooks_.restartEngine) {
+                if (!invokeHookNoThrow("restartEngine", hooks_.restartEngine)) {
+                    setLastError("restartEngine failed");
+                    transitionLocked(SleepState::DRAINING, SleepState::ERROR);
+                    return SleepResult::failedPrecondition(lastError());
+                }
             }
         }
+        engine_quiesce_armed_.store(false, std::memory_order_release);
         engine_quiesced_.store(false, std::memory_order_release);
+
+        const bool    transfers_were_frozen = external_transfers_frozen_.load(std::memory_order_acquire);
         const int32_t active_level = active_sleep_level_.load(std::memory_order_acquire);
-        if (hooks_.resumeExternalTransfers
-            && !invokeHookNoThrow("resumeExternalTransfers", hooks_.resumeExternalTransfers)) {
-            // resumeExternalTransfers is required to fail closed. Re-apply the
-            // freeze hook as a defensive compensation for partially-open hooks.
-            refreezeExternalTransfersNoThrow(hooks_, active_level);
-            setLastError("resumeExternalTransfers failed while cancelling prepared sleep");
-            transitionLocked(SleepState::DRAINING, SleepState::ERROR);
-            return SleepResult::failedPrecondition(lastError());
+        if (transfers_were_frozen) {
+            if (!hooks_.resumeExternalTransfers) {
+                setLastError("resumeExternalTransfers is unavailable while cancelling a sleep with a frozen "
+                             "transfer gate");
+                transitionLocked(SleepState::DRAINING, SleepState::ERROR);
+                return SleepResult::failedPrecondition(lastError());
+            }
+            if (!invokeHookNoThrow("resumeExternalTransfers", hooks_.resumeExternalTransfers)) {
+                // resumeExternalTransfers is required to fail closed. Re-apply
+                // the freeze hook as a defensive compensation for partially-open
+                // hooks.
+                refreezeExternalTransfersNoThrow(hooks_, active_level);
+                setLastError("resumeExternalTransfers failed while cancelling sleep commit");
+                transitionLocked(SleepState::DRAINING, SleepState::ERROR);
+                return SleepResult::failedPrecondition(lastError());
+            }
+            external_transfers_frozen_.store(false, std::memory_order_release);
         }
         if (!transitionLocked(SleepState::DRAINING, SleepState::RUNNING)) {
-            refreezeExternalTransfersNoThrow(hooks_, active_level);
+            if (transfers_were_frozen) {
+                external_transfers_frozen_.store(true, std::memory_order_release);
+                refreezeExternalTransfersNoThrow(hooks_, active_level);
+            }
             return SleepResult::failedPrecondition(lastError());
         }
+        admitted_work_drained_.store(false, std::memory_order_release);
         return SleepResult::success();
     }
     if (opt.commit_only && current != SleepState::WAKING_UP && current != SleepState::RUNNING) {
@@ -697,11 +777,18 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
             setLastError("warmupAndHealthCheck failed");
         }
     }
-    if (ok && hooks_.resumeExternalTransfers) {
-        ok = invokeHookNoThrow("resumeExternalTransfers", hooks_.resumeExternalTransfers);
-        if (!ok) {
-            refreezeExternalTransfersNoThrow(hooks_, active_sleep_level_.load(std::memory_order_acquire));
-            setLastError("resumeExternalTransfers failed");
+    if (ok && external_transfers_frozen_.load(std::memory_order_acquire)) {
+        if (!hooks_.resumeExternalTransfers) {
+            ok = false;
+            setLastError("resumeExternalTransfers is unavailable while waking a frozen transfer gate");
+        } else {
+            ok = invokeHookNoThrow("resumeExternalTransfers", hooks_.resumeExternalTransfers);
+            if (!ok) {
+                refreezeExternalTransfersNoThrow(hooks_, active_sleep_level_.load(std::memory_order_acquire));
+                setLastError("resumeExternalTransfers failed");
+            } else {
+                external_transfers_frozen_.store(false, std::memory_order_release);
+            }
         }
     }
 
@@ -713,6 +800,8 @@ SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
     }
 
     device_kv_cache_valid_.store(true, std::memory_order_release);
+    admitted_work_drained_.store(false, std::memory_order_release);
+    engine_quiesce_armed_.store(false, std::memory_order_release);
     engine_quiesced_.store(false, std::memory_order_release);
     if (!transitionLocked(SleepState::WAKING_UP, SleepState::RUNNING)) {
         return SleepResult::failedPrecondition(lastError());
