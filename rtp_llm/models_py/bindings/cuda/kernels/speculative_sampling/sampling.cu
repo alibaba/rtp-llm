@@ -250,11 +250,11 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
 
     // Accept loop is serial — only thread 0 performs it and broadcasts results via shared memory.
     __shared__ int  s_pos;
-    __shared__ bool s_all_same_token;
+    __shared__ bool s_direct_target_fallback;
 
     if (tx == 0) {
-        bool all_same_token = true;
-        int  pos            = num_speculative_tokens;
+        bool direct_target_fallback = false;
+        int  pos                    = num_speculative_tokens;
         for (int i = 0; i < num_speculative_tokens; ++i) {
             IdType draft_id  = draft_token_ids[row_idx * num_speculative_tokens + i];
             IdType target_id = target_token_ids[(row_idx * (num_speculative_tokens + 1) + i) * target_token_stride
@@ -265,30 +265,39 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
             DType u = uniform_samples[row_idx * (num_speculative_tokens + 1) + i];
 
             bool same_token = target_id == draft_id;
-            if (same_token || (do_sample[row_idx] && u * p < q)) {
+            if ((do_sample[row_idx] && u * p < q) || (!do_sample[row_idx] && same_token)) {
                 output_token_ids[row_idx * (num_speculative_tokens + 1) + i] = draft_id;
-                all_same_token                                               = all_same_token && same_token;
             } else {
                 pos = i;
+                // Greedy verification already has the exact target token.
+                // Rejection-residual sampling is only valid for stochastic
+                // speculative decoding.
+                if (!do_sample[row_idx]) {
+                    output_token_ids[row_idx * (num_speculative_tokens + 1) + i] = target_id;
+                    for (int p = i + 1; p < num_speculative_tokens + 1; ++p) {
+                        output_token_ids[row_idx * (num_speculative_tokens + 1) + p] = -1;
+                    }
+                    direct_target_fallback = true;
+                }
                 break;
             }
         }
 
         output_accepted_token_num[row_idx] = pos + 1;
 
-        if (all_same_token) {
+        if (pos == num_speculative_tokens) {
             IdType bonus_token_id =
                 target_token_ids[(row_idx * (num_speculative_tokens + 1) + pos) * target_token_stride
                                  + target_token_stride - 1];
             output_token_ids[row_idx * (num_speculative_tokens + 1) + pos] = bonus_token_id;
         }
 
-        s_pos            = pos;
-        s_all_same_token = all_same_token;
+        s_pos                    = pos;
+        s_direct_target_fallback = direct_target_fallback;
     }
     __syncthreads();
 
-    if (s_all_same_token) {
+    if (s_direct_target_fallback || s_pos == num_speculative_tokens) {
         return;
     }
     int pos = s_pos;

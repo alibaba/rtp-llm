@@ -567,6 +567,18 @@ public:
     }
 };
 
+TEST_F(MtpExecutorTest, testDeterministicDraftSamplerReportsPointMassProposal) {
+    auto identity_map = torch::arange(4, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
+    spec::FastTopKSampler sampler(identity_map);
+    auto                  logits =
+        torch::tensor({{0.0f, 1.0f, 4.0f, 2.0f}}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+
+    auto output = sampler.forward(logits);
+
+    EXPECT_EQ(output.token_ids.item<int64_t>(), 2);
+    checkTensorEqual(output.all_probs, torch::tensor({{0.0f, 0.0f, 1.0f, 0.0f}}).to(torch::kCUDA));
+}
+
 TEST_F(MtpExecutorTest, testMakePrefillRoundInputPacksMultiRequestRounds) {
     auto components = createMtpExecutorComponents(MtpExecutorTestConfig{});
     GptModelInputs inputs;
