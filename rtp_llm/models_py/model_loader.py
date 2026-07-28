@@ -488,7 +488,7 @@ class NewModelLoader:
                     )
                 try:
                     validator(loaded_tensor_ids)
-                except RuntimeError as exc:
+                except Exception as exc:
                     qualified_name = module_name or "<root>"
                     raise RuntimeError(
                         f"Weight validation failed for {qualified_name} "

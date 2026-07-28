@@ -34,6 +34,12 @@ from .moe import DeepSeekV32MoEBlock
 class DeepSeekV32Indexer(RtpModule):
     """Sparse Indexer for DeepSeek V3.2 DSA, new-loader style.
 
+    The forward orchestration mirrors ``modules/hybrid/indexer.py::Indexer``.
+    Projection ownership differs deliberately: this class owns independently
+    loadable RtpModule children, while the legacy implementation consumes a
+    W.* dictionary. Keep algorithm changes synchronized with that reference;
+    both paths are exercised by the sparse-indexer GPU parity/smoke coverage.
+
     HF ckpt keys (per layer):
       model.layers.{i}.self_attn.indexer.wq_b.weight
       model.layers.{i}.self_attn.indexer.wk.weight
@@ -54,8 +60,6 @@ class DeepSeekV32Indexer(RtpModule):
         layernorm_eps: float,
         blocksize: int,
         is_neox_style: bool,
-        tp_size: int = 1,
-        tp_rank: int = 0,
         quant_config: Optional[QuantizationConfig] = None,
         params_dtype: torch.dtype = torch.bfloat16,
         cos_sin_cache: Optional[torch.Tensor] = None,
@@ -403,8 +407,6 @@ class DeepSeekV32DecoderLayer(RtpModule):
                 layernorm_eps=layernorm_eps,
                 blocksize=blocksize,
                 is_neox_style=indexer_is_neox_style,
-                tp_size=attn_tp_size,
-                tp_rank=attn_tp_rank,
                 quant_config=quant_config,
                 params_dtype=params_dtype,
                 cos_sin_cache=cos_sin_cache,
@@ -415,7 +417,7 @@ class DeepSeekV32DecoderLayer(RtpModule):
 
     @property
     def indexer(self):
-        return getattr(self.self_attn, "indexer", None)
+        return self.self_attn.indexer
 
     def forward(
         self,

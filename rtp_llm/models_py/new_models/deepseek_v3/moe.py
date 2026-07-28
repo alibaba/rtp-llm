@@ -27,6 +27,29 @@ from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 from .mlp import DeepSeekV32MLP
 
 
+def _validate_routing_args(
+    *,
+    num_experts: int,
+    top_k: int,
+    n_group: int,
+    topk_group: int,
+    grouped: bool,
+) -> None:
+    if n_group <= 0 or num_experts % n_group:
+        raise ValueError(
+            f"num_experts={num_experts} must be divisible by n_group={n_group}"
+        )
+    if not 0 < topk_group <= n_group:
+        raise ValueError(f"topk_group={topk_group} must be in [1, n_group={n_group}]")
+    selected_capacity = (
+        topk_group * (num_experts // n_group) if grouped else num_experts
+    )
+    if not 0 < top_k <= selected_capacity:
+        raise ValueError(
+            f"top_k={top_k} exceeds selected-group capacity {selected_capacity}"
+        )
+
+
 def _select_deepseek_topk(
     router_logits_fp32: torch.Tensor,
     *,
@@ -45,18 +68,14 @@ def _select_deepseek_topk(
             f"{tuple(router_logits_fp32.shape)}"
         )
     num_experts = router_logits_fp32.shape[-1]
-    if n_group <= 0 or num_experts % n_group:
-        raise ValueError(
-            f"num_experts={num_experts} must be divisible by n_group={n_group}"
-        )
-    if not 0 < topk_group <= n_group:
-        raise ValueError(f"topk_group={topk_group} must be in [1, n_group={n_group}]")
+    _validate_routing_args(
+        num_experts=num_experts,
+        top_k=top_k,
+        n_group=n_group,
+        topk_group=topk_group,
+        grouped=group_limited,
+    )
     group_size = num_experts // n_group
-    selected_capacity = topk_group * group_size if group_limited else num_experts
-    if not 0 < top_k <= selected_capacity:
-        raise ValueError(
-            f"top_k={top_k} exceeds selected-group capacity " f"{selected_capacity}"
-        )
 
     if scoring_func == 0:
         scores = torch.softmax(router_logits_fp32, dim=-1)
@@ -116,18 +135,14 @@ def _select_deepseek_noaux_topk(
             "correction_bias must have shape [experts], got "
             f"{tuple(correction_bias.shape)} for {num_experts} experts"
         )
-    if n_group <= 0 or num_experts % n_group:
-        raise ValueError(
-            f"num_experts={num_experts} must be divisible by n_group={n_group}"
-        )
-    if not 0 < topk_group <= n_group:
-        raise ValueError(f"topk_group={topk_group} must be in [1, n_group={n_group}]")
+    _validate_routing_args(
+        num_experts=num_experts,
+        top_k=top_k,
+        n_group=n_group,
+        topk_group=topk_group,
+        grouped=True,
+    )
     group_size = num_experts // n_group
-    selected_capacity = topk_group * group_size
-    if not 0 < top_k <= selected_capacity:
-        raise ValueError(
-            f"top_k={top_k} exceeds selected-group capacity {selected_capacity}"
-        )
 
     scores = torch.sigmoid(router_logits_fp32)
     scores_for_choice = scores + correction_bias
@@ -211,6 +226,9 @@ class DeepSeekV32MoeGate(RtpModule):
             self.register_parameter("e_score_correction_bias", None)
 
     def forward(self, x: torch.Tensor) -> torch.Tensor:
+        # Keep the gate GEMM in the model dtype to match GenericMoeLayer and
+        # avoid materializing a full FP32 gate-weight copy on every layer and
+        # forward. Routing itself consumes FP32 logits below.
         return F.linear(x, self.weight, None)
 
 
@@ -265,22 +283,14 @@ class DeepSeekV32MoEBlock(RtpModule):
             )
         if correction_bias and scoring_func != 1:
             raise ValueError("noaux_tc routing requires sigmoid scoring")
-        if num_experts % n_group:
-            raise ValueError(
-                f"num_experts={num_experts} must be divisible by n_group={n_group}"
-            )
-        if not 0 < topk_group <= n_group:
-            raise ValueError(
-                f"topk_group={topk_group} must be in [1, n_group={n_group}]"
-            )
         grouped = topk_method in {"group_limited_greedy", "noaux_tc"}
-        selected_capacity = (
-            topk_group * (num_experts // n_group) if grouped else num_experts
+        _validate_routing_args(
+            num_experts=num_experts,
+            top_k=top_k,
+            n_group=n_group,
+            topk_group=topk_group,
+            grouped=grouped,
         )
-        if not 0 < top_k <= selected_capacity:
-            raise ValueError(
-                f"top_k={top_k} exceeds selected-group capacity " f"{selected_capacity}"
-            )
         self.tp_size = tp_size
         self.ep_size = ep_size
         self.top_k = top_k
@@ -292,12 +302,22 @@ class DeepSeekV32MoEBlock(RtpModule):
         self.has_moe_norm = has_moe_norm
         self.correction_bias = correction_bias
         self.group_limited = topk_method == "group_limited_greedy"
-        self._use_fast_select_topk = (
+        fast_select_topk_candidate = (
             get_device_type() == DeviceType.Cuda
             and not correction_bias
             and scoring_func == 0
             and not self.group_limited
             and routed_scaling_factor == 1.0
+        )
+        # SelectTopk reads these values from the pybind ModelConfig while the
+        # reference path uses the canonical config.json-derived constructor
+        # values above. A stale ModelConfig must never size or normalize the
+        # fused output with a different contract; safely use the reference
+        # implementation when either source disagrees.
+        self._use_fast_select_topk = fast_select_topk_candidate and (
+            model_config.expert_num == num_experts
+            and model_config.moe_k == top_k
+            and model_config.has_moe_norm == has_moe_norm
         )
 
         # Router gate: hidden → num_experts (not TP-sharded, small).

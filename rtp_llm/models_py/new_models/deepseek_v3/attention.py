@@ -158,14 +158,26 @@ def _linear_weight_bf16(linear: nn.Module) -> torch.Tensor:
         fp8_dtypes += (torch.float8_e4m3fnuz,)
     if w.dtype not in fp8_dtypes:
         return w
-    scale = getattr(linear, "weight_scale_inv", None)
+    scale = _fp8_scale_parameter(linear)
     if scale is None:
-        scale = getattr(linear, "weight_scale", None)
-    if scale is None:
-        raise RuntimeError(
-            f"fp8 linear missing block scale: {getattr(linear, 'prefix', '?')}"
-        )
+        raise RuntimeError(f"fp8 linear {type(linear).__name__} is missing block scale")
     return _dequant_fp8_to_bf16(w, scale.data, _fp8_block_size(linear))
+
+
+def _fp8_scale_parameter(linear: nn.Module) -> Optional[nn.Parameter]:
+    """Return the registered pre- or post-hook FP8 block scale.
+
+    Fp8BlockLinearMethod deliberately renames the registered parameter from
+    ``weight_scale_inv`` to ``weight_scale`` in its post-load hook. The MLA
+    parent hook runs before child hooks, while kernel views are built after
+    them, so both lifecycle states are part of the quant-method contract.
+    Keep that dynamic protocol isolated here instead of scattering
+    hasattr/getattr control flow across the attention implementation.
+    """
+    scale = linear._parameters.get("weight_scale")
+    if scale is None:
+        scale = linear._parameters.get("weight_scale_inv")
+    return scale
 
 
 def _kernel_fp8_weight_and_scale(
@@ -250,7 +262,6 @@ class DeepSeekV32MlaAttention(RtpModule):
         self.layer_idx = layer_idx
         self.tp_size = tp_size
         self.quant_config = quant_config
-        self.softmax_scale = self.q_head_dim ** (-0.5)
 
         # The checkpoint stores the A projections as FP8 per-block tensors.
         # Preserve their scale parameters during streaming load. Postprocessing
@@ -389,9 +400,9 @@ class DeepSeekV32MlaAttention(RtpModule):
         # bf16 here. The forward projections still execute the fp8 weights via
         # the linear's DeepGEMM apply — this only affects the kc/vc + fused
         # views consumed by the MLA kernel.
-        q_a_scale = getattr(self.q_a_proj, "weight_scale_inv", None)
-        kv_a_scale = getattr(self.kv_a_proj_with_mqa, "weight_scale_inv", None)
-        is_hip = getattr(torch.version, "hip", None) is not None
+        q_a_scale = _fp8_scale_parameter(self.q_a_proj)
+        kv_a_scale = _fp8_scale_parameter(self.kv_a_proj_with_mqa)
+        is_hip = torch.version.hip is not None
         block_n, _ = _fp8_block_size(self.q_a_proj)
         fused_a_block_aligned = self.q_a_proj.weight.shape[0] % block_n == 0
         if (
@@ -465,9 +476,12 @@ class DeepSeekV32MlaAttention(RtpModule):
         # _kv_b_w: [kv_lora_rank, head_num * (nope + v_head)] — transposed kv_b
         # for FlashInfer prefill (matches legacy DeepSeekV2's `transpose` rule).
         # Decode/absorb paths use _kc_w / _vc_w instead.
-        self._kv_b_w = t.view(
-            self.kv_lora_rank, head_num * (nope + v_head)
-        ).contiguous()
+        kv_b_scale = _fp8_scale_parameter(self.kv_b_proj)
+        self._kv_b_w = (
+            None
+            if kv_b_scale is not None
+            else t.view(self.kv_lora_rank, head_num * (nope + v_head)).contiguous()
+        )
         # _kc_w shape: [head_num, nope, kv_lora_rank]
         self._kc_w = t[:, :, :nope].permute(1, 2, 0).contiguous()
         # _vc_w shape: [head_num, kv_lora_rank, v_head]
@@ -496,12 +510,12 @@ class DeepSeekV32MlaAttention(RtpModule):
                 weights[W.mla_fusedqkrope_w] = self._fused_qkv_a_w.t()
 
             q_b_weight = self.q_b_proj.weight.data
-            if hasattr(self.q_b_proj, "weight_scale"):
-                q_b_scale = self.q_b_proj.weight_scale.data
+            q_b_scale = _fp8_scale_parameter(self.q_b_proj)
+            if q_b_scale is not None:
                 (
                     weights[W.mla_q_b_w],
                     weights[W.mla_q_b_s],
-                ) = _kernel_fp8_weight_and_scale(q_b_weight, q_b_scale)
+                ) = _kernel_fp8_weight_and_scale(q_b_weight, q_b_scale.data)
             else:
                 weights[W.mla_q_b_w] = q_b_weight.t()
             weights[W.mla_q_a_ln_gamma] = self.q_a_layernorm.weight.data
@@ -509,14 +523,14 @@ class DeepSeekV32MlaAttention(RtpModule):
             weights[W.mla_fusedqkrope_no_lora_w] = self._fused_qkv_a_w.t()
         weights[W.mla_kv_a_ln_gamma] = self.kv_a_layernorm.weight.data
         o_weight = self.o_proj.weight.data
-        if hasattr(self.o_proj, "weight_scale"):
-            o_scale = self.o_proj.weight_scale.data
+        o_scale = _fp8_scale_parameter(self.o_proj)
+        if o_scale is not None:
             (
                 weights[W.attn_o_w],
                 weights[W.attn_o_s],
             ) = _kernel_fp8_weight_and_scale(
                 o_weight,
-                o_scale,
+                o_scale.data,
             )
         else:
             # BF16 LinearFactory consumes the legacy [input, output] layout.
@@ -528,16 +542,18 @@ class DeepSeekV32MlaAttention(RtpModule):
         # as the legacy loader; kc/vc remain dequantized derived views for the
         # absorb/decode paths.
         kv_b_weight = self.kv_b_proj.weight.data
-        if hasattr(self.kv_b_proj, "weight_scale"):
-            kv_b_scale = self.kv_b_proj.weight_scale.data
+        kv_b_scale = _fp8_scale_parameter(self.kv_b_proj)
+        if kv_b_scale is not None:
             (
                 weights[W.mla_kv_b_w],
                 weights[W.mla_kv_b_s],
             ) = _kernel_fp8_weight_and_scale(
                 kv_b_weight,
-                kv_b_scale,
+                kv_b_scale.data,
             )
         else:
+            if self._kv_b_w is None:
+                raise RuntimeError("BF16 MLA kv_b runtime view was not constructed")
             weights[W.mla_kv_b_w] = self._kv_b_w
         weights[W.mla_kc] = self._kc_w
         weights[W.mla_vc] = self._vc_w

@@ -625,6 +625,7 @@ class DeepSeekV32ForCausalLM(GptModelBase):
             fmha_config=fmha_config,
             device_resource_config=device_resource_config,
         )
+        self._mla_kernel_layout: Optional[MlaKernelWeightLayout] = None
 
         # Resolve ckpt_path from model_config.ckpt_path (C++ pybind attribute).
         ckpt_path = ""
@@ -759,7 +760,7 @@ class DeepSeekV32ForCausalLM(GptModelBase):
         Called from initialize() once all child post-load hooks have run, and
         also kept as a lazy fallback in forward() for direct-execution paths.
         """
-        if getattr(self, "_mla_kernel_layout", None) is not None:
+        if self._mla_kernel_layout is not None:
             return
         self._mla_kernel_layout = MlaKernelWeightLayout(
             [layer.self_attn._build_mla_kernel_weights() for layer in self.layers],

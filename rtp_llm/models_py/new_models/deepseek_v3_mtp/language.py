@@ -160,6 +160,7 @@ class DeepSeekV32MTPForCausalLM(GptModelBase):
             fmha_config=fmha_config,
             device_resource_config=device_resource_config,
         )
+        self._mla_kernel_layout = None
 
         # Resolve ckpt_path
         ckpt_path = ""
@@ -301,7 +302,7 @@ class DeepSeekV32MTPForCausalLM(GptModelBase):
 
     def _ensure_mla_kernel_layout(self) -> None:
         """Reconstruct only the W.* tensor views required by MLA kernels."""
-        if getattr(self, "_mla_kernel_layout", None) is not None:
+        if self._mla_kernel_layout is not None:
             return
         self._mla_kernel_layout = MlaKernelWeightLayout(
             [layer.self_attn._build_mla_kernel_weights() for layer in self.layers],

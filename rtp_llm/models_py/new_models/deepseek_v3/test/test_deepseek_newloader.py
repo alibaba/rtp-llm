@@ -6,9 +6,14 @@ import unittest
 from unittest import mock
 
 import torch
+import torch.nn.functional as F
+from safetensors.torch import save_file
 
+from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
-from rtp_llm.models_py.model_loader import NewLoaderConfig
+from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
+from rtp_llm.models_py.module_base import RtpModule
+from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.new_models.deepseek_v3.attention import (
     DeepSeekV32MlaAttention,
     _kernel_fp8_weight_and_scale,
@@ -37,6 +42,8 @@ from rtp_llm.models_py.new_models.deepseek_v3_mtp.language import (
 from rtp_llm.models_py.new_models.mtp import MTPBlock
 from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 from rtp_llm.models_py.registry import get_model_class
+from rtp_llm.ops import ParallelismConfig
+from rtp_llm.ops.compute_ops import PyAttentionInputs, PyModelInputs
 from rtp_llm.utils.model_weight import W
 
 
@@ -108,6 +115,158 @@ def _load_config():
         compute_dtype=torch.float32,
         device="cpu",
     )
+
+
+def _router_model_config(
+    *,
+    expert_num=4,
+    moe_k=2,
+    has_moe_norm=False,
+):
+    return types.SimpleNamespace(
+        quant_config=None,
+        expert_num=expert_num,
+        moe_k=moe_k,
+        has_moe_norm=has_moe_norm,
+    )
+
+
+def _dense_loader_model_config(checkpoint_path):
+    config = _model_config()
+    config.ckpt_path = checkpoint_path
+    config.num_layers = 1
+    config.expert_num = 0
+    config.moe_k = 0
+    config.tie_word_embeddings = True
+    return config
+
+
+def _dense_loader_config_json():
+    config = _raw_config()
+    config.update(
+        {
+            "num_hidden_layers": 1,
+            "num_nextn_predict_layers": 0,
+            "first_k_dense_replace": 1,
+            "n_shared_experts": 0,
+            "tie_word_embeddings": True,
+        }
+    )
+    return config
+
+
+def _dense_checkpoint_weights():
+    def values(shape, offset):
+        count = math.prod(shape)
+        return (
+            torch.arange(offset, offset + count, dtype=torch.float32).reshape(shape)
+            / max(count, 1)
+            - 0.5
+        )
+
+    return {
+        "model.embed_tokens.weight": values((16, 8), 0),
+        "model.layers.0.input_layernorm.weight": values((8,), 3) + 1.0,
+        "model.layers.0.self_attn.q_a_proj.weight": values((4, 8), 5),
+        "model.layers.0.self_attn.q_a_layernorm.weight": values((4,), 7) + 1.0,
+        "model.layers.0.self_attn.q_b_proj.weight": values((16, 4), 11),
+        "model.layers.0.self_attn.kv_a_proj_with_mqa.weight": values((6, 8), 13),
+        "model.layers.0.self_attn.kv_a_layernorm.weight": values((4,), 17) + 1.0,
+        "model.layers.0.self_attn.kv_b_proj.weight": values((16, 4), 19),
+        "model.layers.0.self_attn.o_proj.weight": values((8, 8), 23),
+        "model.layers.0.post_attention_layernorm.weight": values((8,), 29) + 1.0,
+        "model.layers.0.mlp.gate_proj.weight": values((16, 8), 31),
+        "model.layers.0.mlp.up_proj.weight": values((16, 8), 37),
+        "model.layers.0.mlp.down_proj.weight": values((8, 16), 41),
+        "model.norm.weight": values((8,), 43) + 1.0,
+    }
+
+
+def _mtp_loader_model_config(checkpoint_path):
+    config = _model_config()
+    config.model_type = "deepseek-v3-mtp"
+    config.ckpt_path = checkpoint_path
+    config.num_layers = 1
+    config.expert_num = 2
+    config.moe_k = 1
+    config.data_type = "fp32"
+    config.activation_type = "SiGLU"
+    # The test intentionally loads CPU tensors.  Preserve their layout while
+    # still executing the real MoE post-load validation/factory hook; device
+    # shuffling is covered by the GPU loader/smoke suites.
+    config.exported_device = types.SimpleNamespace(
+        shuffle_moe_weight=lambda tensor, data_type, name: tensor,
+    )
+    return config
+
+
+def _single_rank_parallelism_config():
+    config = ParallelismConfig()
+    config.tp_size = 1
+    config.tp_rank = 0
+    config.ep_size = 1
+    config.ep_rank = 0
+    config.dp_size = 1
+    config.dp_rank = 0
+    config.world_size = 1
+    config.world_rank = 0
+    config.local_rank = 0
+    config.local_world_size = 1
+    return config
+
+
+def _mtp_loader_config_json():
+    config = _raw_config()
+    config.update(
+        {
+            "num_hidden_layers": 1,
+            "num_nextn_predict_layers": 1,
+            "n_shared_experts": 1,
+            "n_group": 1,
+            "topk_group": 1,
+        }
+    )
+    return config
+
+
+def _mtp_checkpoint_weights():
+    def values(shape, offset):
+        count = math.prod(shape)
+        return (
+            torch.arange(offset, offset + count, dtype=torch.float32).reshape(shape)
+            / max(count, 1)
+            - 0.5
+        )
+
+    prefix = "model.layers.1."
+    weights = {
+        prefix + "embed_tokens.weight": values((16, 8), 0),
+        prefix + "enorm.weight": values((8,), 3) + 1.0,
+        prefix + "hnorm.weight": values((8,), 5) + 1.0,
+        prefix + "eh_proj.weight": values((8, 16), 7),
+        prefix + "input_layernorm.weight": values((8,), 11) + 1.0,
+        prefix + "self_attn.q_a_proj.weight": values((4, 8), 13),
+        prefix + "self_attn.q_a_layernorm.weight": values((4,), 17) + 1.0,
+        prefix + "self_attn.q_b_proj.weight": values((16, 4), 19),
+        prefix + "self_attn.kv_a_proj_with_mqa.weight": values((6, 8), 23),
+        prefix + "self_attn.kv_a_layernorm.weight": values((4,), 29) + 1.0,
+        prefix + "self_attn.kv_b_proj.weight": values((16, 4), 31),
+        prefix + "self_attn.o_proj.weight": values((8, 8), 37),
+        prefix + "post_attention_layernorm.weight": values((8,), 41) + 1.0,
+        prefix + "mlp.gate.weight": values((2, 8), 43),
+        prefix + "mlp.shared_experts.gate_proj.weight": values((8, 8), 47),
+        prefix + "mlp.shared_experts.up_proj.weight": values((8, 8), 53),
+        prefix + "mlp.shared_experts.down_proj.weight": values((8, 8), 59),
+        prefix + "shared_head.norm.weight": values((8,), 61) + 1.0,
+        prefix + "shared_head.head.weight": values((16, 8), 67),
+    }
+    for expert_id in range(2):
+        expert_prefix = prefix + f"mlp.experts.{expert_id}."
+        offset = 71 + expert_id * 17
+        weights[expert_prefix + "gate_proj.weight"] = values((8, 8), offset)
+        weights[expert_prefix + "up_proj.weight"] = values((8, 8), offset + 3)
+        weights[expert_prefix + "down_proj.weight"] = values((8, 8), offset + 5)
+    return weights
 
 
 def _uninitialized_model(model_type, *, layer_count=0, checkpoint_prefix=None):
@@ -223,6 +382,162 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             get_model_class("deepseek-v3-mtp"),
             DeepSeekV32MTPForCausalLM,
         )
+
+    def test_new_model_loader_safetensors_forward_matches_reference(self):
+        weights = _dense_checkpoint_weights()
+        with tempfile.TemporaryDirectory() as checkpoint_path:
+            with open(
+                f"{checkpoint_path}/config.json",
+                "w",
+                encoding="utf-8",
+            ) as config_file:
+                json.dump(_dense_loader_config_json(), config_file)
+            save_file(weights, f"{checkpoint_path}/model.safetensors")
+            model = NewModelLoader(
+                model_config=_dense_loader_model_config(checkpoint_path),
+                load_config=NewLoaderConfig(
+                    tp_size=1,
+                    tp_rank=0,
+                    ep_size=1,
+                    ep_rank=0,
+                    compute_dtype=torch.float32,
+                    device="cpu",
+                ),
+                model_path=checkpoint_path,
+            ).load()
+
+        self.assertIsInstance(model, DeepSeekV32ForCausalLM)
+        self.assertFalse(model.training)
+        torch.testing.assert_close(
+            model.lm_head.weight,
+            model.embed_tokens.weight,
+        )
+        self.assertIsNone(model._mla_kernel_layout)
+        model._ensure_mla_kernel_layout()
+        self.assertIsNotNone(model._mla_kernel_layout)
+
+        class TorchSiluAndMul(torch.nn.Module):
+            @staticmethod
+            def forward(gate_up):
+                gate, up = gate_up.chunk(2, dim=-1)
+                return F.silu(gate) * up
+
+        # The production activation is a CUDA/HIP kernel and does not dispatch
+        # FP32 CPU tensors. Keep this loader/forward parity test CPU-runnable;
+        # GPU activation dispatch is covered by the focused GPU suites.
+        model.layers[0].mlp.act_fn = TorchSiluAndMul()
+
+        class ZeroAttention:
+            fmha_params = None
+
+            @staticmethod
+            def forward(q_view, compressed_kv, k_pe, kv_cache, layer_idx, topk):
+                del compressed_kv, k_pe, kv_cache, layer_idx, topk
+                return torch.zeros(
+                    (*q_view.shape[:-1], 2),
+                    dtype=q_view.dtype,
+                    device=q_view.device,
+                )
+
+        input_ids = torch.tensor([0, 3, 7], dtype=torch.int32)
+        inputs = PyModelInputs(
+            input_ids=input_ids,
+            attention_inputs=PyAttentionInputs(),
+        )
+        with mock.patch(
+            "rtp_llm.models_py.new_models.deepseek_v3.language."
+            "select_block_map_for_layer"
+        ) as select_block_map:
+            outputs = model(inputs, fmha_impl=ZeroAttention())
+        select_block_map.assert_called_once_with(inputs.attention_inputs, 0)
+
+        def rms_norm(x, weight):
+            normalized = x * torch.rsqrt(x.square().mean(dim=-1, keepdim=True) + 1e-6)
+            return normalized * weight
+
+        residual = F.embedding(
+            input_ids.long(),
+            weights["model.embed_tokens.weight"],
+        )
+        mlp_input = rms_norm(
+            residual,
+            weights["model.layers.0.post_attention_layernorm.weight"],
+        )
+        gate = F.linear(
+            mlp_input,
+            weights["model.layers.0.mlp.gate_proj.weight"],
+        )
+        up = F.linear(
+            mlp_input,
+            weights["model.layers.0.mlp.up_proj.weight"],
+        )
+        mlp_output = F.linear(
+            F.silu(gate) * up,
+            weights["model.layers.0.mlp.down_proj.weight"],
+        )
+        expected = rms_norm(
+            residual + mlp_output,
+            weights["model.norm.weight"],
+        )
+        torch.testing.assert_close(outputs.hidden_states, expected)
+
+    def test_weight_validation_wraps_non_runtime_errors_with_module_name(self):
+        class ValueErrorLoader(RtpModule):
+            def load_weights(self, weights):
+                del weights
+
+            def validate_weights_loaded(self, loaded_tensor_ids):
+                del loaded_tensor_ids
+                raise ValueError("invalid child state")
+
+        root = RtpModule()
+        root.child = ValueErrorLoader()
+        with self.assertRaisesRegex(
+            RuntimeError,
+            r"Weight validation failed for child .*invalid child state",
+        ):
+            NewModelLoader._validate_loaded_weights(root)
+
+    def test_mtp_new_model_loader_reads_only_appended_draft_weights(self):
+        weights = _mtp_checkpoint_weights()
+        with tempfile.TemporaryDirectory() as checkpoint_path:
+            with open(
+                f"{checkpoint_path}/config.json",
+                "w",
+                encoding="utf-8",
+            ) as config_file:
+                json.dump(_mtp_loader_config_json(), config_file)
+            save_file(weights, f"{checkpoint_path}/model.safetensors")
+            model = NewModelLoader(
+                model_config=_mtp_loader_model_config(checkpoint_path),
+                load_config=NewLoaderConfig(
+                    tp_size=1,
+                    tp_rank=0,
+                    ep_size=1,
+                    ep_rank=0,
+                    compute_dtype=torch.float32,
+                    device="cpu",
+                    parallelism_config=_single_rank_parallelism_config(),
+                ),
+                model_path=checkpoint_path,
+            ).load()
+
+        self.assertIsInstance(model, DeepSeekV32MTPForCausalLM)
+        self.assertEqual(model._checkpoint_prefix, "model.layers.1.")
+        self.assertFalse(model.training)
+        torch.testing.assert_close(
+            model.embed_tokens.weight,
+            weights["model.layers.1.embed_tokens.weight"],
+        )
+        torch.testing.assert_close(
+            model.mtp_block.fc.weight,
+            weights["model.layers.1.eh_proj.weight"],
+        )
+        torch.testing.assert_close(
+            model.lm_head.weight,
+            weights["model.layers.1.shared_head.head.weight"],
+        )
+        self.assertIsNotNone(model.layers[0].mlp.experts.fused_moe)
 
     def test_rotary_cache_is_valid_immediately_after_construction(self):
         rotary = DeepseekV3RotaryEmbedding(
@@ -623,6 +938,18 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             layer_idx=0,
             params_dtype=torch.float32,
         )
+        # LinearFactory allocates parameters with torch.empty.  Initialize
+        # them deterministically so this layout assertion cannot depend on
+        # allocator contents (in particular, NaNs make torch.equal(x, x)
+        # return False).
+        with torch.no_grad():
+            for parameter_index, parameter in enumerate(attention.parameters()):
+                values = torch.arange(
+                    parameter.numel(),
+                    dtype=parameter.dtype,
+                    device=parameter.device,
+                ).reshape_as(parameter)
+                parameter.copy_(values + parameter_index)
         attention.process_weights_after_loading()
         weights = attention._build_mla_kernel_weights()
 
@@ -806,45 +1133,59 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             )
         )
 
-    def test_noaux_router_constructs_without_cuda_group_topk(self):
+    def test_noaux_router_device_selection_is_explicit(self):
         parallelism_config = types.SimpleNamespace(
             dp_rank=0,
             dp_size=1,
         )
         moe_config = types.SimpleNamespace(fake_balance_expert=False)
-        model_config = types.SimpleNamespace(quant_config=None)
-        with torch.device("cpu"):
-            block = DeepSeekV32MoEBlock(
-                hidden_size=8,
-                moe_intermediate_size=4,
-                num_experts=4,
-                top_k=2,
-                layer_idx=0,
-                tp_size=1,
-                tp_rank=0,
-                ep_size=1,
-                ep_rank=0,
-                model_config=model_config,
-                parallelism_config=parallelism_config,
-                moe_config=moe_config,
-                quant_config=None,
-                params_dtype=torch.float32,
-                has_shared_expert=False,
-                scoring_func=1,
-                routed_scaling_factor=1.0,
-                n_group=2,
-                topk_group=1,
-                topk_method="noaux_tc",
-                correction_bias=True,
-            )
-        expect_fast_group_topk = get_device_type() == DeviceType.Cuda
-        self.assertEqual(block._use_fast_group_topk, expect_fast_group_topk)
-        self.assertEqual(block.group_topk is not None, expect_fast_group_topk)
+        model_config = _router_model_config()
+        for device_type, expect_fast in (
+            (DeviceType.Cuda, True),
+            (DeviceType.ROCm, False),
+        ):
+            with (
+                self.subTest(device_type=device_type),
+                mock.patch(
+                    "rtp_llm.models_py.new_models.deepseek_v3.moe.get_device_type",
+                    return_value=device_type,
+                ),
+                mock.patch(
+                    "rtp_llm.models_py.new_models.deepseek_v3.moe.GroupTopK"
+                ) as group_topk,
+                torch.device("cpu"),
+            ):
+                block = DeepSeekV32MoEBlock(
+                    hidden_size=8,
+                    moe_intermediate_size=4,
+                    num_experts=4,
+                    top_k=2,
+                    layer_idx=0,
+                    tp_size=1,
+                    tp_rank=0,
+                    ep_size=1,
+                    ep_rank=0,
+                    model_config=model_config,
+                    parallelism_config=parallelism_config,
+                    moe_config=moe_config,
+                    quant_config=None,
+                    params_dtype=torch.float32,
+                    has_shared_expert=False,
+                    scoring_func=1,
+                    routed_scaling_factor=1.0,
+                    n_group=2,
+                    topk_group=1,
+                    topk_method="noaux_tc",
+                    correction_bias=True,
+                )
+            self.assertEqual(block._use_fast_group_topk, expect_fast)
+            self.assertEqual(block.group_topk is not None, expect_fast)
+            self.assertEqual(group_topk.call_count, int(expect_fast))
 
     def test_non_noaux_router_avoids_cuda_select_topk_on_other_devices(self):
         parallelism_config = types.SimpleNamespace(dp_rank=0, dp_size=1)
         moe_config = types.SimpleNamespace(fake_balance_expert=False)
-        model_config = types.SimpleNamespace(quant_config=None)
+        model_config = _router_model_config()
         with (
             mock.patch(
                 "rtp_llm.models_py.new_models.deepseek_v3.moe.get_device_type",
@@ -882,6 +1223,46 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertIsNone(block.select_topk)
         select_topk.assert_not_called()
 
+    def test_fast_select_topk_falls_back_on_model_config_mismatch(self):
+        model_config = _router_model_config(has_moe_norm=True)
+        with (
+            mock.patch(
+                "rtp_llm.models_py.new_models.deepseek_v3.moe.get_device_type",
+                return_value=DeviceType.Cuda,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.new_models.deepseek_v3.moe.SelectTopk"
+            ) as select_topk,
+            torch.device("cpu"),
+        ):
+            block = DeepSeekV32MoEBlock(
+                hidden_size=8,
+                moe_intermediate_size=4,
+                num_experts=4,
+                top_k=2,
+                layer_idx=0,
+                tp_size=1,
+                tp_rank=0,
+                ep_size=1,
+                ep_rank=0,
+                model_config=model_config,
+                parallelism_config=types.SimpleNamespace(dp_rank=0, dp_size=1),
+                moe_config=types.SimpleNamespace(fake_balance_expert=False),
+                quant_config=None,
+                params_dtype=torch.float32,
+                has_shared_expert=False,
+                scoring_func=0,
+                routed_scaling_factor=1.0,
+                n_group=1,
+                topk_group=1,
+                topk_method="greedy",
+                has_moe_norm=False,
+                correction_bias=False,
+            )
+        self.assertFalse(block._use_fast_select_topk)
+        self.assertIsNone(block.select_topk)
+        select_topk.assert_not_called()
+
     def test_moe_forward_uses_reference_noaux_routing_on_cpu(self):
         parallelism_config = types.SimpleNamespace(
             dp_rank=0,
@@ -898,7 +1279,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 tp_rank=0,
                 ep_size=1,
                 ep_rank=0,
-                model_config=types.SimpleNamespace(quant_config=None),
+                model_config=_router_model_config(has_moe_norm=True),
                 parallelism_config=parallelism_config,
                 moe_config=types.SimpleNamespace(fake_balance_expert=False),
                 quant_config=None,
@@ -974,7 +1355,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             tp_rank=0,
             ep_size=1,
             ep_rank=0,
-            model_config=types.SimpleNamespace(quant_config=None),
+            model_config=_router_model_config(),
             parallelism_config=types.SimpleNamespace(dp_rank=0, dp_size=1),
             quant_config=None,
             params_dtype=torch.float32,
@@ -1016,7 +1397,10 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 tp_rank=0,
                 ep_size=1,
                 ep_rank=0,
-                model_config=types.SimpleNamespace(quant_config=None),
+                model_config=_router_model_config(
+                    expert_num=8,
+                    has_moe_norm=True,
+                ),
                 parallelism_config=types.SimpleNamespace(dp_rank=0, dp_size=1),
                 moe_config=types.SimpleNamespace(fake_balance_expert=False),
                 quant_config=None,
@@ -1100,6 +1484,97 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertTrue(torch.equal(output, hidden_states))
 
     @unittest.skipUnless(
+        get_device_type() == DeviceType.Cuda,
+        "CUDA SelectTopk is required",
+    )
+    def test_moe_cuda_fast_select_topk_matches_reference(self):
+        model_config = ModelConfig()
+        model_config.attn_config.head_num = 1
+        model_config.attn_config.size_per_head = 128
+        model_config.num_layers = 1
+        model_config.max_seq_len = 1
+        model_config.vocab_size = 16
+        model_config.expert_num = 8
+        model_config.moe_k = 2
+        model_config.has_moe_norm = True
+        with torch.device("cuda"):
+            block = DeepSeekV32MoEBlock(
+                hidden_size=4,
+                moe_intermediate_size=2,
+                num_experts=8,
+                top_k=2,
+                layer_idx=0,
+                tp_size=1,
+                tp_rank=0,
+                ep_size=1,
+                ep_rank=0,
+                model_config=model_config,
+                parallelism_config=types.SimpleNamespace(dp_rank=0, dp_size=1),
+                moe_config=types.SimpleNamespace(fake_balance_expert=False),
+                quant_config=None,
+                params_dtype=torch.float32,
+                has_shared_expert=False,
+                scoring_func=0,
+                routed_scaling_factor=1.0,
+                n_group=1,
+                topk_group=1,
+                topk_method="greedy",
+                has_moe_norm=True,
+                correction_bias=False,
+            )
+        self.assertTrue(block._use_fast_select_topk)
+
+        class CapturingExperts(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.fused_moe = types.SimpleNamespace(topk_ids_dtype=torch.int32)
+                self.weights = None
+                self.ids = None
+
+            def forward(self, hidden_states, topk_weights, topk_ids):
+                self.weights = topk_weights.clone()
+                self.ids = topk_ids.clone()
+                return hidden_states
+
+        capturing_experts = CapturingExperts()
+        block.experts = capturing_experts
+        generator = torch.Generator(device="cuda").manual_seed(20260728)
+        hidden_states = torch.randn(
+            (17, 4),
+            generator=generator,
+            device="cuda",
+        )
+        with torch.no_grad():
+            block.gate.weight.copy_(
+                torch.randn(
+                    block.gate.weight.shape,
+                    generator=generator,
+                    device="cuda",
+                )
+            )
+
+        expected_weights, expected_ids = _select_deepseek_topk(
+            block.gate(hidden_states).float(),
+            top_k=2,
+            scoring_func=0,
+            n_group=1,
+            topk_group=1,
+            group_limited=False,
+            renormalize=True,
+            routed_scaling_factor=1.0,
+        )
+        block(hidden_states)
+
+        actual_order = capturing_experts.ids.argsort(dim=-1)
+        expected_order = expected_ids.argsort(dim=-1)
+        actual_ids = capturing_experts.ids.gather(1, actual_order)
+        expected_ids = expected_ids.gather(1, expected_order).to(actual_ids.dtype)
+        actual_weights = capturing_experts.weights.gather(1, actual_order)
+        expected_weights = expected_weights.gather(1, expected_order)
+        self.assertTrue(torch.equal(actual_ids, expected_ids))
+        torch.testing.assert_close(actual_weights, expected_weights)
+
+    @unittest.skipUnless(
         get_device_type() == DeviceType.ROCm,
         "ROCm is required",
     )
@@ -1115,7 +1590,10 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 tp_rank=0,
                 ep_size=1,
                 ep_rank=0,
-                model_config=types.SimpleNamespace(quant_config=None),
+                model_config=_router_model_config(
+                    expert_num=8,
+                    has_moe_norm=True,
+                ),
                 parallelism_config=types.SimpleNamespace(dp_rank=0, dp_size=1),
                 moe_config=types.SimpleNamespace(fake_balance_expert=False),
                 quant_config=None,
@@ -1237,7 +1715,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         )
 
     @unittest.skipIf(
-        getattr(torch.version, "hip", None) is not None,
+        torch.version.hip is not None,
         "online fused FP8 A projection is CUDA-only",
     )
     def test_mla_online_fp8_uses_models_py_quantizer(self):
@@ -1266,7 +1744,7 @@ class DeepSeekNewloaderTest(unittest.TestCase):
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires a CUDA GPU")
     @unittest.skipIf(
-        getattr(torch.version, "hip", None) is not None,
+        torch.version.hip is not None,
         "DeepGEMM fused FP8 projection is CUDA-only",
     )
     def test_mla_online_fused_fp8_projection_matches_bf16_reference(self):
@@ -1322,6 +1800,102 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         )
         self.assertLess(float(relative_rmse), 0.05)
         self.assertGreater(float(cosine), 0.998)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires a CUDA GPU")
+    @unittest.skipIf(
+        torch.version.hip is not None,
+        "CUDA DeepGEMM pre-quantized FP8 projection is required",
+    )
+    def test_mla_prequantized_fp8_kernel_views_execute_numerically(self):
+        from rtp_llm.models_py.kernels.cuda.fp8_quant import per_block_cast_to_fp8
+
+        device = torch.device("cuda")
+        quant_config = QuantizationConfig("FP8_PER_BLOCK")
+        with torch.device(device):
+            attention = DeepSeekV32MlaAttention(
+                hidden_size=128,
+                num_heads=2,
+                q_lora_rank=128,
+                kv_lora_rank=128,
+                nope_head_dim=64,
+                rope_head_dim=128,
+                v_head_dim=64,
+                layer_idx=0,
+                quant_config=quant_config,
+                params_dtype=torch.bfloat16,
+            )
+
+        generator = torch.Generator(device=device).manual_seed(20260728)
+        reference_weights = {}
+        for name, linear in (
+            ("q_a", attention.q_a_proj),
+            ("kv_a", attention.kv_a_proj_with_mqa),
+            ("q_b", attention.q_b_proj),
+            ("kv_b", attention.kv_b_proj),
+            ("o", attention.o_proj),
+        ):
+            reference = torch.randn(
+                linear.weight.shape,
+                generator=generator,
+                device=device,
+                dtype=torch.bfloat16,
+            )
+            fp8_weight, scale = per_block_cast_to_fp8(
+                reference,
+                use_ue8m0=False,
+            )
+            linear.weight.data.copy_(fp8_weight)
+            linear.weight_scale_inv.data.copy_(scale)
+            reference_weights[name] = reference
+
+        NewModelLoader._run_post_load_hooks(attention)
+        kernel_weights = attention._build_mla_kernel_weights()
+        self.assertIsNone(attention._kv_b_w)
+
+        fused_reference = torch.cat(
+            [reference_weights["q_a"], reference_weights["kv_a"]],
+            dim=0,
+        )
+        cases = (
+            (
+                W.mla_fusedqkrope_w,
+                W.mla_fusedqkrope_s,
+                fused_reference,
+            ),
+            (W.mla_q_b_w, W.mla_q_b_s, reference_weights["q_b"]),
+            (W.mla_kv_b_w, W.mla_kv_b_s, reference_weights["kv_b"]),
+            (W.attn_o_w, W.attn_o_s, reference_weights["o"]),
+        )
+        runtime_quant_config = types.SimpleNamespace(get_method=lambda: "FP8_PER_BLOCK")
+        for weight_key, scale_key, reference in cases:
+            with self.subTest(weight_key=weight_key):
+                linear = LinearFactory.create_linear_from_weights(
+                    kernel_weights,
+                    weight_key,
+                    scale_key,
+                    None,
+                    quant_config=runtime_quant_config,
+                )
+                x = torch.randn(
+                    (11, reference.shape[1]),
+                    generator=generator,
+                    device=device,
+                    dtype=torch.bfloat16,
+                )
+                actual = linear(x)
+                expected = F.linear(x, reference)
+                difference = actual.float() - expected.float()
+                relative_rmse = (
+                    difference.square().mean().sqrt()
+                    / expected.float().square().mean().sqrt()
+                )
+                cosine = F.cosine_similarity(
+                    actual.float().flatten(),
+                    expected.float().flatten(),
+                    dim=0,
+                )
+                self.assertLess(float(relative_rmse), 0.05)
+                self.assertGreater(float(cosine), 0.998)
 
     def test_mlp_tp_reduction_is_owned_by_row_parallel_linear(self):
         dense = DeepSeekV32MLP(
