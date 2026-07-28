@@ -12,8 +12,15 @@ namespace {
 
 template<typename Hook, typename... Args>
 bool invokeHookNoThrow(const char* name, Hook& hook, Args&&... args) {
+    RTP_LLM_LOG_INFO("sleep lifecycle hook begin: hook=%s", name);
     try {
-        return hook(std::forward<Args>(args)...);
+        const bool success = hook(std::forward<Args>(args)...);
+        if (success) {
+            RTP_LLM_LOG_INFO("sleep lifecycle hook end: hook=%s success=1", name);
+        } else {
+            RTP_LLM_LOG_ERROR("sleep lifecycle hook end: hook=%s success=0", name);
+        }
+        return success;
     } catch (const std::exception& e) {
         RTP_LLM_LOG_ERROR("sleep lifecycle hook %s threw exception: %s", name, e.what());
     } catch (...) {
@@ -24,10 +31,30 @@ bool invokeHookNoThrow(const char* name, Hook& hook, Args&&... args) {
 
 bool coordinateResourcePhaseNoThrow(SleepHooks& hooks, const char* phase, int64_t epoch, bool local_success) {
     if (!hooks.coordinateResourcePhase) {
+        RTP_LLM_LOG_INFO("level-3 resource phase skipped: phase=%s epoch=%ld local_success=%d",
+                         phase,
+                         epoch,
+                         local_success);
         return local_success;
     }
-    return invokeHookNoThrow(
+    RTP_LLM_LOG_INFO("level-3 resource phase begin: phase=%s epoch=%ld local_success=%d",
+                     phase,
+                     epoch,
+                     local_success);
+    const bool global_success = invokeHookNoThrow(
         "coordinateResourcePhase", hooks.coordinateResourcePhase, std::string(phase), epoch, local_success);
+    if (global_success) {
+        RTP_LLM_LOG_INFO("level-3 resource phase end: phase=%s epoch=%ld local_success=%d global_success=1",
+                         phase,
+                         epoch,
+                         local_success);
+    } else {
+        RTP_LLM_LOG_ERROR("level-3 resource phase end: phase=%s epoch=%ld local_success=%d global_success=0",
+                          phase,
+                          epoch,
+                          local_success);
+    }
+    return global_success;
 }
 
 void refreezeExternalTransfersNoThrow(SleepHooks& hooks, int32_t level) {
@@ -241,6 +268,16 @@ std::string SleepLifecycleController::disabledReason() const {
 
 SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
     std::unique_lock<std::mutex> lock(transition_mutex_);
+    RTP_LLM_LOG_INFO(
+        "sleep lifecycle request: operation=sleep level=%d mode=%s prepare_only=%d commit_only=%d timeout_ms=%ld "
+        "state=%s epoch=%ld",
+        opt.level,
+        opt.mode.c_str(),
+        opt.prepare_only,
+        opt.commit_only,
+        opt.timeout_ms,
+        sleepStateToString(state_.load(std::memory_order_acquire)).c_str(),
+        sleep_epoch_.load(std::memory_order_acquire));
 
     if (!effective()) {
         return SleepResult::disabled(disabledReason());
@@ -468,6 +505,13 @@ SleepResult SleepLifecycleController::sleep(const SleepOptions& opt) {
 
 SleepResult SleepLifecycleController::wakeUp(const WakeUpOptions& opt) {
     std::lock_guard<std::mutex> lock(transition_mutex_);
+    RTP_LLM_LOG_INFO("sleep lifecycle request: operation=wake_up prepare_only=%d commit_only=%d state=%s epoch=%ld "
+                     "active_level=%d",
+                     opt.prepare_only,
+                     opt.commit_only,
+                     sleepStateToString(state_.load(std::memory_order_acquire)).c_str(),
+                     sleep_epoch_.load(std::memory_order_acquire),
+                     active_sleep_level_.load(std::memory_order_acquire));
 
     if (!effective()) {
         return SleepResult::disabled(disabledReason());

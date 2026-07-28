@@ -674,8 +674,8 @@ message SleepStatusResponsePB {
     string disabled_reason = 13;
     int32 process_id = 14;        // backend rank PID targeted by level-3 CUDA process checkpoint.
     uint64 process_starttime = 15; // /proc/<pid>/stat field 22; protects against PID reuse.
-    uint64 process_pid_namespace = 16; // inode of /proc/<pid>/ns/pid; coordinator must match.
-    string process_boot_id = 17;  // host boot ID; coordinator must be on the same host.
+    uint64 process_pid_namespace = 16; // inode of /proc/<pid>/ns/pid; part of process identity.
+    string process_boot_id = 17;  // host boot ID; distinguishes equal PIDs on different nodes.
     // Sleep-coordination identity (additive; backward compatible with L1/L2).
     // The coordinator must key rank/role/instance by these instead of address
     // order so a shared TCPStore cannot collide across PD roles or instances.
@@ -688,6 +688,31 @@ message SleepStatusResponsePB {
     // it blank). The checkpoint manifest persists + fail-closed verifies this so a
     // holder that exited/changed makes wake unrecoverable instead of silently wrong.
     string holder_instance = 21;
+}
+
+// Node-independent Level-3 CUDA checkpoint control.  The RPC is intentionally
+// executed by the backend rank itself, so a coordinator on another host never
+// needs visibility into this process's PID namespace.
+message CudaCheckpointRequestPB {
+    string action = 1;            // GET_STATE|LOCK|CHECKPOINT|RESTORE|UNLOCK
+    string transaction_id = 2;    // stable across retries for one sleep epoch
+    int64 sleep_epoch = 3;
+    uint32 lock_timeout_ms = 4;
+}
+
+message CudaCheckpointResponsePB {
+    bool success = 1;
+    int32 cuda_result = 2;        // raw CUresult; no normal CUDA API while locked
+    string state = 3;             // RUNNING|LOCKED|CHECKPOINTED|FAILED|UNKNOWN
+    string error = 4;
+    string transaction_id = 5;
+    int64 sleep_epoch = 6;
+    int32 process_id = 7;
+    uint64 process_starttime = 8;
+    uint64 process_pid_namespace = 9;
+    string process_boot_id = 10;
+    int64 world_rank = 11;
+    string holder_instance = 12;
 }
 
 message IsSleepingResponsePB {
@@ -717,6 +742,7 @@ service RpcService {
     rpc WakeUpServing(WakeUpRequestPB) returns (EmptyPB);
     rpc IsSleeping(EmptyPB) returns (IsSleepingResponsePB);
     rpc GetSleepStatus(EmptyPB) returns (SleepStatusResponsePB);
+    rpc CudaCheckpointProcess(CudaCheckpointRequestPB) returns (CudaCheckpointResponsePB);
     rpc SetLogLevel(SetLogLevelRequestPB) returns (EmptyPB);
     rpc StartProfile(StartProfileRequestPB) returns (EmptyPB);
     rpc StartProfileInternal(StartProfileInternalRequestPB) returns (EmptyPB);

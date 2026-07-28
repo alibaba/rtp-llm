@@ -2,8 +2,8 @@
 
 The holder is a CUDA-free service process.  It must outlive checkpointed
 backend ranks, but it must never be part of their checkpoint process tree.
-This module intentionally launches the holder ELF directly; the legacy shell
-launcher remains a developer tool and is not used by server startup.
+This module intentionally launches the holder ELF directly; no shell launcher
+is part of the runtime contract.
 """
 
 from __future__ import annotations
@@ -20,6 +20,7 @@ import subprocess
 import tempfile
 import time
 from dataclasses import dataclass
+from enum import Enum
 from pathlib import Path
 from typing import Any, Dict, Iterator, Mapping, Optional, Sequence, Tuple
 
@@ -63,6 +64,13 @@ class MulticastKeeperConfigError(MulticastKeeperError):
 
 class MulticastKeeperHealthError(MulticastKeeperError):
     """The holder process or its protocol identity is unhealthy."""
+
+
+class MulticastKeeperMode(str, Enum):
+    """Transport selected from the global and node-local worker topology."""
+
+    SINGLE_NODE_POSIX = "single_node_posix"
+    CROSS_NODE_FABRIC = "cross_node_fabric"
 
 
 @dataclass(frozen=True)
@@ -270,8 +278,15 @@ class MulticastKeeperRuntime:
         self.world_size = int(world_size)
         self.local_world_size = int(local_world_size)
         self.role = role
+        self.mode = (
+            MulticastKeeperMode.CROSS_NODE_FABRIC
+            if self.world_size > self.local_world_size
+            else MulticastKeeperMode.SINGLE_NODE_POSIX
+        )
         self.fabric_team_size = (
-            self.world_size if self.world_size > self.local_world_size else None
+            self.world_size
+            if self.mode == MulticastKeeperMode.CROSS_NODE_FABRIC
+            else None
         )
         self.artifacts = artifacts or discover_artifacts(self._env)
         self._state_root = Path(state_root) if state_root is not None else None
@@ -405,6 +420,21 @@ class MulticastKeeperRuntime:
         try:
             self._create_state_dir()
             assert self.log_path is not None
+            _LOGGER.info(
+                "multicast keeper start begin: mode=%s role=%s world_size=%d "
+                "local_world_size=%d gpus=%s fabric_team_size=%s holder=%s "
+                "creator=%s shim=%s socket=%s",
+                self.mode.value,
+                _role_name(self.role),
+                self.world_size,
+                self.local_world_size,
+                self.gpus,
+                self.fabric_team_size,
+                self.artifacts.holder,
+                self.artifacts.creator,
+                self.artifacts.shim,
+                self.socket_path,
+            )
             self._log_handle = self.log_path.open("ab", buffering=0)
             self.log_path.chmod(0o600)
             self.process = subprocess.Popen(
@@ -555,6 +585,28 @@ class MulticastKeeperRuntime:
         except (OSError, MulticastKeeperHealthError):
             return False
 
+    def diagnostics(self) -> Dict[str, Any]:
+        """Return compact, non-secret state suitable for incident logs."""
+
+        return {
+            "mode": self.mode.value,
+            "role": _role_name(self.role),
+            "world_size": self.world_size,
+            "local_world_size": self.local_world_size,
+            "gpus": self.gpus,
+            "fabric_team_size": self.fabric_team_size,
+            "pid": self.process.pid if self.process is not None else None,
+            "returncode": self.process.poll() if self.process is not None else None,
+            "instance": self._instance,
+            "socket": str(self.socket_path) if self.socket_path is not None else "",
+            "log": str(self.log_path) if self.log_path is not None else "",
+        }
+
+    def log_tail(self, limit: int = 40) -> str:
+        """Return the holder log tail before private runtime state is removed."""
+
+        return self._read_log_tail(limit)
+
     def subprocess_env(
         self, base_env: Optional[Mapping[str, str]] = None
     ) -> Dict[str, str]:
@@ -662,10 +714,16 @@ class MulticastKeeperRuntime:
             return
         self._stopped = True
         self._terminate_process()
+        diagnostics = self.diagnostics()
+        holder_log_tail = self.log_tail()
         self._close_log()
         self._remove_state_dir()
         if self.process is not None:
-            _LOGGER.info("multicast keeper stopped pid=%s", self.process.pid)
+            _LOGGER.info(
+                "multicast keeper stopped: diagnostics=%s holder_log_tail=%s",
+                diagnostics,
+                holder_log_tail,
+            )
 
     def __enter__(self) -> "MulticastKeeperRuntime":
         return self.start()
@@ -681,6 +739,7 @@ __all__ = [
     "MulticastKeeperConfigError",
     "MulticastKeeperError",
     "MulticastKeeperHealthError",
+    "MulticastKeeperMode",
     "MulticastKeeperRuntime",
     "discover_artifacts",
     "is_enabled",

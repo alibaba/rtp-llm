@@ -42,22 +42,36 @@ cc_library(
     ],
 )
 
+cc_library(
+    name = "cuda_checkpoint_process_controller",
+    srcs = ["CudaCheckpointProcessController.cc"],
+    hdrs = ["CudaCheckpointProcessController.h"],
+    copts = copts(),
+    linkopts = ["-ldl"],
+    visibility = ["//visibility:public"],
+)
 
 cc_library(
     name = "model_rpc_server",
     srcs = glob(
         ["*.cc"],
         exclude = [
+            "CudaCheckpointProcessController.cc",
             "TensorPbConvert.cc",
         ],
     ),
     hdrs = glob(
         ["*.h"],
-        exclude = ["RPCPool.h"],
+        exclude = [
+            "CudaCheckpointProcessController.h",
+            "RPCPool.h",
+        ],
     ),
     visibility = ["//visibility:public"],
+    linkopts = ["-ldl"],
     deps = [
         ":embedding_arpc_deps",
+        ":cuda_checkpoint_process_controller",
         ":model_rpc_pool",
         ":rpc_error_code",
         ":tensor_pb_convert",

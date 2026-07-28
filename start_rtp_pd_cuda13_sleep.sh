@@ -99,13 +99,9 @@ mkdir -p "$LOG_DIR" "$LOG_DIR/disk_kv_prefill0" "$LOG_DIR/disk_kv_prefill1"
 # Level 3 destroys and rebuilds NCCL/symmetric-memory resources. Keep the
 # multicast fabric handles in CUDA-free role-local holders so NVLS and torch
 # symmetric-memory multicast remain enabled across rank checkpoint/restore.
+# The RTP-LLM supervisor owns the holder lifecycle and injects its private
+# socket plus shim only into backend ranks.
 ENABLE_MULTICAST_KEEPER="${RTP_LLM_ENABLE_MULTICAST_KEEPER:-1}"
-MULTICAST_KEEPER="$REPO_ROOT/rtp_llm/cpp/cuda_checkpoint/multicast_keeper/multicast_keeper.sh"
-MULTICAST_KEEPER_BASE_DIR="${RTP_LLM_MULTICAST_KEEPER_BASE_DIR:-$LOG_DIR/multicast_keeper}"
-DECODE_KEEPER_DIR="$MULTICAST_KEEPER_BASE_DIR/decode"
-PREFILL_KEEPER_DIR="$MULTICAST_KEEPER_BASE_DIR/prefill"
-DECODE_KEEPER_ENV=""
-PREFILL_KEEPER_ENV=""
 DECODE_PID=""
 PREFILL_PID=""
 
@@ -117,12 +113,6 @@ cleanup() {
         fi
     done
     wait 2>/dev/null || true
-    if [[ -n "$DECODE_KEEPER_ENV" ]]; then
-        "$MULTICAST_KEEPER" stop --keeper-dir "$DECODE_KEEPER_DIR" >/dev/null 2>&1 || true
-    fi
-    if [[ -n "$PREFILL_KEEPER_ENV" ]]; then
-        "$MULTICAST_KEEPER" stop --keeper-dir "$PREFILL_KEEPER_DIR" >/dev/null 2>&1 || true
-    fi
 }
 trap cleanup EXIT
 trap 'exit 130' INT TERM
@@ -142,6 +132,11 @@ common_env() {
     export DSV4_USE_MEGA_MOE=1
     export ENABLE_SLEEP_MODE=1
     export SLEEP_MODE_LEVEL="$SLEEP_MODE_LEVEL"
+    if [[ "$SLEEP_MODE_LEVEL" == "3" && "$ENABLE_MULTICAST_KEEPER" == "1" ]]; then
+        export RTP_LLM_CUDA_CKPT_MULTICAST_KEEPER=1
+    else
+        unset RTP_LLM_CUDA_CKPT_MULTICAST_KEEPER
+    fi
     export TOKENIZER_PATH="$MODEL_DIR"
     export CHECKPOINT_PATH="$MODEL_DIR"
     export WARM_UP="${WARM_UP:-1}"
@@ -155,17 +150,7 @@ DECODE_GPUS="${DECODE_GPUS:-4,5}"
 PREFILL_GPUS="${PREFILL_GPUS:-6,7}"
 
 if [[ "$SLEEP_MODE_LEVEL" == "3" && "$ENABLE_MULTICAST_KEEPER" == "1" ]]; then
-    [[ -x "$MULTICAST_KEEPER" ]] || {
-        echo "[start_pd] multicast keeper launcher is unavailable: $MULTICAST_KEEPER" >&2
-        exit 1
-    }
-    "$MULTICAST_KEEPER" start --gpus "$DECODE_GPUS" --keeper-dir "$DECODE_KEEPER_DIR"
-    DECODE_KEEPER_ENV="$DECODE_KEEPER_DIR/keeper.env"
-    if [[ "${DECODE_ONLY:-0}" != "1" ]]; then
-        "$MULTICAST_KEEPER" start --gpus "$PREFILL_GPUS" --keeper-dir "$PREFILL_KEEPER_DIR"
-        PREFILL_KEEPER_ENV="$PREFILL_KEEPER_DIR/keeper.env"
-    fi
-    echo "[start_pd] multicast keeper enabled for Level 3 (NVLS=1, torch multicast=1)"
+    echo "[start_pd] multicast keeper enabled through the RTP-LLM supervisor"
 fi
 
 echo "[start_pd] python=$PYTHON_BIN  decode_gpus=$DECODE_GPUS:$DECODE_PORT  prefill_gpus=$PREFILL_GPUS:$PREFILL_PORT  sleep_level=$SLEEP_MODE_LEVEL"
@@ -177,10 +162,6 @@ PY
 # ---- DECODE role (GPUs 4,5) ----
 (
     common_env
-    if [[ -n "$DECODE_KEEPER_ENV" ]]; then
-        # shellcheck disable=SC1090
-        source "$DECODE_KEEPER_ENV"
-    fi
     export CUDA_VISIBLE_DEVICES="$DECODE_GPUS"
     export START_PORT="$DECODE_PORT"
     export REMOTE_SERVER_PORT="$PREFILL_PORT"
@@ -213,10 +194,6 @@ if [[ "${DECODE_ONLY:-0}" == "1" ]]; then
 else
 (
     common_env
-    if [[ -n "$PREFILL_KEEPER_ENV" ]]; then
-        # shellcheck disable=SC1090
-        source "$PREFILL_KEEPER_ENV"
-    fi
     export CUDA_VISIBLE_DEVICES="$PREFILL_GPUS"
     export START_PORT="$PREFILL_PORT"
     export REMOTE_SERVER_PORT="$DECODE_PORT"

@@ -1,15 +1,15 @@
-"""External CUDA process-checkpoint transaction controller.
+"""Single-node external CUDA process-checkpoint transaction controller.
 
-Level-3 sleep must be driven by a process other than the CUDA target.  This
-module keeps a durable, node-local transaction manifest while driving the CUDA
-``cuCheckpointProcess*`` state machine::
+This module keeps a durable, node-local transaction manifest while an external
+controller drives the CUDA ``cuCheckpointProcess*`` state machine::
 
     RUNNING -> LOCKED -> CHECKPOINTED -> LOCKED -> RUNNING
 
 The manifest is written before the first mutating driver call and after every
 successful transition.  A coordinator that dies between a driver call and the
 following write can therefore reconcile the manifest with the driver and retry
-the same operation safely.
+the same operation safely. Cross-node Level 3 uses the rank-local checkpoint
+RPC and shared TCPStore manifest implemented by ``GrpcClientWrapper`` instead.
 """
 
 import contextlib

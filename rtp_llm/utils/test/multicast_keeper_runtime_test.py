@@ -1,5 +1,8 @@
 import os
+import platform
 import signal
+import struct
+import subprocess
 import sys
 import tempfile
 import textwrap
@@ -18,6 +21,7 @@ from rtp_llm.utils.multicast_keeper import (
     MulticastKeeperConfigError,
     MulticastKeeperError,
     MulticastKeeperHealthError,
+    MulticastKeeperMode,
     MulticastKeeperRuntime,
     discover_artifacts,
     is_enabled,
@@ -124,6 +128,16 @@ while running:
 _FAKE_CREATOR = "#!/bin/sh\nexit 0\n"
 
 
+def _append_preload_for_test(existing: str, shim: str) -> str:
+    entries = [
+        entry
+        for entry in existing.replace(":", " ").split()
+        if entry and entry != shim
+    ]
+    entries.append(shim)
+    return ":".join(entries)
+
+
 class MulticastKeeperRuntimeTest(unittest.TestCase):
     def setUp(self):
         self.tempdir = tempfile.TemporaryDirectory()
@@ -177,6 +191,26 @@ class MulticastKeeperRuntimeTest(unittest.TestCase):
             **kwargs,
         )
 
+    @staticmethod
+    def _native_artifact(name: str) -> Path:
+        relative = Path(
+            "rtp_llm/cpp/cuda_checkpoint/multicast_keeper"
+        ) / name
+        candidates = []
+        if os.environ.get("TEST_SRCDIR"):
+            candidates.append(
+                Path(os.environ["TEST_SRCDIR"])
+                / os.environ.get("TEST_WORKSPACE", "__main__")
+                / relative
+            )
+        candidates.append(
+            Path(__file__).resolve().parents[3] / "bazel-bin" / relative
+        )
+        for candidate in candidates:
+            if candidate.is_file():
+                return candidate.resolve()
+        raise unittest.SkipTest(f"native keeper artifact is unavailable: {name}")
+
     def test_opt_in_and_gpu_list_validation(self):
         self.assertFalse(is_enabled({ENABLE_ENV: "true"}))
         self.assertTrue(is_enabled({ENABLE_ENV: "1"}))
@@ -218,6 +252,7 @@ class MulticastKeeperRuntimeTest(unittest.TestCase):
             env=self._env(),
             artifacts=self.artifacts,
         )
+        self.assertEqual(MulticastKeeperMode.CROSS_NODE_FABRIC, uneven.mode)
         self.assertEqual(3, uneven.fabric_team_size)
 
     def test_from_config_prefers_configured_local_world_size(self):
@@ -232,6 +267,7 @@ class MulticastKeeperRuntimeTest(unittest.TestCase):
             state_root=self.root,
         )
         self.assertIsNotNone(runtime)
+        self.assertEqual(MulticastKeeperMode.CROSS_NODE_FABRIC, runtime.mode)
         self.assertEqual(2, runtime.local_world_size)
         self.assertEqual(4, runtime.fabric_team_size)
 
@@ -301,6 +337,8 @@ class MulticastKeeperRuntimeTest(unittest.TestCase):
 
     def test_single_node_removes_stale_fabric_team_and_context_restores_env(self):
         runtime = self._runtime()
+        self.assertEqual(MulticastKeeperMode.SINGLE_NODE_POSIX, runtime.mode)
+        self.assertIsNone(runtime.fabric_team_size)
         original = dict(os.environ)
         os.environ["RTP_LLM_MC_FABRIC_TEAM_SIZE"] = "99"
         expected = dict(os.environ)
@@ -321,6 +359,99 @@ class MulticastKeeperRuntimeTest(unittest.TestCase):
             runtime.stop()
             os.environ.clear()
             os.environ.update(original)
+
+    def test_native_artifacts_match_host_architecture_and_shim_preloads(self):
+        machine = platform.machine().lower()
+        expected_elf_machine = {
+            "x86_64": 62,
+            "aarch64": 183,
+        }
+        self.assertIn(machine, expected_elf_machine)
+
+        artifacts = {
+            name: self._native_artifact(name)
+            for name in (
+                "keeper_lite_holder",
+                "keeper_lite_creator",
+                "mc_shim_unified.so",
+            )
+        }
+        for name, path in artifacts.items():
+            with path.open("rb") as artifact_file:
+                header = artifact_file.read(20)
+            self.assertEqual(b"\x7fELF", header[:4], name)
+            self.assertEqual(2, header[4], name)  # ELFCLASS64
+            self.assertEqual(1, header[5], name)  # little-endian
+            self.assertEqual(
+                expected_elf_machine[machine],
+                struct.unpack_from("<H", header, 18)[0],
+                name,
+            )
+
+        env = dict(os.environ)
+        shim = str(artifacts["mc_shim_unified.so"])
+        env["LD_PRELOAD"] = _append_preload_for_test(
+            env.get("LD_PRELOAD", ""), shim
+        )
+        env[ENABLE_ENV] = "1"
+        completed = subprocess.run(
+            [
+                sys.executable,
+                "-c",
+                "import ctypes, struct; "
+                "assert struct.calcsize('P') == ctypes.sizeof(ctypes.c_void_p); "
+                "print('preload-smoke-ok')",
+            ],
+            env=env,
+            stdout=subprocess.PIPE,
+            stderr=subprocess.PIPE,
+            text=True,
+            timeout=10,
+            check=False,
+        )
+        self.assertEqual(
+            0,
+            completed.returncode,
+            f"stdout={completed.stdout}\nstderr={completed.stderr}",
+        )
+        self.assertIn("preload-smoke-ok", completed.stdout)
+
+    def test_native_holder_starts_in_single_and_cross_node_modes(self):
+        artifacts = KeeperArtifacts(
+            holder=self._native_artifact("keeper_lite_holder"),
+            creator=self._native_artifact("keeper_lite_creator"),
+            shim=self._native_artifact("mc_shim_unified.so"),
+        )
+        cases = (
+            (2, MulticastKeeperMode.SINGLE_NODE_POSIX, None),
+            (4, MulticastKeeperMode.CROSS_NODE_FABRIC, 4),
+        )
+        for world_size, expected_mode, expected_team_size in cases:
+            with self.subTest(mode=expected_mode):
+                runtime = self._runtime(
+                    world_size=world_size,
+                    artifacts=artifacts,
+                )
+                try:
+                    runtime.start()
+                    health = runtime.health()
+                    self.assertEqual(expected_mode, runtime.mode)
+                    self.assertEqual(expected_team_size, runtime.fabric_team_size)
+                    self.assertEqual(2, health.local_device_count)
+                    diagnostics = runtime.diagnostics()
+                    self.assertEqual(expected_mode.value, diagnostics["mode"])
+                    self.assertEqual(runtime.process.pid, diagnostics["pid"])
+                    self.assertEqual(runtime.instance, diagnostics["instance"])
+                    command = list(runtime.process.args)
+                    if expected_team_size is None:
+                        self.assertNotIn("--fabric-team-size", command)
+                    else:
+                        self.assertEqual(
+                            str(expected_team_size),
+                            command[command.index("--fabric-team-size") + 1],
+                        )
+                finally:
+                    runtime.stop()
 
     def test_startup_failure_is_terminal_and_includes_log(self):
         runtime = self._runtime(env=self._env(FAKE_HOLDER_EXIT="1"))

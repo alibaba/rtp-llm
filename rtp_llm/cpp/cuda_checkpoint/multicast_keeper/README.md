@@ -84,7 +84,19 @@ prototype.
 
 ## Build
 
+The sources are shared, but the three runtime artifacts are native ELF files.
+Build them on the matching architecture; do not copy an aarch64 wheel to an
+x86_64 node or vice versa.
+
 ```bash
+# GB200/GB300 aarch64
+bazelisk build \
+  //rtp_llm/cpp/cuda_checkpoint/multicast_keeper:keeper_lite_creator \
+  //rtp_llm/cpp/cuda_checkpoint/multicast_keeper:keeper_lite_holder \
+  //rtp_llm/cpp/cuda_checkpoint/multicast_keeper:mc_shim_unified.so \
+  --config=cuda13_arm
+
+# x86_64 CUDA 13
 bazelisk build \
   //rtp_llm/cpp/cuda_checkpoint/multicast_keeper:keeper_lite_creator \
   //rtp_llm/cpp/cuda_checkpoint/multicast_keeper:keeper_lite_holder \
@@ -122,60 +134,25 @@ current Level3 instance: do not restart it underneath restored ranks, because
 the replacement has a different holder identity and no longer owns their
 multicast objects.
 
-## Development/debug launcher
+The independent Python entry point is
+`rtp_llm.utils.multicast_keeper.MulticastKeeperRuntime`. It selects
+`single_node_posix` when `world_size == local_world_size`, otherwise
+`cross_node_fabric`. The latter starts one holder on each node and injects the
+global FABRIC team size while retaining only that node's physical GPU list.
+Cross-node handle publication and barriers use the existing RTP-LLM lifecycle
+TCPStore; holders remain node-local and never form a second control plane.
 
-`multicast_keeper` is a development and diagnostics CLI. It is not the
-production service manager. Its Bazel target resolves native artifacts through
-runfiles, whether invoked with `bazelisk run` or directly through the
-`bazel-bin` symlink. Source-tree invocation and the explicit
-`RTP_LLM_MC_KEEPER_BIN_DIR`, `RTP_LLM_MC_HOLDER_BIN`,
-`RTP_LLM_MC_CREATOR_BIN`, and `RTP_LLM_MC_SHIM` overrides remain supported.
-
-For local testing, start one holder for the local GPU team before launching any
-checkpointed rank:
-
-```bash
-KEEPER=./bazel-bin/rtp_llm/cpp/cuda_checkpoint/multicast_keeper/multicast_keeper
-"${KEEPER}" start --gpus 0,1 --keeper-dir /run/user/${UID}/rtp-llm-mc
-source /run/user/${UID}/rtp-llm-mc/keeper.env
-exec your-rank-launcher
-```
-
-The generated environment:
-
-- sets `RTP_LLM_CUDA_CKPT_MULTICAST_KEEPER=1`, the RTP-LLM opt-in/ready marker;
-- sets `NEKYIA_KEEPER_DIR`; the default socket remains
-  `$NEKYIA_KEEPER_DIR/mcsk.sock`;
-- appends `mc_shim_unified.so` to `LD_PRELOAD` and preserves an existing
-  torch_memory_saver preload. The TMS interposer must stay first because it
-  resolves the real `cudaMalloc` through `RTLD_NEXT`;
-- defaults `NCCL_NVLS_ENABLE=1` and
-  `TORCH_SYMM_MEM_DISABLE_MULTICAST=0` only when the caller did not configure
-  them. This component never defaults multicast off.
-
-An explicit `--socket` is supported. The launcher then also exports
-`RTP_LLM_CUDA_CKPT_MULTICAST_SOCKET` for the shim.
-
-For a cross-machine eight-GPU FABRIC team, start each node's holder with the
-same global size and that node's exact local physical GPU list:
+The architecture-neutral runtime test starts the native holder in both modes,
+checks its protocol identity, verifies every ELF matches the current host, and
+preloads the real shim into Python. Run it under both native build configs:
 
 ```bash
-"${KEEPER}" start --gpus 0,1,2,3 --fabric-team-size 8 \
-  --keeper-dir /run/user/${UID}/rtp-llm-mc-${JOB_ID}
-source /run/user/${UID}/rtp-llm-mc-${JOB_ID}/keeper.env
-exec torchrun ...
+bazelisk test //rtp_llm/utils/test:multicast_keeper_runtime_test \
+  --config=cuda13_arm --test_output=errors
+
+bazelisk test //rtp_llm/utils/test:multicast_keeper_runtime_test \
+  --config=cuda13 --test_output=errors
 ```
-
-For a foreground command with automatic cleanup:
-
-```bash
-"${KEEPER}" run --gpus 0,1 --keeper-dir /tmp/my-keeper -- torchrun ...
-```
-
-For a detached development session, use `start`, `status`, and `stop`.
-`SIGTERM` closes all cached FDs and removes the socket and ready file. Stop the
-holder only after all ranks have exited; killing the sole FD holder frees the
-multicast objects.
 
 ## Checkpoint lifecycle
 
@@ -201,9 +178,9 @@ visibility mapping cannot reinterpret those ordinals.
 | `NEKYIA_KEEPER_DIR` | Directory containing `mcsk.sock` |
 | `RTP_LLM_CUDA_CKPT_MULTICAST_SOCKET` | Optional exact socket override |
 | `RTP_LLM_CUDA_CKPT_MULTICAST_KEEPER_DEBUG=1` | Verbose shim logging |
-| `RTP_LLM_MC_KEEPER_GPUS` | Launcher default for `--gpus` |
-| `RTP_LLM_MC_LOCAL_GPUS` | Exact holder GPU list exported to ranks for FABRIC validation |
-| `RTP_LLM_MC_FABRIC_TEAM_SIZE` | Launcher default for `--fabric-team-size`; exact global FABRIC `numDevices` |
+| `RTP_LLM_MC_KEEPER_GPUS` | Optional physical GPU-list override for the supervisor |
+| `RTP_LLM_MC_LOCAL_GPUS` | Exact holder GPU list injected into ranks for FABRIC validation |
+| `RTP_LLM_MC_FABRIC_TEAM_SIZE` | Exact global FABRIC `numDevices`, injected for cross-node runs |
 | `RTP_LLM_MC_CREATOR_TIMEOUT_MS` | Creator timeout, default 120 seconds |
 | `RTP_LLM_MC_HOLDER_IO_TIMEOUT_MS` | Holder request/reply I/O timeout, default 1 second |
 | `RTP_LLM_MC_REQUEST_TIMEOUT_MS` | Shim FETCH/connect deadline, default 5 seconds |
@@ -214,38 +191,3 @@ visibility mapping cannot reinterpret those ordinals.
 
 Without the opt-in marker, the preloaded shim passes multicast driver calls
 through unchanged.
-
-## Tests
-
-CPU tests cover unique same-size objects, exact rebuild reuse, stale holder
-tokens, subgroup/property rejection, half/silent clients, creator timeout,
-readiness, duplicate-holder protection, CUDA-free holder operation, signal
-cleanup, `RELEASE` freeing a slot and re-registration, fail-closed release of
-unknown/foreign/stale objects, owner-generation orphan reclamation, and
-capacity-exhaustion fail-closed, exact FABRIC team contracts, ordinary FABRIC
-import passthrough, AddDevice-based multicast promotion and unknown-size
-correlation, idempotent peer references, last-owner release, and backend restart
-with different first importers:
-
-```bash
-bazelisk test \
-  //rtp_llm/cpp/cuda_checkpoint/multicast_keeper:multicast_keeper_test \
-  --config=cuda13
-```
-
-The manual GPU target runs real NCCL plus PyTorch symmetric memory before and
-after gang CUDA checkpoint/restore. It requires at least two NVLink GPUs. An
-explicit `CUDA_CHECKPOINT_BIN` or `cuda-checkpoint` from `PATH` takes priority;
-when neither exists, the test automatically uses
-`rtp_llm.utils.checkpoint_controller.LibCudaCheckpointDriver`:
-
-```bash
-GPUS=0,1 \
-  bazelisk test \
-  //rtp_llm/cpp/cuda_checkpoint/multicast_keeper:multicast_keeper_gpu_test \
-  --config=cuda13 --test_output=streamed
-```
-
-The test asserts nonzero symmetric-memory multicast pointers before and after
-restore, identical collective output, unchanged rank/holder PIDs, and a live
-holder throughout the checkpoint window.

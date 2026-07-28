@@ -111,6 +111,12 @@ public:
         return local_server_->GetSleepStatus(context, request, response);
     }
 
+    ::grpc::Status CudaCheckpointProcess(::grpc::ServerContext*         context,
+                                         const CudaCheckpointRequestPB* request,
+                                         CudaCheckpointResponsePB*      response) override {
+        return local_server_->CudaCheckpointProcess(context, request, response);
+    }
+
     WorkerStatusInfo getWorkerStatusInfo(int64_t latest_finished_version) {
         return local_server_->getWorkerStatusInfo(latest_finished_version);
     }

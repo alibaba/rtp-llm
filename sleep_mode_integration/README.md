@@ -32,7 +32,9 @@ model and test cache fit on one local L20D. Set
 `HACK_LAYER_NUM=0 TEST_BLOCK_NUM=0` to restore full-model production sizing.
 `MODEL_PATH` is required; `MODEL_TYPE`, `GPU`, `PORT`, and the remaining settings
 can be overridden for another deployment. Level 3 requires the frontend
-coordinator and all backend ranks to share the host boot and PID namespace.
+coordinator and backend ranks to share the host boot and PID namespace only on
+the single-node external-controller path. The cross-node path below invokes the
+Driver API inside each backend rank and does not inspect remote `/proc`.
 
 For a same-node TP2 run:
 
@@ -101,3 +103,147 @@ while sleep 0.5; do
     | awk -F, '$1 ~ /^[[:space:]]*[4-7]$/ {print}'
 done | tee /tmp/diag_pd_level3_cp2/gpu_memory.log
 ```
+
+## Two-node CP8 Prefill Level 3
+
+Cross-node Level 3 uses rank-local Driver API calls; the frontend never opens a
+remote `/proc/<pid>`. The shared distributed TCPStore stores one transaction
+manifest containing every rank identity and the distinct node-local multicast
+holder identities. Driver operations are sequential in world-rank order:
+
+```text
+all ranks SLEEPING
+  -> LOCK rank 0..7 -> verify all LOCKED
+  -> CHECKPOINT rank 0..7 -> verify all CHECKPOINTED
+  -> RESTORE rank 0..7 -> verify all LOCKED
+  -> UNLOCK rank 0..7 -> verify all RUNNING
+```
+
+Both nodes must run the same build and pass NVIDIA's checkpoint/migration demo
+on their installed driver. For the current two-node GB200 pair, node 0 is
+`11.139.19.52` and node 1 is `11.139.19.54`. Use the same gang string and base
+port on both:
+
+```bash
+bazelisk build //rtp_llm:rtp_llm_aarch64 \
+  --verbose_failures --config=cuda13_arm --jobs=64
+
+/opt/conda310/bin/pip install --force-reinstall --no-deps \
+  bazel-bin/rtp_llm/rtp_llm-0.2.0-cp310-cp310-linux_aarch64.whl
+```
+
+If the generated filename has a more specific `manylinux_*_aarch64` platform
+tag, install that file instead. Verify `uname -m` reports `aarch64`; never copy
+or install the `manylinux1_x86_64` wheel on these nodes.
+
+```bash
+export MODEL_PATH=/Deepseek-V4-Flash
+export GPU=0,1,2,3
+export WORLD_SIZE=8
+export LOCAL_WORLD_SIZE=4
+export TP_SIZE=8
+export EP_SIZE=8
+export DP_SIZE=1
+export ROLE_TYPE=PREFILL
+export CP_ROTATE_METHOD=ALL_GATHER
+export PORT=22000
+export HACK_LAYER_NUM=0
+export TEST_BLOCK_NUM=0
+export CACHE_STORE_RDMA_MODE=1
+export RTP_LLM_CUDA_CKPT_MULTICAST_KEEPER=1
+export GANG_CONFIG_STRING='name:dsv4_part0,ip:11.139.19.52,port:22000;name:dsv4_part1,ip:11.139.19.54,port:22000'
+```
+
+On node 0:
+
+```bash
+export WORLD_RANK=0
+./sleep_mode_integration/start_level3_server.sh \
+  > /tmp/dsv4-cp8-node0.log 2>&1
+```
+
+On node 1:
+
+```bash
+export WORLD_RANK=4
+./sleep_mode_integration/start_level3_server.sh \
+  > /tmp/dsv4-cp8-node1.log 2>&1
+```
+
+After both nodes are ready, drive the public endpoint on node 0:
+
+```bash
+curl -sS http://11.139.19.52:22000/sleep_status | jq
+curl -sS -X POST http://11.139.19.52:22000/sleep \
+  -H 'content-type: application/json' \
+  -d '{"level":3,"mode":"wait","timeout_ms":3600000}' | jq
+curl -sS http://11.139.19.52:22000/sleep_status | jq
+nvidia-smi --query-compute-apps=pid,used_memory --format=csv
+curl -sS -X POST http://11.139.19.52:22000/wake_up \
+  -H 'content-type: application/json' -d '{}' | jq
+curl -sS http://11.139.19.52:22000/sleep_status | jq
+```
+
+Do not kill or restart either node's holder while the status is
+`CHECKPOINTED`. A failed phase is rolled back to all-RUNNING when every rank is
+reachable; otherwise the shared manifest is marked `RECOVERY_REQUIRED` and the
+instance fails closed.
+
+## Native CUDA Checkpoint Probe
+
+`cuda_checkpoint_native_probe.c` isolates CUDA Driver API checkpoint/restore
+from RTP-LLM, Python, PyTorch, ctypes, and the `cuda-checkpoint` CLI. The default
+mode uses an external controller process. `--self` follows NVIDIA's R580
+migration sample and makes the CUDA target control its own checkpoint.
+
+```bash
+gcc -std=c11 -O2 -Wall -Wextra -Werror \
+  -I/usr/local/cuda/include \
+  sleep_mode_integration/cuda_checkpoint_native_probe.c \
+  -L/usr/lib64 -Wl,-rpath,/usr/lib64 -lcuda \
+  -o /tmp/cuda_checkpoint_native_probe
+
+CUDA_VISIBLE_DEVICES=0 timeout --signal=KILL 90 \
+  /tmp/cuda_checkpoint_native_probe
+
+CUDA_VISIBLE_DEVICES=0 timeout --signal=KILL 90 \
+  /tmp/cuda_checkpoint_native_probe --self
+```
+
+A passing run must complete `Lock`, `Checkpoint`, `Restore`, and `Unlock`, then
+verify the deterministic device-memory pattern after restoration. Symbol
+presence or a successful `Restore` without a successful `Unlock` is not treated
+as checkpoint/restore support.
+
+## Level 3 failure diagnostics
+
+The test environment does not need a working checkpoint Driver API to produce a
+useful failure report. Collect the frontend log and every backend-rank log, then
+filter the structured Level 3 lines:
+
+```bash
+grep -E \
+  'level3 |level-3 |sleep lifecycle|multicast keeper|multicast-holder|rtp-mc-shim' \
+  /path/to/frontend.log /path/to/backend*.log
+```
+
+Interpret the last completed line as follows:
+
+- `checkpoint preflight failed` together with `cuda_result`/`driver_state`
+  means the Driver API rejected the operation before GPU resources were
+  released. This is the expected fail-safe behavior on an unsupported driver.
+- `checkpoint rpc begin` without the matching `checkpoint rpc end` identifies
+  a rank blocked inside the Driver API. The line contains its rank, address,
+  transaction, epoch, action, and timeout.
+- `sleep lifecycle hook end ... success=0` identifies the exact backend release
+  or rebuild hook that failed, such as RDMA teardown, KV backing, collective
+  rebuild, graph recapture, or health check.
+- `distributed manifest` shows the durable transaction phase and every rank's
+  last confirmed CUDA state. `RECOVERY_REQUIRED` means do not serve traffic or
+  remove the manifest manually; restart or perform explicit recovery.
+- `Multicast keeper health probe failed` includes holder identity, topology,
+  PID/socket information, and the holder log tail captured before private state
+  cleanup.
+
+For a Driver compatibility issue, retain the native probe output together with
+`nvidia-smi -q`, `uname -a`, the wheel filename, and the filtered Level 3 logs.

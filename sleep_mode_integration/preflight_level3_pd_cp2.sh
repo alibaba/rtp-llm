@@ -133,10 +133,11 @@ else
     fail 'Python dependency import failed'
 fi
 
-keeper="${REPO_ROOT}/rtp_llm/cpp/cuda_checkpoint/multicast_keeper/multicast_keeper.sh"
-[[ -x "${keeper}" ]] && pass "multicast keeper launcher is executable" || fail "multicast keeper launcher is unavailable"
-require_text "${keeper}" 'NCCL_NVLS_ENABLE=1'
-require_text "${keeper}" 'TORCH_SYMM_MEM_DISABLE_MULTICAST=0'
+keeper_runtime="${REPO_ROOT}/rtp_llm/utils/multicast_keeper.py"
+require_file "${keeper_runtime}"
+require_text "${LAUNCHER}" 'RTP_LLM_CUDA_CKPT_MULTICAST_KEEPER=1'
+require_text "${keeper_runtime}" 'child_env.setdefault("NCCL_NVLS_ENABLE", "1")'
+require_text "${keeper_runtime}" 'child_env.setdefault("TORCH_SYMM_MEM_DISABLE_MULTICAST", "0")'
 
 if command -v ibv_devices >/dev/null && [[ $(ibv_devices 2>/dev/null | awk 'NR > 2 {count++} END {print count+0}') -gt 0 ]]; then
     pass 'RDMA devices are present'

@@ -30,7 +30,7 @@ The main source inputs were `keeper_lite_creator.cu`,
 - Generalized the creator from two fixed GPUs to a validated GPU list.
 - Added bounded holder/client I/O, bounded creator termination, strict full-team
   property checks, explicit opt-in, readiness, deterministic signal cleanup,
-  Bazel targets, CPU lifecycle tests, and a scriptable GPU checkpoint test.
+  Bazel production targets, and supervisor-managed lifecycle integration.
 - Kept `NEKYIA_KEEPER_DIR/mcsk.sock` as the default endpoint. Protocol V3 is
   deliberately not wire-compatible with the upstream size-only protocol.
 

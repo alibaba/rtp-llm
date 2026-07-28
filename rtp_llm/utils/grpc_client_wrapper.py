@@ -478,6 +478,7 @@ class GrpcClientWrapper:
 
     LIFECYCLE_LEASE_KEY = "rtp_llm_instance_lifecycle_lease"
     LIFECYCLE_RECOVERY_KEY = "rtp_llm_instance_lifecycle_recovery"
+    DISTRIBUTED_CHECKPOINT_KEY = "rtp_llm_distributed_checkpoint_manifest"
     COMMIT_MAX_ATTEMPTS = 3
     LIFECYCLE_STATUS_MAX_ATTEMPTS = 3
     LIFECYCLE_STATUS_POLL_INTERVAL_S = 0.05
@@ -563,6 +564,17 @@ class GrpcClientWrapper:
         # shared TCPStore cannot collide across PD roles or instance generations.
         self._instance_role: Optional[str] = None
         self._instance_generation: Optional[str] = None
+
+    def _uses_distributed_checkpoint(self) -> bool:
+        if not self._level3_enabled:
+            return False
+        if self._single_node is not None:
+            return not self._single_node
+        hosts = {
+            address.rsplit(":", 1)[0].strip("[]")
+            for address in self.control_addresses
+        }
+        return len(hosts) > 1
 
     @property
     def configured_sleep_level(self) -> int:
@@ -855,6 +867,39 @@ class GrpcClientWrapper:
     def _lifecycle_recovery_key(self) -> str:
         return f"{self.LIFECYCLE_RECOVERY_KEY}{self._key_namespace_suffix()}"
 
+    def _distributed_checkpoint_key(self) -> str:
+        return f"{self.DISTRIBUTED_CHECKPOINT_KEY}{self._key_namespace_suffix()}"
+
+    @staticmethod
+    def _distributed_manifest_target_states(manifest: Dict[str, Any]) -> str:
+        targets = sorted(
+            manifest.get("targets", []),
+            key=lambda target: _as_int(target.get("rank", -1), -1),
+        )
+        return ",".join(
+            f"{_as_int(target.get('rank', -1), -1)}@"
+            f"{target.get('address', 'unknown')}:"
+            f"{target.get('driver_state', 'UNKNOWN')}"
+            for target in targets
+        )
+
+    def _log_distributed_manifest(
+        self, event: str, manifest: Dict[str, Any], *, error: str = ""
+    ) -> None:
+        log = logging.error if error else logging.info
+        log(
+            "level3 distributed manifest: event=%s state=%s phase=%s "
+            "transaction=%s epoch=%s targets=[%s] holder_count=%d error=%s",
+            event,
+            manifest.get("state", "UNKNOWN"),
+            manifest.get("phase", "UNKNOWN"),
+            manifest.get("transaction_id", ""),
+            manifest.get("sleep_epoch", -1),
+            self._distributed_manifest_target_states(manifest),
+            len(manifest.get("node_holders", {})),
+            error or manifest.get("error", ""),
+        )
+
     def _manifest_namespace(self) -> Optional[str]:
         # Scope the durable checkpoint manifest to this instance generation + role
         # so a node that reuses control addresses across generations/roles cannot
@@ -1076,11 +1121,59 @@ class GrpcClientWrapper:
         if self._checkpoint_controller is None:
             raise RuntimeError("level-3 checkpoint controller is disabled")
         callback = getattr(self._checkpoint_controller, method)
-        return await asyncio.to_thread(lambda: callback(*args, **kwargs))
+        start = time.monotonic()
+        logging.info(
+            "level3 local checkpoint controller begin: method=%s namespace=%s "
+            "addresses=%s",
+            method,
+            kwargs.get("namespace") or self._manifest_namespace() or "unscoped",
+            self.control_addresses,
+        )
+        try:
+            result = await asyncio.to_thread(lambda: callback(*args, **kwargs))
+        except asyncio.CancelledError:
+            logging.warning(
+                "level3 local checkpoint controller cancelled: method=%s "
+                "duration_ms=%.0f",
+                method,
+                (time.monotonic() - start) * 1000,
+            )
+            raise
+        except Exception:
+            logging.error(
+                "level3 local checkpoint controller failed: method=%s "
+                "duration_ms=%.0f",
+                method,
+                (time.monotonic() - start) * 1000,
+                exc_info=True,
+            )
+            raise
+        result_state = result.get("state", "") if isinstance(result, dict) else ""
+        logging.info(
+            "level3 local checkpoint controller end: method=%s success=1 "
+            "result_state=%s duration_ms=%.0f",
+            method,
+            result_state,
+            (time.monotonic() - start) * 1000,
+        )
+        return result
 
     def _set_frontend_lifecycle_state(self, state: str, error: str = "") -> None:
+        previous_state = self._frontend_lifecycle_state or "IDLE"
         self._frontend_lifecycle_state = state
         self._frontend_lifecycle_error = error
+        next_state = state or "IDLE"
+        log = logging.error if state == "RECOVERY_REQUIRED" else logging.info
+        log(
+            "level3 frontend state transition: %s -> %s role=%s generation=%s "
+            "distributed=%s error=%s",
+            previous_state,
+            next_state,
+            self._instance_role or "unknown",
+            self._instance_generation or "unknown",
+            self._uses_distributed_checkpoint(),
+            error or "",
+        )
         if state == "RECOVERY_REQUIRED":
             self._persist_lifecycle_recovery(error or "lifecycle state is uncertain")
 
@@ -1096,6 +1189,8 @@ class GrpcClientWrapper:
         return ""
 
     async def _read_checkpoint_manifest(self) -> Optional[Dict[str, Any]]:
+        if self._uses_distributed_checkpoint():
+            return self._read_distributed_checkpoint_manifest()
         manifest = await self._checkpoint_controller_call(
             "read_manifest",
             tuple(self.control_addresses),
@@ -1106,6 +1201,68 @@ class GrpcClientWrapper:
         if not isinstance(manifest, dict):
             raise RuntimeError("checkpoint controller returned an invalid manifest")
         return manifest
+
+    def _read_distributed_checkpoint_manifest(self) -> Optional[Dict[str, Any]]:
+        store = self._get_lifecycle_store()
+        if store is None:
+            raise RuntimeError(
+                "cross-node Level-3 requires the instance lifecycle TCPStore"
+            )
+        current = store.compare_set(self._distributed_checkpoint_key(), "", "")
+        current = self._decode_store_value(current)
+        if not current:
+            return None
+        try:
+            manifest = json.loads(current)
+        except (TypeError, ValueError) as e:
+            raise RuntimeError(
+                "distributed checkpoint manifest is malformed"
+            ) from e
+        if not isinstance(manifest, dict) or not manifest.get("distributed"):
+            raise RuntimeError("distributed checkpoint manifest has invalid schema")
+        return manifest
+
+    def _write_distributed_checkpoint_manifest(
+        self, manifest: Dict[str, Any]
+    ) -> None:
+        store = self._get_lifecycle_store()
+        if store is None:
+            raise RuntimeError(
+                "cross-node Level-3 requires the instance lifecycle TCPStore"
+            )
+        key = self._distributed_checkpoint_key()
+        current = self._decode_store_value(store.compare_set(key, "", ""))
+        desired = json.dumps(manifest, sort_keys=True, separators=(",", ":"))
+        observed = self._decode_store_value(
+            store.compare_set(key, current, desired)
+        )
+        if observed != desired:
+            raise RuntimeError(
+                "distributed checkpoint manifest changed outside the lifecycle lease"
+            )
+        self._log_distributed_manifest("persist", manifest)
+
+    def _clear_distributed_checkpoint_manifest(self) -> None:
+        store = self._get_lifecycle_store()
+        if store is None:
+            raise RuntimeError(
+                "cross-node Level-3 requires the instance lifecycle TCPStore"
+            )
+        key = self._distributed_checkpoint_key()
+        current = self._decode_store_value(store.compare_set(key, "", ""))
+        if not current:
+            return
+        observed = self._decode_store_value(store.compare_set(key, current, ""))
+        if observed:
+            raise RuntimeError(
+                "distributed checkpoint manifest changed outside the lifecycle lease"
+            )
+        try:
+            manifest = json.loads(current)
+        except (TypeError, ValueError):
+            manifest = {}
+        if isinstance(manifest, dict):
+            self._log_distributed_manifest("clear", manifest)
 
     def _synthesize_checkpoint_status(
         self, state: str, manifest: Optional[Dict[str, Any]] = None
@@ -1169,6 +1326,10 @@ class GrpcClientWrapper:
         """
         if not manifest:
             return False
+        if manifest.get("distributed"):
+            # Remote PIDs are intentionally not visible in the coordinator's
+            # /proc.  Their identities are verified through rank-local RPCs.
+            return False
         processes = manifest.get("processes") or []
         if not processes:
             return False
@@ -1218,11 +1379,14 @@ class GrpcClientWrapper:
                 "same control addresses) and discarding it"
             )
             try:
-                await self._checkpoint_controller_call(
-                    "clear_manifest",
-                    tuple(self.control_addresses),
-                    namespace=self._manifest_namespace(),
-                )
+                if self._uses_distributed_checkpoint():
+                    self._clear_distributed_checkpoint_manifest()
+                else:
+                    await self._checkpoint_controller_call(
+                        "clear_manifest",
+                        tuple(self.control_addresses),
+                        namespace=self._manifest_namespace(),
+                    )
             except Exception as e:
                 logging.warning("failed to discard stale checkpoint manifest: %s", e)
             manifest = None
@@ -1249,15 +1413,14 @@ class GrpcClientWrapper:
         return None
 
     def _level3_precondition_error(self) -> str:
-        if self._single_node is False:
-            return "level-3 deep sleep currently supports a single node only"
-        if self._single_node is None:
-            hosts = {
-                address.rsplit(":", 1)[0].strip("[]")
-                for address in self.control_addresses
-            }
-            if len(hosts) != 1:
-                return "level-3 deep sleep currently supports a single node only"
+        if (
+            self._uses_distributed_checkpoint()
+            and self._get_lifecycle_store() is None
+        ):
+            return (
+                "cross-node level-3 deep sleep requires instance-wide "
+                "lifecycle TCPStore coordination"
+            )
         return ""
 
     def _validate_checkpoint_targets(
@@ -1270,9 +1433,598 @@ class GrpcClientWrapper:
         if any(str(status.get("state", "")) != "SLEEPING" for status in statuses):
             raise RuntimeError("all backend ranks must be SLEEPING before checkpoint")
         pids = [_as_int(status.get("process_id", 0)) for status in statuses]
-        if any(pid <= 0 for pid in pids) or len(set(pids)) != len(pids):
-            raise RuntimeError("invalid or duplicate backend process ids")
+        if any(pid <= 0 for pid in pids):
+            raise RuntimeError("invalid backend process ids")
+        identities = {
+            (
+                str(status.get("process_boot_id", "")),
+                _as_int(status.get("process_pid_namespace", 0)),
+                _as_int(status.get("process_id", 0)),
+            )
+            for status in statuses
+        }
+        if len(identities) != len(statuses):
+            raise RuntimeError("duplicate backend process identities")
         return pids
+
+    @staticmethod
+    def _distributed_node_key(status: Dict[str, Any]) -> str:
+        boot_id = str(status.get("process_boot_id", ""))
+        pid_namespace = _as_int(status.get("process_pid_namespace", 0))
+        if not boot_id or pid_namespace <= 0:
+            raise RuntimeError("backend rank reports incomplete node identity")
+        return f"{boot_id}:{pid_namespace}"
+
+    def _new_distributed_checkpoint_manifest(
+        self, statuses: Sequence[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        self._validate_checkpoint_targets(statuses)
+        if not self._same_sleep_epoch(statuses):
+            raise RuntimeError("checkpoint terminal sleep_epoch is inconsistent")
+
+        node_holders: Dict[str, str] = {}
+        targets = []
+        for status in statuses:
+            starttime = _as_int(status.get("process_starttime", 0))
+            if starttime <= 0:
+                raise RuntimeError("backend rank reports invalid process starttime")
+            node_key = self._distributed_node_key(status)
+            holder = str(status.get("holder_instance", ""))
+            if not holder:
+                raise RuntimeError(
+                    "cross-node Level-3 requires every rank to report its "
+                    "node-local multicast keeper holder"
+                )
+            previous_holder = node_holders.setdefault(node_key, holder)
+            if previous_holder != holder:
+                raise RuntimeError(
+                    "backend ranks on one node report different multicast holders"
+                )
+            targets.append(
+                {
+                    "address": str(status["address"]),
+                    "rank": _as_int(status.get("world_rank", -1), -1),
+                    "pid": _as_int(status.get("process_id", 0)),
+                    "starttime": starttime,
+                    "pid_namespace": _as_int(
+                        status.get("process_pid_namespace", 0)
+                    ),
+                    "boot_id": str(status.get("process_boot_id", "")),
+                    "node": node_key,
+                    "holder_instance": holder,
+                    "driver_state": "RUNNING",
+                }
+            )
+        if len(set(node_holders.values())) != len(node_holders):
+            raise RuntimeError(
+                "different nodes must use distinct multicast keeper holders"
+            )
+        targets.sort(key=lambda target: target["rank"])
+        epoch = _as_int(statuses[0].get("sleep_epoch", -1), -1)
+        namespace = self._manifest_namespace() or "unscoped"
+        transaction_id = f"{namespace}:sleep-epoch-{epoch}"
+        return {
+            "version": 1,
+            "distributed": True,
+            "state": "CHECKPOINTING",
+            "phase": "CREATED",
+            "sleep_epoch": epoch,
+            "transaction_id": transaction_id,
+            "team": self._keeper_team(),
+            "node_holders": node_holders,
+            "targets": targets,
+            "pids": [target["pid"] for target in targets],
+            "error": "",
+        }
+
+    @staticmethod
+    def _distributed_target_identity_error(
+        target: Dict[str, Any], response: Dict[str, Any]
+    ) -> str:
+        expected = (
+            _as_int(target.get("pid", 0)),
+            _as_int(target.get("starttime", 0)),
+            _as_int(target.get("pid_namespace", 0)),
+            str(target.get("boot_id", "")),
+            _as_int(target.get("rank", -1), -1),
+            str(target.get("holder_instance", "")),
+        )
+        observed = (
+            _as_int(response.get("process_id", 0)),
+            _as_int(response.get("process_starttime", 0)),
+            _as_int(response.get("process_pid_namespace", 0)),
+            str(response.get("process_boot_id", "")),
+            _as_int(response.get("world_rank", -1), -1),
+            str(response.get("holder_instance", "")),
+        )
+        if observed != expected:
+            return (
+                f"rank {target.get('rank')} identity changed: "
+                f"expected={expected}, observed={observed}"
+            )
+        return ""
+
+    async def _distributed_checkpoint_rpc(
+        self,
+        address: str,
+        action: str,
+        *,
+        transaction_id: str = "",
+        sleep_epoch: int = 0,
+        lock_timeout_ms: int = 10000,
+        target: Optional[Dict[str, Any]] = None,
+    ) -> Dict[str, Any]:
+        request = pb2.CudaCheckpointRequestPB(
+            action=action,
+            transaction_id=transaction_id,
+            sleep_epoch=sleep_epoch,
+            lock_timeout_ms=lock_timeout_ms,
+        )
+        if action in {"CHECKPOINT", "RESTORE"}:
+            # Moving a full model's device allocation to/from host memory can
+            # take minutes.  A short client deadline would make the result
+            # uncertain while the rank-local Driver call is still running.
+            rpc_timeout_s = 60 * 60
+        elif action == "LOCK":
+            rpc_timeout_s = max(60.0, lock_timeout_ms / 1000.0 + 30.0)
+        else:
+            rpc_timeout_s = 60.0
+        rank = (
+            _as_int(target.get("rank", -1), -1)
+            if target is not None
+            else -1
+        )
+        start = time.monotonic()
+        logging.info(
+            "level3 checkpoint rpc begin: action=%s address=%s rank=%d "
+            "transaction=%s epoch=%d timeout_s=%.1f",
+            action,
+            address,
+            rank,
+            transaction_id,
+            sleep_epoch,
+            rpc_timeout_s,
+        )
+        try:
+            response = await self._call_control_rpc(
+                address,
+                "CudaCheckpointProcess",
+                request,
+                timeout_s=rpc_timeout_s,
+            )
+        except asyncio.CancelledError:
+            logging.warning(
+                "level3 checkpoint rpc cancelled: action=%s address=%s rank=%d "
+                "transaction=%s epoch=%d duration_ms=%.0f",
+                action,
+                address,
+                rank,
+                transaction_id,
+                sleep_epoch,
+                (time.monotonic() - start) * 1000,
+            )
+            raise
+        except Exception:
+            logging.error(
+                "level3 checkpoint rpc transport failed: action=%s address=%s "
+                "rank=%d transaction=%s epoch=%d duration_ms=%.0f",
+                action,
+                address,
+                rank,
+                transaction_id,
+                sleep_epoch,
+                (time.monotonic() - start) * 1000,
+                exc_info=True,
+            )
+            raise
+        success = bool(response.get("success", False))
+        response_rank = _as_int(response.get("world_rank", rank), rank)
+        log = logging.info if success else logging.error
+        log(
+            "level3 checkpoint rpc end: action=%s address=%s rank=%d success=%s "
+            "cuda_result=%s driver_state=%s transaction=%s response_epoch=%s "
+            "holder=%s duration_ms=%.0f error=%s",
+            action,
+            address,
+            response_rank,
+            success,
+            response.get("cuda_result", "unknown"),
+            response.get("state", "UNKNOWN"),
+            response.get("transaction_id", transaction_id),
+            response.get("sleep_epoch", sleep_epoch),
+            response.get("holder_instance", ""),
+            (time.monotonic() - start) * 1000,
+            response.get("error", ""),
+        )
+        if "error" in response and "success" not in response:
+            raise RuntimeError(
+                f"{action} RPC failed on {address}: {response['error']}"
+            )
+        if not bool(response.get("success", False)):
+            raise RuntimeError(
+                f"{action} failed on {address}: "
+                f"{response.get('error', 'unknown CUDA checkpoint error')} "
+                f"(CUresult={response.get('cuda_result', 'unknown')}, "
+                f"state={response.get('state', 'UNKNOWN')})"
+            )
+        if target is not None:
+            identity_error = self._distributed_target_identity_error(
+                target, response
+            )
+            if identity_error:
+                raise RuntimeError(identity_error)
+        return response
+
+    async def _distributed_checkpoint_preflight(self) -> None:
+        if self._get_lifecycle_store() is None:
+            raise RuntimeError(
+                "cross-node Level-3 requires the instance lifecycle TCPStore"
+            )
+        logging.info(
+            "level3 distributed checkpoint preflight begin: addresses=%s",
+            self.control_addresses,
+        )
+        for address in self.control_addresses:
+            response = await self._distributed_checkpoint_rpc(
+                address, "GET_STATE"
+            )
+            if str(response.get("state", "")) != "RUNNING":
+                raise RuntimeError(
+                    f"rank at {address} is not RUNNING before checkpoint: "
+                    f"{response.get('state', 'UNKNOWN')}"
+                )
+        logging.info(
+            "level3 distributed checkpoint preflight end: success=1 rank_count=%d",
+            len(self.control_addresses),
+        )
+
+    def _persist_distributed_target_state(
+        self,
+        manifest: Dict[str, Any],
+        target: Dict[str, Any],
+        state: str,
+        phase: str,
+    ) -> None:
+        target["driver_state"] = state
+        manifest["phase"] = phase
+        self._write_distributed_checkpoint_manifest(manifest)
+
+    async def _query_distributed_driver_states(
+        self, manifest: Dict[str, Any]
+    ) -> Dict[int, str]:
+        states: Dict[int, str] = {}
+        for target in manifest["targets"]:
+            response = await self._distributed_checkpoint_rpc(
+                target["address"], "GET_STATE", target=target
+            )
+            state = str(response.get("state", "UNKNOWN"))
+            target["driver_state"] = state
+            states[int(target["rank"])] = state
+        self._write_distributed_checkpoint_manifest(manifest)
+        return states
+
+    async def _rollback_distributed_checkpoint(
+        self, manifest: Dict[str, Any], cause: BaseException
+    ) -> None:
+        transaction_id = str(manifest["transaction_id"])
+        epoch = _as_int(manifest["sleep_epoch"], -1)
+        logging.warning(
+            "level3 distributed rollback begin: transaction=%s epoch=%d "
+            "phase=%s cause=%s",
+            transaction_id,
+            epoch,
+            manifest.get("phase", "UNKNOWN"),
+            cause,
+        )
+        try:
+            states = await self._query_distributed_driver_states(manifest)
+            for target in manifest["targets"]:
+                if states[target["rank"]] != "CHECKPOINTED":
+                    continue
+                response = await self._distributed_checkpoint_rpc(
+                    target["address"],
+                    "RESTORE",
+                    transaction_id=transaction_id,
+                    sleep_epoch=epoch,
+                    target=target,
+                )
+                states[target["rank"]] = str(response["state"])
+                self._persist_distributed_target_state(
+                    manifest, target, "LOCKED", "ROLLBACK_RESTORING"
+                )
+            # Establish one global LOCKED barrier even when the original lock
+            # failed before reaching all ranks.
+            for target in manifest["targets"]:
+                if states[target["rank"]] != "RUNNING":
+                    continue
+                response = await self._distributed_checkpoint_rpc(
+                    target["address"],
+                    "LOCK",
+                    transaction_id=transaction_id,
+                    sleep_epoch=epoch,
+                    target=target,
+                )
+                states[target["rank"]] = str(response["state"])
+                self._persist_distributed_target_state(
+                    manifest, target, "LOCKED", "ROLLBACK_LOCKING"
+                )
+            states = await self._query_distributed_driver_states(manifest)
+            if set(states.values()) != {"LOCKED"}:
+                raise RuntimeError(
+                    f"rollback could not establish all-LOCKED barrier: {states}"
+                )
+            for target in manifest["targets"]:
+                await self._distributed_checkpoint_rpc(
+                    target["address"],
+                    "UNLOCK",
+                    transaction_id=transaction_id,
+                    sleep_epoch=epoch,
+                    target=target,
+                )
+                self._persist_distributed_target_state(
+                    manifest, target, "RUNNING", "ROLLBACK_UNLOCKING"
+                )
+            states = await self._query_distributed_driver_states(manifest)
+            if set(states.values()) != {"RUNNING"}:
+                raise RuntimeError(
+                    f"rollback could not establish all-RUNNING barrier: {states}"
+                )
+            manifest["state"] = "RUNNING"
+            manifest["phase"] = "ROLLED_BACK"
+            manifest["error"] = str(cause)
+            self._write_distributed_checkpoint_manifest(manifest)
+            self._clear_distributed_checkpoint_manifest()
+            logging.info(
+                "level3 distributed rollback end: transaction=%s epoch=%d "
+                "success=1 final_states=%s",
+                transaction_id,
+                epoch,
+                states,
+            )
+        except Exception as rollback_error:
+            manifest["state"] = "RECOVERY_REQUIRED"
+            manifest["phase"] = "ROLLBACK_FAILED"
+            manifest["error"] = (
+                f"checkpoint failed ({cause}); rollback failed ({rollback_error})"
+            )
+            try:
+                self._write_distributed_checkpoint_manifest(manifest)
+            except Exception as persist_error:
+                manifest["error"] += (
+                    f"; manifest persistence failed ({persist_error})"
+                )
+            self._log_distributed_manifest(
+                "rollback_failed", manifest, error=manifest["error"]
+            )
+            raise RuntimeError(manifest["error"]) from rollback_error
+
+    async def _distributed_checkpoint_all(
+        self, statuses: Sequence[Dict[str, Any]]
+    ) -> Dict[str, Any]:
+        manifest = self._new_distributed_checkpoint_manifest(statuses)
+        self._write_distributed_checkpoint_manifest(manifest)
+        transaction_id = str(manifest["transaction_id"])
+        epoch = _as_int(manifest["sleep_epoch"], -1)
+        logging.info(
+            "level3 distributed checkpoint begin: transaction=%s epoch=%d "
+            "rank_count=%d",
+            transaction_id,
+            epoch,
+            len(manifest["targets"]),
+        )
+        try:
+            # NVIDIA documents multi-process checkpoint invocation as
+            # sequential.  Keep rank order deterministic and put a global
+            # state barrier between Lock and Checkpoint.
+            for target in manifest["targets"]:
+                await self._distributed_checkpoint_rpc(
+                    target["address"],
+                    "LOCK",
+                    transaction_id=transaction_id,
+                    sleep_epoch=epoch,
+                    lock_timeout_ms=60000,
+                    target=target,
+                )
+                self._persist_distributed_target_state(
+                    manifest, target, "LOCKED", "LOCKING"
+                )
+            states = await self._query_distributed_driver_states(manifest)
+            if set(states.values()) != {"LOCKED"}:
+                raise RuntimeError(
+                    f"checkpoint could not establish all-LOCKED barrier: {states}"
+                )
+            manifest["phase"] = "LOCKED"
+            self._write_distributed_checkpoint_manifest(manifest)
+
+            for target in manifest["targets"]:
+                await self._distributed_checkpoint_rpc(
+                    target["address"],
+                    "CHECKPOINT",
+                    transaction_id=transaction_id,
+                    sleep_epoch=epoch,
+                    target=target,
+                )
+                self._persist_distributed_target_state(
+                    manifest, target, "CHECKPOINTED", "CHECKPOINTING"
+                )
+            states = await self._query_distributed_driver_states(manifest)
+            if set(states.values()) != {"CHECKPOINTED"}:
+                raise RuntimeError(
+                    "checkpoint did not establish all-CHECKPOINTED barrier: "
+                    f"{states}"
+                )
+            manifest["state"] = "CHECKPOINTED"
+            manifest["phase"] = "CHECKPOINTED"
+            self._write_distributed_checkpoint_manifest(manifest)
+            logging.info(
+                "level3 distributed checkpoint end: transaction=%s epoch=%d "
+                "success=1 states=%s",
+                transaction_id,
+                epoch,
+                states,
+            )
+            return manifest
+        except BaseException as checkpoint_error:
+            logging.error(
+                "level3 distributed checkpoint failed: transaction=%s epoch=%d "
+                "phase=%s error=%s",
+                transaction_id,
+                epoch,
+                manifest.get("phase", "UNKNOWN"),
+                checkpoint_error,
+            )
+            # Cancellation is also driven to a safe endpoint before it may
+            # escape; this coroutine is already shielded by _drive_to_terminal.
+            await self._rollback_distributed_checkpoint(
+                manifest, checkpoint_error
+            )
+            error = RuntimeError(str(checkpoint_error))
+            error.all_running = True
+            raise error from checkpoint_error
+
+    async def _validate_distributed_restore_targets(
+        self, manifest: Dict[str, Any]
+    ) -> None:
+        statuses = await self._raw_sleep_statuses()
+        identity_error = self._rank_identity_error(statuses)
+        if identity_error or any("error" in status for status in statuses):
+            raise RuntimeError(
+                "cannot verify checkpointed backend identities: "
+                f"{identity_error or _error_details(statuses)}"
+            )
+        by_rank = {
+            _as_int(status.get("world_rank", -1), -1): status
+            for status in statuses
+        }
+        for target in manifest["targets"]:
+            status = by_rank.get(_as_int(target.get("rank", -1), -1))
+            if status is None:
+                raise RuntimeError(
+                    f"checkpointed rank {target.get('rank')} disappeared"
+                )
+            response_identity = {
+                "process_id": status.get("process_id"),
+                "process_starttime": status.get("process_starttime"),
+                "process_pid_namespace": status.get("process_pid_namespace"),
+                "process_boot_id": status.get("process_boot_id"),
+                "world_rank": status.get("world_rank"),
+                "holder_instance": status.get("holder_instance"),
+            }
+            error = self._distributed_target_identity_error(
+                target, response_identity
+            )
+            if error:
+                raise RuntimeError(error)
+
+    async def _distributed_restore_all(
+        self, manifest: Dict[str, Any]
+    ) -> Dict[str, Any]:
+        await self._validate_distributed_restore_targets(manifest)
+        transaction_id = str(manifest["transaction_id"])
+        epoch = _as_int(manifest["sleep_epoch"], -1)
+        manifest["state"] = "RESTORING"
+        manifest["phase"] = "RECONCILING"
+        self._write_distributed_checkpoint_manifest(manifest)
+        logging.info(
+            "level3 distributed restore begin: transaction=%s epoch=%d "
+            "rank_count=%d",
+            transaction_id,
+            epoch,
+            len(manifest["targets"]),
+        )
+        try:
+            states = await self._query_distributed_driver_states(manifest)
+            if set(states.values()) == {"RUNNING"}:
+                manifest["state"] = "RUNNING"
+                manifest["phase"] = "UNLOCKED"
+                self._write_distributed_checkpoint_manifest(manifest)
+                logging.info(
+                    "level3 distributed restore end: transaction=%s epoch=%d "
+                    "success=1 already_running=1 states=%s",
+                    transaction_id,
+                    epoch,
+                    states,
+                )
+                return manifest
+            for target in manifest["targets"]:
+                state = states[target["rank"]]
+                if state == "CHECKPOINTED":
+                    await self._distributed_checkpoint_rpc(
+                        target["address"],
+                        "RESTORE",
+                        transaction_id=transaction_id,
+                        sleep_epoch=epoch,
+                        target=target,
+                    )
+                    self._persist_distributed_target_state(
+                        manifest, target, "LOCKED", "RESTORING"
+                    )
+                elif state == "RUNNING":
+                    # A prior restore may have been interrupted during the
+                    # unlock phase.  Re-lock it before the global barrier.
+                    await self._distributed_checkpoint_rpc(
+                        target["address"],
+                        "LOCK",
+                        transaction_id=transaction_id,
+                        sleep_epoch=epoch,
+                        target=target,
+                    )
+                    self._persist_distributed_target_state(
+                        manifest, target, "LOCKED", "RELOCKING"
+                    )
+                elif state != "LOCKED":
+                    raise RuntimeError(
+                        f"rank {target['rank']} has unrecoverable CUDA state {state}"
+                    )
+            states = await self._query_distributed_driver_states(manifest)
+            if set(states.values()) != {"LOCKED"}:
+                raise RuntimeError(
+                    f"restore could not establish all-LOCKED barrier: {states}"
+                )
+            manifest["phase"] = "RESTORED_LOCKED"
+            self._write_distributed_checkpoint_manifest(manifest)
+            for target in manifest["targets"]:
+                await self._distributed_checkpoint_rpc(
+                    target["address"],
+                    "UNLOCK",
+                    transaction_id=transaction_id,
+                    sleep_epoch=epoch,
+                    target=target,
+                )
+                self._persist_distributed_target_state(
+                    manifest, target, "RUNNING", "UNLOCKING"
+                )
+            states = await self._query_distributed_driver_states(manifest)
+            if set(states.values()) != {"RUNNING"}:
+                raise RuntimeError(
+                    f"restore could not establish all-RUNNING barrier: {states}"
+                )
+            manifest["state"] = "RUNNING"
+            manifest["phase"] = "UNLOCKED"
+            self._write_distributed_checkpoint_manifest(manifest)
+            logging.info(
+                "level3 distributed restore end: transaction=%s epoch=%d "
+                "success=1 states=%s",
+                transaction_id,
+                epoch,
+                states,
+            )
+            return manifest
+        except BaseException as e:
+            manifest["state"] = "RECOVERY_REQUIRED"
+            manifest["phase"] = "RESTORE_FAILED"
+            manifest["error"] = str(e)
+            try:
+                self._write_distributed_checkpoint_manifest(manifest)
+            except Exception as persist_error:
+                logging.error(
+                    "failed to persist distributed restore failure: %s",
+                    persist_error,
+                )
+            self._log_distributed_manifest(
+                "restore_failed", manifest, error=str(e)
+            )
+            raise
 
     @staticmethod
     def _rollback_confirmed_all_running(
@@ -1334,10 +2086,18 @@ class GrpcClientWrapper:
             world_ranks
         ):
             return "backend world ranks do not exactly cover the configured rank set"
-        if any(process_id <= 0 for process_id in process_ids) or len(
-            set(process_ids)
-        ) != len(process_ids):
-            return "backend ranks report invalid or duplicate process ids"
+        if any(process_id <= 0 for process_id in process_ids):
+            return "backend ranks report invalid process ids"
+        process_identities = {
+            (
+                str(status.get("process_boot_id", "")),
+                _as_int(status.get("process_pid_namespace", 0)),
+                _as_int(status.get("process_id", 0)),
+            )
+            for status in statuses
+        }
+        if len(process_identities) != len(statuses):
+            return "backend ranks report duplicate process identities"
         return ""
 
     @staticmethod
@@ -1738,6 +2498,13 @@ class GrpcClientWrapper:
     async def _complete_level3_sleep(
         self, commit_request: Any, timeout_s: float
     ) -> Dict[str, Any]:
+        logging.info(
+            "level3 sleep commit begin: addresses=%s timeout_s=%.1f "
+            "distributed=%s",
+            self.control_addresses,
+            timeout_s,
+            self._uses_distributed_checkpoint(),
+        )
         try:
             result, terminal_statuses = await self._converge_commit_with_statuses(
                 operation="commit sleep",
@@ -1762,19 +2529,38 @@ class GrpcClientWrapper:
         self._terminal_sleep_status = self._aggregate_sleep_status(
             self._terminal_sleep_statuses
         )
+        logging.info(
+            "level3 backend sleep barrier reached: statuses=%s",
+            [
+                {
+                    "address": status.get("address", ""),
+                    "rank": status.get("world_rank", -1),
+                    "state": status.get("state", "UNKNOWN"),
+                    "epoch": status.get("sleep_epoch", -1),
+                    "holder": status.get("holder_instance", ""),
+                    "last_error": status.get("last_error", ""),
+                }
+                for status in self._terminal_sleep_statuses
+            ],
+        )
         checkpoint_started = False
         try:
             self._validate_checkpoint_targets(self._terminal_sleep_statuses)
             self._set_frontend_lifecycle_state("CHECKPOINTING")
             checkpoint_started = True
-            await self._checkpoint_controller_call(
-                "checkpoint_all",
-                tuple(self.control_addresses),
-                tuple(self._terminal_sleep_statuses),
-                namespace=self._manifest_namespace(),
-                holder_instance=self._keeper_holder_instance(),
-                team=self._keeper_team(),
-            )
+            if self._uses_distributed_checkpoint():
+                await self._distributed_checkpoint_all(
+                    tuple(self._terminal_sleep_statuses)
+                )
+            else:
+                await self._checkpoint_controller_call(
+                    "checkpoint_all",
+                    tuple(self.control_addresses),
+                    tuple(self._terminal_sleep_statuses),
+                    namespace=self._manifest_namespace(),
+                    holder_instance=self._keeper_holder_instance(),
+                    team=self._keeper_team(),
+                )
         except asyncio.CancelledError:
             return self._mark_level3_recovery_required(
                 "backend checkpoint was cancelled after the irreversible Level3 phase began"
@@ -1802,17 +2588,20 @@ class GrpcClientWrapper:
                 self._set_frontend_lifecycle_state("RESTORING", str(e))
                 if checkpoint_started and manifest is not None:
                     try:
-                        finalized = await self._checkpoint_controller_call(
-                            "restore_all",
-                            tuple(self.control_addresses),
-                            namespace=self._manifest_namespace(),
-                            holder_instance=self._keeper_holder_instance(),
-                            team=self._keeper_team(),
-                        )
-                        if finalized is False:
-                            raise RuntimeError(
-                                "rollback manifest disappeared before finalization"
+                        if self._uses_distributed_checkpoint():
+                            self._clear_distributed_checkpoint_manifest()
+                        else:
+                            finalized = await self._checkpoint_controller_call(
+                                "restore_all",
+                                tuple(self.control_addresses),
+                                namespace=self._manifest_namespace(),
+                                holder_instance=self._keeper_holder_instance(),
+                                team=self._keeper_team(),
                             )
+                            if finalized is False:
+                                raise RuntimeError(
+                                    "rollback manifest disappeared before finalization"
+                                )
                     except asyncio.CancelledError:
                         recovery_error = (
                             f"checkpoint failed ({e}); rollback manifest "
@@ -1856,6 +2645,9 @@ class GrpcClientWrapper:
             return self._mark_level3_recovery_required(recovery_error)
 
         self._set_frontend_lifecycle_state("CHECKPOINTED")
+        logging.info(
+            "level3 sleep commit end: success=1 frontend_state=CHECKPOINTED"
+        )
         return {"status": "ok"}
 
     async def sleep_serving(self, req: Any) -> Dict[str, Any]:
@@ -1866,6 +2658,16 @@ class GrpcClientWrapper:
             return validation_error
         assert req is not None
         level = int(req["level"])
+        if level == 3:
+            logging.info(
+                "level3 sleep request begin: mode=%s timeout_ms=%s addresses=%s "
+                "single_node=%s rdma_enabled=%s",
+                req.get("mode", "wait"),
+                req.get("timeout_ms", 60 * 60 * 1000),
+                self.control_addresses,
+                self._single_node,
+                self._rdma_enabled,
+            )
         if level == 0:
             return {
                 "error": "sleep level=0 state-preserving sleep is defined but not implemented",
@@ -1889,6 +2691,8 @@ class GrpcClientWrapper:
                     "error": precondition_error,
                     "grpc_status": "FAILED_PRECONDITION",
                 }
+            if self._uses_distributed_checkpoint():
+                await self._resolve_instance_identity()
             checkpoint_status = await self._checkpoint_status_if_any()
             if checkpoint_status is not None:
                 if checkpoint_status.get("state") == "CHECKPOINTED":
@@ -1959,17 +2763,37 @@ class GrpcClientWrapper:
             if level == 3:
                 precondition_error = self._level3_precondition_error()
                 if precondition_error:
+                    logging.error(
+                        "level3 checkpoint precondition failed: error=%s",
+                        precondition_error,
+                    )
                     return {
                         "error": precondition_error,
                         "grpc_status": "FAILED_PRECONDITION",
                     }
                 try:
-                    await self._checkpoint_controller_call(
-                        "preflight",
-                        tuple(self.control_addresses),
-                        namespace=self._manifest_namespace(),
+                    logging.info(
+                        "level3 checkpoint preflight dispatch: distributed=%s "
+                        "addresses=%s",
+                        self._uses_distributed_checkpoint(),
+                        self.control_addresses,
                     )
+                    if self._uses_distributed_checkpoint():
+                        await self._distributed_checkpoint_preflight()
+                    else:
+                        await self._checkpoint_controller_call(
+                            "preflight",
+                            tuple(self.control_addresses),
+                            namespace=self._manifest_namespace(),
+                        )
                 except Exception as e:
+                    logging.error(
+                        "level3 checkpoint preflight failed: distributed=%s "
+                        "error=%s",
+                        self._uses_distributed_checkpoint(),
+                        e,
+                        exc_info=True,
+                    )
                     return {
                         "error": f"level-3 checkpoint preflight failed: {e}",
                         "grpc_status": "FAILED_PRECONDITION",
@@ -2084,6 +2908,20 @@ class GrpcClientWrapper:
                     "grpc_status": "FAILED_PRECONDITION",
                     "details": details,
                 }
+            if level == 3:
+                logging.info(
+                    "level3 sleep prepare barrier reached: statuses=%s",
+                    [
+                        {
+                            "address": status.get("address", ""),
+                            "rank": status.get("world_rank", -1),
+                            "state": status.get("state", "UNKNOWN"),
+                            "epoch": status.get("sleep_epoch", -1),
+                            "last_error": status.get("last_error", ""),
+                        }
+                        for status in prepared_statuses
+                    ],
+                )
 
             # commit runs the GPU-release hooks; for level-2 that includes dumping
             # the ~weights-sized raw backup to disk, which can take far longer than
@@ -2121,6 +2959,14 @@ class GrpcClientWrapper:
         if validation_error is not None:
             return validation_error
         assert req is not None
+        if self._level3_enabled:
+            logging.info(
+                "level3 wake request begin: addresses=%s distributed=%s "
+                "frontend_state=%s",
+                self.control_addresses,
+                self._uses_distributed_checkpoint(),
+                self._frontend_lifecycle_state or "IDLE",
+            )
         if not self._sleep_enabled:
             return {
                 "error": "sleep mode is disabled",
@@ -2131,6 +2977,8 @@ class GrpcClientWrapper:
                 "supported_modes": [],
             }
         async with self._lifecycle_lock:
+            if self._uses_distributed_checkpoint():
+                await self._resolve_instance_identity()
             lease_record, lease_error = self._acquire_lifecycle_lease("wake_up")
             if lease_error:
                 result = lease_error
@@ -2183,22 +3031,37 @@ class GrpcClientWrapper:
         self, checkpoint_status: Dict[str, Any]
     ) -> Dict[str, Any]:
         self._set_frontend_lifecycle_state("RESTORING")
+        logging.info(
+            "level3 restore orchestration begin: distributed=%s "
+            "checkpoint_state=%s checkpoint_phase=%s",
+            self._uses_distributed_checkpoint(),
+            checkpoint_status.get("state", "UNKNOWN"),
+            checkpoint_status.get("phase", "UNKNOWN"),
+        )
         try:
-            restored = await self._checkpoint_controller_call(
-                "restore_all",
-                tuple(self.control_addresses),
-                namespace=self._manifest_namespace(),
-                holder_instance=self._keeper_holder_instance(),
-                team=self._keeper_team(),
-            )
-            if restored is False:
-                raise RuntimeError(
-                    "checkpoint manifest disappeared before restore completed"
+            if self._uses_distributed_checkpoint():
+                manifest = await self._read_checkpoint_manifest()
+                if manifest is None:
+                    raise RuntimeError(
+                        "distributed checkpoint manifest disappeared before restore"
+                    )
+                restored = await self._distributed_restore_all(manifest)
+            else:
+                restored = await self._checkpoint_controller_call(
+                    "restore_all",
+                    tuple(self.control_addresses),
+                    namespace=self._manifest_namespace(),
+                    holder_instance=self._keeper_holder_instance(),
+                    team=self._keeper_team(),
                 )
-            if isinstance(restored, dict) and not restored.get("processes"):
-                raise RuntimeError(
-                    "checkpoint manifest disappeared before restore completed"
-                )
+                if restored is False:
+                    raise RuntimeError(
+                        "checkpoint manifest disappeared before restore completed"
+                    )
+                if isinstance(restored, dict) and not restored.get("processes"):
+                    raise RuntimeError(
+                        "checkpoint manifest disappeared before restore completed"
+                    )
         except asyncio.CancelledError:
             error = "level-3 backend restore task was cancelled"
             logging.error(error)
@@ -2208,8 +3071,9 @@ class GrpcClientWrapper:
             logging.error(error)
             return self._mark_level3_recovery_required(error)
 
-        # This is deliberately the first backend lifecycle interaction after
-        # restore_all. A checkpointed process cannot answer even status RPCs.
+        # On the single-node external-controller path this remains the first
+        # backend interaction after restore.  The distributed path performs
+        # rank-local checkpoint RPCs while ordinary CUDA APIs are locked.
         try:
             result = await self._wake_backend_locked(
                 drive_commit=False,
@@ -2228,10 +3092,20 @@ class GrpcClientWrapper:
                 return result
             error = f"backend wake failed after level-3 restore: {result['error']}"
             return self._mark_level3_recovery_required(error, result.get("details"))
+        if self._uses_distributed_checkpoint():
+            try:
+                self._clear_distributed_checkpoint_manifest()
+            except Exception as e:
+                return self._mark_level3_recovery_required(
+                    f"backend woke but distributed checkpoint manifest cleanup failed: {e}"
+                )
         self._set_frontend_lifecycle_state("")
         self._terminal_sleep_statuses = []
         self._terminal_sleep_status = {}
         self._level3_wake_completed = True
+        logging.info(
+            "level3 restore orchestration end: success=1 frontend_state=IDLE"
+        )
         return result
 
     async def _wake_backend_locked(
@@ -2288,6 +3162,8 @@ class GrpcClientWrapper:
         """Get aggregate sleep lifecycle status from every control rank."""
         try:
             self._refresh_control_addresses_if_needed()
+            if self._uses_distributed_checkpoint():
+                await self._resolve_instance_identity()
             checkpoint_status = (
                 await self._checkpoint_status_if_any() if self._level3_enabled else None
             )

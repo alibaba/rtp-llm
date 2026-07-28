@@ -35,6 +35,20 @@ test_deps = [
     "@havenask//aios/autil:zlib",
 ] + torch_deps() + device_impl_target()
 
+cc_test(
+    name = "cuda_checkpoint_process_controller_test",
+    srcs = [
+        "CudaCheckpointProcessControllerTest.cc",
+    ],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/model_rpc:cuda_checkpoint_process_controller",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+)
+
 # cc_test(
 #     name = "model_rpc_server_test",
 #     srcs = [

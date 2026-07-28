@@ -133,7 +133,23 @@ static void log_message(int always, const char* format, ...) {
 
 static dlsym_fn get_real_dlsym(void) {
     if (real_dlsym == NULL) {
+#if defined(__aarch64__)
+        // aarch64 glibc starts at GLIBC_2.17. Asking only for the x86_64
+        // baseline version makes dlvsym return NULL and breaks every later
+        // symbol lookup made by a process that preloads this shim.
+        real_dlsym = (dlsym_fn)dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.17");
+        if (real_dlsym == NULL) {
+            real_dlsym = (dlsym_fn)dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.2.5");
+        }
+#else
+        // x86_64 exports dlsym at GLIBC_2.2.5. Keep the aarch64 version as a
+        // fallback so the source remains safe for other little-endian glibc
+        // toolchains rather than silently returning a NULL resolver.
         real_dlsym = (dlsym_fn)dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.2.5");
+        if (real_dlsym == NULL) {
+            real_dlsym = (dlsym_fn)dlvsym(RTLD_NEXT, "dlsym", "GLIBC_2.17");
+        }
+#endif
     }
     return real_dlsym;
 }

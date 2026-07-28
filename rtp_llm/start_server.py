@@ -177,7 +177,7 @@ def _start_multicast_keeper_monitor(
                 runtime.health()
                 unresponsive_since = None
                 continue
-            except OSError:
+            except OSError as error:
                 # CREATE/IMPORT_ADD is synchronous in the holder and can occupy
                 # its socket loop until the bounded creator finishes. A live
                 # holder is allowed that same bounded window to resume PINGs.
@@ -189,18 +189,26 @@ def _start_multicast_keeper_monitor(
                     if now - unresponsive_since <= unresponsive_timeout:
                         logging.warning(
                             "Multicast keeper PING is temporarily unavailable; "
-                            "holder pid=%s remains alive",
+                            "holder pid=%s remains alive error=%s diagnostics=%s",
                             process.pid,
+                            error,
+                            runtime.diagnostics(),
                         )
                         continue
                 logging.error(
                     "Multicast keeper PING remained unavailable past its "
-                    "creator deadline",
+                    "creator deadline: diagnostics=%s holder_log_tail=%s",
+                    runtime.diagnostics(),
+                    runtime.log_tail(),
                     exc_info=True,
                 )
-            except Exception:
+            except Exception as error:
                 logging.error(
-                    "Multicast keeper health probe failed",
+                    "Multicast keeper health probe failed: error=%s "
+                    "diagnostics=%s holder_log_tail=%s",
+                    error,
+                    runtime.diagnostics(),
+                    runtime.log_tail(),
                     exc_info=True,
                 )
             logging.critical(

@@ -200,6 +200,41 @@ class _FakeSleepStatusResponsePB(_FakeProtoMessage):
                 value = list(value)
             setattr(self, key, value)
 
+class _FakeCudaCheckpointRequestPB(_FakeProtoMessage):
+    def __init__(
+        self,
+        action: str = "",
+        transaction_id: str = "",
+        sleep_epoch: int = 0,
+        lock_timeout_ms: int = 0,
+        **_: Any,
+    ):
+        self.action = action
+        self.transaction_id = transaction_id
+        self.sleep_epoch = sleep_epoch
+        self.lock_timeout_ms = lock_timeout_ms
+
+
+class _FakeCudaCheckpointResponsePB(_FakeProtoMessage):
+    def __init__(self, **kwargs: Any):
+        defaults = {
+            "success": False,
+            "cuda_result": 0,
+            "state": "",
+            "error": "",
+            "transaction_id": "",
+            "sleep_epoch": 0,
+            "process_id": 0,
+            "process_starttime": 0,
+            "process_pid_namespace": 0,
+            "process_boot_id": "",
+            "world_rank": 0,
+            "holder_instance": "",
+        }
+        defaults.update(kwargs)
+        for key, value in defaults.items():
+            setattr(self, key, value)
+
 
 def _install_sleep_proto_test_fallback(pb2, grpc_client_wrapper_module):
     """Let direct unittest runs work when the checked-in pb2 is stale."""
@@ -213,6 +248,10 @@ def _install_sleep_proto_test_fallback(pb2, grpc_client_wrapper_module):
     )
     if sleep_status_pb is None or "process_starttime" not in sleep_status_fields:
         pb2.SleepStatusResponsePB = _FakeSleepStatusResponsePB
+    if not hasattr(pb2, "CudaCheckpointRequestPB"):
+        pb2.CudaCheckpointRequestPB = _FakeCudaCheckpointRequestPB
+    if not hasattr(pb2, "CudaCheckpointResponsePB"):
+        pb2.CudaCheckpointResponsePB = _FakeCudaCheckpointResponsePB
 
     message_to_dict = grpc_client_wrapper_module.MessageToDict
     if getattr(message_to_dict, "_supports_sleep_test_fakes", False):
@@ -854,6 +893,142 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
             wrapper._dp_stubs[address].SleepServing = AsyncMock(side_effect=sleep_rpc)
             wrapper._dp_stubs[address].WakeUpServing = AsyncMock(side_effect=wake_rpc)
         return rank_statuses
+
+    def _configure_distributed_level3_backend(self, wrapper, pb2, events=None):
+        events = events if events is not None else []
+        rank_statuses = {}
+        driver_states = {}
+        transactions = {}
+        for rank, address in enumerate(wrapper.control_addresses):
+            rank_statuses[address] = {
+                "state": "RUNNING",
+                "sleep_epoch": 0,
+                "kv_memory_state": "ACTIVE",
+                "device_kv_cache_valid": True,
+                "gpu_resource_state": "ACTIVE",
+                "supported_levels": [3],
+                # PIDs may repeat across hosts; the node identity disambiguates.
+                "process_id": 2001,
+                "process_starttime": 9001 + rank,
+                "process_pid_namespace": 101 + rank,
+                "process_boot_id": f"boot-node-{rank}",
+                "world_rank": rank,
+                "role": "RoleType.PREFILL",
+                "instance_generation_uuid": f"generation-{rank}",
+                "holder_instance": f"keeper-node-{rank}",
+            }
+            driver_states[address] = "RUNNING"
+            transactions[address] = ("", -1)
+
+            async def get_status(*args, address=address, **kwargs):
+                events.append(("backend_status", address))
+                return self._status_pb(pb2, **rank_statuses[address])
+
+            async def sleep_rpc(request, *args, address=address, **kwargs):
+                if request.prepare_only:
+                    events.append(("sleep_prepare", address))
+                    rank_statuses[address].update(state="DRAINING", sleep_epoch=1)
+                elif request.commit_only:
+                    events.append(("sleep_commit", address))
+                    rank_statuses[address].update(
+                        state="SLEEPING",
+                        kv_memory_state="PAUSED",
+                        device_kv_cache_valid=False,
+                        gpu_resource_state="RELEASED",
+                    )
+                return pb2.EmptyPB()
+
+            async def wake_rpc(request, *args, address=address, **kwargs):
+                if request.prepare_only:
+                    events.append(("wake_prepare", address))
+                    rank_statuses[address].update(
+                        state="WAKING_UP", gpu_resource_state="RESTORING"
+                    )
+                elif request.commit_only:
+                    events.append(("wake_commit", address))
+                    rank_statuses[address].update(
+                        state="RUNNING",
+                        kv_memory_state="ACTIVE",
+                        device_kv_cache_valid=True,
+                        gpu_resource_state="ACTIVE",
+                    )
+                return pb2.EmptyPB()
+
+            async def checkpoint_rpc(request, *args, address=address, **kwargs):
+                action = request.action
+                events.append(("cuda_checkpoint", action, address))
+                state = driver_states[address]
+                owner = transactions[address]
+                success = True
+                error = ""
+                if action == "LOCK":
+                    if state == "RUNNING":
+                        transactions[address] = (
+                            request.transaction_id,
+                            request.sleep_epoch,
+                        )
+                        driver_states[address] = "LOCKED"
+                    elif state != "LOCKED" or owner != (
+                        request.transaction_id,
+                        request.sleep_epoch,
+                    ):
+                        success = False
+                        error = "bad LOCK state"
+                elif action == "CHECKPOINT":
+                    if state == "LOCKED" and owner == (
+                        request.transaction_id,
+                        request.sleep_epoch,
+                    ):
+                        driver_states[address] = "CHECKPOINTED"
+                    elif state != "CHECKPOINTED":
+                        success = False
+                        error = "bad CHECKPOINT state"
+                elif action == "RESTORE":
+                    if state == "CHECKPOINTED" and owner == (
+                        request.transaction_id,
+                        request.sleep_epoch,
+                    ):
+                        driver_states[address] = "LOCKED"
+                    elif state != "LOCKED":
+                        success = False
+                        error = "bad RESTORE state"
+                elif action == "UNLOCK":
+                    if state == "LOCKED" and owner == (
+                        request.transaction_id,
+                        request.sleep_epoch,
+                    ):
+                        driver_states[address] = "RUNNING"
+                    elif state != "RUNNING":
+                        success = False
+                        error = "bad UNLOCK state"
+                elif action != "GET_STATE":
+                    success = False
+                    error = "bad action"
+                identity = rank_statuses[address]
+                return pb2.CudaCheckpointResponsePB(
+                    success=success,
+                    cuda_result=0 if success else 1,
+                    state=driver_states[address],
+                    error=error,
+                    transaction_id=transactions[address][0],
+                    sleep_epoch=transactions[address][1],
+                    process_id=identity["process_id"],
+                    process_starttime=identity["process_starttime"],
+                    process_pid_namespace=identity["process_pid_namespace"],
+                    process_boot_id=identity["process_boot_id"],
+                    world_rank=identity["world_rank"],
+                    holder_instance=identity["holder_instance"],
+                )
+
+            wrapper._dp_stubs[address].GetSleepStatus = AsyncMock(
+                side_effect=get_status
+            )
+            wrapper._dp_stubs[address].SleepServing = AsyncMock(side_effect=sleep_rpc)
+            wrapper._dp_stubs[address].WakeUpServing = AsyncMock(side_effect=wake_rpc)
+            wrapper._dp_stubs[address].CudaCheckpointProcess = AsyncMock(
+                side_effect=checkpoint_rpc
+            )
+        return rank_statuses, driver_states
 
     async def test_health_check_failure_preserves_lifecycle_channels(self):
         # Regression: a routine health probe timing out during a sleep/wake
@@ -2832,24 +3007,165 @@ class GrpcClientWrapperSleepTest(unittest.IsolatedAsyncioTestCase):
             wake_count,
         )
 
-    async def test_level3_rejects_multi_node_before_backend_rpc(self):
+    async def test_level3_multi_node_checkpoints_and_restores_in_rank_order(self):
+        addresses = ["10.0.0.1:10001", "10.0.0.2:10001"]
+        store = _FakeStore()
         controller = _FakeCheckpointController()
-        wrapper, _ = self._build_wrapper(
+        events = []
+        wrapper, pb2 = self._build_wrapper(
+            control_addresses=addresses,
+            lifecycle_store=store,
             checkpoint_controller=controller,
             single_node=False,
             rdma_enabled=True,
         )
-        address = wrapper.control_addresses[0]
-        wrapper._dp_stubs[address].GetSleepStatus = AsyncMock()
-        wrapper._dp_stubs[address].SleepServing = AsyncMock()
+        _, driver_states = self._configure_distributed_level3_backend(
+            wrapper, pb2, events
+        )
 
-        result = await wrapper.sleep_serving({"level": 3})
+        slept = await wrapper.sleep_serving({"level": 3})
+        manifest = json.loads(
+            store.values[wrapper._distributed_checkpoint_key()]
+        )
+        woke = await wrapper.wake_up_serving()
+
+        self.assertEqual(slept, {"status": "ok"})
+        self.assertEqual(manifest["state"], "CHECKPOINTED")
+        self.assertEqual(
+            [target["rank"] for target in manifest["targets"]], [0, 1]
+        )
+        self.assertEqual(
+            manifest["node_holders"],
+            {
+                "boot-node-0:101": "keeper-node-0",
+                "boot-node-1:102": "keeper-node-1",
+            },
+        )
+        checkpoint_actions = [
+            (event[1], event[2])
+            for event in events
+            if event[0] == "cuda_checkpoint" and event[1] != "GET_STATE"
+        ]
+        self.assertEqual(
+            checkpoint_actions,
+            [
+                ("LOCK", addresses[0]),
+                ("LOCK", addresses[1]),
+                ("CHECKPOINT", addresses[0]),
+                ("CHECKPOINT", addresses[1]),
+                ("RESTORE", addresses[0]),
+                ("RESTORE", addresses[1]),
+                ("UNLOCK", addresses[0]),
+                ("UNLOCK", addresses[1]),
+            ],
+        )
+        self.assertEqual(woke, {"status": "ok"})
+        self.assertEqual(set(driver_states.values()), {"RUNNING"})
+        self.assertEqual(store.values[wrapper._distributed_checkpoint_key()], "")
+        self.assertFalse(
+            any(
+                event[0] in {"preflight", "checkpoint_all", "restore_all"}
+                for event in controller.events
+            )
+        )
+
+    async def test_level3_multi_node_partial_checkpoint_rolls_back_all_ranks(self):
+        addresses = ["10.0.0.1:10001", "10.0.0.2:10001"]
+        store = _FakeStore()
+        controller = _FakeCheckpointController()
+        wrapper, pb2 = self._build_wrapper(
+            control_addresses=addresses,
+            lifecycle_store=store,
+            checkpoint_controller=controller,
+            single_node=False,
+        )
+        rank_statuses, driver_states = self._configure_distributed_level3_backend(
+            wrapper, pb2
+        )
+        original_rpc = wrapper._dp_stubs[addresses[1]].CudaCheckpointProcess.side_effect
+        failed = False
+
+        async def fail_second_checkpoint(request, *args, **kwargs):
+            nonlocal failed
+            if request.action == "CHECKPOINT" and not failed:
+                failed = True
+                identity = rank_statuses[addresses[1]]
+                return pb2.CudaCheckpointResponsePB(
+                    success=False,
+                    cuda_result=801,
+                    state=driver_states[addresses[1]],
+                    error="injected checkpoint failure",
+                    process_id=identity["process_id"],
+                    process_starttime=identity["process_starttime"],
+                    process_pid_namespace=identity["process_pid_namespace"],
+                    process_boot_id=identity["process_boot_id"],
+                    world_rank=identity["world_rank"],
+                    holder_instance=identity["holder_instance"],
+                )
+            return await original_rpc(request, *args, **kwargs)
+
+        wrapper._dp_stubs[addresses[1]].CudaCheckpointProcess.side_effect = (
+            fail_second_checkpoint
+        )
+
+        with self.assertLogs(level="INFO") as captured_logs:
+            result = await wrapper.sleep_serving({"level": 3})
+        diagnostic_log = "\n".join(captured_logs.output)
 
         self.assertEqual(result["grpc_status"], "FAILED_PRECONDITION")
-        self.assertIn("single node", result["error"])
-        wrapper._dp_stubs[address].GetSleepStatus.assert_not_awaited()
-        wrapper._dp_stubs[address].SleepServing.assert_not_awaited()
-        self.assertFalse(any(event[0] == "preflight" for event in controller.events))
+        self.assertTrue(result["recovered"])
+        self.assertIn("backend wake compensation completed", result["error"])
+        self.assertEqual(set(driver_states.values()), {"RUNNING"})
+        self.assertTrue(
+            all(status["state"] == "RUNNING" for status in rank_statuses.values())
+        )
+        self.assertEqual(store.values[wrapper._distributed_checkpoint_key()], "")
+        self.assertEqual(
+            store.values.get(wrapper._lifecycle_recovery_key(), ""), ""
+        )
+        self.assertIn(
+            "level3 checkpoint rpc end: action=CHECKPOINT "
+            f"address={addresses[1]} rank=1 success=False cuda_result=801 "
+            "driver_state=LOCKED",
+            diagnostic_log,
+        )
+        self.assertIn(
+            "level3 distributed rollback begin:", diagnostic_log
+        )
+        self.assertIn(
+            "level3 distributed rollback end:", diagnostic_log
+        )
+
+    async def test_level3_multi_node_new_frontend_recovers_shared_manifest(self):
+        addresses = ["10.0.0.1:10001", "10.0.0.2:10001"]
+        store = _FakeStore()
+        controller = _FakeCheckpointController()
+        sleeper, pb2 = self._build_wrapper(
+            control_addresses=addresses,
+            lifecycle_store=store,
+            checkpoint_controller=controller,
+            single_node=False,
+        )
+        _, driver_states = self._configure_distributed_level3_backend(
+            sleeper, pb2
+        )
+        slept = await sleeper.sleep_serving({"level": 3})
+
+        waker, _ = self._build_wrapper(
+            control_addresses=addresses,
+            lifecycle_store=store,
+            checkpoint_controller=controller,
+            single_node=False,
+        )
+        for address in addresses:
+            waker._dp_stubs[address] = sleeper._dp_stubs[address]
+
+        woke = await waker.wake_up_serving()
+
+        self.assertEqual(slept, {"status": "ok"})
+        self.assertEqual(woke, {"status": "ok"})
+        self.assertEqual(set(driver_states.values()), {"RUNNING"})
+        self.assertEqual(store.values[waker._distributed_checkpoint_key()], "")
 
     def test_frontend_level3_options_use_runtime_topology_and_rdma_config(self):
         from rtp_llm.utils.grpc_client_wrapper import sleep_level3_options_from_config

@@ -21,6 +21,7 @@
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
+#include "rtp_llm/cpp/model_rpc/CudaCheckpointProcessController.h"
 #include "rtp_llm/cpp/model_rpc/GenerateContext.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.pb.h"
@@ -72,6 +73,10 @@ public:
     grpc::Status IsSleeping(grpc::ServerContext* context, const EmptyPB* request, IsSleepingResponsePB* response);
 
     grpc::Status GetSleepStatus(grpc::ServerContext* context, const EmptyPB* request, SleepStatusResponsePB* response);
+
+    grpc::Status CudaCheckpointProcess(grpc::ServerContext*                 context,
+                                       const CudaCheckpointRequestPB*       request,
+                                       CudaCheckpointResponsePB*            response);
 
     grpc::Status SetLogLevel(grpc::ServerContext* context, const SetLogLevelRequestPB* request, EmptyPB* response);
 
@@ -190,6 +195,9 @@ protected:
     // instead of address order, preventing cross-role/instance collisions on a
     // shared TCPStore.
     std::string instance_generation_uuid_;
+    // Serializes self-checkpoint Driver API calls and rejects a stale
+    // coordinator from mutating a checkpoint owned by another sleep epoch.
+    CudaCheckpointProcessController cuda_checkpoint_process_controller_;
 };
 
 }  // namespace rtp_llm

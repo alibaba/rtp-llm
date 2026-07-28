@@ -1,6 +1,7 @@
 #include <algorithm>
 #include <memory>
 #include <chrono>
+#include <cstring>
 #include <cstdio>
 #include <fstream>
 #include <optional>
@@ -1547,6 +1548,72 @@ LocalRpcServer::GetSleepStatus(grpc::ServerContext* context, const EmptyPB* requ
     // pinned it for an in-flight Level-3 checkpoint). The manifest persists+verifies
     // this so a holder that exits/changes fails wake closed.
     response->set_holder_instance(multicastHolderInstanceString());
+    return grpc::Status::OK;
+}
+
+grpc::Status LocalRpcServer::CudaCheckpointProcess(grpc::ServerContext*           context,
+                                                   const CudaCheckpointRequestPB* request,
+                                                   CudaCheckpointResponsePB*      response) {
+    response->set_process_id(static_cast<int32_t>(getpid()));
+    response->set_process_starttime(readSelfProcessStarttime());
+    response->set_process_pid_namespace(readSelfPidNamespace());
+    response->set_process_boot_id(readHostBootId());
+    response->set_world_rank(maga_init_params_.parallelism_config.world_rank);
+    response->set_holder_instance(multicastHolderInstanceString());
+    const auto backend_sleep_status = engine_->sleepController().status();
+    RTP_LLM_LOG_INFO(
+        "level-3 checkpoint rpc begin: peer=%s rank=%d pid=%d action=%s request_epoch=%ld backend_epoch=%ld "
+        "backend_state=%s transaction=%s holder=%s lock_timeout_ms=%u",
+        context->peer().c_str(),
+        maga_init_params_.parallelism_config.world_rank,
+        static_cast<int>(getpid()),
+        request->action().c_str(),
+        request->sleep_epoch(),
+        backend_sleep_status.sleep_epoch,
+        sleepStateToString(backend_sleep_status.state).c_str(),
+        request->transaction_id().c_str(),
+        response->holder_instance().c_str(),
+        request->lock_timeout_ms());
+    const auto result = cuda_checkpoint_process_controller_.execute(
+        CudaCheckpointCommand{request->action(),
+                              request->transaction_id(),
+                              request->sleep_epoch(),
+                              request->lock_timeout_ms()},
+        static_cast<int>(getpid()),
+        backend_sleep_status.sleep_epoch,
+        backend_sleep_status.state == SleepState::SLEEPING);
+    response->set_success(result.success);
+    response->set_cuda_result(result.cuda_result);
+    response->set_state(result.state);
+    response->set_error(result.error);
+    response->set_transaction_id(result.transaction_id);
+    response->set_sleep_epoch(result.sleep_epoch);
+    if (result.success) {
+        RTP_LLM_LOG_INFO(
+            "level-3 checkpoint rpc end: rank=%d pid=%d action=%s success=1 cuda_result=%d driver_state=%s "
+            "transaction=%s epoch=%ld",
+            maga_init_params_.parallelism_config.world_rank,
+            static_cast<int>(getpid()),
+            request->action().c_str(),
+            result.cuda_result,
+            result.state.c_str(),
+            result.transaction_id.c_str(),
+            result.sleep_epoch);
+    } else {
+        RTP_LLM_LOG_ERROR(
+            "level-3 checkpoint rpc end: rank=%d pid=%d action=%s success=0 cuda_result=%d driver_state=%s "
+            "transaction=%s epoch=%ld backend_state=%s backend_error=%s error=%s",
+            maga_init_params_.parallelism_config.world_rank,
+            static_cast<int>(getpid()),
+            request->action().c_str(),
+            result.cuda_result,
+            result.state.c_str(),
+            result.transaction_id.c_str(),
+            result.sleep_epoch,
+            sleepStateToString(backend_sleep_status.state).c_str(),
+            backend_sleep_status.last_error.c_str(),
+            result.error.c_str());
+    }
     return grpc::Status::OK;
 }
 

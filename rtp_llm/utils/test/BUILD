@@ -33,6 +33,12 @@ py_test(
 py_test(
     name = "multicast_keeper_runtime_test",
     srcs = ["multicast_keeper_runtime_test.py"],
+    data = select({
+        "@//:using_cuda": [
+            "//rtp_llm/cpp/cuda_checkpoint/multicast_keeper:runtime_files",
+        ],
+        "//conditions:default": [],
+    }),
     deps = ["//rtp_llm:utils"],
     timeout = "short",
 )
