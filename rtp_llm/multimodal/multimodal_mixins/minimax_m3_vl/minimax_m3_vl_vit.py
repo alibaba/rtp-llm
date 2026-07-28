@@ -31,6 +31,39 @@ import torch.nn.functional as F
 
 logger = logging.getLogger(__name__)
 
+
+def _patch_cutlass_cute_compat() -> None:
+    """Restore CUTLASS aliases expected by the bundled FlashInfer."""
+    try:
+        # Bazel does not process the CUTLASS wheel's .pth file for subprocesses.
+        import nvidia_cutlass_dsl
+
+        for package_dir in nvidia_cutlass_dsl.__path__:
+            python_packages_dir = os.path.join(package_dir, "python_packages")
+            if (
+                os.path.isdir(python_packages_dir)
+                and python_packages_dir not in sys.path
+            ):
+                sys.path.insert(0, python_packages_dir)
+
+        import cutlass.cute as cutlass_cute
+        import cutlass.cute.atom as cutlass_cute_atom
+        import cutlass.cute.core as cutlass_cute_core
+
+        if not hasattr(cutlass_cute_core, "ThrMma") and hasattr(
+            cutlass_cute_atom, "ThrMma"
+        ):
+            cutlass_cute_core.ThrMma = cutlass_cute_atom.ThrMma
+        if not hasattr(cutlass_cute, "make_fragment") and hasattr(
+            cutlass_cute, "make_rmem_tensor"
+        ):
+            cutlass_cute.make_fragment = cutlass_cute.make_rmem_tensor
+    except Exception:
+        pass
+
+
+_patch_cutlass_cute_compat()
+
 _FA4_VARLEN_FUNC = None
 try:
     from flash_attn.cute import flash_attn_varlen_func as _FA4_VARLEN_FUNC
@@ -653,17 +686,20 @@ class MiniMaxM3VLVisionModel(nn.Module):
             if (
                 self._flashinfer_workspace is None
                 or self._flashinfer_workspace.device != hidden_states.device
+                or self._flashinfer_wrapper is None
             ):
-                self._flashinfer_workspace = torch.empty(
+                flashinfer_workspace = torch.empty(
                     128 * 1024 * 1024,
                     dtype=torch.uint8,
                     device=hidden_states.device,
                 )
-                self._flashinfer_wrapper = _FLASHINFER_RAGGED_WRAPPER(
-                    self._flashinfer_workspace,
+                flashinfer_wrapper = _FLASHINFER_RAGGED_WRAPPER(
+                    flashinfer_workspace,
                     kv_layout="NHD",
                     backend="cute-dsl",
                 )
+                self._flashinfer_workspace = flashinfer_workspace
+                self._flashinfer_wrapper = flashinfer_wrapper
 
             assert self._flashinfer_wrapper is not None
             head_dim = self.config.hidden_size // self.config.num_attention_heads
@@ -684,7 +720,13 @@ class MiniMaxM3VLVisionModel(nn.Module):
                 backend=backend,
                 flashinfer_wrapper=self._flashinfer_wrapper,
             )
-        except (AssertionError, RuntimeError, ValueError) as error:
+        except (
+            AssertionError,
+            AttributeError,
+            ImportError,
+            RuntimeError,
+            ValueError,
+        ) as error:
             if "out of memory" in str(error).lower():
                 raise
             logger.warning(
