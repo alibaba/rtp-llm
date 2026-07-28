@@ -480,6 +480,13 @@ class AiterPrefillAttnOp:
         Supports BF16/FP16 Q or FP8 Q with FP8 KV cache (with descale).
         mha_batch_prefill_func handles mixed dtype via q_descale/k_descale/v_descale.
         """
+        # mha_batch_prefill_func below hardcodes causal=True; fail loud instead
+        # of silently dropping non-causal semantics on this branch.
+        if not self.is_causal:
+            raise NotImplementedError(
+                "aiter paged prefill (mha_batch_prefill_func) hardcodes causal=True; "
+                "non-causal paged prefill is not supported on ROCm"
+            )
         # Ensure Q is 3D [tokens, heads, head_dim] for mha_batch_prefill_func
         if q_tensor.dim() == 2:
             q_tensor = q_tensor.view(q_tensor.size(0), self.head_num, self.head_dim)
@@ -704,6 +711,7 @@ class AiterPrefillAttnOpPaged:
         self.head_dim = attn_configs.size_per_head
         self.head_num_kv = attn_configs.kv_head_num
         self.tokens_per_block = attn_configs.kernel_tokens_per_block
+        self.is_causal = attn_configs.is_causal
         self.enable_cuda_graph = False
         self.cuda_graph_prepared = False
         self.graph_device: Optional[torch.device] = None
@@ -886,6 +894,13 @@ class AiterPrefillAttnOpPaged:
                 k_descale = torch.ones(1, dtype=torch.float32, device=device)
                 v_descale = torch.ones(1, dtype=torch.float32, device=device)
 
+        # mha_batch_prefill_func below hardcodes causal=True; fail loud instead
+        # of silently dropping non-causal semantics on this branch.
+        if not self.is_causal:
+            raise NotImplementedError(
+                "aiter paged prefill (mha_batch_prefill_func) hardcodes causal=True; "
+                "non-causal paged prefill is not supported on ROCm"
+            )
         res = aiter.mha_batch_prefill_func(
             q_tensor,
             key_cache,
@@ -1396,9 +1411,10 @@ class AiterDecodeAttnOpTriton(AiterDecodeAttnOpBase):
 class AiterPrefillImplAsm(FMHAImplBase):
     """Aiter prefill attention implementation using ASM."""
 
-    # Pre-existing ROCm status quo: AiterPrefillAttnOp threads is_causal on its
-    # main branches (the prefix/batch-prefill branch hardcodes causal=True);
-    # kept selectable for non-causal batches to avoid changing ROCm selection.
+    # AiterPrefillAttnOp threads is_causal on its varlen branches (the paged
+    # branch hardcodes causal=True but now fails loud on non-causal inputs
+    # instead of silently running causal), so ragged non-causal (BERT/ViT)
+    # stays selectable on ROCm.
     SUPPORTS_NONCAUSAL = True
 
     def __init__(
@@ -1461,9 +1477,10 @@ class AiterPrefillImplAsm(FMHAImplBase):
 class AiterPrefillImplNonAsm(FMHAImplBase):
     """Aiter prefill attention implementation using non-ASM."""
 
-    # Pre-existing ROCm status quo: AiterPrefillAttnOp threads is_causal on its
-    # main branches (the prefix/batch-prefill branch hardcodes causal=True);
-    # kept selectable for non-causal batches to avoid changing ROCm selection.
+    # AiterPrefillAttnOp threads is_causal on its varlen branches (the paged
+    # branch hardcodes causal=True but now fails loud on non-causal inputs
+    # instead of silently running causal), so ragged non-causal (BERT/ViT)
+    # stays selectable on ROCm.
     SUPPORTS_NONCAUSAL = True
 
     def __init__(
@@ -1530,10 +1547,10 @@ class AiterPrefillImplPaged(FMHAImplBase):
     - Otherwise: CK batch-prefill (general paged prefill)
     """
 
-    # Pre-existing ROCm status quo: AiterPrefillAttnOp threads is_causal on its
-    # main branches (the prefix/batch-prefill branch hardcodes causal=True);
-    # kept selectable for non-causal batches to avoid changing ROCm selection.
-    SUPPORTS_NONCAUSAL = True
+    # Both runtime paths (CK batch-prefill and Triton PA) compute causal
+    # attention only, so this impl must not be selected for non-causal
+    # prefill batches (e.g. the dflash draft).
+    SUPPORTS_NONCAUSAL = False
 
     def __init__(
         self,

@@ -150,12 +150,14 @@ def get_fmha_impl(
 
     mha_impls = PREFILL_MHA_IMPS if attn_inputs.is_prefill else DECODE_MHA_IMPS
 
+    skipped: List[str] = []
     for impl in mha_impls:
         # Check if this FMHA implementation is disabled before creating instance
         impl_class_name = impl.__name__
 
         # Skip if this FMHA implementation is disabled in config
         if _is_fmha_impl_disabled(impl_class_name, fmha_config):
+            skipped.append(f"{impl_class_name}: disabled by fmha_config")
             continue
 
         # Non-causal prefill (e.g. the dflash draft) must land on an impl that
@@ -166,25 +168,33 @@ def get_fmha_impl(
             and not attn_configs.is_causal
             and not impl.SUPPORTS_NONCAUSAL
         ):
+            skipped.append(f"{impl_class_name}: no SUPPORTS_NONCAUSAL")
             continue
 
         # Check support before creating instance
         if not impl.support(attn_configs, attn_inputs):
+            skipped.append(f"{impl_class_name}: support() returned False")
             continue
 
         # Check if implementation supports parallelism config
         if not impl.support_parallelism_config(parallelism_config):
+            skipped.append(f"{impl_class_name}: parallelism config unsupported")
             continue
         try:
             instance = impl(attn_configs, attn_inputs, parallelism_config)
             if not is_cuda_graph or instance.support_cuda_graph():
                 return instance
+            skipped.append(f"{impl_class_name}: no cuda graph support")
 
         except Exception as e:
             # If instantiation fails, continue to next impl
             logging.warning(f"Failed to instantiate {impl_class_name}: {e}")
+            skipped.append(f"{impl_class_name}: instantiation failed ({e})")
             continue
-    raise Exception(f"can not find mha type")
+    raise Exception(
+        f"can not find mha type (is_prefill={attn_inputs.is_prefill}, "
+        f"is_causal={attn_configs.is_causal}; skipped: {'; '.join(skipped)})"
+    )
 
 
 class AttnImplFactory(object):
