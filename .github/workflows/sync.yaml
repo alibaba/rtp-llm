@@ -101,6 +101,7 @@ jobs:
         git checkout origin/yuzho/ci_workflows -- .github/workflows/sync.yaml
         git checkout origin/yuzho/ci_workflows -- .github/workflows/run_tests.yaml
         git checkout origin/yuzho/ci_workflows -- .github/workflows/create_pr.yaml
+        git checkout origin/yuzho/ci_workflows -- rtp_llm_benchmark/
         git commit -a -m '[CI][AMD] add workflows'
         git push --set-upstream origin main --force
 
