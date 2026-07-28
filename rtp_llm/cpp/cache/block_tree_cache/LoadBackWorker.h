@@ -21,7 +21,7 @@ class BlockTransferDispatcher;
 class LoadBackWorker {
 public:
     struct Task {
-        LoadBackTicket::PendingLoadBackItems items;
+        LoadBackTicket::PendingLoadBackItems  items;
         std::vector<GroupSetPtr>              item_groups;
         std::vector<BlockIdxType>             staging_host_blocks;
         std::vector<TransferDescriptor>       disk_to_host_descriptors;
@@ -42,14 +42,14 @@ public:
                              const std::shared_ptr<LoadBackAsyncContext>& context,
                              TaskPtr&                                     task);
     PrepareStatus prepareTransferItem(Task& task, size_t item_index);
-    bool runTransfer(Task&                          task,
-                     const BlockTransferDispatcher& transfer_dispatcher,
-                     BlockTreeCacheMetricsReporter& metrics_reporter,
-                     int                            disk_timeout_ms,
-                     int                            host_timeout_ms,
-                     bool                           prepared);
-    void releaseTaskResources(Task& task);
-    bool cancelLoadBackNolock(const std::shared_ptr<AsyncContext>& context);
+    bool          runTransfer(Task&                          task,
+                              const BlockTransferDispatcher& transfer_dispatcher,
+                              BlockTreeCacheMetricsReporter& metrics_reporter,
+                              int                            disk_timeout_ms,
+                              int                            host_timeout_ms,
+                              bool                           prepared);
+    void          releaseTaskResources(Task& task);
+    bool          cancelLoadBackNolock(const std::shared_ptr<AsyncContext>& context);
 
     // Registry operations rely on the BlockTreeCache mutex.
     bool startLoading(TreeNode*                                    node,
@@ -57,7 +57,7 @@ public:
                       const std::vector<BlockIdxType>&             target_blocks,
                       const std::shared_ptr<LoadBackAsyncContext>& context);
     std::optional<std::vector<BlockIdxType>>
-    joinLoading(TreeNode* node, size_t group_set_id, const std::shared_ptr<LoadBackAsyncContext>& context);
+         joinLoading(TreeNode* node, size_t group_set_id, const std::shared_ptr<LoadBackAsyncContext>& context);
     bool finishLoading(TreeNode* node, size_t group_set_id, bool success);
     bool eraseLoadingForOneContext(TreeNode*                                    node,
                                    size_t                                       group_set_id,

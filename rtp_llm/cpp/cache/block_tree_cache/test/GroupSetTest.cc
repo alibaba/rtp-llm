@@ -68,14 +68,14 @@ TEST(GroupSetTest, RejectsEmptyOrOutOfRangeMembership) {
 }
 
 TEST(GroupSetTest, RejectsNullTopology) {
-    const auto pool = makeTestDevicePool({{64, 16}}, 4, "group_set_null_topology");
+    const auto pool  = makeTestDevicePool({{64, 16}}, 4, "group_set_null_topology");
     auto       group = std::make_shared<FullGroupSet>();
 
     EXPECT_THROW(group->initialize(0, nullptr, {0}, {pool}), std::runtime_error);
 }
 
 TEST(GroupSetTest, RejectsNullPoolAndInvalidLogicalPayload) {
-    const auto topology = makeTestTopology({groupSpec("a", {0})});
+    const auto topology        = makeTestTopology({groupSpec("a", {0})});
     auto       null_pool_group = std::make_shared<FullGroupSet>();
     EXPECT_THROW(null_pool_group->initialize(0, topology, {0}, {nullptr}), std::runtime_error);
 
@@ -103,13 +103,13 @@ TEST(GroupSetTest, RejectsNonReusableMembership) {
 }
 
 TEST(GroupSetTest, RejectsIncompatibleMemberPolicy) {
-    auto first  = groupSpec("a", {0});
-    auto second = groupSpec("b", {0});
+    auto first               = groupSpec("a", {0});
+    auto second              = groupSpec("b", {0});
     second.policy.reservable = false;
-    const auto topology = makeTestTopology({std::move(first), std::move(second)});
-    const auto pool_a   = makeTestDevicePool({{64, 16}}, 4, "group_set_policy_a");
-    const auto pool_b   = makeTestDevicePool({{64, 16}}, 4, "group_set_policy_b");
-    auto       group    = std::make_shared<FullGroupSet>();
+    const auto topology      = makeTestTopology({std::move(first), std::move(second)});
+    const auto pool_a        = makeTestDevicePool({{64, 16}}, 4, "group_set_policy_a");
+    const auto pool_b        = makeTestDevicePool({{64, 16}}, 4, "group_set_policy_b");
+    auto       group         = std::make_shared<FullGroupSet>();
     EXPECT_THROW(group->initialize(0, topology, {0, 1}, {pool_a, pool_b}), std::runtime_error);
 }
 
@@ -146,7 +146,7 @@ TEST(GroupSetTest, LowerTierAllocationFailureReleasesAllocatedPrefix) {
     EXPECT_EQ(host_pool->totalRefCount(BlockRefType::REQUEST), 0u);
 
     TempDirGuard temp_dir("group_set_lower_tier_rollback");
-    auto disk_pool = makeDiskPool(/*payload_bytes=*/80, /*usable_count=*/1, temp_dir.path);
+    auto         disk_pool = makeDiskPool(/*payload_bytes=*/80, /*usable_count=*/1, temp_dir.path);
     ASSERT_NE(disk_pool, nullptr);
     group->setDiskPool(disk_pool);
 
@@ -157,10 +157,10 @@ TEST(GroupSetTest, LowerTierAllocationFailureReleasesAllocatedPrefix) {
 }
 
 TEST(GroupSetTest, KeepsTopologyAliveAfterCallerReleasesOwnership) {
-    auto topology = makeTestTopology({groupSpec("a", {0})});
+    auto                               topology      = makeTestTopology({groupSpec("a", {0})});
     std::weak_ptr<const CacheTopology> weak_topology = topology;
-    const auto pool = makeTestDevicePool({{64, 16}}, 4, "group_set_topology_lifetime");
-    auto       group = makeTestGroupSet(0, topology, {0}, {pool});
+    const auto                         pool          = makeTestDevicePool({{64, 16}}, 4, "group_set_topology_lifetime");
+    auto                               group         = makeTestGroupSet(0, topology, {0}, {pool});
 
     topology.reset();
 

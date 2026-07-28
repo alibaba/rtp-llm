@@ -17,8 +17,8 @@ bool BlockTreeEvictor::EvictionPlan::needsCopy() const {
 }
 
 BlockTreeEvictor::BlockTreeEvictor(std::vector<GroupSetPtr>& group_sets,
-                                   ExecuteTransferFn               execute_transfer,
-                                   bool                            enable_reverse_eviction):
+                                   ExecuteTransferFn         execute_transfer,
+                                   bool                      enable_reverse_eviction):
     group_sets_(group_sets),
     execute_transfer_(std::move(execute_transfer)),
     enable_reverse_eviction_(enable_reverse_eviction) {}
@@ -144,12 +144,12 @@ void BlockTreeEvictor::onInsertCommitted(const BlockTreeInsertResult& result) {
             || adopted.group_set_id >= adopted.node->group_set_resources.size()) {
             continue;
         }
-        const size_t       group_set_index   = adopted.group_set_id;
-        GroupSetPtr& group = group_sets_[group_set_index];
+        const size_t group_set_index = adopted.group_set_id;
+        GroupSetPtr& group           = group_sets_[group_set_index];
         if (group == nullptr) {
             continue;
         }
-        GroupSetResource& slot                        = adopted.node->group_set_resources[group_set_index];
+        GroupSetResource& slot                 = adopted.node->group_set_resources[group_set_index];
         slot.candidate_meta.last_access_seq    = ++access_seq_;
         slot.candidate_meta.admission_seq      = ++admission_seq_;
         slot.candidate_meta.hit_count          = 0;
@@ -179,7 +179,7 @@ void BlockTreeEvictor::onInsertCommitted(const BlockTreeInsertResult& result) {
             if (group_set_index >= node->group_set_resources.size()) {
                 continue;
             }
-            GroupSetResource& slot                        = node->group_set_resources[group_set_index];
+            GroupSetResource& slot                 = node->group_set_resources[group_set_index];
             slot.candidate_meta.last_access_seq    = access;
             slot.candidate_meta.admission_seq      = admit;
             slot.candidate_meta.hit_count          = 0;
@@ -201,7 +201,8 @@ void BlockTreeEvictor::onInsertCommitted(const BlockTreeInsertResult& result) {
             if (group_set_index >= existing_parent->group_set_resources.size()) {
                 continue;
             }
-            refreshCandidate(*group, existing_parent, group->getTopTier(existing_parent->group_set_resources[group_set_index]));
+            refreshCandidate(
+                *group, existing_parent, group->getTopTier(existing_parent->group_set_resources[group_set_index]));
         }
     }
 }
@@ -332,8 +333,8 @@ std::optional<EvictionMove> BlockTreeEvictor::chooseVictimInGroup(GroupSet& grou
             return std::nullopt;
         }
 
-        TreeNode* node = entry->node;
-        auto      group_set_index  = group.groupSetId();
+        TreeNode* node            = entry->node;
+        auto      group_set_index = group.groupSetId();
         if (node == nullptr || group_set_index >= node->group_set_resources.size()) {
             continue;
         }
@@ -377,8 +378,7 @@ std::optional<EvictionMove> BlockTreeEvictor::chooseVictim(size_t group_set_id, 
     return chooseVictimInGroup(*group, tier);
 }
 
-std::vector<EvictionMove>
-BlockTreeEvictor::chooseWatermarkVictims(GroupSet& group, Tier tier, double watermark_ratio) {
+std::vector<EvictionMove> BlockTreeEvictor::chooseWatermarkVictims(GroupSet& group, Tier tier, double watermark_ratio) {
     std::vector<EvictionMove> victims;
     if (watermark_ratio <= 0.0) {
         return victims;
@@ -420,10 +420,8 @@ std::optional<BlockTreeEvictor::EvictionPlan> BlockTreeEvictor::buildPlan(Evicti
     }
     plan.primary = eviction_move;
 
-    for (size_t cascade_group_set_id : selectCascadeGroups(eviction_move.node,
-                                                           eviction_move.group_set_id,
-                                                           eviction_move.source_tier,
-                                                           enable_reverse_eviction_)) {
+    for (size_t cascade_group_set_id : selectCascadeGroups(
+             eviction_move.node, eviction_move.group_set_id, eviction_move.source_tier, enable_reverse_eviction_)) {
         auto cascade_move =
             makeMove(eviction_move.node, cascade_group_set_id, eviction_move.source_tier, eviction_move.target_tier);
 
@@ -734,14 +732,12 @@ bool BlockTreeEvictor::buildTransferDescriptor(const EvictionMove& eviction_move
 
     const BlockIdxType target = eviction_move.target_blocks[0];
     if (eviction_move.source_tier == Tier::DEVICE && eviction_move.target_tier == Tier::HOST) {
-        descriptor =
-            TransferDescriptor::deviceToHost(eviction_move.group_set_id, eviction_move.source_blocks, target);
+        descriptor = TransferDescriptor::deviceToHost(eviction_move.group_set_id, eviction_move.source_blocks, target);
     } else if (eviction_move.source_tier == Tier::HOST && eviction_move.target_tier == Tier::DISK) {
         if (isNullBlockIdx(eviction_move.source_blocks[0])) {
             return false;
         }
-        descriptor =
-            TransferDescriptor::hostToDisk(eviction_move.group_set_id, eviction_move.source_blocks[0], target);
+        descriptor = TransferDescriptor::hostToDisk(eviction_move.group_set_id, eviction_move.source_blocks[0], target);
     } else {
         return false;
     }
@@ -749,23 +745,25 @@ bool BlockTreeEvictor::buildTransferDescriptor(const EvictionMove& eviction_move
     return true;
 }
 
-EvictionMove
-BlockTreeEvictor::makeMove(TreeNode* node, size_t group_set_id, Tier source_tier, Tier target_tier) const {
+EvictionMove BlockTreeEvictor::makeMove(TreeNode* node, size_t group_set_id, Tier source_tier, Tier target_tier) const {
     EvictionMove eviction_move;
-    eviction_move.node               = node;
+    eviction_move.node         = node;
     eviction_move.group_set_id = group_set_id;
-    eviction_move.source_tier        = source_tier;
-    eviction_move.target_tier        = target_tier;
+    eviction_move.source_tier  = source_tier;
+    eviction_move.target_tier  = target_tier;
 
     auto group_set_index = group_set_id;
-    if (node == nullptr || group_set_index >= node->group_set_resources.size() || group_set_index >= group_sets_.size()) {
+    if (node == nullptr || group_set_index >= node->group_set_resources.size()
+        || group_set_index >= group_sets_.size()) {
         return eviction_move;
     }
 
     // getBlocks encapsulates the tier->slot-field mapping and returns empty for
     // absent values, so the source_blocks.empty() guard still holds.
-    eviction_move.source_tier_enter_time_us = node->group_set_resources[group_set_index].candidate_meta.tier_enter_time_us;
-    eviction_move.source_blocks             = group_sets_[group_set_index]->getBlocks(node->group_set_resources[group_set_index], source_tier);
+    eviction_move.source_tier_enter_time_us =
+        node->group_set_resources[group_set_index].candidate_meta.tier_enter_time_us;
+    eviction_move.source_blocks =
+        group_sets_[group_set_index]->getBlocks(node->group_set_resources[group_set_index], source_tier);
     return eviction_move;
 }
 
@@ -912,9 +910,9 @@ std::vector<size_t> BlockTreeEvictor::reusableGroupSetIds() const {
 }
 
 std::vector<size_t> BlockTreeEvictor::selectCascadeGroups(const TreeNode* node,
-                                                           size_t          source_group_set_id,
-                                                       Tier            tier,
-                                                       bool            enable_reverse_eviction) const {
+                                                          size_t          source_group_set_id,
+                                                          Tier            tier,
+                                                          bool            enable_reverse_eviction) const {
     std::vector<size_t> result;
 
     const GroupSetPtr* source_group = nullptr;
@@ -946,8 +944,7 @@ std::vector<size_t> BlockTreeEvictor::selectCascadeGroups(const TreeNode* node,
         bool below = false;
         switch (source_type) {
             case CacheGroupType::FULL:
-                below = (group->groupType() == CacheGroupType::SWA
-                         || group->groupType() == CacheGroupType::LINEAR);
+                below = (group->groupType() == CacheGroupType::SWA || group->groupType() == CacheGroupType::LINEAR);
                 break;
             case CacheGroupType::SWA:
                 below = (group->groupType() == CacheGroupType::LINEAR);

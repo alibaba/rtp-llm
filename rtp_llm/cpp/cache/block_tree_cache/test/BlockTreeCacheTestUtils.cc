@@ -189,10 +189,9 @@ DeviceBlockPoolPtr makeStructuralDevicePool(const std::string& tag) {
 }
 
 void prepareGroupSets(std::vector<GroupSetPtr>& group_sets) {
-    const bool has_uninitialized =
-        std::any_of(group_sets.begin(), group_sets.end(), [](const GroupSetPtr& group_set) {
-            return group_set != nullptr && group_set->topology() == nullptr;
-        });
+    const bool has_uninitialized = std::any_of(group_sets.begin(), group_sets.end(), [](const GroupSetPtr& group_set) {
+        return group_set != nullptr && group_set->topology() == nullptr;
+    });
     if (!has_uninitialized) {
         return;
     }
@@ -242,7 +241,7 @@ void prepareGroupSets(std::vector<GroupSetPtr>& group_sets) {
 }  // namespace
 
 std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::unique_ptr<BlockTree>        tree,
-                                                          std::vector<GroupSetPtr>           group_sets,
+                                                          std::vector<GroupSetPtr>          group_sets,
                                                           BlockTreeCacheConfig              config,
                                                           std::shared_ptr<StorageBackend>   storage_backend,
                                                           std::shared_ptr<BroadcastManager> broadcast_manager) {
@@ -257,26 +256,26 @@ std::unique_ptr<BlockTreeCache> makeBlockTreeCacheForTest(std::unique_ptr<BlockT
     auto task_pool = std::make_unique<BlockCacheTaskPool>(
         static_cast<size_t>(config.eviction_thread_pool_size), 1000, "BlockTreeEvictionPool");
     auto cache = std::make_unique<BlockTreeCache>(std::move(tree),
-                                                 std::move(group_sets),
-                                                 std::move(config),
-                                                 std::move(storage_backend),
-                                                 std::move(transfer_dispatcher),
-                                                 std::move(task_pool));
+                                                  std::move(group_sets),
+                                                  std::move(config),
+                                                  std::move(storage_backend),
+                                                  std::move(transfer_dispatcher),
+                                                  std::move(task_pool));
     if (!cache->init()) {
         return nullptr;
     }
     return cache;
 }
 
-bool insertGroupSetSlots(BlockTreeCache&                                      cache,
-                         TreeNode*                                            parent,
-                         const CacheKeysType&                                 cache_keys,
+bool insertGroupSetSlots(BlockTreeCache&                                   cache,
+                         TreeNode*                                         parent,
+                         const CacheKeysType&                              cache_keys,
                          const std::vector<std::vector<GroupSetResource>>& resources) {
     BlockTree* tree = cache.tree();
     if (tree == nullptr) {
         return false;
     }
-    const BlockTreeInsertResult      insert_result = tree->insertNode(parent, cache_keys, resources);
+    const BlockTreeInsertResult     insert_result = tree->insertNode(parent, cache_keys, resources);
     const std::vector<GroupSetPtr>& group_sets    = cache.groupSets();
     for (const BlockTreeInsertedNode& inserted : insert_result.inserted_nodes) {
         TreeNode* node = inserted.node;
@@ -296,8 +295,7 @@ bool insertGroupSetSlots(BlockTreeCache&                                      ca
                 continue;
             }
             const auto blocks = group->getBlocks(resource, Tier::DEVICE);
-            group->referenceBlocks(MultiNodeResource{group_set_id, Tier::DEVICE, {blocks}},
-                                   BlockRefType::BLOCK_CACHE);
+            group->referenceBlocks(MultiNodeResource{group_set_id, Tier::DEVICE, {blocks}}, BlockRefType::BLOCK_CACHE);
         }
     }
     for (const BlockTreeAdoptedSlot& adopted : insert_result.adopted_slots) {
@@ -309,8 +307,8 @@ bool insertGroupSetSlots(BlockTreeCache&                                      ca
         const GroupSetPtr& group = group_sets[adopted.group_set_id];
         const auto blocks = group->getBlocks(adopted.node->group_set_resources[adopted.group_set_id], Tier::DEVICE);
         if (!blocks.empty()) {
-            group->referenceBlocks(
-                MultiNodeResource{adopted.group_set_id, Tier::DEVICE, {blocks}}, BlockRefType::BLOCK_CACHE);
+            group->referenceBlocks(MultiNodeResource{adopted.group_set_id, Tier::DEVICE, {blocks}},
+                                   BlockRefType::BLOCK_CACHE);
         }
     }
     cache.evictor_.onInsertCommitted(insert_result);
@@ -434,8 +432,7 @@ bool BlockTreeCacheTestPeer::restoreQueueAfterRejectionForTest(BlockTreeCache& c
     return false;
 }
 
-ScriptedPerRankBlockTransferEngine::ScriptedPerRankBlockTransferEngine(
-    const std::vector<GroupSetPtr>& groups):
+ScriptedPerRankBlockTransferEngine::ScriptedPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups):
     PerRankBlockTransferEngine(groups) {}
 
 TransferHandle ScriptedPerRankBlockTransferEngine::submit(const TransferDescriptor& descriptor) {
@@ -562,7 +559,7 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
     auto swa_policy                 = defaultCacheGroupPolicy(CacheGroupType::SWA);
     swa_policy.enable_prefix_reuse  = true;
     swa_policy.sliding_window_size  = 2;
-    environment->topology = block_transfer_engine_test::makeTestTopology({
+    environment->topology           = block_transfer_engine_test::makeTestTopology({
         {"tag_0", full_policy, {0}, kGroupPayloadBytes, 0},
         {"tag_1", full_policy, {0}, kGroupPayloadBytes, 0},
         {"tag_2", swa_policy, {0}, kGroupPayloadBytes, 0},
@@ -592,8 +589,8 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
         std::make_shared<ScriptedPerRankBlockTransferEngine>(environment->groups);
 
     std::vector<GroupSetPtr> cache_groups = environment->groups;
-    environment->cache = makeBlockTreeCacheForTest(
-        std::make_unique<BlockTree>(2), std::move(cache_groups), std::move(config));
+    environment->cache =
+        makeBlockTreeCacheForTest(std::make_unique<BlockTree>(2), std::move(cache_groups), std::move(config));
     if (environment->cache == nullptr) {
         ADD_FAILURE() << "failed to initialize BlockTreeCache test environment";
         return nullptr;
@@ -641,7 +638,7 @@ void FullSWAEnvironment::releaseRequestRefsForGroup(int group_id) {
     const std::vector<TreeNode*> path = topologyPath(*cache->tree(), keys);
     ASSERT_EQ(path.size(), options_.path_length);
     MultiNodeResource released_blocks = request_blocks[static_cast<size_t>(group_id)];
-    released_blocks.tree_nodes         = path;
+    released_blocks.tree_nodes        = path;
     cache->releaseMatchedResources({released_blocks});
     request_refs_released_[static_cast<size_t>(group_id)] = true;
 }
@@ -755,8 +752,9 @@ void FullSWAEnvironment::expectPayloads() const {
                 const size_t tag_begin = group_id == 0 ? 0 : 2;
                 const size_t tag_count = group_id == 0 ? 2 : 1;
                 for (size_t local = 0; local < tag_count; ++local) {
-                    expectBytes(
-                        data + local * kGroupPayloadBytes, kGroupPayloadBytes, payloadPattern(tag_begin + local, path_index));
+                    expectBytes(data + local * kGroupPayloadBytes,
+                                kGroupPayloadBytes,
+                                payloadPattern(tag_begin + local, path_index));
                 }
             } else if (slot.hasTier(Tier::DISK)) {
                 std::vector<uint8_t> data(disk_pools[group_id]->payloadBytes());

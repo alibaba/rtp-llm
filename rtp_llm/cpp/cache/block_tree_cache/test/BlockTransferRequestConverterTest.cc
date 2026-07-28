@@ -58,7 +58,7 @@ std::vector<GroupSetPtr> makeGroupSets() {
     std::vector<GroupSetPtr>               group_sets;
     for (size_t group_set_id = 0; group_set_id < 5; ++group_set_id) {
         const auto& membership = memberships[group_set_id];
-        auto group_set         = makeTestGroupSet(
+        auto        group_set  = makeTestGroupSet(
             group_set_id, topology, membership, std::vector<DeviceBlockPoolPtr>(membership.size(), device_pool));
         group_set->setHostPool(host_pool);
         group_set->setDiskPool(disk_pool);

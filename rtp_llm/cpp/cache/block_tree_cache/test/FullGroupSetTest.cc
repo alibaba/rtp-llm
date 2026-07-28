@@ -16,7 +16,7 @@ protected:
     void SetUp() override {
         pool_ = block_tree_cache_test::makeDevicePool({{1, 0}}, 128, "full_group_set_test");
         ASSERT_NE(pool_, nullptr);
-        group_                     = std::make_shared<FullGroupSet>();
+        group_ = std::make_shared<FullGroupSet>();
         TestGroupSpec spec;
         spec.tag                   = "tag_0";
         spec.policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
@@ -61,9 +61,9 @@ protected:
         node->group_set_resources[static_cast<size_t>(gid)].disk_slot = slot;
     }
 
-    DeviceBlockPoolPtr                  pool_;
-    std::unordered_set<BlockIdxType>    held_blocks_;
-    std::shared_ptr<FullGroupSet> group_;
+    DeviceBlockPoolPtr               pool_;
+    std::unordered_set<BlockIdxType> held_blocks_;
+    std::shared_ptr<FullGroupSet>    group_;
 };
 
 TEST_F(FullGroupSetTest, DeviceLeafDetection) {
@@ -269,17 +269,15 @@ TEST_F(FullGroupSetTest, NoDataNotEligible) {
 TEST_F(FullGroupSetTest, CompleteDeviceValueRequiresExactPoolCardinalityAndNoNullBlocks) {
     auto second_pool = block_tree_cache_test::makeDevicePool({{1, 0}}, 128, "full_group_set_test_second");
     ASSERT_NE(second_pool, nullptr);
-    auto two_pool_group                = std::make_shared<FullGroupSet>();
+    auto          two_pool_group = std::make_shared<FullGroupSet>();
     TestGroupSpec first;
     first.tag                   = "tag_0";
     first.policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
     first.kv_block_stride_bytes = 1;
     TestGroupSpec second        = first;
     second.tag                  = "tag_1";
-    two_pool_group->initialize(0,
-                               makeTestTopology({std::move(first), std::move(second)}),
-                               {0, 1},
-                               {pool_, second_pool});
+    two_pool_group->initialize(
+        0, makeTestTopology({std::move(first), std::move(second)}), {0, 1}, {pool_, second_pool});
 
     GroupSetResource slot;
     EXPECT_FALSE(two_pool_group->hasCompleteDeviceValue(slot));

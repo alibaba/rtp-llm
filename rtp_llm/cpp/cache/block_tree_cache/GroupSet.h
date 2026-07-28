@@ -44,7 +44,7 @@ struct BlockTreeMatchResult {
 
 class MatchValidator {
 public:
-    virtual ~MatchValidator()                                          = default;
+    virtual ~MatchValidator()                                                 = default;
     virtual bool validate(const TreeNode* node, const GroupSetResource& slot) = 0;
 };
 
@@ -74,19 +74,19 @@ public:
 
     void initialize(size_t                               group_set_id,
                     std::shared_ptr<const CacheTopology> topology,
-                    std::vector<size_t>                   group_ids,
+                    std::vector<size_t>                  group_ids,
                     std::vector<DeviceBlockPoolPtr>      device_pools);
 
-    size_t groupSetId() const;
+    size_t                                      groupSetId() const;
     const std::shared_ptr<const CacheTopology>& topology() const {
         return topology_;
     }
     const std::vector<size_t>& groupIds() const {
         return group_ids_;
     }
-    const GroupBase& groupAt(size_t local_group_index) const;
+    const GroupBase&         groupAt(size_t local_group_index) const;
     std::vector<std::string> groupTags() const;
-    size_t payloadBytes() const {
+    size_t                   payloadBytes() const {
         return payload_bytes_;
     }
     CacheGroupType groupType() const {
@@ -133,7 +133,7 @@ public:
 
     bool anyDevicePoolExceedsRatio(double ratio) const {
         for (const auto& pool : device_pools_) {
-            size_t capacity = pool->totalBlocksNum();
+            size_t capacity  = pool->totalBlocksNum();
             size_t used      = capacity - pool->freeBlocksNum();
             size_t threshold = static_cast<size_t>(capacity * ratio);
             if (used > threshold) {
@@ -146,7 +146,7 @@ public:
     size_t devicePoolMaxExcess(double ratio) const {
         size_t max_excess = 0;
         for (const auto& pool : device_pools_) {
-            size_t capacity = pool->totalBlocksNum();
+            size_t capacity  = pool->totalBlocksNum();
             size_t used      = capacity - pool->freeBlocksNum();
             size_t threshold = static_cast<size_t>(capacity * ratio);
             if (used > threshold) {
@@ -162,7 +162,7 @@ public:
     size_t devicePoolMaxExcessForMinFree(size_t min_free_blocks) const {
         size_t max_excess = 0;
         for (const auto& pool : device_pools_) {
-            const size_t capacity = pool->totalBlocksNum();
+            const size_t capacity  = pool->totalBlocksNum();
             const size_t used      = capacity - pool->freeBlocksNum();
             const size_t min_free  = std::min(min_free_blocks, capacity);
             const size_t threshold = capacity - min_free;
@@ -188,8 +188,8 @@ public:
     }
 
     MultiNodeResource allocateBlocks(Tier tier, size_t count, BlockRefType ref_type);
-    void          referenceBlocks(const MultiNodeResource& set, BlockRefType ref_type) const;
-    void          unreferenceBlocks(const MultiNodeResource& set, BlockRefType ref_type) const;
+    void              referenceBlocks(const MultiNodeResource& set, BlockRefType ref_type) const;
+    void              unreferenceBlocks(const MultiNodeResource& set, BlockRefType ref_type) const;
 
     BlockIdxType allocateSingleBlock(Tier tier, BlockRefType ref_type);
     void         releaseSingleBlock(Tier tier, BlockIdxType block, BlockRefType ref_type) const;

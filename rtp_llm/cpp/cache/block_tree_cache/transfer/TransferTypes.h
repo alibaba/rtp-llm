@@ -59,48 +59,48 @@ struct TransferDescriptor {
     static TransferDescriptor
     deviceToHost(size_t group_set_id, std::vector<BlockIdxType> device_blocks, BlockIdxType host_block) {
         TransferDescriptor desc;
-        desc.group_set_id = group_set_id;
-        desc.source_tier        = Tier::DEVICE;
-        desc.target_tier        = Tier::HOST;
-        desc.device_blocks      = std::move(device_blocks);
-        desc.host_block         = host_block;
+        desc.group_set_id  = group_set_id;
+        desc.source_tier   = Tier::DEVICE;
+        desc.target_tier   = Tier::HOST;
+        desc.device_blocks = std::move(device_blocks);
+        desc.host_block    = host_block;
         return desc;
     }
 
     static TransferDescriptor
     hostToDevice(size_t group_set_id, BlockIdxType host_block, std::vector<BlockIdxType> device_blocks) {
         TransferDescriptor desc;
-        desc.group_set_id = group_set_id;
-        desc.source_tier        = Tier::HOST;
-        desc.target_tier        = Tier::DEVICE;
-        desc.host_block         = host_block;
-        desc.device_blocks      = std::move(device_blocks);
+        desc.group_set_id  = group_set_id;
+        desc.source_tier   = Tier::HOST;
+        desc.target_tier   = Tier::DEVICE;
+        desc.host_block    = host_block;
+        desc.device_blocks = std::move(device_blocks);
         return desc;
     }
 
     static TransferDescriptor hostToDisk(size_t group_set_id, BlockIdxType host_block, BlockIdxType disk_block) {
         TransferDescriptor desc;
         desc.group_set_id = group_set_id;
-        desc.source_tier        = Tier::HOST;
-        desc.target_tier        = Tier::DISK;
-        desc.host_block         = host_block;
-        desc.disk_block         = disk_block;
+        desc.source_tier  = Tier::HOST;
+        desc.target_tier  = Tier::DISK;
+        desc.host_block   = host_block;
+        desc.disk_block   = disk_block;
         return desc;
     }
 
     static TransferDescriptor diskToHost(size_t group_set_id, BlockIdxType disk_block, BlockIdxType host_block) {
         TransferDescriptor desc;
         desc.group_set_id = group_set_id;
-        desc.source_tier        = Tier::DISK;
-        desc.target_tier        = Tier::HOST;
-        desc.disk_block         = disk_block;
-        desc.host_block         = host_block;
+        desc.source_tier  = Tier::DISK;
+        desc.target_tier  = Tier::HOST;
+        desc.disk_block   = disk_block;
+        desc.host_block   = host_block;
         return desc;
     }
 
     size_t group_set_id{0};
-    Tier source_tier{Tier::NONE};
-    Tier target_tier{Tier::NONE};
+    Tier   source_tier{Tier::NONE};
+    Tier   target_tier{Tier::NONE};
 
     // DEVICE -> HOST: source. HOST -> DEVICE: target.
     std::vector<BlockIdxType> device_blocks;

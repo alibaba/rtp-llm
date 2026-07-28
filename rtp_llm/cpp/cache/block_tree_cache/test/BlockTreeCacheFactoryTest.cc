@@ -360,8 +360,8 @@ void expectTargetGroupsBoundByTag(const BlockTreeCachePtr& cache, const KVCacheA
             continue;
         }
 
-        const auto group_set_it = std::find_if(
-            cache->groupSets().begin(), cache->groupSets().end(), [&](const GroupSetPtr& group_set) {
+        const auto group_set_it =
+            std::find_if(cache->groupSets().begin(), cache->groupSets().end(), [&](const GroupSetPtr& group_set) {
                 return group_set != nullptr
                        && std::find(group_set->groupIds().begin(), group_set->groupIds().end(), group_id)
                               != group_set->groupIds().end();
@@ -545,8 +545,8 @@ TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguo
     const auto& full_group = *full_group_it;
     ASSERT_EQ(full_group->config().layer_ids, (std::vector<int>{0, 2}));
 
-    const auto group_set_it = std::find_if(
-        cache->groupSets().begin(), cache->groupSets().end(), [](const GroupSetPtr& group_set) {
+    const auto group_set_it =
+        std::find_if(cache->groupSets().begin(), cache->groupSets().end(), [](const GroupSetPtr& group_set) {
             return group_set != nullptr && group_set->groupTags() == std::vector<std::string>{"full"};
         });
     ASSERT_NE(group_set_it, cache->groupSets().end());
@@ -567,14 +567,14 @@ TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguo
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x31);
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x72);
 
-    EXPECT_EQ(cache->executeTransfer(
-                  TransferDescriptor::deviceToHost(group_set->groupSetId(), {device_block}, host_block)),
-              TransferStatus::OK);
+    EXPECT_EQ(
+        cache->executeTransfer(TransferDescriptor::deviceToHost(group_set->groupSetId(), {device_block}, host_block)),
+        TransferStatus::OK);
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x00);
     writeDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x00);
-    EXPECT_EQ(cache->executeTransfer(
-                  TransferDescriptor::hostToDevice(group_set->groupSetId(), host_block, {device_block})),
-              TransferStatus::OK);
+    EXPECT_EQ(
+        cache->executeTransfer(TransferDescriptor::hostToDevice(group_set->groupSetId(), host_block, {device_block})),
+        TransferStatus::OK);
 
     expectDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/0, device_block).kv_addr, layer_bytes, 0x31);
     expectDevicePattern(full_group->convertIndexToAddr(/*global_layer=*/2, device_block).kv_addr, layer_bytes, 0x72);
@@ -642,8 +642,7 @@ TEST_F(BlockTreeCacheFactoryTest, PrefixReuseDisabledGroupStaysAllocatorOwnedBut
     ASSERT_EQ(allocator->cacheGroups().size(), 2u);
     ASSERT_EQ(cache->groupSets().size(), 1u);
     EXPECT_EQ(cache->groupSets()[0]->groupTags(), (std::vector<std::string>{"full"}));
-    EXPECT_EQ(cache->groupSets()[0]->groupIds(),
-              (std::vector<size_t>{config.topology().groupIdForTag("full")}));
+    EXPECT_EQ(cache->groupSets()[0]->groupIds(), (std::vector<size_t>{config.topology().groupIdForTag("full")}));
 }
 
 TEST_F(BlockTreeCacheFactoryTest, SameTypeGroupsWithDifferentPolicyShapeSeqAndStrideAreNeverAggregated) {
@@ -1039,7 +1038,7 @@ TEST_F(BlockTreeCacheFactoryTest, IndependentReinsertRefillsOnlyEmptyIdleGroupSe
     const BlockIdxType host_a = group_set_a->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_a, NULL_BLOCK_IDX);
     node->group_set_resources[0].host_block = host_a;
-    const auto host_replacement     = allocator->cacheGroups()[0]->blockPool()->malloc(1);
+    const auto host_replacement             = allocator->cacheGroups()[0]->blockPool()->malloc(1);
     ASSERT_TRUE(host_replacement.has_value());
     ASSERT_EQ(host_replacement->size(), 1u);
     allocator->cacheGroups()[0]->blockPool()->incRef(*host_replacement, BlockRefType::REQUEST);
@@ -1057,7 +1056,7 @@ TEST_F(BlockTreeCacheFactoryTest, IndependentReinsertRefillsOnlyEmptyIdleGroupSe
     for (const auto state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOADING_BACK}) {
         SCOPED_TRACE(state == GroupSetTransferState::DEMOTING ? "demoting" : "loading_back");
         node->group_set_resources[0].transfer_state = state;
-        const auto before_in_flight         = cache->getKeySnapshot(/*limit=*/16);
+        const auto before_in_flight                 = cache->getKeySnapshot(/*limit=*/16);
         cache->insert(nullptr, CacheKeysType{703}, {{blocked_incoming_a, incoming_b}});
         EXPECT_EQ(cache->getKeySnapshot(/*limit=*/16).version, before_in_flight.version);
         EXPECT_TRUE(node->group_set_resources[0].is_empty());
@@ -1158,8 +1157,7 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPoolGroupSetPayloadUsesTopologyLogicalSt
         size_t expected_payload = 0;
         for (const size_t group_id : group_set->groupIds()) {
             const auto& group = config.topology().groupById(group_id);
-            expected_payload +=
-                group.layer_ids.size() * (group.kv_block_stride_bytes + group.kv_scale_stride_bytes);
+            expected_payload += group.layer_ids.size() * (group.kv_block_stride_bytes + group.kv_scale_stride_bytes);
         }
         EXPECT_EQ(group_set->payloadBytes(), expected_payload);
     }
@@ -1203,8 +1201,7 @@ TEST_F(BlockTreeCacheFactoryTest, LegacySingleGroupAllowsMissingPhysicalStrideTa
     EXPECT_EQ(cache->groupSets()[0]->groupIds(), (std::vector<size_t>{0}));
     const size_t fallback_stride =
         config.topology().groupById(0).kv_block_stride_bytes + config.topology().groupById(0).kv_scale_stride_bytes;
-    EXPECT_EQ(cache->groupSets()[0]->payloadBytes(),
-              config.topology().groupById(0).layer_ids.size() * fallback_stride);
+    EXPECT_EQ(cache->groupSets()[0]->payloadBytes(), config.topology().groupById(0).layer_ids.size() * fallback_stride);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, RejectsDiskCacheWithoutMemoryCacheBeforePublication) {
@@ -1345,12 +1342,12 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
         ASSERT_NE(host_block, NULL_BLOCK_IDX);
         ASSERT_NE(disk_block, NULL_BLOCK_IDX);
 
-        EXPECT_EQ(factory_cache->executeTransfer(TransferDescriptor::deviceToHost(
-                      group->groupSetId(), device_blocks.per_node[0], host_block)),
-                  TransferStatus::OK);
         EXPECT_EQ(factory_cache->executeTransfer(
-                      TransferDescriptor::hostToDisk(group->groupSetId(), host_block, disk_block)),
+                      TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks.per_node[0], host_block)),
                   TransferStatus::OK);
+        EXPECT_EQ(
+            factory_cache->executeTransfer(TransferDescriptor::hostToDisk(group->groupSetId(), host_block, disk_block)),
+            TransferStatus::OK);
 
         group->unreferenceBlocks(device_blocks, BlockRefType::REQUEST);
         group->releaseSingleBlock(Tier::HOST, host_block, BlockRefType::REQUEST);

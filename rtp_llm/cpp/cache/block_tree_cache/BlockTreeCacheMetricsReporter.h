@@ -41,16 +41,14 @@ class BlockTreeCacheMetricsReporter final {
 public:
     void setMetricsReporter(const std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter);
 
-    std::vector<BlockTreePoolMetricsSnapshot>
-    collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets,
-                                const BlockTreeEvictor&               evictor) const;
+    std::vector<BlockTreePoolMetricsSnapshot> collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets,
+                                                                          const BlockTreeEvictor& evictor) const;
     std::vector<BlockTreeEvictableMetricsSnapshot>
-         collectEvictableMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets,
-                                          const BlockTreeEvictor&               evictor) const;
+    collectEvictableMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets, const BlockTreeEvictor& evictor) const;
     void reportEvictableBlockCount(const std::vector<BlockTreeEvictableMetricsSnapshot>& snapshots) const;
     void reportEvictionFinished(const BlockTreeEvictor::EvictionPlan&  plan,
                                 const BlockTreeEvictor::CopyResultSet& results,
-                                const std::vector<GroupSetPtr>&  group_sets) const;
+                                const std::vector<GroupSetPtr>&        group_sets) const;
 
     int64_t reportTransferStarted(Tier source_tier, Tier target_tier);
     void
@@ -58,9 +56,9 @@ public:
 
 private:
     static int transferDirectionIndex(Tier source_tier, Tier target_tier);
-    void       reportEvictionMove(const EvictionMove&                   eviction_move,
+    void       reportEvictionMove(const EvictionMove&             eviction_move,
                                   const std::vector<GroupSetPtr>& group_sets,
-                                  int64_t                               finish_time_us) const;
+                                  int64_t                         finish_time_us) const;
 
     std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter_;
     std::array<std::atomic<int64_t>, 4>        transfer_in_flight_{};

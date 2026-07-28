@@ -49,10 +49,10 @@ BlockTreePoolMetricsSnapshot makePoolMetricsSnapshot(Tier tier, const IBlockPool
 }
 
 DeviceCandidateBlocks collectDeviceCandidateBlocks(const std::vector<GroupSetPtr>& group_sets,
-                                                   const BlockTreeEvictor&               evictor) {
+                                                   const BlockTreeEvictor&         evictor) {
     DeviceCandidateBlocks candidate_blocks;
     for (const GroupSetPtr& group : group_sets) {
-        const std::vector<TreeNode*> candidate_nodes = evictor.candidateNodes(group->groupSetId(), Tier::DEVICE);
+        const std::vector<TreeNode*> candidate_nodes        = evictor.candidateNodes(group->groupSetId(), Tier::DEVICE);
         const std::vector<DeviceBlockPoolPtr>& device_pools = group->devicePools();
         for (TreeNode* node : candidate_nodes) {
             if (node == nullptr || group->groupSetId() >= node->group_set_resources.size()) {
@@ -90,9 +90,9 @@ void BlockTreeCacheMetricsReporter::setMetricsReporter(
 
 std::vector<BlockTreePoolMetricsSnapshot>
 BlockTreeCacheMetricsReporter::collectPoolMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets,
-                                                           const BlockTreeEvictor&               evictor) const {
-    const DeviceCandidateBlocks device_candidate_blocks = collectDeviceCandidateBlocks(group_sets, evictor);
-    std::unordered_set<const IBlockPool*>     reported_device_pools;
+                                                           const BlockTreeEvictor&         evictor) const {
+    const DeviceCandidateBlocks           device_candidate_blocks = collectDeviceCandidateBlocks(group_sets, evictor);
+    std::unordered_set<const IBlockPool*> reported_device_pools;
     std::vector<BlockTreePoolMetricsSnapshot> snapshots;
     for (const GroupSetPtr& group : group_sets) {
         const std::vector<DeviceBlockPoolPtr>& device_pools = group->devicePools();
@@ -126,7 +126,7 @@ BlockTreeCacheMetricsReporter::collectPoolMetricsSnapshots(const std::vector<Gro
 
 std::vector<BlockTreeEvictableMetricsSnapshot>
 BlockTreeCacheMetricsReporter::collectEvictableMetricsSnapshots(const std::vector<GroupSetPtr>& group_sets,
-                                                                const BlockTreeEvictor&               evictor) const {
+                                                                const BlockTreeEvictor&         evictor) const {
     std::array<std::array<size_t, kMetricGroupTypes.size()>, kMetricTiers.size()> evictable_counts{};
     for (const GroupSetPtr& group : group_sets) {
         if (group == nullptr) {
@@ -171,10 +171,9 @@ void BlockTreeCacheMetricsReporter::reportEvictableBlockCount(
     }
 }
 
-void BlockTreeCacheMetricsReporter::reportEvictionFinished(
-    const BlockTreeEvictor::EvictionPlan&  plan,
-    const BlockTreeEvictor::CopyResultSet& results,
-    const std::vector<GroupSetPtr>&  group_sets) const {
+void BlockTreeCacheMetricsReporter::reportEvictionFinished(const BlockTreeEvictor::EvictionPlan&  plan,
+                                                           const BlockTreeEvictor::CopyResultSet& results,
+                                                           const std::vector<GroupSetPtr>&        group_sets) const {
     if (metrics_reporter_ == nullptr) {
         return;
     }
@@ -190,9 +189,9 @@ void BlockTreeCacheMetricsReporter::reportEvictionFinished(
     }
 }
 
-void BlockTreeCacheMetricsReporter::reportEvictionMove(const EvictionMove&                   eviction_move,
+void BlockTreeCacheMetricsReporter::reportEvictionMove(const EvictionMove&             eviction_move,
                                                        const std::vector<GroupSetPtr>& group_sets,
-                                                       int64_t                               finish_time_us) const {
+                                                       int64_t                         finish_time_us) const {
     const size_t group_set_index = eviction_move.group_set_id;
     if (group_set_index >= group_sets.size()) {
         return;
@@ -246,8 +245,7 @@ int64_t BlockTreeCacheMetricsReporter::reportTransferStarted(Tier source_tier, T
     collector.in_flight          = in_flight;
     collector.transfer_completed = false;
     try {
-        metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(
-            nullptr, &collector);
+        metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(nullptr, &collector);
     } catch (...) {
         transfer_in_flight_[static_cast<size_t>(direction_index)].fetch_sub(1);
         throw;

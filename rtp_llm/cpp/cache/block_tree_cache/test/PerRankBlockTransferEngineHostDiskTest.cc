@@ -59,10 +59,9 @@ GroupSetPtr makeHostDiskGroup(size_t                                  group_set_
                               size_t                                  payload_bytes) {
     auto policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
     policy.enable_prefix_reuse = true;
-    auto topology = makeTestTopology({{"host_disk", policy, {0}, payload_bytes, 0}});
-    auto device_pool =
-        makeTestDevicePool({{payload_bytes, 0}}, 2, "host_disk_group_" + std::to_string(group_set_id));
-    auto group = makeTestGroupSet(group_set_id, std::move(topology), {0}, {std::move(device_pool)});
+    auto topology              = makeTestTopology({{"host_disk", policy, {0}, payload_bytes, 0}});
+    auto device_pool = makeTestDevicePool({{payload_bytes, 0}}, 2, "host_disk_group_" + std::to_string(group_set_id));
+    auto group       = makeTestGroupSet(group_set_id, std::move(topology), {0}, {std::move(device_pool)});
     group->setHostPool(std::move(host_pool));
     group->setDiskPool(std::move(disk_pool));
     return group;
@@ -90,7 +89,7 @@ protected:
     std::shared_ptr<HostBlockPool>              host_pool_;
     std::shared_ptr<BlockTreeDiskBlockPool>     disk_pool_;
     std::shared_ptr<PerRankBlockTransferEngine> per_rank_transfer_engine_;
-    GroupSetPtr                           group_set_;
+    GroupSetPtr                                 group_set_;
 };
 
 TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostToDiskRoundTrip) {
@@ -232,9 +231,9 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskStatusMapping) {
 TEST(GroupSetPayloadTest, PayloadBytesUsesLogicalStridesAcrossLayers) {
     auto policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
     policy.enable_prefix_reuse = true;
-    auto topology = makeTestTopology({{"abc", policy, {0, 1, 2}, 160, 40}});
-    auto pool     = makeTestDevicePool({{200, 40}, {220, 40}, {240, 40}}, 2, "group_set_payload_test");
-    auto group    = makeTestGroupSet(0, std::move(topology), {0}, {std::move(pool)});
+    auto topology              = makeTestTopology({{"abc", policy, {0, 1, 2}, 160, 40}});
+    auto pool                  = makeTestDevicePool({{200, 40}, {220, 40}, {240, 40}}, 2, "group_set_payload_test");
+    auto group                 = makeTestGroupSet(0, std::move(topology), {0}, {std::move(pool)});
     EXPECT_EQ(group->payloadBytes(), 600u);
 }
 

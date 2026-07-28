@@ -54,12 +54,12 @@ private:
 
 }  // anonymous namespace
 
-BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>                    tree,
-                               std::vector<GroupSetPtr>                      group_sets,
-                               BlockTreeCacheConfig                          config,
-                               std::shared_ptr<StorageBackend>               storage_backend,
-                               std::unique_ptr<BlockTransferDispatcher>      transfer_dispatcher,
-                               std::unique_ptr<BlockCacheTaskPool>           task_pool):
+BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
+                               std::vector<GroupSetPtr>                 group_sets,
+                               BlockTreeCacheConfig                     config,
+                               std::shared_ptr<StorageBackend>          storage_backend,
+                               std::unique_ptr<BlockTransferDispatcher> transfer_dispatcher,
+                               std::unique_ptr<BlockCacheTaskPool>      task_pool):
     config_(std::move(config)),
     tree_(std::move(tree)),
     group_sets_(std::move(group_sets)),
@@ -123,9 +123,8 @@ bool BlockTreeCache::initializeConfiguration() {
         return false;
     }
     if (tree_->groupSetResourceCount() != group_sets_.size()) {
-        RTP_LLM_LOG_ERROR("tree/group set count mismatch: tree=%zu registry=%zu",
-                          tree_->groupSetResourceCount(),
-                          group_sets_.size());
+        RTP_LLM_LOG_ERROR(
+            "tree/group set count mismatch: tree=%zu registry=%zu", tree_->groupSetResourceCount(), group_sets_.size());
         return false;
     }
     if (config_.enable_disk_cache && !config_.enable_memory_cache) {
@@ -137,7 +136,7 @@ bool BlockTreeCache::initializeConfiguration() {
         return false;
     }
 
-    std::shared_ptr<const CacheTopology>       topology;
+    std::shared_ptr<const CacheTopology>      topology;
     std::unordered_map<size_t, GroupLocation> reusable_group_locations;
     for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
         const GroupSetPtr& group_set = group_sets_[group_set_id];
@@ -234,8 +233,7 @@ void BlockTreeCache::drainTreeHolds() {
                                 node->group_set_resources.size(),
                                 group_sets_.size());
 
-        for (size_t group_set_index = 0; group_set_index < group_sets_.size();
-             ++group_set_index) {
+        for (size_t group_set_index = 0; group_set_index < group_sets_.size(); ++group_set_index) {
             const GroupSetPtr& group_set = group_sets_[group_set_index];
 
             GroupSetResource&               slot          = node->group_set_resources[group_set_index];
@@ -243,25 +241,22 @@ void BlockTreeCache::drainTreeHolds() {
             if (!device_blocks.empty()) {
                 // Keep shutdown symmetric with referenceBlocks/unreferenceBlocks:
                 // pool-less structural slots carry no hold, while real pools are released exactly once.
-                group_set->unreferenceBlocks(
-                    MultiNodeResource{group_set_index, Tier::DEVICE, {device_blocks}},
-                    BlockRefType::BLOCK_CACHE);
+                group_set->unreferenceBlocks(MultiNodeResource{group_set_index, Tier::DEVICE, {device_blocks}},
+                                             BlockRefType::BLOCK_CACHE);
                 std::fill(slot.device_blocks.begin(), slot.device_blocks.end(), NULL_BLOCK_IDX);
             }
 
             if (!isNullBlockIdx(slot.host_block)) {
                 const BlockIdxType host_block = slot.host_block;
-                group_set->unreferenceBlocks(
-                    MultiNodeResource{group_set_index, Tier::HOST, {{host_block}}},
-                    BlockRefType::BLOCK_CACHE);
+                group_set->unreferenceBlocks(MultiNodeResource{group_set_index, Tier::HOST, {{host_block}}},
+                                             BlockRefType::BLOCK_CACHE);
                 slot.host_block = NULL_BLOCK_IDX;
             }
 
             if (!isNullBlockIdx(slot.disk_slot)) {
                 const BlockIdxType disk_block = slot.disk_slot;
-                group_set->unreferenceBlocks(
-                    MultiNodeResource{group_set_index, Tier::DISK, {{disk_block}}},
-                    BlockRefType::BLOCK_CACHE);
+                group_set->unreferenceBlocks(MultiNodeResource{group_set_index, Tier::DISK, {{disk_block}}},
+                                             BlockRefType::BLOCK_CACHE);
                 slot.disk_slot = NULL_BLOCK_IDX;
             }
 
@@ -296,14 +291,14 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
     for (TreeNode* path_node : tree_find_result.path) {
         for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
             const GroupSetResource& resource = path_node->group_set_resources[group_set_id];
-            RTP_LLM_CHECK_WITH_INFO(
-                !resource.hasTier(Tier::DEVICE) || group_sets_[group_set_id]->hasCompleteDeviceValue(resource),
-                "BlockTreeCache partial DEVICE resource: node_key=%ld group_set_id=%zu "
-                "device_width=%zu expected_width=%zu",
-                path_node->cache_key,
-                group_set_id,
-                resource.device_blocks.size(),
-                group_sets_[group_set_id]->devicePoolCount());
+            RTP_LLM_CHECK_WITH_INFO(!resource.hasTier(Tier::DEVICE)
+                                        || group_sets_[group_set_id]->hasCompleteDeviceValue(resource),
+                                    "BlockTreeCache partial DEVICE resource: node_key=%ld group_set_id=%zu "
+                                    "device_width=%zu expected_width=%zu",
+                                    path_node->cache_key,
+                                    group_set_id,
+                                    resource.device_blocks.size(),
+                                    group_sets_[group_set_id]->devicePoolCount());
         }
     }
 
@@ -320,7 +315,7 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
         bool      all_groups_valid = true;
         for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
             GroupSetResource& group_set_resource = path_node->group_set_resources[group_set_id];
-            const bool group_valid = match_validators[group_set_id]->validate(path_node, group_set_resource);
+            const bool        group_valid = match_validators[group_set_id]->validate(path_node, group_set_resource);
             if (!group_valid) {
                 all_groups_valid = false;
             }
@@ -353,22 +348,22 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
     return result;
 }
 
-void BlockTreeCache::insert(TreeNode*                                  parent,
-                            const CacheKeysType&                       cache_keys,
+void BlockTreeCache::insert(TreeNode*                                         parent,
+                            const CacheKeysType&                              cache_keys,
                             const std::vector<std::vector<GroupSetResource>>& slots) {
     insertImpl(parent, cache_keys, slots, false);
 }
 
-void BlockTreeCache::insertSparse(TreeNode*                                  parent,
-                                  const CacheKeysType&                       cache_keys,
+void BlockTreeCache::insertSparse(TreeNode*                                         parent,
+                                  const CacheKeysType&                              cache_keys,
                                   const std::vector<std::vector<GroupSetResource>>& slots) {
     insertImpl(parent, cache_keys, slots, true);
 }
 
-void BlockTreeCache::insertImpl(TreeNode*                                  parent,
-                                const CacheKeysType&                       cache_keys,
+void BlockTreeCache::insertImpl(TreeNode*                                         parent,
+                                const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& slots,
-                                bool                                       allow_sparse_slots) {
+                                bool                                              allow_sparse_slots) {
     std::lock_guard<std::mutex> lock(mutex_);
 
     if (cache_keys.empty()) {
@@ -381,29 +376,26 @@ void BlockTreeCache::insertImpl(TreeNode*                                  paren
     }
     for (size_t i = 0; i < slots.size(); ++i) {
         if (slots[i].size() != group_sets_.size()) {
-            RTP_LLM_LOG_WARNING("GroupSetResource mismatch, index=%zu expected=%zu actual=%zu",
-                                i,
-                                group_sets_.size(),
-                                slots[i].size());
+            RTP_LLM_LOG_WARNING(
+                "GroupSetResource mismatch, index=%zu expected=%zu actual=%zu", i, group_sets_.size(), slots[i].size());
             return;
         }
-        for (size_t group_set_index = 0; group_set_index < group_sets_.size();
-             ++group_set_index) {
-            const auto& group                  = group_sets_[group_set_index];
-            const auto& slot                   = slots[i][group_set_index];
-            const bool  structurally_absent    = slot.device_blocks.empty() && slot.is_empty();
+        for (size_t group_set_index = 0; group_set_index < group_sets_.size(); ++group_set_index) {
+            const auto& group               = group_sets_[group_set_index];
+            const auto& slot                = slots[i][group_set_index];
+            const bool  structurally_absent = slot.device_blocks.empty() && slot.is_empty();
             const bool  allowed_sparse_absence =
                 allow_sparse_slots && group->groupType() != CacheGroupType::FULL && structurally_absent;
-            RTP_LLM_CHECK_WITH_INFO(
-                slot.isValidSteadyState() && (allowed_sparse_absence || group->hasCompleteDeviceValue(slot)),
-                "BlockTreeCache insert requires an IDLE complete DEVICE resource: "
-                "key=%ld group_set_id=%zu state=%d tiers=%zu expected_width=%zu actual_width=%zu",
-                cache_keys[i],
-                group_set_index,
-                static_cast<int>(slot.transfer_state),
-                slot.servingTierCount(),
-                group->devicePoolCount(),
-                slot.device_blocks.size());
+            RTP_LLM_CHECK_WITH_INFO(slot.isValidSteadyState()
+                                        && (allowed_sparse_absence || group->hasCompleteDeviceValue(slot)),
+                                    "BlockTreeCache insert requires an IDLE complete DEVICE resource: "
+                                    "key=%ld group_set_id=%zu state=%d tiers=%zu expected_width=%zu actual_width=%zu",
+                                    cache_keys[i],
+                                    group_set_index,
+                                    static_cast<int>(slot.transfer_state),
+                                    slot.servingTierCount(),
+                                    group->devicePoolCount(),
+                                    slot.device_blocks.size());
         }
     }
 
@@ -421,11 +413,11 @@ void BlockTreeCache::insertImpl(TreeNode*                                  paren
             node == nullptr ? 0 : node->group_set_resources.size());
         for (size_t group_set_index = 0; group_set_index < group_sets_.size(); ++group_set_index) {
             const GroupSetPtr& group = group_sets_[group_set_index];
-            GroupSetResource& slot = node->group_set_resources[group_set_index];
+            GroupSetResource&  slot  = node->group_set_resources[group_set_index];
             if (group->hasCompleteDeviceValue(slot)) {
                 const std::vector<BlockIdxType> blocks = group->getBlocks(slot, Tier::DEVICE);
-                group->referenceBlocks(
-                    MultiNodeResource{group_set_index, Tier::DEVICE, {blocks}}, BlockRefType::BLOCK_CACHE);
+                group->referenceBlocks(MultiNodeResource{group_set_index, Tier::DEVICE, {blocks}},
+                                       BlockRefType::BLOCK_CACHE);
             }
         }
     }
@@ -442,14 +434,13 @@ void BlockTreeCache::insertImpl(TreeNode*                                  paren
             group_set_index,
             group_sets_.size());
         const GroupSetPtr& group = group_sets_[group_set_index];
-        GroupSetResource& slot  = adopted.node->group_set_resources[group_set_index];
+        GroupSetResource&  slot  = adopted.node->group_set_resources[group_set_index];
         RTP_LLM_CHECK_WITH_INFO(group->hasCompleteDeviceValue(slot),
                                 "BlockTreeCache adopted incomplete DEVICE resource: key=%ld group_set_id=%zu",
                                 adopted.node->cache_key,
                                 group_set_index);
-        group->referenceBlocks(
-            MultiNodeResource{group_set_index, Tier::DEVICE, {group->getBlocks(slot, Tier::DEVICE)}},
-            BlockRefType::BLOCK_CACHE);
+        group->referenceBlocks(MultiNodeResource{group_set_index, Tier::DEVICE, {group->getBlocks(slot, Tier::DEVICE)}},
+                               BlockRefType::BLOCK_CACHE);
     }
 
     const bool changed = !insert_result.inserted_nodes.empty() || !insert_result.adopted_slots.empty();
@@ -483,7 +474,7 @@ int BlockTreeCache::evictForTag(const std::string& tag, size_t num_blocks) {
     if (location == nullptr) {
         return 0;
     }
-    const GroupSetPtr& group_set = group_sets_[location->group_set_id];
+    const GroupSetPtr& group_set   = group_sets_[location->group_set_id];
     const auto&        device_pool = group_set->devicePools()[location->local_group_index];
 
     const size_t initial_free = device_pool->freeBlocksNum();
@@ -520,26 +511,24 @@ void BlockTreeCache::validateMatchedResource(const MultiNodeResource& resource) 
 
     const GroupSetPtr& group_set = group_sets_[resource.group_set_id];
     for (const auto& node_blocks : resource.per_node) {
-        RTP_LLM_CHECK_WITH_INFO(
-            node_blocks.size() == group_set->devicePoolCount()
-                && std::all_of(node_blocks.begin(),
-                               node_blocks.end(),
-                               [](BlockIdxType block) { return !isNullBlockIdx(block); }),
-            "malformed matched DEVICE blocks, group_set_id=%zu expected_width=%zu actual_width=%zu",
-            resource.group_set_id,
-            group_set->devicePoolCount(),
-            node_blocks.size());
+        RTP_LLM_CHECK_WITH_INFO(node_blocks.size() == group_set->devicePoolCount()
+                                    && std::all_of(node_blocks.begin(),
+                                                   node_blocks.end(),
+                                                   [](BlockIdxType block) { return !isNullBlockIdx(block); }),
+                                "malformed matched DEVICE blocks, group_set_id=%zu expected_width=%zu actual_width=%zu",
+                                resource.group_set_id,
+                                group_set->devicePoolCount(),
+                                node_blocks.size());
     }
-    RTP_LLM_CHECK_WITH_INFO(
-        resource.tree_nodes.empty()
-            || (resource.tree_nodes.size() == resource.per_node.size()
-                && std::all_of(resource.tree_nodes.begin(),
-                               resource.tree_nodes.end(),
-                               [](const TreeNode* node) { return node != nullptr; })),
-        "malformed matched tree-node alignment, group_set_id=%zu nodes=%zu blocks=%zu",
-        resource.group_set_id,
-        resource.tree_nodes.size(),
-        resource.per_node.size());
+    RTP_LLM_CHECK_WITH_INFO(resource.tree_nodes.empty()
+                                || (resource.tree_nodes.size() == resource.per_node.size()
+                                    && std::all_of(resource.tree_nodes.begin(),
+                                                   resource.tree_nodes.end(),
+                                                   [](const TreeNode* node) { return node != nullptr; })),
+                            "malformed matched tree-node alignment, group_set_id=%zu nodes=%zu blocks=%zu",
+                            resource.group_set_id,
+                            resource.tree_nodes.size(),
+                            resource.per_node.size());
 }
 
 void BlockTreeCache::releaseMatchedResources(const std::vector<MultiNodeResource>& resources) {
@@ -558,9 +547,8 @@ void BlockTreeCache::releaseMatchedResources(const std::vector<MultiNodeResource
     }
 }
 
-BlockIndicesType
-BlockTreeCache::matchedBlocksForGroup(size_t group_id,
-                                      const std::vector<MultiNodeResource>& matched_resources) const {
+BlockIndicesType BlockTreeCache::matchedBlocksForGroup(size_t                                group_id,
+                                                       const std::vector<MultiNodeResource>& matched_resources) const {
     const auto location_it = reusable_group_locations_.find(group_id);
     if (location_it == reusable_group_locations_.end()) {
         return {};
@@ -625,8 +613,9 @@ BlockTreeKeySnapshot BlockTreeCache::getKeySnapshot(size_t limit) const {
     while (!pending.empty() && snapshot.keys.size() < limit) {
         const TreeNode* node = pending.back();
         pending.pop_back();
-        const bool reusable = std::any_of(
-            node->group_set_resources.begin(), node->group_set_resources.end(), [](const GroupSetResource& slot) { return !slot.is_empty(); });
+        const bool reusable = std::any_of(node->group_set_resources.begin(),
+                                          node->group_set_resources.end(),
+                                          [](const GroupSetResource& slot) { return !slot.is_empty(); });
         if (reusable) {
             snapshot.keys.push_back(node->cache_key);
         }
@@ -684,15 +673,13 @@ void BlockTreeCache::prepareMatchedBlocks(const std::vector<TreeNode*>&         
         const GroupSetPtr& group_set = group_sets_[group_set_id];
         MultiNodeResource  matched_device_blocks{group_set_id, Tier::DEVICE};
 
-        const size_t ready_reuse_count =
-            std::min(group_set->computeReuseBlockCount(ready_matched_block_count, matched_path),
-                     ready_matched_block_count);
+        const size_t ready_reuse_count = std::min(
+            group_set->computeReuseBlockCount(ready_matched_block_count, matched_path), ready_matched_block_count);
         const size_t ready_reuse_begin = ready_matched_block_count - ready_reuse_count;
         for (size_t i = ready_reuse_begin; i < ready_matched_block_count; ++i) {
-            TreeNode*               path_node = matched_path[i];
-            GroupSetResource& group_set_resource = path_node->group_set_resources[group_set_id];
-            const std::vector<BlockIdxType> device_blocks =
-                group_set->getBlocks(group_set_resource, Tier::DEVICE);
+            TreeNode*                       path_node          = matched_path[i];
+            GroupSetResource&               group_set_resource = path_node->group_set_resources[group_set_id];
+            const std::vector<BlockIdxType> device_blocks      = group_set->getBlocks(group_set_resource, Tier::DEVICE);
             matched_device_blocks.per_node.push_back(device_blocks);
             matched_device_blocks.tree_nodes.push_back(path_node);
         }
@@ -705,14 +692,13 @@ void BlockTreeCache::prepareMatchedBlocks(const std::vector<TreeNode*>&         
         if (!config_.enable_load_back) {
             continue;
         }
-        const size_t logical_reuse_count =
-            std::min(group_set->computeReuseBlockCount(logical_matched_block_count, matched_path),
-                     logical_matched_block_count);
+        const size_t logical_reuse_count = std::min(
+            group_set->computeReuseBlockCount(logical_matched_block_count, matched_path), logical_matched_block_count);
         for (size_t i = logical_matched_block_count - logical_reuse_count; i < logical_matched_block_count; ++i) {
             if (i >= ready_reuse_begin && i < ready_matched_block_count) {
                 continue;
             }
-            TreeNode*               path_node = matched_path[i];
+            TreeNode*         path_node          = matched_path[i];
             GroupSetResource& group_set_resource = path_node->group_set_resources[group_set_id];
             prepareMatchedLoadBackItem(path_node, group_set, group_set_resource, i, result, pending_load_back_items);
         }
@@ -728,7 +714,7 @@ size_t BlockTreeCache::computeReadyMatchedBlockCount(const std::vector<TreeNode*
         bool all_groups_ready = true;
         for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
             const GroupSetPtr& group_set = group_sets_[group_set_id];
-            const size_t reuse_count =
+            const size_t       reuse_count =
                 std::min(group_set->computeReuseBlockCount(candidate_count, matched_path), candidate_count);
             for (size_t path_index = candidate_count - reuse_count; path_index < candidate_count; ++path_index) {
                 TreeNode* path_node = matched_path[path_index];
@@ -891,14 +877,13 @@ bool BlockTreeCache::reserveLoadBackItems(const LoadBackTicket::PendingLoadBackI
 }
 
 std::shared_ptr<AsyncContext> BlockTreeCache::commitLoadBack(const LoadBackTicket& ticket) {
-    std::lock_guard<std::mutex> lock(mutex_);
+    std::lock_guard<std::mutex>                 lock(mutex_);
     const LoadBackTicket::PendingLoadBackItems& items = ticket.items();
 
     size_t                                      prepared_item_count = 0;
     const std::shared_ptr<LoadBackAsyncContext> context             = ticket.context();
-    ScopeRollback rollback_guard([this, &items, &prepared_item_count, &context]() {
-        abortLoadBackUnsafe(items, prepared_item_count, context);
-    });
+    ScopeRollback                               rollback_guard(
+        [this, &items, &prepared_item_count, &context]() { abortLoadBackUnsafe(items, prepared_item_count, context); });
     if (context == nullptr) {
         RTP_LLM_LOG_WARNING("load-back ticket has no context");
         return nullptr;
@@ -929,20 +914,18 @@ std::shared_ptr<AsyncContext> BlockTreeCache::commitLoadBack(const LoadBackTicke
             return nullptr;
         }
         if (!evictor_.beginLoadBack(item.node, item.group_set_id, item.source_tier)) {
-            const bool erased =
-                load_back_worker_.eraseLoadingForOneContext(item.node, item.group_set_id, context);
+            const bool erased = load_back_worker_.eraseLoadingForOneContext(item.node, item.group_set_id, context);
             if (!erased) {
                 RTP_LLM_LOG_ERROR("failed to erase load-back context, group_set=%zu", item.group_set_id);
             }
-            RTP_LLM_LOG_WARNING(
-                "pending-to-loading transition failed, rolled back all %zu load_back items", items.size());
+            RTP_LLM_LOG_WARNING("pending-to-loading transition failed, rolled back all %zu load_back items",
+                                items.size());
             return nullptr;
         }
         // Add an in-flight copy holder. It becomes a cache holder only after
         // the target blocks are installed into the tree slot.
         group_sets_[item.group_set_id]->referenceBlocks(
-            MultiNodeResource{item.group_set_id, Tier::DEVICE, {item.target_device_blocks}},
-            BlockRefType::REQUEST);
+            MultiNodeResource{item.group_set_id, Tier::DEVICE, {item.target_device_blocks}}, BlockRefType::REQUEST);
         ++prepared_item_count;
     }
 
@@ -961,8 +944,7 @@ std::shared_ptr<AsyncContext> BlockTreeCache::commitLoadBack(const LoadBackTicke
     for (const LoadBackTicket::PendingLoadBackItem& item : items) {
         if (item.joined_load_back) {
             group_sets_[item.group_set_id]->unreferenceBlocks(
-                MultiNodeResource{item.group_set_id, Tier::DEVICE, {item.target_device_blocks}},
-                BlockRefType::REQUEST);
+                MultiNodeResource{item.group_set_id, Tier::DEVICE, {item.target_device_blocks}}, BlockRefType::REQUEST);
         }
     }
     rollback_guard.dismiss();
@@ -991,11 +973,10 @@ void BlockTreeCache::abortLoadBackUnsafe(const LoadBackTicket::PendingLoadBackIt
         const bool fully_prepared = item_index < prepared_item_count;
         if (item.joined_load_back) {
             if (context != nullptr) {
-                const bool erased =
-                    load_back_worker_.eraseLoadingForOneContext(item.node, item.group_set_id, context);
+                const bool erased = load_back_worker_.eraseLoadingForOneContext(item.node, item.group_set_id, context);
                 if (!erased) {
-                    RTP_LLM_LOG_DEBUG(
-                        "joined load-back context is no longer registered, group_set=%zu", item.group_set_id);
+                    RTP_LLM_LOG_DEBUG("joined load-back context is no longer registered, group_set=%zu",
+                                      item.group_set_id);
                 }
             }
             if (!item.target_device_blocks.empty()) {
@@ -1008,11 +989,9 @@ void BlockTreeCache::abortLoadBackUnsafe(const LoadBackTicket::PendingLoadBackIt
         }
         if (item.source_tier != Tier::DEVICE && fully_prepared) {
             if (context != nullptr) {
-                const bool erased =
-                    load_back_worker_.eraseLoadingForOneContext(item.node, item.group_set_id, context);
+                const bool erased = load_back_worker_.eraseLoadingForOneContext(item.node, item.group_set_id, context);
                 if (!erased) {
-                    RTP_LLM_LOG_WARNING(
-                        "failed to erase aborted load-back context, group_set=%zu", item.group_set_id);
+                    RTP_LLM_LOG_WARNING("failed to erase aborted load-back context, group_set=%zu", item.group_set_id);
                 }
             }
             group_sets_[group_set_index]->unreferenceBlocks(
@@ -1031,7 +1010,8 @@ void BlockTreeCache::abortLoadBackUnsafe(const LoadBackTicket::PendingLoadBackIt
                         "loading state mismatch, group=%zu source=%s", item.group_set_id, tierName(item.source_tier));
                 }
             } else {
-                if (!evictor_.abortPendingLoadBack(item.node, item.group_set_id, item.source_tier, item.source_blocks)) {
+                if (!evictor_.abortPendingLoadBack(
+                        item.node, item.group_set_id, item.source_tier, item.source_blocks)) {
                     RTP_LLM_LOG_WARNING("reservation state mismatch, "
                                         "group=%zu source=%s",
                                         item.group_set_id,
@@ -1091,7 +1071,7 @@ void BlockTreeCache::runLoadBackTask(const LoadBackWorker::TaskPtr& task) {
     // to this load-back operation.
     {
         std::lock_guard<std::mutex> lock(mutex_);
-        const bool settlement_success = settleLoadBackNolock(*task, copy_success);
+        const bool                  settlement_success = settleLoadBackNolock(*task, copy_success);
         if (!settlement_success) {
             RTP_LLM_LOG_DEBUG("load-back task settled unsuccessfully");
         }
@@ -1113,13 +1093,12 @@ bool BlockTreeCache::settleLoadBackNolock(LoadBackWorker::Task& task, bool copy_
     for (size_t item_index = 0; item_index < task.items.size(); ++item_index) {
         const LoadBackTicket::PendingLoadBackItem& item  = task.items[item_index];
         const GroupSetPtr&                         group = task.item_groups[item_index];
-        RTP_LLM_CHECK_WITH_INFO(
-            group != nullptr && group->groupSetId() == item.group_set_id && item.node != nullptr
-                && item.group_set_id < item.node->group_set_resources.size(),
-            "malformed load-back item: index=%zu group_set_id=%zu node=%p",
-            item_index,
-            item.group_set_id,
-            static_cast<void*>(item.node));
+        RTP_LLM_CHECK_WITH_INFO(group != nullptr && group->groupSetId() == item.group_set_id && item.node != nullptr
+                                    && item.group_set_id < item.node->group_set_resources.size(),
+                                "malformed load-back item: index=%zu group_set_id=%zu node=%p",
+                                item_index,
+                                item.group_set_id,
+                                static_cast<void*>(item.node));
         if (settlement_success && item.source_tier != Tier::DEVICE
             && (item.target_device_blocks.size() != group->devicePoolCount()
                 || item.node->group_set_resources[item.group_set_id].transfer_state
@@ -1130,8 +1109,8 @@ bool BlockTreeCache::settleLoadBackNolock(LoadBackWorker::Task& task, bool copy_
     }
 
     for (size_t item_index = 0; item_index < task.items.size(); ++item_index) {
-        const LoadBackTicket::PendingLoadBackItem& item  = task.items[item_index];
-        const GroupSetPtr&                         group = task.item_groups[item_index];
+        const LoadBackTicket::PendingLoadBackItem& item         = task.items[item_index];
+        const GroupSetPtr&                         group        = task.item_groups[item_index];
         const size_t                               group_set_id = item.group_set_id;
 
         MultiNodeResource source_protection{group_set_id, item.source_tier, {item.source_blocks}};
@@ -1180,8 +1159,7 @@ bool BlockTreeCache::settleLoadBackNolock(LoadBackWorker::Task& task, bool copy_
         if (item.source_tier == Tier::DEVICE) {
             continue;
         }
-        const bool completed =
-            load_back_worker_.finishLoading(item.node, item.group_set_id, settlement_success);
+        const bool completed = load_back_worker_.finishLoading(item.node, item.group_set_id, settlement_success);
         if (!completed) {
             RTP_LLM_LOG_WARNING("failed to finish loading record, group_set=%zu", item.group_set_id);
         }

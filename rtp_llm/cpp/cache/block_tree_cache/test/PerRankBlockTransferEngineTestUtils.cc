@@ -68,16 +68,16 @@ std::shared_ptr<const CacheTopology> makeTestTopology(std::vector<TestGroupSpec>
         cache_spec->tag = test_spec.tag;
 
         GroupBase group;
-        group.tag                      = test_spec.tag;
-        group.spec                     = std::move(cache_spec);
-        group.policy                   = test_spec.policy;
-        group.layer_ids                = std::move(test_spec.layer_ids);
-        group.block_num                = test_spec.block_num;
-        group.local_kv_head_num        = 1;
-        group.seq_size_per_block       = test_spec.seq_size_per_block;
+        group.tag                       = test_spec.tag;
+        group.spec                      = std::move(cache_spec);
+        group.policy                    = test_spec.policy;
+        group.layer_ids                 = std::move(test_spec.layer_ids);
+        group.block_num                 = test_spec.block_num;
+        group.local_kv_head_num         = 1;
+        group.seq_size_per_block        = test_spec.seq_size_per_block;
         group.kernel_seq_size_per_block = test_spec.seq_size_per_block;
-        group.kv_block_stride_bytes    = test_spec.kv_block_stride_bytes;
-        group.kv_scale_stride_bytes    = test_spec.kv_scale_stride_bytes;
+        group.kv_block_stride_bytes     = test_spec.kv_block_stride_bytes;
+        group.kv_scale_stride_bytes     = test_spec.kv_scale_stride_bytes;
         for (int layer_id : group.layer_ids) {
             layers[static_cast<size_t>(layer_id)].group_tags.push_back(group.tag);
         }
@@ -89,7 +89,7 @@ std::shared_ptr<const CacheTopology> makeTestTopology(std::vector<TestGroupSpec>
 GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
                              std::shared_ptr<const CacheTopology> topology,
                              std::vector<size_t>                  group_ids,
-                             std::vector<DeviceBlockPoolPtr>     device_pools) {
+                             std::vector<DeviceBlockPoolPtr>      device_pools) {
     RTP_LLM_CHECK(topology != nullptr);
     RTP_LLM_CHECK(!group_ids.empty());
     const auto& first = topology->groupById(group_ids.front());
@@ -113,8 +113,8 @@ GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
 }
 
 DeviceBlockPoolPtr makeTestDevicePool(const std::vector<std::pair<size_t, size_t>>& layer_bytes,
-                                      size_t                                         usable_count,
-                                      const std::string&                             pool_name) {
+                                      size_t                                        usable_count,
+                                      const std::string&                            pool_name) {
     RTP_LLM_CHECK(!layer_bytes.empty());
     const size_t physical_block_count = usable_count + 1;
     auto         config               = std::make_shared<DeviceBlockPoolConfig>();
@@ -224,12 +224,12 @@ TransferDescriptor makeDescriptor(Tier                             source_tier,
     }
 
     TransferDescriptor desc;
-    desc.group_set_id       = group_set_id;
-    desc.source_tier        = source_tier;
-    desc.target_tier        = target_tier;
-    desc.device_blocks      = device_blocks;
-    desc.host_block         = host_block;
-    desc.disk_block         = disk_block;
+    desc.group_set_id  = group_set_id;
+    desc.source_tier   = source_tier;
+    desc.target_tier   = target_tier;
+    desc.device_blocks = device_blocks;
+    desc.host_block    = host_block;
+    desc.disk_block    = disk_block;
     return desc;
 }
 

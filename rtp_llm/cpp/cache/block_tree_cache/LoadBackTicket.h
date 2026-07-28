@@ -95,8 +95,7 @@ public:
             return false;
         }
         PendingLoadBackItem& item = items_[item_index];
-        if (item.joined_load_back
-            || (item.source_tier == Tier::DEVICE && item.source_blocks != target_device_blocks)) {
+        if (item.joined_load_back || (item.source_tier == Tier::DEVICE && item.source_blocks != target_device_blocks)) {
             return false;
         }
         item.target_device_blocks = std::move(target_device_blocks);

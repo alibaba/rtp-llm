@@ -14,8 +14,8 @@ size_t SWAGroupSet::computeReuseBlockCount(size_t matched_block_count, const std
         return matched_block_count;  // No window configured, full path
     }
     const size_t group_set_index = groupSetId();
-    size_t       count       = 0;
-    size_t       accumulated = 0;
+    size_t       count           = 0;
+    size_t       accumulated     = 0;
     for (size_t i = matched_block_count; i > 0; --i) {
         const TreeNode* node = path[i - 1];
         if (group_set_index < node->group_set_resources.size()

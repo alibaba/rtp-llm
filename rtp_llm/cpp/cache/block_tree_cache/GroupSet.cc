@@ -11,7 +11,7 @@ namespace rtp_llm {
 
 void GroupSet::initialize(size_t                               group_set_id,
                           std::shared_ptr<const CacheTopology> topology,
-                          std::vector<size_t>                   group_ids,
+                          std::vector<size_t>                  group_ids,
                           std::vector<DeviceBlockPoolPtr>      device_pools) {
     RTP_LLM_CHECK_WITH_INFO(topology_ == nullptr && group_ids_.empty() && device_pools_.empty(),
                             "GroupSet %zu identity and membership are immutable",
@@ -30,7 +30,7 @@ void GroupSet::initialize(size_t                               group_set_id,
                             group_set_id,
                             group_ids.front(),
                             topology_groups.size());
-    const auto& first = topology->groupById(group_ids.front());
+    const auto&                first = topology->groupById(group_ids.front());
     std::unordered_set<size_t> unique_group_ids;
     size_t                     payload_bytes = 0;
     for (size_t local_group_index = 0; local_group_index < group_ids.size(); ++local_group_index) {
@@ -40,10 +40,8 @@ void GroupSet::initialize(size_t                               group_set_id,
                                 group_set_id,
                                 group_id,
                                 topology_groups.size());
-        RTP_LLM_CHECK_WITH_INFO(unique_group_ids.emplace(group_id).second,
-                                "GroupSet %zu duplicate group_id=%zu",
-                                group_set_id,
-                                group_id);
+        RTP_LLM_CHECK_WITH_INFO(
+            unique_group_ids.emplace(group_id).second, "GroupSet %zu duplicate group_id=%zu", group_set_id, group_id);
         RTP_LLM_CHECK_WITH_INFO(device_pools[local_group_index] != nullptr,
                                 "GroupSet %zu device pool[%zu] is null",
                                 group_set_id,
@@ -55,34 +53,30 @@ void GroupSet::initialize(size_t                               group_set_id,
                                 group_set_id,
                                 group_id,
                                 group.tag.c_str());
-        RTP_LLM_CHECK_WITH_INFO(!group.layer_ids.empty(),
-                                "GroupSet %zu group_id=%zu has no layers",
-                                group_set_id,
-                                group_id);
         RTP_LLM_CHECK_WITH_INFO(
-            CacheConfig::samePolicy(group.policy, first.policy) && group.block_num == first.block_num
-                && group.local_kv_head_num == first.local_kv_head_num
-                && group.seq_size_per_block == first.seq_size_per_block
-                && group.kernel_seq_size_per_block == first.kernel_seq_size_per_block
-                && group.kv_block_stride_bytes == first.kv_block_stride_bytes
-                && group.kv_scale_stride_bytes == first.kv_scale_stride_bytes
-                && (group.spec == nullptr) == (first.spec == nullptr)
-                && (group.spec == nullptr || group.spec->type == first.spec->type),
-            "GroupSet %zu incompatible group_id=%zu tag=%s",
-            group_set_id,
-            group_id,
-            group.tag.c_str());
+            !group.layer_ids.empty(), "GroupSet %zu group_id=%zu has no layers", group_set_id, group_id);
+        RTP_LLM_CHECK_WITH_INFO(CacheConfig::samePolicy(group.policy, first.policy)
+                                    && group.block_num == first.block_num
+                                    && group.local_kv_head_num == first.local_kv_head_num
+                                    && group.seq_size_per_block == first.seq_size_per_block
+                                    && group.kernel_seq_size_per_block == first.kernel_seq_size_per_block
+                                    && group.kv_block_stride_bytes == first.kv_block_stride_bytes
+                                    && group.kv_scale_stride_bytes == first.kv_scale_stride_bytes
+                                    && (group.spec == nullptr) == (first.spec == nullptr)
+                                    && (group.spec == nullptr || group.spec->type == first.spec->type),
+                                "GroupSet %zu incompatible group_id=%zu tag=%s",
+                                group_set_id,
+                                group_id,
+                                group.tag.c_str());
 
-        RTP_LLM_CHECK_WITH_INFO(
-            group.kv_block_stride_bytes <= std::numeric_limits<size_t>::max() - group.kv_scale_stride_bytes,
-            "GroupSet %zu group_id=%zu layer payload overflow",
-            group_set_id,
-            group_id);
-        const size_t layer_bytes = group.kv_block_stride_bytes + group.kv_scale_stride_bytes;
-        RTP_LLM_CHECK_WITH_INFO(layer_bytes > 0,
-                                "GroupSet %zu group_id=%zu has zero logical layer payload",
+        RTP_LLM_CHECK_WITH_INFO(group.kv_block_stride_bytes
+                                    <= std::numeric_limits<size_t>::max() - group.kv_scale_stride_bytes,
+                                "GroupSet %zu group_id=%zu layer payload overflow",
                                 group_set_id,
                                 group_id);
+        const size_t layer_bytes = group.kv_block_stride_bytes + group.kv_scale_stride_bytes;
+        RTP_LLM_CHECK_WITH_INFO(
+            layer_bytes > 0, "GroupSet %zu group_id=%zu has zero logical layer payload", group_set_id, group_id);
         RTP_LLM_CHECK_WITH_INFO(group.layer_ids.size() <= std::numeric_limits<size_t>::max() / layer_bytes,
                                 "GroupSet %zu group_id=%zu payload multiply overflow",
                                 group_set_id,
@@ -180,10 +174,8 @@ bool GroupSet::isLeafAtTier(const TreeNode* node, Tier tier) const {
             has_value = slot.hasTier(Tier::DISK);
             break;
         default:
-            RTP_LLM_CHECK_WITH_INFO(false,
-                                    "GroupSet::isLeafAtTier invalid tier=%d group_set_id=%zu",
-                                    static_cast<int>(tier),
-                                    group_set_id);
+            RTP_LLM_CHECK_WITH_INFO(
+                false, "GroupSet::isLeafAtTier invalid tier=%d group_set_id=%zu", static_cast<int>(tier), group_set_id);
     }
     if (!has_value) {
         return false;
@@ -191,8 +183,7 @@ bool GroupSet::isLeafAtTier(const TreeNode* node, Tier tier) const {
 
     for (const auto& [key, child] : node->children) {
         (void)key;
-        RTP_LLM_CHECK_WITH_INFO(child != nullptr
-                                    && group_set_id < child->group_set_resources.size(),
+        RTP_LLM_CHECK_WITH_INFO(child != nullptr && group_set_id < child->group_set_resources.size(),
                                 "GroupSet::isLeafAtTier invalid child/group_set_id=%zu",
                                 group_set_id);
         auto& child_slot = child->group_set_resources[group_set_id];
@@ -269,8 +260,7 @@ void GroupSet::validateBlockResource(const MultiNodeResource& resource) const {
                             resource.tree_nodes.size(),
                             resource.per_node.size());
     const size_t expected_width = resource.tier == Tier::DEVICE ? device_pools_.size() : 1;
-    RTP_LLM_CHECK_WITH_INFO(resource.tier == Tier::DEVICE || resource.tier == Tier::HOST
-                                || resource.tier == Tier::DISK,
+    RTP_LLM_CHECK_WITH_INFO(resource.tier == Tier::DEVICE || resource.tier == Tier::HOST || resource.tier == Tier::DISK,
                             "GroupSet %zu resource has invalid tier=%d",
                             groupSetId(),
                             static_cast<int>(resource.tier));

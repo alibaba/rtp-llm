@@ -34,9 +34,8 @@ std::vector<std::string> BlockTransferRequestConverter::normalizedTags(const Cop
     return tags;
 }
 
-const GroupSet*
-BlockTransferRequestConverter::findGroupSet(const std::vector<std::string>&       normalized_tags,
-                                                  const std::vector<GroupSetPtr>& group_sets) {
+const GroupSet* BlockTransferRequestConverter::findGroupSet(const std::vector<std::string>& normalized_tags,
+                                                            const std::vector<GroupSetPtr>& group_sets) {
     if (normalized_tags.empty()) {
         return nullptr;
     }
@@ -59,7 +58,7 @@ BlockTransferRequestConverter::findGroupSet(const std::vector<std::string>&     
 }
 
 bool BlockTransferRequestConverter::validDeviceBlocks(const std::vector<BlockIdxType>& blocks,
-                                                      const GroupSet&            group_set) {
+                                                      const GroupSet&                  group_set) {
     if (blocks.size() != group_set.groupIds().size() || blocks.empty()) {
         return false;
     }
@@ -93,7 +92,7 @@ bool BlockTransferRequestConverter::validDiskBlock(BlockIdxType block, const Gro
 }
 
 bool BlockTransferRequestConverter::directionFor(const TransferDescriptor&                descriptor,
-                                                 const GroupSet&                    group_set,
+                                                 const GroupSet&                          group_set,
                                                  MemoryOperationRequestPB::CopyDirection& request_direction) {
     if (descriptor.source_tier == Tier::DEVICE && descriptor.target_tier == Tier::HOST) {
         request_direction = MemoryOperationRequestPB::D2H;
@@ -119,7 +118,7 @@ bool BlockTransferRequestConverter::directionFor(const TransferDescriptor&      
 }
 
 void BlockTransferRequestConverter::setDeviceBlocks(const std::vector<BlockIdxType>& blocks,
-                                                    const GroupSet&            group_set,
+                                                    const GroupSet&                  group_set,
                                                     CopyItem&                        item) {
     const auto tags = group_set.groupTags();
     RTP_LLM_CHECK(blocks.size() == tags.size());
@@ -134,7 +133,7 @@ void BlockTransferRequestConverter::setDeviceBlocks(const std::vector<BlockIdxTy
 }
 
 bool BlockTransferRequestConverter::decodeDeviceBlocks(const CopyItem&            item,
-                                                       const GroupSet&      group_set,
+                                                       const GroupSet&            group_set,
                                                        std::vector<BlockIdxType>& blocks) {
     const auto tags = group_set.groupTags();
     if (item.tagged_gpu_blocks_size() != static_cast<int>(tags.size())) {
@@ -161,7 +160,7 @@ bool BlockTransferRequestConverter::decodeDeviceBlocks(const CopyItem&          
 
 bool BlockTransferRequestConverter::decodeDeviceHostTransfer(const MemoryOperationRequestPB& request,
                                                              const CopyItem&                 item,
-                                                             const GroupSet&           group_set,
+                                                             const GroupSet&                 group_set,
                                                              TransferDescriptor&             descriptor) {
     if (item.backing_type() != MemoryOperationRequestPB::MEMORY || !validHostBlock(item.mem_block(), group_set)
         || hasTargetDisk(item) || hasSourceMemory(item) || hasSourceDisk(item)) {
@@ -172,13 +171,13 @@ bool BlockTransferRequestConverter::decodeDeviceHostTransfer(const MemoryOperati
         return false;
     }
     if (request.copy_direction() == MemoryOperationRequestPB::D2H) {
-        descriptor = TransferDescriptor::deviceToHost(
-            group_set.groupSetId(), std::move(device_blocks), item.mem_block());
+        descriptor =
+            TransferDescriptor::deviceToHost(group_set.groupSetId(), std::move(device_blocks), item.mem_block());
         return true;
     }
     if (request.copy_direction() == MemoryOperationRequestPB::H2D) {
-        descriptor = TransferDescriptor::hostToDevice(
-            group_set.groupSetId(), item.mem_block(), std::move(device_blocks));
+        descriptor =
+            TransferDescriptor::hostToDevice(group_set.groupSetId(), item.mem_block(), std::move(device_blocks));
         return true;
     }
     return false;
@@ -186,18 +185,17 @@ bool BlockTransferRequestConverter::decodeDeviceHostTransfer(const MemoryOperati
 
 bool BlockTransferRequestConverter::decodeHostDiskTransfer(const MemoryOperationRequestPB& request,
                                                            const CopyItem&                 item,
-                                                           const GroupSet&           group_set,
+                                                           const GroupSet&                 group_set,
                                                            TransferDescriptor&             descriptor) {
     if (item.tagged_gpu_blocks_size() != 0) {
         return false;
     }
     if (request.copy_direction() == MemoryOperationRequestPB::H2DISK
         && item.backing_type() == MemoryOperationRequestPB::DISK && hasTargetDisk(item)
-        && validDiskBlock(item.disk_slot(), group_set) && isNullBlockIdx(item.mem_block())
-        && hasSourceMemory(item) && !hasSourceDisk(item) && item.src_backing_type() == MemoryOperationRequestPB::MEMORY
+        && validDiskBlock(item.disk_slot(), group_set) && isNullBlockIdx(item.mem_block()) && hasSourceMemory(item)
+        && !hasSourceDisk(item) && item.src_backing_type() == MemoryOperationRequestPB::MEMORY
         && validHostBlock(item.src_mem_block(), group_set)) {
-        descriptor =
-            TransferDescriptor::hostToDisk(group_set.groupSetId(), item.src_mem_block(), item.disk_slot());
+        descriptor = TransferDescriptor::hostToDisk(group_set.groupSetId(), item.src_mem_block(), item.disk_slot());
         return true;
     }
     if (request.copy_direction() == MemoryOperationRequestPB::DISK2H
@@ -205,22 +203,20 @@ bool BlockTransferRequestConverter::decodeHostDiskTransfer(const MemoryOperation
         && !hasTargetDisk(item) && !hasSourceMemory(item) && hasSourceDisk(item)
         && item.src_backing_type() == MemoryOperationRequestPB::DISK
         && validDiskBlock(item.src_disk_slot(), group_set)) {
-        descriptor =
-            TransferDescriptor::diskToHost(group_set.groupSetId(), item.src_disk_slot(), item.mem_block());
+        descriptor = TransferDescriptor::diskToHost(group_set.groupSetId(), item.src_disk_slot(), item.mem_block());
         return true;
     }
     return false;
 }
 
-bool BlockTransferRequestConverter::appendTransfer(const TransferDescriptor&             descriptor,
+bool BlockTransferRequestConverter::appendTransfer(const TransferDescriptor&       descriptor,
                                                    const std::vector<GroupSetPtr>& group_sets,
-    MemoryOperationRequestPB&             request) {
+                                                   MemoryOperationRequestPB&       request) {
     const GroupSet* group_set = nullptr;
     if (descriptor.group_set_id < group_sets.size()) {
         group_set = group_sets[descriptor.group_set_id].get();
     }
-    if (group_set == nullptr || group_set->groupSetId() != descriptor.group_set_id
-        || group_set->groupIds().empty()) {
+    if (group_set == nullptr || group_set->groupSetId() != descriptor.group_set_id || group_set->groupIds().empty()) {
         return false;
     }
 
@@ -268,16 +264,16 @@ bool BlockTransferRequestConverter::appendTransfer(const TransferDescriptor&    
     return true;
 }
 
-bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestPB&       request,
-                                                   int                                   item_index,
+bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestPB& request,
+                                                   int                             item_index,
                                                    const std::vector<GroupSetPtr>& group_sets,
-                                                   TransferDescriptor&                   descriptor) {
+                                                   TransferDescriptor&             descriptor) {
     if (item_index < 0 || item_index >= request.copy_items_size()) {
         return false;
     }
     const CopyItem& item            = request.copy_items(item_index);
     const auto      normalized_tags = normalizedTags(item);
-    const auto*     group_set = findGroupSet(normalized_tags, group_sets);
+    const auto*     group_set       = findGroupSet(normalized_tags, group_sets);
     if (group_set == nullptr) {
         RTP_LLM_LOG_WARNING("cannot resolve exact BlockTree GroupSet tag set, item=%d", item_index);
         return false;

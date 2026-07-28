@@ -12,13 +12,13 @@ class BroadcastManager;
 
 class MultiRankBlockTransferEngine {
 public:
-    MultiRankBlockTransferEngine(std::vector<GroupSetPtr>    group_sets,
+    MultiRankBlockTransferEngine(std::vector<GroupSetPtr>          group_sets,
                                  std::shared_ptr<BroadcastManager> broadcast_manager);
 
     bool execute(const std::vector<TransferDescriptor>& descriptors, int timeout_ms) const;
 
 private:
-    std::vector<GroupSetPtr>    group_sets_;
+    std::vector<GroupSetPtr>          group_sets_;
     std::shared_ptr<BroadcastManager> broadcast_manager_;
 };
 

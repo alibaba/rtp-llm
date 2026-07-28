@@ -21,7 +21,7 @@ bool LoadBackWorker::createTask(const LoadBackTicket::PendingLoadBackItems&  ite
     }
 
     LoadBackTicket::PendingLoadBackItems task_items;
-    std::vector<GroupSetPtr>              task_item_groups;
+    std::vector<GroupSetPtr>             task_item_groups;
     for (const LoadBackTicket::PendingLoadBackItem& item : items) {
         if (item.group_set_id >= group_sets.size()) {
             RTP_LLM_LOG_ERROR("invalid load-back task group, group_set=%zu", item.group_set_id);
@@ -130,7 +130,7 @@ bool LoadBackWorker::runTransfer(Task&                          task,
     int64_t disk_transfer_begin_time_us = 0;
     bool    host_transfer_started       = false;
     bool    disk_transfer_started       = false;
-    auto finish_metrics = [&](bool success) {
+    auto    finish_metrics              = [&](bool success) {
         if (host_transfer_started) {
             host_transfer_started = false;
             metrics_reporter.reportTransferFinished(
@@ -202,8 +202,7 @@ void LoadBackWorker::releaseUninstalledTargetHolders(const Task& task) {
 }
 
 bool LoadBackWorker::cancelLoadBackNolock(const std::shared_ptr<AsyncContext>& context) {
-    std::shared_ptr<LoadBackAsyncContext> load_back_context =
-        std::dynamic_pointer_cast<LoadBackAsyncContext>(context);
+    std::shared_ptr<LoadBackAsyncContext> load_back_context = std::dynamic_pointer_cast<LoadBackAsyncContext>(context);
     if (load_back_context == nullptr) {
         RTP_LLM_LOG_WARNING("context is not owned by BlockTreeCache");
         return false;
@@ -228,9 +227,7 @@ bool LoadBackWorker::startLoading(TreeNode*                                    n
 }
 
 std::optional<std::vector<BlockIdxType>>
-LoadBackWorker::joinLoading(TreeNode* node,
-                            size_t group_set_id,
-                            const std::shared_ptr<LoadBackAsyncContext>& context) {
+LoadBackWorker::joinLoading(TreeNode* node, size_t group_set_id, const std::shared_ptr<LoadBackAsyncContext>& context) {
     if (node == nullptr || context == nullptr) {
         return std::nullopt;
     }

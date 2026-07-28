@@ -15,14 +15,13 @@ using block_tree_cache_test::makeBlockTreeCacheForTest;
 class FullSWALinearEvictionTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        std::unique_ptr<BlockTree> tree       = std::make_unique<BlockTree>(3);
-        auto                       full       = std::make_shared<FullGroupSet>();
-        auto swa                              = std::make_shared<SWAGroupSet>(128, 64);
-        auto linear                           = std::make_shared<LinearGroupSet>();
-        std::vector<GroupSetPtr> groups = {full, swa, linear};
-        cache_                                = makeBlockTreeCacheForTest(std::move(tree),
-                                                            std::move(groups),
-                                                            BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+        std::unique_ptr<BlockTree> tree   = std::make_unique<BlockTree>(3);
+        auto                       full   = std::make_shared<FullGroupSet>();
+        auto                       swa    = std::make_shared<SWAGroupSet>(128, 64);
+        auto                       linear = std::make_shared<LinearGroupSet>();
+        std::vector<GroupSetPtr>   groups = {full, swa, linear};
+        cache_                            = makeBlockTreeCacheForTest(
+            std::move(tree), std::move(groups), BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
     }
 
     void insertPath(const CacheKeysType& keys, BlockIdxType full_b, BlockIdxType swa_b, BlockIdxType lin_b) {
@@ -179,14 +178,12 @@ TEST_F(FullSWALinearEvictionTest, ForkBothBranchesEvictable) {
 //   Reclaiming SWA[200] cascades LINEAR[200], deletes [200], then prunes empty [100].
 // ---------------------------------------------------------------------------
 TEST_F(FullSWALinearEvictionTest, SWAReclaimCascadesToLinear) {
-    std::unique_ptr<BlockTree> tree        = std::make_unique<BlockTree>(2);
-    auto                       swa         = std::make_shared<SWAGroupSet>(128, 64);
-    auto linear                            = std::make_shared<LinearGroupSet>();
-    std::vector<GroupSetPtr>  groups = {swa, linear};
-    std::unique_ptr<BlockTreeCache> swa_lin_cache =
-        makeBlockTreeCacheForTest(std::move(tree),
-                                                   std::move(groups),
-                                                   BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+    std::unique_ptr<BlockTree>      tree          = std::make_unique<BlockTree>(2);
+    auto                            swa           = std::make_shared<SWAGroupSet>(128, 64);
+    auto                            linear        = std::make_shared<LinearGroupSet>();
+    std::vector<GroupSetPtr>        groups        = {swa, linear};
+    std::unique_ptr<BlockTreeCache> swa_lin_cache = makeBlockTreeCacheForTest(
+        std::move(tree), std::move(groups), BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
 
     std::vector<std::vector<GroupSetResource>> slots(2, std::vector<GroupSetResource>(2));
     slots[0][0].device_blocks = {20};

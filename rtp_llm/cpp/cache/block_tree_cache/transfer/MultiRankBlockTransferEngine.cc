@@ -8,7 +8,7 @@
 
 namespace rtp_llm {
 
-MultiRankBlockTransferEngine::MultiRankBlockTransferEngine(std::vector<GroupSetPtr>    group_sets,
+MultiRankBlockTransferEngine::MultiRankBlockTransferEngine(std::vector<GroupSetPtr>          group_sets,
                                                            std::shared_ptr<BroadcastManager> broadcast_manager):
     group_sets_(std::move(group_sets)), broadcast_manager_(std::move(broadcast_manager)) {}
 

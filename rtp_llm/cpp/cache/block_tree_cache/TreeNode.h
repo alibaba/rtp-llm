@@ -64,7 +64,7 @@ struct GroupSetResource {
 
     // Async migration state and the single sorting-metadata copy (current serving tier).
     GroupSetTransferState transfer_state{GroupSetTransferState::IDLE};
-    CandidateMeta     candidate_meta;
+    CandidateMeta         candidate_meta;
 
     bool hasTier(Tier tier) const {
         switch (tier) {

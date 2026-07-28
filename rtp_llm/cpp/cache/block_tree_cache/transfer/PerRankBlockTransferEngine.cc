@@ -108,8 +108,8 @@ TransferHandle PerRankBlockTransferEngine::submit(const TransferDescriptor& desc
 }
 
 TransferStatus PerRankBlockTransferEngine::execute(const TransferDescriptor& desc) {
-    const GroupSet* group  = nullptr;
-    const TransferStatus  status = validateRequest(desc, group);
+    const GroupSet*      group  = nullptr;
+    const TransferStatus status = validateRequest(desc, group);
     if (status != TransferStatus::OK) {
         return status;
     }
@@ -127,7 +127,7 @@ TransferStatus PerRankBlockTransferEngine::execute(const TransferDescriptor& des
 }
 
 TransferStatus PerRankBlockTransferEngine::validateRequest(const TransferDescriptor& desc,
-                                                           const GroupSet*&    group) const {
+                                                           const GroupSet*&          group) const {
     if (desc.group_set_id >= group_sets_.size()) {
         RTP_LLM_LOG_WARNING("invalid group_set_id=%zu", desc.group_set_id);
         return TransferStatus::INVALID_ARGS;
@@ -162,8 +162,7 @@ TransferStatus PerRankBlockTransferEngine::validateRequest(const TransferDescrip
             }
             const DeviceBlockPoolPtr& pool = group->devicePools()[local_group_index];
             if (pool == nullptr || !pool->validBlock(block)) {
-                RTP_LLM_LOG_WARNING(
-                    "invalid device block %d for local_group=%zu", block, local_group_index);
+                RTP_LLM_LOG_WARNING("invalid device block %d for local_group=%zu", block, local_group_index);
                 return TransferStatus::INVALID_ARGS;
             }
             has_device_block = true;

@@ -121,18 +121,19 @@ class BlockTreeCache {
 public:
     using TierWatermark = BlockTreeCacheConfig::TierWatermark;
 
-    BlockTreeCache(std::unique_ptr<BlockTree>                    tree,
-                   std::vector<GroupSetPtr>                      group_sets,
-                   BlockTreeCacheConfig                          config,
-                   std::shared_ptr<StorageBackend>               storage_backend,
-                   std::unique_ptr<BlockTransferDispatcher>      transfer_dispatcher,
-                   std::unique_ptr<BlockCacheTaskPool>           task_pool);
+    BlockTreeCache(std::unique_ptr<BlockTree>               tree,
+                   std::vector<GroupSetPtr>                 group_sets,
+                   BlockTreeCacheConfig                     config,
+                   std::shared_ptr<StorageBackend>          storage_backend,
+                   std::unique_ptr<BlockTransferDispatcher> transfer_dispatcher,
+                   std::unique_ptr<BlockCacheTaskPool>      task_pool);
 
     ~BlockTreeCache();
     bool init();
 
     BlockTreeMatchResult match(const CacheKeysType& cache_keys);
-    void insert(TreeNode* parent, const CacheKeysType& cache_keys, const std::vector<std::vector<GroupSetResource>>& slots);
+    void
+    insert(TreeNode* parent, const CacheKeysType& cache_keys, const std::vector<std::vector<GroupSetResource>>& slots);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
     int evictForTag(const std::string& tag, size_t num_blocks);
@@ -213,12 +214,13 @@ private:
     friend class HybridKVCacheAllocator;
 
     bool initializeConfiguration();
-    void
-    insertSparse(TreeNode* parent, const CacheKeysType& cache_keys, const std::vector<std::vector<GroupSetResource>>& slots);
-    void insertImpl(TreeNode*                                  parent,
-                    const CacheKeysType&                       cache_keys,
+    void insertSparse(TreeNode*                                         parent,
+                      const CacheKeysType&                              cache_keys,
+                      const std::vector<std::vector<GroupSetResource>>& slots);
+    void insertImpl(TreeNode*                                         parent,
+                    const CacheKeysType&                              cache_keys,
                     const std::vector<std::vector<GroupSetResource>>& slots,
-                    bool                                       allow_sparse_slots);
+                    bool                                              allow_sparse_slots);
     void drainTreeHolds();
     void checkWatermark();
     bool reclaimOneForGroup(size_t group_set_id, Tier tier);
@@ -235,51 +237,51 @@ private:
                                     std::vector<TransferDescriptor>&      descriptors) const;
     int  evictionTransferTimeoutMs(const BlockTreeEvictor::EvictionPlan& plan) const;
 
-    void validateMatchedResource(const MultiNodeResource& resource) const;
-    void   prepareMatchedBlocks(const std::vector<TreeNode*>&         matched_path,
-                                const std::vector<bool>&              candidate_logically_valid,
-                                BlockTreeMatchResult&                 result,
-                                LoadBackTicket::PendingLoadBackItems& pending_load_back_items);
-    size_t computeReadyMatchedBlockCount(const std::vector<TreeNode*>& matched_path,
-                                         const std::vector<bool>&      candidate_logically_valid) const;
-    void   prepareMatchedLoadBackItem(TreeNode*                             path_node,
-                                      const GroupSetPtr&                    group_set,
-                                      const GroupSetResource&              group_set_resource,
-                                      size_t                                path_index,
-                                      BlockTreeMatchResult&                 result,
-                                      LoadBackTicket::PendingLoadBackItems& pending_load_back_items);
+    void                            validateMatchedResource(const MultiNodeResource& resource) const;
+    void                            prepareMatchedBlocks(const std::vector<TreeNode*>&         matched_path,
+                                                         const std::vector<bool>&              candidate_logically_valid,
+                                                         BlockTreeMatchResult&                 result,
+                                                         LoadBackTicket::PendingLoadBackItems& pending_load_back_items);
+    size_t                          computeReadyMatchedBlockCount(const std::vector<TreeNode*>& matched_path,
+                                                                  const std::vector<bool>&      candidate_logically_valid) const;
+    void                            prepareMatchedLoadBackItem(TreeNode*                             path_node,
+                                                               const GroupSetPtr&                    group_set,
+                                                               const GroupSetResource&               group_set_resource,
+                                                               size_t                                path_index,
+                                                               BlockTreeMatchResult&                 result,
+                                                               LoadBackTicket::PendingLoadBackItems& pending_load_back_items);
     std::shared_ptr<LoadBackTicket> prepareLoadBackTicket(LoadBackTicket::PendingLoadBackItems& items,
                                                           size_t                                logical_matched_blocks);
     bool                            prepareJoinedLoadBackItem(LoadBackTicket::PendingLoadBackItem&         item,
                                                               const std::shared_ptr<LoadBackAsyncContext>& context);
-    bool   reserveLoadBackItems(const LoadBackTicket::PendingLoadBackItems& items);
-    std::shared_ptr<AsyncContext> commitLoadBack(const LoadBackTicket& ticket);
-    void                          abortLoadBack(const LoadBackTicket& ticket);
-    void abortLoadBackUnsafe(const LoadBackTicket::PendingLoadBackItems&  items,
-                             size_t                                       prepared_item_count,
-                             const std::shared_ptr<LoadBackAsyncContext>& context);
-    void runLoadBackTask(const LoadBackWorker::TaskPtr& task);
-    bool settleLoadBackNolock(LoadBackWorker::Task& task, bool copy_success);
+    bool                            reserveLoadBackItems(const LoadBackTicket::PendingLoadBackItems& items);
+    std::shared_ptr<AsyncContext>   commitLoadBack(const LoadBackTicket& ticket);
+    void                            abortLoadBack(const LoadBackTicket& ticket);
+    void                            abortLoadBackUnsafe(const LoadBackTicket::PendingLoadBackItems&  items,
+                                                        size_t                                       prepared_item_count,
+                                                        const std::shared_ptr<LoadBackAsyncContext>& context);
+    void                            runLoadBackTask(const LoadBackWorker::TaskPtr& task);
+    bool                            settleLoadBackNolock(LoadBackWorker::Task& task, bool copy_success);
 
     struct GroupLocation {
         size_t group_set_id{0};
         size_t local_group_index{0};
     };
 
-    BlockTreeCacheConfig                          config_;
-    std::unique_ptr<BlockTree>                    tree_;
-    std::vector<GroupSetPtr>                     group_sets_;
+    BlockTreeCacheConfig       config_;
+    std::unique_ptr<BlockTree> tree_;
+    std::vector<GroupSetPtr>   group_sets_;
     // Reusable topology group_id -> GroupSet/local position. Non-reusable groups
     // never enter this index or the BlockTree resource space.
     std::unordered_map<size_t, GroupLocation> reusable_group_locations_;
-    LoadBackWorker                          load_back_worker_;
-    std::shared_ptr<LoadBackTicketRegistry>  load_back_ticket_registry_;
-    std::shared_ptr<StorageBackend>          storage_backend_;
-    std::unique_ptr<BlockTransferDispatcher> transfer_dispatcher_;
-    std::unique_ptr<BlockCacheTaskPool>      task_pool_;
-    BlockTreeCacheMetricsReporter            metrics_reporter_;
-    BlockTreeEvictor                         evictor_;
-    bool                                     initialized_{false};
+    LoadBackWorker                            load_back_worker_;
+    std::shared_ptr<LoadBackTicketRegistry>   load_back_ticket_registry_;
+    std::shared_ptr<StorageBackend>           storage_backend_;
+    std::unique_ptr<BlockTransferDispatcher>  transfer_dispatcher_;
+    std::unique_ptr<BlockCacheTaskPool>       task_pool_;
+    BlockTreeCacheMetricsReporter             metrics_reporter_;
+    BlockTreeEvictor                          evictor_;
+    bool                                      initialized_{false};
 
     mutable std::mutex mutex_;
     // Protected by mutex_. Credits remain reserved from async queue acceptance

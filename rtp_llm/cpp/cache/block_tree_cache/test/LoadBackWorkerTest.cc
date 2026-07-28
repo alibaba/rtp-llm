@@ -15,10 +15,10 @@ GroupSetPtr makeWorkerTestGroupSet() {
     using namespace block_transfer_engine_test;
 
     TestGroupSpec spec;
-    spec.tag                        = "load_back_worker";
-    spec.policy                     = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    spec.policy.enable_prefix_reuse = true;
-    spec.layer_ids                  = {0};
+    spec.tag                                            = "load_back_worker";
+    spec.policy                                         = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    spec.policy.enable_prefix_reuse                     = true;
+    spec.layer_ids                                      = {0};
     const std::shared_ptr<const CacheTopology> topology = makeTestTopology({spec});
     DeviceBlockPoolPtr pool = makeTestDevicePool({{spec.kv_block_stride_bytes, spec.kv_scale_stride_bytes}},
                                                  /*usable_count=*/1,

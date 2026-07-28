@@ -33,13 +33,12 @@ public:
 class FullEvictionTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        std::unique_ptr<BlockTree> tree       = std::make_unique<BlockTree>(1);
-        auto                       full       = std::make_shared<CountingFullGroupSet>();
-        counting_full_                        = full.get();
+        std::unique_ptr<BlockTree> tree = std::make_unique<BlockTree>(1);
+        auto                       full = std::make_shared<CountingFullGroupSet>();
+        counting_full_                  = full.get();
         std::vector<GroupSetPtr> groups = {full};
-        cache_                                = makeBlockTreeCacheForTest(std::move(tree),
-                                                            std::move(groups),
-                                                            BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+        cache_                          = makeBlockTreeCacheForTest(
+            std::move(tree), std::move(groups), BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
     }
 
     // Insert a path with given device block for group 0.
@@ -52,7 +51,7 @@ protected:
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
-    CountingFullGroupSet*     counting_full_{nullptr};
+    CountingFullGroupSet*           counting_full_{nullptr};
 };
 
 // ---------------------------------------------------------------------------
@@ -113,8 +112,10 @@ TEST_F(FullEvictionTest, ExtendingExistingLeafRefreshesDirectParent) {
         EXPECT_EQ(refresh_count(path_before[index]), 0) << "ancestor=" << index << " must not be re-scanned";
     }
 
-    EXPECT_EQ(after.path[3]->group_set_resources[0].candidate_meta.last_access_seq, direct_parent_meta_before.last_access_seq);
-    EXPECT_EQ(after.path[3]->group_set_resources[0].candidate_meta.admission_seq, direct_parent_meta_before.admission_seq);
+    EXPECT_EQ(after.path[3]->group_set_resources[0].candidate_meta.last_access_seq,
+              direct_parent_meta_before.last_access_seq);
+    EXPECT_EQ(after.path[3]->group_set_resources[0].candidate_meta.admission_seq,
+              direct_parent_meta_before.admission_seq);
     EXPECT_EQ(after.path[3]->group_set_resources[0].candidate_meta.hit_count, direct_parent_meta_before.hit_count);
     for (size_t index = 0; index < ancestor_meta_before.size(); ++index) {
         const CandidateMeta& after_meta = after.path[index]->group_set_resources[0].candidate_meta;

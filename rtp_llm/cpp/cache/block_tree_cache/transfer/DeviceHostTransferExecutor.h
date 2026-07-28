@@ -18,8 +18,7 @@ public:
     TransferStatus execute(const TransferDescriptor& desc, const GroupSet& group);
 
 private:
-    TransferStatus
-    lowerAndExecute(const TransferDescriptor& desc, const GroupSet& group, bool device_to_host);
+    TransferStatus lowerAndExecute(const TransferDescriptor& desc, const GroupSet& group, bool device_to_host);
 
     DeviceHostCopyPlan lowerPlan(const TransferDescriptor& desc,
                                  const GroupSet&           group,

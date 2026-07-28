@@ -297,8 +297,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
         return nullptr;
     }
     for (int group_id = 0; group_id < group_count; ++group_id) {
-        auto pool =
-            independent_pools.empty() ? allocator->getDeviceBlockPool() : independent_pools[static_cast<size_t>(group_id)];
+        auto pool = independent_pools.empty() ? allocator->getDeviceBlockPool() :
+                                                independent_pools[static_cast<size_t>(group_id)];
         if (!pool || groups[static_cast<size_t>(group_id)]->blockPool() != pool) {
             RTP_LLM_LOG_ERROR("createBlockTreeCache: allocator/group direct pool mismatch for group_id %d", group_id);
             return nullptr;
@@ -325,13 +325,12 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
         return nullptr;
     }
 
-    std::vector<GroupSetPtr> group_sets;
-    const auto plan = buildAggregationPlan(cache_config);
+    std::vector<GroupSetPtr>   group_sets;
+    const auto                 plan = buildAggregationPlan(cache_config);
     std::unordered_set<size_t> planned_group_ids;
     for (const auto& members : plan.members) {
         for (int group_id : members) {
-            RTP_LLM_CHECK_WITH_INFO(group_id >= 0
-                                        && planned_group_ids.emplace(static_cast<size_t>(group_id)).second,
+            RTP_LLM_CHECK_WITH_INFO(group_id >= 0 && planned_group_ids.emplace(static_cast<size_t>(group_id)).second,
                                     "BlockTreeCache aggregation plan contains invalid or duplicate group_id=%d",
                                     group_id);
         }
@@ -355,13 +354,12 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
         group_ids.reserve(members.size());
 
         for (size_t local_pool = 0; local_pool < members.size(); ++local_pool) {
-            const int   group_id      = members[local_pool];
+            const int group_id = members[local_pool];
             device_pools.push_back(group_pools[static_cast<size_t>(group_id)]);
             group_ids.push_back(static_cast<size_t>(group_id));
         }
 
-        group_set->initialize(
-            group_set_id, cache_config.topologyPtr(), std::move(group_ids), std::move(device_pools));
+        group_set->initialize(group_set_id, cache_config.topologyPtr(), std::move(group_ids), std::move(device_pools));
         RTP_LLM_LOG_INFO("createBlockTreeCache: group[%zu] membership sealed: payload_bytes=%zu",
                          group_set_id,
                          group_set->payloadBytes());
@@ -450,8 +448,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     auto per_rank_engine = std::make_shared<PerRankBlockTransferEngine>(group_sets);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
-        multi_rank_engine =
-            std::make_shared<MultiRankBlockTransferEngine>(group_sets, std::move(broadcast_manager));
+        multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(group_sets, std::move(broadcast_manager));
     }
     auto transfer_dispatcher =
         std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine), std::move(multi_rank_engine));
@@ -463,7 +460,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
                                                    std::move(config),
                                                    std::move(storage_backend),
                                                    std::move(transfer_dispatcher),
-                                                    std::move(task_pool));
+                                                   std::move(task_pool));
     if (!result->init()) {
         RTP_LLM_LOG_ERROR("createBlockTreeCache: BlockTreeCache init failed");
         return nullptr;

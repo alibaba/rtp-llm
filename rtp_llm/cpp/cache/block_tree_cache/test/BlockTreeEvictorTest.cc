@@ -121,8 +121,8 @@ DeviceBlockPoolPtr makeTestDevicePool(size_t usable_blocks, const std::string& n
     return pool;
 }
 
-void initializeGroups(const std::vector<GroupSetPtr>&                                  groups,
-                      const std::vector<DeviceBlockPoolPtr>&                           device_pools,
+void initializeGroups(const std::vector<GroupSetPtr>&                        groups,
+                      const std::vector<DeviceBlockPoolPtr>&                 device_pools,
                       std::vector<block_transfer_engine_test::TestGroupSpec> group_specs) {
     RTP_LLM_CHECK(groups.size() == device_pools.size());
     RTP_LLM_CHECK(groups.size() == group_specs.size());
@@ -133,10 +133,7 @@ void initializeGroups(const std::vector<GroupSetPtr>&                           
 }
 
 void initializeFullGroup(const GroupSetPtr& group, const DeviceBlockPoolPtr& device_pool, const std::string& tag) {
-    initializeGroups(
-        {group},
-        {device_pool},
-        {{tag, defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 16, 0}});
+    initializeGroups({group}, {device_pool}, {{tag, defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 16, 0}});
 }
 
 std::shared_ptr<FullGroupSet> makeInitializedFullGroup(size_t group_set_id, const std::string& name) {
@@ -150,28 +147,27 @@ std::shared_ptr<FullGroupSet> makeInitializedFullGroup(size_t group_set_id, cons
 }
 
 std::vector<GroupSetPtr> makeCascadePolicyGroups(CacheEvictPolicy linear_evict_policy) {
-    auto full                = makeFullGroup();
-    auto swa                 = std::make_shared<SWAGroupSet>(2, 1);
-    auto linear              = std::make_shared<LinearGroupSet>();
-    auto full_policy         = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    auto swa_policy          = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    auto linear_policy       = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+    auto full                         = makeFullGroup();
+    auto swa                          = std::make_shared<SWAGroupSet>(2, 1);
+    auto linear                       = std::make_shared<LinearGroupSet>();
+    auto full_policy                  = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    auto swa_policy                   = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    auto linear_policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
     full_policy.enable_prefix_reuse   = true;
     swa_policy.enable_prefix_reuse    = true;
     linear_policy.enable_prefix_reuse = true;
-    full_policy.evict_policy = CacheEvictPolicy::CHAIN;
-    swa_policy.evict_policy  = CacheEvictPolicy::INDEPENDENT;
-    swa_policy.sliding_window_size = 2;
-    linear_policy.evict_policy     = linear_evict_policy;
-    std::vector<GroupSetPtr> groups = {full, swa, linear};
-    initializeGroups(
-        groups,
-        {makeTestDevicePool(2, "cascade_policy_full"),
-         makeTestDevicePool(2, "cascade_policy_swa"),
-         makeTestDevicePool(2, "cascade_policy_linear")},
-        {{"full_tag", full_policy, {0}, 16, 0, 128, 1},
-         {"swa_tag", swa_policy, {0}, 16, 0, 128, 1},
-         {"linear_tag", linear_policy, {0}, 16, 0, 128, 1}});
+    full_policy.evict_policy          = CacheEvictPolicy::CHAIN;
+    swa_policy.evict_policy           = CacheEvictPolicy::INDEPENDENT;
+    swa_policy.sliding_window_size    = 2;
+    linear_policy.evict_policy        = linear_evict_policy;
+    std::vector<GroupSetPtr> groups   = {full, swa, linear};
+    initializeGroups(groups,
+                     {makeTestDevicePool(2, "cascade_policy_full"),
+                      makeTestDevicePool(2, "cascade_policy_swa"),
+                      makeTestDevicePool(2, "cascade_policy_linear")},
+                     {{"full_tag", full_policy, {0}, 16, 0, 128, 1},
+                      {"swa_tag", swa_policy, {0}, 16, 0, 128, 1},
+                      {"linear_tag", linear_policy, {0}, 16, 0, 128, 1}});
     return groups;
 }
 
@@ -251,25 +247,24 @@ void releaseBlocks(IBlockPool& pool, const std::vector<BlockIdxType>& blocks) {
 class CascadeTestEnvironment {
 public:
     bool init(bool enable_reverse_eviction = false) {
-        auto full                  = makeFullGroup();
-        auto swa                   = std::make_shared<SWAGroupSet>(2, 1);
-        auto linear                = std::make_shared<LinearGroupSet>();
-        groups_                    = {full, swa, linear};
-        auto full_policy           = defaultCacheGroupPolicy(CacheGroupType::FULL);
-        auto swa_policy            = defaultCacheGroupPolicy(CacheGroupType::SWA);
-        auto linear_policy         = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+        auto full                         = makeFullGroup();
+        auto swa                          = std::make_shared<SWAGroupSet>(2, 1);
+        auto linear                       = std::make_shared<LinearGroupSet>();
+        groups_                           = {full, swa, linear};
+        auto full_policy                  = defaultCacheGroupPolicy(CacheGroupType::FULL);
+        auto swa_policy                   = defaultCacheGroupPolicy(CacheGroupType::SWA);
+        auto linear_policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
         full_policy.enable_prefix_reuse   = true;
         swa_policy.enable_prefix_reuse    = true;
         linear_policy.enable_prefix_reuse = true;
         swa_policy.sliding_window_size    = 2;
-        initializeGroups(
-            groups_,
-            {makeTestDevicePool(2, "cascade_environment_full"),
-             makeTestDevicePool(2, "cascade_environment_swa"),
-             makeTestDevicePool(2, "cascade_environment_linear")},
-            {{"full_tag", full_policy, {0}, 16, 0, 128, 1},
-             {"swa_tag", swa_policy, {0}, 16, 0, 128, 1},
-             {"linear_tag", linear_policy, {0}, 16, 0, 128, 1}});
+        initializeGroups(groups_,
+                         {makeTestDevicePool(2, "cascade_environment_full"),
+                          makeTestDevicePool(2, "cascade_environment_swa"),
+                          makeTestDevicePool(2, "cascade_environment_linear")},
+                         {{"full_tag", full_policy, {0}, 16, 0, 128, 1},
+                          {"swa_tag", swa_policy, {0}, 16, 0, 128, 1},
+                          {"linear_tag", linear_policy, {0}, 16, 0, 128, 1}});
 
         for (size_t gid = 0; gid < groups_.size(); ++gid) {
             auto host = makePageableHostPool(2);
@@ -356,7 +351,7 @@ public:
         }
     }
 
-    std::vector<GroupSetPtr>                       groups_;
+    std::vector<GroupSetPtr>                             groups_;
     std::vector<std::shared_ptr<HostBlockPool>>          host_pools_;
     std::vector<std::shared_ptr<BlockTreeDiskBlockPool>> disk_pools_;
     std::vector<BlockIdxType>                            host_blocks_;
@@ -364,7 +359,7 @@ public:
     std::unique_ptr<BlockTreeEvictor>                    evictor_;
     TreeNode*                                            node_{nullptr};
     std::deque<TransferStatus>                           transfer_statuses_;
-    std::vector<size_t>                                     transfer_group_set_ids_;
+    std::vector<size_t>                                  transfer_group_set_ids_;
 };
 
 class BlockTreeEvictorTest: public ::testing::Test {
@@ -423,7 +418,7 @@ protected:
                 continue;
             }
             const GroupSetPtr& group  = groups_[gid];
-            const auto               blocks = group->getBlocks(adopted.node->group_set_resources[gid], Tier::DEVICE);
+            const auto         blocks = group->getBlocks(adopted.node->group_set_resources[gid], Tier::DEVICE);
             if (!blocks.empty()) {
                 group->referenceBlocks(MultiNodeResource{adopted.group_set_id, Tier::DEVICE, {blocks}},
                                        BlockRefType::BLOCK_CACHE);
@@ -434,37 +429,37 @@ protected:
     }
 
     bool reserveAndBeginLoadBack(TreeNode* node, size_t group_id, Tier source) {
-        const std::vector<BlockIdxType> source_blocks =
-            groups_[static_cast<size_t>(group_id)]->getBlocks(node->group_set_resources[static_cast<size_t>(group_id)], source);
+        const std::vector<BlockIdxType> source_blocks = groups_[static_cast<size_t>(group_id)]->getBlocks(
+            node->group_set_resources[static_cast<size_t>(group_id)], source);
         return evictor_->reserveLoadBack(node, group_id, source, source_blocks)
                && evictor_->beginLoadBack(node, group_id, source);
     }
 
-    std::shared_ptr<FullGroupSet> group_;
-    DeviceBlockPoolPtr                  device_pool_;
-    std::vector<GroupSetPtr>      groups_;
-    std::unique_ptr<BlockTree>          tree_;
-    std::unique_ptr<BlockTreeEvictor>   evictor_;
-    size_t                              transfer_calls_{0};
+    std::shared_ptr<FullGroupSet>     group_;
+    DeviceBlockPoolPtr                device_pool_;
+    std::vector<GroupSetPtr>          groups_;
+    std::unique_ptr<BlockTree>        tree_;
+    std::unique_ptr<BlockTreeEvictor> evictor_;
+    size_t                            transfer_calls_{0};
 };
 
 TEST(BlockTreeEvictorInitTest, RejectsNullGroupWithoutThrowing) {
     std::vector<GroupSetPtr> groups = {nullptr};
-    BlockTreeEvictor               evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
+    BlockTreeEvictor         evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
 
     EXPECT_NO_THROW(EXPECT_FALSE(initEvictor(evictor)));
 }
 
 TEST(BlockTreeEvictorInitTest, RejectsUninitializedGroupByFailingFast) {
     std::vector<GroupSetPtr> groups = {makeFullGroup()};
-    BlockTreeEvictor               evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
+    BlockTreeEvictor         evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
 
     EXPECT_ANY_THROW(initEvictor(evictor));
 }
 
 TEST(BlockTreeEvictorInitTest, RejectsOutOfRangeGroupIdWithoutThrowing) {
     std::vector<GroupSetPtr> groups = {makeInitializedFullGroup(1, "out_of_range_group")};
-    BlockTreeEvictor               evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
+    BlockTreeEvictor         evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
 
     EXPECT_NO_THROW(EXPECT_FALSE(initEvictor(evictor)));
 }
@@ -472,7 +467,7 @@ TEST(BlockTreeEvictorInitTest, RejectsOutOfRangeGroupIdWithoutThrowing) {
 TEST(BlockTreeEvictorInitTest, RejectsGroupIdDifferentFromVectorIndexWithoutThrowing) {
     std::vector<GroupSetPtr> groups = {makeInitializedFullGroup(0, "duplicate_group_0"),
                                        makeInitializedFullGroup(0, "duplicate_group_1")};
-    BlockTreeEvictor               evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
+    BlockTreeEvictor         evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
 
     EXPECT_NO_THROW(EXPECT_FALSE(initEvictor(evictor)));
 }
@@ -521,12 +516,12 @@ TEST_F(BlockTreeEvictorTest, MatchUpdatesIntermediateHistoryWithoutAdmittingIt) 
     const auto allocated = device_pool_->malloc(3);
     ASSERT_TRUE(allocated.has_value());
     ASSERT_EQ(allocated->size(), 3u);
-    const BlockIdxType                  parent_block = (*allocated)[0];
-    const BlockIdxType                  leaf_block   = (*allocated)[1];
-    const BlockIdxType                  rival_block  = (*allocated)[2];
+    const BlockIdxType                         parent_block = (*allocated)[0];
+    const BlockIdxType                         leaf_block   = (*allocated)[1];
+    const BlockIdxType                         rival_block  = (*allocated)[2];
     std::vector<std::vector<GroupSetResource>> slots        = {{makeSlot(Tier::DEVICE, parent_block)},
-                                                        {makeSlot(Tier::DEVICE, leaf_block)}};
-    auto                                result       = insert({100, 200}, slots);
+                                                               {makeSlot(Tier::DEVICE, leaf_block)}};
+    auto                                       result       = insert({100, 200}, slots);
     ASSERT_EQ(result.inserted_nodes.size(), 2u);
     auto rival = insert({300}, {{makeSlot(Tier::DEVICE, rival_block)}});
     ASSERT_NE(rival.leaf, nullptr);
@@ -653,7 +648,7 @@ TEST_F(BlockTreeEvictorTest, PrepareMoveRejectsNewRequestPinWithoutAllocatingTar
     auto result = insert({100}, {{makeSlot(Tier::HOST, source)}});
     ASSERT_NE(result.leaf, nullptr);
 
-    EvictionMove  stale = BlockTreeEvictorTestPeer::makeMove(*evictor_, result.leaf, 0, Tier::HOST, Tier::DISK);
+    EvictionMove      stale = BlockTreeEvictorTestPeer::makeMove(*evictor_, result.leaf, 0, Tier::HOST, Tier::DISK);
     MultiNodeResource pin{0, Tier::HOST, {{source}}, {result.leaf}};
     group_->referenceBlocks(pin, BlockRefType::REQUEST);
     ASSERT_EQ(host_pool->refCount(source), 2u);
@@ -767,7 +762,7 @@ TEST_F(BlockTreeEvictorTest, PrepareMoveRejectsSourceTierChangedByLoadBack) {
     EvictionMove stale = BlockTreeEvictorTestPeer::makeMove(*evictor_, result.leaf, 0, Tier::HOST, Tier::DISK);
 
     ASSERT_TRUE(reserveAndBeginLoadBack(result.leaf, 0, Tier::HOST));
-    auto&         slot       = result.leaf->group_set_resources[0];
+    auto&             slot       = result.leaf->group_set_resources[0];
     MultiNodeResource device_set = group_->allocateBlocks(Tier::DEVICE, 1, BlockRefType::BLOCK_CACHE);
     ASSERT_EQ(device_set.per_node.size(), 1u);
     ASSERT_EQ(device_set.per_node.front().size(), 1u);
@@ -853,8 +848,8 @@ TEST_F(BlockTreeEvictorTest, LoadBackFailureRestoresSourceAndRejectsDuplicateBeg
 TEST_F(BlockTreeEvictorTest, FinishLoadBackDoesNotOverwriteForeignTransferState) {
     auto result = insert({100}, {{makeSlot(Tier::HOST, 10)}});
     ASSERT_NE(result.leaf, nullptr);
-    GroupSetResource& slot     = result.leaf->group_set_resources[0];
-    slot.transfer_state = GroupSetTransferState::DEMOTING;
+    GroupSetResource& slot = result.leaf->group_set_resources[0];
+    slot.transfer_state    = GroupSetTransferState::DEMOTING;
 
     EXPECT_FALSE(evictor_->finishLoadBack(result.leaf, 0, Tier::HOST, false));
     EXPECT_EQ(slot.transfer_state, GroupSetTransferState::DEMOTING);
@@ -1223,28 +1218,27 @@ TEST(BlockTreeEvictorCascadeTest, DirectCompleteMissingCascadeResultRollsBack) {
 }
 
 TEST(BlockTreeEvictorCascadeTest, RejectsSlotsReservedByAnotherPlan) {
-    auto full                  = makeFullGroup();
-    auto swa                   = std::make_shared<SWAGroupSet>(128, 64);
-    auto linear                = std::make_shared<LinearGroupSet>();
-    auto full_device_pool      = makeTestDevicePool(2, "reserved_plan_full_device");
-    auto swa_device_pool       = makeTestDevicePool(2, "reserved_plan_swa_device");
-    auto linear_device_pool    = makeTestDevicePool(2, "reserved_plan_linear_device");
+    auto full               = makeFullGroup();
+    auto swa                = std::make_shared<SWAGroupSet>(128, 64);
+    auto linear             = std::make_shared<LinearGroupSet>();
+    auto full_device_pool   = makeTestDevicePool(2, "reserved_plan_full_device");
+    auto swa_device_pool    = makeTestDevicePool(2, "reserved_plan_swa_device");
+    auto linear_device_pool = makeTestDevicePool(2, "reserved_plan_linear_device");
     ASSERT_NE(full_device_pool, nullptr);
     ASSERT_NE(swa_device_pool, nullptr);
     ASSERT_NE(linear_device_pool, nullptr);
-    auto full_policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    auto swa_policy  = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    swa_policy.sliding_window_size = 128;
-    auto linear_policy = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+    auto full_policy                  = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    auto swa_policy                   = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    swa_policy.sliding_window_size    = 128;
+    auto linear_policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
     full_policy.enable_prefix_reuse   = true;
     swa_policy.enable_prefix_reuse    = true;
     linear_policy.enable_prefix_reuse = true;
-    initializeGroups(
-        {full, swa, linear},
-        {full_device_pool, swa_device_pool, linear_device_pool},
-        {{"full_tag", full_policy, {0}, 16, 0, 128, 64},
-         {"swa_tag", swa_policy, {0}, 16, 0, 128, 64},
-         {"linear_tag", linear_policy, {0}, 16, 0, 128, 64}});
+    initializeGroups({full, swa, linear},
+                     {full_device_pool, swa_device_pool, linear_device_pool},
+                     {{"full_tag", full_policy, {0}, 16, 0, 128, 64},
+                      {"swa_tag", swa_policy, {0}, 16, 0, 128, 64},
+                      {"linear_tag", linear_policy, {0}, 16, 0, 128, 64}});
 
     auto full_host_pool   = makePageableHostPool(2);
     auto swa_host_pool    = makePageableHostPool(2);
@@ -1257,7 +1251,7 @@ TEST(BlockTreeEvictorCascadeTest, RejectsSlotsReservedByAnotherPlan) {
     linear->setHostPool(linear_host_pool);
 
     std::vector<GroupSetPtr> groups = {full, swa, linear};
-    BlockTreeEvictor               evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
+    BlockTreeEvictor         evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
     ASSERT_TRUE(initEvictor(evictor));
 
     MultiNodeResource full_blocks   = full->allocateBlocks(Tier::DEVICE, 1, BlockRefType::BLOCK_CACHE);
@@ -1322,18 +1316,17 @@ TEST(BlockTreeEvictorStatsTest, AggregatesCandidatesAcrossGroupsAndTiers) {
     ASSERT_NE(disk_pool, nullptr);
     auto group1_device_pool = makeTestDevicePool(1, "block_tree_evictor_stats_unused_device");
     ASSERT_NE(group1_device_pool, nullptr);
-    initializeGroups(
-        {group0, group1},
-        {device_pool, group1_device_pool},
-        {{"tag_0", defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 16, 0},
-         {"tag_1", defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 16, 0}});
+    initializeGroups({group0, group1},
+                     {device_pool, group1_device_pool},
+                     {{"tag_0", defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 16, 0},
+                      {"tag_1", defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 16, 0}});
     group0->setHostPool(host_pool);
     group1->setDiskPool(disk_pool);
     std::vector<GroupSetPtr> groups = {group0, group1};
-    BlockTreeEvictor               evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
+    BlockTreeEvictor         evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
     ASSERT_TRUE(initEvictor(evictor));
 
-    MultiNodeResource      device_set = group0->allocateBlocks(Tier::DEVICE, 1, BlockRefType::BLOCK_CACHE);
+    MultiNodeResource  device_set = group0->allocateBlocks(Tier::DEVICE, 1, BlockRefType::BLOCK_CACHE);
     const BlockIdxType host_block = group0->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     const BlockIdxType disk_block = group1->allocateSingleBlock(Tier::DISK, BlockRefType::BLOCK_CACHE);
     ASSERT_EQ(device_set.per_node.size(), 1u);
@@ -1374,7 +1367,7 @@ TEST(BlockTreeEvictorPolicyTest, MatchDoesNotChangeFifoAdmissionOrder) {
     ASSERT_NE(device_pool, nullptr);
     initializeFullGroup(group, device_pool, "tag_0");
     std::vector<GroupSetPtr> groups = {group};
-    BlockTreeEvictor               evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
+    BlockTreeEvictor         evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
     ASSERT_TRUE(evictor.init(EvictionPolicy::FIFO, EvictionPolicy::LRU, EvictionPolicy::FIFO));
 
     MultiNodeResource device_set = group->allocateBlocks(Tier::DEVICE, 2, BlockRefType::BLOCK_CACHE);
@@ -1408,19 +1401,16 @@ TEST(BlockTreeEvictorPolicyTest, MatchDoesNotChangeFifoAdmissionOrder) {
 }
 
 TEST(BlockTreeEvictorPolicyTest, ExistingGroupFillPrecedesNewSuffixAdmission) {
-    auto group                = std::make_shared<LinearGroupSet>();
-    auto device_pool          = makeTestDevicePool(2, "block_tree_evictor_existing_fill_fifo");
+    auto group       = std::make_shared<LinearGroupSet>();
+    auto device_pool = makeTestDevicePool(2, "block_tree_evictor_existing_fill_fifo");
     ASSERT_NE(device_pool, nullptr);
-    initializeGroups(
-        {group},
-        {device_pool},
-        {{"tag_0", defaultCacheGroupPolicy(CacheGroupType::LINEAR), {0}, 16, 0}});
+    initializeGroups({group}, {device_pool}, {{"tag_0", defaultCacheGroupPolicy(CacheGroupType::LINEAR), {0}, 16, 0}});
 
     std::vector<GroupSetPtr> groups = {group};
-    BlockTreeEvictor               evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
+    BlockTreeEvictor         evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
     ASSERT_TRUE(evictor.init(EvictionPolicy::FIFO, EvictionPolicy::LRU, EvictionPolicy::FIFO));
 
-    BlockTree tree(1);
+    BlockTree        tree(1);
     GroupSetResource empty_slot;
     empty_slot.device_blocks = {NULL_BLOCK_IDX};
     auto existing            = tree.insertNode(nullptr, {100}, {{empty_slot}});
@@ -1458,7 +1448,7 @@ TEST(BlockTreeEvictorPolicyTest, MatchUpdatesLfuHitCountAndOrder) {
     ASSERT_NE(device_pool, nullptr);
     initializeFullGroup(group, device_pool, "tag_0");
     std::vector<GroupSetPtr> groups = {group};
-    BlockTreeEvictor               evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
+    BlockTreeEvictor         evictor(groups, BlockTreeEvictor::ExecuteTransferFn{}, false);
     ASSERT_TRUE(evictor.init(EvictionPolicy::LFU, EvictionPolicy::LRU, EvictionPolicy::FIFO));
 
     MultiNodeResource device_set = group->allocateBlocks(Tier::DEVICE, 2, BlockRefType::BLOCK_CACHE);

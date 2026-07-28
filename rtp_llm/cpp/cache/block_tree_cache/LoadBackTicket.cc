@@ -71,9 +71,9 @@ LoadBackTicketRegistry::createTicket(const LoadBackTicket::PendingLoadBackItems&
         return nullptr;
     }
 
-    const uint64_t ticket_id = next_ticket_id_;
+    const uint64_t ticket_id    = next_ticket_id_;
     pending_tickets_[ticket_id] = PendingTicket{items, context};
-    ticket->ticket_id_ = ticket_id;
+    ticket->ticket_id_          = ticket_id;
     ++next_ticket_id_;
     return ticket;
 }

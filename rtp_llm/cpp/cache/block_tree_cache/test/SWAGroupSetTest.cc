@@ -62,9 +62,9 @@ protected:
         node->group_set_resources[static_cast<size_t>(gid)].host_block = block;
     }
 
-    DeviceBlockPoolPtr                 pool_;
-    std::unordered_set<BlockIdxType>   held_blocks_;
-    std::shared_ptr<SWAGroupSet> group_;
+    DeviceBlockPoolPtr               pool_;
+    std::unordered_set<BlockIdxType> held_blocks_;
+    std::shared_ptr<SWAGroupSet>     group_;
 };
 
 TEST_F(SWAGroupSetTest, AnyNodeWithDataIsSlotEvictable) {

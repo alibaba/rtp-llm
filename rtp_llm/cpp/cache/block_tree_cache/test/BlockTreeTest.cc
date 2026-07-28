@@ -38,7 +38,7 @@ TEST(BlockTreeTest, InsertSinglePath) {
     ASSERT_NE(leaf, nullptr);
     EXPECT_EQ(leaf->cache_key, 300);
     EXPECT_EQ(leaf->group_set_resources[0].device_blocks[0], 44);  // start_block + 2
-    EXPECT_EQ(tree.nodeCount(), 3u);                       // 3 nodes created (not counting root)
+    EXPECT_EQ(tree.nodeCount(), 3u);                               // 3 nodes created (not counting root)
 
     // Verify tree structure and per-node slots
     auto* root = tree.root();
@@ -100,7 +100,7 @@ TEST(BlockTreeTest, FindAllowsLoadingBackNode) {
     const BlockTreeInsertResult insert_result = tree.insertNode(nullptr, {100, 200, 300}, make2DSlots(2, 3, 42));
     ASSERT_NE(insert_result.leaf, nullptr);
 
-    TreeNode* loading_node                                      = tree.root()->children.at(100)->children.at(200);
+    TreeNode* loading_node                              = tree.root()->children.at(100)->children.at(200);
     loading_node->group_set_resources[1].transfer_state = GroupSetTransferState::LOADING_BACK;
 
     const BlockTreeFindResult result = tree.findNode({100, 200, 300});
@@ -110,12 +110,11 @@ TEST(BlockTreeTest, FindAllowsLoadingBackNode) {
 }
 
 TEST(BlockTreeTest, FindStopsBeforeUnavailableNodeAndItsDescendants) {
-    for (GroupSetTransferState state :
-         {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOAD_BACK_PENDING}) {
+    for (GroupSetTransferState state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOAD_BACK_PENDING}) {
         BlockTree tree(1);
         tree.insertNode(nullptr, {100, 200, 300}, make2DSlots(1, 3, 42));
 
-        TreeNode* busy_node                      = tree.root()->children.at(100)->children.at(200);
+        TreeNode* busy_node                              = tree.root()->children.at(100)->children.at(200);
         busy_node->group_set_resources[0].transfer_state = state;
 
         const BlockTreeFindResult result = tree.findNode({100, 200, 300});
@@ -194,9 +193,9 @@ TEST(BlockTreeTest, RemoveEmptyAncestorsStopsAtData) {
     tree.removeNode(leaf);
 
     // removeEmptyAncestors from 100's position: 100 has data → stops
-    auto             result             = tree.findNode({100});
-    std::vector<size_t> reusable_groups = {0};
-    TreeNode*        surviving_ancestor = tree.removeEmptyAncestors(result.matched_node, reusable_groups);
+    auto                result             = tree.findNode({100});
+    std::vector<size_t> reusable_groups    = {0};
+    TreeNode*           surviving_ancestor = tree.removeEmptyAncestors(result.matched_node, reusable_groups);
 
     // 100 should still be in the tree (it has data in group 0)
     EXPECT_EQ(surviving_ancestor, result.matched_node);
@@ -303,7 +302,7 @@ TEST(BlockTreeTest, InsertDoesNotOverwriteExistingNodeSlots) {
 }
 
 TEST(BlockTreeTest, InsertFillsOnlyCompleteEmptyIdleGroupsOnExistingNode) {
-    BlockTree                           tree(2);
+    BlockTree                                  tree(2);
     std::vector<std::vector<GroupSetResource>> original(1, std::vector<GroupSetResource>(2));
     original[0][0].device_blocks = {10};
     original[0][1].device_blocks = {NULL_BLOCK_IDX};
@@ -325,7 +324,7 @@ TEST(BlockTreeTest, InsertFillsOnlyCompleteEmptyIdleGroupsOnExistingNode) {
 }
 
 TEST(BlockTreeTest, InsertSkipsBusyEmptyGroupOnExistingNode) {
-    BlockTree                           tree(1);
+    BlockTree                                  tree(1);
     std::vector<std::vector<GroupSetResource>> original(1, std::vector<GroupSetResource>(1));
     original[0][0].device_blocks = {NULL_BLOCK_IDX};
     TreeNode* node               = tree.insertNode(nullptr, {100}, original).leaf;
@@ -339,7 +338,7 @@ TEST(BlockTreeTest, InsertSkipsBusyEmptyGroupOnExistingNode) {
 }
 
 TEST(BlockTreeTest, InsertSkipsBusyGroupButFillsOtherIdleGroupAndAddsSuffix) {
-    BlockTree                           tree(2);
+    BlockTree                                  tree(2);
     std::vector<std::vector<GroupSetResource>> original(1, std::vector<GroupSetResource>(2));
     original[0][0].device_blocks = {NULL_BLOCK_IDX};
     original[0][1].device_blocks = {NULL_BLOCK_IDX};
@@ -366,7 +365,7 @@ TEST(BlockTreeTest, InsertSkipsBusyGroupButFillsOtherIdleGroupAndAddsSuffix) {
 }
 
 TEST(BlockTreeTest, InsertAdoptsCompleteDeviceValueWithoutPoolTopologyKnowledge) {
-    BlockTree                           tree(1);
+    BlockTree                                  tree(1);
     std::vector<std::vector<GroupSetResource>> original(1, std::vector<GroupSetResource>(1));
     original[0][0].device_blocks = {NULL_BLOCK_IDX, NULL_BLOCK_IDX};
     TreeNode* node               = tree.insertNode(nullptr, {100}, original).leaf;
@@ -381,7 +380,7 @@ TEST(BlockTreeTest, InsertAdoptsCompleteDeviceValueWithoutPoolTopologyKnowledge)
 }
 
 TEST(BlockTreeTest, InsertFailsFastOnMalformedNewNodeSlots) {
-    BlockTree                           tree(2);
+    BlockTree                                  tree(2);
     std::vector<std::vector<GroupSetResource>> malformed(1, std::vector<GroupSetResource>(1));
     malformed[0][0].device_blocks = {10};
 

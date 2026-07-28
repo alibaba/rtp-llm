@@ -14,13 +14,12 @@ using block_tree_cache_test::makeBlockTreeCacheForTest;
 class FullSWAEvictionTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        std::unique_ptr<BlockTree> tree       = std::make_unique<BlockTree>(2);
-        auto                       full       = std::make_shared<FullGroupSet>();
-        auto swa                              = std::make_shared<SWAGroupSet>(128, 64);
-        std::vector<GroupSetPtr> groups = {full, swa};
-        cache_                                = makeBlockTreeCacheForTest(std::move(tree),
-                                                            std::move(groups),
-                                                            BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+        std::unique_ptr<BlockTree> tree   = std::make_unique<BlockTree>(2);
+        auto                       full   = std::make_shared<FullGroupSet>();
+        auto                       swa    = std::make_shared<SWAGroupSet>(128, 64);
+        std::vector<GroupSetPtr>   groups = {full, swa};
+        cache_                            = makeBlockTreeCacheForTest(
+            std::move(tree), std::move(groups), BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
     }
 
     void insertPath(const CacheKeysType& keys, BlockIdxType full_block, BlockIdxType swa_block) {
@@ -72,13 +71,11 @@ TEST_F(FullSWAEvictionTest, FullReclaimCascadesToSWA) {
 //   Reclaiming [300] deletes the leaf and prunes both empty ancestors.
 // ---------------------------------------------------------------------------
 TEST_F(FullSWAEvictionTest, SWAOnlySequentialDrain) {
-    std::unique_ptr<BlockTree> tree        = std::make_unique<BlockTree>(1);
-    auto                       swa         = std::make_shared<SWAGroupSet>(128, 64);
-    std::vector<GroupSetPtr>  groups = {swa};
-    std::unique_ptr<BlockTreeCache> swa_cache =
-        makeBlockTreeCacheForTest(std::move(tree),
-                                                   std::move(groups),
-                                                   BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+    std::unique_ptr<BlockTree>      tree      = std::make_unique<BlockTree>(1);
+    auto                            swa       = std::make_shared<SWAGroupSet>(128, 64);
+    std::vector<GroupSetPtr>        groups    = {swa};
+    std::unique_ptr<BlockTreeCache> swa_cache = makeBlockTreeCacheForTest(
+        std::move(tree), std::move(groups), BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
 
     std::vector<std::vector<GroupSetResource>> slots(3, std::vector<GroupSetResource>(1));
     slots[0][0].device_blocks = {20};

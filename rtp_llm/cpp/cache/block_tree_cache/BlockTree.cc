@@ -80,8 +80,8 @@ bool BlockTree::isNodeMatchReady(const TreeNode& node) const {
     return true;
 }
 
-BlockTreeInsertResult BlockTree::insertNode(TreeNode*                                  parent,
-                                            const CacheKeysType&                       cache_keys,
+BlockTreeInsertResult BlockTree::insertNode(TreeNode*                                         parent,
+                                            const CacheKeysType&                              cache_keys,
                                             const std::vector<std::vector<GroupSetResource>>& slots) {
     BlockTreeInsertResult result;
     if (cache_keys.empty()) {
@@ -125,9 +125,9 @@ BlockTreeInsertResult BlockTree::insertNode(TreeNode*                           
             }
             const auto& incoming_slots = slots[i];
             for (size_t group_set_index = 0; group_set_index < group_set_resource_count_; ++group_set_index) {
-                GroupSetResource&       existing = current->group_set_resources[group_set_index];
-                const GroupSetResource& incoming = incoming_slots[group_set_index];
-                const bool       source_valid = !incoming.device_blocks.empty()
+                GroupSetResource&       existing     = current->group_set_resources[group_set_index];
+                const GroupSetResource& incoming     = incoming_slots[group_set_index];
+                const bool              source_valid = !incoming.device_blocks.empty()
                                           && std::all_of(incoming.device_blocks.begin(),
                                                          incoming.device_blocks.end(),
                                                          [](BlockIdxType block) { return !isNullBlockIdx(block); });
@@ -139,8 +139,7 @@ BlockTreeInsertResult BlockTree::insertNode(TreeNode*                           
                 existing.disk_slot      = NULL_BLOCK_IDX;
                 existing.transfer_state = GroupSetTransferState::IDLE;
                 existing.candidate_meta = {};
-                result.adopted_slots.push_back(
-                    BlockTreeAdoptedSlot{current, i, group_set_index});
+                result.adopted_slots.push_back(BlockTreeAdoptedSlot{current, i, group_set_index});
             }
         } else {
             TreeNode* child        = createNode(key, current);

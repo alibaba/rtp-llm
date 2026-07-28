@@ -56,8 +56,9 @@ public:
     // existing IDLE, empty group adopts only a complete DEVICE vector (the
     // caller validates pool cardinality). Returns new nodes and groups actually
     // filled on existing nodes so callers can add cache holds exactly once.
-    BlockTreeInsertResult
-    insertNode(TreeNode* parent, const CacheKeysType& cache_keys, const std::vector<std::vector<GroupSetResource>>& slots);
+    BlockTreeInsertResult insertNode(TreeNode*                                         parent,
+                                     const CacheKeysType&                              cache_keys,
+                                     const std::vector<std::vector<GroupSetResource>>& slots);
 
     // Remove a node from the tree. The node must have no children.
     // The node's parent link is updated accordingly.

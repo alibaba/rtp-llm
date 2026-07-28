@@ -16,7 +16,7 @@ protected:
     void SetUp() override {
         pool_ = block_tree_cache_test::makeDevicePool({{1, 0}}, 128, "linear_group_set_test");
         ASSERT_NE(pool_, nullptr);
-        group_                     = std::make_shared<LinearGroupSet>();
+        group_ = std::make_shared<LinearGroupSet>();
         TestGroupSpec spec;
         spec.tag                   = "tag_0";
         spec.policy                = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
@@ -49,9 +49,9 @@ protected:
         return block.value();
     }
 
-    DeviceBlockPoolPtr                    pool_;
-    std::unordered_set<BlockIdxType>      held_blocks_;
-    std::shared_ptr<LinearGroupSet> group_;
+    DeviceBlockPoolPtr               pool_;
+    std::unordered_set<BlockIdxType> held_blocks_;
+    std::shared_ptr<LinearGroupSet>  group_;
 };
 
 TEST_F(LinearGroupSetTest, AnyNodeWithDataIsSlotEvictable) {

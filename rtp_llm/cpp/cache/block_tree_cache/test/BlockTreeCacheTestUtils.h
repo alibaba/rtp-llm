@@ -58,14 +58,14 @@ size_t treeCachedBlocksNum(const IBlockPool& pool);
 
 std::unique_ptr<BlockTreeCache>
 makeBlockTreeCacheForTest(std::unique_ptr<BlockTree>        tree,
-                          std::vector<GroupSetPtr>           group_sets,
+                          std::vector<GroupSetPtr>          group_sets,
                           BlockTreeCacheConfig              config            = {},
                           std::shared_ptr<StorageBackend>   storage_backend   = nullptr,
                           std::shared_ptr<BroadcastManager> broadcast_manager = nullptr);
 
-bool insertGroupSetSlots(BlockTreeCache&                                      cache,
-                         TreeNode*                                            parent,
-                         const CacheKeysType&                                 cache_keys,
+bool insertGroupSetSlots(BlockTreeCache&                                   cache,
+                         TreeNode*                                         parent,
+                         const CacheKeysType&                              cache_keys,
                          const std::vector<std::vector<GroupSetResource>>& resources);
 
 class BlockTreeCacheTestPeer {
@@ -148,7 +148,7 @@ public:
                               const std::vector<size_t>& host_free,
                               const std::vector<size_t>& disk_free) const;
 
-    std::vector<BlockIdxType> blocksForTag(size_t tag_id) const;
+    std::vector<BlockIdxType>     blocksForTag(size_t tag_id) const;
     std::vector<GroupSetResource> slotsForPathNode(size_t path_index) const;
 
     CacheKeysType                                        keys;

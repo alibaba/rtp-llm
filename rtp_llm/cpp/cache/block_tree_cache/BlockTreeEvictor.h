@@ -45,8 +45,8 @@ public:
     };
 
     BlockTreeEvictor(std::vector<GroupSetPtr>& group_sets,
-                     ExecuteTransferFn               execute_transfer,
-                     bool                            enable_reverse_eviction);
+                     ExecuteTransferFn         execute_transfer,
+                     bool                      enable_reverse_eviction);
 
     bool init(EvictionPolicy device_policy, EvictionPolicy host_policy, EvictionPolicy disk_policy);
 
@@ -87,8 +87,10 @@ public:
     // ---- Load-back state transitions (owned here; driven by BlockTreeCache) ----
     bool
     reserveLoadBack(TreeNode* node, size_t group_set_id, Tier source, const std::vector<BlockIdxType>& source_blocks);
-    bool
-    abortPendingLoadBack(TreeNode* node, size_t group_set_id, Tier source, const std::vector<BlockIdxType>& source_blocks);
+    bool abortPendingLoadBack(TreeNode*                        node,
+                              size_t                           group_set_id,
+                              Tier                             source,
+                              const std::vector<BlockIdxType>& source_blocks);
     bool beginLoadBack(TreeNode* node, size_t group_set_id, Tier source);
     bool finishLoadBack(TreeNode* node, size_t group_set_id, Tier source, bool copy_ok);
 
@@ -108,23 +110,25 @@ private:
     std::optional<EvictionMove> chooseVictimInGroup(GroupSet& group, Tier tier);
     static Tier                 defaultTargetTier(Tier source);
 
-    EvictionMove makeMove(TreeNode* node, size_t group_set_id, Tier source_tier, Tier target_tier) const;
-    std::vector<size_t>
-    selectCascadeGroups(const TreeNode* node, size_t source_group_set_id, Tier tier, bool enable_reverse_eviction) const;
-    bool executeTierCopy(const EvictionMove& eviction_move);
-    bool prepareMove(EvictionMove& eviction_move);
-    void reserveSource(const EvictionMove& eviction_move);
-    bool restoreSource(const EvictionMove& eviction_move);
-    void releaseTargetBlocks(const EvictionMove& eviction_move);
-    bool applyMoveCompletion(GroupSetPtr& group, const EvictionMove& move);
-    void finalizeEviction(BlockTree& tree, TreeNode* node);
-    bool shouldDeleteNode(const BlockTree& tree, const TreeNode* node) const;
+    EvictionMove        makeMove(TreeNode* node, size_t group_set_id, Tier source_tier, Tier target_tier) const;
+    std::vector<size_t> selectCascadeGroups(const TreeNode* node,
+                                            size_t          source_group_set_id,
+                                            Tier            tier,
+                                            bool            enable_reverse_eviction) const;
+    bool                executeTierCopy(const EvictionMove& eviction_move);
+    bool                prepareMove(EvictionMove& eviction_move);
+    void                reserveSource(const EvictionMove& eviction_move);
+    bool                restoreSource(const EvictionMove& eviction_move);
+    void                releaseTargetBlocks(const EvictionMove& eviction_move);
+    bool                applyMoveCompletion(GroupSetPtr& group, const EvictionMove& move);
+    void                finalizeEviction(BlockTree& tree, TreeNode* node);
+    bool                shouldDeleteNode(const BlockTree& tree, const TreeNode* node) const;
     std::vector<size_t> reusableGroupSetIds() const;
-    size_t computeGroupExcess(const GroupSet& group, Tier tier, double ratio) const;
+    size_t              computeGroupExcess(const GroupSet& group, Tier tier, double ratio) const;
 
     std::vector<GroupSetPtr>& group_sets_;
-    ExecuteTransferFn          execute_transfer_;
-    bool                       enable_reverse_eviction_{false};
+    ExecuteTransferFn         execute_transfer_;
+    bool                      enable_reverse_eviction_{false};
 
     // Heap ownership: vector index is the declared group_set_id.
     std::vector<GroupTierHeaps> heaps_;
