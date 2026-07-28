@@ -1,9 +1,10 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeEvictor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 
 #include <algorithm>
 #include <string>
 #include <utility>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 
@@ -20,8 +21,54 @@ BlockTreeEvictor::BlockTreeEvictor(std::vector<GroupSetPtr>& group_sets,
                                    ExecuteTransferFn         execute_transfer,
                                    bool                      enable_reverse_eviction):
     group_sets_(group_sets),
-    execute_transfer_(std::move(execute_transfer)),
+    task_runner_(std::make_unique<EvictionTaskRunner>(std::move(execute_transfer))),
     enable_reverse_eviction_(enable_reverse_eviction) {}
+
+BlockTreeEvictor::BlockTreeEvictor(std::vector<GroupSetPtr>&      group_sets,
+                                   ExecuteTransferFn              execute_transfer,
+                                   bool                           enable_reverse_eviction,
+                                   BlockTree*                     tree,
+                                   const BlockTransferDispatcher* transfer_dispatcher,
+                                   BlockTreeTaskPool*             task_pool,
+                                   BlockTreeCacheMetricsReporter& metrics_reporter,
+                                   std::mutex&                    mutex,
+                                   int                            memory_timeout_ms,
+                                   int                            disk_timeout_ms,
+                                   IsTierEnabledFn                is_tier_enabled,
+                                   CreditsFn                      reserve_credits,
+                                   CreditsFn                      settle_credits,
+                                   SettledFn                      settled,
+                                   RemoteWriteFn                  remote_write):
+    group_sets_(group_sets),
+    task_runner_(std::make_unique<EvictionTaskRunner>(std::move(execute_transfer),
+                                                      group_sets,
+                                                      tree,
+                                                      transfer_dispatcher,
+                                                      task_pool,
+                                                      metrics_reporter,
+                                                      mutex,
+                                                      memory_timeout_ms,
+                                                      disk_timeout_ms,
+                                                      std::move(is_tier_enabled),
+                                                      std::move(reserve_credits),
+                                                      std::move(settle_credits),
+                                                      std::move(settled),
+                                                      std::move(remote_write))),
+    enable_reverse_eviction_(enable_reverse_eviction) {}
+
+BlockTreeEvictor::~BlockTreeEvictor() = default;
+
+EvictionTaskRunner& BlockTreeEvictor::taskRunner() {
+    return *task_runner_;
+}
+
+const EvictionTaskRunner& BlockTreeEvictor::taskRunner() const {
+    return *task_runner_;
+}
+
+bool BlockTreeEvictor::submitLocked(EvictionMove& eviction_move, std::vector<EvictionReleaseCredit>* release_credits) {
+    return task_runner_->submitLocked(*this, eviction_move, release_credits);
+}
 
 bool BlockTreeEvictor::init(EvictionPolicy device_policy, EvictionPolicy host_policy, EvictionPolicy disk_policy) {
     // Own one heap per (group, tier), using the cache-wide per-tier policies.
@@ -473,58 +520,6 @@ std::optional<BlockTreeEvictor::EvictionPlan> BlockTreeEvictor::buildPlan(Evicti
     return plan;
 }
 
-BlockTreeEvictor::CopyResultSet BlockTreeEvictor::performCopy(const EvictionPlan& plan) {
-    CopyResultSet results;
-    results.primary_success = true;
-
-    if (plan.primary.target_tier != Tier::NONE) {
-        results.primary_success = executeTierCopy(plan.primary);
-        if (!results.primary_success) {
-            RTP_LLM_LOG_WARNING("primary copy FAILED "
-                                "group[%zu] node_key=%ld %s->%s",
-                                plan.primary.group_set_id,
-                                plan.primary.node ? plan.primary.node->cache_key : 0,
-                                tierName(plan.primary.source_tier),
-                                tierName(plan.primary.target_tier));
-            results.cascade_success.assign(plan.cascade_moves.size(), false);
-            return results;
-        } else {
-            RTP_LLM_LOG_DEBUG("primary copy OK "
-                              "group[%zu] node_key=%ld %s->%s",
-                              plan.primary.group_set_id,
-                              plan.primary.node ? plan.primary.node->cache_key : 0,
-                              tierName(plan.primary.source_tier),
-                              tierName(plan.primary.target_tier));
-        }
-    }
-
-    results.cascade_success.reserve(plan.cascade_moves.size());
-    for (const auto& cascade_move : plan.cascade_moves) {
-        bool copy_ok = true;
-        if (cascade_move.target_tier != Tier::NONE) {
-            copy_ok = executeTierCopy(cascade_move);
-        }
-        results.cascade_success.push_back(copy_ok);
-
-        if (!copy_ok) {
-            RTP_LLM_LOG_WARNING("cascade copy FAILED "
-                                "group[%zu] node_key=%ld %s->%s",
-                                cascade_move.group_set_id,
-                                cascade_move.node ? cascade_move.node->cache_key : 0,
-                                tierName(cascade_move.source_tier),
-                                tierName(cascade_move.target_tier));
-        } else if (cascade_move.target_tier != Tier::NONE) {
-            RTP_LLM_LOG_DEBUG("cascade copy OK "
-                              "group[%zu] node_key=%ld %s->%s",
-                              cascade_move.group_set_id,
-                              cascade_move.node ? cascade_move.node->cache_key : 0,
-                              tierName(cascade_move.source_tier),
-                              tierName(cascade_move.target_tier));
-        }
-    }
-    return results;
-}
-
 void BlockTreeEvictor::complete(BlockTree& tree, const EvictionPlan& plan, const CopyResultSet& results) {
     if (plan.primary.node == nullptr) {
         return;
@@ -644,40 +639,6 @@ void BlockTreeEvictor::writeRemoteThrough(const std::shared_ptr<StorageBackend>&
                             group_set_id,
                             cache_key);
     }
-}
-
-bool BlockTreeEvictor::executeTierCopy(const EvictionMove& eviction_move) {
-    if (!execute_transfer_) {
-        return false;
-    }
-
-    TransferDescriptor descriptor;
-    if (!buildTransferDescriptor(eviction_move, descriptor)) {
-        return false;
-    }
-
-    return execute_transfer_(descriptor);
-}
-
-bool BlockTreeEvictor::buildTransferDescriptor(const EvictionMove& eviction_move, TransferDescriptor& descriptor) {
-    if (eviction_move.source_blocks.empty() || eviction_move.target_blocks.empty()
-        || isNullBlockIdx(eviction_move.target_blocks[0])) {
-        return false;
-    }
-
-    const BlockIdxType target = eviction_move.target_blocks[0];
-    if (eviction_move.source_tier == Tier::DEVICE && eviction_move.target_tier == Tier::HOST) {
-        descriptor = TransferDescriptor::deviceToHost(eviction_move.group_set_id, eviction_move.source_blocks, target);
-    } else if (eviction_move.source_tier == Tier::HOST && eviction_move.target_tier == Tier::DISK) {
-        if (isNullBlockIdx(eviction_move.source_blocks[0])) {
-            return false;
-        }
-        descriptor = TransferDescriptor::hostToDisk(eviction_move.group_set_id, eviction_move.source_blocks[0], target);
-    } else {
-        return false;
-    }
-
-    return true;
 }
 
 EvictionMove BlockTreeEvictor::makeMove(TreeNode* node, size_t group_set_id, Tier source_tier, Tier target_tier) const {

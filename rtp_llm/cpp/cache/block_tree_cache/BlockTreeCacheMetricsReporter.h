@@ -8,7 +8,7 @@
 #include <string>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeEvictor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/GroupSet.h"
 
 namespace kmonitor {

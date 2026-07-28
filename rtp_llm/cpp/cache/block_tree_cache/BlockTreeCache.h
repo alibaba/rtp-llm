@@ -8,9 +8,9 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeEvictor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/GroupSet.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeLoader.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/BlockTreeLoader.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
@@ -223,18 +223,8 @@ private:
     void drainTreeHolds();
     void checkWatermark();
     bool reclaimOneForGroup(size_t group_set_id, Tier tier);
-    struct DeviceReleaseCredit {
-        DeviceBlockPoolPtr pool;
-        BlockIdxType       block{NULL_BLOCK_IDX};
-    };
-    bool submitEvictionLocked(EvictionMove& eviction_move, std::vector<DeviceReleaseCredit>* release_credits = nullptr);
-    void reserveInFlightDeviceReleaseCreditsLocked(const std::vector<DeviceReleaseCredit>& release_credits);
-    void settleInFlightDeviceReleaseCreditsLocked(const std::vector<DeviceReleaseCredit>& release_credits) noexcept;
-    void performEvictionCopy(const BlockTreeEvictor::EvictionPlan&   plan,
-                             const std::vector<DeviceReleaseCredit>& release_credits);
-    bool buildEvictionTransferBatch(const BlockTreeEvictor::EvictionPlan& plan,
-                                    std::vector<TransferDescriptor>&      descriptors) const;
-    int  evictionTransferTimeoutMs(const BlockTreeEvictor::EvictionPlan& plan) const;
+    void reserveInFlightDeviceReleaseCreditsLocked(const std::vector<EvictionReleaseCredit>& release_credits);
+    void settleInFlightDeviceReleaseCreditsLocked(const std::vector<EvictionReleaseCredit>& release_credits) noexcept;
 
     void                            validateMatchedResource(const MultiNodeResource& resource) const;
     void                            prepareMatchedBlocks(const std::vector<TreeNode*>& matched_path,
@@ -258,10 +248,9 @@ private:
     std::unique_ptr<BlockTransferDispatcher>  transfer_dispatcher_;
     std::unique_ptr<BlockTreeTaskPool>        task_pool_;
     BlockTreeCacheMetricsReporter             metrics_reporter_;
+    mutable std::mutex                        mutex_;
     BlockTreeEvictor                          evictor_;
     bool                                      initialized_{false};
-
-    mutable std::mutex mutex_;
     // Protected by mutex_. Credits remain reserved from async queue acceptance
     // until the matching plan completes or rolls back.
     std::unordered_map<DeviceBlockPoolPtr, size_t> in_flight_device_release_credits_;

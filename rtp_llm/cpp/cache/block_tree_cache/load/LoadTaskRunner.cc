@@ -1,6 +1,5 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/LoadWorker.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadTaskRunner.h"
 
-#include <algorithm>
 #include <exception>
 #include <utility>
 
@@ -10,10 +9,10 @@
 
 namespace rtp_llm {
 
-bool LoadWorker::createTask(const LoadTicket::PendingLoadItems&      items,
-                            const std::vector<GroupSetPtr>&          group_sets,
-                            const std::shared_ptr<LoadAsyncContext>& context,
-                            TaskPtr&                                 task) {
+bool LoadTaskRunner::createTask(const LoadTicket::PendingLoadItems&      items,
+                                const std::vector<GroupSetPtr>&          group_sets,
+                                const std::shared_ptr<LoadAsyncContext>& context,
+                                TaskPtr&                                 task) {
     task.reset();
     if (context == nullptr) {
         RTP_LLM_LOG_ERROR("invalid load task context");
@@ -51,7 +50,7 @@ bool LoadWorker::createTask(const LoadTicket::PendingLoadItems&      items,
     return true;
 }
 
-LoadWorker::PrepareStatus LoadWorker::prepareTransferItem(Task& task, size_t item_index) {
+LoadTaskRunner::PrepareStatus LoadTaskRunner::prepareTransferItem(Task& task, size_t item_index) {
     if (item_index >= task.items.size() || item_index >= task.item_groups.size()) {
         RTP_LLM_LOG_WARNING("invalid load item index, index=%zu count=%zu", item_index, task.items.size());
         return PrepareStatus::FAILED;
@@ -110,12 +109,12 @@ LoadWorker::PrepareStatus LoadWorker::prepareTransferItem(Task& task, size_t ite
     return PrepareStatus::READY;
 }
 
-bool LoadWorker::runTransfer(Task&                          task,
-                             const BlockTransferDispatcher& transfer_dispatcher,
-                             BlockTreeCacheMetricsReporter& metrics_reporter,
-                             int                            disk_timeout_ms,
-                             int                            host_timeout_ms,
-                             bool                           prepared) {
+bool LoadTaskRunner::runTransfer(Task&                          task,
+                                 const BlockTransferDispatcher& transfer_dispatcher,
+                                 BlockTreeCacheMetricsReporter& metrics_reporter,
+                                 int                            disk_timeout_ms,
+                                 int                            host_timeout_ms,
+                                 bool                           prepared) {
     size_t host_transfer_blocks = 0;
     size_t disk_transfer_blocks = 0;
     for (const LoadTicket::PendingLoadItem& item : task.items) {
@@ -174,12 +173,12 @@ bool LoadWorker::runTransfer(Task&                          task,
     }
 }
 
-void LoadWorker::releaseTaskResources(Task& task) {
+void LoadTaskRunner::releaseTaskResources(Task& task) {
     releaseStagingBlocks(task);
     releaseUninstalledTargetHolders(task);
 }
 
-void LoadWorker::releaseStagingBlocks(Task& task) {
+void LoadTaskRunner::releaseStagingBlocks(Task& task) {
     for (size_t item_index = 0; item_index < task.items.size(); ++item_index) {
         const GroupSetPtr& group = task.item_groups[item_index];
         if (group != nullptr && !isNullBlockIdx(task.staging_host_blocks[item_index])) {
@@ -189,7 +188,7 @@ void LoadWorker::releaseStagingBlocks(Task& task) {
     }
 }
 
-void LoadWorker::releaseUninstalledTargetHolders(const Task& task) {
+void LoadTaskRunner::releaseUninstalledTargetHolders(const Task& task) {
     for (size_t item_index = 0; item_index < task.items.size(); ++item_index) {
         const LoadTicket::PendingLoadItem&         item  = task.items[item_index];
         const GroupSetPtr&                         group = task.item_groups[item_index];
@@ -199,100 +198,6 @@ void LoadWorker::releaseUninstalledTargetHolders(const Task& task) {
         group->unreferenceBlocks(MultiNodeResource{item.group_set_id, Tier::DEVICE, {item.target_device_blocks}},
                                  BlockRefType::REQUEST);
     }
-}
-
-bool LoadWorker::cancelLoadNolock(const std::shared_ptr<AsyncContext>& context) {
-    std::shared_ptr<LoadAsyncContext> load_context = std::dynamic_pointer_cast<LoadAsyncContext>(context);
-    if (load_context == nullptr) {
-        RTP_LLM_LOG_WARNING("context is not owned by BlockTreeCache");
-        return false;
-    }
-    return !load_context->done() && load_context->requestCancel();
-}
-
-bool LoadWorker::startLoading(TreeNode*                                node,
-                              size_t                                   group_set_id,
-                              const std::vector<BlockIdxType>&         target_blocks,
-                              const std::shared_ptr<LoadAsyncContext>& context) {
-    if (node == nullptr || target_blocks.empty() || context == nullptr
-        || std::any_of(
-            target_blocks.begin(), target_blocks.end(), [](BlockIdxType block) { return isNullBlockIdx(block); })) {
-        return false;
-    }
-
-    const LoadingKey                                  key{node, group_set_id};
-    const std::pair<LoadingRecordMap::iterator, bool> insert_result =
-        loading_records_.emplace(key, LoadingRecord{target_blocks, {context}});
-    return insert_result.second;
-}
-
-std::optional<std::vector<BlockIdxType>>
-LoadWorker::joinLoading(TreeNode* node, size_t group_set_id, const std::shared_ptr<LoadAsyncContext>& context) {
-    if (node == nullptr || context == nullptr) {
-        return std::nullopt;
-    }
-
-    const LoadingKey                 key{node, group_set_id};
-    const LoadingRecordMap::iterator record_it = loading_records_.find(key);
-    if (record_it == loading_records_.end()) {
-        return std::nullopt;
-    }
-
-    for (const std::shared_ptr<LoadAsyncContext>& registered_context : record_it->second.contexts) {
-        if (registered_context == context) {
-            return record_it->second.target_blocks;
-        }
-    }
-    record_it->second.contexts.push_back(context);
-    return record_it->second.target_blocks;
-}
-
-bool LoadWorker::finishLoading(TreeNode* node, size_t group_set_id, bool success) {
-    if (node == nullptr) {
-        return false;
-    }
-
-    const LoadingKey                 key{node, group_set_id};
-    const LoadingRecordMap::iterator record_it = loading_records_.find(key);
-    if (record_it == loading_records_.end()) {
-        return false;
-    }
-
-    std::vector<std::shared_ptr<LoadAsyncContext>> contexts = std::move(record_it->second.contexts);
-    loading_records_.erase(record_it);
-
-    bool all_completed = true;
-    for (const std::shared_ptr<LoadAsyncContext>& context : contexts) {
-        if (context == nullptr || !context->completeOne(success)) {
-            all_completed = false;
-            RTP_LLM_LOG_WARNING("failed to complete joined load context, group_set=%zu", group_set_id);
-        }
-    }
-    return all_completed;
-}
-
-bool LoadWorker::eraseLoadingForOneContext(TreeNode*                                node,
-                                           size_t                                   group_set_id,
-                                           const std::shared_ptr<LoadAsyncContext>& context) {
-    if (node == nullptr || context == nullptr) {
-        return false;
-    }
-
-    const LoadingKey                 key{node, group_set_id};
-    const LoadingRecordMap::iterator record_it = loading_records_.find(key);
-    if (record_it == loading_records_.end()) {
-        return false;
-    }
-    const std::vector<std::shared_ptr<LoadAsyncContext>>::iterator context_it =
-        std::find(record_it->second.contexts.begin(), record_it->second.contexts.end(), context);
-    if (context_it == record_it->second.contexts.end()) {
-        return false;
-    }
-    record_it->second.contexts.erase(context_it);
-    if (record_it->second.contexts.empty()) {
-        loading_records_.erase(record_it);
-    }
-    return true;
 }
 
 }  // namespace rtp_llm

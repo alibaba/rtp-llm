@@ -14,7 +14,7 @@
 #include <numeric>
 #include <utility>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/test/PerRankBlockTransferEngineTestUtils.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
 namespace rtp_llm::block_tree_cache_test {
@@ -343,7 +343,7 @@ bool BlockTreeCacheTestPeer::demoteOneForGroupForTest(BlockTreeCache& cache, siz
     if (!eviction_move.has_value()) {
         return false;
     }
-    return cache.submitEvictionLocked(*eviction_move);
+    return cache.evictor_.submitLocked(*eviction_move);
 }
 
 int BlockTreeCacheTestPeer::reclaimBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier) {
@@ -362,7 +362,7 @@ int BlockTreeCacheTestPeer::reclaimBlocksForTest(BlockTreeCache& cache, size_t n
         // Tests use this entry to trigger eviction state transitions without
         // exposing a direct-reclaim operation on the production cache API.
         eviction_move->target_tier = Tier::NONE;
-        if (cache.submitEvictionLocked(*eviction_move)) {
+        if (cache.evictor_.submitLocked(*eviction_move)) {
             ++total_evicted;
         }
     }

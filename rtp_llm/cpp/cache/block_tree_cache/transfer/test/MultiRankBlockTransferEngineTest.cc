@@ -4,13 +4,14 @@
 #include <mutex>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionTaskRunner.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferRequestConverter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/MultiRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/AsyncContext.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/test/PerRankBlockTransferEngineTestUtils.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/test/PerRankBlockTransferEngineTestUtils.h"
 #include "rtp_llm/cpp/model_rpc/BroadcastManager.h"
 
 namespace rtp_llm {
@@ -423,10 +424,10 @@ TEST_F(MultiRankBlockTransferEngineTest, LoadCompletionStateMismatchDoesNotInsta
     item.source_blocks                                  = {host_block};
     item.target_device_blocks                           = {device_block};
     const std::shared_ptr<LoadAsyncContext> context     = std::make_shared<LoadAsyncContext>(1);
-    LoadWorker::TaskPtr                     task;
-    ASSERT_TRUE(cache->loader_.load_worker_.createTask({item}, {group}, context, task));
+    LoadTaskRunner::TaskPtr                 task;
+    ASSERT_TRUE(cache->loader_.load_task_runner_.createTask({item}, {group}, context, task));
     ASSERT_NE(task, nullptr);
-    ASSERT_TRUE(cache->loader_.load_worker_.startLoading(
+    ASSERT_TRUE(cache->loader_.load_join_registry_.start(
         find_result.matched_node, 0, item.target_device_blocks, task->context));
     find_result.matched_node->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
     cache->loader_.runLoadTask(task);
@@ -676,7 +677,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BuildEvictionTransferRequestIncludesPri
     plan.cascade_moves.push_back(cascade);
 
     std::vector<TransferDescriptor> descriptors;
-    ASSERT_TRUE(cache->buildEvictionTransferBatch(plan, descriptors));
+    ASSERT_TRUE(cache->evictor_.taskRunner().buildTransferBatch(plan, descriptors));
     MemoryOperationRequestPB request;
     for (const TransferDescriptor& descriptor : descriptors) {
         ASSERT_TRUE(BlockTransferRequestConverter::appendTransfer(descriptor, cache->groupSets(), request));

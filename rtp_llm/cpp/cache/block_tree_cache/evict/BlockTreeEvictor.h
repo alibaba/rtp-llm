@@ -4,16 +4,27 @@
 #include <cstdint>
 #include <functional>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/GroupSet.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/EvictionHeap.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/evict/EvictionHeap.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/StorageBackend.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
+
+class BlockTransferDispatcher;
+class BlockTreeCacheMetricsReporter;
+class BlockTreeTaskPool;
+class EvictionTaskRunner;
+
+struct EvictionReleaseCredit {
+    DeviceBlockPoolPtr pool;
+    BlockIdxType       block{NULL_BLOCK_IDX};
+};
 
 // Aggregated candidate counts across all groups, one number per tier.
 struct CandidateStats {
@@ -28,6 +39,10 @@ struct CandidateStats {
 class BlockTreeEvictor {
 public:
     using ExecuteTransferFn = std::function<bool(const TransferDescriptor&)>;
+    using IsTierEnabledFn   = std::function<bool(Tier)>;
+    using CreditsFn         = std::function<void(const std::vector<EvictionReleaseCredit>&)>;
+    using SettledFn         = std::function<void(bool tree_data_mutated, bool check_watermark)>;
+    using RemoteWriteFn     = std::function<void(CacheKeyType cache_key, size_t group_set_id)>;
 
     struct EvictionPlan {
         EvictionMove              primary;
@@ -47,6 +62,22 @@ public:
     BlockTreeEvictor(std::vector<GroupSetPtr>& group_sets,
                      ExecuteTransferFn         execute_transfer,
                      bool                      enable_reverse_eviction);
+    BlockTreeEvictor(std::vector<GroupSetPtr>&      group_sets,
+                     ExecuteTransferFn              execute_transfer,
+                     bool                           enable_reverse_eviction,
+                     BlockTree*                     tree,
+                     const BlockTransferDispatcher* transfer_dispatcher,
+                     BlockTreeTaskPool*             task_pool,
+                     BlockTreeCacheMetricsReporter& metrics_reporter,
+                     std::mutex&                    mutex,
+                     int                            memory_timeout_ms,
+                     int                            disk_timeout_ms,
+                     IsTierEnabledFn                is_tier_enabled,
+                     CreditsFn                      reserve_credits,
+                     CreditsFn                      settle_credits,
+                     SettledFn                      settled,
+                     RemoteWriteFn                  remote_write);
+    ~BlockTreeEvictor();
 
     bool init(EvictionPolicy device_policy, EvictionPolicy host_policy, EvictionPolicy disk_policy);
 
@@ -71,18 +102,20 @@ public:
 
     // ---- Eviction selection & migration (caller owns synchronization) ----
     // Selection, prepare, finish, and rollback mutate tree/group/pool/heap state
-    // and must run under BlockTreeCache's mutex. performCopy is a lock-free phase.
+    // and must run under BlockTreeCache's mutex. Task execution is lock-free.
     std::optional<EvictionMove> chooseVictim(Tier tier);
     std::optional<EvictionMove> chooseVictim(size_t group_set_id, Tier tier);
     std::vector<EvictionMove>   chooseWatermarkVictims(GroupSet& group, Tier tier, double watermark_ratio);
     std::optional<EvictionPlan> buildPlan(EvictionMove eviction_move);
-    CopyResultSet               performCopy(const EvictionPlan& plan);
+    bool submitLocked(EvictionMove& eviction_move, std::vector<EvictionReleaseCredit>* release_credits = nullptr);
     void                        complete(BlockTree& tree, const EvictionPlan& plan, const CopyResultSet& results);
     void                        rollbackPreparedPlan(const EvictionPlan& plan);
     void                        writeRemoteThrough(const std::shared_ptr<StorageBackend>& storage_backend,
                                                    CacheKeyType                           cache_key,
                                                    size_t                                 group_set_id);
-    static bool buildTransferDescriptor(const EvictionMove& eviction_move, TransferDescriptor& descriptor);
+
+    EvictionTaskRunner&       taskRunner();
+    const EvictionTaskRunner& taskRunner() const;
 
     // Refresh one node after an external owner changes its transfer state.
     void refreshCandidate(TreeNode* node, size_t group_set_id);
@@ -110,7 +143,6 @@ private:
                                             size_t          source_group_set_id,
                                             Tier            tier,
                                             bool            enable_reverse_eviction) const;
-    bool                executeTierCopy(const EvictionMove& eviction_move);
     bool                prepareMove(EvictionMove& eviction_move);
     void                reserveSource(const EvictionMove& eviction_move);
     bool                restoreSource(const EvictionMove& eviction_move);
@@ -121,9 +153,9 @@ private:
     std::vector<size_t> reusableGroupSetIds() const;
     size_t              computeGroupExcess(const GroupSet& group, Tier tier, double ratio) const;
 
-    std::vector<GroupSetPtr>& group_sets_;
-    ExecuteTransferFn         execute_transfer_;
-    bool                      enable_reverse_eviction_{false};
+    std::vector<GroupSetPtr>&           group_sets_;
+    std::unique_ptr<EvictionTaskRunner> task_runner_;
+    bool                                enable_reverse_eviction_{false};
 
     // Heap ownership: vector index is the declared group_set_id.
     std::vector<GroupTierHeaps> heaps_;

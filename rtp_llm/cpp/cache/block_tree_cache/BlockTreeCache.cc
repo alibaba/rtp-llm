@@ -1,16 +1,12 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 
 #include <algorithm>
-#include <exception>
-#include <optional>
-#include <set>
 #include <unordered_map>
 #include <unordered_set>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeEvictor.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/ScopeRollback.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/host/HostBlockPool.h"
@@ -35,7 +31,34 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
     evictor_(
         group_sets_,
         [this](const TransferDescriptor& descriptor) { return executeTransfer(descriptor); },
-        config_.enable_reverse_eviction),
+        config_.enable_reverse_eviction,
+        tree_.get(),
+        transfer_dispatcher_.get(),
+        task_pool_.get(),
+        metrics_reporter_,
+        mutex_,
+        config_.memory_cache_sync_timeout_ms,
+        config_.memory_cache_disk_sync_timeout_ms,
+        [this](Tier tier) { return config_.isTierEnabled(tier); },
+        [this](const std::vector<EvictionReleaseCredit>& credits) {
+            reserveInFlightDeviceReleaseCreditsLocked(credits);
+        },
+        [this](const std::vector<EvictionReleaseCredit>& credits) {
+            settleInFlightDeviceReleaseCreditsLocked(credits);
+        },
+        [this](bool tree_data_mutated, bool check_watermark) {
+            if (tree_data_mutated) {
+                ++mutation_version_;
+            }
+            if (check_watermark) {
+                checkWatermark();
+            }
+        },
+        [this](CacheKeyType cache_key, size_t group_set_id) {
+            if (config_.enable_remote_cache) {
+                evictor_.writeRemoteThrough(storage_backend_, cache_key, group_set_id);
+            }
+        }),
     loader_(
         group_sets_,
         evictor_,
@@ -464,7 +487,7 @@ int BlockTreeCache::evictForTag(const std::string& tag, size_t num_blocks) {
             break;
         }
         eviction_move->target_tier = Tier::NONE;
-        if (!submitEvictionLocked(*eviction_move)) {
+        if (!evictor_.submitLocked(*eviction_move)) {
             break;
         }
         const size_t current_free = device_pool->freeBlocksNum();
@@ -707,12 +730,12 @@ bool BlockTreeCache::reclaimOneForGroup(size_t group_set_id, Tier tier) {
         return false;
     }
     eviction_move->target_tier = Tier::NONE;
-    return submitEvictionLocked(*eviction_move);
+    return evictor_.submitLocked(*eviction_move);
 }
 
 void BlockTreeCache::reserveInFlightDeviceReleaseCreditsLocked(
-    const std::vector<DeviceReleaseCredit>& release_credits) {
-    for (const DeviceReleaseCredit& credit : release_credits) {
+    const std::vector<EvictionReleaseCredit>& release_credits) {
+    for (const EvictionReleaseCredit& credit : release_credits) {
         if (credit.pool != nullptr) {
             ++in_flight_device_release_credits_[credit.pool];
         }
@@ -720,8 +743,8 @@ void BlockTreeCache::reserveInFlightDeviceReleaseCreditsLocked(
 }
 
 void BlockTreeCache::settleInFlightDeviceReleaseCreditsLocked(
-    const std::vector<DeviceReleaseCredit>& release_credits) noexcept {
-    for (const DeviceReleaseCredit& credit : release_credits) {
+    const std::vector<EvictionReleaseCredit>& release_credits) noexcept {
+    for (const EvictionReleaseCredit& credit : release_credits) {
         const auto it = in_flight_device_release_credits_.find(credit.pool);
         RTP_LLM_CHECK_WITH_INFO(it != in_flight_device_release_credits_.end() && it->second > 0,
                                 "missing in-flight DEVICE release credit while settling pool=%p block=%d",
@@ -732,249 +755,6 @@ void BlockTreeCache::settleInFlightDeviceReleaseCreditsLocked(
         }
     }
 }
-
-bool BlockTreeCache::submitEvictionLocked(EvictionMove&                     eviction_move,
-                                          std::vector<DeviceReleaseCredit>* release_credits) {
-    if (release_credits != nullptr) {
-        release_credits->clear();
-    }
-    if (eviction_move.target_tier != Tier::NONE && !config_.isTierEnabled(eviction_move.target_tier)) {
-        eviction_move.target_tier = Tier::NONE;
-    }
-
-    auto plan = evictor_.buildPlan(eviction_move);
-    if (!plan.has_value()) {
-        return false;
-    }
-
-    std::vector<DeviceReleaseCredit>                    accepted_release_credits;
-    std::set<std::pair<DeviceBlockPool*, BlockIdxType>> accepted_physical_releases;
-    auto                                                collect_device_credits = [&](const EvictionMove& move) {
-        if (move.source_tier != Tier::DEVICE) {
-            return;
-        }
-        const size_t group_set_index = move.group_set_id;
-        RTP_LLM_CHECK_WITH_INFO(group_set_index < group_sets_.size(),
-                                "eviction plan has invalid group_set_id=%zu group_set_count=%zu",
-                                group_set_index,
-                                group_sets_.size());
-        const auto& pools = group_sets_[group_set_index]->devicePools();
-        RTP_LLM_CHECK_WITH_INFO(move.source_blocks.size() == pools.size(),
-                                "eviction plan DEVICE width mismatch: group_set_id=%zu expected=%zu actual=%zu",
-                                group_set_index,
-                                pools.size(),
-                                move.source_blocks.size());
-        for (size_t i = 0; i < pools.size(); ++i) {
-            const auto& pool = pools[i];
-            if (!isNullBlockIdx(move.source_blocks[i])
-                && accepted_physical_releases.emplace(pool.get(), move.source_blocks[i]).second) {
-                accepted_release_credits.push_back({pool, move.source_blocks[i]});
-            }
-        }
-    };
-    collect_device_credits(plan->primary);
-    for (const EvictionMove& cascade_move : plan->cascade_moves) {
-        collect_device_credits(cascade_move);
-    }
-
-    if (!plan->needsCopy()) {
-        BlockTreeEvictor::CopyResultSet results;
-        results.primary_success = true;
-        results.cascade_success.assign(plan->cascade_moves.size(), true);
-        evictor_.complete(*tree_, *plan, results);
-        metrics_reporter_.reportEvictionFinished(*plan, results, group_sets_);
-        ++mutation_version_;
-        if (release_credits != nullptr) {
-            *release_credits = std::move(accepted_release_credits);
-        }
-        return true;
-    }
-
-    auto       plan_ptr                  = std::make_shared<BlockTreeEvictor::EvictionPlan>(std::move(*plan));
-    auto       in_flight_release_credits = accepted_release_credits;
-    const bool submitted =
-        task_pool_->submit([this, plan_ptr, in_flight_release_credits = std::move(in_flight_release_credits)]() {
-            performEvictionCopy(*plan_ptr, in_flight_release_credits);
-        });
-    if (!submitted) {
-        evictor_.rollbackPreparedPlan(*plan_ptr);
-        return false;
-    }
-    reserveInFlightDeviceReleaseCreditsLocked(accepted_release_credits);
-    if (release_credits != nullptr) {
-        *release_credits = std::move(accepted_release_credits);
-    }
-    return true;
-}
-
-void BlockTreeCache::performEvictionCopy(const BlockTreeEvictor::EvictionPlan&   plan,
-                                         const std::vector<DeviceReleaseCredit>& release_credits) {
-    const Tier    source_tier            = plan.primary.source_tier;
-    const Tier    target_tier            = plan.primary.target_tier;
-    const size_t  transfer_block_count   = plan.cascade_moves.size() + 1;
-    const int64_t transfer_begin_time_us = metrics_reporter_.reportTransferStarted(source_tier, target_tier);
-    BlockTreeEvictor::CopyResultSet copy_results;
-    copy_results.primary_success = false;
-    copy_results.cascade_success.assign(plan.cascade_moves.size(), false);
-
-    auto worker_finalization_action = [this,
-                                       &plan,
-                                       &release_credits,
-                                       &copy_results,
-                                       source_tier,
-                                       target_tier,
-                                       transfer_block_count,
-                                       transfer_begin_time_us]() noexcept {
-        const bool transfer_success = copy_results.primary_success
-                                      && std::all_of(copy_results.cascade_success.begin(),
-                                                     copy_results.cascade_success.end(),
-                                                     [](bool success) { return success; });
-        metrics_reporter_.reportTransferFinished(
-            source_tier, target_tier, transfer_block_count, transfer_begin_time_us, transfer_success);
-
-        bool credit_settlement_attempted = false;
-        auto credit_settlement_action    = [this, &release_credits, &credit_settlement_attempted]() noexcept {
-            if (credit_settlement_attempted) {
-                return;
-            }
-            credit_settlement_attempted = true;
-            std::lock_guard<std::mutex> lock(mutex_);
-            settleInFlightDeviceReleaseCreditsLocked(release_credits);
-        };
-        block_tree_cache_detail::ScopeRollback<decltype(credit_settlement_action)> credit_settlement_guard(
-            std::move(credit_settlement_action));
-
-        bool completion_succeeded = false;
-        bool plan_terminalized    = false;
-        bool plan_succeeded       = false;
-        bool copy_ok              = copy_results.primary_success;
-
-        CacheKeyType          remote_cache_key = 0;
-        std::optional<size_t> remote_group_set_id;
-        if (copy_ok && plan.primary.node != nullptr) {
-            remote_cache_key    = plan.primary.node->cache_key;
-            remote_group_set_id = plan.primary.group_set_id;
-        }
-
-        try {
-            std::lock_guard<std::mutex> lock(mutex_);
-            try {
-                evictor_.complete(*tree_, plan, copy_results);
-                completion_succeeded = true;
-                plan_terminalized    = true;
-            } catch (const std::exception& error) {
-                RTP_LLM_LOG_ERROR("eviction completion failed; rolling back accepted plan: %s", error.what());
-                evictor_.rollbackPreparedPlan(plan);
-                plan_terminalized = true;
-            } catch (...) {
-                RTP_LLM_LOG_ERROR("eviction completion failed with unknown exception; rolling back "
-                                  "accepted plan");
-                evictor_.rollbackPreparedPlan(plan);
-                plan_terminalized = true;
-            }
-
-            // Credits are accounting-only. The completed or rolled-back evictor plan above owns all
-            // pool reference transitions; settlement must never add another decRef.
-            credit_settlement_attempted = true;
-            settleInFlightDeviceReleaseCreditsLocked(release_credits);
-
-            const bool mutated = plan_terminalized && completion_succeeded
-                                 && (copy_results.primary_success
-                                     || std::any_of(copy_results.cascade_success.begin(),
-                                                    copy_results.cascade_success.end(),
-                                                    [](bool success) { return success; }));
-            plan_succeeded = plan_terminalized && completion_succeeded && copy_results.primary_success
-                             && copy_results.cascade_success.size() == plan.cascade_moves.size()
-                             && std::all_of(copy_results.cascade_success.begin(),
-                                            copy_results.cascade_success.end(),
-                                            [](bool success) { return success; });
-            if (mutated) {
-                ++mutation_version_;
-            }
-            if (plan_succeeded) {
-                // A fully completed device->host or host->disk plan changes the target tier's
-                // pressure. This remains under the cache lock, after this plan's credits settle.
-                checkWatermark();
-            }
-        } catch (const std::exception& error) {
-            RTP_LLM_LOG_ERROR("eviction terminalization lock/follow-up failed: %s", error.what());
-        } catch (...) {
-            RTP_LLM_LOG_ERROR("eviction terminalization lock/follow-up failed with unknown exception");
-        }
-        metrics_reporter_.reportEvictionFinished(plan, copy_results, group_sets_);
-
-        // If an exception escaped before the in-lock settlement attempt, perform that accounting step
-        // now. The no-throw guard records one attempt and prevents a duplicate decrement.
-        credit_settlement_guard.run();
-
-        if (plan_terminalized && completion_succeeded && copy_ok && config_.enable_remote_cache
-            && remote_group_set_id.has_value()) {
-            try {
-                evictor_.writeRemoteThrough(storage_backend_, remote_cache_key, *remote_group_set_id);
-            } catch (const std::exception& error) {
-                RTP_LLM_LOG_ERROR("remote eviction write-through failed: %s", error.what());
-            } catch (...) {
-                RTP_LLM_LOG_ERROR("remote eviction write-through failed with unknown exception");
-            }
-        }
-    };
-    block_tree_cache_detail::ScopeRollback<decltype(worker_finalization_action)> worker_finalization_guard(
-        std::move(worker_finalization_action));
-
-    try {
-        if (!transfer_dispatcher_->hasMultiRankEngine()) {
-            copy_results = evictor_.performCopy(plan);
-        } else {
-            std::vector<TransferDescriptor> descriptors;
-            const bool                      batch_ready = buildEvictionTransferBatch(plan, descriptors);
-            const bool                      transfer_success =
-                batch_ready && transfer_dispatcher_->executeMultiRank(descriptors, evictionTransferTimeoutMs(plan));
-            copy_results.primary_success = transfer_success;
-            copy_results.cascade_success.assign(plan.cascade_moves.size(), transfer_success);
-        }
-    } catch (const std::exception& error) {
-        RTP_LLM_LOG_ERROR("eviction copy failed with exception: %s", error.what());
-    } catch (...) {
-        RTP_LLM_LOG_ERROR("eviction copy failed with unknown exception");
-    }
-}
-
-bool BlockTreeCache::buildEvictionTransferBatch(const BlockTreeEvictor::EvictionPlan& plan,
-                                                std::vector<TransferDescriptor>&      descriptors) const {
-    descriptors.clear();
-    descriptors.reserve(1 + plan.cascade_moves.size());
-
-    TransferDescriptor primary_descriptor;
-    if (!BlockTreeEvictor::buildTransferDescriptor(plan.primary, primary_descriptor)) {
-        return false;
-    }
-    descriptors.push_back(std::move(primary_descriptor));
-
-    for (const EvictionMove& cascade_move : plan.cascade_moves) {
-        TransferDescriptor cascade_descriptor;
-        if (!BlockTreeEvictor::buildTransferDescriptor(cascade_move, cascade_descriptor)) {
-            descriptors.clear();
-            return false;
-        }
-        descriptors.push_back(std::move(cascade_descriptor));
-    }
-    return true;
-}
-
-int BlockTreeCache::evictionTransferTimeoutMs(const BlockTreeEvictor::EvictionPlan& plan) const {
-    bool uses_disk = plan.primary.source_tier == Tier::DISK || plan.primary.target_tier == Tier::DISK;
-    for (const EvictionMove& cascade_move : plan.cascade_moves) {
-        if (cascade_move.source_tier == Tier::DISK || cascade_move.target_tier == Tier::DISK) {
-            uses_disk = true;
-            break;
-        }
-    }
-    if (!uses_disk) {
-        return config_.memory_cache_sync_timeout_ms;
-    }
-    return std::max(config_.memory_cache_sync_timeout_ms, config_.memory_cache_disk_sync_timeout_ms);
-}
-
 void BlockTreeCache::checkWatermark() {
     if (config_.enable_device_cache && config_.device_min_free_blocks > 0) {
         struct PoolDeficit {
@@ -1032,13 +812,13 @@ void BlockTreeCache::checkWatermark() {
                     unavailable[group_index] = true;
                     continue;
                 }
-                std::vector<DeviceReleaseCredit> release_credits;
-                if (!submitEvictionLocked(*eviction_move, &release_credits)) {
+                std::vector<EvictionReleaseCredit> release_credits;
+                if (!evictor_.submitLocked(*eviction_move, &release_credits)) {
                     unavailable[group_index] = true;
                     continue;
                 }
                 bool credited_uncovered_pool = false;
-                for (const DeviceReleaseCredit& credit : release_credits) {
+                for (const EvictionReleaseCredit& credit : release_credits) {
                     const auto it = pool_indices.find(credit.pool.get());
                     if (it == pool_indices.end()) {
                         continue;
@@ -1072,7 +852,7 @@ void BlockTreeCache::checkWatermark() {
         for (auto& group : group_sets_) {
             auto victims = evictor_.chooseWatermarkVictims(*group, tier, wm.ratio);
             for (auto& eviction_move : victims) {
-                submitEvictionLocked(eviction_move);
+                evictor_.submitLocked(eviction_move);
             }
         }
     }

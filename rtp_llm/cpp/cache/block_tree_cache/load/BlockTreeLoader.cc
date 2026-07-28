@@ -1,4 +1,4 @@
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeLoader.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/BlockTreeLoader.h"
 
 #include <algorithm>
 #include <exception>
@@ -75,7 +75,12 @@ BlockTreeLoadResult BlockTreeLoader::prepareLoadLocked(const std::vector<TreeNod
 }
 
 bool BlockTreeLoader::cancelLoadLocked(const std::shared_ptr<AsyncContext>& context) {
-    return load_worker_.cancelLoadNolock(context);
+    std::shared_ptr<LoadAsyncContext> load_context = std::dynamic_pointer_cast<LoadAsyncContext>(context);
+    if (load_context == nullptr) {
+        RTP_LLM_LOG_WARNING("context is not owned by BlockTreeCache");
+        return false;
+    }
+    return !load_context->done() && load_context->requestCancel();
 }
 
 void BlockTreeLoader::shutdown() {
@@ -155,7 +160,7 @@ std::shared_ptr<LoadTicket> BlockTreeLoader::prepareLoadTicket(LoadTicket::Pendi
 bool BlockTreeLoader::prepareJoinedLoadItem(LoadTicket::PendingLoadItem&             item,
                                             const std::shared_ptr<LoadAsyncContext>& context) {
     const std::optional<std::vector<BlockIdxType>> target_blocks =
-        load_worker_.joinLoading(item.node, item.group_set_id, context);
+        load_join_registry_.join(item.node, item.group_set_id, context);
     if (!target_blocks.has_value()) {
         RTP_LLM_LOG_WARNING("failed to join active load, group_set=%zu", item.group_set_id);
         return false;
@@ -235,8 +240,8 @@ std::shared_ptr<AsyncContext> BlockTreeLoader::commitLoad(const LoadTicket& tick
         return nullptr;
     }
 
-    LoadWorker::TaskPtr task;
-    if (!load_worker_.createTask(items, group_sets_, context, task)) {
+    LoadTaskRunner::TaskPtr task;
+    if (!load_task_runner_.createTask(items, group_sets_, context, task)) {
         return nullptr;
     }
     if (task != nullptr) {
@@ -255,12 +260,12 @@ std::shared_ptr<AsyncContext> BlockTreeLoader::commitLoad(const LoadTicket& tick
             ++prepared_item_count;
             continue;
         }
-        if (!load_worker_.startLoading(item.node, item.group_set_id, item.target_device_blocks, context)) {
+        if (!load_join_registry_.start(item.node, item.group_set_id, item.target_device_blocks, context)) {
             RTP_LLM_LOG_WARNING("failed to create loading record, group_set=%zu", item.group_set_id);
             return nullptr;
         }
         if (!beginLoad(item.node, item.group_set_id, item.source_tier)) {
-            const bool erased = load_worker_.eraseLoadingForOneContext(item.node, item.group_set_id, context);
+            const bool erased = load_join_registry_.eraseForContext(item.node, item.group_set_id, context);
             if (!erased) {
                 RTP_LLM_LOG_ERROR("failed to erase load context, group_set=%zu", item.group_set_id);
             }
@@ -318,7 +323,7 @@ void BlockTreeLoader::abortLoadUnsafe(const LoadTicket::PendingLoadItems&      i
         const bool fully_prepared = item_index < prepared_item_count;
         if (item.joined_load) {
             if (context != nullptr) {
-                const bool erased = load_worker_.eraseLoadingForOneContext(item.node, item.group_set_id, context);
+                const bool erased = load_join_registry_.eraseForContext(item.node, item.group_set_id, context);
                 if (!erased) {
                     RTP_LLM_LOG_DEBUG("joined load context is no longer registered, group_set=%zu", item.group_set_id);
                 }
@@ -333,7 +338,7 @@ void BlockTreeLoader::abortLoadUnsafe(const LoadTicket::PendingLoadItems&      i
         }
         if (item.source_tier != Tier::DEVICE && fully_prepared) {
             if (context != nullptr) {
-                const bool erased = load_worker_.eraseLoadingForOneContext(item.node, item.group_set_id, context);
+                const bool erased = load_join_registry_.eraseForContext(item.node, item.group_set_id, context);
                 if (!erased) {
                     RTP_LLM_LOG_WARNING("failed to erase aborted load context, group_set=%zu", item.group_set_id);
                 }
@@ -372,7 +377,7 @@ void BlockTreeLoader::abortLoadUnsafe(const LoadTicket::PendingLoadItems&      i
     }
 }
 
-void BlockTreeLoader::runLoadTask(const LoadWorker::TaskPtr& task) {
+void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
     if (task == nullptr || task->context == nullptr) {
         RTP_LLM_LOG_ERROR("invalid load task");
         return;
@@ -382,15 +387,15 @@ void BlockTreeLoader::runLoadTask(const LoadWorker::TaskPtr& task) {
     try {
         bool prepared = !task->items.empty();
         for (size_t item_index = 0; item_index < task->items.size(); ++item_index) {
-            LoadWorker::PrepareStatus status = load_worker_.prepareTransferItem(*task, item_index);
-            if (status == LoadWorker::PrepareStatus::NEED_HOST_RECLAIM) {
+            LoadTaskRunner::PrepareStatus status = load_task_runner_.prepareTransferItem(*task, item_index);
+            if (status == LoadTaskRunner::PrepareStatus::NEED_HOST_RECLAIM) {
                 const size_t group_set_id = task->items[item_index].group_set_id;
                 if (reclaim_one_(group_set_id, Tier::HOST)) {
-                    status = load_worker_.prepareTransferItem(*task, item_index);
+                    status = load_task_runner_.prepareTransferItem(*task, item_index);
                 }
             }
-            if (status != LoadWorker::PrepareStatus::READY) {
-                if (status == LoadWorker::PrepareStatus::NEED_HOST_RECLAIM) {
+            if (status != LoadTaskRunner::PrepareStatus::READY) {
+                if (status == LoadTaskRunner::PrepareStatus::NEED_HOST_RECLAIM) {
                     RTP_LLM_LOG_WARNING("failed to prepare host staging block, group_set=%zu",
                                         task->items[item_index].group_set_id);
                 }
@@ -398,7 +403,7 @@ void BlockTreeLoader::runLoadTask(const LoadWorker::TaskPtr& task) {
             }
         }
 
-        copy_success = load_worker_.runTransfer(
+        copy_success = load_task_runner_.runTransfer(
             *task, *transfer_dispatcher_, metrics_reporter_, disk_timeout_ms_, host_timeout_ms_, prepared);
     } catch (const std::exception& error) {
         RTP_LLM_LOG_ERROR("load worker failed with exception: %s", error.what());
@@ -417,7 +422,7 @@ void BlockTreeLoader::runLoadTask(const LoadWorker::TaskPtr& task) {
     }
 }
 
-bool BlockTreeLoader::settleLoadNolock(LoadWorker::Task& task, bool copy_success) {
+bool BlockTreeLoader::settleLoadNolock(LoadTaskRunner::Task& task, bool copy_success) {
     bool settlement_success   = copy_success && task.context != nullptr;
     bool state_settled        = false;
     bool tree_data_mutated    = false;
@@ -490,12 +495,12 @@ bool BlockTreeLoader::settleLoadNolock(LoadWorker::Task& task, bool copy_success
     if (settled_) {
         settled_(tree_data_mutated, device_refs_released || state_settled);
     }
-    load_worker_.releaseTaskResources(task);
+    load_task_runner_.releaseTaskResources(task);
     for (const LoadTicket::PendingLoadItem& item : task.items) {
         if (item.source_tier == Tier::DEVICE) {
             continue;
         }
-        const bool completed = load_worker_.finishLoading(item.node, item.group_set_id, settlement_success);
+        const bool completed = load_join_registry_.finish(item.node, item.group_set_id, settlement_success);
         if (!completed) {
             RTP_LLM_LOG_WARNING("failed to finish loading record, group_set=%zu", item.group_set_id);
         }

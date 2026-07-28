@@ -6,11 +6,12 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadJoinRegistry.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeEvictor.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/GroupSet.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/LoadTicket.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/LoadWorker.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadTicket.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadTaskRunner.h"
 
 namespace rtp_llm {
 
@@ -65,8 +66,8 @@ private:
     void                          abortLoadUnsafe(const LoadTicket::PendingLoadItems&      items,
                                                   size_t                                   prepared_item_count,
                                                   const std::shared_ptr<LoadAsyncContext>& context);
-    void                          runLoadTask(const LoadWorker::TaskPtr& task);
-    bool                          settleLoadNolock(LoadWorker::Task& task, bool copy_success);
+    void                          runLoadTask(const LoadTaskRunner::TaskPtr& task);
+    bool                          settleLoadNolock(LoadTaskRunner::Task& task, bool copy_success);
 
     bool reserveLoad(TreeNode* node, size_t group_set_id, Tier source, const std::vector<BlockIdxType>& source_blocks);
     bool
@@ -84,7 +85,8 @@ private:
     int                                 host_timeout_ms_{0};
     ReclaimOneFn                        reclaim_one_;
     SettledFn                           settled_;
-    LoadWorker                          load_worker_;
+    LoadTaskRunner                      load_task_runner_;
+    LoadJoinRegistry                    load_join_registry_;
     std::shared_ptr<LoadTicketRegistry> load_ticket_registry_;
 };
 
