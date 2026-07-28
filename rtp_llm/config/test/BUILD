@@ -14,3 +14,14 @@ py_test(
     exec_properties = {'gpu':'H20'},
 )
 
+py_test(
+    name = "kv_cache_config_pickle_test",
+    srcs = [
+        "kv_cache_config_pickle_test.py",
+    ],
+    deps = [
+        "//rtp_llm:config_ops",
+        "//rtp_llm:testlib",
+    ],
+    exec_properties = {'gpu':'H20'},
+)

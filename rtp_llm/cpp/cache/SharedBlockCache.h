@@ -17,6 +17,9 @@
 namespace rtp_llm {
 
 class SharedBlockCache {
+private:
+    static const size_t kCacheMaxCapacity = 10000000;
+
 public:
     using NamespaceId = uint32_t;
 
@@ -74,7 +77,8 @@ public:
     using LRUCacheType = LRUCache<CacheKeyType, UnifiedCacheItem>;
 
 public:
-    explicit SharedBlockCache(): lru_cache_(kCacheMaxCapacity) {}
+    explicit SharedBlockCache(size_t max_capacity = kCacheMaxCapacity):
+        lru_cache_(max_capacity == 0 ? 1 : max_capacity) {}
 
     void init(int group_num, const std::vector<BlockPoolPtr>& group_pools);
 
@@ -119,8 +123,6 @@ public:
     void setIndependentGroupEviction(bool enabled, const std::vector<int>& group_ids);
 
 private:
-    static const size_t kCacheMaxCapacity = 10000000;
-
     struct PrefixTreeNode {
         NamespacedKey                                        key;
         NamespacedKey                                        parent;

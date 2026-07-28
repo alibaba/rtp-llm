@@ -77,7 +77,7 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         bind_to=(kv_cache_config, "kv_cache_event_host_ip_port"),
         type=str,
         default="",
-        help="当前 DP replica 的 tp_rank=0 Cache 协调端点。",
+        help="当前 DP replica 的 tp_rank=0 Cache 协调端点；pp_size>1 时该功能禁用。",
     )
     kv_cache_group.add_argument(
         "--kv_cache_event_queue_capacity",

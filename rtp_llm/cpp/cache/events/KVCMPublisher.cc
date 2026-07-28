@@ -14,6 +14,7 @@
 #include <utility>
 
 #include "rtp_llm/cpp/cache/events/KVCacheEventQueue.h"
+#include "rtp_llm/cpp/cache/events/KVCMPublisherUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -27,6 +28,10 @@ bool jsonCodeIsOk(const rapidjson::Value& code) {
     }
     return code.IsInt() && code.GetInt() == 1;
 }
+
+}  // namespace
+
+namespace detail {
 
 bool kvcmResponseIsOk(const std::string& response) {
     rapidjson::Document document;
@@ -59,6 +64,20 @@ bool kvcmResponseIsOk(const std::string& response) {
     return true;
 }
 
+std::string normalizeKVCacheEventEndpoint(std::string endpoint) {
+    while (!endpoint.empty() && endpoint.back() == '/') {
+        endpoint.pop_back();
+    }
+    if (!endpoint.empty() && endpoint.find("://") == std::string::npos) {
+        endpoint = "http://" + endpoint;
+    }
+    return endpoint;
+}
+
+}  // namespace detail
+
+namespace {
+
 size_t appendCurlResponse(char* data, size_t size, size_t count, void* user_data) {
     const size_t bytes = size * count;
     try {
@@ -72,13 +91,12 @@ size_t appendCurlResponse(char* data, size_t size, size_t count, void* user_data
 class CurlKVCacheEventReporter final: public KVCacheEventReporter {
 public:
     CurlKVCacheEventReporter(std::string endpoint, int request_timeout_ms):
-        endpoint_(std::move(endpoint)), request_timeout_ms_(std::max(request_timeout_ms, 1)) {
-        while (!endpoint_.empty() && endpoint_.back() == '/') {
-            endpoint_.pop_back();
-        }
-        if (endpoint_.find("://") == std::string::npos) {
-            endpoint_ = "http://" + endpoint_;
-        }
+        endpoint_(detail::normalizeKVCacheEventEndpoint(std::move(endpoint))),
+        request_timeout_ms_(std::max(request_timeout_ms, 1)) {
+        // This is currently RTP-LLM's only libcurl user, and publishers are
+        // constructed synchronously before their worker thread starts. If
+        // another libcurl client is introduced, move this process-wide setup
+        // into a shared single-threaded startup hook.
         static std::once_flag curl_init_once;
         std::call_once(curl_init_once, [] { curl_global_init(CURL_GLOBAL_DEFAULT); });
     }
@@ -139,7 +157,7 @@ private:
                                 error_buffer);
             return false;
         }
-        if (!kvcmResponseIsOk(response)) {
+        if (!detail::kvcmResponseIsOk(response)) {
             RTP_LLM_LOG_WARNING(
                 "KVCM event request returned failure, route=%s response=%s", route.c_str(), response.c_str());
             return false;
@@ -382,6 +400,7 @@ public:
     }
 
     bool start() noexcept {
+        std::lock_guard<std::mutex> lock(lifecycle_mu_);
         if (!isConfigValid()) {
             state_.store(PublisherState::DEGRADED, std::memory_order_relaxed);
             RTP_LLM_LOG_WARNING("KVCMPublisher is disabled by invalid config: endpoint=%s instance_group=%s "
@@ -393,10 +412,14 @@ public:
                                 static_cast<int>(static_cast<bool>(snapshot_provider_)));
             return false;
         }
-        bool expected = false;
-        if (!started_.compare_exchange_strong(expected, true)) {
+        if (started_.load(std::memory_order_relaxed)) {
             return true;
         }
+        if (stopped_permanently_) {
+            RTP_LLM_LOG_WARNING("KVCMPublisher cannot restart after stop");
+            return false;
+        }
+        stopping_.store(false, std::memory_order_relaxed);
         state_.store(PublisherState::STARTING, std::memory_order_relaxed);
         try {
             worker_ = std::thread(&Impl::workerLoop, this);
@@ -406,6 +429,7 @@ public:
             RTP_LLM_LOG_WARNING("start KVCMPublisher failed: %s", e.what());
             return false;
         }
+        started_.store(true, std::memory_order_relaxed);
         return true;
     }
 
@@ -425,7 +449,8 @@ public:
     }
 
     void stop() noexcept {
-        if (!started_.load(std::memory_order_relaxed)) {
+        std::lock_guard<std::mutex> lock(lifecycle_mu_);
+        if (!started_.load(std::memory_order_relaxed) && !worker_.joinable()) {
             return;
         }
         stopping_.store(true, std::memory_order_relaxed);
@@ -434,6 +459,7 @@ public:
             worker_.join();
         }
         started_.store(false, std::memory_order_relaxed);
+        stopped_permanently_ = true;
         state_.store(PublisherState::STOPPED, std::memory_order_relaxed);
     }
 
@@ -605,8 +631,10 @@ private:
     std::shared_ptr<KVCacheEventReporter> snapshot_reporter_;
     detail::KVCacheEventQueue             queue_;
     std::thread                           worker_;
+    std::mutex                            lifecycle_mu_;
     std::atomic<bool>                     started_{false};
     std::atomic<bool>                     stopping_{false};
+    bool                                  stopped_permanently_{false};
     std::atomic<PublisherState>           state_{PublisherState::DISABLED};
     std::atomic<uint64_t>                 accepted_count_{0};
     std::atomic<uint64_t>                 dropped_count_{0};

@@ -181,7 +181,7 @@ struct KVCacheConfig {
     int64_t device_cache_min_free_blocks            = 0;
     int     load_cache_retry_times                  = 1;  // Maximum retry attempts for load cache transfer failures
 
-    // HBM cache event publishing. Only tp_rank=0 creates an active publisher for each DP replica.
+    // HBM cache event publishing. Only tp_rank=0 with pp_size=1 creates an active publisher for each DP replica.
     std::string kv_cache_event_publisher_type        = "none";  // none | log | kvcm
     std::string kv_cache_event_manager_endpoint      = "";      // KVCM Meta HTTP endpoint
     std::string kv_cache_event_instance_group        = "";

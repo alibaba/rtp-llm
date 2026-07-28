@@ -109,6 +109,114 @@ TEST(SharedBlockCacheTest, PublisherTracksCompleteLogicalKeysOnly) {
     EXPECT_TRUE(cache.logicalCacheSnapshot().cache_keys.empty());
 }
 
+TEST(SharedBlockCacheTest, PublisherIsSeededFromExistingCompleteKeysWithoutDuplicateAdds) {
+    SharedBlockCache cache;
+    putOne(cache, 1, 101, rootDep());
+
+    auto publisher = std::make_shared<RecordingPublisher>();
+    ASSERT_TRUE(publisher->start());
+    cache.setEventPublisher(publisher, /*required_group_count=*/1);
+
+    EXPECT_TRUE(publisher->events.empty());
+    ASSERT_TRUE(cache.remove(1).has_value());
+    ASSERT_EQ(1u, publisher->events.size());
+    EXPECT_EQ(KVCacheEventType::BLOCK_DELETE, publisher->events[0].type);
+    EXPECT_EQ(1, publisher->events[0].block_key);
+}
+
+TEST(SharedBlockCacheTest, PublisherReportsWholeChainEvictionDeletes) {
+    SharedBlockCache cache;
+    auto             publisher = std::make_shared<RecordingPublisher>();
+    ASSERT_TRUE(publisher->start());
+    cache.setEventPublisher(publisher, /*required_group_count=*/1);
+
+    putOne(cache, 1, 101, rootDep(0));
+    putOne(cache, 2, 102, childDep(1, 1));
+    putOne(cache, 3, 103, childDep(2, 2));
+    ASSERT_EQ(3u, publisher->events.size());
+
+    const auto evicted = cache.selectAndEvict(/*min_blocks=*/1);
+
+    ASSERT_EQ((CacheKeysType{1, 2, 3}), evicted.evicted_keys);
+    ASSERT_EQ(6u, publisher->events.size());
+    for (size_t i = 0; i < 3; ++i) {
+        EXPECT_EQ(KVCacheEventType::BLOCK_DELETE, publisher->events[i + 3].type);
+        EXPECT_EQ(static_cast<CacheKeyType>(i + 1), publisher->events[i + 3].block_key);
+    }
+}
+
+TEST(SharedBlockCacheTest, PublisherReportsDeleteWhenIndependentGroupEvictionMakesKeyIncomplete) {
+    SharedBlockCache cache;
+    auto             publisher = std::make_shared<RecordingPublisher>();
+    ASSERT_TRUE(publisher->start());
+    cache.setEventPublisher(publisher, /*required_group_count=*/2);
+    cache.setIndependentGroupEviction(/*enabled=*/true, {3});
+
+    cache.put(1,
+              std::vector<BlockIdxType>{101, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 301},
+              false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              rootDep(0));
+    cache.put(2,
+              std::vector<BlockIdxType>{102, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 302},
+              false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              childDep(1, 1));
+    cache.put(3,
+              std::vector<BlockIdxType>{103, NULL_BLOCK_IDX, NULL_BLOCK_IDX, 303},
+              false,
+              SharedBlockCache::kGpuLogicalNamespace,
+              childDep(2, 2));
+    ASSERT_EQ(3u, publisher->events.size());
+
+    const auto evicted = cache.selectAndEvictForGroup(/*group_id=*/3, /*min_blocks=*/1);
+
+    ASSERT_EQ((CacheKeysType{2}), evicted.evicted_keys);
+    ASSERT_EQ(4u, publisher->events.size());
+    EXPECT_EQ(KVCacheEventType::BLOCK_DELETE, publisher->events.back().type);
+    EXPECT_EQ(2, publisher->events.back().block_key);
+}
+
+TEST(SharedBlockCacheTest, PublisherDoesNotDeleteKeyThatWasNeverComplete) {
+    SharedBlockCache cache;
+    auto             publisher = std::make_shared<RecordingPublisher>();
+    ASSERT_TRUE(publisher->start());
+    cache.setEventPublisher(publisher, /*required_group_count=*/2);
+
+    putOne(cache, 1, 101, rootDep());
+    EXPECT_TRUE(publisher->events.empty());
+
+    const auto evicted = cache.selectAndEvict(/*min_blocks=*/1);
+
+    ASSERT_EQ((CacheKeysType{1}), evicted.evicted_keys);
+    EXPECT_TRUE(publisher->events.empty());
+}
+
+TEST(SharedBlockCacheTest, CapacityReplacementPublishesDeleteBeforeReplacementAdd) {
+    SharedBlockCache cache(/*max_capacity=*/1);
+    auto             publisher = std::make_shared<RecordingPublisher>();
+    ASSERT_TRUE(publisher->start());
+    cache.setEventPublisher(publisher, /*required_group_count=*/1);
+
+    putOne(cache, 1, 101, rootDep());
+    putOne(cache, 2, 102, rootDep());
+    putOne(cache, 1, 103, rootDep());
+
+    ASSERT_EQ((std::vector<CacheKeyType>{1}), cache.allCacheKeys());
+    ASSERT_EQ(5u, publisher->events.size());
+    EXPECT_EQ(KVCacheEventType::BLOCK_ADD, publisher->events[0].type);
+    EXPECT_EQ(KVCacheEventType::BLOCK_DELETE, publisher->events[1].type);
+    EXPECT_EQ(KVCacheEventType::BLOCK_ADD, publisher->events[2].type);
+    EXPECT_EQ(KVCacheEventType::BLOCK_DELETE, publisher->events[3].type);
+    EXPECT_EQ(KVCacheEventType::BLOCK_ADD, publisher->events[4].type);
+    EXPECT_EQ((std::vector<CacheKeyType>{1, 1, 2, 2, 1}),
+              (std::vector<CacheKeyType>{publisher->events[0].block_key,
+                                         publisher->events[1].block_key,
+                                         publisher->events[2].block_key,
+                                         publisher->events[3].block_key,
+                                         publisher->events[4].block_key}));
+}
+
 TEST(SharedBlockCacheTest, PrefixTreeEvictsCollectedChainInParentFirstOrderWithDependencies) {
     SharedBlockCache cache;
     putOne(cache, 1, 101, rootDep(0));

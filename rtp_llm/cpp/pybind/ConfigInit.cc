@@ -543,7 +543,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kv_cache_event_snapshot_timeout_ms);
             },
             [](py::tuple t) {
-                if (t.size() != 43 && t.size() != 54 && t.size() != 56 && t.size() != 57 && t.size() != 68)
+                if (t.size() != 43 && t.size() != 54 && t.size() != 68)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -602,24 +602,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.prefix_tree_memory_state_swa_pool_ratio = t[51].cast<int64_t>();
                         c.enable_independent_group_eviction       = t[52].cast<bool>();
                         c.load_cache_retry_times                  = t[53].cast<int>();
-                    }
-                    if (t.size() == 56 || t.size() == 57) {
-                        c.kv_cache_event_publisher_type        = t[43].cast<std::string>();
-                        c.kv_cache_event_manager_endpoint      = t[44].cast<std::string>();
-                        c.kv_cache_event_instance_group        = t[45].cast<std::string>();
-                        c.kv_cache_event_instance_id           = t[46].cast<std::string>();
-                        c.kv_cache_event_host_ip_port          = t[47].cast<std::string>();
-                        c.kv_cache_event_queue_capacity        = t[48].cast<int64_t>();
-                        c.kv_cache_event_report_batch_size     = t[49].cast<int64_t>();
-                        c.kv_cache_event_flush_interval_ms     = t[50].cast<int>();
-                        c.kv_cache_event_heartbeat_interval_ms = t[51].cast<int>();
-                        c.kv_cache_event_request_timeout_ms    = t[52].cast<int>();
-                        c.kv_cache_event_retry_interval_ms     = t[53].cast<int>();
-                        c.kv_cache_event_snapshot_interval_ms  = t[54].cast<int>();
-                        c.kv_cache_event_log_max_keys          = t[55].cast<int64_t>();
-                        if (t.size() == 57) {
-                            c.kv_cache_event_snapshot_timeout_ms = t[56].cast<int>();
-                        }
                     }
                     if (t.size() == 68) {
                         c.kv_cache_event_publisher_type        = t[54].cast<std::string>();

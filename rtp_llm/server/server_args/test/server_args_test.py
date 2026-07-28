@@ -329,6 +329,35 @@ class ServerArgsSetTest(TestCase):
         with self.assertRaises(SystemExit):
             rtp_llm.server.server_args.server_args.setup_args()
 
+    def test_kv_cache_event_env_vars_bind_to_config(self):
+        os.environ["KV_CACHE_EVENT_PUBLISHER_TYPE"] = "kvcm"
+        os.environ["KV_CACHE_EVENT_QUEUE_CAPACITY"] = "2048"
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertEqual(
+            "kvcm",
+            py_env_configs.kv_cache_config.kv_cache_event_publisher_type,
+        )
+        self.assertEqual(
+            2048,
+            py_env_configs.kv_cache_config.kv_cache_event_queue_capacity,
+        )
+
+    def test_kv_cache_event_env_rejects_unknown_publisher_type(self):
+        os.environ["KV_CACHE_EVENT_PUBLISHER_TYPE"] = "KVCM"
+        sys.argv = ["prog"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        with self.assertRaises(SystemExit):
+            rtp_llm.server.server_args.server_args.setup_args()
+
     def test_gpu_batch_vit_args_parse(self):
         from rtp_llm.config.py_config_modules import PyEnvConfigs
         from rtp_llm.server.server_args.server_args import (

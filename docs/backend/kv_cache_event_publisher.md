@@ -46,9 +46,11 @@ Events describe reusable logical cache keys, not physical block indices.
 - `put`, `pop`, `remove`, and `selectAndEvict` call the non-blocking publisher while holding the `BlockCache` mutex so
   event order matches cache state transitions. Network I/O remains exclusively on the publisher worker thread.
 
-Only `tp_rank=0` is an event owner. Each DP replica has an independent owner and must use a distinct
+Only `tp_rank=0` is an event owner when `pp_size=1`. Each DP replica has an independent owner and must use a distinct
 `KV_CACHE_EVENT_HOST_IP_PORT`; the same identity must not be concurrently owned by two live replicas. Other TP ranks
-use `NullPublisher`.
+use `NullPublisher`. Pipeline parallelism is not supported yet because RTP-LLM does not expose a stable PP-stage rank
+to this component; when `pp_size>1`, the publisher is disabled with a warning to prevent multiple stages from using
+the same KVCM identity.
 The HBM location spec is named `rtp_llm_hbm_<block_size_tokens>` and uses an
 `rtp-llm://<host_ip_port>/hbm` URI. It represents the complete DP-replica location; its registered size is the sum of
 all cache groups across all TP shards, while only the owner rank emits state transitions.
@@ -67,6 +69,8 @@ all cache groups across all TP shards, while only the owner rank emits state tra
 `EVENT_HOST_DOWN` is a terminal lifecycle event, not a reconnect reset. Startup and recovery use an authoritative
 snapshot to replace stale metadata. Within one mutation request, repeated transitions for the same block key are
 coalesced to the last state because KVCM applies aggregated ADDs before aggregated DELETEs.
+Publisher instances are one-shot: repeated `start()` calls are idempotent while running, but `start()` returns false
+after `stop()`. Recreate the publisher to start a new lifecycle.
 
 The queue is a bounded lock-free MPMC ring and assigns event sequence numbers from the committed queue order, so
 concurrent producers cannot publish a sequence inversion. Inference threads never wait for queue space, a consumer
@@ -108,11 +112,19 @@ The following server arguments also have equivalent upper-case environment varia
 disables the publisher while leaving inference available. `log` mode does not require KVCM settings.
 The manager endpoint must be a resolved HTTP endpoint; this version does not perform KVCM service discovery or
 leader switching inside RTP-LLM.
+Publisher type values are case-sensitive for both CLI arguments and environment variables; invalid values are rejected
+during argument parsing.
+
+`KVCacheConfig` pickle state supports the legacy 43- and 54-element layouts plus the current 68-element layout. The
+current layout cannot be deserialized by an older binary, so processes that exchange pickled configuration during
+spawn or restart must be upgraded together.
 
 Publisher state, queue depth, accepted events, and dropped events are exported as
 `rtp_llm_kv_cache_event_publisher_state`, `rtp_llm_kv_cache_event_queue_size`,
-`rtp_llm_kv_cache_event_accepted_count`, and `rtp_llm_kv_cache_event_dropped_count`. A non-zero dropped count means an
-authoritative resync is required; alert on sustained non-`READY` state in `kvcm` mode and on queue growth or drops.
+`rtp_llm_kv_cache_event_accepted_count`, and `rtp_llm_kv_cache_event_dropped_count`. The two count metrics are
+publisher-instance cumulative gauges and reset when the publisher or process is recreated. Dashboards and alerts
+should use reset-aware deltas or rates rather than their absolute values. An increase in dropped count means an
+authoritative resync is required; alert on sustained non-`READY` state in `kvcm` mode and on queue growth or new drops.
 State values are `DISABLED=0`, `STARTING=1`, `LOGGING=2`, `REGISTERING=3`, `RESYNCING=4`, `READY=5`, `DEGRADED=6`, and
 `STOPPED=7`.
 

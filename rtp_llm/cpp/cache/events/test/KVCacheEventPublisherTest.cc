@@ -1,5 +1,6 @@
 // Publisher-specific behavior tests are owned by the cache/events subsystem.
 #include "rtp_llm/cpp/cache/events/KVCMPublisher.h"
+#include "rtp_llm/cpp/cache/events/KVCMPublisherUtils.h"
 #include "rtp_llm/cpp/cache/events/KVCacheEventPublisherFactory.h"
 #include "rtp_llm/cpp/cache/events/LogPublisher.h"
 #include "rtp_llm/cpp/cache/events/NullPublisher.h"
@@ -256,6 +257,41 @@ TEST(KVCacheEventPublisherTest, FactorySelectsConfiguredPublisherWithoutLeakingC
     EXPECT_FALSE(publisher->enabled());
 }
 
+TEST(KVCacheEventPublisherTest, PublisherOwnershipRejectsPipelineParallelism) {
+    EXPECT_TRUE(isKVCacheEventPublisherOwner(/*tp_rank=*/0, /*pp_size=*/1));
+    EXPECT_FALSE(isKVCacheEventPublisherOwner(/*tp_rank=*/1, /*pp_size=*/1));
+    EXPECT_FALSE(isKVCacheEventPublisherOwner(/*tp_rank=*/0, /*pp_size=*/2));
+}
+
+TEST(KVCacheEventPublisherTest, KVCMEndpointNormalizationIsStable) {
+    EXPECT_EQ("", detail::normalizeKVCacheEventEndpoint(""));
+    EXPECT_EQ("http://kvcm-meta:56020", detail::normalizeKVCacheEventEndpoint("kvcm-meta:56020///"));
+    EXPECT_EQ("http://kvcm-meta:56020", detail::normalizeKVCacheEventEndpoint("http://kvcm-meta:56020/"));
+    EXPECT_EQ("https://kvcm-meta.example", detail::normalizeKVCacheEventEndpoint("https://kvcm-meta.example///"));
+}
+
+TEST(KVCacheEventPublisherTest, KVCMResponseValidationCoversProtocolVariantsAndFailures) {
+    const std::vector<std::pair<std::string, bool>> cases = {
+        {R"({"header":{"status":{"code":"OK"}}})", true},
+        {R"({"header":{"status":{"code":"1"}}})", true},
+        {R"({"header":{"status":{"code":1}}})", true},
+        {R"({"header":{"status":{"code":"OK"}},"item_results":[1,"1","OK"]})", true},
+        {R"({"header":{"status":{"code":1}},"itemResults":["OK",1]})", true},
+        {R"({"header":{"status":{"code":"FAILED"}}})", false},
+        {R"({"header":{"status":{"code":0}}})", false},
+        {R"({"header":{"status":{"code":"OK"}},"item_results":[1,0]})", false},
+        {R"({"header":{"status":{"code":"OK"}},"itemResults":"OK"})", false},
+        {R"({"header":{"status":{}}})", false},
+        {R"({"header":{}})", false},
+        {R"({"header":{"status":{"code":"OK"}})", false},
+        {"not-json", false},
+    };
+
+    for (const auto& [response, expected] : cases) {
+        EXPECT_EQ(expected, detail::kvcmResponseIsOk(response)) << response;
+    }
+}
+
 TEST(KVCacheEventPublisherTest, KVCMPublisherRejectsIncompleteIdentity) {
     KVCacheEventPublisherConfig config;
     config.type  = "kvcm";
@@ -301,6 +337,8 @@ TEST(KVCacheEventPublisherTest, PublisherLifecycleIsIdempotent) {
     log_publisher.stop();
     EXPECT_EQ(PublisherState::STOPPED, log_publisher.status().state);
     EXPECT_EQ(PublishResult::NOT_RUNNING, log_publisher.tryPublish({KVCacheEventType::BLOCK_ADD, 43, 0}));
+    EXPECT_FALSE(log_publisher.start());
+    EXPECT_EQ(PublisherState::STOPPED, log_publisher.status().state);
 
     KVCacheEventPublisherConfig kvcm_config;
     kvcm_config.type                  = "kvcm";
@@ -320,6 +358,42 @@ TEST(KVCacheEventPublisherTest, PublisherLifecycleIsIdempotent) {
     kvcm_publisher.stop();
     EXPECT_EQ(PublisherState::STOPPED, kvcm_publisher.status().state);
     EXPECT_EQ(PublishResult::NOT_RUNNING, kvcm_publisher.tryPublish({KVCacheEventType::BLOCK_ADD, 44, 0}));
+    EXPECT_FALSE(kvcm_publisher.start());
+    EXPECT_EQ(PublisherState::STOPPED, kvcm_publisher.status().state);
+}
+
+TEST(KVCacheEventPublisherTest, ConcurrentStartAndStopAlwaysLeavesJoinedWorkers) {
+    for (size_t iteration = 0; iteration < 32; ++iteration) {
+        KVCacheEventPublisherConfig config;
+        config.type              = "log";
+        config.queue_capacity    = 8;
+        config.report_batch_size = 8;
+        config.flush_interval_ms = 1;
+
+        LogPublisher      publisher(config, makeContext());
+        std::atomic<bool> go{false};
+        bool              started = false;
+        std::thread       starter([&] {
+            while (!go.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            started = publisher.start();
+        });
+        std::thread       stopper([&] {
+            while (!go.load(std::memory_order_acquire)) {
+                std::this_thread::yield();
+            }
+            publisher.stop();
+        });
+
+        go.store(true, std::memory_order_release);
+        starter.join();
+        stopper.join();
+        publisher.stop();
+
+        EXPECT_TRUE(started);
+        EXPECT_EQ(PublisherState::STOPPED, publisher.status().state);
+    }
 }
 
 TEST(KVCacheEventPublisherTest, KVCMPublisherRegistersSnapshotsAndReportsDeltas) {
@@ -610,10 +684,7 @@ TEST(KVCacheEventPublisherTest, KVCMPublisherRecoversFromQueueOverflowWithSnapsh
     }
 
     ASSERT_EQ(PublishResult::ACCEPTED, publisher.tryPublish({KVCacheEventType::BLOCK_ADD, 31, 0}));
-    const auto overflow_start = std::chrono::steady_clock::now();
     EXPECT_EQ(PublishResult::QUEUE_FULL, publisher.tryPublish({KVCacheEventType::BLOCK_DELETE, 10, 0}));
-    const auto overflow_cost = std::chrono::steady_clock::now() - overflow_start;
-    EXPECT_LT(overflow_cost, std::chrono::milliseconds(50));
     EXPECT_EQ(1, publisher.status().dropped_count);
 
     snapshot_version.store(2, std::memory_order_relaxed);

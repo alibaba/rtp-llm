@@ -40,4 +40,11 @@ struct KVCacheEventPublisherContext {
     bool    use_mla           = false;
 };
 
+// Pipeline-parallel ranks do not expose a stable pp_rank today, so there is no
+// safe way to select exactly one cache-event owner across PP stages. Keep the
+// feature disabled for pp_size > 1 until that identity is available.
+inline bool isKVCacheEventPublisherOwner(int64_t tp_rank, int64_t pp_size) noexcept {
+    return tp_rank == 0 && pp_size == 1;
+}
+
 }  // namespace rtp_llm

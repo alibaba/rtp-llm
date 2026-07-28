@@ -41,6 +41,7 @@ cc_library(
         "KVCacheEventPublisherConfig.h",
         "KVCacheEventPublisherFactory.h",
         "KVCacheEventReporter.h",
+        "KVCMPublisherUtils.h",
         "LogPublisher.h",
         "NullPublisher.h",
     ],

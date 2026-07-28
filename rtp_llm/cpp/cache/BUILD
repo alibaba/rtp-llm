@@ -132,12 +132,6 @@ cc_library(
     ] + torch_deps(),
 )
 
-alias(
-    name = "kv_cache_event_publisher",
-    actual = "//rtp_llm/cpp/cache/events:kv_cache_event_publisher",
-    visibility = ["//visibility:public"],
-)
-
 cc_library(
     name = "block_pool",
     srcs = [

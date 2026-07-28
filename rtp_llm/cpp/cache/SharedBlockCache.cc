@@ -102,6 +102,16 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
     }
     updateItemDependencyLocked(item, namespace_id, dependency);
 
+    // LRUCache::put normally evicts a full cache's tail internally. Perform
+    // that transition explicitly so tree aliases and cache-event state are
+    // updated before the replacement key is published.
+    if (lru_cache_.full() && !lru_cache_.empty()) {
+        const auto       evicted_key = lru_cache_.items().back().first;
+        UnifiedCacheItem evicted_item;
+        if (removeItemLocked(evicted_key, &evicted_item)) {
+            removeAllTreeAliasesForCacheKeyLocked(evicted_key);
+        }
+    }
     lru_cache_.put(cache_key, item);
     ++version_;
     updatePublishedStateLocked(cache_key);

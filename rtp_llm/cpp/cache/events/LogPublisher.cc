@@ -4,6 +4,7 @@
 #include <atomic>
 #include <chrono>
 #include <exception>
+#include <mutex>
 #include <sstream>
 #include <thread>
 #include <utility>
@@ -36,10 +37,15 @@ public:
     }
 
     bool start() noexcept {
-        bool expected = false;
-        if (!started_.compare_exchange_strong(expected, true)) {
+        std::lock_guard<std::mutex> lock(lifecycle_mu_);
+        if (started_.load(std::memory_order_relaxed)) {
             return true;
         }
+        if (stopped_permanently_) {
+            RTP_LLM_LOG_WARNING("LogPublisher cannot restart after stop");
+            return false;
+        }
+        stopping_.store(false, std::memory_order_relaxed);
         state_.store(PublisherState::STARTING, std::memory_order_relaxed);
         try {
             worker_ = std::thread(&Impl::workerLoop, this);
@@ -49,6 +55,7 @@ public:
             RTP_LLM_LOG_WARNING("start LogPublisher failed: %s", e.what());
             return false;
         }
+        started_.store(true, std::memory_order_relaxed);
         return true;
     }
 
@@ -66,7 +73,8 @@ public:
     }
 
     void stop() noexcept {
-        if (!started_.load(std::memory_order_relaxed)) {
+        std::lock_guard<std::mutex> lock(lifecycle_mu_);
+        if (!started_.load(std::memory_order_relaxed) && !worker_.joinable()) {
             return;
         }
         stopping_.store(true, std::memory_order_relaxed);
@@ -75,6 +83,7 @@ public:
             worker_.join();
         }
         started_.store(false, std::memory_order_relaxed);
+        stopped_permanently_ = true;
         state_.store(PublisherState::STOPPED, std::memory_order_relaxed);
     }
 
@@ -139,8 +148,10 @@ private:
     KVCacheEventPublisherContext context_;
     detail::KVCacheEventQueue    queue_;
     std::thread                  worker_;
+    std::mutex                   lifecycle_mu_;
     std::atomic<bool>            started_{false};
     std::atomic<bool>            stopping_{false};
+    bool                         stopped_permanently_{false};
     std::atomic<PublisherState>  state_{PublisherState::DISABLED};
     std::atomic<uint64_t>        accepted_count_{0};
     std::atomic<uint64_t>        dropped_count_{0};

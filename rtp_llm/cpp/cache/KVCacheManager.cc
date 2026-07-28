@@ -610,7 +610,17 @@ void KVCacheManager::initCacheEventPublisher() {
             cache_event_publisher_ = createNullKVCacheEventPublisher();
             return;
         }
-        if (parallelism_config_.tp_rank != 0) {
+        if (parallelism_config_.pp_size != 1) {
+            RTP_LLM_LOG_WARNING("KV cache event publisher disabled because pipeline parallelism is unsupported, "
+                                "type=%s pp_size=%lld tp_rank=%lld dp_rank=%lld",
+                                publisher_type.c_str(),
+                                static_cast<long long>(parallelism_config_.pp_size),
+                                static_cast<long long>(parallelism_config_.tp_rank),
+                                static_cast<long long>(parallelism_config_.dp_rank));
+            cache_event_publisher_ = createNullKVCacheEventPublisher();
+            return;
+        }
+        if (!isKVCacheEventPublisherOwner(parallelism_config_.tp_rank, parallelism_config_.pp_size)) {
             RTP_LLM_LOG_INFO("KV cache event publisher disabled on non-owner rank, type=%s tp_rank=%lld dp_rank=%lld",
                              publisher_type.c_str(),
                              static_cast<long long>(parallelism_config_.tp_rank),
@@ -659,6 +669,8 @@ void KVCacheManager::initCacheEventPublisher() {
         // The published location is one logical DP-replica endpoint. Its
         // aggregate spec therefore accounts for the same block's shards on
         // every TP rank, even though only tp_rank=0 owns event publication.
+        // Pipeline parallelism is rejected above because a unique PP owner is
+        // not represented in ParallelismConfig yet.
         publisher_context.spec_size_bytes *= std::max<int64_t>(parallelism_config_.tp_size, 1);
         publisher_context.tp_size = static_cast<int32_t>(parallelism_config_.tp_size);
         publisher_context.dp_size = static_cast<int32_t>(parallelism_config_.dp_size);
@@ -689,10 +701,12 @@ void KVCacheManager::initCacheEventPublisher() {
             return;
         }
 
-        RTP_LLM_LOG_INFO("KV cache event publisher started, type=%s instance_id=%s host=%s tp_rank=%lld dp_rank=%lld",
+        RTP_LLM_LOG_INFO("KV cache event publisher started, type=%s instance_id=%s host=%s pp_size=%lld tp_rank=%lld "
+                         "dp_rank=%lld",
                          publisher_type.c_str(),
                          publisher_context.instance_id.c_str(),
                          publisher_context.host_ip_port.c_str(),
+                         static_cast<long long>(parallelism_config_.pp_size),
                          static_cast<long long>(parallelism_config_.tp_rank),
                          static_cast<long long>(parallelism_config_.dp_rank));
     } catch (const std::exception& e) {

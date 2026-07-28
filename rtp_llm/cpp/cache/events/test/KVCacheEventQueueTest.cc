@@ -42,12 +42,14 @@ TEST(KVCacheEventQueueTest, ConcurrentProducersCommitMonotonicSequence) {
 
     std::vector<KVCacheEvent> received;
     received.reserve(kEventCount);
-    while (received.size() < kEventCount) {
+    const auto deadline = std::chrono::steady_clock::now() + std::chrono::seconds(10);
+    while (received.size() < kEventCount && std::chrono::steady_clock::now() < deadline) {
         auto batch = queue.waitPop(256, std::chrono::milliseconds(100));
         received.insert(received.end(), batch.begin(), batch.end());
     }
 
-    ASSERT_EQ(kEventCount, received.size());
+    ASSERT_EQ(kEventCount, received.size())
+        << "queue drain timed out after receiving " << received.size() << " of " << kEventCount << " events";
     for (size_t i = 0; i < received.size(); ++i) {
         EXPECT_EQ(i + 1, received[i].sequence);
     }
@@ -98,7 +100,14 @@ TEST(KVCacheEventQueueTest, SmallRingWrapsUnderConcurrentProducerConsumerLoad) {
     start.store(true, std::memory_order_release);
     std::vector<KVCacheEvent> received;
     received.reserve(kEventCount);
+    bool       timed_out = false;
+    const auto deadline  = std::chrono::steady_clock::now() + std::chrono::seconds(10);
     while (received.size() < kEventCount) {
+        if (std::chrono::steady_clock::now() >= deadline) {
+            timed_out = true;
+            queue.stop();
+            break;
+        }
         auto batch = queue.waitPop(32, std::chrono::milliseconds(100));
         received.insert(received.end(), batch.begin(), batch.end());
     }
@@ -106,6 +115,8 @@ TEST(KVCacheEventQueueTest, SmallRingWrapsUnderConcurrentProducerConsumerLoad) {
         producer.join();
     }
 
+    ASSERT_FALSE(timed_out) << "queue drain timed out after receiving " << received.size() << " of " << kEventCount
+                            << " events";
     ASSERT_EQ(kEventCount, received.size());
     std::vector<bool> seen(kEventCount, false);
     for (size_t i = 0; i < received.size(); ++i) {
