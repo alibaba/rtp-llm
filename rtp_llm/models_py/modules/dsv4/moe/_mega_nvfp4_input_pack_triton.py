@@ -68,6 +68,8 @@ if triton is not None:
         values = tl.load(x_ptr + row * x_stride_m + cols, mask=mask, other=0.0).to(
             tl.float32
         )
+        values_is_finite = tl.abs(values) < float("inf")
+        values = tl.where(values_is_finite, values, 0.0)
         row_amax = tl.maximum(tl.max(tl.abs(values), axis=0), 1.0e-30)
         # Match PyTorch's constant-division lowering in the DeepGEMM reference;
         # forcing div.rn here differs by one ULP for some BF16 row maxima.
@@ -111,6 +113,8 @@ if triton is not None:
                 mask=group_mask,
                 other=0.0,
             ).to(tl.float32)
+            group_values_is_finite = tl.abs(group_values) < float("inf")
+            group_values = tl.where(group_values_is_finite, group_values, 0.0)
             group_amax = tl.max(tl.abs(group_values), axis=1)
             sf_code, sf_value = _cast_ue4m3_nearest(tl.div_rn(group_amax / 6.0, gsf))
             packed_sf = packed_sf | (sf_code << (scale_group * 8))
@@ -129,6 +133,8 @@ if triton is not None:
                     mask=row_mask & (col1 < D),
                     other=0.0,
                 ).to(tl.float32)
+                value0 = tl.where(tl.abs(value0) < float("inf"), value0, 0.0)
+                value1 = tl.where(tl.abs(value1) < float("inf"), value1, 0.0)
                 code0 = _e2m1_code(
                     tl.maximum(tl.minimum(value0 * scale_inv, 6.0), -6.0)
                 )

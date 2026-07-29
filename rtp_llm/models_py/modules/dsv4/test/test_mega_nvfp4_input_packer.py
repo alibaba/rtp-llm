@@ -1,11 +1,17 @@
 """Correctness tests for the fused NVFP4 MegaMoE input packer."""
 
+import os
 import unittest
+from types import SimpleNamespace
+from unittest import mock
 
 import torch
 
 from rtp_llm.models_py.modules.dsv4.moe._mega_nvfp4_input_pack_triton import (
     fused_pack_mega_nvfp4_inputs,
+)
+from rtp_llm.models_py.modules.dsv4.moe.mega_nvfp4_input_packer import (
+    TorchMegaNVFP4InputPacker,
 )
 
 
@@ -52,3 +58,62 @@ class MegaNVFP4InputPackerTest(unittest.TestCase):
             self.assertTrue(torch.equal(out_gsf, ref_gsf))
             self.assertTrue(torch.equal(out_indices, indices))
             self.assertTrue(torch.equal(out_weights, weights))
+
+    def test_nonfinite_activations_are_zeroed(self):
+        from deep_gemm.utils import per_token_cast_to_nvfp4
+
+        tokens, hidden, topk = 3, 256, 6
+        x = torch.randn(tokens, hidden, device="cuda", dtype=torch.bfloat16)
+        x[0, 0] = float("nan")
+        x[1, 1] = float("inf")
+        x[2, 2] = -float("inf")
+        weights = torch.softmax(
+            torch.randn(tokens, topk, device="cuda", dtype=torch.float32), -1
+        ).contiguous()
+        indices = torch.randint(
+            0, 256, (tokens, topk), device="cuda", dtype=torch.int64
+        ).contiguous()
+
+        safe_x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0).contiguous()
+        ref_x, ref_sf, ref_gsf = per_token_cast_to_nvfp4(
+            safe_x,
+            gran_k=16,
+            use_packed_ue4m3=True,
+        )
+
+        fused_buf = SimpleNamespace(
+            x=torch.empty_like(ref_x),
+            x_sf=torch.empty_like(ref_sf),
+            x_gsf=torch.empty_like(ref_gsf),
+            topk_idx=torch.empty_like(indices),
+            topk_weights=torch.empty_like(weights),
+        )
+        fused_pack_mega_nvfp4_inputs(
+            x,
+            weights,
+            indices,
+            fused_buf.x,
+            fused_buf.x_sf,
+            fused_buf.x_gsf,
+            fused_buf.topk_idx,
+            fused_buf.topk_weights,
+        )
+
+        torch_buf = SimpleNamespace(
+            x=torch.empty_like(ref_x),
+            x_sf=torch.empty_like(ref_sf),
+            x_gsf=torch.empty_like(ref_gsf),
+            topk_idx=torch.empty_like(indices),
+            topk_weights=torch.empty_like(weights),
+        )
+        with mock.patch.dict(os.environ, {"DSV4_MOE_STRICT_FUSED": "0"}):
+            TorchMegaNVFP4InputPacker().pack(x, weights, indices, torch_buf, tokens)
+        torch.cuda.synchronize()
+
+        for buf in (fused_buf, torch_buf):
+            self.assertTrue(torch.equal(buf.x, ref_x))
+            self.assertTrue(torch.equal(buf.x_sf, ref_sf))
+            self.assertTrue(torch.equal(buf.x_gsf, ref_gsf))
+            self.assertTrue(torch.isfinite(buf.x_gsf).all().item())
+            self.assertTrue(torch.equal(buf.topk_idx, indices))
+            self.assertTrue(torch.equal(buf.topk_weights, weights))

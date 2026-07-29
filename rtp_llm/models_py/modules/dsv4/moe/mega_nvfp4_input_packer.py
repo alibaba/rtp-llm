@@ -42,8 +42,9 @@ class TorchMegaNVFP4InputPacker(MegaNVFP4InputPacker):
             )
         from deep_gemm.utils import per_token_cast_to_nvfp4
 
+        safe_x = torch.nan_to_num(x, nan=0.0, posinf=0.0, neginf=0.0).contiguous()
         x_fp4, x_sf, x_gsf = per_token_cast_to_nvfp4(
-            x.contiguous(),
+            safe_x,
             gran_k=16,
             use_packed_ue4m3=True,
         )
