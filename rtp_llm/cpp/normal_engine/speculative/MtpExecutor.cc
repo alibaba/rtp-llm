@@ -591,6 +591,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // release hold buffers before draft model forward
     draft_model_->releaseBuffers();
     model_->releaseBuffers();
+    if (sp_prefill_draft_model_) {
+        sp_prefill_draft_model_->releaseBuffers();
+    }
 
     if (propose_step_ > 1) {
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
@@ -693,6 +696,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         cudaSyncAndCheck();
         draft_model_->releaseBuffers();
         model_->releaseBuffers();
+        if (sp_prefill_draft_model_) {
+            sp_prefill_draft_model_->releaseBuffers();
+        }
         return absl::OkStatus();
     }
 
