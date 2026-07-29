@@ -430,6 +430,63 @@ class DefaultRouterTest {
     }
 
     @Test
+    void should_accept_batch_schedule_at_exactly_the_max_count() {
+        // Pins the open/closed edge of the bound: batchScheduleMaxCount itself must be accepted.
+        // The existing over-bound case uses 10_001, an order of magnitude away, so flipping the
+        // production check from `>` to `>=` would not fail it — this pair does.
+        org.flexlb.dao.master.WorkerStatus dummy = new org.flexlb.dao.master.WorkerStatus();
+        dummy.setIp("192.168.1.10");
+        dummy.setPort(8080);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.10:8080", dummy);
+
+        List<BatchScheduleTarget> scriptedTargets = new java.util.ArrayList<>(1000);
+        for (int i = 0; i < 1000; i++) {
+            scriptedTargets.add(target("192.168.1.10", 8080));
+        }
+        replaceBatchLoadBalancer(new ScriptedBatchLoadBalancer(scriptedTargets));
+
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(1000);
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(batchRequest);
+
+        assertTrue(response.isSuccess(), "batch_count == max must be accepted");
+        assertEquals(1000, response.getServerStatus().size());
+    }
+
+    @Test
+    void should_reject_batch_schedule_one_past_the_max_count() {
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(1001);
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(batchRequest);
+
+        assertFalse(response.isSuccess(), "batch_count == max + 1 must be rejected");
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getCode());
+    }
+
+    @Test
+    void should_reject_batch_schedule_when_strategy_returns_fewer_targets_than_requested() {
+        // BatchLoadBalancer is an extension point contracted to return exactly count targets, and
+        // the dispatcher consumes them positionally. A short list must fail loudly at the master
+        // rather than silently leaving the tail of the batch unassigned.
+        org.flexlb.dao.master.WorkerStatus dummy = new org.flexlb.dao.master.WorkerStatus();
+        dummy.setIp("192.168.1.10");
+        dummy.setPort(8080);
+        EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().put("192.168.1.10:8080", dummy);
+
+        replaceBatchLoadBalancer(new ScriptedBatchLoadBalancer(List.of(target("192.168.1.10", 8080))));
+
+        BatchScheduleRequest batchRequest = new BatchScheduleRequest();
+        batchRequest.setBatchCount(3);
+
+        BatchScheduleResponse response = defaultRouter.batchSchedule(batchRequest);
+
+        assertFalse(response.isSuccess());
+        assertEquals(StrategyErrorType.INVALID_REQUEST.getErrorCode(), response.getCode());
+    }
+
+    @Test
     void should_accept_batch_schedule_and_return_requested_targets() {
         org.flexlb.dao.master.WorkerStatus dummy = new org.flexlb.dao.master.WorkerStatus();
         dummy.setIp("192.168.1.10");

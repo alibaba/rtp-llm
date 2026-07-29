@@ -173,6 +173,15 @@ public class DefaultRouter implements Router {
         if (targets == null || targets.isEmpty()) {
             return BatchScheduleResponse.error(roleType.getErrorType());
         }
+        // BatchLoadBalancer is an extension point whose contract is "exactly count targets", and the
+        // dispatcher consumes them positionally 1:1 with the chunks. Enforce it at the single
+        // consumer instead of trusting the javadoc: an implementation returning a short list would
+        // otherwise silently under-assign chunks rather than fail here.
+        if (targets.size() != count) {
+            return BatchScheduleResponse.error(StrategyErrorType.INVALID_REQUEST,
+                    "batchStrategy for role " + roleType.getCode() + " returned " + targets.size()
+                    + " targets for batch_count " + count);
+        }
 
         return BatchScheduleResponse.success(targets);
     }
