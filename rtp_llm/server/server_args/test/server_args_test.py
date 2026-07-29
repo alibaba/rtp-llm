@@ -390,6 +390,24 @@ class ServerArgsSetTest(TestCase):
             any("KV_CACHE_EVENT_QUEUE_CAPACITY" in message for message in logs.output)
         )
 
+    def test_invalid_boolean_env_value_warns_and_uses_default_in_mixed_mode(self):
+        os.environ["ENABLE_REMOTE_CACHE"] = "ture"
+        sys.argv = ["prog", "--model_type", "qwen"]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        with self.assertLogs(level="WARNING") as logs:
+            py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        self.assertFalse(py_env_configs.kv_cache_config.enable_remote_cache)
+        self.assertTrue(
+            any(
+                "ENABLE_REMOTE_CACHE" in message and "default value False" in message
+                for message in logs.output
+            )
+        )
+
     def test_gpu_batch_vit_args_parse(self):
         from rtp_llm.config.py_config_modules import PyEnvConfigs
         from rtp_llm.server.server_args.server_args import (

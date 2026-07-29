@@ -365,16 +365,22 @@ class EnvArgumentParser(argparse.ArgumentParser):
                             if action.type is not None:
                                 try:
                                     converted_value = action.type(env_value)
-                                except (ValueError, TypeError):
+                                except (
+                                    ValueError,
+                                    TypeError,
+                                    argparse.ArgumentTypeError,
+                                ):
                                     # Preserve the legacy fallback-to-default behavior,
                                     # but make the ignored configuration discoverable.
                                     logging.warning(
                                         "Ignoring environment variable %s because it "
-                                        "cannot be converted for argument %s",
+                                        "cannot be converted for argument %s; using "
+                                        "the default value %r",
                                         env_name,
                                         action.option_strings[0]
                                         if action.option_strings
                                         else action.dest,
+                                        action.default,
                                     )
                                 else:
                                     self._validate_env_choice(

@@ -20,6 +20,23 @@ DISK_CACHE_FIELDS = (
     "load_cache_retry_times",
 )
 
+EVENT_PICKLE_FIELDS = (
+    "kv_cache_event_publisher_type",
+    "kv_cache_event_manager_endpoint",
+    "kv_cache_event_instance_group",
+    "kv_cache_event_instance_id",
+    "kv_cache_event_host_ip_port",
+    "kv_cache_event_queue_capacity",
+    "kv_cache_event_report_batch_size",
+    "kv_cache_event_flush_interval_ms",
+    "kv_cache_event_heartbeat_interval_ms",
+    "kv_cache_event_request_timeout_ms",
+    "kv_cache_event_snapshot_timeout_ms",
+    "kv_cache_event_retry_interval_ms",
+    "kv_cache_event_snapshot_interval_ms",
+    "kv_cache_event_log_max_keys",
+)
+
 
 class KVCacheConfigPickleTest(TestCase):
     def test_event_fields_round_trip_in_current_state(self):
@@ -32,6 +49,16 @@ class KVCacheConfigPickleTest(TestCase):
 
         for name, value in KV_CACHE_EVENT_FIELD_VALUES.items():
             self.assertEqual(value, getattr(restored, name), name)
+
+    def test_event_pickle_block_follows_declaration_order(self):
+        config = KVCacheConfig()
+        for name, value in KV_CACHE_EVENT_FIELD_VALUES.items():
+            setattr(config, name, value)
+
+        self.assertEqual(
+            tuple(KV_CACHE_EVENT_FIELD_VALUES[name] for name in EVENT_PICKLE_FIELDS),
+            config.__getstate__()[54:],
+        )
 
     def test_legacy_54_element_state_uses_event_defaults(self):
         source = KVCacheConfig()

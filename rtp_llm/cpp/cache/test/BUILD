@@ -172,7 +172,6 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
     env = {},
-    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(

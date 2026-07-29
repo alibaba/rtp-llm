@@ -9,7 +9,7 @@ supports three modes:
 
 ```mermaid
 flowchart LR
-    Cache["BlockCache put / remove / eviction"] -->|"after state commit"| Logical["logical key completeness"]
+    Cache["SharedBlockCache put / remove / eviction"] -->|"after state commit"| Logical["logical key completeness"]
     Logical -->|"non-blocking tryPublish"| Queue["bounded queue"]
     Queue --> Log["LogPublisher"]
     Queue --> KVCM["KVCMPublisher"]
@@ -22,7 +22,7 @@ The implementation is isolated from the cache core under `rtp_llm/cpp/cache/even
 ```text
 events/
   KVCacheEvent.h                       # transport-neutral event and snapshot model
-  KVCacheEventPublisher.h              # interface consumed by BlockCache
+  KVCacheEventPublisher.h              # interface consumed by SharedBlockCache
   KVCacheEventPublisherConfig.h        # construction-time configuration and identity
   KVCacheEventPublisherFactory.h/.cc   # the only concrete-publisher selection point
   KVCacheEventQueue.h/.cc              # bounded non-blocking ingress shared by async publishers
@@ -32,8 +32,8 @@ events/
   test/                                # Publisher factory, lifecycle, fault, and concurrency tests
 ```
 
-`BlockCache` depends only on `KVCacheEventPublisher`; it does not include a concrete publisher, queue, HTTP, or KVCM
-protocol type. `KVCacheManager` constructs the selected implementation through the factory.
+`SharedBlockCache` depends only on `KVCacheEventPublisher`; it does not include a concrete publisher, queue, HTTP, or
+KVCM protocol type. `KVCacheManager` constructs the selected implementation through the factory.
 
 ## Event semantics
 
@@ -43,8 +43,9 @@ Events describe reusable logical cache keys, not physical block indices.
 - A hybrid cache emits `BLOCK_ADD` only after all required groups for the key exist.
 - Removing or evicting one group from a complete hybrid key emits one `BLOCK_DELETE`.
 - Duplicate inserts and LRU touches do not emit events.
-- `put`, `pop`, `remove`, and `selectAndEvict` call the non-blocking publisher while holding the `BlockCache` mutex so
-  event order matches cache state transitions. Network I/O remains exclusively on the publisher worker thread.
+- `put`, `remove`, `selectAndEvict`, and `selectAndEvictForGroup` call the non-blocking publisher while holding the
+  `SharedBlockCache` mutex so event order matches cache state transitions. Network I/O remains exclusively on the
+  publisher worker thread.
 
 Only `tp_rank=0` is an event owner when `pp_size=1`. Each DP replica has an independent owner and must use a distinct
 `KV_CACHE_EVENT_HOST_IP_PORT`; the same identity must not be concurrently owned by two live replicas. Other TP ranks
@@ -61,7 +62,7 @@ all cache groups across all TP shards, while only the owner rank emits state tra
 
 1. `POST /api/registerInstance`
 2. `EVENT_NODE_REGISTER` for the `hbm` medium
-3. `EVENT_BLOCK_SNAPSHOT` from the current `BlockCache`
+3. `EVENT_BLOCK_SNAPSHOT` from the current `SharedBlockCache`
 4. batched `EVENT_BLOCK_ADD` and `EVENT_BLOCK_DELETE`
 5. periodic `EVENT_HEARTBEAT`
 6. `EVENT_HOST_DOWN` only when the engine actually shuts down
@@ -84,11 +85,16 @@ pages. It uses a separate, longer request timeout from control and incremental t
 and timeout from the deployment's maximum logical-key count and KVCM capacity; keep the KVCM heartbeat expiry longer
 than the maximum accepted snapshot processing time. The KVCM endpoint must support `EVENT_BLOCK_SNAPSHOT` with
 per-scope in-flight fencing and crash-safe commit semantics.
+If a snapshot upload fails, the worker retries the same captured and serialized payload with exponential backoff
+(starting at `kv_cache_event_retry_interval_ms` and growing up to 30 seconds, or retaining a larger configured base)
+instead of copying the cache again. If new dirty generations keep arriving while snapshots succeed, reconciliations
+are separated by at least the base retry interval; due heartbeats are sent before the next reconciliation.
 During shutdown, the built-in HTTP reporter cancels an in-flight snapshot transfer before joining the worker. A
 control or incremental request already in flight remains bounded by `kv_cache_event_request_timeout_ms`; a best-effort
 `EVENT_HOST_DOWN` is sent only when the worker still has a registered session.
 
-The first implementation publishes the device `BlockCache` as the `hbm` medium. DRAM cache events are not included.
+The first implementation publishes the device `SharedBlockCache` as the `hbm` medium. DRAM cache events are not
+included.
 
 ## Configuration
 
@@ -107,7 +113,7 @@ The following server arguments also have equivalent upper-case environment varia
 | `--kv_cache_event_heartbeat_interval_ms` | `1000` | Node heartbeat period |
 | `--kv_cache_event_request_timeout_ms` | `1500` | Registration, heartbeat, and incremental request timeout |
 | `--kv_cache_event_snapshot_timeout_ms` | `30000` | Full snapshot request timeout |
-| `--kv_cache_event_retry_interval_ms` | `500` | Retry interval after registration or report failure |
+| `--kv_cache_event_retry_interval_ms` | `500` | Base failure-backoff and continuous-resync throttle interval |
 | `--kv_cache_event_snapshot_interval_ms` | `300000` | Periodic authoritative reconciliation interval |
 | `--kv_cache_event_log_max_keys` | `8` | Maximum key samples in each log batch |
 
@@ -124,7 +130,8 @@ the ignored variable.
 
 `KVCacheConfig` pickle state supports the legacy 43- and 54-element layouts plus the current 68-element layout. The
 current layout cannot be deserialized by an older binary, so processes that exchange pickled configuration during
-spawn or restart must be upgraded together.
+spawn or restart must be upgraded together. Roll back those components as one version as well; do not run an older
+consumer while a newer process can emit the 68-element state.
 
 Publisher state, queue depth, accepted events, and dropped events are exported as
 `rtp_llm_kv_cache_event_publisher_state`, `rtp_llm_kv_cache_event_queue_size`,
@@ -132,6 +139,10 @@ Publisher state, queue depth, accepted events, and dropped events are exported a
 publisher-instance cumulative gauges and reset when the publisher or process is recreated. Dashboards and alerts
 should use reset-aware deltas or rates rather than their absolute values. An increase in dropped count means an
 authoritative resync is required; alert on sustained non-`READY` state in `kvcm` mode and on queue growth or new drops.
+Only the `tp_rank=0`, `pp_size=1` owner can become `READY`; non-owner TP ranks intentionally export `DISABLED`. Scope
+alerts to the owner rank. If a dashboard cannot filter by rank before aggregating a running DP replica, use the maximum
+publisher state rather than a minimum or average so the expected non-owner `DISABLED=0` series does not trigger a
+false failure.
 State values are `DISABLED=0`, `STARTING=1`, `LOGGING=2`, `REGISTERING=3`, `RESYNCING=4`, `READY=5`, `DEGRADED=6`, and
 `STOPPED=7`.
 

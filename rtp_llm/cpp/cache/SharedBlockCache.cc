@@ -106,7 +106,15 @@ void SharedBlockCache::put(CacheKeyType                     cache_key,
     // that transition explicitly so tree aliases and cache-event state are
     // updated before the replacement key is published.
     if (lru_cache_.full() && !lru_cache_.empty()) {
-        const auto       evicted_key = lru_cache_.items().back().first;
+        const auto evicted = std::find_if(lru_cache_.items().rbegin(),
+                                          lru_cache_.items().rend(),
+                                          [](const auto& entry) { return !entry.second.is_resident; });
+        if (evicted == lru_cache_.items().rend()) {
+            RTP_LLM_LOG_WARNING("SharedBlockCache capacity is exhausted by resident entries; skipping cache key %lld",
+                                static_cast<long long>(cache_key));
+            return;
+        }
+        const auto       evicted_key = evicted->first;
         UnifiedCacheItem evicted_item;
         if (removeItemLocked(evicted_key, &evicted_item)) {
             removeAllTreeAliasesForCacheKeyLocked(evicted_key);

@@ -6,6 +6,7 @@
 #include <curl/curl.h>
 #include <exception>
 #include <mutex>
+#include <optional>
 #include <rapidjson/document.h>
 #include <rapidjson/stringbuffer.h>
 #include <rapidjson/writer.h>
@@ -387,6 +388,13 @@ std::string buildSnapshotReport(const KVCacheEventPublisherContext& context,
 }  // namespace
 
 class KVCMPublisher::Impl {
+    struct PendingSnapshotReport {
+        uint64_t    generation = 0;
+        int64_t     version    = -1;
+        size_t      key_count  = 0;
+        std::string request;
+    };
+
 public:
     Impl(KVCacheEventPublisherConfig           config,
          KVCacheEventPublisherContext          context,
@@ -517,35 +525,43 @@ private:
 
     bool reconcile(uint64_t generation) {
         state_.store(PublisherState::RESYNCING, std::memory_order_relaxed);
-        queue_.discardPending();
+        if (!pending_snapshot_report_) {
+            queue_.discardPending();
 
-        KVCacheSnapshot snapshot;
-        try {
-            snapshot = snapshot_provider_();
-        } catch (const std::exception& e) {
-            RTP_LLM_LOG_WARNING("KVCMPublisher snapshot failed: %s", e.what());
-            return false;
-        } catch (...) {
-            RTP_LLM_LOG_WARNING("KVCMPublisher snapshot failed with unknown exception");
-            return false;
+            KVCacheSnapshot snapshot;
+            try {
+                snapshot = snapshot_provider_();
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_WARNING("KVCMPublisher snapshot failed: %s", e.what());
+                return false;
+            } catch (...) {
+                RTP_LLM_LOG_WARNING("KVCMPublisher snapshot failed with unknown exception");
+                return false;
+            }
+
+            const auto trace_id      = nextTraceId("snapshot");
+            pending_snapshot_report_ = PendingSnapshotReport{generation,
+                                                             snapshot.version,
+                                                             snapshot.block_keys.size(),
+                                                             buildSnapshotReport(context_, trace_id, snapshot)};
         }
 
-        const auto  trace_id = nextTraceId("snapshot");
         std::string response;
-        if (!snapshot_reporter_->post(
-                "/api/reportEvent", buildSnapshotReport(context_, trace_id, snapshot), response)) {
+        if (!snapshot_reporter_->post("/api/reportEvent", pending_snapshot_report_->request, response)) {
             return false;
         }
 
-        reconciled_generation_ = generation;
+        const auto committed_snapshot = std::move(*pending_snapshot_report_);
+        pending_snapshot_report_.reset();
+        reconciled_generation_ = committed_snapshot.generation;
         RTP_LLM_LOG_INFO("KVCMPublisher snapshot committed, instance_id=%s host=%s dp_rank=%d version=%lld keys=%zu "
                          "generation=%llu",
                          context_.instance_id.c_str(),
                          context_.host_ip_port.c_str(),
                          context_.dp_rank,
-                         static_cast<long long>(snapshot.version),
-                         snapshot.block_keys.size(),
-                         static_cast<unsigned long long>(generation));
+                         static_cast<long long>(committed_snapshot.version),
+                         committed_snapshot.key_count,
+                         static_cast<unsigned long long>(committed_snapshot.generation));
         return true;
     }
 
@@ -563,21 +579,45 @@ private:
         return post("/api/reportEvent", buildControlReport(context_, trace_id, ControlEventType::HEARTBEAT));
     }
 
-    void waitBeforeRetry() {
-        queue_.waitForStop(std::chrono::milliseconds(std::max(config_.retry_interval_ms, 1)));
+    void waitBeforeRetry(std::chrono::milliseconds delay) {
+        queue_.waitForStop(delay);
+    }
+
+    void waitUntil(std::chrono::steady_clock::time_point deadline) {
+        const auto now = std::chrono::steady_clock::now();
+        if (deadline <= now) {
+            return;
+        }
+        queue_.waitForStop(std::chrono::duration_cast<std::chrono::milliseconds>(deadline - now)
+                           + std::chrono::milliseconds(1));
     }
 
     void workerLoop() noexcept {
-        bool registered     = false;
-        auto next_heartbeat = std::chrono::steady_clock::now();
-        auto next_snapshot =
+        const auto    base_retry_interval   = std::chrono::milliseconds(std::max(config_.retry_interval_ms, 1));
+        const int64_t max_retry_interval_ms = base_retry_interval.count() >= 30000 ?
+                                                  base_retry_interval.count() :
+                                                  std::min<int64_t>(base_retry_interval.count() * 32, 30000);
+        const auto    max_retry_interval    = std::chrono::milliseconds(max_retry_interval_ms);
+        auto          retry_interval        = base_retry_interval;
+        auto          waitWithBackoff       = [&] {
+            waitBeforeRetry(retry_interval);
+            retry_interval = std::min(retry_interval * 2, max_retry_interval);
+        };
+
+        bool   registered                  = false;
+        size_t consecutive_dirty_snapshots = 0;
+        auto   next_heartbeat              = std::chrono::steady_clock::now();
+        auto   next_reconcile              = std::chrono::steady_clock::now();
+        auto   next_snapshot =
             std::chrono::steady_clock::now() + std::chrono::milliseconds(std::max(config_.snapshot_interval_ms, 1));
         try {
             while (!stopping_.load(std::memory_order_relaxed)) {
                 if (!registered) {
                     if (!registerNode()) {
                         state_.store(PublisherState::DEGRADED, std::memory_order_relaxed);
-                        waitBeforeRetry();
+                        RTP_LLM_LOG_WARNING("KVCMPublisher registration failed; retrying in %lld ms",
+                                            static_cast<long long>(retry_interval.count()));
+                        waitWithBackoff();
                         continue;
                     }
                     registered = true;
@@ -592,15 +632,59 @@ private:
                     next_snapshot = now + std::chrono::milliseconds(std::max(config_.snapshot_interval_ms, 1));
                 }
 
+                // Heartbeats take precedence over a due reconciliation. This
+                // prevents a continuously dirty publisher from starving the
+                // KVCM node lease with back-to-back successful snapshots.
+                if (now >= next_heartbeat) {
+                    if (!heartbeat()) {
+                        dirty_generation_.fetch_add(1, std::memory_order_relaxed);
+                        registered = false;
+                        state_.store(PublisherState::DEGRADED, std::memory_order_relaxed);
+                        RTP_LLM_LOG_WARNING("KVCMPublisher heartbeat failed; retrying in %lld ms",
+                                            static_cast<long long>(retry_interval.count()));
+                        waitWithBackoff();
+                        continue;
+                    }
+                    next_heartbeat = std::chrono::steady_clock::now()
+                                     + std::chrono::milliseconds(std::max(config_.heartbeat_interval_ms, 1));
+                }
+
                 const uint64_t dirty_generation = dirty_generation_.load(std::memory_order_relaxed);
                 if (reconciled_generation_ != dirty_generation) {
+                    const auto reconcile_now = std::chrono::steady_clock::now();
+                    if (reconcile_now < next_reconcile) {
+                        waitUntil(std::min(next_reconcile, next_heartbeat));
+                        continue;
+                    }
                     if (!reconcile(dirty_generation)) {
                         registered = false;
                         state_.store(PublisherState::DEGRADED, std::memory_order_relaxed);
-                        waitBeforeRetry();
+                        RTP_LLM_LOG_WARNING("KVCMPublisher reconciliation failed; retrying in %lld ms",
+                                            static_cast<long long>(retry_interval.count()));
+                        waitWithBackoff();
                         continue;
                     }
-                    state_.store(PublisherState::READY, std::memory_order_relaxed);
+                    retry_interval = base_retry_interval;
+
+                    const uint64_t current_generation = dirty_generation_.load(std::memory_order_relaxed);
+                    if (reconciled_generation_ != current_generation) {
+                        ++consecutive_dirty_snapshots;
+                        state_.store(PublisherState::RESYNCING, std::memory_order_relaxed);
+                        next_reconcile = std::chrono::steady_clock::now() + base_retry_interval;
+                        if ((consecutive_dirty_snapshots & (consecutive_dirty_snapshots - 1)) == 0) {
+                            RTP_LLM_LOG_WARNING(
+                                "KVCMPublisher remained dirty after %zu committed snapshot(s); throttling the next "
+                                "reconciliation for %lld ms, committed_generation=%llu current_generation=%llu",
+                                consecutive_dirty_snapshots,
+                                static_cast<long long>(base_retry_interval.count()),
+                                static_cast<unsigned long long>(reconciled_generation_),
+                                static_cast<unsigned long long>(current_generation));
+                        }
+                    } else {
+                        consecutive_dirty_snapshots = 0;
+                        next_reconcile              = std::chrono::steady_clock::now();
+                        state_.store(PublisherState::READY, std::memory_order_relaxed);
+                    }
                     continue;
                 }
 
@@ -610,20 +694,10 @@ private:
                     dirty_generation_.fetch_add(1, std::memory_order_relaxed);
                     registered = false;
                     state_.store(PublisherState::DEGRADED, std::memory_order_relaxed);
-                    waitBeforeRetry();
+                    RTP_LLM_LOG_WARNING("KVCMPublisher mutation report failed; retrying in %lld ms",
+                                        static_cast<long long>(retry_interval.count()));
+                    waitWithBackoff();
                     continue;
-                }
-
-                if (std::chrono::steady_clock::now() >= next_heartbeat) {
-                    if (!heartbeat()) {
-                        dirty_generation_.fetch_add(1, std::memory_order_relaxed);
-                        registered = false;
-                        state_.store(PublisherState::DEGRADED, std::memory_order_relaxed);
-                        waitBeforeRetry();
-                        continue;
-                    }
-                    next_heartbeat = std::chrono::steady_clock::now()
-                                     + std::chrono::milliseconds(std::max(config_.heartbeat_interval_ms, 1));
                 }
             }
 
@@ -658,6 +732,7 @@ private:
     std::atomic<uint64_t>                 dirty_generation_{1};
     uint64_t                              reconciled_generation_ = 0;
     uint64_t                              next_request_id_       = 1;
+    std::optional<PendingSnapshotReport>  pending_snapshot_report_;
 };
 
 KVCMPublisher::KVCMPublisher(KVCacheEventPublisherConfig           config,

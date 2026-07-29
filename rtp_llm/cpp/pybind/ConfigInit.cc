@@ -527,9 +527,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.prefix_tree_memory_state_swa_pool_ratio,
                                       self.enable_independent_group_eviction,
                                       self.load_cache_retry_times,
-                                      // Pickle field positions are append-only. snapshot_timeout_ms was added
-                                      // after the other event fields and therefore intentionally remains at
-                                      // index 67 even though its declaration appears earlier.
+                                      // This unreleased event-field block follows declaration order.
+                                      // Future fields must be appended after the block.
                                       self.kv_cache_event_publisher_type,
                                       self.kv_cache_event_manager_endpoint,
                                       self.kv_cache_event_instance_group,
@@ -540,10 +539,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.kv_cache_event_flush_interval_ms,
                                       self.kv_cache_event_heartbeat_interval_ms,
                                       self.kv_cache_event_request_timeout_ms,
+                                      self.kv_cache_event_snapshot_timeout_ms,
                                       self.kv_cache_event_retry_interval_ms,
                                       self.kv_cache_event_snapshot_interval_ms,
-                                      self.kv_cache_event_log_max_keys,
-                                      self.kv_cache_event_snapshot_timeout_ms);
+                                      self.kv_cache_event_log_max_keys);
             },
             [](py::tuple t) {
                 if (t.size() != 43 && t.size() != 54 && t.size() != 68)
@@ -607,8 +606,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.load_cache_retry_times                  = t[53].cast<int>();
                     }
                     if (t.size() == 68) {
-                        // Keep these indices aligned with the append-only order in __getstate__;
-                        // snapshot_timeout_ms intentionally occupies the final slot.
+                        // Keep these indices aligned with the event-field declaration order
+                        // in __getstate__; append future fields after this block.
                         c.kv_cache_event_publisher_type        = t[54].cast<std::string>();
                         c.kv_cache_event_manager_endpoint      = t[55].cast<std::string>();
                         c.kv_cache_event_instance_group        = t[56].cast<std::string>();
@@ -619,10 +618,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.kv_cache_event_flush_interval_ms     = t[61].cast<int>();
                         c.kv_cache_event_heartbeat_interval_ms = t[62].cast<int>();
                         c.kv_cache_event_request_timeout_ms    = t[63].cast<int>();
-                        c.kv_cache_event_retry_interval_ms     = t[64].cast<int>();
-                        c.kv_cache_event_snapshot_interval_ms  = t[65].cast<int>();
-                        c.kv_cache_event_log_max_keys          = t[66].cast<int64_t>();
-                        c.kv_cache_event_snapshot_timeout_ms   = t[67].cast<int>();
+                        c.kv_cache_event_snapshot_timeout_ms   = t[64].cast<int>();
+                        c.kv_cache_event_retry_interval_ms     = t[65].cast<int>();
+                        c.kv_cache_event_snapshot_interval_ms  = t[66].cast<int>();
+                        c.kv_cache_event_log_max_keys          = t[67].cast<int64_t>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());

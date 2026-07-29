@@ -217,6 +217,42 @@ TEST(SharedBlockCacheTest, CapacityReplacementPublishesDeleteBeforeReplacementAd
                                          publisher->events[4].block_key}));
 }
 
+TEST(SharedBlockCacheTest, CapacityReplacementSkipsResidentTailForNonResidentEntry) {
+    SharedBlockCache cache(/*max_capacity=*/2);
+    auto             publisher = std::make_shared<RecordingPublisher>();
+    ASSERT_TRUE(publisher->start());
+    cache.setEventPublisher(publisher, /*required_group_count=*/1);
+
+    putOne(cache, 1, 101, rootDep(), SharedBlockCache::kGpuLogicalNamespace, /*resident=*/true);
+    putOne(cache, 2, 102, rootDep());
+    putOne(cache, 3, 103, rootDep());
+
+    EXPECT_TRUE(cache.contains(1));
+    EXPECT_FALSE(cache.contains(2));
+    EXPECT_TRUE(cache.contains(3));
+    ASSERT_EQ(4u, publisher->events.size());
+    EXPECT_EQ(KVCacheEventType::BLOCK_DELETE, publisher->events[2].type);
+    EXPECT_EQ(2, publisher->events[2].block_key);
+    EXPECT_EQ(KVCacheEventType::BLOCK_ADD, publisher->events[3].type);
+    EXPECT_EQ(3, publisher->events[3].block_key);
+}
+
+TEST(SharedBlockCacheTest, CapacityReplacementRejectsInsertWhenAllEntriesAreResident) {
+    SharedBlockCache cache(/*max_capacity=*/1);
+    auto             publisher = std::make_shared<RecordingPublisher>();
+    ASSERT_TRUE(publisher->start());
+    cache.setEventPublisher(publisher, /*required_group_count=*/1);
+
+    putOne(cache, 1, 101, rootDep(), SharedBlockCache::kGpuLogicalNamespace, /*resident=*/true);
+    putOne(cache, 2, 102, rootDep());
+
+    EXPECT_TRUE(cache.contains(1));
+    EXPECT_FALSE(cache.contains(2));
+    ASSERT_EQ(1u, publisher->events.size());
+    EXPECT_EQ(KVCacheEventType::BLOCK_ADD, publisher->events[0].type);
+    EXPECT_EQ(1, publisher->events[0].block_key);
+}
+
 TEST(SharedBlockCacheTest, PrefixTreeEvictsCollectedChainInParentFirstOrderWithDependencies) {
     SharedBlockCache cache;
     putOne(cache, 1, 101, rootDep(0));
