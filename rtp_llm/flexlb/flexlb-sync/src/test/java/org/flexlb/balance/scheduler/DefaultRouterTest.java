@@ -140,7 +140,11 @@ class DefaultRouterTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
     }
 
-    // Helper method to mock the static LoadBalanceStrategyFactory
+    /**
+     * Points the router's per-role map at the mocks. The batch balancer needs no equivalent step:
+     * setUp registers the ROUND_ROBIN default on the factory before constructing the router, so
+     * the constructor already resolved it.
+     */
     private void mockStaticLoadBalanceStrategyFactory() {
         try {
             // Use reflection to set the loadBalancerMap in DefaultRouter
@@ -155,11 +159,6 @@ class DefaultRouterTest {
             loadBalancerMap.put(RoleType.DECODE, decodeLoadBalancer);
             loadBalancerMap.put(RoleType.VIT, vitLoadBalancer);
             loadBalancerMap.put(RoleType.PDFUSION, fusionLoadBalancer);
-
-            // Reset the batch balancer to a plain mock so tests start from a known state.
-            // Tests that exercise the batch path with a scripted batch-capable LB call
-            // replaceBatchLoadBalancer.
-            replaceBatchLoadBalancer(fusionLoadBalancer);
         } catch (Exception e) {
             fail("Failed to mock LoadBalanceStrategyFactory: " + e.getMessage());
         }
@@ -926,14 +925,17 @@ class DefaultRouterTest {
      * {@code /batch_schedule} consults, independent of the regular {@code loadBalancerMap}
      * that {@code /schedule} uses.
      */
+    /**
+     * Swaps the batch balancer through the factory the constructor actually reads, then rebuilds
+     * the router. Writing {@code DefaultRouter.batchLoadBalancer} by reflection would reach past
+     * the supported extension point into a private final field — it breaks silently on a rename
+     * and depends on the JDK continuing to permit final-field writes.
+     */
     private void replaceBatchLoadBalancer(LoadBalancer loadBalancer) {
-        try {
-            Field batchField = DefaultRouter.class.getDeclaredField("batchLoadBalancer");
-            batchField.setAccessible(true);
-            batchField.set(defaultRouter, loadBalancer);
-        } catch (Exception e) {
-            fail("Failed to replace batch load balancer: " + e.getMessage());
-        }
+        LoadBalanceStrategyFactory.register(LoadBalanceStrategyEnum.ROUND_ROBIN, loadBalancer);
+        defaultRouter = new DefaultRouter(configService, modelMetaConfig);
+        // The rebuild starts from a fresh per-role map, so re-apply the role mocks setUp installed.
+        mockStaticLoadBalanceStrategyFactory();
     }
 
     private static class ScriptedBatchLoadBalancer implements org.flexlb.balance.strategy.BatchLoadBalancer {
