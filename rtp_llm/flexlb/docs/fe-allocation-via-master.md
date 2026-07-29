@@ -157,6 +157,24 @@ fleet.
   local `FePool`, so FE selection cannot be toggled back to per-instance at runtime. Rolling back the
   "FE-from-master, no-fallback" behavior means deploying a build from before this change; treat it as a
   code-level, not config-level, rollback when planning a release.
+- **Blast radius when the master is unavailable — state it plainly.** FE selection has a single
+  source and no local fallback, so while the elected master cannot serve `/rtp_llm/batch_schedule`
+  (down, mid-re-election, or unreachable from this node) **every splittable batch on `/dispatcher/*`
+  fails** — each chunk with `CHUNK_NO_FE`, the batch with `all_sub_batches_failed`. This is by
+  design (see Decisions), not a regression, and `DISPATCH_PRE_ASSIGN_BE=false` does **not** mitigate
+  it: that switch only governs BE stamping.
+- **Outage handling (no runtime switch — these are the only levers).** In order of preference:
+  (1) restore/await the master — a re-election in flight self-heals on retry, so brief blips need no
+  action; (2) point batch clients at FE directly (`/batch_infer` on an FE host) — the dispatcher is
+  an optional front layer and direct-to-FE remains the standing bypass for any client that can
+  change its URL; (3) take the dispatcher out of the path entirely by unsetting
+  `dispatch.fe-pool-service-id` (`DISPATCH_FE_POOL_SERVICE_ID`) and restarting — the batch routes
+  stop being registered and traffic falls through to passthrough; (4) if the behavior itself must
+  go, redeploy a pre-change build (code-level rollback, above). Rehearse (2) before enabling the
+  dispatcher for a tenant that has no direct-to-FE path.
+- **Alert on `preassign.rt` `RESULT_EMPTY` too, not only on `CHUNK_NO_FE`.** `RESULT_EMPTY` fires at
+  the moment the master returns no targets, one step before the chunks fail, so it is the earlier
+  signal of exactly this outage; page on a sustained non-zero rate.
 - **Primary alert = `CHUNK_NO_FE`.** Alert on the `no_fe_assignment` chunk-failure rate/ratio, not on
   the log. It is the single authoritative signal that "the master is not assigning FEs". The empty-pool
   WARN is rate-limited (`suppressed=N` carries magnitude); the unexpected-exception ERROR is
