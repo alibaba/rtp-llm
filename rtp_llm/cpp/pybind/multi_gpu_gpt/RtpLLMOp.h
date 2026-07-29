@@ -42,7 +42,8 @@ private:
     void                                          initRPCServer(const EngineInitParams                        maga_init_params,
                                                                 std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                                                                 py::object                                    token_processor,
-                                                                py::object                                    mm_process_engine);
+                                                                py::object                                    mm_process_engine,
+                                                                py::object                                    post_layers_handler);
 
 private:
     std::unique_ptr<RpcServiceImpl> model_rpc_service_;
