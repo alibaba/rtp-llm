@@ -92,7 +92,7 @@ public class QueueStressTest {
 
         try {
             // 1. Configuration
-            configService.loadBalanceConfig().setEnableQueueing(true);
+            configService.loadBalanceConfig().setDefaultScheduleMode("QUEUE");
 
             // 2. Set Worker status (insufficient resources, force queuing)
             setupLimitedWorkerResources();
@@ -188,7 +188,7 @@ public class QueueStressTest {
 
         try {
             // 1. Configuration adjustment
-            configService.loadBalanceConfig().setEnableQueueing(true);
+            configService.loadBalanceConfig().setDefaultScheduleMode("QUEUE");
 
             // 2. Set Worker status
             setupLimitedWorkerResources();
@@ -304,7 +304,7 @@ public class QueueStressTest {
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getDecodeStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getPdFusionStatusMap().clear();
         EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS.getVitStatusMap().clear();
-        configService.loadBalanceConfig().setEnableQueueing(false);
+        configService.loadBalanceConfig().setDefaultScheduleMode("BATCH");
         configService.loadBalanceConfig().setMaxQueueSize(100000);
         log.info("Test environment cleaned up");
     }

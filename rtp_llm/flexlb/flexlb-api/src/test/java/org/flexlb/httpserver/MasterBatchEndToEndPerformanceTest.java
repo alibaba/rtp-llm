@@ -565,7 +565,6 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 .setNumBeams(1)
                 .setModel(template.model())
                 .setCacheKeyBlockSize(1_024L)
-                .setScheduleMode(FlexlbScheduleProtocol.FlexlbScheduleModePB.FLEXLB_SCHEDULE_BATCH)
                 .build();
     }
 

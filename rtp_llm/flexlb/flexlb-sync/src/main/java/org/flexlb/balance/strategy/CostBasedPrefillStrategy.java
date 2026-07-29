@@ -411,10 +411,10 @@ public class CostBasedPrefillStrategy implements LoadBalanceStrategy {
 
     /**
      * Whether batch dispatching is globally disabled.
-     * <p>When batch is enabled, FlexlbBatchScheduler handles all inflight tracking;
-     * placeholders are only needed when batch is fully off ({@code flexlbBatchEnabled=false}).
+     * <p>When batch mode is active, FlexlbBatchScheduler handles all inflight tracking;
+     * placeholders are only needed when the schedule mode is not BATCH.
      */
     private static boolean isNonBatchPath(FlexlbConfig config) {
-        return !config.isFlexlbBatchEnabled();
+        return !config.isBatchPath();
     }
 }

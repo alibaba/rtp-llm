@@ -28,15 +28,15 @@ class DecodeEndpointTest {
     @Test
     void reserve_updatesSnapshotAndInflight() {
         updateStatus(null, null, 10000);
-        endpoint.reserve(100L, 500);
+        endpoint.reserve(100L, 500, 500);
         assertEquals(1, endpoint.getInflightCount());
         assertEquals(9500, endpoint.realKvAvailable());
     }
 
     @Test
     void release_decrementsInflight() {
-        endpoint.reserve(100L, 500);
-        endpoint.reserve(101L, 300);
+        endpoint.reserve(100L, 500, 500);
+        endpoint.reserve(101L, 300, 300);
         endpoint.release(100L);
 
         assertEquals(1, endpoint.getInflightCount());
@@ -44,14 +44,14 @@ class DecodeEndpointTest {
 
     @Test
     void release_unknownRequestId_noEffect() {
-        endpoint.reserve(100L, 500);
+        endpoint.reserve(100L, 500, 500);
         endpoint.release(999L);
         assertEquals(1, endpoint.getInflightCount());
     }
 
     @Test
     void release_neverGoesNegative() {
-        endpoint.reserve(100L, 100);
+        endpoint.reserve(100L, 100, 100);
         endpoint.release(100L);
         endpoint.release(100L);
         assertEquals(0, endpoint.getInflightCount());
@@ -60,7 +60,7 @@ class DecodeEndpointTest {
 
     @Test
     void calibrate_kvAllocatedReleasesFromInflight() {
-        endpoint.reserve(100L, 500);
+        endpoint.reserve(100L, 500, 500);
 
         TaskInfo running = task(100L);
         running.setPhase(TaskPhase.KV_ALLOCATED);
@@ -72,7 +72,7 @@ class DecodeEndpointTest {
 
     @Test
     void calibrate_finishedFailureReleasesFromInflight() {
-        endpoint.reserve(100L, 500);
+        endpoint.reserve(100L, 500, 500);
 
         TaskInfo failed = task(100L);
         failed.setErrorCode(1);
@@ -84,7 +84,7 @@ class DecodeEndpointTest {
 
     @Test
     void calibrate_finishedSuccessReleasesIfStillPresent() {
-        endpoint.reserve(100L, 500);
+        endpoint.reserve(100L, 500, 500);
 
         TaskInfo success = task(100L);
         success.setErrorCode(0);
@@ -95,7 +95,7 @@ class DecodeEndpointTest {
 
     @Test
     void calibrate_updatesReportedKvAvailable() {
-        endpoint.reserve(100L, 500);
+        endpoint.reserve(100L, 500, 500);
         updateStatus(null, null, 10000);
 
         assertEquals(9500, endpoint.realKvAvailable());
@@ -105,8 +105,8 @@ class DecodeEndpointTest {
     void availableKvTokens_accountsForReservations() {
         updateStatus(null, null, 10000);
 
-        endpoint.reserve(100L, 3000);
-        endpoint.reserve(101L, 2000);
+        endpoint.reserve(100L, 3000, 3000);
+        endpoint.reserve(101L, 2000, 2000);
 
         assertEquals(5000, endpoint.realKvAvailable());
     }

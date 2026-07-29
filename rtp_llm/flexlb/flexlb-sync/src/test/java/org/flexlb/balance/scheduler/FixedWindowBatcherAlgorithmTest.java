@@ -15,7 +15,6 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertTrue;
@@ -296,9 +295,7 @@ class FixedWindowBatcherAlgorithmTest {
                                           FlexlbConfig config, BatchDecisionHandler handler,
                                           PriorityBlockingQueue<BatchItem> queue,
                                           BatchSchedulerReporter reporter) {
-        BatchItem head = queue.peek();
         return new BatcherContext(key, endpoint, config, handler, queue,
-                new AtomicInteger(queue.size()),
-                new AtomicLong(head == null ? 0 : head.sortKey()), reporter);
+                new AtomicInteger(queue.size()), reporter);
     }
 }

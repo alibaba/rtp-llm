@@ -10,14 +10,12 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.schedule.grpc.FlexlbServiceGrpc;
 import org.flexlb.schedule.grpc.FlexlbScheduleProtocol;
-import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.interceptor.GrpcServerTimingInterceptor;
 import org.flexlb.service.RouteService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.config.ConfigService;
-import org.flexlb.config.FlexlbConfig;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
 
@@ -217,7 +215,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             ctx.setGenerateInputPbBytes(pb.getGenerateInput().toByteArray());
         }
 
-        ctx.setScheduleMode(resolveScheduleMode(pb.getScheduleMode(), configService.loadBalanceConfig()));
+        ctx.setScheduleMode(configService.loadBalanceConfig().getDefaultScheduleModeEnum());
 
         // Capture gRPC server entry time from interceptor context for delay metric splitting
         Long grpcEntryTime = GrpcServerTimingInterceptor.get();
@@ -230,16 +228,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         }
 
         return ctx;
-    }
-
-    private static ScheduleModeEnum resolveScheduleMode(FlexlbScheduleProtocol.FlexlbScheduleModePB mode,
-                                                        FlexlbConfig config) {
-        return switch (mode) {
-            case FLEXLB_SCHEDULE_BATCH -> ScheduleModeEnum.BATCH;
-            case FLEXLB_SCHEDULE_DIRECT -> ScheduleModeEnum.DIRECT;
-            case FLEXLB_SCHEDULE_QUEUE -> ScheduleModeEnum.QUEUE;
-            default -> config.getDefaultScheduleModeEnum();
-        };
     }
 
     private FlexlbScheduleProtocol.FlexlbScheduleResponsePB toProtoResponse(Response response) {

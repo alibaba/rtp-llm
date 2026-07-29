@@ -30,7 +30,7 @@ public class BalanceContext {
     @ToString.Exclude
     private byte[] generateInputPbBytes;
 
-    private volatile ScheduleModeEnum scheduleMode = ScheduleModeEnum.AUTO;
+    private volatile ScheduleModeEnum scheduleMode = ScheduleModeEnum.BATCH;
 
     //======================== Queue ========================//
 

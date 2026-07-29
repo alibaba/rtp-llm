@@ -233,7 +233,6 @@ PY
     "${env_args[@]+"${env_args[@]}"}" \
     "LOAD_BALANCE_STRATEGY=COST_BASED_PREFILL" \
     "DECODE_LOAD_BALANCE_STRATEGY=COST_BASED_DECODE" \
-    "FLEXLB_BATCH_ENABLED=true" \
     "FLEXLB_EXPECT_FETCH_RESPONSE=true" \
     "HYSTERESIS_BIAS_PERCENT=0" \
     "MAX_QUEUE_SIZE=5000" \
@@ -250,7 +249,6 @@ PY
     "COST_SLO_MS=30000" \
     "COST_HOTSPOT_MULTIPLIER=1.5" \
     "DEFAULT_SCHEDULE_MODE=BATCH" \
-    "ENABLE_QUEUEING=false" \
     "STRATEGY_CONFIGS={}" \
     "OTEL_TRACE_SKIP_PATTERN=.*" \
     "OTEL_EXPORTER_OTLP_ENDPOINT=none" \
@@ -393,7 +391,6 @@ send_requests() {
   PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/flexlb_load_client.py" \
     "${trace}" \
     --flexlb-http-addr "127.0.0.1:${FLEXLB_HTTP_PORT}" \
-    --schedule-mode batch \
     --replay-speed 0 \
     --limit "${limit}" \
     --max-concurrency "${concurrency}" \
@@ -451,7 +448,6 @@ with open('${TRACE_FILE}') as f:
   PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/flexlb_load_client.py" \
     "${long_trace}" \
     --flexlb-http-addr "127.0.0.1:${FLEXLB_HTTP_PORT}" \
-    --schedule-mode batch \
     --replay-speed 0 \
     --max-concurrency 20 \
     --timeout-ms 30000 \
@@ -830,7 +826,6 @@ with open('${TRACE_FILE}') as f:
   PYTHONDONTWRITEBYTECODE=1 PYTHONPATH="${SCRIPT_DIR}" python3 "${SCRIPT_DIR}/flexlb_load_client.py" \
     "${long_trace}" \
     --flexlb-http-addr "127.0.0.1:${FLEXLB_HTTP_PORT}" \
-    --schedule-mode batch \
     --replay-speed 0 \
     --max-concurrency 20 \
     --timeout-ms 30000 \

@@ -14,7 +14,6 @@ import org.flexlb.balance.endpoint.WorkerEndpoint;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
 import org.flexlb.enums.ResourceMeasureIndicatorEnum;
-import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
@@ -46,6 +45,8 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
     public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
         Request request = balanceContext.getRequest();
         long seqLen = request.getSeqLen();
+        long maxNewTokens = request.getMaxNewTokens();
+        long expectedKvTokens = seqLen + maxNewTokens;
         FlexlbConfig config = balanceContext.getConfig();
 
         EndpointFilterResult filterResult = getAvailableEndpoints(roleType, group, config.getResourceMeasureIndicator(roleType));
@@ -62,8 +63,8 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         DecodeEndpoint selectedEndpoint = weightedRandomSelection(survivors);
 
         if (selectedEndpoint != null) {
-            return buildServerStatus(selectedEndpoint, seqLen, roleType, balanceContext.getRequestId(),
-                    balanceContext.getScheduleMode());
+            return buildServerStatus(selectedEndpoint, seqLen, expectedKvTokens,
+                    roleType, balanceContext.getRequestId());
         }
 
         Map<String, Integer> merged = new java.util.HashMap<>(filterResult.rejections());
@@ -221,16 +222,24 @@ public class CostBasedDecodeStrategy implements LoadBalanceStrategy {
         return candidateEndpoints.get(minCacheUsedIdx);
     }
 
-    private ServerStatus buildServerStatus(DecodeEndpoint optimalEndpoint, long seqLen, RoleType roleType,
-                                           long requestId, ScheduleModeEnum scheduleMode) {
+    private ServerStatus buildServerStatus(DecodeEndpoint optimalEndpoint, long seqLen,
+                                           long expectedKvTokens, RoleType roleType,
+                                           long requestId) {
         ServerStatus result = new ServerStatus();
         try {
-            // DIRECT/QUEUE: no lifecycle tracking after routing — skip reserve entirely.
-            boolean skipReserve = scheduleMode == ScheduleModeEnum.DIRECT
-                    || scheduleMode == ScheduleModeEnum.QUEUE;
-            if (!skipReserve) {
-                optimalEndpoint.reserve(requestId, seqLen);
+            // All schedule modes (BATCH, DIRECT, QUEUE) reserve decode KV to prevent
+            // over-admission before the engine reports the new load.
+            //
+            // Cap expectedKvTokens to the endpoint's total KV capacity. When
+            // maxNewTokens is very large (e.g. 8192), the raw sum seqLen +
+            // maxNewTokens may exceed the physical KV limit, causing
+            // inflightKvReserved() to be artificially inflated and scoring
+            // to become overly conservative.
+            long totalKv = optimalEndpoint.realKvTotal();
+            if (totalKv > 0 && expectedKvTokens > totalKv) {
+                expectedKvTokens = totalKv;
             }
+            optimalEndpoint.reserve(requestId, seqLen, expectedKvTokens);
 
             result.setSuccess(true);
             result.setRole(roleType);

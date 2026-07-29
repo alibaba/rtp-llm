@@ -269,8 +269,6 @@ if [[ "${START_FLEXLB}" == "1" ]]; then
     "OTEL_EXPORTER_OTLP_ENDPOINT=${OTEL_EXPORTER_OTLP_ENDPOINT}" \
     "HIPPO_ROLE=${HIPPO_ROLE}" \
     "FLEXLB_EXPECT_FETCH_RESPONSE=true" \
-    "FLEXLB_BATCH_ENABLED=${FLEXLB_BATCH_ENABLED:-true}" \
-    "ENABLE_QUEUEING=${ENABLE_QUEUEING:-false}" \
     java "${JAVA_MODULE_OPTS[@]}" -jar "${FLEXLB_JAR}" \
     --server.port="${FLEXLB_HTTP_PORT}" \
     --management.server.port="${FLEXLB_MANAGEMENT_PORT}" \

@@ -58,7 +58,6 @@ class MultipleWorkersTest extends FlexLBMockTestBase {
     @Override
     protected FlexlbConfig createConfig() {
         FlexlbConfig cfg = new FlexlbConfig();
-        cfg.setFlexlbBatchEnabled(true);
         cfg.setFlexlbBatchSizeMax(1);        // each request dispatches independently
         cfg.setFlexlbBatchWindowMs(300);
         cfg.setCostSloMs(50_000L);

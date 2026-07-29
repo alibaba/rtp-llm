@@ -25,8 +25,7 @@ class CancelSmokeTest(FlexLBSmokeBase):
     # -- Helpers ----------------------------------------------------------
 
     async def _schedule_auto(self, request_id: int, **kwargs):
-        """Schedule with the configured schedule_mode from CLI args."""
-        kwargs.setdefault("schedule_mode", self.args.schedule_mode)
+        """Schedule a request (schedule_mode is accepted but no longer set at request level)."""
         return await self._schedule(request_id, **kwargs)
 
     # -- Scenario T1: basic_cancel ---------------------------------------

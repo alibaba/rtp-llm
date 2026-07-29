@@ -113,7 +113,6 @@ class CostBasedPrefillRoutingPerformanceTest {
 
     private CostBasedPrefillStrategy createStrategy() {
         FlexlbConfig config = new FlexlbConfig();
-        config.setFlexlbBatchEnabled(true);
         config.setCostSloMs(50_000L);
         config.setPrefillQueueSizeThreshold(1_000_000L);
 
@@ -218,7 +217,6 @@ class CostBasedPrefillRoutingPerformanceTest {
 
     private static BalanceContext context(long requestId) {
         FlexlbConfig config = new FlexlbConfig();
-        config.setFlexlbBatchEnabled(true);
         config.setCostSloMs(50_000L);
         Request request = new Request();
         request.setRequestId(requestId);
