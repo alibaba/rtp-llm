@@ -589,18 +589,15 @@ class BackendRPCServerVisitor:
         return stream_with_aux_info()
 
     def is_backend_service_ready(self, refresh: bool = False) -> bool:
-        # COMMENTED OUT: Direct connection to prefill/decode bypasses FlexLB
-        # roles: List[RoleAddr] = self.host_service.get_backend_role_addrs(
-        #     self.backend_role_list, refresh
-        # )
-        # if not roles:
-        #     return False
-        # for role in self.backend_role_list:
-        #     if role not in [r.role for r in roles]:
-        #         logging.warning(f"role {role} not in available roles {roles}")
-        #         return False
-        # return True
-        # Always return True to force routing through FlexLB
+        roles: List[RoleAddr] = self.host_service.get_backend_role_addrs(
+            self.backend_role_list, refresh
+        )
+        if not roles:
+            return False
+        for role in self.backend_role_list:
+            if role not in [r.role for r in roles]:
+                logging.warning(f"role {role} not in available roles {roles}")
+                return False
         return True
 
 
