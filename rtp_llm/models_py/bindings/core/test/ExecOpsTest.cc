@@ -110,21 +110,21 @@ static size_t countKeyPrefix(const std::vector<std::string>& keys, const std::st
 // batch_size = 1, tokens_per_block = 2, input_length = 6  → total_blocks = 3
 static rtp_llm::CacheStoreInputs makeHybridInputs(int layer_id) {
     rtp_llm::CacheStoreInputs p;
-    p.pd_separation                = true;
-    p.warmup                       = false;
-    p.context_batch_size           = 1;
-    p.decoder_batch_size           = 0;
-    p.tokens_per_block             = 2;
-    p.kv_block_stride_bytes        = 64;
-    p.layer_id                     = layer_id;
-    p.tag                          = layer_id == 0 ? "linear" : "full";
-    p.model_id                     = 0;
-    p.use_opaque_kv_cache_store    = false;
-    p.kv_cache_group_policies      = {{"linear", defaultCacheGroupPolicy(CacheGroupType::LINEAR)},
-                                      {"full", defaultCacheGroupPolicy(CacheGroupType::FULL)}};
-    p.tokens_per_block_by_tag      = {{"linear", 2}, {"full", 2}};
-    p.kv_block_stride_bytes_by_tag = {{"linear", 64}, {"full", 64}};
-    p.kv_scale_stride_bytes_by_tag = {{"linear", 0}, {"full", 0}};
+    p.pd_separation                  = true;
+    p.warmup                         = false;
+    p.context_batch_size             = 1;
+    p.decoder_batch_size             = 0;
+    p.tokens_per_block               = 2;
+    p.kv_block_stride_bytes          = 64;
+    p.layer_id                       = layer_id;
+    p.tag                            = layer_id == 0 ? "linear" : "full";
+    p.model_id                       = 0;
+    p.use_opaque_kv_cache_store      = false;
+    p.kv_cache_group_policies        = {{"linear", defaultCacheGroupPolicy(CacheGroupType::LINEAR)},
+                                        {"full", defaultCacheGroupPolicy(CacheGroupType::FULL)}};
+    p.tokens_per_block_by_group      = {{"linear", 2}, {"full", 2}};
+    p.kv_block_stride_bytes_by_group = {{"linear", 64}, {"full", 64}};
+    p.kv_scale_stride_bytes_by_group = {{"linear", 0}, {"full", 0}};
 
     // input_lengths[decoder_batch_size + context_batch_size] = [6]
     p.input_lengths_host = torch::tensor({6}, torch::kInt32);
@@ -152,16 +152,16 @@ static torch_ext::PyCacheStoreInputs makePyCacheStoreInputs(const std::shared_pt
                                                             size_t                                 block_num,
                                                             bool                                   mla_kvcache) {
     torch_ext::PyCacheStoreInputs inputs;
-    inputs.context_batch_size             = 1;
-    inputs.decoder_batch_size             = 0;
-    inputs.request_id                     = torch::tensor({int64_t(42)}, torch::kInt64);
-    inputs.request_pd_separation          = torch::tensor({true}, torch::kBool);
-    inputs.kv_cache_group_policies        = {{"default", defaultCacheGroupPolicy(CacheGroupType::FULL)}};
-    inputs.tokens_per_block_by_tag        = {{"default", tokens_per_block}};
-    inputs.kv_block_stride_bytes_by_tag   = {{"default", kv_stride}};
-    inputs.kv_scale_stride_bytes_by_tag   = {{"default", scale_stride}};
-    inputs.kv_block_transfer_bytes_by_tag = {{"default", kv_stride}};
-    inputs.kv_scale_transfer_bytes_by_tag = {{"default", scale_stride}};
+    inputs.context_batch_size               = 1;
+    inputs.decoder_batch_size               = 0;
+    inputs.request_id                       = torch::tensor({int64_t(42)}, torch::kInt64);
+    inputs.request_pd_separation            = torch::tensor({true}, torch::kBool);
+    inputs.kv_cache_group_policies          = {{"default", defaultCacheGroupPolicy(CacheGroupType::FULL)}};
+    inputs.tokens_per_block_by_group        = {{"default", tokens_per_block}};
+    inputs.kv_block_stride_bytes_by_group   = {{"default", kv_stride}};
+    inputs.kv_scale_stride_bytes_by_group   = {{"default", scale_stride}};
+    inputs.kv_block_transfer_bytes_by_group = {{"default", kv_stride}};
+    inputs.kv_scale_transfer_bytes_by_group = {{"default", scale_stride}};
     for (size_t i = 0; i < block_num; ++i) {
         inputs.cache_keys.push_back("block_" + std::to_string(i));
     }
@@ -443,20 +443,20 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSharedPoolUsesPhysicalBlockStrideInsteadO
     auto kv_cache_base =
         physical_kv.as_strided({static_cast<int64_t>(physical_block_num), static_cast<int64_t>(layer_view_stride)},
                                {static_cast<int64_t>(layer_view_stride), 1});
-    auto cache_store                    = std::make_shared<MockCacheStore>();
-    auto inputs                         = makePyCacheStoreInputs(cache_store,
+    auto cache_store                 = std::make_shared<MockCacheStore>();
+    auto inputs                      = makePyCacheStoreInputs(cache_store,
                                          physical_tokens_per_block,
                                          pool_block_stride,
                                          /*scale_stride=*/0,
                                          physical_block_num,
                                          /*mla_kvcache=*/false);
-    inputs.kv_cache_group_policies      = {{"full", defaultCacheGroupPolicy(CacheGroupType::FULL)},
-                                           {"linear", defaultCacheGroupPolicy(CacheGroupType::LINEAR)}};
-    inputs.tokens_per_block_by_tag      = {{"full", physical_tokens_per_block}, {"linear", physical_tokens_per_block}};
-    inputs.kv_block_stride_bytes_by_tag = {{"full", pool_block_stride}, {"linear", pool_block_stride}};
-    inputs.kv_scale_stride_bytes_by_tag = {{"full", 0}, {"linear", 0}};
-    inputs.kv_block_transfer_bytes_by_tag = {{"full", pool_block_stride}, {"linear", layer_view_stride}};
-    inputs.kv_scale_transfer_bytes_by_tag = {{"full", 0}, {"linear", 0}};
+    inputs.kv_cache_group_policies   = {{"full", defaultCacheGroupPolicy(CacheGroupType::FULL)},
+                                        {"linear", defaultCacheGroupPolicy(CacheGroupType::LINEAR)}};
+    inputs.tokens_per_block_by_group = {{"full", physical_tokens_per_block}, {"linear", physical_tokens_per_block}};
+    inputs.kv_block_stride_bytes_by_group   = {{"full", pool_block_stride}, {"linear", pool_block_stride}};
+    inputs.kv_scale_stride_bytes_by_group   = {{"full", 0}, {"linear", 0}};
+    inputs.kv_block_transfer_bytes_by_group = {{"full", pool_block_stride}, {"linear", layer_view_stride}};
+    inputs.kv_scale_transfer_bytes_by_group = {{"full", 0}, {"linear", 0}};
 
     torch_ext::LayerKVCache layer_cache;
     layer_cache.kv_cache_base      = kv_cache_base;
@@ -491,22 +491,22 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCpStateSendsCompleteRankLocalRow) {
     constexpr size_t physical_row_stride        = 40;
     constexpr size_t canonical_block_num        = 4;
 
-    auto cache_store                    = std::make_shared<MockCacheStore>();
-    auto inputs                         = makePyCacheStoreInputs(cache_store,
+    auto cache_store                      = std::make_shared<MockCacheStore>();
+    auto inputs                           = makePyCacheStoreInputs(cache_store,
                                          canonical_tokens_per_block,
                                          physical_row_stride,
                                          /*scale_stride=*/0,
                                          canonical_block_num,
                                          /*mla_kvcache=*/false);
-    auto state_policy                   = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    state_policy.cp_slice               = CpBlockSliceMode::PAYLOAD_BYTES;
-    inputs.kv_cache_group_policies      = {{"state", state_policy}};
-    inputs.tokens_per_block_by_tag      = {{"state", canonical_tokens_per_block}};
-    inputs.kv_block_stride_bytes_by_tag = {{"state", physical_row_stride}};
-    inputs.kv_scale_stride_bytes_by_tag = {{"state", 0}};
-    inputs.use_opaque_kv_cache_store    = true;
-    inputs.cp_rank                      = 1;
-    inputs.cp_size                      = 2;
+    auto state_policy                     = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    state_policy.cp_slice                 = CpBlockSliceMode::PAYLOAD_BYTES;
+    inputs.kv_cache_group_policies        = {{"state", state_policy}};
+    inputs.tokens_per_block_by_group      = {{"state", canonical_tokens_per_block}};
+    inputs.kv_block_stride_bytes_by_group = {{"state", physical_row_stride}};
+    inputs.kv_scale_stride_bytes_by_group = {{"state", 0}};
+    inputs.use_opaque_kv_cache_store      = true;
+    inputs.cp_rank                        = 1;
+    inputs.cp_size                        = 2;
 
     torch_ext::LayerKVCache layer_cache;
     layer_cache.kv_cache_base      = torch::zeros({2, static_cast<int64_t>(physical_row_stride)}, torch::kUInt8);
@@ -628,7 +628,6 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSuccessDoesNotLogBlockKeys) {
     layer_cache.kv_cache_base      = torch::zeros({2, 16}, torch::kUInt8);
     layer_cache.seq_size_per_block = tokens_per_block;
     layer_cache.layer_id           = 0;
-    layer_cache.group_id           = 0;
     layer_cache.tag                = "default";
 
     ASSERT_NO_THROW(WriteCacheStoreOp(torch::tensor({8}, torch::kInt32),

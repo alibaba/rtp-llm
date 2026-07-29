@@ -155,28 +155,32 @@ TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {
     auto full_spec = std::make_shared<MHAKVCacheSpec>();
     full_spec->tag = "full";
     GroupBase full_group;
-    full_group.tag               = full_spec->tag;
-    full_group.spec              = full_spec;
-    full_group.layer_ids         = {0};
-    full_group.policy            = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    full_group.policy.cp_mapping = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
-    full_group.policy.cp_slice   = CpBlockSliceMode::EQUAL_BYTES;
+    full_group.tag                       = full_spec->tag;
+    full_group.spec                      = full_spec;
+    full_group.layer_ids                 = {0};
+    full_group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    full_group.policy.cp_mapping         = CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+    full_group.policy.cp_slice           = CpBlockSliceMode::EQUAL_BYTES;
+    full_group.seq_size_per_block        = config.seq_size_per_block;
+    full_group.kernel_seq_size_per_block = config.seq_size_per_block;
 
     auto swa_spec = std::make_shared<MHAKVCacheSpec>();
     swa_spec->tag = "swa";
     GroupBase swa_group;
-    swa_group.tag             = swa_spec->tag;
-    swa_group.spec            = swa_spec;
-    swa_group.layer_ids       = {0};
-    swa_group.policy          = defaultCacheGroupPolicy(CacheGroupType::SWA);
-    swa_group.policy.cp_slice = CpBlockSliceMode::EQUAL_BYTES;
+    swa_group.tag                       = swa_spec->tag;
+    swa_group.spec                      = swa_spec;
+    swa_group.layer_ids                 = {0};
+    swa_group.policy                    = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    swa_group.policy.cp_slice           = CpBlockSliceMode::EQUAL_BYTES;
+    swa_group.seq_size_per_block        = config.seq_size_per_block;
+    swa_group.kernel_seq_size_per_block = config.seq_size_per_block;
     config.setTopology({std::move(full_group), std::move(swa_group)}, {{0, {"full", "swa"}}});
 
     CPSlotMapper mapper(0, 2, 8);
 
-    EXPECT_EQ(mapper.layoutForGroup(config, 0).mapping, CpBlockMappingMode::BLOCK_ROUND_ROBIN);
-    EXPECT_EQ(mapper.layoutForGroup(config, 0).slice, CpBlockSliceMode::NONE);
-    EXPECT_EQ(mapper.layoutForGroup(config, 1).slice, CpBlockSliceMode::EQUAL_BYTES);
+    EXPECT_EQ(mapper.layoutForGroup(config, "full").mapping, CpBlockMappingMode::BLOCK_ROUND_ROBIN);
+    EXPECT_EQ(mapper.layoutForGroup(config, "full").slice, CpBlockSliceMode::NONE);
+    EXPECT_EQ(mapper.layoutForGroup(config, "swa").slice, CpBlockSliceMode::EQUAL_BYTES);
 }
 
 }  // namespace test

@@ -93,13 +93,21 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
                                                     int                      gen_num_per_cycle) {
     (void)is_mtp;
 
-    auto       dtype            = MemoryEvaluationHelper::getDataTypeForCache(model_config);
-    const auto tokens_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    auto       dtype                     = MemoryEvaluationHelper::getDataTypeForCache(model_config);
+    const auto tokens_per_block          = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    const auto kernel_seq_size_per_block = model_config.attn_config.kernel_tokens_per_block > 0 ?
+                                               static_cast<uint32_t>(model_config.attn_config.kernel_tokens_per_block) :
+                                               tokens_per_block;
     RTP_LLM_CHECK_WITH_INFO(tokens_per_block > 0, "single seq_size_per_block must be > 0");
+    RTP_LLM_CHECK_WITH_INFO(kernel_seq_size_per_block > 0 && tokens_per_block % kernel_seq_size_per_block == 0,
+                            "single seq_size_per_block=%u must be divisible by kernel_seq_size_per_block=%u",
+                            tokens_per_block,
+                            kernel_seq_size_per_block);
 
     SpecBuildContext ctx;
     ctx.dtype                   = dtype;
     ctx.seq_size_per_block      = tokens_per_block;
+    ctx.kernel_tokens_per_block = kernel_seq_size_per_block;
     ctx.attn_config             = &model_config.attn_config;
     ctx.linear_attention_config = &model_config.linear_attention_config;
     ctx.parallelism_config      = &parallelism_config;
@@ -110,10 +118,11 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     auto layer_num = model_config.num_layers;
 
     CacheConfig config;
-    config.layer_num          = static_cast<uint32_t>(layer_num);
-    config.layer_all_num      = static_cast<uint32_t>(layer_num);
-    config.block_num          = 0;
-    config.seq_size_per_block = tokens_per_block;
+    config.layer_num                 = static_cast<uint32_t>(layer_num);
+    config.layer_all_num             = static_cast<uint32_t>(layer_num);
+    config.block_num                 = 0;
+    config.seq_size_per_block        = tokens_per_block;
+    config.kernel_seq_size_per_block = kernel_seq_size_per_block;
 
     config.use_mla   = model_config.attn_config.use_mla;
     config.dtype     = dtype;
@@ -121,31 +130,11 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
 
     auto spec = getDefaultSpecFromRuntimeSpecs(model_config, runtime_specs);
 
-    std::vector<int> layer_ids(static_cast<size_t>(layer_num));
-    std::iota(layer_ids.begin(), layer_ids.end(), 0);
-    GroupBase group;
-    group.tag  = spec->tag;
-    group.spec = spec;
-    const auto group_type =
-        spec->type == KVCacheSpecType::LinearAttention ? CacheGroupType::LINEAR : CacheGroupType::FULL;
-    group.policy            = defaultCacheGroupPolicy(group_type);
-    group.layer_ids         = layer_ids;
-    group.local_kv_head_num = localKvHeadNumForSpec(spec->type, model_config, parallelism_config);
-
-    std::vector<LayerBase> layers(static_cast<size_t>(layer_num));
-    for (int64_t layer_id = 0; layer_id < layer_num; ++layer_id) {
-        auto& layer      = layers[static_cast<size_t>(layer_id)];
-        layer.layer_id   = static_cast<int>(layer_id);
-        layer.group_tags = {spec->tag};
-    }
-    config.setTopology({group}, std::move(layers));
-    RTP_LLM_CHECK_WITH_INFO(config.groupNums() == 1, "single config expected one cache group");
-
-    // Using spec interface for block size and scale
+    // Complete the physical layout before publishing the immutable topology.
     config.kv_block_stride_bytes = spec->block_size_bytes();
     config.kv_block_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_block_stride_bytes;
 
-    // Scale handling - no need to check dtype as scale_block_size_bytes() returns 0 if no scale support
+    // scale_block_size_bytes() returns 0 when scales are not used.
     config.kv_scale_stride_bytes = spec->scale_block_size_bytes();
     config.kv_scale_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
 
@@ -158,15 +147,35 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
     config.group_layer_num  = layer_num;  // only 1 group for SingleConfig
 
-    // Per-layer block stride (kv + scale).
     const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
     config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
                                               static_cast<int>(per_layer_stride_bytes));
 
-    auto groups                     = config.topology().groups();
-    groups[0].kv_block_stride_bytes = config.kv_block_stride_bytes;
-    groups[0].kv_scale_stride_bytes = config.kv_scale_stride_bytes;
-    config.setTopology(std::move(groups), config.topology().layers());
+    std::vector<int> layer_ids(static_cast<size_t>(layer_num));
+    std::iota(layer_ids.begin(), layer_ids.end(), 0);
+    GroupBase group;
+    group.tag  = spec->tag;
+    group.spec = spec;
+    const auto group_type =
+        spec->type == KVCacheSpecType::LinearAttention ? CacheGroupType::LINEAR : CacheGroupType::FULL;
+    group.policy                    = defaultCacheGroupPolicy(group_type);
+    group.layer_ids                 = layer_ids;
+    group.local_kv_head_num         = localKvHeadNumForSpec(spec->type, model_config, parallelism_config);
+    group.seq_size_per_block        = spec->seq_size_per_block;
+    group.kernel_seq_size_per_block = group_type == CacheGroupType::FULL ?
+                                          std::min<size_t>(kernel_seq_size_per_block, group.seq_size_per_block) :
+                                          group.seq_size_per_block;
+    group.kv_block_stride_bytes     = config.kv_block_stride_bytes;
+    group.kv_scale_stride_bytes     = config.kv_scale_stride_bytes;
+
+    std::vector<LayerBase> layers(static_cast<size_t>(layer_num));
+    for (int64_t layer_id = 0; layer_id < layer_num; ++layer_id) {
+        auto& layer      = layers[static_cast<size_t>(layer_id)];
+        layer.layer_id   = static_cast<int>(layer_id);
+        layer.group_tags = {spec->tag};
+    }
+    config.setTopology({group}, std::move(layers));
+    RTP_LLM_CHECK_WITH_INFO(config.groupNums() == 1, "single config expected one cache group");
 
     return config;
 }

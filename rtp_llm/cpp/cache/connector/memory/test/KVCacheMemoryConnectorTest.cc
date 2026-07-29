@@ -15,6 +15,7 @@
 #include "rtp_llm/cpp/cache/connector/memory/MemoryAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/memory/test/mock/TestRpcService.h"
+#include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
@@ -155,6 +156,20 @@ private:
             servers_.push_back(std::move(server));
         }
     }
+    void resetToHybridCacheConfig() {
+        cache_config_ = makeSimpleHybridMhaCacheConfig(/*layer_num=*/4,
+                                                       /*block_num=*/10,
+                                                       /*tokens_per_block=*/8,
+                                                       DataType::TYPE_FP16,
+                                                       /*group_layer_num=*/2,
+                                                       /*local_head_num_kv=*/8,
+                                                       /*size_per_head=*/128);
+        allocator_    = std::make_shared<HybridTypeKVCacheAllocator>(cache_config_, AllocationType::DEVICE);
+        ASSERT_TRUE(allocator_->init());
+        connector_ =
+            std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, allocator_, server_addrs_);
+        ASSERT_TRUE(connector_->init());
+    }
     // BlockInfo helpers: convertIndexToBuffer() now returns std::vector<BlockInfo>.
     size_t sumBlockInfosBytes(const std::vector<BlockInfo>& infos) const {
         size_t total = 0;
@@ -166,22 +181,14 @@ private:
         return total;
     }
     size_t memoryCacheBlockBytes(const CacheConfig& cfg) const {
-        size_t     total           = 0;
-        const auto layer_group_ids = cfg.layerGroupIdsSnapshot();
-        for (size_t layer = 0; layer < static_cast<size_t>(cfg.layer_all_num); ++layer) {
-            if (layer >= layer_group_ids.size()) {
-                continue;
-            }
-            for (int gid : layer_group_ids[layer]) {
-                if (gid < 0 || gid >= cfg.groupNums()) {
+        size_t total = 0;
+        for (int layer = 0; layer < cfg.layer_all_num; ++layer) {
+            for (const auto& group_ref : cfg.groupsForLayer(layer)) {
+                const auto& group = group_ref.get();
+                if (!group.policy.enable_prefix_reuse) {
                     continue;
                 }
-                const auto policy = cfg.policyForGroup(static_cast<size_t>(gid));
-                if (!policy.enable_prefix_reuse) {
-                    continue;
-                }
-                total += cfg.kvBlockStrideBytesForGroup(static_cast<size_t>(gid))
-                         + cfg.kvScaleStrideBytesForGroup(static_cast<size_t>(gid));
+                total += group.kv_block_stride_bytes + group.kv_scale_stride_bytes;
             }
         }
         return total;
@@ -190,9 +197,15 @@ private:
         return memoryCacheBlockBytes(cache_config_);
     }
     void setGroupBlockBytes(CacheConfig& cfg, size_t stride_bytes) const {
-        cfg.setGroupBlockLayout(std::vector<uint32_t>(cfg.groupNums(), cfg.block_num),
-                                std::vector<size_t>(cfg.groupNums(), stride_bytes),
-                                std::vector<size_t>(cfg.groupNums(), 0));
+        const auto             topology_groups = cfg.topology().groups();
+        std::vector<GroupBase> groups(topology_groups.begin(), topology_groups.end());
+        for (auto& group : groups) {
+            group.block_num             = cfg.block_num;
+            group.kv_block_stride_bytes = stride_bytes;
+            group.kv_scale_stride_bytes = 0;
+        }
+        cfg.setTopology(std::move(groups), cfg.topology().layers());
+        cfg.group_block_layout_initialized = true;
     }
 
     void setBlockBytes(const BlockInfo& b, size_t byte_offset, size_t byte_len, char c) const {
@@ -247,7 +260,7 @@ private:
 
     void addTaggedGpuBlocks(MemoryOperationRequestPB::CopyItem& item,
                             const std::vector<BlockIdxType>&    blocks_by_layer) const {
-        const auto slots = connector_->layerTagSlots();
+        const auto& slots = connector_->layerGroupSlots();
         for (const auto& slot : slots) {
             ASSERT_GE(slot.layer_id, 0);
             ASSERT_LT(static_cast<size_t>(slot.layer_id), blocks_by_layer.size());
@@ -263,7 +276,8 @@ private:
             if (isNullBlockIdx(layer_block.block_id)) {
                 continue;
             }
-            const auto gpu_bufs = allocator_->convertIndexToBuffer(layer_block.layer_id, layer_block.block_id);
+            const auto gpu_bufs =
+                allocator_->convertIndexToBuffer(layer_block.layer_id, "default", layer_block.block_id);
             ASSERT_GT(sumBlockInfosBytes(gpu_bufs), 0u);
             verifyBlockInfosContent(gpu_bufs, static_cast<char>('k' + layer_block.layer_id));
         }
@@ -295,7 +309,7 @@ private:
                 byte_off += layer_stride;
                 continue;
             }
-            const auto gpu_bufs = allocator_->convertIndexToBuffer(static_cast<int>(layer), block_id);
+            const auto gpu_bufs = allocator_->convertIndexToBuffer(static_cast<int>(layer), "default", block_id);
             const auto bytes    = sumBlockInfosBytes(gpu_bufs);
             ASSERT_GT(bytes, 0u);
             ASSERT_LE(bytes, layer_stride);
@@ -333,7 +347,7 @@ private:
             if (isNullBlockIdx(block_id)) {
                 continue;
             }
-            const auto gpu_bufs = allocator_->convertIndexToBuffer(static_cast<int>(layer), block_id);
+            const auto gpu_bufs = allocator_->convertIndexToBuffer(static_cast<int>(layer), "default", block_id);
             const auto bytes    = sumBlockInfosBytes(gpu_bufs);
             ASSERT_GT(bytes, 0u);
             ASSERT_LE(bytes, static_cast<size_t>(cache_config_.layer_to_block_stride_bytes[layer]));
@@ -367,7 +381,7 @@ private:
                     byte_off += layer_stride;
                     continue;
                 }
-                const auto gpu_bufs = allocator_->convertIndexToBuffer(static_cast<int>(layer), block_id);
+                const auto gpu_bufs = allocator_->convertIndexToBuffer(static_cast<int>(layer), "default", block_id);
                 const auto bytes    = sumBlockInfosBytes(gpu_bufs);
                 ASSERT_GT(bytes, 0u);
                 ASSERT_LE(bytes, layer_stride);
@@ -409,21 +423,11 @@ private:
     makeCacheResource(const CacheKeysType&                          cache_keys,
                       const std::vector<std::vector<BlockIdxType>>& per_layer_block_indices,
                       size_t                                        reuse_len = 0) const {
-        auto res               = std::make_shared<KVCacheResource>();
-        res->cacheKeys()       = cache_keys;
-        const size_t layer_num = static_cast<size_t>(cache_config_.layer_all_num);
+        auto res         = std::make_shared<KVCacheResource>();
+        res->cacheKeys() = cache_keys;
         res->initGroups(cache_config_.topologyPtr());
         const auto default_blocks = makeGroupBlockIndices(per_layer_block_indices, cache_keys.size());
-        res->mutableBlockIds(0).assign(default_blocks);
-        for (size_t layer = 0; layer < layer_num; ++layer) {
-            auto layer_blocks = std::make_shared<BlockIds>();
-            if (layer < per_layer_block_indices.size()) {
-                layer_blocks->assign(makeGroupBlockIndices({per_layer_block_indices[layer]}, cache_keys.size()));
-            } else {
-                layer_blocks->assign(default_blocks);
-            }
-            res->layer_group_block_ids[layer][0] = std::move(layer_blocks);
-        }
+        res->mutableBlockIds("default").assign(default_blocks);
         // reuse_len in these tests means "GPU already-reused prefix length".
         // KVCacheResource::reuseBlockNum() is derived from (device + memory + remote),
         // so set device reuse here to make asyncMatch/asyncRead semantics consistent.
@@ -434,20 +438,24 @@ private:
     }
 
     std::shared_ptr<KVCacheResource> makeHybridCacheResource(const CacheKeysType&             cache_keys,
-                                                             const std::vector<BlockIdxType>& group0_blocks,
-                                                             const std::vector<BlockIdxType>& group1_blocks,
+                                                             const std::vector<BlockIdxType>& linear_blocks,
+                                                             const std::vector<BlockIdxType>& full_blocks,
                                                              size_t                           reuse_len = 0) const {
-        auto res         = std::make_shared<KVCacheResource>();
-        res->cacheKeys() = cache_keys;
-        (void)group1_blocks;
+        auto res               = std::make_shared<KVCacheResource>();
+        res->cacheKeys()       = cache_keys;
         const size_t layer_num = static_cast<size_t>(cache_config_.layer_all_num);
         RTP_LLM_CHECK_WITH_INFO(layer_num == 4, "test helper expects 4 layers, got %zu", layer_num);
         res->initGroups(cache_config_.topologyPtr());
-        auto block_indices = group0_blocks;
-        if (block_indices.size() < cache_keys.size()) {
-            block_indices.resize(cache_keys.size(), NULL_BLOCK_IDX);
+        auto normalized_linear_blocks = linear_blocks;
+        if (normalized_linear_blocks.size() < cache_keys.size()) {
+            normalized_linear_blocks.resize(cache_keys.size(), NULL_BLOCK_IDX);
         }
-        res->mutableBlockIds(0).assign(block_indices);
+        auto normalized_full_blocks = full_blocks;
+        if (normalized_full_blocks.size() < cache_keys.size()) {
+            normalized_full_blocks.resize(cache_keys.size(), NULL_BLOCK_IDX);
+        }
+        res->mutableBlockIds("linear").assign(normalized_linear_blocks);
+        res->mutableBlockIds("full1").assign(normalized_full_blocks);
         res->setDeviceReuseBlockNum(reuse_len);
         res->setLastBlockAligned(true);
         return res;
@@ -550,6 +558,20 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_NoWorkerAddrs) {
     std::vector<std::string> empty_addrs;
     auto conn = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, allocator_, empty_addrs);
     EXPECT_THROW(conn->init(), std::runtime_error);
+}
+
+TEST_F(KVCacheMemoryConnectorTest, LayerGroupSlotsAreCachedDerivedBindings) {
+    const auto& first  = connector_->layerGroupSlots();
+    const auto& second = connector_->layerGroupSlots();
+
+    EXPECT_EQ(&first, &second);
+    ASSERT_FALSE(first.empty());
+    for (const auto& slot : first) {
+        EXPECT_EQ(slot.group_type, CacheGroupType::FULL);
+        EXPECT_EQ(slot.block_kind, CacheBlockKind::COMPRESSED_KV);
+        EXPECT_GT(slot.stride_bytes, 0u);
+        EXPECT_FALSE(slot.tag.empty());
+    }
 }
 
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenMemoryCacheSizeMbZero) {
@@ -695,11 +717,14 @@ TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnNull_WhenNoPrefixMatched) {
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncMatch_ReturnMatchedNum_WithHybridGroups) {
+    resetToHybridCacheConfig();
     CacheKeysType cache_keys{71001, 71002, 71003};
     auto          res = makeHybridCacheResource(cache_keys,
-                                       /*group0_blocks=*/{1, 2, 3},
-                                       /*group1_blocks=*/{4, 5, 6});
-    ASSERT_EQ(res->layerBlocks().size(), static_cast<size_t>(cache_config_.layer_all_num));
+                                       /*linear_blocks=*/{1, 2, 3},
+                                       /*full_blocks=*/{4, 5, 6});
+    for (int layer = 0; layer < cache_config_.layer_all_num; ++layer) {
+        ASSERT_EQ(res->blockIdsForLayer(layer).size(), 1u);
+    }
     putItemsToCache({cache_keys[0]}, memoryCacheBlockBytes());
 
     auto ctx = connector_->asyncMatch(res, std::make_shared<TestReadMeta>(true));
@@ -843,9 +868,8 @@ TEST_F(KVCacheMemoryConnectorTest, asyncRead_InvalidInputs_ReturnNullOrThrow) {
     // NOTE: asyncRead always skips the last cache_key (cache_keys.size() - 1), so keep size >= 2 here.
     auto res_empty_lbs         = std::make_shared<KVCacheResource>();
     res_empty_lbs->cacheKeys() = {1, 2};
-    auto ctx_empty_lbs =
-        connector_->asyncRead(res_empty_lbs, nullptr, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/1);
-    EXPECT_EQ(ctx_empty_lbs, nullptr);
+    EXPECT_ANY_THROW((void)connector_->asyncRead(
+        res_empty_lbs, nullptr, nullptr, /*start_read_block_index=*/0, /*read_block_num=*/1));
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncRead_ReturnNull_WhenReuseLenGEKeys) {
@@ -1172,8 +1196,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_InvalidInputs_ReturnNullOrThrow) {
     auto res_empty_lbs         = std::make_shared<KVCacheResource>();
     res_empty_lbs->cacheKeys() = {1};
     res_empty_lbs->setLastBlockAligned(true);
-    auto ctx_empty_lbs = connector_->asyncWrite(res_empty_lbs, meta);
-    EXPECT_EQ(ctx_empty_lbs, nullptr);
+    EXPECT_ANY_THROW((void)connector_->asyncWrite(res_empty_lbs, meta));
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenAllKeysInCache) {
@@ -1299,16 +1322,13 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenBuildPlanEmpty) {
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenAllKeysAreSmall_NoNeedWrite) {
+    resetToHybridCacheConfig();
     // Hybrid-attn: allow writing small keys for continuity, BUT if there is NO "big" key in the tail,
     // buildCopyPlanForWrite() should return nullptr and asyncWrite should be a no-op (return nullptr).
-    CacheKeysType                          cache_keys{81001, 81002, 81003};
-    std::vector<std::vector<BlockIdxType>> lbs_vec{
-        /*layer0*/ {1, 1, 1},
-        /*layer1*/ {NULL_BLOCK_IDX, 1, 1},  // key0 small
-        /*layer2*/ {1, NULL_BLOCK_IDX, 1},  // key1 small
-        /*layer3*/ {1, 1, NULL_BLOCK_IDX},  // key2 small
-    };
-    auto res = makeCacheResource(cache_keys, lbs_vec);
+    CacheKeysType cache_keys{81001, 81002, 81003};
+    auto          res = makeHybridCacheResource(cache_keys,
+                                       /*linear_blocks=*/{NULL_BLOCK_IDX, 1, NULL_BLOCK_IDX},
+                                       /*full_blocks=*/{1, NULL_BLOCK_IDX, 1});
 
     auto pool = connector_->block_pool_;
     ASSERT_NE(pool, nullptr);
@@ -1321,6 +1341,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenAllKeysAreSmall_NoN
 }
 
 TEST_F(KVCacheMemoryConnectorTest, asyncWrite_DropsTailAfterLastBigKey_InHybridAttn) {
+    resetToHybridCacheConfig();
     // Hybrid-attn: write small keys for continuity, but ensure the final written key is big.
     // Keys after the last big key must be dropped.
     std::vector<std::unique_ptr<TestRpcServer>> servers;
@@ -1342,13 +1363,9 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_DropsTailAfterLastBigKey_InHybridA
     // - key1 small (layer1 NULL)
     // - key2 big (all valid)  => last big
     // - key3 small (layer3 NULL) => should be DROPPED (not written, not inserted)
-    std::vector<std::vector<BlockIdxType>> lbs_vec{
-        /*layer0*/ {1, 1, 1, 1},
-        /*layer1*/ {1, NULL_BLOCK_IDX, 1, 1},
-        /*layer2*/ {1, 1, 1, 1},
-        /*layer3*/ {1, 1, 1, NULL_BLOCK_IDX},
-    };
-    auto res = makeCacheResource(cache_keys, lbs_vec);
+    auto res = makeHybridCacheResource(cache_keys,
+                                       /*linear_blocks=*/{1, NULL_BLOCK_IDX, 1, 1},
+                                       /*full_blocks=*/{1, 1, 1, NULL_BLOCK_IDX});
 
     const size_t cache_before = connector_->block_cache_->size();
     auto         meta         = std::make_shared<TestReadMeta>(/*enable_memory_cache=*/true);
@@ -1479,7 +1496,7 @@ TEST_F(KVCacheMemoryConnectorTest, asyncWrite_ReturnNull_WhenThreadPoolFull) {
     auto                                   res = makeCacheResource(cache_keys, lbs_vec);
 
     // Pre-insert one key so cpu_matched_num < cache_keys.size() and it reaches the thread-pool-full check.
-    const auto   bufs  = allocator_->convertIndexToBuffer(layer0, /*block_id=*/1);
+    const auto   bufs  = allocator_->convertIndexToBuffer(layer0, "default", /*block_id=*/1);
     const size_t total = sumBlockInfosBytes(bufs);
     ASSERT_GT(total, 0u);
     ASSERT_NE(ensureBlockPool(total), nullptr);
@@ -1511,7 +1528,7 @@ TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_WhenNoWorkers_NoOp
 TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_AllRanksSuccess) {
     const int    layer_id      = 0;
     const int    gpu_block_idx = 2;
-    const auto   gpu_bufs      = allocator_->convertIndexToBuffer(layer_id, gpu_block_idx);
+    const auto   gpu_bufs      = allocator_->convertIndexToBuffer(layer_id, "default", gpu_block_idx);
     const size_t total         = sumBlockInfosBytes(gpu_bufs);
     ASSERT_GT(total, 0u);
 
@@ -1555,7 +1572,7 @@ TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_PartialRanksFail) 
 
     const int    layer_id      = 0;
     const int    gpu_block_idx = 2;
-    const auto   gpu_bufs      = allocator_->convertIndexToBuffer(layer_id, gpu_block_idx);
+    const auto   gpu_bufs      = allocator_->convertIndexToBuffer(layer_id, "default", gpu_block_idx);
     const size_t total         = sumBlockInfosBytes(gpu_bufs);
     ASSERT_GT(total, 0u);
 
@@ -1612,7 +1629,7 @@ TEST_F(KVCacheMemoryConnectorTest, sendCopyPlan_ReturnContext_RpcStatusError) {
 
     const int    layer_id      = 0;
     const int    gpu_block_idx = 2;
-    const auto   gpu_bufs      = allocator_->convertIndexToBuffer(layer_id, gpu_block_idx);
+    const auto   gpu_bufs      = allocator_->convertIndexToBuffer(layer_id, "default", gpu_block_idx);
     const size_t total         = sumBlockInfosBytes(gpu_bufs);
     ASSERT_GT(total, 0u);
 
@@ -1645,7 +1662,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_RejectsEmptyTaggedBlocks) {
 TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_InvalidMemBlock) {
     const int    layer_id      = 0;
     const int    gpu_block_idx = 1;
-    const auto   gpu_bufs      = allocator_->convertIndexToBuffer(layer_id, gpu_block_idx);
+    const auto   gpu_bufs      = allocator_->convertIndexToBuffer(layer_id, "default", gpu_block_idx);
     const size_t total         = sumBlockInfosBytes(gpu_bufs);
     ASSERT_GT(total, 0u);
 
@@ -1664,7 +1681,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_InvalidMemBlock) {
 TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_InvalidLayerId_BuildCopyPlanFailed) {
     const int    valid_layer   = 0;
     const int    gpu_block_idx = 1;
-    const auto   gpu_bufs      = allocator_->convertIndexToBuffer(valid_layer, gpu_block_idx);
+    const auto   gpu_bufs      = allocator_->convertIndexToBuffer(valid_layer, "default", gpu_block_idx);
     const size_t total         = sumBlockInfosBytes(gpu_bufs);
     ASSERT_GT(total, 0u);
 
@@ -1678,7 +1695,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_InvalidLayerId_BuildCop
     auto*                    item = req.add_copy_items();
     addTaggedGpuBlocks(*item,
                        std::vector<BlockIdxType>(static_cast<size_t>(cache_config_.layer_all_num), gpu_block_idx));
-    const auto slots = connector_->layerTagSlots();
+    const auto& slots = connector_->layerGroupSlots();
     ASSERT_FALSE(slots.empty());
     auto* invalid_block = item->add_tagged_gpu_blocks();
     invalid_block->set_layer_id(cache_config_.layer_num);
@@ -1694,7 +1711,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnFalse_InvalidLayerId_BuildCop
 TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SingleLayer) {
     const int    layer_id      = 0;
     const int    gpu_block_idx = 2;
-    const auto   gpu_bufs      = allocator_->convertIndexToBuffer(layer_id, gpu_block_idx);
+    const auto   gpu_bufs      = allocator_->convertIndexToBuffer(layer_id, "default", gpu_block_idx);
     const size_t total         = sumBlockInfosBytes(gpu_bufs);
     ASSERT_GT(total, 0u);
 
@@ -1777,10 +1794,17 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
     for (int i = 0; i < kLayerNum; ++i) {
         layer_ids[i] = i;
     }
-    cache_config_.fromGroupedSpecs({mla_spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
-    cache_config_.setGroupBlockLayout({static_cast<uint32_t>(kBlockNum)},
-                                      {cache_config_.kv_block_stride_bytes},
-                                      {cache_config_.kv_scale_stride_bytes});
+    setTestTopology(
+        cache_config_,
+        {makeTestGroupForConfig(cache_config_, mla_spec, std::move(layer_ids), CacheGroupType::FULL, "default")});
+    const auto             topology_groups = cache_config_.topology().groups();
+    std::vector<GroupBase> groups(topology_groups.begin(), topology_groups.end());
+    ASSERT_EQ(groups.size(), 1u);
+    groups[0].block_num             = static_cast<uint32_t>(kBlockNum);
+    groups[0].kv_block_stride_bytes = cache_config_.kv_block_stride_bytes;
+    groups[0].kv_scale_stride_bytes = cache_config_.kv_scale_stride_bytes;
+    cache_config_.setTopology(std::move(groups), cache_config_.topology().layers());
+    cache_config_.group_block_layout_initialized = true;
     ASSERT_EQ(mla_spec->block_size_bytes(), cache_config_.kv_block_stride_bytes);
 
     const size_t merged_one_key = memoryCacheBlockBytes(cache_config_);
@@ -1826,7 +1850,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
     for (int i = 0; i < kCopyBlockCount; ++i) {
         const char tag = static_cast<char>(0x21 + (i % 94));
         for (int l = 0; l < kLayerNum; ++l) {
-            const auto gpu_bufs = allocator_->convertIndexToBuffer(l, kGpuBlockBase + i);
+            const auto gpu_bufs = allocator_->convertIndexToBuffer(l, "default", kGpuBlockBase + i);
             ASSERT_GE(gpu_bufs.size(), 2u);
             verifyBlockInfosContent(gpu_bufs, tag);
         }
@@ -1874,7 +1898,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_MultiLayer) {
 TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_D2H_SingleLayer) {
     const int    layer_id      = 0;
     const int    gpu_block_idx = 3;
-    const auto   gpu_bufs      = allocator_->convertIndexToBuffer(layer_id, gpu_block_idx);
+    const auto   gpu_bufs      = allocator_->convertIndexToBuffer(layer_id, "default", gpu_block_idx);
     const size_t total         = sumBlockInfosBytes(gpu_bufs);
     ASSERT_GT(total, 0u);
 
@@ -1957,7 +1981,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_D2H_MultiLayer_ValidatesByteOffsets
 
     // Fill GPU source with distinct byte patterns.
     for (const auto& lb : gpu_layer_blocks) {
-        const auto gpu_bufs = allocator_->convertIndexToBuffer(lb.layer_id, lb.block_id);
+        const auto gpu_bufs = allocator_->convertIndexToBuffer(lb.layer_id, "default", lb.block_id);
         ASSERT_GT(sumBlockInfosBytes(gpu_bufs), 0u);
         setBlockInfosContent(gpu_bufs, static_cast<char>('k' + lb.layer_id));
     }
@@ -2005,7 +2029,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_D2H_MultiLayer_ValidatesByteOffsets
             byte_off += layer_stride;
             continue;
         }
-        const auto gpu_bufs = allocator_->convertIndexToBuffer(static_cast<int>(layer), block_id);
+        const auto gpu_bufs = allocator_->convertIndexToBuffer(static_cast<int>(layer), "default", block_id);
         const auto bytes    = sumBlockInfosBytes(gpu_bufs);
         ASSERT_GT(bytes, 0u);
         ASSERT_LE(bytes, layer_stride);

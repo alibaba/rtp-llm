@@ -9,10 +9,6 @@
 namespace rtp_llm {
 namespace {
 
-size_t groupSeqSize(const CacheConfig& config, size_t gid, size_t fallback) {
-    return gid < static_cast<size_t>(config.groupNums()) ? config.seqSizePerBlockForGroup(gid) : fallback;
-}
-
 bool isCompactFullBlockList(const KVCacheResource&  source,
                             const BlockIndicesType& src_blocks,
                             const CacheKeysType&    selected_keys) {
@@ -49,12 +45,11 @@ CPSlotMapper::CPSlotMapper(int cp_rank, int cp_size, int block_size):
     }
 }
 
-CpGroupLayout CPSlotMapper::layoutForGroup(const CacheConfig& config, size_t gid) const {
+CpGroupLayout CPSlotMapper::layoutForGroup(const CacheConfig& config, std::string_view tag) const {
     CpGroupLayout layout;
-    const auto    policy      = gid < static_cast<size_t>(config.groupNums()) ? config.policyForGroup(gid) :
-                                                                                defaultCacheGroupPolicy(CacheGroupType::FULL);
+    const auto    policy      = config.policyForGroup(tag);
     layout.active_tail_blocks = policy.active_tail_blocks > 0 ? static_cast<size_t>(policy.active_tail_blocks) : 0;
-    if (!isSharded() || gid >= static_cast<size_t>(config.groupNums())) {
+    if (!isSharded()) {
         return layout;
     }
     layout.mapping = policy.cp_mapping;
@@ -64,16 +59,16 @@ CpGroupLayout CPSlotMapper::layoutForGroup(const CacheConfig& config, size_t gid
     return layout;
 }
 
-bool CPSlotMapper::usesCpCanonicalKeys(const CacheConfig& config, size_t gid) const {
-    return layoutForGroup(config, gid).usesCpCanonicalKeys();
+bool CPSlotMapper::usesCpCanonicalKeys(const CacheConfig& config, std::string_view tag) const {
+    return layoutForGroup(config, tag).usesCpCanonicalKeys();
 }
 
-bool CPSlotMapper::blockRoundRobinGroup(const CacheConfig& config, size_t gid) const {
-    return layoutForGroup(config, gid).mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN;
+bool CPSlotMapper::blockRoundRobinGroup(const CacheConfig& config, std::string_view tag) const {
+    return layoutForGroup(config, tag).mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN;
 }
 
-bool CPSlotMapper::compactLastRankGroup(const CacheConfig& config, size_t gid) const {
-    return layoutForGroup(config, gid).mapping == CpBlockMappingMode::COMPACT_LAST_RANK;
+bool CPSlotMapper::compactLastRankGroup(const CacheConfig& config, std::string_view tag) const {
+    return layoutForGroup(config, tag).mapping == CpBlockMappingMode::COMPACT_LAST_RANK;
 }
 
 int CPSlotMapper::localBlockCount(int seq_len) const {
@@ -91,18 +86,18 @@ int CPSlotMapper::effectiveSeqLenForAlloc(int actual_seq_len) const {
     return localBlockCount(actual_seq_len) * block_size_;
 }
 
-int CPSlotMapper::effectiveSeqLenForAlloc(const CacheConfig& config, size_t gid, int seq_len) const {
-    if (!blockRoundRobinGroup(config, gid)) {
+int CPSlotMapper::effectiveSeqLenForAlloc(const CacheConfig& config, std::string_view tag, int seq_len) const {
+    if (!blockRoundRobinGroup(config, tag)) {
         return seq_len;
     }
     return effectiveSeqLenForAlloc(seq_len);
 }
 
-size_t CPSlotMapper::logicalSeqSizePerBlock(const CacheConfig& config, size_t gid) const {
-    if (blockRoundRobinGroup(config, gid)) {
+size_t CPSlotMapper::logicalSeqSizePerBlock(const CacheConfig& config, std::string_view tag) const {
+    if (blockRoundRobinGroup(config, tag)) {
         return static_cast<size_t>(virtual_block_size_);
     }
-    return groupSeqSize(config, gid, config.seq_size_per_block);
+    return config.seqSizePerBlockForGroup(tag);
 }
 
 CacheKeysType CPSlotMapper::canonicalCacheKeys(const CacheKeysType& full_keys) const {
@@ -118,18 +113,17 @@ CacheKeysType CPSlotMapper::canonicalCacheKeys(const CacheKeysType& full_keys) c
 }
 
 CacheKeysType
-CPSlotMapper::localCacheKeys(const CacheConfig& config, size_t gid, const CacheKeysType& full_keys) const {
-    return usesCpCanonicalKeys(config, gid) ? canonicalCacheKeys(full_keys) : full_keys;
+CPSlotMapper::localCacheKeys(const CacheConfig& config, std::string_view tag, const CacheKeysType& full_keys) const {
+    return usesCpCanonicalKeys(config, tag) ? canonicalCacheKeys(full_keys) : full_keys;
 }
 
 std::vector<CacheStoreBlockPair> CPSlotMapper::buildStorePlan(const CacheConfig& config,
-                                                              size_t             gid,
+                                                              std::string_view   tag,
                                                               size_t             total_logical_blocks,
                                                               size_t             reuse_block_size,
                                                               bool               use_hybrid) const {
-    auto policy = gid < static_cast<size_t>(config.groupNums()) ? config.policyForGroup(gid) :
-                                                                  defaultCacheGroupPolicy(CacheGroupType::FULL);
-    if (!isSharded() || gid >= static_cast<size_t>(config.groupNums())) {
+    auto policy = config.policyForGroup(tag);
+    if (!isSharded()) {
         policy.cp_mapping = CpBlockMappingMode::NONE;
     }
     return buildCacheStorePlan(policy, total_logical_blocks, reuse_block_size, use_hybrid, cp_rank_, cp_size_);
@@ -150,18 +144,18 @@ std::vector<CacheStoreBlockPair> CPSlotMapper::buildStorePlan(const CacheGroupPo
 }
 
 std::vector<BlockInfo> CPSlotMapper::sliceBlockForPeer(const CacheConfig&     config,
-                                                       size_t                 gid,
+                                                       std::string_view       tag,
                                                        std::vector<BlockInfo> parts,
                                                        size_t                 peer_idx) const {
-    const auto layout = layoutForGroup(config, gid);
+    const auto layout = layoutForGroup(config, tag);
     if (!isSharded() || layout.slice == CpBlockSliceMode::NONE) {
         return parts;
     }
     RTP_LLM_CHECK_WITH_INFO(parts.size() == 1, "CP byte slicing expects one block part, got %zu", parts.size());
     RTP_LLM_CHECK_WITH_INFO(
         peer_idx < static_cast<size_t>(cp_size_), "CP slice peer_idx=%zu out of cp_size=%d", peer_idx, cp_size_);
-    auto spec = config.specForGroup(gid);
-    RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "CP slice got null spec for gid=%zu", gid);
+    auto spec = config.specForGroup(tag);
+    RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "CP slice got null spec for tag=%s", std::string(tag).c_str());
     auto& block = parts[0];
     RTP_LLM_CHECK_WITH_INFO(block.addr != nullptr, "CP byte slicing got null block addr");
 
@@ -213,12 +207,12 @@ KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& so
         selected.setLastBlockAligned(false);
     }
 
-    for (int gid = 0; gid < source.groupNums(); ++gid) {
-        const auto&      src_blocks = source.blocks(gid);
+    for (const auto& group : source.groupBlocks()) {
+        const auto&      src_blocks = group.block_ids->blocks();
         BlockIndicesType dst_blocks;
         dst_blocks.reserve(selected_keys.size());
 
-        const auto layout = layoutForGroup(config, static_cast<size_t>(gid));
+        const auto layout = layoutForGroup(config, group.tag);
         if (layout.slice != CpBlockSliceMode::NONE) {
             for (size_t i = 0; i < selected_keys.size(); ++i) {
                 dst_blocks.push_back(i < src_blocks.size() ? src_blocks[i] : NULL_BLOCK_IDX);
@@ -241,7 +235,7 @@ KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& so
             }
         }
 
-        selected.mutableBlockIds(gid).assign(std::move(dst_blocks));
+        selected.mutableBlockIds(group.tag).assign(std::move(dst_blocks));
     }
 
     return selected;

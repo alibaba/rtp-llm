@@ -36,7 +36,6 @@ struct LayerKVCache {
     torch::Tensor kv_scale_base;
     int           seq_size_per_block = 0;
     int           layer_id           = -1;
-    int           group_id           = -1;
     std::string   tag                = "default";
 
     LayerKVCache() = default;
@@ -44,14 +43,12 @@ struct LayerKVCache {
     LayerKVCache(torch::Tensor kv_cache_base,
                  int           seq_size_per_block,
                  int           layer_id      = -1,
-                 int           group_id      = -1,
                  std::string   tag           = "default",
                  torch::Tensor kv_scale_base = {}):
         kv_cache_base(std::move(kv_cache_base)),
         kv_scale_base(std::move(kv_scale_base)),
         seq_size_per_block(seq_size_per_block),
         layer_id(layer_id),
-        group_id(group_id),
         tag(std::move(tag)) {}
 };
 
@@ -60,12 +57,6 @@ struct LayerKVCache {
 class KVCache {
 public:
     explicit KVCache(rtp_llm::GroupedCacheLayerLayout grouped_layout): grouped_layout_(std::move(grouped_layout)) {}
-
-    LayerKVCache getLayerCache(int layer_id) const {
-        validateLayer(layer_id);
-        const auto& group = grouped_layout_.topology().soleGroupForLayer(layer_id);
-        return getLayerCache(layer_id, group.tag);
-    }
 
     LayerKVCache getLayerCache(int layer_id, const std::string& tag) const {
         validateLayer(layer_id);
@@ -80,23 +71,15 @@ public:
 
     std::vector<LayerKVCache> getLayerCacheGroups(int layer_id) const {
         validateLayer(layer_id);
-        const auto  layer = static_cast<size_t>(layer_id);
-        const auto& tags  = grouped_layout_.topology().layer(layer_id).group_tags;
+        const auto layer_view = grouped_layout_.at(static_cast<size_t>(layer_id));
 
         std::vector<LayerKVCache> layer_caches;
-        layer_caches.reserve(tags.size());
-        for (const auto& tag : tags) {
-            const auto& group_layout = grouped_layout_.group(tag);
-            if (group_layout.empty() || !group_layout.hasLayer(layer)) {
-                continue;
-            }
-            layer_caches.push_back(getLayerCache(layer_id, tag));
+        layer_caches.reserve(layer_view.size());
+        for (const auto& entry : layer_view) {
+            layer_caches.push_back(
+                makeLayerCache(layer_id, grouped_layout_.topology().group(entry.tag), entry.value.get()));
         }
         return layer_caches;
-    }
-
-    const std::vector<std::string>& groupTags() const {
-        return grouped_layout_.topology().groupTagsSnapshot();
     }
 
     size_t layerCount() const {
@@ -161,13 +144,8 @@ private:
                                 layer_id,
                                 group.tag.c_str());
 
-        const int    group_id = static_cast<int>(grouped_layout_.topology().groupIdForTag(group.tag));
-        LayerKVCache result(buffers.kv_addr,
-                            static_cast<int>(group.seq_size_per_block),
-                            layer_id,
-                            group_id,
-                            group.tag,
-                            buffers.kv_scale_addr);
+        LayerKVCache result(
+            buffers.kv_addr, static_cast<int>(group.seq_size_per_block), layer_id, group.tag, buffers.kv_scale_addr);
 
         const auto spec_type = group.spec->type;
         if (group.policy.group_type != rtp_llm::CacheGroupType::FULL
@@ -260,14 +238,14 @@ struct PyCacheStoreInputs {
     torch::Tensor                                    request_id;
     torch::Tensor                                    request_pd_separation;
     std::map<std::string, rtp_llm::CacheGroupPolicy> kv_cache_group_policies;
-    std::map<std::string, size_t>                    tokens_per_block_by_tag;
+    std::map<std::string, size_t>                    tokens_per_block_by_group;
     // Physical address step and logical transfer length are different for a
     // shared pool: blocks are max-group-stride apart, while each tag transfers
     // only the bytes described by its own cache group.
-    std::map<std::string, size_t> kv_block_stride_bytes_by_tag;
-    std::map<std::string, size_t> kv_scale_stride_bytes_by_tag;
-    std::map<std::string, size_t> kv_block_transfer_bytes_by_tag;
-    std::map<std::string, size_t> kv_scale_transfer_bytes_by_tag;
+    std::map<std::string, size_t> kv_block_stride_bytes_by_group;
+    std::map<std::string, size_t> kv_scale_stride_bytes_by_group;
+    std::map<std::string, size_t> kv_block_transfer_bytes_by_group;
+    std::map<std::string, size_t> kv_scale_transfer_bytes_by_group;
     std::vector<std::string>      cache_keys;  // [context_batch_size]
     size_t                        tokens_per_block = 0;
     // Physical KV-manager block strides, supplied by CacheConfig rather than inferred from tensor views.
@@ -374,7 +352,7 @@ struct PyMultimodalInputs {
     std::vector<torch::Tensor> mm_extra_input;
 };
 
-using AttentionInputsByTag = std::map<std::string, PyAttentionInputs>;
+using AttentionInputsByGroup = std::map<std::string, PyAttentionInputs>;
 
 struct PyModelInputs {
     torch::Tensor      input_ids;
@@ -383,13 +361,13 @@ struct PyModelInputs {
     PyEmbeddingInputs  embedding_inputs;
     PyMultimodalInputs multimodal_inputs;
     // C++ common/single-group fast path. Python sees this field through a
-    // property which returns either this object or attention_inputs_by_tag.
-    PyAttentionInputs    attention_inputs;
-    AttentionInputsByTag attention_inputs_by_tag;
-    BertEmbeddingInputs  bert_embedding_inputs;
+    // property which returns either this object or attention_inputs_by_group.
+    PyAttentionInputs      attention_inputs;
+    AttentionInputsByGroup attention_inputs_by_group;
+    BertEmbeddingInputs    bert_embedding_inputs;
 
-    bool hasAttentionInputsByTag() const {
-        return !attention_inputs_by_tag.empty();
+    bool hasGroupedAttentionInputs() const {
+        return !attention_inputs_by_group.empty();
     }
 };
 

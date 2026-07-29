@@ -4,6 +4,8 @@
 #include <memory>
 #include <optional>
 #include <set>
+#include <string>
+#include <string_view>
 #include <unordered_map>
 #include <unordered_set>
 #include <vector>
@@ -40,29 +42,39 @@ public:
     };
 
     struct UnifiedCacheItem {
-        CacheKeyType              cache_key;
-        bool                      is_resident = false;
-        std::vector<BlockIdxType> group_block_ids;
-        std::vector<bool>         matchable_groups;
-        std::vector<int64_t>      group_block_created_time_us;
-        int64_t                   created_time_us = 0;
-        BlockDependency           dependency;
-        NamespaceId               dependency_namespace = kDefaultNamespace;
-        bool                      has_dependency       = false;
+        struct GroupBlock {
+            std::string  tag;
+            BlockIdxType block_id        = NULL_BLOCK_IDX;
+            bool         matchable       = true;
+            int64_t      created_time_us = 0;
+        };
+
+        CacheKeyType                                cache_key;
+        bool                                        is_resident = false;
+        std::unordered_map<std::string, GroupBlock> blocks_by_group;
+        int64_t                                     created_time_us = 0;
+        BlockDependency                             dependency;
+        NamespaceId                                 dependency_namespace = kDefaultNamespace;
+        bool                                        has_dependency       = false;
     };
 
     struct EvictResult {
-        std::vector<CacheKeyType>                                   evicted_keys;
-        std::unordered_map<CacheKeyType, std::vector<BlockIdxType>> evicted_group_block_ids;
-        std::unordered_map<CacheKeyType, BlockDependency>           evicted_dependencies;
-        std::unordered_map<CacheKeyType, NamespaceId>               evicted_namespaces;
-        std::unordered_map<CacheKeyType, int64_t>                   evicted_lifetime_ms;
-        std::unordered_map<CacheKeyType, int>                       evicted_independent_group;
+        std::vector<CacheKeyType>                                                   evicted_keys;
+        std::unordered_map<CacheKeyType, std::vector<UnifiedCacheItem::GroupBlock>> evicted_blocks_by_group;
+        std::unordered_map<CacheKeyType, BlockDependency>                           evicted_dependencies;
+        std::unordered_map<CacheKeyType, NamespaceId>                               evicted_namespaces;
+        std::unordered_map<CacheKeyType, int64_t>                                   evicted_lifetime_ms;
+        std::unordered_map<CacheKeyType, std::string>                               evicted_independent_tag;
     };
 
     struct MatchResult {
-        bool                      found = false;
-        std::vector<BlockIdxType> group_block_ids;
+        bool                                      found = false;
+        std::vector<UnifiedCacheItem::GroupBlock> blocks_by_group;
+    };
+
+    struct GroupPool {
+        std::string  tag;
+        BlockPoolPtr pool;
     };
 
     using LRUCacheType = LRUCache<CacheKeyType, UnifiedCacheItem>;
@@ -70,25 +82,24 @@ public:
 public:
     explicit SharedBlockCache(): lru_cache_(kCacheMaxCapacity) {}
 
-    void init(int group_num, const std::vector<BlockPoolPtr>& group_pools);
+    void init(const std::vector<GroupPool>& pools);
 
-    void put(CacheKeyType cache_key, const std::vector<BlockIdxType>& group_block_ids, bool is_resident);
-    void put(CacheKeyType                     cache_key,
-             const std::vector<BlockIdxType>& group_block_ids,
-             bool                             is_resident,
-             NamespaceId                      namespace_id,
-             const BlockDependency&           dependency,
-             const std::vector<bool>&         matchable_groups = {});
+    void put(CacheKeyType cache_key, const std::vector<UnifiedCacheItem::GroupBlock>& blocks, bool is_resident);
+    void put(CacheKeyType                                     cache_key,
+             const std::vector<UnifiedCacheItem::GroupBlock>& blocks,
+             bool                                             is_resident,
+             NamespaceId                                      namespace_id,
+             const BlockDependency&                           dependency);
 
     MatchResult match(CacheKeyType cache_key);
 
-    BlockIdxType matchGroup(CacheKeyType cache_key, int group_id);
+    BlockIdxType matchGroup(CacheKeyType cache_key, std::string_view tag);
 
     EvictResult selectAndEvict(size_t min_blocks);
-    EvictResult selectAndEvictForGroup(int group_id, size_t min_blocks);
+    EvictResult selectAndEvictForGroup(std::string_view tag, size_t min_blocks);
 
     size_t evictAndFree(size_t min_blocks);
-    size_t evictAndFreeForGroup(int group_id, size_t min_blocks, EvictResult* evict_result_out = nullptr);
+    size_t evictAndFreeForGroup(std::string_view tag, size_t min_blocks, EvictResult* evict_result_out = nullptr);
 
     std::optional<UnifiedCacheItem> remove(CacheKeyType cache_key);
 
@@ -103,7 +114,7 @@ public:
     int64_t version() const;
     void    setPrefixTreeEnabled(bool enabled);
     bool    prefixTreeEnabled() const;
-    void    setIndependentGroupEviction(bool enabled, const std::vector<int>& group_ids);
+    void    setIndependentGroupEviction(bool enabled, const std::vector<std::string>& tags);
 
 private:
     static const size_t kCacheMaxCapacity = 10000000;
@@ -153,17 +164,16 @@ private:
     bool                       updateItemDependencyLocked(UnifiedCacheItem&      item,
                                                           NamespaceId            namespace_id,
                                                           const BlockDependency& dependency) const;
-    static bool                groupMatchable(const UnifiedCacheItem& item, size_t group_id);
-    static bool                hasUsableGroup(const UnifiedCacheItem& item, int group_id);
+    static bool                hasUsableGroup(const UnifiedCacheItem& item, std::string_view tag);
     std::vector<NamespacedKey> collectEvictChainLocked(const NamespacedKey& leaf_key) const;
-    bool                       chainHasUsableGroupLocked(const std::vector<NamespacedKey>& chain, int group_id) const;
-    bool chainHasReachableAncestorGroupLocked(const std::vector<NamespacedKey>& chain, int group_id) const;
+    bool chainHasUsableGroupLocked(const std::vector<NamespacedKey>& chain, std::string_view tag) const;
+    bool chainHasReachableAncestorGroupLocked(const std::vector<NamespacedKey>& chain, std::string_view tag) const;
     bool subtreeEvictableForAncestorGroupLocked(const NamespacedKey& key) const;
-    bool selectIndependentGroupEvictionsLocked(int group_id, size_t min_blocks, EvictResult& result);
-    void removeGroupFromItemLocked(CacheKeyType cache_key, int group_id, EvictResult& result);
+    bool selectIndependentGroupEvictionsLocked(std::string_view tag, size_t min_blocks, EvictResult& result);
+    void removeGroupFromItemLocked(CacheKeyType cache_key, std::string_view tag, EvictResult& result);
     bool hasFlatItemLocked(CacheKeyType cache_key) const;
     bool isFlatItemResidentLocked(CacheKeyType cache_key) const;
-    bool isIndependentEvictionGroupLocked(int group_id) const;
+    bool isIndependentEvictionGroupLocked(std::string_view tag) const;
 
     LRUCacheType       lru_cache_;
     mutable std::mutex mu_;
@@ -172,14 +182,13 @@ private:
     bool               independent_group_eviction_enabled_{false};
     uint64_t           tree_access_seq_{0};
 
-    int                                                                                    group_num_ = 0;
-    std::vector<BlockPoolPtr>                                                              group_pools_;
+    std::unordered_map<std::string, BlockPoolPtr>                                          pools_by_group_;
     std::unordered_map<NamespacedKey, PrefixTreeNode, NamespacedKeyHash>                   tree_nodes_;
     std::unordered_map<CacheKeyType, std::unordered_set<NamespacedKey, NamespacedKeyHash>> aliases_by_cache_key_;
     std::unordered_map<NamespacedKey, std::unordered_set<NamespacedKey, NamespacedKeyHash>, NamespacedKeyHash>
-                            pending_children_by_parent_;
-    std::set<LeafKey>       leaf_lru_;
-    std::unordered_set<int> independent_eviction_group_ids_;
+                                    pending_children_by_parent_;
+    std::set<LeafKey>               leaf_lru_;
+    std::unordered_set<std::string> independent_eviction_tags_;
 };
 
 using SharedBlockCachePtr = std::shared_ptr<SharedBlockCache>;

@@ -44,10 +44,9 @@ public:
         GenerateStreamPtr stream =
             make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
         BatchKVCacheResource addr;
-        // New (refactored) BatchKVCacheResource: [batch_id][group_id] -> block_indices
         addr.resetBatchSize(1);
         addr.initGroups(makeProcessorCacheConfig().topologyPtr());
-        addr.setBatchBlocks(0, 0, {block_id});
+        addr.setBatchBlocks(0, "default", {block_id});
         stream->setKVCache(addr);
 
         auto        sp_output_buffer = std::make_shared<SpeculativeExecutorStreamOutput>();

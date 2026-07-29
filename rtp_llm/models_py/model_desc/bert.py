@@ -5,6 +5,7 @@ from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
+from rtp_llm.models_py.model_desc.block_map import get_single_layer_cache
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     AddBiasResLayerNorm,
@@ -150,6 +151,6 @@ class BertModel(GptModelBase):
             hidden_states = decoder_layer(
                 hidden_states,
                 fmha_impl,
-                kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
+                kv_cache=get_single_layer_cache(self.kv_cache, i),
             )
         return PyModelOutputs(hidden_states)

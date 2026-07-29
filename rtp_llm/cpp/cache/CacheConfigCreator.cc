@@ -42,12 +42,12 @@ KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
     }
 
     budget.explicit_pool_reserve_bytes = config.explicitly_sized_pool_reserve_bytes;
-    for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
-        if (config.usesExplicitIndependentBlocks(gid)) {
+    for (const auto& group : config.topology().groups()) {
+        if (config.usesExplicitIndependentBlocks(group.tag)) {
             continue;
         }
-        const auto group_bytes = config.blockSizeBytesForGroup(gid);
-        switch (config.typeForGroup(gid)) {
+        const auto group_bytes = config.blockSizeBytesForGroup(group.tag);
+        switch (config.typeForGroup(group.tag)) {
             case CacheGroupType::FULL:
             case CacheGroupType::LINEAR:
                 budget.paged_block_bytes += group_bytes;
@@ -73,41 +73,6 @@ void addBlockBudget(KVCacheBlockBudget& total, const KVCacheBlockBudget& additio
     add(total.explicit_pool_reserve_bytes, addition.explicit_pool_reserve_bytes, "explicit reserve");
     add(total.paged_block_bytes, addition.paged_block_bytes, "paged block bytes");
     add(total.swa_block_bytes, addition.swa_block_bytes, "SWA block bytes");
-}
-
-void setupKernelSeqSize(CacheConfig& config, const KVCacheConfig& kv_cache_config, const char* config_name) {
-    const auto previous_kernel_seq_size_per_block = config.kernel_seq_size_per_block;
-    if (kv_cache_config.kernel_seq_size_per_block > 0) {
-        const auto kernel_seq_size_per_block = static_cast<size_t>(kv_cache_config.kernel_seq_size_per_block);
-        RTP_LLM_CHECK_WITH_INFO(config.seq_size_per_block % kernel_seq_size_per_block == 0,
-                                "%s seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
-                                config_name,
-                                config.seq_size_per_block,
-                                kernel_seq_size_per_block);
-        config.kernel_seq_size_per_block = kernel_seq_size_per_block;
-    } else if (config.kernel_seq_size_per_block == 0 || config.kernel_seq_size_per_block == config.seq_size_per_block) {
-        config.kernel_seq_size_per_block = config.seq_size_per_block;
-    }
-
-    if (config.kernel_seq_size_per_block == previous_kernel_seq_size_per_block || config.groupNums() == 0) {
-        return;
-    }
-
-    auto groups           = config.topology().groups();
-    bool topology_changed = false;
-    for (auto& group : groups) {
-        const auto expected_kernel_seq_size_per_block =
-            group.policy.group_type == CacheGroupType::FULL && config.kernel_seq_size_per_block > 0 ?
-                std::min(config.kernel_seq_size_per_block, group.seq_size_per_block) :
-                group.seq_size_per_block;
-        if (group.kernel_seq_size_per_block != expected_kernel_seq_size_per_block) {
-            group.kernel_seq_size_per_block = expected_kernel_seq_size_per_block;
-            topology_changed                = true;
-        }
-    }
-    if (topology_changed) {
-        config.setTopology(std::move(groups), config.topology().layers());
-    }
 }
 
 uint32_t computeBlockNum(CacheConfig&                                     config,
@@ -184,13 +149,20 @@ CacheConfig CacheConfigCreator::createBasicConfig(const ModelConfig&       model
                                                   const ParallelismConfig& parallelism_config,
                                                   bool                     is_mtp,
                                                   int                      gen_num_per_cycle) {
+    const auto physical_seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    const auto kernel_seq_size_per_block   = model_config.attn_config.kernel_tokens_per_block > 0 ?
+                                                 static_cast<uint32_t>(model_config.attn_config.kernel_tokens_per_block) :
+                                                 physical_seq_size_per_block;
+    RTP_LLM_CHECK_WITH_INFO(physical_seq_size_per_block > 0, "basic cache seq_size_per_block must be > 0");
+    RTP_LLM_CHECK_WITH_INFO(kernel_seq_size_per_block > 0
+                                && physical_seq_size_per_block % kernel_seq_size_per_block == 0,
+                            "basic cache seq_size_per_block(%u) must be divisible by kernel_seq_size_per_block(%u)",
+                            physical_seq_size_per_block,
+                            kernel_seq_size_per_block);
+
     CacheConfig config;
     if (model_config.hybrid_attention_config.enable_independent_kv_cache_pools) {
-        KVCacheConfig no_override_config;
-        no_override_config.seq_size_per_block        = 0;
-        no_override_config.kernel_seq_size_per_block = 0;
-        config                                       = HybridPoolConfigCreator::createConfig(
-            model_config, parallelism_config, no_override_config, is_mtp, gen_num_per_cycle);
+        config = HybridPoolConfigCreator::createConfig(model_config, parallelism_config, is_mtp, gen_num_per_cycle);
     } else if (model_config.hybrid_attention_config.enable_hybrid_attention) {
         config = HybridConfigCreator::createHybridConfig(model_config, parallelism_config, is_mtp, gen_num_per_cycle);
     } else {
@@ -217,13 +189,9 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
                                              const KVCacheConfig&                             kv_cache_config,
                                              const std::optional<WarmUpResult>&               warm_up_result,
                                              const std::optional<SpeculativeExecutionConfig>& sp_config) {
-    CacheConfig config =
-        model_config.hybrid_attention_config.enable_independent_kv_cache_pools ?
-            HybridPoolConfigCreator::createConfig(model_config, parallelism_config, kv_cache_config, false, 0) :
-            CacheConfigCreator::createBasicConfig(model_config, parallelism_config, false, 0);
+    CacheConfig config = createBasicConfig(model_config, parallelism_config, false, 0);
 
     config.linear_step = kv_cache_config.linear_step;
-    setupKernelSeqSize(config, kv_cache_config, "cache");
 
     uint32_t block_num = computeBlockNum(
         config, model_config, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
@@ -256,24 +224,13 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                                bool                               is_mtp,
                                                bool                               is_eagle) {
     CacheConfig score_config =
-        score_model_config.hybrid_attention_config.enable_independent_kv_cache_pools ?
-            HybridPoolConfigCreator::createConfig(
-                score_model_config, parallelism_config, kv_cache_config, false, sp_config.gen_num_per_cycle) :
-            CacheConfigCreator::createBasicConfig(
-                score_model_config, parallelism_config, false, sp_config.gen_num_per_cycle);
+        createBasicConfig(score_model_config, parallelism_config, false, sp_config.gen_num_per_cycle);
     CacheConfig propose_config =
-        propose_model_config.hybrid_attention_config.enable_independent_kv_cache_pools ?
-            HybridPoolConfigCreator::createConfig(
-                propose_model_config, parallelism_config, kv_cache_config, is_mtp, sp_config.gen_num_per_cycle) :
-            CacheConfigCreator::createBasicConfig(
-                propose_model_config, parallelism_config, is_mtp, sp_config.gen_num_per_cycle);
+        createBasicConfig(propose_model_config, parallelism_config, is_mtp, sp_config.gen_num_per_cycle);
 
     const int joint_step       = std::max(1, kv_cache_config.linear_step);
     score_config.linear_step   = joint_step;
     propose_config.linear_step = joint_step;
-
-    setupKernelSeqSize(score_config, kv_cache_config, "score");
-    setupKernelSeqSize(propose_config, kv_cache_config, "propose");
 
     int num_mtp_modules = 1;
     if (is_mtp) {

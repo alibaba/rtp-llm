@@ -7,6 +7,7 @@ from torch import nn
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.distributed.collective_torch import Group, recv, send
+from rtp_llm.models_py.model_desc.block_map import get_single_layer_cache
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import (
     AttnImplFactory,
@@ -480,11 +481,7 @@ class Qwen3AttnModel(DisaggregateModelBase):
                 out = layer(
                     hidden_states=inputs,
                     fmha_impl=fmha_impl,
-                    kv_cache=(
-                        self.kv_cache.get_layer_cache(i)
-                        if self.kv_cache is not None
-                        else None
-                    ),
+                    kv_cache=get_single_layer_cache(self.kv_cache, i),
                 )
                 self.send_to_ffn_service(out)
         outputs: List[PyModelOutputs] = []

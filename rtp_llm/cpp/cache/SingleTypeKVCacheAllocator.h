@@ -18,19 +18,19 @@ public:
 
     void                   free(const FreeInfo& free_info) override;
     void                   insertIntoCache(const InsertInfo& insert_info) override;
-    BlockAddrInfo          convertIndexToAddr(int layer_id, int block_id) const override;
-    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const override;
-    std::vector<BlockInfo>
-    convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override;
+    BlockAddrInfo          convertIndexToAddr(int layer_id, const std::string& tag, int block_id) const override;
+    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, const std::string& tag, int block_id) const override;
+    std::vector<BlockInfo> convertIndexToBuffer(
+        int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const override;
     std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
                                                     const CacheKeysType&   cache_keys,
                                                     bool                   is_connector = false) override;
     GroupedCacheLayerLayout          allLayerCacheBase() const override;
 
-    bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
-                       const std::vector<int>&         block_src_batch,
-                       bool                            copy_last_block,
-                       std::vector<TaggedBlockIdPair>& block_update_mapping) override;
+    bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                       const std::vector<int>&        block_src_batch,
+                       bool                           copy_last_block,
+                       std::vector<GroupBlockIdPair>& block_update_mapping) override;
 
     int seqSizePerBlock() const override;
     int singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
@@ -59,6 +59,7 @@ private:
 
 private:
     std::shared_ptr<FullKVCacheGroup> full_kv_cache_group_;
+    std::string                       group_tag_;
 };
 
 using SingleTypeKVCacheAllocatorPtr = std::shared_ptr<SingleTypeKVCacheAllocator>;

@@ -62,32 +62,15 @@ std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
 
     for (int layer_id = 0; layer_id < resource.layerNum(); ++layer_id) {
-        for (const auto& tag : resource.groupTagsForLayer(layer_id)) {
-            auto buffer =
-                convertLayer(resource, batch_id, layer_id, tag, start_block_idx, block_count, cp_rank, cp_size);
+        for (const auto& entry : resource.blockIdsForLayer(layer_id)) {
+            auto buffer = convertLayer(
+                resource, batch_id, layer_id, std::string(entry.tag), start_block_idx, block_count, cp_rank, cp_size);
             if (buffer) {
                 layer_cache_buffers.push_back(std::move(buffer));
             }
         }
     }
     return layer_cache_buffers;
-}
-
-std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(KVCacheResource& resource,
-                                                                     int              batch_id,
-                                                                     int              layer_id,
-                                                                     int              start_block_idx,
-                                                                     int              block_count,
-                                                                     int              cp_rank,
-                                                                     int              cp_size) {
-    return convertLayer(resource,
-                        batch_id,
-                        layer_id,
-                        resource.soleGroupTagForLayer(layer_id),
-                        start_block_idx,
-                        block_count,
-                        cp_rank,
-                        cp_size);
 }
 
 std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(KVCacheResource&   resource,
@@ -154,7 +137,7 @@ LayerCacheBufferUtil::buildKeyBlockInfos(const std::shared_ptr<LayerBlockConvert
     int                       layer_id = layer_cache_buffer->getLayerId();
 
     for (const auto& [cache_key, block_id] : layer_cache_buffer->blockIdMap()) {
-        auto block_infos = converter->convertIndexToBufferByTag(
+        auto block_infos = converter->convertIndexToBuffer(
             layer_id, layer_cache_buffer->cacheTag(), block_id, partition_count, partition_id);
 
         transfer::KeyBlockInfo kbi;

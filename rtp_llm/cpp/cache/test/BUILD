@@ -21,7 +21,7 @@ test_deps = [
     "@local_config_cuda//cuda:cudart",
 ] + torch_deps()
 
-block_cache_test_deps = [
+shared_block_cache_test_deps = [
     "//rtp_llm/cpp/testing:device_test_utils",
     "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
     "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
@@ -58,6 +58,15 @@ cc_test(
         "@com_google_googletest//:gtest_main",
     ],
     env = {},
+)
+
+cc_test(
+    name = "cache_config_creator_test",
+    srcs = ["CacheConfigCreatorTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    env = {},
+    exec_properties = {'gpu':'H20'},
 )
 
 cc_test(
@@ -148,25 +157,13 @@ cc_library(
 )
 
 cc_test(
-    name = "block_cache_test",
-    srcs = [
-        "BlockCacheTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = block_cache_test_deps,
-    env = {},
-    exec_properties = {'gpu':'H20'},
-)
-
-cc_test(
     name = "shared_block_cache_test",
     srcs = [
         "SharedBlockCacheTest.cc",
     ],
     data = [],
     copts = test_copts,
-    deps = block_cache_test_deps,
+    deps = shared_block_cache_test_deps,
     env = {},
     exec_properties = {'gpu':'H20'},
 )

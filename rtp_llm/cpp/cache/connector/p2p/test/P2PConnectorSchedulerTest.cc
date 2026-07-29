@@ -60,7 +60,7 @@ protected:
 
         for (int layer_id = 0; layer_id < num_layers; ++layer_id) {
             for (int i = 0; i < blocks_per_layer; ++i) {
-                resource->mutableBlockIds(layer_id).add({i});
+                resource->mutableBlockIds("group" + std::to_string(layer_id)).add({i});
             }
         }
 

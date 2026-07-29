@@ -3,6 +3,7 @@
 #include <cstdint>
 #include <mutex>
 #include <optional>
+#include <map>
 #include <string>
 #include <vector>
 #include "rtp_llm/cpp/engine_base/stream/GenerateTypes.h"
@@ -11,11 +12,12 @@ namespace rtp_llm {
 
 struct SystemPromptParams {
     SystemPromptParams() {}
-    SystemPromptParams(const std::vector<int>& prompt_tokens, const std::vector<int>& block_ids):
-        prompt_tokens(prompt_tokens), block_ids(block_ids) {}
+    SystemPromptParams(const std::vector<int>&                 prompt_tokens,
+                       std::map<std::string, std::vector<int>> block_ids_by_group):
+        prompt_tokens(prompt_tokens), block_ids_by_group(std::move(block_ids_by_group)) {}
 
-    std::vector<int> prompt_tokens;
-    std::vector<int> block_ids;
+    std::vector<int>                        prompt_tokens;
+    std::map<std::string, std::vector<int>> block_ids_by_group;
 };
 
 class SystemPrompt {

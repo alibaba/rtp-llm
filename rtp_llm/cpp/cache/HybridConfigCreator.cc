@@ -132,9 +132,6 @@ std::vector<GroupBase> buildTaggedGroups(const LayerKVCacheSpecs& runtime_specs,
         it->layer_ids.push_back(layer_id);
     }
 
-    std::stable_partition(groups.begin(), groups.end(), [](const GroupBase& group) {
-        return group.policy.group_type == CacheGroupType::FULL;
-    });
     RTP_LLM_CHECK_WITH_INFO(!groups.empty(), "hybrid config requires at least one cache group");
     const auto full_group_num = std::count_if(groups.begin(), groups.end(), [](const GroupBase& group) {
         return group.policy.group_type == CacheGroupType::FULL;
@@ -144,14 +141,6 @@ std::vector<GroupBase> buildTaggedGroups(const LayerKVCacheSpecs& runtime_specs,
         "multiple full attention cache groups (%zu) are not supported: FMHA parameters bind one block table before "
         "the layer loop",
         static_cast<size_t>(full_group_num));
-    const bool has_full_group = full_group_num != 0;
-    if (has_full_group
-        && (groups[0].policy.group_type != CacheGroupType::FULL || groups[0].spec == nullptr
-            || groups[0].spec->tag != "full")) {
-        RTP_LLM_LOG_WARNING("hybrid full cache group is expected at gid 0 with tag=full, got tag=%s type=%d",
-                            groups[0].spec == nullptr ? "<null>" : groups[0].spec->tag.c_str(),
-                            static_cast<int>(groups[0].policy.group_type));
-    }
     return groups;
 }
 
@@ -189,8 +178,7 @@ void setupTopologyFromGroups(CacheConfig& config, std::vector<GroupBase> groups)
         layers[layer_id].layer_id = static_cast<int>(layer_id);
     }
 
-    for (size_t gid = 0; gid < groups.size(); ++gid) {
-        const auto& group = groups[gid];
+    for (const auto& group : groups) {
         for (int layer_id : group.layer_ids) {
             RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layers.size(),
                                     "hybrid tag=%s has invalid layer id %d",
@@ -204,35 +192,6 @@ void setupTopologyFromGroups(CacheConfig& config, std::vector<GroupBase> groups)
 }
 
 }  // namespace
-
-std::vector<std::vector<int>> HybridConfigCreator::splitIntoGroups(const std::vector<int>& ids, int group_layer_num) {
-    std::vector<std::vector<int>> groups;
-    if (ids.empty()) {
-        return groups;
-    }
-    const int n = static_cast<int>(ids.size());
-    const int s = std::max(group_layer_num, 1);
-    groups.reserve((n + s - 1) / s);
-    for (int i = 0; i < n; i += s) {
-        const int end = std::min(i + s, n);
-        groups.emplace_back(ids.begin() + i, ids.begin() + end);
-    }
-    return groups;
-}
-
-int HybridConfigCreator::calculateGroupLayerNum(int linear_layer_count, int full_layer_count) {
-    int group_layer_num = 0;
-    if (linear_layer_count > 0 && full_layer_count > 0) {
-        group_layer_num = std::gcd(linear_layer_count, full_layer_count);
-        if (group_layer_num < full_layer_count) {
-            group_layer_num = full_layer_count;
-        }
-    } else {
-        group_layer_num = std::max(linear_layer_count, full_layer_count);
-    }
-    group_layer_num = std::max(group_layer_num, 1);
-    return group_layer_num;
-}
 
 std::pair<std::vector<int>, std::vector<int>>
 HybridConfigCreator::splitLayersByAttentionType(const ModelConfig& model_config) {
@@ -278,88 +237,6 @@ CacheConfig HybridConfigCreator::initializeConfig(const ModelConfig&      model_
     return config;
 }
 
-KVCacheSpecPtr HybridConfigCreator::getSpecFromLayers(const LayerKVCacheSpecs& runtime_specs,
-                                                      const std::vector<int>&  layer_ids,
-                                                      const char*              spec_role) {
-    KVCacheSpecPtr result;
-    std::string    fingerprint;
-    for (int layer_id : layer_ids) {
-        RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(layer_id) < runtime_specs.size()
-                                    && !runtime_specs[static_cast<size_t>(layer_id)].empty(),
-                                "missing runtime kv_cache specs for %s layer %d",
-                                spec_role,
-                                layer_id);
-        RTP_LLM_CHECK_WITH_INFO(runtime_specs[static_cast<size_t>(layer_id)].size() == 1,
-                                "%s layer %d must have exactly one runtime kv_cache spec, got %zu",
-                                spec_role,
-                                layer_id,
-                                runtime_specs[static_cast<size_t>(layer_id)].size());
-        const auto& spec = runtime_specs[static_cast<size_t>(layer_id)][0];
-        RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "%s layer %d has null kv_cache spec", spec_role, layer_id);
-        if (result == nullptr) {
-            result      = spec;
-            fingerprint = spec->fingerprint();
-        } else {
-            RTP_LLM_CHECK_WITH_INFO(
-                fingerprint == spec->fingerprint(), "%s layers have different kv_cache spec fingerprints", spec_role);
-        }
-    }
-    RTP_LLM_CHECK_WITH_INFO(result != nullptr, "no %s layers found", spec_role);
-    return result->clone();
-}
-
-std::pair<std::vector<std::vector<int>>, std::vector<std::vector<int>>> HybridConfigCreator::createLayerGroups(
-    const std::vector<int>& linear_layers, const std::vector<int>& full_layers, int& group_layer_num) {
-    const int linear_cnt = static_cast<int>(linear_layers.size());
-    const int full_cnt   = static_cast<int>(full_layers.size());
-    group_layer_num      = HybridConfigCreator::calculateGroupLayerNum(linear_cnt, full_cnt);
-
-    const auto linear_groups = HybridConfigCreator::splitIntoGroups(linear_layers, group_layer_num);
-    const auto full_groups   = HybridConfigCreator::splitIntoGroups(full_layers, group_layer_num);
-
-    return std::make_pair(std::move(linear_groups), std::move(full_groups));
-}
-
-void HybridConfigCreator::setupCacheConfigSpecs(CacheConfig&                         config,
-                                                const std::vector<std::vector<int>>& linear_groups,
-                                                const std::vector<std::vector<int>>& full_groups,
-                                                const KVCacheSpecPtr&                linear_spec,
-                                                const KVCacheSpecPtr&                full_spec,
-                                                uint32_t                             linear_local_kv_head_num,
-                                                uint32_t                             full_local_kv_head_num) {
-    std::vector<GroupBase> groups;
-    std::vector<LayerBase> layers(static_cast<size_t>(config.layer_num));
-    for (size_t layer_id = 0; layer_id < layers.size(); ++layer_id) {
-        layers[layer_id].layer_id = static_cast<int>(layer_id);
-    }
-
-    auto append_group = [&](const KVCacheSpecPtr&   spec,
-                            CacheGroupType          type,
-                            const std::vector<int>& layer_ids,
-                            uint32_t                local_kv_head_num) {
-        GroupBase group;
-        group.tag               = spec->tag;
-        group.spec              = spec;
-        group.policy            = defaultCacheGroupPolicy(type);
-        group.layer_ids         = layer_ids;
-        group.local_kv_head_num = local_kv_head_num;
-        groups.push_back(group);
-        for (int layer_id : layer_ids) {
-            auto& layer = layers[static_cast<size_t>(layer_id)];
-            layer.group_tags.push_back(spec->tag);
-        }
-    };
-
-    // Keep order: all full groups first, then linear groups.
-    for (const auto& g : full_groups) {
-        append_group(full_spec, CacheGroupType::FULL, g, full_local_kv_head_num);
-    }
-    for (const auto& g : linear_groups) {
-        append_group(linear_spec, CacheGroupType::LINEAR, g, linear_local_kv_head_num);
-    }
-    config.setTopology(std::move(groups), std::move(layers));
-}
-
 void HybridConfigCreator::setupPhysicalSizes(CacheConfig&          config,
                                              const KVCacheSpecPtr& full_spec,
                                              const KVCacheSpecPtr& linear_spec) {
@@ -389,12 +266,20 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
                                                     int                      gen_num_per_cycle) {
     (void)is_mtp;
 
-    auto       dtype            = MemoryEvaluationHelper::getDataTypeForCache(model_config);
-    const auto tokens_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    auto       dtype                     = MemoryEvaluationHelper::getDataTypeForCache(model_config);
+    const auto tokens_per_block          = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
+    const auto kernel_seq_size_per_block = model_config.attn_config.kernel_tokens_per_block > 0 ?
+                                               static_cast<uint32_t>(model_config.attn_config.kernel_tokens_per_block) :
+                                               tokens_per_block;
     RTP_LLM_CHECK_WITH_INFO(tokens_per_block > 0, "hybrid seq_size_per_block must be > 0");
+    RTP_LLM_CHECK_WITH_INFO(kernel_seq_size_per_block > 0 && tokens_per_block % kernel_seq_size_per_block == 0,
+                            "hybrid seq_size_per_block=%u must be divisible by kernel_seq_size_per_block=%u",
+                            tokens_per_block,
+                            kernel_seq_size_per_block);
     SpecBuildContext ctx;
     ctx.dtype                   = dtype;
     ctx.seq_size_per_block      = tokens_per_block;
+    ctx.kernel_tokens_per_block = kernel_seq_size_per_block;
     ctx.attn_config             = &model_config.attn_config;
     ctx.linear_attention_config = &model_config.linear_attention_config;
     ctx.parallelism_config      = &parallelism_config;
@@ -408,22 +293,31 @@ CacheConfig HybridConfigCreator::createHybridConfig(const ModelConfig&       mod
     // Initialize config
     CacheConfig config        = HybridConfigCreator::initializeConfig(model_config, linear_layers, full_layers, dtype);
     config.seq_size_per_block = tokens_per_block;
+    config.kernel_seq_size_per_block = kernel_seq_size_per_block;
 
     auto cache_groups = buildTaggedGroups(runtime_specs, model_config, parallelism_config);
     auto full_spec    = representativeSpec(cache_groups, CacheGroupType::FULL);
     auto linear_spec  = representativeSpec(cache_groups, CacheGroupType::LINEAR);
 
     config.group_layer_num = groupLayerNumForGroups(cache_groups);
-    setupTopologyFromGroups(config, std::move(cache_groups));
 
-    // Setup physical sizes
+    // Complete scalar and per-layer physical layout before publishing the topology.
     HybridConfigCreator::setupPhysicalSizes(config, full_spec, linear_spec);
 
-    // Per-layer block stride (kv + scale).
-    // For hybrid attention, the physical per-layer stride follows the selected physical layout stride.
+    for (auto& group : cache_groups) {
+        group.seq_size_per_block        = group.spec->seq_size_per_block;
+        group.kernel_seq_size_per_block = group.policy.group_type == CacheGroupType::FULL ?
+                                              std::min<size_t>(kernel_seq_size_per_block, group.seq_size_per_block) :
+                                              group.seq_size_per_block;
+        group.kv_block_stride_bytes     = group.spec->block_size_bytes();
+        group.kv_scale_stride_bytes     = group.spec->scale_block_size_bytes();
+    }
+
     const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
     config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
                                               static_cast<int>(per_layer_stride_bytes));
+
+    setupTopologyFromGroups(config, std::move(cache_groups));
 
     return config;
 }

@@ -1,5 +1,8 @@
 #pragma once
 
+#include <algorithm>
+#include <functional>
+#include <iterator>
 #include <map>
 #include <memory>
 #include <string>
@@ -65,8 +68,75 @@ private:
     size_t                          active_layer_count_ = 0;
 };
 
+class GroupedCacheLayerLayout;
+
+// Non-owning view of every tagged cache buffer active at one layer.
+class LayerCacheGroupView {
+public:
+    struct GroupRef {
+        std::string_view                                 tag;
+        std::reference_wrapper<const BlockBufferPtrInfo> value;
+    };
+
+    class Iterator {
+    public:
+        using iterator_category = std::input_iterator_tag;
+        using value_type        = GroupRef;
+        using difference_type   = std::ptrdiff_t;
+        using pointer           = void;
+        using reference         = value_type;
+
+        Iterator() = default;
+        value_type operator*() const;
+
+        Iterator& operator++() {
+            ++tag_it_;
+            return *this;
+        }
+
+        Iterator operator++(int) {
+            auto previous = *this;
+            ++(*this);
+            return previous;
+        }
+
+        bool operator==(const Iterator& other) const {
+            return owner_ == other.owner_ && layer_id_ == other.layer_id_ && tag_it_ == other.tag_it_;
+        }
+
+        bool operator!=(const Iterator& other) const {
+            return !(*this == other);
+        }
+
+    private:
+        friend class LayerCacheGroupView;
+
+        Iterator(const GroupedCacheLayerLayout*           owner,
+                 size_t                                   layer_id,
+                 std::vector<std::string>::const_iterator tag_it):
+            owner_(owner), layer_id_(layer_id), tag_it_(tag_it) {}
+
+        const GroupedCacheLayerLayout*           owner_    = nullptr;
+        size_t                                   layer_id_ = 0;
+        std::vector<std::string>::const_iterator tag_it_;
+    };
+
+    const BlockBufferPtrInfo& at(std::string_view tag) const;
+    bool                      contains(std::string_view tag) const;
+    size_t                    size() const;
+    Iterator                  begin() const;
+    Iterator                  end() const;
+
+private:
+    friend class GroupedCacheLayerLayout;
+    LayerCacheGroupView(const GroupedCacheLayerLayout* owner, size_t layer_id): owner_(owner), layer_id_(layer_id) {}
+
+    const GroupedCacheLayerLayout* owner_;
+    size_t                         layer_id_;
+};
+
 // Canonical KV-cache buffer layout: semantic group tag -> dense all-layer
-// layout. CacheTopology is the sole owner of group metadata and numeric group ids.
+// layout. CacheTopology is the sole owner of group metadata.
 class GroupedCacheLayerLayout {
 public:
     using GroupLayouts = std::map<std::string, CacheLayerLayout>;
@@ -89,6 +159,17 @@ public:
                                     group_config.tag.c_str(),
                                     it->second.size(),
                                     topology_->layers().size());
+            for (size_t layer_id = 0; layer_id < topology_->layers().size(); ++layer_id) {
+                const auto& layer_tags = topology_->layer(static_cast<int>(layer_id)).group_tags;
+                const bool  owns_layer =
+                    std::find(layer_tags.begin(), layer_tags.end(), group_config.tag) != layer_tags.end();
+                RTP_LLM_CHECK_WITH_INFO(it->second.hasLayer(layer_id) == owns_layer,
+                                        "GroupedCacheLayerLayout tag=%s layer=%zu active=%d topology membership=%d",
+                                        group_config.tag.c_str(),
+                                        layer_id,
+                                        it->second.hasLayer(layer_id),
+                                        owns_layer);
+            }
         }
     }
 
@@ -99,35 +180,14 @@ public:
         return it->second;
     }
 
-    const CacheLayerLayout& group(size_t group_id) const {
-        return group(topology().groupById(group_id).tag);
-    }
-
     const BlockBufferPtrInfo& at(std::string_view tag, size_t layer_id) const {
+        topology().groupForLayer(static_cast<int>(layer_id), tag);
         return group(tag).at(layer_id);
     }
 
-    const BlockBufferPtrInfo& at(size_t group_id, size_t layer_id) const {
-        return group(group_id).at(layer_id);
-    }
-
-    // Layer-only access is valid only when exactly one group has data for the
-    // requested layer.
-    const BlockBufferPtrInfo& at(size_t layer_id) const {
-        const BlockBufferPtrInfo* result = nullptr;
-        size_t                    count  = 0;
-        for (const auto& [tag, layout] : groups_) {
-            (void)tag;
-            if (layout.hasLayer(layer_id)) {
-                result = &layout.at(layer_id);
-                ++count;
-            }
-        }
-        RTP_LLM_CHECK_WITH_INFO(count == 1,
-                                "GroupedCacheLayerLayout layer=%zu requires exactly one active group, got %zu",
-                                layer_id,
-                                count);
-        return *result;
+    LayerCacheGroupView at(size_t layer_id) const {
+        topology().layer(static_cast<int>(layer_id));
+        return LayerCacheGroupView(this, layer_id);
     }
 
     const GroupLayouts& groups() const noexcept {
@@ -136,10 +196,6 @@ public:
 
     bool hasGroupData(std::string_view tag) const {
         return !group(tag).empty();
-    }
-
-    size_t groupId(std::string_view tag) const {
-        return topology().groupIdForTag(tag);
     }
 
     const CacheTopology& topology() const {
@@ -156,6 +212,34 @@ private:
     std::shared_ptr<const CacheTopology> topology_;
     GroupLayouts                         groups_;
 };
+
+inline LayerCacheGroupView::GroupRef LayerCacheGroupView::Iterator::operator*() const {
+    return {*tag_it_, std::cref(owner_->group(*tag_it_).at(layer_id_))};
+}
+
+inline LayerCacheGroupView::Iterator LayerCacheGroupView::begin() const {
+    const auto& tags = owner_->topology().layer(static_cast<int>(layer_id_)).group_tags;
+    return Iterator(owner_, layer_id_, tags.begin());
+}
+
+inline LayerCacheGroupView::Iterator LayerCacheGroupView::end() const {
+    const auto& tags = owner_->topology().layer(static_cast<int>(layer_id_)).group_tags;
+    return Iterator(owner_, layer_id_, tags.end());
+}
+
+inline const BlockBufferPtrInfo& LayerCacheGroupView::at(std::string_view tag) const {
+    return owner_->at(tag, layer_id_);
+}
+
+inline bool LayerCacheGroupView::contains(std::string_view tag) const {
+    const auto& tags = owner_->topology().layer(static_cast<int>(layer_id_)).group_tags;
+    return std::any_of(
+        tags.begin(), tags.end(), [tag](const std::string& candidate) { return std::string_view(candidate) == tag; });
+}
+
+inline size_t LayerCacheGroupView::size() const {
+    return owner_->topology().layer(static_cast<int>(layer_id_)).group_tags.size();
+}
 
 struct KVCacheBuffer {
     torch::Tensor kv_blocks;

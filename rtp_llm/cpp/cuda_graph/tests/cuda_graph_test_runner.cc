@@ -34,7 +34,7 @@ public:
         params.hidden_size                  = static_cast<size_t>(hidden_size);
         params.model_data_type              = c10::ScalarType::BFloat16;
         params.prefill_capture_seq_lens     = std::move(prefill_capture_seq_lens);
-        params.kv_cache_group_tags          = std::move(group_tags);
+        bindCacheGroups(params, group_tags);
 
         runner_ = CudaGraphRunner::createForPrefill(std::move(py_instance), std::move(params));
     }
@@ -60,8 +60,8 @@ public:
         params.model_data_type              = c10::ScalarType::BFloat16;
         params.max_context_batch_size       = 128;
         params.decode_capture_batch_sizes   = std::move(decode_capture_batch_sizes);
-        params.kv_cache_group_tags          = std::move(group_tags);
-        params.is_target_verify             = is_target_verify;
+        bindCacheGroups(params, group_tags);
+        params.is_target_verify = is_target_verify;
 
         runner_ = CudaGraphRunner::createForDecode(std::move(py_instance), std::move(params));
     }
@@ -89,6 +89,14 @@ public:
     }
 
 private:
+    static void bindCacheGroups(GraphParams& params, const std::vector<std::string>& group_tags) {
+        for (const auto& tag : group_tags) {
+            const auto [it, inserted] = params.kv_cache_groups.emplace(tag, CacheGroupType::FULL);
+            (void)it;
+            RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate CUDA graph KV cache tag=%s", tag.c_str());
+        }
+    }
+
     void reset_runner() {
         if (runner_ != nullptr) {
             delete runner_;

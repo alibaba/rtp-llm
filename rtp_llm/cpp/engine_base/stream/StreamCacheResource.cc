@@ -682,7 +682,7 @@ void StreamCacheResource::evictDeviceCacheToMemory() {
     }
     // Use notInUseBlocksNum() instead of freeBlocksNum() to account for
     // in-flight connector blocks (being async-written to memory). These blocks
-    // are neither held by requests nor in BlockCache, so they will become free
+    // are neither held by requests nor in SharedBlockCache, so they will become free
     // once the async write completes. This prevents concurrent streams from
     // over-evicting when multiple streams finish simultaneously.
     const auto not_in_use_blocks = resource_context_.cache_manager->notInUseBlocksNum();
@@ -728,11 +728,10 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
         return;
     }
 
-    auto type_list = resource_context_.cache_manager->cacheConfig().groupTypesSnapshot();
-
-    for (size_t i = 0; i < type_list.size(); i++) {
-        if (type_list[i] == CacheGroupType::LINEAR) {
-            batch_kv_cache_resource_->swapBlocks(batch_id, i, rhs, lhs);
+    const auto& cache_config = resource_context_.cache_manager->cacheConfig();
+    for (const auto& group : cache_config.topology().groups()) {
+        if (group.policy.group_type == CacheGroupType::LINEAR) {
+            batch_kv_cache_resource_->swapBlocks(batch_id, group.tag, rhs, lhs);
         }
     }
 }

@@ -64,18 +64,18 @@ bool P2PConnectorWorkerPrefill::writeByLayer(int                       layer_id,
     if (!computed_buffer->expectedBufferCount().has_value()) {
         size_t expected_buffer_count = 0;
         for (int expected_layer = 0; expected_layer < resource->layerNum(); ++expected_layer) {
-            for (const auto& expected_tag : resource->groupTagsForLayer(expected_layer)) {
+            for (const auto& entry : resource->blockIdsForLayer(expected_layer)) {
                 expected_buffer_count += LayerCacheBufferUtil::hasTransferableBlocks(
-                    *resource, expected_layer, expected_tag, 0, -1, config_.cp_rank, config_.cp_size);
+                    *resource, expected_layer, std::string(entry.tag), 0, -1, config_.cp_rank, config_.cp_size);
             }
         }
         computed_buffer->setExpectedBufferCount(expected_buffer_count);
     }
 
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
-    for (const auto& cache_tag : resource->groupTagsForLayer(layer_id)) {
+    for (const auto& entry : resource->blockIdsForLayer(layer_id)) {
         auto layer_cache_buffer = LayerCacheBufferUtil::convertLayer(
-            *resource, 0, layer_id, cache_tag, 0, -1, config_.cp_rank, config_.cp_size);
+            *resource, 0, layer_id, std::string(entry.tag), 0, -1, config_.cp_rank, config_.cp_size);
         if (layer_cache_buffer) {
             collector->total_block_count += layer_cache_buffer->blockIdMap().size();
             layer_cache_buffers.push_back(std::move(layer_cache_buffer));
