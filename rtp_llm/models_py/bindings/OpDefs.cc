@@ -96,6 +96,9 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<rtp_llm::CacheStoreWriter, std::shared_ptr<rtp_llm::CacheStoreWriter>>(m, "CacheStoreWriter")
         .def("write",
              &rtp_llm::CacheStoreWriter::write,
+             // Per-layer hot path that touches no CPython state, so hold no GIL while
+             // it locks, copies tensor handles, records the event and enqueues.
+             pybind11::call_guard<pybind11::gil_scoped_release>(),
              "Schedule one layer's CacheStore write during the active forward cycle. "
              "Calls before init or after draining fail. The inputs object is bound to "
              "the forward cycle that prepared it and must not be reused across cycles.");

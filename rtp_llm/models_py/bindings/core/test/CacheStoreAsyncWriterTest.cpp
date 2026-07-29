@@ -277,8 +277,7 @@ TEST_F(CacheStoreAsyncWriterTest, MissingCacheStoreRollbackSwitchSkipsCycleWrite
     {
         // Degraded-skip mode: the cycle is admitted, write() drops the work without side
         // effects, and the cycle drains clean. The early return precedes write()'s
-        // CUDA/ROCm build guard, so this holds structurally on CPU-only builds too - but
-        // it has never been exercised there (see the UNVERIFIED note in this BUILD file).
+        // CUDA/ROCm build guard.
         autil::EnvGuard rollback_switch("CACHE_STORE_SKIP_WRITE_WHEN_UNREADY", "1");
         ASSERT_NO_THROW(writer.init());
         EXPECT_TRUE(writer.skip_cycle_writes_);

@@ -190,8 +190,12 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         kv_cache_layer_layout = cache_manager->allLayerCacheBase();
     }
 
+    // Single source for the draft module index: the loop below breaks after one
+    // module, so the layout and the cache-config index must name the same module.
+    constexpr int kMtpModuleIndex = 0;
+
     auto target_cache_layer_layout = cache_manager->getMainModelGroupedCacheLayerLayout();
-    auto draft_cache_layer_layout  = cache_manager->getMTPModuleGroupedCacheLayerLayout(0);
+    auto draft_cache_layer_layout  = cache_manager->getMTPModuleGroupedCacheLayerLayout(kMtpModuleIndex);
 
     GptModelInitParams model_init_params(
         {params.gpt_weights,
@@ -260,7 +264,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 mtp_params->model_config_.attn_config.tokens_per_block,
                                 mtp_params->model_config_.attn_config.kernel_tokens_per_block,
                                 cache_manager,
-                                /*mtp_cache_config_index=*/0});
+                                /*mtp_cache_config_index=*/kMtpModuleIndex});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
             draft_model_.reset(new PyWrappedModel(model_params, params.py_sp_model, false, false));
