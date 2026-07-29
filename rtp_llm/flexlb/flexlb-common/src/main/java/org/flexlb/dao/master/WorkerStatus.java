@@ -14,6 +14,7 @@ import java.util.Map.Entry;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.concurrent.locks.ReentrantLock;
 
 @Data
@@ -57,15 +58,16 @@ public class WorkerStatus {
      * @param taskInfo Task information
      */
     public void putLocalTask(Long requestId, TaskInfo taskInfo) {
-        localTaskMap.put(requestId, taskInfo);
         taskInfo.updateTaskState(TaskStateEnum.IN_TRANSIT);
-
-        // Local incremental queue time update
-        this.addRunningQueueTime(taskInfo.estimatePrefillTime());
-        // Local incremental KV cache tokens update
-        long needNewKvCacheLen = taskInfo.getInputLength() - taskInfo.getPrefixLength();
-        this.decKvCacheFree(needNewKvCacheLen);
-        this.addKvCacheUsed(needNewKvCacheLen);
+        AtomicReference<TaskInfo> replacedTaskRef = new AtomicReference<>();
+        localTaskMap.compute(requestId, (id, previousTask) -> {
+            if (previousTask != null) {
+                releaseLocalTaskResources(previousTask);
+                replacedTaskRef.set(previousTask);
+            }
+            reserveLocalTaskResources(taskInfo);
+            return taskInfo;
+        });
 
         lastSelectedTime.set(System.nanoTime() / 1000);
         Logger.debug("Task {} added to local queue with state: {}", requestId, TaskStateEnum.IN_TRANSIT);
@@ -76,14 +78,24 @@ public class WorkerStatus {
      * @param requestId Request ID
      */
     public void removeLocalTask(Long requestId) {
-        TaskInfo taskInfo = localTaskMap.get(requestId);
-        if (taskInfo != null) {
-            safeDecrementQueueTime(runningQueueTime, taskInfo.estimatePrefillTime());
-            long needNewKvCacheLen = taskInfo.getInputLength() - taskInfo.getPrefixLength();
-            decKvCacheFree(-needNewKvCacheLen);
-            addKvCacheUsed(-needNewKvCacheLen);
-            localTaskMap.remove(requestId);
-        }
+        localTaskMap.computeIfPresent(requestId, (id, taskInfo) -> {
+            releaseLocalTaskResources(taskInfo);
+            return null;
+        });
+    }
+
+    private void reserveLocalTaskResources(TaskInfo taskInfo) {
+        this.addRunningQueueTime(taskInfo.estimatePrefillTime());
+        long needNewKvCacheLen = taskInfo.getInputLength() - taskInfo.getPrefixLength();
+        this.decKvCacheFree(needNewKvCacheLen);
+        this.addKvCacheUsed(needNewKvCacheLen);
+    }
+
+    private void releaseLocalTaskResources(TaskInfo taskInfo) {
+        safeDecrementQueueTime(runningQueueTime, taskInfo.estimatePrefillTime());
+        long needNewKvCacheLen = taskInfo.getInputLength() - taskInfo.getPrefixLength();
+        decKvCacheFree(-needNewKvCacheLen);
+        addKvCacheUsed(-needNewKvCacheLen);
     }
 
     /**
@@ -226,6 +238,24 @@ public class WorkerStatus {
         usedKvCacheTokens.getAndSet(latestUsedKvCacheTokens);
         availableKvCacheTokens.getAndSet(latestAvailableKvCacheTokens);
 
+    }
+
+    public long getLocalPendingTaskCount() {
+        long pendingTaskCount = 0;
+        for (TaskInfo taskInfo : localTaskMap.values()) {
+            if (isLocalPendingTask(taskInfo)) {
+                pendingTaskCount++;
+            }
+        }
+        return pendingTaskCount;
+    }
+
+    private boolean isLocalPendingTask(TaskInfo taskInfo) {
+        if (taskInfo == null) {
+            return false;
+        }
+        TaskStateEnum taskState = taskInfo.getTaskState();
+        return taskState == TaskStateEnum.IN_TRANSIT || taskState == TaskStateEnum.CONFIRMED;
     }
 
     /**
