@@ -10,7 +10,6 @@ import java.util.Comparator;
 import java.util.List;
 import java.util.concurrent.PriorityBlockingQueue;
 import java.util.concurrent.atomic.AtomicInteger;
-import java.util.concurrent.atomic.AtomicLong;
 
 /**
  * Controlled access to shared {@link WorkerBatcher} infrastructure.
@@ -27,13 +26,19 @@ public class BatcherContext {
     private final BatchDecisionHandler handler;
     private final PriorityBlockingQueue<BatchItem> queue;
     private final AtomicInteger queueDepth;
-    private final AtomicLong headSortKey;
     private final BatchSchedulerReporter reporter;
+
+    BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
+                   BatchDecisionHandler handler,
+                   PriorityBlockingQueue<BatchItem> queue,
+                   BatchSchedulerReporter reporter) {
+        this(key, prefillEp, cfg, handler, queue, new AtomicInteger(queue.size()), reporter);
+    }
+
     BatcherContext(String key, PrefillEndpoint prefillEp, FlexlbConfig cfg,
                    BatchDecisionHandler handler,
                    PriorityBlockingQueue<BatchItem> queue,
                    AtomicInteger queueDepth,
-                   AtomicLong headSortKey,
                    BatchSchedulerReporter reporter) {
         this.key = key;
         this.prefillEp = prefillEp;
@@ -41,7 +46,6 @@ public class BatcherContext {
         this.handler = handler;
         this.queue = queue;
         this.queueDepth = queueDepth;
-        this.headSortKey = headSortKey;
         this.reporter = reporter;
     }
 
@@ -87,7 +91,6 @@ public class BatcherContext {
         boolean removed = queue.remove(item);
         if (removed) {
             queueDepth.decrementAndGet();
-            refreshHeadSortKey();
         }
         return removed;
     }
@@ -96,17 +99,7 @@ public class BatcherContext {
         int drained = queue.drainTo(dst);
         if (drained > 0) {
             queueDepth.addAndGet(-drained);
-            refreshHeadSortKey();
         }
-    }
-
-    void refreshHeadSortKey() {
-        headSortKey.set(initialHeadSortKey(queue));
-    }
-
-    private static long initialHeadSortKey(PriorityBlockingQueue<BatchItem> queue) {
-        BatchItem head = queue.peek();
-        return head != null ? head.sortKey() : 0;
     }
 
     /**
