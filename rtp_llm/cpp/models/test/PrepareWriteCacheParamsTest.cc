@@ -128,6 +128,26 @@ TEST(PrepareWriteCacheParamsTest, MalformedMetadataTensorsThrow) {
         inputs.kv_cache_block_id = torch::tensor({{int64_t(0)}, {int64_t(1)}}, torch::kInt64);  // wrong dtype
         EXPECT_THROW((void)prepare(inputs), std::exception);
     }
+    {
+        auto inputs                  = makePdPrefillInputs();
+        inputs.request_pd_separation = torch::Tensor();  // undefined
+        EXPECT_THROW((void)prepare(inputs), std::exception);
+    }
+    {
+        auto inputs                  = makePdPrefillInputs();
+        inputs.request_pd_separation = torch::tensor({1, 1}, torch::kInt32);  // wrong dtype
+        EXPECT_THROW((void)prepare(inputs), std::exception);
+    }
+    {
+        auto inputs                  = makePdPrefillInputs();
+        inputs.request_pd_separation = torch::tensor({true}, torch::kBool);  // one entry short
+        EXPECT_THROW((void)prepare(inputs), std::exception);
+    }
+    {
+        auto inputs                  = makePdPrefillInputs();
+        inputs.request_pd_separation = torch::tensor({{true}, {true}}, torch::kBool);  // 2-D
+        EXPECT_THROW((void)prepare(inputs), std::exception);
+    }
 }
 
 TEST(PrepareWriteCacheParamsTest, CpPreChunkLengthsPassThroughByIdentity) {

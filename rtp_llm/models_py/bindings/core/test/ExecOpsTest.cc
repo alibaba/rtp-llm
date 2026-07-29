@@ -445,13 +445,29 @@ TEST_F(ExecOpsTest, testRuntimeMaskLogits) {
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreRejectsUndefinedRequestId) {
+    // Only request_id is malformed: the CacheConfig group and the tagged layer cache
+    // form an otherwise valid single-block write. A default-constructed
+    // CacheConfig{}/LayerKVCache{} would also throw, but from topology lookup, so the
+    // assertion below would silently stop testing request_id if the validation order
+    // inside runtimeWriteCacheStore were ever reshuffled.
     auto inputs       = makePyCacheStoreInputs(/*tokens_per_block=*/2, /*block_num=*/1);
     inputs.request_id = torch::Tensor();
 
+    ExecOpsCacheConfigSpec config_spec(
+        /*tokens_per_block=*/2, /*physical_kv_stride=*/64, /*physical_scale_stride=*/0, /*block_num=*/1);
+    config_spec.mla_cache = true;
+    auto config           = makeCacheConfig(config_spec);
+
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base      = torch::zeros({1, 64}, torch::kUInt8);
+    layer_cache.seq_size_per_block = 2;
+    layer_cache.layer_id           = 0;
+    layer_cache.tag                = "default";
+
     try {
         runtimeWriteCacheStore(inputs,
-                               torch_ext::LayerKVCache{},
-                               CacheConfig{},
+                               layer_cache,
+                               config,
                                std::make_shared<MockCacheStore>(),
                                /*cache_model_id=*/0,
                                /*cp_rank=*/0,

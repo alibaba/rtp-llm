@@ -106,7 +106,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
         ]
         for label, cache_store_inputs, cache_store_writer, expect_warn in cases:
             with self.subTest(pairing=label):
-                attention_common._half_pair_warn_counts.clear()
+                attention_common.reset_half_pair_warn_state()
                 attention_inputs = SimpleNamespace(
                     is_prefill=True,
                     cache_store_inputs=cache_store_inputs,
@@ -118,6 +118,7 @@ class AttentionInputRoutingTest(unittest.TestCase):
                     self.assertIsNone(
                         attention_common.create_write_cache_store_impl(attention_inputs)
                     )
+                    warns_after_first_trigger = warning.call_count
 
                     _write_cp_cache_store(
                         attention_inputs, SimpleNamespace(tag="linear0")
@@ -125,14 +126,18 @@ class AttentionInputRoutingTest(unittest.TestCase):
                     _write_cp_cache_store(
                         attention_inputs, SimpleNamespace(tag="linear0")
                     )
+                    warns_after_three_triggers = warning.call_count
 
                 if cache_store_writer is not None:
                     cache_store_writer.write.assert_not_called()
                 if expect_warn:
-                    # Exponential backoff: occurrences 1 and 2 log, 3 is
-                    # suppressed, so persistence stays visible without
-                    # per-layer spam.
-                    self.assertEqual(warning.call_count, 2)
+                    # The external contract is two claims: a half pair is visible
+                    # immediately, and repeats are throttled rather than one line per
+                    # occurrence. The throttling schedule itself is private, so retuning
+                    # it (different backoff base, or time-interval limiting) must not
+                    # fail this test.
+                    self.assertEqual(warns_after_first_trigger, 1)
+                    self.assertLess(warns_after_three_triggers, 3)
                 else:
                     warning.assert_not_called()
 

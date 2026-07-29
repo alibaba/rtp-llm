@@ -1,5 +1,6 @@
 #include <memory>
 #include <numeric>
+#include "autil/EnvUtil.h"
 #include "torch/all.h"
 #include "gtest/gtest.h"
 
@@ -116,6 +117,79 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
     EXPECT_EQ(cache_keys.size(0), 2);
     EXPECT_EQ(cache_keys.size(1), 5);
     EXPECT_EQ(toVec<int64_t>(cache_keys), (std::vector<int64_t>{101, 102, 103, 0, 0, 201, 202, 203, 204, 205}));
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testPdSepRowWithoutCacheKeysIsExcludedFromPublication) {
+    // A key-less PD-prefill row must never stay flagged for publication. cache_keys is
+    // zero-initialized and runtimeWriteCacheStore publishes every row whose
+    // request_pd_separation flag is set, so leaving the flag on would store cache key
+    // "0" as if it were real - and collide across requests on that shared key.
+    // Suppressing only the memcpy is therefore not enough.
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 2048;
+    model_config.vocab_size  = 2048;
+    model_config.num_layers  = 1;
+
+    PDSepConfig pd_sep_config;
+    pd_sep_config.role_type = RoleType::PREFILL;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    initFullCacheConfig(cache_config, model_config.num_layers);
+    RuntimeConfig runtime_config;
+
+    auto makeStream = [&]() {
+        auto query                                   = make_shared<GenerateInput>();
+        query->input_ids                             = hostIntBuffer({1, 2, 3});
+        query->generate_config                       = make_shared<GenerateConfig>();
+        query->generate_config->num_return_sequences = 2;
+        // queryPdSep() reads this flag; without it the row-level branch is never entered.
+        query->generate_config->pd_separation = true;
+        GenerateStreamPtr stream =
+            make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+
+        BatchKVCacheResource resource;
+        resource.resetBatchSize(2);
+        resource.initGroups(cache_config.topologyPtr());
+        resource.setBatchBlocks(0, 0, {1, 2});
+        resource.setBatchBlocks(1, 0, {3, 4});
+        // Row 1 deliberately gets no keys. hasCacheKeys() is any-row semantics, so the
+        // stream still reports true while cacheKeys(1) stays empty - exactly the shape
+        // that the row-local check exists to catch.
+        resource.setBatchCacheKeys(0, CacheKeysType{101, 102, 103});
+        stream->setKVCache(resource);
+        stream->generate_status_->status = StreamState::RUNNING;
+        return stream;
+    };
+
+    {
+        // Default behavior: abort rather than publish a zero-key row.
+        autil::EnvGuard            fail_fast("CACHE_STORE_SKIP_ROWS_WITHOUT_CACHE_KEYS", "0");
+        StreamGroups               stream_groups({makeStream()});
+        NormalBatchStreamProcessor processor(
+            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        EXPECT_ANY_THROW((void)processor.gatherModelInput(stream_groups));
+    }
+
+    {
+        // Rollback switch: the gather succeeds and the degraded row is excluded, so the
+        // writer skips it instead of publishing zeros.
+        autil::EnvGuard            rollback("CACHE_STORE_SKIP_ROWS_WITHOUT_CACHE_KEYS", "1");
+        StreamGroups               stream_groups({makeStream()});
+        NormalBatchStreamProcessor processor(
+            model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+        auto merge_input_status = processor.gatherModelInput(stream_groups);
+        ASSERT_TRUE(merge_input_status.ok());
+        const auto& flags = merge_input_status.value().request_pd_separation;
+        ASSERT_TRUE(flags.defined());
+        ASSERT_EQ(flags.numel(), 2);
+        const auto flags_accessor = flags.accessor<bool, 1>();
+        EXPECT_TRUE(flags_accessor[0]);
+        EXPECT_FALSE(flags_accessor[1]);
+        // Row 1's keys stay zero; the flag is what keeps them from being published.
+        EXPECT_EQ(toVec<int64_t>(merge_input_status.value().cache_keys),
+                  (std::vector<int64_t>{101, 102, 103, 0, 0, 0}));
+    }
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {

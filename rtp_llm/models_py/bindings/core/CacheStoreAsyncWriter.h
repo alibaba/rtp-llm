@@ -42,6 +42,8 @@ private:
     // via -fno-access-control.
     void submit(std::function<void()> task);
     void enqueueLocked(std::function<void()> task);
+    // Creates the worker pool on first use. state_mutex_ must be held.
+    void ensureThreadPoolLocked();
 
     class PendingTaskGuard {
     public:
@@ -56,7 +58,8 @@ private:
     };
 
     void completePendingTask();
-    void storeCurrentException();
+    // True only for the cycle's first failure; later failures are dropped as before.
+    bool storeCurrentException();
 
     enum class State {
         IDLE,
@@ -79,7 +82,7 @@ private:
     uint64_t                 cycle_id_{0};
     // Guarded by state_mutex_. True only for a cycle admitted without a CacheStore
     // under the CACHE_STORE_SKIP_WRITE_WHEN_UNREADY rollback switch; write() then
-    // no-ops for the whole cycle (legacy WriteCacheStoreOp semantics).
+    // no-ops for the whole cycle (degraded skip mode; see init()).
     bool skip_cycle_writes_{false};
     int  device_id_{-1};
 

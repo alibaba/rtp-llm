@@ -178,7 +178,8 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
 
     RTP_LLM_CHECK_WITH_INFO(cache_store != nullptr,
                             "cache-store write has no active CacheStore for tag=%s layer=%d model_id=%zu. "
-                            "Ensure RemoteRpcServer::setCacheStore() completes before PD prefill.",
+                            "Ensure RemoteRpcServer::initCacheStore() has injected the CacheStore "
+                            "(KVCacheManager::setCacheStore) before PD prefill.",
                             layer_kv.tag.c_str(),
                             layer_kv.layer_id,
                             cache_model_id);

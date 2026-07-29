@@ -1,6 +1,8 @@
 #include <algorithm>
+#include <atomic>
 #include <cstring>
 #include <sstream>
+#include "autil/EnvUtil.h"
 #include "torch/all.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/normal_engine/NormalModelInputGatherer.h"
@@ -393,13 +395,51 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             // zero-filled row from being published as real keys (visible only as decode-side
             // load timeouts).
             const bool row_has_cache_keys = stream->hasCacheKeys() && !stream->cacheKeys(i).empty();
-            if (config_.role_type == RoleType::PREFILL && stream->queryPdSep()) {
-                RTP_LLM_CHECK_WITH_INFO(row_has_cache_keys,
-                                        "pd prefill stream %ld batch row %d must provide cache_keys "
-                                        "(queryPdSep=true, max_blocks_num=%zu)",
-                                        stream->streamId(),
-                                        i,
-                                        ctx.max_blocks_num);
+            if (config_.role_type == RoleType::PREFILL && stream->queryPdSep() && !row_has_cache_keys) {
+                // Operational escape hatch, in the same style as CacheStoreAsyncWriter's
+                // CACHE_STORE_SKIP_WRITE_WHEN_UNREADY: failing here aborts the whole
+                // gather and takes down every co-batched request, so a deployment that
+                // hits an unforeseen key-less path needs a way to degrade without a
+                // rebuild.
+                //
+                // This is a temporary degraded skip-row mode, NOT a restoration of any
+                // historical behavior. The pre-existing code guarded the memcpy with
+                // any-row stream->hasCacheKeys() and wrote the flag unconditionally, so
+                // a key-less row in a mixed batch was neither warned about nor excluded
+                // - it published zero keys. Skipping the row is strictly safer than what
+                // came before.
+                //
+                // The actual exclusion happens where request_pd_separation is written
+                // below. Skipping the memcpy is NOT sufficient on its own: cache_keys is
+                // zero-initialized (see the torch::zeros allocation above) and
+                // runtimeWriteCacheStore publishes every row whose flag is set, so a
+                // degraded row would otherwise store cache key "0" as a real key - the
+                // exact failure this row-level check exists to prevent, made worse by
+                // cross-request collisions on that shared "0" key.
+                // Read per row so flipping the env takes effect immediately.
+                if (autil::EnvUtil::getEnv("CACHE_STORE_SKIP_ROWS_WITHOUT_CACHE_KEYS", false)) {
+                    static std::atomic<uint64_t> total_skipped_rows{0};
+                    const auto skipped_rows = total_skipped_rows.fetch_add(1, std::memory_order_relaxed) + 1;
+                    RTP_LLM_INTERVAL_LOG(60,
+                                         WARN,
+                                         "pd prefill stream %ld batch row %d has no cache_keys; skipping the row "
+                                         "because CACHE_STORE_SKIP_ROWS_WITHOUT_CACHE_KEYS is set "
+                                         "(max_blocks_num=%zu, cumulative skipped rows=%lu)",
+                                         stream->streamId(),
+                                         i,
+                                         ctx.max_blocks_num,
+                                         static_cast<unsigned long>(skipped_rows));
+                } else {
+                    RTP_LLM_CHECK_WITH_INFO(false,
+                                            "pd prefill stream %ld batch row %d must provide cache_keys "
+                                            "(queryPdSep=true, max_blocks_num=%zu). Set "
+                                            "CACHE_STORE_SKIP_ROWS_WITHOUT_CACHE_KEYS=1 to put this row into "
+                                            "temporary degraded skip-row mode (warn and exclude it from cache-store "
+                                            "publication) instead of failing the step.",
+                                            stream->streamId(),
+                                            i,
+                                            ctx.max_blocks_num);
+                }
             }
             if (ctx.max_blocks_num && config_.role_type == RoleType::PREFILL && row_has_cache_keys) {
                 RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(stream->cacheKeys(i).size())
@@ -414,8 +454,14 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             }
 
             *(model_input.request_id.data_ptr<int64_t>() + prefill_batch_idx) = stream->streamId();
+            // AND with row_has_cache_keys so that a row degraded by
+            // CACHE_STORE_SKIP_ROWS_WITHOUT_CACHE_KEYS is genuinely skipped by
+            // runtimeWriteCacheStore, which `continue`s on rows whose flag is clear.
+            // Without this the row would publish its zero-filled cache_keys as real keys.
+            // On the fail-fast path this is an identity transform: a PREFILL row with
+            // queryPdSep() and no keys aborts above and never reaches this line.
             *(reinterpret_cast<bool*>(model_input.request_pd_separation.data_ptr()) + prefill_batch_idx) =
-                stream->queryPdSep();
+                stream->queryPdSep() && row_has_cache_keys;
 
             ctx.batch_idx += 1;
             ctx.token_idx += input_tokens.size();

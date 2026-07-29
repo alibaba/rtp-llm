@@ -3,6 +3,7 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 #include <memory>
+#include <string>
 #include <utility>
 
 #include "autil/EnvUtil.h"
@@ -61,10 +62,22 @@ CacheStoreAsyncWriter::CacheStoreAsyncWriter(int                             dev
         }
     }
 
+    // No thread pool here: it is created by the first init() that gets far enough
+    // to start a cycle. See ensureThreadPoolLocked().
+}
+
+// A writer is constructed per PyWrappedModel (and once more per MTP draft module),
+// but only PD-separation prefill ever opens a cache-store cycle. Creating the pool
+// on first use keeps non-PD and decode-only processes from parking idle worker
+// threads for every model instance. state_mutex_ must be held by the caller.
+void CacheStoreAsyncWriter::ensureThreadPoolLocked() {
+    if (thread_pool_) {
+        return;
+    }
     // Env-tunable with safe defaults (same operational style as
     // CACHE_STORE_SKIP_WRITE_WHEN_UNREADY): queue-full aborts the forward, so
     // deployments with unusual layer/tag/batch products can widen the pool
-    // without a rebuild. Read once per writer at construction.
+    // without a rebuild. Read once, on the cycle that first needs the pool.
     const size_t thread_count = autil::EnvUtil::getEnv("CACHE_STORE_WRITER_THREAD_NUM", static_cast<size_t>(3));
     const size_t queue_size   = autil::EnvUtil::getEnv("CACHE_STORE_WRITER_QUEUE_SIZE", static_cast<size_t>(10000));
     RTP_LLM_CHECK_WITH_INFO(thread_count > 0 && queue_size > 0,
@@ -84,11 +97,15 @@ void CacheStoreAsyncWriter::completePendingTask() {
     }
 }
 
-void CacheStoreAsyncWriter::storeCurrentException() {
+// Returns true only for the caller that actually stored, i.e. the cycle's first
+// failure - which is also the exception waitAllDone() will rethrow.
+bool CacheStoreAsyncWriter::storeCurrentException() {
     std::lock_guard<std::mutex> ex_lock(exception_mutex_);
-    if (!stored_exception_) {
-        stored_exception_ = std::current_exception();
+    if (stored_exception_) {
+        return false;
     }
+    stored_exception_ = std::current_exception();
+    return true;
 }
 
 CacheStoreAsyncWriter::~CacheStoreAsyncWriter() {
@@ -98,10 +115,41 @@ CacheStoreAsyncWriter::~CacheStoreAsyncWriter() {
         state = state_;
     }
     if (state != State::IDLE) {
-        RTP_LLM_LOG_WARNING("CacheStoreAsyncWriter destroyed while %s - "
-                            "caller should call waitAllDone() before destruction",
-                            stateName(state));
+        // Report what is being lost, not just that it happened. pending_count_ is a
+        // snapshot of admitted-but-unfinished tasks; stop() below joins the in-flight
+        // ones but its worker loop breaks on !_run without draining the queue (and
+        // LockFreeThreadPool::clearQueue() is a no-op), so queued-but-unstarted writes
+        // never run. Any stored background exception is lost as well - waitAllDone()
+        // is the only path that rethrows it.
+        const auto  unfinished = pending_count_.load(std::memory_order_acquire);
+        std::string stored_what;
+        {
+            std::lock_guard<std::mutex> ex_lock(exception_mutex_);
+            if (stored_exception_) {
+                try {
+                    std::rethrow_exception(stored_exception_);
+                } catch (const std::exception& e) {
+                    stored_what = e.what();
+                } catch (...) {
+                    stored_what = "<non-std exception>";
+                }
+            }
+        }
+        RTP_LLM_LOG_ERROR("CacheStoreAsyncWriter destroyed while %s - caller should call waitAllDone() before "
+                          "destruction; abandoning up to %ld unfinished write(s) (model_id=%zu, device_id=%d); "
+                          "stored background exception: %s",
+                          stateName(state),
+                          static_cast<long>(unfinished),
+                          cache_model_id_,
+                          device_id_,
+                          stored_what.empty() ? "none" : stored_what.c_str());
     }
+    // UAF safety precondition: background tasks capture a raw `this` (see
+    // enqueueLocked) and touch pending_count_/wait_cv_/exception_mutex_ through
+    // PendingTaskGuard, so those members must outlive every admitted task.
+    // autil::LockFreeThreadPool::stop() -> join() joins every worker thread, so
+    // an executing task always finishes before the members below die - do not
+    // swap it for a non-joining shutdown.
     if (thread_pool_) {
         thread_pool_->stop();
     }
@@ -129,9 +177,12 @@ void CacheStoreAsyncWriter::init() {
                             device_id_);
     auto cache_store = cache_manager_->getCacheStore();
     // Operational rollback for the fail-fast-on-missing-CacheStore behavior:
-    // CACHE_STORE_SKIP_WRITE_WHEN_UNREADY=1 restores the legacy WriteCacheStoreOp
-    // semantics (WARN and silently skip this cycle's writes) for deployments whose
-    // startup order cannot guarantee CacheStore injection before PD prefill traffic.
+    // CACHE_STORE_SKIP_WRITE_WHEN_UNREADY=1 degrades a missing CacheStore to
+    // skipping this cycle's writes, for deployments whose startup order cannot
+    // guarantee CacheStore injection before PD prefill traffic. Degraded mode,
+    // not a literal restoration of the old behavior: the pre-refactor
+    // WriteCacheStoreOp skipped with only a DEBUG log, while this path warns
+    // (rate-limited) so the degradation stays visible.
     // Read per cycle so flipping the env takes effect without code changes.
     skip_cycle_writes_ = false;
     if (cache_store == nullptr && autil::EnvUtil::getEnv("CACHE_STORE_SKIP_WRITE_WHEN_UNREADY", false)) {
@@ -148,11 +199,15 @@ void CacheStoreAsyncWriter::init() {
                                 "CacheStoreAsyncWriter::init() cannot start cache-store work because CacheStore is "
                                 "unavailable (model_id=%zu, device_id=%d). Ensure RemoteRpcServer::initCacheStore() "
                                 "has injected the CacheStore before PD prefill, or set "
-                                "CACHE_STORE_SKIP_WRITE_WHEN_UNREADY=1 to temporarily restore the legacy "
-                                "skip-write behavior.",
+                                "CACHE_STORE_SKIP_WRITE_WHEN_UNREADY=1 to skip cache-store writes for cycles that "
+                                "start before injection.",
                                 cache_model_id_,
                                 device_id_);
     }
+
+    // Last fallible step before the state transition, so a pool that cannot start
+    // leaves the writer IDLE and retryable like every other failure above.
+    ensureThreadPoolLocked();
 
     pending_count_.store(0, std::memory_order_relaxed);
     {
@@ -184,9 +239,21 @@ void CacheStoreAsyncWriter::enqueueLocked(std::function<void()> task) {
         try {
             setCurrentThreadDeviceIfNeeded(device_id_);
             task();
+        } catch (const std::exception& e) {
+            // Log at throw time rather than leaving it to waitAllDone(), which may
+            // rethrow much later (or never, if the writer is destroyed first).
+            // runtimeWriteCacheStore's checks already carry tag/layer/model_id in what().
+            //
+            // First failure only: a malformed shared metadata tensor fails every
+            // layer x tag task of the cycle identically, so logging per task would emit
+            // one duplicate ERROR line per task and bury the rest of the timeline.
+            if (storeCurrentException()) {
+                RTP_LLM_LOG_ERROR("CacheStoreAsyncWriter: background task threw an exception: %s", e.what());
+            }
         } catch (...) {
-            storeCurrentException();
-            RTP_LLM_LOG_ERROR("CacheStoreAsyncWriter: background task threw an exception");
+            if (storeCurrentException()) {
+                RTP_LLM_LOG_ERROR("CacheStoreAsyncWriter: background task threw a non-std exception");
+            }
         }
     };
 
@@ -237,9 +304,10 @@ void CacheStoreAsyncWriter::waitAllDone() {
 void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_store_inputs,
                                   const torch_ext::LayerKVCache&       layer_kv) {
     {
-        // Legacy-skip cycle (see init()): the rollback switch admitted this cycle
-        // without a CacheStore, so drop the write silently. Non-RUNNING states fall
-        // through to the regular error paths below.
+        // Degraded-skip cycle (see init()): the rollback switch admitted this cycle
+        // without a CacheStore, so drop the write without a per-write log - init()
+        // already emitted the rate-limited WARN for this cycle. Non-RUNNING states
+        // fall through to the regular error paths below.
         std::lock_guard<std::mutex> lock(state_mutex_);
         if (state_ == State::RUNNING && skip_cycle_writes_) {
             return;

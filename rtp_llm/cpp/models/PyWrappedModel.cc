@@ -363,11 +363,13 @@ PyWrappedModel::prepareWriteCacheParams(const GptModelInputs& inputs,
                             "cache-store request_id count=%ld does not match context batch=%ld",
                             inputs.request_id.numel(),
                             context_batch_size);
-    // Per-row cache_keys enforcement lives in NormalModelInputGatherer (PD prefill rows
-    // fail fast there when a row lacks keys, because the gatherer zero-fills the batch
-    // tensor and a key-less row would otherwise publish zeros as real keys). This branch
-    // only covers a whole-batch-missing tensor from non-standard producers and keeps the
-    // legacy warned no-op for that case.
+    // Per-row cache_keys enforcement lives in NormalModelInputGatherer: a PD prefill row
+    // lacking keys fails fast there by default, or is excluded from publication under
+    // CACHE_STORE_SKIP_ROWS_WITHOUT_CACHE_KEYS. Either way it never reaches the writer,
+    // because the gatherer zero-fills the batch tensor and a key-less row would otherwise
+    // publish zeros as real keys. This branch only covers a whole-batch-missing tensor
+    // from non-standard producers, where the safe response is a warned no-op rather than
+    // failing the step.
     if (!inputs.cache_keys.defined() || inputs.cache_keys.numel() == 0) {
         auto build_affected_ids = [&]() {
             const auto  request_ids = inputs.request_id.accessor<int64_t, 1>();
@@ -415,6 +417,13 @@ PyWrappedModel::prepareWriteCacheParams(const GptModelInputs& inputs,
     RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_block_id.defined() && inputs.kv_cache_block_id.device().is_cpu()
                                 && inputs.kv_cache_block_id.scalar_type() == torch::kInt32,
                             "cache-store block table must be a defined CPU int32 tensor");
+    RTP_LLM_CHECK_WITH_INFO(inputs.request_pd_separation.defined() && inputs.request_pd_separation.dim() == 1
+                                && inputs.request_pd_separation.device().is_cpu()
+                                && inputs.request_pd_separation.scalar_type() == torch::kBool
+                                && inputs.request_pd_separation.numel() == context_batch_size,
+                            "cache-store request_pd_separation must be a CPU bool 1-D tensor with one entry per "
+                            "context request (context batch=%ld)",
+                            context_batch_size);
     RTP_LLM_CHECK_WITH_INFO(cache_store_input_lengths_host.defined(),
                             "cache-store input lengths must be defined for eligible PD-prefill work");
     RTP_LLM_CHECK_WITH_INFO(cache_store_input_lengths_host.device().is_cpu(),

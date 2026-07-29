@@ -80,10 +80,18 @@ cc_test_wrapper(
     # CI: the write() success path needs one device and the device-pinning case
     # needs two. Both labels and gpu_count are established unit-test precedents
     # (H20 x2: models_py/distributed/test; MI308X-ROCM7 x2: models_py/modules/
-    # base/rocm/test). CPU-only builds stay schedulable anywhere and the GPU
-    # cases skip via their build guards. select() on exec_properties is
-    # configurable-attribute compatible on this repo's Bazel (6.4.0): package
-    # loading and the cuda12_9 test run both pass with it in place.
+    # base/rocm/test). The GPU-only cases skip via their build guards.
+    #
+    # Verified on cuda12_9 only: package loading and the test run both pass with
+    # this select() in place, which also confirms select() on exec_properties is
+    # configurable-attribute compatible on this repo's Bazel (6.4.0).
+    #
+    # UNVERIFIED: the "//conditions:default" (CPU-only) branch has never been
+    # built or scheduled. --config=cpu does not get past analysis here because
+    # the pinned @torch_2.1_py310_cpu archive (declared in deps/http.bzl) fails
+    # checksum verification against the configured mirror. Read the empty
+    # exec_properties as untested intent, not as a guarantee that this target is
+    # schedulable on CPU-only workers.
     exec_properties = select({
         "@//:using_cuda": {"gpu": "H20", "gpu_count": "2"},
         "@//:using_rocm": {"gpu": "MI308X-ROCM7", "gpu_count": "2"},

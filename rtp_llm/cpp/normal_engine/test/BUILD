@@ -46,6 +46,7 @@ cc_test(
         "//rtp_llm/cpp/models:models",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
+        "@havenask//aios/autil:env_util",
         "@local_config_cuda//cuda:cuda_headers",
         "@local_config_cuda//cuda:cudart",
     ],

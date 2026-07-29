@@ -18,7 +18,7 @@ from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplB
 from rtp_llm.ops import AttentionConfigs, CPRotateMethod, FMHAType, ParallelismConfig
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCachePrefillOpQKVOut,
-    KVCache,
+    LayerKVCache,
     PyAttentionInputs,
 )
 
@@ -166,7 +166,7 @@ class CPFlashInferImpl(FMHAImplBase):
     def forward(
         self,
         qkv: torch.Tensor,
-        kv_cache: Optional[KVCache],
+        kv_cache: Optional[LayerKVCache],
         need_rope_kv_cache: bool = True,
     ) -> torch.Tensor:
         assert self.rope_kvcache_impl is not None and self.rope_params is not None

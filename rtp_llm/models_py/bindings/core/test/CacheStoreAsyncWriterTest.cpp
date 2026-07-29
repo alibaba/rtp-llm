@@ -207,6 +207,23 @@ TEST_F(CacheStoreAsyncWriterTest, InitAndWaitBasic) {
     ASSERT_EQ(3, counter.load());
 }
 
+TEST_F(CacheStoreAsyncWriterTest, ThreadPoolIsCreatedLazilyAndReusedAcrossCycles) {
+    // A writer exists per PyWrappedModel (plus one per MTP draft module), but only
+    // PD-separation prefill ever opens a cycle. Constructing one must not start worker
+    // threads, and cycles must share one pool rather than rebuilding it per forward.
+    // Private member reached via -fno-access-control, like the submit() cases below.
+    ASSERT_EQ(writer_->thread_pool_, nullptr);
+
+    writer_->init();
+    const auto* pool_after_first_init = writer_->thread_pool_.get();
+    ASSERT_NE(pool_after_first_init, nullptr);
+    writer_->waitAllDone();
+
+    writer_->init();
+    EXPECT_EQ(writer_->thread_pool_.get(), pool_after_first_init);
+    writer_->waitAllDone();
+}
+
 TEST_F(CacheStoreAsyncWriterTest, WaitAllDoneWhileIdleThrows) {
     ASSERT_ANY_THROW(writer_->waitAllDone());
 }
@@ -242,10 +259,10 @@ TEST_F(CacheStoreAsyncWriterTest, InitWithoutCacheStoreFailsAndCanRetryAfterInje
     ASSERT_NO_THROW(writer.waitAllDone());
 }
 
-TEST_F(CacheStoreAsyncWriterTest, MissingCacheStoreRollbackSwitchRestoresLegacySkip) {
+TEST_F(CacheStoreAsyncWriterTest, MissingCacheStoreRollbackSwitchSkipsCycleWrites) {
     // Outer guard pins the default fail-fast semantics (and restores the caller's
     // original value on exit); the inner guard flips the rollback switch on for
-    // the legacy-skip section only.
+    // the degraded-skip section only.
     autil::EnvGuard force_fail_fast("CACHE_STORE_SKIP_WRITE_WHEN_UNREADY", "0");
 
     auto manager = std::make_shared<KVCacheManager>(makeWriterTestCacheConfig(/*tokens_per_block=*/1), /*warmup=*/true);
@@ -257,8 +274,10 @@ TEST_F(CacheStoreAsyncWriterTest, MissingCacheStoreRollbackSwitchRestoresLegacyS
     layer_cache.tag      = "full";
 
     {
-        // Legacy-skip semantics: the cycle is admitted, writes are dropped silently
-        // (on every build flavor, including CPU-only), and the cycle drains clean.
+        // Degraded-skip mode: the cycle is admitted, write() drops the work without side
+        // effects, and the cycle drains clean. The early return precedes write()'s
+        // CUDA/ROCm build guard, so this holds structurally on CPU-only builds too - but
+        // it has never been exercised there (see the UNVERIFIED note in this BUILD file).
         autil::EnvGuard rollback_switch("CACHE_STORE_SKIP_WRITE_WHEN_UNREADY", "1");
         ASSERT_NO_THROW(writer.init());
         EXPECT_TRUE(writer.skip_cycle_writes_);

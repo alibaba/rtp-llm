@@ -66,9 +66,15 @@ struct GptModelInputs {
     std::optional<std::vector<torch::Tensor>> input_embeddings;  // all input embeddings in gathered stream stored here
     torch::Tensor                             input_embeddings_locs;  // input embeddings index
 
-    torch::Tensor request_id;             // int64, [context_batch_size]
-    torch::Tensor request_pd_separation;  // bool, [context_batch_size]
-    torch::Tensor cache_keys;             // [context_batch_size]
+    torch::Tensor request_id;  // int64, [context_batch_size]
+    // bool, [context_batch_size]. Per-row cache-store publish gate, NOT just a copy of
+    // the request's pd_separation setting: runtimeWriteCacheStore skips every row whose
+    // entry is false, so a row must be cleared here unless its cache_keys slot holds
+    // real keys. cache_keys is zero-initialized, so leaving a key-less row set would
+    // publish cache key "0" as though it were real - and collide across requests on
+    // that shared key. See the write site in NormalModelInputGatherer.
+    torch::Tensor request_pd_separation;
+    torch::Tensor cache_keys;  // [context_batch_size]
     // Physical KV-manager block strides. These are independent of any kernel-block view exposed to attention ops.
     size_t kv_block_stride_bytes;
     size_t kv_scale_stride_bytes;
