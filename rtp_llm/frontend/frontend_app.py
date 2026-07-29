@@ -300,8 +300,11 @@ class FrontendApp(object):
             world_info=world_info,
             parallelism_config=engine_config.parallelism_config,
         )
+        client_config = self.py_env_configs.grpc_config.get_client_config()
         self.grpc_client = GrpcClientWrapper(
-            self.server_config.rpc_server_port, dp_addresses=dp_addresses
+            self.server_config.rpc_server_port,
+            dp_addresses=dp_addresses,
+            client_config=client_config,
         )
 
         logging.info(

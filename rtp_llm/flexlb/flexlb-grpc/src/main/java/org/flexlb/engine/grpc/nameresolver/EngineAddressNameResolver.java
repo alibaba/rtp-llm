@@ -4,10 +4,10 @@ import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.collections4.CollectionUtils;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.dao.master.WorkerHost;
-import org.flexlb.dao.route.Endpoint;
 import org.flexlb.dao.route.ServiceRoute;
 import org.flexlb.discovery.ServiceDiscovery;
 import org.flexlb.discovery.ServiceHostListener;
+import org.flexlb.enums.BackendServiceProtocolEnum;
 import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.scheduling.annotation.Scheduled;
@@ -34,6 +34,7 @@ public class EngineAddressNameResolver implements CustomNameResolver {
     private Listener listener;
     private List<String/*ip:port*/> allIpPortList = new ArrayList<>();
     private final List<String> serviceAddressList;
+    private final Map<String/*address*/, String/*protocol*/> addressProtocolMap = new ConcurrentHashMap<>();
 
     public EngineAddressNameResolver(ServiceDiscovery serviceDiscovery) {
         String modelConfig = System.getenv("MODEL_SERVICE_CONFIG");
@@ -84,7 +85,13 @@ public class EngineAddressNameResolver implements CustomNameResolver {
                 .filter(StringUtils::isNotBlank)
                 .map(json -> JsonUtils.toObject(modelConfigJson, ServiceRoute.class))
                 .map(serviceRoute -> serviceRoute.getAllEndpoints().stream()
-                        .map(Endpoint::getAddress)
+                        .map(endpoint -> {
+                            // Keep address -> protocol mapping for port correction in updateDomainHosts
+                            if (endpoint.getAddress() != null && endpoint.getProtocol() != null) {
+                                addressProtocolMap.put(endpoint.getAddress(), endpoint.getProtocol());
+                            }
+                            return endpoint.getAddress();
+                        })
                         .collect(Collectors.toList()))
                 .filter(CollectionUtils::isNotEmpty)
                 .orElseThrow(() -> new IllegalArgumentException("serviceAddressList cannot be null, please config 'MODEL_SERVICE_CONFIG' environment variable, modelConfigJson=" + modelConfigJson));
@@ -106,9 +113,16 @@ public class EngineAddressNameResolver implements CustomNameResolver {
         if (hostList == null || hostList.isEmpty()) {
             domainHostsMap.remove(address);
         } else {
+            // VipServer registers the gRPC port (not httpPort) for GRPC-protocol deployments.
+            // Downstream AbstractGrpcClient expects "ip:httpPort" and applies toGrpcPort(+1),
+            // so correct the port back to httpPort semantics here (aligned with the GRPC branch
+            // of WorkerAddressService.convertServiceDiscoveryHosts on the sync path).
+            String protocol = addressProtocolMap.get(address);
+            boolean isGrpcProtocol = BackendServiceProtocolEnum.GRPC.getName().equalsIgnoreCase(protocol);
             List<String/*ip:port*/> ipPortList = new ArrayList<>(hostList.size());
             for (WorkerHost host : hostList) {
-                ipPortList.add(host.getIp() + ":" + host.getGrpcPort());
+                int port = isGrpcProtocol ? host.getPort() - 1 : host.getPort();
+                ipPortList.add(host.getIp() + ":" + port);
             }
             domainHostsMap.put(address, ipPortList);
         }
