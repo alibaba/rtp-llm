@@ -12,6 +12,7 @@
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/PrefillCacheHitMetricsReporter.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
@@ -197,6 +198,14 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
                          cp_slot_mapper_->virtualBlockSize());
     }
 
+    if (pd_sep_config_.role_type == RoleType::PREFILL) {
+        if (PrefillCacheHitMetricsReporter::enabled()) {
+            prefill_cache_hit_metrics_reporter_ = std::make_unique<PrefillCacheHitMetricsReporter>(metrics_reporter_);
+        } else {
+            RTP_LLM_LOG_INFO("prefill recent-cache-key metrics disabled by PREFILL_CACHE_HIT_METRIC_ENABLE");
+        }
+    }
+
     RTP_LLM_LOG_INFO("cache config: layer_num=%d, block_num=%d, block_size=%dB, seq_size_per_block=%zu",
                      config_.layer_num,
                      config_.block_num,
@@ -281,14 +290,28 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_CHECK(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids);
 
-    const int seq_size_per_block = config_.seq_size_per_block;
-    if (!malloc_info.batch_kv_cache_resource->curBlocksNum()) {
+    const int  seq_size_per_block = config_.seq_size_per_block;
+    const bool is_first_malloc    = !malloc_info.batch_kv_cache_resource->curBlocksNum();
+    if (is_first_malloc) {
         initCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
     } else {
         updateCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
     }
+    reportPrefillCacheHitMetrics(malloc_info, is_first_malloc);
 
     return allocator_->malloc(malloc_info);
+}
+
+void KVCacheManager::reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc) {
+    if (!is_first_malloc || !prefill_cache_hit_metrics_reporter_ || !malloc_info.batch_kv_cache_resource
+        || !malloc_info.complete_token_ids) {
+        return;
+    }
+    prefill_cache_hit_metrics_reporter_->record(*malloc_info.batch_kv_cache_resource,
+                                                cp_slot_mapper_,
+                                                malloc_info.request_id,
+                                                malloc_info.complete_token_ids->seqLength(),
+                                                config_.seq_size_per_block);
 }
 
 void KVCacheManager::free(const FreeInfo& free_info) {

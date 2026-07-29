@@ -24,6 +24,7 @@ class CPSlotMapper;
 class CacheStore;
 class KVCacheConnectorCoordinator;
 class KVCacheConnectorReadWriteContext;
+class PrefillCacheHitMetricsReporter;
 
 class KVCacheManager {
 public:
@@ -169,6 +170,7 @@ private:
     void initConnectorCoordinator();
     void allocateAndSync();
     void reportMetricsLoop();
+    void reportPrefillCacheHitMetrics(const MallocInfo& malloc_info, bool is_first_malloc);
 
     // 成员变量
     CacheConfig         config_;
@@ -183,7 +185,8 @@ private:
     const CacheStoreConfig             cache_store_config_;
     const bool                         use_cuda_malloc_block_pool_;
 
-    std::shared_ptr<CPSlotMapper> cp_slot_mapper_;
+    std::shared_ptr<CPSlotMapper>                   cp_slot_mapper_;
+    std::unique_ptr<PrefillCacheHitMetricsReporter> prefill_cache_hit_metrics_reporter_;
 
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;

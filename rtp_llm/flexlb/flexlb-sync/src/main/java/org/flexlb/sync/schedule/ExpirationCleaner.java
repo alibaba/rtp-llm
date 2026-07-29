@@ -80,7 +80,7 @@ public class ExpirationCleaner {
                 // Check if task is lost
                 if (task.isLost()) {
                     Logger.warn("Cleaning lost task: {}, state: {}, role: {}, worker: {}", requestId, task.getTaskState(), role, workerStatus.getIp());
-                    reportTaskRemoved(workerStatus.getRole(), workerStatus.getIp(), "lost");
+                    reportTaskRemoved(workerStatus.getRole(), "lost");
                     task.updateTaskState(TaskStateEnum.CLEANED);
                     shouldRemove = true;
                 }
@@ -88,7 +88,7 @@ public class ExpirationCleaner {
                 else if (task.isTimeout(currentTime, taskTimeoutUs)) {
                     Logger.warn("Removing timeout task: {}, state: {}, age: {}ms, role: {}, worker: {}", requestId, task.getTaskState(),
                             (currentTime - task.getLastActiveTimeUs()) / 1000, role, workerStatus.getIp());
-                    reportTaskRemoved(workerStatus.getRole(), workerStatus.getIp(), "timeout");
+                    reportTaskRemoved(workerStatus.getRole(), "timeout");
                     task.updateTaskState(TaskStateEnum.CLEANED);
                     shouldRemove = true;
                 }
@@ -101,10 +101,9 @@ public class ExpirationCleaner {
         }
     }
 
-    private void reportTaskRemoved(String role, String ip, String type) {
+    private void reportTaskRemoved(String role, String type) {
         FlexMetricTags tags = FlexMetricTags.of(
             "role", role,
-            "ip", ip,
             "type", type
         );
         monitor.report(TASK_REMOVED, tags, 1);
