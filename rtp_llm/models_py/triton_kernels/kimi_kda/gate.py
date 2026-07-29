@@ -21,7 +21,11 @@ from rtp_llm.models_py.triton_kernels.fla.index import prepare_chunk_indices
 from rtp_llm.models_py.triton_kernels.fla.op import exp, softplus
 from rtp_llm.models_py.triton_kernels.fla.utils import is_amd as IS_AMD
 
-BS_LIST = [32, 64]
+# The sealed K3 Golden was generated with Triton 3.7.  RTP's Triton 3.6
+# lowering is closest with BS=16; BS=8/32/64 all introduce larger KDA state
+# drift.  Keep one deterministic configuration so an autotuner timing choice
+# cannot change the FP32 scan addition tree between runs.
+BS_LIST = [16]
 BT_LIST_AUTOTUNE = [32, 64, 128]
 NUM_WARPS_AUTOTUNE = [2, 4, 8, 16] if IS_AMD else [4, 8, 16, 32]
 

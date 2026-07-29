@@ -3,5 +3,19 @@ from rtp_llm.models_py.triton_kernels.kimi_kda.fused_recurrent import (
     fused_recurrent_kda,
 )
 from rtp_llm.models_py.triton_kernels.kimi_kda.gate import fused_kda_gate
+from rtp_llm.models_py.triton_kernels.kimi_kda.rms_norm_gate import (
+    kimi_kda_rms_norm_sigmoid_gate,
+)
+from rtp_llm.models_py.triton_kernels.kimi_kda.short_conv import (
+    kimi_kda_short_conv_decode,
+    kimi_kda_short_conv_prefill,
+)
 
-__all__ = ["chunk_kda", "fused_kda_gate", "fused_recurrent_kda"]
+__all__ = [
+    "chunk_kda",
+    "fused_kda_gate",
+    "fused_recurrent_kda",
+    "kimi_kda_rms_norm_sigmoid_gate",
+    "kimi_kda_short_conv_decode",
+    "kimi_kda_short_conv_prefill",
+]

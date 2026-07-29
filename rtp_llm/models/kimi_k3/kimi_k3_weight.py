@@ -1,10 +1,11 @@
 """Kimi K3 checkpoint-to-runtime weight manifest.
 
-K3 is a mixed-format checkpoint: all non-routed-expert tensors are BF16 while
-the routed experts alone are group-32 MXFP4 (two E2M1 values per byte plus one
-UE8M0 scale byte per group).  Treating the nested compressed-tensors config as
-a model-wide quantization mode would corrupt the BF16 tensors, so the packed
-expert tensors are deliberately represented as ordinary byte-valued weights.
+K3 is a mixed-format checkpoint: routed experts are group-32 MXFP4 (two E2M1
+values per byte plus one UE8M0 scale byte per group), most dense tensors are
+BF16, and KDA recurrence/short-convolution/output-norm control weights are
+FP32.  Treating the nested compressed-tensors config as a model-wide
+quantization mode or coercing every non-expert tensor to BF16 would corrupt the
+checkpoint, so every exceptional dtype is represented explicitly.
 """
 
 from __future__ import annotations
@@ -58,6 +59,31 @@ def _merge_conv1d(ts: List[torch.Tensor]) -> torch.Tensor:
     """
 
     return torch.cat(ts, dim=0)
+
+
+def _unpad_kda_alog(ts: List[torch.Tensor], *, num_heads: int) -> torch.Tensor:
+    """Remove the checkpoint's zero alignment tail before TP head sharding.
+
+    The production K3 checkpoint stores ``A_log`` as 128 fp32 values although
+    the model has 96 KDA heads.  Values ``[96:128]`` are alignment padding and
+    are exactly zero.  Keeping that tail would make TP ranks after rank 0 read
+    the wrong logical heads, because ``split_head_linear`` shards by the
+    configured 96-head layout.
+    """
+
+    tensor = identity(ts)
+    if tensor.ndim != 1 or tensor.shape[0] < num_heads:
+        raise ValueError(
+            "K3 KDA A_log must be a 1-D tensor containing at least "
+            f"{num_heads} logical heads, got {tuple(tensor.shape)}"
+        )
+    padding = tensor[num_heads:]
+    if padding.numel() and torch.count_nonzero(padding).item() != 0:
+        raise ValueError(
+            "K3 KDA A_log alignment padding must be exactly zero, got "
+            f"{torch.count_nonzero(padding).item()} non-zero values"
+        )
+    return tensor[:num_heads].contiguous()
 
 
 class KimiK3WeightNames:
@@ -205,9 +231,7 @@ class KimiK3Weight(ModelDeployWeightInfo):
             expert_prefix = prefix + "block_sparse_moe.experts."
             for expert_id in range(model_config.expert_num):
                 for projection in ("w1", "w2", "w3"):
-                    yield (
-                        f"{expert_prefix}{expert_id}.{projection}.weight_packed"
-                    )
+                    yield (f"{expert_prefix}{expert_id}.{projection}.weight_packed")
                     yield f"{expert_prefix}{expert_id}.{projection}.weight_scale"
         else:
             for suffix in cls._DENSE_SUFFIXES:
@@ -273,13 +297,9 @@ class KimiK3Weight(ModelDeployWeightInfo):
         )
 
     @classmethod
-    def _linear(
-        cls, name: str, suffix: str, *, split_func=sp_id
-    ) -> CustomAtomicWeight:
+    def _linear(cls, name: str, suffix: str, *, split_func=sp_id) -> CustomAtomicWeight:
         # RTP LinearFactory stores GEMM weights as [in_features,out_features].
-        return cls._custom(
-            name, suffix, process_fun=transpose, split_func=split_func
-        )
+        return cls._custom(name, suffix, process_fun=transpose, split_func=split_func)
 
     def _global_weights(self) -> List[WeightModule]:
         return [
@@ -336,12 +356,8 @@ class KimiK3Weight(ModelDeployWeightInfo):
                 KimiK3WeightNames.SELF_ATTN_RES_PROJ,
                 "self_attention_res_proj.weight",
             ),
-            self._custom(
-                KimiK3WeightNames.MLP_RES_NORM, "mlp_res_norm.weight"
-            ),
-            self._linear(
-                KimiK3WeightNames.MLP_RES_PROJ, "mlp_res_proj.weight"
-            ),
+            self._custom(KimiK3WeightNames.MLP_RES_NORM, "mlp_res_norm.weight"),
+            self._linear(KimiK3WeightNames.MLP_RES_PROJ, "mlp_res_proj.weight"),
         ]
 
     def _kda_weights(self) -> List[WeightModule]:
@@ -350,10 +366,12 @@ class KimiK3Weight(ModelDeployWeightInfo):
         Aligned with main's ``kimi_linear`` so a future rebase converges: q/k/v
         fuse into one ``linear_attn_qkv_w`` GEMM and the three depthwise convs
         fuse into ``linear_attn_conv1d_w``.  Two K3-specific deviations from
-        ``kimi_linear``: the checkpoint stores ``A_log`` already shaped
-        ``[num_heads]`` (no squeeze), and the output gate is a single full-rank
-        projection (``linear_attn_g_w``) rather than the ``g_a``/``g_b`` LoRA
-        pair.  Per-weight TP sharding is resolved by name via
+        ``kimi_linear``: the checkpoint stores ``A_log`` as a 128-element
+        aligned vector whose first ``num_heads`` entries are logical and whose
+        remaining entries are zero padding.  The padding is removed before TP
+        head sharding.  The output gate is a single full-rank projection
+        (``linear_attn_g_w``) rather than the ``g_a``/``g_b`` LoRA pair.
+        Per-weight TP sharding is resolved by name via
         ``LinearAttnAtomicWeight``'s split-strategy table.
         """
 
@@ -400,8 +418,22 @@ class KimiK3Weight(ModelDeployWeightInfo):
                 ],
                 _merge_conv1d,
                 cfg,
+                # The real K3 checkpoint stores all three short-convolution
+                # kernels in FP32.  Dummy/FLA consumes them in FP32 as well;
+                # inheriting the model-wide BF16 load dtype changes nearly
+                # every coefficient and is amplified by KDA's Q/K
+                # normalization.
+                data_type=torch.float32,
             ),
-            _w(W.linear_attn_alog, "self_attn.A_log", identity, data_type=torch.float32),
+            _w(
+                W.linear_attn_alog,
+                "self_attn.A_log",
+                functools.partial(
+                    _unpad_kda_alog,
+                    num_heads=cfg.linear_num_value_heads,
+                ),
+                data_type=torch.float32,
+            ),
             _w(
                 W.linear_attn_dt_b_kda,
                 "self_attn.dt_bias",
@@ -412,7 +444,12 @@ class KimiK3Weight(ModelDeployWeightInfo):
             _w(W.linear_attn_f_b_w, "self_attn.f_b_proj.weight", transpose),
             _w(W.linear_attn_b_w, "self_attn.b_proj.weight", transpose),
             _w(W.linear_attn_g_w, "self_attn.g_proj.weight", transpose),
-            _w(W.linear_attn_norm_w, "self_attn.o_norm.weight", identity),
+            _w(
+                W.linear_attn_norm_w,
+                "self_attn.o_norm.weight",
+                identity,
+                data_type=torch.float32,
+            ),
             _w(W.linear_attn_out_w, "self_attn.o_proj.weight", transpose),
         ]
 
@@ -424,8 +461,7 @@ class KimiK3Weight(ModelDeployWeightInfo):
             rope_head_dim=self.rope_head_dim,
             kv_lora_rank=self.kv_lora_rank,
             v_head_dim=self.v_head_dim,
-            use_mla=attn.use_mla
-            and self.model_config.mla_ops_type != MlaOpsType.MHA,
+            use_mla=attn.use_mla and self.model_config.mla_ops_type != MlaOpsType.MHA,
             q_use_lora=attn.q_lora_rank > 0,
         )
 
@@ -562,15 +598,9 @@ class KimiK3Weight(ModelDeployWeightInfo):
     def _dense_weights(self) -> List[WeightModule]:
         n = KimiK3WeightNames
         return [
-            self._linear(
-                n.DENSE_GATE, "mlp.gate_proj.weight", split_func=ffn_sp_neg1
-            ),
-            self._linear(
-                n.DENSE_UP, "mlp.up_proj.weight", split_func=ffn_sp_neg1
-            ),
-            self._linear(
-                n.DENSE_DOWN, "mlp.down_proj.weight", split_func=ffn_sp_0
-            ),
+            self._linear(n.DENSE_GATE, "mlp.gate_proj.weight", split_func=ffn_sp_neg1),
+            self._linear(n.DENSE_UP, "mlp.up_proj.weight", split_func=ffn_sp_neg1),
+            self._linear(n.DENSE_DOWN, "mlp.down_proj.weight", split_func=ffn_sp_0),
         ]
 
     def _moe_weights(self) -> List[WeightModule]:
@@ -622,10 +652,7 @@ class KimiK3Weight(ModelDeployWeightInfo):
             (n.MOE_W2_PACKED, n.MOE_W2_SCALE, "w2"),
             (n.MOE_W3_PACKED, n.MOE_W3_SCALE, "w3"),
         ):
-            checkpoint_prefix = (
-                "block_sparse_moe.experts.{expert_id}."
-                f"{projection}."
-            )
+            checkpoint_prefix = "block_sparse_moe.experts.{expert_id}." f"{projection}."
             weights.append(
                 _KimiExpertByteWeight(
                     packed_name,
@@ -667,9 +694,7 @@ class KimiK3Weight(ModelDeployWeightInfo):
                 "Kimi K3 hybrid attention schedule is shorter than num_layers: "
                 f"{len(layer_types)} < {self._num_layers}"
             )
-        for layer_id, layer_type in enumerate(
-            layer_types[: self._num_layers]
-        ):
+        for layer_id, layer_type in enumerate(layer_types[: self._num_layers]):
             weights = self._common_layer_weights()
             weights.extend(
                 self._kda_weights()
@@ -677,9 +702,7 @@ class KimiK3Weight(ModelDeployWeightInfo):
                 else self._mla_weights()
             )
             weights.extend(
-                self._moe_weights()
-                if layer_id in moe_layers
-                else self._dense_weights()
+                self._moe_weights() if layer_id in moe_layers else self._dense_weights()
             )
             layer_weights.append(weights)
         return ModelWeightInfo(

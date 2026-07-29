@@ -198,7 +198,10 @@ class MlaFlashInferPrefillOp(object):
             g_workspace_buffer = torch.empty(
                 512 * 1024 * 1024,
                 dtype=torch.int8,
-                device=self.weights[0].get(W.mla_kv_b_w).device,
+                # Workspace placement must not depend on DeepSeek-specific
+                # MLA projection keys.  Distributed startup has already set
+                # the current CUDA device for this rank.
+                device=torch.device("cuda", torch.cuda.current_device()),
             )
 
         self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
@@ -429,7 +432,11 @@ class MlaFlashInferDecodeOp(object):
             g_workspace_buffer = torch.empty(
                 512 * 1024 * 1024,
                 dtype=torch.int8,
-                device=self.weights[0].get(W.mla_vc).device,
+                # The workspace belongs to the decode indices, not to a
+                # model-specific projection weight.  Kimi K3 does not expose
+                # DeepSeek's ``mla_vc`` key, while ``kv_indices_d`` is already
+                # allocated on the correct CUDA rank.
+                device=self.kv_indices_d.device,
             )
 
         self.mla_wrapper = BatchMLAPagedAttentionWrapper(

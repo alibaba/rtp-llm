@@ -7,12 +7,15 @@
 #
 # Adapted for rtp-llm: forward-only, no CP, no backward.
 
+import os
+
 import torch
 
 from rtp_llm.models_py.triton_kernels.fla.cumsum import chunk_local_cumsum
 from rtp_llm.models_py.triton_kernels.fla.utils import RCP_LN2
 from rtp_llm.models_py.triton_kernels.kimi_kda.chunk_delta_h import (
     chunk_gated_delta_rule_fwd_h,
+    chunk_gated_delta_rule_fwd_h_cublas,
 )
 from rtp_llm.models_py.triton_kernels.kimi_kda.chunk_intra import chunk_kda_fwd_intra
 from rtp_llm.models_py.triton_kernels.kimi_kda.chunk_o import chunk_gla_fwd_o_gk
@@ -38,6 +41,7 @@ def chunk_kda_fwd(
     dt_bias: torch.Tensor | None = None,
     disable_recompute: bool = False,
     return_intermediate_states: bool = False,
+    state_v_first: bool = False,
 ):
     # Apply gate activation
     g_org = None
@@ -76,7 +80,18 @@ def chunk_kda_fwd(
         disable_recompute=disable_recompute,
     )
 
-    h, v_new, final_state = chunk_gated_delta_rule_fwd_h(
+    state_backend = os.environ.get("KIMI_K3_KDA_CHUNK_STATE_BACKEND", "cublas").lower()
+    if state_backend == "cublas":
+        state_forward = chunk_gated_delta_rule_fwd_h_cublas
+    elif state_backend == "triton":
+        state_forward = chunk_gated_delta_rule_fwd_h
+    else:
+        raise ValueError(
+            "KIMI_K3_KDA_CHUNK_STATE_BACKEND must be 'cublas' or "
+            f"'triton', got {state_backend!r}"
+        )
+
+    h, v_new, final_state = state_forward(
         k=kg,
         w=w,
         u=u,
@@ -85,7 +100,7 @@ def chunk_kda_fwd(
         output_final_state=output_final_state,
         cu_seqlens=cu_seqlens,
         use_exp2=True,
-        transpose_state_layout=False,
+        transpose_state_layout=state_v_first,
     )
 
     o = chunk_gla_fwd_o_gk(
@@ -98,7 +113,7 @@ def chunk_kda_fwd(
         cu_seqlens=cu_seqlens,
         chunk_size=chunk_size,
         use_exp2=True,
-        transpose_state_layout=False,
+        transpose_state_layout=state_v_first,
     )
 
     if disable_recompute is False:

@@ -24,9 +24,9 @@ def _beta_sigmoid_fwd_kernel(
     n_elements,
     BLOCK_SIZE: tl.constexpr,
 ):
-    offsets = tl.program_id(0).to(tl.int64) * BLOCK_SIZE + tl.arange(
-        0, BLOCK_SIZE
-    ).to(tl.int64)
+    offsets = tl.program_id(0).to(tl.int64) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE).to(
+        tl.int64
+    )
     mask = offsets < n_elements
     values = tl.load(x + offsets, mask=mask, other=0).to(tl.float32)
     tl.store(y + offsets, tl.sigmoid(values), mask=mask)
@@ -66,6 +66,7 @@ class ChunkKDAFunction(torch.autograd.Function):
         safe_gate: bool = False,
         lower_bound: float | None = None,
         return_intermediate_states: bool = False,
+        state_v_first: bool = False,
     ):
         chunk_size = 64
 
@@ -104,6 +105,7 @@ class ChunkKDAFunction(torch.autograd.Function):
                 dt_bias=dt_bias,
                 disable_recompute=False,
                 return_intermediate_states=return_intermediate_states,
+                state_v_first=state_v_first,
             )
         )
 
@@ -130,6 +132,7 @@ def chunk_kda(
     safe_gate: bool = False,
     lower_bound: float | None = None,
     return_intermediate_states: bool = False,
+    state_v_first: bool = False,
     **kwargs,
 ):
     r"""
@@ -150,6 +153,8 @@ def chunk_kda(
         use_beta_sigmoid_in_kernel (bool): Apply FP32 sigmoid to raw beta.
         cu_seqlens (torch.LongTensor): Cumulative sequence lengths `[N+1]`.
         return_intermediate_states (bool): Return intermediate states for inference.
+        state_v_first (bool): Store recurrent state as `[N,H,V,K]`, matching
+            K3's source checkpoint implementation.
 
     Returns:
         (o, final_state) or (o, final_state, h) if return_intermediate_states=True.
@@ -185,6 +190,12 @@ def chunk_kda(
 
     if scale is None:
         scale = k.shape[-1] ** -0.5
+    if "transpose_state_layout" in kwargs:
+        if state_v_first:
+            raise ValueError(
+                "cannot pass both state_v_first and transpose_state_layout"
+            )
+        state_v_first = bool(kwargs.pop("transpose_state_layout"))
     return ChunkKDAFunction.apply(
         q,
         k,
@@ -203,4 +214,5 @@ def chunk_kda(
         safe_gate,
         lower_bound,
         return_intermediate_states,
+        state_v_first,
     )
