@@ -1,7 +1,9 @@
 #pragma once
 
 #include <gtest/gtest.h>
+#include "autil/EnvUtil.h"
 #include "autil/Log.h"
+#include "rtp_llm/cpp/disaggregate/cache_store/CommonDefine.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/Interface.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/test/test_util/MockMemoryUtil.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/test/test_util/BlockBufferUtil.h"
@@ -11,8 +13,7 @@ namespace rtp_llm {
 class CacheStoreTestBase: public ::testing::Test {
 public:
     void SetUp() override {
-        CacheStoreConfig cache_store_config;
-        memory_util_       = createMemoryUtilImpl(cache_store_config.cache_store_rdma_mode);
+        memory_util_       = createMemoryUtilImpl(autil::EnvUtil::getEnv(kEnvRdmaMode, false));
         device_util_       = std::make_shared<DeviceUtil>();
         block_buffer_util_ = std::make_shared<BlockBufferUtil>(memory_util_, device_util_);
     }
@@ -20,8 +21,8 @@ public:
 
 protected:
     bool initMockMemoryUtil() {
-        CacheStoreConfig cache_store_config;
-        mock_memory_util_ = new MockMemoryUtil(createMemoryUtilImpl(cache_store_config.cache_store_rdma_mode));
+        mock_memory_util_ =
+            new MockMemoryUtil(createMemoryUtilImpl(autil::EnvUtil::getEnv(kEnvRdmaMode, false)));
         memory_util_.reset(mock_memory_util_);
         block_buffer_util_ = std::make_shared<BlockBufferUtil>(memory_util_, device_util_);
         return true;
