@@ -3,7 +3,7 @@ import logging
 import os
 import time
 from dataclasses import replace
-from typing import TYPE_CHECKING, AsyncGenerator, Callable, List, Optional
+from typing import TYPE_CHECKING, AsyncGenerator, Callable, List, Optional, Set
 
 import torch
 
@@ -34,6 +34,11 @@ if TYPE_CHECKING:
     from rtp_llm.config.py_config_modules import PyEnvConfigs
 
 route_logger = logging.getLogger("route_logger")
+
+
+def get_role_names(role_addrs: List[RoleAddr]) -> Set[str]:
+    """Return the set of human-readable role names from a list of RoleAddr."""
+    return {role_addr.role.name for role_addr in role_addrs}
 
 
 PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"

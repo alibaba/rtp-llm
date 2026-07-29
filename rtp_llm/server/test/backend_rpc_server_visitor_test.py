@@ -3,7 +3,11 @@ from dataclasses import dataclass, field
 from unittest.mock import patch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.config.generate_config import RoleAddr, RoleType
+from rtp_llm.server.backend_rpc_server_visitor import (
+    BackendRPCServerVisitor,
+    get_role_names,
+)
 from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
 from rtp_llm.server.master_client import FlexlbResponse
 
@@ -91,6 +95,14 @@ class _FakeMasterClient:
 
 
 class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
+    def test_get_role_names(self):
+        role_addrs = [
+            RoleAddr(role=RoleType.PREFILL, ip="127.0.0.1", http_port=1, grpc_port=2),
+            RoleAddr(role=RoleType.DECODE, ip="127.0.0.2", http_port=3, grpc_port=4),
+        ]
+
+        self.assertEqual(get_role_names(role_addrs), {"PREFILL", "DECODE"})
+
     def test_route_cache_keys_passthrough_when_page_rr_disabled(self):
         self.assertEqual(
             route_cache_keys_for_page_rr([10, 11, 12, 13], False, 4),
