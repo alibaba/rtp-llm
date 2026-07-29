@@ -216,13 +216,6 @@ jobs:
           $IMAGE \
           ${{ github.workspace }}/rtp-llm/rtp_llm_benchmark/ci/summarize_results.sh ${{ github.workspace }}/logs/
 
-    - name: Check out rtp llm source code
-      if: ${{ github.event_name == 'workflow_dispatch' }}
-      uses: actions/checkout@v3
-      with:
-        ref: ${{ inputs.branch }}
-        path: rtp-llm
-
     - name: Check out rtp llm gh-pages
       if: always()
       uses: actions/checkout@v3
