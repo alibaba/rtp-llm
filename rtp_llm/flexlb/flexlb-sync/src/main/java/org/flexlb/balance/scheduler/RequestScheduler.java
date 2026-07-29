@@ -32,6 +32,7 @@ public class RequestScheduler {
     private final QueueManager queueManager;
     private final DynamicWorkerManager dynamicWorkerManager;
     private final RoutingQueueReporter metrics;
+    private final long routingRetryIntervalMs;
 
     // Worker thread pool
     private ExecutorService workerExecutor;
@@ -47,6 +48,7 @@ public class RequestScheduler {
         this.queueManager = queueManager;
         this.dynamicWorkerManager = dynamicWorkerManager;
         this.metrics = metrics;
+        this.routingRetryIntervalMs = configService.loadBalanceConfig().getRoutingRetryIntervalMs();
     }
 
     @PostConstruct
@@ -113,33 +115,69 @@ public class RequestScheduler {
 
     private void processRequest(BalanceContext ctx) {
         try {
-            Response response = router.route(ctx);
-            handleRoutingResult(ctx, response);
+            while (!ctx.getFuture().isDone()) {
+                Response response = router.route(ctx);
+                if (response.isSuccess() || !isRetryable(response)) {
+                    completeRouting(ctx, response);
+                    return;
+                }
+                if (!hasRetryBudget(ctx)) {
+                    logRetryLimitReached(ctx);
+                    completeRouting(ctx, response);
+                    return;
+                }
+                recordRoutingRetry(ctx, response);
+                waitBeforeRetry();
+            }
+        } catch (InterruptedException e) {
+            Logger.warn("Routing retry interrupted for request id:{}, retry count: {}", ctx.getRequestId(), ctx.getRetryCount());
+            Thread.currentThread().interrupt();
+            ctx.getFuture().completeExceptionally(e);
         } catch (Exception e) {
             Logger.error("Worker thread failed to route ctx id:{}", ctx.getRequestId(), e);
             ctx.getFuture().completeExceptionally(e);
         }
     }
 
-    private void handleRoutingResult(BalanceContext ctx, Response response) {
+    /**
+     * Returns whether the request can make another routing attempt.
+     */
+    private boolean hasRetryBudget(BalanceContext ctx) {
         int maxRetry = ctx.getConfig() != null ? ctx.getConfig().getMaxRetryCount() : 0;
-        boolean retryAllowed = maxRetry <= 0 || ctx.getRetryCount() < maxRetry;
-        if (!response.isSuccess() && shouldRetry(response) && retryAllowed) {
-            ctx.incrementRetryCount();
-            Logger.warn("Route failed for request id:{}, error: {}, retry count: {}",
-                    ctx.getRequestId(),
-                    response.getCode(),
-                    ctx.getRetryCount());
-            metrics.reportRoutingFailureQps(response.getCode());
+        return maxRetry <= 0 || ctx.getRetryCount() < maxRetry;
+    }
 
-            queueManager.offerToHead(ctx);
-        } else {
-            if (!response.isSuccess() && !retryAllowed) {
-                Logger.warn("Max retry count ({}) exceeded for request id:{}, completing with error",
-                        maxRetry, ctx.getRequestId());
-            }
-            ctx.getFuture().complete(response);
-            metrics.reportRoutingSuccessQps(ctx.getRetryCount());
+    /**
+     * Records a routing attempt that will be retried by the current scheduling worker.
+     */
+    private void recordRoutingRetry(BalanceContext ctx, Response response) {
+        ctx.incrementRetryCount();
+        Logger.debug("Route failed for request id:{}, error: {}, retry count: {}",
+                ctx.getRequestId(),
+                response.getCode(),
+                ctx.getRetryCount());
+        metrics.reportRoutingFailureQps(response.getCode());
+    }
+
+    /**
+     * Logs that a retryable request has consumed its configured retry budget.
+     */
+    private void logRetryLimitReached(BalanceContext ctx) {
+        int maxRetry = ctx.getConfig() != null ? ctx.getConfig().getMaxRetryCount() : 0;
+        Logger.warn("Retry limit ({}) reached for request id:{}, completing with error", maxRetry, ctx.getRequestId());
+    }
+
+    /**
+     * Completes the request with the final routing response.
+     */
+    private void completeRouting(BalanceContext ctx, Response response) {
+        ctx.getFuture().complete(response);
+        metrics.reportRoutingSuccessQps(ctx.getRetryCount());
+    }
+
+    private void waitBeforeRetry() throws InterruptedException {
+        if (routingRetryIntervalMs > 0) {
+            Thread.sleep(routingRetryIntervalMs);
         }
     }
 
@@ -151,7 +189,7 @@ public class RequestScheduler {
      * @param response Routing response
      * @return true if request should be retried, false otherwise
      */
-    private boolean shouldRetry(Response response) {
+    private boolean isRetryable(Response response) {
         StrategyErrorType errorType = StrategyErrorType.fromErrorCode(response.getCode());
         return errorType != null && errorType.isCanRetry();
     }

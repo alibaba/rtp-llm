@@ -13,8 +13,6 @@ import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
 
-import java.util.concurrent.CompletableFuture;
-
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
@@ -97,40 +95,6 @@ class QueueManagerTest {
         BalanceContext taken = queueManager.takeRequest(false, 0);
         assertNotNull(taken);
         assertEquals("request-2", taken.getRequestId());
-    }
-
-    @Test
-    void offerToHead_shouldRequeueAtFront() {
-        BalanceContext first = createContext("request-1");
-        queueManager.tryRouteAsync(first);
-
-        BalanceContext retried = createContext("request-2");
-        retried.setFuture(new CompletableFuture<>());
-        retried.setEnqueueTime(System.currentTimeMillis());
-        queueManager.offerToHead(retried);
-
-        BalanceContext taken = queueManager.takeRequest(false, 0);
-        assertNotNull(taken);
-        assertEquals("request-2", taken.getRequestId());
-    }
-
-    @Test
-    void offerToHead_shouldCompleteWithErrorWhenQueueFull() {
-        // Fill the queue
-        for (int i = 0; i < 10; i++) {
-            queueManager.tryRouteAsync(createContext("request-" + i));
-        }
-
-        BalanceContext ctx = createContext("request-99");
-        CompletableFuture<Response> future = new CompletableFuture<>();
-        ctx.setFuture(future);
-
-        queueManager.offerToHead(ctx);
-
-        assertTrue(future.isDone());
-        Response response = future.join();
-        assertFalse(response.isSuccess());
-        assertEquals(StrategyErrorType.QUEUE_FULL.getErrorCode(), response.getCode());
     }
 
     private BalanceContext createContext(String requestId) {

@@ -91,19 +91,6 @@ public class QueueManager {
     }
 
     /**
-     * Offer to queue head (for retry on failure)
-     *
-     * @param ctx Load balancing context
-     */
-    public void offerToHead(BalanceContext ctx) {
-        boolean added = queue.offerFirst(ctx);
-        if (!added) {
-            Logger.warn("Failed to re-queue request id: {} (queue full), completing with error", ctx.getRequestId());
-            ctx.getFuture().complete(Response.error(StrategyErrorType.QUEUE_FULL));
-        }
-    }
-
-    /**
      * Take request from queue (blocking/non-blocking)
      *
      * @param isBlock          Whether to block and wait

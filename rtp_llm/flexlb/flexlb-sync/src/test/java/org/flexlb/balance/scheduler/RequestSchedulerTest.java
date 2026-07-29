@@ -19,15 +19,14 @@ import java.util.concurrent.CompletableFuture;
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertTrue;
-import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.Mockito.lenient;
-import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.times;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 /**
  * Unit tests for RequestScheduler routing logic.
- * Tests handleRoutingResult behavior including retry limits.
+ * Tests request completion and retry-limit behavior.
  */
 @ExtendWith(MockitoExtension.class)
 class RequestSchedulerTest {
@@ -50,6 +49,7 @@ class RequestSchedulerTest {
         FlexlbConfig config = new FlexlbConfig();
         config.setScheduleWorkerSize(1);
         config.setMaxRetryCount(3); // Explicitly set for test, default is 0 (unlimited)
+        config.setRoutingRetryIntervalMs(0);
         lenient().when(configService.loadBalanceConfig()).thenReturn(config);
         scheduler = new RequestScheduler(router, configService, queueManager, dynamicWorkerManager, metrics);
     }
@@ -75,14 +75,17 @@ class RequestSchedulerTest {
     void processRequest_shouldRetryOnRetryableError() throws Exception {
         BalanceContext ctx = createContext("request-1");
         Response errorResponse = Response.error(StrategyErrorType.NO_AVAILABLE_WORKER);
-        when(router.route(ctx)).thenReturn(errorResponse);
+        Response successResponse = new Response();
+        successResponse.setSuccess(true);
+        when(router.route(ctx)).thenReturn(errorResponse, successResponse);
 
         var method = RequestScheduler.class.getDeclaredMethod("processRequest", BalanceContext.class);
         method.setAccessible(true);
         method.invoke(scheduler, ctx);
 
         assertEquals(1, ctx.getRetryCount());
-        verify(queueManager).offerToHead(ctx);
+        assertTrue(ctx.getFuture().get().isSuccess());
+        verify(router, times(2)).route(ctx);
         verify(metrics).reportRoutingFailureQps(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode());
     }
 
@@ -97,7 +100,6 @@ class RequestSchedulerTest {
         method.invoke(scheduler, ctx);
 
         assertEquals(0, ctx.getRetryCount());
-        verify(queueManager, never()).offerToHead(any());
         assertTrue(ctx.getFuture().isDone());
         assertFalse(ctx.getFuture().get().isSuccess());
     }
@@ -105,11 +107,6 @@ class RequestSchedulerTest {
     @Test
     void processRequest_shouldStopRetryingAfterMaxRetries() throws Exception {
         BalanceContext ctx = createContext("request-1");
-        // Simulate already retried 3 times (max)
-        for (int i = 0; i < 3; i++) {
-            ctx.incrementRetryCount();
-        }
-
         Response errorResponse = Response.error(StrategyErrorType.NO_AVAILABLE_WORKER);
         when(router.route(ctx)).thenReturn(errorResponse);
 
@@ -117,8 +114,8 @@ class RequestSchedulerTest {
         method.setAccessible(true);
         method.invoke(scheduler, ctx);
 
-        // Should NOT re-queue, should complete with error
-        verify(queueManager, never()).offerToHead(any());
+        assertEquals(3, ctx.getRetryCount());
+        verify(router, times(4)).route(ctx);
         assertTrue(ctx.getFuture().isDone());
         assertFalse(ctx.getFuture().get().isSuccess());
         assertEquals(StrategyErrorType.NO_AVAILABLE_WORKER.getErrorCode(), ctx.getFuture().get().getCode());

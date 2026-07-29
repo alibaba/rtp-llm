@@ -62,6 +62,13 @@ public class FlexlbConfig {
     private int maxRetryCount = 0;
 
     /**
+     * Delay between retryable routing attempts.
+     * Keeps a request in the scheduling worker while engines are full instead of repeatedly
+     * moving it in and out of the main queue.
+     */
+    private long routingRetryIntervalMs = 10;
+
+    /**
      * Prefill role queuing threshold
      * When below this threshold, the Worker is considered available
      */
