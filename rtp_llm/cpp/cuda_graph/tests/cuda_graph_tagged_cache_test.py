@@ -30,6 +30,20 @@ class TaggedBlockTableModel:
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
+class TaggedSequenceLengthModel:
+    """Expose the cumulative lengths used by a tagged captured graph."""
+
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        full_inputs = inputs.attention_inputs["full"]
+        last_q = full_inputs.cu_seqlens_device[-1]
+        last_kv = full_inputs.cu_kv_seqlens_device[-1]
+        signature = (last_q + 100 * last_kv).to(inputs.input_hiddens.dtype)
+        return PyModelOutputs(inputs.input_hiddens + signature)
+
+
 def _tag_attention_inputs(
     common: PyAttentionInputs, tags: list[str], values: dict[str, int]
 ) -> dict[str, PyAttentionInputs]:
@@ -124,6 +138,81 @@ def _build_prefill_inputs(
     attention_inputs.context_total_kv_length = seq_len
     attention_inputs.total_tokens = seq_len
     attention_inputs.kv_cache_kernel_block_id = torch.zeros((1, 1), dtype=torch.int32)
+    attention_inputs.kv_cache_kernel_block_id_device = (
+        attention_inputs.kv_cache_kernel_block_id.cuda()
+    )
+    attention_inputs.kv_cache_block_id = attention_inputs.kv_cache_kernel_block_id
+    attention_inputs.kv_cache_block_id_device = (
+        attention_inputs.kv_cache_kernel_block_id_device
+    )
+    inputs.attention_inputs = _tag_attention_inputs(attention_inputs, tags, values)
+    return inputs
+
+
+def _build_target_verify_inputs(
+    tags: list[str],
+    values: dict[str, int],
+    batch_size: int = 1,
+    query_len: int = 5,
+    prefix_len: int = 11,
+) -> PyModelInputs:
+    inputs = PyModelInputs()
+    token_count = batch_size * query_len
+    inputs.input_ids = torch.arange(token_count, dtype=torch.int32, device="cuda")
+    inputs.input_hiddens = torch.zeros(
+        (token_count, HIDDEN_SIZE), dtype=torch.bfloat16, device="cuda"
+    )
+
+    attention_inputs = PyAttentionInputs()
+    attention_inputs.is_prefill = True
+    attention_inputs.is_target_verify = True
+    attention_inputs.dtype = get_typemeta(torch.zeros(1, dtype=torch.bfloat16))
+    attention_inputs.input_lengths = torch.full(
+        (batch_size,), query_len, dtype=torch.int32
+    ).pin_memory()
+    attention_inputs.prefix_lengths = torch.full(
+        (batch_size,), prefix_len, dtype=torch.int32
+    ).pin_memory()
+    attention_inputs.sequence_lengths = torch.empty(
+        0, dtype=torch.int32
+    ).pin_memory()
+    attention_inputs.sequence_lengths_plus_1_device = (
+        attention_inputs.prefix_lengths.cuda() + 1
+    )
+
+    cu_q = torch.arange(
+        0, token_count + 1, query_len, dtype=torch.int32
+    ).pin_memory()
+    attention_inputs.cu_seqlens = cu_q
+    attention_inputs.cu_seqlens_device = cu_q.cuda()
+    attention_inputs.cu_kv_seqlens_device = torch.arange(
+        0,
+        batch_size * (query_len + prefix_len) + 1,
+        query_len + prefix_len,
+        dtype=torch.int32,
+        device="cuda",
+    )
+    attention_inputs.decode_cu_seqlens = torch.arange(
+        batch_size + 1, dtype=torch.int32
+    ).pin_memory()
+    attention_inputs.decode_cu_seqlens_device = (
+        attention_inputs.decode_cu_seqlens.cuda()
+    )
+
+    attention_inputs.padding_offset = torch.zeros(
+        token_count, dtype=torch.int32
+    ).pin_memory()
+    attention_inputs.context_total_kv_length = batch_size * (
+        query_len + prefix_len
+    )
+    attention_inputs.total_tokens = token_count
+
+    block_count = (
+        prefix_len + query_len + TOKENS_PER_BLOCK - 1
+    ) // TOKENS_PER_BLOCK
+    attention_inputs.kv_cache_kernel_block_id = torch.zeros(
+        (batch_size, block_count), dtype=torch.int32
+    ).pin_memory()
     attention_inputs.kv_cache_kernel_block_id_device = (
         attention_inputs.kv_cache_kernel_block_id.cuda()
     )
@@ -249,6 +338,39 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             is_target_verify=True,
         )
         self.assertFalse(runner.canRun(wrong))
+
+    def test_target_verify_clears_rounded_batch_sequence_lengths(self) -> None:
+        query_len = 5
+        prefix_len = 11
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            TaggedSequenceLengthModel(),
+            HIDDEN_SIZE,
+            64,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [4],
+            GROUP_TAGS,
+            True,
+            query_len,
+        )
+
+        inputs = _build_target_verify_inputs(
+            GROUP_TAGS,
+            {"full": 2, "aux": 1},
+            query_len=query_len,
+            prefix_len=prefix_len,
+        )
+        self.assertTrue(runner.canRun(inputs))
+        self.assertEqual(runner.getCurrentRealGraphSize(), 4)
+
+        output = runner.forward(inputs)
+        torch.cuda.synchronize()
+        expected_signature = query_len + 100 * (query_len + prefix_len)
+        torch.testing.assert_close(
+            output.hidden_states,
+            torch.full_like(output.hidden_states, expected_signature),
+        )
 
 
 if __name__ == "__main__":

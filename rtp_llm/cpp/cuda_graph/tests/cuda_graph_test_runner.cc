@@ -46,7 +46,8 @@ public:
                      int64_t                  kernel_tokens_per_block,
                      std::vector<int>         decode_capture_batch_sizes,
                      std::vector<std::string> group_tags,
-                     bool                     is_target_verify) {
+                     bool                     is_target_verify,
+                     int64_t                  num_tokens_per_bs) {
         reset_runner();
         GraphParams params;
         params.enable_cuda_graph_debug_mode = false;
@@ -54,7 +55,7 @@ public:
         params.max_seq_len                  = static_cast<int>(max_seq_len);
         params.tokens_per_block             = static_cast<int>(tokens_per_block);
         params.kernel_tokens_per_block      = static_cast<int>(kernel_tokens_per_block);
-        params.num_tokens_per_bs            = 1;
+        params.num_tokens_per_bs            = static_cast<int>(num_tokens_per_bs);
         params.hidden_size                  = static_cast<size_t>(hidden_size);
         params.model_data_type              = c10::ScalarType::BFloat16;
         params.max_context_batch_size       = 128;
@@ -70,6 +71,12 @@ public:
     }
 
     torch_ext::PyModelOutputs forward(torch_ext::PyModelInputs& inputs) {
+        // Production PyWrappedModel creates these device mirrors. Python tests
+        // cannot assign them because the bindings intentionally expose them as
+        // read-only, so reproduce that input-building step in the test wrapper.
+        inputs.attention_inputs.input_lengths_device  = inputs.attention_inputs.input_lengths.cuda();
+        inputs.attention_inputs.prefix_lengths_device = inputs.attention_inputs.prefix_lengths.cuda();
+        refreshTaggedAttentionInputs(inputs);
         return runner_->forward(inputs, state_);
     }
 
@@ -117,8 +124,9 @@ PYBIND11_MODULE(libtest_cuda_graph_runner, m) {
              py::arg("tokens_per_block"),
              py::arg("kernel_tokens_per_block"),
              py::arg("decode_capture_batch_sizes"),
-             py::arg("group_tags")       = std::vector<std::string>{},
-             py::arg("is_target_verify") = false)
+             py::arg("group_tags")        = std::vector<std::string>{},
+             py::arg("is_target_verify")  = false,
+             py::arg("num_tokens_per_bs") = 1)
         .def("canRun", &CudaGraphTestRunner::canRun)
         .def("forward", &CudaGraphTestRunner::forward)
         .def("getCurrentRealGraphSize", &CudaGraphTestRunner::getCurrentRealGraphSize);

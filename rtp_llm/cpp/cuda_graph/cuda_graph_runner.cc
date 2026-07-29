@@ -314,8 +314,11 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
         }
     }
 
-    // Reset unused batch portions to prevent stale data (prefill only)
-    if (is_prefill_cuda_graph_mode_) {
+    // Prefill attention consumes cumulative Q/KV lengths. Target verify uses the
+    // same attention path even though it is replayed by the decode graph runner.
+    // Clear graph padding so rounded-up batch slots do not retain capture-time
+    // max sequence lengths and trigger unnecessary attention work.
+    if (is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1) {
         if (state.current_batch_size < max_bs_) {
             py_model_inputs_.attention_inputs.prefix_lengths.slice(0, state.current_batch_size, max_bs_).fill_(0);
             py_model_inputs_.attention_inputs.input_lengths.slice(0, state.current_batch_size, max_bs_).fill_(0);
@@ -324,8 +327,8 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
             py_model_inputs_.attention_inputs.input_lengths_device.slice(0, state.current_batch_size, max_bs_).fill_(0);
         }
 
-        int last_valid_q = state.current_seq_len;
-        int last_valid_kv =
+        const int last_valid_q = is_prefill_cuda_graph_mode_ ? state.current_seq_len : state.seq_len_sum;
+        int       last_valid_kv =
             last_valid_q
             + inputs.attention_inputs.prefix_lengths.slice(0, 0, state.current_batch_size).sum().item<int>();
         py_model_inputs_.attention_inputs.cu_seqlens.slice(0, state.current_batch_size + 1, max_bs_ + 1)
