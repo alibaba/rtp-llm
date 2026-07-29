@@ -1,5 +1,6 @@
 package org.flexlb.dispatcher;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import lombok.Getter;
 import lombok.Setter;
@@ -104,6 +105,14 @@ public class DispatchConfig {
      */
     private boolean preAssignBe = true;
 
-    /** Parsed sub-batch spec; populated by {@link DispatcherConfiguration} during loading. */
-    private transient SubBatchSpec subBatchSpec;
+    /**
+     * Parsed sub-batch spec; populated by {@link DispatcherConfiguration} during loading.
+     *
+     * <p>{@code @JsonIgnore}, not {@code transient}: Jackson does not honour the {@code transient}
+     * keyword by default, and Lombok exposes this as a bean property — so a {@code subBatchSpec}
+     * key appearing in {@code DISPATCH_CONFIG} would be bound onto a derived field instead of
+     * being ignored. It is derived from {@link #subBatch} and never part of the wire contract.
+     */
+    @JsonIgnore
+    private SubBatchSpec subBatchSpec;
 }
