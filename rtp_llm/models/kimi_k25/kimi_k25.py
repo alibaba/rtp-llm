@@ -52,7 +52,7 @@ class KimiK25(DeepSeekV2):
         # Promote `text_config.quantization_config` to the top level so the
         # standard loader path discovers compressed-tensors INT4. Done in
         # the on-disk JSON-equivalent dict before any further processing.
-        text_config = top_config.get("text_config", {}) if top_config else {}
+        text_config = top_config.get("text_config", {})
         if isinstance(text_config, dict) and "quantization_config" in text_config:
             top_config.setdefault(
                 "quantization_config", text_config["quantization_config"]

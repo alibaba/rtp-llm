@@ -198,7 +198,6 @@ py_test(
     ],
     deps = py_test_deps + select({
         "@//:using_cuda12_9_x86": flashinfer_deps,
-        "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
     tags = ["RTX_5000_PRO"],

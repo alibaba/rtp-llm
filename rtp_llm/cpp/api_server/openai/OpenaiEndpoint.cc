@@ -81,9 +81,9 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
         if (chat_render_) {
             request_stop_words_list_ids = chat_render_->tokenize_words(request_stop_words_list);
         } else if (tokenizer_) {
-            // No renderer available: fall back to the tokenizer for an equivalent
-            // token-id encoding so the request-level stop constraint still applies
-            // instead of being silently dropped.
+            // No renderer available: fall back to raw tokenizer encoding. NOTE: this is
+            // NOT strictly equivalent to ChatRender::tokenize_words -- the raw encode()
+            // may include special tokens depending on the tokenizer configuration.
             request_stop_words_list_ids.reserve(request_stop_words_list.size());
             for (const auto& word : request_stop_words_list) {
                 request_stop_words_list_ids.push_back(tokenizer_->encode(word));

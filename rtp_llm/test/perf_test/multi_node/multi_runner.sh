@@ -56,7 +56,7 @@ multi_kill_script() {
     do
       (
         set -e
-        scp -P ${SSH_PORT} multi_local_executor.sh ${RUN_USER}@${IP}:/tmp/multi_local_executor.sh;
+        scp -P ${SSH_PORT} multi_local_executor.sh ${RUN_USER}@${IP}:/tmp/multi_local_executor.sh || echo "WARN: scp to ${IP} failed, trying remote cleanup with existing script";
         # Concat all environment variables
         ENV_STR=$(printenv | paste -sd " ");
         echo "Environment variables: $ENV_STR";
@@ -132,7 +132,7 @@ multi_clean_script() {
     do
       (
         set -e
-        scp -P ${SSH_PORT} multi_local_executor.sh ${RUN_USER}@${IP}:/tmp/multi_local_executor.sh;
+        scp -P ${SSH_PORT} multi_local_executor.sh ${RUN_USER}@${IP}:/tmp/multi_local_executor.sh || echo "WARN: scp to ${IP} failed, trying remote cleanup with existing script";
         # Concat all environment variables
         ENV_STR=$(printenv | paste -sd " ");
         echo "Environment variables: $ENV_STR";
