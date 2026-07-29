@@ -277,8 +277,9 @@ class VitConfig:
         """Resolved MMScheduler kwargs.
 
         use_gpu_batch on  -> cross-request GPU batching with the gpu_* limits;
-        gpu_max_batch_images then caps both the batch and (since a request is never
-        split) the single-request image count.
+        gpu_max_batch_images caps each forward. Models that provide a work
+        budget may split a multi-work-item request across bounded forwards;
+        legacy models retain the original whole-request image cap.
         use_gpu_batch off -> serial mode: one request per forward, no wait window,
         and no image cap (sys.maxsize) — matches the old inline path, which never
         bounded a single request's image count.

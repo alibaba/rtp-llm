@@ -1,4 +1,5 @@
-from typing import Any, List, Tuple, Union
+from dataclasses import dataclass
+from typing import Any, List, Optional, Tuple, Union
 
 import torch
 
@@ -72,6 +73,72 @@ class ImageTransform:
         return tensor_images
 
 
+@dataclass(frozen=True)
+class MMWorkEstimate:
+    """Model-provided cost for one or more preprocessed media items.
+
+    The scheduler treats zero-valued budget fields as unconstrained. Models can
+    therefore start with the dimensions they can estimate reliably while the
+    generic fallback remains compatible with existing multimodal models.
+    """
+
+    input_patches: int = 0
+    output_tokens: int = 0
+    estimated_workspace_bytes: int = 0
+    max_attention_segment: int = 0
+    attention_work: int = 0
+
+    def __post_init__(self) -> None:
+        for field_name, value in vars(self).items():
+            if value < 0:
+                raise ValueError(
+                    f"MMWorkEstimate.{field_name} must be >= 0, got {value}"
+                )
+
+    def __add__(self, other: "MMWorkEstimate") -> "MMWorkEstimate":
+        if not isinstance(other, MMWorkEstimate):
+            return NotImplemented
+        return MMWorkEstimate(
+            input_patches=self.input_patches + other.input_patches,
+            output_tokens=self.output_tokens + other.output_tokens,
+            estimated_workspace_bytes=(
+                self.estimated_workspace_bytes + other.estimated_workspace_bytes
+            ),
+            max_attention_segment=max(
+                self.max_attention_segment, other.max_attention_segment
+            ),
+            attention_work=self.attention_work + other.attention_work,
+        )
+
+    def scaled(self, count: int) -> "MMWorkEstimate":
+        if count < 0:
+            raise ValueError(f"count must be >= 0, got {count}")
+        return MMWorkEstimate(
+            input_patches=self.input_patches * count,
+            output_tokens=self.output_tokens * count,
+            estimated_workspace_bytes=self.estimated_workspace_bytes * count,
+            # This is a maximum, not an additive quantity.
+            max_attention_segment=self.max_attention_segment,
+            attention_work=self.attention_work * count,
+        )
+
+    def fits_within(self, budget: "MMWorkEstimate") -> bool:
+        additive_fields = (
+            "input_patches",
+            "output_tokens",
+            "estimated_workspace_bytes",
+            "attention_work",
+        )
+        for field_name in additive_fields:
+            limit = getattr(budget, field_name)
+            if limit > 0 and getattr(self, field_name) > limit:
+                return False
+        return (
+            budget.max_attention_segment <= 0
+            or self.max_attention_segment <= budget.max_attention_segment
+        )
+
+
 class MultiModalEmbeddingInterface:
     @property
     def _data_type(self):
@@ -91,6 +158,16 @@ class MultiModalEmbeddingInterface:
 
     def get_preprocess_params(self):
         return {}
+
+    def estimate_work(
+        self, data: Any, mm_type: Optional[MMUrlType] = None
+    ) -> Optional[MMWorkEstimate]:
+        """Return exact post-preprocess work when the model can provide it."""
+        return None
+
+    def get_batch_work_budget(self, max_batch_media: int) -> Optional[MMWorkEstimate]:
+        """Derive an internal cost budget from the existing media-count cap."""
+        return None
 
     @torch.inference_mode()
     def embedding(self, data, **kwargs):
