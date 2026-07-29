@@ -90,6 +90,30 @@ class DispatchRouterTest {
     }
 
     @Test
+    void rootSpecMatchesWithAndWithoutTheTrailingSlash() {
+        // The root spec's path is "/", so a naive registration only covers "/dispatcher/". A caller
+        // posting to "/dispatcher" would match no batch route and be passthrough-forwarded to one
+        // FE unsplit — a silent loss of batching that looks like a working request.
+        BatchEndpointSpec root = BatchEndpointSpec.BY_PATH.get("/");
+        assertNotNull(root, "root spec must be registered");
+        BatchHandler batch = mock(BatchHandler.class);
+        when(batch.handle(any(), eq(root))).thenReturn(ServerResponse.ok().bodyValue("batched"));
+        PassthroughClient passthrough = mock(PassthroughClient.class);
+        when(passthrough.forward(any())).thenReturn(ServerResponse.ok().bodyValue("pass"));
+
+        RouterFunction<ServerResponse> routes = new DispatchRouter(
+                batch, passthrough, mock(DispatcherInspectionHandler.class),
+                new ActiveRequestCounter(), List.of(root)).routes();
+        WebTestClient client = WebTestClient.bindToRouterFunction(routes).build();
+
+        client.post().uri("/dispatcher/").bodyValue("{}").exchange()
+                .expectStatus().isOk().expectBody(String.class).isEqualTo("batched");
+        client.post().uri("/dispatcher").bodyValue("{}").exchange()
+                .expectStatus().isOk().expectBody(String.class).isEqualTo("batched");
+        verifyNoInteractions(passthrough);
+    }
+
+    @Test
     void servingRoutesAreCountedForGracefulDrain() {
         ActiveRequestCounter counter = new ActiveRequestCounter();
         long[] seenInFlight = {-1};

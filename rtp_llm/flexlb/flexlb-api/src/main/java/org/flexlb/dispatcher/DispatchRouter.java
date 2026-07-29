@@ -50,7 +50,15 @@ public class DispatchRouter {
     public RouterFunction<ServerResponse> routes() {
         RouterFunctions.Builder b = RouterFunctions.route();
         for (BatchEndpointSpec spec : specs) {
-            b.POST("/dispatcher" + spec.getPath(), req -> tracked(() -> batchHandler.handle(req, spec)));
+            String path = "/dispatcher" + spec.getPath();
+            b.POST(path, req -> tracked(() -> batchHandler.handle(req, spec)));
+            // The root spec's path is "/", so the loop above only registers "/dispatcher/". A
+            // caller posting to "/dispatcher" would miss every batch route and be silently
+            // passthrough-forwarded to a single FE unsplit — register the bare form too.
+            if (path.endsWith("/")) {
+                String bare = path.substring(0, path.length() - 1);
+                b.POST(bare, req -> tracked(() -> batchHandler.handle(req, spec)));
+            }
         }
         // Diagnostics, not serving traffic — left out of the graceful-drain count.
         //
