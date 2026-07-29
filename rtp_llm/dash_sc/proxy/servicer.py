@@ -83,7 +83,7 @@ async def _abort_with_downstream_grpc_error(
         "[DashScGrpc] proxy downstream grpc error: downstream_frontend_addr=%s "
         "code=%s details=%s",
         downstream_addr,
-        code.name,
+        getattr(code, "name", str(code)),
         details,
     )
     await context.abort(code, details)
