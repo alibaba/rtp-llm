@@ -119,6 +119,11 @@ public:
         return StepScope(*this);
     }
 
+    // Called around an actual model-forward step. Unlike tick(), these hooks
+    // do not consume profiling windows on idle TP synchronization steps.
+    void startStep();
+    void finishStep();
+
     bool enabled() const {
         return enabled_.load(std::memory_order_relaxed);
     }

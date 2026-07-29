@@ -117,6 +117,14 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 
 void GenerateStream::resetBeginTime(int64_t begin_time_us) {
     begin_time_us_ = begin_time_us;
+    wait_time_us_ = 0;
+    scheduler_enqueue_time_us_ = 0;
+    can_run_time_us_ = 0;
+    loading_cache_start_time_us_ = 0;
+    loading_cache_done_time_us_ = 0;
+    first_running_time_us_ = 0;
+    loading_cache_latency_us_ = 0;
+    load_done_to_running_us_ = 0;
 }
 
 bool GenerateStream::hasCacheKeys() const {
@@ -130,7 +138,10 @@ const CacheKeysType& GenerateStream::cacheKeys(int32_t batch_id) const {
 absl::Status GenerateStream::initKVBlock() {
     RTP_LLM_PROFILE_FUNCTION();
     std::lock_guard<std::mutex> lock(*mutex_);
-    auto                        ret = stream_cache_resource_->initKVBlock();
+    if (generate_status_->status == StreamState::WAITING) {
+        recordWaitLatency();
+    }
+    auto ret = stream_cache_resource_->initKVBlock();
     if (!ret.ok()) {
         RTP_LLM_LOG_WARNING("GenerateStream::initKVBlock: initKVBlock failed, stream_id: %lld", streamId());
     }
@@ -418,6 +429,7 @@ void GenerateStream::setReuseLength(int reuse_length) {
 
 void GenerateStream::setLocalReuseLength(int length) {
     local_reuse_length_ = length;
+    setDeviceReuseLength(local_reuse_length_ > memory_reuse_length_ ? local_reuse_length_ - memory_reuse_length_ : 0);
 }
 
 void GenerateStream::setRemoteReuseLength(int length) {
@@ -428,12 +440,21 @@ int GenerateStream::localReuseLength() const {
     return local_reuse_length_;
 }
 
+void GenerateStream::setDeviceReuseLength(int length) {
+    device_reuse_length_ = length;
+}
+
+int GenerateStream::deviceReuseLength() const {
+    return device_reuse_length_;
+}
+
 int GenerateStream::remoteReuseLength() const {
     return remote_reuse_length_;
 }
 
 void GenerateStream::setMemoryReuseLength(int length) {
     memory_reuse_length_ = length;
+    setDeviceReuseLength(local_reuse_length_ > memory_reuse_length_ ? local_reuse_length_ - memory_reuse_length_ : 0);
 }
 
 int GenerateStream::memoryReuseLength() const {
@@ -592,6 +613,47 @@ void GenerateStream::checkTimeoutWithoutLock() {
     }
 }
 
+void GenerateStream::recordWaitLatency() {
+    wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+}
+
+void GenerateStream::recordSchedulerEnqueueTime(int64_t time_us) {
+    if (scheduler_enqueue_time_us_ == 0) {
+        scheduler_enqueue_time_us_ = time_us;
+    }
+}
+
+void GenerateStream::recordCanRunTime() {
+    if (can_run_time_us_ == 0) {
+        can_run_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+    }
+}
+
+void GenerateStream::recordLoadingCacheStartTime() {
+    if (loading_cache_start_time_us_ == 0) {
+        loading_cache_start_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+    }
+}
+
+void GenerateStream::recordLoadingCacheDoneTime() {
+    if (loading_cache_done_time_us_ == 0) {
+        loading_cache_done_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+        if (loading_cache_start_time_us_ > 0) {
+            loading_cache_latency_us_ = loading_cache_done_time_us_ - loading_cache_start_time_us_;
+        }
+    }
+}
+
+void GenerateStream::recordRunningTime() {
+    if (first_running_time_us_ != 0) {
+        return;
+    }
+    first_running_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds();
+    if (loading_cache_done_time_us_ > 0) {
+        load_done_to_running_us_ = first_running_time_us_ - loading_cache_done_time_us_;
+    }
+}
+
 void GenerateStream::reportTimeoutWithoutLock(int64_t running_time_ms, int64_t timeout_ms) {
     reportEventWithoutLock(StreamEvents::Error,
                            ErrorCode::GENERATE_TIMEOUT,
@@ -638,18 +700,28 @@ void GenerateStream::setReserveStep(size_t reserve_step) {
 }
 
 StreamState GenerateStream::moveToNext() {
-    std::lock_guard<std::mutex> lock(*mutex_);
-    checkTimeoutWithoutLock();
-    const auto  old_status = getStatus();
-    StreamState state      = generate_status_->moveToNext();
-    const auto  new_status = getStatus();
+    StreamState state;
+    bool        should_report_metric = false;
+    {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        checkTimeoutWithoutLock();
+        const auto old_status = getStatus();
+        state                 = generate_status_->moveToNext();
+        const auto new_status = getStatus();
 
-    if (old_status == StreamState::WAITING && new_status != StreamState::WAITING) {
-        wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+        if (old_status == StreamState::WAITING && new_status != StreamState::WAITING) {
+            wait_time_us_ = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
+        }
+        should_report_metric = old_status != StreamState::FINISHED && new_status == StreamState::FINISHED;
+
+        if (new_status != old_status) {
+            consumer_cv_->notify_all();
+        }
     }
-
-    if (new_status != old_status) {
-        consumer_cv_->notify_all();
+    // Report terminal stream metrics outside the stream mutex; the reporter
+    // may take its own locks and must not nest under mutex_.
+    if (should_report_metric) {
+        reportMetricOnce();
     }
     return state;
 }
@@ -1105,6 +1177,14 @@ void GenerateStream::setMetricsReporter(kmonitor::MetricsReporterPtr metrics_rep
     metrics_reporter_ = metrics_reporter;
 }
 
+void GenerateStream::reportMetricOnce() {
+    if (metrics_reported_) {
+        return;
+    }
+    metrics_reported_ = true;
+    reportMetric();
+}
+
 void GenerateStream::reportMetric() {
     reportStreamMetrics();
     reportCacheReuseMetrics();
@@ -1124,6 +1204,7 @@ void GenerateStream::reportStreamMetrics() {
         if (getStatus() == StreamState::FINISHED || cancelled || timeout) {
             collector.reuse_length           = initial_reuse_length_;
             collector.input_token_length     = inputLength();
+            collector.effective_context_length = std::max<int64_t>(0, collector.input_token_length - initial_reuse_length_);
             collector.output_token_length    = outputTokenLen();
             collector.iterate_count          = iter_count_;
             collector.query_batch_size       = maxBatchSize();
@@ -1132,6 +1213,14 @@ void GenerateStream::reportStreamMetrics() {
             RTP_LLM_LOG_DEBUG(
                 "stream [%ld] report first latency us = %ld", streamId(), collector.first_token_latency_us);
             collector.wait_latency_us          = wait_time_us_;
+            if (scheduler_enqueue_time_us_ > 0 && can_run_time_us_ > scheduler_enqueue_time_us_) {
+                collector.enqueue_to_canrun_us = can_run_time_us_ - scheduler_enqueue_time_us_;
+            }
+            if (can_run_time_us_ > 0 && first_running_time_us_ > can_run_time_us_) {
+                collector.canrun_to_running_us = first_running_time_us_ - can_run_time_us_;
+            }
+            collector.loading_cache_latency_us = loading_cache_latency_us_;
+            collector.load_done_to_running_us  = load_done_to_running_us_;
             collector.batch_with_prefill_times = batch_with_prefill_times_;
             collector.batch_with_prefill_len   = batch_with_prefill_len_;
             collector.malloc_failed_times      = stream_cache_resource_->mallocFailedTimes();
@@ -1148,9 +1237,17 @@ void GenerateStream::reportStreamMetrics() {
 
 void GenerateStream::reportCacheReuseMetrics() const {
     if (metrics_reporter_ && stream_cache_resource_->reuseCache()) {
+        const int64_t input_length        = inputLength();
+        const int64_t total_reuse_length = initialReuseLength();
+        auto hit_ratio = [input_length](int64_t reuse_length) {
+            return input_length > 0 ? static_cast<float>(reuse_length * 100.0 / input_length) : 0.0f;
+        };
         RtpLLMCacheReuseMetricsCollector collector;
-        collector.kv_cache_reuse_length = reuseLength();
-        collector.kv_cache_hit_rate     = inputLength() > 0 ? (reuseLength() * 100.0 / inputLength()) : 0.0;
+        collector.kv_cache_reuse_length            = total_reuse_length;
+        collector.kv_cache_hit_rate                = hit_ratio(total_reuse_length);
+        collector.stream_cache_device_reuse_length = deviceReuseLength();
+        collector.stream_cache_memory_reuse_length = memoryReuseLength();
+        collector.stream_cache_remote_reuse_length = remoteReuseLength();
         kmonitor::MetricsTags tags;
         metrics_reporter_->report<RtpLLMCacheReuseMetrics, RtpLLMCacheReuseMetricsCollector>(&tags, &collector);
     }

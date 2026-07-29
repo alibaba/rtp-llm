@@ -39,7 +39,7 @@ public:
                          int32_t                                        kv_cache_group_num = 1,
                          bool                                           warm_up            = false);
 
-    absl::Status process(const std::list<GenerateStreamPtr>& streams) override;
+    absl::Status process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us = 0) override;
     bool         updateEplbConfig(const EPLBConfig& config) override;
 
     void setTargetModel(std::unique_ptr<ModelBase> model) {
@@ -94,7 +94,9 @@ protected:
 
     void maybePrintModelInput(const GptModelInputs& model_input, const std::string& prefix) const;
 
-    absl::Status prefillStep(const std::list<GenerateStreamPtr>& streams, MtpMetricsCollector& metrics_collector);
+    absl::Status prefillStep(const std::list<GenerateStreamPtr>& streams,
+                             MtpMetricsCollector&                metrics_collector,
+                             int64_t                             schedule_time_us);
 
     absl::Status decodeStep(const std::list<GenerateStreamPtr>& streams, MtpMetricsCollector& metrics_collector);
 
@@ -116,7 +118,8 @@ protected:
     void         collectDecodeMetrics(const StreamGroups&                          stream_groups,
                                       torch::Event&                                accept_len_ready_event,
                                       const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
-                                      MtpMetricsCollector&                         metrics_collector);
+                                      MtpMetricsCollector&                         metrics_collector,
+                                      int64_t                                      model_forward_us);
     absl::Status dispatchDecodeOutput(const StreamGroups&                          stream_groups,
                                       const std::list<GenerateStreamPtr>&          streams,
                                       const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
@@ -128,7 +131,8 @@ protected:
     void draftModelDecode(GptModelInputs&             model_input,
                           const StreamGroups&         stream_groups,
                           std::vector<torch::Tensor>& draft_probs_list,
-                          torch::Tensor&              draft_token_ids_t);
+                          torch::Tensor&              draft_token_ids_t,
+                          int64_t&                    model_forward_us);
 
     bool useDeviceInput() const;
     bool checkDeviceInput() const;
@@ -187,8 +191,11 @@ private:
     int                                      tp_rank_                 = 0;
     ParallelismConfig                        parallelism_config_;
     kmonitor::MetricsReporterPtr             metrics_reporter_ = nullptr;
-    std::shared_ptr<ExpertBalancer>          expert_balancer_;
-    size_t                                   vocab_size_;
+    MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector> tps_reporter_;
+    WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>
+        wall_tps_reporter_;
+    std::shared_ptr<ExpertBalancer>                                          expert_balancer_;
+    size_t                                                                   vocab_size_;
 
     // for mtp
     DataType                                         data_type_;

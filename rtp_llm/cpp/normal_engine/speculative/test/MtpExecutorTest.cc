@@ -744,11 +744,10 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     auto next_draft_input               = GptModelInputs{};
     auto next_draft_output              = GptModelOutputs{};
     next_draft_output.logits            = torch::tensor({1.9f, 1.10f, 1.11f, 1.12f}).reshape({(int64_t)batch_size, 4});
-    next_draft_output.all_hidden_states =
-        torch::tensor({0.1f, 0.1f, 0.2f, 0.22f, 0.3f, 0.33f, 0.0f, 0.0f, 0.0f, 0.0f}).reshape({5, 2});
+    next_draft_output.all_hidden_states = torch::tensor({0.1f, 0.1f, 0.2f, 0.22f, 0.3f, 0.33f}).reshape({3, 2});
 
-    next_draft_input.combo_tokens      = torch::tensor({3, 2, 0, 0, 0}, torch::kInt32);
-    next_draft_input.input_lengths     = torch::tensor({5}, torch::kInt32);
+    next_draft_input.combo_tokens      = torch::tensor({3, 2, 0}, torch::kInt32);
+    next_draft_input.input_lengths     = torch::tensor({3}, torch::kInt32);
     next_draft_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
     next_draft_input.lm_output_indexes = torch::tensor({2}, torch::kInt32);
 
@@ -774,7 +773,7 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
         torch::tensor({0.01f, 0.02f, 0.03f, 0.04f, 0.05f, 0.06f, 0.07f, 0.08f, 0.09f, 0.10f})
             .reshape({(int64_t)(propose_step + 1), 2});
 
-    next_draft_input.last_hidden_states = target_output.all_hidden_states;
+    next_draft_input.last_hidden_states = target_output.all_hidden_states.narrow(0, 0, 3);
 
     components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
     components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});
@@ -902,13 +901,13 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
 
     auto next_draft_input               = GptModelInputs{};
     auto next_draft_output              = GptModelOutputs{};
-    next_draft_input.combo_tokens       = torch::tensor({1, 0, 0}, torch::kInt32);
-    next_draft_input.input_lengths      = torch::tensor({3}, torch::kInt32);
+    next_draft_input.combo_tokens       = torch::tensor({1}, torch::kInt32);
+    next_draft_input.input_lengths      = torch::tensor({1}, torch::kInt32);
     next_draft_input.prefix_lengths     = torch::tensor({2}, torch::kInt32);
     next_draft_input.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
-    next_draft_input.last_hidden_states = target_output.all_hidden_states;
+    next_draft_input.last_hidden_states = target_output.all_hidden_states.narrow(0, 0, 1);
     next_draft_output.logits            = torch::tensor({0.2f, 0.1f, 0.8f, 0.0f}).reshape({1, 4});
-    next_draft_output.all_hidden_states = torch::tensor({0.21f, 0.22f, 0.23f, 0.24f, 0.25f, 0.26f}).reshape({3, 2});
+    next_draft_output.all_hidden_states = torch::tensor({0.21f, 0.22f}).reshape({1, 2});
 
     components.fake_draft_model->setInputs({draft_input_1, next_draft_input});
     components.fake_draft_model->setOutputs({draft_output_1, next_draft_output});
@@ -987,13 +986,13 @@ TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTa
 
     auto next_draft_input               = GptModelInputs{};
     auto next_draft_output              = GptModelOutputs{};
-    next_draft_input.combo_tokens       = torch::tensor({1, 2}, torch::kInt32);
-    next_draft_input.input_lengths      = torch::tensor({2}, torch::kInt32);
+    next_draft_input.combo_tokens       = torch::tensor({1}, torch::kInt32);
+    next_draft_input.input_lengths      = torch::tensor({1}, torch::kInt32);
     next_draft_input.prefix_lengths     = torch::tensor({2}, torch::kInt32);
     next_draft_input.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
-    next_draft_input.last_hidden_states = target_output.all_hidden_states;
+    next_draft_input.last_hidden_states = target_output.all_hidden_states.narrow(0, 0, 1);
     next_draft_output.logits            = torch::tensor({0.2f, 0.1f, 0.8f, 0.0f}).reshape({1, 4});
-    next_draft_output.all_hidden_states = torch::tensor({0.21f, 0.22f, 0.23f, 0.24f}).reshape({2, 2});
+    next_draft_output.all_hidden_states = torch::tensor({0.21f, 0.22f}).reshape({1, 2});
 
     components.fake_target_model->setInputs({target_input});
     components.fake_target_model->setOutputs({target_output});
@@ -1103,14 +1102,13 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     auto next_draft_output = GptModelOutputs{};
     next_draft_output.logits =
         torch::tensor({1.9f, 1.10f, 1.11f, 1.12f, 2.9f, 2.10f, 2.11f, 2.12f}).reshape({(int64_t)batch_size, 4});
-    next_draft_output.all_hidden_states = torch::tensor({0.1f, 0.11f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f,
-                                                         0.0f, 0.0f,  0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 0.0f, 1.5f, 1.55f})
-                                              .reshape({10, 2});
+    next_draft_output.all_hidden_states =
+        torch::tensor({0.1f, 0.11f, 1.1f, 1.11f, 1.2f, 1.22f, 1.3f, 1.33f, 1.4f, 1.44f, 1.5f, 1.55f}).reshape({6, 2});
 
-    next_draft_input.combo_tokens      = torch::tensor({3, 0, 0, 0, 0, 3, 0, 2, 2, 1}, torch::kInt32);
-    next_draft_input.input_lengths     = torch::tensor({5, 5}, torch::kInt32);
+    next_draft_input.combo_tokens      = torch::tensor({3, 3, 0, 2, 2, 1}, torch::kInt32);
+    next_draft_input.input_lengths     = torch::tensor({1, 5}, torch::kInt32);
     next_draft_input.prefix_lengths    = torch::tensor({3, 2}, torch::kInt32);
-    next_draft_input.lm_output_indexes = torch::tensor({0, 9}, torch::kInt32);
+    next_draft_input.lm_output_indexes = torch::tensor({0, 5}, torch::kInt32);
 
     // set target model
     // verify [3, 2, 0, 0, 0], [3, 0, 2, 2, 1]
@@ -1131,7 +1129,8 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
                        0.11f, 0.12f, 0.13f, 0.14f, 0.15f, 0.16f, 0.17f, 0.18f, 0.19f, 0.20f})
             .reshape({(int64_t)(batch_size * (propose_step + 1)), 2});
 
-    next_draft_input.last_hidden_states = target_output.all_hidden_states;
+    next_draft_input.last_hidden_states =
+        torch::cat({target_output.all_hidden_states.narrow(0, 0, 1), target_output.all_hidden_states.narrow(0, 5, 5)});
 
     components.fake_draft_model->setInputs({draft_input_1, draft_input_2, draft_input_3, next_draft_input});
     components.fake_draft_model->setOutputs({draft_output_1, draft_output_2, draft_output_3, next_draft_output});
@@ -1307,11 +1306,14 @@ TEST_F(MtpExecutorTest, testDraftModelDecodeExpandsTargetVerifyPositionIds) {
 
     std::vector<torch::Tensor> draft_probs_list;
     torch::Tensor              draft_token_ids_t;
-    components.executor->draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t);
+    int64_t                    model_forward_us = 0;
+    components.executor->draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
 
     EXPECT_EQ((std::vector<int>{10, 11, 12, 13, 14, 20, 21, 22, 23, 24}), toVec<int>(model_input.combo_tokens));
     EXPECT_EQ((std::vector<int>{5, 5}), toVec<int>(model_input.input_lengths));
-    EXPECT_EQ((std::vector<int>{5, 7}), toVec<int>(model_input.prefix_lengths));
+    // Post draft-position fix: target verification starts one position below
+    // the draft-decode base so it first re-writes the carried target token.
+    EXPECT_EQ((std::vector<int>{4, 6}), toVec<int>(model_input.prefix_lengths));
     EXPECT_EQ(0, model_input.sequence_lengths.numel());
     EXPECT_EQ((std::vector<int>{0, 1, 2, 3, 4, 5, 6, 7, 8, 9}), toVec<int>(model_input.lm_output_indexes));
 
