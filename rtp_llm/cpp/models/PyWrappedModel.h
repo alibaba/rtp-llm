@@ -42,8 +42,11 @@ public:
     void            releaseBuffers() override;
 
 private:
-    std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs,
-                                                              const torch::Tensor&  cache_store_input_lengths_host);
+    // Pure transformation of model inputs into cache-store inputs; reads no
+    // instance state, so it stays static and unit-testable without constructing
+    // the python-backed model.
+    static std::optional<PyCacheStoreInputs>
+    prepareWriteCacheParams(const GptModelInputs& inputs, const torch::Tensor& cache_store_input_lengths_host);
 
 private:
     // Helper functions to reduce code duplication

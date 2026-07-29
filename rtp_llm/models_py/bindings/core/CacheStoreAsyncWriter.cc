@@ -5,6 +5,7 @@
 #include <memory>
 #include <utility>
 
+#include "autil/EnvUtil.h"
 #include "autil/LockFreeThreadPool.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
@@ -118,12 +119,31 @@ void CacheStoreAsyncWriter::init() {
                             cache_model_id_,
                             device_id_);
     auto cache_store = cache_manager_->getCacheStore();
-    RTP_LLM_CHECK_WITH_INFO(cache_store != nullptr,
-                            "CacheStoreAsyncWriter::init() cannot start cache-store work because CacheStore is "
-                            "unavailable (model_id=%zu, device_id=%d). Ensure RemoteRpcServer::initCacheStore() "
-                            "has injected the CacheStore before PD prefill.",
-                            cache_model_id_,
-                            device_id_);
+    // Operational rollback for the fail-fast-on-missing-CacheStore behavior:
+    // CACHE_STORE_SKIP_WRITE_WHEN_UNREADY=1 restores the legacy WriteCacheStoreOp
+    // semantics (WARN and silently skip this cycle's writes) for deployments whose
+    // startup order cannot guarantee CacheStore injection before PD prefill traffic.
+    // Read per cycle so flipping the env takes effect without code changes.
+    skip_cycle_writes_ = false;
+    if (cache_store == nullptr && autil::EnvUtil::getEnv("CACHE_STORE_SKIP_WRITE_WHEN_UNREADY", false)) {
+        RTP_LLM_INTERVAL_LOG(60,
+                             WARN,
+                             "CacheStoreAsyncWriter: CacheStore not injected yet; skipping cache-store writes for "
+                             "this forward cycle because CACHE_STORE_SKIP_WRITE_WHEN_UNREADY is set "
+                             "(model_id=%zu, device_id=%d)",
+                             cache_model_id_,
+                             device_id_);
+        skip_cycle_writes_ = true;
+    } else {
+        RTP_LLM_CHECK_WITH_INFO(cache_store != nullptr,
+                                "CacheStoreAsyncWriter::init() cannot start cache-store work because CacheStore is "
+                                "unavailable (model_id=%zu, device_id=%d). Ensure RemoteRpcServer::initCacheStore() "
+                                "has injected the CacheStore before PD prefill, or set "
+                                "CACHE_STORE_SKIP_WRITE_WHEN_UNREADY=1 to temporarily restore the legacy "
+                                "skip-write behavior.",
+                                cache_model_id_,
+                                device_id_);
+    }
 
     pending_count_.store(0, std::memory_order_relaxed);
     {
@@ -207,6 +227,15 @@ void CacheStoreAsyncWriter::waitAllDone() {
 
 void CacheStoreAsyncWriter::write(const torch_ext::PyCacheStoreInputs& cache_store_inputs,
                                   const torch_ext::LayerKVCache&       layer_kv) {
+    {
+        // Legacy-skip cycle (see init()): the rollback switch admitted this cycle
+        // without a CacheStore, so drop the write silently. Non-RUNNING states fall
+        // through to the regular error paths below.
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (state_ == State::RUNNING && skip_cycle_writes_) {
+            return;
+        }
+    }
 #if !USING_CUDA && !USING_ROCM
     (void)cache_store_inputs;
     (void)layer_kv;

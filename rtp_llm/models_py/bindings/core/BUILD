@@ -317,7 +317,8 @@ cc_library(
     # declared by exec_ops_hdr only. Every consumer's final binary must link
     # exactly one implementation provider (exec_ctx_state, exec_ops_test_lib,
     # or exec_ctx_rocm). Non-CUDA/ROCm builds do not reference those symbols:
-    # write() compiles to an unconditional runtime error on such builds.
+    # write() errors at runtime on such builds before reaching them (or no-ops
+    # first when the cycle was admitted under the legacy-skip rollback switch).
     deps = [
         ":exec_ops_hdr",
         "//rtp_llm/cpp/cache:cache",
@@ -325,6 +326,7 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:device_pin",
         "//rtp_llm/models_py/bindings:op_defs",
+        "@havenask//aios/autil:env_util",
         "@havenask//aios/autil:lock_free",
     ] + torch_deps(),
     visibility = ["//visibility:public"],

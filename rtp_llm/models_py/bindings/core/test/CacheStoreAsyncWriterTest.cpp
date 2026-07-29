@@ -1,5 +1,6 @@
 #include "gtest/gtest.h"
 
+#include <algorithm>
 #include <atomic>
 #include <chrono>
 #include <condition_variable>
@@ -12,9 +13,11 @@
 #include <utility>
 #include <vector>
 
+#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
+#include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 
 #if USING_CUDA
@@ -94,10 +97,29 @@ static CacheConfig makeWriterTestCacheConfig(size_t tokens_per_block) {
 
 class NoopCacheStore final: public CacheStore {
 public:
-    void store(const std::shared_ptr<RequestBlockBuffer>&, CacheStoreStoreDoneCallback callback) override {
+    struct StoreRecord {
+        std::string              request_id;
+        std::vector<std::string> block_keys;
+    };
+
+    void store(const std::shared_ptr<RequestBlockBuffer>& buf, CacheStoreStoreDoneCallback callback) override {
+        if (buf) {
+            StoreRecord record;
+            record.request_id = buf->getRequestId();
+            for (const auto& [key, block] : buf->getBlocks()) {
+                record.block_keys.push_back(key);
+            }
+            std::lock_guard<std::mutex> lock(records_mutex_);
+            store_records_.push_back(std::move(record));
+        }
         if (callback) {
             callback(true, CacheStoreErrorCode::None);
         }
+    }
+
+    std::vector<StoreRecord> storeRecords() const {
+        std::lock_guard<std::mutex> lock(records_mutex_);
+        return store_records_;
     }
 
     void load(const std::shared_ptr<RequestBlockBuffer>&,
@@ -154,6 +176,8 @@ public:
 
 private:
     std::shared_ptr<MemoryUtil> null_memory_util_;
+    mutable std::mutex          records_mutex_;
+    std::vector<StoreRecord>    store_records_;
 };
 
 class CacheStoreAsyncWriterTest: public ::testing::Test {
@@ -192,6 +216,10 @@ TEST_F(CacheStoreAsyncWriterTest, SubmitWhileIdleThrows) {
 }
 
 TEST_F(CacheStoreAsyncWriterTest, InitWithoutCacheStoreFailsAndCanRetryAfterInjection) {
+    // Pin fail-fast semantics: a rollback switch pre-set in the calling
+    // environment must not turn this contract test into a silent pass.
+    autil::EnvGuard force_fail_fast("CACHE_STORE_SKIP_WRITE_WHEN_UNREADY", "0");
+
     auto manager = std::make_shared<KVCacheManager>(makeWriterTestCacheConfig(/*tokens_per_block=*/1), /*warmup=*/true);
     CacheStoreAsyncWriter writer(/*device_id=*/2, manager, /*cache_model_id=*/19);
 
@@ -211,6 +239,42 @@ TEST_F(CacheStoreAsyncWriterTest, InitWithoutCacheStoreFailsAndCanRetryAfterInje
 
     manager->setCacheStore(cache_store_);
     ASSERT_NO_THROW(writer.init());
+    ASSERT_NO_THROW(writer.waitAllDone());
+}
+
+TEST_F(CacheStoreAsyncWriterTest, MissingCacheStoreRollbackSwitchRestoresLegacySkip) {
+    // Outer guard pins the default fail-fast semantics (and restores the caller's
+    // original value on exit); the inner guard flips the rollback switch on for
+    // the legacy-skip section only.
+    autil::EnvGuard force_fail_fast("CACHE_STORE_SKIP_WRITE_WHEN_UNREADY", "0");
+
+    auto manager = std::make_shared<KVCacheManager>(makeWriterTestCacheConfig(/*tokens_per_block=*/1), /*warmup=*/true);
+    CacheStoreAsyncWriter writer(/*device_id=*/-1, manager);
+
+    torch_ext::PyCacheStoreInputs inputs;
+    torch_ext::LayerKVCache       layer_cache;
+    layer_cache.layer_id = 0;
+    layer_cache.tag      = "full";
+
+    {
+        // Legacy-skip semantics: the cycle is admitted, writes are dropped silently
+        // (on every build flavor, including CPU-only), and the cycle drains clean.
+        autil::EnvGuard rollback_switch("CACHE_STORE_SKIP_WRITE_WHEN_UNREADY", "1");
+        ASSERT_NO_THROW(writer.init());
+        EXPECT_TRUE(writer.skip_cycle_writes_);
+        ASSERT_NO_THROW(writer.write(inputs, layer_cache));
+        EXPECT_EQ(0, writer.pending_count_.load());
+        ASSERT_NO_THROW(writer.waitAllDone());
+        EXPECT_EQ(CacheStoreAsyncWriter::State::IDLE, writer.state_);
+    }
+
+    // Switch cleared: the default fail-fast contract is back.
+    ASSERT_ANY_THROW(writer.init());
+
+    // A later cycle with an injected CacheStore must not inherit the skip flag.
+    manager->setCacheStore(cache_store_);
+    ASSERT_NO_THROW(writer.init());
+    EXPECT_FALSE(writer.skip_cycle_writes_);
     ASSERT_NO_THROW(writer.waitAllDone());
 }
 
@@ -400,6 +464,52 @@ TEST_F(CacheStoreAsyncWriterTest, AsyncExecutionWithDeviceId) {
     ASSERT_EQ(kMainThreadDevice, currentDeviceForTest());
 #else
     GTEST_SKIP() << "GPU device pinning is unavailable in CPU-only builds";
+#endif
+}
+
+TEST_F(CacheStoreAsyncWriterTest, WriteSuccessPathDeliversBlocksAndDrainsToIdle) {
+#if USING_CUDA || USING_ROCM
+    if (gpuDeviceCountForTest() < 1) {
+        GTEST_SKIP() << "write() success path needs a GPU device for event creation";
+    }
+
+    // One request, one block, matching the fixture config
+    // (makeWriterTestCacheConfig: 1 layer, 1 block, 1 token/block, FP16 MHA).
+    torch_ext::PyCacheStoreInputs inputs;
+    inputs.input_lengths_host    = torch::tensor({1}, torch::kInt32);
+    inputs.prefix_lengths_host   = torch::tensor({0}, torch::kInt32);
+    inputs.host_kv_cache_offset  = torch::tensor({{0}}, torch::kInt32);
+    inputs.request_id            = torch::tensor({int64_t(42)}, torch::kInt64);
+    inputs.request_pd_separation = torch::tensor({true}, torch::kBool);
+    inputs.cache_keys            = torch::tensor({{int64_t(100)}}, torch::kInt64);
+
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base =
+        torch::zeros({1, 2, 1, 1, 1}, torch::TensorOptions().dtype(torch::kFloat16).device(torch::kCUDA));
+    layer_cache.seq_size_per_block = 1;
+    layer_cache.layer_id           = 0;
+    layer_cache.tag                = "default";
+
+    writer_->init();
+    ASSERT_NO_THROW(writer_->write(inputs, layer_cache));
+    ASSERT_NO_THROW(writer_->waitAllDone());
+
+    EXPECT_EQ(0, writer_->pending_count_.load());
+    EXPECT_EQ(CacheStoreAsyncWriter::State::IDLE, writer_->state_);
+
+    const auto records = cache_store_->storeRecords();
+    ASSERT_EQ(records.size(), 1u);
+    EXPECT_EQ(records.front().request_id, "42");
+    const auto  cache_key = makeCacheKey(/*model_id=*/0, "100", /*layer_id=*/0, "default");
+    const auto& keys      = records.front().block_keys;
+    EXPECT_NE(std::find(keys.begin(), keys.end(), "k_" + cache_key), keys.end());
+    EXPECT_NE(std::find(keys.begin(), keys.end(), "v_" + cache_key), keys.end());
+
+    // A drained writer must accept the next forward cycle cleanly.
+    ASSERT_NO_THROW(writer_->init());
+    ASSERT_NO_THROW(writer_->waitAllDone());
+#else
+    GTEST_SKIP() << "write() requires a CUDA or ROCm build";
 #endif
 }
 

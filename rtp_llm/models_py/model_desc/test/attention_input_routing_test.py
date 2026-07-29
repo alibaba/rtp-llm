@@ -63,6 +63,12 @@ class AttentionInputRoutingTest(unittest.TestCase):
         self.assertIs(decode._get_fla_block_map(attention_inputs), block_map)
 
     def test_cp_cache_store_uses_each_layer_tag_metadata(self):
+        # Metadata (lengths/prefix/block table) now travels inside the
+        # PyCacheStoreInputs object built by C++ prepareWriteCacheParams (covered
+        # per-field by PrepareWriteCacheParamsTest.cc), so the python contract to
+        # lock here is object identity: each layer's writer.write must receive
+        # exactly that layer's tag-local inputs and kv_cache, not copies or
+        # another tag's objects.
         layer_inputs = {}
         for tag in ("full", "linear0", "linear1"):
             cache_store_inputs = SimpleNamespace(tag=tag)
@@ -80,9 +86,12 @@ class AttentionInputRoutingTest(unittest.TestCase):
         for tag in ("full", "linear0", "linear1"):
             attention_inputs, kv_cache = layer_inputs[tag]
             _write_cp_cache_store(attention_inputs, kv_cache)
-            attention_inputs.cache_store_writer.write.assert_called_once_with(
-                attention_inputs.cache_store_inputs, kv_cache
+            attention_inputs.cache_store_writer.write.assert_called_once()
+            passed_inputs, passed_kv_cache = (
+                attention_inputs.cache_store_writer.write.call_args.args
             )
+            self.assertIs(passed_inputs, attention_inputs.cache_store_inputs)
+            self.assertIs(passed_kv_cache, kv_cache)
 
     def test_cp_cache_store_skips_when_pair_incomplete(self):
         # PyWrappedModel attaches cache_store_inputs and cache_store_writer together only

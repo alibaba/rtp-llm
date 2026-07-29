@@ -34,6 +34,19 @@ cc_test(
 )
 
 cc_test(
+    name = "prepare_write_cache_params_test",
+    srcs = [
+        "PrepareWriteCacheParamsTest.cc",
+    ],
+    copts = test_copts,
+    deps = test_deps,
+    env = {
+        "TEST_USING_DEVICE": "CUDA",
+    },
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
     name = "model_inputs_logger_test",
     srcs = ["ModelInputsLoggerTest.cc"],
     copts = test_copts,

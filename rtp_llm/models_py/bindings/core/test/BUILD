@@ -60,9 +60,11 @@ cc_test_wrapper(
         "//rtp_llm/cpp/cache:cache",
         "//rtp_llm/cpp/cache/test:cache_config_test_utils",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
+        "//rtp_llm/cpp/utils:kv_cache_utils",
         "//rtp_llm/models_py/bindings/core:cache_store_async_writer",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
+        "@havenask//aios/autil:env_util",
     ] + torch_deps() + select({
         "@//:using_cuda": [
             "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
@@ -73,4 +75,15 @@ cc_test_wrapper(
         "//conditions:default": [],
     }),
     copts = test_copts,
+    # Mirror the deps select so every GPU-gated case here actually executes in
+    # CI: the write() success path needs one device and the device-pinning case
+    # needs two. Both labels and gpu_count are established unit-test precedents
+    # (H20 x2: models_py/distributed/test; MI308X-ROCM7 x2: models_py/modules/
+    # base/rocm/test). CPU-only builds stay schedulable anywhere and the GPU
+    # cases skip via their build guards.
+    exec_properties = select({
+        "@//:using_cuda": {"gpu": "H20", "gpu_count": "2"},
+        "@//:using_rocm": {"gpu": "MI308X-ROCM7", "gpu_count": "2"},
+        "//conditions:default": {},
+    }),
 )
