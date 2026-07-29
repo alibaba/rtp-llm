@@ -42,7 +42,11 @@ public final class BatchChunkAssembler {
      * Items are shared by reference with the source array — callers must not mutate them.
      */
     public static List<JSONArray> splitArray(JSONArray arr, int chunkSize) {
-        assert chunkSize >= 1 : "chunkSize must be >= 1, got " + chunkSize;
+        // Not an assert: assertions are disabled by default in production, so a zero would slip
+        // through to the chunk-count division and surface as an ArithmeticException instead.
+        if (chunkSize < 1) {
+            throw new IllegalArgumentException("chunkSize must be >= 1, got " + chunkSize);
+        }
         int n = arr.size();
         if (n == 0) {
             return List.of();
@@ -67,7 +71,10 @@ public final class BatchChunkAssembler {
      * so no empty chunk is emitted.
      */
     public static List<JSONArray> splitByCount(JSONArray arr, int requestedCount) {
-        assert requestedCount >= 1 : "requestedCount must be >= 1, got " + requestedCount;
+        // See splitArray: a public pure function must fail explicitly, not rely on -ea.
+        if (requestedCount < 1) {
+            throw new IllegalArgumentException("requestedCount must be >= 1, got " + requestedCount);
+        }
         int n = arr.size();
         if (n == 0) {
             return List.of();
