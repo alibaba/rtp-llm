@@ -15,7 +15,7 @@ set_e2e_para(){
     export PORT=6789
     # yum --disablerepo="*" --enablerepo=alinux3-os install -y jq
     cp ${RTP_PATH}/bazel-bin/rtp_llm/cpp/model_rpc/proto/model_rpc_service_pb2* ${RTP_PATH}/rtp_llm/cpp/model_rpc/proto/
-    GOLDEN_RESPONSES_FILE="${WORKSPACE}/rocm_benchmark/rtp_llm_benchmark/ci/golden_responses.json"
+    GOLDEN_RESPONSES_FILE="${SCRIPT_DIR}/golden_responses.json"
 }
 
 compare_json_score() {
