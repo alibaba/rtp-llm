@@ -1,7 +1,10 @@
+import importlib.util
 import json
+import os
 import sys
 import types
 import unittest
+from pathlib import Path
 from typing import Dict, List, Optional
 from unittest import mock
 
@@ -148,6 +151,30 @@ class GrammarTokenizerInfoTest(unittest.TestCase):
 
         self.assertEqual(encoded_vocab, ["zero", "", "", "three", "", ""])
         self.assertEqual(vocab_size, 6)
+
+    def test_native_serializer_accepts_raw_bytes_vocab(self):
+        runfiles_root = Path(os.environ["TEST_SRCDIR"])
+        workspace = os.environ["TEST_WORKSPACE"]
+        extension_path = runfiles_root / workspace / "libth_grammar_tokenizer_info.so"
+        spec = importlib.util.spec_from_file_location(
+            "libth_grammar_tokenizer_info", extension_path
+        )
+        self.assertIsNotNone(spec)
+        self.assertIsNotNone(spec.loader)
+        module = importlib.util.module_from_spec(spec)
+        spec.loader.exec_module(module)
+
+        result = module.serialize_grammar_tokenizer_info(
+            [b"+", b"\xa1", b"\xe6\x88\x91"],
+            '{"vocab_size":3,"stop_token_ids":[0],"vocab_type":"RAW",'
+            '"add_prefix_space":false}',
+        )
+
+        decoded_vocab = json.loads(result)["decoded_vocab"]
+        self.assertEqual(
+            [token.encode("latin-1") for token in decoded_vocab],
+            [b"+", b"\xa1", b"\xe6\x88\x91"],
+        )
 
     def test_build_tokenizer_info_serializes_fast_tokenizer(self):
         result, serializer = self.build_tokenizer_info(

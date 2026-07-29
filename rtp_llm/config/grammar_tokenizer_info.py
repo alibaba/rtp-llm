@@ -1,8 +1,12 @@
 import json
-from typing import Any, Dict, Iterator, List, Sequence, Tuple
+from typing import Any, Dict, Iterator, List, Sequence, Tuple, Union
+
+VocabToken = Union[str, bytes]
 
 
-def _build_encoded_vocab(vocab: Dict[str, int], model_vocab_size: int) -> Tuple[List[str], int]:
+def _build_encoded_vocab(
+    vocab: Dict[VocabToken, int], model_vocab_size: int
+) -> Tuple[List[VocabToken], int]:
     if not vocab:
         raise ValueError("tokenizer vocab is empty")
     if model_vocab_size < 0:
@@ -20,7 +24,7 @@ def _build_encoded_vocab(vocab: Dict[str, int], model_vocab_size: int) -> Tuple[
     if vocab_size <= 0:
         raise ValueError(f"vocab_size must be positive, got {vocab_size}")
 
-    encoded_vocab = [""] * vocab_size
+    encoded_vocab: List[VocabToken] = [""] * vocab_size
     for token, token_id in vocab.items():
         encoded_vocab[int(token_id)] = token
     return encoded_vocab, vocab_size
@@ -162,9 +166,7 @@ def build_grammar_tokenizer_info_json(
         )
 
     if _is_tiktoken_tokenizer(tokenizer):
-        vocab_type = (
-            "BYTE_LEVEL" if _is_byte_level_tokenizer(tokenizer) else "RAW"
-        )
+        vocab_type = "BYTE_LEVEL" if _is_byte_level_tokenizer(tokenizer) else "RAW"
         metadata = {
             "vocab_size": vocab_size,
             "stop_token_ids": stop_token_ids,

@@ -19,6 +19,9 @@ py_test(
     srcs = [
         "grammar_tokenizer_info_test.py",
     ],
+    data = [
+        "//:th_grammar_tokenizer_info",
+    ],
     deps = [
         "//rtp_llm:config",
     ],
