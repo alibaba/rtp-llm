@@ -372,9 +372,11 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
         attn_inputs = self._create_chunked_prefill_attention_inputs(
             batch_size, prefix_lengths, input_lengths, config.seq_size_per_block
         )
+        attn_inputs.is_target_verify = True
 
         # Create PyFlashinferPrefillPagedAttnOp instance
         attn_op = PyFlashinferPrefillPagedAttnOp(config.attn_configs, attn_inputs)
+        self.assertEqual(attn_op.backend, "fa2")
 
         # Check support
         if not attn_op.support(attn_inputs):

@@ -246,6 +246,22 @@ py_test(
     },
 )
 
+py_test(
+    name = "test_py_flashinfer_workspace_sizing",
+    srcs = [
+        "test_flashinfer_prefill/test_py_flashinfer_workspace_sizing.py",
+    ],
+    deps = py_test_deps + select({
+        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:cuda_pre_12_9": flashinfer_deps,
+        "//conditions:default": []
+    }),
+    tags = ["H20"],
+    exec_properties = {
+        'gpu': 'H20',
+    },
+)
+
 # Test for MhaRotaryEmbeddingOp - RoPE implementation for MHA
 py_test(
     name = "test_mha_rotary_emb",

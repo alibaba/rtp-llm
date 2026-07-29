@@ -32,7 +32,12 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
     """Compare forward() output: CUDA graph copy path vs normal path."""
 
     def _make_inputs(
-        self, input_lengths, prefix_lengths, with_copy_params=False, max_seq_len=0
+        self,
+        input_lengths,
+        prefix_lengths,
+        with_copy_params=False,
+        max_seq_len=0,
+        is_target_verify=False,
     ):
         """Create PyAttentionInputs for prefill (single or multi batch)."""
         if isinstance(input_lengths, int):
@@ -43,6 +48,7 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
         inp = PyAttentionInputs()
         inp.is_cuda_graph = with_copy_params
         inp.is_prefill = True
+        inp.is_target_verify = is_target_verify
         inp.input_lengths = torch.tensor(input_lengths, dtype=torch.int32).pin_memory()
         inp.prefix_lengths = torch.tensor(
             prefix_lengths, dtype=torch.int32
@@ -54,14 +60,12 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
         for il in input_lengths:
             cu.append(cu[-1] + il)
 
-        if with_copy_params:
-            inp.cu_seqlens_device = torch.tensor(cu, dtype=torch.int32).pin_memory()
-            inp.cu_kv_seqlens_device = torch.tensor(cu, dtype=torch.int32).pin_memory()
-        else:
-            inp.cu_seqlens_device = torch.tensor(cu, dtype=torch.int32, device="cuda")
-            inp.cu_kv_seqlens_device = torch.tensor(
-                cu, dtype=torch.int32, device="cuda"
-            )
+        inp.cu_seqlens_device = torch.tensor(
+            cu, dtype=torch.int32, device="cuda"
+        )
+        inp.cu_kv_seqlens_device = torch.tensor(
+            cu, dtype=torch.int32, device="cuda"
+        )
 
         max_blocks = max(math.ceil(s / PAGE_SIZE) for s in seq_lengths)
         block_ids = torch.zeros(batch_size, max_blocks, dtype=torch.int32)
@@ -124,6 +128,7 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
         size_per_head=64,
         capture_input_lengths=None,
         capture_prefix_lengths=None,
+        is_target_verify=False,
     ):
         if isinstance(input_lengths, int):
             input_lengths = [input_lengths]
@@ -163,8 +168,14 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
         )
 
         # Normal path
-        normal_inp = self._make_inputs(input_lengths, prefix_lengths)
+        normal_inp = self._make_inputs(
+            input_lengths,
+            prefix_lengths,
+            is_target_verify=is_target_verify,
+        )
         normal_op = PyFlashinferPrefillPagedAttnOp(config.attn_configs, normal_inp)
+        if is_target_verify:
+            self.assertEqual(normal_op.backend, "fa2")
         normal_op.prepare(normal_inp)
         normal_out = normal_op.forward(q, kv_cache)
 
@@ -172,11 +183,23 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
         capture_input_lengths = capture_input_lengths or input_lengths
         capture_prefix_lengths = capture_prefix_lengths or prefix_lengths
         cg_init = self._make_inputs(
-            capture_input_lengths, capture_prefix_lengths, True, max_seq_len
+            capture_input_lengths,
+            capture_prefix_lengths,
+            True,
+            max_seq_len,
+            is_target_verify,
         )
         cg_op = PyFlashinferPrefillPagedAttnOp(config.attn_configs, cg_init)
+        if is_target_verify:
+            self.assertEqual(cg_op.backend, "fa2")
         cg_op.prepare(cg_init)
-        cg_replay = self._make_inputs(input_lengths, prefix_lengths, True, max_seq_len)
+        cg_replay = self._make_inputs(
+            input_lengths,
+            prefix_lengths,
+            True,
+            max_seq_len,
+            is_target_verify,
+        )
         cg_op.prepare(cg_replay, forbid_realloc=True)
         cg_out = cg_op.forward(q, kv_cache)
 
@@ -201,6 +224,16 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
 
     def test_large_prefix(self):
         self._test_forward_match(5, 500)
+
+    def test_target_verify_long_prefix(self):
+        self._test_forward_match(
+            5,
+            12000,
+            head_num=8,
+            head_num_kv=1,
+            size_per_head=256,
+            is_target_verify=True,
+        )
 
     def test_varying_input_same_max(self):
         for n in [1, 2, 3, 4, 5]:

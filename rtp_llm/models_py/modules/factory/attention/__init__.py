@@ -56,6 +56,7 @@ else:
         )
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
             PyFlashinferDecodeImpl,
+            PyFlashinferMropeTargetVerifyImpl,
             PyFlashinferPagedPrefillImpl,
             PyFlashinferPrefillImpl,
         )
@@ -82,6 +83,7 @@ else:
                 FlashInferTRTLLMFMHAv2PrefillImpl,
                 PyFlashinferPrefillImpl,
                 PyFlashinferPagedPrefillImpl,
+                PyFlashinferMropeTargetVerifyImpl,
                 FlashInferTRTLLMFMHAv2PagedPrefillImpl,
             ]
         )
