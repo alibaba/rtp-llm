@@ -335,7 +335,8 @@ std::string debugLogitsTopKSummary(const torch::Tensor& logits, int64_t k = 8) {
 }
 
 bool isMegaMoeStrategy(const std::string& moe_strategy) {
-    return moe_strategy == "mega_moe" || moe_strategy == "mega_moe_fused" || moe_strategy == "mega_moe_fp8";
+    return moe_strategy == "mega_moe" || moe_strategy == "mega_moe_fused" || moe_strategy == "mega_moe_fp8"
+           || moe_strategy == "mega_moe_fp8_se";
 }
 
 void holdSamplerInputHostBuffers(TensorHolder& holder, const SamplerInputs& inputs) {

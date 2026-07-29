@@ -100,6 +100,7 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
         super().__init__(cfg)
         self._fp8_weight_recipe: Tuple[int, int] = (FP8_BLOCK, FP8_BLOCK)
         self._activation_name = _cfg_activation_name(cfg)
+        self._num_shared_experts = 0
 
     def clone_for_cuda_graph(self) -> "GLM5MegaMoEFP8":
         clone = object.__new__(type(self))
@@ -120,6 +121,7 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
         clone._mega_group = self._mega_group
         clone._fp8_weight_recipe = self._fp8_weight_recipe
         clone._activation_name = self._activation_name
+        clone._num_shared_experts = self._num_shared_experts
         return clone
 
     def _prepare_fp8_scale(
@@ -267,6 +269,7 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
             num_topk=cfg.n_activated_experts,
             hidden=cfg.dim,
             intermediate_hidden=cfg.moe_inter_dim,
+            num_shared_experts=self._num_shared_experts,
             use_fp8_dispatch=True,
             activation=self._activation_name,
         )
@@ -278,6 +281,9 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
         )
         self._input_packer = get_mega_moe_input_packer()
         self._maybe_warmup_jit_once()
+
+    def _fused_shared_expert_kwargs(self, tokens: int) -> Dict[str, Any]:
+        return {}
 
     def forward(
         self,
@@ -329,6 +335,7 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
             )
 
         self._input_packer.pack(x, weights, indices, buf, T)
+        fused_shared_kwargs = self._fused_shared_expert_kwargs(T)
         self._maybe_pre_kernel_barrier(T)
         _sync_cuda_graph_warmup_ranks(
             f"mega_moe_fp8.layer{self.cfg.layer_id}.before_deepgemm",
@@ -351,6 +358,7 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
                 (self._mega_l1_w, self._mega_l1_sf),
                 (self._mega_l2_w, self._mega_l2_sf),
                 buf,
+                **fused_shared_kwargs,
                 **kwargs,
             )
         return y

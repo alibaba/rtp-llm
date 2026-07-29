@@ -71,7 +71,7 @@ except ImportError:
 
 
 class _FusedSharedExpertSentinel(nn.Module):
-    """Marker for shared expert folded into ``fp8_fp4_mega_moe_fused``."""
+    """Marker for a shared expert folded into a MegaMoE kernel."""
 
     accepts_fp8_input = False
 
@@ -164,27 +164,44 @@ class GenericMoeLayer(nn.Module):
         use_ep_shared_allreduce_at_init = (
             self.add_shared_expert and self.ffn_tp_size > 1 and is_ep_mode
         )
-        self._use_mega_moe_fused_shared = moe_config.moe_strategy == "mega_moe_fused"
+        self._use_mega_moe_fused_shared = moe_config.moe_strategy in (
+            "mega_moe_fused",
+            "mega_moe_fp8_se",
+        )
         if self._use_mega_moe_fused_shared:
             if not self.add_shared_expert:
-                raise ValueError("moe_strategy=mega_moe_fused requires shared experts")
+                raise ValueError(
+                    f"moe_strategy={moe_config.moe_strategy} requires shared experts"
+                )
             if shared_expert_gate_weight is not None:
                 raise ValueError(
-                    "moe_strategy=mega_moe_fused does not support shared_expert_gate"
+                    f"moe_strategy={moe_config.moe_strategy} does not support "
+                    "shared_expert_gate"
                 )
             if use_ep_shared_allreduce_at_init:
                 raise ValueError(
-                    "moe_strategy=mega_moe_fused does not support EP shared-expert "
-                    "all-reduce with ffn_tp_size > 1"
+                    f"moe_strategy={moe_config.moe_strategy} does not support EP "
+                    "shared-expert all-reduce with ffn_tp_size > 1"
                 )
 
-        if moe_config.moe_strategy in ("mega_moe", "mega_moe_fp8", "mega_moe_fused"):
+        if moe_config.moe_strategy in (
+            "mega_moe",
+            "mega_moe_fp8",
+            "mega_moe_fp8_se",
+            "mega_moe_fused",
+        ):
             if moe_config.moe_strategy == "mega_moe_fused":
                 from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_fused_wrapper import (
                     MegaMoeFusedWrapper,
                 )
 
                 wrapper_cls = MegaMoeFusedWrapper
+            elif moe_config.moe_strategy == "mega_moe_fp8_se":
+                from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_fp8_se_wrapper import (
+                    MegaMoeFp8SEWrapper,
+                )
+
+                wrapper_cls = MegaMoeFp8SEWrapper
             elif moe_config.moe_strategy == "mega_moe_fp8":
                 from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_fp8_wrapper import (
                     MegaMoeFp8Wrapper,
@@ -243,7 +260,7 @@ class GenericMoeLayer(nn.Module):
         # Overlap executor: runs shared expert on an auxiliary CUDA stream
         # concurrently with the routed-expert dispatch/combine pipeline.
         # Controlled by MOE_SHARED_EXPERT_OVERLAP env var (default: off).
-        if self.shared_expert is not None:
+        if self.shared_expert is not None and not self._use_mega_moe_fused_shared:
             from rtp_llm.models_py.modules.shared_expert_overlap import (
                 SharedExpertOverlapExecutor,
             )
@@ -380,7 +397,11 @@ class GenericMoeLayer(nn.Module):
         # When overlap is disabled (env var / CUDA graph capture / non-CUDA),
         # SharedExpertOverlapExecutor.start() runs synchronously and caches
         # the result for finish().
-        if self.shared_expert is not None and self._shared_overlap is not None:
+        if (
+            self.shared_expert is not None
+            and not use_mega_moe_fused_shared
+            and self._shared_overlap is not None
+        ):
             self._shared_overlap.start(
                 self.shared_expert,
                 hidden_states,

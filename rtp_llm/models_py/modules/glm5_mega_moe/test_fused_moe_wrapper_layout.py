@@ -5,6 +5,7 @@ from unittest.mock import patch
 import torch
 
 from rtp_llm.models_py.modules.glm5_mega_moe import (
+    mega_moe_fp8_se_wrapper,
     mega_moe_fp8_wrapper,
     mega_moe_fused_wrapper,
     mega_moe_wrapper,
@@ -29,6 +30,9 @@ class _FakeMegaMoE:
 
     def setup_shared_expert_from_fp4(self, **kwargs):
         self.shared_fp4_kwargs = kwargs
+
+    def setup_shared_expert_from_fp8(self, **kwargs):
+        self.shared_fp8_kwargs = kwargs
 
     def maybe_warmup_fused_shared_jit_once(self):
         self.fused_shared_jit_warmed = True
@@ -144,6 +148,35 @@ class MegaMoeWrapperLayoutTest(unittest.TestCase):
         torch.testing.assert_close(captured["w1_w"][:, 4:], up_w)
         torch.testing.assert_close(captured["w1_s"][:, :4], gate_s)
         torch.testing.assert_close(captured["w1_s"][:, 4:], up_s)
+
+    def test_fp8_se_wrapper_loads_shared_expert_fp8(self):
+        config = _config(hidden_size=8, inter=4)
+        fp8 = torch.float8_e4m3fn
+        shared_w1 = torch.full((8, 8), 3, dtype=torch.float32).to(fp8)
+        shared_s1 = torch.full((8, 1), 5, dtype=torch.float32)
+        shared_w2 = torch.full((8, 4), 7, dtype=torch.float32).to(fp8)
+        shared_s2 = torch.full((8, 1), 11, dtype=torch.float32)
+        weights = {
+            W.moe_w1: torch.zeros((2, 8, 8), dtype=torch.float32).to(fp8),
+            W.moe_s1: torch.ones((2, 8, 1), dtype=torch.float32),
+            W.moe_w2: torch.ones((2, 8, 4), dtype=torch.float32).to(fp8),
+            W.moe_s2: torch.ones((2, 8, 1), dtype=torch.float32),
+            W.ffn_w13: shared_w1,
+            W.ffn_s13: shared_s1,
+            W.ffn_w2: shared_w2,
+            W.ffn_s2: shared_s2,
+        }
+
+        with patch.object(mega_moe_fp8_se_wrapper, "GLM5MegaMoEFP8SE", _FakeMegaMoE):
+            mega_moe_fp8_se_wrapper.MegaMoeFp8SEWrapper(
+                config, _parallelism(), weights, moe_config=None, layer_idx=0
+            )
+
+        captured = _FakeMegaMoE.instance.shared_fp8_kwargs
+        torch.testing.assert_close(captured["w1_fp8"], shared_w1)
+        torch.testing.assert_close(captured["w1_scale"], shared_s1)
+        torch.testing.assert_close(captured["w2_fp8"], shared_w2)
+        torch.testing.assert_close(captured["w2_scale"], shared_s2)
 
     def test_decode_mtp_budget_includes_verify_width(self):
         from rtp_llm.ops import RoleType
