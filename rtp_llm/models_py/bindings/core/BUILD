@@ -126,6 +126,14 @@ _EXEC_OPS_COMMON_DEPS = [
     "@havenask//aios/autil:scope",
 ] + torch_deps()
 
+filegroup(
+    name = "exec_ops_srcs",
+    srcs = [
+        "ExecOps.cc",
+    ],
+    visibility = ["//visibility:public"],
+)
+
 # Test-only library for ExecOps.cc.
 # Use this for tests that already link cuda_impl.
 cc_library(
