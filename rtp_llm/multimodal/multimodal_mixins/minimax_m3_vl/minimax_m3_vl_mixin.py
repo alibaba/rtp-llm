@@ -42,6 +42,7 @@ from rtp_llm.multimodal.multimodal_mixins.base_multimodal_mixin import (
     BaseVitWeights,
 )
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
+    MMWorkEstimate,
     MultiModalEmbeddingInterface,
 )
 from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
@@ -133,6 +134,111 @@ class MiniMaxM3VLImageEmbedding(MultiModalEmbeddingInterface):
     @property
     def _device(self):
         return next(self.visual.parameters()).device
+
+    def _workspace_bytes_per_patch(self) -> int:
+        """Conservative live-activation estimate for one ViT input patch."""
+        config = self.visual.vision_config
+        dtype_bytes = torch.empty((), dtype=self._data_type).element_size()
+        # QKV/RoPE/attention temporaries plus the two MLP projections dominate
+        # peak inference activation memory. For the released M3VL config this is
+        # 40 KiB/patch, slightly above the 35-37 KiB measured in Stage 1.5.
+        activation_elements = 8 * config.hidden_size + 2 * config.intermediate_size
+        return dtype_bytes * activation_elements
+
+    def estimate_work(
+        self, data: Any, mm_type: Optional[MMUrlType] = None
+    ) -> MMWorkEstimate:
+        """Compute exact M3VL work from the CPU preprocess result.
+
+        This deliberately mirrors ``_gpu_fold`` without running resize, fold,
+        patch embedding, or any other GPU operation.
+        """
+        raw, target_hw, timestamp_token_ids = data
+        target_h, target_w = (int(target_hw[0]), int(target_hw[1]))
+        patch_size = int(self.mm_processor.patch_size)
+        merge_size = int(self.merge_size)
+        temporal_patch_size = int(self.temporal_patch_size)
+
+        if target_h <= 0 or target_w <= 0:
+            raise ValueError(f"invalid M3VL target size {target_hw}")
+        if target_h % patch_size != 0 or target_w % patch_size != 0:
+            raise ValueError(
+                f"M3VL target size {target_hw} is not patch-aligned " f"to {patch_size}"
+            )
+
+        is_video = timestamp_token_ids is not None
+        frame_count = int(raw.shape[0]) if is_video else 1
+        if frame_count <= 0:
+            raise ValueError("M3VL preprocess result has no frames")
+
+        grid_t = (frame_count + temporal_patch_size - 1) // temporal_patch_size
+        grid_h = target_h // patch_size
+        grid_w = target_w // patch_size
+        if grid_h % merge_size != 0 or grid_w % merge_size != 0:
+            raise ValueError(
+                f"M3VL patch grid {(grid_h, grid_w)} is not merge-aligned "
+                f"to {merge_size}"
+            )
+
+        input_patches = grid_t * grid_h * grid_w
+        merged_tokens = input_patches // (merge_size**2)
+
+        if is_video:
+            if len(timestamp_token_ids) != grid_t:
+                raise ValueError(
+                    "M3VL timestamp group count does not match temporal grid: "
+                    f"{len(timestamp_token_ids)} != {grid_t}"
+                )
+            timestamp_tokens = sum(len(ids) for ids in timestamp_token_ids)
+            output_tokens = merged_tokens + timestamp_tokens + 2 * grid_t
+        else:
+            output_tokens = merged_tokens + 2
+
+        max_frames = self.visual.vision_config.vision_segment_max_frames
+        if max_frames is None or max_frames <= 0:
+            segment_frames = [grid_t]
+        else:
+            segment_frames = [
+                min(max_frames, grid_t - start)
+                for start in range(0, grid_t, max_frames)
+            ]
+        segment_lengths = [frames * grid_h * grid_w for frames in segment_frames]
+
+        return MMWorkEstimate(
+            input_patches=input_patches,
+            output_tokens=output_tokens,
+            estimated_workspace_bytes=(
+                input_patches * self._workspace_bytes_per_patch()
+            ),
+            max_attention_segment=max(segment_lengths, default=0),
+            attention_work=sum(length * length for length in segment_lengths),
+        )
+
+    def get_batch_work_budget(self, max_batch_media: int) -> Optional[MMWorkEstimate]:
+        """Map the existing media cap to an M3VL-equivalent work budget."""
+        # Serial mode passes sys.maxsize to preserve the historical unbounded
+        # behavior. Cost admission is only useful for the bounded batch path.
+        if max_batch_media >= 1 << 30:
+            return None
+
+        patch_size = int(self.mm_processor.patch_size)
+        merge_size = int(self.merge_size)
+        max_pixels = int(self.mm_processor.max_pixels)
+        reference_patches = max(1, max_pixels // (patch_size**2))
+        reference_output_tokens = reference_patches // (merge_size**2) + 2
+        max_frames = self.visual.vision_config.vision_segment_max_frames
+        max_segment_frames = max(1, int(max_frames or 1))
+
+        reference = MMWorkEstimate(
+            input_patches=reference_patches,
+            output_tokens=reference_output_tokens,
+            estimated_workspace_bytes=(
+                reference_patches * self._workspace_bytes_per_patch()
+            ),
+            max_attention_segment=reference_patches * max_segment_frames,
+            attention_work=reference_patches * reference_patches,
+        )
+        return reference.scaled(max_batch_media)
 
     def get_preprocess_params(self):
         return {

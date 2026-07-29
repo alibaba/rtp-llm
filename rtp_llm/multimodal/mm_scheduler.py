@@ -13,6 +13,7 @@ from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import GaugeMetrics
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
+    MMWorkEstimate,
     MultiModalEmbeddingInterface,
 )
 from rtp_llm.multimodal.multimodal_util import vit_emb_cache_
@@ -70,33 +71,48 @@ def _run_embedding(
 class _EmbeddingRequest:
     """A single caller's submission to the GPU batch scheduler.
 
-    Lifecycle: created by submit_and_wait -> put on _waiting -> pulled into a
-    batch and run by the executor thread -> done.set() (with exception set on
-    failure) -> submit_and_wait wakes and returns or raises.
-
-    Fields:
-      work_items: the caller's work items, run together in one forward.
-      n_images:   raw media count (sum of len(wi.mm_inputs)); the unit batches
-                  are bounded by. Computed once here since mm_inputs never
-                  changes, so the batch-budget checks don't re-sum it.
-      exception:  failure cause set by the executor before done.set(); None on
-                  success.
-      done:       signaled once the request is finished (success or failure).
-      cancelled:  set by submit_and_wait on timeout so the executor skips it.
-                  A plain bool (not an Event) is fine: one writer (the caller),
-                  read-only for the executor, and the attribute read/write is
-                  atomic under the GIL — a rare stale read only skips, or fails to
-                  skip, one already-doomed request, never corrupts state.
+    A request may be split into bounded chunks. Only its next chunk is queued;
+    after that chunk completes, the executor appends the following one at the
+    queue tail. This prevents one large request from monopolizing the scheduler
+    while preserving the caller's original work-item/result order.
     """
 
-    __slots__ = ("work_items", "n_images", "exception", "done", "cancelled")
+    __slots__ = (
+        "work_items",
+        "chunks",
+        "next_chunk_index",
+        "remaining_chunks",
+        "exception",
+        "done",
+        "cancelled",
+    )
 
     def __init__(self, work_items: List[MMWorkItem]):
         self.work_items = work_items
-        self.n_images = sum(len(wi.mm_inputs) for wi in work_items)
+        self.chunks: List[_EmbeddingChunk] = []
+        self.next_chunk_index = 0
+        self.remaining_chunks = 0
         self.exception: Optional[Exception] = None
         self.done = threading.Event()
         self.cancelled = False
+
+
+class _EmbeddingChunk:
+    """An indivisible scheduler unit belonging to one caller request."""
+
+    __slots__ = ("request", "work_items", "n_images", "work_estimate")
+
+    def __init__(
+        self,
+        request: _EmbeddingRequest,
+        work_items: List[MMWorkItem],
+        n_images: int,
+        work_estimate: Optional[MMWorkEstimate],
+    ):
+        self.request = request
+        self.work_items = work_items
+        self.n_images = n_images
+        self.work_estimate = work_estimate
 
 
 # Fallback wait when a work item carries no positive mm_timeout_ms (e.g. a
@@ -116,7 +132,8 @@ class MMScheduler:
     """A background thread turns submitted work items into embeddings.
 
     Within a wait window it merges concurrent submissions into a single GPU
-    forward, bounded by max_batch_size (requests) and max_batch_images (media).
+    forward, bounded by max_batch_size, max_batch_images, and an optional
+    model-derived work budget.
     Set max_batch_size=1 (with batch_wait_ms=0) for serial, one-request-per-
     forward behavior — no cross-request batching."""
 
@@ -138,12 +155,22 @@ class MMScheduler:
         self._batch_wait_ms = batch_wait_ms
         self._max_batch_size = max_batch_size
         self._max_batch_images = max_batch_images
+        self._work_budget = mm_part.get_batch_work_budget(max_batch_images)
+        if self._work_budget is not None and not isinstance(
+            self._work_budget, MMWorkEstimate
+        ):
+            raise TypeError(
+                "get_batch_work_budget must return MMWorkEstimate or None, got "
+                f"{type(self._work_budget).__name__}"
+            )
+        if self._work_budget is not None:
+            logging.info("MMScheduler: model work budget=%s", self._work_budget)
 
-        self._waiting: queue.Queue[_EmbeddingRequest] = queue.Queue()
-        # A request popped from _waiting that would have overflowed the current
-        # batch's image budget — carried over as the first request of the next
+        self._waiting: queue.Queue[_EmbeddingChunk] = queue.Queue()
+        # A chunk popped from _waiting that would have overflowed the current
+        # batch's media/work budget is carried over as the first chunk of the next
         # round so it is neither lost nor re-ordered behind newer arrivals.
-        self._pending: Optional[_EmbeddingRequest] = None
+        self._pending: Optional[_EmbeddingChunk] = None
         # Set by close(); the executor polls it to exit and submit rejects on it.
         self._stopped = threading.Event()
         # Orders submit's (stopped-check + enqueue) against close's set-stopped
@@ -155,22 +182,198 @@ class MMScheduler:
         )
         self._executor.start()
 
+    @staticmethod
+    def _sum_work_estimates(
+        work_items: List[MMWorkItem],
+    ) -> Optional[MMWorkEstimate]:
+        total = MMWorkEstimate()
+        for work_item in work_items:
+            estimate = getattr(work_item, "work_estimate", None)
+            if estimate is None:
+                return None
+            total = total + estimate
+        return total
+
+    def _would_exceed_work_budget(
+        self,
+        current: Optional[MMWorkEstimate],
+        candidate: Optional[MMWorkEstimate],
+    ) -> bool:
+        if self._work_budget is None or current is None or candidate is None:
+            return False
+        budget = self._work_budget
+        additive_fields = (
+            "input_patches",
+            "output_tokens",
+            "estimated_workspace_bytes",
+            "attention_work",
+        )
+        for field_name in additive_fields:
+            limit = getattr(budget, field_name)
+            if (
+                limit > 0
+                and getattr(current, field_name) + getattr(candidate, field_name)
+                > limit
+            ):
+                return True
+        return (
+            budget.max_attention_segment > 0
+            and max(
+                current.max_attention_segment,
+                candidate.max_attention_segment,
+            )
+            > budget.max_attention_segment
+        )
+
+    def _build_chunks(self, request: _EmbeddingRequest) -> None:
+        if not request.work_items:
+            raise ValueError("MMScheduler requires at least one work item")
+
+        if len(request.work_items) == 1:
+            work_item = request.work_items[0]
+            n_images = len(work_item.mm_inputs)
+            if n_images > self._max_batch_images:
+                raise ValueError(
+                    f"single work item image count {n_images} exceeds "
+                    f"gpu_max_batch_images {self._max_batch_images}; "
+                    "the model preprocess batch is not splittable"
+                )
+            work_estimate = getattr(work_item, "work_estimate", None)
+            if self._work_budget is not None:
+                if work_estimate is None:
+                    raise RuntimeError(
+                        "model enabled cost-aware multimodal scheduling, but a "
+                        "preprocessed work item has no work estimate"
+                    )
+                if not isinstance(work_estimate, MMWorkEstimate):
+                    raise TypeError(
+                        "cost-aware multimodal work estimate must be "
+                        f"MMWorkEstimate, got {type(work_estimate).__name__}"
+                    )
+                if not work_estimate.fits_within(self._work_budget):
+                    logging.warning(
+                        "MMScheduler: one work item exceeds the model work "
+                        "budget; running it alone (estimate=%s, budget=%s)",
+                        work_estimate,
+                        self._work_budget,
+                    )
+            request.chunks = [
+                _EmbeddingChunk(
+                    request=request,
+                    work_items=request.work_items,
+                    n_images=n_images,
+                    work_estimate=work_estimate,
+                )
+            ]
+            request.remaining_chunks = 1
+            request.next_chunk_index = 1
+            return
+
+        if self._work_budget is None:
+            n_images = sum(len(work_item.mm_inputs) for work_item in request.work_items)
+            if n_images > self._max_batch_images:
+                raise ValueError(
+                    f"request image count {n_images} exceeds "
+                    f"gpu_max_batch_images {self._max_batch_images}, "
+                    "request rejected"
+                )
+            request.chunks = [
+                _EmbeddingChunk(
+                    request=request,
+                    work_items=request.work_items,
+                    n_images=n_images,
+                    work_estimate=self._sum_work_estimates(request.work_items),
+                )
+            ]
+            request.remaining_chunks = 1
+            request.next_chunk_index = 1
+            return
+
+        chunks: List[_EmbeddingChunk] = []
+        chunk_items: List[MMWorkItem] = []
+        chunk_images = 0
+        chunk_work = MMWorkEstimate()
+
+        def finish_chunk() -> None:
+            nonlocal chunk_items, chunk_images, chunk_work
+            if not chunk_items:
+                return
+            chunks.append(
+                _EmbeddingChunk(
+                    request=request,
+                    work_items=chunk_items,
+                    n_images=chunk_images,
+                    work_estimate=chunk_work,
+                )
+            )
+            chunk_items = []
+            chunk_images = 0
+            chunk_work = MMWorkEstimate()
+
+        for work_item in request.work_items:
+            item_images = len(work_item.mm_inputs)
+            if item_images > self._max_batch_images:
+                raise ValueError(
+                    f"single work item image count {item_images} exceeds "
+                    f"gpu_max_batch_images {self._max_batch_images}; "
+                    "the model preprocess batch is not splittable"
+                )
+
+            item_work = getattr(work_item, "work_estimate", None)
+            if item_work is None:
+                raise RuntimeError(
+                    "model enabled cost-aware multimodal scheduling, but a "
+                    "preprocessed work item has no work estimate"
+                )
+            if not isinstance(item_work, MMWorkEstimate):
+                raise TypeError(
+                    "cost-aware multimodal work estimate must be "
+                    f"MMWorkEstimate, got {type(item_work).__name__}"
+                )
+            image_overflow = (
+                bool(chunk_items)
+                and chunk_images + item_images > self._max_batch_images
+            )
+            work_overflow = bool(chunk_items) and self._would_exceed_work_budget(
+                chunk_work, item_work
+            )
+            if image_overflow or work_overflow:
+                logging.info(
+                    "MMScheduler: split request before work item "
+                    "(reason=%s, chunk_images=%d, item_images=%d, "
+                    "chunk_work=%s, item_work=%s, budget=%s)",
+                    "media" if image_overflow else "work",
+                    chunk_images,
+                    item_images,
+                    chunk_work,
+                    item_work,
+                    self._work_budget,
+                )
+                finish_chunk()
+
+            chunk_items.append(work_item)
+            chunk_images += item_images
+            chunk_work = chunk_work + item_work
+
+            if len(chunk_items) == 1 and not item_work.fits_within(self._work_budget):
+                # A model work item is not generically splittable (for example,
+                # one long video). Run it alone rather than reintroduce the old
+                # whole-request rejection; a true OOM still reaches the caller.
+                logging.warning(
+                    "MMScheduler: one work item exceeds the model work budget; "
+                    "running it alone (estimate=%s, budget=%s)",
+                    item_work,
+                    self._work_budget,
+                )
+
+        finish_chunk()
+        request.chunks = chunks
+        request.remaining_chunks = len(chunks)
+        request.next_chunk_index = 1
+
     def submit_and_wait(self, work_items: List[MMWorkItem]) -> None:
         req = _EmbeddingRequest(work_items)
-        # max_batch_images is also the SINGLE-request image cap, not just the
-        # cross-request batch cap: a request is never split across batches, so one
-        # carrying more images than the cap can never fit and is rejected up front
-        # (no graceful degradation / auto-splitting). This only bites when GPU
-        # batching is on — serial mode passes sys.maxsize, preserving the old
-        # inline path's "no single-request image limit". Operators enabling GPU
-        # batching must set gpu_max_batch_images >= the largest single-request
-        # image count their traffic can produce.
-        if req.n_images > self._max_batch_images:
-            raise ValueError(
-                f"request image count {req.n_images} exceeds "
-                f"gpu_max_batch_images {self._max_batch_images}, "
-                f"request rejected"
-            )
+        self._build_chunks(req)
 
         # mm_timeout_ms is normally a positive int (server default 120000), but
         # guard against an unset/None/non-positive value so max()/division can't
@@ -189,7 +392,7 @@ class MMScheduler:
         with self._lock:
             if self._stopped.is_set():
                 raise RuntimeError("MMScheduler is closed, request rejected")
-            self._waiting.put(req)
+            self._waiting.put(req.chunks[0])
 
         if not req.done.wait(timeout=timeout_s):
             req.cancelled = True
@@ -222,16 +425,51 @@ class MMScheduler:
 
     @staticmethod
     def _drain(
-        q: "queue.Queue[_EmbeddingRequest]",
-    ) -> List[_EmbeddingRequest]:
-        """Pop and return every request currently queued."""
-        drained: List[_EmbeddingRequest] = []
+        q: "queue.Queue[_EmbeddingChunk]",
+    ) -> List[_EmbeddingChunk]:
+        """Pop and return every chunk currently queued."""
+        drained: List[_EmbeddingChunk] = []
         while True:
             try:
                 drained.append(q.get_nowait())
             except queue.Empty:
                 break
         return drained
+
+    @staticmethod
+    def _fail_chunks(chunks: List[_EmbeddingChunk], error: Exception) -> None:
+        seen_requests = set()
+        for chunk in chunks:
+            request = chunk.request
+            request_id = id(request)
+            if request_id in seen_requests or request.done.is_set():
+                continue
+            seen_requests.add(request_id)
+            request.cancelled = True
+            request.exception = error
+            request.done.set()
+
+    def _complete_chunk(self, chunk: _EmbeddingChunk) -> None:
+        request = chunk.request
+        if request.cancelled or request.done.is_set():
+            return
+
+        request.remaining_chunks -= 1
+        if request.remaining_chunks == 0:
+            request.done.set()
+            return
+
+        with self._lock:
+            if self._stopped.is_set():
+                request.cancelled = True
+                request.exception = RuntimeError(
+                    "MMScheduler closed before request completed"
+                )
+                request.done.set()
+                return
+            next_chunk = request.chunks[request.next_chunk_index]
+            request.next_chunk_index += 1
+            self._waiting.put(next_chunk)
 
     def _executor_loop(self) -> None:
         while not self._stopped.is_set():
@@ -249,15 +487,12 @@ class MMScheduler:
                 # the error now instead of blocking until its own submit timeout.
                 # The loop keeps running so the consumer thread survives.
                 if batch:
-                    for req in batch:
-                        if not req.done.is_set():
-                            req.exception = e
-                            req.done.set()
+                    self._fail_chunks(batch, e)
 
-    def _collect_batch(self) -> Optional[List[_EmbeddingRequest]]:
-        # Pick the first request, skipping any whose caller already timed out
-        # (cancelled) so a dead request neither anchors a batch nor spends its
-        # image budget. _pending (carried over from last round) goes first.
+    def _collect_batch(self) -> Optional[List[_EmbeddingChunk]]:
+        # Pick the first chunk, skipping any whose caller already timed out
+        # (cancelled) so dead work neither anchors a batch nor spends its budget.
+        # _pending (carried over from last round) goes first.
         #
         # The idle wait polls _stopped (see _STOP_POLL_INTERVAL_S) rather than
         # blocking forever, so close() needs no wake-up sentinel: a new request
@@ -277,10 +512,11 @@ class MMScheduler:
                     first = self._waiting.get(timeout=_STOP_POLL_INTERVAL_S)
                 except queue.Empty:
                     continue
-            if not first.cancelled:
+            if not first.request.cancelled:
                 break
         batch = [first]
         n_images = first.n_images
+        batch_work = first.work_estimate
 
         deadline = time.monotonic() + self._batch_wait_ms / 1000.0
 
@@ -289,67 +525,147 @@ class MMScheduler:
             if remaining <= 0:
                 break
             try:
-                req = self._waiting.get(timeout=remaining)
+                chunk = self._waiting.get(timeout=remaining)
             except queue.Empty:
                 break
-            if req.cancelled:
+            if chunk.request.cancelled:
                 continue  # caller already timed out; don't spend budget on it
 
-            # The while guard already caps the request count, so here we only
-            # need to stop when the next request would overflow the image budget.
-            if n_images + req.n_images > self._max_batch_images:
-                self._pending = req
+            image_overflow = n_images + chunk.n_images > self._max_batch_images
+            work_overflow = self._would_exceed_work_budget(
+                batch_work, chunk.work_estimate
+            )
+            if image_overflow or work_overflow:
+                self._pending = chunk
                 break
-            batch.append(req)
-            n_images += req.n_images
+            batch.append(chunk)
+            n_images += chunk.n_images
+            if batch_work is None or chunk.work_estimate is None:
+                batch_work = None
+            else:
+                batch_work = batch_work + chunk.work_estimate
 
         return batch
 
-    def _execute_batch(self, batch: List[_EmbeddingRequest]) -> None:
-        """Run the batched GPU forward and write results back.
+    def _run_items_with_oom_split(self, items: List[MMWorkItem]) -> None:
+        """Run one chunk, recursively halving its items after a CUDA OOM."""
+        try:
+            _run_embedding(self._mm_part, items)
+        except torch.cuda.OutOfMemoryError:
+            torch.cuda.empty_cache()
+            if len(items) <= 1:
+                raise
+            midpoint = len(items) // 2
+            logging.warning(
+                "MMScheduler: OOM retry splitting one request chunk "
+                "from %d items into %d + %d",
+                len(items),
+                midpoint,
+                len(items) - midpoint,
+            )
+            self._run_items_with_oom_split(items[:midpoint])
+            self._run_items_with_oom_split(items[midpoint:])
 
-        All-or-nothing: if the forward raises, the whole batch is discarded and
-        every request in it receives that same exception. There is no per-request
-        retry — a co-batched request can fail as collateral, the deliberate trade
-        for a single, simple failure path. Cross-batch isolation still holds: only
-        this batch is affected; earlier/later batches are untouched.
-        """
-        # Single cancellation checkpoint: drop every request whose caller has
-        # already timed out, so the forward never runs for work nobody awaits.
-        batch = [req for req in batch if not req.cancelled]
+    def _execute_batch(self, batch: List[_EmbeddingChunk]) -> None:
+        """Run a batch, isolating CUDA OOMs by binary split and retry."""
+        # Drop chunks whose callers already timed out, so the forward never runs
+        # for work nobody awaits.
+        batch = [chunk for chunk in batch if not chunk.request.cancelled]
         if not batch:
             return
 
-        items = [wi for req in batch for wi in req.work_items]
-        n_images = sum(r.n_images for r in batch)
-        t0 = time.time()
+        items = [wi for chunk in batch for wi in chunk.work_items]
+        log_composition = logging.getLogger().isEnabledFor(logging.INFO)
+        if log_composition:
+            n_images = sum(chunk.n_images for chunk in batch)
+            work_estimate = self._sum_work_estimates(items)
+            t0 = time.time()
         try:
             _run_embedding(self._mm_part, items)
-            dt = (time.time() - t0) * 1000
-            logging.info(
-                "[SCHEDULER] batch=%d imgs=%d forward=%.0fms",
-                len(batch), n_images, dt,
-            )
-        except Exception as e:
-            # On OOM, reset the allocator so the *next* batch starts from a clean
-            # state; other errors (device assert, count mismatch) need no reset.
-            # The original typed exception (OutOfMemoryError /
-            # OutputCountMismatchError / RuntimeError) propagates unchanged so the
-            # caller sees a clear cause.
-            if isinstance(e, torch.cuda.OutOfMemoryError):
-                torch.cuda.empty_cache()
+        except torch.cuda.OutOfMemoryError as error:
+            torch.cuda.empty_cache()
+            if self._work_budget is None:
+                logging.error(
+                    "MMScheduler: batch OOM with cost-aware scheduling disabled: %s",
+                    error,
+                    exc_info=True,
+                )
+                self._fail_chunks(batch, error)
+                return
+            if len(batch) > 1:
+                midpoint = len(batch) // 2
+                logging.warning(
+                    "MMScheduler: OOM retry splitting batch from %d chunks "
+                    "into %d + %d",
+                    len(batch),
+                    midpoint,
+                    len(batch) - midpoint,
+                )
+                self._execute_batch(batch[:midpoint])
+                self._execute_batch(batch[midpoint:])
+                return
+
+            chunk = batch[0]
+            if len(chunk.work_items) > 1:
+                midpoint = len(chunk.work_items) // 2
+                try:
+                    self._run_items_with_oom_split(chunk.work_items[:midpoint])
+                    self._run_items_with_oom_split(chunk.work_items[midpoint:])
+                except Exception as retry_error:
+                    logging.error(
+                        "MMScheduler: single request OOM retry failed: " "%s: %s",
+                        type(retry_error).__name__,
+                        retry_error,
+                        exc_info=True,
+                    )
+                    self._fail_chunks(batch, retry_error)
+                    return
+                self._complete_chunk(chunk)
+                return
+
             logging.error(
-                f"MMScheduler: batch forward failed, discarding {len(batch)} "
-                f"request(s): {type(e).__name__}: {e}",
+                "MMScheduler: one work item still OOM after isolation: %s",
+                error,
                 exc_info=True,
             )
-            for req in batch:
-                req.exception = e
-                req.done.set()
+            self._fail_chunks(batch, error)
+            return
+        except Exception as error:
+            logging.error(
+                "MMScheduler: batch forward failed, discarding %d chunk(s): " "%s: %s",
+                len(batch),
+                type(error).__name__,
+                error,
+                exc_info=True,
+            )
+            self._fail_chunks(batch, error)
             return
 
-        for req in batch:
-            req.done.set()
+        if log_composition:
+            dt = (time.time() - t0) * 1000
+            if work_estimate is None:
+                logging.info(
+                    "[SCHEDULER] requests=%d items=%d imgs=%d forward=%.0fms",
+                    len(batch),
+                    len(items),
+                    n_images,
+                    dt,
+                )
+            else:
+                logging.info(
+                    "[SCHEDULER] requests=%d items=%d imgs=%d patches=%d "
+                    "tokens=%d workspace=%.1fMiB forward=%.0fms",
+                    len(batch),
+                    len(items),
+                    n_images,
+                    work_estimate.input_patches,
+                    work_estimate.output_tokens,
+                    work_estimate.estimated_workspace_bytes / (1024 * 1024),
+                    dt,
+                )
+
+        for chunk in batch:
+            self._complete_chunk(chunk)
 
     def close(self, timeout: float = 10.0) -> None:
         # Set stopped atomically w.r.t. submit_and_wait so that after this point
@@ -369,14 +685,10 @@ class MMScheduler:
             logging.warning("MMScheduler: executor join exceeded %.0fs", timeout)
             return
 
-        # Executor has exited, so _pending / _waiting have no concurrent accessor:
-        # fail only requests that never started (those still queued and the one
-        # carried over in _pending). In-flight requests were finished by the
-        # executor before it exited (result or error).
+        # Executor has exited, so _pending / _waiting have no concurrent accessor.
+        # Fail requests with a chunk that never started.
         exc = RuntimeError("MMScheduler closed before request completed")
         queued = [self._pending] if self._pending else []
         self._pending = None
         queued.extend(self._drain(self._waiting))
-        for req in queued:
-            req.exception = exc
-            req.done.set()
+        self._fail_chunks(queued, exc)
