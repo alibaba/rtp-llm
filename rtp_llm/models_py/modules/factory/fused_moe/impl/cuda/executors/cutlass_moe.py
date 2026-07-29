@@ -1,14 +1,10 @@
-import logging
 from math import prod
 from typing import Any, Callable, Dict, Optional
 
 import torch
-
-try:
-    from rtp_kernel.fp8_group_gemm import get_cutlass_batched_moe_mm_data
-except ImportError as e:
-    logging.warning(f"rtp_kernel.fp8_group_gemm not available: {e}")
-    get_cutlass_batched_moe_mm_data = None
+from rtp_kernel.fp8_group_gemm import (
+    get_cutlass_batched_moe_mm_data,
+)
 
 from rtp_llm.models_py.kernels.cuda.fp8_kernel import (
     cutlass_moe_mm_fp8_scaled,
@@ -32,8 +28,8 @@ from rtp_llm.models_py.triton_kernels.common.activation import (
 )
 from rtp_llm.models_py.triton_kernels.moe.ep_kernels import (
     cutlass_moe_pre_reorder,
-    get_cutlass_moe_mm_without_permute_info,
     post_reorder_triton_kernel,
+    get_cutlass_moe_mm_without_permute_info,
 )
 from rtp_llm.utils.model_weight import W
 

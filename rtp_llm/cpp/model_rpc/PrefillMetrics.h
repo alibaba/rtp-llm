@@ -39,7 +39,7 @@ void reportPoolMetricsToKmonitor(const kmonitor::MetricsReporterPtr& metrics_rep
 
 // ---- Recent-cache-key / theory-hit metrics ----
 // Compute full-block cache keys for the request, record them into the recent-cache-key window,
-// update theory-hit statistics, optionally append the theory-hit log line, and report to kmonitor.
+// update theory-hit statistics, and report to kmonitor.
 // Callers are responsible for the "report only once" / enabled gating; this does the work.
 void reportPrefillRecentCacheKeyMetrics(RecentCacheKeyWindow*               window,
                                         const kmonitor::MetricsReporterPtr& metrics_reporter,

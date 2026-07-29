@@ -173,7 +173,6 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
             reporter.reportRouteSubmitTimeMs(
                     RoleType.PREFILL.name(),
                     prefillEp.getIp(),
-                    prefillEp.ipPort(),
                     System.currentTimeMillis() - ctx.getStartTime());
         } catch (Throwable t) {
             if (ctx != null) {
@@ -355,7 +354,8 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
 
         // [ASYNC] Delegate gRPC dispatch — dispatcher owns its own thread pool
         long waitMs = System.currentTimeMillis() - items.get(0).enqueuedAtMs();
-        reporter.reportBatchWaitTimeMs(RoleType.PREFILL.name(), prefillEp != null ? prefillEp.getIp() : "", prefillEp != null ? prefillEp.ipPort() : "", waitMs);
+        reporter.reportBatchWaitTimeMs(
+                RoleType.PREFILL.name(), prefillEp != null ? prefillEp.getIp() : "", waitMs);
         FlexlbConfig config = configService.loadBalanceConfig();
         Logger.info("flexlb_batch_dispatch batch_id={} reason={} batch_size={} wait_ms={} "
                         + "predicted_ms={} threshold_ms={} fixed_wait_ms={} batch_size_max={} "
@@ -416,7 +416,6 @@ public class FlexlbBatchScheduler implements BatchDecisionHandler, DispatchCallb
                     reporter.reportDispatchAckTimeMs(
                             RoleType.PREFILL.name(),
                             ep != null ? ep.getIp() : "",
-                            ep != null ? ep.ipPort() : "",
                             System.currentTimeMillis() - dispatchedAtMs);
                 }
             }

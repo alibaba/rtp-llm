@@ -1,9 +1,6 @@
-import logging
 import os
-
+import logging
 from rtp_llm.ops import VitSeparation
-
-from .util import str2bool
 
 
 def _convert_vit_separation(value):
@@ -29,7 +26,7 @@ def _convert_vit_separation(value):
             return VitSeparation.VIT_SEPARATION_LOCAL
         elif value == "1" or value == "VitSeparation.VIT_SEPARATION_ROLE":
             return VitSeparation.VIT_SEPARATION_ROLE
-        elif value == "2" or value == "VitSeparation.VIT_SEPARATION_REMOTE":
+        elif  value == "2" or value == "VitSeparation.VIT_SEPARATION_REMOTE":
             return VitSeparation.VIT_SEPARATION_REMOTE
 
     raise ValueError(
@@ -108,7 +105,7 @@ def init_vit_group_args(parser, vit_config):
         "--use_igraph_cache",
         env_name="USE_IGRAPH_CACHE",
         bind_to=(vit_config, "use_igraph_cache"),
-        type=str2bool,
+        type=bool,
         default=True,
         help="访问igraph是否开启cache",
     )

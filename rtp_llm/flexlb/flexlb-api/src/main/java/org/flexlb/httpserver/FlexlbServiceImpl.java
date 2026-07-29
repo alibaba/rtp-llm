@@ -157,19 +157,16 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         if (ctx != null && ctx.getAckAtMs() > 0) {
             long ackToResponseMs = System.currentTimeMillis() - ctx.getAckAtMs();
             String prefillIp = "";
-            String prefillIpPort = "";
             if (ctx.getResponse() != null && ctx.getResponse().getServerStatus() != null) {
                 for (ServerStatus ss : ctx.getResponse().getServerStatus()) {
                     if (ss.getRole() == RoleType.PREFILL) {
                         prefillIp = ss.getServerIp() != null ? ss.getServerIp() : "";
-                        prefillIpPort = ss.getServerIp() != null
-                                ? ss.getServerIp() + ":" + ss.getHttpPort() : "";
                         break;
                     }
                 }
             }
             batchSchedulerReporter.reportAckToResponseTimeMs(
-                    RoleType.PREFILL.name(), prefillIp, prefillIpPort, ackToResponseMs);
+                    RoleType.PREFILL.name(), prefillIp, ackToResponseMs);
         }
         try {
             observer.onNext(response);

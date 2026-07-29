@@ -195,11 +195,11 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     void startMasterGrpcServer() throws Exception {
         suppressRequestPathLogs();
         doAnswer(invocation -> {
-            String reason = invocation.getArgument(3);
+            String reason = invocation.getArgument(2);
             dispatchReasonCounts.computeIfAbsent(reason, ignored -> new LongAdder()).increment();
             return null;
         }).when(reporter).reportDispatchReason(
-                anyString(), anyString(), anyString(), anyString());
+                anyString(), anyString(), anyString());
         getDecodeEndpoint().getStatus().getAvailableKvCacheTokens().set(1_000_000_000L);
         getDecodeEndpoint().getStatus().getTotalKvCacheTokens().set(2_000_000_000L);
         getDecodeEndpoint().onWorkerStatusUpdate(

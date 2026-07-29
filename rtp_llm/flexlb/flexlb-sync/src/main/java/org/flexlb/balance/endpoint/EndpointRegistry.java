@@ -103,12 +103,12 @@ public class EndpointRegistry {
             return endpoint;
         }
         return ensureEndpoint(prefillEndpoints, ipPort, status,
-                candidateStatus -> createPrefillEndpoint(candidateStatus, roleType, ipPort));
+                candidateStatus -> createPrefillEndpoint(candidateStatus, roleType));
     }
 
     private DecodeEndpoint ensureDecodeEndpoint(String ipPort, WorkerStatus status) {
         return ensureEndpoint(decodeEndpoints, ipPort, status,
-                candidateStatus -> createDecodeEndpoint(candidateStatus, ipPort));
+                this::createDecodeEndpoint);
     }
 
     private PrefillEndpoint ensurePdFusionEndpoint(String ipPort, WorkerStatus status, RoleType roleType) {
@@ -117,12 +117,12 @@ public class EndpointRegistry {
             return endpoint;
         }
         return ensureEndpoint(pdFusionEndpoints, ipPort, status,
-                candidateStatus -> createPrefillEndpoint(candidateStatus, roleType, ipPort));
+                candidateStatus -> createPrefillEndpoint(candidateStatus, roleType));
     }
 
     private SimpleWorkerEndpoint ensureVitEndpoint(String ipPort, WorkerStatus status) {
         return ensureEndpoint(vitEndpoints, ipPort, status,
-                candidateStatus -> createSimpleEndpoint(candidateStatus, RoleType.VIT, ipPort));
+                candidateStatus -> createSimpleEndpoint(candidateStatus, RoleType.VIT));
     }
 
     private <T extends WorkerEndpoint> T ensureEndpoint(ConcurrentHashMap<String, T> endpoints,
@@ -195,26 +195,24 @@ public class EndpointRegistry {
         return batchSchedulerFactory.getObject();
     }
 
-    private PrefillEndpoint createPrefillEndpoint(WorkerStatus status, RoleType roleType,
-                                                  String ipPort) {
+    private PrefillEndpoint createPrefillEndpoint(WorkerStatus status, RoleType roleType) {
         FlexlbConfig config = configService.loadBalanceConfig();
-        prepareEndpointMetrics(roleType, status, ipPort);
+        prepareEndpointMetrics(roleType, status);
         return new PrefillEndpoint(status, config, batchScheduler(), reporter);
     }
 
-    private DecodeEndpoint createDecodeEndpoint(WorkerStatus status, String ipPort) {
-        prepareEndpointMetrics(RoleType.DECODE, status, ipPort);
+    private DecodeEndpoint createDecodeEndpoint(WorkerStatus status) {
+        prepareEndpointMetrics(RoleType.DECODE, status);
         return new DecodeEndpoint(status);
     }
 
-    private SimpleWorkerEndpoint createSimpleEndpoint(WorkerStatus status, RoleType roleType,
-                                                      String ipPort) {
-        prepareEndpointMetrics(roleType, status, ipPort);
+    private SimpleWorkerEndpoint createSimpleEndpoint(WorkerStatus status, RoleType roleType) {
+        prepareEndpointMetrics(roleType, status);
         return new SimpleWorkerEndpoint(status);
     }
 
-    private void prepareEndpointMetrics(RoleType roleType, WorkerStatus status, String ipPort) {
-        reporter.prepareEndpointMetrics(roleType.name(), status.getIp(), ipPort);
+    private void prepareEndpointMetrics(RoleType roleType, WorkerStatus status) {
+        reporter.prepareEndpointMetrics(roleType.name(), status.getIp());
     }
 
     public void close() {

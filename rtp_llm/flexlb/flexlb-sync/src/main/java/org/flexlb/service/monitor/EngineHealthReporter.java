@@ -366,9 +366,6 @@ public class EngineHealthReporter {
 
     /**
      * Delegate routing selected cache match metrics to {@link CacheMetricsReporter}.
-     *
-     * @param engineIp     engine pure IP
-     * @param engineIpPort engine ip:httpPort
      */
     public void reportRoutingSelectedCacheMatchMetrics(RoleType roleType,
                                                        long hitTokens,

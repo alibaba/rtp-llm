@@ -107,8 +107,8 @@ public class BatchSchedulerReporter {
     /**
      * Report per-worker batcher queue depth via {@code routing.queue.length}.
      */
-    public void reportBatcherQueueDepth(String role, String engineIp, String engineIpPort, int depth) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+    public void reportBatcherQueueDepth(String role, String engineIp, int depth) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "type", "batchQueue",
                 "role", role);
         monitor.report(ROUTING_QUEUE_LENGTH, tags, depth);
@@ -120,8 +120,8 @@ public class BatchSchedulerReporter {
      * (which uses type=batchQueue tag). Uses the same role + engineIp tag pattern as other
      * per-worker metrics.
      */
-    public void reportBatcherQueueSize(String role, String engineIp, String engineIpPort, int depth) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+    public void reportBatcherQueueSize(String role, String engineIp, int depth) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", role);
         monitor.report(BATCHER_QUEUE_SIZE, tags, depth);
     }
@@ -129,8 +129,8 @@ public class BatchSchedulerReporter {
     /**
      * Report batch wait time (enqueue to dispatch) via {@code routing.queue.wait.time.ms}.
      */
-    public void reportBatchWaitTimeMs(String role, String engineIp, String engineIpPort, long waitMs) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+    public void reportBatchWaitTimeMs(String role, String engineIp, long waitMs) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", role);
         monitor.report(ROUTING_QUEUE_WAIT_TIME_MS, tags, waitMs);
     }
@@ -140,8 +140,8 @@ public class BatchSchedulerReporter {
     /**
      * Report batch dispatch reason via {@code engine.balancing.master.dispatch.reason}.
      */
-    public void reportDispatchReason(String role, String engineIp, String engineIpPort, String reason) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+    public void reportDispatchReason(String role, String engineIp, String reason) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", role,
                 "reason", reason);
         monitor.report(ENGINE_BALANCING_MASTER_DISPATCH_REASON, tags, 1.0);
@@ -159,12 +159,12 @@ public class BatchSchedulerReporter {
      * @param hitTokens   total cache-hit tokens across the batch
      * @param totalTokens total sequence length across the batch
      */
-    public void reportBatchCacheHitMetrics(String role, String engineIp, String engineIpPort, long hitTokens, long totalTokens) {
+    public void reportBatchCacheHitMetrics(String role, String engineIp, long hitTokens, long totalTokens) {
         if (totalTokens <= 0L) {
             return;
         }
         double hitRatio = hitTokens / (double) totalTokens;
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", role);
         monitor.report(CACHE_HIT_COUNT, tags, hitTokens);
         monitor.report(CACHE_HIT_RATIO, tags, hitRatio);
@@ -174,8 +174,8 @@ public class BatchSchedulerReporter {
     /**
      * Report batch size (number of requests dispatched together) via {@code engine.balancing.master.batch.size}.
      */
-    public void reportBatchSize(String role, String engineIp, String engineIpPort, String reason, int batchSize) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+    public void reportBatchSize(String role, String engineIp, String reason, int batchSize) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", role,
                 "reason", reason);
         monitor.report(ENGINE_BALANCING_MASTER_BATCH_SIZE, tags, batchSize);
@@ -185,8 +185,8 @@ public class BatchSchedulerReporter {
      * Report batch total token count (sum of seqLen across picked items) via
      * {@code engine.balancing.master.batch.total.tokens}.
      */
-    public void reportBatchTotalTokens(String role, String engineIp, String engineIpPort, String reason, long totalTokens) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+    public void reportBatchTotalTokens(String role, String engineIp, String reason, long totalTokens) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", role,
                 "reason", reason);
         monitor.report(ENGINE_BALANCING_MASTER_BATCH_TOTAL_TOKENS, tags, totalTokens);
@@ -204,8 +204,7 @@ public class BatchSchedulerReporter {
     public void reportSchedulerInflightSize(int size) {
         FlexMetricTags tags = FlexMetricTags.of(
                 "role", RoleType.PREFILL.name(),
-                "engineIp", "scheduler",
-                "engineIpPort", "scheduler");
+                "engineIp", "scheduler");
         monitor.report(SCHEDULER_INFLIGHT_SIZE, tags, size);
     }
 
@@ -214,8 +213,8 @@ public class BatchSchedulerReporter {
      * via {@code flexlb.inflight.batch.count}.
      * <p>Unified for both prefill and decode workers, tagged by role and engineIp.
      */
-    public void reportInflightBatchCount(String role, String engineIp, String engineIpPort, int count) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+    public void reportInflightBatchCount(String role, String engineIp, int count) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", role);
         monitor.report(INFLIGHT_BATCH_COUNT, tags, count);
     }
@@ -226,8 +225,8 @@ public class BatchSchedulerReporter {
      * <p>Unified for both prefill and decode workers, tagged by role and engineIp.
      * Replaces the former separate reportPrefillInflightRequestCount and reportDecodeInflightCount.
      */
-    public void reportInflightRequestCount(String role, String engineIp, String engineIpPort, int count) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+    public void reportInflightRequestCount(String role, String engineIp, int count) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", role);
         monitor.report(INFLIGHT_REQUEST_COUNT, tags, count);
     }
@@ -238,8 +237,8 @@ public class BatchSchedulerReporter {
      * Report per-decode-worker total load (confirmed running + scheduler inflight)
      * via {@code flexlb.decode.total.load}.
      */
-    public void reportDecodeTotalLoad(String engineIp, String engineIpPort, int totalLoad) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+    public void reportDecodeTotalLoad(String engineIp, int totalLoad) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", RoleType.DECODE.name());
         monitor.report(DECODE_TOTAL_LOAD, tags, totalLoad);
     }
@@ -248,8 +247,8 @@ public class BatchSchedulerReporter {
      * Report per-decode-worker inflight KV cache reserved tokens (local inflight reservation not yet confirmed by the engine)
      * via {@code flexlb.decode.inflight.kv.reserved.tokens}.
      */
-    public void reportDecodeInflightKvReserved(String engineIp, String engineIpPort, long kvReservedTokens) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+    public void reportDecodeInflightKvReserved(String engineIp, long kvReservedTokens) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", RoleType.DECODE.name());
         monitor.report(DECODE_INFLIGHT_KV_RESERVED_TOKENS, tags, kvReservedTokens);
     }
@@ -259,8 +258,8 @@ public class BatchSchedulerReporter {
     /**
      * Report formula-predicted batch execution time via {@code app.flexlb.batch.predicted.time.ms}.
      */
-    public void reportBatchPredictedTimeMs(String role, String engineIp, String engineIpPort, long predictedMs) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+    public void reportBatchPredictedTimeMs(String role, String engineIp, long predictedMs) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", role);
         monitor.report(BATCH_PREDICTED_TIME_MS, tags, predictedMs);
     }
@@ -268,8 +267,8 @@ public class BatchSchedulerReporter {
     /**
      * Report engine-reported actual batch execution time via {@code app.flexlb.batch.actual.time.ms}.
      */
-    public void reportBatchActualTimeMs(String role, String engineIp, String engineIpPort, long actualMs) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+    public void reportBatchActualTimeMs(String role, String engineIp, long actualMs) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", role);
         monitor.report(BATCH_ACTUAL_TIME_MS, tags, actualMs);
     }
@@ -277,8 +276,8 @@ public class BatchSchedulerReporter {
     /**
      * Report the gap between actual and predicted batch execution time via {@code app.flexlb.batch.predict.gap.ms}.
      */
-    public void reportBatchPredictGapMs(String role, String engineIp, String engineIpPort, long gapMs) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+    public void reportBatchPredictGapMs(String role, String engineIp, long gapMs) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", role);
         monitor.report(BATCH_PREDICT_GAP_MS, tags, gapMs);
     }
@@ -293,22 +292,22 @@ public class BatchSchedulerReporter {
      * @param engineIp the prefill endpoint IP
      * @param ackTimeMs milliseconds from dispatch to ACK
      */
-    public void reportDispatchAckTimeMs(String role, String engineIp, String engineIpPort, long ackTimeMs) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+    public void reportDispatchAckTimeMs(String role, String engineIp, long ackTimeMs) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", role);
         monitor.report(DISPATCH_ACK_TIME_MS, tags, ackTimeMs);
     }
 
     /** Prepare schedule-path meters before an endpoint receives traffic. */
-    public void prepareEndpointMetrics(String role, String engineIp, String engineIpPort) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+    public void prepareEndpointMetrics(String role, String engineIp) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", role);
         if (RoleType.PREFILL.name().equals(role) || RoleType.PDFUSION.name().equals(role)) {
             monitor.prepare(DISPATCH_ACK_TIME_MS, tags);
             monitor.prepare(ROUTE_SUBMIT_TIME_MS, tags);
             monitor.prepare(ROUTING_QUEUE_WAIT_TIME_MS, tags);
             for (String reason : FIXED_WINDOW_DISPATCH_REASONS) {
-                FlexMetricTags reasonTags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+                FlexMetricTags reasonTags = FlexMetricTags.ofEngine(engineIp,
                         "role", role,
                         "reason", reason);
                 monitor.prepare(ENGINE_BALANCING_MASTER_DISPATCH_REASON, reasonTags);
@@ -326,8 +325,8 @@ public class BatchSchedulerReporter {
      * @param engineIp  the prefill endpoint IP
      * @param submitMs  milliseconds from schedule entry to batcher offer completion
      */
-    public void reportRouteSubmitTimeMs(String role, String engineIp, String engineIpPort, long submitMs) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+    public void reportRouteSubmitTimeMs(String role, String engineIp, long submitMs) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", role);
         monitor.report(ROUTE_SUBMIT_TIME_MS, tags, submitMs);
     }
@@ -342,8 +341,8 @@ public class BatchSchedulerReporter {
      * @param engineIp         the prefill endpoint IP
      * @param ackToResponseMs  milliseconds from engine ACK to response sent
      */
-    public void reportAckToResponseTimeMs(String role, String engineIp, String engineIpPort, long ackToResponseMs) {
-        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp, engineIpPort,
+    public void reportAckToResponseTimeMs(String role, String engineIp, long ackToResponseMs) {
+        FlexMetricTags tags = FlexMetricTags.ofEngine(engineIp,
                 "role", role);
         monitor.report(ACK_TO_RESPONSE_TIME_MS, tags, ackToResponseMs);
     }

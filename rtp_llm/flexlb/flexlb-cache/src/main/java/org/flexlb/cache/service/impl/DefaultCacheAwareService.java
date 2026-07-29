@@ -60,7 +60,6 @@ public class DefaultCacheAwareService implements CacheAwareService {
     public WorkerCacheUpdateResult updateEngineBlockCache(WorkerStatus workerStatus) {
         long startTime = System.nanoTime() / 1000;
         String engineIpPort = workerStatus.getIpPort();
-        String engineIp = workerStatus.getIp();
         String role = workerStatus.getRole().getCode();
 
         try {
@@ -86,7 +85,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
             WorkerCacheUpdateResult result = buildSuccessResult(workerStatus, cacheStatus);
 
             cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "1");
-            
+
             return result;
 
         } catch (Throwable e) {
@@ -95,7 +94,7 @@ public class DefaultCacheAwareService implements CacheAwareService {
             WorkerCacheUpdateResult result = buildFailureResult(engineIpPort, e.getMessage());
 
             cacheMetricsReporter.reportUpdateEngineBlockCacheRT(role, startTime, "0");
-            
+
             return result;
         }
     }

@@ -25,6 +25,7 @@ public:
                       py::object                                             mm_process_engine,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                       py::object                                             weight_manager) {
+        (void)weight_manager;
         local_server_ = std::make_shared<LocalRpcServer>();
         return local_server_->init(maga_init_params, mm_process_engine, std::move(propose_params));
     }

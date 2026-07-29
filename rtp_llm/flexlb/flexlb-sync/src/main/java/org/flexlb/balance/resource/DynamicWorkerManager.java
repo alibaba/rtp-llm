@@ -12,7 +12,6 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
-import java.util.LinkedHashMap;
 import java.util.List;
 import java.util.Map;
 import java.util.concurrent.Executors;
@@ -41,8 +40,6 @@ public class DynamicWorkerManager {
     private final int maxTotalWorkers;
     private final AtomicInteger totalPermits;
     private static final int ADJUSTMENT_STEP = 1;
-
-    private double lastMaxWaterLevel = -1.0;
 
     public DynamicWorkerManager(ConfigService configService, ResourceMeasureFactory resourceMeasureFactory) {
         FlexlbConfig config = configService.loadBalanceConfig();
@@ -95,8 +92,6 @@ public class DynamicWorkerManager {
         double maxWaterLevel = 0.0;
 
         FlexlbConfig config = configService.loadBalanceConfig();
-        // Collect per-role water levels for conditional debug logging
-        Map<RoleType, Double> roleWaterLevels = new LinkedHashMap<>();
         for (RoleType roleType : roleTypeList) {
             Map<String, WorkerStatus> workerStatusMap = modelWorkerStatus.getRoleStatusMap(roleType);
             ResourceMeasureIndicatorEnum indicator = config.getResourceMeasureIndicator(roleType);
@@ -104,24 +99,14 @@ public class DynamicWorkerManager {
             if (measure != null) {
                 double waterLevel = measure.calculateAverageWaterLevel(workerStatusMap);
                 maxWaterLevel = Math.max(maxWaterLevel, waterLevel);
-                roleWaterLevels.put(roleType, waterLevel);
-            }
-        }
-
-        boolean waterLevelChanged = maxWaterLevel != lastMaxWaterLevel;
-        if (waterLevelChanged) {
-            for (Map.Entry<RoleType, Double> entry : roleWaterLevels.entrySet()) {
-                Logger.debug("Role: {}, water level: {}%", entry.getKey(), entry.getValue());
+                Logger.debug("Role: {}, water level: {}%", roleType, waterLevel);
             }
         }
 
         int newAllowedWorkers = calculateAllowedWorkers(maxWaterLevel);
         int oldAllowedWorkers = allowedWorkers;
         allowedWorkers = newAllowedWorkers;
-        if (waterLevelChanged) {
-            Logger.debug("Final water level: {}%, allowedWorkers: {} -> {}", maxWaterLevel, oldAllowedWorkers, newAllowedWorkers);
-        }
-        lastMaxWaterLevel = maxWaterLevel;
+        Logger.debug("Final water level: {}%, allowedWorkers: {} -> {}", maxWaterLevel, oldAllowedWorkers, newAllowedWorkers);
 
         adjustPermitCapacity(allowedWorkers);
     }

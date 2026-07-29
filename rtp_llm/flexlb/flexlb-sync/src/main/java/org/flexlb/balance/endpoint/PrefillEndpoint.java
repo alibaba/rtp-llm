@@ -353,10 +353,10 @@ public class PrefillEndpoint extends WorkerEndpoint {
      */
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
         int queueSize = batcher.queueSize();
-        reporter.reportBatcherQueueDepth(RoleType.PREFILL.name(), getIp(), ipPort(), queueSize);
-        reporter.reportBatcherQueueSize(RoleType.PREFILL.name(), getIp(), ipPort(), queueSize);
-        reporter.reportInflightBatchCount(RoleType.PREFILL.name(), getIp(), ipPort(), getInflightBatchCount());
-        reporter.reportInflightRequestCount(RoleType.PREFILL.name(), getIp(), ipPort(), inflightRequestCount.get());
+        reporter.reportBatcherQueueDepth(RoleType.PREFILL.name(), getIp(), queueSize);
+        reporter.reportBatcherQueueSize(RoleType.PREFILL.name(), getIp(), queueSize);
+        reporter.reportInflightBatchCount(RoleType.PREFILL.name(), getIp(), getInflightBatchCount());
+        reporter.reportInflightRequestCount(RoleType.PREFILL.name(), getIp(), inflightRequestCount.get());
     }
 
     /**
@@ -389,9 +389,9 @@ public class PrefillEndpoint extends WorkerEndpoint {
         // Feed the actual-vs-predicted timing back into the predictor for future learning.
         predictor.learn(batch.requests(), predictedMs, actualMs);
 
-        reporter.reportBatchPredictedTimeMs(RoleType.PREFILL.name(), getIp(), ipPort(), predictedMs);
-        reporter.reportBatchActualTimeMs(RoleType.PREFILL.name(), getIp(), ipPort(), actualMs);
-        reporter.reportBatchPredictGapMs(RoleType.PREFILL.name(), getIp(), ipPort(), gapMs);
+        reporter.reportBatchPredictedTimeMs(RoleType.PREFILL.name(), getIp(), predictedMs);
+        reporter.reportBatchActualTimeMs(RoleType.PREFILL.name(), getIp(), actualMs);
+        reporter.reportBatchPredictGapMs(RoleType.PREFILL.name(), getIp(), gapMs);
     }
 
     private long estimateWaitingTimeMs(long nowMs) {

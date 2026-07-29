@@ -406,7 +406,6 @@ struct RuntimeConfig {
     std::string              model_name = "";
     std::vector<std::string> worker_grpc_addrs;
     std::vector<std::string> worker_addrs;
-    std::vector<std::string> all_worker_grpc_addrs;
 
     // Fields merged from PyDeviceResourceConfig
     std::string specify_gpu_arch = "";

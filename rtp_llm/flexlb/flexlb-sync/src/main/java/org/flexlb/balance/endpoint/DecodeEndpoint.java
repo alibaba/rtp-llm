@@ -158,9 +158,9 @@ public class DecodeEndpoint extends WorkerEndpoint {
      * Called periodically by {@link org.flexlb.balance.scheduler.FlexlbBatchScheduler}.
      */
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
-        reporter.reportInflightRequestCount(RoleType.DECODE.name(), getIp(), ipPort(), getInflightCount());
-        reporter.reportDecodeTotalLoad(getIp(), ipPort(), getTotalLoad());
-        reporter.reportDecodeInflightKvReserved(getIp(), ipPort(), inflightKvReserved());
+        reporter.reportInflightRequestCount(RoleType.DECODE.name(), getIp(), getInflightCount());
+        reporter.reportDecodeTotalLoad(getIp(), getTotalLoad());
+        reporter.reportDecodeInflightKvReserved(getIp(), inflightKvReserved());
     }
 
     /**
