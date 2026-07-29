@@ -1709,6 +1709,12 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         draft_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
     }
 
+    int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+    if (tps_execute_time_us <= 0) {
+        tps_execute_time_us = model_forward_us;
+    }
+    stream_groups.addContextExecuteTimeUs(tps_execute_time_us);
+
     // collect metrics
     if (metrics_reporter_) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(collect_metrics)");
@@ -1720,11 +1726,6 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         executor_collector.execute_token_size_when_has_context = executor_collector.execute_token_size;
         executor_collector.max_seq_len_when_has_context        = executor_collector.max_seq_len;
         executor_collector.model_forward_us += model_forward_us;
-        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
-        if (tps_execute_time_us <= 0) {
-            tps_execute_time_us = model_forward_us;
-        }
-
         tps_collector.addTokenSize(stream_groups.contextExecuteTokenSize(),
                                    stream_groups.contextExecuteTokenSizeWithCache(),
                                    0,
@@ -1906,6 +1907,7 @@ void MtpExecutor::prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& 
 absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams,
                                      MtpMetricsCollector&                metrics_collector) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.decode_step(decode_stream_size=%zu)", streams.size());
+    const int64_t decode_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
     RtpLLMExecutorMetricsCollector& executor_collector = metrics_collector.executor_collector;
 
@@ -2292,6 +2294,10 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     if (metrics_reporter_) {
         collectDecodeMetrics(stream_groups, accept_len_ready_event, speculative_sampler_output, metrics_collector);
     }
+
+    const int64_t decode_execute_time_us       = autil::TimeUtility::currentTimeInMicroSeconds() - decode_start_time_us;
+    metrics_collector.generate_execute_time_us = decode_execute_time_us;
+    stream_groups.addGenerateExecuteTimeUs(decode_execute_time_us);
 
     return dispatchDecodeOutput(stream_groups,
                                 streams,
@@ -3011,13 +3017,12 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
         // decode metrics
         auto& tps_collector       = metrics_collector.tps_collector;
         auto& sp_engine_collector = metrics_collector.sp_engine_collector;
-        auto  decode_time         = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
         if (sp_engine_collector.total_accepted_token_num) {
             tps_collector.addTokenSize(0,
                                        0,
                                        sp_engine_collector.total_accepted_token_num,
                                        sp_engine_collector.total_accepted_token_num,
-                                       decode_time);
+                                       metrics_collector.generate_execute_time_us);
         }
 
         RTP_LLM_PROFILE_SCOPE("executor.mtp.process(report_metrics)");

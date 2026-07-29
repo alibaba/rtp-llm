@@ -25,6 +25,7 @@ struct MtpMetricsCollector {
     RtpLLMExecutorMetricsCollector          executor_collector;
     RtpLLMTokenPSMetricsCollector           tps_collector;
     RtpLLMSpeculativeEngineMetricsCollector sp_engine_collector;
+    int64_t                                 generate_execute_time_us = 0;
 
     bool not_skip = false;
 };

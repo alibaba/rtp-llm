@@ -1,4 +1,5 @@
 import asyncio
+import copy
 import json
 import logging
 import threading
@@ -16,13 +17,17 @@ from rtp_llm.config.model_config import (
     update_stop_words_from_env,
     update_tokenizer_special_tokens,
 )
+from rtp_llm.frontend.frontend_request_metrics import (
+    FrontendRequestMetrics,
+    FrontendRequestMetricState,
+)
 from rtp_llm.frontend.frontend_worker import FrontendWorker, TokenizerEncodeResponse
 from rtp_llm.frontend.request_id_generator import generate_request_id
 from rtp_llm.metrics import AccMetrics, GaugeMetrics, kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
-from rtp_llm.ops import SpecialTokens, TaskType
+from rtp_llm.ops import SpecialTokens, SpeculativeType, TaskType
 from rtp_llm.server.misc import format_exception
 from rtp_llm.server.request_headers import extract_request_headers
 from rtp_llm.structure.request_constants import request_id_field_name
@@ -62,6 +67,21 @@ class FrontendServer(object):
         self.rank_id = str(rank_id)
         self.server_id = str(server_id)
         kmonitor.init()
+        monitor_interval = getattr(
+            getattr(py_env_configs, "server_config", None),
+            "monitor_interval",
+            1,
+        )
+        self._request_metrics = FrontendRequestMetrics(
+            concurrency_report_interval_s=max(float(monitor_interval or 1), 0.1)
+        )
+        sp_config = getattr(py_env_configs, "sp_config", None)
+        sp_type = getattr(sp_config, "type", SpeculativeType.NONE)
+        self._speculative_steps = (
+            max(int(getattr(sp_config, "gen_num_per_cycle", 0) or 0), 0)
+            if sp_type != SpeculativeType.NONE
+            else 0
+        )
 
     def start(self):
         if (
@@ -130,6 +150,7 @@ class FrontendServer(object):
             self.is_embedding = True
 
     async def close(self):
+        self._request_metrics.close()
         if self._frontend_worker is not None:
             close = getattr(self._frontend_worker, "close", None)
             if close is not None:
@@ -159,6 +180,64 @@ class FrontendServer(object):
             return all(
                 getattr(choice, "finish_reason", None) is not None for choice in choices
             )
+        return False
+
+    @staticmethod
+    def _request_aux_info_enabled(request: Dict[str, Any]) -> bool:
+        if "aux_info" in request:
+            return request["aux_info"] is not False
+        config = request.get(
+            "generation_config",
+            request.get("generate_config", {}),
+        )
+        if isinstance(config, dict) and "aux_info" in config:
+            return config["aux_info"] is not False
+        return True
+
+    @staticmethod
+    def _force_internal_aux_info(request: Dict[str, Any]) -> None:
+        config_name = (
+            "generation_config" if "generation_config" in request else "generate_config"
+        )
+        config = request.get(config_name)
+        if isinstance(config, dict):
+            config["aux_info"] = True
+        request["aux_info"] = True
+
+    @staticmethod
+    def _hide_aux_info(response: Any) -> None:
+        response_batch = (
+            response.get("response_batch")
+            if isinstance(response, dict)
+            else getattr(response, "response_batch", None)
+        )
+        if response_batch:
+            for item in response_batch:
+                FrontendServer._hide_aux_info(item)
+            return
+        if isinstance(response, dict):
+            response.pop("aux_info", None)
+            return
+        if not hasattr(response, "aux_info"):
+            return
+        aux_info = getattr(response, "aux_info")
+        if isinstance(aux_info, dict):
+            response.aux_info = {}
+        elif isinstance(aux_info, (list, tuple)):
+            response.aux_info = []
+        else:
+            response.aux_info = None
+
+    @staticmethod
+    def _request_disables_speculative(request: Dict[str, Any]) -> bool:
+        if "force_disable_sp_run" in request:
+            return bool(request["force_disable_sp_run"])
+        config = request.get(
+            "generation_config",
+            request.get("generate_config", {}),
+        )
+        if isinstance(config, dict) and "force_disable_sp_run" in config:
+            return bool(config["force_disable_sp_run"])
         return False
 
     async def embedding(self, request: Dict[str, Any], raw_request: Request):
@@ -291,14 +370,28 @@ class FrontendServer(object):
                 sequence,
             )
             request_headers = extract_request_headers(raw_request.headers)
+            generation_req = copy.deepcopy(req)
+            self._force_internal_aux_info(generation_req)
         except Exception as e:
             return self._handle_exception(req, e)
 
         def generate_call():
             assert self._frontend_worker is not None
+            metric_tags = {
+                "rank_id": self.rank_id,
+                "server_id": self.server_id,
+                "source": str(req.get("source", "unknown")),
+            }
             if request_headers:
-                return self._frontend_worker.inference(**req, headers=request_headers)
-            return self._frontend_worker.inference(**req)
+                return self._frontend_worker.inference(
+                    **generation_req,
+                    headers=request_headers,
+                    frontend_metric_tags=metric_tags,
+                )
+            return self._frontend_worker.inference(
+                **generation_req,
+                frontend_metric_tags=metric_tags,
+            )
 
         try:
             rep = await self._infer_wrap(req, raw_request, generate_call)
@@ -334,10 +427,19 @@ class FrontendServer(object):
             sequence,
         )
 
+        internal_request = request.model_copy(update={"aux_info": True})
+
         def generate_call():
             assert self._openai_endpoint != None
             response = self._openai_endpoint.chat_completion(
-                request_id, request, raw_request
+                request_id,
+                internal_request,
+                raw_request,
+                frontend_metric_tags={
+                    "rank_id": self.rank_id,
+                    "server_id": self.server_id,
+                    "source": str(getattr(request, "source", "unknown")),
+                },
             )
             assert isinstance(
                 response, CompleteResponseAsyncGenerator
@@ -397,60 +499,69 @@ class FrontendServer(object):
         return rep
 
     async def _call_generate_with_report(
-        self, generate_call: Callable[[], CompleteResponseAsyncGenerator]
+        self,
+        generate_call: Callable[[], CompleteResponseAsyncGenerator],
+        request_metrics: FrontendRequestMetricState,
+        expose_aux_info: bool,
     ):
         async def __gen_response_with_report(start_time: float, response_generator):
             last_iterate_time = current_time_ms()
             first_token = True
             iter_count = 0
-            async for response in response_generator:
-                end_time = current_time_ms()
-                if first_token:
-                    first_token = False
-                    kmonitor.report(
-                        GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC,
-                        end_time - last_iterate_time,
-                    )
-                else:
-                    step_output_len = 1
-                    if hasattr(response, "aux_info"):
-                        if isinstance(response.aux_info, list):
-                            step_output_len = 0
-                            for info in response.aux_info:
-                                step_output_len += info.get("step_output_len", 1)
-                        elif isinstance(response.aux_info, dict):
-                            step_output_len = max(
-                                response.aux_info.get("step_output_len", 1),
-                                step_output_len,
-                            )
+            try:
+                async for response in response_generator:
+                    end_time = current_time_ms()
+                    request_metrics.observe(response)
+                    if first_token:
+                        first_token = False
+                        kmonitor.report(
+                            GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC,
+                            end_time - last_iterate_time,
+                        )
+                    else:
+                        step_output_len = 1
+                        if hasattr(response, "aux_info"):
+                            if isinstance(response.aux_info, list):
+                                step_output_len = 0
+                                for info in response.aux_info:
+                                    step_output_len += info.get("step_output_len", 1)
+                            elif isinstance(response.aux_info, dict):
+                                step_output_len = max(
+                                    response.aux_info.get("step_output_len", 1),
+                                    step_output_len,
+                                )
 
+                        kmonitor.report(
+                            GaugeMetrics.RESPONSE_ITER_RT_METRIC,
+                            (end_time - last_iterate_time) / step_output_len,
+                        )
                     kmonitor.report(
-                        GaugeMetrics.RESPONSE_ITER_RT_METRIC,
-                        (end_time - last_iterate_time) / step_output_len,
+                        AccMetrics.ITER_QPS_METRIC,
+                        1,
+                        {
+                            "rank_id": self.rank_id,
+                            "server_id": self.server_id,
+                        },
                     )
+                    last_iterate_time = end_time
+                    iter_count += 1
+                    if not expose_aux_info:
+                        self._hide_aux_info(response)
+                    yield response
+                kmonitor.report(GaugeMetrics.RESPONSE_ITERATE_COUNT, iter_count)
                 kmonitor.report(
-                    AccMetrics.ITER_QPS_METRIC,
+                    GaugeMetrics.LANTENCY_METRIC, current_time_ms() - start_time
+                )
+                kmonitor.report(
+                    AccMetrics.SUCCESS_QPS_METRIC,
                     1,
                     {
                         "rank_id": self.rank_id,
                         "server_id": self.server_id,
                     },
                 )
-                last_iterate_time = end_time
-                iter_count += 1
-                yield response
-            kmonitor.report(GaugeMetrics.RESPONSE_ITERATE_COUNT, iter_count)
-            kmonitor.report(
-                GaugeMetrics.LANTENCY_METRIC, current_time_ms() - start_time
-            )
-            kmonitor.report(
-                AccMetrics.SUCCESS_QPS_METRIC,
-                1,
-                {
-                    "rank_id": self.rank_id,
-                    "server_id": self.server_id,
-                },
-            )
+            finally:
+                request_metrics.finish()
 
         assert self._frontend_worker is not None
         start_time = current_time_ms()
@@ -491,9 +602,28 @@ class FrontendServer(object):
         )
         self._access_logger.log_query_access(req)
         is_streaming = self._frontend_worker.is_streaming(req)
-        if await raw_request.is_disconnected():
-            raise asyncio.CancelledError("client disconnects")
-        res = await self._call_generate_with_report(generate_call)
+        request_metrics = self._request_metrics.begin(
+            rank_id=self.rank_id,
+            server_id=self.server_id,
+            source=str(req.get("source", "unkown")),
+            streaming=is_streaming,
+            speculative_steps=(
+                0
+                if self._request_disables_speculative(req)
+                else self._speculative_steps
+            ),
+        )
+        try:
+            if await raw_request.is_disconnected():
+                raise asyncio.CancelledError("client disconnects")
+            res = await self._call_generate_with_report(
+                generate_call,
+                request_metrics,
+                self._request_aux_info_enabled(req),
+            )
+        except BaseException:
+            request_metrics.finish()
+            raise
 
         if is_streaming:
             return StreamingResponse(

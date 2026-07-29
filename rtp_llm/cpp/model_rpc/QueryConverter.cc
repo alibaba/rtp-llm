@@ -367,6 +367,12 @@ void QueryConverter::transResponse(GenerateOutputsPB*     outputs,
             aux_info->set_decode_local_reuse_len(response.aux_info.decode_local_reuse_len);
             aux_info->set_decode_remote_reuse_len(response.aux_info.decode_remote_reuse_len);
             aux_info->set_decode_memory_reuse_len(response.aux_info.decode_memory_reuse_len);
+            aux_info->set_speculative_verify_rounds(response.aux_info.speculative_verify_rounds);
+            aux_info->set_speculative_accepted_token_num(response.aux_info.speculative_accepted_token_num);
+            aux_info->set_speculative_proposed_draft_tokens(response.aux_info.speculative_proposed_draft_tokens);
+            aux_info->set_context_execute_time_us(response.aux_info.context_execute_time_us);
+            aux_info->set_generate_execute_time_us(response.aux_info.generate_execute_time_us);
+            aux_info->set_context_execute_time_with_cache_us(response.aux_info.context_execute_time_with_cache_us);
             aux_info->set_aux_string(aux_string);
             if (response.aux_info.cum_log_probs.has_value()) {
                 transTensorPB(aux_info->mutable_cum_log_probs(), response.aux_info.cum_log_probs.value());

@@ -449,6 +449,7 @@ class CustomChatRenderer:
         backend_rpc_server_visitor: BackendRPCServerVisitor,
         request: ChatCompletionRequest,
         headers: Optional[Dict[str, str]] = None,
+        frontend_metric_tags: Optional[Dict[str, str]] = None,
     ) -> AsyncGenerator[StreamResponseObject, None]:
 
         token_type_ids = []
@@ -463,6 +464,7 @@ class CustomChatRenderer:
                     tokenizer=self.tokenizer,
                     token_type_ids=token_type_ids,
                     headers=normalize_request_headers(headers),
+                    frontend_metric_tags=dict(frontend_metric_tags or {}),
                 )
             )
         )

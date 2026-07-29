@@ -108,7 +108,13 @@ TEST(InferenceDataTypeTest, RawRequest_Prompt) {
 
 TEST(InferenceDataTypeTest, AuxInfoAdapter) {
     AuxInfo aux_info;
-    aux_info.cost_time_us = 1000;
+    aux_info.cost_time_us                       = 1000;
+    aux_info.speculative_verify_rounds          = 3;
+    aux_info.speculative_accepted_token_num     = 9;
+    aux_info.speculative_proposed_draft_tokens  = 12;
+    aux_info.context_execute_time_us            = 100;
+    aux_info.context_execute_time_with_cache_us = 80;
+    aux_info.generate_execute_time_us           = 200;
     AuxInfoAdapter aux_info_adapter(aux_info);
     std::string    jsonStr = ToJsonString(aux_info_adapter, true);
     ASSERT_TRUE(jsonStr.find(R"("cost_time":1)") != std::string::npos);
@@ -120,6 +126,12 @@ TEST(InferenceDataTypeTest, AuxInfoAdapter) {
     ASSERT_TRUE(jsonStr.find(R"("step_output_len":0)") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("beam_responses":[])") != std::string::npos);
     ASSERT_TRUE(jsonStr.find(R"("cum_log_probs":)") == std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("speculative_verify_rounds":3)") != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("speculative_accepted_token_num":9)") != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("speculative_proposed_draft_tokens":12)") != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("context_execute_time_us":100)") != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("context_execute_time_with_cache_us":80)") != std::string::npos);
+    ASSERT_TRUE(jsonStr.find(R"("generate_execute_time_us":200)") != std::string::npos);
 }
 
 TEST(InferenceDataTypeTest, MultiSeqsResponse) {

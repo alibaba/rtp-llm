@@ -11,7 +11,7 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, ReportsLongPrefillByExecutionTime) {
 
     EXPECT_NEAR(collector.contextTPS(), 25600.0, 1e-6);
     EXPECT_NEAR(collector.contextTPSWithCache(), 25600.0, 1e-6);
-    EXPECT_NEAR(collector.totalTPS(), 256000.0, 1e-6);
+    EXPECT_NEAR(collector.totalTPS(), 25600.0, 1e-6);
     EXPECT_TRUE(collector.hasContextTPS());
     EXPECT_TRUE(collector.hasContextTPSWithCache());
     EXPECT_TRUE(collector.hasTotalTPS());
@@ -53,28 +53,44 @@ TEST(RtpLLMTokenPSMetricsCollectorTest, MergeKeepsTimeWeightedTps) {
     EXPECT_NEAR(merged.totalTPS(), 10000.0, 1e-6);
 }
 
-TEST(RtpLLMTokenPSMetricsCollectorTest, KeepsGenerateAndTotalAsTokenCounts) {
+TEST(RtpLLMTokenPSMetricsCollectorTest, ReportsGenerateAndTotalByExecutionTime) {
     RtpLLMTokenPSMetricsCollector collector;
 
     collector.addTokenSize(1000, 1500, 10, 1010, 100 * 1000);
 
     EXPECT_NEAR(collector.contextTPS(), 10000.0, 1e-6);
     EXPECT_NEAR(collector.contextTPSWithCache(), 15000.0, 1e-6);
-    EXPECT_NEAR(collector.generateTPS(), 10.0, 1e-6);
-    EXPECT_NEAR(collector.totalTPS(), 1010.0, 1e-6);
+    EXPECT_NEAR(collector.generateTPS(), 100.0, 1e-6);
+    EXPECT_NEAR(collector.totalTPS(), 10100.0, 1e-6);
 }
 
-TEST(RtpLLMTokenPSMetricsCollectorTest, KeepsGenerateAndTotalWhenExecutionTimeIsZero) {
+TEST(RtpLLMTokenPSMetricsCollectorTest, IgnoresGenerateAndTotalWhenExecutionTimeIsZero) {
     RtpLLMTokenPSMetricsCollector collector;
 
     collector.addTokenSize(1000, 1000, 2, 1002, 0);
 
     EXPECT_FALSE(collector.hasContextTPS());
     EXPECT_FALSE(collector.hasContextTPSWithCache());
-    EXPECT_TRUE(collector.hasGenerateTPS());
-    EXPECT_TRUE(collector.hasTotalTPS());
-    EXPECT_NEAR(collector.generateTPS(), 2.0, 1e-6);
-    EXPECT_NEAR(collector.totalTPS(), 1002.0, 1e-6);
+    EXPECT_FALSE(collector.hasGenerateTPS());
+    EXPECT_FALSE(collector.hasTotalTPS());
+    EXPECT_NEAR(collector.generateTPS(), 0.0, 1e-6);
+    EXPECT_NEAR(collector.totalTPS(), 0.0, 1e-6);
+}
+
+TEST(RtpLLMTokenPSMetricsCollectorTest, MergeKeepsGenerateTimeWeightedTps) {
+    RtpLLMTokenPSMetricsCollector first;
+    RtpLLMTokenPSMetricsCollector second;
+    RtpLLMTokenPSMetricsCollector merged;
+
+    first.addTokenSize(0, 0, 10, 10, 100 * 1000);
+    second.addTokenSize(0, 0, 90, 90, 900 * 1000);
+    merged.merge(&first);
+    merged.merge(&second);
+
+    EXPECT_NEAR(merged.generateTPS(), 100.0, 1e-6);
+    EXPECT_NEAR(merged.totalTPS(), 100.0, 1e-6);
+    EXPECT_EQ(merged.generateTokenNum(), 100);
+    EXPECT_EQ(merged.generateTimeUs(), 1000 * 1000);
 }
 
 TEST(RtpLLMTokenPSMetricsCollectorTest, MarksEmptyIdleWindowForZeroReport) {

@@ -86,6 +86,13 @@ struct StreamSpecUpdateInfo {
     // use zero.  Kept trailing so existing aggregate initializers retain their
     // source compatibility.
     int32_t logprobs_offset = 0;
+
+    // Authoritative speculative sampler accounting for this verify update.
+    // Accepted tokens include the mandatory target token; proposed draft
+    // tokens do not.
+    int64_t speculative_verify_rounds         = 0;
+    int64_t speculative_accepted_token_num    = 0;
+    int64_t speculative_proposed_draft_tokens = 0;
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -260,8 +267,13 @@ public:
     int              currentExecuteTokenSize();
     std::vector<int> currentExecuteTokens(int batch_idx = 0) const;
 
-    void step();
-    void spStep();
+    void    step();
+    void    spStep();
+    void    addContextExecuteTimeUs(int64_t execute_time_us);
+    void    addContextExecuteTimeWithCacheUs(int64_t execute_time_us);
+    void    addGenerateExecuteTimeUs(int64_t execute_time_us);
+    int64_t contextExecuteTimeUs() const;
+    int64_t contextExecuteTimeWithCacheUs() const;
 
     std::vector<torch::Tensor> multimodalFeatures() const;
     int                        multimodalFeaturesLength() const;
@@ -771,16 +783,22 @@ protected:
     int64_t                               wait_time_us_ = 0;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
     std::shared_ptr<bool>                 is_context_stream_;
-    size_t                                iter_count_           = 0;
-    size_t                                sp_iter_count_        = 0;
-    size_t                                last_output_pos_      = 0;
-    int                                   initial_reuse_length_ = 0;
-    int                                   reuse_length_         = 0;
-    int                                   local_reuse_length_   = 0;
-    int                                   device_reuse_length_  = 0;
-    int                                   remote_reuse_length_  = 0;
-    int                                   memory_reuse_length_  = 0;
-    int                                   reuse_mm_length_      = 0;
+    size_t                                iter_count_                         = 0;
+    size_t                                sp_iter_count_                      = 0;
+    int64_t                               speculative_verify_rounds_          = 0;
+    int64_t                               speculative_accepted_token_num_     = 0;
+    int64_t                               speculative_proposed_draft_tokens_  = 0;
+    int64_t                               context_execute_time_us_            = 0;
+    int64_t                               context_execute_time_with_cache_us_ = 0;
+    int64_t                               generate_execute_time_us_           = 0;
+    size_t                                last_output_pos_                    = 0;
+    int                                   initial_reuse_length_               = 0;
+    int                                   reuse_length_                       = 0;
+    int                                   local_reuse_length_                 = 0;
+    int                                   device_reuse_length_                = 0;
+    int                                   remote_reuse_length_                = 0;
+    int                                   memory_reuse_length_                = 0;
+    int                                   reuse_mm_length_                    = 0;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     int64_t prefill_total_reuse_len_  = 0;
     int64_t prefill_local_reuse_len_  = 0;

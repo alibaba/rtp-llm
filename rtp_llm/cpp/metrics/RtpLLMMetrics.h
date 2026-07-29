@@ -157,21 +157,21 @@ public:
     int64_t retained_unique_cache_keys = 0;
     int64_t time_window_ms             = 0;
 
-    int64_t theory_all_hit_count       = 0;
-    int64_t theory_all_total_count     = 0;
-    double  theory_all_hit_ratio       = 0.0;
-    int64_t theory_1m_hit_count        = 0;
-    int64_t theory_1m_total_count      = 0;
-    double  theory_1m_hit_ratio        = 0.0;
-    int64_t theory_5m_hit_count        = 0;
-    int64_t theory_5m_total_count      = 0;
-    double  theory_5m_hit_ratio        = 0.0;
-    int64_t theory_10m_hit_count       = 0;
-    int64_t theory_10m_total_count     = 0;
-    double  theory_10m_hit_ratio       = 0.0;
-    int64_t theory_15m_hit_count       = 0;
-    int64_t theory_15m_total_count     = 0;
-    double  theory_15m_hit_ratio       = 0.0;
+    int64_t theory_all_hit_count   = 0;
+    int64_t theory_all_total_count = 0;
+    double  theory_all_hit_ratio   = 0.0;
+    int64_t theory_1m_hit_count    = 0;
+    int64_t theory_1m_total_count  = 0;
+    double  theory_1m_hit_ratio    = 0.0;
+    int64_t theory_5m_hit_count    = 0;
+    int64_t theory_5m_total_count  = 0;
+    double  theory_5m_hit_ratio    = 0.0;
+    int64_t theory_10m_hit_count   = 0;
+    int64_t theory_10m_total_count = 0;
+    double  theory_10m_hit_ratio   = 0.0;
+    int64_t theory_15m_hit_count   = 0;
+    int64_t theory_15m_total_count = 0;
+    double  theory_15m_hit_ratio   = 0.0;
 };
 
 class PrefillRecentCacheKeyMetrics: public kmonitor::MetricsGroup {
@@ -189,21 +189,21 @@ public:
     kmonitor::MutableMetric* retained_unique_cache_keys_metric = nullptr;
     kmonitor::MutableMetric* time_window_ms_metric             = nullptr;
 
-    kmonitor::MutableMetric* theory_all_hit_count_metric    = nullptr;
-    kmonitor::MutableMetric* theory_all_total_count_metric  = nullptr;
-    kmonitor::MutableMetric* theory_all_hit_ratio_metric    = nullptr;
-    kmonitor::MutableMetric* theory_1m_hit_count_metric     = nullptr;
-    kmonitor::MutableMetric* theory_1m_total_count_metric   = nullptr;
-    kmonitor::MutableMetric* theory_1m_hit_ratio_metric     = nullptr;
-    kmonitor::MutableMetric* theory_5m_hit_count_metric     = nullptr;
-    kmonitor::MutableMetric* theory_5m_total_count_metric   = nullptr;
-    kmonitor::MutableMetric* theory_5m_hit_ratio_metric     = nullptr;
-    kmonitor::MutableMetric* theory_10m_hit_count_metric    = nullptr;
-    kmonitor::MutableMetric* theory_10m_total_count_metric  = nullptr;
-    kmonitor::MutableMetric* theory_10m_hit_ratio_metric    = nullptr;
-    kmonitor::MutableMetric* theory_15m_hit_count_metric    = nullptr;
-    kmonitor::MutableMetric* theory_15m_total_count_metric  = nullptr;
-    kmonitor::MutableMetric* theory_15m_hit_ratio_metric    = nullptr;
+    kmonitor::MutableMetric* theory_all_hit_count_metric   = nullptr;
+    kmonitor::MutableMetric* theory_all_total_count_metric = nullptr;
+    kmonitor::MutableMetric* theory_all_hit_ratio_metric   = nullptr;
+    kmonitor::MutableMetric* theory_1m_hit_count_metric    = nullptr;
+    kmonitor::MutableMetric* theory_1m_total_count_metric  = nullptr;
+    kmonitor::MutableMetric* theory_1m_hit_ratio_metric    = nullptr;
+    kmonitor::MutableMetric* theory_5m_hit_count_metric    = nullptr;
+    kmonitor::MutableMetric* theory_5m_total_count_metric  = nullptr;
+    kmonitor::MutableMetric* theory_5m_hit_ratio_metric    = nullptr;
+    kmonitor::MutableMetric* theory_10m_hit_count_metric   = nullptr;
+    kmonitor::MutableMetric* theory_10m_total_count_metric = nullptr;
+    kmonitor::MutableMetric* theory_10m_hit_ratio_metric   = nullptr;
+    kmonitor::MutableMetric* theory_15m_hit_count_metric   = nullptr;
+    kmonitor::MutableMetric* theory_15m_total_count_metric = nullptr;
+    kmonitor::MutableMetric* theory_15m_hit_ratio_metric   = nullptr;
 
 private:
     AUTIL_LOG_DECLARE();
@@ -365,11 +365,13 @@ public:
             context_token_num_with_cache_ += context_token_num_with_cache;
             context_time_us_with_cache_ += execute_time_us;
         }
-        if (generate_token_num > 0) {
+        if (generate_token_num > 0 && execute_time_us > 0) {
             generate_token_num_ += generate_token_num;
+            generate_time_us_ += execute_time_us;
         }
-        if (total_token_num > 0) {
+        if (total_token_num > 0 && execute_time_us > 0) {
             total_token_num_ += total_token_num;
+            total_time_us_ += execute_time_us;
         }
     }
 
@@ -380,7 +382,9 @@ public:
             context_token_num_with_cache_ += collector->context_token_num_with_cache_;
             context_time_us_with_cache_ += collector->context_time_us_with_cache_;
             generate_token_num_ += collector->generate_token_num_;
+            generate_time_us_ += collector->generate_time_us_;
             total_token_num_ += collector->total_token_num_;
+            total_time_us_ += collector->total_time_us_;
             if (hasMetrics()) {
                 report_zero_tps_ = false;
             } else if (collector->report_zero_tps_) {
@@ -414,11 +418,35 @@ public:
     }
 
     double generateTPS() const {
-        return generate_token_num_;
+        return calcTps(generate_token_num_, generate_time_us_);
     }
 
     double totalTPS() const {
-        return total_token_num_;
+        return calcTps(total_token_num_, total_time_us_);
+    }
+
+    int64_t contextTokenNum() const {
+        return context_token_num_;
+    }
+
+    int64_t contextTimeUs() const {
+        return context_time_us_;
+    }
+
+    int64_t contextTokenNumWithCache() const {
+        return context_token_num_with_cache_;
+    }
+
+    int64_t contextTimeUsWithCache() const {
+        return context_time_us_with_cache_;
+    }
+
+    int64_t generateTokenNum() const {
+        return generate_token_num_;
+    }
+
+    int64_t generateTimeUs() const {
+        return generate_time_us_;
     }
 
     bool hasContextTPS() const {
@@ -430,11 +458,11 @@ public:
     }
 
     bool hasGenerateTPS() const {
-        return generate_token_num_ > 0;
+        return generate_token_num_ > 0 && generate_time_us_ > 0;
     }
 
     bool hasTotalTPS() const {
-        return total_token_num_ > 0;
+        return total_token_num_ > 0 && total_time_us_ > 0;
     }
 
     bool hasMetrics() const {
@@ -465,7 +493,9 @@ private:
     int64_t context_token_num_with_cache_ = 0;
     int64_t context_time_us_with_cache_   = 0;
     int64_t generate_token_num_           = 0;
+    int64_t generate_time_us_             = 0;
     int64_t total_token_num_              = 0;
+    int64_t total_time_us_                = 0;
     int64_t report_window_us_             = 0;
     bool    report_zero_tps_              = false;
 };
@@ -599,7 +629,7 @@ private:
     bool                         stop_ = false;
     CollectType                  collector_;
     int                          active_count_ = 0;
-    int                          interval_ms_ = 1000;
+    int                          interval_ms_  = 1000;
     std::thread                  metrics_reporter_thread_;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
 };
@@ -839,8 +869,8 @@ private:
 
 class RtpLLMCacheEvictionMetricsCollector final {
 public:
-    int64_t lifetime_ms          = -1;
-    int64_t evicted_block_count  = -1;
+    int64_t lifetime_ms         = -1;
+    int64_t evicted_block_count = -1;
 };
 
 class RtpLLMCacheEvictionMetrics: public kmonitor::MetricsGroup {
@@ -1289,7 +1319,7 @@ public:
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_failed_qps_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_copy_latency_metric    = nullptr;
 
-    kmonitor::MutableMetric* kv_cache_memory_cache_status_item_num_metric        = nullptr;
+    kmonitor::MutableMetric* kv_cache_memory_cache_status_item_num_metric            = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_status_total_block_num_metric     = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_status_allocated_block_num_metric = nullptr;
     kmonitor::MutableMetric* kv_cache_memory_cache_status_available_block_num_metric = nullptr;

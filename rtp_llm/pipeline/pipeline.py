@@ -338,7 +338,7 @@ class Pipeline(object):
             skip_special_tokens=generate_config.skip_special_tokens,
             **kwargs,
         )
-        newly_decoded_texts = [text.rstrip("\uFFFD") for text in decoded_batch]
+        newly_decoded_texts = [text.rstrip("\ufffd") for text in decoded_batch]
         all_texts = newly_decoded_texts
 
         final_texts = []
@@ -476,6 +476,7 @@ class Pipeline(object):
             batch_group_size=kwargs.get("batch_group_size", 1),
             batch_group_id=kwargs.get("batch_group_id", -1),
             headers=request_headers,
+            frontend_metric_tags=dict(kwargs.get("frontend_metric_tags", {})),
         )
 
         stop_word_strs = generate_config.stop_words_str

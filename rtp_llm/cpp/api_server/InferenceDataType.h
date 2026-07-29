@@ -97,22 +97,37 @@ public:
         }
         json.Jsonize("local_reuse_len", local_reuse_len, local_reuse_len);
         json.Jsonize("remote_reuse_len", remote_reuse_len, remote_reuse_len);
+        json.Jsonize("speculative_verify_rounds", speculative_verify_rounds, speculative_verify_rounds);
+        json.Jsonize("speculative_accepted_token_num", speculative_accepted_token_num, speculative_accepted_token_num);
+        json.Jsonize(
+            "speculative_proposed_draft_tokens", speculative_proposed_draft_tokens, speculative_proposed_draft_tokens);
+        json.Jsonize("context_execute_time_us", context_execute_time_us, context_execute_time_us);
+        json.Jsonize("context_execute_time_with_cache_us",
+                     context_execute_time_with_cache_us,
+                     context_execute_time_with_cache_us);
+        json.Jsonize("generate_execute_time_us", generate_execute_time_us, generate_execute_time_us);
     }
     AuxInfoAdapter() {
         AuxInfo();
     }
     AuxInfoAdapter(const AuxInfo& base) {
-        cost_time_us     = base.cost_time_us;
-        iter_count       = base.iter_count;
-        input_len        = base.input_len;
-        prefix_len       = base.prefix_len;
-        reuse_len        = base.reuse_len;
-        output_len       = base.output_len;
-        step_output_len  = base.step_output_len;
-        pd_sep           = base.pd_sep;
-        cum_log_probs    = base.cum_log_probs;
-        local_reuse_len  = base.local_reuse_len;
-        remote_reuse_len = base.remote_reuse_len;
+        cost_time_us                       = base.cost_time_us;
+        iter_count                         = base.iter_count;
+        input_len                          = base.input_len;
+        prefix_len                         = base.prefix_len;
+        reuse_len                          = base.reuse_len;
+        output_len                         = base.output_len;
+        step_output_len                    = base.step_output_len;
+        pd_sep                             = base.pd_sep;
+        cum_log_probs                      = base.cum_log_probs;
+        local_reuse_len                    = base.local_reuse_len;
+        remote_reuse_len                   = base.remote_reuse_len;
+        speculative_verify_rounds          = base.speculative_verify_rounds;
+        speculative_accepted_token_num     = base.speculative_accepted_token_num;
+        speculative_proposed_draft_tokens  = base.speculative_proposed_draft_tokens;
+        context_execute_time_us            = base.context_execute_time_us;
+        context_execute_time_with_cache_us = base.context_execute_time_with_cache_us;
+        generate_execute_time_us           = base.generate_execute_time_us;
 
         cost_time_ms = cost_time_us / 1000.0;
     }

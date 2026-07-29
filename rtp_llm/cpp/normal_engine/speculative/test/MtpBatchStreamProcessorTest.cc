@@ -353,6 +353,9 @@ TEST_F(MtpBatchStreamProcessorTest, testDecodeTargetLogprobsCoverReplacementAcce
                                          .narrow(2, 0, top_ks[i]);
 
         EXPECT_EQ(update_infos[i].num_new_tokens, lengths[i]);
+        EXPECT_EQ(update_infos[i].speculative_verify_rounds, 1);
+        EXPECT_EQ(update_infos[i].speculative_accepted_token_num, lengths[i]);
+        EXPECT_EQ(update_infos[i].speculative_proposed_draft_tokens, 2);
         EXPECT_TRUE(torch::allclose(update_infos[i].token_logprobs.cpu(), expected_selected.cpu()));
         EXPECT_TRUE(torch::equal(update_infos[i].top_logprob_token_ids.cpu(), expected_top_ids.cpu()));
         EXPECT_TRUE(torch::allclose(update_infos[i].top_logprobs.cpu(), expected_top_logprobs.cpu()));

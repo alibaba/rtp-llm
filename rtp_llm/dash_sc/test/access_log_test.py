@@ -375,6 +375,42 @@ class CorrelationHeaderTest(TestCase):
 
 
 class BuildRecordTest(TestCase):
+    def test_frontend_mtp_generate_tokens_match_backend_tps_numerator(self) -> None:
+        rec = _make_record()
+        rec.record_frontend_backend_aux_info(
+            SimpleNamespace(
+                speculative_verify_rounds=4,
+                speculative_accepted_token_num=7,
+                speculative_proposed_draft_tokens=12,
+                context_execute_time_us=100,
+                context_execute_time_with_cache_us=100,
+                generate_execute_time_us=200,
+                input_len=10,
+                reuse_len=2,
+                output_len=6,
+            )
+        )
+
+        self.assertEqual(rec.frontend_combined_metric_counters[-1], 7)
+
+    def test_frontend_normal_generate_tokens_exclude_first_token(self) -> None:
+        rec = _make_record()
+        rec.record_frontend_backend_aux_info(
+            SimpleNamespace(
+                speculative_verify_rounds=0,
+                speculative_accepted_token_num=0,
+                speculative_proposed_draft_tokens=0,
+                context_execute_time_us=100,
+                context_execute_time_with_cache_us=100,
+                generate_execute_time_us=200,
+                input_len=10,
+                reuse_len=2,
+                output_len=6,
+            )
+        )
+
+        self.assertEqual(rec.frontend_combined_metric_counters[-1], 5)
+
     def test_struct_mode_token_accounting(self) -> None:
         rec = _make_record()
         rec.capture_structured_request(

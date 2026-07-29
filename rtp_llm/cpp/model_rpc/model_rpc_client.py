@@ -392,6 +392,16 @@ def trans_output(
                 decode_local_reuse_len=aux_info_pb.decode_local_reuse_len,
                 decode_remote_reuse_len=aux_info_pb.decode_remote_reuse_len,
                 decode_memory_reuse_len=aux_info_pb.decode_memory_reuse_len,
+                speculative_verify_rounds=aux_info_pb.speculative_verify_rounds,
+                speculative_accepted_token_num=aux_info_pb.speculative_accepted_token_num,
+                speculative_proposed_draft_tokens=(
+                    aux_info_pb.speculative_proposed_draft_tokens
+                ),
+                context_execute_time_us=aux_info_pb.context_execute_time_us,
+                generate_execute_time_us=aux_info_pb.generate_execute_time_us,
+                context_execute_time_with_cache_us=(
+                    aux_info_pb.context_execute_time_with_cache_us
+                ),
                 aux_string=aux_info_pb.aux_string,
                 role_addrs=input_py.generate_config.role_addrs,
             )

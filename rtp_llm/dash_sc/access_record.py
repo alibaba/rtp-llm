@@ -373,6 +373,13 @@ class GrpcAccessRecord:
     finished: Optional[bool] = None
     terminal_seen: bool = False
     prompt_cached_token_num: Optional[int] = None
+    # Latest cumulative speculative sampler counters per internal phase.
+    # DashSC phase-2 starts new backend counters, while the Frontend metric is
+    # request-scoped, so phase totals are summed before reporting.
+    frontend_backend_metric_counters: dict[
+        str, tuple[int, int, int, int, int, int, int, int, int]
+    ] = dataclasses.field(default_factory=dict, repr=False)
+    frontend_metric_state: Any = dataclasses.field(default=None, repr=False)
     # Protocol-level backend error channel (predict_v2.proto: empty means
     # success). Kept here so a successful gRPC status can still be classified as
     # a backend failure when the payload says so.
@@ -466,6 +473,74 @@ class GrpcAccessRecord:
         """
         if token_ids:
             self.generated_ids.extend(token_ids)
+
+    def record_frontend_backend_aux_info(
+        self, aux_info: Any, *, phase: str = "phase1"
+    ) -> None:
+        """Retain authoritative backend sampler counters for Frontend metrics."""
+        if aux_info is None:
+            return
+        try:
+            speculative_verify_rounds = max(
+                int(getattr(aux_info, "speculative_verify_rounds", 0)),
+                0,
+            )
+            speculative_accepted_token_num = max(
+                int(getattr(aux_info, "speculative_accepted_token_num", 0)),
+                0,
+            )
+            # Match the numerator used by rtp_llm_generate_tps. MTP reports
+            # accepted tokens per verify step directly; output_len - 1 is only
+            # the compatibility fallback for ordinary one-token decode.
+            generate_token_num = (
+                speculative_accepted_token_num
+                if speculative_verify_rounds > 0
+                else max(int(getattr(aux_info, "output_len", 0)) - 1, 0)
+            )
+            counters = (
+                speculative_verify_rounds,
+                speculative_accepted_token_num,
+                max(
+                    int(
+                        getattr(
+                            aux_info,
+                            "speculative_proposed_draft_tokens",
+                            0,
+                        )
+                    ),
+                    0,
+                ),
+                max(int(getattr(aux_info, "context_execute_time_us", 0)), 0),
+                max(
+                    int(
+                        getattr(
+                            aux_info,
+                            "context_execute_time_with_cache_us",
+                            0,
+                        )
+                    ),
+                    0,
+                ),
+                max(int(getattr(aux_info, "generate_execute_time_us", 0)), 0),
+                max(int(getattr(aux_info, "input_len", 0)), 0),
+                max(int(getattr(aux_info, "reuse_len", 0)), 0),
+                generate_token_num,
+            )
+        except (TypeError, ValueError):
+            return
+        self.frontend_backend_metric_counters[str(phase)] = counters
+
+    @property
+    def frontend_combined_metric_counters(
+        self,
+    ) -> tuple[int, int, int, int, int, int, int, int, int]:
+        """Return request totals across DashSC's internal backend phases."""
+        counters = self.frontend_backend_metric_counters.values()
+        return (
+            tuple(sum(values) for values in zip(*counters))
+            if counters
+            else (0, 0, 0, 0, 0, 0, 0, 0, 0)
+        )
 
     def check_repetition(self) -> None:
         self._repetition_monitor.check_generated_ids(self.generated_ids or ())

@@ -798,12 +798,13 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
     RTP_LLM_LOG_DEBUG("request [%ld] start to poll remote output", prefill_context.request_id);
     auto&             request_id = prefill_context.request_id;
     GenerateOutputsPB response;
-    auto              prefill_total_reuse_len  = prefill_context.getStream()->initialReuseLength();
-    auto              prefill_local_reuse_len  = prefill_context.getStream()->localReuseLength();
-    auto              prefill_remote_reuse_len = prefill_context.getStream()->remoteReuseLength();
-    auto              prefill_memory_reuse_len = prefill_context.getStream()->memoryReuseLength();
-
-    auto first_token_rt_us = prefill_context.getStream()->getTimeInfo().first_token_rt_us;
+    auto              prefill_total_reuse_len         = prefill_context.getStream()->initialReuseLength();
+    auto              prefill_local_reuse_len         = prefill_context.getStream()->localReuseLength();
+    auto              prefill_remote_reuse_len        = prefill_context.getStream()->remoteReuseLength();
+    auto              prefill_memory_reuse_len        = prefill_context.getStream()->memoryReuseLength();
+    auto              prefill_context_execute_time_us = prefill_context.getStream()->contextExecuteTimeUs();
+    auto prefill_context_execute_time_with_cache_us   = prefill_context.getStream()->contextExecuteTimeWithCacheUs();
+    auto first_token_rt_us                            = prefill_context.getStream()->getTimeInfo().first_token_rt_us;
     while (prefill_context.client_stream->Read(&response)) {
         if (prefill_context.server_context->IsCancelled()) {
             RTP_LLM_LOG_WARNING("request [%ld] cancel by user", request_id);
@@ -847,6 +848,10 @@ void PrefillRpcServer::pollRemoteOutput(PrefillGenerateContext& prefill_context)
                 decode_remote_reuse_len);
             response.mutable_flatten_output()->mutable_aux_info(i)->set_decode_memory_reuse_len(
                 decode_memory_reuse_len);
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_context_execute_time_us(
+                prefill_context_execute_time_us);
+            response.mutable_flatten_output()->mutable_aux_info(i)->set_context_execute_time_with_cache_us(
+                prefill_context_execute_time_with_cache_us);
         }
         if (!prefill_context.rpc_context.writer->Write(response)) {
             RTP_LLM_LOG_WARNING("request [%ld] write outputs pb failed", request_id);

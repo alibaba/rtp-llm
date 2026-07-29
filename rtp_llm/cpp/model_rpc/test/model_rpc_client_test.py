@@ -72,6 +72,12 @@ class FakeStub:
         aux_info2 = output_pb2.aux_info.add()
         aux_info2.iter_count = 2
         aux_info2.output_len = 2
+        aux_info2.speculative_verify_rounds = 3
+        aux_info2.speculative_accepted_token_num = 9
+        aux_info2.speculative_proposed_draft_tokens = 12
+        aux_info2.context_execute_time_us = 100
+        aux_info2.generate_execute_time_us = 200
+        aux_info2.context_execute_time_with_cache_us = 80
         output_pb2.logits.data_type = TensorPB.DataType.FP32
         output_pb2.logits.shape.extend([1, 1, 2])
         output_pb2.logits.fp32_data = struct.pack("<ff", 0.1, 0.2)
@@ -142,6 +148,12 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(res[1].finished, False)
         self.assertEqual(res[1].aux_info.iter_count, 3)
         self.assertEqual(res[1].aux_info.output_len, 2)
+        self.assertEqual(res[1].aux_info.speculative_verify_rounds, 3)
+        self.assertEqual(res[1].aux_info.speculative_accepted_token_num, 9)
+        self.assertEqual(res[1].aux_info.speculative_proposed_draft_tokens, 12)
+        self.assertEqual(res[1].aux_info.context_execute_time_us, 100)
+        self.assertEqual(res[1].aux_info.generate_execute_time_us, 200)
+        self.assertEqual(res[1].aux_info.context_execute_time_with_cache_us, 80)
 
         self.assertEqual(res[2].finished, True)
 

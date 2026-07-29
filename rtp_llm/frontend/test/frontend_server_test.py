@@ -17,6 +17,10 @@ class FakePipelinResponse(BaseModel):
     res: str
 
 
+class FakeAuxResponse(BaseModel):
+    aux_info: dict[str, Any]
+
+
 class FakeFrontendWorker(object):
     class FakeBackendRpcServerVisitor:
         def __init__(self):
@@ -46,6 +50,8 @@ class FakeFrontendWorker(object):
 
 
 class FakeRawRequest(object):
+    headers = {}
+
     async def is_disconnected(self):
         return False
 
@@ -64,6 +70,9 @@ class FrontendServerTest(TestCase):
             py_env_configs=py_env_configs,
         )
         self.frontend_server._frontend_worker = FakeFrontendWorker()
+
+    def tearDown(self):
+        self.frontend_server._request_metrics.close()
 
     async def _async_run(self, *args: Any, **kwargs: Any):
         res = await self.frontend_server.inference(*args, **kwargs)
@@ -98,6 +107,24 @@ class FrontendServerTest(TestCase):
         self.assertTrue(self.frontend_server.check_health())
         visitor = self.frontend_server._frontend_worker.backend_rpc_server_visitor
         self.assertEqual(visitor.refresh_calls, [False])
+
+    def test_internal_aux_info_is_forced_but_can_be_hidden_from_response(self):
+        request = {"generate_config": {"aux_info": False}}
+        self.assertFalse(FrontendServer._request_aux_info_enabled(request))
+
+        FrontendServer._force_internal_aux_info(request)
+        self.assertTrue(request["generate_config"]["aux_info"])
+
+        response = FakeAuxResponse(aux_info={"input_len": 10})
+        FrontendServer._hide_aux_info(response)
+        self.assertEqual(response.aux_info, {})
+
+    def test_request_can_disable_speculative_metrics(self):
+        self.assertTrue(
+            FrontendServer._request_disables_speculative(
+                {"generate_config": {"force_disable_sp_run": True}}
+            )
+        )
 
 
 main()

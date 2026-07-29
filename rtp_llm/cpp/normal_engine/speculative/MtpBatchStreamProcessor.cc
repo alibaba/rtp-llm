@@ -788,10 +788,10 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
                 model_input.sequence_lengths = committedLenToDraftDecodePosition(committed_len, host_holder);
                 model_input.prefix_lengths   = (model_input.sequence_lengths - 1).to(torch::kInt32);
             } else if (model_input.sequence_lengths.defined()) {
-                auto target_prefix_lengths   = toCudaInt32(model_input.sequence_lengths, host_holder);
-                model_input.prefix_lengths   = target_prefix_lengths;
-                model_input.sequence_lengths = normalDecodePositionToDraftDecodePosition(
-                    std::move(target_prefix_lengths), host_holder);
+                auto target_prefix_lengths = toCudaInt32(model_input.sequence_lengths, host_holder);
+                model_input.prefix_lengths = target_prefix_lengths;
+                model_input.sequence_lengths =
+                    normalDecodePositionToDraftDecodePosition(std::move(target_prefix_lengths), host_holder);
             }
             model_input.input_lengths = toCudaInt32(model_input.input_lengths, host_holder);
             return;
@@ -809,8 +809,8 @@ void MtpBatchStreamProcessor::prepareDecodeDraftModelInput(const StreamGroups& s
         model_input.combo_tokens      = std::move(combo_tokens_gpu);
         model_input.lm_output_indexes = makeCudaInt32Range(model_input.combo_tokens.numel());
         model_input.input_lengths     = toCudaInt32(model_input.input_lengths, host_holder);
-        auto target_prefix_lengths   = toCudaInt32(model_input.sequence_lengths, host_holder);
-        model_input.prefix_lengths   = target_prefix_lengths;
+        auto target_prefix_lengths    = toCudaInt32(model_input.sequence_lengths, host_holder);
+        model_input.prefix_lengths    = target_prefix_lengths;
         model_input.sequence_lengths =
             normalDecodePositionToDraftDecodePosition(std::move(target_prefix_lengths), host_holder);
         return;
@@ -1276,7 +1276,10 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
                                      std::move(compact_target_logprobs.top_logprobs),
                                      true,
                                      false,
-                                     static_cast<int32_t>(logprobs_offset)});
+                                     static_cast<int32_t>(logprobs_offset),
+                                     1,
+                                     cur_accept_len,
+                                     propose_step_});
 
         token_offset += propose_step_ + 1;
         batch_idx_in += cur_batch_size;

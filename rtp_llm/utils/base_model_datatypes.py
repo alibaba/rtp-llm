@@ -49,6 +49,7 @@ class GenerateInput:
         -1
     )  # Batch group ID for force batch grouping, -1 means not set
     headers: Dict[str, str] = field(default_factory=dict, repr=False)
+    frontend_metric_tags: Dict[str, str] = field(default_factory=dict, repr=False)
     request_info: RequestInfo = field(default_factory=RequestInfo, repr=False)
 
     class Config:
@@ -96,6 +97,13 @@ class AuxInfo:
     decode_local_reuse_len: int = 0
     decode_remote_reuse_len: int = 0
     decode_memory_reuse_len: int = 0
+
+    speculative_verify_rounds: int = 0
+    speculative_accepted_token_num: int = 0
+    speculative_proposed_draft_tokens: int = 0
+    context_execute_time_us: int = 0
+    context_execute_time_with_cache_us: int = 0
+    generate_execute_time_us: int = 0
 
     role_addrs: List[RoleAddr] = field(default_factory=list)
     aux_string: str = ""

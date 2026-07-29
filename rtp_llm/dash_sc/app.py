@@ -35,6 +35,7 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.openai.renderer_factory import ChatRendererFactory
 from rtp_llm.openai.renderers.custom_renderer import RendererParams
+from rtp_llm.ops import SpeculativeType
 from rtp_llm.server.backend_rpc_server_visitor import create_backend_rpc_server_visitor
 
 _PROXY_MODE_ENV_KEY = "DASH_SC_GRPC_PROXY_MODE"
@@ -516,6 +517,13 @@ class DashScApp:
                         env_terminate_id if env_terminate_id > 0 else None
                     ),
                 )
+                sp_config = getattr(self.py_env_configs, "sp_config", None)
+                sp_type = getattr(sp_config, "type", SpeculativeType.NONE)
+                speculative_steps = (
+                    max(int(getattr(sp_config, "gen_num_per_cycle", 0) or 0), 0)
+                    if sp_type != SpeculativeType.NONE
+                    else 0
+                )
                 servicer = DashScInferenceServicer(
                     backend_visitor=backend_visitor,
                     ip=self.server_config.ip,
@@ -528,6 +536,11 @@ class DashScApp:
                     think_runtime=think_runtime,
                     rank_id=self.server_config.rank_id,
                     repetition_monitor_config=repetition_monitor_config,
+                    monitor_interval_s=max(
+                        float(self.server_config.monitor_interval or 1),
+                        0.1,
+                    ),
+                    speculative_steps=speculative_steps,
                 )
 
             loop = self._start_enqueue_loop()

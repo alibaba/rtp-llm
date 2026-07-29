@@ -124,16 +124,24 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             generate_output.aux_info.cost_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - begin_time_us_;
             generate_output.aux_info.first_token_cost_time_us = complete_token_ids_->firstTokenLatencyUs();
             generate_output.aux_info.wait_time_us             = wait_time_us_;
-            generate_output.aux_info.input_len                = generate_input_->promptLength();
-            generate_output.aux_info.prefix_len               = generate_input_->prefix_length;
+            // Match rtp_llm_input_token_length and the cache-hit denominator:
+            // input length includes any materialized prefix tokens.
+            generate_output.aux_info.input_len  = generate_input_->inputLength();
+            generate_output.aux_info.prefix_len = generate_input_->prefix_length;
             // TODO(xinfei.sxf) 提前结束的query，output len要设置正确
-            generate_output.aux_info.output_len       = seqLength() - generate_input_->inputLength();
-            generate_output.aux_info.step_output_len  = output_len;
-            generate_output.aux_info.reuse_len        = initial_reuse_length_;
-            generate_output.aux_info.pd_sep           = queryPdSep();
-            generate_output.aux_info.local_reuse_len  = local_reuse_length_;
-            generate_output.aux_info.remote_reuse_len = remote_reuse_length_;
-            generate_output.aux_info.memory_reuse_len = memory_reuse_length_;
+            generate_output.aux_info.output_len                         = seqLength() - generate_input_->inputLength();
+            generate_output.aux_info.step_output_len                    = output_len;
+            generate_output.aux_info.reuse_len                          = initial_reuse_length_;
+            generate_output.aux_info.pd_sep                             = queryPdSep();
+            generate_output.aux_info.local_reuse_len                    = local_reuse_length_;
+            generate_output.aux_info.remote_reuse_len                   = remote_reuse_length_;
+            generate_output.aux_info.memory_reuse_len                   = memory_reuse_length_;
+            generate_output.aux_info.speculative_verify_rounds          = speculative_verify_rounds_;
+            generate_output.aux_info.speculative_accepted_token_num     = speculative_accepted_token_num_;
+            generate_output.aux_info.speculative_proposed_draft_tokens  = speculative_proposed_draft_tokens_;
+            generate_output.aux_info.context_execute_time_us            = context_execute_time_us_;
+            generate_output.aux_info.context_execute_time_with_cache_us = context_execute_time_with_cache_us_;
+            generate_output.aux_info.generate_execute_time_us           = generate_execute_time_us_;
             if (generate_input_->generate_config->return_softmax_probs && softmax_probs_.defined()) {
                 generate_output.aux_info.softmax_probs =
                     softmax_probs_[i].narrow(0, last_output_pos_, output_len).clone();

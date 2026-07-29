@@ -1,10 +1,12 @@
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.metrics import GaugeMetrics
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
 from rtp_llm.server.master_client import FlexlbResponse
@@ -59,6 +61,46 @@ class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
 
     def test_route_cache_keys_short_prompt_has_no_complete_virtual_block(self):
         self.assertEqual(route_cache_keys_for_page_rr([10, 11, 12], True, 4), [])
+
+
+class BackendRPCServerVisitorFrontendCacheMetricTest(unittest.TestCase):
+    def test_reports_every_prompt_with_frontend_tags(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.seq_size_per_block = 16
+        visitor._page_rr_route_cache_keys = False
+        visitor._page_rr_cp_size = 1
+        visitor.recent_cache_key_window = SimpleNamespace(
+            record=lambda keys: SimpleNamespace(
+                request_occurrences=len(keys),
+                request_hit_occurrences=1,
+                request_hit_ratio=0.5,
+            )
+        )
+        input = SimpleNamespace(
+            token_ids=torch.tensor([[1, 2], [3, 4]], dtype=torch.int32),
+            frontend_metric_tags={
+                "rank_id": "0",
+                "server_id": "1",
+                "source": "test",
+            },
+        )
+
+        with patch(
+            "rtp_llm.server.backend_rpc_server_visitor.get_block_cache_keys",
+            side_effect=[[11, 12], [21, 22]],
+        ) as cache_keys, patch(
+            "rtp_llm.server.backend_rpc_server_visitor.kmonitor"
+        ) as metric_sink:
+            visitor._report_frontend_cache_key_metrics(input)
+
+        self.assertEqual(cache_keys.call_count, 2)
+        ratio_calls = [
+            call
+            for call in metric_sink.report.call_args_list
+            if call.args[0] == GaugeMetrics.RECENT_CACHE_KEY_HIT_RATIO_METRIC
+        ]
+        self.assertEqual(len(ratio_calls), 2)
+        self.assertEqual(ratio_calls[0].args[2], input.frontend_metric_tags)
 
 
 class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
@@ -185,6 +227,7 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
         visitor.frontend_stop_word_ids_list = []
         visitor.fill_request_info = lambda _input: None
         visitor.check_sp_supported = lambda _input: None
+        visitor._report_frontend_cache_key_metrics = lambda _input: None
         return visitor
 
     async def test_non_streaming_discards_partial_attempt_before_retry(self):
@@ -225,9 +268,7 @@ class BackendRPCServerVisitorRetryTest(unittest.IsolatedAsyncioTestCase):
         visitor = self._visitor(client)
         visitor.frontend_stop_word_ids_list = [[8, 9]]
 
-        with patch.dict(
-            os.environ, {"RTP_LLM_STRIP_FRONTEND_STOP_TOKEN_IDS": "1"}
-        ):
+        with patch.dict(os.environ, {"RTP_LLM_STRIP_FRONTEND_STOP_TOKEN_IDS": "1"}):
             stream = await visitor.enqueue(_FakeInput(is_streaming=False))
             outputs = [output async for output in stream]
 

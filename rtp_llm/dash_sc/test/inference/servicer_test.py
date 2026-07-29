@@ -30,6 +30,8 @@ from rtp_llm.dash_sc.inference.servicer import (
     iter_real_model_stream_infer,
 )
 from rtp_llm.dash_sc.proto import predict_v2_pb2
+from rtp_llm.frontend.frontend_request_metrics import FrontendRequestMetrics
+from rtp_llm.metrics import AccMetrics, GaugeMetrics
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
 
@@ -50,6 +52,20 @@ def _add_input_tensor(
 
 def _unpack_int32_le(raw: bytes) -> list[int]:
     return list(struct.unpack("<%di" % (len(raw) // 4), raw))
+
+
+class _MetricSink:
+    def __init__(self):
+        self.calls = []
+
+    def report(self, metric, value=1, tags=None):
+        self.calls.append((metric, value, dict(tags or {})))
+
+    def values(self, metric):
+        return [value for called, value, _ in self.calls if called == metric]
+
+    def tags(self, metric):
+        return [tags for called, _, tags in self.calls if called == metric]
 
 
 class _FakeAsyncStream:
@@ -2400,6 +2416,139 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             for i in range(len(infer.outputs))
         }
         self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [9])
+
+    async def test_real_mode_reports_shared_frontend_metrics_and_cache_tags(
+        self,
+    ) -> None:
+        first = GenerateOutput(
+            output_ids=torch.tensor([9, 10], dtype=torch.int32),
+            finished=False,
+            aux_info=AuxInfo(
+                input_len=10,
+                output_len=2,
+                reuse_len=4,
+                iter_count=2,
+                context_execute_time_us=10_000,
+                context_execute_time_with_cache_us=5_000,
+                generate_execute_time_us=10_000,
+                speculative_verify_rounds=1,
+                speculative_accepted_token_num=3,
+                speculative_proposed_draft_tokens=4,
+            ),
+        )
+        second = GenerateOutput(
+            output_ids=torch.tensor([11, 12, 13], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(
+                input_len=10,
+                output_len=5,
+                reuse_len=4,
+                iter_count=3,
+                context_execute_time_us=10_000,
+                context_execute_time_with_cache_us=5_000,
+                generate_execute_time_us=40_000,
+                speculative_verify_rounds=2,
+                speculative_accepted_token_num=6,
+                speculative_proposed_draft_tokens=8,
+            ),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream(
+                [
+                    GenerateOutputs(generate_outputs=[first]),
+                    GenerateOutputs(generate_outputs=[second]),
+                ]
+            )
+        )
+        sink = _MetricSink()
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            rank_id=2,
+            server_id="3",
+            speculative_steps=4,
+            request_metrics=FrontendRequestMetrics(sink),
+        )
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(
+                _areq_iter([self._valid_infer_request()]),
+                MagicMock(),
+            )
+        )
+
+        self.assertEqual(len(responses), 2)
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_INPUT_TOKEN_TPS_METRIC),
+            [2000.0],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_NONCACHE_INPUT_TOKEN_TPS_METRIC),
+            [600.0],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_OUTPUT_TOKEN_TPS_METRIC),
+            [100.0],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_INPUT_LENGTH_METRIC),
+            [10],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_OUTPUT_LENGTH_METRIC),
+            [5],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_CACHED_TOKEN_LENGTH_METRIC),
+            [4],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_CACHE_HIT_RATIO_METRIC),
+            [40.0],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_SPECULATIVE_AVG_ACCEPT_LENGTH_METRIC),
+            [3.0],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_SPECULATIVE_ACCEPT_RATE_METRIC),
+            [0.5],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_STREAM_FIRST_OUTPUT_TOKEN_LENGTH_METRIC),
+            [2],
+        )
+        self.assertEqual(
+            sink.values(GaugeMetrics.FRONTEND_CONCURRENCY_METRIC),
+            [1, 0],
+        )
+        self.assertEqual(
+            sink.tags(GaugeMetrics.FRONTEND_CACHE_HIT_RATIO_METRIC)[0]["source"],
+            "dash_sc",
+        )
+        self.assertTrue(
+            sink.values(GaugeMetrics.FRONTEND_TTFT_MS_METRIC),
+        )
+        self.assertTrue(
+            sink.values(GaugeMetrics.FRONTEND_TPOT_MS_METRIC),
+        )
+        self.assertTrue(
+            sink.values(GaugeMetrics.FRONTEND_REQUEST_RT_MS_METRIC),
+        )
+        self.assertTrue(
+            sink.values(GaugeMetrics.FRONTEND_SPECULATIVE_ACCEPT_RATE_METRIC),
+        )
+        self.assertTrue(
+            sink.values(GaugeMetrics.FRONTEND_SPECULATIVE_AVG_ACCEPT_LENGTH_METRIC),
+        )
+        self.assertEqual(
+            visitor.last_generate_input.frontend_metric_tags,
+            {
+                "rank_id": "2",
+                "server_id": "3",
+                "source": "dash_sc",
+                "protocol": "dash_sc_grpc",
+            },
+        )
 
     async def test_timeout_request_sets_dashscope_partial_response_metadata(
         self,

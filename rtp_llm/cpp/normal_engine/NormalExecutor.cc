@@ -403,6 +403,8 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         if (tps_execute_time_us <= 0) {
             tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
         }
+        stream_groups.addContextExecuteTimeUs(tps_execute_time_us);
+        stream_groups.addGenerateExecuteTimeUs(tps_execute_time_us);
         reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us);
 
         // REBASE CONFLICT CONTEXT(704f3c147): source branch closed the profiler
@@ -419,15 +421,18 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
 
     {
         RTP_LLM_PROFILE_SCOPE("executor.dispatch_output");
+        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        if (tps_execute_time_us <= 0) {
+            tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
+        }
+        stream_groups.addContextExecuteTimeUs(tps_execute_time_us);
+        stream_groups.addGenerateExecuteTimeUs(tps_execute_time_us);
+
         int64_t      start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         MergedOutput merge_outputs{std::move(model_output), std::move(sampler_output)};
         publishNormalDeviceState(stream_groups, merge_outputs.sampler_output);
         auto result                           = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        int64_t tps_execute_time_us           = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
-        if (tps_execute_time_us <= 0) {
-            tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
-        }
         reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us);
 
         if (profile_step_finish_) {

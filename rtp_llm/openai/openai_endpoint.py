@@ -2,7 +2,7 @@ import itertools
 import json
 import logging
 from functools import partial
-from typing import Any, AsyncGenerator, List, Optional
+from typing import Any, AsyncGenerator, Dict, List, Optional
 
 from fastapi import Request
 
@@ -577,7 +577,11 @@ class OpenaiEndpoint(object):
         return rendered_input
 
     def chat_completion(
-        self, request_id: int, chat_request: ChatCompletionRequest, raw_request: Request
+        self,
+        request_id: int,
+        chat_request: ChatCompletionRequest,
+        raw_request: Request,
+        frontend_metric_tags: Optional[Dict[str, str]] = None,
     ) -> CompleteResponseAsyncGenerator:
         renderer = (
             self.template_renderer if chat_request.user_template else self.chat_renderer
@@ -607,6 +611,7 @@ class OpenaiEndpoint(object):
             self.backend_rpc_server_visitor,
             chat_request,
             headers=extract_request_headers(raw_request.headers),
+            frontend_metric_tags=frontend_metric_tags,
         )
 
         return self._complete_stream_response(

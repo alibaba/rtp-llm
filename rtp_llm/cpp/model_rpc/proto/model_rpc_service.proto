@@ -185,6 +185,12 @@ message AuxInfoPB {
     int32 memory_reuse_len = 24;
     int32 prefill_memory_reuse_len = 25;
     int32 decode_memory_reuse_len = 26;
+    int64 speculative_verify_rounds = 27;
+    int64 speculative_accepted_token_num = 28;
+    int64 speculative_proposed_draft_tokens = 29;
+    int64 context_execute_time_us = 30;
+    int64 generate_execute_time_us = 31;
+    int64 context_execute_time_with_cache_us = 32;
 }
 
 message FlattenOutputPB {

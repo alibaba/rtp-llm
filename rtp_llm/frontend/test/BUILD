@@ -75,3 +75,13 @@ py_test(
         "//rtp_llm:frontend",
     ],
 )
+
+py_test(
+    name = "frontend_request_metrics_test",
+    srcs = ["frontend_request_metrics_test.py"],
+    deps = [
+        "//rtp_llm:frontend",
+        "//rtp_llm/metrics:metrics",
+        "//rtp_llm:testlib",
+    ],
+)

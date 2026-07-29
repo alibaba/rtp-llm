@@ -1,8 +1,7 @@
+import asyncio
 import logging
 import os
 import time
-
-import asyncio
 from typing import TYPE_CHECKING, Any, AsyncGenerator, List, Optional
 
 import torch
@@ -104,6 +103,7 @@ def _to_output_ids_tensor(token_ids: List[int], like: torch.Tensor) -> torch.Ten
             shape
         )
     return torch.empty(shape, dtype=like.dtype, device=like.device)
+
 
 PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"
 DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE = 3
@@ -287,7 +287,6 @@ class BackendRPCServerVisitor:
         # it must not recompute request hashes with the virtual block size.
         full_block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
         block_cache_keys = self._route_cache_keys(full_block_cache_keys)
-        self._report_recent_cache_key_metrics(block_cache_keys)
 
         try:
             route_result = await self.master_client.get_backend_role_addrs(
@@ -323,32 +322,55 @@ class BackendRPCServerVisitor:
         )
         return route_result
 
-    def _report_recent_cache_key_metrics(self, block_cache_keys: List[int]) -> None:
+    def _report_recent_cache_key_metrics(
+        self,
+        block_cache_keys: List[int],
+        tags: Optional[dict[str, str]] = None,
+    ) -> None:
         try:
             snapshot = self.recent_cache_key_window.record(block_cache_keys)
             kmonitor.report(
                 AccMetrics.RECENT_CACHE_KEY_REQUEST_COUNT_METRIC,
                 1,
+                tags or {},
             )
             if snapshot.request_occurrences <= 0:
                 kmonitor.report(
                     AccMetrics.RECENT_CACHE_KEY_EMPTY_REQUEST_COUNT_METRIC,
                     1,
+                    tags or {},
                 )
             kmonitor.report(
                 AccMetrics.RECENT_CACHE_KEY_HIT_COUNT_METRIC,
                 snapshot.request_hit_occurrences,
+                tags or {},
             )
             kmonitor.report(
                 AccMetrics.RECENT_CACHE_KEY_TOTAL_COUNT_METRIC,
                 snapshot.request_occurrences,
+                tags or {},
             )
             kmonitor.report(
                 GaugeMetrics.RECENT_CACHE_KEY_HIT_RATIO_METRIC,
                 snapshot.request_hit_ratio,
+                tags or {},
             )
         except Exception:
             route_logger.exception("failed to report recent cache key metrics")
+
+    def _report_frontend_cache_key_metrics(self, input: GenerateInput) -> None:
+        token_ids = input.token_ids.tolist()
+        prompts = token_ids if len(input.token_ids.shape) == 2 else [token_ids]
+        tags = dict(getattr(input, "frontend_metric_tags", {}) or {})
+        for prompt_token_ids in prompts:
+            full_cache_keys = get_block_cache_keys(
+                prompt_token_ids,
+                self.seq_size_per_block,
+            )
+            self._report_recent_cache_key_metrics(
+                self._route_cache_keys(full_cache_keys),
+                tags,
+            )
 
     def _route_cache_keys(self, block_cache_keys: List[int]) -> List[int]:
         return route_cache_keys_for_page_rr(
@@ -593,6 +615,11 @@ class BackendRPCServerVisitor:
         except BaseException as e:
             set_aux_info(e)
             raise
+
+        # This is deliberately outside route_ips(): route retries must not
+        # duplicate samples, and domain/explicit-address routes need the same
+        # theoretical cache-hit metric as FlexLB master routing.
+        self._report_frontend_cache_key_metrics(input)
 
         async def route_and_enqueue(attempt: int):
             if attempt > 0:

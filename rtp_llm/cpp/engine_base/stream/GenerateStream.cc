@@ -640,6 +640,37 @@ void GenerateStream::spStep() {
     sp_iter_count_++;
 }
 
+void GenerateStream::addContextExecuteTimeUs(int64_t execute_time_us) {
+    if (execute_time_us > 0) {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        context_execute_time_us_ += execute_time_us;
+    }
+}
+
+void GenerateStream::addContextExecuteTimeWithCacheUs(int64_t execute_time_us) {
+    if (execute_time_us > 0) {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        context_execute_time_with_cache_us_ += execute_time_us;
+    }
+}
+
+void GenerateStream::addGenerateExecuteTimeUs(int64_t execute_time_us) {
+    if (execute_time_us > 0) {
+        std::lock_guard<std::mutex> lock(*mutex_);
+        generate_execute_time_us_ += execute_time_us;
+    }
+}
+
+int64_t GenerateStream::contextExecuteTimeUs() const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return context_execute_time_us_;
+}
+
+int64_t GenerateStream::contextExecuteTimeWithCacheUs() const {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    return context_execute_time_with_cache_us_;
+}
+
 int64_t GenerateStream::getTimeoutMs() const {
     return generate_input_->generate_config->timeout_ms;
 }
@@ -913,6 +944,10 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     if (isFinished() && !update_info.force_update_info) {
         return;
     }
+
+    speculative_verify_rounds_ += update_info.speculative_verify_rounds;
+    speculative_accepted_token_num_ += update_info.speculative_accepted_token_num;
+    speculative_proposed_draft_tokens_ += update_info.speculative_proposed_draft_tokens;
 
     const auto& new_tokens = update_info.new_tokens;
 

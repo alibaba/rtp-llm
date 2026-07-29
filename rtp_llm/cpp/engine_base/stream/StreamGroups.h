@@ -138,6 +138,36 @@ public:
         return decode_streams_;
     }
 
+    void addContextExecuteTimeUs(int64_t execute_time_us) const {
+        addAllocatedExecuteTime(
+            context_streams_,
+            execute_time_us,
+            [](const GenerateStreamPtr& stream) { return static_cast<int64_t>(stream->currentExecuteTokenSize()); },
+            [](const GenerateStreamPtr& stream, int64_t allocated_time_us) {
+                stream->addContextExecuteTimeUs(allocated_time_us);
+            });
+        addAllocatedExecuteTime(
+            context_streams_,
+            execute_time_us,
+            [](const GenerateStreamPtr& stream) {
+                return static_cast<int64_t>(stream->currentExecuteTokenSize()
+                                            + stream->reuseLength() * stream->currentBatchSize());
+            },
+            [](const GenerateStreamPtr& stream, int64_t allocated_time_us) {
+                stream->addContextExecuteTimeWithCacheUs(allocated_time_us);
+            });
+    }
+
+    void addGenerateExecuteTimeUs(int64_t execute_time_us) const {
+        addAllocatedExecuteTime(
+            decode_streams_,
+            execute_time_us,
+            [](const GenerateStreamPtr& stream) { return static_cast<int64_t>(stream->currentBatchSize()); },
+            [](const GenerateStreamPtr& stream, int64_t allocated_time_us) {
+                stream->addGenerateExecuteTimeUs(allocated_time_us);
+            });
+    }
+
     bool needReturnAllProbs() const {
         for (auto& stream : context_streams_) {
             if (stream->getReturnAllProbs()) {
@@ -256,6 +286,43 @@ public:
     }
 
 private:
+    template<typename WeightFn, typename AddFn>
+    static void addAllocatedExecuteTime(const std::list<GenerateStreamPtr>& streams,
+                                        int64_t                             execute_time_us,
+                                        WeightFn                            weight_fn,
+                                        AddFn                               add_fn) {
+        if (execute_time_us <= 0 || streams.empty()) {
+            return;
+        }
+        int64_t total_weight  = 0;
+        auto    last_weighted = streams.end();
+        for (auto stream_it = streams.begin(); stream_it != streams.end(); ++stream_it) {
+            const auto weight = std::max<int64_t>(weight_fn(*stream_it), 0);
+            total_weight += weight;
+            if (weight > 0) {
+                last_weighted = stream_it;
+            }
+        }
+        if (total_weight <= 0) {
+            return;
+        }
+
+        int64_t allocated_time_us = 0;
+        auto    stream_it         = streams.begin();
+        for (; stream_it != streams.end(); ++stream_it) {
+            const auto weight = std::max<int64_t>(weight_fn(*stream_it), 0);
+            if (weight == 0) {
+                continue;
+            }
+            const bool is_last = stream_it == last_weighted;
+            int64_t    stream_time_us =
+                is_last ? execute_time_us - allocated_time_us : execute_time_us * weight / total_weight;
+            stream_time_us = std::max<int64_t>(stream_time_us, 0);
+            add_fn(*stream_it, stream_time_us);
+            allocated_time_us += stream_time_us;
+        }
+    }
+
     std::list<GenerateStreamPtr> context_streams_;
     std::list<GenerateStreamPtr> decode_streams_;
     size_t                       total_sampler_batch_size_in_           = 0;
