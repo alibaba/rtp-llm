@@ -1343,14 +1343,6 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     input_ids_list, sampling, request_controls = (
                         parse_dash_sc_grpc_request(request)
                     )
-                    if sampling is not None and (
-                        sampling.response_format is not None
-                        or sampling.json_format
-                        or sampling.structural_tag is not None
-                    ):
-                        raise DashScParameterError(
-                            "structured output/grammar controls are not supported yet"
-                        )
                 except DashScParameterError as e:
                     if first_request:
                         record.record_request_frame(request)

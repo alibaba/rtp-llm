@@ -2084,33 +2084,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(generate_config.in_think_mode)
         self.assertEqual(generate_config.max_thinking_tokens, 32000)
 
-    async def test_dash_generation_response_format_is_rejected_before_enqueue(
-        self,
-    ) -> None:
-        visitor = _FakeVisitor(_FakeAsyncStream([]))
-        tok = _dsv4_tokenizer()
-        env_cfg = _GenerateEnvCfg()
-        servicer = DashScInferenceServicer(
-            backend_visitor=visitor,
-            tokenizer=tok,
-            generate_env_config=env_cfg,
-            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
-        )
-        req = self._valid_infer_request()
-        req.parameters["enable_thinking"].bool_param = True
-        req.parameters["response_format"].string_param = json.dumps(
-            {"type": "json_object"}
-        )
-
-        responses = await _drain(
-            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
-        )
-
-        self.assertEqual(visitor.enqueue_called, 0)
-        self.assertEqual(len(responses), 1)
-        _assert_parameter_error_response(self, responses[0], "not supported yet")
-
-    async def test_dash_generation_guided_json_is_rejected_before_enqueue(
+    async def test_dash_generation_guided_json_with_enable_thinking_sets_response_format(
         self,
     ) -> None:
         schema = {
@@ -2133,15 +2107,19 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             [schema], ensure_ascii=False
         )
 
-        responses = await _drain(
-            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        generate_config = visitor.last_generate_input.generate_config
+        self.assertTrue(generate_config.in_think_mode)
+        self.assertEqual(generate_config.end_think_token_ids, [128822, 271])
+        self.assertEqual(
+            json.loads(generate_config.response_format),
+            {"type": "json_schema", "json_schema": {"schema": schema}},
         )
+        self.assertIsNone(generate_config.json_schema)
 
-        self.assertEqual(visitor.enqueue_called, 0)
-        self.assertEqual(len(responses), 1)
-        _assert_parameter_error_response(self, responses[0], "not supported yet")
-
-    async def test_dash_generation_tool_call_structural_tag_is_rejected_before_enqueue(
+    async def test_dash_generation_tool_call_structural_tag_reaches_generate_config(
         self,
     ) -> None:
         tag = {
@@ -2168,13 +2146,13 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             tag, ensure_ascii=False
         )
 
-        responses = await _drain(
-            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
-        )
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
 
-        self.assertEqual(visitor.enqueue_called, 0)
-        self.assertEqual(len(responses), 1)
-        _assert_parameter_error_response(self, responses[0], "not supported yet")
+        self.assertEqual(visitor.enqueue_called, 1)
+        generate_config = visitor.last_generate_input.generate_config
+        self.assertEqual(json.loads(generate_config.structural_tag), tag)
+        self.assertIsNone(generate_config.response_format)
+        self.assertFalse(generate_config.json_format)
 
     async def test_dash_generation_budget_aliases_without_enable_thinking_keep_thinking(
         self,

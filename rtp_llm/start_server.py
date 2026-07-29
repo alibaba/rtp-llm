@@ -161,31 +161,43 @@ def start_dash_sc_server_impl(
     dash_sc_processes = []
     dash_sc_pipe_readers = []
 
-    for rank in _iter_serving_ranks(py_env_configs):
-        for i in range(frontend_server_count):
-            pipe_reader, pipe_writer = multiprocessing.Pipe(duplex=False)
-            logging.info(
-                f"[PROCESS_SPAWN]Start dash_sc server process rank_{rank}_server_{i} outer"
-            )
-            process = multiprocessing.Process(
-                target=start_dash_sc_server,
-                args=(
-                    rank,
-                    i,
-                    global_controller,
-                    py_env_configs,
-                    pipe_writer,
-                ),
-                name=f"dash_sc_server_{rank}_{i}",
-            )
-            dash_sc_processes.append(process)
-            process.start()
-            pipe_writer.close()
-            dash_sc_pipe_readers.append(pipe_reader)
+    worker_specs = [
+        (rank, server_id)
+        for rank in _iter_serving_ranks(py_env_configs)
+        for server_id in range(frontend_server_count)
+    ]
+    if not worker_specs:
+        return dash_sc_processes
+
+    bind_barrier = multiprocessing.Barrier(len(worker_specs))
+    for rank, server_id in worker_specs:
+        pipe_reader, pipe_writer = multiprocessing.Pipe(duplex=False)
+        logging.info(
+            f"[PROCESS_SPAWN]Start dash_sc server process "
+            f"rank_{rank}_server_{server_id} outer"
+        )
+        process = multiprocessing.Process(
+            target=start_dash_sc_server,
+            args=(
+                rank,
+                server_id,
+                global_controller,
+                py_env_configs,
+                pipe_writer,
+                bind_barrier,
+            ),
+            name=f"dash_sc_server_{rank}_{server_id}",
+        )
+        dash_sc_processes.append(process)
+        process.start()
+        pipe_writer.close()
+        dash_sc_pipe_readers.append(pipe_reader)
 
     startup_status = {"remaining": set(range(len(dash_sc_pipe_readers)))}
 
-    def check_dash_sc_ready():
+    # Process.start() drops its args while spawned children may still be rebuilding
+    # named semaphores. The default keeps the Barrier alive with the health check.
+    def check_dash_sc_ready(_bind_barrier_keepalive=bind_barrier):
         if not startup_status["remaining"]:
             return True
 
