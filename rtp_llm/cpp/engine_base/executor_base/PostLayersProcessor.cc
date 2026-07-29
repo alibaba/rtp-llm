@@ -5,6 +5,7 @@
 // torch/extension.h registers the pybind11 casters for at::Tensor; without it
 // handler_.attr(...)(**kwargs).cast<torch::Tensor>() throws "Unregistered type".
 #include <torch/extension.h>
+#include <torch/csrc/inductor/aoti_package/model_package_loader.h>
 #include <string>
 #include <vector>
 
@@ -13,6 +14,8 @@
 namespace py = pybind11;
 
 namespace rtp_llm {
+
+PostLayersProcessor::PostLayersProcessor() = default;
 
 PostLayersProcessor::~PostLayersProcessor() {
     if (!handler_) {
@@ -60,18 +63,45 @@ void PostLayersProcessor::setHandler(py::object handler) {
         throw std::runtime_error("post-layers handler trigger_mode \"" + trigger
                                  + "\" is not implemented; only Trigger.CONTEXT is supported");
     }
+
+    // compiled mode: ensure_aoti_package compiles on first startup (weights
+    // are loaded by now) or returns the hash-cached package. Failures
+    // propagate — a deployment declaring compiled mode must not come up
+    // degraded to eager.
+    if (py::hasattr(handler_, "ensure_aoti_package")) {
+        auto package = handler_.attr("ensure_aoti_package")();
+        if (!package.is_none()) {
+            const auto path = py::cast<std::string>(package);
+            aoti_loader_    = std::make_unique<torch::inductor::AOTIModelPackageLoader>(path);
+            RTP_LLM_LOG_INFO("post-layers AOTI package loaded: %s", path.c_str());
+        }
+    }
+
     wants_context_ = true;
     has_handler_   = true;
-    RTP_LLM_LOG_INFO("post-layers handler registered, trigger=%s", trigger.c_str());
+    RTP_LLM_LOG_INFO("post-layers handler registered, trigger=%s, mode=%s",
+                     trigger.c_str(),
+                     aoti_loader_ ? "compiled" : "eager");
 }
 
 torch::Tensor PostLayersProcessor::invokeHandler(const torch::Tensor& context_rows) const {
-    py::gil_scoped_acquire gil;
-    py::dict               kwargs;
-    if (HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::LAST_HIDDEN_STATES)) {
-        kwargs[HandlerArgs::get_name(HandlerArgs::Arg::LAST_HIDDEN_STATES)] = context_rows;
+    torch::Tensor output;
+    if (aoti_loader_) {
+        // compiled tier: runs the AOTI package on the current CUDA stream,
+        // no GIL and no python objects on the hot path
+        auto outputs = aoti_loader_->run({context_rows.contiguous()});
+        if (outputs.empty()) {
+            throw std::runtime_error("post-layers AOTI package returned no outputs");
+        }
+        output = outputs[0];
+    } else {
+        py::gil_scoped_acquire gil;
+        py::dict               kwargs;
+        if (HandlerArgs::has_arg(handler_args_, HandlerArgs::Arg::LAST_HIDDEN_STATES)) {
+            kwargs[HandlerArgs::get_name(HandlerArgs::Arg::LAST_HIDDEN_STATES)] = context_rows;
+        }
+        output = handler_.attr("extend_forward")(**kwargs).cast<torch::Tensor>();
     }
-    auto output = handler_.attr("extend_forward")(**kwargs).cast<torch::Tensor>();
     if (output.defined() && output.size(0) != context_rows.size(0)) {
         throw std::runtime_error("post-layers handler returned " + std::to_string(output.size(0)) + " rows for "
                                  + std::to_string(context_rows.size(0)) + " context requests");

@@ -100,9 +100,10 @@ def create_post_layers_module(
         return None
 
     mode = os.environ.get("CUSTOM_PROCESSOR_MODE", "eager")
-    if mode != "eager":
+    if mode not in ("eager", "compiled"):
         raise RuntimeError(
-            f"CUSTOM_PROCESSOR_MODE={mode} is not implemented, only 'eager' is"
+            f"CUSTOM_PROCESSOR_MODE={mode} is not implemented, "
+            "only 'eager' and 'compiled' are"
         )
 
     if target.endswith(".py"):
@@ -121,5 +122,16 @@ def create_post_layers_module(
         raise RuntimeError(
             f"CUSTOM_OUTPUT_PROCESSOR {target} create_custom_module returned None"
         )
-    logging.info(f"loaded post-layers custom module from {target}")
+    if mode == "compiled":
+        handler = custom_module.get_handler()
+        if handler.compiled_module() is None:
+            raise RuntimeError(
+                f"CUSTOM_PROCESSOR_MODE=compiled but {target} handler does not "
+                "implement compiled_module()"
+            )
+        # the actual AOT compile runs at handler injection time, after
+        # init(tensor_map) has loaded the real weights — see
+        # CustomHandler.ensure_aoti_package
+        handler._aoti_requested = True
+    logging.info(f"loaded post-layers custom module from {target}, mode={mode}")
     return custom_module

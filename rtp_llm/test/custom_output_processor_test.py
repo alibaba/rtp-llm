@@ -29,6 +29,37 @@ def create_custom_module(config, tokenizer):
     return None
 """
 
+COMPILED_CAPABLE_MODULE = """
+import torch
+
+
+class Handler:
+    def __init__(self):
+        self.mlp = torch.nn.Linear(4, 1)
+
+    def compiled_module(self):
+        return self.mlp
+
+    def extend_forward_args(self):
+        return ["last_hidden_states"]
+
+
+class Module:
+    def __init__(self):
+        self.handler = Handler()
+
+    def get_handler(self):
+        return self.handler
+
+
+def create_custom_module(config, tokenizer):
+    return Module()
+"""
+
+EAGER_ONLY_MODULE = COMPILED_CAPABLE_MODULE.replace(
+    "return self.mlp", "return None"
+)
+
 
 class TriggerProtocolTest(unittest.TestCase):
     def test_default_trigger_is_context(self):
@@ -81,16 +112,53 @@ class CreatePostLayersModuleTest(unittest.TestCase):
         finally:
             os.unlink(path)
 
-    def test_non_eager_mode_fails(self):
+    def test_unknown_mode_fails(self):
         with mock.patch.dict(
             os.environ,
             {
                 "CUSTOM_OUTPUT_PROCESSOR": "some.module",
-                "CUSTOM_PROCESSOR_MODE": "compiled",
+                "CUSTOM_PROCESSOR_MODE": "jit",
             },
         ):
-            with self.assertRaises(RuntimeError):
+            with self.assertRaisesRegex(RuntimeError, "CUSTOM_PROCESSOR_MODE"):
                 create_post_layers_module(None, None)
+
+    def _write_module(self, source):
+        with tempfile.NamedTemporaryFile("w", suffix=".py", delete=False) as tmp_file:
+            tmp_file.write(source)
+            return tmp_file.name
+
+    def test_compiled_mode_marks_handler_for_aot(self):
+        path = self._write_module(COMPILED_CAPABLE_MODULE)
+        try:
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "CUSTOM_OUTPUT_PROCESSOR": path,
+                    "CUSTOM_PROCESSOR_MODE": "compiled",
+                },
+            ):
+                module = create_post_layers_module(None, None)
+                # compile itself is deferred to injection time (after weight
+                # init); create only validates and marks the handler
+                self.assertTrue(module.get_handler()._aoti_requested)
+        finally:
+            os.unlink(path)
+
+    def test_compiled_mode_without_compiled_module_fails(self):
+        path = self._write_module(EAGER_ONLY_MODULE)
+        try:
+            with mock.patch.dict(
+                os.environ,
+                {
+                    "CUSTOM_OUTPUT_PROCESSOR": path,
+                    "CUSTOM_PROCESSOR_MODE": "compiled",
+                },
+            ):
+                with self.assertRaisesRegex(RuntimeError, "compiled_module"):
+                    create_post_layers_module(None, None)
+        finally:
+            os.unlink(path)
 
     def test_missing_file_fails(self):
         with mock.patch.dict(
@@ -99,6 +167,17 @@ class CreatePostLayersModuleTest(unittest.TestCase):
         ):
             with self.assertRaises(Exception):
                 create_post_layers_module(None, None)
+
+
+class EnsureAotiPackageTest(unittest.TestCase):
+    def test_not_requested_returns_none(self):
+        self.assertIsNone(CustomHandler(None).ensure_aoti_package())
+
+    def test_requested_without_compiled_module_fails(self):
+        handler = CustomHandler(None)
+        handler._aoti_requested = True
+        with self.assertRaisesRegex(RuntimeError, "compiled_module"):
+            handler.ensure_aoti_package()
 
 
 if __name__ == "__main__":
