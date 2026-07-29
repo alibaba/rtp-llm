@@ -131,6 +131,9 @@ filegroup(
     srcs = [
         "ExecOps.cc",
     ],
+    # Consumed by
+    # //internal_source/RTP_LLM-PPU/rtp_llm/models_py/bindings:ppu_bindings_register
+    # to inline ExecOps.cc into the PPU register library.
     visibility = ["//visibility:public"],
 )
 
