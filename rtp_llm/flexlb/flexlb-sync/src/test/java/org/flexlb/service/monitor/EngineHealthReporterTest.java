@@ -38,7 +38,7 @@ class EngineHealthReporterTest {
     }
 
     @Test
-    void shouldRegisterCacheHitComparisonTokenMetrics() {
+    void shouldRegisterCacheHitComparisonMetrics() {
         reporter.init();
 
         verify(monitor).register("app.cache.hit.comparison.predicted.tokens", FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -47,6 +47,12 @@ class EngineHealthReporterTest {
         verify(monitor).register("app.cache.hit.comparison.local.standby.predicted.tokens",
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.local.standby.delta.tokens",
+                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register("app.cache.hit.comparison.predicted.ratio",
+                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register("app.cache.hit.comparison.actual.ratio",
+                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        verify(monitor).register("app.cache.hit.comparison.local.standby.predicted.ratio",
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
     }
 
@@ -70,6 +76,9 @@ class EngineHealthReporterTest {
         verify(monitor).report("app.cache.hit.comparison.delta.tokens", expectedTags, 20.0);
         verify(monitor).report("app.cache.hit.comparison.local.standby.predicted.tokens", expectedTags, 80.0);
         verify(monitor).report("app.cache.hit.comparison.local.standby.delta.tokens", expectedTags, 40.0);
+        verify(monitor).report("app.cache.hit.comparison.predicted.ratio", expectedTags, 0.5);
+        verify(monitor).report("app.cache.hit.comparison.actual.ratio", expectedTags, 0.6);
+        verify(monitor).report("app.cache.hit.comparison.local.standby.predicted.ratio", expectedTags, 0.4);
         assertEquals(Map.of(
                 "model", "test-model",
                 "engineIp", "10.0.0.1",
@@ -93,6 +102,32 @@ class EngineHealthReporterTest {
                 org.mockito.ArgumentMatchers.anyDouble());
         verify(monitor, never()).report(
                 org.mockito.ArgumentMatchers.eq("app.cache.hit.comparison.local.standby.delta.tokens"),
+                org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
+                org.mockito.ArgumentMatchers.anyDouble());
+        verify(monitor, never()).report(
+                org.mockito.ArgumentMatchers.eq("app.cache.hit.comparison.local.standby.predicted.ratio"),
+                org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
+                org.mockito.ArgumentMatchers.anyDouble());
+    }
+
+    @Test
+    void shouldNotReportRatiosWithoutInputTokens() {
+        CacheHitComparisonResult comparison = new CacheHitComparisonResult(
+                "cache_hit_comparison", "request-1", "KVCM", "PREFILL", "test-group", "10.0.0.1", 8080,
+                "running", 0, 64, 4096, 100, 80, true, 120, 20, 40);
+
+        reporter.reportCacheHitComparisonMetrics("test-model", comparison);
+
+        verify(monitor, never()).report(
+                org.mockito.ArgumentMatchers.eq("app.cache.hit.comparison.predicted.ratio"),
+                org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
+                org.mockito.ArgumentMatchers.anyDouble());
+        verify(monitor, never()).report(
+                org.mockito.ArgumentMatchers.eq("app.cache.hit.comparison.actual.ratio"),
+                org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
+                org.mockito.ArgumentMatchers.anyDouble());
+        verify(monitor, never()).report(
+                org.mockito.ArgumentMatchers.eq("app.cache.hit.comparison.local.standby.predicted.ratio"),
                 org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
                 org.mockito.ArgumentMatchers.anyDouble());
     }

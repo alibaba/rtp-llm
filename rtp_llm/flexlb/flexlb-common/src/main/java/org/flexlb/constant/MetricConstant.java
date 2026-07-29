@@ -155,6 +155,21 @@ public class MetricConstant {
     public static final String CACHE_HIT_COMPARISON_LOCAL_STANDBY_DELTA_TOKENS = "app.cache.hit.comparison.local.standby.delta.tokens";
 
     /**
+     * Scheduling cache-hit ratio for requests with an eventual engine result.
+     */
+    public static final String CACHE_HIT_COMPARISON_PREDICTED_RATIO = "app.cache.hit.comparison.predicted.ratio";
+
+    /**
+     * Actual engine cache-hit ratio for requests with an eventual engine result.
+     */
+    public static final String CACHE_HIT_COMPARISON_ACTUAL_RATIO = "app.cache.hit.comparison.actual.ratio";
+
+    /**
+     * Local Standby cache-hit ratio for requests with an eventual engine result.
+     */
+    public static final String CACHE_HIT_COMPARISON_LOCAL_STANDBY_PREDICTED_RATIO = "app.cache.hit.comparison.local.standby.predicted.ratio";
+
+    /**
      * Local Standby mappings rejected because the configured capacity has been reached.
      */
     public static final String CACHE_LOCAL_STANDBY_CAPACITY_REJECTED_QPS = "app.cache.local.standby.capacity.rejected.qps";
