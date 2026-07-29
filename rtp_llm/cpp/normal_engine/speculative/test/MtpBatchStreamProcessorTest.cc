@@ -181,8 +181,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputReplicatesScoreTok
     SpeculativeExecutionConfig  sp_config;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
-    CacheConfig                 cache_config;
-    cache_config.group_types = {CacheGroupType::FULL};
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
 
     model_config.max_seq_len    = 2048;
     model_config.vocab_size     = 4;
@@ -228,13 +227,12 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
     SpeculativeExecutionConfig  sp_config;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
-    CacheConfig                 cache_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
 
     model_config.max_seq_len    = 2048;
     model_config.vocab_size     = 16;
     model_config.num_layers     = 1;
     sp_config.gen_num_per_cycle = 2;
-    cache_config.group_types    = {CacheGroupType::FULL};
 
     ResourceContext resource_context;
     auto stream = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 1, {7}, {8, 9});
@@ -255,10 +253,14 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
     ASSERT_NE(sampler_inputs.logits_processor_states_ptr, nullptr);
     sampler_inputs.logits_processor_states_ptr->batchProcess(sampler_inputs);
 
-    float neg_inf = -std::numeric_limits<float>::max();
+    // Think-mode processors that are spec-verify eligible report isStateful()
+    // and are intentionally excluded from the score-batch states: their think
+    // boundary masking is applied through the SpecLogitsVerifyRunner vocab
+    // mask (spec_vocab_mask_gpu) instead of direct batchProcess. Without a
+    // spec mask attached, batchProcess must leave the logits untouched.
     for (int i = 0; i < 3; ++i) {
-        EXPECT_EQ(neg_inf, sampler_inputs.logits[i][7].item<float>());
-        EXPECT_EQ(neg_inf, sampler_inputs.logits[i][8].item<float>());
+        EXPECT_EQ(0, sampler_inputs.logits[i][7].item<float>());
+        EXPECT_EQ(0, sampler_inputs.logits[i][8].item<float>());
         EXPECT_EQ(0, sampler_inputs.logits[i][9].item<float>());
     }
 }
@@ -360,10 +362,9 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
 
     checkOutput(stream1, {1, 2, 3, 1, 3, 2}, {2, 0}, {0.2, 0.1, 0.3, 0.5}, {0.6, 0.06});
     checkOutput(stream2, {2, 1, 2}, {2, 3}, {0.3, 0.1, 0.4, 0.2}, {1.3, 0.13});
-    EXPECT_EQ(stream1->getMtpAsyncDeviceState().last_real_seq_len, stream1->seqLength());
-    EXPECT_EQ(stream1->getMtpAsyncDeviceState().next_real_seq_len, stream1->seqLength());
-    EXPECT_EQ(stream2->getMtpAsyncDeviceState().last_real_seq_len, stream2->seqLength());
-    EXPECT_EQ(stream2->getMtpAsyncDeviceState().next_real_seq_len, stream2->seqLength());
+    // Device-state real_seq_len publication moved to the executor layer
+    // (MtpExecutor::publishSyncMtpDeviceState); dispatchDecode itself only
+    // performs host bookkeeping now, so no device-state asserts here.
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
@@ -521,7 +522,7 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInputFromDe
     SpeculativeExecutionConfig  sp_config;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
-    CacheConfig                 cache_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
 
     model_config.max_seq_len    = 2048;
     model_config.vocab_size     = 4;
@@ -588,7 +589,6 @@ TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInputFromDe
 
     auto stream_groups = StreamGroups({stream1, stream2});
 
-    cache_config.group_types = {CacheGroupType::FULL};
     auto processor           = MtpBatchStreamProcessor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
     TensorHolder holder;
@@ -1163,7 +1163,7 @@ TEST_F(MtpBatchStreamProcessorTest, testUpdateOneStepDraftSamplerOutputFromDevic
     SpeculativeExecutionConfig  sp_config;
     PDSepConfig                 pd_sep_config;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
-    CacheConfig                 cache_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
 
     model_config.max_seq_len    = 2048;
     model_config.vocab_size     = 4;

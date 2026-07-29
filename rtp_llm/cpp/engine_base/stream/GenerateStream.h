@@ -112,7 +112,7 @@ public:
                    size_t                                extra_reserve_token_num = 0,
                    bool                                  pert_test               = false);
     virtual ~GenerateStream() {
-        reportMetric();
+        reportMetricOnce();
         releaseResource();
         stream_magic_ = 0;
     }
@@ -210,8 +210,10 @@ public:
     size_t  maxTokenNum() const;
     void    setReuseLength(int reuse_length);
     void    setLocalReuseLength(int length);
+    void    setDeviceReuseLength(int length);
     void    setRemoteReuseLength(int length);
     int     localReuseLength() const;
+    int     deviceReuseLength() const;
     int     remoteReuseLength() const;
     void    setMemoryReuseLength(int length);
     int     memoryReuseLength() const;
@@ -250,6 +252,12 @@ public:
     torch::Tensor              multimodalLocations() const;
 
     int64_t getTimeoutMs() const;
+    void    recordWaitLatency();
+    void    recordSchedulerEnqueueTime(int64_t time_us);
+    void    recordCanRunTime();
+    void    recordLoadingCacheStartTime();
+    void    recordLoadingCacheDoneTime();
+    void    recordRunningTime();
 
     // 统一的事件上报接口，替代原先所有 reportXX 方法。
     // 外部线程调用时自动加锁保护 error_info 和 events_ 的一致性。
@@ -266,6 +274,9 @@ public:
     void reportEventWithoutLock(StreamEvents::EventType event,
                                 ErrorCode               error_code = ErrorCode::NONE_ERROR,
                                 T&&                     error_msg  = std::decay_t<T>{}) {
+        if (event == StreamEvents::CanRun) {
+            recordCanRunTime();
+        }
         generate_status_->reportEvent(event, error_code, std::forward<T>(error_msg));
         if (event == StreamEvents::Error || event == StreamEvents::GenerateDone
             || event == StreamEvents::NeedRemoteGenerate) {
@@ -489,6 +500,9 @@ public:
 
     int64_t enqueueTime() const {
         return generate_input_->begin_time_us;
+    }
+    int64_t schedulerEnqueueTimeUs() const {
+        return scheduler_enqueue_time_us_ > 0 ? scheduler_enqueue_time_us_ : enqueueTime();
     }
 
     std::vector<BaseLogitsProcessorPtr> getAllLogitsProcessorPtr() const {
@@ -745,6 +759,7 @@ protected:
 
     void reportStreamMetrics();
     void reportCacheReuseMetrics() const;
+    void reportMetricOnce();
 
 protected:
     uint64_t                              stream_magic_ = STREAM_MAGIC;
@@ -756,6 +771,14 @@ protected:
     std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
     int64_t                               begin_time_us_;
     int64_t                               wait_time_us_ = 0;
+    bool                                  metrics_reported_ = false;
+    int64_t                               scheduler_enqueue_time_us_ = 0;
+    int64_t                               can_run_time_us_ = 0;
+    int64_t                               loading_cache_start_time_us_ = 0;
+    int64_t                               loading_cache_done_time_us_ = 0;
+    int64_t                               first_running_time_us_ = 0;
+    int64_t                               loading_cache_latency_us_ = 0;
+    int64_t                               load_done_to_running_us_ = 0;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
     std::shared_ptr<bool>                 is_context_stream_;
     size_t                                iter_count_           = 0;
@@ -764,6 +787,7 @@ protected:
     int                                   initial_reuse_length_ = 0;
     int                                   reuse_length_         = 0;
     int                                   local_reuse_length_   = 0;
+    int                                   device_reuse_length_  = 0;
     int                                   remote_reuse_length_  = 0;
     int                                   memory_reuse_length_  = 0;
     // prefill reuse info (PD-sep); read/write only under output_mutex_

@@ -142,7 +142,15 @@ void NormalEngine::initExecutor(const EngineInitParams&                        p
         executor_.reset(new MtpExecutor(
             params, propose_params, resource_context_.cache_manager, mla_ops_type_, kv_cache_group_num_));
     } else {
-        executor_.reset(new NormalExecutor(params, resource_context_.cache_manager, false, false, 0, mla_ops_type_));
+        executor_.reset(new NormalExecutor(
+            params,
+            resource_context_.cache_manager,
+            false,
+            false,
+            0,
+            mla_ops_type_,
+            [this]() { step_profiler_.startStep(); },
+            [this]() { step_profiler_.finishStep(); }));
     }
 }
 
@@ -498,6 +506,7 @@ absl::Status NormalEngine::step() {
         std::this_thread::sleep_for(std::chrono::milliseconds(50));
     }
 
+    int64_t                 tps_schedule_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
     list<GenerateStreamPtr> streams;
     if (parallelism_config.tp_rank == 0 && !ffn_disaggregate_config.is_ffn_service()) {
         {
@@ -521,7 +530,8 @@ absl::Status NormalEngine::step() {
     absl::Status status             = absl::OkStatus();
 
     // Per-request timeline: if any stream requested gen_timeline and no session is
-    // active yet, configure the profiler so the next stepScope() captures THIS step.
+    // active yet, configure the profiler so the executor-driven step window
+    // captures THIS step.
     if (!step_profiler_.enabled()) {
         for (const auto& stream : streams) {
             if (stream && stream->genTimeline()) {
@@ -533,14 +543,22 @@ absl::Status NormalEngine::step() {
     }
 
     {
-        [[maybe_unused]] auto profile_step = step_profiler_.stepScope();
+        // NormalExecutor drives startStep/finishStep via callbacks; MtpExecutor
+        // has no callbacks yet, so bracket the propose path here on the engine
+        // loop thread (Kineto requires enable/disable on the same thread).
+        if (propose_params_) {
+            step_profiler_.startStep();
+        }
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("engine.normal.execute(stream_size=%zu)", streams.size());
         const bool refresh_cache_status_snapshot =
             resource_context_.cache_manager && shouldRefreshCacheStatusSnapshot(pd_sep_config.role_type, streams);
-        status = executor_->process(streams);
+        status = executor_->process(streams, tps_schedule_time_us);
         if (status.ok() && refresh_cache_status_snapshot) {
             RTP_LLM_PROFILE_SCOPE("engine.normal.refresh_cache_status_snapshot");
             resource_context_.cache_manager->refreshKVCacheInfoSnapshot();
+        }
+        if (propose_params_) {
+            step_profiler_.finishStep();
         }
     }
 

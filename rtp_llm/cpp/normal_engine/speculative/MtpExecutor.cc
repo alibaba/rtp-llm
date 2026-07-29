@@ -474,6 +474,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     Executor(),
     cache_manager_(cache_manager),
     metrics_reporter_(params.metrics_reporter),
+    tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
+        params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
+    wall_tps_reporter_(WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
+        params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
     warm_up_(warm_up),
     role_type_(params.pd_sep_config.role_type),
     collect_metrics_stream_(cuda_graph::graphGetStreamFromPool(true)),
@@ -676,7 +680,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
  * @return absl::Status
  */
 absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& streams,
-                                      MtpMetricsCollector&                metrics_collector) {
+                                      MtpMetricsCollector&                metrics_collector,
+                                      int64_t                             schedule_time_us) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.prefill_step(prefill_stream_size=%zu)", streams.size());
 
     RtpLLMExecutorMetricsCollector& executor_collector = metrics_collector.executor_collector;
@@ -694,6 +699,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     torch::Tensor                      draft_probs;
     torch::Tensor                      draft_token_ids;
     speculative::FastTopKSamplerOutput fast_topk_sampler_output;
+    int64_t                            model_forward_us = 0;
 
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(gather_model_input)");
@@ -735,7 +741,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(target_model_forward)");
         maybePrintModelInput(model_input, "prefill target model");
-        model_output = std::move(forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET));
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        model_output          = std::move(forwardModel(model_.get(), model_input, ModelInputsModelRole::TARGET));
+        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
     // eplb
@@ -766,9 +774,11 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
         tpSyncModelInputs(model_input, parallelism_config_);
         maybePrintModelInput(model_input, "prefill post draft model");
+        int64_t     start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
         applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
         draft_model_output = std::move(forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT));
+        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
@@ -794,9 +804,17 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         executor_collector.context_batch_size_when_has_context = executor_collector.context_batch_size;
         executor_collector.execute_token_size_when_has_context = executor_collector.execute_token_size;
         executor_collector.max_seq_len_when_has_context        = executor_collector.max_seq_len;
+        executor_collector.model_forward_us += model_forward_us;
+        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        if (tps_execute_time_us <= 0) {
+            tps_execute_time_us = model_forward_us;
+        }
 
-        tps_collector.context_tps = stream_groups.modelExecuteTokenSize();
-        tps_collector.total_tps   = tps_collector.context_tps;
+        tps_collector.addTokenSize(stream_groups.contextExecuteTokenSize(),
+                                   stream_groups.contextExecuteTokenSizeWithCache(),
+                                   0,
+                                   stream_groups.modelExecuteTokenSize(),
+                                   tps_execute_time_us);
     }
 
     // dispatch
@@ -893,6 +911,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     std::vector<torch::Tensor> draft_probs_list;
     torch::Event               accept_len_ready_event = cuda_graph::makeGraphEvent();
     auto spec_logits_result = std::make_shared<SpecLogitsVerifyRunner::LaunchResult>();
+    int64_t model_forward_us = 0;
 
     // Stream-async events are recorded on the main stream as soon as tensors
     // become valid. rejection_event guards accept_len/tokens D2H; draft_event
@@ -960,7 +979,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     if (propose_step_ > 1) {
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
-        draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t);
+        draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
     }
 
@@ -972,7 +991,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // on this prepare happens just before draft_model_forward below.
     launchDraftPrefillPrepareAsync(model_input);
 
-    model_output = runTargetVerifyForward(model_input, stream_groups);
+    {
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+        model_output          = runTargetVerifyForward(model_input, stream_groups);
+        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    }
 
     // trick: update draft sampler output after spec decode to avoid kernel launch overhead
     if (isTpRank0()) {
@@ -1118,7 +1141,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
 
-    draft_prefill_model_output = runDraftPrefillForward(model_input);
+    {
+        int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
+        draft_prefill_model_output = runDraftPrefillForward(model_input);
+        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
         releaseAllModelBuffers();
@@ -1142,7 +1169,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     }
 
     if (metrics_reporter_) {
-        collectDecodeMetrics(stream_groups, accept_len_ready_event, speculative_sampler_output, metrics_collector);
+        collectDecodeMetrics(
+            stream_groups, accept_len_ready_event, speculative_sampler_output, metrics_collector, model_forward_us);
     }
 
     return dispatchDecodeOutput(stream_groups,
@@ -1507,7 +1535,8 @@ GptModelOutputs MtpExecutor::runDraftPrefillForward(GptModelInputs& model_input)
 void MtpExecutor::collectDecodeMetrics(const StreamGroups&                          stream_groups,
                                        torch::Event&                                accept_len_ready_event,
                                        const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
-                                       MtpMetricsCollector&                         metrics_collector) {
+                                       MtpMetricsCollector&                         metrics_collector,
+                                       int64_t                                      model_forward_us) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(collect_metrics)");
     auto& executor_collector  = metrics_collector.executor_collector;
     auto& sp_engine_collector = metrics_collector.sp_engine_collector;
@@ -1518,6 +1547,7 @@ void MtpExecutor::collectDecodeMetrics(const StreamGroups&                      
     executor_collector.generate_batch_size = stream_groups.totalModelBatchSize();
     executor_collector.execute_token_size += total_accept_len;
     executor_collector.max_seq_len = stream_groups.maxSeqLen();
+    executor_collector.model_forward_us += model_forward_us;
 
     executor_collector.context_batch_size_when_has_context = executor_collector.context_batch_size;
     executor_collector.execute_token_size_when_has_context = executor_collector.execute_token_size;
@@ -1606,10 +1636,18 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
     }
 }
 
-absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams) {
+absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.process(stream_size=%zu,mtp_step=%zu)", streams.size(), propose_step_);
 
+    const int64_t process_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    if (schedule_time_us <= 0) {
+        schedule_time_us = process_start_time_us;
+    }
     MtpMetricsCollector metrics_collector;
+    auto tps_active_guard =
+        tps_reporter_.makeActiveGuard(metrics_reporter_ && isTpRank0() && !warm_up_ && !streams.empty());
+    auto wall_tps_active_guard =
+        wall_tps_reporter_.makeActiveGuard(metrics_reporter_ && isTpRank0() && !warm_up_ && !streams.empty());
 
     std::list<GenerateStreamPtr> prefill_streams;
     std::list<GenerateStreamPtr> decode_streams;
@@ -1621,7 +1659,7 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams) {
     int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
 
     if (role_type_ == RoleType::PREFILL || role_type_ == RoleType::PDFUSION) {
-        THROW_IF_STATUS_ERROR(prefillStep(prefill_streams, metrics_collector));
+        THROW_IF_STATUS_ERROR(prefillStep(prefill_streams, metrics_collector, schedule_time_us));
     }
 
     if (role_type_ == RoleType::DECODE || role_type_ == RoleType::PDFUSION) {
@@ -1633,11 +1671,23 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams) {
 
     // report metrics
     if (isTpRank0() && metrics_reporter_ && metrics_collector.not_skip) {
+        // decode metrics
+        auto& tps_collector       = metrics_collector.tps_collector;
+        auto& sp_engine_collector = metrics_collector.sp_engine_collector;
+        auto  decode_time         = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        if (sp_engine_collector.total_accepted_token_num) {
+            tps_collector.addTokenSize(0,
+                                       0,
+                                       sp_engine_collector.total_accepted_token_num,
+                                       sp_engine_collector.total_accepted_token_num,
+                                       decode_time);
+        }
+
         RTP_LLM_PROFILE_SCOPE("executor.mtp.process(report_metrics)");
         metrics_reporter_->report<RtpLLMExecutorMetrics, RtpLLMExecutorMetricsCollector>(
             nullptr, &metrics_collector.executor_collector);
-        metrics_reporter_->report<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
-            nullptr, &metrics_collector.tps_collector);
+        tps_reporter_.report(&metrics_collector.tps_collector);
+        wall_tps_reporter_.report(&metrics_collector.tps_collector);
         metrics_reporter_->report<RtpLLMSpeculativeEngineMetrics, RtpLLMSpeculativeEngineMetricsCollector>(
             nullptr, &metrics_collector.sp_engine_collector);
     }
@@ -1655,7 +1705,8 @@ bool MtpExecutor::updateEplbConfig(const EPLBConfig& config) {
 void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
                                    const StreamGroups&         stream_groups,
                                    std::vector<torch::Tensor>& draft_probs_list,
-                                   torch::Tensor&              draft_token_ids_t) {
+                                   torch::Tensor&              draft_token_ids_t,
+                                   int64_t&                    model_forward_us) {
     RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(batch_size=%zu)", model_input.combo_tokens.size(0));
 
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
@@ -1755,8 +1806,10 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
         RTP_LLM_PROFILE_SCOPE_DYNAMIC("executor.mtp.draft_model_decode(loop_iter=%d)", i);
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %d/%d start, batch_size %zu", i, propose_step_ - 1, batch_size);
         ensureModelInputsOnCuda(model_input, "draft_decode.loop_forward");
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         draft_decode_model_output =
             std::move(forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT));
+        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         RTP_LLM_LOG_DEBUG("[MTP draftDecode] loop step %d forward done", i);
 
         // sample

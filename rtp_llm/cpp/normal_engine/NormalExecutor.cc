@@ -59,15 +59,22 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
                                bool                                   warm_up,
                                bool                                   is_propose,
                                int                                    propose_model_index,
-                               MlaOpsType                             mla_ops_type):
+                               MlaOpsType                             mla_ops_type,
+                               std::function<void()>                  profile_step_start,
+                               std::function<void()>                  profile_step_finish):
     Executor(),
     cache_manager_(cache_manager),
     warm_up_(warm_up),
     use_all_gather_(params.moe_config.use_all_gather && !params.moe_config.use_deepep_low_latency),
     metrics_reporter_(params.metrics_reporter),
-    tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(metrics_reporter_)),
+    tps_reporter_(MetricsLoopReporter<RtpLLMTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
+        params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
+    wall_tps_reporter_(WallClockMetricsLoopReporter<RtpLLMWallClockTokenPSMetrics, RtpLLMTokenPSMetricsCollector>(
+        params.parallelism_config.tp_rank == 0 && !warm_up ? metrics_reporter_ : nullptr)),
     is_propose_(is_propose),
     propose_model_index_(propose_model_index),
+    profile_step_start_(std::move(profile_step_start)),
+    profile_step_finish_(std::move(profile_step_finish)),
     dispatch_runner_(cuda_graph::graphGetStreamFromPool(true)) {
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
     tp_rank_            = params.parallelism_config.tp_rank;
@@ -166,12 +173,20 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
     cudaProfilerBegin();
 }
 
-absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams) {
+absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us) {
+    const int64_t process_start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
+    if (schedule_time_us <= 0) {
+        schedule_time_us = process_start_time_us;
+    }
     RtpLLMExecutorMetricsCollector executor_collector;
     RtpLLMTokenPSMetricsCollector  tps_collector;
-    GptModelInputs                 model_input;
-    GptModelOutputs                model_output;
-    SamplerOutput                  sampler_output;
+    auto                           tps_active_guard =
+        tps_reporter_.makeActiveGuard(metrics_reporter_ && tp_rank_ == 0 && !warm_up_ && !streams.empty());
+    auto wall_tps_active_guard =
+        wall_tps_reporter_.makeActiveGuard(metrics_reporter_ && tp_rank_ == 0 && !warm_up_ && !streams.empty());
+    GptModelInputs  model_input;
+    GptModelOutputs model_output;
+    SamplerOutput   sampler_output;
     RTP_LLM_PROFILE_FUNCTION();
     // Cap outstanding stream-async bookkeeping to one step unless DROP_BROAD_SYNC is on.
     // Still sync when gatherModelInput lacks NormalAsyncDeviceState; host
@@ -225,6 +240,10 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         executor_collector.tp_sync_input_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
+    if (profile_step_start_) {
+        profile_step_start_();
+    }
+
     // make sure last model input is released before forward
     // TensorHolder release point (NormalExecutor): after current TP sync has
     // consumed model-input H2D staging, advance the one-extra-round hold window
@@ -269,6 +288,9 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
     if (tp_rank_ > 0 || warm_up_ || streams.size() == 0) {
         cudaSyncAndCheck();
         model_->releaseBuffers();
+        if (profile_step_finish_) {
+            profile_step_finish_();
+        }
         return absl::OkStatus();
     }
 
@@ -312,10 +334,17 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         // Metrics and KV release stay on the main thread; dispatch_output_us
         // now measures launch cost, while worker time is in async_runner.thread.
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        reportMetrics(stream_groups, executor_collector, tps_collector);
+        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        if (tps_execute_time_us <= 0) {
+            tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
+        }
+        reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us);
 
-        return dispatchOutputAsync(
-            stream_groups, std::move(model_output), std::move(sampler_output), std::move(sampler_event));
+        return dispatchOutputAsync(stream_groups,
+                                   std::move(model_output),
+                                   std::move(sampler_output),
+                                   std::move(sampler_event),
+                                   profile_step_finish_);
     }
 
     {
@@ -327,15 +356,23 @@ absl::Status NormalExecutor::process(const std::list<GenerateStreamPtr>& streams
         }
         auto result                           = batch_stream_processor_->dispatch(stream_groups, merge_outputs);
         executor_collector.dispatch_output_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
-        reportMetrics(stream_groups, executor_collector, tps_collector);
+        int64_t tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - schedule_time_us;
+        if (tps_execute_time_us <= 0) {
+            tps_execute_time_us = autil::TimeUtility::currentTimeInMicroSeconds() - process_start_time_us;
+        }
+        reportMetrics(stream_groups, executor_collector, tps_collector, tps_execute_time_us);
 
+        if (profile_step_finish_) {
+            profile_step_finish_();
+        }
         return result;
     }
 }
 
 void NormalExecutor::reportMetrics(const StreamGroups&             stream_groups,
                                    RtpLLMExecutorMetricsCollector& executor_collector,
-                                   RtpLLMTokenPSMetricsCollector&  tps_collector) {
+                                   RtpLLMTokenPSMetricsCollector&  tps_collector,
+                                   int64_t                         tps_execute_time_us) {
     if (tp_rank_ > 0) {
         return;
     }
@@ -352,10 +389,13 @@ void NormalExecutor::reportMetrics(const StreamGroups&             stream_groups
         }
         metrics_reporter_->report<RtpLLMExecutorMetrics, RtpLLMExecutorMetricsCollector>(nullptr, &executor_collector);
 
-        tps_collector.context_tps  = stream_groups.modelExecuteTokenSize() - stream_groups.totalDecodeBatchSize();
-        tps_collector.generate_tps = stream_groups.totalDecodeBatchSize();
-        tps_collector.total_tps    = stream_groups.modelExecuteTokenSize();
+        tps_collector.addTokenSize(stream_groups.contextExecuteTokenSize(),
+                                   stream_groups.contextExecuteTokenSizeWithCache(),
+                                   stream_groups.totalDecodeBatchSize(),
+                                   stream_groups.modelExecuteTokenSize(),
+                                   tps_execute_time_us);
         tps_reporter_.report(&tps_collector);
+        wall_tps_reporter_.report(&tps_collector);
     }
 }
 
@@ -623,7 +663,8 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
 absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           stream_groups,
                                                  GptModelOutputs               model_output,
                                                  SamplerOutput                 sampler_output,
-                                                 std::shared_ptr<torch::Event> sampler_event) {
+                                                 std::shared_ptr<torch::Event> sampler_event,
+                                                 std::function<void()>         profile_step_finish) {
     RTP_LLM_PROFILE_SCOPE("executor.dispatch_output_async");
 
     if (useDeviceInput()) {
@@ -672,6 +713,12 @@ absl::Status NormalExecutor::dispatchOutputAsync(const StreamGroups&           s
         }
         // dec_guard destructs here, dec'ing each stream's pending count.
     });
+
+    // Kineto requires profiler enable/disable on the same thread. Keep finish
+    // on the engine loop thread even when output dispatch runs asynchronously.
+    if (profile_step_finish) {
+        profile_step_finish();
+    }
 
     return absl::OkStatus();
 }
