@@ -1,10 +1,15 @@
 #pragma once
 
 #include <cstdint>
+#include <memory>
 #include <pybind11/pybind11.h>
 #include <torch/torch.h>
 
 #include "rtp_llm/cpp/engine_base/executor_base/HandlerArgs.h"
+
+namespace torch::inductor {
+class AOTIModelPackageLoader;
+}
 
 namespace rtp_llm {
 
@@ -19,11 +24,18 @@ namespace rtp_llm {
 // EmbeddingExecutor::postProcess, so one handler class serves both engines.
 class PostLayersProcessor {
 public:
+    // defined in the .cc: the AOTI loader member is only forward-declared
+    // here, so implicit ctor/dtor cannot be instantiated by callers
+    PostLayersProcessor();
     ~PostLayersProcessor();
 
     // Parses the handler protocol (extend_forward_args + trigger_mode).
     // Throws on trigger modes v1 does not implement — a misconfigured
     // deployment must fail at startup, not degrade silently.
+    // In compiled mode (CUSTOM_PROCESSOR_MODE=compiled) this also triggers
+    // the handler's AOT compile (weights are loaded by injection time) and
+    // loads the AOTInductor package; per-step invocations then run the
+    // package directly, with no Python interpreter on the hot path.
     void setHandler(pybind11::object handler);
 
     bool hasHandler() const {
@@ -57,6 +69,8 @@ private:
     bool              wants_context_ = false;
     pybind11::object  handler_;
     HandlerArgs::Flag handler_args_{};
+    // non-null in compiled mode; replaces the python call in invokeHandler
+    std::unique_ptr<torch::inductor::AOTIModelPackageLoader> aoti_loader_;
 };
 
 }  // namespace rtp_llm
