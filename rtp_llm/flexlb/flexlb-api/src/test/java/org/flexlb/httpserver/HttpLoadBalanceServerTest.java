@@ -10,6 +10,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.RouteService;
+import org.flexlb.service.address.FlexlbInstanceAddressService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.transport.GeneralHttpNettyService;
@@ -27,6 +28,7 @@ import reactor.core.publisher.Mono;
 import java.net.URI;
 import java.util.List;
 import java.util.Map;
+import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.RejectedExecutionException;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
@@ -58,6 +60,8 @@ class HttpLoadBalanceServerTest {
     private RequestBlockHashService requestBlockHashService;
     @Mock
     private CacheAwareService cacheAwareService;
+    @Mock
+    private FlexlbInstanceAddressService instanceAddressService;
 
     private WebTestClient webTestClient;
 
@@ -71,9 +75,33 @@ class HttpLoadBalanceServerTest {
                 queueManager,
                 new ActiveRequestCounter(),
                 requestBlockHashService,
-                cacheAwareService);
+                cacheAwareService,
+                instanceAddressService);
         webTestClient = WebTestClient.bindToRouterFunction(
                 server.loadBalancePrefill()).build();
+    }
+
+    @Test
+    void returnsPodAndInstanceAddressesInMasterInfo() {
+        when(lbStatusConsistencyService.getMasterHostIpPort())
+                .thenReturn("10.224.145.32:7001");
+        when(instanceAddressService.getPodIp()).thenReturn("10.224.145.32");
+        when(instanceAddressService.getInstanceIp()).thenReturn("10.101.105.30");
+        when(queueManager.getQueue()).thenReturn(new LinkedBlockingDeque<>());
+
+        webTestClient.post()
+                .uri("/rtp_llm/master/info")
+                .contentType(MediaType.APPLICATION_JSON)
+                .bodyValue(Map.of())
+                .exchange()
+                .expectStatus().isOk()
+                .expectBody()
+                .jsonPath("$.success").isEqualTo(true)
+                .jsonPath("$.code").isEqualTo(200)
+                .jsonPath("$.real_master_host").isEqualTo("10.224.145.32:7001")
+                .jsonPath("$.pod_ip").isEqualTo("10.224.145.32")
+                .jsonPath("$.instance_ip").isEqualTo("10.101.105.30")
+                .jsonPath("$.queue_length").isEqualTo(0);
     }
 
     @Test

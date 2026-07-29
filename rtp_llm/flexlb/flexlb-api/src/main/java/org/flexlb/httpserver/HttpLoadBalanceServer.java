@@ -11,12 +11,14 @@ import org.flexlb.dao.loadbalance.QueueSnapshotResponse;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
+import org.flexlb.dao.master.MasterInfoResponse;
 import org.flexlb.dao.pv.PvLogData;
 import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
 import org.flexlb.service.RouteService;
+import org.flexlb.service.address.FlexlbInstanceAddressService;
 import org.flexlb.service.grace.ActiveRequestCounter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.transport.GeneralHttpNettyService;
@@ -51,6 +53,7 @@ public class HttpLoadBalanceServer {
     private final ActiveRequestCounter activeRequestCounter;
     private final RequestBlockHashService requestBlockHashService;
     private final CacheAwareService cacheAwareService;
+    private final FlexlbInstanceAddressService instanceAddressService;
 
     public HttpLoadBalanceServer(GeneralHttpNettyService generalHttpNettyService,
                                  RouteService routeService,
@@ -59,7 +62,8 @@ public class HttpLoadBalanceServer {
                                  QueueManager queueManager,
                                  ActiveRequestCounter activeRequestCounter,
                                  RequestBlockHashService requestBlockHashService,
-                                 CacheAwareService cacheAwareService) {
+                                 CacheAwareService cacheAwareService,
+                                 FlexlbInstanceAddressService instanceAddressService) {
         this.generalHttpNettyService = generalHttpNettyService;
         this.routeService = routeService;
         this.lbStatusConsistencyService = lbStatusConsistencyService;
@@ -68,6 +72,7 @@ public class HttpLoadBalanceServer {
         this.activeRequestCounter = activeRequestCounter;
         this.requestBlockHashService = requestBlockHashService;
         this.cacheAwareService = cacheAwareService;
+        this.instanceAddressService = instanceAddressService;
     }
 
     @Bean
@@ -133,14 +138,14 @@ public class HttpLoadBalanceServer {
     private Mono<ServerResponse> responseMasterInfo(ServerRequest request) {
         return request.bodyToMono(Request.class)
                 .flatMap((Function<Request, Mono<ServerResponse>>) req -> {
-                    Response result = new Response();
+                    MasterInfoResponse result = new MasterInfoResponse();
                     result.setRealMasterHost(lbStatusConsistencyService.getMasterHostIpPort());
+                    result.setPodIp(instanceAddressService.getPodIp());
+                    result.setInstanceIp(instanceAddressService.getInstanceIp());
                     result.setQueueLength(queueManager.getQueue().size());
-                    result.setCode(200);
-                    result.setSuccess(true);
                     return ServerResponse.ok()
                             .contentType(MediaType.APPLICATION_JSON)
-                            .body(Mono.just(result), Response.class);
+                            .bodyValue(result);
                 }).onErrorResume(e -> {
                     Logger.error("responseMasterInfo error", e);
                     Response errorResponse = new Response();
