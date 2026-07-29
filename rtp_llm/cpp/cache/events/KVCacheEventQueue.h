@@ -23,6 +23,9 @@ class KVCacheEventQueue {
 public:
     explicit KVCacheEventQueue(size_t capacity);
 
+    // ACCEPTED pushes assign and consume the next monotonically increasing
+    // event.sequence. FULL/STOPPED pushes do not consume one; discardPending()
+    // and stop() do not reset the sequence within this queue instance.
     QueuePushResult           tryPush(KVCacheEvent event) noexcept;
     std::vector<KVCacheEvent> waitPop(size_t max_batch_size, std::chrono::milliseconds timeout);
     void                      waitForStop(std::chrono::milliseconds timeout);
