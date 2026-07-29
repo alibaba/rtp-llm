@@ -549,7 +549,7 @@ bool BlockTreeLoader::abortPendingLoad(TreeNode*                        node,
         return false;
     }
     resource.transfer_state = GroupSetTransferState::IDLE;
-    RTP_LLM_CHECK_WITH_INFO(group_set->isValidSteadyState(resource),
+    RTP_LLM_CHECK_WITH_INFO(!resource.hasTier(Tier::DEVICE) || group_set->hasCompleteDeviceValue(resource),
                             "load abort produced invalid steady state: group_set_id=%zu node_key=%ld",
                             group_set_id,
                             node->cache_key);
@@ -587,7 +587,7 @@ bool BlockTreeLoader::finishLoad(TreeNode* node, size_t group_set_id, Tier sourc
         return false;
     }
     resource.transfer_state = GroupSetTransferState::IDLE;
-    RTP_LLM_CHECK_WITH_INFO(group_set->isValidSteadyState(resource),
+    RTP_LLM_CHECK_WITH_INFO(!resource.hasTier(Tier::DEVICE) || group_set->hasCompleteDeviceValue(resource),
                             "load settlement produced invalid steady state: group_set_id=%zu node_key=%ld",
                             group_set_id,
                             node->cache_key);

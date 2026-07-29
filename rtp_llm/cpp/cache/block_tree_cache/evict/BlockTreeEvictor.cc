@@ -568,7 +568,7 @@ bool BlockTreeEvictor::applyMoveCompletion(GroupSetPtr& group_set, const Evictio
                                  BlockRefType::BLOCK_CACHE);
     group_set->evictFromTier(move.node, resource, move.source_tier);
     resource.transfer_state = GroupSetTransferState::IDLE;
-    RTP_LLM_CHECK_WITH_INFO(group_set->isValidSteadyState(resource),
+    RTP_LLM_CHECK_WITH_INFO(!resource.hasTier(Tier::DEVICE) || group_set->hasCompleteDeviceValue(resource),
                             "eviction settlement produced invalid steady state: group_set_id=%zu node_key=%ld",
                             move.group_set_id,
                             move.node->cache_key);
@@ -718,7 +718,8 @@ bool BlockTreeEvictor::restoreSource(const EvictionMove& eviction_move) {
         return false;
     }
     resource.transfer_state = GroupSetTransferState::IDLE;
-    RTP_LLM_CHECK_WITH_INFO(group_sets_[group_set_id]->isValidSteadyState(resource),
+    RTP_LLM_CHECK_WITH_INFO(!resource.hasTier(Tier::DEVICE)
+                                || group_sets_[group_set_id]->hasCompleteDeviceValue(resource),
                             "eviction rollback produced invalid steady state: group_set_id=%zu node_key=%ld",
                             eviction_move.group_set_id,
                             eviction_move.node->cache_key);

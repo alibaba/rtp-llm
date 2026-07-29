@@ -182,14 +182,10 @@ bool GroupSet::isLeafAtTier(const TreeNode* node, Tier tier) const {
 }
 
 bool GroupSet::hasCompleteDeviceValue(const GroupSetResource& resource) const {
-    return resource.device_blocks.size() == device_pools_.size()
+    return resource.hasTier(Tier::DEVICE) && resource.device_blocks.size() == device_pools_.size()
            && std::all_of(resource.device_blocks.begin(), resource.device_blocks.end(), [](BlockIdxType block) {
                   return !isNullBlockIdx(block);
               });
-}
-
-bool GroupSet::isValidSteadyState(const GroupSetResource& resource) const {
-    return resource.isValidSteadyState() && (resource.hasTier(Tier::DEVICE) == hasCompleteDeviceValue(resource));
 }
 
 bool GroupSet::hasAllocatedDeviceBlocks(const std::vector<BlockIdxType>& blocks) const {

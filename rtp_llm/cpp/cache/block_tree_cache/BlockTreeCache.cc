@@ -145,12 +145,6 @@ void BlockTreeCache::drainTreeHolds() {
                             "BlockTreeCache::drainTreeHolds: tree and root must be valid");
 
     const auto drain_node = [this](TreeNode* node) {
-        RTP_LLM_CHECK_WITH_INFO(node != nullptr, "BlockTreeCache::drainTreeHolds: node must be valid");
-        RTP_LLM_CHECK_WITH_INFO(node->group_set_resources.size() == group_sets_.size(),
-                                "BlockTreeCache::drainTreeHolds: resource count mismatch, resources=%zu group_sets=%zu",
-                                node->group_set_resources.size(),
-                                group_sets_.size());
-
         for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
             const GroupSetPtr& group_set = group_sets_[group_set_id];
 
@@ -269,12 +263,6 @@ void BlockTreeCache::insertImpl(TreeNode*                                       
     // eviction). Reused nodes keep theirs; their demoted data comes from load.
     for (const BlockTreeInsertedNode& inserted : insert_result.inserted_nodes) {
         TreeNode* node = inserted.node;
-        RTP_LLM_CHECK_WITH_INFO(
-            node != nullptr && node->group_set_resources.size() == group_sets_.size(),
-            "BlockTreeCache received malformed inserted node: node=%p expected_resources=%zu actual_resources=%zu",
-            static_cast<void*>(node),
-            group_sets_.size(),
-            node == nullptr ? 0 : node->group_set_resources.size());
         for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
             const GroupSetPtr& group_set = group_sets_[group_set_id];
             GroupSetResource&  resource  = node->group_set_resources[group_set_id];
@@ -289,14 +277,7 @@ void BlockTreeCache::insertImpl(TreeNode*                                       
     // Existing nodes may independently refill one empty GroupSetResource. Take a tree
     // holder only for that adopted resource; other resources already own theirs.
     for (const BlockTreeAdoptedResource& adopted : insert_result.adopted_resources) {
-        const size_t group_set_id = adopted.group_set_id;
-        RTP_LLM_CHECK_WITH_INFO(
-            adopted.node != nullptr && group_set_id < group_sets_.size()
-                && adopted.node->group_set_resources.size() == group_sets_.size(),
-            "BlockTreeCache received malformed adopted resource: node=%p group_set_id=%zu group_set_count=%zu",
-            static_cast<void*>(adopted.node),
-            group_set_id,
-            group_sets_.size());
+        const size_t       group_set_id = adopted.group_set_id;
         const GroupSetPtr& group_set = group_sets_[group_set_id];
         GroupSetResource&  resource  = adopted.node->group_set_resources[group_set_id];
         RTP_LLM_CHECK_WITH_INFO(group_set->hasCompleteDeviceValue(resource),

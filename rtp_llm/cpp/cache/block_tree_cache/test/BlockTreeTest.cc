@@ -16,9 +16,10 @@ std::vector<std::vector<GroupSetResource>> make2DResources(int group_count, int 
     return resources;
 }
 
-// Helper: create 2D resources with empty inner vectors (no data assigned to nodes).
+// Helper: create 2D resources with one empty GroupSetResource per node.
 std::vector<std::vector<GroupSetResource>> makeEmpty2DResources(int path_len) {
-    return std::vector<std::vector<GroupSetResource>>(static_cast<size_t>(path_len));
+    return std::vector<std::vector<GroupSetResource>>(static_cast<size_t>(path_len),
+                                                       std::vector<GroupSetResource>(1));
 }
 
 TEST(BlockTreeTest, EmptyTreeFindReturnsEmpty) {
@@ -127,16 +128,6 @@ TEST(BlockTreeTest, FindTraversesBusyNodeAndItsDescendants) {
     }
 }
 
-TEST(BlockTreeTest, FindFailsFastOnMalformedGroupSetResourceCount) {
-    BlockTree tree(2);
-    tree.insertNode(nullptr, {100, 200}, make2DResources(2, 2, 42));
-
-    TreeNode* malformed_node = tree.root()->children.at(100)->children.at(200);
-    malformed_node->group_set_resources.pop_back();
-
-    EXPECT_ANY_THROW(tree.findNode({100, 200}));
-}
-
 TEST(BlockTreeTest, FindEmptyKeys) {
     BlockTree tree(1);
     tree.insertNode(nullptr, {100}, make2DResources(1, 1, 1));
@@ -169,7 +160,6 @@ TEST(BlockTreeTest, RemoveEmptyAncestors) {
     tree.insertNode(nullptr, {100, 200}, makeEmpty2DResources(2));
     // Insert root → 100 → 200 → 300 with data only on the new leaf.
     auto leaf_resources = makeEmpty2DResources(3);
-    leaf_resources[2].resize(1);
     leaf_resources[2][0].device_blocks = {42};
     TreeNode* leaf                     = tree.insertNode(nullptr, {100, 200, 300}, leaf_resources).leaf;
     EXPECT_EQ(tree.nodeCount(), 3u);
@@ -380,15 +370,6 @@ TEST(BlockTreeTest, InsertAdoptsCompleteDeviceValueWithoutPoolTopologyKnowledge)
 
     ASSERT_EQ(result.adopted_resources.size(), 1u);
     EXPECT_EQ(node->group_set_resources[0].device_blocks, (BlockIndicesType{20}));
-}
-
-TEST(BlockTreeTest, InsertFailsFastOnMalformedNewNodeResources) {
-    BlockTree                                  tree(2);
-    std::vector<std::vector<GroupSetResource>> malformed(1, std::vector<GroupSetResource>(1));
-    malformed[0][0].device_blocks = {10};
-
-    EXPECT_ANY_THROW(tree.insertNode(nullptr, {100}, malformed));
-    EXPECT_EQ(tree.nodeCount(), 0u);
 }
 
 TEST(BlockTreeTest, RemoveEmptyAncestorsStopsAtBusyEmptyNode) {

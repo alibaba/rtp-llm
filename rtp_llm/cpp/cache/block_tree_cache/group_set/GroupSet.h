@@ -111,7 +111,6 @@ public:
         return device_pools_;
     }
     bool                           hasCompleteDeviceValue(const GroupSetResource& resource) const;
-    bool                           isValidSteadyState(const GroupSetResource& resource) const;
     std::shared_ptr<HostBlockPool> hostPool() const {
         return host_pool_;
     }
