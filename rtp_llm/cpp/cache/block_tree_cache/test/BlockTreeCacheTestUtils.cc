@@ -328,7 +328,10 @@ void BlockTreeCacheTestPeer::runMaintenanceForTest(BlockTreeCache& cache) {
     cache.checkWatermark();
 }
 
-bool BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(BlockTreeCache& cache, size_t group_set_id, Tier tier) {
+bool BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(BlockTreeCache&     cache,
+                                                         size_t              group_set_id,
+                                                         Tier                tier,
+                                                         std::optional<Tier> target_override) {
     std::lock_guard<std::mutex> lock(cache.mutex_);
     if (!cache.config_.isTierEnabled(tier)) {
         return false;
@@ -336,6 +339,9 @@ bool BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(BlockTreeCache& cache, 
     auto eviction_move = cache.evictor_.chooseVictim(group_set_id, tier);
     if (!eviction_move.has_value()) {
         return false;
+    }
+    if (target_override.has_value()) {
+        eviction_move->target_tier = *target_override;
     }
     return cache.evictor_.submitLocked(*eviction_move);
 }

@@ -15,6 +15,23 @@
 
 namespace rtp_llm {
 
+namespace {
+
+bool isCanonicalEvictionTarget(Tier source_tier, Tier target_tier) {
+    switch (source_tier) {
+        case Tier::DEVICE:
+            return target_tier == Tier::HOST || target_tier == Tier::NONE;
+        case Tier::HOST:
+            return target_tier == Tier::DISK || target_tier == Tier::NONE;
+        case Tier::DISK:
+            return target_tier == Tier::NONE;
+        default:
+            return false;
+    }
+}
+
+}  // namespace
+
 EvictionTaskRunner::EvictionTaskRunner(ExecuteTransferFn execute_transfer):
     execute_transfer_(std::move(execute_transfer)) {}
 
@@ -53,8 +70,15 @@ bool EvictionTaskRunner::submitLocked(BlockTreeEvictor&                   evicto
     if (release_credits != nullptr) {
         release_credits->clear();
     }
-    if (eviction_move.target_tier != Tier::NONE && !is_tier_enabled_(eviction_move.target_tier)) {
-        eviction_move.target_tier = Tier::NONE;
+    if (!isCanonicalEvictionTarget(eviction_move.source_tier, eviction_move.target_tier)) {
+        RTP_LLM_LOG_WARNING("rejecting eviction move with non-canonical target: source=%s target=%s group_set=%zu",
+                            tierName(eviction_move.source_tier),
+                            tierName(eviction_move.target_tier),
+                            eviction_move.group_set_id);
+        return false;
+    }
+    if (eviction_move.target_tier != Tier::NONE) {
+        eviction_move.target_tier = normalizeTargetTier(eviction_move.source_tier);
     }
 
     auto plan = evictor.buildPlan(eviction_move);
@@ -319,6 +343,26 @@ bool EvictionTaskRunner::executeTierCopy(const EvictionMove& eviction_move) cons
     return execute_transfer_(descriptor);
 }
 
+Tier EvictionTaskRunner::normalizeTargetTier(Tier source_tier) const {
+    switch (source_tier) {
+        case Tier::DEVICE:
+            if (is_tier_enabled_(Tier::HOST)) {
+                return Tier::HOST;
+            }
+            if (is_tier_enabled_(Tier::DISK)) {
+                return Tier::DISK;
+            }
+            return Tier::NONE;
+        case Tier::HOST:
+            if (is_tier_enabled_(Tier::DISK)) {
+                return Tier::DISK;
+            }
+            return Tier::NONE;
+        default:
+            return Tier::NONE;
+    }
+}
+
 bool EvictionTaskRunner::buildTransferDescriptor(const EvictionMove& eviction_move, TransferDescriptor& descriptor) {
     if (eviction_move.source_blocks.empty() || eviction_move.target_blocks.empty()
         || isNullBlockIdx(eviction_move.target_blocks[0])) {
@@ -328,6 +372,8 @@ bool EvictionTaskRunner::buildTransferDescriptor(const EvictionMove& eviction_mo
     const BlockIdxType target = eviction_move.target_blocks[0];
     if (eviction_move.source_tier == Tier::DEVICE && eviction_move.target_tier == Tier::HOST) {
         descriptor = TransferDescriptor::deviceToHost(eviction_move.group_set_id, eviction_move.source_blocks, target);
+    } else if (eviction_move.source_tier == Tier::DEVICE && eviction_move.target_tier == Tier::DISK) {
+        descriptor = TransferDescriptor::deviceToDisk(eviction_move.group_set_id, eviction_move.source_blocks, target);
     } else if (eviction_move.source_tier == Tier::HOST && eviction_move.target_tier == Tier::DISK) {
         if (isNullBlockIdx(eviction_move.source_blocks[0])) {
             return false;
@@ -371,7 +417,7 @@ int EvictionTaskRunner::transferTimeoutMs(const BlockTreeEvictor::EvictionPlan& 
             break;
         }
     }
-    return uses_disk ? std::max(memory_timeout_ms, disk_timeout_ms) : memory_timeout_ms;
+    return uses_disk ? disk_timeout_ms : memory_timeout_ms;
 }
 
 }  // namespace rtp_llm

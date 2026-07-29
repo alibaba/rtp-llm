@@ -21,7 +21,7 @@ BlockTreeLoader::BlockTreeLoader(std::vector<GroupSetPtr>&      group_sets,
                                  std::mutex&                    mutex,
                                  int                            disk_timeout_ms,
                                  int                            host_timeout_ms,
-                                 ReclaimOneFn                   reclaim_one,
+                                 bool                           enable_device_cache,
                                  SettledFn                      settled):
     group_sets_(group_sets),
     evictor_(evictor),
@@ -31,7 +31,7 @@ BlockTreeLoader::BlockTreeLoader(std::vector<GroupSetPtr>&      group_sets,
     mutex_(mutex),
     disk_timeout_ms_(disk_timeout_ms),
     host_timeout_ms_(host_timeout_ms),
-    reclaim_one_(std::move(reclaim_one)),
+    enable_device_cache_(enable_device_cache),
     settled_(std::move(settled)),
     load_ticket_registry_(
         std::make_shared<LoadTicketRegistry>([this](const LoadTicket& ticket) { return commitLoad(ticket); },
@@ -397,18 +397,7 @@ void BlockTreeLoader::runLoadTask(const LoadTaskRunner::TaskPtr& task) {
     try {
         bool prepared = !task->items.empty();
         for (size_t item_index = 0; item_index < task->items.size(); ++item_index) {
-            LoadTaskRunner::PrepareStatus status = load_task_runner_.prepareTransferItem(*task, item_index);
-            if (status == LoadTaskRunner::PrepareStatus::NEED_HOST_RECLAIM) {
-                const size_t group_set_id = task->items[item_index].group_set_id;
-                if (reclaim_one_(group_set_id, Tier::HOST)) {
-                    status = load_task_runner_.prepareTransferItem(*task, item_index);
-                }
-            }
-            if (status != LoadTaskRunner::PrepareStatus::READY) {
-                if (status == LoadTaskRunner::PrepareStatus::NEED_HOST_RECLAIM) {
-                    RTP_LLM_LOG_WARNING("failed to prepare host staging block, group_set=%zu",
-                                        task->items[item_index].group_set_id);
-                }
+            if (!load_task_runner_.prepareTransferItem(*task, item_index)) {
                 prepared = false;
             }
         }
@@ -479,18 +468,26 @@ bool BlockTreeLoader::settleLoadNolock(LoadTaskRunner::Task& task, bool copy_suc
         }
         GroupSetResource& resource = item.node->group_set_resources[group_set_id];
         if (settlement_success) {
-            MultiNodeResource target_holder{group_set_id, Tier::DEVICE, {item.target_device_blocks}};
-            group_set->setBlocks(resource, Tier::DEVICE, item.target_device_blocks);
-            group_set->referenceBlocks(target_holder, BlockRefType::BLOCK_CACHE);
-            group_set->unreferenceBlocks(target_holder, BlockRefType::REQUEST);
-            group_set->unreferenceBlocks(MultiNodeResource{group_set_id, item.source_tier, {item.source_blocks}},
-                                         BlockRefType::BLOCK_CACHE);
-            group_set->evictFromTier(item.node, resource, item.source_tier);
-            task.target_installed[item_index] = true;
-            tree_data_mutated                 = true;
-            RTP_LLM_CHECK_WITH_INFO(finishLoad(item.node, group_set_id, item.source_tier, true),
-                                    "load state changed after locked preflight, group_set_id=%zu",
-                                    group_set_id);
+            if (enable_device_cache_) {
+                MultiNodeResource target_holder{group_set_id, Tier::DEVICE, {item.target_device_blocks}};
+                group_set->setBlocks(resource, Tier::DEVICE, item.target_device_blocks);
+                group_set->referenceBlocks(target_holder, BlockRefType::BLOCK_CACHE);
+                group_set->unreferenceBlocks(target_holder, BlockRefType::REQUEST);
+                group_set->unreferenceBlocks(MultiNodeResource{group_set_id, item.source_tier, {item.source_blocks}},
+                                             BlockRefType::BLOCK_CACHE);
+                group_set->evictFromTier(item.node, resource, item.source_tier);
+                task.target_installed[item_index] = true;
+                tree_data_mutated                 = true;
+                RTP_LLM_CHECK_WITH_INFO(finishLoad(item.node, group_set_id, item.source_tier, true),
+                                        "load state changed after locked preflight, group_set_id=%zu",
+                                        group_set_id);
+            } else {
+                // Request-only (device cache disabled): the target stays request-owned,
+                // the source tier keeps its residency, and no tree data is mutated.
+                RTP_LLM_CHECK_WITH_INFO(finishLoad(item.node, group_set_id, item.source_tier, false),
+                                        "load state changed after locked preflight (request-only), group_set_id=%zu",
+                                        group_set_id);
+            }
             state_settled = true;
             continue;
         }

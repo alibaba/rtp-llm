@@ -417,8 +417,10 @@ TEST_F(KVCacheManagerTest, FactoryFailureDoesNotPublishOrInjectBlockTreeCache) {
     auto cache_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/6, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_BF16);
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_memory_cache_disk = true;
-    auto cache_manager                       = std::make_shared<KVCacheManager>(cache_config,
+    kv_cache_config.enable_tiered_memory_cache = true;
+    kv_cache_config.enable_memory_cache        = true;
+    kv_cache_config.memory_cache_size_mb       = 0;
+    auto cache_manager                         = std::make_shared<KVCacheManager>(cache_config,
                                                           /*warmup=*/false,
                                                           /*metrics_reporter=*/nullptr,
                                                           kv_cache_config);

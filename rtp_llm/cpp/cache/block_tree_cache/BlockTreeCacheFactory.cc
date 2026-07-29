@@ -298,14 +298,11 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
         group_pools[static_cast<size_t>(group_id)] = std::move(pool);
     }
 
-    const bool host_enabled = kv_cache_config.enable_tiered_memory_cache && kv_cache_config.enable_memory_cache;
-    const bool disk_enabled = host_enabled && kv_cache_config.enable_memory_cache_disk;
-    if (kv_cache_config.enable_tiered_memory_cache && !kv_cache_config.enable_memory_cache) {
-        RTP_LLM_LOG_ERROR("createBlockTreeCache: tiered memory requires enable_memory_cache");
-        return nullptr;
-    }
-    if (kv_cache_config.enable_memory_cache_disk && !host_enabled) {
-        RTP_LLM_LOG_ERROR("createBlockTreeCache: disk cache requires tiered host cache");
+    const bool tiered       = kv_cache_config.enable_tiered_memory_cache;
+    const bool host_enabled = tiered && kv_cache_config.enable_memory_cache;
+    const bool disk_enabled = tiered && kv_cache_config.enable_memory_cache_disk;
+    if (tiered && !host_enabled && !disk_enabled) {
+        RTP_LLM_LOG_ERROR("createBlockTreeCache: tiered memory requires host or disk cache");
         return nullptr;
     }
     if (host_enabled && kv_cache_config.memory_cache_size_mb <= 0) {
@@ -416,7 +413,7 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     config.enable_memory_cache    = host_enabled;
     config.enable_disk_cache      = disk_enabled;
     config.enable_remote_cache    = kv_cache_config.enable_remote_cache && storage_backend != nullptr;
-    config.enable_load            = host_enabled;
+    config.enable_load            = host_enabled || disk_enabled;
     config.device_min_free_blocks = kv_cache_config.device_cache_min_free_blocks > 0 ?
                                         static_cast<size_t>(kv_cache_config.device_cache_min_free_blocks) :
                                         0;
@@ -437,7 +434,13 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
             checkedTimeout(kv_cache_config.memory_cache_disk_sync_timeout_ms, "memory_cache_disk_sync_timeout_ms") :
             config.memory_cache_sync_timeout_ms;
 
-    auto per_rank_engine = std::make_shared<PerRankBlockTransferEngine>(group_sets);
+    if (disk_enabled && config.device_disk_staging_block_count == 0) {
+        RTP_LLM_LOG_ERROR("createBlockTreeCache: device_disk_staging_block_count must be > 0 for direct transfer");
+        return nullptr;
+    }
+
+    auto per_rank_engine = std::make_shared<PerRankBlockTransferEngine>(
+        group_sets, DeviceHostCopyOptions{}, config.device_disk_staging_block_count);
     std::shared_ptr<MultiRankBlockTransferEngine> multi_rank_engine;
     if (broadcast_manager != nullptr) {
         multi_rank_engine = std::make_shared<MultiRankBlockTransferEngine>(group_sets, std::move(broadcast_manager));

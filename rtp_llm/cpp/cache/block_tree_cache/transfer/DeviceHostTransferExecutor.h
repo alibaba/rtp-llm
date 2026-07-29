@@ -15,14 +15,19 @@ public:
     explicit DeviceHostTransferExecutor(DeviceHostCopyOptions options = {});
     ~DeviceHostTransferExecutor();
 
-    TransferStatus execute(const TransferDescriptor& desc, const GroupSet& group_set);
+    TransferStatus deviceToHost(const TransferDescriptor& desc, const GroupSet& group_set, HostBufferView host);
+    TransferStatus hostToDevice(HostBufferView host, const TransferDescriptor& desc, const GroupSet& group_set);
 
 private:
-    TransferStatus lowerAndExecute(const TransferDescriptor& desc, const GroupSet& group_set, bool device_to_host);
+    TransferStatus lowerAndExecute(const TransferDescriptor& desc,
+                                   const GroupSet&           group_set,
+                                   bool                      device_to_host,
+                                   HostBufferView            host);
 
     DeviceHostCopyPlan lowerPlan(const TransferDescriptor& desc,
                                  const GroupSet&           group_set,
                                  bool                      device_to_host,
+                                 HostBufferView            host,
                                  TransferStatus&           out_status) const;
 
     TransferStatus executeStrategies(const DeviceHostCopyPlan& plan);

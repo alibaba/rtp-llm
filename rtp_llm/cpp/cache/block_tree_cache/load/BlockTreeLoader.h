@@ -30,7 +30,6 @@ struct BlockTreeLoadResult {
 // tickets, transfer execution, state transitions, and settlement.
 class BlockTreeLoader {
 public:
-    using ReclaimOneFn = std::function<bool(size_t group_set_id, Tier tier)>;
     // Invoked with the shared cache mutex held.
     using SettledFn = std::function<void(bool tree_data_mutated, bool check_watermark)>;
 
@@ -42,7 +41,7 @@ public:
                     std::mutex&                    mutex,
                     int                            disk_timeout_ms,
                     int                            host_timeout_ms,
-                    ReclaimOneFn                   reclaim_one,
+                    bool                           enable_device_cache,
                     SettledFn                      settled);
 
     // The caller must hold the shared BlockTreeCache mutex.
@@ -83,7 +82,7 @@ private:
     std::mutex&                         mutex_;
     int                                 disk_timeout_ms_{0};
     int                                 host_timeout_ms_{0};
-    ReclaimOneFn                        reclaim_one_;
+    bool                                enable_device_cache_{true};
     SettledFn                           settled_;
     LoadTaskRunner                      load_task_runner_;
     LoadJoinRegistry                    load_join_registry_;

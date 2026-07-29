@@ -1124,12 +1124,38 @@ TEST_F(BlockTreeCacheFactoryTest, LegacySingleGroupAllowsMissingPhysicalStrideTa
     EXPECT_EQ(cache->groupSets()[0]->payloadBytes(), config.topology().groupById(0).layer_ids.size() * fallback_stride);
 }
 
-TEST_F(BlockTreeCacheFactoryTest, RejectsDiskCacheWithoutMemoryCacheBeforePublication) {
+TEST_F(BlockTreeCacheFactoryTest, CreatesDiskCacheWithoutMemoryCache) {
+    const auto                               config    = makeSingleConfig();
+    auto                                     allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_l3_only");
+    KVCacheConfig                            kv_cache_config;
+    kv_cache_config.enable_tiered_memory_cache    = true;
+    kv_cache_config.enable_memory_cache           = false;
+    kv_cache_config.enable_memory_cache_disk      = true;
+    kv_cache_config.memory_cache_disk_size_mb     = 1;
+    kv_cache_config.memory_cache_disk_paths       = disk_dir.path;
+    kv_cache_config.memory_cache_disk_buffered_io = true;
+
+    auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{});
+    ASSERT_NE(cache, nullptr);
+    EXPECT_FALSE(cache->isMemoryCacheEnabled());
+    EXPECT_TRUE(cache->isDiskCacheEnabled());
+    EXPECT_TRUE(cache->config().enable_load);
+    ASSERT_FALSE(cache->groupSets().empty());
+    for (const auto& group_set : cache->groupSets()) {
+        ASSERT_NE(group_set, nullptr);
+        EXPECT_EQ(group_set->hostPool(), nullptr);
+        EXPECT_NE(group_set->diskPool(), nullptr);
+    }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, RejectsTieredWithoutHostOrDiskBeforePublication) {
     const auto    config    = makeSingleConfig();
     auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_memory_cache      = false;
-    kv_cache_config.enable_memory_cache_disk = true;
+    kv_cache_config.enable_tiered_memory_cache = true;
+    kv_cache_config.enable_memory_cache        = false;
+    kv_cache_config.enable_memory_cache_disk   = false;
 
     expectFactoryRejects(config, allocator, kv_cache_config);
 }

@@ -42,6 +42,10 @@ private:
                                        const CopyItem&                 item,
                                        const GroupSet&                 group_set,
                                        TransferDescriptor&             descriptor);
+    static bool decodeDeviceDiskTransfer(const MemoryOperationRequestPB& request,
+                                         const CopyItem&                 item,
+                                         const GroupSet&                 group_set,
+                                         TransferDescriptor&             descriptor);
 };
 
 }  // namespace rtp_llm

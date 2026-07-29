@@ -634,7 +634,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettleme
         // The request owns one reference and the committed pending copy protects the target with another.
         EXPECT_EQ(device_pool->refCount(target_block), 2u);
         EXPECT_EQ(device_pool->freeBlocksNum(), device_free_before - 1);
-        EXPECT_EQ(host_pool->freeBlocksNum(), host_free_before - 1);
+        EXPECT_EQ(host_pool->freeBlocksNum(), host_free_before);
         EXPECT_EQ(disk_pool->freeBlocksNum(), disk_free_before - 1);
         EXPECT_EQ(outliving_ticket->commit(), nullptr);
 
@@ -650,24 +650,22 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettleme
         const std::vector<BlockIdxType> host_blocks_after_wait   = allocatedBlocksSnapshot(*host_pool);
         const std::vector<BlockIdxType> disk_blocks_after_wait   = allocatedBlocksSnapshot(*disk_pool);
         ASSERT_EQ(device_blocks_after_wait, (std::vector<BlockIdxType>{target_block}));
-        ASSERT_EQ(host_blocks_after_wait.size(), 1u);
-        const BlockIdxType staging_block = host_blocks_after_wait.front();
+        EXPECT_TRUE(host_blocks_after_wait.empty());
         ASSERT_EQ(disk_blocks_after_wait, (std::vector<BlockIdxType>{source_block}));
         const std::vector<TransferDescriptor> descriptors_after_wait = pausable_per_rank_transfer_engine->descriptors();
         ASSERT_EQ(descriptors_after_wait.size(), 1u);
         EXPECT_EQ(descriptors_after_wait[0].group_set_id, 0);
         EXPECT_EQ(descriptors_after_wait[0].source_tier, Tier::DISK);
-        EXPECT_EQ(descriptors_after_wait[0].target_tier, Tier::HOST);
+        EXPECT_EQ(descriptors_after_wait[0].target_tier, Tier::DEVICE);
         EXPECT_EQ(descriptors_after_wait[0].disk_block, source_block);
-        EXPECT_EQ(descriptors_after_wait[0].host_block, staging_block);
+        EXPECT_TRUE(isNullBlockIdx(descriptors_after_wait[0].host_block));
+        EXPECT_EQ(descriptors_after_wait[0].device_blocks, (std::vector<BlockIdxType>{target_block}));
         EXPECT_TRUE(device_pool->isAllocated(target_block));
-        EXPECT_TRUE(host_pool->isAllocated(staging_block));
         EXPECT_TRUE(disk_pool->isAllocated(source_block));
         EXPECT_EQ(device_pool->refCount(target_block), 2u);
-        EXPECT_EQ(host_pool->refCount(staging_block), 1u);
         EXPECT_EQ(disk_pool->refCount(source_block), 2u);
         EXPECT_EQ(device_pool->freeBlocksNum(), device_free_before - 1);
-        EXPECT_EQ(host_pool->freeBlocksNum(), host_free_before - 1);
+        EXPECT_EQ(host_pool->freeBlocksNum(), host_free_before);
         EXPECT_EQ(disk_pool->freeBlocksNum(), disk_free_before - 1);
 
         pausable_per_rank_transfer_engine->release();
@@ -676,8 +674,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettleme
         context->waitDone();
         EXPECT_TRUE(context->done());
         EXPECT_EQ(context->success(), copy_success);
-        EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(), copy_success ? 2u : 1u);
-        EXPECT_FALSE(host_pool->isAllocated(staging_block));
+        EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(), 1u);
         EXPECT_FALSE(disk_pool->isAllocated(source_block));
         EXPECT_EQ(host_pool->freeBlocksNum(), host_free_before);
         EXPECT_EQ(disk_pool->freeBlocksNum(), disk_free_before);
@@ -1118,6 +1115,115 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
     environment->cache->onBlocksReleased();
     environment->reclaimAll();
     environment->expectFullyReclaimed();
+}
+
+TEST_F(BlockTreeCacheIntegrationTest, EvictionRejectsNonCanonicalTargetBeforeCopy) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+
+    FullSWAEnvironmentOptions options;
+    options.path_length = 1;
+    auto environment    = FullSWAEnvironment::create(options);
+    ASSERT_NE(environment, nullptr);
+    environment->insertRequestPath();
+    environment->releaseRequestRefs();
+
+    environment->scripted_per_rank_transfer_engine->clear();
+    EXPECT_FALSE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, 1, Tier::DEVICE, Tier::DISK));
+    environment->cache->waitForPendingTasks();
+    EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
+    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
+}
+
+TEST_F(BlockTreeCacheIntegrationTest, EvictionExplicitNoneIsNotNormalized) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+
+    FullSWAEnvironmentOptions options;
+    options.path_length             = 1;
+    options.enable_reverse_eviction = false;
+    auto environment                = FullSWAEnvironment::create(options);
+    ASSERT_NE(environment, nullptr);
+    environment->insertRequestPath();
+    environment->releaseRequestRefs();
+
+    environment->scripted_per_rank_transfer_engine->clear();
+    EXPECT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, 1, Tier::DEVICE, Tier::NONE));
+    environment->cache->waitForPendingTasks();
+    BlockTreeFindResult result = environment->cache->tree()->findNode(environment->keys);
+    ASSERT_NE(result.matched_node, nullptr);
+    EXPECT_EQ(result.matched_node->group_set_resources[1].transfer_state, GroupSetTransferState::IDLE);
+    EXPECT_EQ(environment->groups[1]->getTopTier(result.matched_node->group_set_resources[1]), Tier::NONE);
+    EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
+}
+
+TEST_F(BlockTreeCacheIntegrationTest, DiskLoadRequestOnlyKeepsDiskResidency) {
+    if (!cudaAvailable()) {
+        GTEST_SKIP() << "CUDA not available";
+    }
+
+    constexpr size_t payload_bytes = 256;
+    auto             device_pool   = makeDevicePool({{payload_bytes, 0}}, 4, "request_only_load_device");
+    auto             disk_pool     = makeDiskPool(payload_bytes, 4, std::make_unique<MemoryDiskBlockIO>());
+    auto             topology      = block_transfer_engine_test::makeTestTopology(
+        {block_transfer_engine_test::makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, payload_bytes)});
+    auto group = block_transfer_engine_test::makeTestGroupSet(0, topology, {0}, {device_pool});
+    group->setDiskPool(disk_pool);
+
+    BlockTreeCacheConfig config;
+    config.enable_device_cache      = false;
+    config.enable_memory_cache      = false;
+    config.enable_disk_cache        = true;
+    config.enable_load              = true;
+    std::vector<GroupSetPtr> groups = {group};
+    auto cache = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1), std::move(groups), std::move(config));
+    ASSERT_NE(cache, nullptr);
+
+    const size_t       disk_free_before = disk_pool->freeBlocksNum();
+    const BlockIdxType source_block     = group->allocateSingleBlock(Tier::DISK, BlockRefType::BLOCK_CACHE);
+    ASSERT_FALSE(isNullBlockIdx(source_block));
+    std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
+    resources[0][0].disk_slot = source_block;
+    ASSERT_TRUE(insertGroupSetResources(*cache, nullptr, {100}, resources));
+
+    BlockTreeMatchResult result = cache->match({100});
+    ASSERT_NE(result.load_ticket, nullptr);
+    ASSERT_EQ(result.load_ticket->items().size(), 1u);
+    EXPECT_EQ(result.load_ticket->items()[0].source_tier, Tier::DISK);
+    EXPECT_EQ(result.load_ticket->items()[0].source_blocks, (std::vector<BlockIdxType>{source_block}));
+
+    const size_t      device_free_before = device_pool->freeBlocksNum();
+    const BlockIdList request_targets    = device_pool->malloc(1).value();
+    ASSERT_EQ(request_targets.size(), 1u);
+    device_pool->incRef(request_targets, BlockRefType::REQUEST);
+    result.load_ticket->items_[0].target_device_blocks = request_targets;
+
+    std::shared_ptr<AsyncContext> context = result.load_ticket->commit();
+    ASSERT_NE(context, nullptr);
+    context->waitDone();
+    ASSERT_TRUE(context->success());
+    BlockTreeFindResult find_result = cache->tree()->findNode({100});
+    ASSERT_NE(find_result.matched_node, nullptr);
+    const GroupSetResource& resource = find_result.matched_node->group_set_resources[0];
+    EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+    EXPECT_EQ(resource.disk_slot, source_block);
+    EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
+    EXPECT_EQ(disk_pool->refCount(source_block), 1u);
+    EXPECT_EQ(device_pool->refCount(request_targets.front()), 1u);
+
+    BlockTreeMatchResult rematch = cache->match({100});
+    ASSERT_NE(rematch.load_ticket, nullptr);
+    for (const LoadTicket::PendingLoadItem& item : rematch.load_ticket->items()) {
+        EXPECT_EQ(item.source_tier, Tier::DISK);
+    }
+    rematch.load_ticket.reset();
+    result.load_ticket.reset();
+    device_pool->decRef(request_targets, BlockRefType::REQUEST);
+    EXPECT_EQ(device_pool->freeBlocksNum(), device_free_before);
+    cache.reset();
+    EXPECT_EQ(disk_pool->freeBlocksNum(), disk_free_before);
 }
 
 class BlockTreeCacheLowerTierTest: public ::testing::TestWithParam<Tier> {};
@@ -1646,7 +1752,7 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesLoadAndRestoresCandi
     environment->expectFullyReclaimed();
 }
 
-TEST_F(BlockTreeCacheIntegrationTest, DiskLoadHostToDeviceExceptionReleasesStagingAndRestoresSource) {
+TEST_F(BlockTreeCacheIntegrationTest, DiskLoadDirectTransferExceptionRestoresSource) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -1670,10 +1776,10 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadHostToDeviceExceptionReleasesStagi
     BlockTreeMatchResult                result           = environment->cache->match(environment->keys);
     ASSERT_NE(result.load_ticket, nullptr);
     ASSERT_FALSE(result.load_ticket->empty());
-    const size_t disk_to_host_submit_count = result.load_ticket->items().size();
-    ASSERT_GT(disk_to_host_submit_count, 0u);
+    const size_t disk_submit_count = result.load_ticket->items().size();
+    ASSERT_GT(disk_submit_count, 0u);
 
-    pausable_per_rank_transfer_engine->setThrowOnSubmit(disk_to_host_submit_count + 1);
+    pausable_per_rank_transfer_engine->setThrowOnSubmit(1);
 
     struct SourceRef {
         IBlockPool*  pool;
@@ -1707,7 +1813,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadHostToDeviceExceptionReleasesStagi
 
     ASSERT_TRUE(context->done());
     EXPECT_FALSE(context->success());
-    EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(), disk_to_host_submit_count + 1);
+    EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(), 1u);
     EXPECT_EQ(environment->host_pools[0]->freeBlocksNum(), host_free_before[0]);
     EXPECT_EQ(environment->host_pools[1]->freeBlocksNum(), host_free_before[1]);
     const std::vector<GroupSetResource> resources_after = environment->resourcesForPathNode(0);

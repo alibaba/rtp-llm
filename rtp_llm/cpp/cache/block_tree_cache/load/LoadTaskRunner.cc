@@ -44,69 +44,64 @@ bool LoadTaskRunner::createTask(const LoadTicket::PendingLoadItems&      items,
     task                  = std::make_shared<Task>();
     task->items           = std::move(task_items);
     task->item_group_sets = std::move(task_item_group_sets);
-    task->staging_host_blocks.assign(task->items.size(), NULL_BLOCK_IDX);
     task->target_installed.assign(task->items.size(), false);
     task->context = context;
     return true;
 }
 
-LoadTaskRunner::PrepareStatus LoadTaskRunner::prepareTransferItem(Task& task, size_t item_index) {
+bool LoadTaskRunner::prepareTransferItem(Task& task, size_t item_index) {
     if (item_index >= task.items.size() || item_index >= task.item_group_sets.size()) {
         RTP_LLM_LOG_WARNING("invalid load item index, index=%zu count=%zu", item_index, task.items.size());
-        return PrepareStatus::FAILED;
+        return false;
     }
 
     const LoadTicket::PendingLoadItem& item      = task.items[item_index];
     const GroupSetPtr&                 group_set = task.item_group_sets[item_index];
     if (group_set == nullptr || group_set->groupSetId() != item.group_set_id) {
         RTP_LLM_LOG_WARNING("invalid group set id, group_set=%zu", item.group_set_id);
-        return PrepareStatus::FAILED;
+        return false;
     }
     if (item.target_device_blocks.size() != group_set->devicePoolCount()) {
         RTP_LLM_LOG_WARNING("target block count mismatch, group_set=%zu expected=%zu actual=%zu",
                             item.group_set_id,
                             group_set->devicePoolCount(),
                             item.target_device_blocks.size());
-        return PrepareStatus::FAILED;
+        return false;
     }
     if (item.source_tier == Tier::DEVICE) {
         if (item.source_blocks.empty() || item.source_blocks != item.target_device_blocks) {
             RTP_LLM_LOG_WARNING("resident identity changed, group_set=%zu", item.group_set_id);
-            return PrepareStatus::FAILED;
+            return false;
         }
-        return PrepareStatus::READY;
+        return true;
     }
     if (item.node == nullptr) {
         RTP_LLM_LOG_WARNING("invalid copy item node, group_set=%zu", item.group_set_id);
-        return PrepareStatus::FAILED;
+        return false;
     }
     if ((item.source_tier != Tier::HOST && item.source_tier != Tier::DISK) || item.source_blocks.size() != 1) {
         RTP_LLM_LOG_WARNING(
             "invalid copy item, group_set=%zu source=%s", item.group_set_id, tierName(item.source_tier));
-        return PrepareStatus::FAILED;
+        return false;
     }
 
-    BlockIdxType source_host_block = NULL_BLOCK_IDX;
-    if (item.source_tier == Tier::HOST && group_set->hostPool() != nullptr) {
-        source_host_block = item.source_blocks[0];
-    } else if (item.source_tier == Tier::DISK && group_set->hostPool() != nullptr && group_set->diskPool() != nullptr) {
-        source_host_block = group_set->allocateSingleBlock(Tier::HOST, BlockRefType::REQUEST);
-        if (isNullBlockIdx(source_host_block)) {
-            return PrepareStatus::NEED_HOST_RECLAIM;
+    if (item.source_tier == Tier::HOST) {
+        if (group_set->hostPool() == nullptr) {
+            RTP_LLM_LOG_WARNING("host load without host pool, group_set=%zu", item.group_set_id);
+            return false;
         }
-        task.staging_host_blocks[item_index] = source_host_block;
-        task.disk_to_host_descriptors.push_back(
-            TransferDescriptor::diskToHost(item.group_set_id, item.source_blocks[0], source_host_block));
+        task.host_to_device_descriptors.push_back(
+            TransferDescriptor::hostToDevice(item.group_set_id, item.source_blocks[0], item.target_device_blocks));
+        return true;
     }
 
-    if (isNullBlockIdx(source_host_block)) {
-        RTP_LLM_LOG_WARNING(
-            "failed to prepare source, group_set=%zu source=%s", item.group_set_id, tierName(item.source_tier));
-        return PrepareStatus::FAILED;
+    if (group_set->diskPool() == nullptr) {
+        RTP_LLM_LOG_WARNING("disk load without disk pool, group_set=%zu", item.group_set_id);
+        return false;
     }
-    task.host_to_device_descriptors.push_back(
-        TransferDescriptor::hostToDevice(item.group_set_id, source_host_block, item.target_device_blocks));
-    return PrepareStatus::READY;
+    task.disk_to_device_descriptors.push_back(
+        TransferDescriptor::diskToDevice(item.group_set_id, item.source_blocks[0], item.target_device_blocks));
+    return true;
 }
 
 bool LoadTaskRunner::runTransfer(Task&                          task,
@@ -154,10 +149,10 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
 
         bool copy_success = prepared;
         if (copy_success) {
-            copy_success = transfer_dispatcher.executeMultiRank(task.disk_to_host_descriptors, disk_timeout_ms);
+            copy_success = transfer_dispatcher.executeMultiRank(task.host_to_device_descriptors, host_timeout_ms);
         }
         if (copy_success) {
-            copy_success = transfer_dispatcher.executeMultiRank(task.host_to_device_descriptors, host_timeout_ms);
+            copy_success = transfer_dispatcher.executeMultiRank(task.disk_to_device_descriptors, disk_timeout_ms);
         }
         finish_metrics(copy_success);
         return copy_success;
@@ -173,19 +168,8 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
     }
 }
 
-void LoadTaskRunner::releaseTaskResources(Task& task) {
-    releaseStagingBlocks(task);
+void LoadTaskRunner::releaseTaskResources(const Task& task) {
     releaseUninstalledTargetHolders(task);
-}
-
-void LoadTaskRunner::releaseStagingBlocks(Task& task) {
-    for (size_t item_index = 0; item_index < task.items.size(); ++item_index) {
-        const GroupSetPtr& group_set = task.item_group_sets[item_index];
-        if (group_set != nullptr && !isNullBlockIdx(task.staging_host_blocks[item_index])) {
-            group_set->releaseSingleBlock(Tier::HOST, task.staging_host_blocks[item_index], BlockRefType::REQUEST);
-            task.staging_host_blocks[item_index] = NULL_BLOCK_IDX;
-        }
-    }
 }
 
 void LoadTaskRunner::releaseUninstalledTargetHolders(const Task& task) {

@@ -92,7 +92,8 @@ bool HostBlockPool::init() {
 
     // block 0's slot is allocated as backing but is never handed out by malloc().
     const size_t total_bytes = cfg.physical_block_count * cfg.stride_bytes;
-    auto         cpu         = torch::empty({static_cast<int64_t>(total_bytes)},
+    const size_t alloc_bytes = total_bytes + cfg.alignment;
+    auto         cpu         = torch::empty({static_cast<int64_t>(alloc_bytes)},
                             torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCPU));
 
     bool pinned = false;
@@ -115,8 +116,10 @@ bool HostBlockPool::init() {
         backing_ = cpu;
     }
 
-    pinned_   = pinned;
-    base_ptr_ = backing_.data_ptr();
+    pinned_                 = pinned;
+    const auto raw_base     = reinterpret_cast<uintptr_t>(backing_.data_ptr());
+    const auto aligned_base = (raw_base + cfg.alignment - 1) / cfg.alignment * cfg.alignment;
+    base_ptr_               = reinterpret_cast<void*>(aligned_base);
 
     markHostBlockPoolDontDump(cfg.pool_name.c_str(), base_ptr_, total_bytes);
 

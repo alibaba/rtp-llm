@@ -88,6 +88,16 @@ bool BlockTransferRequestConverter::directionFor(const TransferDescriptor&      
         return descriptor.device_blocks.empty() && validDiskBlock(descriptor.disk_block, group_set)
                && validHostBlock(descriptor.host_block, group_set);
     }
+    if (descriptor.source_tier == Tier::DEVICE && descriptor.target_tier == Tier::DISK) {
+        request_direction = MemoryOperationRequestPB::D2DISK;
+        return validDeviceBlocks(descriptor.device_blocks, group_set)
+               && validDiskBlock(descriptor.disk_block, group_set);
+    }
+    if (descriptor.source_tier == Tier::DISK && descriptor.target_tier == Tier::DEVICE) {
+        request_direction = MemoryOperationRequestPB::DISK2D;
+        return validDiskBlock(descriptor.disk_block, group_set)
+               && validDeviceBlocks(descriptor.device_blocks, group_set);
+    }
     return false;
 }
 
@@ -182,6 +192,37 @@ bool BlockTransferRequestConverter::decodeHostDiskTransfer(const MemoryOperation
     return false;
 }
 
+bool BlockTransferRequestConverter::decodeDeviceDiskTransfer(const MemoryOperationRequestPB& request,
+                                                             const CopyItem&                 item,
+                                                             const GroupSet&                 group_set,
+                                                             TransferDescriptor&             descriptor) {
+    if (request.copy_direction() == MemoryOperationRequestPB::D2DISK
+        && item.backing_type() == MemoryOperationRequestPB::DISK && hasTargetDisk(item)
+        && validDiskBlock(item.disk_slot(), group_set) && isNullBlockIdx(item.mem_block()) && !hasSourceMemory(item)
+        && !hasSourceDisk(item)) {
+        std::vector<BlockIdxType> device_blocks;
+        if (!decodeDeviceBlocks(item, group_set, device_blocks)) {
+            return false;
+        }
+        descriptor =
+            TransferDescriptor::deviceToDisk(group_set.groupSetId(), std::move(device_blocks), item.disk_slot());
+        return true;
+    }
+    if (request.copy_direction() == MemoryOperationRequestPB::DISK2D && !hasTargetDisk(item)
+        && isNullBlockIdx(item.mem_block()) && !hasSourceMemory(item) && hasSourceDisk(item)
+        && item.src_backing_type() == MemoryOperationRequestPB::DISK
+        && validDiskBlock(item.src_disk_slot(), group_set)) {
+        std::vector<BlockIdxType> device_blocks;
+        if (!decodeDeviceBlocks(item, group_set, device_blocks)) {
+            return false;
+        }
+        descriptor =
+            TransferDescriptor::diskToDevice(group_set.groupSetId(), item.src_disk_slot(), std::move(device_blocks));
+        return true;
+    }
+    return false;
+}
+
 bool BlockTransferRequestConverter::appendTransfer(const TransferDescriptor&       descriptor,
                                                    const std::vector<GroupSetPtr>& group_sets,
                                                    MemoryOperationRequestPB&       request) {
@@ -222,6 +263,18 @@ bool BlockTransferRequestConverter::appendTransfer(const TransferDescriptor&    
         item.set_mem_block(descriptor.host_block);
         item.set_src_backing_type(MemoryOperationRequestPB::DISK);
         item.set_src_disk_slot(descriptor.disk_block);
+    } else if (descriptor.source_tier == Tier::DEVICE && descriptor.target_tier == Tier::DISK) {
+        item.set_backing_type(MemoryOperationRequestPB::DISK);
+        item.set_mem_block(NULL_BLOCK_IDX);
+        item.set_disk_slot(descriptor.disk_block);
+        setDeviceBlocks(descriptor.device_blocks, *group_set, item);
+    } else if (descriptor.source_tier == Tier::DISK && descriptor.target_tier == Tier::DEVICE) {
+        // DISK2D has no primary non-device backing: source is src_disk_slot, target is group_blocks.
+        // Leave primary backing_type at its proto3 default (not decoded).
+        item.set_mem_block(NULL_BLOCK_IDX);
+        item.set_src_backing_type(MemoryOperationRequestPB::DISK);
+        item.set_src_disk_slot(descriptor.disk_block);
+        setDeviceBlocks(descriptor.device_blocks, *group_set, item);
     } else {
         return false;
     }
@@ -254,6 +307,9 @@ bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestP
         case MemoryOperationRequestPB::H2DISK:
         case MemoryOperationRequestPB::DISK2H:
             return decodeHostDiskTransfer(request, item, *group_set, descriptor);
+        case MemoryOperationRequestPB::D2DISK:
+        case MemoryOperationRequestPB::DISK2D:
+            return decodeDeviceDiskTransfer(request, item, *group_set, descriptor);
         default:
             return false;
     }

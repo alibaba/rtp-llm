@@ -80,6 +80,9 @@ struct BlockTreeCacheConfig {
     std::string memory_cache_disk_path;
     bool        memory_cache_disk_buffered_io{true};
 
+    // Usable transient Device<->Disk staging blocks per rank.
+    size_t device_disk_staging_block_count{4};
+
     // Block size (from CacheConfig), used to compute pool block count
     size_t block_size_bytes{0};
 
@@ -223,7 +226,6 @@ private:
                     bool                                              allow_sparse_resources);
     void drainTreeHolds();
     void checkWatermark();
-    bool reclaimOneForGroupSet(size_t group_set_id, Tier tier);
     void reserveInFlightDeviceReleaseCreditsLocked(const std::vector<EvictionReleaseCredit>& release_credits);
     void settleInFlightDeviceReleaseCreditsLocked(const std::vector<EvictionReleaseCredit>& release_credits) noexcept;
 

@@ -166,6 +166,52 @@ TEST(BlockTransferRequestConverterTest, ConvertsDiskToHost) {
     EXPECT_EQ(output.host_block, 81);
 }
 
+TEST(BlockTransferRequestConverterTest, ConvertsDeviceToDisk) {
+    const TransferDescriptor input = TransferDescriptor::deviceToDisk(3, {51}, 61);
+    MemoryOperationRequestPB request;
+
+    ASSERT_TRUE(BlockTransferRequestConverter::appendTransfer(input, groupSets(), request));
+    const MemoryOperationRequestPB::CopyItem& item = request.copy_items(0);
+    EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::D2DISK);
+    EXPECT_EQ(item.group_set_id(), 3);
+    EXPECT_EQ(item.backing_type(), MemoryOperationRequestPB::DISK);
+    EXPECT_EQ(item.disk_slot(), 61);
+    EXPECT_TRUE(isNullBlockIdx(item.mem_block()));
+    EXPECT_EQ(wireBlocks(item), (std::unordered_map<size_t, BlockIdxType>{{5, 51}}));
+
+    TransferDescriptor output;
+    ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(request, 0, groupSets(), output));
+    EXPECT_EQ(output.group_set_id, 3);
+    EXPECT_EQ(output.source_tier, Tier::DEVICE);
+    EXPECT_EQ(output.target_tier, Tier::DISK);
+    EXPECT_EQ(output.disk_block, 61);
+    EXPECT_EQ(output.device_blocks, (std::vector<BlockIdxType>{51}));
+}
+
+TEST(BlockTransferRequestConverterTest, ConvertsDiskToDevice) {
+    const TransferDescriptor input = TransferDescriptor::diskToDevice(4, 71, {81});
+    MemoryOperationRequestPB request;
+
+    ASSERT_TRUE(BlockTransferRequestConverter::appendTransfer(input, groupSets(), request));
+    const MemoryOperationRequestPB::CopyItem& item = request.copy_items(0);
+    EXPECT_EQ(request.copy_direction(), MemoryOperationRequestPB::DISK2D);
+    EXPECT_EQ(item.group_set_id(), 4);
+    // DISK2D has no primary non-device backing; the field is left at its proto3 default.
+    EXPECT_EQ(item.backing_type(), MemoryOperationRequestPB::MEMORY);
+    EXPECT_EQ(item.src_backing_type(), MemoryOperationRequestPB::DISK);
+    EXPECT_EQ(item.src_disk_slot(), 71);
+    EXPECT_TRUE(isNullBlockIdx(item.mem_block()));
+    EXPECT_EQ(wireBlocks(item), (std::unordered_map<size_t, BlockIdxType>{{6, 81}}));
+
+    TransferDescriptor output;
+    ASSERT_TRUE(BlockTransferRequestConverter::decodeTransfer(request, 0, groupSets(), output));
+    EXPECT_EQ(output.group_set_id, 4);
+    EXPECT_EQ(output.source_tier, Tier::DISK);
+    EXPECT_EQ(output.target_tier, Tier::DEVICE);
+    EXPECT_EQ(output.disk_block, 71);
+    EXPECT_EQ(output.device_blocks, (std::vector<BlockIdxType>{81}));
+}
+
 TEST(BlockTransferRequestConverterTest, PreservesGroupSetForIdenticalBlockIds) {
     MemoryOperationRequestPB request;
     const TransferDescriptor first  = TransferDescriptor::deviceToHost(0, {7}, 8);

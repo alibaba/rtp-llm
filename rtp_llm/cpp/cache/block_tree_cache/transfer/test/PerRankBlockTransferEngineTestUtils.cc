@@ -3,8 +3,10 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <cstdint>
 #include <cstdio>
 #include <cstdlib>
+#include <cstring>
 #include <utility>
 #include <vector>
 
@@ -171,7 +173,8 @@ std::shared_ptr<BlockTreeDiskBlockPool> makeDiskPool(size_t                     
                                                      size_t                       usable_count,
                                                      const std::string&           work_dir,
                                                      std::unique_ptr<DiskBlockIO> io,
-                                                     const std::string&           pool_name) {
+                                                     const std::string&           pool_name,
+                                                     bool                         buffered_io) {
     const size_t stride_bytes = ((payload_bytes + 4095) / 4096) * 4096;
 
     auto config             = std::make_shared<BlockTreeDiskBlockPoolConfig>();
@@ -183,11 +186,110 @@ std::shared_ptr<BlockTreeDiskBlockPool> makeDiskPool(size_t                     
     config->disk_size_bytes = stride_bytes * (usable_count + 1);
     config->payload_bytes   = payload_bytes;
     config->stride_bytes    = stride_bytes;
-    config->buffered_io     = true;
+    config->buffered_io     = buffered_io;
 
     auto pool = std::make_shared<BlockTreeDiskBlockPool>(config, std::move(io));
     RTP_LLM_CHECK(pool->init());
     return pool;
+}
+
+StatusDiskBlockIO::StatusDiskBlockIO(DiskBlockIOStatus status): status_(status) {}
+
+DiskBlockIOStatus StatusDiskBlockIO::openAndPreallocate(const std::string&, size_t, bool) {
+    return DiskBlockIOStatus::OK;
+}
+
+DiskBlockIOStatus StatusDiskBlockIO::read(uint64_t, void*, size_t) {
+    return status_;
+}
+
+DiskBlockIOStatus StatusDiskBlockIO::write(uint64_t, const void*, size_t) {
+    return status_;
+}
+
+DiskBlockIOStatus StatusDiskBlockIO::read(const std::vector<DiskRead>&) {
+    return status_;
+}
+
+DiskBlockIOStatus StatusDiskBlockIO::write(const std::vector<DiskWrite>&) {
+    return status_;
+}
+
+void StatusDiskBlockIO::close() {}
+
+std::string StatusDiskBlockIO::debugString() const {
+    return "StatusDiskBlockIO";
+}
+
+void StatusDiskBlockIO::setStatus(DiskBlockIOStatus status) {
+    status_ = status;
+}
+
+DiskBlockIOStatus DirectAlignmentDiskBlockIO::openAndPreallocate(const std::string&, size_t bytes, bool buffered_io) {
+    data_.assign(bytes, 0);
+    buffered_io_ = buffered_io;
+    return DiskBlockIOStatus::OK;
+}
+
+DiskBlockIOStatus DirectAlignmentDiskBlockIO::read(uint64_t offset, void* dst, size_t bytes) {
+    if (!aligned(offset, dst, bytes) || offset + bytes > data_.size()) {
+        return DiskBlockIOStatus::ALIGNMENT_ERROR;
+    }
+    std::memcpy(dst, data_.data() + offset, bytes);
+    last_read_bytes_ = bytes;
+    return DiskBlockIOStatus::OK;
+}
+
+DiskBlockIOStatus DirectAlignmentDiskBlockIO::write(uint64_t offset, const void* src, size_t bytes) {
+    if (!aligned(offset, src, bytes) || offset + bytes > data_.size()) {
+        return DiskBlockIOStatus::ALIGNMENT_ERROR;
+    }
+    std::memcpy(data_.data() + offset, src, bytes);
+    last_write_bytes_ = bytes;
+    return DiskBlockIOStatus::OK;
+}
+
+DiskBlockIOStatus DirectAlignmentDiskBlockIO::read(const std::vector<DiskRead>& reads) {
+    for (const DiskRead& item : reads) {
+        const DiskBlockIOStatus status = read(item.offset, item.buffer, item.bytes);
+        if (status != DiskBlockIOStatus::OK) {
+            return status;
+        }
+    }
+    return DiskBlockIOStatus::OK;
+}
+
+DiskBlockIOStatus DirectAlignmentDiskBlockIO::write(const std::vector<DiskWrite>& writes) {
+    for (const DiskWrite& item : writes) {
+        const DiskBlockIOStatus status = write(item.offset, item.buffer, item.bytes);
+        if (status != DiskBlockIOStatus::OK) {
+            return status;
+        }
+    }
+    return DiskBlockIOStatus::OK;
+}
+
+void DirectAlignmentDiskBlockIO::close() {}
+
+std::string DirectAlignmentDiskBlockIO::debugString() const {
+    return "DirectAlignmentDiskBlockIO";
+}
+
+size_t DirectAlignmentDiskBlockIO::lastReadBytes() const {
+    return last_read_bytes_;
+}
+
+size_t DirectAlignmentDiskBlockIO::lastWriteBytes() const {
+    return last_write_bytes_;
+}
+
+bool DirectAlignmentDiskBlockIO::bufferedIo() const {
+    return buffered_io_;
+}
+
+bool DirectAlignmentDiskBlockIO::aligned(uint64_t offset, const void* buffer, size_t bytes) {
+    const auto addr = reinterpret_cast<uintptr_t>(buffer);
+    return offset % kAlignment == 0 && addr % kAlignment == 0 && bytes % kAlignment == 0;
 }
 
 BlockIdxType poolMalloc(IBlockPool& pool) {

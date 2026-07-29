@@ -30,16 +30,11 @@ struct HostZeroTile {
     size_t bytes{0};
 };
 
-struct HostPayloadView {
-    void*  base{nullptr};
-    size_t payload_bytes{0};
-};
-
 struct DeviceHostCopyPlan {
     bool                            device_to_host{false};
     bool                            single_device{true};
     size_t                          group_set_id{0};
-    HostPayloadView                 host;
+    HostBufferView                  host;
     std::vector<DeviceHostCopyTile> copy_tiles;
     std::vector<HostZeroTile>       zero_tiles;
 };

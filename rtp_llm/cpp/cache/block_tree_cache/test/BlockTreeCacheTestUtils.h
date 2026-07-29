@@ -4,6 +4,7 @@
 #include <deque>
 #include <memory>
 #include <mutex>
+#include <optional>
 #include <string>
 #include <vector>
 
@@ -91,7 +92,10 @@ public:
     static void setPerRankBlockTransferEngineForTest(BlockTreeCache&               cache,
                                                      PerRankBlockTransferEnginePtr per_rank_transfer_engine);
     static void runMaintenanceForTest(BlockTreeCache& cache);
-    static bool demoteOneForGroupSetForTest(BlockTreeCache& cache, size_t group_set_id, Tier tier);
+    static bool demoteOneForGroupSetForTest(BlockTreeCache&     cache,
+                                            size_t              group_set_id,
+                                            Tier                tier,
+                                            std::optional<Tier> target_override = std::nullopt);
     static int  reclaimBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier = Tier::DEVICE);
     static int  pendingTasksForTest(const BlockTreeCache& cache);
 

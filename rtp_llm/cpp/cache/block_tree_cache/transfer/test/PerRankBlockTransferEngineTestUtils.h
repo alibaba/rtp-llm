@@ -49,7 +49,52 @@ std::shared_ptr<BlockTreeDiskBlockPool> makeDiskPool(size_t                     
                                                      size_t                       usable_count,
                                                      const std::string&           work_dir,
                                                      std::unique_ptr<DiskBlockIO> io = nullptr,
-                                                     const std::string& pool_name    = "per_rank_transfer_engine_disk");
+                                                     const std::string& pool_name    = "per_rank_transfer_engine_disk",
+                                                     bool               buffered_io  = true);
+
+class StatusDiskBlockIO: public DiskBlockIO {
+public:
+    explicit StatusDiskBlockIO(DiskBlockIOStatus status);
+
+    DiskBlockIOStatus openAndPreallocate(const std::string&, size_t, bool) override;
+    DiskBlockIOStatus read(uint64_t, void*, size_t) override;
+    DiskBlockIOStatus write(uint64_t, const void*, size_t) override;
+    DiskBlockIOStatus read(const std::vector<DiskRead>&) override;
+    DiskBlockIOStatus write(const std::vector<DiskWrite>&) override;
+    void              close() override;
+    std::string       debugString() const override;
+
+    void setStatus(DiskBlockIOStatus status);
+
+private:
+    DiskBlockIOStatus status_;
+};
+
+// Deterministically enforces O_DIRECT alignment.
+class DirectAlignmentDiskBlockIO: public DiskBlockIO {
+public:
+    static constexpr size_t kAlignment = 4096;
+
+    DiskBlockIOStatus openAndPreallocate(const std::string&, size_t bytes, bool buffered_io) override;
+    DiskBlockIOStatus read(uint64_t offset, void* dst, size_t bytes) override;
+    DiskBlockIOStatus write(uint64_t offset, const void* src, size_t bytes) override;
+    DiskBlockIOStatus read(const std::vector<DiskRead>& reads) override;
+    DiskBlockIOStatus write(const std::vector<DiskWrite>& writes) override;
+    void              close() override;
+    std::string       debugString() const override;
+
+    size_t lastReadBytes() const;
+    size_t lastWriteBytes() const;
+    bool   bufferedIo() const;
+
+private:
+    static bool aligned(uint64_t offset, const void* buffer, size_t bytes);
+
+    std::vector<char> data_;
+    size_t            last_read_bytes_{0};
+    size_t            last_write_bytes_{0};
+    bool              buffered_io_{true};
+};
 
 BlockIdxType poolMalloc(IBlockPool& pool);
 

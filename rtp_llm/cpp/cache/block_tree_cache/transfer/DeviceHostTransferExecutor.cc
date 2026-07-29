@@ -5,7 +5,6 @@
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/models_py/bindings/NoBlockCopy.h"
 
@@ -19,16 +18,26 @@ DeviceHostTransferExecutor::DeviceHostTransferExecutor(DeviceHostCopyOptions opt
 
 DeviceHostTransferExecutor::~DeviceHostTransferExecutor() = default;
 
-TransferStatus DeviceHostTransferExecutor::execute(const TransferDescriptor& desc, const GroupSet& group_set) {
-    bool device_to_host = (desc.source_tier == Tier::DEVICE && desc.target_tier == Tier::HOST);
-    return lowerAndExecute(desc, group_set, device_to_host);
+TransferStatus
+DeviceHostTransferExecutor::deviceToHost(const TransferDescriptor& desc,
+                                         const GroupSet&           group_set,
+                                         HostBufferView            host) {
+    return lowerAndExecute(desc, group_set, /*device_to_host=*/true, host);
+}
+
+TransferStatus
+DeviceHostTransferExecutor::hostToDevice(HostBufferView            host,
+                                         const TransferDescriptor& desc,
+                                         const GroupSet&           group_set) {
+    return lowerAndExecute(desc, group_set, /*device_to_host=*/false, host);
 }
 
 TransferStatus DeviceHostTransferExecutor::lowerAndExecute(const TransferDescriptor& desc,
                                                            const GroupSet&           group_set,
-                                                           bool                      device_to_host) {
+                                                           bool                      device_to_host,
+                                                           HostBufferView            host) {
     TransferStatus lower_status = TransferStatus::OK;
-    auto           plan         = lowerPlan(desc, group_set, device_to_host, lower_status);
+    auto           plan         = lowerPlan(desc, group_set, device_to_host, host, lower_status);
     if (lower_status != TransferStatus::OK) {
         return lower_status;
     }
@@ -57,25 +66,25 @@ TransferStatus DeviceHostTransferExecutor::lowerAndExecute(const TransferDescrip
 DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescriptor& desc,
                                                          const GroupSet&           group_set,
                                                          bool                      device_to_host,
+                                                         HostBufferView            host,
                                                          TransferStatus&           out_status) const {
     DeviceHostCopyPlan plan;
     plan.device_to_host = device_to_host;
     plan.group_set_id   = desc.group_set_id;
     out_status          = TransferStatus::OK;
 
-    const auto host_block = desc.host_block;
-    auto&      host_pool  = *group_set.hostPool();
-
-    void* host_base = host_pool.blockBuffer(host_block).addr;
-    if (!host_base) {
-        RTP_LLM_LOG_WARNING("null host address for block %d", host_block);
-        out_status = TransferStatus::DEVICE_IO_ERROR;
+    const size_t required_host_bytes = group_set.payloadBytes();
+    if (!isValidHostBufferView(host, required_host_bytes, required_host_bytes)) {
+        RTP_LLM_LOG_WARNING("invalid host buffer group=%zu payload=%zu capacity=%zu required=%zu",
+                            desc.group_set_id,
+                            host.payload_bytes,
+                            host.capacity_bytes,
+                            required_host_bytes);
+        out_status = host.base == nullptr ? TransferStatus::DEVICE_IO_ERROR : TransferStatus::INVALID_ARGS;
         return plan;
     }
 
-    const size_t required_host_bytes = group_set.payloadBytes();
-
-    plan.host.base          = host_base;
+    plan.host.base          = host.base;
     plan.host.payload_bytes = required_host_bytes;
 
     const auto& device_blocks = desc.device_blocks;
@@ -104,7 +113,7 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
             const size_t kv_bytes        = group_base.kv_block_stride_bytes;
             const size_t scale_bytes     = group_base.kv_scale_stride_bytes;
             const size_t layer_bytes     = kv_bytes + scale_bytes;
-            auto*        layer_host_addr = static_cast<uint8_t*>(host_base) + host_offset;
+            auto*        layer_host_addr = static_cast<uint8_t*>(host.base) + host_offset;
 
             if (!has_device_block) {
                 if (device_to_host) {

@@ -517,6 +517,8 @@ message MemoryOperationRequestPB {
         D2H = 1;
         H2DISK = 2;
         DISK2H = 3;
+        D2DISK = 4;
+        DISK2D = 5;
     }
     enum BackingType {
         MEMORY = 0;

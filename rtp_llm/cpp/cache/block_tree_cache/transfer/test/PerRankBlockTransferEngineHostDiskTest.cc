@@ -16,6 +16,8 @@ namespace rtp_llm {
 namespace {
 
 using block_transfer_engine_test::TempDirGuard;
+using block_transfer_engine_test::DirectAlignmentDiskBlockIO;
+using block_transfer_engine_test::StatusDiskBlockIO;
 using block_transfer_engine_test::expectStatus;
 using block_transfer_engine_test::makeDescriptor;
 using block_transfer_engine_test::makeDiskPool;
@@ -26,34 +28,6 @@ using block_transfer_engine_test::makeTestGroupSet;
 using block_transfer_engine_test::makeTestTopology;
 using block_transfer_engine_test::poolMalloc;
 using block_transfer_engine_test::submitSucceeded;
-
-class StatusDiskBlockIO: public DiskBlockIO {
-public:
-    explicit StatusDiskBlockIO(DiskBlockIOStatus status): status_(status) {}
-
-    DiskBlockIOStatus openAndPreallocate(const std::string&, size_t, bool) override {
-        return DiskBlockIOStatus::OK;
-    }
-    DiskBlockIOStatus read(uint64_t, void*, size_t) override {
-        return status_;
-    }
-    DiskBlockIOStatus write(uint64_t, const void*, size_t) override {
-        return status_;
-    }
-    DiskBlockIOStatus read(const std::vector<DiskRead>&) override {
-        return status_;
-    }
-    DiskBlockIOStatus write(const std::vector<DiskWrite>&) override {
-        return status_;
-    }
-    void        close() override {}
-    std::string debugString() const override {
-        return "StatusDiskBlockIO";
-    }
-
-private:
-    DiskBlockIOStatus status_;
-};
 
 GroupSetPtr makeHostDiskGroup(size_t                                  group_set_id,
                               std::shared_ptr<HostBlockPool>          host_pool,
@@ -118,6 +92,49 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitHostToDiskRoundTrip) {
 
     host_pool_->free(host_block);
     disk_pool_->free(disk_slot);
+}
+
+TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskDirectIoWritesAlignedStrideAndZeroPads) {
+    auto  owned_io  = std::make_unique<DirectAlignmentDiskBlockIO>();
+    auto* direct_io = owned_io.get();
+    auto  direct_disk =
+        makeDiskPool(host_block_size_, 4, temp_dir_.path, std::move(owned_io), "host_disk_direct", false);
+    auto         group  = makeHostDiskGroup(0, host_pool_, direct_disk, host_block_size_);
+    auto         engine = makeEngine({group});
+    const size_t stride = direct_disk->strideBytes();
+    ASSERT_GT(stride, host_block_size_);
+    EXPECT_FALSE(direct_io->bufferedIo());
+
+    const BlockIdxType host_block = poolMalloc(*host_pool_);
+    ASSERT_NE(host_block, NULL_BLOCK_IDX);
+    uint8_t* host_data = static_cast<uint8_t*>(host_pool_->blockBuffer(host_block).addr);
+    // Seed non-zero padding to verify that the executor clears it.
+    for (size_t i = 0; i < stride; ++i) {
+        host_data[i] = static_cast<uint8_t>((i * 7 + 1) & 0xFF);
+    }
+
+    const auto disk_slot = poolMalloc(*direct_disk);
+    ASSERT_NE(disk_slot, NULL_BLOCK_IDX);
+    ASSERT_TRUE(submitSucceeded(engine, makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_slot)));
+    EXPECT_EQ(direct_io->lastWriteBytes(), stride);
+
+    const BlockIdxType dst_block = poolMalloc(*host_pool_);
+    ASSERT_NE(dst_block, NULL_BLOCK_IDX);
+    uint8_t* dst_data = static_cast<uint8_t*>(host_pool_->blockBuffer(dst_block).addr);
+    std::memset(dst_data, 0xAB, stride);
+    ASSERT_TRUE(submitSucceeded(engine, makeDescriptor(Tier::DISK, Tier::HOST, {}, dst_block, disk_slot)));
+    EXPECT_EQ(direct_io->lastReadBytes(), stride);
+
+    for (size_t i = 0; i < host_block_size_; ++i) {
+        EXPECT_EQ(dst_data[i], static_cast<uint8_t>((i * 7 + 1) & 0xFF)) << "payload byte " << i;
+    }
+    for (size_t i = host_block_size_; i < stride; ++i) {
+        EXPECT_EQ(dst_data[i], 0) << "padding byte " << i;
+    }
+
+    host_pool_->free(host_block);
+    host_pool_->free(dst_block);
+    direct_disk->free(disk_slot);
 }
 
 TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitRejectsMissingRequiredBlocks) {

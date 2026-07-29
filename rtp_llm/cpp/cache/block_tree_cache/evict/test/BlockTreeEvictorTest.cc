@@ -642,6 +642,34 @@ TEST_F(BlockTreeEvictorTest, PrepareMoveRejectsNewRequestPinWithoutAllocatingTar
     EXPECT_EQ(host_pool->freeBlocksNum(), 1u);
 }
 
+TEST_F(BlockTreeEvictorTest, PrepareMoveRejectsSourceBlockIdentityMismatch) {
+    auto host_pool = makePageableHostPool(2);
+    auto disk_pool = makeTestDiskPool(1, "block_tree_evictor_prepare_identity");
+    ASSERT_NE(host_pool, nullptr);
+    ASSERT_NE(disk_pool, nullptr);
+    group_->setHostPool(host_pool);
+    group_->setDiskPool(disk_pool);
+
+    const BlockIdxType source = group_->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+    const BlockIdxType other  = group_->allocateSingleBlock(Tier::HOST, BlockRefType::REQUEST);
+    ASSERT_FALSE(isNullBlockIdx(source));
+    ASSERT_FALSE(isNullBlockIdx(other));
+    auto result = insert({100}, {{makeResource(Tier::HOST, source)}});
+    ASSERT_NE(result.leaf, nullptr);
+
+    EvictionMove stale  = BlockTreeEvictorTestPeer::makeMove(*evictor_, result.leaf, 0, Tier::HOST, Tier::DISK);
+    stale.source_blocks = {other};
+    EXPECT_FALSE(BlockTreeEvictorTestPeer::prepareMove(*evictor_, stale));
+    EXPECT_TRUE(stale.target_blocks.empty());
+    EXPECT_EQ(result.leaf->group_set_resources[0].host_block, source);
+    EXPECT_EQ(result.leaf->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
+    EXPECT_EQ(disk_pool->freeBlocksNum(), 1u);
+
+    result.leaf->group_set_resources[0].host_block = NULL_BLOCK_IDX;
+    group_->releaseSingleBlock(Tier::HOST, source, BlockRefType::BLOCK_CACHE);
+    group_->releaseSingleBlock(Tier::HOST, other, BlockRefType::REQUEST);
+}
+
 TEST_F(BlockTreeEvictorTest, PrepareMovePreservesLoadOwner) {
     auto host_pool = makePageableHostPool(1);
     auto disk_pool = makeTestDiskPool(1, "block_tree_evictor_load");

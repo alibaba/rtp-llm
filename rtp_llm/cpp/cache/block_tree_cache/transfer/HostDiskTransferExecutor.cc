@@ -1,7 +1,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/HostDiskTransferExecutor.h"
 
+#include <cstring>
+
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -33,48 +34,60 @@ TransferStatus HostDiskTransferExecutor::blockIOStatusToTransferStatus(BlockIOSt
         case BlockIOStatus::ALIGNMENT_ERROR:
             return TransferStatus::INVALID_ARGS;
         case BlockIOStatus::IO_ERROR:
-            return TransferStatus::DISK_IO_ERROR;
         case BlockIOStatus::PARTIAL_FAILURE:
             return TransferStatus::DISK_IO_ERROR;
     }
     return TransferStatus::DISK_IO_ERROR;
 }
 
-TransferStatus HostDiskTransferExecutor::hostToDisk(const TransferDescriptor& desc, const GroupSet& group_set) const {
-    const auto  host_block = desc.host_block;
-    const auto  disk_block = desc.disk_block;
-    auto&       host_pool  = *group_set.hostPool();
-    auto&       disk_pool  = *group_set.diskPool();
-    const void* host_base  = host_pool.blockBuffer(host_block).addr;
-    if (!host_base) {
-        RTP_LLM_LOG_WARNING("null host buffer");
+TransferStatus
+HostDiskTransferExecutor::hostToDisk(HostBufferView            host,
+                                     const TransferDescriptor& desc,
+                                     const GroupSet&           group_set) const {
+    const auto   disk_block  = desc.disk_block;
+    auto&        disk_pool   = *group_set.diskPool();
+    const size_t payload     = group_set.payloadBytes();
+    const size_t disk_stride = disk_pool.strideBytes();
+    if (!isValidHostBufferView(host, payload, disk_stride)) {
+        RTP_LLM_LOG_WARNING("invalid host buffer for host->disk, disk=%d payload=%zu stride=%zu capacity=%zu",
+                            disk_block,
+                            payload,
+                            disk_stride,
+                            host.capacity_bytes);
         return TransferStatus::DISK_IO_ERROR;
     }
-    const size_t bytes  = group_set.payloadBytes();
-    const auto   status = disk_pool.write(disk_block, host_base, bytes);
+    // Write a full disk stride so O_DIRECT length stays block-aligned; zero the
+    // [payload, stride) padding so no uninitialized host memory reaches disk.
+    if (disk_stride > payload) {
+        std::memset(static_cast<uint8_t*>(host.base) + payload, 0, disk_stride - payload);
+    }
+    const auto status = disk_pool.write(disk_block, host.base, disk_stride);
     if (status != BlockIOStatus::OK) {
-        RTP_LLM_LOG_WARNING(
-            "write failed, host=%d, disk=%d, status=%s", host_block, disk_block, blockIOStatusName(status));
+        RTP_LLM_LOG_WARNING("write failed, disk=%d, status=%s", disk_block, blockIOStatusName(status));
         return blockIOStatusToTransferStatus(status);
     }
     return TransferStatus::OK;
 }
 
-TransferStatus HostDiskTransferExecutor::diskToHost(const TransferDescriptor& desc, const GroupSet& group_set) const {
-    const auto disk_block = desc.disk_block;
-    const auto host_block = desc.host_block;
-    auto&      host_pool  = *group_set.hostPool();
-    auto&      disk_pool  = *group_set.diskPool();
-    void*      host_base  = host_pool.blockBuffer(host_block).addr;
-    if (!host_base) {
-        RTP_LLM_LOG_WARNING("null host buffer");
+TransferStatus
+HostDiskTransferExecutor::diskToHost(const TransferDescriptor& desc,
+                                     const GroupSet&           group_set,
+                                     HostBufferView            host) const {
+    const auto   disk_block  = desc.disk_block;
+    auto&        disk_pool   = *group_set.diskPool();
+    const size_t payload     = group_set.payloadBytes();
+    const size_t disk_stride = disk_pool.strideBytes();
+    if (!isValidHostBufferView(host, payload, disk_stride)) {
+        RTP_LLM_LOG_WARNING("invalid host buffer for disk->host, disk=%d payload=%zu stride=%zu capacity=%zu",
+                            disk_block,
+                            payload,
+                            disk_stride,
+                            host.capacity_bytes);
         return TransferStatus::DISK_IO_ERROR;
     }
-    const size_t bytes  = group_set.payloadBytes();
-    const auto   status = disk_pool.read(disk_block, host_base, bytes);
+    const auto status = disk_pool.read(disk_block, host.base, disk_stride);
     if (status != BlockIOStatus::OK) {
-        RTP_LLM_LOG_WARNING(
-            "read failed, disk=%d, host=%d, status=%s", disk_block, host_block, blockIOStatusName(status));
+        RTP_LLM_LOG_WARNING("read failed, disk=%d, status=%s", disk_block, blockIOStatusName(status));
         return blockIOStatusToTransferStatus(status);
     }
     return TransferStatus::OK;

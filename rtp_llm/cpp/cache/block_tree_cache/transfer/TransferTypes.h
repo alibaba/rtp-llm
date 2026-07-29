@@ -14,6 +14,7 @@ enum class TransferStatus {
     INVALID_ARGS,
     DEVICE_IO_ERROR,
     DISK_IO_ERROR,
+    RESOURCE_EXHAUSTED,
 };
 
 struct DeviceHostCopyOptions {
@@ -22,6 +23,19 @@ struct DeviceHostCopyOptions {
     bool   staged_sm_copy_enabled{false};
     bool   cuda_batch_copy_enabled{true};
 };
+
+struct HostBufferView {
+    void*  base{nullptr};
+    size_t payload_bytes{0};
+    // Safe access range from base; disk I/O may require capacity beyond the logical payload.
+    size_t capacity_bytes{0};
+};
+
+inline bool
+isValidHostBufferView(const HostBufferView& view, size_t required_payload_bytes, size_t required_access_bytes) {
+    return view.base != nullptr && view.payload_bytes <= view.capacity_bytes
+           && view.payload_bytes >= required_payload_bytes && view.capacity_bytes >= required_access_bytes;
+}
 
 struct TransferDescriptor {
     static TransferDescriptor
@@ -63,6 +77,28 @@ struct TransferDescriptor {
         desc.target_tier  = Tier::HOST;
         desc.disk_block   = disk_block;
         desc.host_block   = host_block;
+        return desc;
+    }
+
+    static TransferDescriptor
+    deviceToDisk(size_t group_set_id, std::vector<BlockIdxType> device_blocks, BlockIdxType disk_block) {
+        TransferDescriptor desc;
+        desc.group_set_id  = group_set_id;
+        desc.source_tier   = Tier::DEVICE;
+        desc.target_tier   = Tier::DISK;
+        desc.device_blocks = std::move(device_blocks);
+        desc.disk_block    = disk_block;
+        return desc;
+    }
+
+    static TransferDescriptor
+    diskToDevice(size_t group_set_id, BlockIdxType disk_block, std::vector<BlockIdxType> device_blocks) {
+        TransferDescriptor desc;
+        desc.group_set_id  = group_set_id;
+        desc.source_tier   = Tier::DISK;
+        desc.target_tier   = Tier::DEVICE;
+        desc.disk_block    = disk_block;
+        desc.device_blocks = std::move(device_blocks);
         return desc;
     }
 

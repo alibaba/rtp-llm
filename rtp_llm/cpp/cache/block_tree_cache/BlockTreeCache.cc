@@ -68,7 +68,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
         mutex_,
         config_.memory_cache_disk_sync_timeout_ms,
         config_.memory_cache_sync_timeout_ms,
-        [this](size_t group_set_id, Tier tier) { return reclaimOneForGroupSet(group_set_id, tier); },
+        config_.enable_device_cache,
         [this](bool tree_data_mutated, bool check_watermark) {
             if (tree_data_mutated) {
                 ++mutation_version_;
@@ -445,19 +445,6 @@ void BlockTreeCache::onBlocksReleased() {
 bool BlockTreeCache::cancelLoad(const std::shared_ptr<AsyncContext>& context) {
     std::lock_guard<std::mutex> lock(mutex_);
     return loader_.cancelLoadLocked(context);
-}
-
-bool BlockTreeCache::reclaimOneForGroupSet(size_t group_set_id, Tier tier) {
-    std::lock_guard<std::mutex> lock(mutex_);
-    if (group_set_id >= group_sets_.size()) {
-        return false;
-    }
-    auto eviction_move = evictor_.chooseVictim(group_set_id, tier);
-    if (!eviction_move.has_value()) {
-        return false;
-    }
-    eviction_move->target_tier = Tier::NONE;
-    return evictor_.submitLocked(*eviction_move);
 }
 
 void BlockTreeCache::reserveInFlightDeviceReleaseCreditsLocked(

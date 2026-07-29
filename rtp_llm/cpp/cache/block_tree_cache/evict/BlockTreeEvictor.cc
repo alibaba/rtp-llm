@@ -670,6 +670,7 @@ bool BlockTreeEvictor::prepareMove(EvictionMove& eviction_move) {
     if (!source_tier_valid || eviction_move.source_blocks.empty()
         || resource.transfer_state != GroupSetTransferState::IDLE
         || group_set.getTopTier(resource) != eviction_move.source_tier
+        || group_set.getBlocks(resource, eviction_move.source_tier) != eviction_move.source_blocks
         || !group_set.isEvictable(*node, eviction_move.source_tier)) {
         return reject_stale_move();
     }
