@@ -29,6 +29,7 @@ class GenerateConfigTest(TestCase):
             "MEMORY_CACHE_DISK_SIZE_MB": "4096",
             "MEMORY_CACHE_DISK_BUFFERED_IO": "0",
             "MEMORY_CACHE_DISK_SYNC_TIMEOUT_MS": "12345",
+            "MEMORY_CACHE_DISK_STAGING_BLOCK_COUNT": "8",
             "ENABLE_GPU_PREFIX_TREE": "1",
             "ENABLE_PREFIX_TREE_MEMORY_CACHE": "1",
             "ENABLE_LEGACY_MEMORY_CONNECTOR_FALLBACK": "0",
@@ -46,6 +47,7 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(config.memory_cache_disk_size_mb, 4096)
         self.assertFalse(config.memory_cache_disk_buffered_io)
         self.assertEqual(config.memory_cache_disk_sync_timeout_ms, 12345)
+        self.assertEqual(config.memory_cache_disk_staging_block_count, 8)
         self.assertTrue(config.enable_gpu_prefix_tree)
         self.assertTrue(config.enable_prefix_tree_memory_cache)
         self.assertFalse(config.enable_legacy_memory_connector_fallback)
@@ -58,6 +60,27 @@ class GenerateConfigTest(TestCase):
         self.assertFalse(config.enable_gpu_prefix_tree)
         self.assertFalse(config.enable_prefix_tree_memory_cache)
         self.assertTrue(config.enable_legacy_memory_connector_fallback)
+        self.assertEqual(config.memory_cache_disk_staging_block_count, 4)
+
+    def test_kv_cache_config_pickle_round_trip_includes_staging_fields(self):
+        import pickle
+
+        from rtp_llm.ops import KVCacheConfig
+
+        config = KVCacheConfig()
+        config.memory_cache_disk_staging_block_count = 8
+
+        state = config.__getstate__()
+        self.assertEqual(len(state), 55)
+
+        restored = pickle.loads(pickle.dumps(config))
+        self.assertEqual(restored.memory_cache_disk_staging_block_count, 8)
+
+        # Legacy 43/54-element states must unpickle with the staging default.
+        for legacy_size in (43, 54):
+            legacy = KVCacheConfig.__new__(KVCacheConfig)
+            legacy.__setstate__(tuple(state)[:legacy_size])
+            self.assertEqual(legacy.memory_cache_disk_staging_block_count, 4)
 
     def test_engine_config_propagates_role_to_parallelism_config(self):
         py_env_configs = PyEnvConfigs()

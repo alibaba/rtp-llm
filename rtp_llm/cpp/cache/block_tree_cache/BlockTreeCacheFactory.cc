@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <algorithm>
+#include <chrono>
 #include <limits>
 #include <string>
 #include <unordered_set>
@@ -434,9 +435,15 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
             checkedTimeout(kv_cache_config.memory_cache_disk_sync_timeout_ms, "memory_cache_disk_sync_timeout_ms") :
             config.memory_cache_sync_timeout_ms;
 
-    if (disk_enabled && config.device_disk_staging_block_count == 0) {
-        RTP_LLM_LOG_ERROR("createBlockTreeCache: device_disk_staging_block_count must be > 0 for direct transfer");
-        return nullptr;
+    if (disk_enabled) {
+        const int64_t staging_block_count = kv_cache_config.memory_cache_disk_staging_block_count;
+        if (staging_block_count <= 0
+            || static_cast<uint64_t>(staging_block_count) > std::numeric_limits<size_t>::max()) {
+            RTP_LLM_LOG_ERROR("createBlockTreeCache: memory_cache_disk_staging_block_count must be > 0, got %ld",
+                              staging_block_count);
+            return nullptr;
+        }
+        config.device_disk_staging_block_count = static_cast<size_t>(staging_block_count);
     }
 
     auto per_rank_engine = std::make_shared<PerRankBlockTransferEngine>(

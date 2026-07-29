@@ -56,8 +56,7 @@ ErrorInfo transferStatusToErrorInfo(TransferStatus status) {
 
 PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> group_sets,
                                                        DeviceHostCopyOptions    device_host_options,
-                                                       size_t                   device_disk_staging_block_count,
-                                                       StagingPinMemoryFn       staging_pin_memory):
+                                                       size_t                   device_disk_staging_block_count):
     group_sets_(std::move(group_sets)),
     device_host_executor_(std::make_unique<DeviceHostTransferExecutor>(std::move(device_host_options))),
     host_disk_executor_(std::make_unique<HostDiskTransferExecutor>()) {
@@ -65,11 +64,8 @@ PerRankBlockTransferEngine::PerRankBlockTransferEngine(std::vector<GroupSetPtr> 
         return group_set != nullptr && group_set->diskPool() != nullptr;
     });
     if (any_disk_pool) {
-        device_disk_executor_ = std::make_unique<DeviceDiskTransferExecutor>(*device_host_executor_,
-                                                                             *host_disk_executor_,
-                                                                             group_sets_,
-                                                                             device_disk_staging_block_count,
-                                                                             std::move(staging_pin_memory));
+        device_disk_executor_ = std::make_unique<DeviceDiskTransferExecutor>(
+            *device_host_executor_, *host_disk_executor_, group_sets_, device_disk_staging_block_count);
     }
 }
 

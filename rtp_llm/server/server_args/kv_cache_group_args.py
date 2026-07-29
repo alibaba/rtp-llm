@@ -191,6 +191,14 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="磁盘 KV cache 同步超时，单位毫秒。",
     )
     kv_cache_group.add_argument(
+        "--memory_cache_disk_staging_block_count",
+        env_name="MEMORY_CACHE_DISK_STAGING_BLOCK_COUNT",
+        bind_to=(kv_cache_config, "memory_cache_disk_staging_block_count"),
+        type=int,
+        default=4,
+        help="单个 rank Device<->Disk 直传的 Host staging block 数，决定直传并发容量。",
+    )
+    kv_cache_group.add_argument(
         "--enable_gpu_prefix_tree",
         env_name="ENABLE_GPU_PREFIX_TREE",
         bind_to=(kv_cache_config, "enable_gpu_prefix_tree"),

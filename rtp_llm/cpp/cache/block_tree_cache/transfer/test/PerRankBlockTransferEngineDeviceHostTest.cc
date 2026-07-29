@@ -21,6 +21,7 @@
 
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceDiskTransferExecutor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostCopyStrategy.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"
@@ -737,35 +738,72 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceHostDiskHostDeviceRoundTri
     EXPECT_EQ(readDeviceLayer(device_pool, 0, device_block), expected);
 }
 
-class BlockingWriteDiskBlockIO: public DiskBlockIO {
+// Blocks the selected operation until released; payloads land in memory so blocked
+// transfers can still be verified after release.
+class BlockingDiskBlockIO: public DiskBlockIO {
 public:
-    DiskBlockIOStatus openAndPreallocate(const std::string&, size_t, bool) override {
+    enum class BlockOn {
+        READ,
+        WRITE,
+    };
+
+    explicit BlockingDiskBlockIO(BlockOn block_on): block_on_(block_on) {}
+
+    DiskBlockIOStatus openAndPreallocate(const std::string&, size_t bytes, bool) override {
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        data_.resize(bytes, 0);
         return DiskBlockIOStatus::OK;
     }
-    DiskBlockIOStatus read(uint64_t, void*, size_t) override {
+    DiskBlockIOStatus read(uint64_t offset, void* dst, size_t bytes) override {
+        if (block_on_ == BlockOn::READ) {
+            blockUntilReleased();
+        }
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        if (offset + bytes > data_.size()) {
+            return DiskBlockIOStatus::INVALID_SIZE;
+        }
+        std::memcpy(dst, data_.data() + offset, bytes);
         return DiskBlockIOStatus::OK;
     }
-    DiskBlockIOStatus write(uint64_t, const void*, size_t) override {
-        blockUntilReleased();
+    DiskBlockIOStatus write(uint64_t offset, const void* src, size_t bytes) override {
+        if (block_on_ == BlockOn::WRITE) {
+            blockUntilReleased();
+        }
+        std::lock_guard<std::mutex> lock(data_mutex_);
+        if (offset + bytes > data_.size()) {
+            data_.resize(offset + bytes, 0);
+        }
+        std::memcpy(data_.data() + offset, src, bytes);
         return DiskBlockIOStatus::OK;
     }
-    DiskBlockIOStatus read(const std::vector<DiskRead>&) override {
+    DiskBlockIOStatus read(const std::vector<DiskRead>& reads) override {
+        for (const auto& item : reads) {
+            const auto status = read(item.offset, item.buffer, item.bytes);
+            if (status != DiskBlockIOStatus::OK) {
+                return status;
+            }
+        }
         return DiskBlockIOStatus::OK;
     }
-    DiskBlockIOStatus write(const std::vector<DiskWrite>&) override {
-        blockUntilReleased();
+    DiskBlockIOStatus write(const std::vector<DiskWrite>& writes) override {
+        for (const auto& item : writes) {
+            const auto status = write(item.offset, item.buffer, item.bytes);
+            if (status != DiskBlockIOStatus::OK) {
+                return status;
+            }
+        }
         return DiskBlockIOStatus::OK;
     }
     void        close() override {}
     std::string debugString() const override {
-        return "BlockingWriteDiskBlockIO";
+        return "BlockingDiskBlockIO";
     }
 
-    bool waitUntilWriting(std::chrono::milliseconds timeout) {
+    bool waitUntilBlocked(std::chrono::milliseconds timeout) {
         std::unique_lock<std::mutex> lock(mutex_);
-        return cv_.wait_for(lock, timeout, [this] { return writing_; });
+        return cv_.wait_for(lock, timeout, [this] { return blocked_; });
     }
-    void releaseWrites() {
+    void release() {
         std::lock_guard<std::mutex> lock(mutex_);
         released_ = true;
         cv_.notify_all();
@@ -774,21 +812,24 @@ public:
 private:
     void blockUntilReleased() {
         std::unique_lock<std::mutex> lock(mutex_);
-        writing_ = true;
+        blocked_ = true;
         cv_.notify_all();
         cv_.wait(lock, [this] { return released_; });
     }
 
+    const BlockOn           block_on_;
     std::mutex              mutex_;
     std::condition_variable cv_;
-    bool                    writing_{false};
+    bool                    blocked_{false};
     bool                    released_{false};
+    std::mutex              data_mutex_;
+    std::vector<char>       data_;
 };
 
-class BlockingWriteGuard {
+class BlockingIOGuard {
 public:
-    BlockingWriteGuard(BlockingWriteDiskBlockIO& io, std::thread& thread): io_(&io), thread_(&thread) {}
-    ~BlockingWriteGuard() {
+    BlockingIOGuard(BlockingDiskBlockIO& io, std::thread& thread): io_(&io), thread_(&thread) {}
+    ~BlockingIOGuard() {
         releaseAndJoin();
     }
 
@@ -796,7 +837,7 @@ public:
         if (io_ == nullptr) {
             return;
         }
-        io_->releaseWrites();
+        io_->release();
         if (thread_->joinable()) {
             thread_->join();
         }
@@ -804,8 +845,8 @@ public:
     }
 
 private:
-    BlockingWriteDiskBlockIO* io_;
-    std::thread*              thread_;
+    BlockingDiskBlockIO* io_;
+    std::thread*         thread_;
 };
 
 TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskDirectRoundTripWithoutHostPool) {
@@ -841,44 +882,21 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskDirectRoundTripWithout
     EXPECT_EQ(direct_io->lastReadBytes(), disk_pool->strideBytes());
 }
 
-TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskPinnedFailureFallsBackToAlignedPageableMemory) {
-    ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
-    TempDirGuard     temp_dir("per_rank_direct_pageable_fallback");
-    constexpr size_t payload_bytes = 80;
-    auto             owned_io      = std::make_unique<DirectAlignmentDiskBlockIO>();
-    auto*            direct_io     = owned_io.get();
-    auto disk_pool = makeDiskPool(payload_bytes, 2, temp_dir.path, std::move(owned_io), "device_disk_pageable", false);
-    auto device_pool  = makeDevicePool({{64, 16}}, 2, "per_rank_direct_pageable_device");
-    auto device_block = poolMalloc(*device_pool);
-    auto disk_block   = poolMalloc(*disk_pool);
-    ASSERT_NE(device_block, NULL_BLOCK_IDX);
-    ASSERT_NE(disk_block, NULL_BLOCK_IDX);
+TEST(TransientHostStagingPoolTest, PageableBackingServesLeasesWhenPinningDisabled) {
+    using Pool = DeviceDiskTransferExecutor::TransientHostStagingPool;
+    Pool pool(1, 4096, /*try_pin_memory=*/false);
 
-    auto   group = makeDeviceHostGroup(0, {device_pool}, nullptr, {makeGroupBase({0}, 64, 16)}, disk_pool);
-    size_t pin_attempts = 0;
-    auto   engine       = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{group},
-                                                               DeviceHostCopyOptions{},
-                                                               4,
-                                                               [&pin_attempts](const torch::Tensor&) -> torch::Tensor {
-                                                                   ++pin_attempts;
-                                                                   throw std::runtime_error("injected pin failure");
-                                                               });
+    auto lease = pool.tryAcquire();
+    ASSERT_TRUE(lease.has_value());
+    const auto view = lease->view(64);
+    ASSERT_NE(view.base, nullptr);
+    EXPECT_EQ(view.payload_bytes, 64u);
+    EXPECT_EQ(view.capacity_bytes, 4096u);
+    std::memset(view.base, 0xAB, view.payload_bytes);
 
-    fillDeviceLayer(device_pool, 0, device_block, {0x4A, 0xB7});
-    const auto expected = readDeviceLayer(device_pool, 0, device_block);
-    expectStatus(engine,
-                 makeDescriptor(Tier::DEVICE, Tier::DISK, {device_block}, NULL_BLOCK_IDX, disk_block, 0),
-                 TransferStatus::OK);
-    fillDeviceLayer(device_pool, 0, device_block, {0x00, 0x00});
-    expectStatus(engine,
-                 makeDescriptor(Tier::DISK, Tier::DEVICE, {device_block}, NULL_BLOCK_IDX, disk_block, 0),
-                 TransferStatus::OK);
-
-    EXPECT_EQ(pin_attempts, 1u);
-    EXPECT_FALSE(direct_io->bufferedIo());
-    EXPECT_EQ(direct_io->lastWriteBytes(), disk_pool->strideBytes());
-    EXPECT_EQ(direct_io->lastReadBytes(), disk_pool->strideBytes());
-    EXPECT_EQ(readDeviceLayer(device_pool, 0, device_block), expected);
+    EXPECT_FALSE(pool.tryAcquire().has_value());
+    lease.reset();
+    EXPECT_TRUE(pool.tryAcquire().has_value());
 }
 
 TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskStageFailureShortCircuitsAndReleasesStaging) {
@@ -914,14 +932,59 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskStageFailureShortCircu
                  TransferStatus::OK);
 }
 
-TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskStagingExhaustionFailsFast) {
+TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskStagingTransientExhaustionWaitsAndSucceeds) {
     ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
-    TempDirGuard     temp_dir("per_rank_direct_exhaustion");
+    TempDirGuard     temp_dir("per_rank_transient_exhaustion");
     constexpr size_t payload_bytes = 80;
-    auto             blocking_io   = std::make_unique<BlockingWriteDiskBlockIO>();
+    auto             blocking_io   = std::make_unique<BlockingDiskBlockIO>(BlockingDiskBlockIO::BlockOn::WRITE);
     auto*            io            = blocking_io.get();
     auto             disk_pool     = makeDiskPool(payload_bytes, 2, temp_dir.path, std::move(blocking_io));
-    auto             device_pool   = makeDevicePool({{64, 16}}, 2, "per_rank_direct_exhaustion_device");
+    auto             device_pool   = makeDevicePool({{64, 16}}, 2, "per_rank_transient_exhaustion_device");
+    auto             first_block   = poolMalloc(*device_pool);
+    auto             second_block  = poolMalloc(*device_pool);
+    auto             first_slot    = poolMalloc(*disk_pool);
+    auto             second_slot   = poolMalloc(*disk_pool);
+    ASSERT_NE(first_block, NULL_BLOCK_IDX);
+    ASSERT_NE(second_block, NULL_BLOCK_IDX);
+    ASSERT_NE(first_slot, NULL_BLOCK_IDX);
+    ASSERT_NE(second_slot, NULL_BLOCK_IDX);
+
+    auto group  = makeDeviceHostGroup(0, {device_pool}, nullptr, {makeGroupBase({0}, 64, 16)}, disk_pool);
+    auto engine = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{group},
+                                                               DeviceHostCopyOptions{},
+                                                               /*device_disk_staging_block_count=*/1);
+
+    std::atomic<bool> first_submit_ok{false};
+    std::thread       writer([&] {
+        first_submit_ok = submitSucceeded(
+            engine, makeDescriptor(Tier::DEVICE, Tier::DISK, {first_block}, NULL_BLOCK_IDX, first_slot, 0));
+    });
+    BlockingIOGuard   writer_guard(*io, writer);
+    ASSERT_TRUE(io->waitUntilBlocked(std::chrono::seconds(5)));
+
+    // The first transfer holds the only lease until the releaser fires, so the second
+    // transfer must wait for it instead of failing fast.
+    std::thread releaser([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        io->release();
+    });
+    expectStatus(engine,
+                 makeDescriptor(Tier::DEVICE, Tier::DISK, {second_block}, NULL_BLOCK_IDX, second_slot, 0),
+                 TransferStatus::OK);
+
+    releaser.join();
+    writer_guard.releaseAndJoin();
+    EXPECT_TRUE(first_submit_ok.load());
+}
+
+TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskStagingPersistentExhaustionTimesOut) {
+    ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
+    TempDirGuard     temp_dir("per_rank_persistent_exhaustion");
+    constexpr size_t payload_bytes = 80;
+    auto             blocking_io   = std::make_unique<BlockingDiskBlockIO>(BlockingDiskBlockIO::BlockOn::WRITE);
+    auto*            io            = blocking_io.get();
+    auto             disk_pool     = makeDiskPool(payload_bytes, 2, temp_dir.path, std::move(blocking_io));
+    auto             device_pool   = makeDevicePool({{64, 16}}, 2, "per_rank_persistent_exhaustion_device");
     auto             first_block   = poolMalloc(*device_pool);
     auto             second_block  = poolMalloc(*device_pool);
     auto             first_slot    = poolMalloc(*disk_pool);
@@ -932,26 +995,93 @@ TEST(PerRankBlockTransferEngineIntegrationTest, DeviceDiskStagingExhaustionFails
     ASSERT_NE(second_slot, NULL_BLOCK_IDX);
 
     auto group  = makeDeviceHostGroup(0, {device_pool}, nullptr, {makeGroupBase({0}, 64, 16)}, disk_pool);
-    auto engine = std::make_shared<PerRankBlockTransferEngine>(
-        std::vector<GroupSetPtr>{group}, DeviceHostCopyOptions{}, /*device_disk_staging_block_count=*/1);
+    auto engine = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{group},
+                                                               DeviceHostCopyOptions{},
+                                                               /*device_disk_staging_block_count=*/1);
 
-    std::atomic<bool>  first_submit_ok{false};
-    std::thread        writer([&] {
+    std::atomic<bool> first_submit_ok{false};
+    std::thread       writer([&] {
         first_submit_ok = submitSucceeded(
             engine, makeDescriptor(Tier::DEVICE, Tier::DISK, {first_block}, NULL_BLOCK_IDX, first_slot, 0));
     });
-    BlockingWriteGuard writer_guard(*io, writer);
-    ASSERT_TRUE(io->waitUntilWriting(std::chrono::seconds(5)));
+    BlockingIOGuard   writer_guard(*io, writer);
+    ASSERT_TRUE(io->waitUntilBlocked(std::chrono::seconds(5)));
 
+    const auto wait_start = std::chrono::steady_clock::now();
     expectStatus(engine,
                  makeDescriptor(Tier::DEVICE, Tier::DISK, {second_block}, NULL_BLOCK_IDX, second_slot, 0),
                  TransferStatus::RESOURCE_EXHAUSTED);
+    const auto elapsed = std::chrono::steady_clock::now() - wait_start;
+    // Internal staging acquire budget is fixed at 1000 ms.
+    EXPECT_GE(elapsed, std::chrono::milliseconds(900));
+    EXPECT_LT(elapsed, std::chrono::seconds(5));
 
     writer_guard.releaseAndJoin();
     EXPECT_TRUE(first_submit_ok.load());
+    // Timeout must not leak the lease.
     expectStatus(engine,
                  makeDescriptor(Tier::DEVICE, Tier::DISK, {second_block}, NULL_BLOCK_IDX, second_slot, 0),
                  TransferStatus::OK);
+}
+
+TEST(PerRankBlockTransferEngineIntegrationTest, DiskDeviceStagingTransientExhaustionWaitsAndDeliversPayload) {
+    ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
+    TempDirGuard     temp_dir("per_rank_disk2d_transient_exhaustion");
+    constexpr size_t payload_bytes = 80;
+    auto             blocking_io   = std::make_unique<BlockingDiskBlockIO>(BlockingDiskBlockIO::BlockOn::READ);
+    auto*            io            = blocking_io.get();
+    auto             disk_pool     = makeDiskPool(payload_bytes, 2, temp_dir.path, std::move(blocking_io));
+    auto             device_pool   = makeDevicePool({{64, 16}}, 2, "per_rank_disk2d_transient_device");
+    auto             first_block   = poolMalloc(*device_pool);
+    auto             second_block  = poolMalloc(*device_pool);
+    auto             first_slot    = poolMalloc(*disk_pool);
+    auto             second_slot   = poolMalloc(*disk_pool);
+    ASSERT_NE(first_block, NULL_BLOCK_IDX);
+    ASSERT_NE(first_slot, NULL_BLOCK_IDX);
+    ASSERT_NE(second_block, NULL_BLOCK_IDX);
+    ASSERT_NE(second_slot, NULL_BLOCK_IDX);
+
+    auto group  = makeDeviceHostGroup(0, {device_pool}, nullptr, {makeGroupBase({0}, 64, 16)}, disk_pool);
+    auto engine = std::make_shared<PerRankBlockTransferEngine>(std::vector<GroupSetPtr>{group},
+                                                               DeviceHostCopyOptions{},
+                                                               /*device_disk_staging_block_count=*/1);
+
+    fillDeviceLayer(device_pool, 0, first_block, {0x6A, 0xD3});
+    fillDeviceLayer(device_pool, 0, second_block, {0x4B, 0xE1});
+    const auto expected_first  = readDeviceLayer(device_pool, 0, first_block);
+    const auto expected_second = readDeviceLayer(device_pool, 0, second_block);
+
+    expectStatus(engine,
+                 makeDescriptor(Tier::DEVICE, Tier::DISK, {first_block}, NULL_BLOCK_IDX, first_slot, 0),
+                 TransferStatus::OK);
+    expectStatus(engine,
+                 makeDescriptor(Tier::DEVICE, Tier::DISK, {second_block}, NULL_BLOCK_IDX, second_slot, 0),
+                 TransferStatus::OK);
+    fillDeviceLayer(device_pool, 0, first_block, {0x00, 0x00});
+    fillDeviceLayer(device_pool, 0, second_block, {0x00, 0x00});
+
+    std::atomic<bool> first_submit_ok{false};
+    std::thread       reader([&] {
+        first_submit_ok = submitSucceeded(
+            engine, makeDescriptor(Tier::DISK, Tier::DEVICE, {first_block}, NULL_BLOCK_IDX, first_slot, 0));
+    });
+    BlockingIOGuard   reader_guard(*io, reader);
+    ASSERT_TRUE(io->waitUntilBlocked(std::chrono::seconds(5)));
+
+    std::thread releaser([&] {
+        std::this_thread::sleep_for(std::chrono::milliseconds(200));
+        io->release();
+    });
+    expectStatus(engine,
+                 makeDescriptor(Tier::DISK, Tier::DEVICE, {second_block}, NULL_BLOCK_IDX, second_slot, 0),
+                 TransferStatus::OK);
+
+    releaser.join();
+    reader_guard.releaseAndJoin();
+    EXPECT_TRUE(first_submit_ok.load());
+    // Both waited transfers must land the real payload, not stale staging data.
+    EXPECT_EQ(readDeviceLayer(device_pool, 0, first_block), expected_first);
+    EXPECT_EQ(readDeviceLayer(device_pool, 0, second_block), expected_second);
 }
 
 // ---- Strategy chain tests ----

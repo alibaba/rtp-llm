@@ -404,6 +404,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("memory_cache_disk_size_mb", &KVCacheConfig::memory_cache_disk_size_mb)
         .def_readwrite("memory_cache_disk_buffered_io", &KVCacheConfig::memory_cache_disk_buffered_io)
         .def_readwrite("memory_cache_disk_sync_timeout_ms", &KVCacheConfig::memory_cache_disk_sync_timeout_ms)
+        .def_readwrite("memory_cache_disk_staging_block_count", &KVCacheConfig::memory_cache_disk_staging_block_count)
         .def_readwrite("linear_step", &KVCacheConfig::linear_step)
         .def_readwrite("fp8_kv_cache", &KVCacheConfig::fp8_kv_cache)
         .def_readwrite("ssm_state_dtype", &KVCacheConfig::ssm_state_dtype)
@@ -503,10 +504,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_legacy_memory_connector_fallback,
                                       self.prefix_tree_memory_state_swa_pool_ratio,
                                       self.enable_independent_group_eviction,
-                                      self.load_cache_retry_times);
+                                      self.load_cache_retry_times,
+                                      self.memory_cache_disk_staging_block_count);
             },
             [](py::tuple t) {
-                if (t.size() != 43 && t.size() != 54)
+                if (t.size() != 43 && t.size() != 54 && t.size() != 55)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -565,6 +567,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.prefix_tree_memory_state_swa_pool_ratio = t[51].cast<int64_t>();
                         c.enable_independent_group_eviction       = t[52].cast<bool>();
                         c.load_cache_retry_times                  = t[53].cast<int>();
+                    }
+                    if (t.size() >= 55) {
+                        c.memory_cache_disk_staging_block_count = t[54].cast<int64_t>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());

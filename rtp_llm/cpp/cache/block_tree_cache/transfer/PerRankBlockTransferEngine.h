@@ -18,8 +18,7 @@ class PerRankBlockTransferEngine {
 public:
     explicit PerRankBlockTransferEngine(std::vector<GroupSetPtr> group_sets,
                                         DeviceHostCopyOptions    device_host_options             = {},
-                                        size_t                   device_disk_staging_block_count = 4,
-                                        StagingPinMemoryFn       staging_pin_memory              = {});
+                                        size_t                   device_disk_staging_block_count = 4);
     PerRankBlockTransferEngine() = delete;
     virtual ~PerRankBlockTransferEngine();
 

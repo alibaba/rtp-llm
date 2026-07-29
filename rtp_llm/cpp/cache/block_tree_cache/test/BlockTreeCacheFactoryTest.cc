@@ -1141,11 +1141,54 @@ TEST_F(BlockTreeCacheFactoryTest, CreatesDiskCacheWithoutMemoryCache) {
     EXPECT_FALSE(cache->isMemoryCacheEnabled());
     EXPECT_TRUE(cache->isDiskCacheEnabled());
     EXPECT_TRUE(cache->config().enable_load);
+    EXPECT_EQ(cache->config().device_disk_staging_block_count, 4u);
     ASSERT_FALSE(cache->groupSets().empty());
     for (const auto& group_set : cache->groupSets()) {
         ASSERT_NE(group_set, nullptr);
         EXPECT_EQ(group_set->hostPool(), nullptr);
         EXPECT_NE(group_set->diskPool(), nullptr);
+    }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, DiskStagingBlockCountPropagatesAndValidates) {
+    const auto config = makeSingleConfig();
+
+    const auto makeDiskKvCacheConfig = [](const std::string& disk_path) {
+        KVCacheConfig kv_cache_config;
+        kv_cache_config.enable_tiered_memory_cache = true;
+        kv_cache_config.enable_memory_cache        = false;
+        kv_cache_config.enable_memory_cache_disk   = true;
+        kv_cache_config.memory_cache_disk_size_mb  = 1;
+        kv_cache_config.memory_cache_disk_paths    = disk_path;
+        return kv_cache_config;
+    };
+
+    {
+        auto                                     allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_staging_overrides");
+        auto                                     kv_cache_config = makeDiskKvCacheConfig(disk_dir.path);
+        kv_cache_config.memory_cache_disk_staging_block_count    = 2;
+
+        auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{});
+        ASSERT_NE(cache, nullptr);
+        EXPECT_EQ(cache->config().device_disk_staging_block_count, 2u);
+    }
+
+    for (const int64_t bad_block_count : {int64_t{0}, int64_t{-1}}) {
+        auto                                     allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_staging_bad_blocks");
+        auto                                     kv_cache_config = makeDiskKvCacheConfig(disk_dir.path);
+        kv_cache_config.memory_cache_disk_staging_block_count    = bad_block_count;
+        expectFactoryRejects(config, allocator, kv_cache_config);
+    }
+
+    // Disk disabled: staging block count is not validated and creation succeeds.
+    {
+        auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        KVCacheConfig kv_cache_config;
+        kv_cache_config.memory_cache_disk_staging_block_count = 0;
+        auto cache = createBlockTreeCache(config, kv_cache_config, allocator);
+        ASSERT_NE(cache, nullptr);
     }
 }
 
