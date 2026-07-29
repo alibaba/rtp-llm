@@ -27,7 +27,10 @@ public enum StrategyErrorType {
     // batch dispatch error
     BATCH_DISPATCH_FAILED(8510, true),
     BATCH_SLO_EXPIRED(8511, false),
-    BATCH_BUILD_FAILED(8512, false);
+    BATCH_BUILD_FAILED(8512, false),
+    // worker (decode engine) execution failure — non-retryable to prevent retry storms
+    // on persistent errors such as OOM or input-too-long.
+    WORKER_EXECUTION_FAILED(8513, false);
 
     private final int errorCode;
     private final String errorMsg;
