@@ -100,6 +100,36 @@ TEST(PrepareWriteCacheParamsTest, InvalidInputLengthsThrow) {
                  std::exception);
 }
 
+TEST(PrepareWriteCacheParamsTest, MalformedMetadataTensorsThrow) {
+    // Request-thread mirrors of the runtimeWriteCacheStore host-tensor
+    // requirements: illegal metadata must fail here, not in the background writer.
+    {
+        auto inputs       = makePdPrefillInputs();
+        inputs.cache_keys = torch::tensor({int64_t(100), int64_t(200)}, torch::kInt64);  // 1-D
+        EXPECT_THROW((void)prepare(inputs), std::exception);
+    }
+    {
+        auto inputs       = makePdPrefillInputs();
+        inputs.cache_keys = torch::tensor({{int64_t(100)}}, torch::kInt64);  // rows != context batch
+        EXPECT_THROW((void)prepare(inputs), std::exception);
+    }
+    {
+        auto inputs           = makePdPrefillInputs();
+        inputs.prefix_lengths = torch::tensor({0}, torch::kInt32);  // one entry short
+        EXPECT_THROW((void)prepare(inputs), std::exception);
+    }
+    {
+        auto inputs           = makePdPrefillInputs();
+        inputs.prefix_lengths = torch::tensor({int64_t(0), int64_t(0)}, torch::kInt64);  // wrong dtype
+        EXPECT_THROW((void)prepare(inputs), std::exception);
+    }
+    {
+        auto inputs              = makePdPrefillInputs();
+        inputs.kv_cache_block_id = torch::tensor({{int64_t(0)}, {int64_t(1)}}, torch::kInt64);  // wrong dtype
+        EXPECT_THROW((void)prepare(inputs), std::exception);
+    }
+}
+
 TEST(PrepareWriteCacheParamsTest, CpPreChunkLengthsPassThroughByIdentity) {
     // CP contract: the published lengths must be the pre-chunk originals handed in
     // by the caller, not the rank-local input_lengths already on the model inputs.

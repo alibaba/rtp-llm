@@ -12,6 +12,7 @@ from rtp_llm.ops.compute_ops import (
     KVCache,
     LayerKVCache,
     PyAttentionInputs,
+    PyCacheStoreInputs,
     PyModelInputs,
     PyModelOutputs,
 )
@@ -61,6 +62,10 @@ class PyModelInputsCompatTest(unittest.TestCase):
             ("KVCache", KVCache),
             ("LayerKVCache", LayerKVCache),
             ("PyAttentionInputs", PyAttentionInputs),
+            # Core transfer object of the cache-store refactor; it is designed
+            # to stay opaque to Python, so a member exposed without a stub
+            # update (or vice versa) must fail here.
+            ("PyCacheStoreInputs", PyCacheStoreInputs),
         ):
             with self.subTest(class_name=class_name):
                 stub_members = set()

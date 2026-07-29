@@ -97,7 +97,8 @@ void registerPyOpDefs(pybind11::module& m) {
         .def("write",
              &rtp_llm::CacheStoreWriter::write,
              "Schedule one layer's CacheStore write during the active forward cycle. "
-             "Calls before init or after draining fail.");
+             "Calls before init or after draining fail. The inputs object is bound to "
+             "the forward cycle that prepared it and must not be reused across cycles.");
 
     pybind11::class_<rtp_llm::ParamsBase, std::shared_ptr<rtp_llm::ParamsBase>>(m, "ParamsBase")
         .def(pybind11::init<>())

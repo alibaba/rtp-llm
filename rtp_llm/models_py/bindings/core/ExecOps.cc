@@ -316,9 +316,14 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
             continue;
         }
 
-        const int64_t request_id     = request_ids[context_index];
-        auto          event          = pre_created_event ? pre_created_event : runtimeCreateEvent();
-        auto          request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
+        const int64_t request_id = request_ids[context_index];
+        // Stream-sync contract: CacheStoreAsyncWriter always passes an event
+        // pre-created on the caller thread before the async gap, so the
+        // fallback below never runs in production. Creating the event at
+        // execution time is only sound for synchronous direct calls (tests),
+        // where no work is pending between the caller and this point.
+        auto event          = pre_created_event ? pre_created_event : runtimeCreateEvent();
+        auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
         RTP_LLM_LOG_DEBUG(
             "write cache store, request id is %ld, blocks num is %d", static_cast<long>(request_id), total_blocks);
 

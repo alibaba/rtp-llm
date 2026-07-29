@@ -111,6 +111,12 @@ OverallExpertStats execCreateMoeExpertStates(const ExpertStatsParams& params);
 // Events
 // ===================================================================
 
+// Linking contract for runtimeCreateEvent/runtimeWriteCacheStore below: this
+// header only declares them. Every final binary consuming these symbols must
+// link exactly one implementation provider — exec_ctx_state (CUDA production),
+// exec_ops_test_lib (CUDA tests), or exec_ctx_rocm (ROCm); see the
+// cache_store_async_writer notes in //rtp_llm/models_py/bindings/core/BUILD.
+// An undefined-symbol link error on these names means the provider is missing.
 std::shared_ptr<torch::Event> runtimeCreateEvent();
 
 // ===================================================================

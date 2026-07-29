@@ -61,9 +61,18 @@ CacheStoreAsyncWriter::CacheStoreAsyncWriter(int                             dev
         }
     }
 
-    constexpr size_t kThreadCount = 3;
-    constexpr size_t kQueueSize   = 10000;
-    auto pool = std::make_shared<autil::LockFreeThreadPool>(kThreadCount, kQueueSize, nullptr, "CacheStoreAsync");
+    // Env-tunable with safe defaults (same operational style as
+    // CACHE_STORE_SKIP_WRITE_WHEN_UNREADY): queue-full aborts the forward, so
+    // deployments with unusual layer/tag/batch products can widen the pool
+    // without a rebuild. Read once per writer at construction.
+    const size_t thread_count = autil::EnvUtil::getEnv("CACHE_STORE_WRITER_THREAD_NUM", static_cast<size_t>(3));
+    const size_t queue_size   = autil::EnvUtil::getEnv("CACHE_STORE_WRITER_QUEUE_SIZE", static_cast<size_t>(10000));
+    RTP_LLM_CHECK_WITH_INFO(thread_count > 0 && queue_size > 0,
+                            "CacheStoreAsyncWriter: CACHE_STORE_WRITER_THREAD_NUM (%zu) and "
+                            "CACHE_STORE_WRITER_QUEUE_SIZE (%zu) must both be positive",
+                            thread_count,
+                            queue_size);
+    auto pool = std::make_shared<autil::LockFreeThreadPool>(thread_count, queue_size, nullptr, "CacheStoreAsync");
     RTP_LLM_CHECK_WITH_INFO(pool->start(), "CacheStoreAsyncWriter: failed to start thread pool");
     thread_pool_ = std::move(pool);
 }

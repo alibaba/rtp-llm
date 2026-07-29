@@ -6,17 +6,25 @@ This module contains helper functions for FMHA implementations including:
 - KV cache offset management
 """
 
+import logging
 from typing import Any, Optional
 
 import torch
 
-from rtp_llm.models_py.modules.base.common.kvcache_store import WriteCacheStoreOp
+from rtp_llm.models_py.modules.base.common.kvcache_store import (
+    WriteCacheStoreOp,
+    write_layer_cache,
+)
 from rtp_llm.ops.compute_ops import (
     CacheStoreWriter,
     LayerKVCache,
     PyAttentionInputs,
     PyCacheStoreInputs,
 )
+
+logger = logging.getLogger(__name__)
+
+_half_pair_warn_counts: dict = {}
 
 
 def reshape_paged_kv_cache(
@@ -53,6 +61,24 @@ def _resolve_cache_store_pair(
     cache_store_inputs = attn_inputs.cache_store_inputs
     cache_store_writer = attn_inputs.cache_store_writer
     if cache_store_inputs is None or cache_store_writer is None:
+        # Exactly one half present means an upstream bypassed
+        # prepareWriteCacheParams, which always attaches both or neither.
+        # Skipping is still the safe action, but log with exponential backoff
+        # (1st, 2nd, 4th, 8th, ... occurrence, cumulative count in each line)
+        # so a persistent contract break stays observable without per-layer
+        # spam; both-None is the normal non-PD path and stays silent.
+        combo = (cache_store_inputs is not None, cache_store_writer is not None)
+        if any(combo):
+            count = _half_pair_warn_counts.get(combo, 0) + 1
+            _half_pair_warn_counts[combo] = count
+            if count & (count - 1) == 0:
+                logger.warning(
+                    "cache-store pair incomplete (inputs=%s, writer=%s); "
+                    "skipping cache-store writes (occurrence %d)",
+                    combo[0],
+                    combo[1],
+                    count,
+                )
         return None
     return cache_store_writer, cache_store_inputs
 
@@ -106,7 +132,7 @@ def write_cache_store_if_needed(
     if cache_store_pair is None:
         return
     cache_store_writer, cache_store_inputs = cache_store_pair
-    cache_store_writer.write(cache_store_inputs, kv_cache)
+    write_layer_cache(cache_store_writer, cache_store_inputs, kv_cache)
 
 
 def copy_kv_cache_offset(old_offset: torch.Tensor, new_offset: torch.Tensor) -> None:

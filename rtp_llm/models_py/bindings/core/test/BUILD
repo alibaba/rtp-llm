@@ -8,6 +8,7 @@ test_copts = [
 exec_ops_test_deps = [
     "//rtp_llm/cpp/cache:cache_config",
     "//rtp_llm/cpp/cache:kv_cache_specs",
+    "//rtp_llm/cpp/utils:kv_cache_utils",
     "//rtp_llm/models_py/bindings:op_defs",
     "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
     "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
@@ -80,7 +81,9 @@ cc_test_wrapper(
     # needs two. Both labels and gpu_count are established unit-test precedents
     # (H20 x2: models_py/distributed/test; MI308X-ROCM7 x2: models_py/modules/
     # base/rocm/test). CPU-only builds stay schedulable anywhere and the GPU
-    # cases skip via their build guards.
+    # cases skip via their build guards. select() on exec_properties is
+    # configurable-attribute compatible on this repo's Bazel (6.4.0): package
+    # loading and the cuda12_9 test run both pass with it in place.
     exec_properties = select({
         "@//:using_cuda": {"gpu": "H20", "gpu_count": "2"},
         "@//:using_rocm": {"gpu": "MI308X-ROCM7", "gpu_count": "2"},

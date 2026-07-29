@@ -38,6 +38,10 @@ cc_test(
     srcs = [
         "PrepareWriteCacheParamsTest.cc",
     ],
+    # Assertions are host-only (CPU tensors), but linking
+    # //rtp_llm/cpp/models:models requires the CUDA toolchain, so this target
+    # shares the sibling test_deps/executor setup: CUDA is needed to link, a
+    # GPU is not needed to run.
     copts = test_copts,
     deps = test_deps,
     env = {

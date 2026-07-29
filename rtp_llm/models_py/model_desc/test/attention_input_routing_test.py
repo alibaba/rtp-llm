@@ -96,30 +96,45 @@ class AttentionInputRoutingTest(unittest.TestCase):
     def test_cp_cache_store_skips_when_pair_incomplete(self):
         # PyWrappedModel attaches cache_store_inputs and cache_store_writer together only
         # when the C++ boundary accepts eligibility, so any half pair reaching python is a
-        # contract break by an upstream that bypassed prepareWriteCacheParams. Regardless of
-        # cause, no pairing below may produce a write op or a writer call.
+        # contract break by an upstream that bypassed prepareWriteCacheParams. No pairing
+        # below may produce a write op or a writer call; half pairs must additionally
+        # leave a WARN signal (both-None is the normal non-PD path and stays silent).
         cases = [
-            ("neither", None, None),
-            ("inputs_only", SimpleNamespace(tag="linear0"), None),
-            ("writer_only", None, Mock()),
+            ("neither", None, None, False),
+            ("inputs_only", SimpleNamespace(tag="linear0"), None, True),
+            ("writer_only", None, Mock(), True),
         ]
-        for label, cache_store_inputs, cache_store_writer in cases:
+        for label, cache_store_inputs, cache_store_writer, expect_warn in cases:
             with self.subTest(pairing=label):
+                attention_common._half_pair_warn_counts.clear()
                 attention_inputs = SimpleNamespace(
                     is_prefill=True,
                     cache_store_inputs=cache_store_inputs,
                     cache_store_writer=cache_store_writer,
                 )
 
-                # Observable skip decision through the public factory surface.
-                self.assertIsNone(
-                    attention_common.create_write_cache_store_impl(attention_inputs)
-                )
+                with patch.object(attention_common.logger, "warning") as warning:
+                    # Observable skip decision through the public factory surface.
+                    self.assertIsNone(
+                        attention_common.create_write_cache_store_impl(attention_inputs)
+                    )
 
-                _write_cp_cache_store(attention_inputs, SimpleNamespace(tag="linear0"))
+                    _write_cp_cache_store(
+                        attention_inputs, SimpleNamespace(tag="linear0")
+                    )
+                    _write_cp_cache_store(
+                        attention_inputs, SimpleNamespace(tag="linear0")
+                    )
 
                 if cache_store_writer is not None:
                     cache_store_writer.write.assert_not_called()
+                if expect_warn:
+                    # Exponential backoff: occurrences 1 and 2 log, 3 is
+                    # suppressed, so persistence stays visible without
+                    # per-layer spam.
+                    self.assertEqual(warning.call_count, 2)
+                else:
+                    warning.assert_not_called()
 
     def test_write_cp_cache_store_helper_skips_when_not_prefill(self):
         # Helper-level guard: even with a complete pair attached, decode passes must never

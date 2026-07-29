@@ -62,19 +62,10 @@ cc_library(
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
     ] + torch_deps() + select_py_bindings() + select({
         # Only the cuda12 configuration is a supported CUDA build for this .so.
-        # exec_ctx_state carries process-wide ExecOps state (see core/BUILD
-        # ownership notes): it must be linked into librtp_compute_ops.so exactly
-        # once and never into libth_transformer.so.
-        #
-        # Pre-existing invariant (not introduced by this PR): the
-        # "exec_ctx_state ships in exactly one .so per process" rule pre-dates
-        # this refactor and is documented at
-        # //rtp_llm/models_py/bindings/core/BUILD:177-188. Tightening it into a
-        # build-time guard (visibility whitelist or dependency-graph assertion)
-        # belongs in a dedicated infrastructure PR; a previous attempt to add
-        # that guard here (visibility + ELF sh_test + hermetic $(NM)) was
-        # reverted during scope rewrite because the guard machinery generated
-        # more review surface than the ownership note it was meant to enforce.
+        # Process-wide invariant: exec_ctx_state carries ExecOps state and must
+        # be linked into librtp_compute_ops.so exactly once per process and
+        # never into libth_transformer.so (see the exec_ctx_state ownership
+        # notes in //rtp_llm/models_py/bindings/core/BUILD).
         "@//:using_cuda12": [
             "//rtp_llm/models_py/bindings/core:exec_ctx_state",
             "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
