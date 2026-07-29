@@ -24,6 +24,7 @@ class KvcmWorkerMetadataResolverTest {
     void resolvesNamespaceAndQueryTypeFromOneWorkerStatusRefresh() {
         WorkerStatus workerStatus = workerStatus(
                 "prefill-deployment", KvCacheGroupMode.WITH_MAMBA);
+        workerStatus.setCacheMatchRollbackBlocks(1);
         KvcmWorkerMetadataResolver resolver = new KvcmWorkerMetadataResolver(
                 configuration(null), provider(List.of(workerStatus)));
 
@@ -35,6 +36,8 @@ class KvcmWorkerMetadataResolverTest {
                 resolver.resolveQueryType(RoleType.PREFILL, "default"));
         assertEquals(QueryType.QT_PREFIX_MATCH_WITH_MAMBA,
                 resolver.resolveQueryType(RoleType.PREFILL, null));
+        assertEquals(1, resolver.resolveCacheMatchRollbackBlocks(RoleType.PREFILL, "default"));
+        assertEquals(1, resolver.resolveCacheMatchRollbackBlocks(RoleType.PREFILL, null));
     }
 
     @Test
@@ -50,6 +53,7 @@ class KvcmWorkerMetadataResolverTest {
                 resolver.resolveNamespace(RoleType.PREFILL, "default", 1024));
         assertEquals(QueryType.QT_PREFIX_MATCH,
                 resolver.resolveQueryType(RoleType.PREFILL, "default"));
+        assertEquals(0, resolver.resolveCacheMatchRollbackBlocks(RoleType.PREFILL, "default"));
     }
 
     @Test

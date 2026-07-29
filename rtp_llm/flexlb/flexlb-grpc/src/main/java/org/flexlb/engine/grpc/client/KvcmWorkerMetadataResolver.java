@@ -19,7 +19,7 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 /**
- * Resolves KVCM namespace and query type from one traversal of in-memory worker status.
+ * Resolves KVCM request metadata from one traversal of in-memory worker status.
  */
 @Slf4j
 @Component
@@ -35,6 +35,10 @@ public class KvcmWorkerMetadataResolver {
     private final ConcurrentMap<String, ConcurrentMap<RoleType, QueryType>> queryTypeByGroupAndRole =
             new ConcurrentHashMap<>();
     private final ConcurrentMap<RoleType, QueryType> queryTypeByRoleForCrossGroupRouting =
+            new ConcurrentHashMap<>();
+    private final ConcurrentMap<String, ConcurrentMap<RoleType, Integer>> rollbackBlocksByGroupAndRole =
+            new ConcurrentHashMap<>();
+    private final ConcurrentMap<RoleType, Integer> rollbackBlocksByRoleForCrossGroupRouting =
             new ConcurrentHashMap<>();
 
     public KvcmWorkerMetadataResolver(CacheMatchConfiguration configuration, WorkerStatusProvider workerStatusProvider) {
@@ -64,6 +68,14 @@ public class KvcmWorkerMetadataResolver {
         return queryTypeByRole == null ? null : queryTypeByRole.get(roleType);
     }
 
+    public int resolveCacheMatchRollbackBlocks(RoleType roleType, String group) {
+        if (StringUtils.isBlank(group)) {
+            return rollbackBlocksByRoleForCrossGroupRouting.getOrDefault(roleType, 0);
+        }
+        ConcurrentMap<RoleType, Integer> rollbackBlocksByRole = rollbackBlocksByGroupAndRole.get(group);
+        return rollbackBlocksByRole == null ? 0 : rollbackBlocksByRole.getOrDefault(roleType, 0);
+    }
+
     public boolean usesConfiguredNamespace() {
         return configuredNamespace != null;
     }
@@ -75,6 +87,7 @@ public class KvcmWorkerMetadataResolver {
 
         boolean namespaceChanged = false;
         boolean queryTypeChanged = false;
+        boolean rollbackBlocksChanged = false;
         for (GroupRoleEndPoint roleEndpoints : serviceRoute.getRoleEndpoints()) {
             String group = StringUtils.defaultString(roleEndpoints.getGroup());
             for (RoleType roleType : RoleType.values()) {
@@ -101,12 +114,24 @@ public class KvcmWorkerMetadataResolver {
                         queryTypeChanged = true;
                     }
                 }
+                if (metadata.cacheMatchRollbackBlocks() != null) {
+                    ConcurrentMap<RoleType, Integer> rollbackBlocksByRole = rollbackBlocksByGroupAndRole.computeIfAbsent(
+                            group, ignored -> new ConcurrentHashMap<>());
+                    if (!metadata.cacheMatchRollbackBlocks().equals(rollbackBlocksByRole.get(roleType))) {
+                        rollbackBlocksByRole.put(roleType, metadata.cacheMatchRollbackBlocks());
+                        rollbackBlocksChanged = true;
+                    }
+                }
             }
         }
 
         if (queryTypeChanged) {
             refreshCrossGroupQueryTypes();
             log.info("Updated KVCM role query types: {}", queryTypeByGroupAndRole);
+        }
+        if (rollbackBlocksChanged) {
+            refreshCrossGroupRollbackBlocks();
+            log.info("Updated KVCM cache match rollback blocks: {}", rollbackBlocksByGroupAndRole);
         }
         if (namespaceChanged) {
             log.info("Updated KVCM role namespaces: {}", namespaceByGroupAndRole);
@@ -116,8 +141,9 @@ public class KvcmWorkerMetadataResolver {
     private ResolvedWorkerMetadata resolveWorkerMetadata(Collection<WorkerStatus> workerStatuses) {
         String namespace = null;
         QueryType queryType = null;
+        Integer cacheMatchRollbackBlocks = null;
         if (workerStatuses == null || workerStatuses.isEmpty()) {
-            return new ResolvedWorkerMetadata(null, null);
+            return new ResolvedWorkerMetadata(null, null, null);
         }
         for (WorkerStatus workerStatus : workerStatuses) {
             if (workerStatus == null) {
@@ -130,11 +156,16 @@ public class KvcmWorkerMetadataResolver {
             if (queryType == null) {
                 queryType = toQueryType(workerStatus.getKvCacheGroupMode());
             }
-            if ((configuredNamespace != null || namespace != null) && queryType != null) {
+            if (cacheMatchRollbackBlocks == null) {
+                cacheMatchRollbackBlocks = workerStatus.getCacheMatchRollbackBlocks();
+            }
+            if ((configuredNamespace != null || namespace != null)
+                    && queryType != null
+                    && cacheMatchRollbackBlocks != null) {
                 break;
             }
         }
-        return new ResolvedWorkerMetadata(namespace, queryType);
+        return new ResolvedWorkerMetadata(namespace, queryType, cacheMatchRollbackBlocks);
     }
 
     private QueryType toQueryType(KvCacheGroupMode mode) {
@@ -172,6 +203,27 @@ public class KvcmWorkerMetadataResolver {
         }
     }
 
-    private record ResolvedWorkerMetadata(String namespace, QueryType queryType) {
+    private void refreshCrossGroupRollbackBlocks() {
+        for (RoleType roleType : RoleType.values()) {
+            Integer resolvedRollbackBlocks = null;
+            for (ConcurrentMap<RoleType, Integer> rollbackBlocksByRole : rollbackBlocksByGroupAndRole.values()) {
+                Integer candidate = rollbackBlocksByRole.get(roleType);
+                if (candidate == null) {
+                    continue;
+                }
+                resolvedRollbackBlocks = resolvedRollbackBlocks == null
+                        ? candidate
+                        : Math.max(resolvedRollbackBlocks, candidate);
+            }
+            if (resolvedRollbackBlocks != null) {
+                rollbackBlocksByRoleForCrossGroupRouting.put(roleType, resolvedRollbackBlocks);
+            }
+        }
+    }
+
+    private record ResolvedWorkerMetadata(
+            String namespace,
+            QueryType queryType,
+            Integer cacheMatchRollbackBlocks) {
     }
 }

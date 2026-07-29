@@ -148,14 +148,17 @@ public class KvcmGrpcClient {
                     + "requestId={}, role={}, group={}", requestId, roleType, group);
             return Collections.emptyMap();
         }
-        return queryWithRetry(requestId, blockCacheKeys, namespace, queryType, roleType, group);
+        int rollbackBlocks = workerMetadataResolver.resolveCacheMatchRollbackBlocks(roleType, group);
+        return queryWithRetry(requestId, blockCacheKeys, namespace, queryType, rollbackBlocks, roleType, group);
     }
 
     private Map<String, Integer> queryWithRetry(String requestId, List<Long> blockCacheKeys, String namespace,
-                                                QueryType queryType, RoleType roleType, String group) {
+                                                QueryType queryType, int rollbackBlocks,
+                                                RoleType roleType, String group) {
         for (int attemptIndex = 0; attemptIndex <= maxQueryRetryCount; attemptIndex++) {
             try {
-                Map<String, Integer> matches = queryOnce(requestId, blockCacheKeys, namespace, queryType, roleType, group);
+                Map<String, Integer> matches = queryOnce(
+                        requestId, blockCacheKeys, namespace, queryType, rollbackBlocks, roleType, group);
                 recordQuerySuccess();
                 return matches;
             } catch (RuntimeException failure) {
@@ -170,7 +173,9 @@ public class KvcmGrpcClient {
         throw new IllegalStateException("KVCM query retry loop completed without a result");
     }
 
-    private Map<String, Integer> queryOnce(String requestId, List<Long> blockCacheKeys, String namespace, QueryType queryType, RoleType roleType, String group) {
+    private Map<String, Integer> queryOnce(String requestId, List<Long> blockCacheKeys, String namespace,
+                                           QueryType queryType, int rollbackBlocks,
+                                           RoleType roleType, String group) {
         GrpcTarget currentLeader = leaderResolver.resolve();
         if (currentLeader == null) {
             throw new KvcmQueryException("KVCM leader is unavailable");
@@ -183,14 +188,16 @@ public class KvcmGrpcClient {
                 .setInstanceId(namespace)
                 .setQueryType(queryType)
                 .addAllBlockCacheKeys(blockCacheKeys)
+                .setUseEaglePop(rollbackBlocks > 0)
                 .build();
 
         try {
             if (log.isDebugEnabled()) {
                 log.debug("KVCM GetHostCacheState request: requestId={}, traceId={}, namespace={}, "
-                                + "leader={}, role={}, group={}, queryType={}, blockCount={}, blockCacheKeys={}",
-                        requestId, traceId, namespace, currentLeader, roleType, group, queryType,
-                        blockCacheKeys.size(), blockCacheKeys);
+                                + "leader={}, role={}, group={}, queryType={}, useEaglePop={}, "
+                                + "blockCount={}, blockCacheKeys={}",
+                        requestId, traceId, namespace, currentLeader, roleType, group,
+                        queryType, request.getUseEaglePop(), blockCacheKeys.size(), blockCacheKeys);
             }
             GetHostCacheStateResponse response = metaServiceClient.getHostCacheState(
                     currentLeader, request, config.getRequestTimeoutMs());

@@ -48,6 +48,7 @@ import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.junit.jupiter.api.Assertions.fail;
@@ -102,6 +103,7 @@ class KvcmGrpcClientTest {
         assertEquals("deployment-first_2192", request.getInstanceId());
         assertEquals(QueryType.QT_PREFIX_MATCH, request.getQueryType());
         assertEquals(List.of(11L, 22L, 33L), request.getBlockCacheKeysList());
+        assertFalse(request.getUseEaglePop());
         assertEquals(0, request.getMediumCount());
         assertTrue(client.findMatchingEngines(
                 "request-null-group", List.of(11L, 22L, 33L), 2192L, RoleType.PDFUSION, null).isEmpty());
@@ -115,13 +117,15 @@ class KvcmGrpcClientTest {
         client = newClient(
                 modelMetaConfig(seedServer.getPort(), "vllm-test-0"),
                 serviceDiscovery,
-                KvCacheGroupMode.WITH_MAMBA);
+                KvCacheGroupMode.WITH_MAMBA,
+                1);
 
         Map<String, Integer> matches = waitForMatches(RoleType.PDFUSION, null);
 
         assertEquals(2, matches.get("10.0.0.1:8601"));
         assertEquals("vllm-test-0_2192", lastCacheRequest.get().getInstanceId());
         assertEquals(QueryType.QT_PREFIX_MATCH_WITH_MAMBA, lastCacheRequest.get().getQueryType());
+        assertTrue(lastCacheRequest.get().getUseEaglePop());
     }
 
     @Test
@@ -368,20 +372,27 @@ class KvcmGrpcClientTest {
     }
 
     private KvcmGrpcClient newClient(ModelMetaConfig modelMetaConfig, RoutingServiceDiscovery serviceDiscovery, KvCacheGroupMode mode) {
+        return newClient(modelMetaConfig, serviceDiscovery, mode, 0);
+    }
+
+    private KvcmGrpcClient newClient(ModelMetaConfig modelMetaConfig, RoutingServiceDiscovery serviceDiscovery,
+                                     KvCacheGroupMode mode, int rollbackBlocks) {
         KvcmMetaServiceClient metaServiceClient = new KvcmMetaServiceClient(channelFactory());
         CacheMatchConfiguration configuration = new CacheMatchConfiguration(modelMetaConfig);
         return new KvcmGrpcClient(
                 configuration,
                 metaServiceClient,
                 new KvcmLeaderResolver(configuration, serviceDiscovery, metaServiceClient),
-                new KvcmWorkerMetadataResolver(configuration, workerStatusProvider(mode)),
+                new KvcmWorkerMetadataResolver(
+                        configuration, workerStatusProvider(mode, rollbackBlocks)),
                 () -> true);
     }
 
-    private WorkerStatusProvider workerStatusProvider(KvCacheGroupMode mode) {
+    private WorkerStatusProvider workerStatusProvider(KvCacheGroupMode mode, int rollbackBlocks) {
         WorkerStatus workerStatus = new WorkerStatus();
         workerStatus.setDeploymentName("deployment-first");
         workerStatus.setKvCacheGroupMode(mode);
+        workerStatus.setCacheMatchRollbackBlocks(rollbackBlocks);
         return new WorkerStatusProvider() {
             @Override
             public Collection<WorkerStatus> getWorkerStatuses(RoleType roleType, String group) {
