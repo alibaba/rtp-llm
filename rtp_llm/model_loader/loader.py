@@ -1,6 +1,7 @@
 import gc
 import logging
 import os
+import time
 from collections import OrderedDict
 from typing import Dict, List, NamedTuple, Optional, Tuple
 
@@ -19,7 +20,7 @@ from rtp_llm.model_loader.model_weight_info import (
 )
 from rtp_llm.model_loader.tensor_source import DatabaseTensorSource, TensorCollector
 from rtp_llm.model_loader.weight_module import CustomAtomicWeight, WeightModule
-from rtp_llm.ops import TaskType, VitSeparation
+from rtp_llm.ops import RoleType, TaskType, VitSeparation
 from rtp_llm.utils.database import BaseDatabase, CkptDatabase
 from rtp_llm.utils.model_weight import W, WeightStyle, identity
 from rtp_llm.utils.module_util import has_module
@@ -28,6 +29,17 @@ from rtp_llm.utils.util import check_with_info
 
 
 class ModelLoader:
+    _KIMI_K3_CPU_OFFLOAD_WEIGHT_NAMES = frozenset(
+        {
+            "kimi_k3.moe.w1_packed",
+            "kimi_k3.moe.w1_scale",
+            "kimi_k3.moe.w2_packed",
+            "kimi_k3.moe.w2_scale",
+            "kimi_k3.moe.w3_packed",
+            "kimi_k3.moe.w3_scale",
+        }
+    )
+
     WeightInfo = NamedTuple(
         "WeightInfo",
         [
@@ -71,6 +83,72 @@ class ModelLoader:
             exported_device=get_current_device(),
             force_cpu_load_weights=force_cpu_load_weights,
         )
+        self._kimi_k3_cpu_offload_expert_layer_start = (
+            self._parse_kimi_k3_cpu_offload_expert_layer_start()
+        )
+
+    def _parse_kimi_k3_cpu_offload_expert_layer_start(self) -> Optional[int]:
+        raw_value = os.environ.get("KIMI_K3_CPU_OFFLOAD_EXPERT_LAYER_START")
+        if raw_value is None or raw_value == "":
+            return None
+        if not self._is_kimi_k3_single_node_pd_decode():
+            logging.warning(
+                "Ignoring KIMI_K3_CPU_OFFLOAD_EXPERT_LAYER_START=%r: selective "
+                "expert CPU offload is only supported for single-node Kimi K3 "
+                "PD Decode (model_type=%s, role_type=%s, num_nodes=%s).",
+                raw_value,
+                self.model_config.model_type,
+                getattr(self._weights_info, "role_type", None),
+                getattr(self._weights_info, "num_nodes", None),
+            )
+            return None
+        try:
+            layer_start = int(raw_value)
+        except ValueError as error:
+            raise ValueError(
+                "KIMI_K3_CPU_OFFLOAD_EXPERT_LAYER_START must be an integer, "
+                f"got {raw_value!r}"
+            ) from error
+        if layer_start < 0 or layer_start >= self.model_config.num_layers:
+            raise ValueError(
+                "KIMI_K3_CPU_OFFLOAD_EXPERT_LAYER_START must be in "
+                f"[0, {self.model_config.num_layers}), got {layer_start}"
+            )
+        logging.warning(
+            "Kimi K3 single-node PD Decode CPU expert offload is enabled for layers "
+            "[%d, %d). Packed MXFP4 bytes and UE8M0 scales remain on CPU and "
+            "selected experts are copied to the model device on demand.",
+            layer_start,
+            self.model_config.num_layers,
+        )
+        return layer_start
+
+    def _is_kimi_k3_single_node_pd_decode(self) -> bool:
+        return (
+            self.model_config.model_type == "kimi_k3"
+            and getattr(self._weights_info, "role_type", None) == RoleType.DECODE
+            and getattr(self._weights_info, "num_nodes", None) == 1
+        )
+
+    def _keep_weight_on_cpu(self, layer_id: Optional[int], name: str) -> bool:
+        layer_start = self._kimi_k3_cpu_offload_expert_layer_start
+        return (
+            self._is_kimi_k3_single_node_pd_decode()
+            and layer_start is not None
+            and layer_id is not None
+            and layer_id >= layer_start
+            and name in self._KIMI_K3_CPU_OFFLOAD_WEIGHT_NAMES
+        )
+
+    def _fastsafetensor_weight_device(
+        self, weight_info: WeightInfo, device: str
+    ) -> str:
+        if self._keep_weight_on_cpu(
+            weight_info.layer_id,
+            weight_info.weight.name,
+        ):
+            return "cpu"
+        return device
 
     def get_load_config(self) -> LoadConfig:
         return self._load_config
@@ -292,6 +370,11 @@ class ModelLoader:
         logging.info(f"load weight by device: {device}")
         model_weights = self._create_model_weights(device)
         tensor_to_weight_map, weight_info_list = self._generate_weight_info()
+        cpu_offload_source_tensors = 0
+        cpu_offload_source_bytes = 0
+        cpu_offload_weight_groups = set()
+        cpu_offload_transfer_seconds = 0.0
+        cpu_offload_materialize_seconds = 0.0
 
         stacked_key_config = self._build_stacked_key_config(weight_info_list)
         if stacked_key_config:
@@ -309,15 +392,33 @@ class ModelLoader:
             if key not in tensor_to_weight_map:
                 continue
             weight_info = tensor_to_weight_map[key]
+            weight_device = self._fastsafetensor_weight_device(weight_info, device)
+            if weight_device == "cpu":
+                cpu_offload_source_tensors += 1
+                cpu_offload_source_bytes += (
+                    loaded_tensor.numel() * loaded_tensor.element_size()
+                )
+                cpu_offload_weight_groups.add(
+                    (weight_info.layer_id, weight_info.weight.name)
+                )
+                if loaded_tensor.device.type != "cpu":
+                    transfer_start = time.perf_counter()
+                    loaded_tensor = loaded_tensor.cpu()
+                    cpu_offload_transfer_seconds += time.perf_counter() - transfer_start
 
             complete = weight_info.collector.store_tensor(key, loaded_tensor)
             if complete:
+                materialize_start = time.perf_counter()
                 tensors = weight_info.weight.load(
                     tensor_source=weight_info.collector,
                     layer_id=weight_info.layer_id,
-                    device=device,
+                    device=weight_device,
                     load_config=self._load_config,
                 )
+                if weight_device == "cpu":
+                    cpu_offload_materialize_seconds += (
+                        time.perf_counter() - materialize_start
+                    )
                 for name, tensor in tensors.items():
                     if weight_info.layer_id is not None:
                         model_weights.set_layer_weight(
@@ -331,17 +432,40 @@ class ModelLoader:
             weight_info.collector.clear()
             if weight_info.collector.is_collection_complete():
                 continue
+            weight_device = self._fastsafetensor_weight_device(weight_info, device)
+            if weight_device == "cpu":
+                cpu_offload_weight_groups.add(
+                    (weight_info.layer_id, weight_info.weight.name)
+                )
+            materialize_start = time.perf_counter()
             tensors = weight_info.weight.load(
                 tensor_source=DatabaseTensorSource(self._load_config.database),
                 layer_id=weight_info.layer_id,
-                device=device,
+                device=weight_device,
                 load_config=self._load_config,
             )
+            if weight_device == "cpu":
+                cpu_offload_materialize_seconds += (
+                    time.perf_counter() - materialize_start
+                )
             for name, tensor in tensors.items():
                 if weight_info.layer_id is not None:
                     model_weights.set_layer_weight(weight_info.layer_id, name, tensor)
                 else:
                     model_weights.set_global_weight(name, tensor)
+        if cpu_offload_weight_groups:
+            logging.info(
+                "fastsafetensors Kimi K3 CPU offload completed: layers=[%d, %d), "
+                "source_tensors=%d, source_bytes=%d, weight_groups=%d, "
+                "d2h_seconds=%.3f, cpu_materialize_seconds=%.3f",
+                self._kimi_k3_cpu_offload_expert_layer_start,
+                self.model_config.num_layers,
+                cpu_offload_source_tensors,
+                cpu_offload_source_bytes,
+                len(cpu_offload_weight_groups),
+                cpu_offload_transfer_seconds,
+                cpu_offload_materialize_seconds,
+            )
         return model_weights
 
     def prepare_weights(self, device: str):
@@ -529,7 +653,10 @@ class ModelLoader:
         logging.info(f"load weight by device: {convert_device}")
 
         for layer_id, name, tensor in self.prepare_weights(convert_device):
-            if convert_device != device:
+            if self._keep_weight_on_cpu(layer_id, name):
+                if tensor.device.type != "cpu":
+                    tensor = tensor.cpu()
+            elif convert_device != device:
                 tensor = tensor.to(device)
             if (
                 layer_id is not None

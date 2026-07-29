@@ -183,6 +183,7 @@ class ModelDeployWeightInfo:
         self.ep_rank = parallelism_config.ep_rank
         self.dp_size = parallelism_config.dp_size
         self.dp_rank = parallelism_config.dp_rank
+        self.role_type = getattr(parallelism_config, "role_type", None)
         self.num_nodes: int = (
             parallelism_config.world_size // parallelism_config.local_world_size
         )
