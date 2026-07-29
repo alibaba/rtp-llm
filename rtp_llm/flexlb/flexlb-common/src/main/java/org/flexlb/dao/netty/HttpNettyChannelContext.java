@@ -13,6 +13,7 @@ import java.util.List;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.function.BiConsumer;
 import java.util.function.Consumer;
+import java.util.function.Supplier;
 
 /**
  * NettyChannel context information
@@ -70,6 +71,12 @@ public class HttpNettyChannelContext<T> {
      * Processing completion flag
      */
     private boolean finish;
+    /**
+     * Termination cause claimed before the sink existed, handed to whoever installs it. Without it
+     * the real reason (read timeout, protocol error, netty cause chain) would be dropped and every
+     * such exchange would be reported as a generic disconnect.
+     */
+    private Throwable pendingError;
 
     /**
      * {@code sink} is installed by the thread that issues the request while the Netty threads may
@@ -107,6 +114,7 @@ public class HttpNettyChannelContext<T> {
     /**
      * Installs the sink and reports whether the exchange had already ended before it existed, in
      * which case the caller owns terminating it — whoever ended the exchange found no sink to end.
+     * When that happens {@link #getPendingError()} carries the cause the winner recorded.
      */
     public synchronized boolean installSink(FluxSink<T> sink) {
         this.sink = sink;
@@ -116,14 +124,27 @@ public class HttpNettyChannelContext<T> {
     /**
      * Claims the exclusive right to terminate the sink and returns it. Null means the caller does
      * not own the termination: either the exchange has already ended, or the sink does not exist
-     * yet and the thread installing it terminates instead.
+     * yet and the thread installing it terminates instead — in the latter case {@code error} is
+     * recorded so that thread can fail with the real cause rather than a generic disconnect.
      */
-    public synchronized FluxSink<T> claimTermination() {
+    public synchronized FluxSink<T> claimTermination(Supplier<Throwable> error) {
         if (finish) {
             return null;
         }
         finish = true;
+        if (sink == null) {
+            pendingError = error.get();
+        }
         return sink;
+    }
+
+    /** Explicitly synchronized so {@code @Data} cannot supply unsynchronized accessors instead. */
+    public synchronized Throwable getPendingError() {
+        return pendingError;
+    }
+
+    public synchronized void setPendingError(Throwable pendingError) {
+        this.pendingError = pendingError;
     }
 
     @Data

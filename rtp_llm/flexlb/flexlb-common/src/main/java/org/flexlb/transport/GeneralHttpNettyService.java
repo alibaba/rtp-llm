@@ -66,8 +66,10 @@ public class GeneralHttpNettyService {
     }
 
     public <Request, Result> Mono<Result> request(Request request, URI uri, String path, HttpHeaders headers, Class<Result> responseClz) {
-
-        return Mono.fromFuture(this.doRequest(request, uri, path, headers, responseClz).toFuture());
+        // Delegate rather than bridging through toFuture(), which subscribes at assembly time and
+        // would fire the request even if the returned Mono is never subscribed — the 4-arg overload
+        // above is cold, and these two must not differ in that.
+        return this.doRequest(request, uri, path, headers, responseClz);
     }
 
     public <Request, Result> Mono<Result> doRequest(Request request, URI uri, String path, HttpHeaders headers, Class<Result> responseClz) {
@@ -118,9 +120,13 @@ public class GeneralHttpNettyService {
         return Flux.<Result>create(sink -> {
             if (nettyCtx.installSink(sink)) {
                 // The exchange ended before the sink existed, so whoever ended it had nothing to
-                // terminate and left the duty here.
-                sink.error(StatusEnum.ENGINE_ABNORMAL_DISCONNECT_EXCEPTION
-                        .toException("channel closed before request could be written"));
+                // terminate and left the duty here — along with the cause it recorded, so a read
+                // timeout or protocol error keeps its type and cause chain instead of being
+                // reported as a plain disconnect.
+                Throwable pending = nettyCtx.getPendingError();
+                sink.error(pending != null ? pending
+                        : StatusEnum.ENGINE_ABNORMAL_DISCONNECT_EXCEPTION
+                                .toException("channel closed before request could be written"));
                 return;
             }
             DefaultFullHttpRequest request = buildRequest(nettyCtx, uri, path, headers);
@@ -154,8 +160,10 @@ public class GeneralHttpNettyService {
      * is the common one (a completed exchange closes its own channel) and must stay allocation-free.
      */
     private <Result> void failSink(HttpNettyChannelContext<Result> nettyCtx, Supplier<Throwable> error) {
-        FluxSink<Result> sink = nettyCtx.claimTermination();
+        FluxSink<Result> sink = nettyCtx.claimTermination(error);
         if (sink == null || sink.isCancelled()) {
+            // Either the exchange had already ended, or this caller won the claim before the sink
+            // existed — in which case claimTermination recorded the cause for whoever installs it.
             return;
         }
         sink.error(error.get());
