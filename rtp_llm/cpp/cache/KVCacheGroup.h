@@ -24,11 +24,11 @@ struct NeedBlocksInfo {
 
 class KVCacheGroup {
 public:
-    KVCacheGroup(const LayerIdsType& layer_ids,
-                 KVCacheSpecPtr      kvcache_spec,
-                 BlockPoolPtr        block_pool,
-                 int                 group_id,
-                 SharedBlockCache*   shared_cache = nullptr,
+    KVCacheGroup(const LayerIdsType&                 layer_ids,
+                 KVCacheSpecPtr                      kvcache_spec,
+                 BlockPoolPtr                        block_pool,
+                 int                                 group_id,
+                 SharedBlockCache*                   shared_cache     = nullptr,
                  const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
         layer_ids_(layer_ids),
         kvcache_spec_(std::move(kvcache_spec)),
@@ -56,8 +56,8 @@ public:
     std::unordered_map<int, torch::Tensor> allLayerCacheBase() const;
     std::unordered_map<int, torch::Tensor> allLayerScaleCacheBase() const;
     BlockAddrInfo                          convertIndexToAddr(int layer_id, int block_id) const;
-    std::vector<BlockInfo>                 convertIndexToBuffer(int layer_id, int block_id) const;
-    std::vector<BlockInfo>
+    virtual std::vector<BlockInfo>         convertIndexToBuffer(int layer_id, int block_id) const;
+    virtual std::vector<BlockInfo>
     convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const;
 
     size_t freeBlocksNum() const;
@@ -66,12 +66,12 @@ public:
     int    group_id() const;
 
 protected:
-    LayerIdsType      layer_ids_;
-    KVCacheSpecPtr    kvcache_spec_;
-    BlockPoolPtr      block_pool_;
-    SharedBlockCache* shared_cache_ = nullptr;
+    LayerIdsType                 layer_ids_;
+    KVCacheSpecPtr               kvcache_spec_;
+    BlockPoolPtr                 block_pool_;
+    SharedBlockCache*            shared_cache_     = nullptr;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
-    int               group_id_     = 0;
+    int                          group_id_         = 0;
 
     int                                    seq_size_per_block_;
     std::unordered_map<int, torch::Tensor> global_layer_to_kv_tensors;

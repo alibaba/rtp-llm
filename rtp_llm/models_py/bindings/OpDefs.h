@@ -7,6 +7,7 @@
 #include <cstdint>
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
+#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
@@ -24,12 +25,20 @@ namespace torch_ext {
 //   MHA: [kernel_block_num, 2, num_kv_heads, kernel_seq_size_per_block, head_dim]
 //   MLA: [kernel_block_num, kernel_seq_size_per_block, kv_lora_rank + rope_head_dim]
 struct LayerKVCache {
-    torch::Tensor              kv_cache_base;
-    torch::Tensor              kv_scale_base;
-    int                        seq_size_per_block = 0;
-    int                        layer_id           = -1;
-    int                        group_id           = -1;
-    rtp_llm::KVCacheRegionName region_name        = rtp_llm::KVCacheRegionName::DEFAULT;
+    torch::Tensor kv_cache_base;
+    torch::Tensor kv_scale_base;
+    // Optional contiguous source segments used by normal CacheStore for
+    // asymmetric-TP linear-state transfer. The destination allocator exposes
+    // matching non-contiguous segments through MemoryLayoutStrategy.
+    std::vector<size_t> cache_store_segment_sizes;
+    // True when dim(0) indexes kernel pages rather than physical cache
+    // blocks. CacheStore uses this explicit bit instead of guessing from the
+    // tensor rank, because both views can be 3-D.
+    bool                       cache_store_tensor_is_kernel_block_view = false;
+    int                        seq_size_per_block                      = 0;
+    int                        layer_id                                = -1;
+    int                        group_id                                = -1;
+    rtp_llm::KVCacheRegionName region_name                             = rtp_llm::KVCacheRegionName::DEFAULT;
 };
 
 // Whole-model KV cache holding tensors for all layers.
@@ -86,22 +95,49 @@ struct KVCache {
             const int64_t kernel_blocks_per_kv_block =
                 kernel_seq_size_per_block > 0 ? (int64_t)seq_size_per_block / (int64_t)kernel_seq_size_per_block : 1;
 
-            // [block_num, kv_block_stride_elems] shared by all layer types.
-            if (base.defined() && base.dim() == 2) {
+            // Shared HybridCache can expose MLA storage either as a flat
+            // [physical_blocks, stride] tensor or as the physical
+            // [physical_blocks, physical_tokens, width] view created by the
+            // pool's MLA layout.  Both must be converted to kernel-page
+            // granularity before the attention kernel sees them.
+            if (base.defined() && (base.dim() == 2 || base.dim() == 3)) {
                 const int64_t physical_block_num = base.size(0);
                 const int64_t kernel_block_num   = physical_block_num * kernel_blocks_per_kv_block;
                 if (use_mla && kv_lora_rank > 0 && rope_head_dim > 0) {
                     // MLA layout: [kernel_block_num, kernel_seq_size_per_block, kv_lora_rank + rope_head_dim]
-                    layer_cache.kv_cache_base = base.reshape({kernel_block_num,
-                                                              (int64_t)kernel_seq_size_per_block,
-                                                              (int64_t)(kv_lora_rank + rope_head_dim)});
-                } else if (num_kv_heads > 0 && head_dim > 0) {
+                    const int64_t width              = static_cast<int64_t>(kv_lora_rank + rope_head_dim);
+                    const int64_t logical_page_elems = static_cast<int64_t>(kernel_seq_size_per_block) * width;
+                    if (base.dim() == 2 && base.stride(0) != static_cast<int64_t>(seq_size_per_block) * width) {
+                        // Shared HybridCache may be sized by a larger KDA state.
+                        // Divide the physical padding evenly among MLA kernel
+                        // pages so concat/cache and FlashInfer retain one
+                        // constant page stride on both Prefill and Decode.
+                        RTP_LLM_CHECK_WITH_INFO(
+                            base.stride(0) % kernel_blocks_per_kv_block == 0,
+                            "padded MLA physical block stride=%ld is not divisible by kernel pages=%ld",
+                            base.stride(0),
+                            kernel_blocks_per_kv_block);
+                        const int64_t physical_page_stride = base.stride(0) / kernel_blocks_per_kv_block;
+                        RTP_LLM_CHECK_WITH_INFO(physical_page_stride >= logical_page_elems,
+                                                "padded MLA page stride=%ld is smaller than logical page=%ld",
+                                                physical_page_stride,
+                                                logical_page_elems);
+                        layer_cache.kv_cache_base =
+                            base.as_strided({kernel_block_num, (int64_t)kernel_seq_size_per_block, width},
+                                            {physical_page_stride, width, 1});
+                    } else {
+                        layer_cache.kv_cache_base =
+                            base.reshape({kernel_block_num, (int64_t)kernel_seq_size_per_block, width});
+                    }
+                    layer_cache.cache_store_tensor_is_kernel_block_view = kernel_blocks_per_kv_block > 1;
+                } else if (base.dim() == 2 && num_kv_heads > 0 && head_dim > 0) {
                     // MHA layout: [kernel_block_num, 2, num_kv_heads, kernel_seq_size_per_block, head_dim]
-                    layer_cache.kv_cache_base = base.reshape({kernel_block_num,
-                                                              2,
-                                                              (int64_t)num_kv_heads,
-                                                              (int64_t)kernel_seq_size_per_block,
-                                                              (int64_t)head_dim});
+                    layer_cache.kv_cache_base                           = base.reshape({kernel_block_num,
+                                                                                        2,
+                                                                                        (int64_t)num_kv_heads,
+                                                                                        (int64_t)kernel_seq_size_per_block,
+                                                                                        (int64_t)head_dim});
+                    layer_cache.cache_store_tensor_is_kernel_block_view = kernel_blocks_per_kv_block > 1;
                 } else {
                     layer_cache.kv_cache_base = base;
                 }
@@ -171,14 +207,14 @@ struct KVCache {
         }
 
         LayerKVCache layer_cache;
-        layer_cache.layer_id      = idx;
-        layer_cache.group_id      = layer_region_to_group_id.empty() ? -1 : layer_region_to_group_id[layer][attn];
-        layer_cache.region_name   = region_name;
-        const bool is_full_region = !rtp_llm::isDsv4FixedRegion(region_name);
-        layer_cache.seq_size_per_block =
-            is_full_region && kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block :
-                                                              groupSeqSizePerBlock(layer_cache.group_id);
-        layer_cache.kv_cache_base = base;
+        layer_cache.layer_id           = idx;
+        layer_cache.group_id           = layer_region_to_group_id.empty() ? -1 : layer_region_to_group_id[layer][attn];
+        layer_cache.region_name        = region_name;
+        const bool is_full_region      = !rtp_llm::isDsv4FixedRegion(region_name);
+        layer_cache.seq_size_per_block = is_full_region && kernel_seq_size_per_block > 0 ?
+                                             kernel_seq_size_per_block :
+                                             groupSeqSizePerBlock(layer_cache.group_id);
+        layer_cache.kv_cache_base      = base;
         if (!kv_scale_base_by_layer_region.empty() && layer < kv_scale_base_by_layer_region.size()
             && attn < kv_scale_base_by_layer_region[layer].size()) {
             layer_cache.kv_scale_base = kv_scale_base_by_layer_region[layer][attn];
@@ -284,8 +320,11 @@ struct PyContextParallelParams {
 };
 
 struct PyAttentionInputs {
-    bool          is_prefill{false};
-    bool          is_target_verify{false};
+    bool is_prefill{false};
+    bool is_target_verify{false};
+    // True for the synthetic stream used to keep DP/EP collectives aligned.
+    // Python models must not read or write request KV state for this stream.
+    bool          is_fake_stream{false};
     torch::Tensor prefix_lengths;
     torch::Tensor sequence_lengths;
     torch::Tensor input_lengths;
@@ -297,9 +336,14 @@ struct PyAttentionInputs {
     // Shape: [group, batch, max_blocks] or [batch, max_blocks].
     torch::Tensor kv_cache_block_id_host;
     torch::Tensor kv_cache_block_id_device;
+    // Hybrid cache support: per-group physical block tables for CacheStore.
+    // These stay at seq_size_per_block granularity even when attention compute
+    // expands FULL groups into kernel_seq_size_per_block pages.
+    std::vector<torch::Tensor> kv_cache_block_id_host_by_group;
     // Hybrid cache support: per-group CUDA kernel block tables.
-    // Legacy CPU consumers still use singular kv_cache_kernel_block_id_host,
-    // which aliases group 0.
+    // Legacy consumers still use the singular fields; block_map.py switches
+    // those aliases to the current layer's group before attention runs.
+    std::vector<torch::Tensor> kv_cache_kernel_block_id_host_by_group;
     std::vector<torch::Tensor> kv_cache_kernel_block_id_device_by_group;
     torch::Tensor              kv_cache_layer_to_group;
     caffe2::TypeMeta           dtype;

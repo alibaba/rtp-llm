@@ -3,9 +3,86 @@
 #include <algorithm>
 #include <unordered_set>
 
+#include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
+
+std::vector<BlockInfo>
+LinearKVCacheGroup::convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const {
+    RTP_LLM_CHECK_WITH_INFO(partition_count > 0, "linear cache partition_count must be positive");
+    RTP_LLM_CHECK_WITH_INFO(partition_id >= 0 && partition_id < partition_count,
+                            "linear cache partition_id=%d is outside [0, %d)",
+                            partition_id,
+                            partition_count);
+
+    const auto linear_spec = std::dynamic_pointer_cast<LinearKVCacheSpec>(kvcache_spec_);
+    RTP_LLM_CHECK_WITH_INFO(linear_spec != nullptr, "LinearKVCacheGroup requires LinearKVCacheSpec");
+    RTP_LLM_CHECK_WITH_INFO(linear_spec->local_num_k_heads > 0 && linear_spec->local_num_v_heads > 0,
+                            "linear cache head metadata is missing");
+    RTP_LLM_CHECK_WITH_INFO(linear_spec->local_num_k_heads % partition_count == 0
+                                && linear_spec->local_num_v_heads % partition_count == 0,
+                            "linear cache heads k=%u v=%u are not divisible by partition_count=%d",
+                            linear_spec->local_num_k_heads,
+                            linear_spec->local_num_v_heads,
+                            partition_count);
+    RTP_LLM_CHECK_WITH_INFO(linear_spec->conv_kernel_dim > 1,
+                            "linear conv kernel must be greater than one, got %u",
+                            linear_spec->conv_kernel_dim);
+
+    auto whole_block = KVCacheGroup::convertIndexToBuffer(layer_id, block_id);
+    RTP_LLM_CHECK_WITH_INFO(whole_block.size() == 1,
+                            "shared linear cache expects one unscaled physical block, got %zu parts",
+                            whole_block.size());
+    RTP_LLM_CHECK_WITH_INFO(whole_block[0].addr != nullptr, "shared linear cache block address is null");
+
+    const size_t ssm_bytes      = linear_spec->k_block_size_bytes();
+    const size_t conv_type_size = rtp_llm::getTypeSize(linear_spec->conv_state_dtype);
+    const size_t q_bytes =
+        static_cast<size_t>(linear_spec->local_num_k_heads) * linear_spec->head_k_dim * conv_type_size;
+    const size_t k_bytes = q_bytes;
+    const size_t v_bytes =
+        static_cast<size_t>(linear_spec->local_num_v_heads) * linear_spec->head_v_dim * conv_type_size;
+    const size_t history_count  = static_cast<size_t>(linear_spec->conv_kernel_dim - 1);
+    const size_t history_stride = q_bytes + k_bytes + v_bytes;
+    const size_t state_bytes    = ssm_bytes + history_count * history_stride;
+    RTP_LLM_CHECK_WITH_INFO(state_bytes <= whole_block[0].size_bytes,
+                            "linear cache state bytes=%zu exceed shared physical block stride=%zu",
+                            state_bytes,
+                            whole_block[0].size_bytes);
+    RTP_LLM_CHECK_WITH_INFO(ssm_bytes % static_cast<size_t>(partition_count) == 0
+                                && q_bytes % static_cast<size_t>(partition_count) == 0
+                                && k_bytes % static_cast<size_t>(partition_count) == 0
+                                && v_bytes % static_cast<size_t>(partition_count) == 0,
+                            "linear cache segment bytes are not divisible by partition_count=%d",
+                            partition_count);
+
+    auto*        block_base = static_cast<char*>(whole_block[0].addr);
+    const size_t part       = static_cast<size_t>(partition_id);
+    const size_t count      = static_cast<size_t>(partition_count);
+    auto         make_part  = [&](size_t offset, size_t bytes) {
+        BlockInfo info  = whole_block[0];
+        info.addr       = block_base + offset;
+        info.size_bytes = bytes;
+        return info;
+    };
+
+    std::vector<BlockInfo> out;
+    out.reserve(1 + history_count * 3);
+    const size_t ssm_part_bytes = ssm_bytes / count;
+    out.push_back(make_part(part * ssm_part_bytes, ssm_part_bytes));
+
+    const size_t q_part_bytes = q_bytes / count;
+    const size_t k_part_bytes = k_bytes / count;
+    const size_t v_part_bytes = v_bytes / count;
+    for (size_t history_idx = 0; history_idx < history_count; ++history_idx) {
+        const size_t history_base = ssm_bytes + history_idx * history_stride;
+        out.push_back(make_part(history_base + part * q_part_bytes, q_part_bytes));
+        out.push_back(make_part(history_base + q_bytes + part * k_part_bytes, k_part_bytes));
+        out.push_back(make_part(history_base + q_bytes + k_bytes + part * v_part_bytes, v_part_bytes));
+    }
+    return out;
+}
 
 void LinearKVCacheGroup::filterValidBlocks(const BlockIndicesType& in, BlockIndicesType& out) const {
     out.clear();

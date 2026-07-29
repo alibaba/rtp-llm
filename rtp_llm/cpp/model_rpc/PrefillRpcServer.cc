@@ -305,6 +305,11 @@ void PrefillRpcServer::remoteAllocateResource(PrefillGenerateContext& prefill_co
     if (cp_cfg.kv_cache_sharded && maga_init_params_.parallelism_config.tp_size > 1) {
         alloc_request.set_prefill_cp_size(static_cast<int32_t>(maga_init_params_.parallelism_config.tp_size));
     }
+    const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
+    alloc_request.set_prefill_seq_size_per_block(static_cast<int32_t>(cache_config.seq_size_per_block));
+    alloc_request.set_prefill_kernel_seq_size_per_block(static_cast<int32_t>(cache_config.kernel_seq_size_per_block));
+    alloc_request.set_prefill_attention_tp_size(
+        static_cast<int32_t>(maga_init_params_.parallelism_config.get_attn_tp_size()));
 
     CLIENT_GRPC_RET_IF_ERROR(
         prefill_context, client_stream->Write(alloc_request), ErrorCode::REMOTE_ALLOCATE_RESOURCE_WRITE_FAILED);
@@ -335,7 +340,7 @@ void PrefillRpcServer::enqueueRequest(PrefillGenerateContext& prefill_context) {
 void PrefillRpcServer::remoteLoadCacheStart(PrefillGenerateContext& prefill_context) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_LOG_DEBUG("request [%ld] remote load cache", prefill_context.request_id);
-    auto start_time_us = currentTimeUs();
+    auto start_time_us         = currentTimeUs();
     prefill_context.error_info = waitStreamBeforeRun(prefill_context.getStream());
     prefill_context.stat_info.remote_load_cache_wait_stream_rt_us += currentTimeUs() - start_time_us;
     if (prefill_context.error_info.hasError()) {

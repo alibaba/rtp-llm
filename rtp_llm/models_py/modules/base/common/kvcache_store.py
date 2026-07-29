@@ -49,7 +49,16 @@ class WriteCacheStoreOp(nn.Module):
         self, kv_cache: Optional[LayerKVCache]
     ) -> Optional[torch.Tensor]:
         if self._block_ids_by_group is None:
-            return self.kv_cache_block_id_host
+            block_ids = self.kv_cache_block_id_host
+            if block_ids is not None and block_ids.dim() == 3:
+                gid = getattr(kv_cache, "group_id", -1)
+                if gid < 0 or gid >= block_ids.shape[0]:
+                    raise RuntimeError(
+                        "missing physical cache-store block table for owned KV cache "
+                        f"group: group_id={gid}, group_count={block_ids.shape[0]}"
+                    )
+                return block_ids[gid]
+            return block_ids
         gid = getattr(kv_cache, "group_id", -1)
         layer_id = getattr(kv_cache, "layer_id", -1)
         region_name = getattr(kv_cache, "region_name", None)
@@ -107,16 +116,20 @@ def create_write_cache_store_impl(
     if prefix_lengths is None or not prefix_lengths.numel():
         prefix_lengths = attn_inputs.prefix_lengths
 
-    has_multi_region = (
-        kv_cache is not None
-        and bool(getattr(kv_cache, "layer_region_to_group_id", None))
-        and bool(getattr(attn_inputs, "kv_cache_kernel_block_id_host_by_group", None))
+    # A layer-local attention wrapper (MLA is the important example) does not
+    # necessarily own the whole-model ``KVCache`` object.  The scheduler has
+    # already provided authoritative physical block tables per cache group,
+    # and ``LayerKVCache.group_id`` is sufficient to select the right one.
+    # Falling back to the singular table here pins every later HybridCache
+    # group to group 0 and publishes the wrong physical block.
+    has_group_block_tables = bool(
+        getattr(attn_inputs, "kv_cache_block_id_host_by_group", None)
     )
-    if has_multi_region:
+    if has_group_block_tables:
         return WriteCacheStoreOp(
             input_lengths,
             prefix_lengths,
-            attn_inputs.kv_cache_kernel_block_id_host_by_group,
+            attn_inputs.kv_cache_block_id_host_by_group,
             cache_store_inputs,
         )
 

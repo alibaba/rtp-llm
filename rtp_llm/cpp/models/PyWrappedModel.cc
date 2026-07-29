@@ -211,6 +211,15 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     if (inputs.kv_cache_block_id.defined()) {
         RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs(kv_block_host)");
         py_attn_inputs.kv_cache_block_id_host = pinned_host_i32(inputs.kv_cache_block_id);
+        py_attn_inputs.kv_cache_block_id_host_by_group.clear();
+        if (py_attn_inputs.kv_cache_block_id_host.dim() == 3) {
+            const size_t group_count = py_attn_inputs.kv_cache_block_id_host.size(0);
+            py_attn_inputs.kv_cache_block_id_host_by_group.reserve(group_count);
+            for (size_t group_id = 0; group_id < group_count; ++group_id) {
+                py_attn_inputs.kv_cache_block_id_host_by_group.push_back(
+                    py_attn_inputs.kv_cache_block_id_host[group_id]);
+            }
+        }
     }
     if (inputs.kv_cache_layer_to_group.defined()) {
         py_attn_inputs.kv_cache_layer_to_group = inputs.kv_cache_layer_to_group;
@@ -223,6 +232,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.dtype            = dataTypeToTorchType(description_.data_type);
     py_attn_inputs.is_prefill       = !decode_batch_size;
     py_attn_inputs.is_target_verify = inputs.is_target_verify;
+    py_attn_inputs.is_fake_stream   = inputs.is_fake_stream;
     RTP_LLM_CHECK_WITH_INFO(
         context_batch_size + decode_batch_size == batch_size,
         "batch size check failed context_batch_size[%ld] decode_batch_size[%ld] total_batch_size[%ld]",
@@ -327,7 +337,7 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
     }
     RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_kernel_block_id.dim() == 3, "kv_cache_kernel_block_id shape should be 3");
     // New CUDA layout: [group, batch, kernel_blocks].
-    // Per-group device views are zero-copy slices; host_by_group was removed.
+    // Per-group device views are zero-copy slices.
     const size_t group = inputs.kv_cache_kernel_block_id.size(0);
 
     py_attn_inputs.kv_cache_kernel_block_id_device_by_group.clear();
@@ -344,16 +354,21 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
     // Gate host materialization: MHA reads device fields only, while MLA/
     // SparseMLA/ROCm/CP paths still consume the singular host block table.
     if (description_.attention_conf.use_mla) {
-        torch::Tensor group0 = inputs.kv_cache_kernel_block_id[0];
-        if (group0.device().is_cuda()) {
-            group0 = group0.cpu();
+        torch::Tensor all_groups = inputs.kv_cache_kernel_block_id;
+        if (all_groups.device().is_cuda()) {
+            all_groups = all_groups.cpu();
         }
-        if (group0.dtype() != torch::kInt32) {
-            group0 = group0.to(torch::kInt32);
+        if (all_groups.dtype() != torch::kInt32) {
+            all_groups = all_groups.to(torch::kInt32);
         }
-        group0 = group0.contiguous().pin_memory();
-        buffer_holder_.hold_host(group0);
-        py_attn_inputs.kv_cache_kernel_block_id_host = group0;
+        all_groups = all_groups.contiguous().pin_memory();
+        buffer_holder_.hold_host(all_groups);
+        py_attn_inputs.kv_cache_kernel_block_id_host_by_group.clear();
+        py_attn_inputs.kv_cache_kernel_block_id_host_by_group.reserve(group);
+        for (size_t group_id = 0; group_id < group; ++group_id) {
+            py_attn_inputs.kv_cache_kernel_block_id_host_by_group.push_back(all_groups[group_id]);
+        }
+        py_attn_inputs.kv_cache_kernel_block_id_host = py_attn_inputs.kv_cache_kernel_block_id_host_by_group[0];
     }
 }
 
@@ -792,9 +807,13 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         return callForwardPostLayers(hidden_states, inputs, true);
 
     } catch (const py::error_already_set& e) {
+        fprintf(stderr, "[K3_FORWARD_DIAG] Python error: %s\n", e.what());
+        fflush(stderr);
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
         throw std::runtime_error(std::string("pybind11 error during forward call on Python instance: ") + e.what());
     } catch (const std::exception& e) {
+        fprintf(stderr, "[K3_FORWARD_DIAG] C++ error: %s\n", e.what());
+        fflush(stderr);
         RTP_LLM_LOG_ERROR("C++ error during forward call on Python instance: %s", e.what());
         throw std::runtime_error(std::string("C++ error during forward call on Python instance: ") + e.what());
     } catch (...) {
@@ -957,6 +976,12 @@ GptModelOutputs PyWrappedModel::forwardPostLayers(torch::Tensor         hidden,
             RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayers(tp_sync_logits)");
             logits = tpSyncEmbeddingOrLogits(logits);
         }
+        if (description_.round_lm_head_to_model_dtype
+            && logits.scalar_type() != dataTypeToTorchType(description_.data_type)) {
+            // K3's source nn.Linear returns BF16 logits, then exposes them as
+            // FP32. The BF16 rounding point is observable for tied argmaxes.
+            logits = logits.to(dataTypeToTorchType(description_.data_type)).to(torch::kFloat32);
+        }
         if (check_nan_) {
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");
             RTP_LLM_CHECK_WITH_INFO(!torch::isnan(logits).any().item<bool>(), "NAN detected in logits");
@@ -1007,6 +1032,10 @@ GptModelOutputs PyWrappedModel::forwardPostLayersLastHidden(torch::Tensor hidden
     if (device_props_.tp_size > 1) {
         RTP_LLM_PROFILE_SCOPE("py_model.forwardPostLayersLastHidden(tp_sync_logits)");
         logits = tpSyncEmbeddingOrLogits(logits);
+    }
+    if (description_.round_lm_head_to_model_dtype
+        && logits.scalar_type() != dataTypeToTorchType(description_.data_type)) {
+        logits = logits.to(dataTypeToTorchType(description_.data_type)).to(torch::kFloat32);
     }
     if (check_nan_) {
         RTP_LLM_CHECK_WITH_INFO(!torch::isnan(last_hidden).any().item<bool>(), "NAN detected in last_hidden");

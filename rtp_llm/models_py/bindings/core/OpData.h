@@ -175,6 +175,11 @@ struct KvCacheInfo {
     torch::Tensor kv_cache_buffer;
     // Optional scale buffer for kv cache quantization (int8/fp8). If set, it should match kv_cache_buffer layout.
     torch::Tensor kv_scale_buffer;
+    // A linear cache source block is contiguous locally, but its per-head
+    // slices land in non-contiguous regions when prefill/decode TP differ.
+    // Store each logical segment under a distinct key so CacheStore can
+    // scatter it into the destination allocator's matching segments.
+    std::vector<size_t> linear_cache_segment_sizes;
 };
 
 struct CacheStoreInputs {

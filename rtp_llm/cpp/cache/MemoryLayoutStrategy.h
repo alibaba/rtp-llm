@@ -45,6 +45,8 @@ private:
     std::vector<BlockInfo>
     createPartitionedBlockInfo(int layer_id, int block_id, int partition_count, int partition_id) const;
     std::vector<BlockInfo>
+    createLinearPartitionedBlockInfo(int layer_id, int block_id, int partition_count, int partition_id) const;
+    std::vector<BlockInfo>
     createPartitionedSubBlocks(const torch::Tensor& layer_tensor, void* base_addr, const KVPartitionBytes& parts) const;
 
     MemoryLayoutConfig         config_;

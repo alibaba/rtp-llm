@@ -30,6 +30,9 @@ struct GptModelDescription {
     double                    input_embedding_scalar = 1;
     double                    residual_scalar        = 1;
     bool                      reverse_e_h_norm       = false;
+    // Some source models expose model-dtype lm_head results and only cast to
+    // FP32 afterwards. Preserve that rounding point before sampling.
+    bool round_lm_head_to_model_dtype = false;
 };
 
 struct GptModelInitParams {

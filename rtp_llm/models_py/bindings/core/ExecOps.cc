@@ -1,6 +1,9 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
+#include <algorithm>
+#include <cstdlib>
+#include <sstream>
 #include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
@@ -20,6 +23,7 @@
 #include <mutex>
 #include <atomic>
 #include <algorithm>
+#include <limits>
 #include <memory>
 #if USING_CUDA
 #include <c10/cuda/CUDAGuard.h>
@@ -140,6 +144,32 @@ std::shared_ptr<torch::Event> runtimeCreateEvent() {
 // CacheStore (cache_store passed explicitly from KVCacheManager)
 // ============================================================
 
+namespace {
+
+bool kimiK3PdTraceLogEnabled() {
+    const char* value = std::getenv("KIMI_K3_PD_TRACE_LOG_ENABLE");
+    return value != nullptr && std::string(value) == "1";
+}
+
+std::string cacheStoreBlockKeysForTrace(const std::shared_ptr<RequestBlockBuffer>& request_blocks) {
+    std::vector<std::string> keys;
+    keys.reserve(request_blocks->getBlocksCount());
+    for (const auto& [key, _] : request_blocks->getBlocks()) {
+        keys.push_back(key);
+    }
+    std::sort(keys.begin(), keys.end());
+    std::ostringstream stream;
+    for (size_t i = 0; i < keys.size(); ++i) {
+        if (i != 0) {
+            stream << ",";
+        }
+        stream << keys[i];
+    }
+    return stream.str();
+}
+
+}  // namespace
+
 void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                             const KvCacheInfo&          kv_cache,
                             bool                        mla_kvcache,
@@ -215,9 +245,9 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     auto       kv_cache_data      = (uint64_t*)kv_cache.kv_cache_buffer.data_ptr();
     auto       kv_cache_owner     = std::make_shared<torch::Tensor>(kv_cache.kv_cache_buffer);
     const bool kv_gpu_mem         = kv_cache.kv_cache_buffer.is_cuda();
-    const bool has_kv_scale = kv_cache.kv_scale_buffer.defined() && kv_cache.kv_scale_buffer.numel() > 0
-                              && param.kv_scale_stride_bytes > 0;
-    uint64_t*  kv_scale_data      = nullptr;
+    const bool has_kv_scale =
+        kv_cache.kv_scale_buffer.defined() && kv_cache.kv_scale_buffer.numel() > 0 && param.kv_scale_stride_bytes > 0;
+    uint64_t*                      kv_scale_data = nullptr;
     std::shared_ptr<torch::Tensor> kv_scale_owner;
     if (has_kv_scale) {
         kv_scale_data  = (uint64_t*)kv_cache.kv_scale_buffer.data_ptr();
@@ -256,10 +286,9 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             / seq_size_per_block;
         int canonical_reuse_block_num =
             param.prefix_lengths_host.data_ptr<int>()[batch_id] / canonical_seq_size_per_block;
-        int canonical_block_num =
-            (param.input_lengths_host.data_ptr<int>()[param.decoder_batch_size + batch_id]
-             + canonical_seq_size_per_block - 1)
-            / canonical_seq_size_per_block;
+        int canonical_block_num = (param.input_lengths_host.data_ptr<int>()[param.decoder_batch_size + batch_id]
+                                   + canonical_seq_size_per_block - 1)
+                                  / canonical_seq_size_per_block;
         auto request_id     = *(param.request_id.data_ptr<int64_t>() + batch_id);
         auto event          = param.pre_created_event ? param.pre_created_event : runtimeCreateEvent();
         auto request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
@@ -307,20 +336,50 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
 
             constexpr size_t kDsv4SwaFp8EntryBytes  = 584;
             constexpr size_t kDsv4SwaTokenDataBytes = 576;
-            const bool       is_swa_cp_slice        = param.region_name == KVCacheRegionName::SWA_KV && param.cp_size > 1
-                                               && param.kv_block_stride_bytes % kDsv4SwaFp8EntryBytes == 0;
+            const bool       is_swa_cp_slice = param.region_name == KVCacheRegionName::SWA_KV && param.cp_size > 1
+                                         && param.kv_block_stride_bytes % kDsv4SwaFp8EntryBytes == 0;
 
             // Some layouts treat the block as a single opaque KV chunk. Only
             // the legacy MHA path splits k/v. SWA_KV is opaque logically, but
             // its FP8 physical block is striped as DATA then SCALES, so CP
             // slices must store those two regions independently.
-            if (is_swa_cp_slice) {
-                constexpr size_t kSwaTokenDataBytes  = kDsv4SwaTokenDataBytes;
-                constexpr size_t kSwaTokenScaleBytes = kDsv4SwaFp8EntryBytes - kSwaTokenDataBytes;
-                const size_t     local_entries       = param.kv_block_stride_bytes / kDsv4SwaFp8EntryBytes;
-                const size_t     data_bytes          = local_entries * kSwaTokenDataBytes;
-                const size_t     scale_bytes         = local_entries * kSwaTokenScaleBytes;
-                void*            scale_addr          = static_cast<void*>(static_cast<int8_t*>(kv_addr) + data_bytes);
+            if (!kv_cache.linear_cache_segment_sizes.empty()) {
+                RTP_LLM_CHECK_WITH_INFO(!has_kv_scale, "segmented linear cache-store does not support a scale buffer");
+                size_t segment_offset = 0;
+                for (size_t segment_id = 0; segment_id < kv_cache.linear_cache_segment_sizes.size(); ++segment_id) {
+                    const size_t segment_size = kv_cache.linear_cache_segment_sizes[segment_id];
+                    RTP_LLM_CHECK_WITH_INFO(
+                        segment_size > 0, "linear cache-store segment %zu has zero size", segment_id);
+                    RTP_LLM_CHECK_WITH_INFO(segment_offset + segment_size <= param.kv_block_stride_bytes,
+                                            "linear cache-store segment %zu range [%zu, %zu) exceeds block size %zu",
+                                            segment_id,
+                                            segment_offset,
+                                            segment_offset + segment_size,
+                                            param.kv_block_stride_bytes);
+                    RTP_LLM_CHECK_WITH_INFO(segment_size <= std::numeric_limits<uint32_t>::max(),
+                                            "linear cache-store segment %zu is too large: %zu",
+                                            segment_id,
+                                            segment_size);
+                    void* segment_addr = static_cast<void*>(static_cast<int8_t*>(kv_addr) + segment_offset);
+                    std::shared_ptr<void> segment_block_addr(kv_cache_owner, segment_addr);
+                    request_blocks->addBlock(makeLinearCacheSegmentKey(segment_id, cache_key),
+                                             segment_block_addr,
+                                             static_cast<uint32_t>(segment_size),
+                                             kv_gpu_mem,
+                                             true);
+                    segment_offset += segment_size;
+                }
+                RTP_LLM_CHECK_WITH_INFO(segment_offset <= param.kv_block_stride_bytes,
+                                        "linear cache-store segments cover %zu bytes, exceed block size %zu",
+                                        segment_offset,
+                                        param.kv_block_stride_bytes);
+            } else if (is_swa_cp_slice) {
+                constexpr size_t      kSwaTokenDataBytes  = kDsv4SwaTokenDataBytes;
+                constexpr size_t      kSwaTokenScaleBytes = kDsv4SwaFp8EntryBytes - kSwaTokenDataBytes;
+                const size_t          local_entries       = param.kv_block_stride_bytes / kDsv4SwaFp8EntryBytes;
+                const size_t          data_bytes          = local_entries * kSwaTokenDataBytes;
+                const size_t          scale_bytes         = local_entries * kSwaTokenScaleBytes;
+                void*                 scale_addr = static_cast<void*>(static_cast<int8_t*>(kv_addr) + data_bytes);
                 std::shared_ptr<void> scale_block_addr(kv_cache_owner, scale_addr);
                 request_blocks->addBlock("kv_" + cache_key, kv_block_addr, data_bytes, kv_gpu_mem, true);
                 request_blocks->addBlock("kv_scale_" + cache_key, scale_block_addr, scale_bytes, kv_gpu_mem, true);
@@ -389,6 +448,17 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             }
         };
         if (request_blocks->getBlocksCount() > 0) {
+            if (kimiK3PdTraceLogEnabled()) {
+                RTP_LLM_LOG_INFO("[K3_PD_TRACE] event=cache_store_publish request_id=%ld layer=%d gid=%d region=%d "
+                                 "blocks=%zu bytes=%zu keys=%s",
+                                 request_id,
+                                 param.layer_id,
+                                 gid,
+                                 static_cast<int>(param.region_name),
+                                 request_blocks->getBlocksCount(),
+                                 request_blocks->getBlocksSize(),
+                                 cacheStoreBlockKeysForTrace(request_blocks).c_str());
+            }
             cache_store->store(request_blocks, storeCallback);
         } else {
             RTP_LLM_LOG_DEBUG("skip cache store because all selected blocks are null, request id [%ld], layer id [%d]",

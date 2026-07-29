@@ -130,6 +130,8 @@ void RtpLLMOp::init(py::object model,
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
 
     EngineInitParams params = initModel(model, engine_config, vit_config);
+    fprintf(stderr, "[K3_INIT_DIAG] initModel complete\n");
+    fflush(stderr);
 
     if (!propose_model.is_none()) {
         if (!propose_model.attr("model").is_none()) {
@@ -140,14 +142,20 @@ void RtpLLMOp::init(py::object model,
     RTP_LLM_LOG_INFO("init engine params success");
 
     params.showDebugInfo();
+    fprintf(stderr, "[K3_INIT_DIAG] showDebugInfo complete\n");
+    fflush(stderr);
     std::unique_ptr<ProposeModelEngineInitParams> propose_params = initProposeModel(propose_model, params);
-    pybind11::gil_scoped_release                  release;
+    fprintf(stderr, "[K3_INIT_DIAG] initProposeModel complete\n");
+    fflush(stderr);
+    pybind11::gil_scoped_release release;
     grpc_server_thread_ = std::thread(&RtpLLMOp::initRPCServer,
                                       this,
                                       std::move(params),
                                       std::move(mm_process_engine),
                                       std::move(propose_params),
                                       std::move(token_processor));
+    fprintf(stderr, "[K3_INIT_DIAG] initRPCServer thread spawned\n");
+    fflush(stderr);
     grpc_server_thread_.detach();
     while (!is_server_ready_) {
         sleep(1);  // wait 1s for server ready
@@ -156,6 +164,8 @@ void RtpLLMOp::init(py::object model,
 
 EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config, py::object vit_config) {
     try {
+        fprintf(stderr, "[K3_INIT_DIAG] initModel begin\n");
+        fflush(stderr);
         // Get model_config from model
         auto model_config = model.attr("model_config").cast<ModelConfig>();
 
@@ -178,6 +188,8 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
         auto arpc_config            = engine_config.attr("arpc_config").cast<ArpcConfig>();
         auto grpc_config            = engine_config.attr("grpc_config").cast<GrpcConfig>();
         auto grammar_config         = engine_config.attr("grammar_config").cast<GrammarConfig>();
+        fprintf(stderr, "[K3_INIT_DIAG] config casts complete\n");
+        fflush(stderr);
 
         // Extract vit_config
         VitConfig vit_config_cpp;
@@ -188,8 +200,12 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
         py::object py_layers_weights = model.attr("weight").attr("weights");
         py::object py_global_weights = model.attr("weight").attr("global_weights");
 
-        auto convert    = WeightsConverter(false, model_config.quant_algo);
+        auto convert = WeightsConverter(false, model_config.quant_algo);
+        fprintf(stderr, "[K3_INIT_DIAG] createGptWeights begin\n");
+        fflush(stderr);
         auto gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
+        fprintf(stderr, "[K3_INIT_DIAG] createGptWeights complete\n");
+        fflush(stderr);
 
         auto py_model       = model.attr("py_model");
         auto weight_manager = model.attr("weight_manager");
@@ -201,6 +217,8 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
             py_eplb = model.attr("py_eplb");
         }
 
+        fprintf(stderr, "[K3_INIT_DIAG] EngineInitParams begin\n");
+        fflush(stderr);
         EngineInitParams params(model_id_,
                                 model_config,
                                 parallelism_config,
@@ -225,6 +243,8 @@ EngineInitParams RtpLLMOp::initModel(py::object model, py::object engine_config,
                                 py_model,
                                 weight_manager,
                                 py_eplb);
+        fprintf(stderr, "[K3_INIT_DIAG] EngineInitParams complete\n");
+        fflush(stderr);
         params.grammar_config   = grammar_config;
         params.nccl_comm_config = engine_config.attr("nccl_comm_config").cast<NcclCommConfig>();
         params.server_config    = engine_config.attr("server_config");
@@ -304,12 +324,16 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
                              py::object                                    mm_process_engine,
                              std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                              py::object                                    token_processor) {
+    fprintf(stderr, "[K3_INIT_DIAG] initRPCServer begin\n");
+    fflush(stderr);
     std::string server_address;
     {
         pybind11::gil_scoped_acquire acquire;
-        int64_t                      http_port = maga_init_params.server_config.attr("http_port").cast<int64_t>();
-        int64_t model_rpc_port                 = maga_init_params.server_config.attr("rpc_server_port").cast<int64_t>();
-        auto    role_type                      = maga_init_params.pd_sep_config.role_type;
+        fprintf(stderr, "[K3_INIT_DIAG] initRPCServer GIL acquired\n");
+        fflush(stderr);
+        int64_t http_port      = maga_init_params.server_config.attr("http_port").cast<int64_t>();
+        int64_t model_rpc_port = maga_init_params.server_config.attr("rpc_server_port").cast<int64_t>();
+        auto    role_type      = maga_init_params.pd_sep_config.role_type;
         // NOTE: ip/ip段可自定义为所需范围。
         server_address = "0.0.0.0:" + std::to_string(model_rpc_port);
         if (role_type == RoleType::PREFILL || role_type == RoleType::DECODE) {
@@ -317,8 +341,12 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
         } else {
             model_rpc_service_.reset(new LocalRpcServiceImpl());
         }
+        fprintf(stderr, "[K3_INIT_DIAG] model rpc service init begin\n");
+        fflush(stderr);
         grpc::Status grpc_status =
             model_rpc_service_->init(maga_init_params, std::move(mm_process_engine), std::move(propose_params));
+        fprintf(stderr, "[K3_INIT_DIAG] model rpc service init complete\n");
+        fflush(stderr);
         if (!grpc_status.ok()) {
             RTP_LLM_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
         }
@@ -330,6 +358,8 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
                                              http_server_address,
                                              maga_init_params,
                                              token_processor));
+        fprintf(stderr, "[K3_INIT_DIAG] HttpApiServer complete\n");
+        fflush(stderr);
         if (model_rpc_port < 0) {
             is_server_ready_ = true;
             return;
@@ -350,6 +380,8 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
     builder.RegisterService(model_rpc_service_.get());
 
     grpc_server_ = builder.BuildAndStart();
+    fprintf(stderr, "[K3_INIT_DIAG] grpc BuildAndStart complete\n");
+    fflush(stderr);
     RTP_LLM_CHECK_WITH_INFO(grpc_server_ != nullptr, "grpc server start failed at address " + server_address);
 
     RTP_LLM_LOG_INFO("Server listening on %s", server_address.c_str());

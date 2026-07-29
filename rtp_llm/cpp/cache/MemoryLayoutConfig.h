@@ -33,6 +33,17 @@ struct MemoryLayoutConfig {
 
     bool is_mla  = false;  // true for scale 3D layout (MLA or indexer)
     bool use_mla = false;  // true for KV 3D layout (concat_and_cache_mla path only)
+    // Linear-cache blocks need a segmented head partition for asymmetric-TP
+    // PD transfer. Their physical layout is
+    //   [ssm heads][history][q heads | k heads | v heads]
+    // rather than the contiguous [K heads][V heads] layout used by MHA.
+    bool   is_linear_attention        = false;
+    size_t linear_num_k_heads         = 0;
+    size_t linear_num_v_heads         = 0;
+    size_t linear_conv_history        = 0;
+    size_t linear_q_bytes_per_history = 0;
+    size_t linear_k_bytes_per_history = 0;
+    size_t linear_v_bytes_per_history = 0;
     // TODO(xinfei.sxf) rm head info
     size_t local_head_num_kv  = 0;
     size_t seq_size_per_block = 0;

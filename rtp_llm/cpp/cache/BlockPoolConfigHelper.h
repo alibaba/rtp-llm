@@ -188,9 +188,30 @@ private:
         cfg.dtype                   = spec->dtype;
         cfg.local_head_num_kv       = spec->local_head_num_kv;
         cfg.enable_hybrid_attention = enable_hybrid_attention;
-        // Scale 3D layout for MLA and indexer; KV 3D only for MLA (concat_and_cache_mla)
-        cfg.is_mla             = cache_config.use_mla || cache_config.is_sparse;
-        cfg.use_mla            = cache_config.use_mla;
+        if (auto linear_spec = std::dynamic_pointer_cast<LinearKVCacheSpec>(spec)) {
+            const size_t conv_type_size = rtp_llm::getTypeSize(linear_spec->conv_state_dtype);
+            RTP_LLM_CHECK_WITH_INFO(linear_spec->conv_kernel_dim > 1,
+                                    "linear conv_kernel_dim must be greater than one, got %u",
+                                    linear_spec->conv_kernel_dim);
+            RTP_LLM_CHECK_WITH_INFO(conv_type_size > 0,
+                                    "invalid linear conv state dtype=%d",
+                                    static_cast<int>(linear_spec->conv_state_dtype));
+            cfg.is_linear_attention = true;
+            cfg.linear_num_k_heads  = linear_spec->local_num_k_heads;
+            cfg.linear_num_v_heads  = linear_spec->local_num_v_heads;
+            cfg.linear_conv_history = linear_spec->conv_kernel_dim - 1;
+            cfg.linear_q_bytes_per_history =
+                static_cast<size_t>(linear_spec->local_num_k_heads) * linear_spec->head_k_dim * conv_type_size;
+            cfg.linear_k_bytes_per_history = cfg.linear_q_bytes_per_history;
+            cfg.linear_v_bytes_per_history =
+                static_cast<size_t>(linear_spec->local_num_v_heads) * linear_spec->head_v_dim * conv_type_size;
+        }
+        // A mixed KDA+MLA model has a model-level use_mla flag, but an
+        // independent LINEAR group must never be reshaped as MLA. Shared
+        // HybridCache still builds its single physical layout from the leading
+        // FULL spec, so this remains true for the common pool.
+        cfg.is_mla             = !cfg.is_linear_attention && (cache_config.use_mla || cache_config.is_sparse);
+        cfg.use_mla            = !cfg.is_linear_attention && cache_config.use_mla;
         cfg.seq_size_per_block = static_cast<size_t>(cache_config.seq_size_per_block);
 
         cfg.kv_block_pool_size_bytes =
