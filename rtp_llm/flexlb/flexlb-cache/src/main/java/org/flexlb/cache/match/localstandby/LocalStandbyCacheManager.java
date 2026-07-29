@@ -15,14 +15,11 @@ import org.springframework.stereotype.Component;
 import javax.annotation.PreDestroy;
 import java.util.Collection;
 import java.util.Collections;
-import java.util.HashSet;
-import java.util.Iterator;
 import java.util.LinkedHashMap;
 import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
-import java.util.concurrent.TimeUnit;
 
 /**
  * Coordinates Local Standby cache matching, request-derived metadata updates and index sizing.
@@ -35,24 +32,24 @@ import java.util.concurrent.TimeUnit;
 public class LocalStandbyCacheManager {
 
     private static final long CAPACITY_REFRESH_INTERVAL_MS = 60_000;
-    private static final long CAPACITY_WARNING_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(1);
     private final boolean enabled;
     private final WorkerStatusProvider workerStatusProvider;
     private final CacheMetricsReporter cacheMetricsReporter;
     private final Collection<ServiceRoute> serviceRoutes;
-    private final long hardMaximumEntries;
+    private final long configuredMaximumEntries;
     private final double capacityMultiplier;
     private final long configuredBlockSize;
     private final LocalStandbyCacheIndex cacheIndex;
-    private volatile long nextCapacityWarningNanos;
 
-    public LocalStandbyCacheManager(CacheMatchConfiguration configuration, WorkerStatusProvider workerStatusProvider, CacheMetricsReporter cacheMetricsReporter) {
+    public LocalStandbyCacheManager(CacheMatchConfiguration configuration,
+                                    WorkerStatusProvider workerStatusProvider,
+                                    CacheMetricsReporter cacheMetricsReporter) {
         LocalStandbyConfig config = configuration.getLocalStandbyConfig();
         this.enabled = configuration.isLocalStandbyEnabled();
         this.workerStatusProvider = workerStatusProvider;
         this.cacheMetricsReporter = cacheMetricsReporter;
         this.serviceRoutes = configuration.getServiceRoutes();
-        this.hardMaximumEntries = enabled
+        this.configuredMaximumEntries = enabled
                 ? config.getMaximumEntries()
                 : LocalStandbyConfig.DEFAULT_MAXIMUM_ENTRIES;
         this.capacityMultiplier = enabled
@@ -62,7 +59,18 @@ public class LocalStandbyCacheManager {
         long entryTtlMs = enabled
                 ? config.getEntryTtlMs()
                 : LocalStandbyConfig.DEFAULT_ENTRY_TTL_MS;
-        this.cacheIndex = new LocalStandbyCacheIndex(entryTtlMs, hardMaximumEntries, enabled);
+        long minimumEntryTtlMs = enabled
+                ? config.getMinimumEntryTtlMs()
+                : LocalStandbyConfig.DEFAULT_MINIMUM_ENTRY_TTL_MS;
+        double ttlReductionStartRatio = enabled
+                ? config.getTtlReductionStartRatio()
+                : LocalStandbyConfig.DEFAULT_TTL_REDUCTION_START_RATIO;
+        this.cacheIndex = new LocalStandbyCacheIndex(
+                entryTtlMs,
+                minimumEntryTtlMs,
+                ttlReductionStartRatio,
+                configuredMaximumEntries,
+                enabled);
     }
 
     public Map<String, Integer> findMatchingEngines(List<Long> blockCacheKeys, RoleType roleType, String group) {
@@ -102,7 +110,7 @@ public class LocalStandbyCacheManager {
             Long blockCacheKey = blockCacheKeys.get(blockIndex);
             Map<String, Long> blockOwners = cacheIndex.getUnexpiredEnginesForBlock(blockCacheKey, queryTimeNanos);
 
-            Iterator<String> candidateIterator = candidateWorkers.iterator();
+            var candidateIterator = candidateWorkers.iterator();
             while (candidateIterator.hasNext()) {
                 String candidateWorker = candidateIterator.next();
                 if (blockOwners == null) {
@@ -148,17 +156,7 @@ public class LocalStandbyCacheManager {
     }
 
     public void addRoutedRequestBlocks(String workerIpPort, List<Long> blockCacheKeys) {
-        int rejectedMappings = cacheIndex.addWorkerBlockMappings(workerIpPort, blockCacheKeys);
-        if (rejectedMappings > 0) {
-            cacheMetricsReporter.reportLocalStandbyCapacityRejected();
-            long now = System.nanoTime();
-            if (now >= nextCapacityWarningNanos) {
-                nextCapacityWarningNanos = now + CAPACITY_WARNING_INTERVAL_NANOS;
-                log.warn("Local Standby cache capacity reached; rejected {} new mappings, "
-                                + "currentMappings={}, maximumEntries={} (warning limited to once per minute)",
-                        rejectedMappings, cacheIndex.mappingCount(), cacheIndex.maximumEntryCount());
-            }
-        }
+        cacheIndex.addWorkerBlockMappings(workerIpPort, blockCacheKeys);
     }
 
     public long mappingCount() {
@@ -177,7 +175,7 @@ public class LocalStandbyCacheManager {
     }
 
     @Scheduled(fixedDelay = CAPACITY_REFRESH_INTERVAL_MS)
-    void refreshMaximumEntries() {
+    void refreshCapacityLimits() {
         if (!enabled) {
             return;
         }
@@ -188,22 +186,18 @@ public class LocalStandbyCacheManager {
                 return;
             }
 
-            double capacityWithHeadroom = estimatedHbmBlockCapacity * capacityMultiplier;
-            long newMaximum = capacityWithHeadroom >= hardMaximumEntries
-                    ? hardMaximumEntries
-                    : Math.max(1, (long) Math.ceil(capacityWithHeadroom));
+            long newMaximumEntries = calculateMaximumEntries(estimatedHbmBlockCapacity);
             long previousMaximum = cacheIndex.maximumEntryCount();
-            if (newMaximum == previousMaximum) {
-                return;
+            cacheIndex.updateMaximumEntries(newMaximumEntries);
+            if (newMaximumEntries != previousMaximum) {
+                log.info("Updated Local Standby cache capacity from {} to {} entries "
+                                + "(estimatedHbmBlocks={}, multiplier={}, configuredMaximum={})",
+                        previousMaximum,
+                        newMaximumEntries,
+                        estimatedHbmBlockCapacity,
+                        capacityMultiplier,
+                        configuredMaximumEntries);
             }
-
-            cacheIndex.updateMaximumEntries(newMaximum);
-            log.info("Updated local standby cache capacity from {} to {} entries (estimatedHbmBlocks={}, multiplier={}, hardMaximum={})",
-                    previousMaximum,
-                    newMaximum,
-                    estimatedHbmBlockCapacity,
-                    capacityMultiplier,
-                    hardMaximumEntries);
         } catch (RuntimeException e) {
             log.warn("Failed to update local standby cache capacity; keeping {} entries", cacheIndex.maximumEntryCount(), e);
         }
@@ -211,20 +205,16 @@ public class LocalStandbyCacheManager {
 
     private long estimateHbmBlockCapacity() {
         long totalCapacity = 0;
-        Set<WorkerCapacityKey> countedWorkers = new HashSet<>();
         for (ServiceRoute serviceRoute : serviceRoutes) {
             for (RoleType roleType : serviceRoute.getAllRoleTypes()) {
-                totalCapacity = addRoleCapacity(totalCapacity, countedWorkers, serviceRoute, roleType);
-                if (totalCapacity >= hardMaximumEntries) {
-                    return hardMaximumEntries;
-                }
+                totalCapacity += addRoleCapacity(serviceRoute, roleType);
             }
         }
         return totalCapacity;
     }
 
-    private long addRoleCapacity(long currentCapacity, Set<WorkerCapacityKey> countedWorkers, ServiceRoute serviceRoute, RoleType roleType) {
-        long totalCapacity = currentCapacity;
+    private long addRoleCapacity(ServiceRoute serviceRoute, RoleType roleType) {
+        long roleCapacity = 0;
         for (var endpointWithGroup : serviceRoute.getAllEndpointsWithGroup(roleType)) {
             if (endpointWithGroup.getRight() == null) {
                 continue;
@@ -239,17 +229,19 @@ public class LocalStandbyCacheManager {
                 if (workerCapacity <= 0) {
                     continue;
                 }
-                WorkerCapacityKey workerKey = new WorkerCapacityKey(group, roleType, workerStatus.getIpPort());
-                if (!countedWorkers.add(workerKey)) {
-                    continue;
-                }
-                totalCapacity += workerCapacity;
-                if (totalCapacity >= hardMaximumEntries) {
-                    return hardMaximumEntries;
-                }
+                roleCapacity += workerCapacity;
             }
         }
-        return totalCapacity;
+        return roleCapacity;
+    }
+
+    private long calculateMaximumEntries(long estimatedHbmBlockCapacity) {
+        // KVS can retain substantially more metadata than HBM. The multiplier adds that
+        // headroom without claiming to model the engine's actual multi-tier eviction policy.
+        double capacityWithHeadroom = estimatedHbmBlockCapacity * capacityMultiplier;
+        return capacityWithHeadroom >= configuredMaximumEntries
+                ? configuredMaximumEntries
+                : (long) Math.ceil(capacityWithHeadroom);
     }
 
     private long calculateWorkerBlockCapacity(WorkerStatus workerStatus) {
@@ -273,8 +265,5 @@ public class LocalStandbyCacheManager {
     @PreDestroy
     public void shutdown() {
         cacheIndex.shutdown();
-    }
-
-    private record WorkerCapacityKey(String group, RoleType roleType, String workerIpPort) {
     }
 }

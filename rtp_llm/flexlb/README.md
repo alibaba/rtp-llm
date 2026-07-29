@@ -164,7 +164,12 @@ object at the same level as `role_endpoints`:
     "max_query_retry_count": 1,
     "leader_refresh_interval_ms": 10000,
     "local_standby": {
-      "auto_switch": true
+      "auto_switch": true,
+      "entry_ttl_ms": 300000,
+      "minimum_entry_ttl_ms": 100000,
+      "ttl_reduction_start_ratio": 0.8,
+      "maximum_entries": 2000000,
+      "capacity_multiplier": 10
     }
   }
 }
@@ -185,6 +190,12 @@ background `GetClusterInfo` probes. The optional `heartbeat_failure_threshold`,
 `query_failure_threshold`, and `recovery_success_threshold` fields override those defaults.
 `local_standby.auto_switch` controls whether an unhealthy KVCM changes subsequent requests to
 Local Standby automatically; the current request still falls back after its KVCM retries fail.
+Local Standby multiplies each worker's HBM block capacity reported by `GetWorkerStatus` by
+`capacity_multiplier`, sums the results, and caps the global metadata budget at
+`maximum_entries`. Mappings are still accepted beyond that estimate. The global TTL starts
+decreasing linearly at `ttl_reduction_start_ratio` utilization, from `entry_ttl_ms` to
+`minimum_entry_ttl_ms` at full utilization. Background cleanup automatically changes its
+effective cadence between 30, 20, and 10 seconds as capacity pressure increases.
 
 `kvcm.namespace` can explicitly override the namespace for every role and group:
 

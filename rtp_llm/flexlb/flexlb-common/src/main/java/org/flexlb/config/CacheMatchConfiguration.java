@@ -81,12 +81,15 @@ public class CacheMatchConfiguration {
                     kvcmConfig.getRecoverySuccessThreshold());
         }
         if (localStandbyEnabled) {
-            log.info("Local standby cache configuration: autoSwitch={}, blockSize={}, entryTtlMs={}, "
+            log.info("Local standby cache configuration: autoSwitch={}, blockSize={}, "
+                            + "entryTtlMs={}, minimumEntryTtlMs={}, ttlReductionStartRatio={}, "
                             + "maximumEntries={}, capacityMultiplier={}, asyncQueueCapacity={}, "
                             + "hashThreadCount={}, hashQueueCapacity={}",
                     localStandbyConfig.isAutoSwitch(),
                     localStandbyConfig.getBlockSize(),
                     localStandbyConfig.getEntryTtlMs(),
+                    localStandbyConfig.getMinimumEntryTtlMs(),
+                    localStandbyConfig.getTtlReductionStartRatio(),
                     localStandbyConfig.getMaximumEntries(),
                     localStandbyConfig.getCapacityMultiplier(),
                     localStandbyConfig.getAsyncQueueCapacity(),

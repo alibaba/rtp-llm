@@ -91,7 +91,8 @@ class ModelServiceConfigurationTest {
                 "max_query_retry_count":2,"recovery_success_threshold":2,
                 "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]},
                 "local_standby":{"auto_switch":true,"block_size":4096,
-                "entry_ttl_ms":300000,"maximum_entries":1000000,
+                "entry_ttl_ms":300000,"minimum_entry_ttl_ms":120000,
+                "ttl_reduction_start_ratio":0.75,"maximum_entries":1000000,
                 "capacity_multiplier":1.3,
                 "async_queue_capacity":8192,"hash_thread_count":6,
                 "hash_queue_capacity":2048}},
@@ -110,6 +111,8 @@ class ModelServiceConfigurationTest {
                     var standby = kvcm.getLocalStandby();
                     assertThat(standby.isAutoSwitch()).isTrue();
                     assertThat(standby.getBlockSize()).isEqualTo(4096);
+                    assertThat(standby.getMinimumEntryTtlMs()).isEqualTo(120000);
+                    assertThat(standby.getTtlReductionStartRatio()).isEqualTo(0.75);
                     assertThat(standby.getCapacityMultiplier()).isEqualTo(1.3);
                     assertThat(standby.getHashThreadCount()).isEqualTo(6);
                     assertThat(standby.getHashQueueCapacity()).isEqualTo(2048);
@@ -117,6 +120,27 @@ class ModelServiceConfigurationTest {
                     assertThat(kvcm.getQueryFailureThreshold()).isEqualTo(5);
                     assertThat(kvcm.getMaxQueryRetryCount()).isEqualTo(2);
                     assertThat(kvcm.getRecoverySuccessThreshold()).isEqualTo(2);
+                });
+    }
+
+    @Test
+    void rejectsInvalidDynamicTtlConfiguration() {
+        String config = """
+                {"service_id":"test-service","kvcm":{"enabled":true,"address":"kvcm-service",
+                "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]},
+                "local_standby":{"entry_ttl_ms":1000,"minimum_entry_ttl_ms":2000}},
+                "role_endpoints":[{"group":"default",
+                "pd_fusion_endpoint":{"address":"service-a","protocol":"http","path":"/",
+                "discovery":{"type":"static-env","hosts":["127.0.0.1:8080"]}}}]}
+                """;
+
+        contextRunner
+                .withPropertyValues("MODEL_SERVICE_CONFIG=" + config)
+                .run(context -> {
+                    assertThat(context).hasFailed();
+                    assertThat(context.getStartupFailure())
+                            .hasRootCauseMessage(
+                                    "MODEL_SERVICE_CONFIG kvcm.local_standby contains invalid values");
                 });
     }
 

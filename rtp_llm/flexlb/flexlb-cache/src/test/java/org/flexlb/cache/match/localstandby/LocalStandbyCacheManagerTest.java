@@ -120,7 +120,7 @@ class LocalStandbyCacheManagerTest {
     }
 
     @Test
-    void derivesMaximumEntriesFromReportedHbmCapacity() {
+    void derivesMaximumEntriesFromHbmCapacityAndConfiguredMultiplier() {
         WorkerStatusProvider workerStatusProvider = mock(WorkerStatusProvider.class);
         WorkerStatus worker = worker("10.0.0.1", 8080);
         worker.setAlive(true);
@@ -132,14 +132,14 @@ class LocalStandbyCacheManagerTest {
                 .thenReturn(List.of(worker));
         LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
                 new CacheMatchConfiguration(
-                        modelMetaConfig(300_000, 1_000, 1.2)),
+                        modelMetaConfig(300_000, 2_000, 10.0)),
                 workerStatusProvider,
                 mock(CacheMetricsReporter.class));
 
-        manager.refreshMaximumEntries();
+        manager.refreshCapacityLimits();
         manager.addRoutedRequestBlocks(worker.getIpPort(), List.of(11L));
 
-        assertEquals(120, manager.maximumEntryCount());
+        assertEquals(1_000, manager.maximumEntryCount());
         manager.shutdown();
     }
 
@@ -155,25 +155,42 @@ class LocalStandbyCacheManagerTest {
         when(workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, "default"))
                 .thenReturn(List.of(worker));
         LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
-                new CacheMatchConfiguration(modelMetaConfig(300_000, 1_000, 1.2, 200)),
+                new CacheMatchConfiguration(modelMetaConfig(300_000, 1_000, 10.0, 200)),
                 workerStatusProvider,
                 mock(CacheMetricsReporter.class));
 
-        manager.refreshMaximumEntries();
+        manager.refreshCapacityLimits();
 
-        assertEquals(60, manager.maximumEntryCount());
+        assertEquals(500, manager.maximumEntryCount());
         manager.shutdown();
     }
 
     @Test
-    void rejectsNewMappingsAtCapacityAndAllowsExistingMappingsToRefresh() {
+    void capsAggregateWorkerEstimatesAtGlobalMaximum() {
+        WorkerStatusProvider workerStatusProvider = mock(WorkerStatusProvider.class);
+        WorkerStatus worker1 = workerWithCacheCapacity("10.0.0.1", 8080, 10_000, 100);
+        WorkerStatus worker2 = workerWithCacheCapacity("10.0.0.2", 8080, 20_000, 100);
+        when(workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, "default"))
+                .thenReturn(List.of(worker1, worker2));
+        LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
+                new CacheMatchConfiguration(modelMetaConfig(300_000, 1_000, 10.0)),
+                workerStatusProvider,
+                mock(CacheMetricsReporter.class));
+        manager.refreshCapacityLimits();
+
+        assertEquals(1_000, manager.maximumEntryCount());
+        manager.shutdown();
+    }
+
+    @Test
+    void acceptsNewMappingsBeyondEstimatedCapacity() {
         WorkerStatusProvider workerStatusProvider = mock(WorkerStatusProvider.class);
         CacheMetricsReporter cacheMetricsReporter = mock(CacheMetricsReporter.class);
         WorkerStatus worker = worker("10.0.0.1", 8080);
         when(workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, "default"))
                 .thenReturn(List.of(worker));
         LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
-                new CacheMatchConfiguration(modelMetaConfig(300_000, 1, 1.2)),
+                new CacheMatchConfiguration(modelMetaConfig(300_000, 1, 10.0)),
                 workerStatusProvider,
                 cacheMetricsReporter);
 
@@ -181,14 +198,13 @@ class LocalStandbyCacheManagerTest {
         manager.addRoutedRequestBlocks(worker.getIpPort(), List.of(11L));
         manager.addRoutedRequestBlocks(worker.getIpPort(), List.of(22L));
 
-        assertEquals(1, manager.mappingCount());
+        assertEquals(2, manager.mappingCount());
         assertEquals(1, manager.findMatchingEngines(
                 List.of(11L), RoleType.PREFILL, "default").get(worker.getIpPort()));
-        assertEquals(0, manager.findMatchingEngines(
+        assertEquals(1, manager.findMatchingEngines(
                 List.of(22L), RoleType.PREFILL, "default").get(worker.getIpPort()));
         manager.reportMappingCount();
-        verify(cacheMetricsReporter).reportLocalStandbyCapacityRejected();
-        verify(cacheMetricsReporter).reportLocalStandbyMappingCount(1);
+        verify(cacheMetricsReporter).reportLocalStandbyMappingCount(2);
         manager.shutdown();
     }
 
@@ -196,6 +212,17 @@ class LocalStandbyCacheManagerTest {
         WorkerStatus workerStatus = new WorkerStatus();
         workerStatus.setIp(ip);
         workerStatus.setPort(port);
+        return workerStatus;
+    }
+
+    private WorkerStatus workerWithCacheCapacity(
+            String ip, int port, long totalKvCache, long blockSize) {
+        WorkerStatus workerStatus = worker(ip, port);
+        workerStatus.setAlive(true);
+        workerStatus.setCacheStatus(CacheStatus.builder()
+                .totalKvCache(totalKvCache)
+                .blockSize(blockSize)
+                .build());
         return workerStatus;
     }
 
@@ -213,6 +240,8 @@ class LocalStandbyCacheManagerTest {
     private ModelMetaConfig modelMetaConfig(long expirationMs, long maximumEntries, double capacityMultiplier, long blockSize) {
         LocalStandbyConfig standby = new LocalStandbyConfig();
         standby.setEntryTtlMs(expirationMs);
+        standby.setMinimumEntryTtlMs(
+                Math.min(expirationMs, LocalStandbyConfig.DEFAULT_MINIMUM_ENTRY_TTL_MS));
         standby.setMaximumEntries(maximumEntries);
         standby.setCapacityMultiplier(capacityMultiplier);
         standby.setBlockSize(blockSize);

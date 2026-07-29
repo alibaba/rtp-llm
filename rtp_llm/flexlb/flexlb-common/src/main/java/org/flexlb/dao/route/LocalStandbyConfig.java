@@ -12,8 +12,10 @@ import lombok.Data;
 public class LocalStandbyConfig {
 
     public static final long DEFAULT_ENTRY_TTL_MS = 300_000L;
+    public static final long DEFAULT_MINIMUM_ENTRY_TTL_MS = 100_000L;
+    public static final double DEFAULT_TTL_REDUCTION_START_RATIO = 0.8;
     public static final long DEFAULT_MAXIMUM_ENTRIES = 2_000_000L;
-    public static final double DEFAULT_CAPACITY_MULTIPLIER = 1.2;
+    public static final double DEFAULT_CAPACITY_MULTIPLIER = 10.0;
     public static final int DEFAULT_ASYNC_QUEUE_CAPACITY = 100000;
     public static final int DEFAULT_HASH_THREAD_COUNT = 4;
     public static final int DEFAULT_HASH_QUEUE_CAPACITY = 100000;
@@ -36,13 +38,26 @@ public class LocalStandbyConfig {
     private long entryTtlMs = DEFAULT_ENTRY_TTL_MS;
 
     /**
-     * Hard upper bound for worker/block-hash associations retained by this process.
+     * Minimum lifetime used when a worker reaches or exceeds its metadata capacity estimate.
+     */
+    @JsonProperty("minimum_entry_ttl_ms")
+    private long minimumEntryTtlMs = DEFAULT_MINIMUM_ENTRY_TTL_MS;
+
+    /**
+     * Global capacity usage ratio at which TTL starts decreasing linearly.
+     */
+    @JsonProperty("ttl_reduction_start_ratio")
+    private double ttlReductionStartRatio = DEFAULT_TTL_REDUCTION_START_RATIO;
+
+    /**
+     * Upper capacity budget used to shorten TTL. New mappings may temporarily exceed this value.
      */
     @JsonProperty("maximum_entries")
     private long maximumEntries = DEFAULT_MAXIMUM_ENTRIES;
 
     /**
-     * Headroom applied to the HBM block capacity reported by WorkerStatus.
+     * Multiplier applied to each worker's HBM block capacity before calculating the global
+     * metadata budget. This is only a FlexLB retention heuristic for multi-tier KV storage.
      */
     @JsonProperty("capacity_multiplier")
     private double capacityMultiplier = DEFAULT_CAPACITY_MULTIPLIER;
