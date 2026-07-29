@@ -1,4 +1,5 @@
 #!/bin/bash
+SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 
 LOG_DIR=${1}
 if [[ -z "${LOG_DIR}" ]]; then
@@ -94,7 +95,7 @@ summarize_results() {
 }
 
 turn_results_to_htmls() {
-    cd ${LOG_DIR}/../rocm_benchmark/rtp_llm_benchmark/ci/
+ cd ${SCRIPT_DIR}/
     # /opt/conda310/bin/python3 -m pip install recommonmark sphinx-markdown-tables sphinx_pdj_theme
     cp -r ${LOG_DIR}/* ./sphinx_reg_result/
     sphinx-build -M html ./sphinx_reg_result/ ${LOG_DIR}/_docs_build/ --show-traceback
