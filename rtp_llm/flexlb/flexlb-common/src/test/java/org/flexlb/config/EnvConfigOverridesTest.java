@@ -22,6 +22,28 @@ class EnvConfigOverridesTest {
         enum Mode { A, B, C }
     }
 
+    static class WithStaticAndFinal {
+        static int staticField = 1;
+        final int finalField = 2;
+        int instanceField = 3;
+    }
+
+    @Test
+    void staticAndFinalFieldsAreNotOverridden() {
+        // Only instance state is configuration: a static field is shared process-wide (coverage
+        // agents also inject synthetic ones) and a final field may already be inlined at its use
+        // sites, so neither is a safe target for an env override.
+        WithStaticAndFinal s = new WithStaticAndFinal();
+        EnvConfigOverrides.apply(s, "TEST_", Map.of(
+                "TEST_STATIC_FIELD", "42",
+                "TEST_FINAL_FIELD", "43",
+                "TEST_INSTANCE_FIELD", "44"));
+
+        assertEquals(1, WithStaticAndFinal.staticField, "a static field must not be overridden");
+        assertEquals(2, s.finalField, "a final field must not be overridden");
+        assertEquals(44, s.instanceField, "instance fields still apply");
+    }
+
     @Test
     void appliesIntOverrideViaCamelToUpperSnake() {
         Sample s = new Sample();

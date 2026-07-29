@@ -312,9 +312,9 @@ class DispatcherE2ETest {
                 .expectStatus().isOk();
 
         // Each FE saw one chunk; each chunk's generate_config.role_addrs carries the i-th target.
-        verifyChunkHasRoleAddr(fe1.takeRequest(), "10.0.0.1");
-        verifyChunkHasRoleAddr(fe2.takeRequest(), "10.0.0.2");
-        verifyChunkHasRoleAddr(fe3.takeRequest(), "10.0.0.3");
+        verifyChunkHasRoleAddr(fe1.takeRequest(), "10.0.0.1", 3);
+        verifyChunkHasRoleAddr(fe2.takeRequest(), "10.0.0.2", 3);
+        verifyChunkHasRoleAddr(fe3.takeRequest(), "10.0.0.3", 3);
     }
 
     @Test
@@ -539,9 +539,10 @@ class DispatcherE2ETest {
         assertEquals(0, fe3.getRequestCount());
     }
 
-    private void verifyChunkHasRoleAddr(RecordedRequest rec, String expectedIp) throws Exception {
-        assertNotNull(rec);
-        JsonNode bodyJson = mapper.readTree(rec.getBody().readUtf8());
+    private void verifyChunkHasRoleAddr(RecordedRequest rec, String expectedIp, int expectedSliceSize)
+            throws Exception {
+        // Also pins the chunk's path/slice size and that the envelope was deep-copied per chunk.
+        JsonNode bodyJson = assertChunkBatchInferRequest(rec, expectedSliceSize);
         // Dispatcher must NOT use a new top-level field (pydantic extra=ignore would drop it);
         // it must write into generate_config.role_addrs which FE already honors.
         assertNull(bodyJson.get("pre_assigned_be"),

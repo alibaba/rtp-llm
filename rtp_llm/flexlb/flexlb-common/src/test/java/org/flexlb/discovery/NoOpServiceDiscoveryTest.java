@@ -101,8 +101,9 @@ class NoOpServiceDiscoveryTest {
         NoOpServiceDiscovery.getInstance().listen("no.such.address.for.test", pushed::set);
         assertTrue(pushed.get().isEmpty(), "an unresolvable address pushes an empty fleet");
 
-        AtomicReference<List<WorkerHost>> notPushed = new AtomicReference<>();
-        NoOpServiceDiscovery.getInstance().listen("blank.address.test", null);
-        assertNull(notPushed.get(), "a null listener is a no-op");
+        // A null listener must be tolerated rather than NPE. Asserting on a fresh AtomicReference
+        // here would hold whatever it was constructed with and pass no matter what listen() did.
+        assertDoesNotThrow(() -> NoOpServiceDiscovery.getInstance().listen("blank.address.test", null),
+                "a null listener is a no-op, not an NPE");
     }
 }

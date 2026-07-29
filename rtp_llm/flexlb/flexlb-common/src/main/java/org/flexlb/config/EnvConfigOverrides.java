@@ -3,6 +3,7 @@ package org.flexlb.config;
 import lombok.extern.slf4j.Slf4j;
 
 import java.lang.reflect.Field;
+import java.lang.reflect.Modifier;
 import java.util.Arrays;
 import java.util.Locale;
 import java.util.Map;
@@ -54,6 +55,12 @@ public final class EnvConfigOverrides {
      */
     public static void apply(Object config, String prefix, Map<String, String> env) {
         for (Field field : config.getClass().getDeclaredFields()) {
+            // Only instance state is configuration. A static field is shared process-wide (and
+            // includes synthetic ones like jacoco's $jacocoData), and a final field's value may
+            // already be inlined at its use sites, so writing either would be surprising at best.
+            if (Modifier.isStatic(field.getModifiers()) || Modifier.isFinal(field.getModifiers())) {
+                continue;
+            }
             Class<?> type = field.getType();
             if (!isSupportedType(type)) {
                 continue;
