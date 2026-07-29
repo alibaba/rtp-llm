@@ -1,4 +1,5 @@
 import unittest
+from types import SimpleNamespace
 
 import torch
 import torch.nn.functional as F
@@ -11,6 +12,7 @@ from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl import (
 )
 from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.minimax_m3_vl_mixin import (
     MiniMaxM3VLDeployWeightInfo,
+    MiniMaxM3VLImageEmbedding,
 )
 from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.minimax_m3_vl_vit import (
     CLIPAttention,
@@ -19,6 +21,55 @@ from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.minimax_m3_vl_vit import
     _apply_rope,
     get_fused_qkv_checkpoint_names,
 )
+
+
+class MiniMaxM3VLWorkEstimateTest(unittest.TestCase):
+    def setUp(self):
+        self.embedding = object.__new__(MiniMaxM3VLImageEmbedding)
+        self.embedding.mm_processor = SimpleNamespace(
+            patch_size=14,
+            max_pixels=451584,
+        )
+        self.embedding.temporal_patch_size = 2
+        self.embedding.merge_size = 2
+        self.embedding.visual = SimpleNamespace(
+            dtype=torch.bfloat16,
+            vision_config=VisionConfig(),
+        )
+
+    def test_image_work_estimate_is_exact(self):
+        raw = torch.zeros(3, 16, 16, dtype=torch.uint8)
+        estimate = self.embedding.estimate_work((raw, (448, 448), None))
+
+        self.assertEqual(estimate.input_patches, 1024)
+        self.assertEqual(estimate.output_tokens, 258)
+        self.assertEqual(estimate.max_attention_segment, 1024)
+        self.assertEqual(estimate.attention_work, 1024**2)
+        self.assertEqual(estimate.estimated_workspace_bytes, 1024 * 40960)
+
+    def test_video_work_estimate_includes_padding_and_timestamps(self):
+        raw = torch.zeros(5, 1, 1, 3, dtype=torch.uint8)
+        timestamps = [[1, 2], [3], [4, 5, 6]]
+        estimate = self.embedding.estimate_work((raw, (448, 448), timestamps))
+
+        self.assertEqual(estimate.input_patches, 3 * 1024)
+        self.assertEqual(estimate.output_tokens, 768 + 6 + 6)
+        self.assertEqual(estimate.max_attention_segment, 3 * 1024)
+        self.assertEqual(estimate.attention_work, (3 * 1024) ** 2)
+
+    def test_timestamp_group_mismatch_is_rejected(self):
+        raw = torch.zeros(5, 1, 1, 3, dtype=torch.uint8)
+        with self.assertRaisesRegex(ValueError, "timestamp group count"):
+            self.embedding.estimate_work((raw, (448, 448), [[1], [2]]))
+
+    def test_batch_budget_uses_existing_media_cap(self):
+        budget = self.embedding.get_batch_work_budget(32)
+
+        self.assertEqual(budget.input_patches, 32 * 2304)
+        self.assertEqual(budget.output_tokens, 32 * 578)
+        self.assertEqual(budget.max_attention_segment, 4 * 2304)
+        self.assertEqual(budget.attention_work, 32 * (2304**2))
+        self.assertIsNone(self.embedding.get_batch_work_budget(1 << 30))
 
 
 class MiniMaxM3VLVisionAttentionTest(unittest.TestCase):
