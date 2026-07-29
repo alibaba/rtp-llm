@@ -39,8 +39,9 @@ DISPATCH_FE_POOL_SERVICE_ID  (env: dispatch.fe-pool-service-id)
        |- @Scheduled(30s) serviceDiscovery.getHosts(id)  poll, freshness fallback
        both write AtomicReference<List<String>> fePoolUrls; url = "http://" + ipPort
   -> FePool(refresher.source(), FeHealthChecker)
-       next() reads a fresh snapshot each call, skipping FeHealthChecker-dead hosts
-  -> MasterFeAssigner.assign() calls fePool.next() to stamp each target.fe_url
+       next()/nextBatch(n) read a fresh snapshot, skipping FeHealthChecker-dead hosts
+  -> MasterFeAssigner.assign() calls fePool.nextBatch(targets.size()) once and zips the
+     result 1:1 onto target.fe_url (all-or-nothing — see below)
 ```
 
 `ServiceDiscovery` is the same VipServer-backed infrastructure the master already uses for BE
@@ -51,8 +52,8 @@ link.
 Every dispatcher node (including the elected master) runs its own refresher against the same
 serviceId, so all nodes see an eventually-consistent FE set. The master's list is not "more
 authoritative" — the value of the design is a **single cursor**, not a more-accurate list. FE
-liveness is the master's own `FeHealthChecker` view: `fePool.next()` skips hosts the master marks
-dead, and the dispatcher trusts the master's pick without re-probing.
+liveness is the master's own `FeHealthChecker` view: `fePool.next()`/`nextBatch()` skip hosts the
+master marks dead, and the dispatcher trusts the master's pick without re-probing.
 
 ## Data flow
 
@@ -62,7 +63,11 @@ dispatcher receives batch
        -> BatchScheduleCoordinator.schedule()
             master:  RouteService.batchSchedule -> DefaultRouter -> RoundRobinLoadBalancer.selectBatch
             slave:   forwardToMaster (HTTP) to the elected master
-       -> MasterFeAssigner.assign(targets): for each target, fe_url = fePool.next()
+       -> MasterFeAssigner.assign(targets): fe_url = fePool.nextBatch(targets.size()), zipped 1:1
+            one snapshot + one contiguous cursor reservation for the whole batch, and
+            all-or-nothing: an empty snapshot stamps no target at all (every fe_url stays
+            null -> every chunk fails CHUNK_NO_FE downstream) rather than leaving a
+            stamped prefix and a null tail
             (only when this node resolved locally AND the FePool bean exists — see Guards)
             master-local resolution: BatchScheduleClient stamps here
             slave forward:           the master already stamped in its HttpLoadBalanceServer, the
