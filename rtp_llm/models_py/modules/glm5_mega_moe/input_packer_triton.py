@@ -112,6 +112,43 @@ if triton is not None:
                 mask=router_mask,
             )
 
+    @triton.jit(do_not_specialize=["tokens"])
+    def _stage_shared_expert_sf_kernel(
+        source_ptr,
+        destination_ptr,
+        tokens,
+        packed_k: tl.constexpr,
+        block_m: tl.constexpr,
+        aligned_block_m: tl.constexpr,
+        source_stride_m: tl.constexpr,
+        source_stride_k: tl.constexpr,
+        destination_stride_m: tl.constexpr,
+        destination_stride_k: tl.constexpr,
+        BLOCK_SIZE: tl.constexpr,
+    ):
+        offsets = tl.program_id(0) * BLOCK_SIZE + tl.arange(0, BLOCK_SIZE)
+        token_idx = offsets // packed_k
+        k_idx = offsets % packed_k
+        mask = token_idx < tokens
+        within_block = token_idx % block_m
+        destination_row = (
+            token_idx // block_m * aligned_block_m
+            + within_block // 128 * 128
+            + within_block % 32 * 4
+            + within_block % 128 // 32
+        )
+        value = tl.load(
+            source_ptr + token_idx * source_stride_m + k_idx * source_stride_k,
+            mask=mask,
+        )
+        tl.store(
+            destination_ptr
+            + destination_row * destination_stride_m
+            + k_idx * destination_stride_k,
+            value,
+            mask=mask,
+        )
+
 
 def fused_pack_mega_moe_inputs(
     x: torch.Tensor,
@@ -172,5 +209,47 @@ def fused_pack_mega_moe_inputs(
         fp8_max,
         BLOCK_M=block_m,
         BLOCK_K=block_k,
+        num_warps=4,
+    )
+
+
+def stage_shared_expert_input_scales(
+    source: torch.Tensor,
+    destination: torch.Tensor,
+    tokens: int,
+    block_m: int,
+) -> None:
+    """Stage packed input scales in the layout used by fused shared L1."""
+    if triton is None:
+        raise RuntimeError("triton is unavailable")
+    if source.dtype != torch.int32 or destination.dtype != torch.int32:
+        raise TypeError("shared-expert input scales must be packed int32 tensors")
+    if source.dim() != 2 or destination.dim() != 2:
+        raise ValueError("shared-expert input scales must be 2D")
+    if source.shape[1] != destination.shape[1]:
+        raise ValueError(
+            "source and destination packed scale widths differ: "
+            f"{source.shape[1]} != {destination.shape[1]}"
+        )
+    if tokens <= 0:
+        return
+    if block_m <= 0:
+        raise ValueError(f"block_m must be positive, got {block_m}")
+
+    packed_k = source.shape[1]
+    block_size = 256
+    grid = (triton.cdiv(tokens * packed_k, block_size),)
+    _stage_shared_expert_sf_kernel[grid](
+        source,
+        destination,
+        tokens,
+        packed_k,
+        block_m,
+        triton.cdiv(block_m, 128) * 128,
+        source.stride(0),
+        source.stride(1),
+        destination.stride(0),
+        destination.stride(1),
+        BLOCK_SIZE=block_size,
         num_warps=4,
     )

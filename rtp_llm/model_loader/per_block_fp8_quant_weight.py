@@ -839,9 +839,10 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
             )
             # kernel_weight, scale_weight = load_config.exported_device.convert_fp8_weight_params(kernel_weight, scale_weight)
 
-            skip_moe_scale_repack = os.environ.get(
-                "MOE_STRATEGY"
-            ) == "mega_moe_fp8" and self.kernel.name in (W.moe_w1, W.moe_w2)
+            skip_moe_scale_repack = os.environ.get("MOE_STRATEGY") in (
+                "mega_moe_fp8",
+                "mega_moe_fp8_se",
+            ) and self.kernel.name in (W.moe_w1, W.moe_w2)
             if is_deep_gemm_e8m0_used() and not skip_moe_scale_repack:
                 kernel_weight, scale_weight = requant_weight_ue8m0(
                     kernel_weight, scale_weight
@@ -871,7 +872,10 @@ class LoadQuantPerBlockFp8Weight(PerBlockFp8Weight):
         if getattr(quant_config, "skip_moe", False) and isinstance(
             src_weight_info, MoeAtomicWeight
         ):
-            return os.environ.get("MOE_STRATEGY") == "mega_moe_fp8"
+            return os.environ.get("MOE_STRATEGY") in (
+                "mega_moe_fp8",
+                "mega_moe_fp8_se",
+            )
         return True
 
     def __init__(

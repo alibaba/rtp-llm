@@ -580,6 +580,7 @@ class GLM5MegaMoE(nn.Module):
             return
 
         warmup_key = (
+            type(self).__name__,
             cfg.ep_size,
             cfg.n_routed_experts,
             cfg.n_local_experts,

@@ -15,6 +15,7 @@ def estimate_mega_moe_fp8_symm_buffer_bytes(
     num_topk: int,
     hidden: int,
     intermediate_hidden: int,
+    num_shared_experts: int = 0,
     use_fp8_dispatch: bool = True,
     activation: str = "swiglu",
 ) -> int | None:
@@ -31,6 +32,7 @@ def estimate_mega_moe_fp8_symm_buffer_bytes(
                 intermediate_hidden,
                 use_fp8_dispatch,
                 activation,
+                num_shared_experts,
             )[0]
         )
     except Exception:
@@ -44,6 +46,7 @@ def get_or_create_mega_buf_fp8(
     num_topk: int,
     hidden: int,
     intermediate_hidden: int,
+    num_shared_experts: int = 0,
     use_fp8_dispatch: bool = True,
     activation: str = "swiglu",
 ):
@@ -57,6 +60,7 @@ def get_or_create_mega_buf_fp8(
         num_topk,
         hidden,
         intermediate_hidden,
+        num_shared_experts,
         bool(use_fp8_dispatch),
         activation,
     )
@@ -76,6 +80,7 @@ def get_or_create_mega_buf_fp8(
             num_topk=num_topk,
             hidden=hidden,
             intermediate_hidden=intermediate_hidden,
+            num_shared_experts=num_shared_experts,
             use_fp8_dispatch=use_fp8_dispatch,
             activation=activation,
         )
@@ -90,6 +95,7 @@ def get_or_create_mega_buf_fp8(
         num_topk=num_topk,
         hidden=hidden,
         intermediate_hidden=intermediate_hidden,
+        num_shared_experts=num_shared_experts,
         use_fp8_dispatch=use_fp8_dispatch,
         activation=activation,
     )
@@ -107,13 +113,14 @@ def get_or_create_mega_buf_fp8(
         logging.info(
             "[MegaMoE FP8] allocated symm buffer: group_size=%d "
             "num_experts=%d max_tokens_per_rank=%d topk=%d hidden=%d "
-            "intermediate=%d actual=%.3f GiB%s",
+            "intermediate=%d shared_experts=%d actual=%.3f GiB%s",
             group_size,
             num_experts,
             num_max_tokens_per_rank,
             num_topk,
             hidden,
             intermediate_hidden,
+            num_shared_experts,
             actual_bytes / (1024**3),
             est_str,
         )

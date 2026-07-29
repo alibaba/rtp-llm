@@ -54,6 +54,7 @@ class BackendManager(object):
         if not need_dist and engine_config.moe_config.moe_strategy in (
             "mega_moe",
             "mega_moe_fp8",
+            "mega_moe_fp8_se",
             "mega_moe_fused",
         ):
             need_dist = True
