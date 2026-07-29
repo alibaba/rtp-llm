@@ -136,13 +136,24 @@ void RtpLLMOp::init(py::object model,
 
     params.showDebugInfo();
     std::unique_ptr<ProposeModelEngineInitParams> propose_params = initProposeModel(propose_model, params);
-    pybind11::gil_scoped_release                  release;
+
+    // Deployment-registered post-layers CustomHandler (generate path):
+    // extracted here, injected by initRPCServer after the engine is built and
+    // before is_server_ready_ flips — the first routed request must already
+    // see the handler (in compiled mode injection includes the AOT compile).
+    py::object post_layers_handler;
+    if (pybind11::hasattr(model, "custom_module") && !model.attr("custom_module").is_none()) {
+        post_layers_handler = model.attr("custom_module").attr("handler");
+    }
+
+    pybind11::gil_scoped_release release;
     grpc_server_thread_ = std::thread(&RtpLLMOp::initRPCServer,
                                       this,
                                       std::move(params),
                                       std::move(propose_params),
                                       std::move(token_processor),
-                                      std::move(mm_process_engine));
+                                      std::move(mm_process_engine),
+                                      std::move(post_layers_handler));
     grpc_server_thread_.detach();
     while (!is_server_ready_) {
         sleep(1);  // wait 1s for server ready
@@ -299,7 +310,8 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
 void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_init_params,
                              std::unique_ptr<ProposeModelEngineInitParams> propose_params,
                              py::object                                    token_processor,
-                             py::object                                    mm_process_engine) {
+                             py::object                                    mm_process_engine,
+                             py::object                                    post_layers_handler) {
     std::string server_address;
     {
         pybind11::gil_scoped_acquire acquire;
@@ -318,6 +330,24 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
         if (!grpc_status.ok()) {
             RTP_LLM_FAIL("init rpc server failed, error msg: %s", grpc_status.error_message().c_str());
         }
+
+        // Post-layers handler injection (incl. warmup, and the AOT compile in
+        // compiled mode) must finish before is_server_ready_ flips below:
+        // once ready, every routed request is entitled to a score. Failures
+        // propagate — a deployment declaring a handler it cannot run must not
+        // come up.
+        if (post_layers_handler && !post_layers_handler.is_none()) {
+            auto engine = model_rpc_service_->getEngine();
+            RTP_LLM_CHECK_WITH_INFO(engine != nullptr, "engine not ready for post-layers handler injection");
+            try {
+                engine->setHiddenStatesProcessor(post_layers_handler);
+            } catch (const std::exception& e) {
+                RTP_LLM_FAIL("post-layers handler injection failed: %s", e.what());
+            }
+        }
+        // drop our reference while still under the GIL; the thread body ends
+        // without it
+        post_layers_handler = py::object();
 
         // NOTE: ip/ip段可自定义为所需范围。
         std::string http_server_address("tcp:0.0.0.0:" + std::to_string(http_port));
