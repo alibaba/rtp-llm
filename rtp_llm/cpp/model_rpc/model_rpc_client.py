@@ -549,7 +549,6 @@ class ModelRpcClient(object):
             input_py.generate_config.timeout_ms
         )
         input_py.generate_config.timeout_ms = int(grpc_timeout_seconds * 1000)
-        input_pb = trans_input(input_py)
         response_iterator = None
         stream_state = StreamState()
 
@@ -558,16 +557,17 @@ class ModelRpcClient(object):
 
         if not address_list:
             raise ValueError(f"No address found for request: {input_py.request_id}")
+        target_address = address_list[input_py.request_id % len(address_list)]
         logging.debug(
-            f"request: [{input_py.request_id}] send to address: {address_list[input_py.request_id % len(address_list)]}"
+            f"request: [{input_py.request_id}] send to address: {target_address}"
         )
 
+        # Built once, after the target is known: trans_input validates the generate_config and
+        # copies every field into a fresh PB, so building it twice doubles that per-request cost
+        # on the streaming hot path for a value nothing in between reads.
         input_pb = trans_input(input_py)
 
         try:
-            # Select target address
-            target_address = address_list[input_py.request_id % len(address_list)]
-            logging.debug(f"target_address: {target_address}")
             # Get channel from pool
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)

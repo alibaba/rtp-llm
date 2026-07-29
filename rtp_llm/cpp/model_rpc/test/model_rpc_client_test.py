@@ -396,7 +396,7 @@ class EnqueueTargetSelectionTest(TestCase):
             ),
         )
 
-    def _capture_target(self, client, input_py):
+    def _capture_target(self, client, input_py, calls=None):
         captured = {}
 
         async def fake_get(address):
@@ -409,12 +409,26 @@ class EnqueueTargetSelectionTest(TestCase):
             async for _ in client.enqueue(input_py):
                 pass
 
+        def counting_trans_input(x):
+            if calls is not None:
+                calls.append(x)
+            return object()
+
         with patch(
-            "rtp_llm.cpp.model_rpc.model_rpc_client.trans_input", lambda x: object()
+            "rtp_llm.cpp.model_rpc.model_rpc_client.trans_input", counting_trans_input
         ):
             with self.assertRaises(EnqueueTargetSelectionTest._StopBeforeRpc):
                 asyncio.run(drive())
         return captured["address"]
+
+    def test_enqueue_builds_the_request_pb_exactly_once(self):
+        # trans_input validates the generate_config and copies every field into a fresh PB, so
+        # building it twice doubles that cost on every streaming request. enqueue once did exactly
+        # that (the first result was overwritten); pin the single build so it cannot come back.
+        client = self._client(["10.0.0.1:100"])
+        calls = []
+        self._capture_target(client, self._input(0), calls=calls)
+        self.assertEqual(1, len(calls), "enqueue must build the request PB exactly once")
 
     def test_enqueue_sends_to_the_pre_assigned_backend(self):
         client = self._client(["10.9.9.9:1"])
@@ -837,7 +851,12 @@ class SchedulePayloadSeqLenTest(TestCase):
             request_id=1,
             prompt_length=prompt_length,
             generate_config=SimpleNamespace(
-                role_addrs=[], timeout_ms=3000, ttft_timeout_ms=None
+                role_addrs=[],
+                timeout_ms=3000,
+                ttft_timeout_ms=None,
+                # Declared on the real GenerateConfig, so the stub must carry it too rather than
+                # the production code defending against its absence with getattr.
+                traffic_reject_priority=100,
             ),
         )
 
