@@ -20,7 +20,7 @@ install_and_test_ut(){
         logfile="${LOG_DIR}/bazeltest_tests_rocm_all.log"
         echo "$case in $(basename "$logfile")" >> "${LOG_DIR}/test_cases_registry.txt"
         echo "Runing $case ..." | tee -a "$logfile"
-        bazelisk test "$case" --config=rocm --test_output=all 2>&1 | tee -a "$logfile" || EXIT_CODE=1
+        bazelisk test "$case" --config=rocm --test_env=HSA_NO_SCRATCH_RECLAIM=1 --test_output=all 2>&1 | tee -a "$logfile" || EXIT_CODE=1
     done
 
     # ------------------------------------------------------------------------------
@@ -38,7 +38,7 @@ install_and_test_ut(){
         logfile="${LOG_DIR}/bazeltest_py_all.log"
         echo "$case in $(basename "$logfile")" >> "${LOG_DIR}/test_cases_registry.txt"
         echo "Running $case ..." | tee -a "$logfile"
-        bazelisk test "$case" --config=rocm --test_output=all 2>&1 | tee -a "$logfile" || EXIT_CODE=1
+        bazelisk test "$case" --config=rocm --test_env=HSA_NO_SCRATCH_RECLAIM=1 --test_output=all 2>&1 | tee -a "$logfile" || EXIT_CODE=1
     done
 }
 
