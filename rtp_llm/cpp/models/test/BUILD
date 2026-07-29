@@ -23,25 +23,12 @@ cc_test(
     name = "model_data_test",
     srcs = [
         "ModelDataTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps,
-    env = {
-        "TEST_USING_DEVICE": "CUDA",
-    },
-    exec_properties = {'gpu':'H20'},
-)
-
-cc_test(
-    name = "prepare_write_cache_params_test",
-    srcs = [
+        # PrepareWriteCacheParamsTest asserts on host tensors only, but linking
+        # //rtp_llm/cpp/models:models needs the CUDA toolchain. Sharing this binary
+        # keeps it off a second GPU slot.
         "PrepareWriteCacheParamsTest.cc",
     ],
-    # Assertions are host-only (CPU tensors), but linking
-    # //rtp_llm/cpp/models:models requires the CUDA toolchain, so this target
-    # shares the sibling test_deps/executor setup: CUDA is needed to link, a
-    # GPU is not needed to run.
+    data = [],
     copts = test_copts,
     deps = test_deps,
     env = {

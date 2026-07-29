@@ -238,9 +238,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     // gen_num_per_cycle > 1 with a single weight set (RtpLLMOp already warns once
     // about it); runtime execution and cache loading use module 0 only, so the
     // extra entries below are legal and skipped by the loop's break.
-    for (size_t module_index = 0; module_index < propose_params->mtp_model_params_->size(); ++module_index) {
-        auto& mtp_params = (*propose_params->mtp_model_params_)[module_index];
-        auto  model_params =
+    for (auto& mtp_params : *propose_params->mtp_model_params_) {
+        auto model_params =
             GptModelInitParams({mtp_params->gpt_weights,
                                 Executor::genModelDescription(mtp_params->model_config_,
                                                               mtp_params->parallelism_config,
@@ -261,7 +260,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 mtp_params->model_config_.attn_config.tokens_per_block,
                                 mtp_params->model_config_.attn_config.kernel_tokens_per_block,
                                 cache_manager,
-                                /*mtp_cache_config_index=*/static_cast<int>(module_index)});
+                                /*mtp_cache_config_index=*/0});
         if (!params.py_sp_model.is_none()) {
             RTP_LLM_LOG_INFO("[speculative decoding] using py model");
             draft_model_.reset(new PyWrappedModel(model_params, params.py_sp_model, false, false));

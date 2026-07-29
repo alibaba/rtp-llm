@@ -19,7 +19,9 @@ exec_ops_test_deps = [
     "@com_google_googletest//:gtest_main",
 ] + torch_deps()
 
-cache_store_test_filter = "ExecOpsTest.testWriteCacheStore*:ExecOpsTest.testLoadContextFailureDebugInfo*"
+# Selects by fixture, so a new CacheStoreOpsTest case is gated by declaration
+# rather than by matching a name prefix.
+cache_store_test_filter = "CacheStoreOpsTest.*"
 
 cc_test(
     name = "exec_ops_test",
@@ -76,25 +78,7 @@ cc_test_wrapper(
         "//conditions:default": [],
     }),
     copts = test_copts,
-    # Mirror the deps select so every GPU-gated case here actually executes in
-    # CI: the write() success path needs one device and the device-pinning case
-    # needs two. Both labels and gpu_count are established unit-test precedents
-    # (H20 x2: models_py/distributed/test; MI308X-ROCM7 x2: models_py/modules/
-    # base/rocm/test). The GPU-only cases skip via their build guards.
-    #
-    # Verified on cuda12_9 only: package loading and the test run both pass with
-    # this select() in place, which also confirms select() on exec_properties is
-    # configurable-attribute compatible on this repo's Bazel (6.4.0).
-    #
-    # UNVERIFIED: the "//conditions:default" (CPU-only) branch has never been
-    # built or scheduled. --config=cpu does not get past analysis here because
-    # the pinned @torch_2.1_py310_cpu archive (declared in deps/http.bzl) fails
-    # checksum verification against the configured mirror. Read the empty
-    # exec_properties as untested intent, not as a guarantee that this target is
-    # schedulable on CPU-only workers.
-    exec_properties = select({
-        "@//:using_cuda": {"gpu": "H20", "gpu_count": "2"},
-        "@//:using_rocm": {"gpu": "MI308X-ROCM7", "gpu_count": "2"},
-        "//conditions:default": {},
-    }),
+    # Two devices: the write() success path needs one, the device-pinning case needs
+    # two. GPU-only cases skip via their build guards.
+    exec_properties = {"gpu": "H20", "gpu_count": "2"},
 )

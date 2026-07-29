@@ -320,6 +320,11 @@ protected:
     }
 };
 
+// Cache-store cases live here so the BUILD gate selects them by fixture name
+// rather than by a test-name prefix. New cases are gated by where they are
+// declared, not by what they are called.
+class CacheStoreOpsTest: public ExecOpsTest {};
+
 TEST_F(ExecOpsTest, testInitRuntimeIdempotent) {
     // Second call should be a no-op (already initialized).
     auto mla = initRuntime(0, false, false, MlaOpsType::AUTO);
@@ -444,7 +449,7 @@ TEST_F(ExecOpsTest, testRuntimeMaskLogits) {
     runtimeSyncAndCheck();
 }
 
-TEST_F(ExecOpsTest, testWriteCacheStoreRejectsUndefinedRequestId) {
+TEST_F(CacheStoreOpsTest, testWriteCacheStoreRejectsUndefinedRequestId) {
     // Only request_id is malformed: the CacheConfig group and the tagged layer cache
     // form an otherwise valid single-block write. A default-constructed
     // CacheConfig{}/LayerKVCache{} would also throw, but from topology lookup, so the
@@ -479,7 +484,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreRejectsUndefinedRequestId) {
     }
 }
 
-TEST_F(ExecOpsTest, testWriteCacheStoreMlaBf16UsesPhysicalPageSizeAndExplicitStride) {
+TEST_F(CacheStoreOpsTest, testWriteCacheStoreMlaBf16UsesPhysicalPageSizeAndExplicitStride) {
     // Four physical blocks, each containing four kernel blocks. The old shape heuristic treated the leading
     // dimension as kernel-block count and inflated the physical stride by 4x. Write two blocks so the
     // per-block address assertion also verifies the cross-block stride for the BF16 layout.
@@ -487,13 +492,13 @@ TEST_F(ExecOpsTest, testWriteCacheStoreMlaBf16UsesPhysicalPageSizeAndExplicitStr
     expectMlaPhysicalViewUsesExplicitStride(kv_cache_base, /*blocks_to_write=*/2);
 }
 
-TEST_F(ExecOpsTest, testWriteCacheStoreMlaFp8PackedPhysicalViewUsesExplicitStride) {
+TEST_F(CacheStoreOpsTest, testWriteCacheStoreMlaFp8PackedPhysicalViewUsesExplicitStride) {
     // Packed FP8 MLA storage contains FP8 NoPE, BF16 RoPE, and scale bytes in the same physical block.
     auto kv_cache_base = torch::zeros({4, 8, 73}, torch::kUInt8);
     expectMlaPhysicalViewUsesExplicitStride(kv_cache_base);
 }
 
-TEST_F(ExecOpsTest, testWriteCacheStoreMhaKernelViewKeepsExplicitKvAndScaleStrides) {
+TEST_F(CacheStoreOpsTest, testWriteCacheStoreMhaKernelViewKeepsExplicitKvAndScaleStrides) {
     constexpr size_t physical_block_num         = 4;
     constexpr size_t physical_tokens_per_block  = 8;
     constexpr size_t kernel_tokens_per_block    = 2;
@@ -549,7 +554,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreMhaKernelViewKeepsExplicitKvAndScaleStrid
     }
 }
 
-TEST_F(ExecOpsTest, testWriteCacheStoreSharedPoolUsesPhysicalBlockStrideInsteadOfLayerViewStride) {
+TEST_F(CacheStoreOpsTest, testWriteCacheStoreSharedPoolUsesPhysicalBlockStrideInsteadOfLayerViewStride) {
     constexpr size_t physical_block_num        = 4;
     constexpr size_t physical_tokens_per_block = 8;
     constexpr size_t pool_block_stride         = 256;
@@ -592,7 +597,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSharedPoolUsesPhysicalBlockStrideInsteadO
               reinterpret_cast<uintptr_t>(physical_kv.data_ptr()) + physical_kv.nbytes());
 }
 
-TEST_F(ExecOpsTest, testWriteCacheStoreCpStateSendsCompleteRankLocalRow) {
+TEST_F(CacheStoreOpsTest, testWriteCacheStoreCpStateSendsCompleteRankLocalRow) {
     constexpr size_t canonical_tokens_per_block = 4;
     constexpr size_t physical_row_stride        = 40;
     constexpr size_t canonical_block_num        = 4;
@@ -640,7 +645,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCpStateSendsCompleteRankLocalRow) {
     }
 }
 
-TEST_F(ExecOpsTest, testWriteCacheStoreCpRoundRobinUsesCanonicalKeyCount) {
+TEST_F(CacheStoreOpsTest, testWriteCacheStoreCpRoundRobinUsesCanonicalKeyCount) {
     constexpr size_t physical_tokens_per_block = 4;
     constexpr size_t physical_row_stride       = 16;
     constexpr size_t canonical_block_num       = 11;
@@ -680,7 +685,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreCpRoundRobinUsesCanonicalKeyCount) {
     }
 }
 
-TEST_F(ExecOpsTest, testWriteCacheStoreFailureBufferContainsEveryBlockKey) {
+TEST_F(CacheStoreOpsTest, testWriteCacheStoreFailureBufferContainsEveryBlockKey) {
     rtp_llm::test::TestLogCapture log_capture("write_cache_failure");
     constexpr size_t              block_num        = 2;
     constexpr size_t              tokens_per_block = 4;
@@ -713,7 +718,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreFailureBufferContainsEveryBlockKey) {
     }
 }
 
-TEST_F(ExecOpsTest, testWriteCacheStoreSuccessDoesNotLogBlockKeys) {
+TEST_F(CacheStoreOpsTest, testWriteCacheStoreSuccessDoesNotLogBlockKeys) {
     rtp_llm::test::TestLogCapture log_capture("write_cache_success");
     constexpr size_t              block_num        = 2;
     constexpr size_t              tokens_per_block = 4;
@@ -740,7 +745,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSuccessDoesNotLogBlockKeys) {
     }
 }
 
-TEST_F(ExecOpsTest, testLoadContextFailureDebugInfoContainsEveryBlockKey) {
+TEST_F(CacheStoreOpsTest, testLoadContextFailureDebugInfoContainsEveryBlockKey) {
     auto cache_store          = std::make_shared<MockCacheStore>();
     cache_store->load_success = false;
     cache_store->load_error   = CacheStoreErrorCode::LoadConnectFailed;
@@ -770,7 +775,7 @@ TEST_F(ExecOpsTest, testLoadContextFailureDebugInfoContainsEveryBlockKey) {
     EXPECT_NE(debug_infos[0].find("kv_key_1"), std::string::npos);
 }
 
-TEST_F(ExecOpsTest, testWriteCacheStoreTag_LinearGroup) {
+TEST_F(CacheStoreOpsTest, testWriteCacheStoreTag_LinearGroup) {
     auto                   cache_store = std::make_shared<MockCacheStore>();
     auto                   inputs      = makePyCacheStoreInputs(/*tokens_per_block=*/2, /*block_num=*/3);
     ExecOpsCacheConfigSpec config_spec(
@@ -795,7 +800,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreTag_LinearGroup) {
         << "Hybrid cache-store must write opaque kv_ keys even when use_opaque_kv_cache_store=false";
 }
 
-TEST_F(ExecOpsTest, testWriteCacheStoreTag_FullGroup) {
+TEST_F(CacheStoreOpsTest, testWriteCacheStoreTag_FullGroup) {
     auto                   cache_store = std::make_shared<MockCacheStore>();
     auto                   inputs      = makePyCacheStoreInputs(/*tokens_per_block=*/2, /*block_num=*/3);
     ExecOpsCacheConfigSpec config_spec(
@@ -819,7 +824,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreTag_FullGroup) {
     EXPECT_EQ(countKeyPrefix(cache_store->records[0].block_keys, "kv_"), 3u);
 }
 
-TEST_F(ExecOpsTest, testWriteCacheStoreSameLayerRoutesByTag) {
+TEST_F(CacheStoreOpsTest, testWriteCacheStoreSameLayerRoutesByTag) {
     constexpr size_t tokens_per_block = 2;
     constexpr size_t block_num        = 3;
     constexpr size_t block_stride     = 64;
@@ -869,7 +874,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSameLayerRoutesByTag) {
     EXPECT_EQ(full_store->records[0].block_count, block_num);
 }
 
-TEST_F(ExecOpsTest, testWriteCacheStoreRejectsNonLocalBlockTable) {
+TEST_F(CacheStoreOpsTest, testWriteCacheStoreRejectsNonLocalBlockTable) {
     auto cache_store               = std::make_shared<MockCacheStore>();
     auto inputs                    = makePyCacheStoreInputs(/*tokens_per_block=*/2, /*block_num=*/3);
     inputs.host_kv_cache_offset    = torch::ones({2, 1, 3}, torch::kInt32);
@@ -884,7 +889,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreRejectsNonLocalBlockTable) {
         inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, /*cp_rank=*/0, /*cp_size=*/1, nullptr));
 }
 
-TEST_F(ExecOpsTest, testWriteCacheStoreTag_LocalOffset) {
+TEST_F(CacheStoreOpsTest, testWriteCacheStoreTag_LocalOffset) {
     auto                   cache_store = std::make_shared<MockCacheStore>();
     auto                   inputs      = makePyCacheStoreInputs(/*tokens_per_block=*/2, /*block_num=*/3);
     ExecOpsCacheConfigSpec config_spec(
@@ -908,7 +913,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreTag_LocalOffset) {
     EXPECT_EQ(countKeyPrefix(cache_store->records[0].block_keys, "kv_"), 3u);
 }
 
-TEST_F(ExecOpsTest, testWriteCacheStoreUsesDecoderOffsetForContextBlockRow) {
+TEST_F(CacheStoreOpsTest, testWriteCacheStoreUsesDecoderOffsetForContextBlockRow) {
     auto cache_store            = std::make_shared<MockCacheStore>();
     auto inputs                 = makePyCacheStoreInputs(/*tokens_per_block=*/2, /*block_num=*/2);
     inputs.input_lengths_host   = torch::tensor({1, 4}, torch::kInt32);
@@ -933,7 +938,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreUsesDecoderOffsetForContextBlockRow) {
               reinterpret_cast<uintptr_t>(layer_cache.kv_cache_base.data_ptr()) + 64);
 }
 
-TEST_F(ExecOpsTest, testWriteCacheStoreReadsNonContiguousHostMetadata) {
+TEST_F(CacheStoreOpsTest, testWriteCacheStoreReadsNonContiguousHostMetadata) {
     auto inputs                  = makeTwoRequestCacheStoreInputs();
     inputs.host_kv_cache_offset  = makeNonContiguousMatrix(inputs.host_kv_cache_offset, /*gap_value=*/99);
     inputs.input_lengths_host    = makeNonContiguousVector(inputs.input_lengths_host, /*gap_value=*/0);

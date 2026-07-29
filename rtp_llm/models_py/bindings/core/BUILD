@@ -208,16 +208,9 @@ cc_library(
         "//conditions:default": [],
     }),
     copts = copts(),
-    # This target defines globalRuntime() and the runtimeCreateEvent /
-    # runtimeWriteCacheStore implementations, so a process that links it twice gets
-    # two copies of the ExecOps singleton. Restricting visibility to the one .so
-    # allowed to own that state lowers the chance of an accidental *direct*
-    # dependency; test binaries take :exec_ops_test_lib instead.
-    #
-    # It is NOT a proof of final-link uniqueness: visibility only constrains direct
-    # dependency edges, so a same-package wrapper (:exec_ctx_rocm is exactly that)
-    # or any whitelisted package can re-wrap this target and widen its reach again.
-    # The invariant still has to be checked by review.
+    # Defines globalRuntime() and the runtimeCreateEvent / runtimeWriteCacheStore
+    # implementations; librtp_compute_ops.so owns that state. Test binaries take
+    # :exec_ops_test_lib instead.
     visibility = ["//rtp_llm/cpp/pybind:__pkg__"],
     alwayslink = 1,
 )
@@ -316,11 +309,7 @@ cc_library(
         ":exec_ctx_ops",
     ],
     copts = copts(),
-    # Carries :exec_ctx_state transitively, so it inherits the same
-    # single-provider constraint - see the visibility note there. Whitelist rather
-    # than public: a new consumer must land here deliberately, which is the review
-    # point where the "exactly one implementation provider per final binary" rule
-    # gets checked.
+    # Carries :exec_ctx_state transitively; same ownership scope.
     visibility = [
         "//rtp_llm/cpp/pybind:__pkg__",
         "//rtp_llm/cpp/testing:__pkg__",
@@ -334,18 +323,9 @@ cc_library(
     name = "cache_store_async_writer",
     hdrs = ["CacheStoreAsyncWriter.h"],
     srcs = ["CacheStoreAsyncWriter.cc"],
-    # Intentionally underlinked: runtimeCreateEvent/runtimeWriteCacheStore are
-    # declared by exec_ops_hdr only. Every consumer's final binary must link
-    # exactly one implementation provider (exec_ctx_state, exec_ops_test_lib,
-    # or exec_ctx_rocm). Non-CUDA/ROCm builds do not reference those symbols:
-    # write() errors at runtime on such builds before reaching them (or no-ops
-    # first when the cycle was admitted under the degraded-skip rollback switch).
-    #
-    # Missing the provider entirely fails at link time, deterministically. The
-    # "exactly one" half has no mechanical check: :exec_ctx_state and
-    # :exec_ctx_rocm are visibility-restricted to reduce accidental direct
-    # dependencies, but visibility cannot bound transitive reach, so a duplicate
-    # provider reaching a final binary is still caught only by review.
+    # runtimeCreateEvent/runtimeWriteCacheStore come from exec_ops_hdr's
+    # implementation provider: exec_ctx_state (prod), exec_ops_test_lib (tests),
+    # or exec_ctx_rocm.
     deps = [
         ":exec_ops_hdr",
         "//rtp_llm/cpp/cache:cache",
