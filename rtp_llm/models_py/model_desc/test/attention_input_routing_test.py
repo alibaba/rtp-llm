@@ -93,6 +93,32 @@ class AttentionInputRoutingTest(unittest.TestCase):
             self.assertIs(passed_inputs, attention_inputs.cache_store_inputs)
             self.assertIs(passed_kv_cache, kv_cache)
 
+    def test_fmha_factory_path_publishes_through_writer(self):
+        # FMHA publish route: create_write_cache_store_impl -> apply_write_cache_store
+        # -> writer.write. Locks the forward chain by object identity.
+        cache_store_inputs = SimpleNamespace(tag="full")
+        kv_cache = SimpleNamespace(tag="full")
+        cache_store_writer = Mock()
+        attention_inputs = SimpleNamespace(
+            is_prefill=True,
+            cache_store_inputs=cache_store_inputs,
+            cache_store_writer=cache_store_writer,
+        )
+
+        write_impl = attention_common.create_write_cache_store_impl(attention_inputs)
+        self.assertIsNotNone(write_impl)
+
+        attention_common.apply_write_cache_store(write_impl, attention_inputs, kv_cache)
+        cache_store_writer.write.assert_called_once()
+        passed_inputs, passed_kv_cache = cache_store_writer.write.call_args.args
+        self.assertIs(passed_inputs, cache_store_inputs)
+        self.assertIs(passed_kv_cache, kv_cache)
+
+        # Null kv_cache: publishes nothing, op stays reusable.
+        cache_store_writer.reset_mock()
+        attention_common.apply_write_cache_store(write_impl, attention_inputs, None)
+        cache_store_writer.write.assert_not_called()
+
     def test_cp_cache_store_skips_when_pair_incomplete(self):
         # PyWrappedModel attaches cache_store_inputs and cache_store_writer together only
         # when the C++ boundary accepts eligibility, so any half pair reaching python is a

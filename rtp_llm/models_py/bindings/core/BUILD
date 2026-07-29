@@ -313,7 +313,6 @@ cc_library(
     visibility = [
         "//rtp_llm/cpp/pybind:__pkg__",
         "//rtp_llm/cpp/testing:__pkg__",
-        "//rtp_llm/models_py/bindings/common:__pkg__",
         "//rtp_llm/models_py/bindings/core/test:__pkg__",
         "//rtp_llm/models_py/bindings/rocm/ops/tests:__pkg__",
     ],
