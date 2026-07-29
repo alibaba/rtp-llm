@@ -9,8 +9,19 @@ from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.renderer_factory_register import register_renderer
 from rtp_llm.openai.renderers.custom_renderer import (
     CustomChatRenderer,
+    OutputDelta,
     RenderedInputs,
+    StreamStatus,
 )
+
+
+class _KimiK3StreamStatus(StreamStatus):
+    """Per-choice state for filtering K3's terminal XTML envelope."""
+
+    def __init__(self, request: ChatCompletionRequest):
+        super().__init__(request)
+        self.xtml_pending = ""
+        self.response_closed = False
 
 
 class KimiK3Renderer(CustomChatRenderer):
@@ -26,6 +37,86 @@ class KimiK3Renderer(CustomChatRenderer):
     def __init__(self, *args, **kwargs):
         super().__init__(*args, **kwargs)
         self.add_extra_stop_words(["<|end_of_msg|>"])
+
+    @staticmethod
+    def _filter_non_thinking_xtml_delta(status: _KimiK3StreamStatus, text: str) -> str:
+        """Remove only a verified terminal ``response`` channel envelope.
+
+        K3 emits ``<|close|>response<|sep|><|end_of_msg|>`` after the visible
+        answer.  The EOS token is already removed by the generic stop-word
+        path, but the preceding XTML envelope consists of ordinary output
+        tokens and would otherwise leak into OpenAI ``content``.
+
+        Buffer from ``<|close|>`` through ``<|sep|>`` so a wrong channel label
+        (for example ``think``) is returned verbatim instead of being hidden.
+        This keeps numerical/protocol failures observable while suppressing
+        only the valid response closure.
+        """
+
+        if status.response_closed:
+            return ""
+
+        close = "<|close|>"
+        sep = "<|sep|>"
+        response_closure = f"{close}response{sep}"
+        combined = status.xtml_pending + text
+        status.xtml_pending = ""
+        visible: List[str] = []
+        cursor = 0
+
+        while cursor < len(combined):
+            close_at = combined.find(close, cursor)
+            if close_at < 0:
+                visible.append(combined[cursor:])
+                break
+            visible.append(combined[cursor:close_at])
+            sep_at = combined.find(sep, close_at + len(close))
+            if sep_at < 0:
+                status.xtml_pending = combined[close_at:]
+                break
+            segment_end = sep_at + len(sep)
+            segment = combined[close_at:segment_end]
+            if segment == response_closure:
+                status.response_closed = True
+                break
+            visible.append(segment)
+            cursor = segment_end
+
+        return "".join(visible)
+
+    @override
+    async def _create_status_list(
+        self, n: int, request: ChatCompletionRequest
+    ) -> List[StreamStatus]:
+        return [_KimiK3StreamStatus(request) for _ in range(n)]
+
+    @override
+    async def _update_single_status(
+        self,
+        status: StreamStatus,
+        output,
+        max_new_tokens: int,
+        stop_words_str: List[str],
+        stop_word_slice_list: List[str],
+        is_streaming: bool,
+    ) -> OutputDelta:
+        delta = await super()._update_single_status(
+            status,
+            output,
+            max_new_tokens,
+            stop_words_str,
+            stop_word_slice_list,
+            is_streaming,
+        )
+        if (
+            isinstance(status, _KimiK3StreamStatus)
+            and status.request.disable_thinking()
+            and isinstance(delta.output_str, str)
+        ):
+            delta.output_str = self._filter_non_thinking_xtml_delta(
+                status, delta.output_str
+            )
+        return delta
 
     @staticmethod
     def _request_dict(request: ChatCompletionRequest) -> Dict[str, Any]:
@@ -56,8 +147,7 @@ class KimiK3Renderer(CustomChatRenderer):
         functions = request_dict.get("functions")
         if functions:
             return [
-                {"type": "function", "function": function}
-                for function in functions
+                {"type": "function", "function": function} for function in functions
             ]
         return None
 
