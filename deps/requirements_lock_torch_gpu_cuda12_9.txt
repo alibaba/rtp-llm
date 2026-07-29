@@ -703,10 +703,10 @@ decord==0.6.0 \
     --hash=sha256:9c20674964fb1490c677bd911d2023d2a09fec7a58a4bb0b7ddf1ccc269f107a \
     --hash=sha256:a0eb1258beade34dceb29d97856a7764d179db1b5182899b61874f3418a1abc8
     # via -r requirements_base.txt
-deep-ep @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/deep-ep/deep_ep-1.2.1.10%2Bd7d7b48-cp310-cp310-linux_x86_64.whl \
+deep-ep==1.2.1.10+d7d7b48 \
     --hash=sha256:2e291bcd8cd8da84a1eec52dc8d5c0033e264b4ac26e86f6c951410ca3adb247
     # via -r requirements_torch_gpu_cuda12_9.txt
-deep-gemm @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/deep-gemm/deep_gemm-2.1.1%2Blocal-cp310-cp310-linux_x86_64.whl \
+deep-gemm==2.1.1+local \
     --hash=sha256:430ea2635d204d7e2d182860c496d787d83e46ac81ee10043eaa86eb8eadf88d \
     --hash=sha256:64a42117cd51089eb471b0a4d66e5bd958ce95cae7f922ff9ea4f711ce3a5b41 \
     --hash=sha256:fda5ed1639253d16dafeb2de92453bb3fef286ffdc647061053b3ec1a7a656b1
@@ -733,12 +733,11 @@ exceptiongroup==1.3.1 \
     --hash=sha256:8b412432c6055b0b7d14c310000ae93352ed6754f70fa8f7c34141f91c4e3219 \
     --hash=sha256:a7a39a3bd276781e98394987d3a5701d0c4edffb633bb7a5144577f82c773598
     # via anyio
-fast-hadamard-transform @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/fast-hadamard-transform/fast_hadamard_transform-1.0.4.post1-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:a296eaf72201599b698ff5f924b6cb9d1d4bede3ca0faac3c9de929a30e39168 \
+fast-hadamard-transform==1.0.4.post1 \
     --hash=sha256:a465dc40ecf271cb1ffda8d25623f2fd17f90b892effaf63108f5841ebba966a \
     --hash=sha256:b778ac8445b5257ded89c4e8612cd9ac650f446cdf0408e5fdb4319be0c78706
     # via -r requirements_torch_gpu_cuda12_9.txt
-fast-safetensors @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/fast-safetensors/fast_safetensors-0.7.3%2Btorch2.1.2.cu121-cp310-cp310-linux_x86_64.whl \
+fast-safetensors==0.7.3+torch2.1.2.cu121 \
     --hash=sha256:7a69f6e1235e2312b712c8918bb5043716819810ffb90cdbb6366fc4c07a50ba \
     --hash=sha256:a031a05cc35a9ffe47b236d92854d3e24de488343102fbbae05b8b77cc8480e4 \
     --hash=sha256:dd760931feb6dd585cc0b14b1bacf39c1e31a39bb9f8e12a8c62720caf1ccc1f
@@ -747,7 +746,7 @@ fastapi==0.115.6 \
     --hash=sha256:9ec46f7addc14ea472958a96aae5b5de65f39721a46aaf5705c480d9a8b76654 \
     --hash=sha256:e9240b29e36fa8f4bb7290316988e90c381e5092e0cbe84e7818cc3713bcf305
     # via -r requirements_base.txt
-fastsafetensors @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/fastsafetensors/fastsafetensors-0.1.19rc5%2Bali-cp310-cp310-linux_x86_64.whl \
+fastsafetensors==0.1.19rc5+ali \
     --hash=sha256:0801d96f5e4318eae121c25bd6940968e10de73e9ce9d1fa0b5e0f6f9221aafe \
     --hash=sha256:681c5772c005032959c66ef24f7a1bd6972f2c7bc90d3d7e9a523d262f2597a1 \
     --hash=sha256:aafb2bc7492a5de970b03455e68b5c9e15034e5d31d86f4524523bee7d9ada29
@@ -761,25 +760,25 @@ filelock==3.29.6 \
     #   datasets
     #   huggingface-hub
     #   torch
-flash-attn @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/flash-attn/flash_attn-2.8.3%2Bcu12torch2.8cxx11abiTRUE-cp310-cp310-linux_x86_64.whl \
-    --hash=sha256:75c51f34bb93c5a4438d6b767547ca6c22a9bfc6b29b5646dda98e943cd75d99
+flash-attn==2.8.3+cu12torch2.8cxx11abitrue \
+    --hash=sha256:51977dd0a897218cdfcafbbab62f781806207c3d68a15cae74d4fbce92495b3a
     # via -r requirements_torch_gpu_cuda12_9.txt
 flash-attn-3==3.0.0b1 \
     --hash=sha256:138c4e50f0e1e5b594a258de21552b861615002a3c8da96e6f51e46bc80c2bdc \
     --hash=sha256:a3cab4f2ae9c27b229631e5fe06fe23807201dd29020df60d947593746a7eb04 \
     --hash=sha256:a8d3e9aa99318fd1ea4eec10cfd2e19b0bfee03030301234acfb5165dd29af9a
     # via -r requirements_torch_gpu_cuda12_9.txt
-flash-mla @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/flash-mla/flash_mla-1.0.0%2Bca58fed-cp310-cp310-linux_x86_64.whl \
+flash-mla==1.0.0+ca58fed \
     --hash=sha256:960fecb602f90f0f882b6e460f9ddebaec0c3cedca3b01594330445c90afaa5e
     # via -r requirements_torch_gpu_cuda12_9.txt
-flashinfer-cubin @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/flashinfer-cubin/flashinfer_cubin-0.6.6-py3-none-any.whl \
+flashinfer-cubin==0.6.6 \
     --hash=sha256:3363511f06b0315b9267fc3976412b7f844750fdfe451c44f3f84076bffac641
     # via -r requirements_torch_gpu_cuda12_9.txt
 flashinfer-jit-cache==0.6.6 \
     --hash=sha256:346bb153c2fab3922e017f9f1fb41d5dad679849d787c2dac9d2fc7102a74e64 \
     --hash=sha256:d05323d7e0a766cae097e715df99e3d97d74305d699ceb95276cf98915f404a5
     # via -r requirements_torch_gpu_cuda12_9.txt
-flashinfer-python @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/flashinfer-python/flashinfer_python-0.6.6-py3-none-any.whl \
+flashinfer-python==0.6.6 \
     --hash=sha256:4ee501a8cc6a4479c6a23e6fb4f0a1ebcce3212d72d6ae15c9bcf9a79571efa5
     # via
     #   -r requirements_torch_gpu_cuda12_9.txt
@@ -3578,7 +3577,7 @@ rouge==1.0.1 \
     --hash=sha256:12b48346ca47d6bcf3c45061f315452b9ccec0620ee895ec85b7efc3d54aae34 \
     --hash=sha256:28d118536e8c774dc47d1d15ec266479b4dd0914c4672ce117d4002789bdc644
     # via auto-gptq
-rtp-kernel @ https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/rtp-kernel/rtp_kernel-0.1.0%2B125c29e5.20260422154605-cp310-cp310-linux_x86_64.whl \
+rtp-kernel==0.1.0+125c29e5.20260422154605 \
     --hash=sha256:cafcb02ab3feacdebc209d739a48f5677d3ca0be353e28097717d95f4109d4f0
     # via -r requirements_torch_gpu_cuda12_9.txt
 safetensors==0.8.0 \
