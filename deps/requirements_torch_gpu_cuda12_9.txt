@@ -10,9 +10,9 @@ fastsafetensors==0.1.19rc5+ali ; platform_machine == "x86_64"
 flash-attn==2.8.3+cu12torch2.8cxx11abiTRUE ; platform_machine == "x86_64"
 flash-attn-3==3.0.0b1
 flash-mla==1.0.0+ca58fed ; platform_machine == "x86_64"
-flashinfer-cubin==0.6.6
-flashinfer-jit-cache==0.6.6
-flashinfer-python==0.6.6
+flashinfer-cubin==0.6.9
+flashinfer-jit-cache==0.6.9
+flashinfer-python==0.6.9
 mysql-connector-python
 nvidia-cutlass-dsl==4.4.1
 # rtp-kernel is built per-arch, so this x86_64 wheel carries a different build

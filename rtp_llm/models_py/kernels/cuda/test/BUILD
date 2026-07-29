@@ -65,7 +65,7 @@ py_test(
         "@//:using_cuda12_9_x86": ["//rtp_llm:flashinfer-python"],
         "//conditions:default": []
     }),
-    tags = ["open_skip", "H20", "manual"],
+    tags = ["open_skip", "H20"],
     exec_properties = {'gpu':'H20'},
 )
 
