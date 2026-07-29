@@ -16,9 +16,41 @@ class ModelMetaConfigTest {
 
     private static final String TEST_SERVICE_ID = "model_meta_cfg_test.pd.service";
 
+    /** Two distinct serviceIds whose modelName suffix is identical — see IdUtils#getModelNameByServiceId. */
+    private static final String SHARED_MODEL_SERVICE_A =
+            "aigc.text-generation.generation" + ".shared_model_a";
+    private static final String SHARED_MODEL_SERVICE_B =
+            "aigc.text-generation.generatioX" + ".shared_model_a";
+
     @AfterEach
     void tearDown() {
         ModelMetaConfig.removeServiceRoute(TEST_SERVICE_ID);
+        ModelMetaConfig.removeServiceRoute(SHARED_MODEL_SERVICE_A);
+        ModelMetaConfig.removeServiceRoute(SHARED_MODEL_SERVICE_B);
+    }
+
+    @Test
+    void removingOneRouteKeepsAModelStillServedByAnother() {
+        // Several serviceIds can map to one modelName. Dropping the model from the sync set on the
+        // first removal would stop syncing a model other live routes still serve.
+        ServiceRoute a = routeWithRoles(SHARED_MODEL_SERVICE_A, true, false, false);
+        a.setLoadBalance(true);
+        ServiceRoute b = routeWithRoles(SHARED_MODEL_SERVICE_B, true, false, false);
+        b.setLoadBalance(true);
+        ModelMetaConfig.putServiceRoute(SHARED_MODEL_SERVICE_A, a);
+        ModelMetaConfig.putServiceRoute(SHARED_MODEL_SERVICE_B, b);
+        String modelName = org.flexlb.util.IdUtils.getModelNameByServiceId(SHARED_MODEL_SERVICE_A);
+        assertTrue(ModelMetaConfig.getLoadBalanceSyncModels().contains(modelName));
+
+        ModelMetaConfig.removeServiceRoute(SHARED_MODEL_SERVICE_A);
+
+        assertTrue(ModelMetaConfig.getLoadBalanceSyncModels().contains(modelName),
+                "the model is still served by the other route, so it must stay in the sync set");
+
+        ModelMetaConfig.removeServiceRoute(SHARED_MODEL_SERVICE_B);
+
+        assertFalse(ModelMetaConfig.getLoadBalanceSyncModels().contains(modelName),
+                "the last route referencing the model is gone, so it drops out");
     }
 
     private ServiceRoute routeWithRoles(String serviceId, boolean prefill, boolean decode, boolean pdFusion) {

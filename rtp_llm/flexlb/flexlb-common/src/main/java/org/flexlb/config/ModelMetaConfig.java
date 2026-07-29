@@ -20,8 +20,9 @@ public class ModelMetaConfig {
      */
     private static final ConcurrentHashMap<String/*serviceId*/, ServiceRoute> modelServiceRoute = new ConcurrentHashMap<>();
 
+    /** Concurrent: mutated through the route-table entry points while readers iterate it. */
     @Getter
-    private static final Set<String> loadBalanceSyncModels = new HashSet<>();
+    private static final Set<String> loadBalanceSyncModels = ConcurrentHashMap.newKeySet();
 
     /**
      * Memoized {@link #getConfiguredRoleTypes()} result, tagged with the route-table version it
@@ -54,7 +55,16 @@ public class ModelMetaConfig {
         ServiceRoute removed = modelServiceRoute.remove(serviceId);
         routeTableVersion.incrementAndGet();
         if (removed != null && Boolean.TRUE.equals(removed.getLoadBalance())) {
-            loadBalanceSyncModels.remove(IdUtils.getModelNameByServiceId(removed.getServiceId()));
+            String modelName = IdUtils.getModelNameByServiceId(removed.getServiceId());
+            // Several serviceIds can map to one modelName, so the model stays in the sync set until
+            // the last load-balanced route referencing it is gone — dropping it on the first removal
+            // would stop syncing a model other live routes still serve.
+            boolean stillReferenced = modelServiceRoute.values().stream()
+                    .filter(route -> Boolean.TRUE.equals(route.getLoadBalance()))
+                    .anyMatch(route -> modelName.equals(IdUtils.getModelNameByServiceId(route.getServiceId())));
+            if (!stillReferenced) {
+                loadBalanceSyncModels.remove(modelName);
+            }
         }
     }
 
