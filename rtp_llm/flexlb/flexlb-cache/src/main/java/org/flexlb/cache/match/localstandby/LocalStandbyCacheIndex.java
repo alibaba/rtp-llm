@@ -7,8 +7,10 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.Executors;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ScheduledExecutorService;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicLong;
 
 /**
@@ -22,15 +24,19 @@ import java.util.concurrent.atomic.AtomicLong;
 class LocalStandbyCacheIndex {
 
     private static final long CLEANUP_CHECK_INTERVAL_MS = 10_000;
-    private static final int CLEANUP_BATCH_DIVISOR = 10;
+    private static final int NORMAL_CLEANUP_BATCH_DIVISOR = 10;
+    private static final int PRESSURE_CLEANUP_BATCH_DIVISOR = 5;
     private static final int NORMAL_CHECKS_BEFORE_CLEANUP = 3;
     private static final int PRESSURE_CHECKS_BEFORE_CLEANUP = 2;
-    private static final int CRITICAL_CHECKS_BEFORE_CLEANUP = 1;
+    private static final double FULL_SCAN_TRIGGER_RATIO = 0.9;
 
     private final long entryTtlNanos;
     private final long minimumEntryTtlNanos;
     private final double ttlReductionStartRatio;
+    private final boolean automaticCleanupEnabled;
     private final ConcurrentHashMap<Long, ConcurrentHashMap<String, Long>> blockToEnginesMap = new ConcurrentHashMap<>();
+    // Prevent duplicate request-triggered full scans from being queued or run concurrently.
+    private final AtomicBoolean highWatermarkCleanupTriggered = new AtomicBoolean();
     private final AtomicLong mappingCount = new AtomicLong();
     private final ScheduledExecutorService cleanupExecutor;
     private volatile long maximumEntries;
@@ -46,6 +52,7 @@ class LocalStandbyCacheIndex {
         this.minimumEntryTtlNanos = TimeUnit.MILLISECONDS.toNanos(minimumEntryTtlMs);
         this.ttlReductionStartRatio = ttlReductionStartRatio;
         this.maximumEntries = maximumEntries;
+        this.automaticCleanupEnabled = enabled;
         this.cleanupExecutor = Executors.newSingleThreadScheduledExecutor(runnable -> {
             Thread thread = new Thread(runnable, "local-standby-cache-cleaner");
             thread.setDaemon(true);
@@ -60,12 +67,13 @@ class LocalStandbyCacheIndex {
         }
     }
 
-    void addWorkerBlockMappings(String workerIpPort, List<Long> blockCacheKeys) {
+    int addWorkerBlockMappings(String workerIpPort, List<Long> blockCacheKeys) {
         if (workerIpPort == null || workerIpPort.isEmpty() || blockCacheKeys == null || blockCacheKeys.isEmpty()) {
-            return;
+            return 0;
         }
 
         long lastUpdatedNanos = System.nanoTime();
+        int[] rejectedMappings = new int[1];
         for (Long blockCacheKey : blockCacheKeys) {
             if (blockCacheKey == null) {
                 continue;
@@ -84,13 +92,19 @@ class LocalStandbyCacheIndex {
                     currentWorkers = new ConcurrentHashMap<>();
                 }
 
-                Long previousUpdatedAt = currentWorkers.put(workerIpPort, lastUpdatedNanos);
-                if (previousUpdatedAt == null) {
-                    mappingCount.incrementAndGet();
+                if (currentWorkers.replace(workerIpPort, lastUpdatedNanos) != null) {
+                    return currentWorkers;
                 }
+                if (!incrementMappingCountIfBelowLimit()) {
+                    rejectedMappings[0]++;
+                    return currentWorkers.isEmpty() ? null : currentWorkers;
+                }
+                currentWorkers.put(workerIpPort, lastUpdatedNanos);
                 return currentWorkers;
             });
         }
+        requestHighWatermarkCleanupIfNeeded();
+        return rejectedMappings[0];
     }
 
     Map<String, Long> getUnexpiredEnginesForBlock(Long blockCacheKey, long queryTimeNanos) {
@@ -114,6 +128,7 @@ class LocalStandbyCacheIndex {
 
     void updateMaximumEntries(long newMaximumEntries) {
         maximumEntries = newMaximumEntries;
+        requestHighWatermarkCleanupIfNeeded();
     }
 
     long maximumEntryCount() {
@@ -130,6 +145,12 @@ class LocalStandbyCacheIndex {
 
     void runCleanupCheck() {
         try {
+            if (capacityUsageRatio() >= FULL_SCAN_TRIGGER_RATIO) {
+                checksSinceLastCleanup = 0;
+                runHighWatermarkFullScan();
+                return;
+            }
+
             checksSinceLastCleanup++;
             if (checksSinceLastCleanup < checksBeforeCleanup()) {
                 return;
@@ -141,12 +162,24 @@ class LocalStandbyCacheIndex {
         }
     }
 
-    int checksBeforeCleanup() {
-        double usageRatio = capacityUsageRatio();
-        if (usageRatio >= 1.0) {
-            return CRITICAL_CHECKS_BEFORE_CLEANUP;
+    void runHighWatermarkFullScan() {
+        try {
+            long mappingsBeforeCleanup = mappingCount.get();
+            removeExpiredMappingsFullScan();
+            cleanupIterator = null;
+            long mappingsAfterCleanup = mappingCount.get();
+            log.info("Completed high-watermark Local Standby cache full scan, "
+                            + "before={}, after={}, expiredRemoved={}",
+                    mappingsBeforeCleanup,
+                    mappingsAfterCleanup,
+                    Math.max(0, mappingsBeforeCleanup - mappingsAfterCleanup));
+        } catch (RuntimeException e) {
+            log.warn("Failed to run high-watermark Local Standby cache full scan", e);
         }
-        if (usageRatio >= ttlReductionStartRatio) {
+    }
+
+    int checksBeforeCleanup() {
+        if (capacityUsageRatio() >= ttlReductionStartRatio) {
             return PRESSURE_CHECKS_BEFORE_CLEANUP;
         }
         return NORMAL_CHECKS_BEFORE_CLEANUP;
@@ -174,11 +207,14 @@ class LocalStandbyCacheIndex {
     void removeExpiredMappingsBatch() {
         try {
             /*
-             * Each pass scans roughly 10% of block hashes. Together with the 30/20/10-second
-             * cleanup cadence, a complete scan takes about 300/200/100 seconds.
+             * Normal cleanup scans about 10% of block hashes. After the configured pressure
+             * threshold, each pass scans about 20%.
              */
-            int blockBatchSize = Math.max(1, (blockToEnginesMap.size() + CLEANUP_BATCH_DIVISOR - 1)
-                    / CLEANUP_BATCH_DIVISOR);
+            int batchDivisor = capacityUsageRatio() >= ttlReductionStartRatio
+                    ? PRESSURE_CLEANUP_BATCH_DIVISOR
+                    : NORMAL_CLEANUP_BATCH_DIVISOR;
+            int blockBatchSize = Math.max(1, (blockToEnginesMap.size() + batchDivisor - 1)
+                    / batchDivisor);
             if (cleanupIterator == null || !cleanupIterator.hasNext()) {
                 cleanupIterator = blockToEnginesMap.keySet().iterator();
             }
@@ -210,6 +246,45 @@ class LocalStandbyCacheIndex {
             }
             return workers.isEmpty() ? null : workers;
         });
+    }
+
+    private void removeExpiredMappingsFullScan() {
+        long cleanupTimeNanos = System.nanoTime();
+        long effectiveEntryTtlNanos = effectiveEntryTtlNanos();
+        for (Long blockCacheKey : blockToEnginesMap.keySet()) {
+            removeExpiredWorkerMappings(blockCacheKey, cleanupTimeNanos, effectiveEntryTtlNanos);
+        }
+    }
+
+    private boolean incrementMappingCountIfBelowLimit() {
+        if (mappingCount.get() >= maximumEntries) {
+            return false;
+        }
+        mappingCount.incrementAndGet();
+        return true;
+    }
+
+    private void requestHighWatermarkCleanupIfNeeded() {
+        if (!automaticCleanupEnabled || capacityUsageRatio() < FULL_SCAN_TRIGGER_RATIO) {
+            return;
+        }
+        if (!highWatermarkCleanupTriggered.compareAndSet(false, true)) {
+            return;
+        }
+        try {
+            cleanupExecutor.execute(() -> {
+                try {
+                    runCleanupCheck();
+                } finally {
+                    highWatermarkCleanupTriggered.set(false);
+                }
+            });
+        } catch (RejectedExecutionException e) {
+            highWatermarkCleanupTriggered.set(false);
+            if (!cleanupExecutor.isShutdown()) {
+                log.warn("Failed to schedule immediate Local Standby cache cleanup", e);
+            }
+        }
     }
 
     private boolean isExpired(long lastUpdatedNanos, long currentTimeNanos, long effectiveEntryTtlNanos) {

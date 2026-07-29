@@ -18,6 +18,7 @@ import java.util.List;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.anyLong;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
@@ -183,28 +184,24 @@ class LocalStandbyCacheManagerTest {
     }
 
     @Test
-    void acceptsNewMappingsBeyondEstimatedCapacity() {
+    void reportsNewMappingsRejectedAtHardCapacityLimit() {
         WorkerStatusProvider workerStatusProvider = mock(WorkerStatusProvider.class);
         CacheMetricsReporter cacheMetricsReporter = mock(CacheMetricsReporter.class);
         WorkerStatus worker = worker("10.0.0.1", 8080);
         when(workerStatusProvider.getWorkerStatuses(RoleType.PREFILL, "default"))
                 .thenReturn(List.of(worker));
         LocalStandbyCacheManager manager = new LocalStandbyCacheManager(
-                new CacheMatchConfiguration(modelMetaConfig(300_000, 1, 10.0)),
+                new CacheMatchConfiguration(modelMetaConfig(300_000, 10, 10.0)),
                 workerStatusProvider,
                 cacheMetricsReporter);
 
-        manager.addRoutedRequestBlocks(worker.getIpPort(), List.of(11L));
-        manager.addRoutedRequestBlocks(worker.getIpPort(), List.of(11L));
-        manager.addRoutedRequestBlocks(worker.getIpPort(), List.of(22L));
+        manager.addRoutedRequestBlocks(
+                worker.getIpPort(),
+                List.of(1L, 2L, 3L, 4L, 5L, 6L, 7L, 8L, 9L, 10L, 11L));
 
-        assertEquals(2, manager.mappingCount());
-        assertEquals(1, manager.findMatchingEngines(
-                List.of(11L), RoleType.PREFILL, "default").get(worker.getIpPort()));
-        assertEquals(1, manager.findMatchingEngines(
-                List.of(22L), RoleType.PREFILL, "default").get(worker.getIpPort()));
         manager.reportMappingCount();
-        verify(cacheMetricsReporter).reportLocalStandbyMappingCount(2);
+        verify(cacheMetricsReporter).reportLocalStandbyCapacityRejected();
+        verify(cacheMetricsReporter).reportLocalStandbyMappingCount(anyLong());
         manager.shutdown();
     }
 

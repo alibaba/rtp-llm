@@ -20,6 +20,7 @@ import java.util.LinkedHashSet;
 import java.util.List;
 import java.util.Map;
 import java.util.Set;
+import java.util.concurrent.TimeUnit;
 
 /**
  * Coordinates Local Standby cache matching, request-derived metadata updates and index sizing.
@@ -32,6 +33,7 @@ import java.util.Set;
 public class LocalStandbyCacheManager {
 
     private static final long CAPACITY_REFRESH_INTERVAL_MS = 60_000;
+    private static final long CAPACITY_WARNING_INTERVAL_NANOS = TimeUnit.MINUTES.toNanos(1);
     private final boolean enabled;
     private final WorkerStatusProvider workerStatusProvider;
     private final CacheMetricsReporter cacheMetricsReporter;
@@ -40,6 +42,7 @@ public class LocalStandbyCacheManager {
     private final double capacityMultiplier;
     private final long configuredBlockSize;
     private final LocalStandbyCacheIndex cacheIndex;
+    private volatile long nextCapacityWarningNanos;
 
     public LocalStandbyCacheManager(CacheMatchConfiguration configuration,
                                     WorkerStatusProvider workerStatusProvider,
@@ -156,7 +159,22 @@ public class LocalStandbyCacheManager {
     }
 
     public void addRoutedRequestBlocks(String workerIpPort, List<Long> blockCacheKeys) {
-        cacheIndex.addWorkerBlockMappings(workerIpPort, blockCacheKeys);
+        int rejectedMappings = cacheIndex.addWorkerBlockMappings(workerIpPort, blockCacheKeys);
+        if (rejectedMappings <= 0) {
+            return;
+        }
+
+        cacheMetricsReporter.reportLocalStandbyCapacityRejected();
+        long now = System.nanoTime();
+        if (now >= nextCapacityWarningNanos) {
+            nextCapacityWarningNanos = now + CAPACITY_WARNING_INTERVAL_NANOS;
+            log.warn("Local Standby cache reached its capacity limit; rejected {} new "
+                            + "mappings while existing mappings remain refreshable, "
+                            + "currentMappings={}, maximumEntries={}",
+                    rejectedMappings,
+                    cacheIndex.mappingCount(),
+                    cacheIndex.maximumEntryCount());
+        }
     }
 
     public long mappingCount() {

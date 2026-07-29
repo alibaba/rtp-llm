@@ -38,7 +38,7 @@ public class LocalStandbyConfig {
     private long entryTtlMs = DEFAULT_ENTRY_TTL_MS;
 
     /**
-     * Minimum lifetime used when a worker reaches or exceeds its metadata capacity estimate.
+     * Minimum global lifetime used when metadata reaches its capacity estimate.
      */
     @JsonProperty("minimum_entry_ttl_ms")
     private long minimumEntryTtlMs = DEFAULT_MINIMUM_ENTRY_TTL_MS;
@@ -50,7 +50,9 @@ public class LocalStandbyConfig {
     private double ttlReductionStartRatio = DEFAULT_TTL_REDUCTION_START_RATIO;
 
     /**
-     * Upper capacity budget used to shorten TTL. New mappings may temporarily exceed this value.
+     * Approximate global capacity limit. Existing mappings remain refreshable at the limit,
+     * while new mappings resume after cleanup reduces usage below this value. Concurrent
+     * additions may exceed the limit slightly.
      */
     @JsonProperty("maximum_entries")
     private long maximumEntries = DEFAULT_MAXIMUM_ENTRIES;

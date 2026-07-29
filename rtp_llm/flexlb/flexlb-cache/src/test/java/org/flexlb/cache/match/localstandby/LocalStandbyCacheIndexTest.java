@@ -4,8 +4,8 @@ import org.junit.jupiter.api.Test;
 
 import java.util.List;
 import java.util.Map;
-import java.util.Set;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicInteger;
 import java.util.stream.IntStream;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -43,17 +43,50 @@ class LocalStandbyCacheIndexTest {
     }
 
     @Test
-    void acceptsNewMappingsBeyondEstimatedCapacity() {
+    void rejectsNewMappingsAtHardLimitAndResumesAfterCleanup() throws InterruptedException {
         String worker = "10.0.0.1:8080";
-        LocalStandbyCacheIndex cacheIndex = cacheIndex(60_000, 20_000, 0.8, 2);
+        LocalStandbyCacheIndex cacheIndex = cacheIndex(1, 1, 0.8, 2);
         cacheIndex.updateMaximumEntries(2);
 
-        cacheIndex.addWorkerBlockMappings(worker, List.of(11L, 22L, 33L));
+        assertEquals(
+                1, cacheIndex.addWorkerBlockMappings(worker, List.of(11L, 22L, 33L)));
+        assertEquals(0, cacheIndex.addWorkerBlockMappings(worker, List.of(11L)));
 
-        assertEquals(3, cacheIndex.mappingCount());
-        assertEquals(Set.of(worker), owners(cacheIndex, 11L));
-        assertEquals(Set.of(worker), owners(cacheIndex, 22L));
-        assertEquals(Set.of(worker), owners(cacheIndex, 33L));
+        assertEquals(2, cacheIndex.mappingCount());
+        assertNull(cacheIndex.getUnexpiredEnginesForBlock(33L, System.nanoTime()));
+
+        Thread.sleep(5);
+        cacheIndex.runHighWatermarkFullScan();
+        assertEquals(0, cacheIndex.mappingCount());
+        assertEquals(0, cacheIndex.addWorkerBlockMappings(worker, List.of(33L)));
+        assertEquals(1, cacheIndex.mappingCount());
+        cacheIndex.shutdown();
+    }
+
+    @Test
+    void highWatermarkCleanupDoesNotEvictUnexpiredMappings() {
+        String worker = "10.0.0.1:8080";
+        LocalStandbyCacheIndex cacheIndex = cacheIndex(60_000, 20_000, 0.8, 10);
+        cacheIndex.addWorkerBlockMappings(
+                worker, IntStream.range(0, 10).mapToObj(value -> (long) value).toList());
+
+        cacheIndex.runHighWatermarkFullScan();
+
+        assertEquals(10, cacheIndex.mappingCount());
+        cacheIndex.shutdown();
+    }
+
+    @Test
+    void highWatermarkCleanupScansEntireIndexForExpiredMappings() throws InterruptedException {
+        String worker = "10.0.0.1:8080";
+        LocalStandbyCacheIndex cacheIndex = cacheIndex(1, 1, 0.8, 10);
+        cacheIndex.addWorkerBlockMappings(
+                worker, IntStream.range(0, 10).mapToObj(value -> (long) value).toList());
+
+        Thread.sleep(5);
+        cacheIndex.runHighWatermarkFullScan();
+
+        assertEquals(0, cacheIndex.mappingCount());
         cacheIndex.shutdown();
     }
 
@@ -93,9 +126,51 @@ class LocalStandbyCacheIndexTest {
 
         cacheIndex.addWorkerBlockMappings(worker, List.of(7L));
         assertEquals(2, cacheIndex.checksBeforeCleanup());
+        cacheIndex.shutdown();
+    }
 
-        cacheIndex.addWorkerBlockMappings(worker, List.of(8L, 9L));
-        assertEquals(1, cacheIndex.checksBeforeCleanup());
+    @Test
+    void normalCleanupScansTenPercentOfBlockHashes() throws InterruptedException {
+        LocalStandbyCacheIndex cacheIndex = cacheIndex(1, 1, 0.8, 100);
+        cacheIndex.addWorkerBlockMappings(
+                "10.0.0.1:8080",
+                IntStream.range(0, 70).mapToObj(value -> (long) value).toList());
+        Thread.sleep(5);
+
+        cacheIndex.runCleanupCheck();
+        cacheIndex.runCleanupCheck();
+        cacheIndex.runCleanupCheck();
+
+        assertEquals(63, cacheIndex.mappingCount());
+        cacheIndex.shutdown();
+    }
+
+    @Test
+    void pressureCleanupScansTwentyPercentOfBlockHashes() throws InterruptedException {
+        LocalStandbyCacheIndex cacheIndex = cacheIndex(1, 1, 0.8, 100);
+        cacheIndex.addWorkerBlockMappings(
+                "10.0.0.1:8080",
+                IntStream.range(0, 80).mapToObj(value -> (long) value).toList());
+        Thread.sleep(5);
+
+        cacheIndex.runCleanupCheck();
+        cacheIndex.runCleanupCheck();
+
+        assertEquals(64, cacheIndex.mappingCount());
+        cacheIndex.shutdown();
+    }
+
+    @Test
+    void highWatermarkCleanupScansAllBlockHashes() throws InterruptedException {
+        LocalStandbyCacheIndex cacheIndex = cacheIndex(1, 1, 0.8, 10);
+        cacheIndex.addWorkerBlockMappings(
+                "10.0.0.1:8080",
+                IntStream.range(0, 9).mapToObj(value -> (long) value).toList());
+        Thread.sleep(5);
+
+        cacheIndex.runCleanupCheck();
+
+        assertEquals(0, cacheIndex.mappingCount());
         cacheIndex.shutdown();
     }
 
@@ -119,10 +194,12 @@ class LocalStandbyCacheIndexTest {
     void concurrentUpdatesBeyondCapacityKeepIndexAndCountersConsistent() {
         LocalStandbyCacheIndex cacheIndex = cacheIndex(60_000, 20_000, 0.8, 100);
         cacheIndex.updateMaximumEntries(100);
+        AtomicInteger rejectedMappings = new AtomicInteger();
 
         IntStream.range(0, 1_000).parallel().forEach(index -> {
             String worker = "10.0.0." + (index % 4 + 1) + ":8080";
-            cacheIndex.addWorkerBlockMappings(worker, List.of((long) index));
+            rejectedMappings.addAndGet(
+                    cacheIndex.addWorkerBlockMappings(worker, List.of((long) index)));
         });
 
         long indexedMappings = IntStream.range(0, 1_000)
@@ -133,7 +210,8 @@ class LocalStandbyCacheIndexTest {
                     return owners == null ? 0 : owners.size();
                 })
                 .sum();
-        assertEquals(1_000, cacheIndex.mappingCount());
+        assertTrue(cacheIndex.mappingCount() >= 100);
+        assertEquals(1_000, cacheIndex.mappingCount() + rejectedMappings.get());
         assertEquals(cacheIndex.mappingCount(), indexedMappings);
         cacheIndex.shutdown();
     }
@@ -151,8 +229,4 @@ class LocalStandbyCacheIndexTest {
                 false);
     }
 
-    private static Set<String> owners(LocalStandbyCacheIndex cacheIndex, long blockCacheKey) {
-        return Set.copyOf(
-                cacheIndex.getUnexpiredEnginesForBlock(blockCacheKey, System.nanoTime()).keySet());
-    }
 }
