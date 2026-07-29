@@ -35,26 +35,24 @@ class PerBlockFp8LayoutTest(unittest.TestCase):
             use_e8m0_scale_layout(
                 is_sm12x_device=True,
                 is_sm120_device=True,
-                is_moe_weight=False,
                 deep_gemm_e8m0_enabled=True,
             )
         )
 
-    def test_sm12x_moe_fails_before_layout_mutation(self):
-        with self.assertRaisesRegex(Exception, "unsupported on SM12x"):
+    def test_sm12x_moe_keeps_float_scale_layout(self):
+        self.assertFalse(
             use_e8m0_scale_layout(
                 is_sm12x_device=True,
                 is_sm120_device=True,
-                is_moe_weight=True,
                 deep_gemm_e8m0_enabled=False,
             )
+        )
 
     def test_non_sm120_sm12x_fails_before_layout_mutation(self):
         with self.assertRaisesRegex(Exception, "other than exact sm_120"):
             use_e8m0_scale_layout(
                 is_sm12x_device=True,
                 is_sm120_device=False,
-                is_moe_weight=False,
                 deep_gemm_e8m0_enabled=False,
             )
 
@@ -63,7 +61,6 @@ class PerBlockFp8LayoutTest(unittest.TestCase):
             use_e8m0_scale_layout(
                 is_sm12x_device=False,
                 is_sm120_device=False,
-                is_moe_weight=True,
                 deep_gemm_e8m0_enabled=True,
             )
         )
@@ -71,7 +68,6 @@ class PerBlockFp8LayoutTest(unittest.TestCase):
             use_e8m0_scale_layout(
                 is_sm12x_device=False,
                 is_sm120_device=False,
-                is_moe_weight=False,
                 deep_gemm_e8m0_enabled=False,
             )
         )
@@ -140,12 +136,13 @@ class PerBlockFp8LayoutTest(unittest.TestCase):
 
     @mock.patch("rtp_llm.models_py.utils.arch.is_sm120", return_value=True)
     @mock.patch("rtp_llm.models_py.utils.arch.is_sm12x", return_value=True)
-    def test_sm12x_moe_postprocess_rejects_unsupported_path(self, _is_sm12x, _is_sm120):
+    def test_sm12x_moe_postprocess_keeps_native_layout(self, _is_sm12x, _is_sm120):
         weight = self._make_weight(W.moe_w1, W.moe_s1)
         loaded = {
             W.moe_w1: torch.empty((1, 128, 128)),
             W.moe_s1: torch.empty((1, 1, 1)),
         }
+        fp8_kernel = SimpleNamespace(requant_weight_ue8m0=mock.Mock())
 
         with (
             mock.patch.dict(
@@ -154,15 +151,16 @@ class PerBlockFp8LayoutTest(unittest.TestCase):
                     "rtp_llm.models_py.kernels.cuda.deepgemm_wrapper": SimpleNamespace(
                         is_deep_gemm_e8m0_used=mock.Mock(return_value=False)
                     ),
-                    "rtp_llm.models_py.kernels.cuda.fp8_kernel": SimpleNamespace(
-                        requant_weight_ue8m0=mock.Mock()
-                    ),
+                    "rtp_llm.models_py.kernels.cuda.fp8_kernel": fp8_kernel,
                 },
             ),
             mock.patch.object(CompositeWeight, "_postprocess", return_value=loaded),
-            self.assertRaisesRegex(Exception, "unsupported on SM12x"),
         ):
-            weight._postprocess(None, "cpu", self._load_config())
+            processed = weight._postprocess(None, "cpu", self._load_config())
+
+        fp8_kernel.requant_weight_ue8m0.assert_not_called()
+        self.assertEqual((1, 128, 128), processed[W.moe_w1].shape)
+        self.assertEqual((1, 1, 1), processed[W.moe_s1].shape)
 
 
 if __name__ == "__main__":

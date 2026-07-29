@@ -26,7 +26,8 @@ class StrategyAttributes:
     This ensures:
     - Better router implementation gets higher priority
     - Better executor implementation gets higher priority within same router level
-    - Priority range: 0-49 (5 router types × 10 + 5 executor types)
+    - Executor values must stay below 10 so the router occupies the tens digit
+    - Current priority range: 0-79
 
     Examples:
     - BATCHED_DATA + BATCHED_TRITON = 0*10 + 0 = 0 (lowest)

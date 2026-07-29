@@ -57,7 +57,6 @@ def use_e8m0_scale_layout(
     *,
     is_sm12x_device: bool,
     is_sm120_device: bool,
-    is_moe_weight: bool,
     deep_gemm_e8m0_enabled: bool,
 ) -> bool:
     """Resolve the FP8 scale layout before mutating loaded tensors."""
@@ -65,13 +64,6 @@ def use_e8m0_scale_layout(
         not (is_sm12x_device and not is_sm120_device),
         "FP8_PER_BLOCK is unsupported on SM12x devices other than exact sm_120; "
         "use another quantization method or a supported device architecture",
-    )
-    check_with_info(
-        not (is_sm120_device and is_moe_weight),
-        (
-            "FP8_PER_BLOCK MoE is unsupported on SM12x; use a dense model, "
-            "another quantization method, or a supported device architecture"
-        ),
     )
     return deep_gemm_e8m0_enabled and not is_sm120_device
 
@@ -796,12 +788,10 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         from rtp_llm.models_py.kernels.cuda.fp8_kernel import requant_weight_ue8m0
         from rtp_llm.models_py.utils.arch import is_sm12x, is_sm120
 
-        # SM12x dense layers must keep float scales because DeepGEMM does not
-        # support that family. The reshape below stores physical (N, K) data
-        # behind the loader's logical (K, N) shape; the inverse contract is
-        # CudaFp8VllmBlockwiseLinear._restore_blockwise_weight_layout.
-        # MoE has no SM12x FP8_PER_BLOCK backend here.
-        is_moe_weight = self.kernel.name in (W.moe_w1, W.moe_w2)
+        # SM12x weights must keep float scales because DeepGEMM does not
+        # support that family. For dense 2-D weights, the reshape below stores
+        # physical (N, K) data behind the loader's logical (K, N) shape; MoE
+        # weights remain in their native 3-D expert layout for grouped GEMM.
         # Weight conversion may intentionally run on the host before the
         # tensors are copied to CUDA.  The layout, however, is consumed by the
         # runtime GPU, so use that device whenever CUDA is available.
@@ -811,7 +801,6 @@ class PerBlockFp8Weight(CompositeWeight, QuantWeight):
         use_e8m0 = use_e8m0_scale_layout(
             is_sm12x_device=is_sm12x_device,
             is_sm120_device=is_sm120_device,
-            is_moe_weight=is_moe_weight,
             deep_gemm_e8m0_enabled=is_deep_gemm_e8m0_used(),
         )
 

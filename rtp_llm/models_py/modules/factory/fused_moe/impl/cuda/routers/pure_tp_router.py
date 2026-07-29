@@ -196,8 +196,10 @@ class PureTpRouterFp8PerBlock(PureTpRouterBase):
     def _do_quant(
         self, a1: torch.Tensor
     ) -> Tuple[torch.Tensor, Optional[torch.Tensor]]:
-        """FP8 per-block quantization with DeepGemm"""
-        if is_deep_gemm_e8m0_used():
+        """Quantize activations for the selected FP8 per-block backend."""
+        from rtp_llm.models_py.utils.arch import is_sm12x
+
+        if is_deep_gemm_e8m0_used() and not is_sm12x(a1.device):
             return sgl_per_token_group_quant_fp8(
                 a1,
                 128,
