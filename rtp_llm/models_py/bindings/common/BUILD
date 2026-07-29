@@ -41,7 +41,7 @@ cc_library(
         ],
         "//:using_rocm": [
             "//rtp_llm/models_py/bindings/common/kernels:kernels_cu",
-            "//rtp_llm/models_py/bindings/core:exec_ctx_ops",
+            "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
         ],
         "//conditions:default": [],
     }),

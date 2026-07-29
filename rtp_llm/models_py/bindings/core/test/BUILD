@@ -78,7 +78,9 @@ cc_test_wrapper(
         "//conditions:default": [],
     }),
     copts = test_copts,
-    # Two devices: the write() success path needs one, the device-pinning case needs
-    # two. GPU-only cases skip via their build guards.
-    exec_properties = {"gpu": "H20", "gpu_count": "2"},
+    exec_properties = select({
+        "@//:using_cuda": {"gpu": "H20", "gpu_count": "2"},
+        "@//:using_rocm": {"gpu": "MI308X-ROCM7", "gpu_count": "2"},
+        "//conditions:default": {},
+    }),
 )

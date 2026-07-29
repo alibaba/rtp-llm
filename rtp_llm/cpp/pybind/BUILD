@@ -55,11 +55,21 @@ cc_library(
     ],
     hdrs = [],
     deps = [
+        "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        "//rtp_llm/cpp/cache:block_info",
+        "//rtp_llm/cpp/cache:cp_slot_mapper",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:model_config",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:debug_utils",
+        "//rtp_llm/cpp/utils:device_perf_wrapper",
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
+        # internal_source/rtp_llm/cpp/BUILD relies on //:rtp_compute_ops for these
+        # instead of declaring them; removing them breaks that build.
+        "@havenask//aios/autil:base64",
+        "@havenask//aios/autil:zlib",
     ] + torch_deps() + select_py_bindings() + select({
         # Only the cuda12 configuration is a supported CUDA build for this .so.
         # Process-wide invariant: exec_ctx_state carries ExecOps state and must
@@ -67,7 +77,9 @@ cc_library(
         # never into libth_transformer.so (see the exec_ctx_state ownership
         # notes in //rtp_llm/models_py/bindings/core/BUILD).
         "@//:using_cuda12": [
+            "//rtp_llm/cpp/utils:device_pin",
             "//rtp_llm/models_py/bindings/core:exec_ctx_state",
+            "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
             "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
         ],
         "@//:using_rocm": ["//rtp_llm/models_py/bindings/core:exec_ctx_rocm"],

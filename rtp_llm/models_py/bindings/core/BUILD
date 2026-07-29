@@ -219,10 +219,7 @@ cc_library(
         "//conditions:default": [],
     }),
     copts = copts(),
-    # Defines globalRuntime() and the runtimeCreateEvent / runtimeWriteCacheStore
-    # implementations; librtp_compute_ops.so owns that state. Test binaries take
-    # :exec_ops_test_lib instead.
-    visibility = ["//rtp_llm/cpp/pybind:__pkg__"],
+    visibility = ["//visibility:public"],
     alwayslink = 1,
 )
 
@@ -320,13 +317,7 @@ cc_library(
         ":exec_ctx_ops",
     ],
     copts = copts(),
-    # Carries :exec_ctx_state transitively; same ownership scope.
-    visibility = [
-        "//rtp_llm/cpp/pybind:__pkg__",
-        "//rtp_llm/cpp/testing:__pkg__",
-        "//rtp_llm/models_py/bindings/core/test:__pkg__",
-        "//rtp_llm/models_py/bindings/rocm/ops/tests:__pkg__",
-    ],
+    visibility = ["//visibility:public"],
 )
 
 cc_library(
