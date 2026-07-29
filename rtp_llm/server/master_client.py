@@ -20,7 +20,6 @@ route_logger = logging.getLogger("route_logger")
 SCHEDULE_PATH = "/rtp_llm/schedule"
 DEFAULT_REQUEST_TIMEOUT_SEC = 0.5
 SUCCESS_CODE = 200
-DEFAULT_REQUEST_PRIORITY = 100
 CONNECTOR_LIMIT_PER_HOST = 30
 CONNECTOR_KEEPALIVE_TIMEOUT_SEC = 30
 
@@ -234,22 +233,18 @@ class MasterClient:
 
         slave_addr = None
         if self.host_service:
-            slave_addr = getattr(self.host_service, "get_slave_addr", lambda: None)()
+            slave_addr = self.host_service.get_slave_addr()
 
-        ttft_timeout_ms = getattr(
-            input.generate_config, "ttft_timeout_ms", None
-        ) or getattr(input.generate_config, "timeout_ms", None)
+        ttft_timeout_ms = (
+            input.generate_config.ttft_timeout_ms or input.generate_config.timeout_ms
+        )
         if not ttft_timeout_ms or ttft_timeout_ms <= 0:
             ttft_timeout_ms = (
                 self.master_config.master_default_timeout_ms
                 if self.master_config
                 else 3600000
             )
-        request_priority = getattr(
-            input.generate_config,
-            "traffic_reject_priority",
-            DEFAULT_REQUEST_PRIORITY,
-        )
+        request_priority = input.generate_config.traffic_reject_priority
         start = time.time()
 
         payload: Dict[str, Any] = {
