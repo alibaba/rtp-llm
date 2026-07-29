@@ -44,31 +44,29 @@ class BatchSchedulerReporterTest {
 
     @Test
     void should_report_dispatch_reason_with_correct_tags() {
-        reporter.reportDispatchReason("PREFILL", "10.0.0.1", "10.0.0.1:8080", "batch_full");
+        reporter.reportDispatchReason("PREFILL", "10.0.0.1", "batch_full");
 
         FlexMetricTags tags = FlexMetricTags.of(
                 "role", "PREFILL",
                 "engineIp", "10.0.0.1",
-                "engineIpPort", "10.0.0.1:8080",
                 "reason", "batch_full");
         verify(monitor).report(ENGINE_BALANCING_MASTER_DISPATCH_REASON, tags, 1.0);
     }
 
     @Test
     void should_not_report_dispatch_reason_to_select_detail_metric() {
-        reporter.reportDispatchReason("PREFILL", "10.0.0.1", "10.0.0.1:8080", "batch_full");
+        reporter.reportDispatchReason("PREFILL", "10.0.0.1", "batch_full");
 
         verify(monitor, never()).report(eq(ENGINE_BALANCING_MASTER_SELECT_DETAIL), any(), anyDouble());
     }
 
     @Test
     void should_prepare_all_fixed_window_endpoint_metrics() {
-        reporter.prepareEndpointMetrics("PREFILL", "10.0.0.1", "10.0.0.1:8080");
+        reporter.prepareEndpointMetrics("PREFILL", "10.0.0.1");
 
         FlexMetricTags endpointTags = FlexMetricTags.of(
                 "role", "PREFILL",
-                "engineIp", "10.0.0.1",
-                "engineIpPort", "10.0.0.1:8080");
+                "engineIp", "10.0.0.1");
         verify(monitor).prepare(DISPATCH_ACK_TIME_MS, endpointTags);
         verify(monitor).prepare(ROUTE_SUBMIT_TIME_MS, endpointTags);
         verify(monitor).prepare(ROUTING_QUEUE_WAIT_TIME_MS, endpointTags);
@@ -76,7 +74,6 @@ class BatchSchedulerReporterTest {
             FlexMetricTags reasonTags = FlexMetricTags.of(
                     "role", "PREFILL",
                     "engineIp", "10.0.0.1",
-                    "engineIpPort", "10.0.0.1:8080",
                     "reason", reason);
             verify(monitor).prepare(ENGINE_BALANCING_MASTER_DISPATCH_REASON, reasonTags);
         }
@@ -84,7 +81,7 @@ class BatchSchedulerReporterTest {
 
     @Test
     void should_not_prepare_prefill_batch_metrics_for_decode_endpoint() {
-        reporter.prepareEndpointMetrics("DECODE", "10.0.0.2", "10.0.0.2:8080");
+        reporter.prepareEndpointMetrics("DECODE", "10.0.0.2");
 
         verify(monitor, never()).prepare(any(), any());
     }

@@ -7,7 +7,7 @@ import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
 /**
- * Reduces Prometheus metrics cardinality by removing per-engine tags (engineIp, engineIpPort).
+ * Reduces Prometheus metrics cardinality by removing the per-engine tag.
  * With 750+ mock engines, per-engine tags generate ~139K time series (23.5MB per scrape),
  * causing Prometheus scrape timeouts. This filter aggregates metrics across engines.
  * Set flexlb.monitor.per-engine-tags=true to restore per-engine granularity for debugging.
@@ -19,6 +19,6 @@ public class MetricsCardinalityConfig {
 
     @Bean
     public MeterFilter removeEngineTagsFilter() {
-        return MeterFilter.ignoreTags("engineIp", "engineIpPort");
+        return MeterFilter.ignoreTags("engineIp");
     }
 }

@@ -175,6 +175,31 @@ class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):
             int(ExceptionType.MASTER_NO_AVAILABLE_WORKER),
         )
 
+    async def test_route_ips_falls_back_on_master_connection_failure(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.master_config = None
+        visitor.host_service = _FakeHostService()
+        visitor.backend_role_list = ["PREFILL"]
+        domain_route_called = False
+
+        async def get_master_route_addrs(_input):
+            return FlexlbResponse.connection_failed_response()
+
+        async def get_domain_route_addrs(input):
+            nonlocal domain_route_called
+            domain_route_called = True
+            input.generate_config.role_addrs.append("domain-role")
+
+        visitor.get_master_route_addrs = get_master_route_addrs
+        visitor.get_domain_route_addrs = get_domain_route_addrs
+        input = _FakeInput()
+
+        with patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor"):
+            await visitor.route_ips(input)
+
+        self.assertTrue(domain_route_called)
+        self.assertEqual(input.generate_config.role_addrs, ["domain-role"])
+
 
 class _RetryingModelRpcClient:
     def __init__(self):

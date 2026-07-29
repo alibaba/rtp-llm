@@ -114,7 +114,7 @@ public class KvCacheManager {
 
         // Report metrics
         cacheMetricsReporter.reportEngineLocalMetrics(
-                engineIPort.split(":")[0], engineIPort, role, engineLocalView.size(engineIPort));
+                engineIPort.split(":")[0], role, engineLocalView.size(engineIPort));
         cacheMetricsReporter.reportGlobalCacheMetrics(globalCacheIndex.totalBlocks(), globalCacheIndex.totalMappings());
         cacheMetricsReporter.reportEngineViewsMapSize(engineLocalView.getEngineViewsMapSize());
     }

@@ -93,13 +93,13 @@ class AnalyzeSloBatchTest(unittest.TestCase):
             )
             (run / "master_prometheus_after.prom").write_text(
                 "flexlb_app_engine_balancing_master_dispatch_reason_total{"
-                'engineIp="127.0.0.1",engineIpPort="127.0.0.1:61000",'
+                'engineIp="127.0.0.1",'
                 'reason="predict_threshold",role="PREFILL"} 70.0\n'
                 "flexlb_app_engine_balancing_master_dispatch_reason_total{"
-                'engineIp="127.0.0.1",engineIpPort="127.0.0.1:61001",'
+                'engineIp="127.0.0.1",'
                 'reason="predict_threshold",role="PREFILL"} 30.0\n'
                 "flexlb_app_engine_balancing_master_dispatch_reason_total{"
-                'engineIp="127.0.0.1",engineIpPort="127.0.0.1:61001",'
+                'engineIp="127.0.0.1",'
                 'reason="fixed_window_timeout",role="PREFILL"} 25.0\n',
                 encoding="utf-8",
             )
