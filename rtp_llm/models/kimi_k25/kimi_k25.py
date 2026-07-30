@@ -189,7 +189,7 @@ class KimiK25(DeepSeekV2):
     def _populate_vision_config(
         cls, config: ModelConfig, top_config: Dict[str, Any]
     ) -> None:
-        vision_config = top_config.get("vision_config", {}) if top_config else {}
+        vision_config = top_config.get("vision_config", {})
         # Drop unsupported HF keys (e.g. `_attn_implementation`) before
         # passing to KimiK25VisionConfig so PretrainedConfig.__init__ does
         # not raise on unknown kwargs.

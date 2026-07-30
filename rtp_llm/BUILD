@@ -21,11 +21,6 @@ load(
 if_rocm = _if_rocm
 
 
-flashinfer = [
-    "apache-tvm-ffi",
-    "flashinfer-python",
-]
-
 flashinfer_with_cache = [
     "apache-tvm-ffi",
     "flashinfer-python",

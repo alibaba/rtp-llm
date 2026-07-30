@@ -100,7 +100,7 @@ multi_copy_script() {
         echo "TEST_OUTPUT_PATH=${TEST_OUTPUT_PATH}";
         TEST_OUTPUT_NAME=$(basename "$TEST_OUTPUT_PATH")
         scp -P ${SSH_PORT} ${RUN_USER}@${IP}:${TEST_OUTPUT_PATH}/main_logs/process.log ${TASK_OUTPUT_DIR}/process_logs/process_${TEST_OUTPUT_NAME}.log;
-        scp -P ${SSH_PORT} ${RUN_USER}@${IP}:${TEST_OUTPUT_PATH}/normal_* ${TASK_OUTPUT_DIR}/trace_files/;
+        scp -P ${SSH_PORT} ${RUN_USER}@${IP}:${TEST_OUTPUT_PATH}/normal_* ${TASK_OUTPUT_DIR}/trace_files/ || echo "WARN: no trace files on ${IP}";
         if [ $WORLD_RANK -eq 0 ]; then
           scp -P ${SSH_PORT} ${RUN_USER}@${IP}:${TEST_OUTPUT_PATH}/*Result.json ${TASK_OUTPUT_DIR}/;
         fi

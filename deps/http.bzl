@@ -66,16 +66,6 @@ def http_deps():
         build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
     )
 
-    http_archive(
-        name = "torch_2.3_py310_cpu_aarch64",
-        sha256 = "bef6996c27d8f6e92ea4e13a772d89611da0e103b48790de78131e308cf73076",
-        urls = [
-            "https://mirrors.aliyun.com/pytorch-wheels/cpu/torch-2.1.2-cp310-cp310-manylinux_2_17_aarch64.manylinux2014_aarch64.whl#sha256=bef6996c27d8f6e92ea4e13a772d89611da0e103b48790de78131e308cf73076",
-        ],
-        type = "zip",
-        build_file = clean_dep("@rtp_llm//:BUILD.pytorch"),
-    )
-
     # aiter C++ headers/runtime archive is kept in lock-step with the Python wheel
     # in requirements_rocm.txt (0.1.17.dev79) to avoid ABI mismatch.
     http_archive(
