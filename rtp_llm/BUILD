@@ -149,6 +149,9 @@ py_library(
     name = "utils",
     srcs = glob([
         "utils/**/*.py",
+    ], exclude = [
+        "utils/test/*.py",
+        "utils/test/**/*.py",
     ]),
     deps = [
         ":torch",
@@ -159,7 +162,7 @@ py_library(
         ":prettytable",
         ":psutil",
         "//rtp_llm/aios/kmonitor:kmonitor_py",
-    ] + internal_deps()
+    ] + arch_dep + internal_deps()
 )
 
 py_library(
@@ -414,6 +417,7 @@ py_library(
         'start_server.py',
         'start_frontend_server.py',
         'start_backend_server.py',
+        'start_dash_sc_server.py',
         '_ft_pickler.py',
         'model_factory_register.py',
     ],
@@ -436,6 +440,7 @@ py_library(
         ":concurrent_log_handler",
         ":blobfile",
         ":partial_json_parser",
+        ":utils",
     ],
     data = jit_deps(),
     imports = ["."],
@@ -495,6 +500,7 @@ py_library(
         "//rtp_llm/server:server",
         ":plugins",
         "//rtp_llm/cpp/model_rpc:model_rpc_client",
+        "//rtp_llm/dash_sc:dash_sc_grpc_server",
         ":openai_api",
         ":lora",
         ":sdk",

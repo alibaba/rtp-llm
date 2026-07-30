@@ -9,7 +9,6 @@ import torch
 from rtp_llm.config.kv_cache_config import KVCacheConfig
 from rtp_llm.config.py_config_modules import (
     MIN_WORKER_INFO_PORT_NUM,
-    WORKER_INFO_PORT_NUM,
     LoadConfig,
     PyEnvConfigs,
     ServerConfig,
@@ -18,9 +17,11 @@ from rtp_llm.ops import (
     ArpcConfig,
     CacheStoreConfig,
     ConcurrencyConfig,
+    DashScGrpcConfig,
     DeviceResourceConfig,
     FfnDisAggregateConfig,
     FMHAConfig,
+    GrammarConfig,
     GrpcConfig,
     HWKernelConfig,
     MiscellaneousConfig,
@@ -68,6 +69,8 @@ class EngineConfig:
     misc_config: MiscellaneousConfig
     arpc_config: ArpcConfig
     grpc_config: GrpcConfig
+    dash_sc_grpc_config: DashScGrpcConfig
+    grammar_config: GrammarConfig
     load_config: LoadConfig
 
     def to_string(self) -> str:
@@ -83,101 +86,62 @@ class EngineConfig:
 
         # Parallelism and runtime configs
         lines.append("\n[ParallelismConfig]")
-        if hasattr(self.parallelism_config, "to_string"):
-            lines.append(self.parallelism_config.to_string())
-        else:
-            lines.append(str(self.parallelism_config))
+        lines.append(self.parallelism_config.to_string())
 
         lines.append("\n[RuntimeConfig]")
-        if hasattr(self.runtime_config, "to_string"):
-            lines.append(self.runtime_config.to_string())
-        else:
-            lines.append(str(self.runtime_config))
+        lines.append(self.runtime_config.to_string())
 
         # Specialized configs
         lines.append("\n[PDSepConfig]")
-        if hasattr(self.pd_sep_config, "to_string"):
-            lines.append(self.pd_sep_config.to_string())
-        else:
-            lines.append(str(self.pd_sep_config))
+        lines.append(self.pd_sep_config.to_string())
 
         lines.append("\n[ConcurrencyConfig]")
-        if hasattr(self.concurrency_config, "to_string"):
-            lines.append(self.concurrency_config.to_string())
-        else:
-            lines.append(str(self.concurrency_config))
+        lines.append(self.concurrency_config.to_string())
 
         lines.append("\n[FMHAConfig]")
-        if hasattr(self.fmha_config, "to_string"):
-            lines.append(self.fmha_config.to_string())
-        else:
-            lines.append(str(self.fmha_config))
+        lines.append(self.fmha_config.to_string())
 
         lines.append("\n[KVCacheConfig]")
-        if hasattr(self.kv_cache_config, "to_string"):
-            lines.append(self.kv_cache_config.to_string())
-        else:
-            lines.append(str(self.kv_cache_config))
+        lines.append(self.kv_cache_config.to_string())
 
         lines.append("\n[ProfilingDebugLoggingConfig]")
-        if hasattr(self.profiling_debug_logging_config, "to_string"):
-            lines.append(self.profiling_debug_logging_config.to_string())
-        else:
-            lines.append(str(self.profiling_debug_logging_config))
+        lines.append(self.profiling_debug_logging_config.to_string())
 
         lines.append("\n[HWKernelConfig]")
-        if hasattr(self.hw_kernel_config, "to_string"):
-            lines.append(self.hw_kernel_config.to_string())
-        else:
-            lines.append(str(self.hw_kernel_config))
+        lines.append(self.hw_kernel_config.to_string())
 
         lines.append("\n[DeviceResourceConfig]")
-        if hasattr(self.device_resource_config, "to_string"):
-            lines.append(self.device_resource_config.to_string())
-        else:
-            lines.append(str(self.device_resource_config))
+        lines.append(self.device_resource_config.to_string())
 
         lines.append("\n[MoeConfig]")
-        if hasattr(self.moe_config, "to_string"):
-            lines.append(self.moe_config.to_string())
-        else:
-            lines.append(str(self.moe_config))
+        lines.append(self.moe_config.to_string())
 
         lines.append("\n[ModelSpecificConfig]")
-        if hasattr(self.model_specific_config, "to_string"):
-            lines.append(self.model_specific_config.to_string())
-        else:
-            lines.append(str(self.model_specific_config))
+        lines.append(self.model_specific_config.to_string())
 
         lines.append("\n[SpeculativeExecutionConfig]")
-        if hasattr(self.sp_config, "to_string"):
-            lines.append(self.sp_config.to_string())
-        else:
-            lines.append(str(self.sp_config))
+        lines.append(self.sp_config.to_string())
 
         lines.append("\n[CacheStoreConfig]")
-        if hasattr(self.cache_store_config, "to_string"):
-            lines.append(self.cache_store_config.to_string())
-        else:
-            lines.append(str(self.cache_store_config))
+        lines.append(self.cache_store_config.to_string())
 
         lines.append("\n[MiscellaneousConfig]")
-        if hasattr(self.misc_config, "to_string"):
-            lines.append(self.misc_config.to_string())
-        else:
-            lines.append(str(self.misc_config))
+        lines.append(self.misc_config.to_string())
 
         lines.append("\n[ArpcConfig]")
-        if hasattr(self.arpc_config, "to_string"):
-            lines.append(self.arpc_config.to_string())
-        else:
-            lines.append(str(self.arpc_config))
+        lines.append(self.arpc_config.to_string())
+
+        lines.append("\n[GrpcConfig]")
+        lines.append(self.grpc_config.to_string())
+
+        lines.append("\n[DashScGrpcConfig]")
+        lines.append(self.dash_sc_grpc_config.to_string())
+
+        lines.append("\n[GrammarConfig]")
+        lines.append(self.grammar_config.to_string())
 
         lines.append("\n[LoadConfig]")
-        if hasattr(self.load_config, "to_string"):
-            lines.append(self.load_config.to_string())
-        else:
-            lines.append(str(self.load_config))
+        lines.append(self.load_config.to_string())
 
         lines.append("\n" + "=" * 80)
         return "\n".join(lines)
@@ -226,13 +190,24 @@ class EngineConfig:
         cache_store_config = py_env_configs.cache_store_config
         arpc_config = py_env_configs.arpc_config
         grpc_config = py_env_configs.grpc_config
+        dash_sc_grpc_config = py_env_configs.dash_sc_grpc_config
+        grammar_config = py_env_configs.grammar_config
         load_config = py_env_configs.load_config
 
-        # role_config.role_type property automatically converts string to RoleType enum
-        pd_sep_config.role_type = py_env_configs.role_config.role_type
-        # Cache topology construction consumes the role from ParallelismConfig.
-        # Keep it aligned with the PD role so prefill CP builds rank-local
-        # STATE/SWA layouts while decode builds the corresponding full layout.
+        # Setup pd_sep_config role_type based on vit_separation
+        if (
+            py_env_configs.vit_config.vit_separation
+            == VitSeparation.VIT_SEPARATION_ROLE
+        ):
+            pd_sep_config.role_type = RoleType.VIT
+        else:
+            # role_config.role_type property automatically converts string to RoleType enum
+            pd_sep_config.role_type = py_env_configs.role_config.role_type
+
+        # Mirror role into parallelism_config so model construction can read it
+        # via parallelism_config.role_type instead of os.environ["ROLE_TYPE"].
+        # Mirrors the vit_separation override above so VIT rank also surfaces
+        # as RoleType::VIT to model code.
         parallelism_config.role_type = pd_sep_config.role_type
 
         if nccl_comm_config is None:
@@ -263,6 +238,8 @@ class EngineConfig:
             misc_config=misc_config,
             arpc_config=arpc_config,
             grpc_config=grpc_config,
+            dash_sc_grpc_config=dash_sc_grpc_config,
+            grammar_config=grammar_config,
             load_config=load_config,
         )
 
@@ -335,7 +312,7 @@ def setup_pd_sep_config(
         distribute_config.cache_store_rdma_connect_port
     )
     pd_sep_config.remote_rpc_server_port = distribute_config.remote_rpc_server_port
-    pd_sep_config.worker_port_offset = WORKER_INFO_PORT_NUM
+    pd_sep_config.worker_port_offset = server_config.worker_info_port_num
 
     # Override with values from other sources
     if pd_sep_config.role_type in [RoleType.PREFILL, RoleType.DECODE]:

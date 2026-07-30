@@ -1,4 +1,5 @@
 import importlib
+import json
 import os
 import sys
 from unittest import TestCase, main
@@ -32,6 +33,8 @@ class ServerArgsSetTest(TestCase):
         os.environ["MAX_CONTEXT_BATCH_SIZE"] = "32"
         os.environ["WARM_UP"] = "1"
         os.environ["MAX_SEQ_LEN"] = "4096"
+        os.environ["FRONTEND_PRE_STOP_DRAIN_SECONDS"] = "2.5"
+        os.environ["DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"] = "9"
 
         sys.argv = ["prog"]
 
@@ -58,6 +61,14 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(
             py_env_configs.runtime_config.fifo_scheduler_config.max_context_batch_size,
             32,
+        )
+
+        # Verify frontend and DashSc pre-stop windows are configured independently.
+        self.assertEqual(
+            py_env_configs.server_config.frontend_pre_stop_drain_seconds, 2.5
+        )
+        self.assertEqual(
+            py_env_configs.server_config.dash_sc_grpc_pre_stop_drain_seconds, 9.0
         )
 
         # Verify runtime_config (warm_up is now in RuntimeConfig)
@@ -343,6 +354,43 @@ class ServerArgsSetTest(TestCase):
         parser.parse_args(["--gpu_batch_wait_ms", "500", "--gpu_max_batch_size", "8"])
         self.assertEqual(cfg.vit_config.gpu_max_batch_size, 8)
         self.assertEqual(cfg.vit_config.gpu_batch_wait_ms, 500)
+
+    def test_repetition_detection_config(self):
+        """Test that repetition detection args bind to PyEnvConfigs."""
+        sys.argv = [
+            "prog",
+            "--tool_call_loop_threshold",
+            "7",
+            "--tool_call_loop_begin_marker",
+            "<tool_call>",
+            "--tool_call_loop_end_marker",
+            "</tool_call>",
+        ]
+
+        import rtp_llm.server.server_args.server_args
+
+        importlib.reload(rtp_llm.server.server_args.server_args)
+        py_env_configs = rtp_llm.server.server_args.server_args.setup_args()
+
+        cfg = py_env_configs.repetition_detection_config
+        self.assertEqual(cfg.tool_call_loop_threshold, 7)
+        self.assertEqual(cfg.tool_call_loop_begin_marker, "<tool_call>")
+        self.assertEqual(cfg.tool_call_loop_end_marker, "</tool_call>")
+
+    def test_dash_sc_default_allows_large_requests_on_both_ends(self):
+        from rtp_llm.server.server_args.grpc_group_args import (
+            default_dash_sc_grpc_config_json,
+        )
+
+        config = json.loads(default_dash_sc_grpc_config_json())
+        expected = 1024 * 1024 * 1024
+        self.assertEqual(
+            config["client_config"]["grpc.max_receive_message_length"], expected
+        )
+        self.assertEqual(
+            config["server_config"]["grpc.max_receive_message_length"],
+            64 * 1024 * 1024,
+        )
 
 
 if __name__ == "__main__":
