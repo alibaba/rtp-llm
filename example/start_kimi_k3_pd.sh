@@ -4,10 +4,8 @@
 #   Prefill: TP8 / DP1 / EP8
 #   Decode:  TP1 / DP8 / EP8
 #
-# Build and install this checkout before launching:
-#   bazelisk build --config=cuda13 --config=sm10x //rtp_llm:rtp_llm
-#   python3 -m pip install --force-reinstall --no-deps \
-#     bazel-bin/rtp_llm/rtp_llm-*.whl
+# The script incrementally builds its Bazel launcher with CUDA13/SM10x.  It
+# does not install or replace a system rtp-llm wheel.
 #
 # Example (run the matching command on each host):
 #   CHECKPOINT_PATH=/models/Kimi-K3 \
@@ -25,6 +23,20 @@
 
 set -euo pipefail
 
+# `docker exec -u` may preserve root's HOME even though the effective user is
+# not root. Bazelisk and pip need a writable home for their per-user caches.
+if [[ -z "${HOME:-}" || ! -d "${HOME}" || ! -w "${HOME}" ]]; then
+    resolved_home="$(
+        getent passwd "$(id -u)" 2>/dev/null | awk -F: '{print $6}'
+    )"
+    [[ -n "${resolved_home}" && -d "${resolved_home}" && -w "${resolved_home}" ]] \
+        || {
+            echo "error: HOME is not writable and the account home could not be resolved" >&2
+            exit 2
+        }
+    export HOME="${resolved_home}"
+fi
+
 usage() {
     cat >&2 <<'EOF'
 Usage:
@@ -36,29 +48,35 @@ Usage:
 Optional environment variables:
   TOKENIZER_PATH                         defaults to CHECKPOINT_PATH
   RTP_LLM_PYTHON                         defaults to python3 in PATH
-  KIMI_K3_BAZEL_EXTERNAL_ROOT            defaults to this checkout's
-                                         bazel-github-opensource/external
   KIMI_K3_RUN_ROOT                      defaults below TMPDIR
   KIMI_K3_TMPDIR                        defaults to a short role-specific
                                          path below /tmp
+  KIMI_K3_BAZEL_OUTPUT_BASE             optional existing Bazel output base;
+                                         useful on inode-constrained hosts
   KIMI_K3_SERVICE_ID                    defaults to kimi-k3-pd
   KIMI_K3_MAX_SEQ_LEN                   defaults to 16384
-  KIMI_K3_KV_CACHE_MEM_MB               defaults to 1024
+  KIMI_K3_KV_CACHE_MEM_MB               defaults to 8192
   KIMI_K3_DECODE_CPU_OFFLOAD_START      defaults to auto; integer or none
   KIMI_K3_EXECUTION_MODE                defaults to optimized; one of:
                                          optimized, accuracy
-  KIMI_K3_USE_HOST_METADATA             independent optimization switch
-  KIMI_K3_SP_MOE                        independent optimization switch
-  KIMI_K3_KDA_BACKEND                   defaults to kernel; accuracy Decode
-                                         defaults to fla37_precompiled
-  KIMI_K3_MOE_BACKEND                   defaults to deepep
-  KIMI_K3_PERF_FUSIONS                  independent optimization switch
+  KIMI_K3_USE_HOST_METADATA             optimized defaults to 1; accuracy to 0
+  KIMI_K3_SP_MOE                        optimized Prefill defaults to 1;
+                                         all other modes/roles default to 0
+  KIMI_K3_KDA_BACKEND                   optimized Prefill defaults to flash_kda;
+                                         accuracy Prefill defaults to kernel;
+                                         Decode defaults to fla37_precompiled
+  KIMI_K3_MOE_BACKEND                   optimized Prefill defaults to
+                                         deep_gemm_mega; otherwise deepep
+  KIMI_K3_PERF_FUSIONS                  optimized Prefill defaults to 1;
+                                         all other modes/roles default to 0
   KIMI_K3_PERF_MODE                     strict performance-path validation only
   KIMI_K3_KDA_FLA37_PRECOMPILED_DIR     defaults to the bundled SM103 image
                                          for fla37_precompiled
-  KIMI_K3_DEEP_EP_PYTHONPATH            optional DeepEP site-packages overlay
+  KIMI_K3_DEEP_EP_PYTHONPATH            optional DeepEP site-packages overlay;
+                                         defaults to the bundled CUDA13 wheel
   KIMI_K3_OPERATOR_PYTHONPATH           optional FlashKDA/DeepGEMM overlay;
-                                         prepended before Bazel site-packages
+                                         optimized Prefill otherwise installs
+                                         the bundled fixed wheels automatically
   KIMI_K3_ACCURACY_MODE                 defaults to native; one of:
                                          canonical, native_mla, native
   KIMI_K3_ACCURACY_RETAIN_FULL_TP_WEIGHTS
@@ -113,58 +131,54 @@ python_bin="${RTP_LLM_PYTHON:-$(command -v python3 || true)}"
     || die "set RTP_LLM_PYTHON to an executable Python"
 
 repo_root="$(cd "$(dirname "${BASH_SOURCE[0]}")/.." && pwd -P)"
-bazel_external_root="${KIMI_K3_BAZEL_EXTERNAL_ROOT:-${repo_root}/bazel-github-opensource/external}"
-bazel_pythonpath=""
-if [[ -d "${bazel_external_root}" ]]; then
-    while IFS= read -r site_packages; do
-        bazel_pythonpath="${bazel_pythonpath:+${bazel_pythonpath}:}${site_packages}"
-    done < <(
-        find -L "${bazel_external_root}" \
-            -mindepth 2 -maxdepth 2 -type d -name site-packages \
-            -path '*/pip_gpu_cuda13_torch_*/*' \
-            -print | LC_ALL=C sort
-    )
-fi
-
-rtp_llm_libs="$(
-    "${python_bin}" -c '
-from importlib.metadata import distribution
-print(distribution("rtp-llm").locate_file("rtp_llm/libs"))
-'
-)" || die "rtp-llm wheel is not installed for ${python_bin}"
-[[ -f "${rtp_llm_libs}/librtp_compute_ops.so" ]] \
-    || die "missing ${rtp_llm_libs}/librtp_compute_ops.so"
-
-runtime_pythonpath="${rtp_llm_libs}"
-if [[ -n "${bazel_pythonpath}" ]]; then
-    runtime_pythonpath="${runtime_pythonpath}:${bazel_pythonpath}"
-fi
-if [[ -n "${KIMI_K3_DEEP_EP_PYTHONPATH:-}" ]]; then
-    [[ -d "${KIMI_K3_DEEP_EP_PYTHONPATH}" ]] \
-        || die "KIMI_K3_DEEP_EP_PYTHONPATH is not a directory"
-    runtime_pythonpath="${KIMI_K3_DEEP_EP_PYTHONPATH}:${runtime_pythonpath}"
-fi
-if [[ -n "${KIMI_K3_OPERATOR_PYTHONPATH:-}" ]]; then
-    [[ -d "${KIMI_K3_OPERATOR_PYTHONPATH}" ]] \
-        || die "KIMI_K3_OPERATOR_PYTHONPATH is not a directory"
-    runtime_pythonpath="${KIMI_K3_OPERATOR_PYTHONPATH}:${runtime_pythonpath}"
-fi
-export PYTHONPATH="${runtime_pythonpath}${PYTHONPATH:+:${PYTHONPATH}}"
-
-torch_libs="$(
-    "${python_bin}" -c '
-from pathlib import Path
-import torch
-print(Path(torch.__file__).resolve().parent / "lib")
-'
-)"
-export LD_LIBRARY_PATH="${rtp_llm_libs}:${torch_libs}${LD_LIBRARY_PATH:+:${LD_LIBRARY_PATH}}"
+server_target="//example/kimi_k3_prefill_perf:kimi_k3_prefill_server"
+server_binary="${repo_root}/bazel-bin/example/kimi_k3_prefill_perf/kimi_k3_prefill_server"
 
 service_id="${KIMI_K3_SERVICE_ID:-kimi-k3-pd}"
 run_root="${KIMI_K3_RUN_ROOT:-${TMPDIR:-/tmp}/${service_id}}"
 # CpuTpBroadcaster appends a long per-rank UDS name.  Keep the default runtime
 # path short even when RUN_ROOT is an archival path.
 runtime_tmpdir="${KIMI_K3_TMPDIR:-/tmp/${service_id}-${role,,}}"
+
+if [[ -z "${KIMI_K3_DEEP_EP_PYTHONPATH:-}" ]]; then
+    deep_ep_bundle="${repo_root}/example/kimi_k3_pd/wheels"
+    deep_ep_manifest="${deep_ep_bundle}/SHA256SUMS"
+    deep_ep_wheel="${deep_ep_bundle}/deep_ep-1.2.1.12+37fda1c.base-cp310-cp310-linux_x86_64.whl"
+    [[ -f "${deep_ep_manifest}" && -f "${deep_ep_wheel}" ]] \
+        || die "missing bundled CUDA13 DeepEP wheel"
+    (
+        cd "${deep_ep_bundle}"
+        sha256sum --check SHA256SUMS
+    ) || die "bundled DeepEP wheel checksum failed"
+    deep_ep_manifest_sha="$(sha256sum "${deep_ep_manifest}" | awk '{print $1}')"
+    deep_ep_overlay="${run_root}/deep-ep-overlay/${deep_ep_manifest_sha}"
+    deep_ep_marker="${deep_ep_overlay}/.kimi-k3-deep-ep-installed"
+    if [[ ! -f "${deep_ep_marker}" ]]; then
+        mkdir -p "${deep_ep_overlay}"
+        "${python_bin}" -m pip install \
+            --no-deps --upgrade \
+            --target "${deep_ep_overlay}" \
+            "${deep_ep_wheel}"
+        touch "${deep_ep_marker}"
+    fi
+    export KIMI_K3_DEEP_EP_PYTHONPATH="${deep_ep_overlay}"
+fi
+
+runtime_pythonpath=""
+if [[ -n "${KIMI_K3_DEEP_EP_PYTHONPATH:-}" ]]; then
+    [[ -d "${KIMI_K3_DEEP_EP_PYTHONPATH}" ]] \
+        || die "KIMI_K3_DEEP_EP_PYTHONPATH is not a directory"
+    runtime_pythonpath="${KIMI_K3_DEEP_EP_PYTHONPATH}"
+fi
+if [[ -n "${KIMI_K3_OPERATOR_PYTHONPATH:-}" ]]; then
+    [[ -d "${KIMI_K3_OPERATOR_PYTHONPATH}" ]] \
+        || die "KIMI_K3_OPERATOR_PYTHONPATH is not a directory"
+    runtime_pythonpath="${KIMI_K3_OPERATOR_PYTHONPATH}${runtime_pythonpath:+:${runtime_pythonpath}}"
+fi
+if [[ -n "${runtime_pythonpath}" ]]; then
+    export PYTHONPATH="${runtime_pythonpath}${PYTHONPATH:+:${PYTHONPATH}}"
+fi
+
 max_seq_len="${KIMI_K3_MAX_SEQ_LEN:-16384}"
 execution_mode="${KIMI_K3_EXECUTION_MODE:-optimized}"
 case "${execution_mode}" in
@@ -172,10 +186,17 @@ case "${execution_mode}" in
         default_accuracy_mode=native
         if [[ "${role}" == "DECODE" ]]; then
             default_kda_backend=fla37_precompiled
+            default_moe_backend=deepep
+            default_sp_moe=0
+            default_perf_fusions=0
+            default_kv_cache_mem_mb=8192
         else
-            default_kda_backend=kernel
+            default_kda_backend=flash_kda
+            default_moe_backend=deep_gemm_mega
+            default_sp_moe=1
+            default_perf_fusions=1
+            default_kv_cache_mem_mb=8192
         fi
-        default_kv_cache_mem_mb=1024
         default_decode_offload_start=auto
         default_use_host_metadata=1
         ;;
@@ -187,13 +208,17 @@ case "${execution_mode}" in
         default_accuracy_mode=native
         if [[ "${role}" == "DECODE" ]]; then
             default_kda_backend=fla37_precompiled
+            default_kv_cache_mem_mb=8192
         else
             default_kda_backend=kernel
+            default_kv_cache_mem_mb=8192
         fi
+        default_moe_backend=deepep
+        default_sp_moe=0
+        default_perf_fusions=0
         # These are capacity choices only.  Keep the validated mathematical
         # path while retaining enough margin for eight concurrent
         # fastsafetensors loaders on one B300 node.
-        default_kv_cache_mem_mb=1024
         default_decode_offload_start=auto
         default_use_host_metadata=0
         ;;
@@ -201,14 +226,42 @@ case "${execution_mode}" in
 esac
 
 use_host_metadata="${KIMI_K3_USE_HOST_METADATA:-${default_use_host_metadata}}"
-sp_moe="${KIMI_K3_SP_MOE:-0}"
+sp_moe="${KIMI_K3_SP_MOE:-${default_sp_moe}}"
 kda_backend="${KIMI_K3_KDA_BACKEND:-${default_kda_backend}}"
-moe_backend="${KIMI_K3_MOE_BACKEND:-deepep}"
-perf_fusions="${KIMI_K3_PERF_FUSIONS:-0}"
+moe_backend="${KIMI_K3_MOE_BACKEND:-${default_moe_backend}}"
+perf_fusions="${KIMI_K3_PERF_FUSIONS:-${default_perf_fusions}}"
 perf_mode="${KIMI_K3_PERF_MODE:-0}"
 accuracy_mode="${KIMI_K3_ACCURACY_MODE:-${default_accuracy_mode}}"
 kv_cache_mem_mb="${KIMI_K3_KV_CACHE_MEM_MB:-${default_kv_cache_mem_mb}}"
 kda_fla37_precompiled_dir="${KIMI_K3_KDA_FLA37_PRECOMPILED_DIR:-${repo_root}/example/kimi_k3_pd/fla37-sm103}"
+
+if [[ "${role}" == "PREFILL" ]] \
+    && { [[ "${kda_backend}" == "flash_kda" ]] \
+        || [[ "${moe_backend}" == "deep_gemm_mega" ]]; } \
+    && [[ -z "${KIMI_K3_OPERATOR_PYTHONPATH:-}" ]]; then
+    operator_bundle="${repo_root}/example/kimi_k3_prefill_perf/wheels"
+    operator_manifest="${operator_bundle}/SHA256SUMS"
+    [[ -f "${operator_manifest}" ]] \
+        || die "missing bundled operator manifest ${operator_manifest}"
+    (
+        cd "${operator_bundle}"
+        sha256sum --check SHA256SUMS
+    ) || die "bundled FlashKDA/DeepGEMM wheel checksum failed"
+    operator_manifest_sha="$(sha256sum "${operator_manifest}" | awk '{print $1}')"
+    operator_overlay="${run_root}/operator-overlay/${operator_manifest_sha}"
+    operator_marker="${operator_overlay}/.kimi-k3-operators-installed"
+    if [[ ! -f "${operator_marker}" ]]; then
+        mkdir -p "${operator_overlay}"
+        "${python_bin}" -m pip install \
+            --no-deps --upgrade \
+            --target "${operator_overlay}" \
+            "${operator_bundle}/deep_gemm-2.6.1-cp310-cp310-linux_x86_64.whl" \
+            "${operator_bundle}/flash_kda-0.0.1-cp310-cp310-linux_x86_64.whl"
+        touch "${operator_marker}"
+    fi
+    export KIMI_K3_OPERATOR_PYTHONPATH="${operator_overlay}"
+    export PYTHONPATH="${operator_overlay}${PYTHONPATH:+:${PYTHONPATH}}"
+fi
 
 for flag_name in use_host_metadata sp_moe perf_fusions perf_mode; do
     flag_value="${!flag_name}"
@@ -307,7 +360,15 @@ export KIMI_K3_USE_HOST_METADATA="${use_host_metadata}"
 export KIMI_K3_SP_MOE="${sp_moe}"
 export KIMI_K3_PERF_FUSIONS="${perf_fusions}"
 export KIMI_K3_PERF_MODE="${perf_mode}"
+export KIMI_K3_REQUIRE_DEEP_EP=1
 export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
+if [[ "${moe_backend}" == "deep_gemm_mega" ]]; then
+    export KIMI_K3_DEEPGEMM_EXPECTED_PATH="${KIMI_K3_OPERATOR_PYTHONPATH}"
+    export KIMI_K3_MEGA_MAX_TOKENS_PER_RANK="${KIMI_K3_MEGA_MAX_TOKENS_PER_RANK:-8192}"
+    export OPS_OVERLAY="${KIMI_K3_OPERATOR_PYTHONPATH}"
+else
+    unset OPS_OVERLAY
+fi
 
 unset KIMI_K3_KDA_FLA37_PRECOMPILED_DIR
 unset KIMI_K3_KDA_CHUNK_STATE_BACKEND
@@ -349,9 +410,11 @@ print(config["num_hidden_layers"])
 ' "${CHECKPOINT_PATH}/config.json"
         )"
         # Keep a deterministic safety margin during eight concurrent
-        # fastsafetensors loads.  Small sliced checkpoints need no offload.
+        # fastsafetensors loads. With the full 93-layer checkpoint, a cutoff
+        # of 60 still reaches the B300 limit during rank-0 staging; 30 is the
+        # validated cold-start setting. Small sliced checkpoints need none.
         if (( num_hidden_layers > 60 )); then
-            offload_start=60
+            offload_start=30
         else
             offload_start=none
         fi
@@ -387,7 +450,6 @@ echo "  runtime tmp:     ${TMPDIR}"
 echo "  logs:            ${LOG_PATH}"
 
 server_args=(
-    -m rtp_llm.start_server
     --role_type "${role}"
     --tp_size "${tp_size}"
     --dp_size "${dp_size}"
@@ -419,17 +481,22 @@ server_args=(
 
 if [[ "${KIMI_K3_DRY_RUN:-0}" == "1" ]]; then
     printf 'command:'
-    printf ' %q' "${python_bin}" "${server_args[@]}"
+    printf ' %q' "${server_binary}" "${server_args[@]}"
     printf '\n'
     exit 0
 fi
 
-"${python_bin}" -c \
-    'import rtp_llm.ops.compute_ops; print("RTP-LLM runtime import: OK")'
-
-"${python_bin}" -c \
-    'import deep_ep; print(f"DeepEP runtime: {deep_ep.__file__}")' \
-    || die "Kimi K3 EP8 requires a CUDA-compatible deep_ep installation"
+bazel_startup_args=()
+if [[ -n "${KIMI_K3_BAZEL_OUTPUT_BASE:-}" ]]; then
+    mkdir -p "${KIMI_K3_BAZEL_OUTPUT_BASE}"
+    bazel_startup_args+=("--output_base=${KIMI_K3_BAZEL_OUTPUT_BASE}")
+fi
+(
+    cd "${repo_root}"
+    bazelisk "${bazel_startup_args[@]}" \
+        build --config=cuda13 --config=sm10x "${server_target}"
+) || die "failed to build ${server_target}"
+[[ -x "${server_binary}" ]] || die "missing Bazel launcher ${server_binary}"
 
 cd "${run_root}/work/${role,,}"
-exec "${python_bin}" "${server_args[@]}"
+exec "${server_binary}" "${server_args[@]}"
