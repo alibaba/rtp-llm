@@ -313,8 +313,17 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
     auto sp_output_buffer = stream->getSPOutputBuffer();
 
     if (sp_output_buffer) {
-        auto all_probs_cpu =
-            sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
+        torch::Tensor all_probs_cpu;
+        if (engine_->isDSpark() && stream->generateConfig()->top1()) {
+            // Greedy verification never reads draft probs (the rejection
+            // kernel's same_token short-circuit), so skip the [1, k, vocab]
+            // fp32 payload (~4 MiB per request at a 150k vocab); the decode
+            // node substitutes a persistent zero dummy.
+            all_probs_cpu = torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat32));
+        } else {
+            all_probs_cpu =
+                sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
+        }
         torch::Tensor hidden_states_cpu;
         if (!sp_output_buffer->hidden_states.defined()) {
             // dummy hidden states, so datatype is not important

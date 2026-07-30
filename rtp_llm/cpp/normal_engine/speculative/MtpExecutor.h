@@ -210,6 +210,13 @@ private:
     torch::Tensor target_kv_cache_layer_to_group;
     torch::Tensor draft_kv_cache_layer_to_group;
 
+    // Non-root dspark decode-tail NCCL receive buffers (grow-only, reused
+    // every round: the recv write and the draft forward read are ordered on
+    // the main CUDA stream, so the next round's recv cannot race the read).
+    torch::Tensor dspark_recv_aux_;          // [cap_rows, n_aux*H]
+    torch::Tensor dspark_recv_ctx_starts_;   // [cap] int32
+    torch::Tensor dspark_recv_ctx_lengths_;  // [cap] int32
+
     torch::Tensor d2t_map_;
 
     torch::Stream                 collect_metrics_stream_;

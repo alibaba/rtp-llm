@@ -620,23 +620,31 @@ void MtpExecutor::prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& 
 
         const auto& propose_probs_t  = side_channel.propose_probs;
         const auto& propose_hidden_t = side_channel.propose_hidden;
-        RTP_LLM_CHECK_WITH_INFO(propose_probs_t.defined() && propose_probs_t.numel() > 0,
+        // dspark greedy streams ship no draft probs (the rejection kernel's
+        // same_token short-circuit never reads them; the batch processor
+        // substitutes the persistent zero dummy).  Everything else must ship
+        // real probs.
+        const bool greedy_probs_skipped = is_dspark_ && stream->generateConfig()->top1()
+                                          && (!propose_probs_t.defined() || propose_probs_t.numel() == 0);
+        RTP_LLM_CHECK_WITH_INFO(greedy_probs_skipped || (propose_probs_t.defined() && propose_probs_t.numel() > 0),
                                 "[mtp-grpc] propose_probs must be non-empty, stream=%ld",
                                 stream->streamId());
         if (is_dspark_) {
             // The prefill node ships the whole block proposal: {target, p1..pk}
-            // tokens plus [1, k, vocab] draft probs. No hidden chain crosses
-            // the wire (the ctx feature KV rides the standard KV transfer).
+            // tokens plus [1, k, vocab] draft probs (greedy: tokens only). No
+            // hidden chain crosses the wire (the ctx feature KV rides the
+            // standard KV transfer).
             RTP_LLM_CHECK_WITH_INFO(sp_output_buffer->tokens.size(1) == static_cast<int64_t>(propose_step_) + 1,
                                     "[dspark-grpc] wire tokens must be [1, k+1], got %ld cols (k=%zu), stream=%ld",
                                     (long)sp_output_buffer->tokens.size(1),
                                     propose_step_,
                                     stream->streamId());
-            RTP_LLM_CHECK_WITH_INFO(propose_probs_t.dim() == 3
-                                        && propose_probs_t.size(1) == static_cast<int64_t>(propose_step_),
-                                    "[dspark-grpc] propose_probs must be [1, k, vocab], got dim=%ld, stream=%ld",
-                                    (long)propose_probs_t.dim(),
-                                    stream->streamId());
+            RTP_LLM_CHECK_WITH_INFO(
+                greedy_probs_skipped
+                    || (propose_probs_t.dim() == 3 && propose_probs_t.size(1) == static_cast<int64_t>(propose_step_)),
+                "[dspark-grpc] propose_probs must be [1, k, vocab], got dim=%ld, stream=%ld",
+                (long)propose_probs_t.dim(),
+                stream->streamId());
         } else if (propose_step_ > 1) {
             const int64_t hidden_dim   = propose_hidden_t.defined() ? propose_hidden_t.dim() : -1;
             const int64_t hidden_numel = propose_hidden_t.defined() ? propose_hidden_t.numel() : -1;
@@ -650,7 +658,7 @@ void MtpExecutor::prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& 
                                     hidden_numel);
         }
 
-        sp_output_buffer->all_probs     = to_cuda_async(propose_probs_t);
+        sp_output_buffer->all_probs     = greedy_probs_skipped ? torch::Tensor() : to_cuda_async(propose_probs_t);
         sp_output_buffer->hidden_states = to_cuda_async(propose_hidden_t);
 
         auto  accept_len_cpu    = torch::ones({1}, pinned_i32);
@@ -1151,14 +1159,27 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             // across TP ranks), plus the [B] dense injection window pair.
             RTP_LLM_CHECK_WITH_INFO(model_output.aux_hidden_states.defined(),
                                     "dspark decode tail: target verify did not export aux_hidden_states");
-            // Fresh allocation, not a view: under CUDA graph the local aux is
+            // Separate storage, not a view: under CUDA graph the local aux is
             // a slice of the target graph's static output buffer, which the
-            // NCCL receive below must not write into.
-            const auto& aux                = model_output.aux_hidden_states;
-            model_input.last_hidden_states = torch::empty_like(aux.reshape({aux.size(0), -1}));
+            // NCCL receive below must not write into.  The receive buffers are
+            // grow-only members reused across rounds (recv write and draft
+            // forward read are ordered on the main stream).
+            const auto&   aux      = model_output.aux_hidden_states;
+            const int64_t aux_rows = aux.size(0);
+            const int64_t aux_cols = aux.numel() / std::max<int64_t>(aux_rows, 1);
+            if (!dspark_recv_aux_.defined() || dspark_recv_aux_.size(0) < aux_rows
+                || dspark_recv_aux_.size(1) != aux_cols || dspark_recv_aux_.scalar_type() != aux.scalar_type()) {
+                dspark_recv_aux_ = torch::empty({aux_rows, aux_cols},
+                                                torch::TensorOptions().dtype(aux.scalar_type()).device(torch::kCUDA));
+            }
+            model_input.last_hidden_states = dspark_recv_aux_.narrow(0, 0, aux_rows);
             const auto cuda_i32            = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
-            model_input.dspark_ctx_starts  = torch::empty({(int64_t)batch_size}, cuda_i32);
-            model_input.dspark_ctx_lengths = torch::empty({(int64_t)batch_size}, cuda_i32);
+            if (!dspark_recv_ctx_starts_.defined() || dspark_recv_ctx_starts_.size(0) < (int64_t)batch_size) {
+                dspark_recv_ctx_starts_  = torch::empty({(int64_t)batch_size}, cuda_i32);
+                dspark_recv_ctx_lengths_ = torch::empty({(int64_t)batch_size}, cuda_i32);
+            }
+            model_input.dspark_ctx_starts  = dspark_recv_ctx_starts_.narrow(0, 0, (int64_t)batch_size);
+            model_input.dspark_ctx_lengths = dspark_recv_ctx_lengths_.narrow(0, 0, (int64_t)batch_size);
         } else {
             model_input.last_hidden_states = model_output.all_hidden_states;
         }

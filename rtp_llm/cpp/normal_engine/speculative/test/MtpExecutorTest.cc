@@ -632,9 +632,9 @@ TEST_F(MtpExecutorTest, testSingleBatchDecode) {
     draft_input_3.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
     draft_input_3.last_hidden_states = draft_output_2.all_hidden_states;
 
-    auto next_draft_input               = GptModelInputs{};
-    auto next_draft_output              = GptModelOutputs{};
-    next_draft_output.logits            = torch::tensor({1.9f, 1.10f, 1.11f, 1.12f}).reshape({(int64_t)batch_size, 4});
+    auto next_draft_input    = GptModelInputs{};
+    auto next_draft_output   = GptModelOutputs{};
+    next_draft_output.logits = torch::tensor({1.9f, 1.10f, 1.11f, 1.12f}).reshape({(int64_t)batch_size, 4});
     next_draft_output.all_hidden_states =
         torch::tensor({0.1f, 0.1f, 0.2f, 0.22f, 0.3f, 0.33f, 0.0f, 0.0f, 0.0f, 0.0f}).reshape({5, 2});
 
@@ -959,6 +959,55 @@ TEST_F(MtpExecutorTest, testDSparkGrpcSideChannelSeeding) {
 
     // side channel consumed exactly once
     EXPECT_FALSE(sp_buffer->side_channel.any());
+}
+
+TEST_F(MtpExecutorTest, testDSparkGrpcGreedyProbsSkipped) {
+    // PD wire gate: a greedy (top1) stream ships an EMPTY propose_probs
+    // tensor.  prepareGrpcMtpDeviceState must accept it, seed the full
+    // propose row as usual, and leave the device-state probs undefined (the
+    // batch processor substitutes the zero dummy).  A sampling stream with
+    // empty probs must still hard-fail.
+    const int64_t k = 3;
+
+    MtpExecutorTestConfig test_config;
+    test_config.gen_num_per_cycle    = k;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.dspark_mask_token_id = 3;
+    auto components                  = createMtpExecutorComponents(test_config);
+
+    auto make_wire_stream = [&](int top_k) {
+        auto stream = createContextStream(
+            components.model_config, components.runtime_config, components.resource_context, {0, 1});
+        stream->generateConfig()->top_k        = top_k;
+        auto sp_buffer                         = std::make_shared<SpeculativeExecutorStreamOutput>();
+        sp_buffer->propose_step                = k;
+        sp_buffer->tokens                      = torch::tensor({2, 1, 2, 3}, torch::kInt32).reshape({1, k + 1});
+        sp_buffer->side_channel.propose_probs  = torch::empty({0}, torch::kFloat32);  // greedy wire skip
+        sp_buffer->side_channel.propose_hidden = torch::empty({0}, torch::kFloat16);
+        stream->setSPOutputBuffer(sp_buffer);
+        return stream;
+    };
+
+    {
+        auto                         stream = make_wire_stream(/*top_k=*/1);
+        std::list<GenerateStreamPtr> streams{stream};
+        TensorHolder                 holder;
+        components.executor->prepareGrpcMtpDeviceState(streams, holder);
+
+        const auto& propose_gpu = stream->getProposeTokensGpu();
+        ASSERT_TRUE(propose_gpu.defined());
+        EXPECT_EQ((vector<int>{1, 2, 3}), toVec<int>(propose_gpu));
+        EXPECT_FALSE(stream->getDraftAllProbsGpu().defined());
+        EXPECT_FALSE(stream->getSPOutputBuffer()->all_probs.defined());
+        EXPECT_FALSE(stream->getSPOutputBuffer()->side_channel.any());
+    }
+
+    {
+        auto                         stream = make_wire_stream(/*top_k=*/0);  // sampling stream
+        std::list<GenerateStreamPtr> streams{stream};
+        TensorHolder                 holder;
+        EXPECT_ANY_THROW(components.executor->prepareGrpcMtpDeviceState(streams, holder));
+    }
 }
 
 }  // namespace rtp_llm
