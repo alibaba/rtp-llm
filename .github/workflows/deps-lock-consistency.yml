@@ -1,0 +1,15 @@
+name: Deps Lock Consistency
+
+on:
+  pull_request:
+    paths:
+      - "deps/**"
+
+jobs:
+  check-lock-consistency:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Check source/lock consistency
+        run: python3 deps/check_lock_consistency.py
