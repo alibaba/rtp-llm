@@ -1,4 +1,4 @@
-from typing import Any, Optional
+from typing import Any
 
 import torch
 from torch import nn
@@ -7,6 +7,7 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.block_map import (
     get_group_tags_for_layers,
+    get_primary_attention_inputs,
     select_attention_inputs_for_layer,
     select_fmha_impl_for_layer,
 )
@@ -15,13 +16,7 @@ from rtp_llm.models_py.model_desc.qwen3_next import (
     Qwen3NextDecoderLayer,
     Qwen3NextMetadata,
 )
-from rtp_llm.models_py.modules import (
-    AttnImplFactory,
-    Embedding,
-    LinearFactory,
-    RMSNorm,
-    RMSResNorm,
-)
+from rtp_llm.models_py.modules import Embedding, LinearFactory, RMSNorm, RMSResNorm
 from rtp_llm.ops import HybridAttentionType, ParallelismConfig
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
@@ -89,7 +84,7 @@ class Qwen3NextMTPModel(GptModelBase):
             weights.get_global_weight(W.final_ln_gamma), eps=model_config.layernorm_eps
         )
 
-    def _get_fmha_group_tags(self) -> Optional[list[str]]:
+    def _get_fmha_group_tags(self) -> list[str] | None:
         if self.kv_cache is None:
             return None
         full_attention_layers = (
@@ -112,6 +107,10 @@ class Qwen3NextMTPModel(GptModelBase):
             fmha_impl = self.prepare_fmha_impl(inputs)
 
         residual = torch.zeros_like(hidden_states)
+        primary_attention_inputs = get_primary_attention_inputs(inputs, self.kv_cache)
+        attn_meta = Qwen3NextMetadata(
+            is_target_verify=primary_attention_inputs.is_target_verify
+        )
         for i, decoder_layer in enumerate(self.layers):
             layer_attention_inputs = select_attention_inputs_for_layer(
                 inputs, self.kv_cache, i
@@ -127,7 +126,7 @@ class Qwen3NextMTPModel(GptModelBase):
                 layer_fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 attention_inputs=layer_attention_inputs,
-                attn_meta=Qwen3NextMetadata(),
+                attn_meta=attn_meta,
             )
         hidden_states, residual = self.norm(hidden_states, residual)
         return PyModelOutputs(hidden_states)

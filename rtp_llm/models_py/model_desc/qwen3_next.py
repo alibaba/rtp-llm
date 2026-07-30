@@ -1,5 +1,6 @@
 import logging
 import sys
+from dataclasses import dataclass
 from typing import Any, Dict, Optional
 
 import torch
@@ -36,6 +37,7 @@ from rtp_llm.models_py.triton_kernels.causal_conv1d import (
 from rtp_llm.models_py.triton_kernels.common.layernorm_gated import RmsNormGated
 from rtp_llm.models_py.triton_kernels.common.scatter_qkv import scatter_qkv
 from rtp_llm.models_py.triton_kernels.fla.aiter_flydsl_decode import (
+    AiterFlydslGdnDecodeStateMetadata,
     aiter_flydsl_gdn_decode,
     is_aiter_flydsl_gdn_decode_supported,
     prepare_aiter_flydsl_gdn_decode_state_indices,
@@ -54,6 +56,7 @@ from rtp_llm.models_py.triton_kernels.fla.fused_recurrent import (
     fused_recurrent_gated_delta_rule,
 )
 from rtp_llm.models_py.triton_kernels.fla.gdn_gating import fused_gdn_gating
+from rtp_llm.models_py.triton_kernels.fla.utils import is_amd
 from rtp_llm.models_py.utils.debug import cudagraph_debug_kernel
 from rtp_llm.models_py.utils.typed_storage_view import LinearCacheConverter
 from rtp_llm.ops import (
@@ -70,6 +73,15 @@ from rtp_llm.ops.compute_ops import (
 )
 from rtp_llm.utils.model_weight import W
 from rtp_llm.utils.util import to_torch_dtype
+
+
+@dataclass(frozen=True)
+class _AiterFlydslGdnDecodeCacheEntry:
+    state_metadata: AiterFlydslGdnDecodeStateMetadata
+    read_indices: torch.Tensor
+    write_indices: torch.Tensor
+    invalid_row_flags: torch.Tensor
+    copy_state: bool
 
 
 class Qwen3NextMetadata(object):
@@ -90,6 +102,16 @@ class Qwen3NextMetadata(object):
         self.cp_restore_indices = cp_restore_indices
         self.cp_local_extract_indices = cp_local_extract_indices
         self.cp_local_valid_mask = cp_local_valid_mask
+        # This metadata is constructed once per model forward and shared by
+        # all layers. Cache layer-independent decode indices by attention-input
+        # storage identity so new pybind wrappers for the same tensors still
+        # share indices. Values retain strong references to prevent allocator
+        # address reuse from ever matching a stale entry during this forward.
+        self.aiter_flydsl_gdn_decode_indices: dict[
+            tuple[object, ...],
+            _AiterFlydslGdnDecodeCacheEntry,
+        ] = {}
+        self.aiter_flydsl_gdn_decode_unsupported: set[tuple[object, ...]] = set()
 
     def get_prefill_conv1d_meta(self) -> Optional[CausalConv1dMetadata]:
         return self.prefill_conv1d_meta
@@ -404,18 +426,55 @@ class Qwen3NextGatedDeltaNetPrefill(Qwen3NextGatedDeltaNetBase):
 
 
 class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
+    def __init__(
+        self,
+        linear_attn_config: LinearAttentionConfig,
+        parallelism_config: ParallelismConfig,
+        weights: Dict[str, torch.Tensor],
+        enable_cuda_graph: bool = False,
+    ):
+        super().__init__(linear_attn_config, parallelism_config, weights)
+        # This model-level flag is propagated independently of FMHA tag
+        # selection. In a tagged hybrid cache, LINEAR attention inputs are not
+        # passed through AttnImplFactory, so their dynamic is_cuda_graph field
+        # is not a reliable indication that the model uses Graph replay.
+        self.enable_cuda_graph = enable_cuda_graph
+        self._aiter_flydsl_gdn_decode_invalid_row_flags: torch.Tensor | None = None
+
+    def get_aiter_flydsl_gdn_decode_invalid_row_flags(
+        self,
+    ) -> torch.Tensor | None:
+        """Return graph-updated invalid-row flags for out-of-band diagnostics."""
+        return self._aiter_flydsl_gdn_decode_invalid_row_flags
+
+    def check_aiter_flydsl_gdn_decode_state_indices(self) -> None:
+        """Fail on invalid replay rows when called at a synchronization boundary.
+
+        This diagnostic intentionally is not invoked from ``forward`` because
+        reading device flags there would synchronize every decode token.
+        """
+        flags = self._aiter_flydsl_gdn_decode_invalid_row_flags
+        if flags is None:
+            return
+        invalid_rows = torch.nonzero(flags, as_tuple=False).flatten().cpu().tolist()
+        if invalid_rows:
+            raise RuntimeError(
+                "AITER FlyDSL GDN decode found invalid block-cache rows: "
+                f"{invalid_rows}"
+            )
+
     def _get_fla_block_map(self, attn_inputs: PyAttentionInputs) -> torch.Tensor:
         block_map = attn_inputs.kv_cache_kernel_block_id_device
         if (
-            attn_inputs.is_cuda_graph
+            self.enable_cuda_graph
             and block_map is not None
             and block_map.ndim == 2
             and block_map.shape[1] > 1
         ):
-            # CUDA graph capture allocates a fixed-width block table, while the
-            # recurrent FLA decode kernel consumes only the first logical block.
-            # Keep the original row stride in this narrow view: FLA receives it
-            # explicitly and uses it to advance between batch rows.
+            # CUDA graph capture exposes a fixed-width block-table allocation.
+            # This view preserves its original row stride and backing storage;
+            # the Triton kernel uses pointer arithmetic to access the logical
+            # column selected from the current sequence length.
             return block_map[:, :1]
         return block_map
 
@@ -456,8 +515,9 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         kv_cache_tensor: torch.Tensor,
         seq_size_per_block: int,
         attn_inputs: PyAttentionInputs,
-        is_target_verify: bool,
+        attn_meta: Qwen3NextMetadata,
     ) -> torch.Tensor:
+        is_target_verify = attn_meta.is_target_verify
         batch, seq = self._get_bs_from_attenion_input(
             mixed_qkv, attn_inputs, is_target_verify
         )
@@ -479,21 +539,72 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
         )
 
         ssm_states = self._get_ssm_states(kv_cache_tensor)
-        use_aiter_flydsl_decode = (
-            # The current RTP block-cache index adapter resolves one state
-            # transition per request. Target verify adds multiple tokens per
-            # request, so retain the Triton implementation for that path.
-            not is_target_verify
-            and is_aiter_flydsl_gdn_decode_supported(
-                query, key, value, a, b, ssm_states
-            )
-        )
-        if use_aiter_flydsl_decode:
-            block_map = attn_inputs.kv_cache_kernel_block_id_device
-            read_indices, write_indices = prepare_aiter_flydsl_gdn_decode_state_indices(
+        block_map = attn_inputs.kv_cache_kernel_block_id_device
+        cache_entry = None
+        # The current RTP block-cache adapter resolves one state transition per
+        # request. Target verify adds multiple tokens per request.
+        if not is_target_verify and block_map is not None:
+            sequence_lengths = attn_inputs.sequence_lengths_plus_1_device
+            cache_key = AiterFlydslGdnDecodeStateMetadata.make_cache_key(
                 block_map,
-                attn_inputs.sequence_lengths_plus_1_device,
+                sequence_lengths,
+                attn_inputs.sequence_lengths,
                 seq_size_per_block,
+                ssm_states.shape[0],
+                ssm_states.dtype,
+            )
+            cache_entry = attn_meta.aiter_flydsl_gdn_decode_indices.get(cache_key)
+            if (
+                cache_entry is None
+                and cache_key not in attn_meta.aiter_flydsl_gdn_decode_unsupported
+            ):
+                supported = is_aiter_flydsl_gdn_decode_supported(
+                    query,
+                    key,
+                    value,
+                    a,
+                    b,
+                    ssm_states,
+                    self.alog,
+                    self.dt_bias,
+                    scale=None,
+                    block_map=block_map,
+                    sequence_lengths_plus_1=sequence_lengths,
+                    seq_size_per_block=seq_size_per_block,
+                    host_sequence_lengths=attn_inputs.sequence_lengths,
+                    state_pool_size=ssm_states.shape[0],
+                )
+                if supported:
+                    state_metadata = AiterFlydslGdnDecodeStateMetadata(
+                        block_map=block_map,
+                        sequence_lengths_plus_1=sequence_lengths,
+                        seq_size_per_block=seq_size_per_block,
+                        host_sequence_lengths=attn_inputs.sequence_lengths,
+                        state_pool_size=ssm_states.shape[0],
+                    )
+                    read_indices, write_indices, invalid_row_flags = (
+                        prepare_aiter_flydsl_gdn_decode_state_indices(
+                            state_metadata,
+                        )
+                    )
+                    cache_entry = _AiterFlydslGdnDecodeCacheEntry(
+                        state_metadata=state_metadata,
+                        read_indices=read_indices,
+                        write_indices=write_indices,
+                        invalid_row_flags=invalid_row_flags,
+                        copy_state=state_metadata.should_copy_state(is_capturing=False),
+                    )
+                    attn_meta.aiter_flydsl_gdn_decode_indices[cache_key] = cache_entry
+                else:
+                    attn_meta.aiter_flydsl_gdn_decode_unsupported.add(cache_key)
+
+        if cache_entry is not None:
+            # This tensor is updated in-place by the captured index kernel.
+            # Retain it on every layer so diagnostics can inspect replay errors
+            # at an existing synchronization boundary without adding kernels
+            # or synchronizations to the decode hot path.
+            self._aiter_flydsl_gdn_decode_invalid_row_flags = (
+                cache_entry.invalid_row_flags
             )
             core_attn_out = aiter_flydsl_gdn_decode(
                 A_log=self.alog,
@@ -504,14 +615,17 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
                 v=value,
                 b=b,
                 state=ssm_states,
-                read_indices=read_indices,
-                write_indices=write_indices,
+                read_indices=cache_entry.read_indices,
+                write_indices=cache_entry.write_indices,
                 scale=None,
                 use_qk_l2norm_in_kernel=True,
+                already_validated=True,
+                copy_state=cache_entry.copy_state,
             )
         else:
             # Keep the original Triton implementation for NVIDIA CUDA and as
             # the ROCm fallback when AITER FlyDSL cannot handle the inputs.
+            self._aiter_flydsl_gdn_decode_invalid_row_flags = None
             g, beta = fused_gdn_gating(self.alog, a, b, self.dt_bias)
             # contiguous will be applied by fused_recurrent_gated_delta_rule.
             g = g.view(batch, seq, self.local_num_v_heads)
@@ -566,7 +680,7 @@ class Qwen3NextGatedDeltaNetDecode(Qwen3NextGatedDeltaNetBase):
             kv_cache_tensor,
             kv_cache.seq_size_per_block,
             attn_inputs,
-            is_target_verify,
+            attn_meta,
         )
 
         return attn_out
@@ -629,8 +743,6 @@ class Qwen3NextAttention(CausalAttention):
         attention_inputs: Optional[PyAttentionInputs],
         attn_meta: Optional[Qwen3NextMetadata] = None,
     ) -> torch.Tensor:
-        if attn_meta is None:
-            attn_meta = Qwen3NextMetadata()
         gate = self.gate(hidden_states)
         attn_out = super().forward(hidden_states, fmha_impl, kv_cache, gate)
         return attn_out
@@ -645,6 +757,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
         layernorm_eps: float,
         quant_config: Optional[object] = None,
         hw_kernel_config: Optional["HWKernelConfig"] = None,
+        enable_cuda_graph: bool = False,
     ):
         super().__init__()
         self.linear_attn_config = linear_attn_config
@@ -672,8 +785,7 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             ba_w = weights[W.linear_attn_ba_w]
             self._qkvz_size = qkvz_w.shape[1]
             self._ba_size = ba_w.shape[1]
-            _is_rocm = hasattr(torch.version, "hip") and torch.version.hip is not None
-            if _is_rocm:
+            if is_amd:
                 # ROCm: cat in [N, K] space then .t() to preserve column-major
                 # physical layout that hipb_mm / swizzle kernels expect.
                 fused_w = torch.cat([qkvz_w.t(), ba_w.t()], dim=0).t()
@@ -719,7 +831,10 @@ class Qwen3NextGatedDeltaNet(nn.Module):
             linear_attn_config, parallelism_config, weights
         )
         self.decode_gdn = Qwen3NextGatedDeltaNetDecode(
-            linear_attn_config, parallelism_config, weights
+            linear_attn_config,
+            parallelism_config,
+            weights,
+            enable_cuda_graph=enable_cuda_graph,
         )
         self.norm = RmsNormGated(
             weights[W.linear_attn_norm_w],
@@ -1026,6 +1141,7 @@ class Qwen3NextDecoderLayer(nn.Module):
                 config.layernorm_eps,
                 config.quant_config,
                 hw_kernel_config=hw_kernel_config,
+                enable_cuda_graph=enable_cuda_graph,
             )
         else:
             attn_configs = config.getAttentionConfigs(

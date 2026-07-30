@@ -16,6 +16,15 @@ from packaging import version
 
 logger = logging.getLogger(__name__)
 
+TRUE_ENV_VALUES = frozenset({"1", "true", "t", "yes", "y", "on"})
+
+
+def env_flag(name: str, default: str = "0") -> bool:
+    """Read a conventional boolean environment variable."""
+    return os.getenv(name, default).strip().lower() in TRUE_ENV_VALUES
+
+
+# Preserve the historical strict parsing contract for existing FLA settings.
 COMPILER_MODE = os.getenv("FLA_COMPILER_MODE") == "1"
 FLA_CI_ENV = os.getenv("FLA_CI_ENV") == "1"
 

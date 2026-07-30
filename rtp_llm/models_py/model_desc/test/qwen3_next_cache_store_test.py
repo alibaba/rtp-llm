@@ -1,0 +1,100 @@
+import unittest
+from types import SimpleNamespace
+from unittest.mock import patch
+
+import torch
+
+from rtp_llm.models_py.model_desc.qwen3_next import (
+    Qwen3NextMetadata,
+    _maybe_write_cp_cache_store,
+    _write_cp_cache_store,
+)
+
+
+class Qwen3NextCacheStoreTest(unittest.TestCase):
+    def test_cp_cache_store_uses_each_layer_tag_metadata(self):
+        expected = {}
+        layer_inputs = {}
+        for index, tag in enumerate(("full", "linear0", "linear1"), start=1):
+            actual_lengths = torch.tensor([index], dtype=torch.int32)
+            prefix_lengths = torch.tensor([index + 10], dtype=torch.int32)
+            block_ids = torch.tensor([[index + 20]], dtype=torch.int32)
+            cache_store_inputs = SimpleNamespace(tag=tag)
+            kv_cache = SimpleNamespace(tag=tag)
+            layer_inputs[tag] = (
+                SimpleNamespace(
+                    context_parallel_info=SimpleNamespace(
+                        prefill_actual_input_lengths_cpu=actual_lengths
+                    ),
+                    prefix_lengths=prefix_lengths,
+                    kv_cache_block_id=block_ids,
+                    cache_store_inputs=cache_store_inputs,
+                ),
+                kv_cache,
+            )
+            expected[tag] = (
+                actual_lengths,
+                prefix_lengths,
+                block_ids,
+                cache_store_inputs,
+                kv_cache,
+            )
+
+        with patch(
+            "rtp_llm.models_py.model_desc.qwen3_next.compute_ops.write_cache_store"
+        ) as write_cache_store:
+            for tag in ("full", "linear0", "linear1"):
+                _write_cp_cache_store(*layer_inputs[tag])
+
+        self.assertEqual(write_cache_store.call_count, 3)
+        for call, tag in zip(
+            write_cache_store.call_args_list, ("full", "linear0", "linear1")
+        ):
+            for actual, wanted in zip(call.args, expected[tag]):
+                self.assertIs(actual, wanted)
+
+    def test_cp_cache_store_skips_layer_without_store_inputs(self):
+        attention_inputs = SimpleNamespace(cache_store_inputs=None)
+
+        with patch(
+            "rtp_llm.models_py.model_desc.qwen3_next.compute_ops.write_cache_store"
+        ) as write_cache_store:
+            _write_cp_cache_store(attention_inputs, SimpleNamespace(tag="linear0"))
+
+        write_cache_store.assert_not_called()
+
+    def test_cp_cache_store_requires_context_parallel_metadata(self):
+        attention_inputs = SimpleNamespace(
+            cache_store_inputs=SimpleNamespace(tag="linear0"),
+            context_parallel_info=None,
+        )
+
+        with self.assertRaisesRegex(
+            RuntimeError, "CP cache store requires context_parallel_info"
+        ):
+            _write_cp_cache_store(attention_inputs, SimpleNamespace(tag="linear0"))
+
+    def test_non_cp_linear_attention_does_not_write_cache_store(self):
+        attention_inputs = SimpleNamespace(
+            cache_store_inputs=SimpleNamespace(tag="linear0"),
+            context_parallel_info=SimpleNamespace(
+                prefill_actual_input_lengths_cpu=torch.tensor([1], dtype=torch.int32)
+            ),
+            prefix_lengths=torch.tensor([0], dtype=torch.int32),
+            kv_cache_block_id=torch.tensor([[1]], dtype=torch.int32),
+        )
+
+        with patch(
+            "rtp_llm.models_py.model_desc.qwen3_next.compute_ops.write_cache_store"
+        ) as write_cache_store:
+            _maybe_write_cp_cache_store(
+                attention_inputs,
+                SimpleNamespace(tag="linear0"),
+                Qwen3NextMetadata(),
+            )
+
+        write_cache_store.assert_not_called()
+
+
+if __name__ == "__main__":
+    unittest.main()

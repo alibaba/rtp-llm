@@ -12,6 +12,8 @@ from unittest.mock import MagicMock, patch
 
 import torch
 
+from rtp_llm.models_py.triton_kernels.fla.utils import is_amd
+
 
 class TestQwen3NextQkvzBaFusion(unittest.TestCase):
     """Validates fusion correctness against the 2-GEMM baseline."""
@@ -59,7 +61,7 @@ class TestQwen3NextQkvzBaFusion(unittest.TestCase):
 
     # ---- (2) Qwen3NextGatedDeltaNet end-to-end ----
 
-    def _build_module(self, weights_extra=None):
+    def _build_module(self, weights_extra=None, *, enable_cuda_graph=False):
         """Construct a small Qwen3NextGatedDeltaNet with random weights.
 
         Mirrors the setup pattern in
@@ -116,7 +118,20 @@ class TestQwen3NextQkvzBaFusion(unittest.TestCase):
         if weights_extra:
             weights.update(weights_extra)
 
-        return Qwen3NextGatedDeltaNet(cfg, par, weights, layernorm_eps=1e-6).to(dev)
+        return Qwen3NextGatedDeltaNet(
+            cfg,
+            par,
+            weights,
+            layernorm_eps=1e-6,
+            enable_cuda_graph=enable_cuda_graph,
+        ).to(dev)
+
+    def test_cuda_graph_setting_propagates_to_decode_gdn(self) -> None:
+        module = self._build_module(enable_cuda_graph=True)
+        self.assertTrue(module.decode_gdn.enable_cuda_graph)
+        self.assertIsNone(
+            module.decode_gdn.get_aiter_flydsl_gdn_decode_invalid_row_flags()
+        )
 
     def test_bf16_path_takes_fusion(self) -> None:
         """When linear_attn_qkvz_s is None (BF16), fusion is enabled."""
@@ -228,9 +243,8 @@ class TestQwen3NextQkvzBaFusion(unittest.TestCase):
         self.assertEqual(qkvz_view.data_ptr(), fused_buf.data_ptr())
         # ROCm uses column-major layout (cat in [N,K] then .t()),
         # CUDA uses row-major (torch.empty + copy_).
-        _is_rocm = hasattr(torch.version, "hip") and torch.version.hip is not None
         K = fused_buf.shape[0]
-        if _is_rocm:
+        if is_amd:
             expected_offset = module._qkvz_size * K * fused_buf.element_size()
         else:
             expected_offset = module._qkvz_size * fused_buf.element_size()

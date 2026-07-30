@@ -536,10 +536,14 @@ class FlyDSLChunkGDNCacheStoreTest(unittest.TestCase):
             f"(max diff {diff_dec.max().item():.3e})",
         )
 
-    def test_output_final_state_false_no_buffer_write(self):
-        """output_final_state=False must not write to any ht buffer
-        (compile-time DCE in build_megakernel). main attn_out must be
-        bit-identical to the True path."""
+    def test_output_final_state_false_does_not_write_ht(self):
+        """The no-final-state specialization must leave its ht pointer untouched.
+
+        The launcher normally passes an empty dummy tensor when final state is not
+        requested. Replace that dummy with a guarded, non-empty probe so this test
+        observes an accidental ht store directly instead of inferring DCE from a
+        comparison between two independently compiled specializations.
+        """
         for shape in SHAPES:
             with self.subTest(shape=shape):
                 self._output_final_state_false_for_shape(shape)
@@ -557,52 +561,96 @@ class FlyDSLChunkGDNCacheStoreTest(unittest.TestCase):
         )
 
         q, k, v, g, beta, _ = _build_inputs(shape, T, cu_seqlens=cu_seqlens)
-        ssm_buf = _alloc_ssm_states(n_blocks + 1, shape)
+        ssm_ref = _alloc_ssm_states(n_blocks + 1, shape)
+        ssm_false = _alloc_ssm_states(n_blocks + 1, shape)
 
-        # output_final_state=False — wrapper must accept and return None final_state.
-        o_false, final_false = chunk_gated_delta_rule_flydsl_with_cache_store(
-            q=q,
-            k=k,
-            v=v,
-            g=g,
-            beta=beta,
-            prefix_lengths=prefix_lengths,
-            block_map=block_map,
-            ssm_states=ssm_buf,
-            seq_size_per_block=SEQ_SIZE_PER_BLOCK,
-            initial_state=None,
-            output_final_state=False,
-            cu_seqlens=cu_seqlens,
-            use_qk_l2norm_in_kernel=True,
+        o_ref = self._run_triton_path(
+            q,
+            k,
+            v,
+            g,
+            beta,
+            cu_seqlens,
+            prefix_lengths,
+            block_map,
+            ssm_ref,
+            SEQ_SIZE_PER_BLOCK,
         )
+
+        _, h, k_dim, v_dim = shape
+        guard_elements = 64
+        ht_elements = h * v_dim * k_dim
+        ht_storage = torch.full(
+            (guard_elements + ht_elements + guard_elements,),
+            -12345.0,
+            device=device,
+            dtype=torch.float32,
+        )
+        ht_storage_before = ht_storage.clone()
+        ht_probe = ht_storage[guard_elements:-guard_elements]
+        original_empty = torch.empty
+        ht_probe_requests = 0
+
+        def empty_with_ht_probe(size, *args, **kwargs):
+            nonlocal ht_probe_requests
+            is_empty = size == 0 or size == (0,) or size == [0]
+            if is_empty and kwargs.get("dtype") == torch.float32:
+                ht_probe_requests += 1
+                return ht_probe
+            return original_empty(size, *args, **kwargs)
+
+        with mock.patch.object(torch, "empty", side_effect=empty_with_ht_probe):
+            o_false, final_false = chunk_gated_delta_rule_flydsl_with_cache_store(
+                q=q,
+                k=k,
+                v=v,
+                g=g,
+                beta=beta,
+                prefix_lengths=prefix_lengths,
+                block_map=block_map,
+                ssm_states=ssm_false,
+                seq_size_per_block=SEQ_SIZE_PER_BLOCK,
+                initial_state=None,
+                output_final_state=False,
+                cu_seqlens=cu_seqlens,
+                use_qk_l2norm_in_kernel=True,
+            )
+        torch.cuda.synchronize()
+
         self.assertIsNone(final_false, "final_state must be None when not requested")
-
-        # Same inputs, output_final_state=True — attn_out must match exactly
-        # (compile-time guard only removes ht store, not main compute).
-        ssm_buf_true = _alloc_ssm_states(n_blocks + 1, shape)
-        o_true, final_true = chunk_gated_delta_rule_flydsl_with_cache_store(
-            q=q,
-            k=k,
-            v=v,
-            g=g,
-            beta=beta,
-            prefix_lengths=prefix_lengths,
-            block_map=block_map,
-            ssm_states=ssm_buf_true,
-            seq_size_per_block=SEQ_SIZE_PER_BLOCK,
-            initial_state=None,
-            output_final_state=True,
-            cu_seqlens=cu_seqlens,
-            use_qk_l2norm_in_kernel=True,
+        self.assertGreater(
+            ht_probe_requests,
+            0,
+            "test did not replace the launcher's dummy ht allocation",
         )
-        self.assertIsNotNone(final_true)
+        self.assertTrue(
+            torch.equal(ht_storage, ht_storage_before),
+            "output_final_state=False wrote through the dummy ht pointer",
+        )
 
-        diff = (o_true.float() - o_false.float()).abs()
-        self.assertEqual(
-            diff.max().item(),
-            0.0,
-            f"attn_out must be bit-identical between output_final_state True/False; "
-            f"got max diff {diff.max().item():.3e}",
+        self.assertTrue(
+            torch.isfinite(o_false).all() and torch.isfinite(o_ref).all(),
+            "attn_out must be finite for both FlyDSL and Triton paths",
+        )
+        output_cos = torch.nn.functional.cosine_similarity(
+            o_false.float().flatten().unsqueeze(0),
+            o_ref.float().flatten().unsqueeze(0),
+        ).item()
+        self.assertGreater(
+            output_cos,
+            0.999,
+            f"no-final-state attn_out differs from Triton reference: cos={output_cos:.6f}",
+        )
+
+        written_block_ids = block_map.flatten().long()
+        state_cos = torch.nn.functional.cosine_similarity(
+            ssm_false[written_block_ids].float().flatten().unsqueeze(0),
+            ssm_ref[written_block_ids].float().flatten().unsqueeze(0),
+        ).item()
+        self.assertGreater(
+            state_cos,
+            0.99999,
+            f"no-final-state cache differs from Triton reference: cos={state_cos:.6f}",
         )
 
 

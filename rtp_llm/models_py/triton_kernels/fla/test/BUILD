@@ -152,6 +152,7 @@ py_test(
         "test_aiter_flydsl_gdn_decode.py"
     ],
     deps = [
+        "//rtp_llm/models_py/triton_kernels:aiter_flydsl_decode",
         "//rtp_llm/models_py/triton_kernels:fla",
     ] + [":triton", ":torch", ":einops", ":packaging"],
     visibility = ["//visibility:public"],
@@ -165,6 +166,7 @@ py_test(
     ],
     main = "test_aiter_flydsl_gdn_decode.py",
     deps = [
+        "//rtp_llm/models_py/triton_kernels:aiter_flydsl_decode",
         "//rtp_llm/models_py/triton_kernels:fla",
     ] + [":triton", ":torch", ":einops", ":packaging"],
     visibility = ["//visibility:public"],

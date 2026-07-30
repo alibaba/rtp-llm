@@ -124,6 +124,7 @@ py_library(
         ":kernels",
         ":configs",
         "//rtp_llm/model_loader:loader",
+        "//rtp_llm/models_py/triton_kernels:aiter_flydsl_decode",
     ] + select({
         "@//:using_cuda12": [
             ":modules_cuda",

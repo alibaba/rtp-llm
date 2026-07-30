@@ -8,15 +8,36 @@ alias(
 
 py_library(
     name = "fla",
-    srcs = glob(["fla/*.py"]),
+    # Keep the optional AITER-dependent adapter in its own target. Consumers
+    # importing it must depend on :aiter_flydsl_decode explicitly, and sources
+    # in :fla must not import the adapter back.
+    srcs = glob(
+        ["fla/*.py"],
+        exclude = ["fla/aiter_flydsl_decode.py"],
+    ),
     deps = [":common"] + select({
         "@rtp_llm//:using_rocm": [
-            "//rtp_llm:aiter",
             requirement_gpu_rocm("flydsl"),
         ],
         "//conditions:default": [],
     }),
     visibility = ["//visibility:public"]
+)
+
+py_library(
+    name = "aiter_flydsl_decode",
+    srcs = ["fla/aiter_flydsl_decode.py"],
+    deps = [
+        ":common",
+        ":fla",
+    ] + select({
+        "@rtp_llm//:using_rocm": [
+            requirement_gpu_rocm("aiter"),
+            requirement_gpu_rocm("flydsl"),
+        ],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
 )
 
 py_library(
@@ -59,6 +80,7 @@ py_library(
     name = "triton_kernels",
     deps = [
         ":autotune_cache",
+        ":aiter_flydsl_decode",
         ":fla",
         ":kimi_kda",
         ":causal_conv1d",
