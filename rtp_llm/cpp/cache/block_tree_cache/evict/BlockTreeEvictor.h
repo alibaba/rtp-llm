@@ -84,10 +84,6 @@ public:
     void onMatched(const std::vector<TreeNode*>& path);
     // A match-protection reference was released: re-evaluate candidacy (lazy ref).
     void refreshCandidatesAfterRelease(const MultiNodeResource& set);
-    // Re-evaluate candidacy for every tree node across all group sets.
-    // Called after external refcount changes (e.g. request free) that may make
-    // previously non-evictable blocks evictable.
-    void refreshAllCandidates();
     // A node's topology changed (e.g. became a leaf after child deletion).
     void onTopologyChanged(TreeNode* parent);
     CandidateStats         candidateStats() const;

@@ -465,6 +465,7 @@ bool BlockTreeLoader::settleLoadNolock(LoadTaskRunner::Task& task, bool copy_suc
             if (enable_device_cache_) {
                 MultiNodeResource target_holder{group_set_id, Tier::DEVICE, {{item.node, item.target_device_blocks}}};
                 resource.setBlocks(Tier::DEVICE, item.target_device_blocks);
+                group_set->mapDeviceBlocksToTreeNode(target_holder);
                 group_set->referenceBlocks(target_holder, BlockRefType::BLOCK_CACHE);
                 group_set->unreferenceBlocks(target_holder, BlockRefType::REQUEST);
                 group_set->unreferenceBlocks(MultiNodeResource{group_set_id, item.source_tier, {{item.node, item.source_blocks}}},

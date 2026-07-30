@@ -36,7 +36,6 @@ bool KVCacheGroup::init() {
 }
 
 void KVCacheGroup::setEvictCallback(EvictCallback callback) {
-    std::lock_guard<std::mutex> lock(evict_callback_mutex_);
     evict_callback_ = std::move(callback);
 }
 
@@ -52,17 +51,14 @@ bool KVCacheGroup::ensureFreeBlocks(int required_blocks) {
         }
 
         const size_t need_evict = static_cast<size_t>(required_blocks) - free_blocks;
-        {
-            std::lock_guard<std::mutex> lock(evict_callback_mutex_);
-            if (evict_callback_) {
-                if (evict_callback_(need_evict) == 0) {
-                    RTP_LLM_LOG_WARNING("ensure free blocks failed, BTC reclaimed no blocks for tag=%s need=%zu",
-                                        tag().c_str(),
-                                        need_evict);
-                    return false;
-                }
-                continue;
+        if (evict_callback_) {
+            if (evict_callback_(need_evict) == 0) {
+                RTP_LLM_LOG_WARNING("ensure free blocks failed, BTC reclaimed no blocks for tag=%s need=%zu",
+                                    tag().c_str(),
+                                    need_evict);
+                return false;
             }
+            continue;
         }
 
         RTP_LLM_LOG_WARNING("ensure free blocks failed, no BlockTree eviction callback for tag=%s, free=%zu, need=%d",
@@ -126,7 +122,7 @@ bool KVCacheGroup::materializePositions(BlockIds& block_ids, const std::vector<s
     if (!allocated.has_value() || allocated->size() != missing_positions.size()) {
         return false;
     }
-    block_pool_->incRef(*allocated, BlockRefType::REQUEST);
+    addBlockRefs(*allocated, BlockRefType::REQUEST);
     for (size_t i = 0; i < missing_positions.size(); ++i) {
         block_ids.setAt(missing_positions[i], (*allocated)[i]);
     }
@@ -200,7 +196,25 @@ KVCacheGroup::convertIndexToBuffer(int layer_id, int block_id, int partition_cou
 }
 
 void KVCacheGroup::reference(const BlockIndicesType& new_block_indices) {
-    block_pool_->incRef(new_block_indices, BlockRefType::REQUEST);
+    addBlockRefs(new_block_indices, BlockRefType::REQUEST);
+}
+
+void KVCacheGroup::reference(const BlockIndicesType& new_block_indices, BlockRefType ref_type) {
+    addBlockRefs(new_block_indices, ref_type);
+}
+
+void KVCacheGroup::addBlockRefs(const BlockIndicesType& blocks, BlockRefType ref_type) {
+    if (!blocks.empty()) {
+        block_pool_->incRef(blocks, ref_type);
+    }
+}
+
+std::vector<BlockRefTransition>
+KVCacheGroup::releaseBlockRefs(const BlockIndicesType& blocks, BlockRefType ref_type) {
+    if (blocks.empty()) {
+        return {};
+    }
+    return block_pool_->decRefWithResult(blocks, ref_type);
 }
 
 bool KVCacheGroup::prefixReusable() const {

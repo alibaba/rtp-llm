@@ -31,9 +31,6 @@ public:
 private:
     bool doInit() override;
 
-    void referenceBlocksInGroup(int group_id, const BlockIndicesType& blocks, BlockRefType ref_type) const override;
-    void freeBlocksInGroup(int group_id, const BlockIndicesType& blocks, BlockRefType ref_type) override;
-
     int                    defaultGroupIdForLayer(int layer_id) const;
     int                    validateGroupIdForLayer(int layer_id, int group_id) const;
     std::vector<BlockInfo> logicalGroupBlockBuffers(int group_id, std::vector<BlockInfo> buffers) const;

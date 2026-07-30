@@ -307,8 +307,8 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadCommitsDeviceResource)
     EXPECT_EQ(host_pool->freeBlocksNum(), 4u);
     EXPECT_EQ(cache->getStats().host_heap_total_size, 0u);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 0u);
-    group->devicePools().front()->decRef(device_block, BlockRefType::REQUEST);
-    cache->onBlocksReleased();
+    releaseDeviceBlocksAndNotify(
+        *cache, group->devicePools().front(), {device_block}, BlockRefType::REQUEST);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
 
     std::lock_guard<std::mutex> lock(state->mutex);
@@ -501,8 +501,8 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadUsesSingleDirectStage)
     EXPECT_EQ(disk_pool->freeBlocksNum(), 4u);
     EXPECT_EQ(cache->getStats().disk_heap_total_size, 0u);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 0u);
-    group->devicePools().front()->decRef(device_block, BlockRefType::REQUEST);
-    cache->onBlocksReleased();
+    releaseDeviceBlocksAndNotify(
+        *cache, group->devicePools().front(), {device_block}, BlockRefType::REQUEST);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
 
     std::lock_guard<std::mutex> lock(state->mutex);
@@ -612,8 +612,8 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDeviceEvictionBypassesHostWith
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = device.front();
     ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
-    unreferenceDeviceBlocksForTest(*full, device, BlockRefType::REQUEST);
-    cache->onBlocksReleased();
+    releaseDeviceBlocksAndNotify(
+        *cache, full->devicePools().front(), device.front(), BlockRefType::REQUEST);
 
     cache->setTierWatermark(Tier::DEVICE, 0.01, 0);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
@@ -669,8 +669,8 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastD2DiskFailureRollsBackDeviceSo
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = device.front();
     ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
-    unreferenceDeviceBlocksForTest(*full, device, BlockRefType::REQUEST);
-    cache->onBlocksReleased();
+    releaseDeviceBlocksAndNotify(
+        *cache, full->devicePools().front(), device.front(), BlockRefType::REQUEST);
 
     cache->setTierWatermark(Tier::DEVICE, 0.01, 0);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);

@@ -525,7 +525,7 @@ public:
     std::string target_tier;
     std::string group_type;
     int64_t     evictable_block_count = 0;
-    int64_t lifetime_ms = 0;
+    int64_t     lifetime_ms           = 0;
     bool        report_evictable      = false;
     bool        report_eviction       = false;
     bool        report_lifetime       = false;

@@ -46,6 +46,17 @@ cc_library(
 )
 
 cc_test(
+    name = "block_release_batch_test",
+    srcs = ["BlockReleaseBatchTest.cc"],
+    copts = test_copts,
+    deps = [
+        "//rtp_llm/cpp/cache:block_release_batch",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
     name = "async_context_test",
     srcs = ["AsyncContextTest.cc"],
     copts = test_copts,

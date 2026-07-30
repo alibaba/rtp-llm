@@ -243,7 +243,7 @@ bool LinearKVCacheGroup::malloc(BlockIds&            block_ids,
             return false;
         }
         allocated_blocks = std::move(*allocated);
-        block_pool_->incRef(allocated_blocks, BlockRefType::REQUEST);
+        addBlockRefs(allocated_blocks, BlockRefType::REQUEST);
     }
 
     size_t allocated_idx = 0;
@@ -273,10 +273,11 @@ bool LinearKVCacheGroup::malloc(BlockIds&            block_ids,
     return true;
 }
 
-void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
+std::vector<BlockRefTransition>
+LinearKVCacheGroup::releaseSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
     const auto& block_indices = block_ids.blocks();
     if (block_indices.empty()) {
-        return;
+        return {};
     }
     const int step                 = std::max(1, linear_step_);
     const int retained_tail_blocks = retainedTailBlockCount();
@@ -295,21 +296,32 @@ void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_re
         pos_to_remove.push_back(static_cast<size_t>(i));
     }
     if (!blocks_to_free.empty()) {
-        block_pool_->decRef(blocks_to_free, BlockRefType::REQUEST);
+        auto transitions = releaseBlockRefs(blocks_to_free, BlockRefType::REQUEST);
         block_ids.remove(pos_to_remove);
+        return transitions;
     }
+    return {};
 }
 
-void LinearKVCacheGroup::free(const BlockIndicesType& block_indices) {
+void LinearKVCacheGroup::removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache, int reserve_step) {
+    (void)releaseSkippedBlocks(block_ids, enable_reuse_cache, reserve_step);
+}
+
+std::vector<BlockRefTransition>
+LinearKVCacheGroup::release(const BlockIndicesType& block_indices, BlockRefType ref_type) {
     if (block_indices.empty()) {
-        return;
+        return {};
     }
     BlockIndicesType valid;
     filterValidBlocks(block_indices, valid);
     if (valid.empty()) {
-        return;
+        return {};
     }
-    block_pool_->decRef(valid, BlockRefType::REQUEST);
+    return releaseBlockRefs(valid, ref_type);
+}
+
+void LinearKVCacheGroup::free(const BlockIndicesType& block_indices) {
+    (void)release(block_indices, BlockRefType::REQUEST);
 }
 
 void LinearKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices) {
@@ -317,7 +329,7 @@ void LinearKVCacheGroup::reference(BlockIds& block_ids, const BlockIndicesType& 
     BlockIndicesType valid;
     filterValidBlocks(new_block_indices, valid);
     if (!valid.empty()) {
-        block_pool_->incRef(valid, BlockRefType::REQUEST);
+        addBlockRefs(valid, BlockRefType::REQUEST);
     }
 }
 

@@ -45,7 +45,7 @@ struct CachePoolMetricsSnapshot {
 
 RtpLLMCacheMetricsCollector collectGlobalCacheMetrics(const KVCacheAllocatorPtr& allocator) {
     RtpLLMCacheMetricsCollector collector;
-    BlockTreeCache*             block_tree_cache = allocator->blockTreeCache();
+    const BlockTreeCachePtr     block_tree_cache = allocator->blockTreeCache();
     collector.kv_cache_item_num =
         block_tree_cache ? static_cast<int64_t>(block_tree_cache->getStats().tree_node_count) : 0;
     collector.kv_cache_left_seq = static_cast<int64_t>(allocator->availableTokensNum());
@@ -217,11 +217,6 @@ KVCacheManager::~KVCacheManager() {
     if (metrics_reporter_thread_.joinable()) {
         metrics_reporter_thread_.join();
     }
-    if (allocator_) {
-        allocator_->setBlockTreeCache(nullptr);
-    }
-    allocator_.reset();
-    block_tree_cache_.reset();
 }
 
 // 初始化和配置相关
@@ -273,7 +268,7 @@ bool KVCacheManager::init() {
         return false;
     }
     block_tree_cache_->setMetricsReporter(metrics_reporter_);
-    allocator_->setBlockTreeCache(block_tree_cache_.get());
+    allocator_->attachBlockTreeCache(block_tree_cache_);
 
     if (metrics_reporter_) {
         stop_.store(false, std::memory_order_relaxed);

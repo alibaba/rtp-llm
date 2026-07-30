@@ -614,10 +614,15 @@ TEST_F(HybridTypeKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly
     seed_resource->cacheResource(0).setBlockDependencies(
         {BlockDependency{true, 9999, 41}, BlockDependency{false, 0, 7}});
     allocator->insertIntoCache(InsertInfo{seed_resource, nullptr, /*is_resident=*/false});
+    BlockReleaseBatch releases;
     for (size_t group_id = 0; group_id < cache_groups.size(); ++group_id) {
-        cache_groups[group_id]->blockPool()->decRef(seeded_blocks[group_id], BlockRefType::REQUEST);
+        releases.append(
+            group_id, cache_groups[group_id]->release(seeded_blocks[group_id], BlockRefType::REQUEST));
     }
-    allocator->blockTreeCacheOwner()->onBlocksReleased();
+    const std::vector<BlockReleaseReceipt> receipts = releases.finish();
+    if (!receipts.empty()) {
+        allocator->blockTreeCacheOwner()->onBlocksReleased(receipts);
+    }
 
     const auto tree_path = allocator->blockTreeCacheOwner()->tree()->findNode(seed_keys);
     ASSERT_EQ(tree_path.size(), seed_keys.size());
@@ -1088,19 +1093,19 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     const auto linear_block_before = batch_res->blocks(0, /*group_id=*/0)[0];
     const auto full_block_before   = batch_res->blocks(0, /*group_id=*/1)[0];
 
-    // Leave exactly 1 free block in pool, so linear allocates 1 and full fails on the next allocation.
+    // Leave exactly 2 free blocks in the shared pool. Linear consumes both, then Full fails and forces
+    // rollback of Linear's fresh allocations.
     const size_t free_before_incr = block_pool->freeBlocksNum();
-    ASSERT_GE(free_before_incr, 1u);
-    auto keep = block_pool->malloc(free_before_incr - 1).value();
+    ASSERT_GE(free_before_incr, 2u);
+    auto keep = block_pool->malloc(free_before_incr - 2).value();
     block_pool->incRef(keep, BlockRefType::REQUEST);
-    ASSERT_EQ(block_pool->freeBlocksNum(), 1u);
+    ASSERT_EQ(block_pool->freeBlocksNum(), 2u);
 
-    // Incr to seq_len=9 => 3 resources per group. Linear adds 2 resources but allocates only 1 real block; full
-    // needs 2.
+    // Incr to seq_len=9 => 3 resources per group. Linear allocates 2 blocks and Full then needs 2 more.
     token_ids->setSeqLength(9);
     MallocInfo incr_info{batch_res, token_ids};
     incr_info.enable_device_cache = false;
-    auto incr_result              = allocator->malloc(incr_info);
+    auto incr_result = allocator->malloc(incr_info);
     EXPECT_FALSE(incr_result.success);
 
     // Rollback should restore original sizes and keep original blocks.
@@ -1109,8 +1114,8 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     EXPECT_EQ(batch_res->blocks(0, /*group_id=*/0)[0], linear_block_before);
     EXPECT_EQ(batch_res->blocks(0, /*group_id=*/1)[0], full_block_before);
 
-    // Free blocks count should return to 1 (no leaks).
-    EXPECT_EQ(block_pool->freeBlocksNum(), 1u);
+    // Free blocks count should return to 2 (no leaks).
+    EXPECT_EQ(block_pool->freeBlocksNum(), 2u);
 
     // Cleanup.
     block_pool->decRef(keep, BlockRefType::REQUEST);

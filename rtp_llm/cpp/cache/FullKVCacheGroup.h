@@ -31,7 +31,11 @@ public:
     MatchResult matchPrefix(const CacheKeysType& cache_keys) const override;
     void
     insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident) override;
+    std::vector<BlockRefTransition>
+    release(const BlockIndicesType& block_indices, BlockRefType ref_type = BlockRefType::REQUEST) override;
     void free(const BlockIndicesType& block_indices) override;
+    std::vector<BlockRefTransition>
+    releaseSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
     int  needBlocksNum(int seq_len, int current_blocks = 0, int reserve_step = 0) const override;
     int  estimatePeakNeedBlocks(int                     seq_len,

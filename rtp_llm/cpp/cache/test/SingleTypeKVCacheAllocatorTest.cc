@@ -594,6 +594,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, OrdinaryAllocationEvictsOnlyAfterTreeEntr
 
     allocator_->free(FreeInfo{seed, seed_tokens});
     EXPECT_EQ(device_pool->refCount(seed_block), 1u);
+    EXPECT_EQ(allocator_->blockTreeCacheOwner()->getStats().device_heap_total_size, 1u);
     EXPECT_TRUE(allocator_->malloc(pressure_malloc).success);
     EXPECT_TRUE(allocator_->blockTreeCacheOwner()->tree()->findNode(CacheKeysType{100}).empty());
     EXPECT_NE(std::find(pressure->blocks(0, 0).begin(), pressure->blocks(0, 0).end(), seed_block),
@@ -863,11 +864,9 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SuccessfulOuterAllocationCommitsLoadExact
     EXPECT_EQ(device_pool->refCount(published_target), 3u);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 0u);
     const auto before_watermark_retry = cache->getKeySnapshot(/*limit=*/16);
-    cache->onBlocksReleased();
-    cache->waitForPendingTasks();
+    EXPECT_EQ(cache->evictForGroup(0, 1), 0);
     EXPECT_EQ(cache->getKeySnapshot(/*limit=*/16).version, before_watermark_retry.version);
     EXPECT_EQ(find.back()->group_set_resources.front().device_blocks, (BlockIndicesType{published_target}));
-    EXPECT_EQ(cache->evictForGroup(0, 1), 0);
 
     allocator_->free(FreeInfo{resource, token_ids});
     registry->commit_callback_ = std::move(original_commit);
@@ -1852,6 +1851,38 @@ TEST_F(SingleTypeKVCacheAllocatorTest, EstimateBatchPeakCoversPartialTailCopiesA
     EXPECT_EQ(resource->batchSize(), 4);
     EXPECT_EQ(block_update_mapping.size(), 3);
     EXPECT_EQ(allocator_->freeBlocksNum(), 0);
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, UpdateKVBlockReleasesSharedBlocksFromEachDroppedBatch) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/1, /*block_num=*/6, /*seq_size_per_block=*/4);
+    allocator_  = std::make_shared<TestSingleTypeKVCacheAllocator>(config);
+    ASSERT_TRUE(allocator_->init());
+
+    auto block_pool = allocator_->getDeviceBlockPool();
+    ASSERT_NE(block_pool, nullptr);
+    const auto shared_blocks = block_pool->malloc(2);
+    ASSERT_TRUE(shared_blocks.has_value());
+    for (int batch_id = 0; batch_id < 3; ++batch_id) {
+        block_pool->incRef(*shared_blocks, BlockRefType::REQUEST);
+    }
+
+    auto resource = createBatchKVCacheResource(/*batch_size=*/3, config);
+    for (int batch_id = 0; batch_id < 3; ++batch_id) {
+        resource->setBatchBlocks(batch_id, /*group_id=*/0, *shared_blocks);
+    }
+
+    std::vector<TaggedBlockIdPair> block_update_mapping;
+    ASSERT_TRUE(allocator_->updateKVBlock(
+        resource, /*block_src_batch=*/{0}, /*copy_last_block=*/false, block_update_mapping));
+
+    ASSERT_EQ(resource->batchSize(), 1);
+    EXPECT_EQ(resource->blocks(0, 0), *shared_blocks);
+    EXPECT_TRUE(block_update_mapping.empty());
+    for (const BlockIdxType block : *shared_blocks) {
+        EXPECT_EQ(block_pool->refCount(block), 1u);
+    }
+
+    block_pool->decRef(*shared_blocks, BlockRefType::REQUEST);
 }
 
 }  // namespace test

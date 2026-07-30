@@ -32,6 +32,14 @@ enum class BlockRefType : uint8_t {
 
 constexpr size_t kBlockRefTypeCount = static_cast<size_t>(BlockRefType::COUNT);
 
+struct BlockRefTransition {
+    BlockIdxType block_id{NULL_BLOCK_IDX};
+    BlockRefType ref_type{BlockRefType::REQUEST};
+    uint32_t     old_total_ref_count{0};
+    uint32_t     new_total_ref_count{0};
+    bool         block_released{false};
+};
+
 struct BlockPoolConfigBase {
     virtual ~BlockPoolConfigBase() = default;
 
@@ -68,6 +76,7 @@ public:
     // than free() directly. Requires refcount > 0.
     void     decRef(BlockIdxType block, BlockRefType ref_type);
     void     decRef(const BlockIdList& blocks, BlockRefType ref_type);
+    std::vector<BlockRefTransition> decRefWithResult(const BlockIdList& blocks, BlockRefType ref_type);
     uint32_t refCount(BlockIdxType block) const;
     // used only for metrics report
     size_t totalRefCount(BlockRefType ref_type) const;

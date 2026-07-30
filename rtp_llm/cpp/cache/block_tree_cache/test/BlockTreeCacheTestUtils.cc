@@ -205,6 +205,24 @@ size_t treeCachedBlocksNum(const IBlockPool& pool) {
     return count;
 }
 
+void releaseDeviceBlocksAndNotify(BlockTreeCache&          cache,
+                                  const DeviceBlockPoolPtr& pool,
+                                  const BlockIdList&        blocks,
+                                  BlockRefType              ref_type) {
+    for (const GroupSetPtr& group_set : cache.groupSets()) {
+        for (size_t member_group_id = 0; member_group_id < group_set->devicePools().size(); ++member_group_id) {
+            if (group_set->devicePools()[member_group_id] != pool) {
+                continue;
+            }
+            BlockReleaseBatch releases;
+            releases.append(group_set->groupIds()[member_group_id], pool->decRefWithResult(blocks, ref_type));
+            cache.onBlocksReleased(releases.finish());
+            return;
+        }
+    }
+    RTP_LLM_CHECK(false);
+}
+
 DeviceBlockPoolPtr makeStructuralDevicePool(size_t group_set_id) {
     constexpr size_t physical_block_count = 1024;
     constexpr size_t block_bytes          = 1;

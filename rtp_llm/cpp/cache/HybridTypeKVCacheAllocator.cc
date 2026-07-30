@@ -72,20 +72,6 @@ bool HybridTypeKVCacheAllocator::doInit() {
     return true;
 }
 
-void HybridTypeKVCacheAllocator::referenceBlocksInGroup(int                     group_id,
-                                                        const BlockIndicesType& blocks,
-                                                        BlockRefType            ref_type) const {
-    (void)group_id;
-    block_pool_->incRef(blocks, ref_type);
-}
-
-void HybridTypeKVCacheAllocator::freeBlocksInGroup(int                     group_id,
-                                                   const BlockIndicesType& blocks,
-                                                   BlockRefType            ref_type) {
-    (void)group_id;
-    block_pool_->decRef(blocks, ref_type);
-}
-
 GroupedCacheLayerLayout HybridTypeKVCacheAllocator::allLayerCacheBase() const {
     const auto layer_tensors = block_pool_->allLayerCacheBase();
     const auto scale_tensors = block_pool_->allLayerScaleCacheBase();

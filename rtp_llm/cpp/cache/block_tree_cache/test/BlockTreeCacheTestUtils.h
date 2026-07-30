@@ -66,6 +66,10 @@ MultiNodeResource makeMultiNodeResourceForTest(size_t                       grou
 size_t unreferencedBlocksNum(const IBlockPool& pool);
 size_t treeCachedBlocksNum(const IBlockPool& pool);
 DeviceBlockPoolPtr makeStructuralDevicePool(size_t group_set_id);
+void releaseDeviceBlocksAndNotify(BlockTreeCache&          cache,
+                                  const DeviceBlockPoolPtr& pool,
+                                  const BlockIdList&        blocks,
+                                  BlockRefType              ref_type);
 
 void prepareGroupSetsForTest(std::vector<GroupSetPtr>& group_sets);
 

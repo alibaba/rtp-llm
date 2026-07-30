@@ -157,18 +157,6 @@ int HybridPoolKVCacheAllocator::validateGroupIdForLayer(int layer_id, int group_
     return group_id;
 }
 
-void HybridPoolKVCacheAllocator::referenceBlocksInGroup(int                     group_id,
-                                                        const BlockIndicesType& blocks,
-                                                        BlockRefType            ref_type) const {
-    group_block_pools_[static_cast<size_t>(group_id)]->incRef(blocks, ref_type);
-}
-
-void HybridPoolKVCacheAllocator::freeBlocksInGroup(int                     group_id,
-                                                   const BlockIndicesType& blocks,
-                                                   BlockRefType            ref_type) {
-    group_block_pools_[static_cast<size_t>(group_id)]->decRef(blocks, ref_type);
-}
-
 GroupedCacheLayerLayout HybridPoolKVCacheAllocator::allLayerCacheBase() const {
     const auto topology = config_.topologyPtr();
     RTP_LLM_CHECK_WITH_INFO(kv_cache_groups_.size() == topology->groups().size(),

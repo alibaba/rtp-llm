@@ -10,6 +10,7 @@
 #include "gtest/gtest.h"
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/BlockReleaseBatch.h"
 #include "rtp_llm/cpp/cache/FullKVCacheGroup.h"
 #include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
@@ -392,13 +393,22 @@ insertOneKeyThroughAllocator(const CacheConfig& config, const KVCacheAllocatorPt
     return blocks;
 }
 
-void releaseInsertedRequestBlocks(const KVCacheAllocatorPtr& allocator, const std::vector<BlockIdxType>& blocks) {
+void releaseInsertedRequestBlocks(const KVCacheAllocatorPtr&      allocator,
+                                  const std::vector<BlockIdxType>& blocks,
+                                  BlockReleaseBatch&               releases) {
     const auto groups = allocator->cacheGroups();
     ASSERT_EQ(groups.size(), blocks.size());
     for (size_t group_id = 0; group_id < groups.size(); ++group_id) {
         if (!isNullBlockIdx(blocks[group_id])) {
-            groups[group_id]->blockPool()->decRef(blocks[group_id], BlockRefType::REQUEST);
+            releases.append(group_id, groups[group_id]->release({blocks[group_id]}, BlockRefType::REQUEST));
         }
+    }
+}
+
+void submitBlockReleases(const std::shared_ptr<BlockTreeCache>& cache, BlockReleaseBatch& releases) {
+    const std::vector<BlockReleaseReceipt> receipts = releases.finish();
+    if (!receipts.empty()) {
+        cache->onBlocksReleased(receipts);
     }
 }
 
@@ -696,7 +706,7 @@ TEST_F(BlockTreeCacheFactoryTest, CompatibleInsertPacksOneGroupSetResourceInGrou
     auto       allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
     auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
     ASSERT_NE(cache, nullptr);
-    allocator->setBlockTreeCache(cache.get());
+    allocator->attachBlockTreeCache(cache);
 
     ASSERT_EQ(cache->groupSets().size(), 1u);
     EXPECT_EQ(cache->groupSets()[0]->groupIds(), (std::vector<size_t>{0, 1}));
@@ -708,8 +718,48 @@ TEST_F(BlockTreeCacheFactoryTest, CompatibleInsertPacksOneGroupSetResourceInGrou
     ASSERT_EQ(cache->matchedBlocksForGroup(1, match.matched_resources), (BlockIndicesType{blocks[1]}));
     cache->releaseMatchedResources(match.matched_resources);
 
-    releaseInsertedRequestBlocks(allocator, blocks);
-    allocator->setBlockTreeCache(nullptr);
+    BlockReleaseBatch releases;
+    releaseInsertedRequestBlocks(allocator, blocks, releases);
+    submitBlockReleases(cache, releases);
+}
+
+TEST_F(BlockTreeCacheFactoryTest, BlockTreeCacheCanOnlyBeAttachedOnce) {
+    const auto config    = makeSingleConfig();
+    auto       allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
+    ASSERT_NE(cache, nullptr);
+
+    EXPECT_THROW(allocator->attachBlockTreeCache(nullptr), std::runtime_error);
+    allocator->attachBlockTreeCache(cache);
+    EXPECT_EQ(allocator->blockTreeCache(), cache);
+    EXPECT_THROW(allocator->attachBlockTreeCache(cache), std::runtime_error);
+}
+
+TEST_F(BlockTreeCacheFactoryTest, SurvivingGroupCallbackKeepsBlockTreeCacheAliveWithoutAllocator) {
+    const auto config    = makeSingleConfig();
+    auto       allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+    auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
+    ASSERT_NE(cache, nullptr);
+    allocator->attachBlockTreeCache(cache);
+
+    KVCacheGroupPtr group = allocator->cacheGroups().front();
+    ASSERT_NE(group, nullptr);
+    const DeviceBlockPoolPtr pool        = group->blockPool();
+    const size_t             free_blocks = pool->freeBlocksNum();
+    auto                     allocated   = pool->malloc(free_blocks);
+    ASSERT_TRUE(allocated.has_value());
+    pool->incRef(*allocated, BlockRefType::REQUEST);
+
+    std::weak_ptr<BlockTreeCache> cache_lifetime = cache;
+    allocator.reset();
+    cache.reset();
+
+    EXPECT_FALSE(cache_lifetime.expired());
+    EXPECT_FALSE(group->ensureFreeBlocks(1));
+
+    pool->decRef(*allocated, BlockRefType::REQUEST);
+    group.reset();
+    EXPECT_TRUE(cache_lifetime.expired());
 }
 
 TEST_F(BlockTreeCacheFactoryTest, MiddleDisabledGroupIsExcludedWithoutShiftingReusableGroupIds) {
@@ -717,7 +767,7 @@ TEST_F(BlockTreeCacheFactoryTest, MiddleDisabledGroupIsExcludedWithoutShiftingRe
     auto       allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
     auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
     ASSERT_NE(cache, nullptr);
-    allocator->setBlockTreeCache(cache.get());
+    allocator->attachBlockTreeCache(cache);
 
     ASSERT_EQ(cache->groupSets().size(), 1u);
     EXPECT_EQ(cache->groupSets()[0]->groupIds(), (std::vector<size_t>{0, 2}));
@@ -732,8 +782,9 @@ TEST_F(BlockTreeCacheFactoryTest, MiddleDisabledGroupIsExcludedWithoutShiftingRe
     }
     cache->releaseMatchedResources(match.matched_resources);
 
-    releaseInsertedRequestBlocks(allocator, blocks);
-    allocator->setBlockTreeCache(nullptr);
+    BlockReleaseBatch releases;
+    releaseInsertedRequestBlocks(allocator, blocks, releases);
+    submitBlockReleases(cache, releases);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkCountsPrimaryAndCascadeCreditsOnce) {
@@ -747,7 +798,7 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkCountsPrimaryAnd
     kv_cache_config.device_cache_min_free_blocks = 4;
     auto cache                                   = createBlockTreeCache(config, kv_cache_config, allocator);
     ASSERT_NE(cache, nullptr);
-    allocator->setBlockTreeCache(cache.get());
+    allocator->attachBlockTreeCache(cache);
 
     const auto allocator_groups = allocator->cacheGroups();
     ASSERT_EQ(allocator_groups.size(), 2u);
@@ -768,11 +819,12 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkCountsPrimaryAnd
         request_blocks.push_back(insertOneKeyThroughAllocator(config, allocator, key));
     }
     ASSERT_EQ(backing->freeBlocksNum(), 1u);
+    BlockReleaseBatch releases;
     for (const auto& blocks : request_blocks) {
-        releaseInsertedRequestBlocks(allocator, blocks);
+        releaseInsertedRequestBlocks(allocator, blocks, releases);
     }
+    submitBlockReleases(cache, releases);
 
-    cache->onBlocksReleased();
     cache->waitForPendingTasks();
 
     // One physical deficit is shared by both logical adapters. A FULL+LINEAR
@@ -796,7 +848,6 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkCountsPrimaryAnd
     block_tree_cache_test::BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, /*num_blocks=*/100, Tier::DEVICE);
     block_tree_cache_test::BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, /*num_blocks=*/100, Tier::HOST);
     cache->waitForPendingTasks();
-    allocator->setBlockTreeCache(nullptr);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesOnNextTrigger) {
@@ -810,7 +861,7 @@ TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesO
     kv_cache_config.device_cache_min_free_blocks = 7;
     auto cache                                   = createBlockTreeCache(config, kv_cache_config, allocator);
     ASSERT_NE(cache, nullptr);
-    allocator->setBlockTreeCache(cache.get());
+    allocator->attachBlockTreeCache(cache);
 
     auto scripted_copy =
         std::make_shared<block_tree_cache_test::ScriptedPerRankBlockTransferEngine>(cache->groupSets());
@@ -820,8 +871,9 @@ TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesO
     const auto blocks  = insertOneKeyThroughAllocator(config, allocator, /*key=*/810);
     auto       backing = allocator->cacheGroups().front()->blockPool();
     ASSERT_EQ(backing->freeBlocksNum(), 6u);
-    releaseInsertedRequestBlocks(allocator, blocks);
-    cache->onBlocksReleased();
+    BlockReleaseBatch releases;
+    releaseInsertedRequestBlocks(allocator, blocks, releases);
+    submitBlockReleases(cache, releases);
     cache->waitForPendingTasks();
 
     // The failed accepted async plan is not recursively retried in the same
@@ -830,14 +882,13 @@ TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesO
     EXPECT_EQ(backing->freeBlocksNum(), 6u);
 
     scripted_copy->clear();
-    cache->onBlocksReleased();
+    block_tree_cache_test::BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     cache->waitForPendingTasks();
     EXPECT_EQ(scripted_copy->submitCount(), 1u);
     EXPECT_EQ(backing->freeBlocksNum(), 7u);
 
     block_tree_cache_test::BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, /*num_blocks=*/100, Tier::HOST);
     cache->waitForPendingTasks();
-    allocator->setBlockTreeCache(nullptr);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, IncompatibleGroupsKeepSeparateGroupSetResources) {
@@ -845,7 +896,7 @@ TEST_F(BlockTreeCacheFactoryTest, IncompatibleGroupsKeepSeparateGroupSetResource
     auto       allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
     auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
     ASSERT_NE(cache, nullptr);
-    allocator->setBlockTreeCache(cache.get());
+    allocator->attachBlockTreeCache(cache);
 
     ASSERT_EQ(cache->groupSets().size(), 2u);
     const auto blocks = insertOneKeyThroughAllocator(config, allocator, /*key=*/702);
@@ -861,8 +912,9 @@ TEST_F(BlockTreeCacheFactoryTest, IncompatibleGroupsKeepSeparateGroupSetResource
     EXPECT_EQ(cache->groupSets()[0]->devicePools()[0]->refCount(blocks[0]), 2u);
     EXPECT_EQ(cache->groupSets()[1]->devicePools()[0]->refCount(blocks[1]), 2u);
 
-    releaseInsertedRequestBlocks(allocator, blocks);
-    allocator->setBlockTreeCache(nullptr);
+    BlockReleaseBatch releases;
+    releaseInsertedRequestBlocks(allocator, blocks, releases);
+    submitBlockReleases(cache, releases);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) {
@@ -874,7 +926,7 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
     kv_cache_config.memory_cache_size_mb       = 1;
     auto cache                                 = createBlockTreeCache(config, kv_cache_config, allocator);
     ASSERT_NE(cache, nullptr);
-    allocator->setBlockTreeCache(cache.get());
+    allocator->attachBlockTreeCache(cache);
 
     ASSERT_EQ(cache->groupSets().size(), 2u);
     const auto& group_set_a = cache->groupSets()[0];
@@ -887,8 +939,9 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
 
     const auto original_blocks = insertOneKeyThroughAllocator(config, allocator, /*key=*/703);
     ASSERT_EQ(original_blocks.size(), 2u);
-    releaseInsertedRequestBlocks(allocator, original_blocks);
-    cache->onBlocksReleased();
+    BlockReleaseBatch releases;
+    releaseInsertedRequestBlocks(allocator, original_blocks, releases);
+    submitBlockReleases(cache, releases);
 
     auto find = cache->tree()->findNode(CacheKeysType{703});
     ASSERT_EQ(find.size(), 1u);
@@ -934,8 +987,8 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
         allocator->cacheGroups()[1]->convertIndexToAddr(b_layer, original_blocks[1]).kv_addr, b_bytes, 0x5a);
 
     EXPECT_EQ(cache->getStats().device_heap_total_size, 1u);
-    allocator->cacheGroups()[0]->blockPool()->decRef(*refill_a, BlockRefType::REQUEST);
-    cache->onBlocksReleased();
+    block_tree_cache_test::releaseDeviceBlocksAndNotify(
+        *cache, allocator->cacheGroups()[0]->blockPool(), *refill_a, BlockRefType::REQUEST);
     EXPECT_EQ(cache->getStats().device_heap_total_size, 2u);
 
     const size_t a_ref_before_duplicate = group_set_a->devicePools()[0]->refCount(refill_a->front());
@@ -997,7 +1050,6 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
     EXPECT_EQ(group_set_b->devicePools()[0]->refCount(original_blocks[1]), b_ref_before);
     expectDevicePattern(
         allocator->cacheGroups()[1]->convertIndexToAddr(b_layer, original_blocks[1]).kv_addr, b_bytes, 0x5a);
-    allocator->setBlockTreeCache(nullptr);
 }
 
 TEST_F(BlockTreeCacheFactoryTest, InsertRejectsWrongShapeAndFailsFastOnInvalidGroupPayloads) {

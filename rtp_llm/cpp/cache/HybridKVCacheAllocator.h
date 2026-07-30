@@ -62,20 +62,20 @@ protected:
                     const std::shared_ptr<CPSlotMapper>& cp_mapper,
                     std::shared_ptr<LoadTicket>&         ticket,
                     std::vector<BlockIndicesType>&       referenced_blocks);
-    bool preflightLoadMappings(const std::shared_ptr<LoadTicket>& ticket) const;
+    bool                       preflightLoadMappings(const std::shared_ptr<LoadTicket>& ticket) const;
+    const std::vector<size_t>* groupIdsForGroupSet(size_t group_set_id) const;
 
-    virtual void referenceBlocksInGroup(int group_id, const BlockIndicesType& blocks, BlockRefType ref_type) const = 0;
-    virtual void freeBlocksInGroup(int group_id, const BlockIndicesType& blocks, BlockRefType ref_type)            = 0;
+    void referenceBlocksInGroup(int group_id, const BlockIndicesType& blocks, BlockRefType ref_type) const;
+    std::vector<BlockRefTransition>
+    freeBlocksInGroup(int group_id, const BlockIndicesType& blocks, BlockRefType ref_type);
     virtual bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const;
     bool         skipReuseCacheGroup(int group_id) const;
     bool         cpCompactSwaGroup(int group_id, const std::shared_ptr<CPSlotMapper>& mapper) const;
     void         rollbackBlockIdsToSize(int group_id, BlockIds& block_ids, size_t original_size);
     void         rollbackInitMalloc(BatchKVCacheResource&                kv_resource,
                                     const std::vector<BlockIndicesType>& referenced_blocks,
-                                    const std::vector<size_t>&           original_sizes);
-    void         rollbackIncrMalloc(BatchKVCacheResource&                   kv_resource,
-                                    const std::vector<std::vector<size_t>>& original_sizes,
-                                    int                                     failed_batch);
+                                    const std::vector<size_t>&           original_sizes,
+                                    BlockReleaseBatch&                   releases);
     virtual void copyBlockMappingForGroup(int group_id, const std::vector<BlockIdPair>& block_update_mapping) const;
     virtual MemoryType memoryTypeForGroup(int group_id) const;
 

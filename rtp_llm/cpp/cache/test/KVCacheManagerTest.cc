@@ -364,7 +364,7 @@ TEST_F(KVCacheManagerTest, InitAcceptsFullAndLinearGroups) {
     EXPECT_NE(cache_manager->convertIndexToAddr(/*block_index=*/1, /*layer_id=*/3).kv_addr, nullptr);
 }
 
-TEST_F(KVCacheManagerTest, InitPublishesOneOwnedBlockTreeCacheAndInjectsSameObserver) {
+TEST_F(KVCacheManagerTest, InitPublishesSameSharedBlockTreeCacheToAllocator) {
     auto cache_config = makeSimpleHybridMhaCacheConfig(
         /*layer_num=*/4, /*block_num=*/6, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_BF16);
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
@@ -372,7 +372,9 @@ TEST_F(KVCacheManagerTest, InitPublishesOneOwnedBlockTreeCacheAndInjectsSameObse
     ASSERT_TRUE(cache_manager->init());
     ASSERT_NE(cache_manager->blockTreeCache(), nullptr);
     ASSERT_NE(cache_manager->allocator_, nullptr);
-    EXPECT_EQ(cache_manager->allocator_->blockTreeCache(), cache_manager->blockTreeCache().get());
+    const BlockTreeCachePtr allocator_cache = cache_manager->allocator_->blockTreeCache();
+    ASSERT_NE(allocator_cache, nullptr);
+    EXPECT_EQ(allocator_cache, cache_manager->blockTreeCache());
 
     const auto target_groups = cache_manager->allocator_->cacheGroups();
     ASSERT_EQ(target_groups.size(), static_cast<size_t>(cache_config.groupNums()));
@@ -395,7 +397,7 @@ TEST_F(KVCacheManagerTest, InitPublishesOneOwnedBlockTreeCacheAndInjectsSameObse
     }
 }
 
-TEST_F(KVCacheManagerTest, TeardownDisconnectsSurvivingAllocatorBeforeOwnedBlockTreeCacheDies) {
+TEST_F(KVCacheManagerTest, TeardownKeepsBlockTreeCacheAliveWithSurvivingAllocator) {
     auto cache_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/6, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_BF16);
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
@@ -408,9 +410,12 @@ TEST_F(KVCacheManagerTest, TeardownDisconnectsSurvivingAllocatorBeforeOwnedBlock
 
     cache_manager.reset();
 
-    EXPECT_EQ(surviving_allocator->blockTreeCache(), nullptr);
-    EXPECT_TRUE(cache_lifetime.expired());
+    EXPECT_EQ(surviving_allocator->blockTreeCache(), cache_lifetime.lock());
+    EXPECT_FALSE(cache_lifetime.expired());
     EXPECT_FALSE(surviving_allocator->cacheGroups().empty());
+
+    surviving_allocator.reset();
+    EXPECT_TRUE(cache_lifetime.expired());
 }
 
 TEST_F(KVCacheManagerTest, FactoryFailureDoesNotPublishOrInjectBlockTreeCache) {

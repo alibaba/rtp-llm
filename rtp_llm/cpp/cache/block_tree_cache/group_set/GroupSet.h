@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -82,6 +83,11 @@ public:
 
     bool hasAllocatedDeviceBlocks(const std::vector<BlockIdxType>& blocks) const;
 
+    void      mapDeviceBlocksToTreeNode(const MultiNodeResource& resource);
+    void      unmapDeviceBlocksFromTreeNode(const MultiNodeResource& resource);
+    TreeNode* findTreeNodeByDeviceBlock(size_t member_group_id, BlockIdxType block_id) const;
+    bool      areBlockToNodeMapsEmpty() const;
+
     bool anyDevicePoolExceedsRatio(double ratio) const {
         for (const auto& pool : device_pools_) {
             size_t capacity  = pool->totalBlocksNum();
@@ -147,13 +153,16 @@ public:
     virtual bool isEvictable(const GroupSetResource& resource, Tier tier) const;
 
 private:
+    using DeviceBlockToTreeNodeMap = std::unordered_map<BlockIdxType, TreeNode*>;
+
     std::vector<DeviceBlockPoolPtr>         device_pools_;
     std::shared_ptr<HostBlockPool>          host_pool_;
     std::shared_ptr<BlockTreeDiskBlockPool> disk_pool_;
-    size_t                               group_set_id_{0};
-    std::shared_ptr<const CacheTopology> topology_;
-    std::vector<size_t>                  group_ids_;
-    size_t                               payload_bytes_{0};
+    std::vector<DeviceBlockToTreeNodeMap>   block_to_node_maps_;
+    size_t                                  group_set_id_{0};
+    std::shared_ptr<const CacheTopology>    topology_;
+    std::vector<size_t>                     group_ids_;
+    size_t                                  payload_bytes_{0};
 };
 
 using GroupSetPtr = std::shared_ptr<GroupSet>;

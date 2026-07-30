@@ -17,6 +17,8 @@ namespace rtp_llm {
 
 class CPSlotMapper;
 class BlockTreeCache;
+using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;
+class BlockReleaseBatch;
 class KVCacheGroup;
 using KVCacheGroupPtr = std::shared_ptr<KVCacheGroup>;
 struct KVCacheTokenCapacity {
@@ -110,9 +112,9 @@ public:
         return {};
     }
 
-    void setBlockTreeCache(BlockTreeCache* block_tree_cache);
+    void attachBlockTreeCache(BlockTreeCachePtr block_tree_cache);
 
-    BlockTreeCache* blockTreeCache() const {
+    BlockTreeCachePtr blockTreeCache() const {
         return block_tree_cache_;
     }
 
@@ -175,11 +177,12 @@ protected:
     size_t       logicalSeqSizePerBlockForCapacity(size_t gid) const;
     int          cpEffectiveSeqLenForAlloc(size_t gid, int seq_len) const;
     int          deviceCacheMetricTokensPerBlock() const;
+    void         submitBlockReleases(BlockReleaseBatch& releases);
 
     CacheConfig                        config_;
     AllocationType                     allocation_type_;
     DeviceBlockPoolPtr                 block_pool_;
-    BlockTreeCache*                    block_tree_cache_ = nullptr;
+    BlockTreeCachePtr                  block_tree_cache_;
     std::shared_ptr<CPSlotMapper>      cp_slot_mapper_;
     const kmonitor::MetricsReporterPtr metrics_reporter_           = nullptr;
     bool                               use_cuda_malloc_block_pool_ = false;

@@ -154,6 +154,33 @@ TEST_F(DeviceFullKVCacheGroupTest, RequestReleaseKeepsCacheHeldBlock) {
     EXPECT_FALSE(block_pool->isAllocated(block));
 }
 
+TEST_F(DeviceFullKVCacheGroupTest, ReleaseReturnsFilteredReferenceTransitions) {
+    auto block_pool = createDeviceBlockPool();
+    ASSERT_TRUE(block_pool->init());
+
+    auto spec                = std::make_shared<MHAKVCacheSpec>();
+    spec->seq_size_per_block = 2;
+    DeviceFullKVCacheGroup group({}, spec, block_pool, 7);
+
+    BlockIds block_ids(/*kernel_blocks_per_kv_block=*/1);
+    ASSERT_TRUE(group.malloc(block_ids, /*seq_len=*/2));
+    ASSERT_EQ(block_ids.blocksNum(), 1u);
+    const BlockIdxType block = block_ids.blocks()[0];
+    block_pool->incRef(block, BlockRefType::BLOCK_CACHE);
+
+    const auto transitions =
+        group.release(BlockIndicesType{NULL_BLOCK_IDX, block}, BlockRefType::REQUEST);
+
+    ASSERT_EQ(transitions.size(), 1u);
+    EXPECT_EQ(transitions[0].block_id, block);
+    EXPECT_EQ(transitions[0].ref_type, BlockRefType::REQUEST);
+    EXPECT_EQ(transitions[0].old_total_ref_count, 2u);
+    EXPECT_EQ(transitions[0].new_total_ref_count, 1u);
+    EXPECT_FALSE(transitions[0].block_released);
+
+    block_pool->decRef(block, BlockRefType::BLOCK_CACHE);
+}
+
 }  // namespace test
 }  // namespace rtp_llm
 

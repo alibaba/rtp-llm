@@ -2,16 +2,17 @@
 
 #include <memory>
 #include <string>
+#include <tuple>
 #include <unordered_map>
 #include <utility>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/BlockReleaseBatch.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheFactory.h"
 
 namespace rtp_llm::test {
 
 // Mirrors KVCacheManager's mandatory allocator/BTC wiring for allocator unit tests.
-// The wrapper owns the cache so the raw allocator observer never outlives it.
 template<typename Allocator>
 class BlockTreeCacheTestAllocator: public Allocator {
 public:
@@ -19,25 +20,20 @@ public:
     explicit BlockTreeCacheTestAllocator(const CacheConfig& config, Args&&... args):
         Allocator(config, std::forward<Args>(args)...), config_(config) {}
 
-    ~BlockTreeCacheTestAllocator() override {
-        this->setBlockTreeCache(nullptr);
-        block_tree_cache_.reset();
-    }
-
     bool init() {
         if (!Allocator::init()) {
             return false;
         }
-        block_tree_cache_ = createBlockTreeCache(config_, kv_cache_config_, this->shared_from_this());
-        if (!block_tree_cache_) {
+        auto block_tree_cache = createBlockTreeCache(config_, kv_cache_config_, this->shared_from_this());
+        if (!block_tree_cache) {
             return false;
         }
-        this->setBlockTreeCache(block_tree_cache_.get());
+        this->attachBlockTreeCache(std::move(block_tree_cache));
         return true;
     }
 
     const BlockTreeCachePtr& blockTreeCacheOwner() const {
-        return block_tree_cache_;
+        return this->block_tree_cache_;
     }
 
     void setBlockTreeCacheConfigForTest(KVCacheConfig config) {
@@ -45,9 +41,8 @@ public:
     }
 
 private:
-    CacheConfig       config_;
-    KVCacheConfig     kv_cache_config_;
-    BlockTreeCachePtr block_tree_cache_;
+    CacheConfig   config_;
+    KVCacheConfig kv_cache_config_;
 };
 
 struct BlockTreeSeedResult {
@@ -73,12 +68,13 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
 
     const auto&                                group_sets = cache->groupSets();
     std::vector<std::vector<GroupSetResource>> slots(keys.size(), std::vector<GroupSetResource>(group_sets.size()));
-    std::vector<std::pair<DeviceBlockPoolPtr, BlockIndicesType>> request_holds;
+    std::vector<std::tuple<size_t, DeviceBlockPoolPtr, BlockIndicesType>> request_holds;
 
     for (const auto& group_set : group_sets) {
         if (!group_set || group_set->groupSetId() >= group_sets.size()
             || group_set->groupIds().size() != group_set->devicePools().size()) {
-            for (const auto& [pool, blocks] : request_holds) {
+            for (const auto& [group_id, pool, blocks] : request_holds) {
+                (void)group_id;
                 pool->decRef(blocks, BlockRefType::REQUEST);
             }
             return result;
@@ -88,7 +84,8 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
         for (size_t pool_index = 0; pool_index < group_set->devicePools().size(); ++pool_index) {
             const auto& device_pool = group_set->devicePools()[pool_index];
             if (!device_pool) {
-                for (const auto& [pool, blocks] : request_holds) {
+                for (const auto& [group_id, pool, blocks] : request_holds) {
+                    (void)group_id;
                     pool->decRef(blocks, BlockRefType::REQUEST);
                 }
                 return result;
@@ -99,7 +96,8 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
                 if (allocated.has_value()) {
                     device_pool->free(*allocated);
                 }
-                for (const auto& [pool, held_blocks] : request_holds) {
+                for (const auto& [group_id, pool, held_blocks] : request_holds) {
+                    (void)group_id;
                     pool->decRef(held_blocks, BlockRefType::REQUEST);
                 }
                 return result;
@@ -113,15 +111,19 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
                 device_blocks[pool_index] = blocks[path_index];
             }
             result.blocks_by_tag.emplace(group_set->groupAt(pool_index).tag, blocks);
-            request_holds.emplace_back(device_pool, std::move(blocks));
+            request_holds.emplace_back(group_set->groupIds()[pool_index], device_pool, std::move(blocks));
         }
     }
 
     cache->insert(keys, slots);
-    for (const auto& [pool, blocks] : request_holds) {
-        pool->decRef(blocks, BlockRefType::REQUEST);
+    BlockReleaseBatch releases;
+    for (const auto& [group_id, pool, blocks] : request_holds) {
+        releases.append(group_id, pool->decRefWithResult(blocks, BlockRefType::REQUEST));
     }
-    cache->onBlocksReleased();
+    const auto receipts = releases.finish();
+    if (!receipts.empty()) {
+        cache->onBlocksReleased(receipts);
+    }
 
     auto match     = cache->match(keys);
     result.success = match.matched_blocks == keys.size();

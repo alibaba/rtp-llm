@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeTaskPool.h"
@@ -269,13 +270,47 @@ void BlockTreeCache::waitForPendingTasks() {
     task_pool_->waitForIdle();
 }
 
-void BlockTreeCache::onBlocksReleased() {
+void BlockTreeCache::onBlocksReleased(const std::vector<BlockReleaseReceipt>& receipts) {
     std::lock_guard<std::mutex> lock(mutex_);
-    // After external refcount changes (e.g. request free), blocks that were
-    // non-evictable at insert time (refcount > 1) may now have refcount == 1
-    // and thus become eviction candidates.  Refresh the eviction heap before
-    // checking watermark so that pending evictions can find victims.
-    evictor_.refreshAllCandidates();
+    struct DirtyResource {
+        TreeNode* node;
+        size_t    group_set_id;
+
+        bool operator==(const DirtyResource& other) const {
+            return node == other.node && group_set_id == other.group_set_id;
+        }
+    };
+    struct DirtyResourceHash {
+        size_t operator()(const DirtyResource& resource) const {
+            const size_t node_hash      = std::hash<TreeNode*>{}(resource.node);
+            const size_t group_set_hash = std::hash<size_t>{}(resource.group_set_id);
+            return node_hash ^ (group_set_hash << 1);
+        }
+    };
+
+    std::unordered_set<DirtyResource, DirtyResourceHash> dirty_resources;
+    dirty_resources.reserve(receipts.size());
+    for (const BlockReleaseReceipt& receipt : receipts) {
+        if (receipt.new_total_ref_count > 1) {
+            continue;
+        }
+        const ReusableGroupLocation* location = tree_->reusableGroupLocation(receipt.group_id);
+        if (location == nullptr) {
+            continue;
+        }
+
+        const GroupSetPtr& group_set = tree_->groupSets()[location->group_set_id];
+
+        TreeNode* node = group_set->findTreeNodeByDeviceBlock(location->member_group_id, receipt.block_id);
+        if (node == nullptr) {
+            continue;
+        }
+        dirty_resources.emplace(DirtyResource{node, location->group_set_id});
+    }
+
+    for (const DirtyResource& dirty_resource : dirty_resources) {
+        evictor_.refreshCandidate(dirty_resource.node, dirty_resource.group_set_id);
+    }
     checkWatermark();
 }
 

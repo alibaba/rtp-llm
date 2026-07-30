@@ -277,22 +277,6 @@ void BlockTreeEvictor::refreshCandidatesAfterRelease(const MultiNodeResource& se
     }
 }
 
-void BlockTreeEvictor::refreshAllCandidates() {
-    for (const auto& node_ptr : tree_->nodes()) {
-        TreeNode* node = node_ptr.get();
-        if (node == nullptr) {
-            continue;
-        }
-        for (auto& group_set : tree_->groupSets()) {
-            const size_t group_set_id = group_set->groupSetId();
-            if (group_set_id >= node->group_set_resources.size()) {
-                continue;
-            }
-            refreshCandidate(*group_set, node, node->group_set_resources[group_set_id].getTopTier());
-        }
-    }
-}
-
 void BlockTreeEvictor::onTopologyChanged(TreeNode* parent) {
     if (parent == nullptr) {
         return;
@@ -523,6 +507,9 @@ bool BlockTreeEvictor::applyMoveCompletion(const GroupSetPtr& group_set, const E
     if (move.target_tier != Tier::NONE) {
         MultiNodeResource target_holder{move.group_set_id, move.target_tier, {{move.node, move.target_blocks}}};
         resource.setBlocks(move.target_tier, move.target_blocks);
+        if (move.target_tier == Tier::DEVICE) {
+            group_set->mapDeviceBlocksToTreeNode(target_holder);
+        }
         group_set->referenceBlocks(target_holder, BlockRefType::BLOCK_CACHE);
         group_set->unreferenceBlocks(target_holder, BlockRefType::EVICTION);
     }
@@ -530,8 +517,12 @@ bool BlockTreeEvictor::applyMoveCompletion(const GroupSetPtr& group_set, const E
     // DEMOTING is the operation's ownership token. Release its saved source
     // cache hold before clearing the corresponding resource tier. The target is
     // installed while the state is still non-IDLE, then IDLE is published last.
-    group_set->unreferenceBlocks(MultiNodeResource{move.group_set_id, move.source_tier, {{move.node, move.source_blocks}}},
-                                 BlockRefType::BLOCK_CACHE);
+    const MultiNodeResource source_holder{
+        move.group_set_id, move.source_tier, {{move.node, move.source_blocks}}};
+    if (move.source_tier == Tier::DEVICE) {
+        group_set->unmapDeviceBlocksFromTreeNode(source_holder);
+    }
+    group_set->unreferenceBlocks(source_holder, BlockRefType::BLOCK_CACHE);
     resource.evictFromTier(move.source_tier);
     resource.transfer_state = GroupSetTransferState::IDLE;
     RTP_LLM_CHECK_WITH_INFO(!resource.hasTier(Tier::DEVICE) || resource.hasCompleteDeviceValue(),

@@ -1,7 +1,6 @@
 #pragma once
 
 #include <functional>
-#include <mutex>
 #include <memory>
 #include <vector>
 #include <cstdint>
@@ -18,6 +17,8 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 
 namespace rtp_llm {
+
+class KVCacheAllocator;
 
 struct NeedBlocksInfo {
     int common_blocks = 0;  // shared blocks across batches
@@ -61,8 +62,13 @@ public:
     virtual void
          insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident);
     bool materializePositions(BlockIds& block_ids, const std::vector<size_t>& positions);
-    virtual void free(const BlockIndicesType& block_indices)                                                     = 0;
-    virtual void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
+    virtual std::vector<BlockRefTransition>
+    release(const BlockIndicesType& block_indices, BlockRefType ref_type = BlockRefType::REQUEST) = 0;
+    virtual void free(const BlockIndicesType& block_indices)                                      = 0;
+    virtual std::vector<BlockRefTransition>
+    releaseSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
+    virtual void
+    removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) = 0;
     virtual int  needBlocksNum(int seq_len, int current_blocks, int reserve_step = 0) const                      = 0;
     // Estimate peak additional blocks needed when generating remaining_tokens more tokens.
     virtual int estimatePeakNeedBlocks(int                     seq_len,
@@ -83,6 +89,8 @@ public:
     virtual void reference(BlockIds& block_ids, const BlockIndicesType& new_block_indices)                         = 0;
 
     void                                   reference(const BlockIndicesType& new_block_indices);
+    void                                   reference(const BlockIndicesType& new_block_indices,
+                                                     BlockRefType            ref_type);
     std::unordered_map<int, torch::Tensor> allLayerCacheBase() const;
     std::unordered_map<int, torch::Tensor> allLayerScaleCacheBase() const;
     BlockAddrInfo                          convertIndexToAddr(int layer_id, int block_id) const;
@@ -93,7 +101,6 @@ public:
     size_t freeBlocksNum() const;
     bool   ensureFreeBlocks(int need_blocks);
     using EvictCallback = std::function<size_t(size_t)>;
-    void                    setEvictCallback(EvictCallback callback);
     int                     seqSizePerBlock() const;
     const std::string&      tag() const;
     const GroupBase&        config() const;
@@ -128,16 +135,22 @@ protected:
         return group;
     }
 
+    void                            addBlockRefs(const BlockIndicesType& blocks, BlockRefType ref_type);
+    std::vector<BlockRefTransition> releaseBlockRefs(const BlockIndicesType& blocks, BlockRefType ref_type);
+
     GroupBase                    cache_group_;
     DeviceBlockPoolPtr           block_pool_;
     kmonitor::MetricsReporterPtr metrics_reporter_ = nullptr;
     int                          group_id_         = -1;
     EvictCallback                evict_callback_;
-    mutable std::mutex           evict_callback_mutex_;
 
     std::unordered_map<int, torch::Tensor> global_layer_to_kv_tensors;
     std::unordered_map<int, torch::Tensor> global_layer_to_kv_scale_tensors;
     std::unordered_map<int, int>           global_layer_to_local_layer;
+
+private:
+    friend class KVCacheAllocator;
+    void setEvictCallback(EvictCallback callback);
 };
 
 using KVCacheGroupPtr = std::shared_ptr<KVCacheGroup>;

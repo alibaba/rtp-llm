@@ -1009,10 +1009,9 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
         second.load_ticket.reset();
         environment->reclaimAll();
         for (const auto& [pool, block] : request_targets) {
-            pool->decRef(block, BlockRefType::REQUEST);
-            pool->decRef(block, BlockRefType::REQUEST);
+            releaseDeviceBlocksAndNotify(*environment->cache, pool, {block}, BlockRefType::REQUEST);
+            releaseDeviceBlocksAndNotify(*environment->cache, pool, {block}, BlockRefType::REQUEST);
         }
-        environment->cache->onBlocksReleased();
         environment->reclaimAll();
         environment->expectFullyReclaimed();
     }
@@ -1106,9 +1105,8 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
     result.load_ticket.reset();
     environment->reclaimAll();
     for (const auto& [pool, block] : request_targets) {
-        pool->decRef(block, BlockRefType::REQUEST);
+        releaseDeviceBlocksAndNotify(*environment->cache, pool, {block}, BlockRefType::REQUEST);
     }
-    environment->cache->onBlocksReleased();
     environment->reclaimAll();
     environment->expectFullyReclaimed();
 }
@@ -1300,9 +1298,8 @@ TEST_P(BlockTreeCacheLowerTierTest, FullSWA_MatchLowerTierOnlyReturnsTicketWitho
     environment->reclaimAll();
     environment->cache->waitForPendingTasks();
     for (const auto& [pool, block] : request_targets) {
-        pool->decRef(block, BlockRefType::REQUEST);
+        releaseDeviceBlocksAndNotify(*environment->cache, pool, {block}, BlockRefType::REQUEST);
     }
-    environment->cache->onBlocksReleased();
     environment->reclaimAll();
     environment->expectFullyReclaimed();
 }
@@ -1510,9 +1507,8 @@ TEST_P(BlockTreeCacheLowerTierTest, CancelPausedLoadStillInstallsTransferredTarg
     result.load_ticket.reset();
     environment->cache->waitForPendingTasks();
     for (const auto& [pool, block] : target_blocks) {
-        pool->decRef(block, BlockRefType::REQUEST);
+        releaseDeviceBlocksAndNotify(*environment->cache, pool, {block}, BlockRefType::REQUEST);
     }
-    environment->cache->onBlocksReleased();
     environment->reclaimAll();
     environment->expectFullyReclaimed();
 }
@@ -1594,9 +1590,8 @@ TEST_P(BlockTreeCacheLowerTierTest, CancelCompletionRaceSettlesExactlyOnce) {
     result.load_ticket.reset();
     environment->reclaimAll();
     for (const auto& [pool, block] : target_blocks) {
-        pool->decRef(block, BlockRefType::REQUEST);
+        releaseDeviceBlocksAndNotify(*environment->cache, pool, {block}, BlockRefType::REQUEST);
     }
-    environment->cache->onBlocksReleased();
     environment->reclaimAll();
     environment->expectFullyReclaimed();
 }
@@ -1739,10 +1734,9 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesLoadAndRestoresCandi
     joined_result.load_ticket.reset();
     environment->reclaimAll();
     for (const auto& [pool, block] : target_blocks) {
-        pool->decRef(block, BlockRefType::REQUEST);
-        pool->decRef(block, BlockRefType::REQUEST);
+        releaseDeviceBlocksAndNotify(*environment->cache, pool, {block}, BlockRefType::REQUEST);
+        releaseDeviceBlocksAndNotify(*environment->cache, pool, {block}, BlockRefType::REQUEST);
     }
-    environment->cache->onBlocksReleased();
     environment->reclaimAll();
     environment->expectFullyReclaimed();
 }
@@ -1833,9 +1827,8 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadDirectTransferExceptionRestoresSou
     result.load_ticket.reset();
     environment->reclaimAll();
     for (const auto& [pool, block] : target_blocks) {
-        pool->decRef(block, BlockRefType::REQUEST);
+        releaseDeviceBlocksAndNotify(*environment->cache, pool, {block}, BlockRefType::REQUEST);
     }
-    environment->cache->onBlocksReleased();
     environment->reclaimAll();
     environment->expectFullyReclaimed();
 }
@@ -2102,9 +2095,8 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadAsyncCompletionRefreshesBeforeTe
     EXPECT_TRUE(context->success());
     environment->cache->waitForPendingTasks();
     for (const auto& [pool, block] : request_target_blocks) {
-        pool->decRef(block, BlockRefType::REQUEST);
+        releaseDeviceBlocksAndNotify(*environment->cache, pool, {block}, BlockRefType::REQUEST);
     }
-    environment->cache->onBlocksReleased();
     environment->reclaimAll();
     environment->expectFullyReclaimed();
 }
@@ -2128,9 +2120,11 @@ TEST_F(BlockTreeCacheIntegrationTest, SparseDisconnectedSWADoesNotPublishVacuous
         ASSERT_TRUE(swa_resource.hasTier(Tier::DEVICE));
         const std::vector<BlockIdxType> old_device_blocks =
             swa_resource.getBlocks(Tier::DEVICE);
-        environment->groups[1]->unreferenceBlocks(MultiNodeResource{1, Tier::DEVICE, {{find[path_index], old_device_blocks}}},
-                                                  BlockRefType::BLOCK_CACHE);
-        swa_resource.setBlocks(Tier::DEVICE, {});
+        const MultiNodeResource device_resource{
+            1, Tier::DEVICE, {{find[path_index], old_device_blocks}}};
+        environment->groups[1]->unmapDeviceBlocksFromTreeNode(device_resource);
+        swa_resource.evictFromTier(Tier::DEVICE);
+        environment->groups[1]->unreferenceBlocks(device_resource, BlockRefType::BLOCK_CACHE);
         if (path_index >= 2) {
             const BlockIdxType host_block =
                 environment->groups[1]->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
@@ -2139,7 +2133,6 @@ TEST_F(BlockTreeCacheIntegrationTest, SparseDisconnectedSWADoesNotPublishVacuous
             swa_host_blocks.push_back(host_block);
         }
     }
-    environment->cache->onBlocksReleased();
 
     BlockTreeMatchResult result = environment->cache->match(environment->keys);
     expectUnpublishedResult(result);

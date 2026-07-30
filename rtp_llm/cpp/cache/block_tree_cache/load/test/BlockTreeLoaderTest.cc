@@ -14,6 +14,7 @@ namespace {
 using block_tree_cache_test::FullSWAEnvironment;
 using block_tree_cache_test::FullSWAEnvironmentOptions;
 using block_tree_cache_test::cudaAvailable;
+using block_tree_cache_test::releaseDeviceBlocksAndNotify;
 
 TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
     if (!cudaAvailable()) {
@@ -63,9 +64,8 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
     result.load_ticket.reset();
     environment->reclaimAll();
     for (const auto& [pool, block] : request_targets) {
-        pool->decRef(block, BlockRefType::REQUEST);
+        releaseDeviceBlocksAndNotify(*environment->cache, pool, {block}, BlockRefType::REQUEST);
     }
-    environment->cache->onBlocksReleased();
     environment->reclaimAll();
     environment->expectFullyReclaimed();
 }

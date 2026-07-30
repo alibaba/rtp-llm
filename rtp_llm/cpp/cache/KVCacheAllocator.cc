@@ -6,6 +6,7 @@
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/BlockReleaseBatch.h"
 #include "rtp_llm/cpp/cache/KVCacheGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
@@ -137,26 +138,15 @@ int KVCacheAllocator::estimateBatchPeakNeedBlocks(const BatchKVCacheResourcePtr&
     return target_width * per_sequence_growth + tail_copy_blocks;
 }
 
-void KVCacheAllocator::setBlockTreeCache(BlockTreeCache* block_tree_cache) {
+void KVCacheAllocator::attachBlockTreeCache(BlockTreeCachePtr block_tree_cache) {
+    RTP_LLM_CHECK_WITH_INFO(block_tree_cache != nullptr, "cannot attach a null BlockTreeCache");
+    RTP_LLM_CHECK_WITH_INFO(block_tree_cache_ == nullptr, "BlockTreeCache has already been attached");
+
+    block_tree_cache_ = std::move(block_tree_cache);
     for (const auto& group : cacheGroups()) {
-        if (group) {
-            group->setEvictCallback({});
-        }
-    }
-    block_tree_cache_ = block_tree_cache;
-    if (block_tree_cache_ == nullptr) {
-        return;
-    }
-    for (const auto& group : cacheGroups()) {
-        if (!group) {
-            continue;
-        }
-        RTP_LLM_CHECK_WITH_INFO(group->group_id() >= 0,
-                                "cannot register BlockTree eviction callback for invalid group_id=%d",
-                                group->group_id());
         const size_t group_id = static_cast<size_t>(group->group_id());
-        group->setEvictCallback([block_tree_cache, group_id](size_t need_blocks) {
-            const int reclaimed = block_tree_cache->evictForGroup(group_id, need_blocks);
+        group->setEvictCallback([cache = block_tree_cache_, group_id](size_t need_blocks) {
+            const int reclaimed = cache->evictForGroup(group_id, need_blocks);
             return reclaimed > 0 ? static_cast<size_t>(reclaimed) : 0;
         });
     }
@@ -164,6 +154,16 @@ void KVCacheAllocator::setBlockTreeCache(BlockTreeCache* block_tree_cache) {
 
 bool KVCacheAllocator::cancelLoad(const std::shared_ptr<AsyncContext>& context) {
     return block_tree_cache_ != nullptr && block_tree_cache_->cancelLoad(context);
+}
+
+void KVCacheAllocator::submitBlockReleases(BlockReleaseBatch& releases) {
+    std::vector<BlockReleaseReceipt> receipts = releases.finish();
+    if (receipts.empty()) {
+        return;
+    }
+    if (block_tree_cache_ != nullptr) {
+        block_tree_cache_->onBlocksReleased(receipts);
+    }
 }
 
 uint32_t KVCacheAllocator::convertToGlobalLayerId(size_t model_id, int local_layer_id) const {

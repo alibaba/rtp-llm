@@ -6,6 +6,7 @@
 #include <unordered_map>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/BlockReleaseBatch.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeMatcher.h"
@@ -144,7 +145,7 @@ public:
     void                                      reportMetrics() const;
     BlockTreeKeySnapshot                      getKeySnapshot(size_t limit) const;
     void                                      waitForPendingTasks();
-    void                                      onBlocksReleased();
+    void                                      onBlocksReleased(const std::vector<BlockReleaseReceipt>& receipts);
     bool                                      cancelLoad(const std::shared_ptr<AsyncContext>& context);
 
     // Release path-lock references acquired during match().
