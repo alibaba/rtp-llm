@@ -113,6 +113,10 @@ struct TokenSliceInfo {
     size_t count  = 0;
 };
 
+// probe-only alias: F03-version PyWrappedModel uses ModelBufferHolder.
+struct TensorHolder;
+using ModelBufferHolder = TensorHolder;
+
 struct TensorHolder {
     std::vector<torch::Tensor> tensors;
     std::vector<torch::Tensor> clear_tensors;
