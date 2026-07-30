@@ -135,10 +135,15 @@ class CPFlashInferImpl(FMHAImplBase):
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
 
-        assert (
-            parallelism_config is not None
-        ), "CPFlashInferImpl requires a parallelism_config with prefill_cp_config"
+        if parallelism_config is None:
+            raise RuntimeError(
+                "CPFlashInferImpl requires parallelism_config with prefill_cp_config"
+            )
         method = parallelism_config.prefill_cp_config.method
+        if method not in impl_map:
+            raise RuntimeError(
+                f"CPFlashInferImpl: unknown CP method '{method}', available: {list(impl_map.keys())}"
+            )
         self.fmha_impl = impl_map[method](attn_configs, attn_inputs, parallelism_config)
         self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(attn_configs)
 
