@@ -503,11 +503,20 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         // Bounded to the selected graph's read window: rows past it are not
         // read by this replay, and a later, larger graph zeroes its own tail.
         if (is_dspark_ && !is_target_verify_ && py_model_inputs_.attention_inputs.kv_cache_block_id_host.defined()) {
-            copyStridedHost(inputs.attention_inputs.kv_cache_block_id_host,
-                            py_model_inputs_.attention_inputs.kv_cache_block_id_host);
-            zeroStridedHostTail(inputs.attention_inputs.kv_cache_block_id_host,
-                                py_model_inputs_.attention_inputs.kv_cache_block_id_host,
-                                state.current_real_graph_bs);
+            // The engine publishes the logical table as [group, batch, blocks];
+            // the injection mirror is the 2-D [batch, blocks] single-FULL-group
+            // view (phase-1 rejects hybrid caches), so select group 0 before
+            // the row-wise refresh.  The pre-check flat copy silently moved the
+            // wrong bytes for a 3-D src, leaving page>0 injection rows zeroed
+            // (= reserved block 0) — the same-rank check exists to keep this
+            // mismatch loud.
+            torch::Tensor logical_src = inputs.attention_inputs.kv_cache_block_id_host;
+            if (logical_src.defined() && logical_src.dim() == 3) {
+                logical_src = logical_src.select(0, 0);
+            }
+            copyStridedHost(logical_src, py_model_inputs_.attention_inputs.kv_cache_block_id_host);
+            zeroStridedHostTail(
+                logical_src, py_model_inputs_.attention_inputs.kv_cache_block_id_host, state.current_real_graph_bs);
         }
 
         optimizedCopyAsync(inputs.attention_inputs.kv_cache_layer_to_group,
