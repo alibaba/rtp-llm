@@ -12,20 +12,27 @@ from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import (
     DashErrorSpec,
     DashScParameterError,
-    LLMFinishReason,
     DashScRequestControls,
+    LLMFinishReason,
+    MultimodalPart,
     SamplingParams,
     build_dash_error_response,
     build_stream_response_from_generate_outputs,
     parse_dash_sc_grpc_request,
     parse_input_ids_from_request,
+    parse_multimodal_parts_from_request,
     parse_request_controls,
     parse_sampling_params,
     prepend_to_generated_ids_tensor,
 )
 from rtp_llm.dash_sc.inference.servicer import stream_log_tag
 from rtp_llm.dash_sc.proto import predict_v2_pb2
-from rtp_llm.utils.base_model_datatypes import AuxInfo, GenerateOutput, GenerateOutputs
+from rtp_llm.utils.base_model_datatypes import (
+    AuxInfo,
+    GenerateOutput,
+    GenerateOutputs,
+    MMUrlType,
+)
 
 
 def _unpack_int32_le(raw: bytes) -> list[int]:
@@ -671,9 +678,7 @@ class DashScGrpcRequestTest(TestCase):
             enable_thinking=True, max_new_think_tokens=10
         )
 
-        generate_config = sampling.to_generate_config(
-            request_controls=request_controls
-        )
+        generate_config = sampling.to_generate_config(request_controls=request_controls)
 
         self.assertEqual(generate_config.max_new_tokens, 100)
         self.assertEqual(generate_config.max_thinking_tokens, 10)
@@ -690,9 +695,7 @@ class DashScGrpcRequestTest(TestCase):
             enable_thinking=True, max_new_think_tokens=10
         )
 
-        generate_config = sampling.to_generate_config(
-            request_controls=request_controls
-        )
+        generate_config = sampling.to_generate_config(request_controls=request_controls)
 
         self.assertEqual(generate_config.max_new_tokens, 100)
         self.assertEqual(generate_config.max_thinking_tokens, 10)
@@ -705,9 +708,7 @@ class DashScGrpcRequestTest(TestCase):
             enable_thinking=True, max_new_think_tokens=10
         )
 
-        generate_config = sampling.to_generate_config(
-            request_controls=request_controls
-        )
+        generate_config = sampling.to_generate_config(request_controls=request_controls)
 
         self.assertEqual(generate_config.max_new_tokens, 100)
         self.assertEqual(generate_config.max_thinking_tokens, 10)
@@ -871,6 +872,136 @@ class DashScGrpcRequestTest(TestCase):
         self.assertEqual(gc.max_thinking_tokens, 128)
         self.assertEqual(gc.stop_words_list, [[42]])
         self.assertTrue(gc.return_input_ids)
+
+
+class DashScMultimodalRequestTest(TestCase):
+    @staticmethod
+    def _set_payload(
+        request: predict_v2_pb2.ModelInferRequest,
+        payload: object,
+        key: str = "payload",
+    ) -> None:
+        request.parameters[key].string_param = json.dumps(payload)
+
+    def test_parses_openai_image_video_and_audio_parts(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            request,
+            {
+                "input": {
+                    "messages": [
+                        {
+                            "role": "user",
+                            "content": [
+                                {
+                                    "type": "image_url",
+                                    "image_url": {"url": "http://x.png"},
+                                },
+                                {
+                                    "type": "video_url",
+                                    "video_url": {"url": "http://y.mp4"},
+                                },
+                                {
+                                    "type": "audio_url",
+                                    "audio_url": {"url": "http://z.wav"},
+                                },
+                            ],
+                        }
+                    ]
+                }
+            },
+        )
+
+        self.assertEqual(
+            parse_multimodal_parts_from_request(request),
+            [
+                MultimodalPart("http://x.png", MMUrlType.IMAGE),
+                MultimodalPart("http://y.mp4", MMUrlType.VIDEO),
+                MultimodalPart("http://z.wav", MMUrlType.AUDIO),
+            ],
+        )
+
+    def test_parses_dashscope_native_parts_and_flattens_video_frames(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            request,
+            [
+                {
+                    "role": "user",
+                    "content": [
+                        {"image": "http://x.png", "max_pixels": 4096},
+                        {
+                            "video": ["http://f1.jpg", "http://f2.jpg"],
+                            "fps": 2,
+                            "max_frames": 32,
+                        },
+                    ],
+                }
+            ],
+            key="__messages__",
+        )
+
+        self.assertEqual(
+            parse_multimodal_parts_from_request(request),
+            [
+                MultimodalPart("http://x.png", MMUrlType.IMAGE, max_pixels=4096),
+                MultimodalPart(
+                    "http://f1.jpg",
+                    MMUrlType.VIDEO,
+                    fps=2,
+                    max_frames=32,
+                ),
+                MultimodalPart(
+                    "http://f2.jpg",
+                    MMUrlType.VIDEO,
+                    fps=2,
+                    max_frames=32,
+                ),
+            ],
+        )
+
+    def test_inline_preprocess_values_override_nested_values(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        self._set_payload(
+            request,
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": "http://x.png",
+                                "preprocess_config": {
+                                    "min_pixels": 100,
+                                    "max_pixels": 200,
+                                },
+                                "min_pixels": 300,
+                            }
+                        ],
+                    }
+                ]
+            },
+        )
+
+        self.assertEqual(
+            parse_multimodal_parts_from_request(request),
+            [
+                MultimodalPart(
+                    "http://x.png",
+                    MMUrlType.IMAGE,
+                    min_pixels=300,
+                    max_pixels=200,
+                )
+            ],
+        )
+
+    def test_missing_or_invalid_payload_is_text_only(self) -> None:
+        request = predict_v2_pb2.ModelInferRequest()
+        self.assertEqual(parse_multimodal_parts_from_request(request), [])
+
+        request.parameters["payload"].string_param = "not-json"
+        self.assertEqual(parse_multimodal_parts_from_request(request), [])
 
 
 class BuildStreamResponseFromGenerateOutputsTest(TestCase):

@@ -31,12 +31,13 @@ from rtp_llm.dash_sc.codec import (
     DASH_ERROR_TOO_LONG,
     DASH_ERROR_UNSUPPORTED,
     DashScParameterError,
-    LLMFinishReason,
     DashScRequestControls,
+    LLMFinishReason,
     SamplingParams,
 )
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
+    _build_mm_inputs_from_request,
     _dash_error_spec_for_ft_exception,
     _derive_max_token_id,
     build_think_runtime,
@@ -319,6 +320,60 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 2)
         self.assertEqual(infer.parameters["prompt_cached_token_num"].int64_param, 0)
 
+    async def test_multimodal_inputs_reach_backend_generate_input(self) -> None:
+        req = self._minimal_request()
+        out = GenerateOutput(
+            output_ids=torch.tensor([3], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        mm_input = object()
+
+        await _drain(
+            iter_real_model_stream_infer(
+                req,
+                [1, 2],
+                SamplingParams(),
+                DashScRequestControls(),
+                visitor,
+                rtp_llm_request_id=1,
+                mm_inputs=[mm_input],
+            )
+        )
+
+        self.assertEqual(visitor.last_generate_input.mm_inputs, [mm_input])
+
+    def test_builds_generic_multimodal_inputs_from_payload(self) -> None:
+        req = self._minimal_request()
+        req.parameters["payload"].string_param = json.dumps(
+            {
+                "messages": [
+                    {
+                        "role": "user",
+                        "content": [
+                            {
+                                "type": "image_url",
+                                "image_url": {"url": "http://x.png"},
+                                "min_pixels": 128,
+                                "max_pixels": 4096,
+                            }
+                        ],
+                    }
+                ]
+            }
+        )
+
+        mm_inputs = _build_mm_inputs_from_request(req)
+
+        self.assertEqual(len(mm_inputs), 1)
+        self.assertEqual(mm_inputs[0].url, "http://x.png")
+        self.assertEqual(mm_inputs[0].mm_preprocess_config.min_pixels, 128)
+        self.assertEqual(mm_inputs[0].mm_preprocess_config.max_pixels, 4096)
+        self.assertEqual(mm_inputs[0].mm_preprocess_config.mm_timeout_ms, -1)
+
     async def test_reasoning_effort_override_reaches_generate_config(self) -> None:
         req = self._minimal_request()
         out = GenerateOutput(
@@ -456,9 +511,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status_code"], 503)
         self.assertIn("route failed", payload["status_message"])
         self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.TASK_LIST_FULL)
-        self.assertEqual(
-            access_agg.backend_error_code, "8500_ROUTE_ERROR"
-        )
+        self.assertEqual(access_agg.backend_error_code, "8500_ROUTE_ERROR")
 
     async def test_stream_exception_yields_error_message(self) -> None:
         req = self._minimal_request()
@@ -1657,9 +1710,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             finished=True,
             aux_info=AuxInfo(input_len=1, reuse_len=0),
         )
-        return _FakeVisitor(
-            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
-        )
+        return _FakeVisitor(_FakeAsyncStream([GenerateOutputs(generate_outputs=[out])]))
 
     async def test_access_log_records_input_and_generated_ids(self) -> None:
         # Frontend struct path: the emitted access line carries the real token
