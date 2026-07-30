@@ -75,8 +75,8 @@ Optional environment variables:
   KIMI_K3_EXECUTION_MODE                defaults to optimized; one of:
                                          optimized, accuracy
   KIMI_K3_USE_HOST_METADATA             optimized defaults to 1; accuracy to 0
-  KIMI_K3_SP_MOE                        optimized Prefill defaults to 1;
-                                         all other modes/roles default to 0
+  KIMI_K3_SP_MOE                        optimized TP8/EP8 defaults to 1;
+                                         all other modes/topologies default to 0
   KIMI_K3_KDA_BACKEND                   optimized Prefill defaults to cula;
                                          accuracy Prefill defaults to kernel;
                                          Decode tp8_ep8 defaults to kernel;
@@ -84,8 +84,10 @@ Optional environment variables:
                                          fla37_precompiled
   KIMI_K3_MOE_BACKEND                   optimized TP8/EP8 defaults to
                                          deep_gemm_mega; otherwise deepep
-  KIMI_K3_PERF_FUSIONS                  optimized Prefill defaults to 1;
-                                         all other modes/roles default to 0
+  KIMI_K3_PERF_FUSIONS                  optimized TP8/EP8 defaults to 1;
+                                         all other modes/topologies default to 0
+  KIMI_K3_BATCHED_KDA_DECODE            optimized TP8/EP8 Decode defaults to 1;
+                                         all other modes/topologies default to 0
   KIMI_K3_PERF_MODE                     strict performance-path validation only
   KIMI_K3_KDA_FLA37_PRECOMPILED_DIR     defaults to the bundled SM103 image
                                          for fla37_precompiled
@@ -280,6 +282,7 @@ if [[ -n "${runtime_pythonpath}" ]]; then
 fi
 
 max_seq_len="${KIMI_K3_MAX_SEQ_LEN:-16384}"
+default_batched_kda_decode=0
 case "${execution_mode}" in
     optimized)
         default_accuracy_mode=native
@@ -296,6 +299,7 @@ case "${execution_mode}" in
                 default_moe_backend=deep_gemm_mega
                 default_sp_moe=1
                 default_perf_fusions=1
+                default_batched_kda_decode=1
                 default_decode_offload_start=none
             else
                 default_kda_backend=fla37_precompiled
@@ -353,6 +357,7 @@ sp_moe="${KIMI_K3_SP_MOE:-${default_sp_moe}}"
 kda_backend="${KIMI_K3_KDA_BACKEND:-${default_kda_backend}}"
 moe_backend="${KIMI_K3_MOE_BACKEND:-${default_moe_backend}}"
 perf_fusions="${KIMI_K3_PERF_FUSIONS:-${default_perf_fusions}}"
+batched_kda_decode="${KIMI_K3_BATCHED_KDA_DECODE:-${default_batched_kda_decode}}"
 perf_mode="${KIMI_K3_PERF_MODE:-0}"
 accuracy_mode="${KIMI_K3_ACCURACY_MODE:-${default_accuracy_mode}}"
 kv_cache_mem_mb="${KIMI_K3_KV_CACHE_MEM_MB:-${default_kv_cache_mem_mb}}"
@@ -405,7 +410,7 @@ if { [[ "${role}" == "PREFILL" ]] \
     fi
 fi
 
-for flag_name in use_host_metadata sp_moe perf_fusions perf_mode; do
+for flag_name in use_host_metadata sp_moe perf_fusions batched_kda_decode perf_mode; do
     flag_value="${!flag_name}"
     [[ "${flag_value}" == "0" || "${flag_value}" == "1" ]] \
         || die "${flag_name} must resolve to 0 or 1, got ${flag_value}"
@@ -523,6 +528,7 @@ export KIMI_K3_MLA_BACKEND=kernel
 export KIMI_K3_USE_HOST_METADATA="${use_host_metadata}"
 export KIMI_K3_SP_MOE="${sp_moe}"
 export KIMI_K3_PERF_FUSIONS="${perf_fusions}"
+export KIMI_K3_BATCHED_KDA_DECODE="${batched_kda_decode}"
 export KIMI_K3_PERF_MODE="${perf_mode}"
 export KIMI_K3_FASTSAFETENSORS_STREAMING="${KIMI_K3_FASTSAFETENSORS_STREAMING:-1}"
 export KIMI_K3_FASTSAFETENSORS_FILES_PER_BATCH="${KIMI_K3_FASTSAFETENSORS_FILES_PER_BATCH:-1}"
@@ -682,6 +688,7 @@ echo "  KDA backend:     ${kda_backend}"
 echo "  MoE backend:     ${moe_backend}"
 echo "  DeepGEMM JIT:    ${deepgemm_jit_compiler}"
 echo "  perf fusions:    ${perf_fusions}"
+echo "  batched KDA:     ${batched_kda_decode}"
 echo "  perf validation: ${perf_mode}"
 echo "  fastsafetensors: streaming=${KIMI_K3_FASTSAFETENSORS_STREAMING}, files_per_batch=${KIMI_K3_FASTSAFETENSORS_FILES_PER_BATCH}"
 echo "  FlashInfer JIT:  ${FLASHINFER_WORKSPACE_BASE}"

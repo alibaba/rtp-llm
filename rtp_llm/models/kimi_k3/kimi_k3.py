@@ -363,8 +363,7 @@ class KimiK3(BaseModel):
         )
 
     def support_cuda_graph(self) -> bool:
-        # Re-enable only after recurrent KDA and hybrid cache are graph-safe.
-        return False
+        return True
 
     def _create_python_model(self):
         from rtp_llm.models_py.model_desc.kimi_k3 import KimiK3Model

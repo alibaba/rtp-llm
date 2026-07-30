@@ -418,12 +418,11 @@ class KimiK3Weight(ModelDeployWeightInfo):
                 ],
                 _merge_conv1d,
                 cfg,
-                # The real K3 checkpoint stores all three short-convolution
-                # kernels in FP32.  Dummy/FLA consumes them in FP32 as well;
-                # inheriting the model-wide BF16 load dtype changes nearly
-                # every coefficient and is amplified by KDA's Q/K
-                # normalization.
-                data_type=torch.float32,
+                # The checkpoint tensors are FP32, but the official model
+                # converts ShortConvolution parameters to the requested model
+                # dtype in ``from_pretrained``.  Inherit the runtime load dtype
+                # here as well; forcing FP32 changes the convolution result
+                # before KDA Q/K normalization.
             ),
             _w(
                 W.linear_attn_alog,

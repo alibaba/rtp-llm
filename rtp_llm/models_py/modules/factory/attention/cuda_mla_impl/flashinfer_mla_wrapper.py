@@ -95,6 +95,9 @@ class MlaFlashInferImplBase(MlaImplBase):
         assert (
             self.fmha_params is not None
         ), "fmha_params should be initialized in __init__"
+        # HybridCache switches the explicit PyAttentionInputs view per group.
+        # Keep cache-store consumers on the same view as the planner.
+        self.attn_inputs = attn_inputs
         check_attention_inputs(attn_inputs)
         use_host_metadata = os.environ.get("KIMI_K3_USE_HOST_METADATA", "0") == "1"
         prefix_lengths = (
@@ -137,6 +140,54 @@ class MlaFlashInferImplBase(MlaImplBase):
         )
         self.fmha_impl.plan(self.fmha_params)
 
+    def _device_decode_slot_mapping(self) -> Optional[torch.Tensor]:
+        """Build the current HybridCache group's decode write locations.
+
+        The regular host planner populates ``fmha_params.slot_mapping``.  The
+        graph-safe group refresh intentionally skips that planner, so derive
+        the same mapping from its device metadata and the currently selected
+        group block table.  The tensor operations are captured and therefore
+        read live sequence lengths and block IDs on every replay.
+        """
+
+        assert self.fmha_params is not None
+        slot_mapping = getattr(self.fmha_params, "slot_mapping", None)
+        if slot_mapping is not None:
+            return None
+
+        # The pybind surface exposes the stable device buffers, not the
+        # transient C++ aliases (positions/batch_indice).
+        positions = getattr(self.fmha_params, "positions_d", None)
+        batch_indices = getattr(self.fmha_params, "batch_indice_d", None)
+        block_table = getattr(
+            self.attn_inputs, "kv_cache_kernel_block_id_device", None
+        )
+        if (
+            positions is None
+            or batch_indices is None
+            or block_table is None
+            or positions.numel() == 0
+            or batch_indices.numel() == 0
+            or block_table.numel() == 0
+        ):
+            raise RuntimeError(
+                "CUDA Graph MLA cache write requires device positions, "
+                "batch indices, and the selected group block table"
+            )
+
+        positions_i64 = positions.to(torch.int64)
+        batch_indices_i64 = batch_indices.to(torch.int64)
+        block_indices = torch.div(
+            positions_i64,
+            self.seq_size_per_block,
+            rounding_mode="floor",
+        )
+        block_numbers = block_table[batch_indices_i64, block_indices].to(torch.int64)
+        return (
+            block_numbers * self.seq_size_per_block
+            + torch.remainder(positions_i64, self.seq_size_per_block)
+        )
+
     def forward(
         self,
         q: torch.Tensor,
@@ -171,7 +222,11 @@ class MlaFlashInferImplBase(MlaImplBase):
             tuple(compressed_kv.shape),
         ):
             self.kv_cache_write_op.forward(
-                compressed_kv, k_pe, kv_cache, self.rope_params
+                compressed_kv,
+                k_pe,
+                kv_cache,
+                self.rope_params,
+                slot_mapping_override=self._device_decode_slot_mapping(),
             )
 
         with profile("cache_store_publish_noop_for_standalone_prefill", ()):
@@ -435,3 +490,62 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs):
         self.prepare(attn_inputs, forbid_realloc=True)
+
+    def prepare_cuda_graph_group(self, attn_inputs: PyAttentionInputs) -> None:
+        """Refresh one HybridCache FULL group inside graph capture.
+
+        ``prepare_cuda_graph`` runs before replay and may call FlashInfer's
+        host-side planner.  Kimi K3 additionally switches the selected FULL
+        cache group between MLA layers *inside* the captured forward.  Calling
+        the regular ``prepare`` there would materialize CUDA lengths and block
+        tables on the host, which CUDA Graph capture forbids.
+
+        The batch shape and sequence lengths are identical for every FULL
+        group, so the plan prepared before capture/replay remains valid.  Only
+        regenerate the compact page indices on device and copy them into
+        FlashInfer's stable CUDA Graph indices buffer before the group runs.
+        Both operations are then recorded in the graph and use the live
+        per-group block table on every replay.
+        """
+
+        assert self.fmha_impl is not None
+        assert self.fmha_params is not None
+        self.attn_inputs = attn_inputs
+        sequence_lengths_plus_1 = getattr(
+            attn_inputs, "sequence_lengths_plus_1_d", None
+        )
+        block_table = getattr(
+            attn_inputs, "kv_cache_kernel_block_id_device", None
+        )
+        if (
+            sequence_lengths_plus_1 is None
+            or sequence_lengths_plus_1.numel() == 0
+        ):
+            raise RuntimeError(
+                "K3 CUDA Graph MLA group refresh requires "
+                "sequence_lengths_plus_1_d"
+            )
+        if block_table is None or block_table.numel() == 0:
+            raise RuntimeError(
+                "K3 CUDA Graph MLA group refresh requires a device block table"
+            )
+
+        self.fmha_params.fill_decode_cuda_graph_params(
+            sequence_lengths_plus_1,
+            block_table,
+            self.seq_size_per_block,
+        )
+        page_indices = self.fmha_params.page_indice_d
+        graph_indices = self.fmha_impl.kv_indices_d
+        if page_indices.numel() < graph_indices.numel():
+            raise RuntimeError(
+                "K3 CUDA Graph MLA compact page-index source is too small: "
+                f"source={page_indices.numel()} target={graph_indices.numel()}"
+            )
+        # CudaGraphRunner rounds each request's block-table width up to a full
+        # KV-cache page.  ``page_indices`` therefore has padded tail capacity,
+        # while FlashInfer reserves only ceil(max_context/kernel_page) entries
+        # per request.  The device preparation kernel compacts every live page
+        # at the front, so copying the stable graph-buffer capacity preserves
+        # all usable indices and deliberately drops only that padded tail.
+        graph_indices.copy_(page_indices[: graph_indices.numel()])
