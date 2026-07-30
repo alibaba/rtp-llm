@@ -932,6 +932,12 @@ TEST_F(CacheStoreOpsTest, testWriteCacheStoreUsesDecoderOffsetForContextBlockRow
         inputs, layer_cache, config, cache_store, /*cache_model_id=*/0, /*cp_rank=*/0, /*cp_size=*/1, nullptr));
 
     ASSERT_EQ(cache_store->records.size(), 1u);
+    // Column 0 discriminates: context row {0,1} vs decode row {1,1}. A fallback
+    // indexing the block table by batch row would put the first block at base+64.
+    const auto first_key = "kv_" + cacheKeyAt(inputs, 0, 0);
+    ASSERT_NE(cache_store->records[0].blocks.find(first_key), cache_store->records[0].blocks.end());
+    EXPECT_EQ(reinterpret_cast<uintptr_t>(cache_store->records[0].blocks.at(first_key).addr),
+              reinterpret_cast<uintptr_t>(layer_cache.kv_cache_base.data_ptr()));
     const auto second_key = "kv_" + cacheKeyAt(inputs, 1, 0);
     ASSERT_NE(cache_store->records[0].blocks.find(second_key), cache_store->records[0].blocks.end());
     EXPECT_EQ(reinterpret_cast<uintptr_t>(cache_store->records[0].blocks.at(second_key).addr),

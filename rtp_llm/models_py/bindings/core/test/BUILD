@@ -5,19 +5,24 @@ test_copts = [
     "-fno-access-control",
 ] + copts()
 
-exec_ops_test_deps = [
+# ExecOpsTest.cc has no CUDA/ROCm-specific symbols of its own; only the runtime
+# implementations it links against are platform-specific.
+exec_ops_test_common_deps = [
     "//rtp_llm/cpp/cache:cache_config",
     "//rtp_llm/cpp/cache:kv_cache_specs",
     "//rtp_llm/cpp/utils:kv_cache_utils",
     "//rtp_llm/models_py/bindings:op_defs",
-    "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
     "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
-    "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
-    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
     "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
     "//rtp_llm/cpp/testing:test_log_capture",
     "@com_google_googletest//:gtest_main",
 ] + torch_deps()
+
+exec_ops_test_deps = exec_ops_test_common_deps + [
+    "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
+    "//rtp_llm/models_py/bindings/cuda/ops:gpu_base",
+    "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
+]
 
 # Selects by fixture, so a new CacheStoreOpsTest case is gated by declaration
 # rather than by matching a name prefix.
@@ -41,6 +46,21 @@ cc_test(
     deps = exec_ops_test_deps,
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
+)
+
+# ROCm counterpart of cache_store_op_test: same fixture, ROCm runtime provider.
+# A separate rocm-tagged target rather than a select() on the CUDA one, because
+# exec_properties cannot be a select() under the prelude's cc_test override.
+cc_test_wrapper(
+    name = "cache_store_op_rocm_test",
+    srcs = ["ExecOpsTest.cc"],
+    args = ["--gtest_filter=" + cache_store_test_filter],
+    deps = exec_ops_test_common_deps + [
+        "//rtp_llm/models_py/bindings/core:exec_ctx_rocm",
+    ],
+    copts = test_copts,
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
 )
 
 cc_test(
