@@ -662,7 +662,10 @@ def reduce_scatter(input_tensor: torch.Tensor, group: Group) -> torch.Tensor:
         dtype=input_tensor.dtype,
     )
     torch.distributed.reduce_scatter_tensor(
-        output_tensor, input_tensor, op=torch.distributed.ReduceOp.SUM, group=process_group
+        output_tensor,
+        input_tensor,
+        op=torch.distributed.ReduceOp.SUM,
+        group=process_group,
     )
     return output_tensor
 
