@@ -1,0 +1,4 @@
+interface:
+  display_name: "RTP Remote Dev Environment"
+  short_description: "Operate audited Mac-to-B300 Git build and test workflows"
+  default_prompt: "Use $rtp-remote-dev-environment to synchronize RTP-LLM from Mac through origin to a clean B300 test worktree with an operation ledger."

@@ -174,6 +174,59 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     }
 }
 
+TEST_F(NormalBatchStreamProcessorTest, testDeviceStateGatherPreservesHostSequenceLengths) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 128;
+    model_config.vocab_size  = 128;
+    model_config.num_layers  = 1;
+    RuntimeConfig runtime_config;
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    auto query             = std::make_shared<GenerateInput>();
+    query->input_ids        = hostIntBuffer({1, 2, 3});
+    query->generate_config  = std::make_shared<GenerateConfig>();
+    GenerateStreamPtr stream =
+        std::make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->setIsContextStream(false);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    BatchKVCacheResource kv_cache;
+    kv_cache.resetBatchSize(1);
+    kv_cache.initGroups(1, 1, {0});
+    kv_cache.setBatchBlocks(0, 0, {1});
+    stream->setKVCache(kv_cache);
+
+    const auto cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+        .last_sample_token_gpu = torch::full({1}, 42, cuda_i32),
+        .next_seq_len_gpu      = torch::full({1}, 4, cuda_i32),
+        .last_real_seq_len     = 3,
+        .next_real_seq_len     = 4,
+    });
+
+    std::list<GenerateStreamPtr> streams{stream};
+    StreamGroups                 stream_groups(streams);
+    TensorHolder                 holder;
+    auto                         status = processor.gatherModelInput(stream_groups, holder);
+
+    ASSERT_TRUE(status.ok()) << status.status();
+    const auto& model_input = status.value();
+    EXPECT_TRUE(model_input.combo_tokens.is_cuda());
+    EXPECT_TRUE(model_input.sequence_lengths.is_cuda());
+    ASSERT_TRUE(model_input.sequence_lengths_host_for_log.defined());
+    EXPECT_FALSE(model_input.sequence_lengths_host_for_log.is_cuda());
+    EXPECT_EQ(std::vector<int32_t>({42}), toVec<int32_t>(model_input.combo_tokens));
+    EXPECT_EQ(std::vector<int32_t>({3}), toVec<int32_t>(model_input.sequence_lengths));
+    EXPECT_EQ(std::vector<int32_t>({3}), toVec<int32_t>(model_input.sequence_lengths_host_for_log));
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testDeviceStateFastPathWaitsForBlockingLogitsProcessorState) {
     ResourceContext resource_context;
     ModelConfig     model_config;

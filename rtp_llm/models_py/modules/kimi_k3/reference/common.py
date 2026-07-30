@@ -24,7 +24,10 @@ class KimiRMSNorm(nn.Module):
         normalized = x_float * torch.rsqrt(
             x_float.square().mean(dim=-1, keepdim=True) + self.eps
         )
-        return (normalized * self.weight.float()).to(dtype=x.dtype)
+        # The checkpoint implementation rounds the normalized activation back
+        # to BF16 before applying the BF16 affine weight.  This rounding point
+        # is observable at routed-expert boundaries and must remain exact.
+        return self.weight * normalized.to(dtype=x.dtype)
 
 
 class SituAndMul(nn.Module):

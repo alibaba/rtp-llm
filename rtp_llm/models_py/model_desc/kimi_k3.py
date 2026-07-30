@@ -42,6 +42,10 @@ from rtp_llm.models_py.distributed.collective_torch import (
     reduce_scatter_padded,
 )
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
+from rtp_llm.models_py.model_desc.kimi_k3_cuda_graph_cache import (
+    load_cuda_graph_decode_tensors,
+    store_cuda_graph_decode_state,
+)
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.base.common.kvcache_store import (
     create_write_cache_store_impl,
@@ -62,6 +66,7 @@ from rtp_llm.models_py.modules.kimi_k3.reference.kda_reference import (
 from rtp_llm.models_py.triton_kernels.kimi_kda import (
     chunk_kda,
     fused_recurrent_kda,
+    is_kimi_kda_short_conv_paged_decode_supported,
     kimi_k3_a2a_unpack_rms_norm_sigmoid_gate,
     kimi_k3_interleave_tp_hidden,
     kimi_k3_pack_a2a_projection,
@@ -71,6 +76,7 @@ from rtp_llm.models_py.triton_kernels.kimi_kda import (
     kimi_k3_two_way_attn_res,
     kimi_kda_rms_norm_sigmoid_gate,
     kimi_kda_short_conv_decode,
+    kimi_kda_short_conv_paged_decode,
     kimi_kda_short_conv_prefill,
 )
 from rtp_llm.models_py.triton_kernels.kimi_kda.fused_recurrent import (
@@ -112,6 +118,12 @@ def _perf_fusions_enabled() -> bool:
     """Select the explicitly staged performance-fusion implementations."""
 
     return _env_flag("KIMI_K3_PERF_FUSIONS")
+
+
+def _batched_kda_decode_enabled() -> bool:
+    """Enable the experimental indexed KDA decode path."""
+
+    return _env_flag("KIMI_K3_BATCHED_KDA_DECODE")
 
 
 def _perf_profile(name: str, tensor: Optional[torch.Tensor] = None):
@@ -296,6 +308,22 @@ def _prepare_mla_fmha_for_group(
 
     if selected_group_id == prepared_group_id:
         return selected_group_id
+    sequence_lengths = getattr(attention_inputs, "sequence_lengths", None)
+    is_capturing = bool(
+        sequence_lengths is not None
+        and sequence_lengths.is_cuda
+        and torch.cuda.is_current_stream_capturing()
+    )
+    if is_capturing:
+        prepare_group = getattr(fmha_impl, "prepare_cuda_graph_group", None)
+        if not callable(prepare_group):
+            raise RuntimeError(
+                "Kimi K3 HybridCache MLA requires graph-safe group refresh "
+                "during CUDA Graph capture"
+            )
+        prepare_group(attention_inputs)
+        return selected_group_id
+
     prepare = getattr(fmha_impl, "prepare", None)
     if not callable(prepare):
         raise RuntimeError(
@@ -837,11 +865,20 @@ def _packed_causal_depthwise_conv1d(
             "packed causal conv expects x=[tokens,channels] and "
             "weight=[channels,kernel]"
         )
-    ranges = (
-        sequence_ranges
-        if sequence_ranges is not None
-        else _sequence_offsets(cu_seqlens, x.shape[0])
-    )
+    if sequence_ranges is not None:
+        ranges = sequence_ranges
+    elif mode == "decode":
+        # K3 does not support target-verify yet, so recurrent decode always
+        # contains exactly one token per packed sequence.  Building these
+        # static ranges from tensor shapes avoids reading CUDA cu_seqlens back
+        # to the host while a graph is being captured.
+        if cu_seqlens.numel() != x.shape[0] + 1:
+            raise ValueError(
+                "KDA recurrent decode requires one cu_seqlens entry per token"
+            )
+        ranges = [(index, index + 1) for index in range(x.shape[0])]
+    else:
+        ranges = _sequence_offsets(cu_seqlens, x.shape[0])
     channels, kernel_size = weight.shape
     history_size = kernel_size - 1
     expected_state = (len(ranges), channels, history_size)
@@ -1150,6 +1187,31 @@ class KimiK3LinearCacheAdapter:
 
         return bool(getattr(attention_inputs, "is_fake_stream", False))
 
+    @staticmethod
+    def _is_cuda_graph_decode(
+        attention_inputs: PyAttentionInputs,
+        mode: KDAExecutionMode,
+    ) -> bool:
+        if mode != "decode":
+            return False
+        if bool(getattr(attention_inputs, "is_cuda_graph", False)):
+            return True
+
+        # CudaGraphRunner prepares the FMHA object with ``is_cuda_graph=True``,
+        # but that Python call currently receives a pybind value-copy of
+        # PyModelInputs.  The flag therefore does not always propagate to the
+        # PyAttentionInputs instance passed into the captured model forward.
+        # PyTorch's stream state is authoritative while recording the graph
+        # and keeps this path independent of an experimental environment flag.
+        sequence_lengths_plus_one = getattr(
+            attention_inputs, "sequence_lengths_plus_1_d", None
+        )
+        return bool(
+            sequence_lengths_plus_one is not None
+            and sequence_lengths_plus_one.is_cuda
+            and torch.cuda.is_current_stream_capturing()
+        )
+
     def load(
         self,
         kv_cache: LayerKVCache,
@@ -1159,11 +1221,27 @@ class KimiK3LinearCacheAdapter:
         mode: KDAExecutionMode,
     ) -> KimiKDAState:
         ssm_cache, conv_cache = self._views(kv_cache)
-        past_lengths, _ = self._lengths(attention_inputs, cu_seqlens, mode=mode)
-        block_map = self._block_map(attention_inputs)
         page_size = int(kv_cache.seq_size_per_block)
         if page_size <= 0:
             raise ValueError("linear cache seq_size_per_block must be positive")
+        if self._is_cuda_graph_decode(attention_inputs, mode):
+            q_state, k_state, v_state, recurrent = load_cuda_graph_decode_tensors(
+                ssm_cache,
+                conv_cache,
+                getattr(attention_inputs, "sequence_lengths_plus_1_d", None),
+                attention_inputs.kv_cache_kernel_block_id_device,
+                page_size,
+                self.projection_size,
+            )
+            return KimiKDAState(
+                q_conv_state=q_state,
+                k_conv_state=k_state,
+                v_conv_state=v_state,
+                recurrent_state=recurrent,
+            )
+
+        past_lengths, _ = self._lengths(attention_inputs, cu_seqlens, mode=mode)
+        block_map = self._block_map(attention_inputs)
 
         if _perf_fusions_enabled() and len(past_lengths) == 1:
             past_length = past_lengths[0]
@@ -1249,11 +1327,24 @@ class KimiK3LinearCacheAdapter:
         mode: KDAExecutionMode,
     ) -> None:
         ssm_cache, conv_cache = self._views(kv_cache)
+        page_size = int(kv_cache.seq_size_per_block)
+        if page_size <= 0:
+            raise ValueError("linear cache seq_size_per_block must be positive")
+        if self._is_cuda_graph_decode(attention_inputs, mode):
+            store_cuda_graph_decode_state(
+                state,
+                ssm_cache,
+                conv_cache,
+                getattr(attention_inputs, "sequence_lengths_plus_1_d", None),
+                attention_inputs.kv_cache_kernel_block_id_device,
+                page_size,
+            )
+            return
+
         past_lengths, new_lengths = self._lengths(
             attention_inputs, cu_seqlens, mode=mode
         )
         block_map = self._block_map(attention_inputs)
-        page_size = int(kv_cache.seq_size_per_block)
         is_fake_stream = self._is_fake_stream(attention_inputs)
         for sequence_idx, (past_length, new_length) in enumerate(
             zip(past_lengths, new_lengths)
@@ -1448,6 +1539,7 @@ class KimiK3KDA(nn.Module):
                 "fused KDA qkv width "
                 f"{fused_qkv.shape[1]} != 3*{self.projection_size}"
             )
+        self.kda_qkv_w = fused_qkv
         self.kda_q_w, self.kda_k_w, self.kda_v_w = torch.split(
             fused_qkv, self.projection_size, dim=1
         )
@@ -1457,6 +1549,7 @@ class KimiK3KDA(nn.Module):
                 "fused KDA conv channels "
                 f"{fused_conv.shape[0]} != 3*{self.projection_size}"
             )
+        self.kda_conv = fused_conv
         self.kda_q_conv, self.kda_k_conv, self.kda_v_conv = torch.split(
             fused_conv, self.projection_size, dim=0
         )
@@ -1574,6 +1667,7 @@ class KimiK3KDA(nn.Module):
         self.weights[W.linear_attn_g_w] = self._a2a_g_weight
         self.weights[W.linear_attn_out_w] = self._a2a_o_weight
         del self.weights[W.linear_attn_b_w]
+        self.kda_qkv_w = None
         self.kda_q_w = None
         self.kda_k_w = None
         self.kda_v_w = None
@@ -1642,6 +1736,120 @@ class KimiK3KDA(nn.Module):
             self.weights[W.linear_attn_dt_b_kda],
             lower_bound=self.gate_lower_bound,
         )
+
+    def _paged_decode_cache(
+        self,
+        hidden_states: torch.Tensor,
+        kv_cache: Optional[LayerKVCache],
+        attention_inputs: Optional[PyAttentionInputs],
+        *,
+        mode: KDAExecutionMode,
+    ) -> Optional[
+        tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, int]
+    ]:
+        """Return device-resident paged KDA state for the batched decode path.
+
+        The optimized path is deliberately isolated behind an environment flag
+        and falls back to the canonical gather/compute/scatter implementation
+        whenever its one-token CUDA contract is not satisfied.
+        """
+
+        if (
+            not _batched_kda_decode_enabled()
+            or mode != "decode"
+            or kv_cache is None
+            or attention_inputs is None
+            or not hidden_states.is_cuda
+            or _accuracy_trace_enabled()
+            or _accuracy_canonical_tp_enabled()
+            or self._kda_backend not in ("kernel", "flash_kda")
+            or bool(getattr(attention_inputs, "is_target_verify", False))
+        ):
+            return None
+
+        sequence_lengths_plus_one = getattr(
+            attention_inputs, "sequence_lengths_plus_1_d", None
+        )
+        block_map = getattr(
+            attention_inputs, "kv_cache_kernel_block_id_device", None
+        )
+        if (
+            sequence_lengths_plus_one is None
+            or block_map is None
+            or not sequence_lengths_plus_one.is_cuda
+            or not block_map.is_cuda
+            or sequence_lengths_plus_one.ndim != 1
+            or block_map.ndim != 2
+            or sequence_lengths_plus_one.numel() != hidden_states.shape[0]
+            or block_map.shape[0] != hidden_states.shape[0]
+            or block_map.shape[1] == 0
+        ):
+            return None
+
+        ssm_cache, conv_cache = self.cache_adapter._views(kv_cache)
+        page_size = int(kv_cache.seq_size_per_block)
+        if (
+            page_size <= 0
+            or ssm_cache.dtype != torch.float32
+            or ssm_cache.ndim != 4
+            or tuple(ssm_cache.shape[1:])
+            != (self.local_heads, self.head_dim, self.head_dim)
+            or conv_cache.ndim != 3
+            or tuple(conv_cache.shape[1:])
+            != (self.cache_adapter.history_size, 3 * self.projection_size)
+            or ssm_cache.device != hidden_states.device
+            or conv_cache.device != hidden_states.device
+        ):
+            return None
+        return (
+            ssm_cache,
+            conv_cache,
+            block_map,
+            sequence_lengths_plus_one,
+            page_size,
+        )
+
+    def _paged_decode_core(
+        self,
+        q: torch.Tensor,
+        k: torch.Tensor,
+        v: torch.Tensor,
+        raw_gate: torch.Tensor,
+        raw_beta: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        ssm_cache: torch.Tensor,
+        block_map: torch.Tensor,
+        sequence_lengths_plus_one: torch.Tensor,
+        page_size: int,
+    ) -> torch.Tensor:
+        """Run one indexed recurrent launch and update physical SSM pages."""
+
+        token_count = q.shape[0]
+        head_shape = (1, token_count, self.local_heads, self.head_dim)
+        output, _ = fused_recurrent_kda(
+            q.reshape(head_shape),
+            k.reshape(head_shape),
+            v.reshape(head_shape),
+            raw_gate.reshape(head_shape),
+            raw_beta.float().reshape(1, token_count, self.local_heads),
+            initial_state=ssm_cache,
+            A_log=self.weights[W.linear_attn_alog],
+            dt_bias=self.weights[W.linear_attn_dt_b_kda],
+            inplace_final_state=True,
+            use_qk_l2norm_in_kernel=True,
+            use_gate_in_kernel=True,
+            use_beta_sigmoid_in_kernel=True,
+            lower_bound=self.gate_lower_bound,
+            # The physical RTP cache ABI is [H,K,V].  The kernel keeps its
+            # register tile V-first internally; false makes its addresses
+            # translate that tile to the cache's K-first storage.
+            state_v_first=False,
+            cu_seqlens=cu_seqlens,
+            block_map=block_map,
+            seq_size_per_block=page_size,
+            sequence_lengths=sequence_lengths_plus_one,
+        )
+        return output.reshape(head_shape).to(dtype=q.dtype)
 
     def _kda_core(
         self,
@@ -2428,13 +2636,19 @@ class KimiK3KDA(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
         sequence_parallel: bool = False,
-    ) -> tuple[torch.Tensor, KimiKDAState]:
+    ) -> tuple[torch.Tensor, Optional[KimiKDAState]]:
         trace_enabled = _accuracy_trace_enabled()
         if state is not None and kv_cache is not None:
             raise ValueError(
                 "pass either an explicit KDA state or LayerKVCache, not both"
             )
-        if kv_cache is not None:
+        paged_decode_cache = self._paged_decode_cache(
+            hidden_states,
+            kv_cache,
+            attention_inputs,
+            mode=mode,
+        )
+        if kv_cache is not None and paged_decode_cache is None:
             if attention_inputs is None:
                 raise ValueError("attention_inputs are required with a KDA cache")
             with _perf_profile(
@@ -2578,30 +2792,38 @@ class KimiK3KDA(nn.Module):
             with _perf_profile(
                 f"{self.trace_prefix}.qkv_column_parallel_projections", hidden_states
             ):
-                q_projected = _column_parallel_linear(
-                    hidden_states,
-                    self.kda_q_w,
-                    self.attn_tp_size,
-                    self.attn_tp_rank,
-                    self._full_column_weights,
-                    "q",
-                )
-                k_projected = _column_parallel_linear(
-                    hidden_states,
-                    self.kda_k_w,
-                    self.attn_tp_size,
-                    self.attn_tp_rank,
-                    self._full_column_weights,
-                    "k",
-                )
-                v_projected = _column_parallel_linear(
-                    hidden_states,
-                    self.kda_v_w,
-                    self.attn_tp_size,
-                    self.attn_tp_rank,
-                    self._full_column_weights,
-                    "v",
-                )
+                if paged_decode_cache is not None:
+                    packed_qkv_projected = _linear(hidden_states, self.kda_qkv_w)
+                    q_projected, k_projected, v_projected = torch.split(
+                        packed_qkv_projected,
+                        self.projection_size,
+                        dim=1,
+                    )
+                else:
+                    q_projected = _column_parallel_linear(
+                        hidden_states,
+                        self.kda_q_w,
+                        self.attn_tp_size,
+                        self.attn_tp_rank,
+                        self._full_column_weights,
+                        "q",
+                    )
+                    k_projected = _column_parallel_linear(
+                        hidden_states,
+                        self.kda_k_w,
+                        self.attn_tp_size,
+                        self.attn_tp_rank,
+                        self._full_column_weights,
+                        "k",
+                    )
+                    v_projected = _column_parallel_linear(
+                        hidden_states,
+                        self.kda_v_w,
+                        self.attn_tp_size,
+                        self.attn_tp_rank,
+                        self._full_column_weights,
+                        "v",
+                    )
             token_count = hidden_states.shape[0]
             with _perf_profile(
                 f"{self.trace_prefix}.forget_gate_and_beta_projections",
@@ -2653,39 +2875,72 @@ class KimiK3KDA(nn.Module):
             k_state = None if state is None else state.k_conv_state
             v_state = None if state is None else state.v_conv_state
             recurrent_state = None if state is None else state.recurrent_state
-            sequence_ranges = _sequence_offsets(
-                cu_seqlens,
-                token_count,
-                cu_seqlens_host=(
-                    getattr(attention_inputs, "cu_seqlens_host", None)
-                    if attention_inputs is not None and _host_metadata_enabled()
-                    else None
-                ),
-            )
-            q, q_final = _packed_causal_depthwise_conv1d(
-                q_projected,
-                self.kda_q_conv,
-                cu_seqlens,
-                q_state,
-                mode=mode,
-                sequence_ranges=sequence_ranges,
-            )
-            k, k_final = _packed_causal_depthwise_conv1d(
-                k_projected,
-                self.kda_k_conv,
-                cu_seqlens,
-                k_state,
-                mode=mode,
-                sequence_ranges=sequence_ranges,
-            )
-            v, v_final = _packed_causal_depthwise_conv1d(
-                v_projected,
-                self.kda_v_conv,
-                cu_seqlens,
-                v_state,
-                mode=mode,
-                sequence_ranges=sequence_ranges,
-            )
+            if paged_decode_cache is not None:
+                (
+                    ssm_cache,
+                    conv_cache,
+                    block_map,
+                    sequence_lengths_plus_one,
+                    page_size,
+                ) = paged_decode_cache
+                if not is_kimi_kda_short_conv_paged_decode_supported(
+                    q_projected,
+                    k_projected,
+                    v_projected,
+                    self.kda_conv,
+                    conv_cache,
+                    block_map,
+                    sequence_lengths_plus_one,
+                    page_size,
+                ):
+                    raise RuntimeError(
+                        "KDA batched decode support changed after cache selection"
+                    )
+                q, k, v = kimi_kda_short_conv_paged_decode(
+                    q_projected,
+                    k_projected,
+                    v_projected,
+                    self.kda_conv,
+                    conv_cache,
+                    block_map,
+                    sequence_lengths_plus_one,
+                    page_size,
+                )
+                q_final = k_final = v_final = None
+            else:
+                sequence_ranges = _sequence_offsets(
+                    cu_seqlens,
+                    token_count,
+                    cu_seqlens_host=(
+                        getattr(attention_inputs, "cu_seqlens_host", None)
+                        if attention_inputs is not None and _host_metadata_enabled()
+                        else None
+                    ),
+                )
+                q, q_final = _packed_causal_depthwise_conv1d(
+                    q_projected,
+                    self.kda_q_conv,
+                    cu_seqlens,
+                    q_state,
+                    mode=mode,
+                    sequence_ranges=sequence_ranges,
+                )
+                k, k_final = _packed_causal_depthwise_conv1d(
+                    k_projected,
+                    self.kda_k_conv,
+                    cu_seqlens,
+                    k_state,
+                    mode=mode,
+                    sequence_ranges=sequence_ranges,
+                )
+                v, v_final = _packed_causal_depthwise_conv1d(
+                    v_projected,
+                    self.kda_v_conv,
+                    cu_seqlens,
+                    v_state,
+                    mode=mode,
+                    sequence_ranges=sequence_ranges,
+                )
             if trace_enabled:
                 prepared = self._prepared_trace_values(
                     q.reshape(head_shape),
@@ -2707,29 +2962,53 @@ class KimiK3KDA(nn.Module):
                     record_accuracy_tensor(
                         f"{self.trace_prefix}.prepared_beta", beta, token_dim=1
                     )
-            output, recurrent_final = self._kda_core(
-                q.reshape(head_shape),
-                k.reshape(head_shape),
-                v.reshape(head_shape),
-                raw_gate.reshape(head_shape),
-                raw_beta.float().reshape(1, token_count, self.local_heads),
-                self.weights[W.linear_attn_alog],
-                self.weights[W.linear_attn_dt_b_kda],
-                recurrent_state,
-                mode=mode,
-                cu_seqlens=cu_seqlens,
-            )
-            final_state = KimiKDAState(
-                q_conv_state=q_final,
-                k_conv_state=k_final,
-                v_conv_state=v_final,
-                recurrent_state=recurrent_final,
-            )
+            if paged_decode_cache is not None:
+                output = self._paged_decode_core(
+                    q,
+                    k,
+                    v,
+                    raw_gate,
+                    raw_beta,
+                    cu_seqlens,
+                    ssm_cache,
+                    block_map,
+                    sequence_lengths_plus_one,
+                    page_size,
+                )
+                # Both physical state pools were updated in place.  The model
+                # caller ignores this auxiliary return when LayerKVCache owns
+                # state, so avoid gathering it back into canonical tensors.
+                final_state = None
+            else:
+                output, recurrent_final = self._kda_core(
+                    q.reshape(head_shape),
+                    k.reshape(head_shape),
+                    v.reshape(head_shape),
+                    raw_gate.reshape(head_shape),
+                    raw_beta.float().reshape(1, token_count, self.local_heads),
+                    self.weights[W.linear_attn_alog],
+                    self.weights[W.linear_attn_dt_b_kda],
+                    recurrent_state,
+                    mode=mode,
+                    cu_seqlens=cu_seqlens,
+                )
+                assert (
+                    q_final is not None
+                    and k_final is not None
+                    and v_final is not None
+                )
+                final_state = KimiKDAState(
+                    q_conv_state=q_final,
+                    k_conv_state=k_final,
+                    v_conv_state=v_final,
+                    recurrent_state=recurrent_final,
+                )
             if trace_enabled:
                 record_accuracy_tensor(f"{self.trace_prefix}.q_conv", q, token_dim=0)
                 record_accuracy_tensor(f"{self.trace_prefix}.k_conv", k, token_dim=0)
                 record_accuracy_tensor(f"{self.trace_prefix}.v_conv", v, token_dim=0)
         if trace_enabled:
+            assert final_state is not None
             record_accuracy_tensor(
                 f"{self.trace_prefix}.core_output", output, token_dim=1
             )
@@ -2867,7 +3146,12 @@ class KimiK3KDA(nn.Module):
                 )
         if trace_enabled:
             record_accuracy_tensor(f"{self.trace_prefix}.output", output, token_dim=0)
-        if kv_cache is not None and not stored_page_states:
+        if (
+            kv_cache is not None
+            and not stored_page_states
+            and paged_decode_cache is None
+        ):
+            assert final_state is not None
             self.cache_adapter.store(
                 final_state,
                 kv_cache,
@@ -5321,15 +5605,28 @@ class KimiK3Model(GptModelBase):
                     device=input_ids.device,
                 )
             )
-        _sequence_offsets(
-            cu_seqlens,
-            input_ids.numel(),
-            cu_seqlens_host=(
-                getattr(attention_inputs, "cu_seqlens_host", None)
-                if _host_metadata_enabled()
-                else None
-            ),
+        graph_decode = not attention_inputs.is_prefill and (
+            bool(getattr(attention_inputs, "is_cuda_graph", False))
+            or (input_ids.is_cuda and torch.cuda.is_current_stream_capturing())
         )
+        if graph_decode:
+            # Decode has exactly one packed token per request.  Inspecting the
+            # CUDA prefix sums on the host would make capture illegal and would
+            # freeze replay metadata; shape validation is sufficient here.
+            if cu_seqlens.numel() != input_ids.numel() + 1:
+                raise ValueError(
+                    "K3 CUDA Graph decode requires one cu_seqlens interval per token"
+                )
+        else:
+            _sequence_offsets(
+                cu_seqlens,
+                input_ids.numel(),
+                cu_seqlens_host=(
+                    getattr(attention_inputs, "cu_seqlens_host", None)
+                    if _host_metadata_enabled()
+                    else None
+                ),
+            )
         return cu_seqlens
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
