@@ -5,14 +5,19 @@ script_dir="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 
 : "${RUN_ROOT:?RUN_ROOT must point to this run artifact directory}"
-: "${OPS_OVERLAY:?OPS_OVERLAY must contain the bundled FlashKDA/DeepGEMM wheels}"
+: "${OPS_OVERLAY:?OPS_OVERLAY must contain cuLA/FLA/FlashKDA/DeepGEMM}"
 
 checkpoint="${CHECKPOINT_PATH:-/data0/luohaocheng.lhc/Kimi-K3-4layers-preflight}"
 start_port="${START_PORT:-27188}"
 cuda_devices="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
+python_bin="${PYTHON_BIN:-/opt/conda310/bin/python3}"
 server_runfiles="${repo_root}/bazel-bin/example/kimi_k3_prefill_perf/kimi_k3_prefill_server.runfiles"
 server_binary="${repo_root}/bazel-bin/example/kimi_k3_prefill_perf/kimi_k3_prefill_server"
 
+if [[ ! -x "${python_bin}" ]]; then
+  echo "Python binary is not executable: ${python_bin}" >&2
+  exit 2
+fi
 if [[ ! -x "${server_binary}" || ! -d "${server_runfiles}" ]]; then
   echo "missing Bazel server binary/runfiles: ${server_binary}" >&2
   echo "build //example/kimi_k3_prefill_perf:kimi_k3_prefill_server first" >&2
@@ -24,6 +29,7 @@ if [[ ! -f "${checkpoint}/config.json" ]]; then
 fi
 
 export TMPDIR="${K3_PERF_TMPDIR:-/tmp/k3p-${start_port}-$$}"
+export PATH="$(dirname -- "${python_bin}"):${PATH}"
 export CUDA_VISIBLE_DEVICES="${cuda_devices}"
 export PYTHONPATH="${OPS_OVERLAY}${PYTHONPATH:+:${PYTHONPATH}}"
 export PYTHONSAFEPATH=1
@@ -32,6 +38,7 @@ export PYTHONFAULTHANDLER=1
 export TORCH_SHOW_CPP_STACKTRACES=1
 export TORCH_DISABLE_ADDR2LINE=1
 export PYTORCH_CUDA_ALLOC_CONF=expandable_segments:True
+export FLA_TILELANG=0
 export RTP_LLM_STARTUP_TIMEOUT_S="${RTP_LLM_STARTUP_TIMEOUT_S:-14400}"
 export NCCL_DEBUG="${NCCL_DEBUG:-WARN}"
 export LOG_LEVEL="${LOG_LEVEL:-INFO}"
@@ -48,7 +55,7 @@ export KIMI_K3_PERF_MODE=1
 export KIMI_K3_PERF_FUSIONS=1
 export KIMI_K3_USE_HOST_METADATA=1
 export KIMI_K3_SP_MOE=1
-export KIMI_K3_KDA_BACKEND=flash_kda
+export KIMI_K3_KDA_BACKEND="${KIMI_K3_KDA_BACKEND:-cula}"
 export KIMI_K3_MOE_BACKEND=deep_gemm_mega
 export KIMI_K3_MLA_BACKEND=kernel
 export KIMI_K3_DEEPGEMM_EXPECTED_PATH="${OPS_OVERLAY}"

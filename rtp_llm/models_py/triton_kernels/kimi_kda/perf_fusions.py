@@ -392,7 +392,7 @@ def kimi_k3_store_linear_cache_state(
     ssm_cache: torch.Tensor,
     conv_cache: torch.Tensor,
 ) -> None:
-    """Store one V-first KDA state without eager cat/transpose/copy operators."""
+    """Store one backend-native KDA state without eager cat/transpose/copy ops."""
 
     if (
         recurrent.ndim != 3

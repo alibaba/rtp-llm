@@ -88,6 +88,7 @@ if TYPE_CHECKING:
 KIMI_K3_MLA_LATENT_NORM_EPS = 1e-6
 _FLASH_KDA_WORKSPACES: dict[tuple[int, int], torch.Tensor] = {}
 _FLASH_KDA_LOGGED_DEVICES: set[int] = set()
+_CULA_LOGGED_DEVICES: set[int] = set()
 _DEEPGEMM_MEGA_LOGGED_DEVICES: set[int] = set()
 
 
@@ -135,7 +136,6 @@ def _validate_perf_environment() -> None:
     if os.environ.get("KIMI_K3_ACCURACY_TRACE_DIR"):
         conflicting_flags.append("KIMI_K3_ACCURACY_TRACE_DIR")
     expected = {
-        "KIMI_K3_KDA_BACKEND": "flash_kda",
         "KIMI_K3_MOE_BACKEND": "deep_gemm_mega",
         "KIMI_K3_MLA_BACKEND": "kernel",
         "KIMI_K3_USE_HOST_METADATA": "1",
@@ -147,6 +147,9 @@ def _validate_perf_environment() -> None:
         for name, value in expected.items()
         if os.environ.get(name, "").strip().lower() != value
     ]
+    kda_backend = os.environ.get("KIMI_K3_KDA_BACKEND", "").strip().lower()
+    if kda_backend not in ("cula", "flash_kda"):
+        wrong_settings.append(f"KIMI_K3_KDA_BACKEND={kda_backend!r}")
     if conflicting_flags or wrong_settings:
         details = ", ".join(conflicting_flags + wrong_settings)
         raise RuntimeError(
@@ -676,6 +679,7 @@ def _packed_causal_depthwise_conv1d(
     mode: KDAExecutionMode = "prefill",
     use_initial_state: Optional[bool] = None,
     sequence_ranges: Optional[list[tuple[int, int]]] = None,
+    output_target: Optional[torch.Tensor] = None,
     final_state_outputs: Optional[list[torch.Tensor]] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Packed KDA short convolution matching Dummy/FLA arithmetic.
@@ -713,6 +717,23 @@ def _packed_causal_depthwise_conv1d(
             "KDA short conv final-state output count must match packed sequences: "
             f"outputs={len(final_state_outputs)} sequences={len(ranges)}"
         )
+    if output_target is not None:
+        if (
+            tuple(output_target.shape) != tuple(x.shape)
+            or output_target.dtype != x.dtype
+            or output_target.device != x.device
+            or not output_target.is_contiguous()
+        ):
+            raise ValueError(
+                "KDA short conv output target must be contiguous and match "
+                f"the input: input={tuple(x.shape)}/{x.dtype}/{x.device}, "
+                f"output={tuple(output_target.shape)}/{output_target.dtype}/"
+                f"{output_target.device}"
+            )
+        if not x.is_cuda or mode != "prefill":
+            raise ValueError(
+                "KDA short conv output target is supported only for CUDA prefill"
+            )
     outputs: list[torch.Tensor] = []
     final_states: list[torch.Tensor] = []
     for sequence_idx, (start, end) in enumerate(ranges):
@@ -749,6 +770,7 @@ def _packed_causal_depthwise_conv1d(
                     if use_initial_state is None
                     else use_initial_state
                 ),
+                output=(None if output_target is None else output_target[start:end]),
                 final_state=(
                     None
                     if final_state_outputs is None
@@ -791,12 +813,13 @@ def _packed_causal_depthwise_conv1d(
 
 
 class KimiK3LinearCacheAdapter:
-    """Map canonical KDA state to RTP's paged linear-cache byte layout.
+    """Map backend-native KDA state to RTP's paged linear-cache byte layout.
 
-    RTP stores ``[H,V,K]`` followed by a single packed ``[history,QKV]``
-    convolution state in each linear block.  The correctness KDA equations use
-    ``[H,K,V]`` and three ``[channels,history]`` tensors, so conversion is kept
-    explicit at this boundary.  Cached prefill writes a state at every physical
+    Each linear block stores one square recurrent-state tensor followed by a
+    packed ``[history,QKV]`` convolution state.  The performance path keeps the
+    selected backend's native layout in that square tensor: FlashKDA uses
+    ``[H,V,K]`` while cuLA uses ``[H,K,V]``.  Accuracy/reference paths retain
+    the canonical conversion.  Cached prefill writes a state at every physical
     page boundary (and at the partial tail), which makes both PD tail transfer
     and prefix reuse from an earlier page well-defined.
     """
@@ -1024,7 +1047,8 @@ class KimiK3LinearCacheAdapter:
             q_state, k_state, v_state = torch.split(
                 packed_conv, self.projection_size, dim=0
             )
-            # FlashKDA and the physical SSM cache both use [H,V,K].
+            # The square physical cache preserves the selected performance
+            # backend's native layout: FlashKDA [H,V,K], cuLA [H,K,V].
             return KimiKDAState(
                 q_conv_state=q_state.unsqueeze(0),
                 k_conv_state=k_state.unsqueeze(0),
@@ -1213,6 +1237,7 @@ class KimiK3KDA(nn.Module):
         self.projection_size = self.local_heads * self.head_dim
         self._full_beta_weight: Optional[torch.Tensor] = None
         self._full_column_weights: dict[str, torch.Tensor] = {}
+        self._segment_cu_seqlens_cpu: dict[int, torch.Tensor] = {}
         self.eps = float(config.layernorm_eps)
         self.gate_lower_bound = runtime.kda_gate_lower_bound
         # KDA delta-net core backend: the ported Triton kernel by default, with
@@ -1223,10 +1248,11 @@ class KimiK3KDA(nn.Module):
             "reference",
             "fla37_precompiled",
             "flash_kda",
+            "cula",
         ):
             raise ValueError(
                 "KIMI_K3_KDA_BACKEND must be 'kernel', 'reference', "
-                "'fla37_precompiled', or 'flash_kda', got "
+                "'fla37_precompiled', 'flash_kda', or 'cula', got "
                 f"{self._kda_backend!r}"
             )
         if not runtime.kda_use_full_rank_gate:
@@ -1330,7 +1356,10 @@ class KimiK3KDA(nn.Module):
         *,
         mode: KDAExecutionMode,
         cu_seqlens: torch.Tensor,
+        cu_seqlens_cpu: Optional[torch.Tensor] = None,
         output_target: Optional[torch.Tensor] = None,
+        checkpoint_interval: Optional[int] = None,
+        checkpoint_states: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the KDA delta-net core (l2norm + decay gate + scan).
 
@@ -1341,6 +1370,15 @@ class KimiK3KDA(nn.Module):
         for precision verification. Kernel/reference agreement covers the
         non-zero initial-state prefill/decode seams.
         """
+
+        if checkpoint_interval is None and checkpoint_states is not None:
+            raise ValueError("checkpoint_states requires checkpoint_interval")
+        if checkpoint_interval is not None and (
+            mode != "prefill" or self._kda_backend != "cula"
+        ):
+            raise ValueError(
+                "FP32 checkpoint states are supported only by cuLA prefill"
+            )
 
         if self._kda_backend == "reference" or not q.is_cuda:
             return kimi_kda(
@@ -1357,18 +1395,19 @@ class KimiK3KDA(nn.Module):
                 cu_seqlens=cu_seqlens,
             )
 
-        copy_free_flash_prefill = (
+        copy_free_backend_prefill = (
             _perf_fusions_enabled()
-            and self._kda_backend == "flash_kda"
+            and self._kda_backend in ("flash_kda", "cula")
             and mode == "prefill"
         )
-        if copy_free_flash_prefill:
+        if copy_free_backend_prefill:
             state_in = recurrent_state
             if state_in is not None and (
                 state_in.dtype != torch.float32 or not state_in.is_contiguous()
             ):
                 raise ValueError(
-                    "K3 FlashKDA fused state must be contiguous FP32 V-first"
+                    "K3 fused state must be contiguous FP32 in the "
+                    f"{self._kda_backend} native layout"
                 )
         else:
             # Accuracy/recurrent kernels may mutate initial_state. Feed a
@@ -1379,6 +1418,91 @@ class KimiK3KDA(nn.Module):
                 else recurrent_state.float().contiguous().clone()
             )
         if mode == "prefill":
+            if self._kda_backend == "cula":
+                try:
+                    import cula
+                    from cula.kda import chunk_kda as cula_chunk_kda
+                except Exception as error:
+                    raise RuntimeError(
+                        "KIMI_K3_KDA_BACKEND=cula was requested but the "
+                        "cuda-linear-attention package could not be imported: "
+                        f"{type(error).__name__}: {error}"
+                    ) from error
+                if self.gate_lower_bound is None:
+                    raise RuntimeError("cuLA requires K3's finite gate lower bound")
+
+                device_index = q.device.index if q.device.index is not None else 0
+                if device_index not in _CULA_LOGGED_DEVICES:
+                    logging.info(
+                        "[KimiK3 cuLA] enabled device=%s package=%s version=%s",
+                        q.device,
+                        getattr(cula, "__file__", "<unknown>"),
+                        getattr(cula, "__version__", "<unknown>"),
+                    )
+                    _CULA_LOGGED_DEVICES.add(device_index)
+                single_sequence = int(cu_seqlens.numel()) == 2
+                cula_cu_seqlens = (
+                    None
+                    if _perf_fusions_enabled() and single_sequence
+                    else cu_seqlens.contiguous()
+                )
+                with (
+                    torch.inference_mode(),
+                    torch.autograd.profiler.record_function("k3.kda.cula"),
+                ):
+                    cula_result = cula_chunk_kda(
+                        q.contiguous(),
+                        k.contiguous(),
+                        v.contiguous(),
+                        raw_gate.to(dtype=q.dtype).contiguous(),
+                        raw_beta.to(dtype=q.dtype).contiguous(),
+                        scale=self.head_dim**-0.5,
+                        initial_state=state_in,
+                        output_final_state=True,
+                        use_qk_l2norm_in_kernel=True,
+                        use_gate_in_kernel=True,
+                        use_beta_sigmoid_in_kernel=True,
+                        cu_seqlens=cula_cu_seqlens,
+                        cu_seqlens_cpu=(
+                            None if cula_cu_seqlens is None else cu_seqlens_cpu
+                        ),
+                        safe_gate=True,
+                        lower_bound=float(self.gate_lower_bound),
+                        disable_recompute=False,
+                        use_intracard_cp=(
+                            False if checkpoint_interval is not None else "auto"
+                        ),
+                        A_log=a_log.float().contiguous(),
+                        dt_bias=dt_bias.float().contiguous(),
+                        checkpoint_interval=checkpoint_interval,
+                        checkpoint_states=checkpoint_states,
+                    )
+                    if checkpoint_interval is None:
+                        output, final_state = cula_result
+                    else:
+                        output, final_state, published_checkpoints = cula_result
+                        if (
+                            checkpoint_states is None
+                            or published_checkpoints.data_ptr()
+                            != checkpoint_states.data_ptr()
+                        ):
+                            raise RuntimeError(
+                                "cuLA did not publish into the requested FP32 "
+                                "checkpoint buffer"
+                            )
+                    if (
+                        final_state is None
+                        or final_state.dtype != torch.float32
+                        or not final_state.is_contiguous()
+                    ):
+                        raise RuntimeError(
+                            "cuLA must return a contiguous FP32 final state"
+                        )
+                    if output_target is not None:
+                        output_target.copy_(output)
+                        output = output_target
+                return output.to(dtype=q.dtype), final_state
+
             if self._kda_backend == "flash_kda":
                 try:
                     import flash_kda
@@ -1402,7 +1526,7 @@ class KimiK3KDA(nn.Module):
 
                 state_v_first = (
                     state_in
-                    if copy_free_flash_prefill
+                    if copy_free_backend_prefill
                     else (
                         None
                         if state_in is None
@@ -1463,7 +1587,7 @@ class KimiK3KDA(nn.Module):
                     )
                 final_state = (
                     final_state_v_first
-                    if copy_free_flash_prefill
+                    if copy_free_backend_prefill
                     else final_state_v_first.transpose(-1, -2).contiguous()
                 )
                 return output.to(dtype=q.dtype), final_state
@@ -1550,6 +1674,170 @@ class KimiK3KDA(nn.Module):
         )
         return output, final_state
 
+    def _cached_cula_checkpoint_prefill(
+        self,
+        q_projected: torch.Tensor,
+        k_projected: torch.Tensor,
+        v_projected: torch.Tensor,
+        raw_gate: torch.Tensor,
+        raw_beta: torch.Tensor,
+        cu_seqlens: torch.Tensor,
+        initial_state: KimiKDAState,
+        kv_cache: LayerKVCache,
+        attention_inputs: PyAttentionInputs,
+        *,
+        past_length: int,
+        page_size: int,
+        block_map: list[list[int]],
+    ) -> tuple[torch.Tensor, KimiKDAState]:
+        """Run one long cuLA invocation and publish exact page checkpoints."""
+
+        token_count = int(q_projected.shape[0])
+        if token_count <= 0:
+            raise ValueError("cuLA checkpoint prefill requires at least one token")
+        if page_size % 64:
+            raise ValueError(
+                "cuLA checkpoint page size must be a multiple of 64 tokens, "
+                f"got {page_size}"
+            )
+        if past_length % page_size:
+            raise ValueError(
+                "cuLA checkpoint prefill requires a page-aligned prefix, "
+                f"got past_length={past_length}, page_size={page_size}"
+            )
+        checkpoint_count = (token_count + page_size - 1) // page_size
+        q_conv = torch.empty_like(q_projected)
+        k_conv = torch.empty_like(k_projected)
+        v_conv = torch.empty_like(v_projected)
+        sequence_range = [(0, token_count)]
+        with _perf_profile(
+            f"{self.trace_prefix}.all_pages.qkv_short_conv_and_final_state_export"
+        ):
+            q_conv_result, q_final = _packed_causal_depthwise_conv1d(
+                q_projected,
+                self.kda_q_conv,
+                cu_seqlens,
+                initial_state.q_conv_state,
+                mode="prefill",
+                use_initial_state=past_length > 0,
+                sequence_ranges=sequence_range,
+                output_target=q_conv,
+            )
+            k_conv_result, k_final = _packed_causal_depthwise_conv1d(
+                k_projected,
+                self.kda_k_conv,
+                cu_seqlens,
+                initial_state.k_conv_state,
+                mode="prefill",
+                use_initial_state=past_length > 0,
+                sequence_ranges=sequence_range,
+                output_target=k_conv,
+            )
+            v_conv_result, v_final = _packed_causal_depthwise_conv1d(
+                v_projected,
+                self.kda_v_conv,
+                cu_seqlens,
+                initial_state.v_conv_state,
+                mode="prefill",
+                use_initial_state=past_length > 0,
+                sequence_ranges=sequence_range,
+                output_target=v_conv,
+            )
+            if (
+                q_conv_result.data_ptr() != q_conv.data_ptr()
+                or k_conv_result.data_ptr() != k_conv.data_ptr()
+                or v_conv_result.data_ptr() != v_conv.data_ptr()
+            ):
+                raise RuntimeError("K3 short convolution did not use its output target")
+
+        recurrent_checkpoints = torch.empty(
+            (
+                1,
+                checkpoint_count,
+                self.local_heads,
+                self.head_dim,
+                self.head_dim,
+            ),
+            dtype=torch.float32,
+            device=q_projected.device,
+        )
+        cu_seqlens_cpu = self._segment_cu_seqlens_cpu.get(token_count)
+        if cu_seqlens_cpu is None:
+            cu_seqlens_cpu = torch.tensor([0, token_count], dtype=torch.int32)
+            self._segment_cu_seqlens_cpu[token_count] = cu_seqlens_cpu
+        head_shape = (1, token_count, self.local_heads, self.head_dim)
+        with _perf_profile(f"{self.trace_prefix}.all_pages.cula_recurrence_and_output"):
+            output, recurrent_final = self._kda_core(
+                q_conv.reshape(head_shape),
+                k_conv.reshape(head_shape),
+                v_conv.reshape(head_shape),
+                raw_gate.reshape(head_shape),
+                raw_beta.reshape(1, token_count, self.local_heads),
+                self.weights[W.linear_attn_alog],
+                self.weights[W.linear_attn_dt_b_kda],
+                (None if past_length == 0 else initial_state.recurrent_state),
+                mode="prefill",
+                cu_seqlens=cu_seqlens,
+                cu_seqlens_cpu=cu_seqlens_cpu,
+                checkpoint_interval=page_size,
+                checkpoint_states=recurrent_checkpoints,
+            )
+
+        history_size = self.cache_adapter.history_size
+        for checkpoint_index in range(checkpoint_count):
+            end = min((checkpoint_index + 1) * page_size, token_count)
+            absolute_end = past_length + end
+            page_prefix = (
+                f"{self.trace_prefix}.page.{(absolute_end - 1) // page_size}"
+                f"[tokens={end - checkpoint_index * page_size},"
+                f"physical_block={page_size}]"
+            )
+            if end >= history_size:
+                q_checkpoint = (
+                    q_projected.narrow(0, end - history_size, history_size)
+                    .transpose(0, 1)
+                    .unsqueeze(0)
+                )
+                k_checkpoint = (
+                    k_projected.narrow(0, end - history_size, history_size)
+                    .transpose(0, 1)
+                    .unsqueeze(0)
+                )
+                v_checkpoint = (
+                    v_projected.narrow(0, end - history_size, history_size)
+                    .transpose(0, 1)
+                    .unsqueeze(0)
+                )
+            else:
+                q_checkpoint = q_final
+                k_checkpoint = k_final
+                v_checkpoint = v_final
+            checkpoint_state = KimiKDAState(
+                q_conv_state=q_checkpoint,
+                k_conv_state=k_checkpoint,
+                v_conv_state=v_checkpoint,
+                recurrent_state=recurrent_checkpoints[:, checkpoint_index],
+            )
+            with _perf_profile(
+                f"{page_prefix}.linear_cache_update_ssm_plus_3xqkv_history"
+            ):
+                self.cache_adapter.store_position(
+                    checkpoint_state,
+                    0,
+                    kv_cache,
+                    attention_inputs,
+                    0,
+                    absolute_end - 1,
+                    block_map=block_map,
+                )
+
+        return output, KimiKDAState(
+            q_conv_state=q_final,
+            k_conv_state=k_final,
+            v_conv_state=v_final,
+            recurrent_state=recurrent_final,
+        )
+
     def _cached_chunk_prefill(
         self,
         q_projected: torch.Tensor,
@@ -1581,6 +1869,26 @@ class KimiK3KDA(nn.Module):
         page_size = int(kv_cache.seq_size_per_block)
         if page_size <= 0:
             raise ValueError("linear cache seq_size_per_block must be positive")
+        if (
+            _perf_fusions_enabled()
+            and self._kda_backend == "cula"
+            and len(ranges) == 1
+            and past_lengths[0] % page_size == 0
+        ):
+            return self._cached_cula_checkpoint_prefill(
+                q_projected,
+                k_projected,
+                v_projected,
+                raw_gate,
+                raw_beta,
+                cu_seqlens,
+                initial_state,
+                kv_cache,
+                attention_inputs,
+                past_length=past_lengths[0],
+                page_size=page_size,
+                block_map=block_map,
+            )
 
         packed_outputs: list[torch.Tensor] = []
         fused_output = (
@@ -1694,11 +2002,26 @@ class KimiK3KDA(nn.Module):
                 beta_for_core = raw_beta[cursor:segment_end].reshape(
                     1, segment_length, self.local_heads
                 )
-                if not (_perf_fusions_enabled() and self._kda_backend == "flash_kda"):
+                if not (
+                    _perf_fusions_enabled()
+                    and self._kda_backend in ("flash_kda", "cula")
+                ):
                     beta_for_core = beta_for_core.float()
                 with _perf_profile(
-                    f"{page_prefix}.flashkda_prepare_recurrence_and_output"
+                    f"{page_prefix}.{self._kda_backend}_recurrence_and_output"
                 ):
+                    segment_cu_seqlens_cpu = None
+                    if self._kda_backend == "cula":
+                        segment_cu_seqlens_cpu = self._segment_cu_seqlens_cpu.get(
+                            segment_length
+                        )
+                        if segment_cu_seqlens_cpu is None:
+                            segment_cu_seqlens_cpu = torch.tensor(
+                                [0, segment_length], dtype=torch.int32
+                            )
+                            self._segment_cu_seqlens_cpu[segment_length] = (
+                                segment_cu_seqlens_cpu
+                            )
                     segment_output, recurrent_state = self._kda_core(
                         q.reshape(head_shape),
                         k.reshape(head_shape),
@@ -1710,6 +2033,7 @@ class KimiK3KDA(nn.Module):
                         recurrent_state,
                         mode="prefill",
                         cu_seqlens=segment_cu_seqlens,
+                        cu_seqlens_cpu=segment_cu_seqlens_cpu,
                         output_target=(
                             None
                             if fused_output is None

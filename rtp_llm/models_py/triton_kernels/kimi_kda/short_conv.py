@@ -207,6 +207,7 @@ def kimi_kda_short_conv_prefill(
     history: torch.Tensor,
     *,
     use_history: bool,
+    output: torch.Tensor | None = None,
     final_state: torch.Tensor | None = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Run FLA-compatible causal short convolution for one packed sequence."""
@@ -223,15 +224,48 @@ def kimi_kda_short_conv_prefill(
             f"{(channels, kernel_size - 1)}, got {tuple(history.shape)}"
         )
     if token_count == 0:
+        if output is None:
+            output = torch.empty_like(x)
+        elif tuple(output.shape) != tuple(x.shape):
+            raise ValueError(
+                "KDA short conv output must have shape "
+                f"{tuple(x.shape)}, got {tuple(output.shape)}"
+            )
+        elif (
+            output.dtype != x.dtype
+            or output.device != x.device
+            or not output.is_contiguous()
+        ):
+            raise ValueError(
+                "KDA short conv output must be contiguous and match input "
+                f"dtype/device: input={x.dtype}/{x.device}, "
+                f"output={output.dtype}/{output.device}"
+            )
         if final_state is None:
             final_state = history.clone()
         else:
             final_state.copy_(history)
-        return torch.empty_like(x), final_state
+        return output, final_state
     if not x.is_cuda:
         raise ValueError("KDA Triton short conv requires CUDA input")
 
-    output = torch.empty_like(x, memory_format=torch.contiguous_format)
+    if output is None:
+        output = torch.empty_like(x, memory_format=torch.contiguous_format)
+    elif tuple(output.shape) != tuple(x.shape):
+        raise ValueError(
+            "KDA short conv output must have shape "
+            f"{tuple(x.shape)}, got {tuple(output.shape)}"
+        )
+    elif (
+        output.dtype != x.dtype
+        or output.device != x.device
+        or not output.is_contiguous()
+    ):
+        raise ValueError(
+            "KDA short conv output must be contiguous and match input "
+            f"dtype/device: input={x.dtype}/{x.device}, "
+            f"output={output.dtype}/{output.device}"
+        )
     if final_state is None:
         final_state = torch.empty_like(history, memory_format=torch.contiguous_format)
     elif tuple(final_state.shape) != tuple(history.shape):

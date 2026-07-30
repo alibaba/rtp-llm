@@ -62,7 +62,7 @@ Optional environment variables:
   KIMI_K3_USE_HOST_METADATA             optimized defaults to 1; accuracy to 0
   KIMI_K3_SP_MOE                        optimized Prefill defaults to 1;
                                          all other modes/roles default to 0
-  KIMI_K3_KDA_BACKEND                   optimized Prefill defaults to flash_kda;
+  KIMI_K3_KDA_BACKEND                   optimized Prefill defaults to cula;
                                          accuracy Prefill defaults to kernel;
                                          Decode defaults to fla37_precompiled
   KIMI_K3_MOE_BACKEND                   optimized Prefill defaults to
@@ -74,7 +74,7 @@ Optional environment variables:
                                          for fla37_precompiled
   KIMI_K3_DEEP_EP_PYTHONPATH            optional DeepEP site-packages overlay;
                                          defaults to the bundled CUDA13 wheel
-  KIMI_K3_OPERATOR_PYTHONPATH           optional FlashKDA/DeepGEMM overlay;
+  KIMI_K3_OPERATOR_PYTHONPATH           optional KDA/DeepGEMM operator overlay;
                                          optimized Prefill otherwise installs
                                          the bundled fixed wheels automatically
   KIMI_K3_ACCURACY_MODE                 defaults to native; one of:
@@ -191,7 +191,7 @@ case "${execution_mode}" in
             default_perf_fusions=0
             default_kv_cache_mem_mb=8192
         else
-            default_kda_backend=flash_kda
+            default_kda_backend=cula
             default_moe_backend=deep_gemm_mega
             default_sp_moe=1
             default_perf_fusions=1
@@ -236,7 +236,8 @@ kv_cache_mem_mb="${KIMI_K3_KV_CACHE_MEM_MB:-${default_kv_cache_mem_mb}}"
 kda_fla37_precompiled_dir="${KIMI_K3_KDA_FLA37_PRECOMPILED_DIR:-${repo_root}/example/kimi_k3_pd/fla37-sm103}"
 
 if [[ "${role}" == "PREFILL" ]] \
-    && { [[ "${kda_backend}" == "flash_kda" ]] \
+    && { [[ "${kda_backend}" == "cula" ]] \
+        || [[ "${kda_backend}" == "flash_kda" ]] \
         || [[ "${moe_backend}" == "deep_gemm_mega" ]]; } \
     && [[ -z "${KIMI_K3_OPERATOR_PYTHONPATH:-}" ]]; then
     operator_bundle="${repo_root}/example/kimi_k3_prefill_perf/wheels"
@@ -246,7 +247,7 @@ if [[ "${role}" == "PREFILL" ]] \
     (
         cd "${operator_bundle}"
         sha256sum --check SHA256SUMS
-    ) || die "bundled FlashKDA/DeepGEMM wheel checksum failed"
+    ) || die "bundled K3 operator wheel checksum failed"
     operator_manifest_sha="$(sha256sum "${operator_manifest}" | awk '{print $1}')"
     operator_overlay="${run_root}/operator-overlay/${operator_manifest_sha}"
     operator_marker="${operator_overlay}/.kimi-k3-operators-installed"
@@ -255,8 +256,10 @@ if [[ "${role}" == "PREFILL" ]] \
         "${python_bin}" -m pip install \
             --no-deps --upgrade \
             --target "${operator_overlay}" \
+            "${operator_bundle}/cuda_linear_attention-0.1.2+rtp.f7495b8.1-cp310-cp310-linux_x86_64.whl" \
             "${operator_bundle}/deep_gemm-2.6.1-cp310-cp310-linux_x86_64.whl" \
-            "${operator_bundle}/flash_kda-0.0.1-cp310-cp310-linux_x86_64.whl"
+            "${operator_bundle}/flash_kda-0.0.1-cp310-cp310-linux_x86_64.whl" \
+            "${operator_bundle}/flash_linear_attention-0.5.0+rtp.3a9ce1c.2-py3-none-any.whl"
         touch "${operator_marker}"
     fi
     export KIMI_K3_OPERATOR_PYTHONPATH="${operator_overlay}"
@@ -271,9 +274,9 @@ done
 
 case "${kda_backend}" in
     kernel | reference) ;;
-    flash_kda)
+    cula | flash_kda)
         [[ "${role}" == "PREFILL" ]] \
-            || die "KIMI_K3_KDA_BACKEND=flash_kda is Prefill-only"
+            || die "KIMI_K3_KDA_BACKEND=${kda_backend} is Prefill-only"
         ;;
     fla37_precompiled)
         [[ -d "${kda_fla37_precompiled_dir}" ]] \

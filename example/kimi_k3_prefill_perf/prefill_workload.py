@@ -117,6 +117,7 @@ def main() -> None:
     parser.add_argument("--length", type=int, default=65536)
     parser.add_argument("--timeout", type=int, default=14400)
     parser.add_argument("--max-warmups", type=int, default=6)
+    parser.add_argument("--backend", choices=("cula", "flash_kda"), default="cula")
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--trace-dir", type=Path, required=True)
     args = parser.parse_args()
@@ -165,7 +166,7 @@ def main() -> None:
     manifest["warmup_seconds"] = warmups
     manifest["warmup_count"] = len(warmups)
 
-    trace_name = f"k3_sp_flashkda_mega_prefill_{args.length}"
+    trace_name = f"k3_sp_{args.backend}_mega_prefill_{args.length}"
     profile_response = post_json(
         args.base_url.rstrip("/") + "/start_profile",
         {

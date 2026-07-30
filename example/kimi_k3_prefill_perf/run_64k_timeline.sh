@@ -25,11 +25,17 @@ python_bin="${PYTHON_BIN:-/opt/conda310/bin/python3}"
 checkpoint="${CHECKPOINT_PATH:-/data0/luohaocheng.lhc/Kimi-K3-4layers-preflight}"
 start_port="${START_PORT:-27188}"
 timestamp="$(date +%Y%m%d-%H%M%S)"
-run_root="${RUN_ROOT:-${HOME}/kimi_k3_perf_runs/${timestamp}-k3-sp-flashkda-mega-64k}"
+kda_backend="${KIMI_K3_KDA_BACKEND:-cula}"
+run_root="${RUN_ROOT:-${HOME}/kimi_k3_perf_runs/${timestamp}-k3-sp-${kda_backend}-mega-64k}"
 ops_overlay="${run_root}/runtime/ops"
 server_log="${run_root}/launcher.log"
 server_target="//example/kimi_k3_prefill_perf:kimi_k3_prefill_server"
 server_pid=""
+
+if [[ "${kda_backend}" != "cula" && "${kda_backend}" != "flash_kda" ]]; then
+  echo "KIMI_K3_KDA_BACKEND must be cula or flash_kda, got ${kda_backend}" >&2
+  exit 2
+fi
 
 cleanup() {
   if [[ -n "${server_pid}" ]] && kill -0 "${server_pid}" 2>/dev/null; then
@@ -74,15 +80,18 @@ fi
 rm -rf "${ops_overlay}"
 "${python_bin}" -m pip install \
   --no-deps --target "${ops_overlay}" \
+  "${script_dir}/wheels/cuda_linear_attention-0.1.2+rtp.f7495b8.1-cp310-cp310-linux_x86_64.whl" \
   "${script_dir}/wheels/deep_gemm-2.6.1-cp310-cp310-linux_x86_64.whl" \
-  "${script_dir}/wheels/flash_kda-0.0.1-cp310-cp310-linux_x86_64.whl"
+  "${script_dir}/wheels/flash_kda-0.0.1-cp310-cp310-linux_x86_64.whl" \
+  "${script_dir}/wheels/flash_linear_attention-0.5.0+rtp.3a9ce1c.2-py3-none-any.whl"
 
-PYTHONPATH="${ops_overlay}" "${python_bin}" - <<'PY'
+KDA_BACKEND="${kda_backend}" PYTHONPATH="${ops_overlay}" "${python_bin}" - <<'PY'
 import inspect
 import os
+from importlib.metadata import version
+from pathlib import Path
+
 import deep_gemm
-import flash_kda
-import flash_kda_C
 import torch
 
 if torch.__version__ != "2.11.0+cu130" or torch.version.cuda != "13.0":
@@ -94,9 +103,26 @@ if torch.cuda.device_count() < 8:
     raise RuntimeError(f"expected 8 visible GPUs, got {torch.cuda.device_count()}")
 if torch.cuda.get_device_capability(0) != (10, 3):
     raise RuntimeError(
-        f"bundled FlashKDA wheel targets sm_103a, got "
+        f"operator wheels target sm_103a, got "
         f"{torch.cuda.get_device_capability(0)}"
     )
+if version("flash-linear-attention") != "0.5.0+rtp.3a9ce1c.2":
+    raise RuntimeError("unexpected flash-linear-attention version")
+if version("cuda-linear-attention") != "0.1.2+rtp.f7495b8.1":
+    raise RuntimeError("unexpected cuda-linear-attention version")
+overlay = Path(os.environ["PYTHONPATH"].split(os.pathsep, 1)[0])
+if not (overlay / "cula" / "kda" / "chunk.py").is_file():
+    raise RuntimeError("cuLA chunk_kda Python entrypoint is unavailable")
+if not list((overlay / "cula").glob("_cudac*.so")):
+    raise RuntimeError("cuLA sm_103a extension is unavailable")
+if os.environ["KDA_BACKEND"] == "flash_kda":
+    import flash_kda
+    import flash_kda_C
+
+    if not hasattr(flash_kda, "get_workspace_size"):
+        raise RuntimeError("FlashKDA Python API is incomplete")
+    print(f"flash_kda={os.path.realpath(flash_kda.__file__)}")
+    print(f"flash_kda_C={os.path.realpath(flash_kda_C.__file__)}")
 required = {"activation_beta", "activation_linear_beta", "fast_math"}
 missing = required.difference(
     inspect.signature(deep_gemm.fp8_fp4_mega_moe).parameters
@@ -104,8 +130,8 @@ missing = required.difference(
 if missing:
     raise RuntimeError(f"DeepGEMM wheel lacks K3 SiTU parameters: {missing}")
 print(f"deep_gemm={os.path.realpath(deep_gemm.__file__)}")
-print(f"flash_kda={os.path.realpath(flash_kda.__file__)}")
-print(f"flash_kda_C={os.path.realpath(flash_kda_C.__file__)}")
+print(f"fla={overlay / 'fla'}")
+print(f"cula={overlay / 'cula'}")
 PY
 
 cd "${repo_root}"
@@ -134,6 +160,8 @@ export RUN_ROOT="${run_root}"
 export OPS_OVERLAY="${ops_overlay}"
 export CHECKPOINT_PATH="${checkpoint}"
 export START_PORT="${start_port}"
+export PYTHON_BIN="${python_bin}"
+export KIMI_K3_KDA_BACKEND="${kda_backend}"
 
 setsid "${script_dir}/launch_prefill_server.sh" >"${server_log}" 2>&1 &
 server_pid=$!
@@ -158,13 +186,14 @@ echo "[service] healthy on port ${start_port}"
 "${python_bin}" "${script_dir}/prefill_workload.py" \
   --base-url "http://127.0.0.1:${start_port}" \
   --length 65536 \
+  --backend "${kda_backend}" \
   --output-dir "${run_root}/measurements" \
   --trace-dir "${run_root}/traces" \
   | tee "${run_root}/measurements/console.log"
 
 nvidia-smi -q >"${run_root}/snapshots/nvidia_smi_after.txt"
 echo "[done] run_root=${run_root}"
-echo "[done] rank0_trace=${run_root}/traces/k3_sp_flashkda_mega_prefill_65536_wr0_1.json"
+echo "[done] rank0_trace=${run_root}/traces/k3_sp_${kda_backend}_mega_prefill_65536_wr0_1.json"
 
 if [[ "${KEEP_SERVER:-0}" == "1" ]]; then
   trap - EXIT INT TERM
