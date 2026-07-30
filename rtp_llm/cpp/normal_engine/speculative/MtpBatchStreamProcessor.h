@@ -145,6 +145,25 @@ protected:
     // dereferences the [B, k, V] buffer, but a greedy row's accept decision
     // never depends on its contents (same_token short-circuit).
     torch::Tensor dsparkDummyProbs(int64_t batch_size);
+    // Target-side [cap, k+1, V] zero stand-in for the greedy sampler fast
+    // path below (same kernel contract as dsparkDummyProbs).
+    torch::Tensor dsparkTargetDummyProbs(int64_t batch_size);
+
+public:
+    // Greedy spec-sampler fast path (dspark decode).  When every stream is
+    // plain greedy with no logit shaping (penalties, ngram bans, logits
+    // processors, beams/tiling) and no probs/logits/loss returns, the
+    // rejection kernel's accept decision reads only the target argmax ids:
+    // greedy rows short-circuit on same_token and never reach the
+    // residual-resample section, so neither probs buffer's contents matter.
+    // The whole sampler-input gather (host loops + O(seq_len) token-history
+    // copy) and Sampler::forward (penalty kernels + [B*(k+1), V] softmax)
+    // then collapse to one argmax over the verify logits plus cached zero
+    // probs stand-ins.
+    bool          canUseGreedySpecSamplerFastPath(const std::list<GenerateStreamPtr>& streams) const;
+    SamplerOutput buildGreedySpecSamplerOutput(const torch::Tensor& logits, int64_t batch_size);
+
+protected:
 
     int propose_step_;
     // DSpark/DFlash block-diffusion draft (see the DSpark variants above).
@@ -157,5 +176,6 @@ protected:
     torch::Tensor dspark_ctx_lengths_cache_;  // [cap] int32, filled with width
     torch::Tensor dspark_lm_indexes_cache_;   // [cap] int32, arange(cap) * width
     torch::Tensor dspark_dummy_probs_;        // [cap, k, vocab] fp32 zeros
+    torch::Tensor dspark_target_dummy_probs_;  // [cap, k+1, vocab] fp32 zeros
 };
 }  // namespace rtp_llm

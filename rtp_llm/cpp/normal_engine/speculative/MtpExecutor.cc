@@ -1121,11 +1121,21 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             }
 
             // target model sample
-            CHECK_AND_RETURN_REF(
-                sampler_input,
-                batch_stream_processor_->gatherSpecSamplerInput(stream_groups, model_input, model_output));
-            holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
-            sampler_output           = std::move(sampler_->forward(sampler_input));
+            if (batch_stream_processor_->canUseGreedySpecSamplerFastPath(streams)) {
+                // Plain-greedy batches skip the sampler-input gather (host
+                // loops + O(seq_len) token-history copy) and Sampler::forward
+                // entirely: rejection only needs the verify argmax ids, and
+                // greedy rows never read either probs buffer's contents.
+                RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(greedy_sampler_fast_path)");
+                sampler_output =
+                    batch_stream_processor_->buildGreedySpecSamplerOutput(model_output.logits, (int64_t)batch_size);
+            } else {
+                CHECK_AND_RETURN_REF(
+                    sampler_input,
+                    batch_stream_processor_->gatherSpecSamplerInput(stream_groups, model_input, model_output));
+                holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
+                sampler_output = std::move(sampler_->forward(sampler_input));
+            }
             sampler_output.all_probs = sampler_output.all_probs.reshape(
                 {(int64_t)batch_size, (int64_t)(propose_step_ + 1), (int64_t)vocab_size_});
 

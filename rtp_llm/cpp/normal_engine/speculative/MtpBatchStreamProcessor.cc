@@ -689,6 +689,62 @@ torch::Tensor MtpBatchStreamProcessor::dsparkDummyProbs(int64_t batch_size) {
     return dspark_dummy_probs_.narrow(0, 0, batch_size);
 }
 
+torch::Tensor MtpBatchStreamProcessor::dsparkTargetDummyProbs(int64_t batch_size) {
+    if (!dspark_target_dummy_probs_.defined() || dspark_target_dummy_probs_.size(0) < batch_size) {
+        dspark_target_dummy_probs_ = torch::zeros({batch_size, (int64_t)propose_step_ + 1, dspark_vocab_size_},
+                                                  torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    }
+    return dspark_target_dummy_probs_.narrow(0, 0, batch_size);
+}
+
+bool MtpBatchStreamProcessor::canUseGreedySpecSamplerFastPath(const std::list<GenerateStreamPtr>& streams) const {
+    if (!is_dspark_) {
+        return false;
+    }
+    for (const auto& stream : streams) {
+        const auto& config = stream->generateConfig();
+        if (!config->top1()) {
+            return false;
+        }
+        // Anything that reshapes the verify logits before the pick, or needs
+        // real probs downstream, must take the full sampler path.
+        if (config->repetition_penalty != 1.0f || config->presence_penalty != 0.0f
+            || config->frequency_penalty != 0.0f || config->no_repeat_ngram_size.value_or(0) > 0) {
+            return false;
+        }
+        if (config->num_beams != 1 || !config->variable_num_beams.empty() || stream->needTilingForSampling()) {
+            return false;
+        }
+        if (config->calculate_loss != 0 || config->return_logits || config->return_cum_log_probs
+            || config->return_all_probs != ReturnAllProbsMode::NONE) {
+            return false;
+        }
+        if (!stream->getAllLogitsProcessorPtr().empty()) {
+            return false;
+        }
+    }
+    return true;
+}
+
+SamplerOutput MtpBatchStreamProcessor::buildGreedySpecSamplerOutput(const torch::Tensor& logits,
+                                                                    int64_t              batch_size) {
+    // The verify logits arrive as [B*(k+1), V] on device.  The rejection
+    // kernel indexes target token ids as [(row*(k+1)+i)*stride + stride-1],
+    // so an argmax kept as the last (only) column satisfies the contract.
+    // bf16 -> fp32 casts are exact, and the full sampler's penalty-free greedy
+    // pick is argmax-equivalent, so this path is bit-identical in output.
+    const int64_t width = (int64_t)propose_step_ + 1;
+    RTP_LLM_CHECK_WITH_INFO(logits.dim() == 2 && logits.size(0) == batch_size * width,
+                            "greedy fast path expects [B*(k+1), V] verify logits, got %ld rows for batch %ld width %ld",
+                            (long)logits.size(0),
+                            (long)batch_size,
+                            (long)width);
+    SamplerOutput sampler_output;
+    sampler_output.token_ids = logits.argmax(-1, /*keepdim=*/true).to(torch::kInt32);
+    sampler_output.all_probs = dsparkTargetDummyProbs(batch_size);
+    return sampler_output;
+}
+
 void MtpBatchStreamProcessor::updatePrefillPostDSparkDraftModelInput(GptModelInputs&        model_input,
                                                                      const GptModelOutputs& model_output,
                                                                      const SamplerOutput&   sampler_output,

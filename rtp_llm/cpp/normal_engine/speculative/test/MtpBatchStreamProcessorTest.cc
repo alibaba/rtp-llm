@@ -991,4 +991,85 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkDraftSamplerOutputGreedyDummyProbs
     }
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testDSparkGreedySpecSamplerFastPath) {
+    // Fast-path gate: only plain-greedy batches (no logit shaping, no
+    // probs/logits returns) may skip the target sampler; the builder must
+    // reproduce the sampler's greedy picks bit-exactly and hand the rejection
+    // kernel a zero probs stand-in of the target shape.
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+
+    const int64_t k     = 3;
+    const int64_t vocab = 5;
+
+    model_config.max_seq_len          = 2048;
+    model_config.vocab_size           = vocab;
+    model_config.num_layers           = 1;
+    sp_config.gen_num_per_cycle       = k;
+    sp_config.type                    = SP_TYPE_DSPARK;
+    sp_config.sp_dspark_mask_token_id = 3;
+
+    ResourceContext resource_context;
+
+    auto make_stream = [&](int block_id) {
+        auto stream                     = createContextStream(model_config, runtime_config, resource_context, {1, 2}, block_id);
+        stream->generateConfig()->top_k = 1;
+        return stream;
+    };
+
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    {
+        // Plain greedy pair -> eligible.
+        std::list<GenerateStreamPtr> streams{make_stream(1), make_stream(2)};
+        EXPECT_TRUE(processor.canUseGreedySpecSamplerFastPath(streams));
+    }
+
+    {
+        // Each logit-shaping / probs-return knob individually disqualifies.
+        auto sampling = make_stream(3);
+        sampling->generateConfig()->top_k = 0;
+        EXPECT_FALSE(processor.canUseGreedySpecSamplerFastPath({make_stream(4), sampling}));
+
+        auto penalty = make_stream(5);
+        penalty->generateConfig()->repetition_penalty = 1.2f;
+        EXPECT_FALSE(processor.canUseGreedySpecSamplerFastPath({penalty}));
+
+        auto ngram = make_stream(6);
+        ngram->generateConfig()->no_repeat_ngram_size = 2;
+        EXPECT_FALSE(processor.canUseGreedySpecSamplerFastPath({ngram}));
+
+        auto probs = make_stream(7);
+        probs->generateConfig()->return_all_probs = ReturnAllProbsMode::ORIGINAL;
+        EXPECT_FALSE(processor.canUseGreedySpecSamplerFastPath({probs}));
+
+        auto logits = make_stream(8);
+        logits->generateConfig()->return_logits = true;
+        EXPECT_FALSE(processor.canUseGreedySpecSamplerFastPath({logits}));
+    }
+
+    {
+        // Builder: argmax ids in the kernel's stride-1 layout, zero probs.
+        const int64_t batch  = 2;
+        const int64_t width  = k + 1;
+        torch::Tensor logits = torch::randn({batch * width, vocab},
+                                            torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+        auto          out    = processor.buildGreedySpecSamplerOutput(logits, batch);
+        EXPECT_EQ((std::vector<int64_t>{batch * width, 1}), out.token_ids.sizes().vec());
+        EXPECT_EQ(torch::kInt32, out.token_ids.scalar_type());
+        EXPECT_TRUE(out.token_ids.squeeze(-1).eq(logits.argmax(-1).to(torch::kInt32)).all().item<bool>());
+        EXPECT_EQ((std::vector<int64_t>{batch, width, vocab}), out.all_probs.sizes().vec());
+        EXPECT_TRUE(out.all_probs.eq(0).all().item<bool>());
+
+        // Wrong row count is a contract violation, not a silent reshape.
+        EXPECT_ANY_THROW(processor.buildGreedySpecSamplerOutput(logits, batch + 1));
+    }
+}
+
 }  // namespace rtp_llm
