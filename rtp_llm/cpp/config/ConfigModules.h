@@ -372,7 +372,6 @@ struct FIFOSchedulerConfig {
 };
 
 struct GrammarConfig {
-    std::string          grammar_backend                         = "xgrammar";
     bool                 constrained_json_disable_any_whitespace = false;
     int                  num_workers                             = 8;
     std::string          tokenizer_info_json;

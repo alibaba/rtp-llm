@@ -413,6 +413,12 @@ def h20_oss_suites():
                 smoke_args="--load_method scratch --act_type BF16 --seq_size_per_block 2048 --tp_size 2",
                 gpu_type=["H20"],
             ),
+            smoke_test(
+                name="next_dash_structural_tag_think",
+                task_info="data/model/qwen3_next/dash_structural_tag_think.json",
+                smoke_args="--load_method scratch --act_type BF16 --seq_size_per_block 2048 --tp_size 2 --think_mode 1",
+                gpu_type=["H20"],
+            ),
         ],
     )
 

@@ -17,6 +17,7 @@ fields:
 """
 from __future__ import annotations
 
+import json
 import struct
 from typing import Any, Dict, List, Optional
 
@@ -24,6 +25,7 @@ import grpc
 from pydantic import BaseModel
 from smoke.base_comparer import BaseComparer
 from smoke.common_def import QueryStatus, SmokeException
+from smoke.grammar_constraint_validator import validate_constraint
 
 from rtp_llm.config.py_config_modules import DASH_SC_GRPC_SERVER_PORT_OFFSET
 from rtp_llm.dash_sc.client import (
@@ -37,6 +39,8 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactor
 
 DASH_ENDPOINT = "dash://ModelStreamInfer"
 DASH_GRPC_TIMEOUT_SECONDS = 600
+THINK_BEGIN = "<think>\n"
+THINK_END = "</think>\n\n"
 
 
 class DashQueryInfo(BaseModel):
@@ -81,22 +85,18 @@ def _build_sampling_params(gc: Dict[str, Any]) -> SamplingParams:
     unsupported = [
         name
         for name in (
-            "response_format",
             "guided_json",
             "json_schema",
             "regex",
             "ebnf",
-            "structural_tag",
-            "tool_call_structural_tag",
         )
         if gc.get(name) is not None
     ]
-    if gc.get("json_format"):
-        unsupported.append("json_format")
     if unsupported:
         raise SmokeException(
             QueryStatus.VALID_FAILED,
-            "structured output is not supported yet by DashSc smoke: "
+            "DashSc smoke requires response_format/structural_tag wire fields; "
+            "unsupported typed grammar fields: "
             + ", ".join(unsupported),
         )
 
@@ -116,7 +116,73 @@ def _build_sampling_params(gc: Dict[str, Any]) -> SamplingParams:
     ):
         if k in gc and gc[k] is not None:
             kwargs[k] = gc[k]
+    for k in ("response_format", "structural_tag"):
+        if k in gc and gc[k] is not None:
+            kwargs[k] = gc[k]
+    if gc.get("tool_call_structural_tag") is not None:
+        kwargs["structural_tag"] = gc["tool_call_structural_tag"]
+    if gc.get("json_format"):
+        kwargs["json_format"] = True
     return SamplingParams(**kwargs)
+
+
+def _grammar_response_format(gc: Dict[str, Any]) -> Optional[Dict[str, Any]]:
+    response_format = gc.get("response_format")
+    if response_format is not None:
+        if isinstance(response_format, str):
+            response_format = json.loads(response_format)
+        if not isinstance(response_format, dict):
+            raise ValueError("DashSc smoke response_format must be a JSON object")
+        return response_format
+
+    structural_tag = gc.get("structural_tag")
+    if structural_tag is None:
+        structural_tag = gc.get("tool_call_structural_tag")
+    if structural_tag is None:
+        return None
+    if isinstance(structural_tag, str):
+        structural_tag = json.loads(structural_tag)
+    if not isinstance(structural_tag, dict):
+        raise ValueError("DashSc smoke structural_tag must be a JSON object")
+    return {
+        "type": "structural_tag",
+        "structural_tag": structural_tag,
+    }
+
+
+def _answer_after_thinking(response: str) -> str:
+    """Validate the generated reasoning envelope and return its answer suffix."""
+    if not response.startswith(THINK_BEGIN):
+        raise ValueError(
+            f"thinking response must start with {THINK_BEGIN!r}: {response!r}"
+        )
+    end_pos = response.find(THINK_END, len(THINK_BEGIN))
+    if end_pos < 0:
+        raise ValueError(
+            f"thinking response must contain {THINK_END!r}: {response!r}"
+        )
+    return response[end_pos + len(THINK_END) :]
+
+
+def _decode_visible_generated_ids(tokenizer: Any, generated_ids: List[int]) -> str:
+    """Decode generated content while hiding only terminal EOS tokens.
+
+    Thinking tags must remain visible so the comparer can validate the Dash SC
+    reasoning envelope. ``skip_special_tokens=True`` is therefore too broad,
+    while decoding every ID exposes the model EOS marker as answer content and
+    makes an otherwise valid JSON suffix fail with ``Extra data``.
+    """
+    visible_ids = list(generated_ids)
+    raw_eos_ids = getattr(tokenizer, "eos_token_id", None)
+    if isinstance(raw_eos_ids, int):
+        eos_ids = {raw_eos_ids}
+    elif isinstance(raw_eos_ids, (list, tuple, set)):
+        eos_ids = {int(token_id) for token_id in raw_eos_ids}
+    else:
+        eos_ids = set()
+    while visible_ids and visible_ids[-1] in eos_ids:
+        visible_ids.pop()
+    return tokenizer.decode(visible_ids, skip_special_tokens=False)
 
 
 class DashGrpcComparer(BaseComparer):
@@ -148,7 +214,31 @@ class DashGrpcComparer(BaseComparer):
         return DashSmokeResponse(**result_json)
 
     # override
-    def compare_result(self, expect: DashSmokeResponse, actual: DashSmokeResponse) -> None:
+    def compare_result(
+        self, expect: DashSmokeResponse, actual: DashSmokeResponse
+    ) -> None:
+        if self.qr_info.get("grammar_constraint_only"):
+            response_format = _grammar_response_format(
+                self.qr_info["query"].get("generate_config") or {}
+            )
+            if response_format is None:
+                raise SmokeException(
+                    QueryStatus.VALID_FAILED,
+                    "grammar_constraint_only requires a DashSc grammar field",
+                )
+            try:
+                response = actual.response
+                query = self.qr_info.get("query") or {}
+                if query.get("enable_thinking") is True:
+                    response = _answer_after_thinking(response)
+                validate_constraint(response, response_format, 0)
+            except Exception as e:
+                raise SmokeException(
+                    QueryStatus.COMPARE_FAILED,
+                    f"[grammar_constraint_only] constraint check failed: {e}",
+                ) from e
+            return
+
         if expect.response != actual.response:
             raise SmokeException(
                 QueryStatus.COMPARE_FAILED,
@@ -267,7 +357,10 @@ class DashGrpcComparer(BaseComparer):
         finally:
             channel.close()
 
-        response_text = tokenizer.decode(generated_ids) if generated_ids else ""
+        if generated_ids:
+            response_text = _decode_visible_generated_ids(tokenizer, generated_ids)
+        else:
+            response_text = ""
         actual = DashSmokeResponse(
             response=response_text,
             finish_reason=last_finish,

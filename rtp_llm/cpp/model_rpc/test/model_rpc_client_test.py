@@ -174,17 +174,23 @@ class ModelRpcClientTest(TestCase):
     def test_trans_input_writes_typed_grammar_fields_consistently(self):
         grammar_fields = ("json_schema", "regex", "ebnf", "structural_tag")
         cases = [
-            ("json_schema", '{"type":"object"}', '{"type":"object"}'),
-            ("regex", r"[a-z]+", r"[a-z]+"),
-            ("ebnf", 'root ::= "a"', 'root ::= "a"'),
+            (
+                "json_schema",
+                '{"type":"object"}',
+                '{"type":"object"}',
+                lambda pb: pb.json_schema,
+            ),
+            ("regex", r"[a-z]+", r"[a-z]+", lambda pb: pb.regex),
+            ("ebnf", 'root ::= "a"', 'root ::= "a"', lambda pb: pb.ebnf),
             (
                 "structural_tag",
                 '{"type":"structural_tag","format":{"type":"regex","pattern":"a"}}',
                 '{"type":"structural_tag","format":{"type":"regex","pattern":"a"}}',
+                lambda pb: pb.structural_tag,
             ),
         ]
 
-        for field, value, expected in cases:
+        for field, value, expected, field_value in cases:
             with self.subTest(field=field):
                 config = GenerateConfig(**{field: value})
                 config_before_rpc = config.model_dump()
@@ -192,9 +198,7 @@ class ModelRpcClientTest(TestCase):
 
                 self.assertEqual(config.model_dump(), config_before_rpc)
                 self.assertTrue(input_pb.generate_config.HasField(field))
-                self.assertEqual(
-                    getattr(input_pb.generate_config, field).value, expected
-                )
+                self.assertEqual(field_value(input_pb.generate_config).value, expected)
                 for other_field in grammar_fields:
                     if other_field != field:
                         self.assertFalse(input_pb.generate_config.HasField(other_field))

@@ -217,15 +217,88 @@ def validate_structural_tag(
 ) -> None:
     stag = response_format.get("structural_tag") or {}
     fmt = stag.get("format") or {}
+
+    validate_structural_format(content, fmt, idx)
+
+
+def validate_structural_format(content: str, fmt: Dict[str, Any], idx: int) -> None:
     fmt_type = fmt.get("type")
-    if fmt_type == "json_schema":
+    if fmt_type == "json_schema" and fmt.get("style", "json") == "glm_xml":
         validate_glm_xml_payload(content, fmt, idx, allow_outside=False)
+    elif fmt_type == "json_schema":
+        try:
+            parsed = json.loads(content)
+        except json.JSONDecodeError as e:
+            raise ValueError(
+                f"choice[{idx}] structural_tag content is not valid JSON: {e}; "
+                f"content={content!r}"
+            ) from e
+        validate_json_schema_instance(
+            parsed, fmt.get("json_schema") or {}, f"choice[{idx}]"
+        )
     elif fmt_type == "triggered_tags":
         validate_triggered_tags(content, fmt, idx)
+    elif fmt_type == "sequence":
+        validate_reasoning_sequence(content, fmt, idx)
     else:
         raise ValueError(
             f"choice[{idx}] structural_tag validator does not handle format.type={fmt_type!r}"
         )
+
+
+def validate_reasoning_sequence(content: str, fmt: Dict[str, Any], idx: int) -> None:
+    """Validate the reasoning envelope emitted before a final constrained format."""
+    elements = fmt.get("elements") or []
+    if len(elements) not in (2, 3):
+        raise ValueError(
+            f"choice[{idx}] reasoning sequence must contain 2 or 3 elements"
+        )
+
+    reasoning = elements[0]
+    reasoning_content = (
+        reasoning.get("content") if isinstance(reasoning, dict) else None
+    )
+    end = reasoning.get("end") if isinstance(reasoning, dict) else None
+    if (
+        not isinstance(reasoning, dict)
+        or reasoning.get("type") != "tag"
+        or reasoning.get("begin", "") != ""
+        or not isinstance(reasoning_content, dict)
+        or reasoning_content.get("type") != "any_text"
+        or not isinstance(end, str)
+        or not end
+    ):
+        raise ValueError(
+            f"choice[{idx}] first sequence element is not a text reasoning tag"
+        )
+
+    end_pos = content.find(end)
+    if end_pos < 0:
+        raise ValueError(
+            f"choice[{idx}] reasoning output did not reach end marker {end!r}: "
+            f"{content!r}"
+        )
+    final_content = content[end_pos + len(end) :]
+    final_idx = 1
+    if len(elements) == 3:
+        suffix = elements[1]
+        suffix_value = suffix.get("value") if isinstance(suffix, dict) else None
+        if (
+            not isinstance(suffix, dict)
+            or suffix.get("type") != "const_string"
+            or not isinstance(suffix_value, str)
+            or not final_content.startswith(suffix_value)
+        ):
+            raise ValueError(
+                f"choice[{idx}] reasoning sequence suffix was not emitted"
+            )
+        final_content = final_content[len(suffix_value) :]
+        final_idx = 2
+
+    final_format = elements[final_idx]
+    if not isinstance(final_format, dict):
+        raise ValueError(f"choice[{idx}] final sequence format must be an object")
+    validate_structural_format(final_content, final_format, idx)
 
 
 # ---------------------------------------------------------------------------

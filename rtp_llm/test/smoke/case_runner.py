@@ -97,6 +97,7 @@ class CaseRunner(object):
         self.sleep_time_qr = sleep_time_qr
         self.kill_remote = kill_remote
         self.concurrency_test = concurrency_test
+        self.remote_kvcm_server: Optional[RemoteKVCMServer] = None
 
     @staticmethod
     def _extract_bool_arg(args_str: str, arg_name: str, default: bool = False) -> bool:
@@ -462,10 +463,7 @@ class CaseRunner(object):
                 task_states.query_status.append((QueryStatus.OTHERS, str(e), tracer))
             if self.sleep_time_qr > 0:
                 time.sleep(self.sleep_time_qr)
-            if (
-                self.kill_remote
-                and getattr(self, "remote_kvcm_server", None) is not None
-            ):
+            if self.kill_remote and self.remote_kvcm_server is not None:
                 self.remote_kvcm_server.stop_server()
                 logging.info("manually stop remote_kvcm_server")
 

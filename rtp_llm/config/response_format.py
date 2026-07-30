@@ -48,6 +48,13 @@ def parse_response_format(value: Any) -> Optional[ResponseFormat]:
         return None
     if isinstance(value, ResponseFormat):
         return value
+    if isinstance(value, BaseModel):
+        # The OpenAI request layer owns a wire-model ResponseFormat class that
+        # is intentionally separate from this canonical config model. Convert
+        # any validated Pydantic envelope back to its wire shape before
+        # canonical validation instead of coupling the config layer to the
+        # OpenAI module.
+        value = value.model_dump(exclude_none=True)
     if isinstance(value, str):
         stripped = value.strip()
         if not stripped:

@@ -3,7 +3,7 @@ import hashlib
 import json
 import logging
 import time
-from typing import Any, Dict, List, Optional, Union
+from typing import TYPE_CHECKING, Any, Dict, List, Optional, Union
 
 from pydantic import (
     BaseModel,
@@ -16,15 +16,17 @@ from pydantic import (
 from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
-from rtp_llm.config.response_format import ResponseFormatInput
+from rtp_llm.config.response_format import ResponseFormat, ResponseFormatInput
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.check_util import *
 from rtp_llm.utils.util import check_with_info
 
+if TYPE_CHECKING:
+    from rtp_llm.config.grammar_constraint import GrammarConstraint
+
 _GRAMMAR_RESPONSE_FORMAT_TYPES = frozenset(
     {"json_schema", "json_object", "regex", "ebnf", "structural_tag"}
 )
-_JSON_OBJECT_SCHEMA: Dict[str, str] = {"type": "object"}
 
 
 def _compact_json(value: Union[str, Dict[str, Any]]) -> str:
@@ -33,9 +35,11 @@ def _compact_json(value: Union[str, Dict[str, Any]]) -> str:
     return json.dumps(value, ensure_ascii=False, separators=(",", ":"))
 
 
-def _response_format_is_grammar(rf: Optional[Union[str, Dict[str, Any]]]) -> bool:
+def _response_format_is_grammar(rf: Optional[ResponseFormatInput]) -> bool:
     if rf is None:
         return False
+    if isinstance(rf, ResponseFormat):
+        return rf.type in _GRAMMAR_RESPONSE_FORMAT_TYPES
     if isinstance(rf, str):
         try:
             rf = json.loads(rf)
@@ -110,6 +114,11 @@ class GenerateConfig(BaseModel):
     # --- private attrs（不参与序列化/schema，生命周期与实例绑定） ---
     _diverge_depth_warned: bool = PrivateAttr(default=False)
     _ban_auto_downgraded: bool = PrivateAttr(default=False)
+    _reasoning_grammar_terminate_without_stop_token: bool = PrivateAttr(
+        default=False
+    )
+    _reasoning_envelope_applied: bool = PrivateAttr(default=False)
+    _reasoning_final_constraint: Any = PrivateAttr(default=None)
 
     max_new_tokens: int = 32000
     # only for qwen agent fncall check max input tokens
@@ -522,7 +531,7 @@ class GenerateConfig(BaseModel):
         generate_env_config,
         enable_thinking: Optional[bool] = None,
         reasoning_format: Optional[Any] = None,
-    ) -> None:
+    ) -> Optional["GrammarConstraint"]:
         """Resolve thinking parameters, validate config, and finalize grammar."""
 
         end_think_token_id = generate_env_config.think_end_token_id
@@ -554,7 +563,9 @@ class GenerateConfig(BaseModel):
             reasoning_format = ReasoningFormat.from_generate_env_config(
                 generate_env_config
             )
-        ResponseFormatBuilder(self, reasoning_format=reasoning_format).apply()
+        return ResponseFormatBuilder(
+            self, reasoning_format=reasoning_format
+        ).apply()
 
     def grammar_terminate_without_stop_token(self) -> bool:
         from rtp_llm.config.response_format_builder import ResponseFormatBuilder
@@ -738,21 +749,10 @@ class GenerateConfig(BaseModel):
         )
 
     def _normalize_grammar_fields(self):
-        if (
-            self.json_format
-            and self.response_format is None
-            and self.json_schema is None
-            and self.regex is None
-            and self.ebnf is None
-            and self.structural_tag is None
-        ):
-            self.json_schema = _JSON_OBJECT_SCHEMA
         if self.json_schema is not None:
             self.json_schema = _compact_json(self.json_schema)
         if self.structural_tag is not None:
             self.structural_tag = _compact_json(self.structural_tag)
-        if self.response_format is not None:
-            self.response_format = _compact_json(self.response_format)
 
     def enforce_prompt_scoring_constraints(self):
         """Clamp config fields for prompt scoring mode. Call after setting return_prompt_logits=True."""

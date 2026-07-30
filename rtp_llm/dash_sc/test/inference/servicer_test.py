@@ -735,14 +735,13 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         )
         phase2_input_ids = visitor.generate_inputs[1].token_ids.cpu().int().tolist()
         self.assertEqual(phase2_input_ids, [7, 8, 128821, 271, 128822, 271])
-        self.assertEqual(
-            json.loads(visitor.generate_inputs[0].generate_config.response_format),
-            {"type": "json_object"},
-        )
-        self.assertEqual(
-            json.loads(visitor.generate_inputs[1].generate_config.response_format),
-            {"type": "json_object"},
-        )
+        phase1_config = visitor.generate_inputs[0].generate_config
+        phase2_config = visitor.generate_inputs[1].generate_config
+        self.assertIsNone(phase1_config.response_format)
+        self.assertIsNotNone(phase1_config.structural_tag)
+        self.assertIsNone(phase2_config.response_format)
+        self.assertIsNone(phase2_config.structural_tag)
+        self.assertEqual(phase2_config.json_schema, '{"type":"object"}')
         self.assertFalse(visitor.generate_inputs[1].generate_config.in_think_mode)
         self.assertEqual(len(visitor.generate_inputs[0].generate_config.role_addrs), 1)
         self.assertEqual(visitor.generate_inputs[1].generate_config.role_addrs, [])
@@ -2084,7 +2083,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertTrue(generate_config.in_think_mode)
         self.assertEqual(generate_config.max_thinking_tokens, 32000)
 
-    async def test_dash_generation_response_format_is_rejected_before_enqueue(
+    async def test_dash_generation_response_format_is_finalized_before_enqueue(
         self,
     ) -> None:
         visitor = _FakeVisitor(_FakeAsyncStream([]))
@@ -2106,11 +2105,74 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
         )
 
+        self.assertEqual(visitor.enqueue_called, 1)
+        self.assertEqual(len(responses), 1)
+        config = visitor.last_generate_input.generate_config
+        self.assertIsNone(config.response_format)
+        self.assertIsNone(config.json_schema)
+        self.assertIsNotNone(config.structural_tag)
+        structural_tag = json.loads(config.structural_tag)
+        elements = structural_tag["format"]["elements"]
+        self.assertEqual(elements[0]["begin"], "<think>\n")
+        self.assertEqual(elements[0]["end"], "</think>\n\n")
+        self.assertEqual(elements[1]["type"], "json_schema")
+
+    async def test_dash_generation_omits_think_begin_when_input_already_has_it(
+        self,
+    ) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            echo_prefix_ids=[128821, 198],
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+        )
+        req = self._valid_infer_request()
+        req.inputs[0].shape[:] = [3]
+        req.raw_input_contents[0] = struct.pack("<3i", 7, 128821, 198)
+        req.parameters["enable_thinking"].bool_param = True
+        req.parameters["response_format"].string_param = json.dumps(
+            {"type": "json_object"}
+        )
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        config = visitor.last_generate_input.generate_config
+        structural_tag = json.loads(config.structural_tag)
+        reasoning_tag = structural_tag["format"]["elements"][0]
+        self.assertEqual(reasoning_tag["begin"], "")
+        self.assertEqual(reasoning_tag["end"], "</think>\n\n")
+
+    async def test_dash_grammar_request_rejects_its_own_multi_sequence(self) -> None:
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        req = self._valid_infer_request()
+        _add_input_tensor(
+            req,
+            "num_return_sequences",
+            "INT32",
+            [1],
+            struct.pack("<i", 2),
+        )
+        req.parameters["response_format"].string_param = json.dumps(
+            {"type": "json_object"}
+        )
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
+        )
+
         self.assertEqual(visitor.enqueue_called, 0)
         self.assertEqual(len(responses), 1)
-        _assert_parameter_error_response(self, responses[0], "not supported yet")
+        _assert_parameter_error_response(
+            self, responses[0], "num_return_sequences > 1"
+        )
 
-    async def test_dash_generation_guided_json_is_rejected_before_enqueue(
+    async def test_dash_generation_guided_json_is_finalized_before_enqueue(
         self,
     ) -> None:
         schema = {
@@ -2137,11 +2199,17 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
         )
 
-        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(visitor.enqueue_called, 1)
         self.assertEqual(len(responses), 1)
-        _assert_parameter_error_response(self, responses[0], "not supported yet")
+        config = visitor.last_generate_input.generate_config
+        self.assertIsNone(config.response_format)
+        self.assertIsNone(config.json_schema)
+        structural_tag = json.loads(config.structural_tag)
+        final_format = structural_tag["format"]["elements"][-1]
+        self.assertEqual(final_format["type"], "json_schema")
+        self.assertEqual(final_format["json_schema"], schema)
 
-    async def test_dash_generation_tool_call_structural_tag_is_rejected_before_enqueue(
+    async def test_dash_generation_tool_call_structural_tag_is_finalized_before_enqueue(
         self,
     ) -> None:
         tag = {
@@ -2172,9 +2240,58 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
             servicer.ModelStreamInfer(_areq_iter([req]), MagicMock())
         )
 
-        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(visitor.enqueue_called, 1)
         self.assertEqual(len(responses), 1)
-        _assert_parameter_error_response(self, responses[0], "not supported yet")
+        config = visitor.last_generate_input.generate_config
+        self.assertIsNone(config.response_format)
+        canonical_tag = json.loads(config.structural_tag)
+        self.assertEqual(canonical_tag["type"], "structural_tag")
+        self.assertEqual(canonical_tag["format"], tag["format"])
+
+    async def test_dash_generation_locally_wraps_tool_call_answer_format(
+        self,
+    ) -> None:
+        tag = {
+            "format": {
+                "type": "triggered_tags",
+                "triggers": ["<｜DSML｜invoke"],
+                "tags": [
+                    {
+                        "type": "tag",
+                        "begin": '<｜DSML｜invoke name="get_weather">',
+                        "content": {
+                            "type": "json_schema",
+                            "json_schema": {"type": "object"},
+                        },
+                        "end": "</｜DSML｜invoke>",
+                    }
+                ],
+            }
+        }
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor,
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+        )
+        req = self._valid_infer_request()
+        req.parameters["enable_thinking"].bool_param = True
+        req.parameters["tool_call_structural_tag"].string_param = json.dumps(
+            tag, ensure_ascii=False
+        )
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([req]), MagicMock()))
+
+        self.assertEqual(visitor.enqueue_called, 1)
+        config = visitor.last_generate_input.generate_config
+        canonical_tag = json.loads(config.structural_tag)
+        elements = canonical_tag["format"]["elements"]
+        self.assertEqual(elements[0]["begin"], "<think>\n")
+        self.assertEqual(elements[0]["end"], "</think>\n\n")
+        self.assertEqual(elements[1], tag["format"])
 
     async def test_dash_generation_budget_aliases_without_enable_thinking_keep_thinking(
         self,

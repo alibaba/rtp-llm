@@ -545,11 +545,15 @@ class GrammarConfig:
     compiler_cache_bytes: int
     constrained_json_disable_any_whitespace: bool
     num_workers: int
+    override_stop_tokens: list[int]
+    tokenizer_info_json: str
     def __getstate__(self) -> tuple:
         ...
     def __init__(self) -> None:
         ...
     def __setstate__(self, arg0: tuple) -> None:
+        ...
+    def to_string(self) -> str:
         ...
 class GrpcConfig:
     def __getstate__(self) -> tuple:
