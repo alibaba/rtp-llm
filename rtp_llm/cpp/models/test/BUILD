@@ -23,9 +23,10 @@ cc_test(
     name = "model_data_test",
     srcs = [
         "ModelDataTest.cc",
-        # PrepareWriteCacheParamsTest asserts on host tensors only, but linking
-        # //rtp_llm/cpp/models:models needs the CUDA toolchain. Sharing this binary
-        # keeps it off a second GPU slot.
+        # PrepareWriteCacheParamsTest is mostly host-only, but one case exercises
+        # the CUDA-device rejection branch and linking //rtp_llm/cpp/models:models
+        # needs the CUDA toolchain anyway. Sharing this binary keeps it off a
+        # second GPU slot.
         "PrepareWriteCacheParamsTest.cc",
     ],
     data = [],

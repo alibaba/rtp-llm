@@ -5,7 +5,6 @@
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include <cstdint>
-#include <atomic>
 #include <stdexcept>
 #include <mutex>
 #include <vector>
@@ -363,39 +362,12 @@ PyWrappedModel::prepareWriteCacheParams(const GptModelInputs& inputs,
                             "cache-store request_id count=%ld does not match context batch=%ld",
                             inputs.request_id.numel(),
                             context_batch_size);
-    // Per-row cache_keys enforcement lives in NormalModelInputGatherer: a PD prefill row
-    // lacking keys fails fast there by default, or is excluded from publication under
-    // CACHE_STORE_SKIP_ROWS_WITHOUT_CACHE_KEYS. Either way it never reaches the writer,
-    // because the gatherer zero-fills the batch tensor and a key-less row would otherwise
-    // publish zeros as real keys. This branch only covers a whole-batch-missing tensor
-    // from non-standard producers, where the safe response is a warned no-op rather than
-    // failing the step.
-    if (!inputs.cache_keys.defined() || inputs.cache_keys.numel() == 0) {
-        auto build_affected_ids = [&]() {
-            const auto  request_ids = inputs.request_id.accessor<int64_t, 1>();
-            std::string joined;
-            for (int64_t i = 0; i < context_batch_size; ++i) {
-                if (i > 0) {
-                    joined += ",";
-                }
-                joined += std::to_string(request_ids[i]);
-            }
-            return joined;
-        };
-        // Cumulative process-lifetime count keeps a persistent contract break
-        // visible under the 60s rate limit: consecutive log lines with a
-        // growing count expose the skip rate, not just the fact.
-        static std::atomic<uint64_t> total_skipped_batches{0};
-        const auto skipped_batches = total_skipped_batches.fetch_add(1, std::memory_order_relaxed) + 1;
-        RTP_LLM_INTERVAL_LOG(60,
-                             WARN,
-                             "pd prefill requests [%s] have no cache_keys; skip cache-store write for context "
-                             "batch=%ld (cumulative skipped batches=%lu)",
-                             build_affected_ids().c_str(),
-                             context_batch_size,
-                             static_cast<unsigned long>(skipped_batches));
-        return std::nullopt;
-    }
+    // Same error semantics as the per-row check in NormalModelInputGatherer: keys are
+    // derived for every scheduled stream, so a missing tensor is a producer bug rather
+    // than a state the writer should silently absorb.
+    RTP_LLM_CHECK_WITH_INFO(inputs.cache_keys.defined() && inputs.cache_keys.numel() > 0,
+                            "cache-store cache_keys missing for pd prefill context batch=%ld",
+                            context_batch_size);
     // Only the per-batch count cross-checks live here. Rank, device and dtype for
     // every host tensor are validated once in runtimeWriteCacheStore.
     RTP_LLM_CHECK_WITH_INFO(inputs.cache_keys.size(0) == context_batch_size,

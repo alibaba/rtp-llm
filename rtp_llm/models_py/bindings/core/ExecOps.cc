@@ -236,6 +236,19 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     const bool kv_gpu_mem     = layer_kv.kv_cache_base.is_cuda();
     const bool has_kv_scale   = layer_kv.kv_scale_base.defined() && layer_kv.kv_scale_base.numel() > 0
                               && kv_scale_stride_bytes > 0 && kv_scale_transfer_bytes > 0;
+    if (!has_kv_scale && kv_scale_stride_bytes > 0 && kv_scale_transfer_bytes > 0) {
+        // The group reserves scale bytes but this layer has no scale tensor, so the
+        // published blocks carry KV without scales and the gap only surfaces as a
+        // decode-side read failure.
+        RTP_LLM_INTERVAL_LOG(60,
+                             WARN,
+                             "cache-store model_id=%zu tag=%s layer=%d expects %zu scale bytes per block but "
+                             "kv_scale_base is empty; publishing kv blocks without scale",
+                             cache_model_id,
+                             layer_kv.tag.c_str(),
+                             layer_kv.layer_id,
+                             kv_scale_transfer_bytes);
+    }
     uint8_t*                       kv_scale_data = nullptr;
     std::shared_ptr<torch::Tensor> kv_scale_owner;
     if (has_kv_scale) {
