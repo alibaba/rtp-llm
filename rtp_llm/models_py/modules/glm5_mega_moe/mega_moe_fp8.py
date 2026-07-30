@@ -22,7 +22,12 @@ logger = logging.getLogger(__name__)
 _CUDA_GRAPH_CLONE_FP8_BUF_CACHE: dict[tuple, object] = {}
 
 
-def _get_or_create_cuda_graph_clone_buf_fp8(src_buf, group, cfg: GLM5MegaMoeCfg):
+def _get_or_create_cuda_graph_clone_buf_fp8(
+    src_buf,
+    group,
+    cfg: GLM5MegaMoeCfg,
+    num_shared_experts: int = 0,
+):
     if src_buf is None or group is None:
         return src_buf
     key = (
@@ -33,6 +38,7 @@ def _get_or_create_cuda_graph_clone_buf_fp8(src_buf, group, cfg: GLM5MegaMoeCfg)
         cfg.n_activated_experts,
         cfg.dim,
         cfg.moe_inter_dim,
+        num_shared_experts,
     )
     cached = _CUDA_GRAPH_CLONE_FP8_BUF_CACHE.get(key)
     if cached is not None:
@@ -47,6 +53,7 @@ def _get_or_create_cuda_graph_clone_buf_fp8(src_buf, group, cfg: GLM5MegaMoeCfg)
         num_topk=cfg.n_activated_experts,
         hidden=cfg.dim,
         intermediate_hidden=cfg.moe_inter_dim,
+        num_shared_experts=num_shared_experts,
         use_fp8_dispatch=True,
         activation="swiglu",
     )
@@ -72,8 +79,12 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
         clone._mega_l1_sf = self._mega_l1_sf
         clone._mega_l2_w = self._mega_l2_w
         clone._mega_l2_sf = self._mega_l2_sf
+        clone._num_shared_experts = getattr(self, "_num_shared_experts", 0)
         clone._mega_buf = _get_or_create_cuda_graph_clone_buf_fp8(
-            self._mega_buf, self._mega_group, self.cfg
+            self._mega_buf,
+            self._mega_group,
+            self.cfg,
+            clone._num_shared_experts,
         )
         clone._mega_y = (
             torch.empty_like(self._mega_y) if self._mega_y is not None else None
@@ -239,7 +250,7 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
             buf,
             recipe=(1, 1, FP4_BLOCK),
             activation="swiglu",
-            activation_clamp=None, #(self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None),
+            activation_clamp=None,  # (self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None),
             fast_math=False,
             assume_all_topk_valid=True,
         )
