@@ -80,7 +80,13 @@ install_requirements() {
     if [ `uname -m` == "aarch64" ]; then
       (/opt/conda310/bin/python3 -m pip install -r ./internal_source/deps/requirements_lock_cuda12_arm.txt) || exit 1;
     else
-      (/opt/conda310/bin/python3 -m pip install -r ./internal_source/deps/requirements_lock_torch_gpu_cuda12_9.txt) || exit 1;
+      LOCK_FILE="./internal_source/deps/requirements_lock_torch_gpu_cuda12_9.txt"
+      if [[ ! -f "${LOCK_FILE}" ]]; then
+          echo "ERROR: lockfile not found: ${LOCK_FILE}" >&2
+          echo "       Run 'uv pip compile' to regenerate. See docs/references/Update-whl-Deps.md" >&2
+          exit 1
+      fi
+      (/opt/conda310/bin/python3 -m pip install -r "${LOCK_FILE}") || exit 1;
     fi
   fi
 }

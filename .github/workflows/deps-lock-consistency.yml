@@ -1,15 +1,29 @@
 name: Deps Lock Consistency
 
 on:
+  push:
+    branches: [main]
   pull_request:
     paths:
       - "deps/**"
 
+permissions:
+  contents: read
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
 jobs:
   check-lock-consistency:
     runs-on: ubuntu-latest
+    timeout-minutes: 5
     steps:
       - uses: actions/checkout@v4
+
+      - uses: actions/setup-python@v5
+        with:
+          python-version: '3.10'
 
       - name: Check source/lock consistency
         run: python3 deps/check_lock_consistency.py
