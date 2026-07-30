@@ -200,4 +200,32 @@ TEST_F(OpenaiEndpointTest, ExtractGenerationConfig_NullTokenizer_SpAdvice_Throws
     EXPECT_THROW(openai_endpoint->extract_generation_config(req), std::runtime_error);
 }
 
+// getDebugInfo must not crash when both tokenizer_ and chat_render_ are null,
+// and must degrade gracefully when rendered_prompt is empty.
+TEST_F(OpenaiEndpointTest, GetDebugInfo_NullTokenizerAndRender) {
+    ModelConfig model_config;
+    auto        openai_endpoint = std::make_shared<OpenaiEndpoint>(nullptr, nullptr, model_config);
+
+    ChatCompletionRequest req;
+
+    {
+        // rendered_prompt is empty and tokenizer is null: prompt decoding is skipped,
+        // the call must still succeed and produce a valid debug info json.
+        RenderedInputs rendered_input({1, 2, 3}, {}, "");
+        std::string    debug_info;
+        ASSERT_NO_THROW(debug_info = openai_endpoint->getDebugInfo(req, rendered_input));
+        EXPECT_FALSE(debug_info.empty());
+        EXPECT_NE(debug_info.find("input_prompt"), std::string::npos);
+        EXPECT_NE(debug_info.find("tokenizer_info"), std::string::npos);
+        EXPECT_NE(debug_info.find("renderer_info"), std::string::npos);
+    }
+    {
+        // rendered_prompt is non-empty: it is used directly without touching tokenizer_.
+        RenderedInputs rendered_input({1, 2, 3}, {}, "hello prompt");
+        std::string    debug_info;
+        ASSERT_NO_THROW(debug_info = openai_endpoint->getDebugInfo(req, rendered_input));
+        EXPECT_NE(debug_info.find("hello prompt"), std::string::npos);
+    }
+}
+
 }  // namespace rtp_llm

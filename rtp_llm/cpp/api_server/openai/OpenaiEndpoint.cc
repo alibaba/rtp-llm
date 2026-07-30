@@ -84,6 +84,8 @@ std::shared_ptr<GenerateConfig> OpenaiEndpoint::extract_generation_config(const 
             // No renderer available: fall back to raw tokenizer encoding. NOTE: this is
             // NOT strictly equivalent to ChatRender::tokenize_words -- the raw encode()
             // may include special tokens depending on the tokenizer configuration.
+            RTP_LLM_LOG_WARNING(
+                "chat_render is null, falling back to raw tokenizer encoding for request stop words");
             request_stop_words_list_ids.reserve(request_stop_words_list.size());
             for (const auto& word : request_stop_words_list) {
                 request_stop_words_list_ids.push_back(tokenizer_->encode(word));
