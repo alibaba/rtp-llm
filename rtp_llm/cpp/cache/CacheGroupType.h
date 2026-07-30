@@ -28,12 +28,6 @@ enum class CacheEvictPolicy : int8_t {
     NONE        = 2,
 };
 
-enum class CacheMemoryPlacement : int8_t {
-    DEVICE      = 0,
-    HOST        = 1,
-    HOST_PINNED = 2,
-};
-
 enum class CpBlockMappingMode : int8_t {
     NONE              = 0,
     BLOCK_ROUND_ROBIN = 1,
@@ -53,7 +47,6 @@ struct CacheGroupPolicy {
     bool                 reservable             = true;
     uint32_t             explicit_block_num     = 0;
     bool                 charge_to_paged_budget = false;
-    CacheMemoryPlacement memory_placement       = CacheMemoryPlacement::DEVICE;
     uint32_t             active_tail_blocks     = 0;
     bool                 validate_tail_blocks   = true;
     CpBlockMappingMode   cp_mapping             = CpBlockMappingMode::NONE;

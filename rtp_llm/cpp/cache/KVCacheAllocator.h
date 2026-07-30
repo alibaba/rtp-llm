@@ -37,11 +37,9 @@ struct KVCachePoolMetricsSnapshot {
 class KVCacheAllocator {
 public:
     KVCacheAllocator(const CacheConfig&                 config,
-                     AllocationType                     allocation_type     = AllocationType::DEVICE,
                      const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
                      int64_t                            reserve_block_ratio = 0):
         config_(config),
-        allocation_type_(allocation_type),
         metrics_reporter_(metrics_reporter),
         reserve_block_ratio_(reserve_block_ratio) {}
 
@@ -185,7 +183,6 @@ protected:
     int          deviceCacheMetricTokensPerBlock() const;
 
     CacheConfig                        config_;
-    AllocationType                     allocation_type_;
     BlockPoolPtr                       block_pool_;
     SharedBlockCachePtr                shared_block_cache_;
     std::shared_ptr<CPSlotMapper>      cp_slot_mapper_;

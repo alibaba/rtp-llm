@@ -345,7 +345,7 @@ public:
     explicit FakeTypedKVCacheAllocator(const CacheConfig& config,
                                        size_t             payload_gap_bytes = 0,
                                        std::set<int>      host_groups       = {}):
-        KVCacheAllocator(config, AllocationType::DEVICE),
+        KVCacheAllocator(config),
         host_groups_(std::move(host_groups)),
         payload_gap_bytes_(payload_gap_bytes) {
         const auto cuda_options    = torch::TensorOptions().dtype(torch::kUInt8).device(torch::kCUDA);

@@ -46,25 +46,13 @@ void appendPoolSummary(std::ostringstream&    os,
        << ", blocks=" << pool_config.block_num;
 }
 
-AllocationType allocationTypeForPlacement(CacheMemoryPlacement placement, AllocationType fallback) {
-    if (placement == CacheMemoryPlacement::HOST) {
-        return AllocationType::HOST;
-    }
-    return fallback;
-}
-
-bool pinnedCpuBackingForPlacement(CacheMemoryPlacement placement) {
-    return placement == CacheMemoryPlacement::HOST_PINNED;
-}
-
 }  // namespace
 
 HybridPoolKVCacheAllocator::HybridPoolKVCacheAllocator(const CacheConfig&                 config,
-                                                       AllocationType                     allocation_type,
                                                        const kmonitor::MetricsReporterPtr metrics_reporter,
                                                        int64_t                            reserve_block_ratio,
                                                        RoleType                           role_type):
-    HybridKVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio), role_type_(role_type) {}
+    HybridKVCacheAllocator(config, metrics_reporter, reserve_block_ratio), role_type_(role_type) {}
 
 bool HybridPoolKVCacheAllocator::doInit() {
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "no cache groups found in CacheConfig");
@@ -105,17 +93,8 @@ bool HybridPoolKVCacheAllocator::doInit() {
     for (int gid = 0; gid < group_nums; ++gid) {
         const auto& pool_config = group_pool_configs[static_cast<size_t>(gid)];
         const auto  group_type  = config_.typeForGroup(static_cast<size_t>(gid));
-        const auto  policy      = config_.policyForGroup(static_cast<size_t>(gid));
-
-        // BlockPool::validateConfig() rejects pinned-CPU and cudaMalloc backing
-        // together, so a HOST_PINNED pool must opt out of cudaMalloc backing even
-        // when the allocator-wide flag is on.
-        const bool use_pinned_cpu_backing = pinnedCpuBackingForPlacement(policy.memory_placement);
-        auto       group_pool =
-            std::make_shared<BlockPool>(pool_config,
-                                        allocationTypeForPlacement(policy.memory_placement, allocation_type_),
-                                        use_pinned_cpu_backing,
-                                        use_cuda_malloc_block_pool_ && !use_pinned_cpu_backing);
+        auto group_pool = std::make_shared<BlockPool>(
+            pool_config, AllocationType::DEVICE, /*use_pinned_cpu_backing=*/false, use_cuda_malloc_block_pool_);
         RTP_LLM_CHECK_WITH_INFO(
             group_pool->init(), "Failed to initialize block pool %s(group %d)", pool_config.pool_name.c_str(), gid);
 
