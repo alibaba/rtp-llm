@@ -122,11 +122,11 @@ CPSlotMapper::localCacheKeys(const CacheConfig& config, size_t gid, const CacheK
     return usesCpCanonicalKeys(config, gid) ? canonicalCacheKeys(full_keys) : full_keys;
 }
 
-std::vector<CacheStoreBlockPair> CPSlotMapper::buildStorePlan(const CacheConfig& config,
-                                                              size_t             gid,
-                                                              size_t             total_logical_blocks,
-                                                              size_t             reuse_block_size,
-                                                              bool               use_hybrid) const {
+std::vector<CacheStoreBlockMapping> CPSlotMapper::buildStorePlan(const CacheConfig& config,
+                                                                 size_t             gid,
+                                                                 size_t             total_logical_blocks,
+                                                                 size_t             reuse_block_size,
+                                                                 bool               use_hybrid) const {
     auto policy = gid < static_cast<size_t>(config.groupNums()) ? config.policyForGroup(gid) :
                                                                   defaultCacheGroupPolicy(CacheGroupType::FULL);
     if (!isSharded() || gid >= static_cast<size_t>(config.groupNums())) {
@@ -135,17 +135,17 @@ std::vector<CacheStoreBlockPair> CPSlotMapper::buildStorePlan(const CacheConfig&
     return buildCacheStorePlan(policy, total_logical_blocks, reuse_block_size, use_hybrid, cp_rank_, cp_size_);
 }
 
-std::vector<CacheStoreBlockPair> CPSlotMapper::buildStorePlan(CacheGroupType group_type,
-                                                              size_t         total_logical_blocks,
-                                                              size_t         reuse_block_size,
-                                                              bool           use_hybrid) const {
+std::vector<CacheStoreBlockMapping> CPSlotMapper::buildStorePlan(CacheGroupType group_type,
+                                                                 size_t         total_logical_blocks,
+                                                                 size_t         reuse_block_size,
+                                                                 bool           use_hybrid) const {
     return buildStorePlan(defaultCacheGroupPolicy(group_type), total_logical_blocks, reuse_block_size, use_hybrid);
 }
 
-std::vector<CacheStoreBlockPair> CPSlotMapper::buildStorePlan(const CacheGroupPolicy& policy,
-                                                              size_t                  total_logical_blocks,
-                                                              size_t                  reuse_block_size,
-                                                              bool                    use_hybrid) const {
+std::vector<CacheStoreBlockMapping> CPSlotMapper::buildStorePlan(const CacheGroupPolicy& policy,
+                                                                 size_t                  total_logical_blocks,
+                                                                 size_t                  reuse_block_size,
+                                                                 bool                    use_hybrid) const {
     return buildCacheStorePlan(policy, total_logical_blocks, reuse_block_size, use_hybrid, cp_rank_, cp_size_);
 }
 

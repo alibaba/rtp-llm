@@ -147,7 +147,7 @@ sliceStateBlockForPeer(const KVCacheSpec& spec, std::vector<BlockInfo> parts, in
     return mapper.sliceBlockForPeer(config, /*gid=*/0, std::move(parts), peer_idx);
 }
 
-static std::vector<CacheStoreBlockPair>
+static std::vector<CacheStoreBlockMapping>
 buildSwaStorePlan(size_t total_logical_blocks, size_t reuse_block_size, bool use_hybrid, int cp_size) {
     auto         spec   = makeResolvedOpaqueSpec(/*state_cache=*/true, "swa", DataType::TYPE_UINT8, 2, 1);
     auto         config = makeSingleStateCpConfig(*spec, cp_size);
@@ -803,10 +803,10 @@ TEST(CPSlotMapperTest, CpCompactSwaUsesCanonicalTailRows) {
                                   /*use_hybrid=*/true,
                                   /*cp_size=*/4);
     ASSERT_EQ(plan.size(), 2u);
-    EXPECT_EQ(plan[0].key_index, 3);
-    EXPECT_EQ(plan[0].offset_index, 0);
-    EXPECT_EQ(plan[1].key_index, 7);
-    EXPECT_EQ(plan[1].offset_index, 1);
+    EXPECT_EQ(plan[0].cache_key_index, 3);
+    EXPECT_EQ(plan[0].block_table_index, 0);
+    EXPECT_EQ(plan[1].cache_key_index, 7);
+    EXPECT_EQ(plan[1].block_table_index, 1);
 }
 
 TEST(CPSlotMapperTest, CpCompactSwaKeepsPartialTailRows) {
@@ -816,8 +816,8 @@ TEST(CPSlotMapperTest, CpCompactSwaKeepsPartialTailRows) {
                                       /*use_hybrid=*/true,
                                       /*cp_size=*/2);
         ASSERT_EQ(plan.size(), 1u);
-        EXPECT_EQ(plan[0].key_index, 0);
-        EXPECT_EQ(plan[0].offset_index, 0);
+        EXPECT_EQ(plan[0].cache_key_index, 0);
+        EXPECT_EQ(plan[0].block_table_index, 0);
     }
     {
         auto plan = buildSwaStorePlan(/*total_logical_blocks=*/11,
@@ -825,10 +825,10 @@ TEST(CPSlotMapperTest, CpCompactSwaKeepsPartialTailRows) {
                                       /*use_hybrid=*/true,
                                       /*cp_size=*/2);
         ASSERT_EQ(plan.size(), 2u);
-        EXPECT_EQ(plan[0].key_index, 9);
-        EXPECT_EQ(plan[0].offset_index, 4);
-        EXPECT_EQ(plan[1].key_index, 10);
-        EXPECT_EQ(plan[1].offset_index, 5);
+        EXPECT_EQ(plan[0].cache_key_index, 9);
+        EXPECT_EQ(plan[0].block_table_index, 4);
+        EXPECT_EQ(plan[1].cache_key_index, 10);
+        EXPECT_EQ(plan[1].block_table_index, 5);
     }
 }
 

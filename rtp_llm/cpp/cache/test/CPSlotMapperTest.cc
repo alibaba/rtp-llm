@@ -130,10 +130,10 @@ TEST_F(CPSlotMapperTest, BuildStorePlanUsesPolicyActiveTailBlocks) {
                                              /*reuse_block_size=*/0,
                                              /*use_hybrid=*/true);
     ASSERT_EQ(default_swa.size(), 2);
-    EXPECT_EQ(default_swa[0].key_index, 3);
-    EXPECT_EQ(default_swa[0].offset_index, 1);
-    EXPECT_EQ(default_swa[1].key_index, 4);
-    EXPECT_EQ(default_swa[1].offset_index, 2);
+    EXPECT_EQ(default_swa[0].cache_key_index, 3);
+    EXPECT_EQ(default_swa[0].block_table_index, 1);
+    EXPECT_EQ(default_swa[1].cache_key_index, 4);
+    EXPECT_EQ(default_swa[1].block_table_index, 2);
 
     CacheGroupPolicy policy   = defaultCacheGroupPolicy(CacheGroupType::SWA);
     policy.active_tail_blocks = 1;
@@ -142,8 +142,8 @@ TEST_F(CPSlotMapperTest, BuildStorePlanUsesPolicyActiveTailBlocks) {
                                             /*reuse_block_size=*/0,
                                             /*use_hybrid=*/true);
     ASSERT_EQ(custom_swa.size(), 1);
-    EXPECT_EQ(custom_swa[0].key_index, 4);
-    EXPECT_EQ(custom_swa[0].offset_index, 2);
+    EXPECT_EQ(custom_swa[0].cache_key_index, 4);
+    EXPECT_EQ(custom_swa[0].block_table_index, 2);
 }
 
 TEST_F(CPSlotMapperTest, FullGroupIgnoresByteSlicePolicy) {

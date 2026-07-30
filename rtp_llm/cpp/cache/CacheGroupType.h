@@ -56,20 +56,20 @@ struct CacheGroupPolicy {
 // One cache-store registration step: pair a cache key from the full logical
 // namespace with a slot in the tag-local physical block table. Under CP,
 // both round-robin FULL groups and compact STATE/SWA groups use local slots.
-struct CacheStoreBlockPair {
-    int key_index;
-    int offset_index;
+struct CacheStoreBlockMapping {
+    int cache_key_index;
+    int block_table_index;
 };
 
 // Keep cache-store projection header-only so bindings that consume ExecOps.cc
 // as a source file do not need to link the full CPSlotMapper implementation.
-inline std::vector<CacheStoreBlockPair> buildCacheStorePlan(const CacheGroupPolicy& policy,
-                                                            size_t                  total_logical_blocks,
-                                                            size_t                  reuse_block_size,
-                                                            bool                    use_hybrid,
-                                                            int                     cp_rank,
-                                                            int                     cp_size) {
-    std::vector<CacheStoreBlockPair> plan;
+inline std::vector<CacheStoreBlockMapping> buildCacheStorePlan(const CacheGroupPolicy& policy,
+                                                               size_t                  total_logical_blocks,
+                                                               size_t                  reuse_block_size,
+                                                               bool                    use_hybrid,
+                                                               int                     cp_rank,
+                                                               int                     cp_size) {
+    std::vector<CacheStoreBlockMapping> plan;
     if (total_logical_blocks == 0) {
         return plan;
     }
