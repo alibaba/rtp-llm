@@ -100,15 +100,24 @@ TEST(CacheConfigCreatorTest, HybridAppliesModelKernelShapeOnlyToFullGroup) {
     auto config = CacheConfigCreator::createConfig(model_config, parallelism_config, runtime_config, kv_cache_config);
 
     ASSERT_EQ(config.groupNums(), 2);
+    EXPECT_TRUE(config.use_independent_block_pools);
     EXPECT_EQ(config.kernel_seq_size_per_block, 4u);
     EXPECT_EQ(config.kernelSeqSizePerBlockForGroup("full"), 4u);
     EXPECT_EQ(config.kernelSeqSizePerBlockForGroup("linear"), config.seqSizePerBlockForGroup("linear"));
+    EXPECT_EQ(config.kvBlockStrideBytesForGroup("full"), config.specForGroup("full")->block_size_bytes());
+    EXPECT_EQ(config.kvBlockStrideBytesForGroup("linear"), config.specForGroup("linear")->block_size_bytes());
+    EXPECT_NE(config.kvBlockStrideBytesForGroup("full"), config.kvBlockStrideBytesForGroup("linear"));
+
+    size_t expected_kv_block_bytes = 0;
+    for (const auto& group : config.topology().groups()) {
+        expected_kv_block_bytes += group.layer_ids.size() * group.kv_block_stride_bytes;
+    }
+    EXPECT_EQ(config.kv_block_size_bytes, expected_kv_block_bytes);
 }
 
 TEST(CacheConfigCreatorTest, HybridPoolPublishesCompleteGroupsFromModelShape) {
-    auto model_config                                                      = makeHybridModelConfig();
-    model_config.hybrid_attention_config.enable_independent_kv_cache_pools = true;
-    model_config.attn_config.kernel_tokens_per_block                       = 4;
+    auto model_config                                = makeHybridModelConfig();
+    model_config.attn_config.kernel_tokens_per_block = 4;
 
     ParallelismConfig parallelism_config;
     auto config = CacheConfigCreator::createBasicConfig(model_config, parallelism_config, /*is_mtp=*/false, /*gen=*/0);

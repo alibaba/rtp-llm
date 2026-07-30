@@ -61,7 +61,6 @@ private:
     // Removed functions moved to dedicated creators:
     // createSingleConfig
     // createHybridConfig
-    // splitIntoGroups (moved to HybridConfigCreator)
 };
 
 }  // namespace rtp_llm

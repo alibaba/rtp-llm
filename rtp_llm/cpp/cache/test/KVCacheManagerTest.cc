@@ -119,8 +119,7 @@ static ModelConfig makeDSV4ManagerFlashModelConfig() {
         ratios.push_back((i % 2 == 0) ? 4 : 128);
     }
     ratios.push_back(0);
-    mc.hybrid_attention_config.enable_hybrid_attention           = true;
-    mc.hybrid_attention_config.enable_independent_kv_cache_pools = true;
+    mc.hybrid_attention_config.enable_hybrid_attention = true;
     setDsv4KvCacheSpecs(mc, ratios);
     return mc;
 }
