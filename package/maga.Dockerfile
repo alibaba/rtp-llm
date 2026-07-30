@@ -10,3 +10,5 @@ RUN /opt/conda310/bin/pip install /tmp/$WHL_FILE \
 
 ARG START_FILE
 ADD $START_FILE /usr/bin/maga_start.sh
+ADD dash_sc_start.sh /usr/bin/dash_sc_start.sh
+RUN chmod 0755 /usr/bin/dash_sc_start.sh

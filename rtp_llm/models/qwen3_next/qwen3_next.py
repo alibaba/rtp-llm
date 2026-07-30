@@ -6,15 +6,13 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.hybrid_kv_cache import build_hybrid_kv_cache_spec_descs
+from rtp_llm.models.mrope_utils import apply_mrope_section
 from rtp_llm.models.qwen3_next.qwen3_next_weight import (
     Qwen3NextWeight,
     Qwen35DenseWeight,
     Qwen35MoeWeight,
 )
-from rtp_llm.ops import (
-    KVCacheSpecType,
-    HybridAttentionType,
-)
+from rtp_llm.ops import HybridAttentionType, KVCacheSpecType
 
 
 class Qwen3NextBase(BaseModel):
@@ -200,9 +198,11 @@ class Qwen35Moe(Qwen3NextBase):
     @classmethod
     def _parse_rope_config(cls, config_json: dict, config: ModelConfig):
         rope_parameters = config_json["rope_parameters"]
-        # TODO@xieshui support mrope in cuda graph and reopen config
-        mrope_interleaved = rope_parameters["mrope_interleaved"]
-        assert mrope_interleaved, "mrope_interleaved should be True"
+        mrope_interleaved = rope_parameters.get("mrope_interleaved", True)
+        if not mrope_interleaved:
+            raise ValueError(
+                "Qwen3Next requires rope_parameters.mrope_interleaved to be true"
+            )
         config.attn_config.rope_config.style = 7
         config.attn_config.rope_config.base = rope_parameters["rope_theta"]
         config.partial_rotary_factor = rope_parameters["partial_rotary_factor"]
@@ -210,10 +210,12 @@ class Qwen35Moe(Qwen3NextBase):
             config.attn_config.size_per_head * config.partial_rotary_factor
         )
         mrope_section = rope_parameters["mrope_section"]
-        config.attn_config.rope_config.index_factor = len(mrope_section)
-        config.attn_config.rope_config.mrope_dim1 = mrope_section[0]
-        config.attn_config.rope_config.mrope_dim2 = mrope_section[1]
-        config.attn_config.rope_config.mrope_dim3 = mrope_section[2]
+        apply_mrope_section(
+            config.attn_config.rope_config,
+            mrope_section,
+            model_name="Qwen3.5",
+            interleaved=mrope_interleaved,
+        )
         config.mm_model_config.mm_position_ids_style = 2
 
     @classmethod
@@ -233,10 +235,11 @@ class Qwen35Moe(Qwen3NextBase):
         moe_config = self.moe_config
         max_generate_batch_size = self.max_generate_batch_size
 
+        from rtp_llm.device.device_type import is_hip
         from rtp_llm.models_py.utils.arch import is_cuda
 
-        if not is_cuda():
-            raise RuntimeError("Qwen3Next is only supported in cuda arch")
+        if not is_cuda() and not is_hip():
+            raise RuntimeError("Qwen3Next is only supported in cuda/rocm arch")
         from rtp_llm.models_py.model_desc.qwen3_next import Qwen35Model
 
         self.py_model = Qwen35Model(

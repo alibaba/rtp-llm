@@ -4,7 +4,6 @@ import os
 from typing import Any, Dict, List, Optional
 
 import torch
-import torch.library as tl
 from PIL import Image
 from transformers import AutoProcessor, Qwen2VLImageProcessor
 
@@ -25,13 +24,14 @@ from rtp_llm.multimodal.multimodal_mixins.qwen3_vl_mixin import (
 from rtp_llm.multimodal.multimodal_util import get_bytes_io_from_url
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
-from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
 from rtp_llm.utils.database import CkptDatabase
-
+from rtp_llm.utils.flash_attn_utils import can_use_flash_attn
 
 default_attn_impl = "sdpa"
 try:
     if can_use_flash_attn():
+        from flash_attn import flash_attn_varlen_func  # noqa: F401
+
         default_attn_impl = "flash_attention_2"
 except Exception as e:
     logging.info(

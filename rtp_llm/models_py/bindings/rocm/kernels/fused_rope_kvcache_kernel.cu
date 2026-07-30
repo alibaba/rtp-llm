@@ -101,6 +101,33 @@ inline __device__ type_out* reinterpret_ptr(void* ptr, size_t offset) {
     return reinterpret_cast<type_out*>(reinterpret_cast<type_in*>(ptr) + offset);
 }
 
+__device__ __forceinline__ int get_mrope_position_dim(const RopeConfig& rope_config, const int tidx) {
+    // Vec_t<T> contains one rotary pair after RotaryHalfRead, so tidx is
+    // the frequency-pair index. Qwen3/3.5 assigns H/W to interleaved slots
+    // and keeps all remaining slots on the temporal axis. The host validates
+    // that the three section counts sum to rope_config.dim / 2 and fit these
+    // interleaved slots before launching the kernel.
+    if (tidx % 3 == 1 && tidx < rope_config.mrope_dim2 * 3) {
+        return 1;
+    }
+    if (tidx % 3 == 2 && tidx < rope_config.mrope_dim3 * 3) {
+        return 2;
+    }
+    return 0;
+}
+
+__device__ __forceinline__ int
+get_rope_position_id(const RopeConfig& rope_config, const int* position_ids, const int token_idx, const int tidx) {
+    if (!position_ids) {
+        return -1;
+    }
+    if (rope_config.style == RopeStyle::Mrope) {
+        const int now_dim = get_mrope_position_dim(rope_config, tidx);
+        return position_ids[token_idx * rope_config.index_factor + now_dim];
+    }
+    return position_ids[token_idx * rope_config.index_factor];
+}
+
 inline __device__ void convert_to_fp8(__hip_fp8x2_e4m3_fnuz* v, const amd_bfloat162 u) {
     __hip_bfloat162_raw   raw_bf16  = *reinterpret_cast<const __hip_bfloat162_raw*>(&u);
     __hip_fp8x2_storage_t raw_fp8x2 = __hip_cvt_bfloat16raw2_to_fp8x2(raw_bf16, __HIP_SATFINITE, __HIP_E4M3_FNUZ);
@@ -215,21 +242,9 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
             v      = add(v, v_bias);
         }
     }
-    int position_id = -1;
-    if (rope_config.style == RopeStyle::Mrope && position_ids) {
-        int rope_dim = rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3;
-        int now_idx = tidx % rope_dim, now_dim = 0;
-        if (now_idx >= rope_config.mrope_dim1 + rope_config.mrope_dim2) {
-            now_dim = 2;
-        } else if (now_idx >= rope_config.mrope_dim1) {
-            now_dim = 1;
-        }
-        position_id = position_ids[token_idx * rope_config.index_factor + now_dim];
-    } else if (position_ids) {
-        position_id = position_ids[token_idx * rope_config.index_factor];
-    }
-    const int pre_len   = cu_seqlens[batch_idx];
-    const int input_len = cu_seqlens[batch_idx + 1] - pre_len;
+    int       position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
+    const int pre_len     = cu_seqlens[batch_idx];
+    const int input_len   = cu_seqlens[batch_idx + 1] - pre_len;
     context_rope<T, Vec_t, ROPE_STYLE>(rope_config,
                                        q,
                                        k,
@@ -369,6 +384,9 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel_v1(T*                
     }
 }
 
+// Keep the pre-existing V3 hot-path layout stable so focused MRoPE changes do
+// not rewrite unrelated performance-sensitive code.
+// clang-format off
 // =====================================================================================
 // v3 optimized kernel: vec=8 + 4 tokens/block + smem partner exchange + __hadd2.
 // One block per token-chunk iterates over ALL heads inside, sharing cos/sin across
@@ -849,19 +867,7 @@ __global__ void add_fusedQKV_bias_transpose_prefill_kernel(T*                   
             v      = add(v, v_bias);
         }
     }
-    int position_id = -1;
-    if (rope_config.style == RopeStyle::Mrope && position_ids) {
-        int rope_dim = rope_config.mrope_dim1 + rope_config.mrope_dim2 + rope_config.mrope_dim3;
-        int now_idx = tidx % rope_dim, now_dim = 0;
-        if (now_idx >= rope_config.mrope_dim1 + rope_config.mrope_dim2) {
-            now_dim = 2;
-        } else if (now_idx >= rope_config.mrope_dim1) {
-            now_dim = 1;
-        }
-        position_id = position_ids[token_idx * rope_config.index_factor + now_dim];
-    } else if (position_ids) {
-        position_id = position_ids[token_idx * rope_config.index_factor];
-    }
+    int position_id = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
     const int pre_len   = cu_seqlens[batch_idx];
     const int input_len = cu_seqlens[batch_idx + 1] - pre_len;
     context_rope<T, Vec_t, ROPE_STYLE>(rope_config,
@@ -1072,6 +1078,7 @@ void invokeAddFusedQKVBiasTransposePrefill(T*                             q_buf,
         }
     }
     // ---- end v3 fast path ----
+    // clang-format on
 
     dim3   block((size_per_head / Vec_t<T>::size + 31) / 32 * 32);
     dim3   grid(token_num, head_num);
@@ -1200,7 +1207,7 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel_v1(T*                 
 
     // refer to the implementation of hipify decode attention
     const auto batch_beam_idx = blockIdx.y;
-    const int  position_id    = position_ids == nullptr ? -1 : position_ids[token_idx * rope_config.index_factor];
+    const int  position_id    = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
 
     const int input_len = (input_lengths == nullptr) ? 0 : input_lengths[batch_beam_idx];
     const int timestep  = tlength;
@@ -1360,7 +1367,7 @@ __global__ void add_fusedQKV_bias_transpose_decode_kernel(T*                    
 
     // refer to the implementation of hipify decode attention
     const auto batch_beam_idx = blockIdx.y;
-    const int  position_id    = position_ids == nullptr ? -1 : position_ids[token_idx * rope_config.index_factor];
+    const int  position_id    = get_rope_position_id(rope_config, position_ids, token_idx, tidx);
 
     const int input_len = (input_lengths == nullptr) ? 0 : input_lengths[batch_beam_idx];
     const int timestep  = tlength;

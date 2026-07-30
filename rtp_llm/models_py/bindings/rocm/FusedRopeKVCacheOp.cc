@@ -2,8 +2,11 @@
 #include "rtp_llm/models_py/bindings/rocm/kernels/fused_rope_kvcache_kernel.h"
 #include "rtp_llm/models_py/bindings/core/Dispatch.h"
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
+#include "rtp_llm/models_py/bindings/rocm/mrope_config_validation.h"
+#include <mutex>
 #include <stdexcept>
 #include <string>
+#include <unordered_map>
 #include "rtp_llm/cpp/model_utils/RopeConfig.h"
 #include "rtp_llm/models_py/bindings/common/kernels/kv_cache/kv_cache_utils.h"
 #include "rtp_llm/models_py/bindings/common/kernels/kv_cache_kernels.h"
@@ -12,16 +15,67 @@
 
 namespace rtp_llm {
 
+namespace {
+
+void validateMropeConfig(const AttentionConfigs& attn_configs) {
+    const RopeConfig& rope_config = attn_configs.rope_config;
+    if (rope_config.style != RopeStyle::Mrope) {
+        return;
+    }
+    if (!rope_config.mrope_interleaved) {
+        throw std::runtime_error("ROCm FusedRopeKVCache does not support MRoPE with mrope_interleaved=false. "
+                                 "Qwen2-VL/Qwen2.5-VL use this layout by default; do not flip the flag because "
+                                 "that changes RoPE semantics. Use a CUDA backend for these checkpoints.");
+    }
+    const std::string validation_error = validateInterleavedMropeConfig(rope_config.index_factor,
+                                                                        rope_config.dim,
+                                                                        attn_configs.size_per_head,
+                                                                        rope_config.mrope_dim1,
+                                                                        rope_config.mrope_dim2,
+                                                                        rope_config.mrope_dim3);
+    if (!validation_error.empty()) {
+        throw std::runtime_error("ROCm FusedRopeKVCache MRoPE " + validation_error);
+    }
+}
+
+void validateMropePositionIds(const RopeConfig&    rope_config,
+                              const torch::Tensor& position_ids,
+                              int64_t              token_num,
+                              const char*          where) {
+    if (rope_config.style != RopeStyle::Mrope) {
+        return;
+    }
+    if (!position_ids.defined() || position_ids.numel() == 0) {
+        throw std::runtime_error(std::string("MRoPE ") + where
+                                 + " requires combo_position_ids but it is undefined or empty");
+    }
+    const int64_t min_expected = token_num * static_cast<int64_t>(rope_config.index_factor);
+    if (position_ids.numel() < min_expected) {
+        throw std::runtime_error(std::string("MRoPE ") + where + " combo_position_ids too small: got "
+                                 + std::to_string(position_ids.numel()) + ", expected at least "
+                                 + std::to_string(min_expected) + " (token_num=" + std::to_string(token_num)
+                                 + ", index_factor=" + std::to_string(rope_config.index_factor) + ")");
+    }
+}
+
+}  // namespace
+
 static at::ScalarType get_fp8_dtype() {
-    hipDeviceProp_t prop;
-    int             device_id = 0;
+    int device_id = 0;
     hipGetDevice(&device_id);
+    static std::mutex                              cache_mutex;
+    static std::unordered_map<int, at::ScalarType> dtype_by_device;
+    std::lock_guard<std::mutex>                    lock(cache_mutex);
+    const auto                                     cached = dtype_by_device.find(device_id);
+    if (cached != dtype_by_device.end()) {
+        return cached->second;
+    }
+    hipDeviceProp_t prop;
     hipGetDeviceProperties(&prop, device_id);
     std::string arch(prop.gcnArchName);
-    if (arch.find("gfx950") != std::string::npos) {
-        return torch::kFloat8_e4m3fn;
-    }
-    return torch::kFloat8_e4m3fnuz;  // gfx942 and default
+    const auto  dtype = arch.find("gfx950") != std::string::npos ? torch::kFloat8_e4m3fn : torch::kFloat8_e4m3fnuz;
+    dtype_by_device.emplace(device_id, dtype);
+    return dtype;
 }
 
 static void copyTensorExactInPlace(torch::Tensor& dst, const torch::Tensor& src, const char* name) {
@@ -84,22 +138,9 @@ void prepareInPlace(CKAttn& params, const torch_ext::PyAttentionInputs& attn_inp
     updateKvCacheOffset(params, attn_inputs.kv_cache_kernel_block_id_device);
 }
 
-static void rejectMropeWithoutPositionIds(const RopeConfig& rope_config, const char* where) {
-    // ROCm prefill/decode dispatch always passes position_ids=nullptr (combo_position_ids
-    // is not plumbed through this path yet). Mrope needs real per-axis position ids — without
-    // them the kernel silently uses position_id=-1, producing wrong RoPE positions.
-    if (rope_config.style == RopeStyle::Mrope) {
-        throw std::runtime_error(std::string(where)
-                                 + ": RopeStyle::Mrope requires combo_position_ids, but ROCm "
-                                   "fused RoPE+KV-cache path does not plumb position_ids yet. "
-                                   "Run this model on the CUDA path or extend this op to accept "
-                                   "position_ids before enabling Mrope.");
-    }
-}
-
 FusedRopeKVCachePrefillOpBase::FusedRopeKVCachePrefillOpBase(const AttentionConfigs& attn_configs):
     attn_configs_(attn_configs) {
-    rejectMropeWithoutPositionIds(attn_configs.rope_config, "FusedRopeKVCachePrefillOp");
+    validateMropeConfig(attn_configs_);
 }
 
 FusedRopeKVCachePrefillOpAsm::FusedRopeKVCachePrefillOpAsm(const AttentionConfigs& attn_configs):
@@ -144,14 +185,18 @@ CKAttnPtr FusedRopeKVCachePrefillOpBase::prepare(torch_ext::PyAttentionInputs at
         attn_params->prefix_lengths = attn_inputs.prefix_lengths;
     }
     attn_params->kv_block_array.cache_type = attn_configs_.kv_cache_dtype;
-    attn_params->position_ids = attn_inputs.combo_position_ids;
+    attn_params->position_ids              = attn_inputs.combo_position_ids;
+    validateMropePositionIds(attn_configs_.rope_config,
+                             attn_params->position_ids,
+                             attn_inputs.input_lengths.sum().item<int64_t>(),
+                             "prefill");
 
-// Ensure position_ids is on CUDA device (e.g., MROPE position_ids may be on CPU)
+    // Ensure position_ids is on CUDA device (e.g., MROPE position_ids may be on CPU)
     if (attn_params->position_ids.defined() && !attn_params->position_ids.is_cuda()) {
         attn_params->position_ids =
             attn_params->position_ids.to(torch::kCUDA, /*non_blocking=*/false, /*copy=*/true).contiguous();
     }
-    
+
     int max_prefix_length = 0;
     if (has_prefix && attn_params->prefix_lengths.defined() && attn_params->prefix_lengths.numel() > 0) {
         max_prefix_length = attn_params->prefix_lengths.max().item<int32_t>();
@@ -272,10 +317,6 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
         position_ids = params->position_ids.data_ptr<int>();
     }
 
-    auto    rope_cache = getRopeCacheOnce(attn_configs_.rope_config, attn_configs_.max_seq_len, false);
-    float2* rope_cache_ptr =
-        rope_cache.used && rope_cache.data.defined() ? static_cast<float2*>(rope_cache.data.data_ptr()) : nullptr;
-
     if (use_asm()) {
         DISPATCH_CUDA_FUNCTION_DATA_TYPE(
             torchDTypeToDataType(qkv.dtype()),
@@ -289,7 +330,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                         (use_fmha_fp8 && qkv_buf_fp8.defined() ? qkv_buf_fp8.data_ptr() : nullptr),
             position_ids,
             nullptr,  // qkv_bias
-            params->padding_offset.data_ptr<int>(),
+            padding_offset,
             params->cu_seqlens.data_ptr<int>(),
             batch_size,
             seq_len,
@@ -322,7 +363,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
                         (use_fmha_fp8 && qkv_buf_fp8.defined() ? qkv_buf_fp8.data_ptr() : nullptr),
             position_ids,
             nullptr,
-            params->padding_offset.data_ptr<int>(),
+            padding_offset,
             params->cu_seqlens.data_ptr<int>(),
             batch_size,
             seq_len,
@@ -353,7 +394,7 @@ std::tuple<torch::Tensor, torch::Tensor, torch::Tensor> FusedRopeKVCachePrefillO
 
 FusedRopeKVCacheDecodeOpBase::FusedRopeKVCacheDecodeOpBase(const AttentionConfigs& attn_configs):
     attn_configs_(attn_configs) {
-    rejectMropeWithoutPositionIds(attn_configs.rope_config, "FusedRopeKVCacheDecodeOp");
+    validateMropeConfig(attn_configs_);
 }
 
 FusedRopeKVCacheDecodeOpAsm::FusedRopeKVCacheDecodeOpAsm(const AttentionConfigs& attn_configs):
@@ -419,12 +460,13 @@ torch::Tensor FusedRopeKVCacheDecodeOpBase::forward(const torch::Tensor&        
         kv_block_array.scale = kv_cache.value().kv_scale_base.data_ptr();
     }
 
-    const int     local_head_num    = attn_configs_.head_num;
-    const int     local_head_num_kv = attn_configs_.kv_head_num;
-    const int     size_per_head     = attn_configs_.size_per_head;
-    const int     token_num         = qkv.size(0);
-    const int     batch_size        = params->sequence_lengths.size(0);
-    torch::Tensor q_output          = torch::empty({token_num, local_head_num, size_per_head},
+    const int local_head_num    = attn_configs_.head_num;
+    const int local_head_num_kv = attn_configs_.kv_head_num;
+    const int size_per_head     = attn_configs_.size_per_head;
+    const int token_num         = qkv.size(0);
+    const int batch_size        = params->sequence_lengths.size(0);
+    validateMropePositionIds(attn_configs_.rope_config, params->position_ids, token_num, "decode");
+    torch::Tensor q_output = torch::empty({token_num, local_head_num, size_per_head},
                                           torch::TensorOptions(qkv.dtype()).device(qkv.device()));
 
     PrefixPromptBatchWeightsParam prefix_prompt_param;

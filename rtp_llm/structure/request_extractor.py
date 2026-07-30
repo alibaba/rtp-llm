@@ -5,8 +5,7 @@ from typing import Any, Dict, List, NamedTuple, Optional, Tuple, Union
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig, RequestFormat, RoleAddr
-
-request_id_field_name = "__request_id__"
+from rtp_llm.structure.request_constants import request_id_field_name
 
 
 class Request(NamedTuple):
@@ -76,7 +75,7 @@ class RequestExtractor:
         generate_config, remain_kwargs = self._format_generate_config(kwargs)
 
         # Handle role_addrs parsing - convert dict to RoleAddr objects
-        if hasattr(generate_config, "role_addrs") and generate_config.role_addrs:
+        if generate_config.role_addrs:
             try:
                 # Check if we have dict objects that need conversion
                 if generate_config.role_addrs and isinstance(
