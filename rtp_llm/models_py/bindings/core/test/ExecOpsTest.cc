@@ -2,7 +2,6 @@
 #include "rtp_llm/models_py/bindings/common/WriteCacheStoreOp.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
-#include "rtp_llm/cpp/distribute/CpuBroadcast.h"
 #include "rtp_llm/cpp/distribute/CpuBroadcaster.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
@@ -98,6 +97,27 @@ int execBroadcastCpuChild(int rank, const std::string& base) {
     const bool ok = torch::equal(tensor, torch::tensor({7, 8, 9}, torch::TensorOptions(torch::kInt32)));
     bcast.reset();
     return ok ? 0 : 1;
+}
+
+int execBroadcastCpuAbortChild(int rank, const std::string& base) {
+    auto& broadcaster = CpuBroadcaster::instance();
+    broadcaster.reset();
+    broadcaster.initialize(rank, 2, base);
+
+    if (rank == 1) {
+        abortCpuBroadcast("synthetic model-input validation failure");
+    }
+
+    auto                       tensor = torch::zeros({1}, torch::kUInt8);
+    std::vector<torch::Tensor> buffers{tensor};
+    try {
+        execBroadcastCpu({buffers, 0}, false);
+    } catch (const std::exception&) {
+        broadcaster.reset();
+        return 0;
+    }
+    broadcaster.reset();
+    return 1;
 }
 
 }  // namespace
@@ -461,6 +481,16 @@ TEST_F(ExecOpsTest, testExecBroadcastCpuRejectsUninitializedWithoutFallback) {
     std::vector<torch::Tensor> buffers{tensor};
     BroadcastParams            params{buffers, 0};
     EXPECT_ANY_THROW(execBroadcastCpu(params, false));
+}
+
+TEST_F(ExecOpsTest, testExecBroadcastCpuPropagatesExplicitAbortTp2) {
+    const std::string  base = makeCpuBroadcasterBase();
+    std::vector<pid_t> pids;
+    pids.push_back(spawnExecOpsChild([=] { return execBroadcastCpuAbortChild(0, base); }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    pids.push_back(spawnExecOpsChild([=] { return execBroadcastCpuAbortChild(1, base); }));
+    expectExecOpsChildrenOk(pids);
+    cleanupCpuBroadcasterBase(base);
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreMlaBf16PhysicalViewUsesExplicitStride) {

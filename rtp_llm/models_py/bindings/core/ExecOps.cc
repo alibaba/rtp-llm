@@ -67,6 +67,13 @@ static std::once_flag    g_init_flag;
 static bool g_enable_comm_overlap = true;
 
 static int64_t g_device_id = 0;
+
+std::unique_ptr<py::gil_scoped_release> releaseGilIfHeld() {
+    if (!Py_IsInitialized() || !PyGILState_Check()) {
+        return nullptr;
+    }
+    return std::make_unique<py::gil_scoped_release>();
+}
 }  // anonymous namespace
 
 // ============================================================
@@ -593,6 +600,50 @@ void execBroadcast(const BroadcastParams& params) {
     // Do not add a CUDA device sync here; GPU callers depend on keeping the
     // broadcast on the asynchronous communication path.
     fn(tensors, params.root, static_cast<int>(params.mode));
+}
+
+void execBroadcastCpu(const BroadcastParams& params, bool allow_fallback) {
+    RTP_LLM_CHECK_WITH_INFO(
+        params.root == 0, "execBroadcastCpu supports only root=0; got %ld", static_cast<long>(params.root));
+    RTP_LLM_CHECK_WITH_INFO(params.mode == ParallelMode::TP,
+                            "execBroadcastCpu supports only ParallelMode::TP; got %d",
+                            static_cast<int>(params.mode));
+
+    for (auto& tensor : params.buffers) {
+        RTP_LLM_CHECK_WITH_INFO(
+            tensor.is_cpu(), "execBroadcastCpu requires CPU tensors (got device=%s)", tensor.device().str().c_str());
+    }
+
+    auto& broadcaster = CpuBroadcaster::instance();
+    if (!broadcaster.isInitialized()) {
+        RTP_LLM_CHECK_WITH_INFO(allow_fallback, "execBroadcastCpu called before CpuBroadcaster is initialized");
+        execBroadcast(params);
+        execSyncCommunication(false);
+        cudaSyncAndCheck();
+        return;
+    }
+
+    for (auto& tensor : params.buffers) {
+        auto contiguous = tensor.contiguous();
+        {
+            // Production engine workers do not hold the GIL, while direct
+            // Python entry points may. A stalled peer must not freeze unrelated
+            // Python threads.
+            auto gil_release = releaseGilIfHeld();
+            broadcaster.broadcast(contiguous.data_ptr(), contiguous.nbytes(), params.root);
+        }
+        if (!contiguous.is_same(tensor)) {
+            tensor.copy_(contiguous);
+        }
+    }
+}
+
+bool isCpuBroadcastInitialized() {
+    return CpuBroadcaster::instance().isInitialized();
+}
+
+void abortCpuBroadcast(const std::string& reason) {
+    CpuBroadcaster::instance().abort(reason);
 }
 
 AllReduceOutput execAllReduce(const AllReduceParams& params) {

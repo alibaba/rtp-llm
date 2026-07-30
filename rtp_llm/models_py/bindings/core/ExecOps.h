@@ -93,7 +93,13 @@ void             execRejectionSampling(const RejectionSamplingParams& params);
 // PyTorch stream ordering so later GPU work can consume the buffer without a
 // device-wide sync. Communication errors must propagate as exceptions from the
 // callback.
-void            execBroadcast(const BroadcastParams& params);
+void execBroadcast(const BroadcastParams& params);
+// CPU metadata broadcast for TP sync paths. Before UDS initialization,
+// allow_fallback controls whether regular c10d execBroadcast may be used. A
+// runtime UDS failure is terminal and never falls back rank-locally.
+void            execBroadcastCpu(const BroadcastParams& params, bool allow_fallback = true);
+bool            isCpuBroadcastInitialized();
+void            abortCpuBroadcast(const std::string& reason);
 AllReduceOutput execAllReduce(const AllReduceParams& params);
 void            execAllGather(const AllGatherParams& params);
 void            execSyncCommunication(bool timeout = true);

@@ -35,7 +35,7 @@ cc_test(
 
 # Thin pybind bridge that dynamically resolves tpSyncModelInputs from the
 # shipped libth_transformer.so. It deliberately does not define the production
-# symbol or link CpuBroadcast.cc.
+# symbol or link another copy of the ExecOps implementation.
 cc_binary(
     name = "tp_sync_model_inputs_production_test_bridge",
     srcs = ["TpSyncModelInputsProductionTestBridge.cc"],

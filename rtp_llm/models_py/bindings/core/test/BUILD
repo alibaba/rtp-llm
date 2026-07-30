@@ -6,7 +6,6 @@ test_copts = [
 ] + copts()
 
 exec_ops_test_deps = [
-    "//rtp_llm/cpp/distribute:cpu_broadcast",
     "//rtp_llm/cpp/distribute:cpu_broadcaster",
     "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
     "//rtp_llm/models_py/bindings/common:common",
@@ -19,6 +18,7 @@ exec_ops_test_deps = [
 ] + torch_deps()
 
 cache_store_test_filter = "ExecOpsTest.testWriteCacheStore*:ExecOpsTest.testLoadContextFailureDebugInfo*"
+cpu_broadcast_test_filter = "ExecOpsTest.testExecBroadcastCpu*"
 
 cc_test(
     name = "exec_ops_test",
@@ -38,6 +38,18 @@ cc_test(
     deps = exec_ops_test_deps,
     copts = test_copts,
     exec_properties = {"gpu": "H20"},
+)
+
+# Keep the CPU broadcaster integration and its no-fallback safety contract in
+# the default test gate instead of only in the broad manual ExecOps suite.
+cc_test(
+    name = "cpu_broadcast_exec_op_test",
+    srcs = ["ExecOpsTest.cc"],
+    args = ["--gtest_filter=" + cpu_broadcast_test_filter],
+    deps = exec_ops_test_deps,
+    copts = test_copts,
+    exec_properties = {"gpu": "H20"},
+    tags = ["H20"],
 )
 
 cc_test(

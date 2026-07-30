@@ -53,6 +53,11 @@ public:
     // Throws on transport error, frame-size mismatch, or shared abort.
     void broadcast(void* buf, std::size_t nbytes, int root);
 
+    // Publish a terminal abort for the next broadcast generation. This lets a
+    // rank that rejects local pre-collective validation wake peers before they
+    // enter a different collective.
+    void abort(const std::string& reason);
+
     // Close all sockets and return the singleton to its initial state so a
     // later distributed init can bootstrap a fresh base_path.
     void reset();

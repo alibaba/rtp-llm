@@ -533,6 +533,44 @@ void CpuBroadcaster::reset() {
     cleanupStateLocked();
 }
 
+void CpuBroadcaster::abort(const std::string& reason) {
+    std::lock_guard<std::mutex> lock(mu_);
+    RTP_LLM_CHECK_WITH_INFO(initialized_.load(std::memory_order_acquire),
+                            "CpuBroadcaster::abort called before initialize: %s",
+                            reason.c_str());
+    RTP_LLM_CHECK_WITH_INFO(
+        !broadcast_in_progress_, "CpuBroadcaster::abort cannot race with an in-flight broadcast: %s", reason.c_str());
+    if (failed_) {
+        return;
+    }
+    if (world_size_ <= 1) {
+        failed_ = true;
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(shared_state_ != nullptr, "CpuBroadcaster::abort has no shared decision state");
+
+    const uint32_t next_generation   = cpu_broadcast_detail::nextGeneration(broadcast_generation_);
+    uint32_t*      decision_slot     = decisionSlot(shared_state_, next_generation);
+    const uint32_t previous_decision = loadDecision(decision_slot);
+    cpu_broadcast_detail::AbortDecision decision;
+    if (previous_decision == next_generation) {
+        decision = cpu_broadcast_detail::AbortDecision::kCommitted;
+    } else if (previous_decision == (next_generation | kBroadcastFailedMask)) {
+        decision = cpu_broadcast_detail::AbortDecision::kAborted;
+    } else {
+        decision = cpu_broadcast_detail::abortOrObserveCommit(decision_slot, previous_decision, next_generation);
+    }
+    RTP_LLM_CHECK_WITH_INFO(decision == cpu_broadcast_detail::AbortDecision::kAborted,
+                            "CpuBroadcaster cannot abort already committed generation %u: %s",
+                            next_generation,
+                            reason.c_str());
+    RTP_LLM_LOG_WARNING("CpuBroadcaster rank %d aborting generation %u after local validation failure: %s",
+                        rank_,
+                        next_generation,
+                        reason.c_str());
+    markBroadcastFailedLocked(next_generation);
+}
+
 void CpuBroadcaster::initialize(int rank, int world_size, const std::string& base_path) {
     std::lock_guard<std::mutex> lock(mu_);
 
@@ -776,10 +814,13 @@ void CpuBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
         shared_state        = shared_state_;
         decision_slot       = decisionSlot(shared_state, next_generation);
         previous_decision   = loadDecision(decision_slot);
-        RTP_LLM_CHECK_WITH_INFO((previous_decision & kBroadcastFailedMask) == 0,
-                                "CpuBroadcaster generation %u found stale abort decision 0x%x",
-                                next_generation,
-                                previous_decision);
+        if ((previous_decision & kBroadcastFailedMask) != 0) {
+            markBroadcastFailedLocked(next_generation);
+            RTP_LLM_FAIL("CpuBroadcaster generation %u found stale abort decision 0x%x "
+                         "from a peer validation or transport failure",
+                         next_generation,
+                         previous_decision);
+        }
         peer_fds               = peer_fds_;
         broadcast_in_progress_ = true;
     }

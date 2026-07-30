@@ -1,5 +1,4 @@
 load("//:def.bzl", "cc_test_wrapper", "copts")
-load("@arch_config//:arch_select.bzl", "torch_deps")
 
 cc_test = cc_test_wrapper
 
@@ -23,31 +22,6 @@ cc_library(
 alias(
     name = "cpu_tp_broadcaster",
     actual = ":cpu_broadcaster",
-)
-
-cc_library(
-    name = "cpu_broadcast_hdr",
-    hdrs = ["CpuBroadcast.h"],
-    deps = [
-        "//rtp_llm/models_py/bindings/core:op_data",
-    ],
-    copts = copts(),
-)
-
-cc_library(
-    name = "cpu_broadcast",
-    srcs = ["CpuBroadcast.cc"],
-    # CpuBroadcast.cc provides execBroadcastCpu to ModelTypes.cc in another
-    # shared library. Force the archive member into librtp_compute_ops.so even
-    # though th_compute_lib itself has no direct reference to that symbol.
-    alwayslink = True,
-    deps = [
-        ":cpu_broadcast_hdr",
-        ":cpu_broadcaster",
-        "//rtp_llm/cpp/utils:core_utils",
-        "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
-    ] + torch_deps(),
-    copts = copts(),
 )
 
 cc_test(

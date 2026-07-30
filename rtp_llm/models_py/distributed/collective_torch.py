@@ -59,6 +59,11 @@ def _should_init_cpu_tp_broadcaster(
 ) -> bool:
     if _env_flag_enabled(_CPU_TP_BROADCASTER_DISABLE_ENV):
         return False
+    # The mixed UDS + device collective path is currently validated on CUDA.
+    # Keep ROCm on the existing RCCL path until equivalent production-boundary
+    # coverage is available.
+    if rocm_rccl.is_available_runtime():
+        return False
     tp_size = parallelism_config.tp_size
     local_world_size = parallelism_config.local_world_size
     if tp_size <= 1 or local_world_size <= 0:

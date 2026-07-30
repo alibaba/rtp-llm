@@ -15,6 +15,17 @@ This page lists server arguments used to configure the behavior and performance 
 | `--local-world-size` | Number of GPU devices used on the current node. | None |
 | `--enable_ffn_disaggregate` | Enables FFN disaggregation feature to separate attention and feed-forward network computations for performance optimization. | None |
 
+### CPU TP broadcaster environment variables
+
+For eligible single-node CUDA tensor-parallel groups, RTP-LLM uses a Unix-domain-socket (UDS) broadcaster for small CPU metadata while GPU tensors remain on the regular NCCL path. ROCm deployments continue to use RCCL for this traffic. Initialization failures fall back group-wide to NCCL; a transport failure after UDS initialization is terminal and requires a coordinated reset/restart, because rank-local fallback could split collective ordering.
+
+| Environment variable | Description | Default |
+|----------------------|-------------|---------|
+| `RTP_LLM_CPU_TP_BROADCASTER_DISABLE` | Set to `1`, `true`, `yes`, or `on` to disable the UDS optimization and keep CPU TP broadcasts on NCCL. This is the runtime rollback switch. | Disabled (`false`) |
+| `RTP_LLM_CPU_TP_BROADCASTER_DIR` | Parent directory for the private per-user socket directory. The path must pass ownership, symlink, and sticky-bit validation and must fit the platform UDS path limit. | `$TMPDIR`, or `/tmp` when unset |
+| `RTP_LLM_CPU_TP_BROADCASTER_ID` | Optional session identifier used in UDS paths. All TP ranks must use the same value. Unsafe filename characters are replaced with `_`; when unset, the ID is derived from the distributed master address, init port, world size, and TP size. | Derived session ID |
+| `RTP_LLM_CPU_TP_BROADCASTER_BROADCAST_TIMEOUT_MS` | Runtime UDS broadcast timeout in milliseconds. Valid range: `0` to `86400000`. `0` means wait indefinitely, matching the NCCL timeout policy; nonzero values make a timeout terminal for that broadcaster generation. | `0` |
+
 ## Concurrency Control
 
 | Arguments | Description | Defaults |

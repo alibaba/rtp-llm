@@ -118,6 +118,12 @@ class TestCpuTpBroadcasterBootstrap(unittest.TestCase):
         self.assertEqual(fake_ops.init_calls, [])
         self.assertEqual(fake_ops.destroy_calls, 1)
 
+    def test_rocm_runtime_keeps_cpu_tp_broadcaster_disabled(self):
+        config = self._parallelism_config(tp_size=4, local_world_size=8)
+
+        with patch.object(ct.rocm_rccl, "is_available_runtime", return_value=True):
+            self.assertFalse(ct._should_init_cpu_tp_broadcaster(config))
+
     def test_missing_parallelism_config_resets_old_cpp_singleton(self):
         fake_ops = _FakeLibrtpComputeOps()
         ct._parallelism_config = None

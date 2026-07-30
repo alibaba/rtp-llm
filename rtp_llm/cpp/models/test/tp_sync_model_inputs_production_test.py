@@ -164,6 +164,32 @@ def _production_boundary_worker(rank: int, nccl_port: int, uds_dir: str) -> None
         _run_real_tp_sync(rank, "uninitialized-fallback")
         torch.distributed.barrier()
 
+        # The NCCL fallback also needs group-wide validation. A local layout
+        # rejection must be reduced before either rank starts the packed payload
+        # collectives, otherwise root could wait forever for the rejecting peer.
+        try:
+            production_bridge.run_tp_sync_model_inputs(
+                libth_transformer.__file__,
+                rank,
+                False,
+                root_combo_tokens_on_gpu=True,
+            )
+        except RuntimeError as error:
+            expected_error = (
+                "device mismatch"
+                if rank == 1
+                else "validation failed on a peer rank"
+            )
+            if expected_error not in str(error):
+                raise AssertionError(
+                    f"rank {rank}: unexpected fallback validation error: {error}"
+                ) from error
+        else:
+            raise AssertionError(
+                f"rank {rank}: fallback device mismatch did not fail fast"
+            )
+        torch.distributed.barrier()
+
         # Recreate a valid group before injecting a one-rank re-init failure.
         ct._init_cpu_tp_broadcaster_if_needed(librtp_compute_ops)
         valid_base_path = ct._cpu_tp_broadcaster_base_path
@@ -193,8 +219,8 @@ def _production_boundary_worker(rank: int, nccl_port: int, uds_dir: str) -> None
         torch.distributed.barrier()
 
         # 4. Non-empty hidden states with zero combo tokens must raise a useful
-        # shape error rather than divide by zero on non-root. Root observes the
-        # peer abort through the next UDS metadata broadcast.
+        # shape error rather than divide by zero on non-root. The rejecting rank
+        # publishes a terminal UDS abort so root fails without process teardown.
         try:
             production_bridge.run_tp_sync_model_inputs(
                 libth_transformer.__file__,
@@ -203,11 +229,6 @@ def _production_boundary_worker(rank: int, nccl_port: int, uds_dir: str) -> None
                 empty_combo_tokens=True,
             )
         except RuntimeError as error:
-            if rank == 1:
-                # This rank rejected the shape before entering root's next UDS
-                # broadcast. Close its idle endpoint so root observes the
-                # terminal peer abort immediately instead of waiting timeout.
-                librtp_compute_ops.destroy_cpu_tp_broadcaster()
             expected_error = "non-zero combo tokens" if rank == 1 else "CpuBroadcaster"
             if expected_error not in str(error):
                 raise AssertionError(
