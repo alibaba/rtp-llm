@@ -9,10 +9,9 @@
 namespace rtp_llm {
 
 HybridTypeKVCacheAllocator::HybridTypeKVCacheAllocator(const CacheConfig&                 config,
-                                                       AllocationType                     allocation_type,
                                                        const kmonitor::MetricsReporterPtr metrics_reporter,
                                                        int64_t                            reserve_block_ratio):
-    HybridKVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio) {}
+    HybridKVCacheAllocator(config, metrics_reporter, reserve_block_ratio) {}
 
 bool HybridTypeKVCacheAllocator::doInit() {
     RTP_LLM_CHECK_WITH_INFO(config_.groupNums() > 0, "no cache groups found in CacheConfig");
@@ -29,7 +28,7 @@ bool HybridTypeKVCacheAllocator::doInit() {
 
     auto pool_config = BlockPoolConfigHelper::createConfig(config_);
     block_pool_      = std::make_shared<BlockPool>(
-        pool_config, allocation_type_, /*use_pinned_cpu_backing=*/false, use_cuda_malloc_block_pool_);
+        pool_config, AllocationType::DEVICE, /*use_pinned_cpu_backing=*/false, use_cuda_malloc_block_pool_);
     RTP_LLM_CHECK_WITH_INFO(block_pool_->init(), "Failed to initialize block pool for HybridTypeKVCacheAllocator");
 
     const int group_nums = config_.groupNums();

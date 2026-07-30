@@ -213,7 +213,7 @@ static size_t validBlockCount(const BlockIndicesType& blocks) {
 static HybridPoolKVCacheAllocatorPtr
 makeAllocator(const CacheConfig& config, RoleType role_type = RoleType::PDFUSION, int64_t reserve_block_ratio = 0) {
     auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(
-        config, AllocationType::DEVICE, nullptr, reserve_block_ratio, role_type);
+        config, nullptr, reserve_block_ratio, role_type);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     return allocator;

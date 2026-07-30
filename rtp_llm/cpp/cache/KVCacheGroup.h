@@ -109,7 +109,6 @@ public:
     virtual bool                 hasKernelBlockSubdiv() const;
     virtual bool                 transferTailBlocks() const;
     virtual bool                 isReservable() const;
-    virtual CacheMemoryPlacement memoryPlacement() const;
 
 protected:
     static GroupBase

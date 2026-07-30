@@ -10,7 +10,6 @@ namespace rtp_llm {
 class HybridTypeKVCacheAllocator: public HybridKVCacheAllocator {
 public:
     HybridTypeKVCacheAllocator(const CacheConfig&                 config,
-                               AllocationType                     allocation_type     = AllocationType::DEVICE,
                                const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
                                int64_t                            reserve_block_ratio = 0);
 

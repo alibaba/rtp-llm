@@ -2035,7 +2035,7 @@ protected:
 
 TEST_F(DSV4AllocatorTest, InitAndBasicProperties) {
     auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     // 7 groups → HybridTypeKVCacheAllocator path
@@ -2048,7 +2048,7 @@ TEST_F(DSV4AllocatorTest, InitAndBasicProperties) {
 TEST_F(DSV4AllocatorTest, CpPageRrFixedAndSwaAllocateOneBlockPerVirtualBlock) {
     constexpr uint32_t cp_size   = 4;
     auto               config    = makeDSV4CpAllocatorConfig(cp_size);
-    auto               allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto               allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     const int spb     = allocator->seqSizePerBlock();
@@ -2082,7 +2082,7 @@ TEST_F(DSV4AllocatorTest, CpPageRrFixedAndSwaAllocateOneBlockPerVirtualBlock) {
 
 TEST_F(DSV4AllocatorTest, FlashInitAndBasicProperties) {
     auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     EXPECT_EQ(config.groupNums(), 7);
@@ -2092,7 +2092,7 @@ TEST_F(DSV4AllocatorTest, FlashInitAndBasicProperties) {
 
 TEST_F(DSV4AllocatorTest, AddressLookupAllGroups) {
     auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     // Verify address lookup works for a layer in each group
@@ -2109,7 +2109,7 @@ TEST_F(DSV4AllocatorTest, AddressLookupAllGroups) {
 
 TEST_F(DSV4AllocatorTest, BlockPoolCreatedWithCorrectTensors) {
     auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     auto block_pool = allocator->getBlockPool();
@@ -2127,7 +2127,7 @@ TEST_F(DSV4AllocatorTest, BlockPoolCreatedWithCorrectTensors) {
 
 TEST_F(DSV4AllocatorTest, SharedLogicalGroupsProduceDeduplicatedMrBufferList) {
     auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     const auto layout               = allocator->allLayerCacheBase();
@@ -2158,7 +2158,7 @@ TEST_F(DSV4AllocatorTest, SharedLogicalGroupsProduceDeduplicatedMrBufferList) {
 
 TEST_F(DSV4AllocatorTest, ConvertIndexToBufferAllGroups) {
     auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     // convertIndexToBuffer should work for layers in each of the 7 groups
@@ -2172,7 +2172,7 @@ TEST_F(DSV4AllocatorTest, ConvertIndexToBufferAllGroups) {
 
 TEST_F(DSV4AllocatorTest, MallocAndFreeBlocks) {
     auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     auto block_pool = allocator->getBlockPool();
@@ -2274,7 +2274,7 @@ TEST_F(DSV4AllocatorTest, FlashGroupTypes) {
 
 TEST_F(DSV4AllocatorTest, FlashAddressLookupAllGroups) {
     auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     for (int gid = 0; gid < 7; gid++) {
@@ -2287,7 +2287,7 @@ TEST_F(DSV4AllocatorTest, FlashAddressLookupAllGroups) {
 
 TEST_F(DSV4AllocatorTest, FlashBlockPoolTensors) {
     auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     auto layout = allocator->allLayerCacheBase();
@@ -2324,7 +2324,7 @@ TEST_F(DSV4AllocatorTest, FlashSpecBlockSizes) {
 
 TEST_F(DSV4AllocatorTest, FlashMallocAndFree) {
     auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     auto   block_pool  = allocator->getBlockPool();
@@ -2345,7 +2345,7 @@ TEST_F(DSV4AllocatorTest, FlashMallocAndFree) {
 
 TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
     auto config       = makeDSV4AllocatorConfig();
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
@@ -2407,7 +2407,7 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
 
 TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
     auto config       = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
@@ -2465,7 +2465,7 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
 
 TEST_F(DSV4AllocatorTest, PrefixCacheReusePagedGroupsOnly) {
     auto config       = makeDSV4AllocatorConfig();
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
@@ -2533,7 +2533,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReusePagedGroupsOnly) {
 
 TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresSWATailHit) {
     auto config       = makeDSV4AllocatorConfig();
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
@@ -2582,7 +2582,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresSWATailHit) {
 
 TEST_F(DSV4AllocatorTest, PrefixCacheReuseDoesNotRequireHCAStateHit) {
     auto config       = makeDSV4AllocatorConfig();
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
@@ -2640,7 +2640,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseDoesNotRequireHCAStateHit) {
 
 TEST_F(DSV4AllocatorTest, PrefixCacheReuseAcceptsSingleLatestSWATailHit) {
     auto config       = makeDSV4AllocatorConfig();
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
@@ -2689,7 +2689,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseAcceptsSingleLatestSWATailHit) {
 
 TEST_F(DSV4AllocatorTest, FlashPrefixCacheReusePagedGroupsOnly) {
     auto config       = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
@@ -2828,7 +2828,7 @@ TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksDoNotReduceExplicitHcaStateCapa
 TEST_F(DSV4AllocatorTest, SWAGroupParticipatesInPrefixCacheReuse) {
     auto config = makeDSV4AllocatorConfig();
     config.finalizeBlockNums(/*global_block_num=*/100, RuntimeConfig{});
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
@@ -2883,7 +2883,7 @@ TEST_F(DSV4AllocatorTest, SWAGroupParticipatesInPrefixCacheReuse) {
 
 TEST_F(DSV4AllocatorTest, SWAPrefixCacheRestoresTailReuse) {
     auto config       = makeDSV4AllocatorConfig();
-    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
     ASSERT_TRUE(allocator->init());
@@ -2941,7 +2941,7 @@ TEST_F(DSV4AllocatorTest, SWAPrefixCacheRestoresTailReuse) {
 
 TEST_F(DSV4AllocatorTest, IncrMallocDecodeGrowsBlocks) {
     auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     int spb = allocator->seqSizePerBlock();
@@ -2997,7 +2997,7 @@ TEST_F(DSV4AllocatorTest, IncrMallocDecodeGrowsBlocks) {
 
 TEST_F(DSV4AllocatorTest, FreeReturnsBlocksToPool) {
     auto config    = makeDSV4AllocatorConfig();
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     size_t free_before = allocator->freeBlocksNum();
@@ -3052,7 +3052,7 @@ TEST_F(DSV4AllocatorTest, FreeReturnsBlocksToPool) {
 
 TEST_F(DSV4AllocatorTest, FlashIncrMallocDecode) {
     auto config    = makeDSV4AllocatorConfig(/*use_flash=*/true);
-    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+    auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(config);
     ASSERT_TRUE(allocator->init());
 
     int spb = allocator->seqSizePerBlock();

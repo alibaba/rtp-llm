@@ -117,8 +117,6 @@ try:
         CacheCpPolicyDesc,
         CacheEvictPolicy,
         CacheGroupType,
-        CacheMemoryPlacement,
-        CacheMemoryPolicyDesc,
         CacheReusePolicy,
         CacheReusePolicyDesc,
         CacheStoreConfig,

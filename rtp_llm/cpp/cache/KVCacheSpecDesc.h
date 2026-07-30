@@ -36,10 +36,6 @@ struct CacheCapacityPolicyDesc {
     std::optional<bool>     charge_to_paged_budget;
 };
 
-struct CacheMemoryPolicyDesc {
-    std::optional<CacheMemoryPlacement> placement;
-};
-
 struct CacheTailPolicyDesc {
     std::optional<uint32_t> active_tail_blocks;
     std::optional<bool>     validate_tail_blocks;
@@ -75,7 +71,6 @@ struct KVCacheSpecDesc {
     std::optional<CacheGroupType>          group_type;
     std::optional<CacheReusePolicyDesc>    reuse;
     std::optional<CacheCapacityPolicyDesc> capacity;
-    std::optional<CacheMemoryPolicyDesc>   memory;
     std::optional<CacheTailPolicyDesc>     tail;
     std::optional<CacheCpPolicyDesc>       cp;
 };

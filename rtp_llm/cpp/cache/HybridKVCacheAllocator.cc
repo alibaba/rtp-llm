@@ -79,10 +79,9 @@ bool HybridKVCacheAllocator::cpCompactSwaGroup(int gid, const std::shared_ptr<CP
 }
 
 HybridKVCacheAllocator::HybridKVCacheAllocator(const CacheConfig&                 config,
-                                               AllocationType                     allocation_type,
                                                const kmonitor::MetricsReporterPtr metrics_reporter,
                                                int64_t                            reserve_block_ratio):
-    KVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio) {}
+    KVCacheAllocator(config, metrics_reporter, reserve_block_ratio) {}
 
 int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cache_keys,
                                        BatchKVCacheResource&                kv_resource,
@@ -839,7 +838,7 @@ void HybridKVCacheAllocator::rollbackIncrMalloc(BatchKVCacheResource&           
 
 MemoryType HybridKVCacheAllocator::memoryTypeForGroup(int gid) const {
     (void)gid;
-    return allocation_type_ == AllocationType::DEVICE ? MemoryType::MEMORY_GPU : MemoryType::MEMORY_CPU;
+    return MemoryType::MEMORY_GPU;
 }
 
 void HybridKVCacheAllocator::copyBlockMappingForGroup(int                             gid,

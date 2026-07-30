@@ -8,8 +8,7 @@ namespace rtp_llm {
 
 class MockKVCacheAllocator: public KVCacheAllocator {
 public:
-    explicit MockKVCacheAllocator(const CacheConfig& config, AllocationType atype = AllocationType::DEVICE):
-        KVCacheAllocator(config, atype) {}
+    explicit MockKVCacheAllocator(const CacheConfig& config): KVCacheAllocator(config) {}
     ~MockKVCacheAllocator() override = default;
 
 public:

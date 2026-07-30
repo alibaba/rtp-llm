@@ -912,11 +912,6 @@ class CacheEvictPolicy:
     INDEPENDENT: typing.ClassVar[CacheEvictPolicy]
     NONE: typing.ClassVar[CacheEvictPolicy]
 
-class CacheMemoryPlacement:
-    DEVICE: typing.ClassVar[CacheMemoryPlacement]
-    HOST: typing.ClassVar[CacheMemoryPlacement]
-    HOST_PINNED: typing.ClassVar[CacheMemoryPlacement]
-
 class CpBlockMappingMode:
     NONE: typing.ClassVar[CpBlockMappingMode]
     BLOCK_ROUND_ROBIN: typing.ClassVar[CpBlockMappingMode]
@@ -946,10 +941,6 @@ class CacheCapacityPolicyDesc:
     reservable: typing.Any
     explicit_block_num: typing.Any
     charge_to_paged_budget: typing.Any
-    def __init__(self) -> None: ...
-
-class CacheMemoryPolicyDesc:
-    placement: typing.Any
     def __init__(self) -> None: ...
 
 class CacheTailPolicyDesc:
@@ -983,7 +974,6 @@ class KVCacheSpecDesc:
     group_type: typing.Any
     reuse: typing.Any
     capacity: typing.Any
-    memory: typing.Any
     tail: typing.Any
     cp: typing.Any
     def __init__(self) -> None: ...

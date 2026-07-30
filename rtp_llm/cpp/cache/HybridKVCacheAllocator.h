@@ -13,7 +13,6 @@ namespace rtp_llm {
 class HybridKVCacheAllocator: public KVCacheAllocator, public std::enable_shared_from_this<HybridKVCacheAllocator> {
 public:
     HybridKVCacheAllocator(const CacheConfig&                 config,
-                           AllocationType                     allocation_type     = AllocationType::DEVICE,
                            const kmonitor::MetricsReporterPtr metrics_reporter    = nullptr,
                            int64_t                            reserve_block_ratio = 0);
 

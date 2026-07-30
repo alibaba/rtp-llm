@@ -104,7 +104,7 @@ protected:
         createDevice();
 
         cache_config_ = createMockCacheConfig();
-        allocator_    = std::make_shared<SingleTypeKVCacheAllocator>(cache_config_, AllocationType::DEVICE);
+        allocator_    = std::make_shared<SingleTypeKVCacheAllocator>(cache_config_);
         ASSERT_TRUE(allocator_->init());
 
         const int server_num = 4;
@@ -1790,7 +1790,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
         + 256;
     kv_cache_config_.memory_cache_size_mb = std::max(pool_mb, 512);
 
-    allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(cache_config_, AllocationType::DEVICE);
+    allocator_ = std::make_shared<SingleTypeKVCacheAllocator>(cache_config_);
     ASSERT_TRUE(allocator_->init());
     connector_ = std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, allocator_, server_addrs_);
     ASSERT_TRUE(connector_->init());
