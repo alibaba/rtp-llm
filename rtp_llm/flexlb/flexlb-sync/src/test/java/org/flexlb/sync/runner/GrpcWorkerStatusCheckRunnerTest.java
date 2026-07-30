@@ -57,4 +57,27 @@ class GrpcWorkerStatusCheckRunnerTest {
         // Assert
         verify(engineGrpcService).getWorkerStatus("127.0.0.1", 8081, -1L, 20L, RoleType.PREFILL);
     }
+
+    @Test
+    void should_useLongerTimeoutForVitStatusCheck() {
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setIp("127.0.0.1");
+        workerStatus.setPort(8080);
+
+        EngineRpcService.WorkerStatusPB workerStatusPB = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole("VIT")
+                .setStatusVersion(1)
+                .setAlive(true)
+                .build();
+        when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(workerStatusPB);
+
+        GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
+                "test-model", "127.0.0.1:8080", "test-site", RoleType.VIT,
+                "test-group", workerStatus, engineHealthReporter, engineGrpcService,
+                20, 1000);
+        runner.run();
+
+        verify(engineGrpcService).getWorkerStatus("127.0.0.1", 8081, -1L, 1000L, RoleType.VIT);
+    }
 }
