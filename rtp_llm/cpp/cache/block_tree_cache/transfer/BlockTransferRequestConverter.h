@@ -14,10 +14,9 @@ public:
                                const std::vector<GroupSetPtr>& group_sets,
                                MemoryOperationRequestPB&       request);
 
-    static bool decodeTransfer(const MemoryOperationRequestPB& request,
-                               int                             item_index,
-                               const std::vector<GroupSetPtr>& group_sets,
-                               TransferDescriptor&             descriptor);
+    // Returns an invalid descriptor (isValid() == false) when the request cannot be decoded.
+    static TransferDescriptor
+    decodeTransfer(const MemoryOperationRequestPB& request, int item_index, const std::vector<GroupSetPtr>& group_sets);
 
 private:
     using CopyItem = MemoryOperationRequestPB::CopyItem;
@@ -34,18 +33,12 @@ private:
                                         MemoryOperationRequestPB::CopyDirection& request_direction);
     static void setDeviceBlocks(const std::vector<BlockIdxType>& blocks, const GroupSet& group_set, CopyItem& item);
     static bool decodeDeviceBlocks(const CopyItem& item, const GroupSet& group_set, std::vector<BlockIdxType>& blocks);
-    static bool decodeDeviceHostTransfer(const MemoryOperationRequestPB& request,
-                                         const CopyItem&                 item,
-                                         const GroupSet&                 group_set,
-                                         TransferDescriptor&             descriptor);
-    static bool decodeHostDiskTransfer(const MemoryOperationRequestPB& request,
-                                       const CopyItem&                 item,
-                                       const GroupSet&                 group_set,
-                                       TransferDescriptor&             descriptor);
-    static bool decodeDeviceDiskTransfer(const MemoryOperationRequestPB& request,
-                                         const CopyItem&                 item,
-                                         const GroupSet&                 group_set,
-                                         TransferDescriptor&             descriptor);
+    static TransferDescriptor
+    decodeDeviceHostTransfer(const MemoryOperationRequestPB& request, const CopyItem& item, const GroupSet& group_set);
+    static TransferDescriptor
+    decodeHostDiskTransfer(const MemoryOperationRequestPB& request, const CopyItem& item, const GroupSet& group_set);
+    static TransferDescriptor
+    decodeDeviceDiskTransfer(const MemoryOperationRequestPB& request, const CopyItem& item, const GroupSet& group_set);
 };
 
 }  // namespace rtp_llm

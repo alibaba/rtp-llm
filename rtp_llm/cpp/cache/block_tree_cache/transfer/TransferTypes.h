@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <cstddef>
 #include <string>
 #include <utility>
@@ -102,6 +103,39 @@ struct TransferDescriptor {
         return desc;
     }
 
+    // A descriptor is valid only when every endpoint of its direction is resolved.
+    bool isValid() const {
+        const bool device_resolved =
+            !device_blocks.empty() && std::none_of(device_blocks.begin(), device_blocks.end(), [](BlockIdxType block) {
+                return isNullBlockIdx(block);
+            });
+        const bool host_resolved = !isNullBlockIdx(host_block);
+        const bool disk_resolved = !isNullBlockIdx(disk_block);
+        if ((source_tier == Tier::DEVICE && target_tier == Tier::HOST)
+            || (source_tier == Tier::HOST && target_tier == Tier::DEVICE)) {
+            return device_resolved && host_resolved;
+        }
+        if ((source_tier == Tier::HOST && target_tier == Tier::DISK)
+            || (source_tier == Tier::DISK && target_tier == Tier::HOST)) {
+            return device_blocks.empty() && host_resolved && disk_resolved;
+        }
+        if ((source_tier == Tier::DEVICE && target_tier == Tier::DISK)
+            || (source_tier == Tier::DISK && target_tier == Tier::DEVICE)) {
+            return device_resolved && disk_resolved;
+        }
+        return false;
+    }
+
+    std::string debugString() const {
+        std::string device_blocks_str;
+        for (size_t i = 0; i < device_blocks.size(); ++i) {
+            device_blocks_str += (i == 0 ? "" : ",") + std::to_string(device_blocks[i]);
+        }
+        return "TransferDescriptor{group_set_id=" + std::to_string(group_set_id) + ", direction="
+               + tierName(source_tier) + "->" + tierName(target_tier) + ", device_blocks=[" + device_blocks_str
+               + "], host_block=" + std::to_string(host_block) + ", disk_block=" + std::to_string(disk_block) + "}";
+    }
+
     size_t group_set_id{0};
     Tier   source_tier{Tier::NONE};
     Tier   target_tier{Tier::NONE};
@@ -114,7 +148,6 @@ struct TransferDescriptor {
 
     // HOST -> DISK: target. DISK -> HOST: source.
     BlockIdxType disk_block{NULL_BLOCK_IDX};
-    std::string  storage_key;
 };
 
 }  // namespace rtp_llm

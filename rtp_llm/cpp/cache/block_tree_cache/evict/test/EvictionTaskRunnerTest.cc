@@ -94,6 +94,24 @@ TEST_F(EvictionTaskRunnerTest, BuildTransferBatchIncludesPrimaryAndCascades) {
     EXPECT_EQ(descriptors[1].disk_block, 5);
 }
 
+TEST_F(EvictionTaskRunnerTest, BuildTransferBatchRejectsMalformedMoves) {
+    const auto expect_rejected = [](void (*mutate)(BlockTreeEvictor::EvictionPlan&)) {
+        auto plan = makeCopyPlan();
+        mutate(plan);
+        std::vector<TransferDescriptor> descriptors;
+        EXPECT_FALSE(EvictionTaskRunner::buildTransferBatch(plan, descriptors));
+        EXPECT_TRUE(descriptors.empty());
+    };
+
+    expect_rejected([](auto& plan) { plan.primary.source_blocks = {}; });
+    expect_rejected([](auto& plan) { plan.primary.source_blocks = {1, NULL_BLOCK_IDX}; });
+    expect_rejected([](auto& plan) { plan.primary.target_blocks = {}; });
+    expect_rejected([](auto& plan) { plan.primary.target_blocks = {3, 4}; });
+    expect_rejected([](auto& plan) { plan.primary.source_tier = Tier::DISK; });
+    expect_rejected([](auto& plan) { plan.cascade_moves[0].source_blocks = {4, 5}; });
+    expect_rejected([](auto& plan) { plan.cascade_moves[0].target_blocks = {NULL_BLOCK_IDX}; });
+}
+
 TEST_F(EvictionTaskRunnerTest, DiskInvolvedPlanUsesDiskTimeoutEvenWhenSmaller) {
     auto plan = makeCopyPlan();
     EXPECT_EQ(EvictionTaskRunner::transferTimeoutMs(plan, 8000, 3000), 3000);

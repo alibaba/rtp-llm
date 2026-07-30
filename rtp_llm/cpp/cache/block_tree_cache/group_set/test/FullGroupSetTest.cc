@@ -232,21 +232,6 @@ TEST_F(FullGroupSetTest, MatchValidatorAllowsLoadingResource) {
     delete node;
 }
 
-TEST_F(FullGroupSetTest, BuildTransferD2H) {
-    auto*              node         = makeNode(100);
-    const BlockIdxType device_block = setDeviceBlock(node, 0);
-    ASSERT_NE(device_block, NULL_BLOCK_IDX);
-
-    TransferDescriptor desc = group_->buildTransfer(node->group_set_resources[0], TransferType::DEVICE_TO_HOST);
-    EXPECT_EQ(desc.source_tier, Tier::DEVICE);
-    EXPECT_EQ(desc.target_tier, Tier::HOST);
-    EXPECT_EQ(desc.group_set_id, 0);
-    ASSERT_EQ(desc.device_blocks.size(), 1u);
-    EXPECT_EQ(desc.device_blocks[0], device_block);
-
-    delete node;
-}
-
 TEST_F(FullGroupSetTest, HostLeafDetection) {
     auto* a          = makeNode(100);
     auto* b          = makeNode(200);

@@ -331,8 +331,8 @@ bool EvictionTaskRunner::executeTierCopy(const EvictionMove& eviction_move) cons
         return false;
     }
 
-    TransferDescriptor descriptor;
-    if (!buildTransferDescriptor(eviction_move, descriptor)) {
+    TransferDescriptor descriptor = buildTransferDescriptor(eviction_move);
+    if (!descriptor.isValid()) {
         return false;
     }
     return execute_transfer_(descriptor);
@@ -358,26 +358,23 @@ Tier EvictionTaskRunner::normalizeTargetTier(Tier source_tier) const {
     }
 }
 
-bool EvictionTaskRunner::buildTransferDescriptor(const EvictionMove& eviction_move, TransferDescriptor& descriptor) {
-    if (eviction_move.source_blocks.empty() || eviction_move.target_blocks.empty()
-        || isNullBlockIdx(eviction_move.target_blocks[0])) {
-        return false;
+TransferDescriptor EvictionTaskRunner::buildTransferDescriptor(const EvictionMove& eviction_move) {
+    if (eviction_move.source_blocks.empty() || eviction_move.target_blocks.size() != 1) {
+        return {};
     }
 
     const BlockIdxType target = eviction_move.target_blocks[0];
     if (eviction_move.source_tier == Tier::DEVICE && eviction_move.target_tier == Tier::HOST) {
-        descriptor = TransferDescriptor::deviceToHost(eviction_move.group_set_id, eviction_move.source_blocks, target);
-    } else if (eviction_move.source_tier == Tier::DEVICE && eviction_move.target_tier == Tier::DISK) {
-        descriptor = TransferDescriptor::deviceToDisk(eviction_move.group_set_id, eviction_move.source_blocks, target);
-    } else if (eviction_move.source_tier == Tier::HOST && eviction_move.target_tier == Tier::DISK) {
-        if (isNullBlockIdx(eviction_move.source_blocks[0])) {
-            return false;
-        }
-        descriptor = TransferDescriptor::hostToDisk(eviction_move.group_set_id, eviction_move.source_blocks[0], target);
-    } else {
-        return false;
+        return TransferDescriptor::deviceToHost(eviction_move.group_set_id, eviction_move.source_blocks, target);
     }
-    return true;
+    if (eviction_move.source_tier == Tier::DEVICE && eviction_move.target_tier == Tier::DISK) {
+        return TransferDescriptor::deviceToDisk(eviction_move.group_set_id, eviction_move.source_blocks, target);
+    }
+    if (eviction_move.source_tier == Tier::HOST && eviction_move.target_tier == Tier::DISK
+        && eviction_move.source_blocks.size() == 1) {
+        return TransferDescriptor::hostToDisk(eviction_move.group_set_id, eviction_move.source_blocks[0], target);
+    }
+    return {};
 }
 
 bool EvictionTaskRunner::buildTransferBatch(const BlockTreeEvictor::EvictionPlan& plan,
@@ -385,15 +382,15 @@ bool EvictionTaskRunner::buildTransferBatch(const BlockTreeEvictor::EvictionPlan
     descriptors.clear();
     descriptors.reserve(1 + plan.cascade_moves.size());
 
-    TransferDescriptor primary_descriptor;
-    if (!buildTransferDescriptor(plan.primary, primary_descriptor)) {
+    TransferDescriptor primary_descriptor = buildTransferDescriptor(plan.primary);
+    if (!primary_descriptor.isValid()) {
         return false;
     }
     descriptors.push_back(std::move(primary_descriptor));
 
     for (const EvictionMove& cascade_move : plan.cascade_moves) {
-        TransferDescriptor cascade_descriptor;
-        if (!buildTransferDescriptor(cascade_move, cascade_descriptor)) {
+        TransferDescriptor cascade_descriptor = buildTransferDescriptor(cascade_move);
+        if (!cascade_descriptor.isValid()) {
             descriptors.clear();
             return false;
         }

@@ -25,18 +25,12 @@ struct DeviceHostCopyTile {
     size_t local_layer_index{0};
 };
 
-struct HostZeroTile {
-    void*  host_addr{nullptr};
-    size_t bytes{0};
-};
-
 struct DeviceHostCopyPlan {
     bool                            device_to_host{false};
     bool                            single_device{true};
     size_t                          group_set_id{0};
     HostBufferView                  host;
     std::vector<DeviceHostCopyTile> copy_tiles;
-    std::vector<HostZeroTile>       zero_tiles;
 };
 
 // --- Strategy result ---

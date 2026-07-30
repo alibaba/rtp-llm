@@ -50,7 +50,7 @@ private:
     std::vector<EvictionReleaseCredit> collectReleaseCredits(const BlockTreeEvictor::EvictionPlan& plan) const;
     bool                               executeTierCopy(const EvictionMove& eviction_move) const;
     Tier                               normalizeTargetTier(Tier source_tier) const;
-    static bool buildTransferDescriptor(const EvictionMove& eviction_move, TransferDescriptor& descriptor);
+    static TransferDescriptor          buildTransferDescriptor(const EvictionMove& eviction_move);
     static int
     transferTimeoutMs(const BlockTreeEvictor::EvictionPlan& plan, int memory_timeout_ms, int disk_timeout_ms);
 

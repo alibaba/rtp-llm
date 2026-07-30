@@ -33,7 +33,7 @@ const GroupSet* BlockTransferRequestConverter::findGroupSet(const CopyItem&     
 
 bool BlockTransferRequestConverter::validDeviceBlocks(const std::vector<BlockIdxType>& blocks,
                                                       const GroupSet&                  group_set) {
-    if (blocks.size() != group_set.groupIds().size() || blocks.empty()) {
+    if (blocks.empty() || blocks.size() != group_set.groupIds().size()) {
         return false;
     }
 
@@ -41,18 +41,12 @@ bool BlockTransferRequestConverter::validDeviceBlocks(const std::vector<BlockIdx
     if (blocks.size() != device_pools.size()) {
         return false;
     }
-    bool has_valid_block = false;
     for (size_t i = 0; i < blocks.size(); ++i) {
-        const BlockIdxType block = blocks[i];
-        if (isNullBlockIdx(block)) {
-            continue;
-        }
-        if (device_pools[i] == nullptr || !device_pools[i]->validBlock(block)) {
+        if (device_pools[i] == nullptr || !device_pools[i]->validBlock(blocks[i])) {
             return false;
         }
-        has_valid_block = true;
     }
-    return has_valid_block;
+    return true;
 }
 
 bool BlockTransferRequestConverter::validHostBlock(BlockIdxType block, const GroupSet& group_set) {
@@ -141,72 +135,61 @@ bool BlockTransferRequestConverter::decodeDeviceBlocks(const CopyItem&          
     return blocks_by_group_id.size() == group_ids.size() && validDeviceBlocks(blocks, group_set);
 }
 
-bool BlockTransferRequestConverter::decodeDeviceHostTransfer(const MemoryOperationRequestPB& request,
-                                                             const CopyItem&                 item,
-                                                             const GroupSet&                 group_set,
-                                                             TransferDescriptor&             descriptor) {
+TransferDescriptor BlockTransferRequestConverter::decodeDeviceHostTransfer(const MemoryOperationRequestPB& request,
+                                                                           const CopyItem&                 item,
+                                                                           const GroupSet&                 group_set) {
     if (item.backing_type() != MemoryOperationRequestPB::MEMORY || !validHostBlock(item.mem_block(), group_set)
         || hasTargetDisk(item) || hasSourceMemory(item) || hasSourceDisk(item)) {
-        return false;
+        return {};
     }
     std::vector<BlockIdxType> device_blocks;
     if (!decodeDeviceBlocks(item, group_set, device_blocks)) {
-        return false;
+        return {};
     }
     if (request.copy_direction() == MemoryOperationRequestPB::D2H) {
-        descriptor =
-            TransferDescriptor::deviceToHost(group_set.groupSetId(), std::move(device_blocks), item.mem_block());
-        return true;
+        return TransferDescriptor::deviceToHost(group_set.groupSetId(), std::move(device_blocks), item.mem_block());
     }
     if (request.copy_direction() == MemoryOperationRequestPB::H2D) {
-        descriptor =
-            TransferDescriptor::hostToDevice(group_set.groupSetId(), item.mem_block(), std::move(device_blocks));
-        return true;
+        return TransferDescriptor::hostToDevice(group_set.groupSetId(), item.mem_block(), std::move(device_blocks));
     }
-    return false;
+    return {};
 }
 
-bool BlockTransferRequestConverter::decodeHostDiskTransfer(const MemoryOperationRequestPB& request,
-                                                           const CopyItem&                 item,
-                                                           const GroupSet&                 group_set,
-                                                           TransferDescriptor&             descriptor) {
+TransferDescriptor BlockTransferRequestConverter::decodeHostDiskTransfer(const MemoryOperationRequestPB& request,
+                                                                         const CopyItem&                 item,
+                                                                         const GroupSet&                 group_set) {
     if (item.group_blocks_size() != 0) {
-        return false;
+        return {};
     }
     if (request.copy_direction() == MemoryOperationRequestPB::H2DISK
         && item.backing_type() == MemoryOperationRequestPB::DISK && hasTargetDisk(item)
         && validDiskBlock(item.disk_slot(), group_set) && isNullBlockIdx(item.mem_block()) && hasSourceMemory(item)
         && !hasSourceDisk(item) && item.src_backing_type() == MemoryOperationRequestPB::MEMORY
         && validHostBlock(item.src_mem_block(), group_set)) {
-        descriptor = TransferDescriptor::hostToDisk(group_set.groupSetId(), item.src_mem_block(), item.disk_slot());
-        return true;
+        return TransferDescriptor::hostToDisk(group_set.groupSetId(), item.src_mem_block(), item.disk_slot());
     }
     if (request.copy_direction() == MemoryOperationRequestPB::DISK2H
         && item.backing_type() == MemoryOperationRequestPB::MEMORY && validHostBlock(item.mem_block(), group_set)
         && !hasTargetDisk(item) && !hasSourceMemory(item) && hasSourceDisk(item)
         && item.src_backing_type() == MemoryOperationRequestPB::DISK
         && validDiskBlock(item.src_disk_slot(), group_set)) {
-        descriptor = TransferDescriptor::diskToHost(group_set.groupSetId(), item.src_disk_slot(), item.mem_block());
-        return true;
+        return TransferDescriptor::diskToHost(group_set.groupSetId(), item.src_disk_slot(), item.mem_block());
     }
-    return false;
+    return {};
 }
 
-bool BlockTransferRequestConverter::decodeDeviceDiskTransfer(const MemoryOperationRequestPB& request,
-                                                             const CopyItem&                 item,
-                                                             const GroupSet&                 group_set,
-                                                             TransferDescriptor&             descriptor) {
+TransferDescriptor BlockTransferRequestConverter::decodeDeviceDiskTransfer(const MemoryOperationRequestPB& request,
+                                                                           const CopyItem&                 item,
+                                                                           const GroupSet&                 group_set) {
     if (request.copy_direction() == MemoryOperationRequestPB::D2DISK
         && item.backing_type() == MemoryOperationRequestPB::DISK && hasTargetDisk(item)
         && validDiskBlock(item.disk_slot(), group_set) && isNullBlockIdx(item.mem_block()) && !hasSourceMemory(item)
         && !hasSourceDisk(item)) {
         std::vector<BlockIdxType> device_blocks;
         if (!decodeDeviceBlocks(item, group_set, device_blocks)) {
-            return false;
+            return {};
         }
-        descriptor =
-            TransferDescriptor::deviceToDisk(group_set.groupSetId(), std::move(device_blocks), item.disk_slot());
-        return true;
+        return TransferDescriptor::deviceToDisk(group_set.groupSetId(), std::move(device_blocks), item.disk_slot());
     }
     if (request.copy_direction() == MemoryOperationRequestPB::DISK2D && !hasTargetDisk(item)
         && isNullBlockIdx(item.mem_block()) && !hasSourceMemory(item) && hasSourceDisk(item)
@@ -214,13 +197,11 @@ bool BlockTransferRequestConverter::decodeDeviceDiskTransfer(const MemoryOperati
         && validDiskBlock(item.src_disk_slot(), group_set)) {
         std::vector<BlockIdxType> device_blocks;
         if (!decodeDeviceBlocks(item, group_set, device_blocks)) {
-            return false;
+            return {};
         }
-        descriptor =
-            TransferDescriptor::diskToDevice(group_set.groupSetId(), item.src_disk_slot(), std::move(device_blocks));
-        return true;
+        return TransferDescriptor::diskToDevice(group_set.groupSetId(), item.src_disk_slot(), std::move(device_blocks));
     }
-    return false;
+    return {};
 }
 
 bool BlockTransferRequestConverter::appendTransfer(const TransferDescriptor&       descriptor,
@@ -286,32 +267,31 @@ bool BlockTransferRequestConverter::appendTransfer(const TransferDescriptor&    
     return true;
 }
 
-bool BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestPB& request,
-                                                   int                             item_index,
-                                                   const std::vector<GroupSetPtr>& group_sets,
-                                                   TransferDescriptor&             descriptor) {
+TransferDescriptor BlockTransferRequestConverter::decodeTransfer(const MemoryOperationRequestPB& request,
+                                                                 int                             item_index,
+                                                                 const std::vector<GroupSetPtr>& group_sets) {
     if (item_index < 0 || item_index >= request.copy_items_size()) {
-        return false;
+        return {};
     }
     const CopyItem& item      = request.copy_items(item_index);
     const auto*     group_set = findGroupSet(item, group_sets);
     if (group_set == nullptr) {
         RTP_LLM_LOG_WARNING("cannot resolve BlockTree GroupSet id=%lu, item=%d", item.group_set_id(), item_index);
-        return false;
+        return {};
     }
 
     switch (request.copy_direction()) {
         case MemoryOperationRequestPB::D2H:
         case MemoryOperationRequestPB::H2D:
-            return decodeDeviceHostTransfer(request, item, *group_set, descriptor);
+            return decodeDeviceHostTransfer(request, item, *group_set);
         case MemoryOperationRequestPB::H2DISK:
         case MemoryOperationRequestPB::DISK2H:
-            return decodeHostDiskTransfer(request, item, *group_set, descriptor);
+            return decodeHostDiskTransfer(request, item, *group_set);
         case MemoryOperationRequestPB::D2DISK:
         case MemoryOperationRequestPB::DISK2D:
-            return decodeDeviceDiskTransfer(request, item, *group_set, descriptor);
+            return decodeDeviceDiskTransfer(request, item, *group_set);
         default:
-            return false;
+            return {};
     }
 }
 

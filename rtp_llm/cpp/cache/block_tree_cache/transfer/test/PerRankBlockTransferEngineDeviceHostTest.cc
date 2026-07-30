@@ -610,23 +610,21 @@ TEST_F(PerRankBlockTransferEngineTest, SubmitHostToDeviceIndependentDescriptors)
     device_pool_->free(second_device_block);
 }
 
-class PerRankBlockTransferEngineMixedNullTest: public ::testing::Test {
+class PerRankBlockTransferEngineMultiMemberTest: public ::testing::Test {
 protected:
     void SetUp() override {
         ASSERT_TRUE(torch::cuda::is_available()) << "CUDA not available, cannot run GPU tests";
         host_pool_ = makeHostPool(240, 4, true);
         pools_     = {
-            makeDevicePool({{64, 16}}, 4, "per_rank_transfer_engine_mixed_0"),
-            makeDevicePool({{64, 16}}, 4, "per_rank_transfer_engine_mixed_1"),
-            makeDevicePool({{64, 16}}, 4, "per_rank_transfer_engine_mixed_2"),
+            makeDevicePool({{64, 16}}, 4, "per_rank_transfer_engine_multi_member_0"),
+            makeDevicePool({{64, 16}}, 4, "per_rank_transfer_engine_multi_member_1"),
+            makeDevicePool({{64, 16}}, 4, "per_rank_transfer_engine_multi_member_2"),
         };
         for (const auto& pool : pools_) {
             blocks_.push_back(poolMalloc(*pool));
             ASSERT_NE(blocks_.back(), NULL_BLOCK_IDX);
         }
 
-        // Pool bindings remain concrete in the declarative topology. The middle
-        // descriptor block is NULL, so lowering must skip it without touching its pool.
         auto group =
             makeDeviceHostGroup(0,
                                 pools_,
@@ -644,7 +642,7 @@ protected:
     BlockIdxType                                host_block_{NULL_BLOCK_IDX};
 };
 
-TEST_F(PerRankBlockTransferEngineMixedNullTest, DeviceToHostMixedNullGroupsPreserveOffsets) {
+TEST_F(PerRankBlockTransferEngineMultiMemberTest, CompleteMultiMemberRoundTripPreservesOffsets) {
     fillDeviceLayer(pools_[0], 0, blocks_[0], {0xA1, 0xA2});
     fillDeviceLayer(pools_[1], 0, blocks_[1], {0xB1, 0xB2});
     fillDeviceLayer(pools_[2], 0, blocks_[2], {0xC1, 0xC2});
@@ -652,51 +650,41 @@ TEST_F(PerRankBlockTransferEngineMixedNullTest, DeviceToHostMixedNullGroupsPrese
     std::memset(host_data, 0xFF, 240);
 
     expectStatus(engine_,
-                 makeDescriptor(Tier::DEVICE, Tier::HOST, {blocks_[0], NULL_BLOCK_IDX, blocks_[2]}, host_block_),
+                 makeDescriptor(Tier::DEVICE, Tier::HOST, {blocks_[0], blocks_[1], blocks_[2]}, host_block_),
                  TransferStatus::OK);
     for (size_t i = 0; i < 64; ++i)
         EXPECT_EQ(host_data[i], 0xA1);
     for (size_t i = 64; i < 80; ++i)
         EXPECT_EQ(host_data[i], 0xA2);
-    for (size_t i = 80; i < 160; ++i)
-        EXPECT_EQ(host_data[i], 0x00);
+    for (size_t i = 80; i < 144; ++i)
+        EXPECT_EQ(host_data[i], 0xB1);
+    for (size_t i = 144; i < 160; ++i)
+        EXPECT_EQ(host_data[i], 0xB2);
     for (size_t i = 160; i < 224; ++i)
         EXPECT_EQ(host_data[i], 0xC1);
     for (size_t i = 224; i < 240; ++i)
         EXPECT_EQ(host_data[i], 0xC2);
-}
 
-TEST_F(PerRankBlockTransferEngineMixedNullTest, HostToDeviceMixedNullGroupsPreserveOffsets) {
-    auto* host_data = static_cast<uint8_t*>(host_pool_->blockBuffer(host_block_).addr);
-    std::memset(host_data, 0x11, 64);
-    std::memset(host_data + 64, 0x12, 16);
-    std::memset(host_data + 80, 0x22, 64);
-    std::memset(host_data + 144, 0x23, 16);
-    std::memset(host_data + 160, 0x31, 64);
-    std::memset(host_data + 224, 0x32, 16);
     fillDeviceLayer(pools_[0], 0, blocks_[0], {0x00, 0x00});
-    fillDeviceLayer(pools_[1], 0, blocks_[1], {0xEE, 0xEF});
+    fillDeviceLayer(pools_[1], 0, blocks_[1], {0x00, 0x00});
     fillDeviceLayer(pools_[2], 0, blocks_[2], {0x00, 0x00});
-
     expectStatus(engine_,
-                 makeDescriptor(Tier::HOST, Tier::DEVICE, {blocks_[0], NULL_BLOCK_IDX, blocks_[2]}, host_block_),
+                 makeDescriptor(Tier::HOST, Tier::DEVICE, {blocks_[0], blocks_[1], blocks_[2]}, host_block_),
                  TransferStatus::OK);
 
     const auto comp0 = readDeviceLayer(pools_[0], 0, blocks_[0]);
     const auto comp1 = readDeviceLayer(pools_[1], 0, blocks_[1]);
     const auto comp2 = readDeviceLayer(pools_[2], 0, blocks_[2]);
-    for (size_t i = 0; i < 64; ++i)
-        EXPECT_EQ(comp0[i], 0x11);
-    for (size_t i = 64; i < 80; ++i)
-        EXPECT_EQ(comp0[i], 0x12);
-    for (size_t i = 0; i < 64; ++i)
-        EXPECT_EQ(comp1[i], 0xEE);
-    for (size_t i = 64; i < 80; ++i)
-        EXPECT_EQ(comp1[i], 0xEF);
-    for (size_t i = 0; i < 64; ++i)
-        EXPECT_EQ(comp2[i], 0x31);
-    for (size_t i = 64; i < 80; ++i)
-        EXPECT_EQ(comp2[i], 0x32);
+    for (size_t i = 0; i < 64; ++i) {
+        EXPECT_EQ(comp0[i], 0xA1);
+        EXPECT_EQ(comp1[i], 0xB1);
+        EXPECT_EQ(comp2[i], 0xC1);
+    }
+    for (size_t i = 64; i < 80; ++i) {
+        EXPECT_EQ(comp0[i], 0xA2);
+        EXPECT_EQ(comp1[i], 0xB2);
+        EXPECT_EQ(comp2[i], 0xC2);
+    }
 }
 
 TEST(PerRankBlockTransferEngineIntegrationTest, DeviceHostDiskHostDeviceRoundTrip) {

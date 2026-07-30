@@ -1,6 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/DeviceHostTransferExecutor.h"
 
-#include <cstring>
 #include <map>
 #include <utility>
 
@@ -18,17 +17,15 @@ DeviceHostTransferExecutor::DeviceHostTransferExecutor(DeviceHostCopyOptions opt
 
 DeviceHostTransferExecutor::~DeviceHostTransferExecutor() = default;
 
-TransferStatus
-DeviceHostTransferExecutor::deviceToHost(const TransferDescriptor& desc,
-                                         const GroupSet&           group_set,
-                                         HostBufferView            host) {
+TransferStatus DeviceHostTransferExecutor::deviceToHost(const TransferDescriptor& desc,
+                                                        const GroupSet&           group_set,
+                                                        HostBufferView            host) {
     return lowerAndExecute(desc, group_set, /*device_to_host=*/true, host);
 }
 
-TransferStatus
-DeviceHostTransferExecutor::hostToDevice(HostBufferView            host,
-                                         const TransferDescriptor& desc,
-                                         const GroupSet&           group_set) {
+TransferStatus DeviceHostTransferExecutor::hostToDevice(HostBufferView            host,
+                                                        const TransferDescriptor& desc,
+                                                        const GroupSet&           group_set) {
     return lowerAndExecute(desc, group_set, /*device_to_host=*/false, host);
 }
 
@@ -43,14 +40,9 @@ TransferStatus DeviceHostTransferExecutor::lowerAndExecute(const TransferDescrip
     }
 
     if (plan.copy_tiles.empty()) {
-        RTP_LLM_LOG_WARNING("%s copy plan has no copyable device block group_set=%zu",
-                            device_to_host ? "D2H" : "H2D",
-                            desc.group_set_id);
+        RTP_LLM_LOG_WARNING(
+            "%s copy plan lowered no copy tile group_set=%zu", device_to_host ? "D2H" : "H2D", desc.group_set_id);
         return TransferStatus::INVALID_ARGS;
-    }
-
-    for (const auto& zero_tile : plan.zero_tiles) {
-        std::memset(zero_tile.host_addr, 0, zero_tile.bytes);
     }
 
     auto device_plans = splitByDevice(plan);
@@ -97,16 +89,13 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
     for (size_t member_index = 0; member_index < group_set.groupIds().size(); ++member_index) {
         const auto& group_base        = group_set.groupAt(member_index);
         const auto  device_block      = device_blocks[member_index];
-        const bool  has_device_block  = !isNullBlockIdx(device_block);
         auto&       device_pool       = *device_pools[member_index];
         const int   pool_device_index = device_pool.deviceIndex();
 
-        if (has_device_block) {
-            if (first_device_index < 0) {
-                first_device_index = pool_device_index;
-            } else if (pool_device_index != first_device_index) {
-                single_device = false;
-            }
+        if (first_device_index < 0) {
+            first_device_index = pool_device_index;
+        } else if (pool_device_index != first_device_index) {
+            single_device = false;
         }
 
         for (size_t local_layer_index = 0; local_layer_index < group_base.layer_ids.size(); ++local_layer_index) {
@@ -114,14 +103,6 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
             const size_t scale_bytes     = group_base.kv_scale_stride_bytes;
             const size_t layer_bytes     = kv_bytes + scale_bytes;
             auto*        layer_host_addr = static_cast<uint8_t*>(host.base) + host_offset;
-
-            if (!has_device_block) {
-                if (device_to_host) {
-                    plan.zero_tiles.push_back(HostZeroTile{layer_host_addr, layer_bytes});
-                }
-                host_offset += layer_bytes;
-                continue;
-            }
 
             const auto buffers = device_pool.convertIndexToBuffer(static_cast<int>(local_layer_index), device_block);
             const auto append_tile = [&](size_t buffer_index, size_t logical_bytes, size_t layer_offset) {

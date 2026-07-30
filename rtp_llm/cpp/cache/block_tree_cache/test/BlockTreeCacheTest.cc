@@ -1145,25 +1145,6 @@ TEST_F(BlockTreeCacheTest, NodeDeletedWhenAllGroupsEmpty) {
     EXPECT_EQ(cache->getStats().tree_node_count, 0u);
 }
 
-TEST_F(BlockTreeCacheTest, SWABuildTransferSupportsHostToDisk) {
-    auto swa = std::make_shared<SWAGroupSet>(128, 64);
-    initializeTestGroupSet(swa, makeStructuralDevicePools(1, "swa_build_transfer"));
-
-    // Create a mock tree node with host data
-    auto                                       tree = std::make_unique<BlockTree>(std::vector<GroupSetPtr>{swa});
-    std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
-    tree->insertNode({100}, resources);
-    auto find = tree->findNode({100});
-    ASSERT_FALSE(find.empty());
-    find.back()->group_set_resources[0].host_block = 7;
-
-    // Verify HOST_TO_DISK transfer descriptor is correct
-    TransferDescriptor desc = swa->buildTransfer(find.back()->group_set_resources[0], TransferType::HOST_TO_DISK);
-    EXPECT_EQ(desc.source_tier, Tier::HOST);
-    EXPECT_EQ(desc.target_tier, Tier::DISK);
-    EXPECT_EQ(desc.host_block, 7);
-}
-
 TEST_F(BlockTreeCacheTest, MatchCollectsBlocksSelectedByGroupPolicy) {
 
     std::shared_ptr<FullGroupSet>   full   = std::make_shared<FullGroupSet>();

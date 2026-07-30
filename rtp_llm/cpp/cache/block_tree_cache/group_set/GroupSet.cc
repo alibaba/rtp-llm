@@ -125,21 +125,6 @@ void GroupSet::evictFromTier(GroupSetResource& resource, Tier tier) {
     }
 }
 
-TransferDescriptor GroupSet::buildTransfer(const GroupSetResource& resource, TransferType type) {
-    switch (type) {
-        case TransferType::DEVICE_TO_HOST:
-            return TransferDescriptor::deviceToHost(groupSetId(), resource.device_blocks, NULL_BLOCK_IDX);
-        case TransferType::HOST_TO_DEVICE:
-            return TransferDescriptor::hostToDevice(groupSetId(), resource.host_block, resource.device_blocks);
-        case TransferType::HOST_TO_DISK:
-            return TransferDescriptor::hostToDisk(groupSetId(), resource.host_block, NULL_BLOCK_IDX);
-        case TransferType::DISK_TO_HOST:
-            return TransferDescriptor::diskToHost(groupSetId(), resource.disk_slot, NULL_BLOCK_IDX);
-        default:
-            return {};
-    }
-}
-
 bool GroupSet::hasCompleteDeviceValue(const GroupSetResource& resource) const {
     return resource.hasTier(Tier::DEVICE) && resource.device_blocks.size() == device_pools_.size()
            && std::all_of(resource.device_blocks.begin(), resource.device_blocks.end(), [](BlockIdxType block) {

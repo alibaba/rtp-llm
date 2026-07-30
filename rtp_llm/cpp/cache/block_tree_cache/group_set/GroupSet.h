@@ -6,8 +6,8 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheTopology.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
@@ -15,7 +15,6 @@
 namespace rtp_llm {
 
 class LoadTicket;
-struct TreeNode;
 
 struct MultiNodeResource {
     size_t                                 group_set_id{0};
@@ -45,16 +44,6 @@ class MatchValidator {
 public:
     virtual ~MatchValidator() = default;
     virtual bool validate(const GroupSetResource& resource) = 0;
-};
-
-enum class TransferType {
-    DEVICE_TO_HOST,
-    HOST_TO_DEVICE,
-    HOST_TO_DISK,
-    DISK_TO_HOST,
-    DEVICE_TO_REMOTE,
-    HOST_TO_REMOTE,
-    REMOTE_TO_DEVICE,
 };
 
 struct EvictionMove {
@@ -93,8 +82,6 @@ public:
     virtual std::unique_ptr<MatchValidator> createMatchValidator() = 0;
 
     virtual void evictFromTier(GroupSetResource& resource, Tier tier);
-
-    virtual TransferDescriptor buildTransfer(const GroupSetResource& resource, TransferType type);
 
     virtual size_t computeReuseBlockCount(size_t matched_block_count) const = 0;
 
