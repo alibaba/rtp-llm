@@ -123,18 +123,7 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
         torch::empty({(int64_t)inputs.batch_size}, torch::TensorOptions().dtype(torch::kBool).device(torch::kCUDA));
     auto all_beam_indices =
         has_num_beams ? torch::empty({(int64_t)inputs.batch_size_out}, torch::kInt32) : torch::Tensor();
-    torch::Tensor inputs_token_ids_cuda;
-    {
-        auto main_stream     = cuda_graph::graphGetCurrentStream();
-        auto copy_done_event = cuda_graph::makeGraphEvent();
-        {
-            cuda_graph::GraphStreamGuard guard(copy_stream_);
-            inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA, /*non_blocking=*/true);
-            copy_done_event.record(copy_stream_);
-        }
-        copy_done_event.block(main_stream);
-        inputs_token_ids_cuda.record_stream(main_stream);
-    }
+    auto inputs_token_ids_cuda = inputs.token_ids.to(torch::kCUDA);
 
     auto all_token_ids_out     = variable_num_beams ?
                                      torch::empty({(int64_t)inputs.batch_size_out, (int64_t)max_seq_len},
