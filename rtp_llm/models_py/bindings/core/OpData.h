@@ -45,6 +45,13 @@ struct GptModelInputs {
     torch::Tensor         input_lengths_host_for_log;
     torch::Tensor         sequence_lengths_host_for_log;
     torch::Tensor         prefix_lengths_host_for_log;
+    // Pinned host mirrors retained at gather time. Performance-sensitive
+    // Python attention paths consume these instead of synchronously copying
+    // CUDA cache metadata back to the host during model forward.
+    torch::Tensor kv_cache_block_id_host;
+    torch::Tensor kv_cache_kernel_block_id_host;
+    torch::Tensor kv_cache_layer_to_group_host;
+    torch::Tensor kv_cache_group_types_host;
 
     torch::Tensor combo_tokens_type_ids;  // [cumulated_seq_len]
     torch::Tensor combo_position_ids;     // [cumulated_seq_len]

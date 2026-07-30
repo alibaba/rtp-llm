@@ -17,8 +17,10 @@ precision comparison against the framework/Triton kernels.
 
 from __future__ import annotations
 
+import inspect
 import logging
 import os
+from contextlib import nullcontext
 from typing import TYPE_CHECKING, Any, Dict, Optional
 
 import torch
@@ -28,24 +30,30 @@ from torch import nn
 import rtp_llm.ops.compute_ops as compute_ops
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models.kimi_k3.kimi_k3_weight import KimiK3WeightNames as K3W
-from rtp_llm.models_py.distributed.collective_torch import Group, all_gather, all_reduce
+from rtp_llm.models_py.distributed.collective_torch import (
+    Group,
+    all_gather,
+    all_reduce,
+    barrier,
+    reduce_scatter,
+)
 from rtp_llm.models_py.model_desc.block_map import select_block_map_for_layer
 from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules.base.common.kvcache_store import (
     create_write_cache_store_impl,
 )
 from rtp_llm.models_py.modules.hybrid.mla_attention import MlaAttention
-from rtp_llm.models_py.modules.kimi_k3.kda_state import KDAExecutionMode, KimiKDAState
-from rtp_llm.models_py.modules.kimi_k3.mxfp4 import dequantize_mxfp4
-from rtp_llm.models_py.modules.kimi_k3.reference.kda_reference import (
-    kimi_kda,
-    prepare_kimi_kda_inputs,
-)
 from rtp_llm.models_py.modules.kimi_k3.diagnostics.accuracy_trace import (
     accuracy_trace_mode,
     kimi_k3_accuracy_trace,
     mark_accuracy_fake_stream,
     record_accuracy_tensor,
+)
+from rtp_llm.models_py.modules.kimi_k3.kda_state import KDAExecutionMode, KimiKDAState
+from rtp_llm.models_py.modules.kimi_k3.mxfp4 import dequantize_mxfp4
+from rtp_llm.models_py.modules.kimi_k3.reference.kda_reference import (
+    kimi_kda,
+    prepare_kimi_kda_inputs,
 )
 from rtp_llm.models_py.triton_kernels.kimi_kda import (
     chunk_kda,
@@ -73,6 +81,104 @@ if TYPE_CHECKING:
 
 
 KIMI_K3_MLA_LATENT_NORM_EPS = 1e-6
+_FLASH_KDA_WORKSPACES: dict[tuple[int, int], torch.Tensor] = {}
+_FLASH_KDA_LOGGED_DEVICES: set[int] = set()
+_DEEPGEMM_MEGA_LOGGED_DEVICES: set[int] = set()
+
+
+def _env_flag(name: str, default: bool = False) -> bool:
+    return os.environ.get(name, "1" if default else "0").strip() == "1"
+
+
+def _perf_mode_enabled() -> bool:
+    """Enable strict validation and profiler annotations, not model math."""
+
+    return _env_flag("KIMI_K3_PERF_MODE")
+
+
+def _perf_fusions_enabled() -> bool:
+    """Select the explicitly staged performance-fusion implementations."""
+
+    return _env_flag("KIMI_K3_PERF_FUSIONS")
+
+
+def _perf_profile(name: str, tensor: Optional[torch.Tensor] = None):
+    if not _perf_mode_enabled():
+        return nullcontext()
+    suffix = ""
+    if tensor is not None:
+        shape = "x".join(str(dim) for dim in tensor.shape)
+        suffix = f"[shape={shape},dtype={tensor.dtype}]"
+    return torch.autograd.profiler.record_function(f"{name}{suffix}")
+
+
+def _validate_perf_environment() -> None:
+    """Reject mixed accuracy/reference settings in a measured performance run."""
+
+    if not _perf_mode_enabled():
+        return
+    conflicting_flags = [
+        name
+        for name in (
+            "KIMI_K3_ACCURACY_CANONICAL_TP",
+            "KIMI_K3_ACCURACY_CANONICAL_EP",
+            "KIMI_K3_ACCURACY_CANONICAL_MLA",
+            "KIMI_K3_ACCURACY_LOCAL_EAGER_MLA",
+        )
+        if _env_flag(name)
+    ]
+    if os.environ.get("KIMI_K3_ACCURACY_TRACE_DIR"):
+        conflicting_flags.append("KIMI_K3_ACCURACY_TRACE_DIR")
+    expected = {
+        "KIMI_K3_KDA_BACKEND": "flash_kda",
+        "KIMI_K3_MOE_BACKEND": "deep_gemm_mega",
+        "KIMI_K3_MLA_BACKEND": "kernel",
+        "KIMI_K3_USE_HOST_METADATA": "1",
+        "KIMI_K3_SP_MOE": "1",
+        "KIMI_K3_PERF_FUSIONS": "1",
+    }
+    wrong_settings = [
+        f"{name}={os.environ.get(name, '')!r}"
+        for name, value in expected.items()
+        if os.environ.get(name, "").strip().lower() != value
+    ]
+    if conflicting_flags or wrong_settings:
+        details = ", ".join(conflicting_flags + wrong_settings)
+        raise RuntimeError(
+            "KIMI_K3_PERF_MODE only labels the fully optimized path and "
+            "forbids accuracy/reference work; invalid settings: "
+            f"{details}"
+        )
+
+
+def _sp_moe_enabled() -> bool:
+    """Keep K3 Prefill activations token-sharded between decoder layers."""
+
+    return os.environ.get("KIMI_K3_SP_MOE", "0").strip() == "1"
+
+
+def _flash_kda_workspace(
+    flash_kda: Any,
+    q: torch.Tensor,
+    cu_seqlens: torch.Tensor,
+) -> torch.Tensor:
+    """Return a process-local reusable FlashKDA workspace."""
+
+    device_index = q.device.index if q.device.index is not None else 0
+    sequence_count = int(cu_seqlens.numel() - 1)
+    required = int(
+        flash_kda.get_workspace_size(
+            int(q.shape[0] * q.shape[1]),
+            int(q.shape[2]),
+            sequence_count,
+        )
+    )
+    key = (device_index, int(q.shape[2]))
+    workspace = _FLASH_KDA_WORKSPACES.get(key)
+    if workspace is None or workspace.numel() < required:
+        workspace = torch.empty(required, dtype=torch.uint8, device=q.device)
+        _FLASH_KDA_WORKSPACES[key] = workspace
+    return workspace
 
 
 def _linear(x: torch.Tensor, weight: torch.Tensor) -> torch.Tensor:
@@ -108,6 +214,18 @@ def _accuracy_full_router_trace_enabled() -> bool:
     """Keep full O(T) router diagnostics in an otherwise boundary-only trace."""
 
     return os.environ.get("KIMI_K3_ACCURACY_TRACE_FULL_ROUTER", "0") == "1"
+
+
+def _accuracy_trace_enabled() -> bool:
+    """Return whether this forward is actively recording accuracy tensors."""
+
+    return not _perf_mode_enabled() and accuracy_trace_mode() is not None
+
+
+def _host_metadata_enabled() -> bool:
+    """Use gather-time pinned host metadata instead of synchronous D2H reads."""
+
+    return os.environ.get("KIMI_K3_USE_HOST_METADATA", "0") == "1"
 
 
 def _accuracy_canonical_mla_enabled() -> bool:
@@ -220,6 +338,44 @@ def _column_parallel_linear(
     return full_output[:, begin : begin + local_width].contiguous()
 
 
+def _replicated_column_weight(
+    local_weight: torch.Tensor,
+    tp_size: int,
+    cache: dict[str, torch.Tensor],
+    cache_key: str,
+) -> torch.Tensor:
+    """Gather a column-sharded ``[in, out/tp]`` weight on every TP rank."""
+
+    if tp_size <= 1:
+        return local_weight
+    full_weight = cache.get(cache_key)
+    if full_weight is None:
+        full_weight = (
+            all_gather(local_weight.transpose(0, 1).contiguous(), group=Group.TP)
+            .transpose(0, 1)
+            .contiguous()
+        )
+        cache[cache_key] = full_weight
+    return full_weight
+
+
+def _replicated_row_weight(
+    local_weight: torch.Tensor,
+    tp_size: int,
+    cache: dict[str, torch.Tensor],
+    cache_key: str,
+) -> torch.Tensor:
+    """Gather a row-sharded ``[in/tp, out]`` weight on every TP rank."""
+
+    if tp_size <= 1:
+        return local_weight
+    full_weight = cache.get(cache_key)
+    if full_weight is None:
+        full_weight = all_gather(local_weight.contiguous(), group=Group.TP)
+        cache[cache_key] = full_weight
+    return full_weight
+
+
 class _KimiK3SplitQKVAProjection(nn.Module):
     """Preserve K3's two independent MLA down-projection rounding points."""
 
@@ -262,6 +418,8 @@ def _row_parallel_linear(
     x: torch.Tensor,
     weight: torch.Tensor,
     tp_size: int,
+    *,
+    reduce_scatter_tokens: bool = False,
 ) -> torch.Tensor:
     """Apply and reduce a K3 row-parallel projection.
 
@@ -306,10 +464,18 @@ def _row_parallel_linear(
         and weight.dtype == x.dtype
     ):
         output = torch.mm(x, weight, out_dtype=torch.float32)
-        output = all_reduce(output, group=Group.TP)
+        output = (
+            reduce_scatter(output, group=Group.TP)
+            if reduce_scatter_tokens
+            else all_reduce(output, group=Group.TP)
+        )
         return output.to(dtype=x.dtype)
     output = _linear(x, weight)
-    return all_reduce(output, group=Group.TP)
+    return (
+        reduce_scatter(output, group=Group.TP)
+        if reduce_scatter_tokens
+        else all_reduce(output, group=Group.TP)
+    )
 
 
 def _rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
@@ -436,13 +602,21 @@ def _attention_residual(
 
 
 def _sequence_offsets(
-    cu_seqlens: torch.Tensor, token_count: int
+    cu_seqlens: torch.Tensor,
+    token_count: int,
+    *,
+    cu_seqlens_host: Optional[torch.Tensor] = None,
 ) -> list[tuple[int, int]]:
     if cu_seqlens.ndim != 1 or cu_seqlens.numel() < 2:
         raise ValueError("cu_seqlens must be a one-dimensional [batch + 1] tensor")
     if cu_seqlens.dtype not in (torch.int32, torch.int64):
         raise ValueError("cu_seqlens must use an integer dtype")
-    offsets = [int(value) for value in cu_seqlens.detach().cpu().tolist()]
+    source = (
+        cu_seqlens_host
+        if cu_seqlens_host is not None and cu_seqlens_host.numel()
+        else cu_seqlens
+    )
+    offsets = [int(value) for value in source.detach().cpu().tolist()]
     if offsets[0] != 0 or offsets[-1] != token_count:
         raise ValueError(
             f"cu_seqlens must start at 0 and end at {token_count}, got {offsets}"
@@ -461,6 +635,7 @@ def _packed_causal_depthwise_conv1d(
     *,
     mode: KDAExecutionMode = "prefill",
     use_initial_state: Optional[bool] = None,
+    sequence_ranges: Optional[list[tuple[int, int]]] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Packed KDA short convolution matching Dummy/FLA arithmetic.
 
@@ -475,7 +650,11 @@ def _packed_causal_depthwise_conv1d(
             "packed causal conv expects x=[tokens,channels] and "
             "weight=[channels,kernel]"
         )
-    ranges = _sequence_offsets(cu_seqlens, x.shape[0])
+    ranges = (
+        sequence_ranges
+        if sequence_ranges is not None
+        else _sequence_offsets(cu_seqlens, x.shape[0])
+    )
     channels, kernel_size = weight.shape
     history_size = kernel_size - 1
     expected_state = (len(ranges), channels, history_size)
@@ -613,12 +792,37 @@ class KimiK3LinearCacheAdapter:
         *,
         mode: KDAExecutionMode,
     ) -> tuple[list[int], list[int]]:
-        offsets = [int(value) for value in cu_seqlens.detach().cpu().tolist()]
+        cu_host = (
+            getattr(attention_inputs, "cu_seqlens_host", None)
+            if _host_metadata_enabled()
+            else None
+        )
+        offsets = [
+            int(value)
+            for value in (
+                cu_host
+                if cu_host is not None and cu_host.numel()
+                else cu_seqlens.detach().cpu()
+            ).tolist()
+        ]
         new_lengths = [right - left for left, right in zip(offsets, offsets[1:])]
+        source_host = (
+            (
+                getattr(attention_inputs, "prefix_lengths_host", None)
+                if mode == "prefill"
+                else getattr(attention_inputs, "sequence_lengths_host", None)
+            )
+            if _host_metadata_enabled()
+            else None
+        )
         source = (
-            attention_inputs.prefix_lengths
-            if mode == "prefill"
-            else attention_inputs.sequence_lengths
+            source_host
+            if source_host is not None and source_host.numel()
+            else (
+                attention_inputs.prefix_lengths
+                if mode == "prefill"
+                else attention_inputs.sequence_lengths
+            )
         )
         if source is None or source.numel() == 0:
             past_lengths = [0] * len(new_lengths)
@@ -633,11 +837,23 @@ class KimiK3LinearCacheAdapter:
 
     @staticmethod
     def _block_map(attention_inputs: PyAttentionInputs) -> list[list[int]]:
-        block_map = attention_inputs.kv_cache_kernel_block_id_device
+        if _host_metadata_enabled():
+            # Linear KDA uses one state per physical block. The selected
+            # physical host table is therefore the exact map it needs.
+            block_map = attention_inputs.kv_cache_block_id_host
+            if block_map is None or block_map.numel() == 0:
+                block_map = attention_inputs.kv_cache_kernel_block_id_host
+        else:
+            block_map = attention_inputs.kv_cache_kernel_block_id_device
         if block_map is None or block_map.numel() == 0 or block_map.ndim != 2:
             raise ValueError("KDA cache requires a two-dimensional kernel block map")
         return [
-            [int(value) for value in row] for row in block_map.detach().cpu().tolist()
+            [int(value) for value in row]
+            for row in (
+                block_map.tolist()
+                if block_map.device.type == "cpu"
+                else block_map.detach().cpu().tolist()
+            )
         ]
 
     @staticmethod
@@ -878,6 +1094,7 @@ class KimiK3KDA(nn.Module):
         self.attn_tp_rank = int(parallelism_config.get_attn_tp_rank())
         self.local_heads = total_heads // tp_size
         self._accuracy_full_weight_cache: dict[str, torch.Tensor] = {}
+        self._segment_cu_seqlens: dict[tuple[int, int], torch.Tensor] = {}
         self.projection_size = self.local_heads * self.head_dim
         self._full_beta_weight: Optional[torch.Tensor] = None
         self._full_column_weights: dict[str, torch.Tensor] = {}
@@ -890,10 +1107,11 @@ class KimiK3KDA(nn.Module):
             "kernel",
             "reference",
             "fla37_precompiled",
+            "flash_kda",
         ):
             raise ValueError(
-                "KIMI_K3_KDA_BACKEND must be 'kernel', 'reference', or "
-                "'fla37_precompiled', got "
+                "KIMI_K3_KDA_BACKEND must be 'kernel', 'reference', "
+                "'fla37_precompiled', or 'flash_kda', got "
                 f"{self._kda_backend!r}"
             )
         if not runtime.kda_use_full_rank_gate:
@@ -1031,6 +1249,82 @@ class KimiK3KDA(nn.Module):
             else recurrent_state.float().contiguous().clone()
         )
         if mode == "prefill":
+            if self._kda_backend == "flash_kda":
+                try:
+                    import flash_kda
+                    import flash_kda_C
+                except Exception as error:
+                    raise RuntimeError(
+                        "KIMI_K3_KDA_BACKEND=flash_kda was requested but the "
+                        "FlashKDA extension could not be imported"
+                    ) from error
+                required_api = ("fwd", "get_workspace_size")
+                missing = [
+                    name for name in required_api if not hasattr(flash_kda, name)
+                ]
+                if missing:
+                    raise RuntimeError(
+                        "FlashKDA overlay is missing required API: "
+                        + ", ".join(missing)
+                    )
+                if self.gate_lower_bound is None:
+                    raise RuntimeError("FlashKDA requires K3's finite gate lower bound")
+
+                state_v_first = (
+                    None
+                    if state_in is None
+                    else state_in.transpose(-1, -2).contiguous()
+                )
+                sequence_count = int(cu_seqlens.numel() - 1)
+                final_state_v_first = torch.empty(
+                    (
+                        sequence_count,
+                        self.local_heads,
+                        self.head_dim,
+                        self.head_dim,
+                    ),
+                    dtype=(
+                        state_v_first.dtype
+                        if state_v_first is not None
+                        else torch.float32
+                    ),
+                    device=q.device,
+                )
+                output = torch.empty_like(v)
+                workspace = _flash_kda_workspace(flash_kda, q, cu_seqlens)
+                device_index = q.device.index if q.device.index is not None else 0
+                if device_index not in _FLASH_KDA_LOGGED_DEVICES:
+                    logging.info(
+                        "[KimiK3 FlashKDA] enabled device=%s python=%s extension=%s "
+                        "workspace_bytes=%d",
+                        q.device,
+                        getattr(flash_kda, "__file__", "<unknown>"),
+                        getattr(flash_kda_C, "__file__", "<unknown>"),
+                        workspace.numel(),
+                    )
+                    _FLASH_KDA_LOGGED_DEVICES.add(device_index)
+                with torch.autograd.profiler.record_function("k3.kda.flashkda"):
+                    flash_kda.fwd(
+                        q.contiguous(),
+                        k.contiguous(),
+                        v.contiguous(),
+                        raw_gate.to(dtype=q.dtype).contiguous(),
+                        raw_beta.to(dtype=q.dtype).contiguous(),
+                        self.head_dim**-0.5,
+                        output,
+                        a_log.float().contiguous(),
+                        dt_bias.float()
+                        .reshape(self.local_heads, self.head_dim)
+                        .contiguous(),
+                        float(self.gate_lower_bound),
+                        initial_state=state_v_first,
+                        final_state=final_state_v_first,
+                        cu_seqlens=cu_seqlens.contiguous(),
+                        workspace=workspace,
+                    )
+                final_state = final_state_v_first.transpose(-1, -2).contiguous()
+                return output.to(dtype=q.dtype), final_state
+
             # Dummy/FLA executes KDA with ``transpose_state_layout=True``.
             # Besides changing storage from [K,V] to [V,K], that selector
             # changes the TensorCore reduction order used for the chunk state
@@ -1060,6 +1354,11 @@ class KimiK3KDA(nn.Module):
             )
             final_state = final_state_v_first.transpose(-1, -2).contiguous()
         elif mode == "decode":
+            if self._kda_backend == "flash_kda":
+                raise RuntimeError(
+                    "KIMI_K3_KDA_BACKEND=flash_kda only implements Prefill; "
+                    "select kernel or fla37_precompiled for Decode"
+                )
             # Match Dummy's recurrent call boundary: gate activation, beta
             # sigmoid, V-first register layout and state update all stay in
             # one Triton program.  Precomputing gate/beta or transposing the
@@ -1122,7 +1421,16 @@ class KimiK3KDA(nn.Module):
     ) -> tuple[torch.Tensor, KimiKDAState]:
         """Run chunk form page-by-page and persist every reusable boundary."""
 
-        ranges = _sequence_offsets(cu_seqlens, q_projected.shape[0])
+        trace_enabled = _accuracy_trace_enabled()
+        ranges = _sequence_offsets(
+            cu_seqlens,
+            q_projected.shape[0],
+            cu_seqlens_host=(
+                getattr(attention_inputs, "cu_seqlens_host", None)
+                if _host_metadata_enabled()
+                else None
+            ),
+        )
         past_lengths, _ = self.cache_adapter._lengths(
             attention_inputs, cu_seqlens, mode="prefill"
         )
@@ -1157,72 +1465,98 @@ class KimiK3KDA(nn.Module):
                 tokens_to_page_end = page_size - (absolute_position % page_size)
                 segment_end = min(end, cursor + tokens_to_page_end)
                 segment_length = segment_end - cursor
-                segment_cu_seqlens = torch.tensor(
-                    [0, segment_length],
-                    dtype=torch.int32,
-                    device=cu_seqlens.device,
+                device_index = (
+                    cu_seqlens.device.index
+                    if cu_seqlens.device.index is not None
+                    else 0
                 )
-                q, q_state = _packed_causal_depthwise_conv1d(
-                    q_projected[cursor:segment_end],
-                    self.kda_q_conv,
-                    segment_cu_seqlens,
-                    q_state,
-                    mode="prefill",
-                    use_initial_state=absolute_position > 0,
+                segment_key = (device_index, segment_length)
+                segment_cu_seqlens = self._segment_cu_seqlens.get(segment_key)
+                if segment_cu_seqlens is None:
+                    segment_cu_seqlens = torch.tensor(
+                        [0, segment_length],
+                        dtype=torch.int32,
+                        device=cu_seqlens.device,
+                    )
+                    self._segment_cu_seqlens[segment_key] = segment_cu_seqlens
+                segment_ranges = [(0, segment_length)]
+                page_index = absolute_position // page_size
+                page_prefix = (
+                    f"{self.trace_prefix}.page.{page_index}"
+                    f"[tokens={segment_length},physical_block={page_size}]"
                 )
-                k, k_state = _packed_causal_depthwise_conv1d(
-                    k_projected[cursor:segment_end],
-                    self.kda_k_conv,
-                    segment_cu_seqlens,
-                    k_state,
-                    mode="prefill",
-                    use_initial_state=absolute_position > 0,
-                )
-                v, v_state = _packed_causal_depthwise_conv1d(
-                    v_projected[cursor:segment_end],
-                    self.kda_v_conv,
-                    segment_cu_seqlens,
-                    v_state,
-                    mode="prefill",
-                    use_initial_state=absolute_position > 0,
-                )
-                packed_q.append(q)
-                packed_k.append(k)
-                packed_v.append(v)
+                with _perf_profile(
+                    f"{page_prefix}.qkv_short_conv_and_conv_state_export"
+                ):
+                    q, q_state = _packed_causal_depthwise_conv1d(
+                        q_projected[cursor:segment_end],
+                        self.kda_q_conv,
+                        segment_cu_seqlens,
+                        q_state,
+                        mode="prefill",
+                        use_initial_state=absolute_position > 0,
+                        sequence_ranges=segment_ranges,
+                    )
+                    k, k_state = _packed_causal_depthwise_conv1d(
+                        k_projected[cursor:segment_end],
+                        self.kda_k_conv,
+                        segment_cu_seqlens,
+                        k_state,
+                        mode="prefill",
+                        use_initial_state=absolute_position > 0,
+                        sequence_ranges=segment_ranges,
+                    )
+                    v, v_state = _packed_causal_depthwise_conv1d(
+                        v_projected[cursor:segment_end],
+                        self.kda_v_conv,
+                        segment_cu_seqlens,
+                        v_state,
+                        mode="prefill",
+                        use_initial_state=absolute_position > 0,
+                        sequence_ranges=segment_ranges,
+                    )
+                if trace_enabled:
+                    packed_q.append(q)
+                    packed_k.append(k)
+                    packed_v.append(v)
                 head_shape = (
                     1,
                     segment_length,
                     self.local_heads,
                     self.head_dim,
                 )
-                prepared = self._prepared_trace_values(
-                    q.reshape(head_shape),
-                    k.reshape(head_shape),
-                    raw_gate[cursor:segment_end].reshape(head_shape),
-                    raw_beta[cursor:segment_end]
-                    .float()
-                    .reshape(1, segment_length, self.local_heads),
-                )
-                if prepared is not None:
-                    q_work, k_work, alpha, beta = prepared
-                    prepared_q.append(q_work)
-                    prepared_k.append(k_work)
-                    prepared_alpha.append(alpha)
-                    prepared_beta.append(beta)
-                segment_output, recurrent_state = self._kda_core(
-                    q.reshape(head_shape),
-                    k.reshape(head_shape),
-                    v.reshape(head_shape),
-                    raw_gate[cursor:segment_end].reshape(head_shape),
-                    raw_beta[cursor:segment_end]
-                    .float()
-                    .reshape(1, segment_length, self.local_heads),
-                    self.weights[W.linear_attn_alog],
-                    self.weights[W.linear_attn_dt_b_kda],
-                    recurrent_state,
-                    mode="prefill",
-                    cu_seqlens=segment_cu_seqlens,
-                )
+                if trace_enabled:
+                    prepared = self._prepared_trace_values(
+                        q.reshape(head_shape),
+                        k.reshape(head_shape),
+                        raw_gate[cursor:segment_end].reshape(head_shape),
+                        raw_beta[cursor:segment_end]
+                        .float()
+                        .reshape(1, segment_length, self.local_heads),
+                    )
+                    if prepared is not None:
+                        q_work, k_work, alpha, beta = prepared
+                        prepared_q.append(q_work)
+                        prepared_k.append(k_work)
+                        prepared_alpha.append(alpha)
+                        prepared_beta.append(beta)
+                with _perf_profile(
+                    f"{page_prefix}.flashkda_prepare_recurrence_and_output"
+                ):
+                    segment_output, recurrent_state = self._kda_core(
+                        q.reshape(head_shape),
+                        k.reshape(head_shape),
+                        v.reshape(head_shape),
+                        raw_gate[cursor:segment_end].reshape(head_shape),
+                        raw_beta[cursor:segment_end]
+                        .float()
+                        .reshape(1, segment_length, self.local_heads),
+                        self.weights[W.linear_attn_alog],
+                        self.weights[W.linear_attn_dt_b_kda],
+                        recurrent_state,
+                        mode="prefill",
+                        cu_seqlens=segment_cu_seqlens,
+                    )
                 packed_outputs.append(segment_output.squeeze(0))
                 segment_state = KimiKDAState(
                     q_conv_state=q_state,
@@ -1230,14 +1564,17 @@ class KimiK3KDA(nn.Module):
                     v_conv_state=v_state,
                     recurrent_state=recurrent_state,
                 )
-                self.cache_adapter.store_position(
-                    segment_state,
-                    0,
-                    kv_cache,
-                    attention_inputs,
-                    sequence_idx,
-                    absolute_position + segment_length - 1,
-                )
+                with _perf_profile(
+                    f"{page_prefix}.linear_cache_update_ssm_plus_3xqkv_history"
+                ):
+                    self.cache_adapter.store_position(
+                        segment_state,
+                        0,
+                        kv_cache,
+                        attention_inputs,
+                        sequence_idx,
+                        absolute_position + segment_length - 1,
+                    )
                 cursor = segment_end
                 absolute_position += segment_length
 
@@ -1248,42 +1585,43 @@ class KimiK3KDA(nn.Module):
 
         if packed_outputs:
             output = torch.cat(packed_outputs, dim=0).unsqueeze(0)
-            record_accuracy_tensor(
-                f"{self.trace_prefix}.q_conv",
-                torch.cat(packed_q, dim=0),
-                token_dim=0,
-            )
-            record_accuracy_tensor(
-                f"{self.trace_prefix}.k_conv",
-                torch.cat(packed_k, dim=0),
-                token_dim=0,
-            )
-            record_accuracy_tensor(
-                f"{self.trace_prefix}.v_conv",
-                torch.cat(packed_v, dim=0),
-                token_dim=0,
-            )
-            if prepared_q:
+            if trace_enabled:
                 record_accuracy_tensor(
-                    f"{self.trace_prefix}.prepared_q",
-                    torch.cat(prepared_q, dim=1),
-                    token_dim=1,
+                    f"{self.trace_prefix}.q_conv",
+                    torch.cat(packed_q, dim=0),
+                    token_dim=0,
                 )
                 record_accuracy_tensor(
-                    f"{self.trace_prefix}.prepared_k",
-                    torch.cat(prepared_k, dim=1),
-                    token_dim=1,
+                    f"{self.trace_prefix}.k_conv",
+                    torch.cat(packed_k, dim=0),
+                    token_dim=0,
                 )
                 record_accuracy_tensor(
-                    f"{self.trace_prefix}.alpha",
-                    torch.cat(prepared_alpha, dim=1),
-                    token_dim=1,
+                    f"{self.trace_prefix}.v_conv",
+                    torch.cat(packed_v, dim=0),
+                    token_dim=0,
                 )
-                record_accuracy_tensor(
-                    f"{self.trace_prefix}.prepared_beta",
-                    torch.cat(prepared_beta, dim=1),
-                    token_dim=1,
-                )
+                if prepared_q:
+                    record_accuracy_tensor(
+                        f"{self.trace_prefix}.prepared_q",
+                        torch.cat(prepared_q, dim=1),
+                        token_dim=1,
+                    )
+                    record_accuracy_tensor(
+                        f"{self.trace_prefix}.prepared_k",
+                        torch.cat(prepared_k, dim=1),
+                        token_dim=1,
+                    )
+                    record_accuracy_tensor(
+                        f"{self.trace_prefix}.alpha",
+                        torch.cat(prepared_alpha, dim=1),
+                        token_dim=1,
+                    )
+                    record_accuracy_tensor(
+                        f"{self.trace_prefix}.prepared_beta",
+                        torch.cat(prepared_beta, dim=1),
+                        token_dim=1,
+                    )
         else:
             output = q_projected.new_empty(1, 0, self.local_heads, self.head_dim)
         return output, KimiKDAState(
@@ -1302,7 +1640,9 @@ class KimiK3KDA(nn.Module):
         state: Optional[KimiKDAState] = None,
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
+        sequence_parallel: bool = False,
     ) -> tuple[torch.Tensor, KimiKDAState]:
+        trace_enabled = _accuracy_trace_enabled()
         if state is not None and kv_cache is not None:
             raise ValueError(
                 "pass either an explicit KDA state or LayerKVCache, not both"
@@ -1310,10 +1650,13 @@ class KimiK3KDA(nn.Module):
         if kv_cache is not None:
             if attention_inputs is None:
                 raise ValueError("attention_inputs are required with a KDA cache")
-            state = self.cache_adapter.load(
-                kv_cache, attention_inputs, cu_seqlens, mode=mode
-            )
-        if mode == "decode" and state is not None:
+            with _perf_profile(
+                f"{self.trace_prefix}.cache_load_recurrent_plus_conv_history"
+            ):
+                state = self.cache_adapter.load(
+                    kv_cache, attention_inputs, cu_seqlens, mode=mode
+                )
+        if trace_enabled and mode == "decode" and state is not None:
             record_accuracy_tensor(
                 f"{self.trace_prefix}.cache_input.q_conv",
                 state.q_conv_state,
@@ -1330,52 +1673,64 @@ class KimiK3KDA(nn.Module):
                 f"{self.trace_prefix}.cache_input.recurrent",
                 state.recurrent_state,
             )
-        q_projected = _column_parallel_linear(
-            hidden_states,
-            self.kda_q_w,
-            self.attn_tp_size,
-            self.attn_tp_rank,
-            self._full_column_weights,
-            "q",
-        )
-        k_projected = _column_parallel_linear(
-            hidden_states,
-            self.kda_k_w,
-            self.attn_tp_size,
-            self.attn_tp_rank,
-            self._full_column_weights,
-            "k",
-        )
-        v_projected = _column_parallel_linear(
-            hidden_states,
-            self.kda_v_w,
-            self.attn_tp_size,
-            self.attn_tp_rank,
-            self._full_column_weights,
-            "v",
-        )
-        record_accuracy_tensor(
-            f"{self.trace_prefix}.q_projected", q_projected, token_dim=0
-        )
-        record_accuracy_tensor(
-            f"{self.trace_prefix}.k_projected", k_projected, token_dim=0
-        )
-        record_accuracy_tensor(
-            f"{self.trace_prefix}.v_projected", v_projected, token_dim=0
-        )
+        with _perf_profile(
+            f"{self.trace_prefix}.qkv_column_parallel_projections", hidden_states
+        ):
+            q_projected = _column_parallel_linear(
+                hidden_states,
+                self.kda_q_w,
+                self.attn_tp_size,
+                self.attn_tp_rank,
+                self._full_column_weights,
+                "q",
+            )
+            k_projected = _column_parallel_linear(
+                hidden_states,
+                self.kda_k_w,
+                self.attn_tp_size,
+                self.attn_tp_rank,
+                self._full_column_weights,
+                "k",
+            )
+            v_projected = _column_parallel_linear(
+                hidden_states,
+                self.kda_v_w,
+                self.attn_tp_size,
+                self.attn_tp_rank,
+                self._full_column_weights,
+                "v",
+            )
+        if trace_enabled:
+            record_accuracy_tensor(
+                f"{self.trace_prefix}.q_projected", q_projected, token_dim=0
+            )
+            record_accuracy_tensor(
+                f"{self.trace_prefix}.k_projected", k_projected, token_dim=0
+            )
+            record_accuracy_tensor(
+                f"{self.trace_prefix}.v_projected", v_projected, token_dim=0
+            )
         token_count = hidden_states.shape[0]
         head_shape = (1, token_count, self.local_heads, self.head_dim)
-        raw_gate = _column_parallel_linear(
-            _linear(hidden_states, self.weights[W.linear_attn_f_a_w]),
-            self.weights[W.linear_attn_f_b_w],
-            self.attn_tp_size,
-            self.attn_tp_rank,
-            self._full_column_weights,
-            "forget_gate_up",
-        )
-        raw_beta = self._beta_projection(hidden_states)
-        record_accuracy_tensor(f"{self.trace_prefix}.raw_gate", raw_gate, token_dim=0)
-        record_accuracy_tensor(f"{self.trace_prefix}.raw_beta", raw_beta, token_dim=0)
+        with _perf_profile(
+            f"{self.trace_prefix}.forget_gate_and_beta_projections", hidden_states
+        ):
+            raw_gate = _column_parallel_linear(
+                _linear(hidden_states, self.weights[W.linear_attn_f_a_w]),
+                self.weights[W.linear_attn_f_b_w],
+                self.attn_tp_size,
+                self.attn_tp_rank,
+                self._full_column_weights,
+                "forget_gate_up",
+            )
+            raw_beta = self._beta_projection(hidden_states)
+        if trace_enabled:
+            record_accuracy_tensor(
+                f"{self.trace_prefix}.raw_gate", raw_gate, token_dim=0
+            )
+            record_accuracy_tensor(
+                f"{self.trace_prefix}.raw_beta", raw_beta, token_dim=0
+            )
         stored_page_states = mode == "prefill" and kv_cache is not None
         if stored_page_states:
             assert state is not None and attention_inputs is not None
@@ -1395,12 +1750,22 @@ class KimiK3KDA(nn.Module):
             k_state = None if state is None else state.k_conv_state
             v_state = None if state is None else state.v_conv_state
             recurrent_state = None if state is None else state.recurrent_state
+            sequence_ranges = _sequence_offsets(
+                cu_seqlens,
+                token_count,
+                cu_seqlens_host=(
+                    getattr(attention_inputs, "cu_seqlens_host", None)
+                    if attention_inputs is not None and _host_metadata_enabled()
+                    else None
+                ),
+            )
             q, q_final = _packed_causal_depthwise_conv1d(
                 q_projected,
                 self.kda_q_conv,
                 cu_seqlens,
                 q_state,
                 mode=mode,
+                sequence_ranges=sequence_ranges,
             )
             k, k_final = _packed_causal_depthwise_conv1d(
                 k_projected,
@@ -1408,6 +1773,7 @@ class KimiK3KDA(nn.Module):
                 cu_seqlens,
                 k_state,
                 mode=mode,
+                sequence_ranges=sequence_ranges,
             )
             v, v_final = _packed_causal_depthwise_conv1d(
                 v_projected,
@@ -1415,25 +1781,29 @@ class KimiK3KDA(nn.Module):
                 cu_seqlens,
                 v_state,
                 mode=mode,
+                sequence_ranges=sequence_ranges,
             )
-            prepared = self._prepared_trace_values(
-                q.reshape(head_shape),
-                k.reshape(head_shape),
-                raw_gate.reshape(head_shape),
-                raw_beta.float().reshape(1, token_count, self.local_heads),
-            )
-            if prepared is not None:
-                q_work, k_work, alpha, beta = prepared
-                record_accuracy_tensor(
-                    f"{self.trace_prefix}.prepared_q", q_work, token_dim=1
+            if trace_enabled:
+                prepared = self._prepared_trace_values(
+                    q.reshape(head_shape),
+                    k.reshape(head_shape),
+                    raw_gate.reshape(head_shape),
+                    raw_beta.float().reshape(1, token_count, self.local_heads),
                 )
-                record_accuracy_tensor(
-                    f"{self.trace_prefix}.prepared_k", k_work, token_dim=1
-                )
-                record_accuracy_tensor(f"{self.trace_prefix}.alpha", alpha, token_dim=1)
-                record_accuracy_tensor(
-                    f"{self.trace_prefix}.prepared_beta", beta, token_dim=1
-                )
+                if prepared is not None:
+                    q_work, k_work, alpha, beta = prepared
+                    record_accuracy_tensor(
+                        f"{self.trace_prefix}.prepared_q", q_work, token_dim=1
+                    )
+                    record_accuracy_tensor(
+                        f"{self.trace_prefix}.prepared_k", k_work, token_dim=1
+                    )
+                    record_accuracy_tensor(
+                        f"{self.trace_prefix}.alpha", alpha, token_dim=1
+                    )
+                    record_accuracy_tensor(
+                        f"{self.trace_prefix}.prepared_beta", beta, token_dim=1
+                    )
             output, recurrent_final = self._kda_core(
                 q.reshape(head_shape),
                 k.reshape(head_shape),
@@ -1452,48 +1822,71 @@ class KimiK3KDA(nn.Module):
                 v_conv_state=v_final,
                 recurrent_state=recurrent_final,
             )
-            record_accuracy_tensor(f"{self.trace_prefix}.q_conv", q, token_dim=0)
-            record_accuracy_tensor(f"{self.trace_prefix}.k_conv", k, token_dim=0)
-            record_accuracy_tensor(f"{self.trace_prefix}.v_conv", v, token_dim=0)
-        record_accuracy_tensor(f"{self.trace_prefix}.core_output", output, token_dim=1)
-        record_accuracy_tensor(
-            f"{self.trace_prefix}.state.q_conv", final_state.q_conv_state
-        )
-        record_accuracy_tensor(
-            f"{self.trace_prefix}.state.k_conv", final_state.k_conv_state
-        )
-        record_accuracy_tensor(
-            f"{self.trace_prefix}.state.v_conv", final_state.v_conv_state
-        )
-        record_accuracy_tensor(
-            f"{self.trace_prefix}.state.recurrent", final_state.recurrent_state
-        )
-        output_gate = _column_parallel_linear(
-            hidden_states,
-            self.weights[W.linear_attn_g_w],
-            self.attn_tp_size,
-            self.attn_tp_rank,
-            self._full_column_weights,
-            "output_gate",
-        ).reshape(head_shape)
-        record_accuracy_tensor(
-            f"{self.trace_prefix}.output_gate",
-            output_gate.squeeze(0),
-            token_dim=0,
-        )
-        output = kimi_kda_rms_norm_sigmoid_gate(
-            output,
-            output_gate,
-            self.weights[W.linear_attn_norm_w],
-            self.eps,
-        )
-        record_accuracy_tensor(f"{self.trace_prefix}.gated_output", output, token_dim=1)
-        output = _row_parallel_linear(
-            output.reshape(token_count, self.projection_size),
-            self.weights[W.linear_attn_out_w],
-            self.parallelism_config.get_attn_tp_size(),
-        )
-        record_accuracy_tensor(f"{self.trace_prefix}.output", output, token_dim=0)
+            if trace_enabled:
+                record_accuracy_tensor(f"{self.trace_prefix}.q_conv", q, token_dim=0)
+                record_accuracy_tensor(f"{self.trace_prefix}.k_conv", k, token_dim=0)
+                record_accuracy_tensor(f"{self.trace_prefix}.v_conv", v, token_dim=0)
+        if trace_enabled:
+            record_accuracy_tensor(
+                f"{self.trace_prefix}.core_output", output, token_dim=1
+            )
+            record_accuracy_tensor(
+                f"{self.trace_prefix}.state.q_conv", final_state.q_conv_state
+            )
+            record_accuracy_tensor(
+                f"{self.trace_prefix}.state.k_conv", final_state.k_conv_state
+            )
+            record_accuracy_tensor(
+                f"{self.trace_prefix}.state.v_conv", final_state.v_conv_state
+            )
+            record_accuracy_tensor(
+                f"{self.trace_prefix}.state.recurrent",
+                final_state.recurrent_state,
+            )
+        with _perf_profile(
+            f"{self.trace_prefix}.output_gate_projection", hidden_states
+        ):
+            output_gate = _column_parallel_linear(
+                hidden_states,
+                self.weights[W.linear_attn_g_w],
+                self.attn_tp_size,
+                self.attn_tp_rank,
+                self._full_column_weights,
+                "output_gate",
+            ).reshape(head_shape)
+        if trace_enabled:
+            record_accuracy_tensor(
+                f"{self.trace_prefix}.output_gate",
+                output_gate.squeeze(0),
+                token_dim=0,
+            )
+        with _perf_profile(f"{self.trace_prefix}.rmsnorm_sigmoid_output_gate", output):
+            output = kimi_kda_rms_norm_sigmoid_gate(
+                output,
+                output_gate,
+                self.weights[W.linear_attn_norm_w],
+                self.eps,
+            )
+        if trace_enabled:
+            record_accuracy_tensor(
+                f"{self.trace_prefix}.gated_output", output, token_dim=1
+            )
+        with _perf_profile(
+            f"{self.trace_prefix}.o_projection_then_token_reduce_scatter", output
+        ):
+            output = _row_parallel_linear(
+                output.reshape(token_count, self.projection_size),
+                self.weights[W.linear_attn_out_w],
+                self.parallelism_config.get_attn_tp_size(),
+                reduce_scatter_tokens=(
+                    sequence_parallel
+                    and mode == "prefill"
+                    and self.attn_tp_size > 1
+                    and hidden_states.is_cuda
+                ),
+            )
+        if trace_enabled:
+            record_accuracy_tensor(f"{self.trace_prefix}.output", output, token_dim=0)
         if kv_cache is not None and not stored_page_states:
             self.cache_adapter.store(
                 final_state,
@@ -1538,6 +1931,7 @@ class KimiK3MLA(MlaAttention):
         self.config = config
         self.weights = weights
         self.trace_prefix = f"layer.{layer_idx}.mla" if layer_idx >= 0 else "mla"
+        self._perf_profile_prefix = self.trace_prefix if _perf_mode_enabled() else None
         tp_size = int(parallelism_config.get_attn_tp_size())
         total_heads = int(config.attn_config.head_num)
         if total_heads % tp_size:
@@ -1600,6 +1994,7 @@ class KimiK3MLA(MlaAttention):
         # different on SM10x.  Keep the framework cache/FMHA path, but restore
         # the source model's two GEMM boundaries.
         self.fused_qkv_a_proj = _KimiK3SplitQKVAProjection(self._q_a_w, self._kv_a_w)
+        self._sp_active_for_forward = False
 
     def _apply_output_gate(
         self, attn_output: torch.Tensor, hidden_states: torch.Tensor
@@ -1620,7 +2015,50 @@ class KimiK3MLA(MlaAttention):
         )
         return attn_output * torch.sigmoid(gate)
 
+    def _project_output(self, attn_output: torch.Tensor) -> torch.Tensor:
+        if self._sp_active_for_forward:
+            return _row_parallel_linear(
+                attn_output,
+                self._o_w,
+                self.parallelism_config.get_attn_tp_size(),
+                reduce_scatter_tokens=True,
+            )
+        return super()._project_output(attn_output)
+
     def forward(
+        self,
+        hidden_states: torch.Tensor,
+        fmha_impl: Any,
+        kv_cache: Optional[LayerKVCache] = None,
+        attention_inputs: Optional[PyAttentionInputs] = None,
+        sequence_parallel: bool = False,
+    ) -> torch.Tensor:
+        attn_inputs = _select_mla_attention_inputs(attention_inputs, fmha_impl)
+        self._sp_active_for_forward = bool(
+            sequence_parallel
+            and self.parallelism_config.get_attn_tp_size() > 1
+            and hidden_states.is_cuda
+            and attn_inputs is not None
+            and attn_inputs.is_prefill
+        )
+        if self._sp_active_for_forward and _accuracy_canonical_tp_enabled():
+            self._sp_active_for_forward = False
+            raise RuntimeError(
+                "Kimi K3 Sequence Parallel is incompatible with canonical TP; "
+                "disable one of KIMI_K3_SP_MOE and "
+                "KIMI_K3_ACCURACY_CANONICAL_TP"
+            )
+        try:
+            return self._forward_impl(
+                hidden_states,
+                fmha_impl,
+                kv_cache,
+                attention_inputs=attention_inputs,
+            )
+        finally:
+            self._sp_active_for_forward = False
+
+    def _forward_impl(
         self,
         hidden_states: torch.Tensor,
         fmha_impl: Any,
@@ -1840,11 +2278,10 @@ class KimiK3MLA(MlaAttention):
                 context,
                 self._o_w,
                 self.parallelism_config.get_attn_tp_size(),
+                reduce_scatter_tokens=self._sp_active_for_forward,
             )
         else:
-            output = self.o_proj(context)
-            if self.parallelism_config.get_attn_tp_size() > 1:
-                output = all_reduce(output, group=Group.TP)
+            output = self._project_output(context)
         record_accuracy_tensor(f"{self.trace_prefix}.output", output, token_dim=0)
         return output
 
@@ -2201,6 +2638,7 @@ class KimiK3MLA(MlaAttention):
             output.reshape(hidden_states.shape[0], -1),
             self._o_w,
             self.parallelism_config.get_attn_tp_size(),
+            reduce_scatter_tokens=self._sp_active_for_forward,
         )
         record_accuracy_tensor(f"{self.trace_prefix}.output", output, token_dim=0)
         return output
@@ -2221,44 +2659,91 @@ class KimiK3DenseMLP(nn.Module):
         self.ffn_tp_size = int(parallelism_config.get_ffn_tp_size())
         self.ffn_tp_rank = int(parallelism_config.get_ffn_tp_rank())
         self._full_column_weights: dict[str, torch.Tensor] = {}
+        self._full_row_weights: dict[str, torch.Tensor] = {}
         runtime = config.k3_runtime_config
         self.beta = runtime.activation_situ_beta
         self.linear_beta = runtime.activation_situ_linear_beta
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        gate = _column_parallel_linear(
-            hidden_states,
-            self.weights[K3W.DENSE_GATE],
-            self.ffn_tp_size,
-            self.ffn_tp_rank,
-            self._full_column_weights,
-            "gate",
-        )
-        up = _column_parallel_linear(
-            hidden_states,
-            self.weights[K3W.DENSE_UP],
-            self.ffn_tp_size,
-            self.ffn_tp_rank,
-            self._full_column_weights,
-            "up",
-        )
-        record_accuracy_tensor(f"{self.trace_prefix}.gate", gate, token_dim=0)
-        record_accuracy_tensor(f"{self.trace_prefix}.up", up, token_dim=0)
-        activated = _situ(
-            gate,
-            up,
-            self.beta,
-            self.linear_beta,
-        )
-        record_accuracy_tensor(
-            f"{self.trace_prefix}.activation", activated, token_dim=0
-        )
-        output = _row_parallel_linear(
-            activated,
-            self.weights[K3W.DENSE_DOWN],
-            self.parallelism_config.get_ffn_tp_size(),
-        )
-        record_accuracy_tensor(f"{self.trace_prefix}.output", output, token_dim=0)
+    def forward(
+        self, hidden_states: torch.Tensor, *, sequence_parallel: bool = False
+    ) -> torch.Tensor:
+        sp_active = sequence_parallel and self.ffn_tp_size > 1 and hidden_states.is_cuda
+        trace_enabled = _accuracy_trace_enabled()
+        if sp_active:
+            with _perf_profile(
+                f"{self.trace_prefix}.replicated_gate_and_up_gemm", hidden_states
+            ):
+                gate = _linear(
+                    hidden_states,
+                    _replicated_column_weight(
+                        self.weights[K3W.DENSE_GATE],
+                        self.ffn_tp_size,
+                        self._full_column_weights,
+                        "sp_gate",
+                    ),
+                )
+                up = _linear(
+                    hidden_states,
+                    _replicated_column_weight(
+                        self.weights[K3W.DENSE_UP],
+                        self.ffn_tp_size,
+                        self._full_column_weights,
+                        "sp_up",
+                    ),
+                )
+        else:
+            gate = _column_parallel_linear(
+                hidden_states,
+                self.weights[K3W.DENSE_GATE],
+                self.ffn_tp_size,
+                self.ffn_tp_rank,
+                self._full_column_weights,
+                "gate",
+            )
+            up = _column_parallel_linear(
+                hidden_states,
+                self.weights[K3W.DENSE_UP],
+                self.ffn_tp_size,
+                self.ffn_tp_rank,
+                self._full_column_weights,
+                "up",
+            )
+        if trace_enabled:
+            record_accuracy_tensor(f"{self.trace_prefix}.gate", gate, token_dim=0)
+            record_accuracy_tensor(f"{self.trace_prefix}.up", up, token_dim=0)
+        with _perf_profile(f"{self.trace_prefix}.situ_activation", gate):
+            activated = _situ(
+                gate,
+                up,
+                self.beta,
+                self.linear_beta,
+            )
+        if trace_enabled:
+            record_accuracy_tensor(
+                f"{self.trace_prefix}.activation", activated, token_dim=0
+            )
+        with _perf_profile(
+            f"{self.trace_prefix}.replicated_down_gemm_no_collective", activated
+        ):
+            output = (
+                _linear(
+                    activated,
+                    _replicated_row_weight(
+                        self.weights[K3W.DENSE_DOWN],
+                        self.ffn_tp_size,
+                        self._full_row_weights,
+                        "sp_down",
+                    ),
+                )
+                if sp_active
+                else _row_parallel_linear(
+                    activated,
+                    self.weights[K3W.DENSE_DOWN],
+                    self.parallelism_config.get_ffn_tp_size(),
+                )
+            )
+        if trace_enabled:
+            record_accuracy_tensor(f"{self.trace_prefix}.output", output, token_dim=0)
         return output
 
 
@@ -2309,6 +2794,7 @@ class KimiK3LatentMoE(nn.Module):
         self.ffn_tp_size = int(parallelism_config.get_ffn_tp_size())
         self.ffn_tp_rank = int(parallelism_config.get_ffn_tp_rank())
         self._full_column_weights: dict[str, torch.Tensor] = {}
+        self._full_row_weights: dict[str, torch.Tensor] = {}
         runtime = config.k3_runtime_config
         self.latent_moe_use_norm = runtime.latent_moe_use_norm
         self.beta = runtime.activation_situ_beta
@@ -2322,6 +2808,282 @@ class KimiK3LatentMoE(nn.Module):
                 f"the routed latent width: {self.dispatch_hidden_size} < "
                 f"{self.latent_size}"
             )
+        self.layer_idx = int(layer_idx)
+        self._moe_backend = (
+            os.environ.get("KIMI_K3_MOE_BACKEND", "deepep").strip().lower()
+        )
+        if self._moe_backend not in ("deepep", "deep_gemm_mega"):
+            raise ValueError(
+                "KIMI_K3_MOE_BACKEND must be 'deepep' or "
+                f"'deep_gemm_mega', got {self._moe_backend!r}"
+            )
+        if self._moe_backend == "deep_gemm_mega":
+            self._setup_deep_gemm_mega()
+
+    @staticmethod
+    def _packed_fp4_view(tensor: torch.Tensor) -> torch.Tensor:
+        if tensor.dtype == torch.int8:
+            return tensor
+        if tensor.dtype == torch.uint8:
+            return tensor.view(torch.int8)
+        raise TypeError(
+            "K3 DeepGEMM packed expert weight must be uint8/int8, got "
+            f"{tensor.dtype}"
+        )
+
+    @staticmethod
+    def _ue8m0_view(tensor: torch.Tensor) -> torch.Tensor:
+        if tensor.dtype == torch.float8_e8m0fnu:
+            return tensor
+        if tensor.dtype == torch.uint8:
+            return tensor.view(torch.float8_e8m0fnu)
+        raise TypeError(
+            "K3 DeepGEMM expert scale must be uint8/float8_e8m0fnu, got "
+            f"{tensor.dtype}"
+        )
+
+    def _setup_deep_gemm_mega(self) -> None:
+        """Transform K3's EP-local MXFP4 weights for SiTU MegaMoE."""
+
+        import deep_gemm
+        import torch.distributed as dist
+
+        from rtp_llm.models_py.modules.dsv4.moe.input_packer import (
+            get_mega_moe_input_packer,
+        )
+        from rtp_llm.models_py.modules.dsv4.moe.mega_buf import (
+            _get_or_create_mega_buf,
+            _get_or_create_mega_output,
+        )
+        from rtp_llm.models_py.modules.dsv4.quant_layouts import (
+            FP4_BLOCK,
+            prepare_fp4_weight_scale_for_deepgemm,
+        )
+
+        if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] < 10:
+            raise RuntimeError("K3 DeepGEMM MegaMoE requires an SM100+ CUDA GPU")
+        if not dist.is_initialized():
+            raise RuntimeError(
+                "K3 DeepGEMM MegaMoE requires torch.distributed initialization"
+            )
+        world_size = int(dist.get_world_size())
+        if (
+            self.ep_size != 8
+            or self.attn_tp_size != 8
+            or world_size != 8
+            or self.local_expert_count != 112
+        ):
+            raise RuntimeError(
+                "K3 DeepGEMM MegaMoE is fixed to "
+                "TP8/EP8/world8/112-local-experts; got "
+                f"TP={self.attn_tp_size} EP={self.ep_size} world={world_size} "
+                f"local_experts={self.local_expert_count}"
+            )
+
+        mega_signature = inspect.signature(deep_gemm.fp8_fp4_mega_moe)
+        required_parameters = {
+            "activation_beta",
+            "activation_linear_beta",
+            "fast_math",
+        }
+        missing_parameters = required_parameters.difference(mega_signature.parameters)
+        if missing_parameters:
+            raise RuntimeError(
+                "KIMI_K3_MOE_BACKEND=deep_gemm_mega resolved an old DeepGEMM "
+                "without K3 SiTU support; missing parameters: "
+                + ", ".join(sorted(missing_parameters))
+            )
+        expected_root = os.environ.get("KIMI_K3_DEEPGEMM_EXPECTED_PATH")
+        deep_gemm_path = os.path.realpath(getattr(deep_gemm, "__file__", ""))
+        if expected_root and not deep_gemm_path.startswith(
+            os.path.realpath(expected_root) + os.sep
+        ):
+            raise RuntimeError(
+                "K3 DeepGEMM loaded from an unexpected path: "
+                f"{deep_gemm_path}; expected under {expected_root}"
+            )
+
+        st_w1_w = self.weights.pop(K3W.MOE_W1_PACKED)
+        st_w1_s = self.weights.pop(K3W.MOE_W1_SCALE)
+        st_w3_w = self.weights.pop(K3W.MOE_W3_PACKED)
+        st_w3_s = self.weights.pop(K3W.MOE_W3_SCALE)
+        if st_w1_w.ndim != 3 or st_w1_w.shape[0] != self.local_expert_count:
+            raise RuntimeError(
+                "unexpected K3 W1 stack for MegaMoE: " f"{tuple(st_w1_w.shape)}"
+            )
+        device = st_w1_w.device
+        intermediate = int(st_w1_w.shape[1])
+        if (
+            self.latent_size != 3584
+            or intermediate != 3072
+            or int(st_w1_w.shape[2]) * 2 != self.latent_size
+        ):
+            raise RuntimeError(
+                "K3 DeepGEMM MegaMoE expects latent/intermediate=3584/3072; "
+                f"got {self.latent_size}/{intermediate}"
+            )
+
+        expert_count = self.local_expert_count
+        w13 = torch.empty(
+            (expert_count, 2 * intermediate, self.latent_size // 2),
+            dtype=torch.int8,
+            device=device,
+        )
+        s13_raw = torch.empty(
+            (expert_count, 2 * intermediate, self.latent_size // FP4_BLOCK),
+            dtype=torch.float8_e8m0fnu,
+            device=device,
+        )
+        w13[:, :intermediate].copy_(self._packed_fp4_view(st_w1_w))
+        w13[:, intermediate:].copy_(self._packed_fp4_view(st_w3_w))
+        s13_raw[:, :intermediate].copy_(self._ue8m0_view(st_w1_s))
+        s13_raw[:, intermediate:].copy_(self._ue8m0_view(st_w3_s))
+        del st_w1_w, st_w1_s, st_w3_w, st_w3_s
+        s13 = prepare_fp4_weight_scale_for_deepgemm(
+            s13_raw,
+            2 * intermediate,
+            self.latent_size,
+            expert_count,
+        )
+        del s13_raw
+        torch.cuda.empty_cache()
+
+        st_w2_w = self.weights.pop(K3W.MOE_W2_PACKED)
+        st_w2_s = self.weights.pop(K3W.MOE_W2_SCALE)
+        expected_w2_shape = (
+            expert_count,
+            self.latent_size,
+            intermediate // 2,
+        )
+        if tuple(st_w2_w.shape) != expected_w2_shape:
+            raise RuntimeError(
+                "unexpected K3 W2 stack for MegaMoE: "
+                f"{tuple(st_w2_w.shape)} != {expected_w2_shape}"
+            )
+        w2 = torch.empty(expected_w2_shape, dtype=torch.int8, device=device)
+        s2_raw = torch.empty(
+            (expert_count, self.latent_size, intermediate // FP4_BLOCK),
+            dtype=torch.float8_e8m0fnu,
+            device=device,
+        )
+        w2.copy_(self._packed_fp4_view(st_w2_w))
+        s2_raw.copy_(self._ue8m0_view(st_w2_s))
+        del st_w2_w, st_w2_s
+        s2 = prepare_fp4_weight_scale_for_deepgemm(
+            s2_raw,
+            self.latent_size,
+            intermediate,
+            expert_count,
+        )
+        del s2_raw
+        torch.cuda.empty_cache()
+
+        (self._mega_l1_w, self._mega_l1_sf), (
+            self._mega_l2_w,
+            self._mega_l2_sf,
+        ) = deep_gemm.transform_weights_for_mega_moe(
+            (w13, s13),
+            (w2, s2),
+            activation="situ",
+        )
+        del w13, s13, w2, s2
+        torch.cuda.empty_cache()
+
+        max_tokens_per_rank = int(
+            os.environ.get("KIMI_K3_MEGA_MAX_TOKENS_PER_RANK", "65536")
+        )
+        if max_tokens_per_rank <= 0:
+            raise ValueError("KIMI_K3_MEGA_MAX_TOKENS_PER_RANK must be positive")
+        self._mega_group = dist.group.WORLD
+        self._mega_buf = _get_or_create_mega_buf(
+            group=self._mega_group,
+            num_experts=self.expert_num,
+            num_max_tokens_per_rank=max_tokens_per_rank,
+            num_topk=self.top_k,
+            hidden=self.latent_size,
+            intermediate_hidden=intermediate,
+            use_fp8_dispatch=True,
+            activation="situ",
+        )
+        output_capacity = max(
+            max_tokens_per_rank,
+            int(getattr(self._mega_buf, "num_max_tokens_per_rank", 0)),
+        )
+        self._mega_y = _get_or_create_mega_output(
+            output_capacity,
+            self.latent_size,
+            torch.bfloat16,
+            device,
+        )
+        self._mega_input_packer = get_mega_moe_input_packer()
+
+        device_index = device.index if device.index is not None else 0
+        if device_index not in _DEEPGEMM_MEGA_LOGGED_DEVICES:
+            logging.info(
+                "[KimiK3 DeepGEMM MegaMoE] enabled device=%s module=%s "
+                "TP=%d EP=%d experts=%d local_experts=%d topk=%d "
+                "latent=%d intermediate=%d max_tokens_per_rank=%d "
+                "input_packer=%s",
+                device,
+                deep_gemm_path,
+                self.attn_tp_size,
+                self.ep_size,
+                self.expert_num,
+                self.local_expert_count,
+                self.top_k,
+                self.latent_size,
+                intermediate,
+                max_tokens_per_rank,
+                self._mega_input_packer.name,
+            )
+            _DEEPGEMM_MEGA_LOGGED_DEVICES.add(device_index)
+
+    def _deep_gemm_mega_expert_sum(
+        self,
+        routed_input: torch.Tensor,
+        expert_ids: torch.Tensor,
+        routing_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        import deep_gemm
+
+        token_count = int(routed_input.shape[0])
+        capacity = int(self._mega_buf.num_max_tokens_per_rank)
+        if token_count > capacity:
+            raise RuntimeError(
+                f"K3 MegaMoE tokens/rank={token_count} exceeds capacity={capacity}"
+            )
+        with _perf_profile(
+            f"{self.trace_prefix}.mega_input_pack_hidden_topk_weights_ids",
+            routed_input,
+        ):
+            self._mega_input_packer.pack(
+                routed_input,
+                routing_weights,
+                expert_ids,
+                self._mega_buf,
+                token_count,
+            )
+        output = self._mega_y[:token_count]
+        with _perf_profile(
+            f"{self.trace_prefix}.deepgemm_mega_fused_a2a_dispatch"
+            "_mxfp4_w13_situ_w2_combine",
+            routed_input,
+        ):
+            deep_gemm.fp8_fp4_mega_moe(
+                output,
+                (self._mega_l1_w, self._mega_l1_sf),
+                (self._mega_l2_w, self._mega_l2_sf),
+                self._mega_buf,
+                recipe=(1, 1, 32),
+                activation="situ",
+                activation_clamp=None,
+                activation_beta=float(self.beta),
+                activation_linear_beta=(
+                    None if self.linear_beta is None else float(self.linear_beta)
+                ),
+                fast_math=True,
+            )
+        return output
 
     def _route(self, hidden_states: torch.Tensor) -> tuple[torch.Tensor, torch.Tensor]:
         router_weight = self.weights[K3W.MOE_GATE]
@@ -2891,13 +3653,41 @@ class KimiK3LatentMoE(nn.Module):
         routed_input: torch.Tensor,
         expert_ids: torch.Tensor,
         routing_weights: torch.Tensor,
+        *,
+        sequence_parallel: bool = False,
     ) -> torch.Tensor:
+        if self._moe_backend == "deep_gemm_mega":
+            if sequence_parallel:
+                return self._deep_gemm_mega_expert_sum(
+                    routed_input,
+                    expert_ids,
+                    routing_weights,
+                )
+            sliced_input, sliced_ids, sliced_weights, tokens_per_tp_rank = (
+                self._tp_token_slice(routed_input, expert_ids, routing_weights)
+            )
+            local_output = self._deep_gemm_mega_expert_sum(
+                sliced_input,
+                sliced_ids,
+                sliced_weights,
+            )
+            return self._tp_gather(
+                local_output,
+                routed_input.shape[0],
+                tokens_per_tp_rank,
+            )
+
         from rtp_llm.models_py.distributed.deepep_wrapper import (
             DeepEPMode,
             DeepEPWrapper,
         )
 
         canonical_slots = _accuracy_canonical_ep_enabled()
+        if sequence_parallel and canonical_slots and not DeepEPWrapper.supported():
+            raise RuntimeError(
+                "Kimi K3 Sequence Parallel requires DeepEP when canonical EP "
+                "is enabled; the NCCL replicated-token fallback is incompatible"
+            )
         if canonical_slots and not DeepEPWrapper.supported():
             if not getattr(self, "_canonical_ep_fallback_logged", False):
                 logging.warning(
@@ -2912,9 +3702,16 @@ class KimiK3LatentMoE(nn.Module):
             )
 
         wrapper = self._deepep_wrapper()
-        sliced_input, sliced_ids, sliced_weights, tokens_per_tp_rank = (
-            self._tp_token_slice(routed_input, expert_ids, routing_weights)
-        )
+        sp_active = sequence_parallel and self.attn_tp_size > 1 and routed_input.is_cuda
+        if sp_active:
+            sliced_input = routed_input
+            sliced_ids = expert_ids
+            sliced_weights = routing_weights
+            tokens_per_tp_rank = routed_input.shape[0]
+        else:
+            sliced_input, sliced_ids, sliced_weights, tokens_per_tp_rank = (
+                self._tp_token_slice(routed_input, expert_ids, routing_weights)
+            )
         if wrapper.mode == DeepEPMode.NORMAL:
             # Every EP rank must execute the same dispatch/combine schedule.
             # Decode DP uses collective-only fake streams on the non-owning
@@ -2941,96 +3738,181 @@ class KimiK3LatentMoE(nn.Module):
                 "Kimi K3 does not yet support DeepEP LOW_LATENCY_M2N/FFN "
                 f"disaggregation mode: {wrapper.mode}"
             )
-        return self._tp_gather(local_output, routed_input.shape[0], tokens_per_tp_rank)
+        return (
+            local_output
+            if sp_active
+            else self._tp_gather(
+                local_output, routed_input.shape[0], tokens_per_tp_rank
+            )
+        )
 
-    def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
-        expert_ids, routing_weights = self._route(hidden_states)
-        router_token_dim = None if _accuracy_full_router_trace_enabled() else 0
-        record_accuracy_tensor(
-            f"{self.trace_prefix}.expert_ids",
-            expert_ids,
-            token_dim=router_token_dim,
+    def forward(
+        self, hidden_states: torch.Tensor, *, sequence_parallel: bool = False
+    ) -> torch.Tensor:
+        sp_active = (
+            sequence_parallel and self.attn_tp_size > 1 and hidden_states.is_cuda
         )
-        record_accuracy_tensor(
-            f"{self.trace_prefix}.routing_weights",
-            routing_weights,
-            token_dim=router_token_dim,
-        )
-        record_accuracy_tensor(
-            f"{self.trace_prefix}.router_counts",
-            torch.bincount(expert_ids.reshape(-1), minlength=self.expert_num),
-        )
-        routed_input = _linear(hidden_states, self.weights[K3W.MOE_ROUTED_DOWN])
-        record_accuracy_tensor(
-            f"{self.trace_prefix}.routed_input", routed_input, token_dim=0
-        )
-        routed_output = (
-            self._distributed_expert_sum(routed_input, expert_ids, routing_weights)
-            if self.ep_size > 1
-            else self._local_expert_sum(
-                routed_input,
+        trace_enabled = _accuracy_trace_enabled()
+        with _perf_profile(
+            f"{self.trace_prefix}.router_sigmoid_grouped_topk16", hidden_states
+        ):
+            expert_ids, routing_weights = self._route(hidden_states)
+        if trace_enabled:
+            router_token_dim = None if _accuracy_full_router_trace_enabled() else 0
+            record_accuracy_tensor(
+                f"{self.trace_prefix}.expert_ids",
                 expert_ids,
+                token_dim=router_token_dim,
+            )
+            record_accuracy_tensor(
+                f"{self.trace_prefix}.routing_weights",
                 routing_weights,
-                ids_are_local=False,
+                token_dim=router_token_dim,
             )
-        )
-        record_accuracy_tensor(
-            f"{self.trace_prefix}.expert_sum", routed_output, token_dim=0
-        )
+            record_accuracy_tensor(
+                f"{self.trace_prefix}.router_counts",
+                torch.bincount(expert_ids.reshape(-1), minlength=self.expert_num),
+            )
+        with _perf_profile(
+            f"{self.trace_prefix}.routed_down_7168_to_3584", hidden_states
+        ):
+            routed_input = _linear(hidden_states, self.weights[K3W.MOE_ROUTED_DOWN])
+        if trace_enabled:
+            record_accuracy_tensor(
+                f"{self.trace_prefix}.routed_input", routed_input, token_dim=0
+            )
+        with _perf_profile(
+            f"{self.trace_prefix}.routed_experts_mega_dispatch_compute_combine",
+            routed_input,
+        ):
+            routed_output = (
+                self._distributed_expert_sum(
+                    routed_input,
+                    expert_ids,
+                    routing_weights,
+                    sequence_parallel=sp_active,
+                )
+                if self.ep_size > 1
+                else self._local_expert_sum(
+                    routed_input,
+                    expert_ids,
+                    routing_weights,
+                    ids_are_local=False,
+                )
+            )
+        if trace_enabled:
+            record_accuracy_tensor(
+                f"{self.trace_prefix}.expert_sum", routed_output, token_dim=0
+            )
         if self.latent_moe_use_norm:
-            routed_output = _rms_norm(
-                routed_output, self.weights[K3W.MOE_ROUTED_NORM], self.eps
+            with _perf_profile(
+                f"{self.trace_prefix}.routed_latent_rmsnorm", routed_output
+            ):
+                routed_output = _rms_norm(
+                    routed_output, self.weights[K3W.MOE_ROUTED_NORM], self.eps
+                )
+        if trace_enabled:
+            record_accuracy_tensor(
+                f"{self.trace_prefix}.routed_normalized",
+                routed_output,
+                token_dim=0,
             )
-        record_accuracy_tensor(
-            f"{self.trace_prefix}.routed_normalized",
-            routed_output,
-            token_dim=0,
-        )
-        routed_output = _linear(routed_output, self.weights[K3W.MOE_ROUTED_UP])
-        record_accuracy_tensor(
-            f"{self.trace_prefix}.routed_output", routed_output, token_dim=0
-        )
-        shared_gate = _column_parallel_linear(
-            hidden_states,
-            self.weights[K3W.MOE_SHARED_GATE],
-            self.ffn_tp_size,
-            self.ffn_tp_rank,
-            self._full_column_weights,
-            "shared_gate",
-        )
-        shared_up = _column_parallel_linear(
-            hidden_states,
-            self.weights[K3W.MOE_SHARED_UP],
-            self.ffn_tp_size,
-            self.ffn_tp_rank,
-            self._full_column_weights,
-            "shared_up",
-        )
-        shared_activation = _situ(
-            shared_gate,
-            shared_up,
-            self.beta,
-            self.linear_beta,
-        )
-        record_accuracy_tensor(
-            f"{self.trace_prefix}.shared_gate", shared_gate, token_dim=0
-        )
-        record_accuracy_tensor(f"{self.trace_prefix}.shared_up", shared_up, token_dim=0)
-        record_accuracy_tensor(
-            f"{self.trace_prefix}.shared_activation",
+        with _perf_profile(
+            f"{self.trace_prefix}.routed_up_3584_to_7168", routed_output
+        ):
+            routed_output = _linear(routed_output, self.weights[K3W.MOE_ROUTED_UP])
+        if trace_enabled:
+            record_accuracy_tensor(
+                f"{self.trace_prefix}.routed_output", routed_output, token_dim=0
+            )
+        if sp_active:
+            with _perf_profile(
+                f"{self.trace_prefix}.shared_expert_replicated_gate_up_gemm",
+                hidden_states,
+            ):
+                shared_gate = _linear(
+                    hidden_states,
+                    _replicated_column_weight(
+                        self.weights[K3W.MOE_SHARED_GATE],
+                        self.ffn_tp_size,
+                        self._full_column_weights,
+                        "sp_shared_gate",
+                    ),
+                )
+                shared_up = _linear(
+                    hidden_states,
+                    _replicated_column_weight(
+                        self.weights[K3W.MOE_SHARED_UP],
+                        self.ffn_tp_size,
+                        self._full_column_weights,
+                        "sp_shared_up",
+                    ),
+                )
+        else:
+            shared_gate = _column_parallel_linear(
+                hidden_states,
+                self.weights[K3W.MOE_SHARED_GATE],
+                self.ffn_tp_size,
+                self.ffn_tp_rank,
+                self._full_column_weights,
+                "shared_gate",
+            )
+            shared_up = _column_parallel_linear(
+                hidden_states,
+                self.weights[K3W.MOE_SHARED_UP],
+                self.ffn_tp_size,
+                self.ffn_tp_rank,
+                self._full_column_weights,
+                "shared_up",
+            )
+        with _perf_profile(f"{self.trace_prefix}.shared_expert_situ", shared_gate):
+            shared_activation = _situ(
+                shared_gate,
+                shared_up,
+                self.beta,
+                self.linear_beta,
+            )
+        if trace_enabled:
+            record_accuracy_tensor(
+                f"{self.trace_prefix}.shared_gate", shared_gate, token_dim=0
+            )
+            record_accuracy_tensor(
+                f"{self.trace_prefix}.shared_up", shared_up, token_dim=0
+            )
+            record_accuracy_tensor(
+                f"{self.trace_prefix}.shared_activation",
+                shared_activation,
+                token_dim=0,
+            )
+        with _perf_profile(
+            f"{self.trace_prefix}.shared_expert_replicated_down_no_collective",
             shared_activation,
-            token_dim=0,
-        )
-        shared_output = _row_parallel_linear(
-            shared_activation,
-            self.weights[K3W.MOE_SHARED_DOWN],
-            self.parallelism_config.get_ffn_tp_size(),
-        )
-        record_accuracy_tensor(
-            f"{self.trace_prefix}.shared_output", shared_output, token_dim=0
-        )
-        output = routed_output + shared_output
-        record_accuracy_tensor(f"{self.trace_prefix}.output", output, token_dim=0)
+        ):
+            shared_output = (
+                _linear(
+                    shared_activation,
+                    _replicated_row_weight(
+                        self.weights[K3W.MOE_SHARED_DOWN],
+                        self.ffn_tp_size,
+                        self._full_row_weights,
+                        "sp_shared_down",
+                    ),
+                )
+                if sp_active
+                else _row_parallel_linear(
+                    shared_activation,
+                    self.weights[K3W.MOE_SHARED_DOWN],
+                    self.parallelism_config.get_ffn_tp_size(),
+                )
+            )
+        if trace_enabled:
+            record_accuracy_tensor(
+                f"{self.trace_prefix}.shared_output", shared_output, token_dim=0
+            )
+        with _perf_profile(f"{self.trace_prefix}.sum_routed_and_shared", routed_output):
+            output = routed_output + shared_output
+        if trace_enabled:
+            record_accuracy_tensor(f"{self.trace_prefix}.output", output, token_dim=0)
         return output
 
 
@@ -3070,69 +3952,105 @@ class KimiK3DecoderLayer(nn.Module):
         kv_cache: Optional[LayerKVCache] = None,
         attention_inputs: Optional[PyAttentionInputs] = None,
         fmha_impl: Any = None,
+        sequence_parallel: bool = False,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         trace_prefix = f"layer.{self.layer_idx}"
-        record_accuracy_tensor(f"{trace_prefix}.input", hidden_states, token_dim=0)
+        trace_enabled = _accuracy_trace_enabled()
+        if trace_enabled:
+            record_accuracy_tensor(f"{trace_prefix}.input", hidden_states, token_dim=0)
         prefix_sum: Optional[torch.Tensor] = hidden_states
         if block_residual.shape[1] > 0:
-            hidden_states = _attention_residual(
-                prefix_sum,
-                block_residual,
-                self.weights[K3W.SELF_ATTN_RES_NORM],
-                self.weights[K3W.SELF_ATTN_RES_PROJ],
-                self.eps,
-            )
+            with _perf_profile(f"{trace_prefix}.self_attn_residual_mix", prefix_sum):
+                hidden_states = _attention_residual(
+                    prefix_sum,
+                    block_residual,
+                    self.weights[K3W.SELF_ATTN_RES_NORM],
+                    self.weights[K3W.SELF_ATTN_RES_PROJ],
+                    self.eps,
+                )
         if self.layer_idx % self.attn_res_block_size == 0:
             block_residual = torch.cat((block_residual, prefix_sum.unsqueeze(1)), dim=1)
             prefix_sum = None
-        attention_input = _rms_norm(
-            hidden_states, self.weights[W.pre_ln_gamma], self.eps
-        )
-        record_accuracy_tensor(
-            f"{trace_prefix}.attention_input", attention_input, token_dim=0
-        )
-        if self.is_kda:
-            attention_output, _ = self.self_attn(
-                attention_input,
-                cu_seqlens,
-                mode=mode,
-                kv_cache=kv_cache,
-                attention_inputs=attention_inputs,
+        with _perf_profile(f"{trace_prefix}.attention_input_rmsnorm", hidden_states):
+            attention_input = _rms_norm(
+                hidden_states, self.weights[W.pre_ln_gamma], self.eps
             )
+        if trace_enabled:
+            record_accuracy_tensor(
+                f"{trace_prefix}.attention_input", attention_input, token_dim=0
+            )
+        if sequence_parallel:
+            with _perf_profile(
+                f"{trace_prefix}.attention_input_token_allgather_TP8",
+                attention_input,
+            ):
+                attention_input = all_gather(attention_input, group=Group.TP)
+        if self.is_kda:
+            with _perf_profile(
+                f"{trace_prefix}.KDA_attention_complete", attention_input
+            ):
+                attention_output, _ = self.self_attn(
+                    attention_input,
+                    cu_seqlens,
+                    mode=mode,
+                    kv_cache=kv_cache,
+                    attention_inputs=attention_inputs,
+                    sequence_parallel=sequence_parallel,
+                )
         else:
             # MLA layers use the shared ``MlaAttention`` signature and consume
             # the framework fmha_impl built by ``prepare_fmha_impl``.
-            attention_output = self.self_attn(
-                attention_input,
-                fmha_impl,
-                kv_cache,
-                attention_inputs=attention_inputs,
+            with _perf_profile(
+                f"{trace_prefix}.MLA_attention_complete", attention_input
+            ):
+                attention_output = self.self_attn(
+                    attention_input,
+                    fmha_impl,
+                    kv_cache,
+                    attention_inputs=attention_inputs,
+                    sequence_parallel=sequence_parallel,
+                )
+        with _perf_profile(f"{trace_prefix}.attention_prefix_sum", attention_output):
+            prefix_sum = (
+                attention_output
+                if prefix_sum is None
+                else prefix_sum + attention_output
             )
-        prefix_sum = (
-            attention_output if prefix_sum is None else prefix_sum + attention_output
+        with _perf_profile(f"{trace_prefix}.mlp_attn_residual_mix", prefix_sum):
+            mlp_input = _attention_residual(
+                prefix_sum,
+                block_residual,
+                self.weights[K3W.MLP_RES_NORM],
+                self.weights[K3W.MLP_RES_PROJ],
+                self.eps,
+            )
+        if trace_enabled:
+            record_accuracy_tensor(f"{trace_prefix}.mlp_input", mlp_input, token_dim=0)
+        with _perf_profile(f"{trace_prefix}.mlp_input_rmsnorm", mlp_input):
+            normalized_mlp_input = _rms_norm(
+                mlp_input, self.weights[W.post_ln_gamma], self.eps
+            )
+        if trace_enabled:
+            record_accuracy_tensor(
+                f"{trace_prefix}.normalized_mlp_input",
+                normalized_mlp_input,
+                token_dim=0,
+            )
+        mlp_kind = (
+            "latent_MoE" if isinstance(self.mlp, KimiK3LatentMoE) else "dense_MLP"
         )
-        mlp_input = _attention_residual(
-            prefix_sum,
-            block_residual,
-            self.weights[K3W.MLP_RES_NORM],
-            self.weights[K3W.MLP_RES_PROJ],
-            self.eps,
-        )
-        record_accuracy_tensor(f"{trace_prefix}.mlp_input", mlp_input, token_dim=0)
-        normalized_mlp_input = _rms_norm(
-            mlp_input, self.weights[W.post_ln_gamma], self.eps
-        )
-        record_accuracy_tensor(
-            f"{trace_prefix}.normalized_mlp_input",
-            normalized_mlp_input,
-            token_dim=0,
-        )
-        mlp_output = self.mlp(normalized_mlp_input)
-        output = prefix_sum + mlp_output
-        record_accuracy_tensor(f"{trace_prefix}.output", output, token_dim=0)
-        record_accuracy_tensor(
-            f"{trace_prefix}.block_residual", block_residual, token_dim=0
-        )
+        with _perf_profile(f"{trace_prefix}.{mlp_kind}_complete", normalized_mlp_input):
+            mlp_output = self.mlp(
+                normalized_mlp_input,
+                sequence_parallel=sequence_parallel,
+            )
+        with _perf_profile(f"{trace_prefix}.residual_add", mlp_output):
+            output = prefix_sum + mlp_output
+        if trace_enabled:
+            record_accuracy_tensor(f"{trace_prefix}.output", output, token_dim=0)
+            record_accuracy_tensor(
+                f"{trace_prefix}.block_residual", block_residual, token_dim=0
+            )
         return output, block_residual
 
 
@@ -3173,6 +4091,8 @@ class KimiK3Model(GptModelBase):
         self.final_norm_weight = weights.get_global_weight(W.final_ln_gamma)
         self.output_attn_res_norm = weights.get_global_weight(K3W.OUTPUT_ATTN_RES_NORM)
         self.output_attn_res_proj = weights.get_global_weight(K3W.OUTPUT_ATTN_RES_PROJ)
+        self._layer_group_ids: Optional[tuple[int, ...]] = None
+        _validate_perf_environment()
 
     # ``prepare_fmha_impl`` is inherited from ``GptModelBase``: it builds the
     # framework MLA impl via ``AttnImplFactory.get_fmha_impl`` (identical to the
@@ -3219,10 +4139,20 @@ class KimiK3Model(GptModelBase):
                     device=input_ids.device,
                 )
             )
-        _sequence_offsets(cu_seqlens, input_ids.numel())
+        _sequence_offsets(
+            cu_seqlens,
+            input_ids.numel(),
+            cu_seqlens_host=(
+                getattr(attention_inputs, "cu_seqlens_host", None)
+                if _host_metadata_enabled()
+                else None
+            ),
+        )
         return cu_seqlens
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
+        if _perf_mode_enabled():
+            return self._forward_impl(inputs, fmha_impl)
         attention_inputs = inputs.attention_inputs
         phase = (
             "prefill"
@@ -3245,15 +4175,70 @@ class KimiK3Model(GptModelBase):
         if not attention_inputs.is_prefill and self.kv_cache is None:
             raise RuntimeError("Kimi K3 decode requires an initialized hybrid cache")
         input_ids = inputs.input_ids.reshape(-1)
+        trace_enabled = _accuracy_trace_enabled()
+        tp_size = int(self.parallelism_config.get_attn_tp_size())
+        sp_requested = _sp_moe_enabled() and attention_inputs.is_prefill and tp_size > 1
+        sp_active = sp_requested and input_ids.numel() % tp_size == 0
+        if _perf_mode_enabled():
+            if not sp_active:
+                raise RuntimeError(
+                    "K3 performance profiling requires divisible TP8/EP8 "
+                    f"Prefill Sequence Parallel; tokens={input_ids.numel()}, "
+                    f"TP={tp_size}, is_prefill={attention_inputs.is_prefill}"
+                )
+            # Kineto can arm ranks at slightly different wall times.  Align
+            # once before model operators so the first embedding collective
+            # does not absorb scheduler skew.  This named range is excluded
+            # from model-kernel latency.
+            with _perf_profile(
+                "profiling.rank_entry_barrier.exclude_from_model_latency"
+            ):
+                barrier(Group.TP)
         cu_seqlens = self._cu_seqlens(attention_inputs, input_ids)
-        mark_accuracy_fake_stream(
-            KimiK3LinearCacheAdapter._is_fake_stream(attention_inputs),
-            input_ids.device,
-        )
-        record_accuracy_tensor("input_ids", input_ids.long(), token_dim=0)
-        record_accuracy_tensor("cu_seqlens", cu_seqlens)
-        hidden_states = self._embed(input_ids)
-        record_accuracy_tensor("embedding", hidden_states, token_dim=0)
+        if sp_active:
+            ep_size = int(self.parallelism_config.ep_size)
+            if ep_size != tp_size:
+                raise RuntimeError(
+                    "Kimi K3 Sequence Parallel currently requires TP == EP; "
+                    f"got TP={tp_size}, EP={ep_size}"
+                )
+            if _accuracy_canonical_tp_enabled():
+                raise RuntimeError(
+                    "Kimi K3 Sequence Parallel is incompatible with canonical "
+                    "TP; disable one of KIMI_K3_SP_MOE and "
+                    "KIMI_K3_ACCURACY_CANONICAL_TP"
+                )
+        elif sp_requested and not getattr(self, "_sp_shape_fallback_logged", False):
+            logging.warning(
+                "Kimi K3 Sequence Parallel is falling back to the replicated "
+                "TP path because token count %d is not divisible by TP=%d",
+                input_ids.numel(),
+                tp_size,
+            )
+            self._sp_shape_fallback_logged = True
+        if trace_enabled:
+            mark_accuracy_fake_stream(
+                KimiK3LinearCacheAdapter._is_fake_stream(attention_inputs),
+                input_ids.device,
+            )
+            record_accuracy_tensor("input_ids", input_ids.long(), token_dim=0)
+            record_accuracy_tensor("cu_seqlens", cu_seqlens)
+        with _perf_profile(
+            "model.embedding_vocab_parallel_then_hidden_allgather", input_ids
+        ):
+            hidden_states = self._embed(input_ids)
+        if trace_enabled:
+            record_accuracy_tensor("embedding", hidden_states, token_dim=0)
+        if sp_active:
+            local_tokens = hidden_states.shape[0] // tp_size
+            tp_rank = int(self.parallelism_config.get_attn_tp_rank())
+            with _perf_profile(
+                "model.embedding_to_sequence_parallel_token_shard",
+                hidden_states,
+            ):
+                hidden_states = hidden_states.narrow(
+                    0, tp_rank * local_tokens, local_tokens
+                ).contiguous()
         block_residual = hidden_states.new_empty(
             hidden_states.shape[0], 0, hidden_states.shape[1]
         )
@@ -3261,15 +4246,31 @@ class KimiK3Model(GptModelBase):
         write_cache_store_impl = create_write_cache_store_impl(
             attention_inputs, self.kv_cache
         )
-        trace_cache_mapping = accuracy_trace_mode() is not None
+        trace_cache_mapping = trace_enabled
         if trace_cache_mapping and attention_inputs.kv_cache_layer_to_group is not None:
             record_accuracy_tensor(
                 "kv_cache_layer_to_group",
                 attention_inputs.kv_cache_layer_to_group,
             )
         prepared_mla_group_id: Optional[int] = None
+        if _host_metadata_enabled() and self._layer_group_ids is None:
+            layer_map_host = getattr(
+                attention_inputs, "kv_cache_layer_to_group_host", None
+            )
+            if layer_map_host is not None and layer_map_host.numel():
+                self._layer_group_ids = tuple(
+                    int(value) for value in layer_map_host.tolist()
+                )
         for layer_idx, layer in enumerate(self.layers):
-            selected_group_id = select_block_map_for_layer(attention_inputs, layer_idx)
+            static_group_id = (
+                self._layer_group_ids[layer_idx]
+                if self._layer_group_ids is not None
+                and layer_idx < len(self._layer_group_ids)
+                else None
+            )
+            selected_group_id = select_block_map_for_layer(
+                attention_inputs, layer_idx, static_group_id
+            )
             if selected_group_id is None:
                 selected_group_id = 0
             layer_cache = (
@@ -3324,15 +4325,19 @@ class KimiK3Model(GptModelBase):
                             f"layer.{layer_idx}.mla.slot_mapping",
                             slot_mapping.detach().clone(),
                         )
-            hidden_states, block_residual = layer(
-                hidden_states,
-                block_residual,
-                cu_seqlens,
-                mode=mode,
-                kv_cache=layer_cache,
-                attention_inputs=attention_inputs,
-                fmha_impl=fmha_impl,
-            )
+            with _perf_profile(
+                f"layer.{layer_idx}.decoder_layer_complete", hidden_states
+            ):
+                hidden_states, block_residual = layer(
+                    hidden_states,
+                    block_residual,
+                    cu_seqlens,
+                    mode=mode,
+                    kv_cache=layer_cache,
+                    attention_inputs=attention_inputs,
+                    fmha_impl=fmha_impl,
+                    sequence_parallel=sp_active,
+                )
             # Loop-level cache-store is only for KDA layers. MLA publishes
             # from its wrapper immediately after concat_and_cache_mla.
             if (
@@ -3348,19 +4353,32 @@ class KimiK3Model(GptModelBase):
                 layer_cache.cache_store_segment_sizes = list(
                     layer.self_attn.cache_adapter.cache_store_segment_sizes
                 )
-                write_cache_store_impl(layer_cache)
-        hidden_states = _attention_residual(
-            hidden_states,
-            block_residual,
-            self.output_attn_res_norm,
-            self.output_attn_res_proj,
-            self.config.layernorm_eps,
-        )
-        record_accuracy_tensor("output_attn_res", hidden_states, token_dim=0)
-        hidden_states = _rms_norm(
-            hidden_states, self.final_norm_weight, self.config.layernorm_eps
-        )
-        record_accuracy_tensor("final_hidden", hidden_states, token_dim=0)
+                with _perf_profile(
+                    f"layer.{layer_idx}.pd_cache_store_publish_kda_segments"
+                ):
+                    write_cache_store_impl(layer_cache)
+        with _perf_profile("model.output_attn_residual_mix", hidden_states):
+            hidden_states = _attention_residual(
+                hidden_states,
+                block_residual,
+                self.output_attn_res_norm,
+                self.output_attn_res_proj,
+                self.config.layernorm_eps,
+            )
+        if trace_enabled:
+            record_accuracy_tensor("output_attn_res", hidden_states, token_dim=0)
+        with _perf_profile("model.final_rmsnorm", hidden_states):
+            hidden_states = _rms_norm(
+                hidden_states, self.final_norm_weight, self.config.layernorm_eps
+            )
+        if sp_active:
+            with _perf_profile(
+                "model.exit_token_allgather_for_framework_contract",
+                hidden_states,
+            ):
+                hidden_states = all_gather(hidden_states, group=Group.TP)
+        if trace_enabled:
+            record_accuracy_tensor("final_hidden", hidden_states, token_dim=0)
         fmha_params = getattr(fmha_impl, "fmha_params", None)
         return (
             PyModelOutputs(hidden_states, fmha_params)

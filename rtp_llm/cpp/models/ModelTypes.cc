@@ -174,6 +174,11 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.prefix_lengths   = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                            {context_batch_size},
                                          pickAlloc(GptModelInputDeviceBit::kDeviceBitPrefixLengths));
+        inputs.input_lengths_host_for_log =
+            allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths]});
+        inputs.sequence_lengths_host_for_log =
+            allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::sequenceLengths]});
+        inputs.prefix_lengths_host_for_log = allocBuf(rtp_llm::DataType::TYPE_INT32, {context_batch_size});
         if (max_kernel_blocks != 0) {
             // kv_cache_kernel_block_id is now device-resident on the producer (rank 0). Allocate
             // the matching buffer on CUDA for non-root ranks so the gpu_packed branch below
@@ -184,6 +189,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                 rtp_llm::AllocationType::DEVICE);
             inputs.kv_cache_update_mapping = allocBuf(
                 rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum], 2});
+            inputs.kv_cache_kernel_block_id_host = allocBuf(
+                rtp_llm::DataType::TYPE_INT32,
+                {kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_kernel_blocks});
         }
         if (max_blocks != 0) {
             inputs.kv_cache_block_id =
@@ -193,12 +201,17 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                 inputs.cache_keys = allocBuf(rtp_llm::DataType::TYPE_INT64,
                                              {context_batch_size, cache_keys_width ? cache_keys_width : max_blocks});
             }
+            inputs.kv_cache_block_id_host =
+                allocBuf(rtp_llm::DataType::TYPE_INT32,
+                         {kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_blocks});
         }
         if (layer_to_group_len) {
-            inputs.kv_cache_layer_to_group = allocBuf(rtp_llm::DataType::TYPE_INT32, {layer_to_group_len});
+            inputs.kv_cache_layer_to_group      = allocBuf(rtp_llm::DataType::TYPE_INT32, {layer_to_group_len});
+            inputs.kv_cache_layer_to_group_host = allocBuf(rtp_llm::DataType::TYPE_INT32, {layer_to_group_len});
         }
         if (group_types_len) {
-            inputs.kv_cache_group_types = allocBuf(rtp_llm::DataType::TYPE_INT32, {group_types_len});
+            inputs.kv_cache_group_types      = allocBuf(rtp_llm::DataType::TYPE_INT32, {group_types_len});
+            inputs.kv_cache_group_types_host = allocBuf(rtp_llm::DataType::TYPE_INT32, {group_types_len});
         }
         inputs.request_id            = allocBuf(rtp_llm::DataType::TYPE_INT64, {request_length});
         inputs.request_pd_separation = allocBuf(rtp_llm::DataType::TYPE_BOOL, {request_length});
@@ -249,14 +262,21 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     collect(inputs.input_lengths);
     collect(inputs.sequence_lengths);
     collect(inputs.prefix_lengths);
+    collect(inputs.input_lengths_host_for_log);
+    collect(inputs.sequence_lengths_host_for_log);
+    collect(inputs.prefix_lengths_host_for_log);
     if (max_kernel_blocks || max_blocks) {
         collect(inputs.kv_cache_kernel_block_id);
         collect(inputs.kv_cache_block_id);
+        collect(inputs.kv_cache_kernel_block_id_host);
+        collect(inputs.kv_cache_block_id_host);
         if (layer_to_group_len) {
             collect(inputs.kv_cache_layer_to_group);
+            collect(inputs.kv_cache_layer_to_group_host);
         }
         if (group_types_len) {
             collect(inputs.kv_cache_group_types);
+            collect(inputs.kv_cache_group_types_host);
         }
         if (inputs.pd_separation) {
             collect(inputs.cache_keys);

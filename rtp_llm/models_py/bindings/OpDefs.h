@@ -328,6 +328,10 @@ struct PyAttentionInputs {
     torch::Tensor prefix_lengths;
     torch::Tensor sequence_lengths;
     torch::Tensor input_lengths;
+    // Pinned CPU mirrors created before CUDA metadata publication.
+    torch::Tensor prefix_lengths_host;
+    torch::Tensor sequence_lengths_host;
+    torch::Tensor input_lengths_host;
     // Kernel-granularity block IDs for attention compute.
     // Shape: [group, batch, max_kernel_blocks] or [batch, max_kernel_blocks].
     torch::Tensor kv_cache_kernel_block_id_host;
@@ -346,6 +350,7 @@ struct PyAttentionInputs {
     std::vector<torch::Tensor> kv_cache_kernel_block_id_host_by_group;
     std::vector<torch::Tensor> kv_cache_kernel_block_id_device_by_group;
     torch::Tensor              kv_cache_layer_to_group;
+    torch::Tensor              kv_cache_layer_to_group_host;
     caffe2::TypeMeta           dtype;
     // Cumulative sequence lengths for attention kernels (e.g. FusedRopeKVCacheDecodeOp).
     // cu_seqlens lives on CUDA device; cu_seqlens_host is its pinned-memory CPU mirror

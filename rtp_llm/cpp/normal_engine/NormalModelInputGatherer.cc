@@ -476,10 +476,11 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     if (config_.is_multimodal && !gathered_mm_features.empty()) {
         model_input.multimodal_features = std::move(gathered_mm_features);
     }
-    if (config_.enable_model_inputs_log) {
-        model_input.prefix_lengths_host_for_log = prefix_lengths_host;
-    }
-    model_input.prefix_lengths = publishInt32ToCuda(prefix_lengths_host, host_holder);
+    // Keep the original pinned host lengths alive for Python attention
+    // metadata consumers. Restricting this mirror to input logging forces
+    // KDA/MLA to issue a blocking CUDA-to-CPU copy in every forward.
+    model_input.prefix_lengths_host_for_log = prefix_lengths_host;
+    model_input.prefix_lengths              = publishInt32ToCuda(prefix_lengths_host, host_holder);
     return absl::OkStatus();
 }
 
@@ -536,16 +537,26 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     initializeKvCacheMetadata(model_input);
     RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
     RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups, host_holder));
-    if (config_.enable_model_inputs_log) {
-        if (model_input.combo_tokens.defined() && !model_input.combo_tokens.is_cuda()) {
-            model_input.combo_tokens_host_for_log = model_input.combo_tokens;
-        }
-        if (model_input.input_lengths.defined() && !model_input.input_lengths.is_cuda()) {
-            model_input.input_lengths_host_for_log = model_input.input_lengths;
-        }
-        if (model_input.sequence_lengths.defined() && !model_input.sequence_lengths.is_cuda()) {
-            model_input.sequence_lengths_host_for_log = model_input.sequence_lengths;
-        }
+    if (model_input.combo_tokens.defined() && !model_input.combo_tokens.is_cuda()) {
+        model_input.combo_tokens_host_for_log = model_input.combo_tokens;
+    }
+    if (model_input.input_lengths.defined() && !model_input.input_lengths.is_cuda()) {
+        model_input.input_lengths_host_for_log = model_input.input_lengths;
+    }
+    if (model_input.sequence_lengths.defined() && !model_input.sequence_lengths.is_cuda()) {
+        model_input.sequence_lengths_host_for_log = model_input.sequence_lengths;
+    }
+    if (model_input.kv_cache_block_id.defined() && !model_input.kv_cache_block_id.is_cuda()) {
+        model_input.kv_cache_block_id_host = model_input.kv_cache_block_id;
+    }
+    if (model_input.kv_cache_kernel_block_id.defined() && !model_input.kv_cache_kernel_block_id.is_cuda()) {
+        model_input.kv_cache_kernel_block_id_host = model_input.kv_cache_kernel_block_id;
+    }
+    if (model_input.kv_cache_layer_to_group.defined() && !model_input.kv_cache_layer_to_group.is_cuda()) {
+        model_input.kv_cache_layer_to_group_host = model_input.kv_cache_layer_to_group;
+    }
+    if (model_input.kv_cache_group_types.defined() && !model_input.kv_cache_group_types.is_cuda()) {
+        model_input.kv_cache_group_types_host = model_input.kv_cache_group_types;
     }
     publishModelInputCoreTensorsToCuda(model_input, host_holder);
     model_input.lm_output_indexes = buildLmOutputIndexesOnCuda(model_input, stream_groups);

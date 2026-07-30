@@ -39,15 +39,27 @@ Optional environment variables:
   KIMI_K3_BAZEL_EXTERNAL_ROOT            defaults to this checkout's
                                          bazel-github-opensource/external
   KIMI_K3_RUN_ROOT                      defaults below TMPDIR
-  KIMI_K3_TMPDIR                        defaults to KIMI_K3_RUN_ROOT/tmp
+  KIMI_K3_TMPDIR                        defaults to a short role-specific
+                                         path below /tmp
   KIMI_K3_SERVICE_ID                    defaults to kimi-k3-pd
   KIMI_K3_MAX_SEQ_LEN                   defaults to 16384
   KIMI_K3_KV_CACHE_MEM_MB               defaults to 1024
   KIMI_K3_DECODE_CPU_OFFLOAD_START      defaults to auto; integer or none
-  KIMI_K3_KDA_BACKEND                   defaults to kernel
-  KIMI_K3_KDA_FLA37_PRECOMPILED_DIR     required for fla37_precompiled
+  KIMI_K3_EXECUTION_MODE                defaults to optimized; one of:
+                                         optimized, accuracy
+  KIMI_K3_USE_HOST_METADATA             independent optimization switch
+  KIMI_K3_SP_MOE                        independent optimization switch
+  KIMI_K3_KDA_BACKEND                   defaults to kernel; accuracy Decode
+                                         defaults to fla37_precompiled
+  KIMI_K3_MOE_BACKEND                   defaults to deepep
+  KIMI_K3_PERF_FUSIONS                  independent optimization switch
+  KIMI_K3_PERF_MODE                     strict performance-path validation only
+  KIMI_K3_KDA_FLA37_PRECOMPILED_DIR     defaults to the bundled SM103 image
+                                         for fla37_precompiled
   KIMI_K3_DEEP_EP_PYTHONPATH            optional DeepEP site-packages overlay
-  KIMI_K3_ACCURACY_MODE                 defaults to native_mla; one of:
+  KIMI_K3_OPERATOR_PYTHONPATH           optional FlashKDA/DeepGEMM overlay;
+                                         prepended before Bazel site-packages
+  KIMI_K3_ACCURACY_MODE                 defaults to native; one of:
                                          canonical, native_mla, native
   KIMI_K3_ACCURACY_RETAIN_FULL_TP_WEIGHTS
                                          defaults to 0 in this service launcher
@@ -132,6 +144,11 @@ if [[ -n "${KIMI_K3_DEEP_EP_PYTHONPATH:-}" ]]; then
         || die "KIMI_K3_DEEP_EP_PYTHONPATH is not a directory"
     runtime_pythonpath="${KIMI_K3_DEEP_EP_PYTHONPATH}:${runtime_pythonpath}"
 fi
+if [[ -n "${KIMI_K3_OPERATOR_PYTHONPATH:-}" ]]; then
+    [[ -d "${KIMI_K3_OPERATOR_PYTHONPATH}" ]] \
+        || die "KIMI_K3_OPERATOR_PYTHONPATH is not a directory"
+    runtime_pythonpath="${KIMI_K3_OPERATOR_PYTHONPATH}:${runtime_pythonpath}"
+fi
 export PYTHONPATH="${runtime_pythonpath}${PYTHONPATH:+:${PYTHONPATH}}"
 
 torch_libs="$(
@@ -145,20 +162,82 @@ export LD_LIBRARY_PATH="${rtp_llm_libs}:${torch_libs}${LD_LIBRARY_PATH:+:${LD_LI
 
 service_id="${KIMI_K3_SERVICE_ID:-kimi-k3-pd}"
 run_root="${KIMI_K3_RUN_ROOT:-${TMPDIR:-/tmp}/${service_id}}"
-runtime_tmpdir="${KIMI_K3_TMPDIR:-${run_root}/tmp}"
+# CpuTpBroadcaster appends a long per-rank UDS name.  Keep the default runtime
+# path short even when RUN_ROOT is an archival path.
+runtime_tmpdir="${KIMI_K3_TMPDIR:-/tmp/${service_id}-${role,,}}"
 max_seq_len="${KIMI_K3_MAX_SEQ_LEN:-16384}"
-kv_cache_mem_mb="${KIMI_K3_KV_CACHE_MEM_MB:-1024}"
-kda_backend="${KIMI_K3_KDA_BACKEND:-kernel}"
-accuracy_mode="${KIMI_K3_ACCURACY_MODE:-native_mla}"
+execution_mode="${KIMI_K3_EXECUTION_MODE:-optimized}"
+case "${execution_mode}" in
+    optimized)
+        default_accuracy_mode=native
+        if [[ "${role}" == "DECODE" ]]; then
+            default_kda_backend=fla37_precompiled
+        else
+            default_kda_backend=kernel
+        fi
+        default_kv_cache_mem_mb=1024
+        default_decode_offload_start=auto
+        default_use_host_metadata=1
+        ;;
+    accuracy)
+        # The validated 93-layer baseline is fully native TP/EP/MLA with the
+        # FLA 0.5.1 recurrent image on Decode.  canonical TP/EP is retained as
+        # an explicit diagnostic mode, but gathering full 93-layer weights can
+        # exceed one B300.
+        default_accuracy_mode=native
+        if [[ "${role}" == "DECODE" ]]; then
+            default_kda_backend=fla37_precompiled
+        else
+            default_kda_backend=kernel
+        fi
+        # These are capacity choices only.  Keep the validated mathematical
+        # path while retaining enough margin for eight concurrent
+        # fastsafetensors loaders on one B300 node.
+        default_kv_cache_mem_mb=1024
+        default_decode_offload_start=auto
+        default_use_host_metadata=0
+        ;;
+    *) die "unsupported KIMI_K3_EXECUTION_MODE=${execution_mode}" ;;
+esac
+
+use_host_metadata="${KIMI_K3_USE_HOST_METADATA:-${default_use_host_metadata}}"
+sp_moe="${KIMI_K3_SP_MOE:-0}"
+kda_backend="${KIMI_K3_KDA_BACKEND:-${default_kda_backend}}"
+moe_backend="${KIMI_K3_MOE_BACKEND:-deepep}"
+perf_fusions="${KIMI_K3_PERF_FUSIONS:-0}"
+perf_mode="${KIMI_K3_PERF_MODE:-0}"
+accuracy_mode="${KIMI_K3_ACCURACY_MODE:-${default_accuracy_mode}}"
+kv_cache_mem_mb="${KIMI_K3_KV_CACHE_MEM_MB:-${default_kv_cache_mem_mb}}"
+kda_fla37_precompiled_dir="${KIMI_K3_KDA_FLA37_PRECOMPILED_DIR:-${repo_root}/example/kimi_k3_pd/fla37-sm103}"
+
+for flag_name in use_host_metadata sp_moe perf_fusions perf_mode; do
+    flag_value="${!flag_name}"
+    [[ "${flag_value}" == "0" || "${flag_value}" == "1" ]] \
+        || die "${flag_name} must resolve to 0 or 1, got ${flag_value}"
+done
 
 case "${kda_backend}" in
     kernel | reference) ;;
+    flash_kda)
+        [[ "${role}" == "PREFILL" ]] \
+            || die "KIMI_K3_KDA_BACKEND=flash_kda is Prefill-only"
+        ;;
     fla37_precompiled)
-        : "${KIMI_K3_KDA_FLA37_PRECOMPILED_DIR:?required by fla37_precompiled}"
-        [[ -d "${KIMI_K3_KDA_FLA37_PRECOMPILED_DIR}" ]] \
+        [[ -d "${kda_fla37_precompiled_dir}" ]] \
             || die "KIMI_K3_KDA_FLA37_PRECOMPILED_DIR is not a directory"
         ;;
     *) die "unsupported KIMI_K3_KDA_BACKEND=${kda_backend}" ;;
+esac
+
+case "${moe_backend}" in
+    deepep) ;;
+    deep_gemm_mega)
+        [[ "${role}" == "PREFILL" ]] \
+            || die "KIMI_K3_MOE_BACKEND=deep_gemm_mega is Prefill-only"
+        [[ -n "${KIMI_K3_OPERATOR_PYTHONPATH:-}" ]] \
+            || die "deep_gemm_mega requires KIMI_K3_OPERATOR_PYTHONPATH"
+        ;;
+    *) die "unsupported KIMI_K3_MOE_BACKEND=${moe_backend}" ;;
 esac
 
 case "${accuracy_mode}" in
@@ -222,7 +301,22 @@ export LOAD_METHOD="${LOAD_METHOD:-fastsafetensors}"
 export REMOTE_RPC_SERVER_IP="${remote_endpoint}"
 export MODEL_SERVICE_CONFIG="${model_service_config}"
 export KIMI_K3_KDA_BACKEND="${kda_backend}"
+export KIMI_K3_MOE_BACKEND="${moe_backend}"
 export KIMI_K3_MLA_BACKEND=kernel
+export KIMI_K3_USE_HOST_METADATA="${use_host_metadata}"
+export KIMI_K3_SP_MOE="${sp_moe}"
+export KIMI_K3_PERF_FUSIONS="${perf_fusions}"
+export KIMI_K3_PERF_MODE="${perf_mode}"
+export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
+
+unset KIMI_K3_KDA_FLA37_PRECOMPILED_DIR
+unset KIMI_K3_KDA_CHUNK_STATE_BACKEND
+if [[ "${kda_backend}" == "fla37_precompiled" ]]; then
+    export KIMI_K3_KDA_FLA37_PRECOMPILED_DIR="${kda_fla37_precompiled_dir}"
+fi
+if [[ "${role}" == "PREFILL" && "${kda_backend}" == "kernel" ]]; then
+    export KIMI_K3_KDA_CHUNK_STATE_BACKEND=triton
+fi
 
 export KIMI_K3_ACCURACY_CANONICAL_TP="${canonical_tp}"
 export KIMI_K3_ACCURACY_CANONICAL_EP="${canonical_ep}"
@@ -231,17 +325,18 @@ export KIMI_K3_ACCURACY_CANONICAL_MLA="${canonical_mla}"
 # weights and can OOM on its first request. Re-gathering preserves the canonical
 # GEMM result while keeping the one-request accuracy service within memory.
 export KIMI_K3_ACCURACY_RETAIN_FULL_TP_WEIGHTS="${KIMI_K3_ACCURACY_RETAIN_FULL_TP_WEIGHTS:-0}"
-unset KIMI_K3_ACCURACY_TRACE_DIR
-unset KIMI_K3_ACCURACY_TRACE_MODE
-unset KIMI_K3_ACCURACY_TRACE_ENABLE_FILE
-unset KIMI_K3_ACCURACY_TRACE_FULL_ROUTER
-unset KIMI_K3_ACCURACY_TRACE_FORWARD_INDEX
-unset KIMI_K3_ACCURACY_TRACE_INPUT_TOKEN_ID
-unset KIMI_K3_ACCURACY_TRACE_RANK
+if [[ -z "${KIMI_K3_ACCURACY_TRACE_DIR:-}" ]]; then
+    unset KIMI_K3_ACCURACY_TRACE_MODE
+    unset KIMI_K3_ACCURACY_TRACE_ENABLE_FILE
+    unset KIMI_K3_ACCURACY_TRACE_FULL_ROUTER
+    unset KIMI_K3_ACCURACY_TRACE_FORWARD_INDEX
+    unset KIMI_K3_ACCURACY_TRACE_INPUT_TOKEN_ID
+    unset KIMI_K3_ACCURACY_TRACE_RANK
+fi
 
 unset KIMI_K3_CPU_OFFLOAD_EXPERT_LAYER_START
 if [[ "${role}" == "DECODE" ]]; then
-    offload_start="${KIMI_K3_DECODE_CPU_OFFLOAD_START:-auto}"
+    offload_start="${KIMI_K3_DECODE_CPU_OFFLOAD_START:-${default_decode_offload_start}}"
     if [[ "${offload_start}" == "auto" ]]; then
         num_hidden_layers="$(
             "${python_bin}" -c '
@@ -266,6 +361,10 @@ print(config["num_hidden_layers"])
             || die "KIMI_K3_DECODE_CPU_OFFLOAD_START must be auto, an integer, or none"
         export KIMI_K3_CPU_OFFLOAD_EXPERT_LAYER_START="${offload_start}"
     fi
+    if [[ "${execution_mode}" == "accuracy" ]]; then
+        export ACCL_DISPATCH_NUM_WARP_GROUPS="${ACCL_DISPATCH_NUM_WARP_GROUPS:-2}"
+        export ACCL_COMBINE_NUM_WARP_GROUPS="${ACCL_COMBINE_NUM_WARP_GROUPS:-2}"
+    fi
 fi
 
 mkdir -p "${LOG_PATH}" "${run_root}/work/${role,,}" "${TMPDIR}"
@@ -276,7 +375,14 @@ echo "  remote endpoint: ${remote_endpoint}"
 echo "  checkpoint:      ${CHECKPOINT_PATH}"
 echo "  topology:        TP${tp_size}/DP${dp_size}/EP8"
 echo "  load method:     ${LOAD_METHOD}"
+echo "  execution mode:  ${execution_mode}"
 echo "  accuracy mode:   ${accuracy_mode}"
+echo "  host metadata:   ${use_host_metadata}"
+echo "  SP MoE:          ${sp_moe}"
+echo "  KDA backend:     ${kda_backend}"
+echo "  MoE backend:     ${moe_backend}"
+echo "  perf fusions:    ${perf_fusions}"
+echo "  perf validation: ${perf_mode}"
 echo "  runtime tmp:     ${TMPDIR}"
 echo "  logs:            ${LOG_PATH}"
 

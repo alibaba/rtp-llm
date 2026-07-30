@@ -1,3 +1,4 @@
+import os
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -54,6 +55,22 @@ class MlaFlashInferImplBase(MlaImplBase):
         warmup_flashinfer_python()
         self.seq_size_per_block = seq_size_per_block
         self.fmha_impl: Any = fmha_impl
+        if (
+            self.fmha_impl is not None
+            and os.environ.get("KIMI_K3_USE_HOST_METADATA", "0") == "1"
+        ):
+            input_host = getattr(attn_inputs, "input_lengths_host", None)
+            prefix_host = getattr(attn_inputs, "prefix_lengths_host", None)
+            if input_host is not None and input_host.numel():
+                input_values = [int(value) for value in input_host.tolist()]
+                prefix_values = (
+                    [int(value) for value in prefix_host.tolist()]
+                    if prefix_host is not None and prefix_host.numel()
+                    else [0] * len(input_values)
+                )
+                self.fmha_impl.total_kv_lens_hint = sum(input_values) + sum(
+                    prefix_values
+                )
         self.fmha_params = None
         self.rope_params = None
         self.rope_impl = rope_impl
@@ -78,10 +95,41 @@ class MlaFlashInferImplBase(MlaImplBase):
             self.fmha_params is not None
         ), "fmha_params should be initialized in __init__"
         check_attention_inputs(attn_inputs)
+        use_host_metadata = os.environ.get("KIMI_K3_USE_HOST_METADATA", "0") == "1"
+        prefix_lengths = (
+            getattr(attn_inputs, "prefix_lengths_host", None)
+            if use_host_metadata
+            else None
+        )
+        sequence_lengths = (
+            getattr(attn_inputs, "sequence_lengths_host", None)
+            if use_host_metadata
+            else None
+        )
+        input_lengths = (
+            getattr(attn_inputs, "input_lengths_host", None)
+            if use_host_metadata
+            else None
+        )
+        prefix_lengths = (
+            prefix_lengths
+            if prefix_lengths is not None and prefix_lengths.numel()
+            else attn_inputs.prefix_lengths
+        )
+        sequence_lengths = (
+            sequence_lengths
+            if sequence_lengths is not None
+            else attn_inputs.sequence_lengths
+        )
+        input_lengths = (
+            input_lengths
+            if input_lengths is not None and input_lengths.numel()
+            else attn_inputs.input_lengths
+        )
         self.fmha_params.fill_params(
-            attn_inputs.prefix_lengths,
-            attn_inputs.sequence_lengths,
-            attn_inputs.input_lengths,
+            prefix_lengths,
+            sequence_lengths,
+            input_lengths,
             attn_inputs.kv_cache_kernel_block_id_host,
             self.seq_size_per_block,
             forbid_realloc,
@@ -172,15 +220,31 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
             parallelism_config,
         )
         self.has_reuse_cache = False
-        # Type narrowing: check and assign
-        if attn_inputs.prefix_lengths is not None:
-            max_prefix_val = attn_inputs.prefix_lengths.max().item()  # type: ignore
-            self.has_reuse_cache = max_prefix_val > 0
+        use_host_metadata = os.environ.get("KIMI_K3_USE_HOST_METADATA", "0") == "1"
+        prefix_host = (
+            getattr(attn_inputs, "prefix_lengths_host", None)
+            if use_host_metadata
+            else None
+        )
+        if prefix_host is not None and prefix_host.numel():
+            self.has_reuse_cache = max(int(v) for v in prefix_host.tolist()) > 0
+        elif attn_inputs.prefix_lengths is not None:
+            # Compatibility fallback for older bindings.
+            self.has_reuse_cache = bool(attn_inputs.prefix_lengths.max().item() > 0)
 
         self.absorb_opt_len = (
             fmha_config.absorb_opt_len if fmha_config is not None else 1024
         )
-        q_len = attn_inputs.input_lengths.sum().item()
+        input_host = (
+            getattr(attn_inputs, "input_lengths_host", None)
+            if use_host_metadata
+            else None
+        )
+        q_len = (
+            sum(int(v) for v in input_host.tolist())
+            if input_host is not None and input_host.numel()
+            else attn_inputs.input_lengths.sum().item()
+        )
         self.absorb_fmha: Optional[MlaFlashInferDecodeOp] = None
         if (
             q_len < self.absorb_opt_len

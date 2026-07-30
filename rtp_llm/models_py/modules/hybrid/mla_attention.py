@@ -1,3 +1,4 @@
+from contextlib import nullcontext
 from typing import Any, Dict, Optional
 
 import torch
@@ -135,6 +136,28 @@ class MlaAttention(nn.Module):
         """
         return attn_output
 
+    def _project_output(self, attn_output: torch.Tensor) -> torch.Tensor:
+        """Apply the row-parallel output projection and TP reduction.
+
+        This hook preserves the existing AllReduce behavior by default. Hybrid
+        attention subclasses can override only this boundary when their
+        layer-to-layer activation layout uses Sequence Parallel.
+        """
+
+        attn_output = self.o_proj(attn_output)
+        if self.parallelism_config.get_attn_tp_size() > 1:
+            attn_output = all_reduce(attn_output, group=Group.TP)
+        return attn_output
+
+    def _profile_stage(self, stage: str, tensor: torch.Tensor):
+        prefix = getattr(self, "_perf_profile_prefix", None)
+        if prefix is None:
+            return nullcontext()
+        shape = "x".join(str(dim) for dim in tensor.shape)
+        return torch.autograd.profiler.record_function(
+            f"{prefix}.{stage}[shape={shape},dtype={tensor.dtype}]"
+        )
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -144,7 +167,8 @@ class MlaAttention(nn.Module):
         input_shape = hidden_states.shape[:-1]
         q_c = None
         if self.q_lora_rank > 0:
-            fused_qkv = self.fused_qkv_a_proj(hidden_states)
+            with self._profile_stage("q_kv_down_projection", hidden_states):
+                fused_qkv = self.fused_qkv_a_proj(hidden_states)
             kv_offset = self.q_lora_rank
             q, compressed_kv = torch.split(
                 fused_qkv,
@@ -154,10 +178,13 @@ class MlaAttention(nn.Module):
                 ],
                 dim=-1,
             )
-            q_c = self.q_a_layernorm(q.contiguous())
-            q = self.q_b_proj(q_c)
+            with self._profile_stage("q_latent_rmsnorm", q):
+                q_c = self.q_a_layernorm(q.contiguous())
+            with self._profile_stage("q_up_projection_local_heads", q_c):
+                q = self.q_b_proj(q_c)
         else:
-            fused_qkv = self.fused_qkv_proj(hidden_states)
+            with self._profile_stage("q_kv_projection", hidden_states):
+                fused_qkv = self.fused_qkv_proj(hidden_states)
             kv_offset = self.num_heads * self.attn_config.size_per_head
             q, compressed_kv = torch.split(
                 fused_qkv,
@@ -173,14 +200,17 @@ class MlaAttention(nn.Module):
             compressed_kv, [self.kv_lora_rank, self.qk_rope_head_dim], dim=-1
         )
 
-        compressed_kv = self.kv_a_layernorm(compressed_kv.contiguous())
+        with self._profile_stage("kv_latent_rmsnorm", compressed_kv):
+            compressed_kv = self.kv_a_layernorm(compressed_kv.contiguous())
 
-        topk_indices = self._run_sparse_indexer(
-            hidden_states, q_c, q_view, kv_cache, fmha_impl
-        )
-        attn_output = fmha_impl.forward(
-            q_view, compressed_kv, k_pe, kv_cache, self.layer_idx, topk_indices
-        )
+        with self._profile_stage("sparse_indexer_or_dense_noop", q_view):
+            topk_indices = self._run_sparse_indexer(
+                hidden_states, q_c, q_view, kv_cache, fmha_impl
+            )
+        with self._profile_stage("native_mla_and_cache_pipeline", q_view):
+            attn_output = fmha_impl.forward(
+                q_view, compressed_kv, k_pe, kv_cache, self.layer_idx, topk_indices
+            )
 
         if attn_output is not None:
             attn_output = attn_output.reshape(*input_shape, -1).contiguous()
@@ -190,8 +220,7 @@ class MlaAttention(nn.Module):
                 dtype=hidden_states.dtype,
                 device=hidden_states.device,
             )
-        attn_output = self._apply_output_gate(attn_output, hidden_states)
-        attn_output = self.o_proj(attn_output)
-        if self.parallelism_config.get_attn_tp_size() > 1:
-            attn_output = all_reduce(attn_output, group=Group.TP)
-        return attn_output
+        with self._profile_stage("sigmoid_output_gate", attn_output):
+            attn_output = self._apply_output_gate(attn_output, hidden_states)
+        with self._profile_stage("o_projection_then_token_reduce_scatter", attn_output):
+            return self._project_output(attn_output)

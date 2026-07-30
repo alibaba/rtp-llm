@@ -687,7 +687,9 @@ def broadcast(tensor: torch.Tensor, src: int, group: Group) -> None:
     torch.distributed.broadcast(tensor, src, group=process_group)
 
 
-def all_reduce(tensor: torch.Tensor, group: Group, *, inplace: bool = False) -> torch.Tensor:
+def all_reduce(
+    tensor: torch.Tensor, group: Group, *, inplace: bool = False
+) -> torch.Tensor:
     """All-reduce a tensor across all ranks in the group.
 
     Args:
@@ -764,6 +766,38 @@ def all_gather(tensor: torch.Tensor, group: Group) -> torch.Tensor:
     # return torch.cat(tensor_list, dim=0)
 
 
+def reduce_scatter(tensor: torch.Tensor, group: Group) -> torch.Tensor:
+    """Reduce and scatter equal contiguous dim-0 shards.
+
+    Kimi K3 Sequence Parallel uses this after the attention output projection:
+    every TP rank contributes a partial ``[tokens, hidden]`` tensor and keeps
+    only its contiguous ``[tokens / tp, hidden]`` rows.
+    """
+
+    process_group = _get_group(group)
+    world_size = torch.distributed.get_world_size(process_group)
+    if world_size <= 1:
+        return tensor
+    if tensor.ndim == 0 or tensor.shape[0] % world_size:
+        raise ValueError(
+            "reduce_scatter requires dim0 divisible by group size: "
+            f"shape={tuple(tensor.shape)}, world_size={world_size}"
+        )
+    send = tensor.contiguous()
+    output = torch.empty(
+        [send.shape[0] // world_size] + list(send.shape[1:]),
+        dtype=send.dtype,
+        device=send.device,
+    )
+    torch.distributed.reduce_scatter_tensor(
+        output,
+        send,
+        op=torch.distributed.ReduceOp.SUM,
+        group=process_group,
+    )
+    return output
+
+
 def barrier(group: Group) -> None:
     """Barrier all ranks in the group.
 
@@ -785,5 +819,6 @@ __all__ = [
     "broadcast",
     "all_reduce",
     "all_gather",
+    "reduce_scatter",
     "barrier",
 ]

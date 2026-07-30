@@ -179,7 +179,10 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         if (host_tensor.dtype() != torch::kInt32) {
             host_tensor = host_tensor.to(torch::kInt32);
         }
-        host_tensor = host_tensor.contiguous().pin_memory();
+        host_tensor = host_tensor.contiguous();
+        if (!host_tensor.is_pinned()) {
+            host_tensor = host_tensor.pin_memory();
+        }
         buffer_holder_.hold_host(host_tensor);
         return host_tensor;
     };
@@ -200,17 +203,25 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
 
     // Keep all length tensors device-resident on the model boundary. Legacy CPU
     // consumers must opt in to an explicit .cpu() with TODO(async) at the call site.
-    py_attn_inputs.prefix_lengths   = prefix_lengths;
-    py_attn_inputs.sequence_lengths = sequence_lengths;
-    py_attn_inputs.input_lengths    = input_lengths;
+    py_attn_inputs.prefix_lengths        = prefix_lengths;
+    py_attn_inputs.sequence_lengths      = sequence_lengths;
+    py_attn_inputs.input_lengths         = input_lengths;
+    py_attn_inputs.prefix_lengths_host   = pinned_host_i32(inputs.prefix_lengths_host_for_log);
+    py_attn_inputs.sequence_lengths_host = pinned_host_i32(inputs.sequence_lengths_host_for_log);
+    py_attn_inputs.input_lengths_host    = pinned_host_i32(inputs.input_lengths_host_for_log);
 
     if (inputs.kv_cache_kernel_block_id.defined() && inputs.kv_cache_kernel_block_id.dim() != 3) {
         RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs(kv_kernel_block_host)");
-        py_attn_inputs.kv_cache_kernel_block_id_host = pinned_host_i32(inputs.kv_cache_kernel_block_id);
+        const auto& kernel_host                      = inputs.kv_cache_kernel_block_id_host.defined() ?
+                                                           inputs.kv_cache_kernel_block_id_host :
+                                                           inputs.kv_cache_kernel_block_id;
+        py_attn_inputs.kv_cache_kernel_block_id_host = pinned_host_i32(kernel_host);
     }
     if (inputs.kv_cache_block_id.defined()) {
         RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs(kv_block_host)");
-        py_attn_inputs.kv_cache_block_id_host = pinned_host_i32(inputs.kv_cache_block_id);
+        const auto& block_host =
+            inputs.kv_cache_block_id_host.defined() ? inputs.kv_cache_block_id_host : inputs.kv_cache_block_id;
+        py_attn_inputs.kv_cache_block_id_host = pinned_host_i32(block_host);
         py_attn_inputs.kv_cache_block_id_host_by_group.clear();
         if (py_attn_inputs.kv_cache_block_id_host.dim() == 3) {
             const size_t group_count = py_attn_inputs.kv_cache_block_id_host.size(0);
@@ -222,7 +233,11 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         }
     }
     if (inputs.kv_cache_layer_to_group.defined()) {
-        py_attn_inputs.kv_cache_layer_to_group = inputs.kv_cache_layer_to_group;
+        py_attn_inputs.kv_cache_layer_to_group      = inputs.kv_cache_layer_to_group;
+        const auto& layer_map_host                  = inputs.kv_cache_layer_to_group_host.defined() ?
+                                                          inputs.kv_cache_layer_to_group_host :
+                                                          inputs.kv_cache_layer_to_group;
+        py_attn_inputs.kv_cache_layer_to_group_host = pinned_host_i32(layer_map_host);
     }
 
     // Calculate cu_seqlens
@@ -266,6 +281,17 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         py_attn_inputs.cu_seqlens              = torch::empty({batch_size + 1}, cuda_i32);
         py_attn_inputs.cu_kv_seqlens           = torch::empty({batch_size + 1}, cuda_i32);
         py_attn_inputs.padding_offset          = torch::empty({py_attn_inputs.total_tokens}, cuda_i32);
+        if (py_attn_inputs.input_lengths_host.defined()) {
+            const auto pinned_i32          = torch::TensorOptions(torch::kInt32).pinned_memory(true);
+            py_attn_inputs.cu_seqlens_host = torch::empty({batch_size + 1}, pinned_i32);
+            auto* cu_host                  = py_attn_inputs.cu_seqlens_host.data_ptr<int32_t>();
+            auto* lengths_host             = py_attn_inputs.input_lengths_host.data_ptr<int32_t>();
+            cu_host[0]                     = 0;
+            for (int i = 0; i < batch_size; ++i) {
+                cu_host[i + 1] = cu_host[i] + lengths_host[i];
+            }
+            buffer_holder_.hold_host(py_attn_inputs.cu_seqlens_host);
+        }
 #if USING_CUDA
         invokeBuildAttentionInputMetadata(py_attn_inputs.input_lengths,
                                           py_attn_inputs.prefix_lengths,
@@ -354,7 +380,9 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
     // Gate host materialization: MHA reads device fields only, while MLA/
     // SparseMLA/ROCm/CP paths still consume the singular host block table.
     if (description_.attention_conf.use_mla) {
-        torch::Tensor all_groups = inputs.kv_cache_kernel_block_id;
+        torch::Tensor all_groups = inputs.kv_cache_kernel_block_id_host.defined() ?
+                                       inputs.kv_cache_kernel_block_id_host :
+                                       inputs.kv_cache_kernel_block_id;
         if (all_groups.device().is_cuda()) {
             all_groups = all_groups.cpu();
         }
@@ -452,8 +480,12 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             buffer_holder_.hold_host(host);
             return host;
         };
-        auto input_lengths_host  = async_to_pinned_host(inputs.input_lengths);
-        auto prefix_lengths_host = async_to_pinned_host(inputs.prefix_lengths);
+        auto input_lengths_host  = inputs.input_lengths_host_for_log.defined() ?
+                                       inputs.input_lengths_host_for_log :
+                                       async_to_pinned_host(inputs.input_lengths);
+        auto prefix_lengths_host = inputs.prefix_lengths_host_for_log.defined() ?
+                                       inputs.prefix_lengths_host_for_log :
+                                       async_to_pinned_host(inputs.prefix_lengths);
 
         torch::Tensor kv_cache_layer_to_group =
             inputs.kv_cache_layer_to_group.defined() ? inputs.kv_cache_layer_to_group : torch::Tensor();
