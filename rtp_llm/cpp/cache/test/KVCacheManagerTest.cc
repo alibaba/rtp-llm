@@ -133,7 +133,6 @@ static void setGroupBlockNumsForTest(CacheConfig& config, const std::unordered_m
         group.block_num = it->second;
     }
     config.setTopology(std::move(groups), config.topology().layers());
-    config.group_block_layout_initialized = true;
 }
 
 static CacheConfig makeCompactDSV4ManagerConfig(uint32_t block_num = 16) {
@@ -302,14 +301,14 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
     EXPECT_EQ(cache_manager->freeBlocksNum(), 0);
 }
 
-TEST_F(KVCacheManagerTest, InitRejectsSingleLinearGroup) {
+TEST_F(KVCacheManagerTest, InitAcceptsSingleLinearGroup) {
     auto cache_config = makeSimpleLinearCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_BF16);
 
     auto cache_manager = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false);
-    EXPECT_THROW(cache_manager->init(), std::runtime_error);
+    ASSERT_TRUE(cache_manager->init());
     ASSERT_NE(cache_manager->allocator_, nullptr);
-    EXPECT_EQ(cache_manager->allocator_->getBlockPool(), nullptr);
+    EXPECT_NE(cache_manager->allocator_->blockPool("linear"), nullptr);
 }
 
 TEST_F(KVCacheManagerTest, InitAcceptsFullAndLinearGroups) {
@@ -341,11 +340,11 @@ TEST_F(KVCacheManagerTest, DSV4IndependentPoolsUseGpuBacking) {
 
         auto allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(cache_manager->allocator_);
         ASSERT_NE(allocator, nullptr);
-        ASSERT_EQ(allocator->groupBlockPools().size(), static_cast<size_t>(config.groupNums()));
+        ASSERT_EQ(allocator->poolCount(), static_cast<size_t>(config.groupNums()));
 
-        for (const auto& [tag, pool] : allocator->groupBlockPools()) {
-            EXPECT_EQ(pool->where(), MemoryType::MEMORY_GPU)
-                << "role=" << static_cast<int>(role_type) << " tag=" << tag;
+        for (const auto& group : config.topology().groups()) {
+            EXPECT_EQ(allocator->blockPool(group.tag)->where(), MemoryType::MEMORY_GPU)
+                << "role=" << static_cast<int>(role_type) << " tag=" << group.tag;
         }
     };
 
@@ -1058,13 +1057,13 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfo_UsesSmallestHybridPoolTokenCapacity) {
     auto hybrid_allocator = std::dynamic_pointer_cast<HybridPoolKVCacheAllocator>(kv_cache_manager->allocator_);
     ASSERT_NE(hybrid_allocator, nullptr);
 
-    size_t      expected_total_tokens     = std::numeric_limits<size_t>::max();
-    size_t      expected_available_tokens = std::numeric_limits<size_t>::max();
-    const auto& pools                     = hybrid_allocator->groupBlockPools();
-    ASSERT_GT(pools.size(), 1u);
+    size_t expected_total_tokens     = std::numeric_limits<size_t>::max();
+    size_t expected_available_tokens = std::numeric_limits<size_t>::max();
+    ASSERT_GT(hybrid_allocator->poolCount(), 1u);
 
-    for (const auto& [tag, pool] : pools) {
-        ASSERT_NE(pool, nullptr) << "tag=" << tag;
+    for (const auto& group : cache_config.topology().groups()) {
+        const auto pool = hybrid_allocator->blockPool(group.tag);
+        ASSERT_NE(pool, nullptr) << "tag=" << group.tag;
         const size_t seq_size     = cache_config.seq_size_per_block;
         expected_total_tokens     = std::min(expected_total_tokens, pool->totalBlocksNum() * seq_size);
         expected_available_tokens = std::min(expected_available_tokens, pool->availableBlocksNum() * seq_size);
@@ -1092,12 +1091,12 @@ TEST_F(KVCacheManagerTest, MaxAvailableTokensNumUsesCPVirtualBlockSizeForHybridP
     kv_cache_manager->cp_slot_mapper_ = cp_slot_mapper;
     hybrid_allocator->setCPSlotMapper(cp_slot_mapper);
 
-    size_t      expected_logical_capacity = std::numeric_limits<size_t>::max();
-    const auto& pools                     = hybrid_allocator->groupBlockPools();
-    for (const auto& [tag, pool] : pools) {
-        if (cache_config.typeForGroup(tag) != CacheGroupType::FULL) {
+    size_t expected_logical_capacity = std::numeric_limits<size_t>::max();
+    for (const auto& group : cache_config.topology().groups()) {
+        if (group.policy.group_type != CacheGroupType::FULL) {
             continue;
         }
+        const auto pool = hybrid_allocator->blockPool(group.tag);
         expected_logical_capacity =
             std::min(expected_logical_capacity,
                      pool->totalBlocksNum() * static_cast<size_t>(cache_config.seq_size_per_block * 2));

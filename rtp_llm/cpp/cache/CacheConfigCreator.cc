@@ -52,11 +52,6 @@ bool blockNumFitsBudget(uint32_t block_num, size_t total_budget_bytes, const KVC
 
 KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
     KVCacheBlockBudget budget;
-    if (!config.use_independent_block_pools) {
-        budget.paged_block_bytes = config.block_size_bytes;
-        return budget;
-    }
-
     budget.explicit_pool_reserve_bytes = config.explicitly_sized_pool_reserve_bytes;
     for (const auto& group : config.topology().groups()) {
         if (config.usesExplicitIndependentBlocks(group.tag)) {
@@ -295,26 +290,11 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     config.explicitly_sized_pool_reserve_bytes = explicit_pool_reserve;
 
     const uint32_t main_layer_num = score_config.layer_num;
-    const uint32_t mtp_layer_num  = propose_config.layer_num;
 
     config.mtp_sub_configs.clear();
     config.mtp_sub_configs.reserve(num_mtp_modules);
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(total_layer_num), 0);
-
-    const size_t score_layers = static_cast<size_t>(main_layer_num);
-    RTP_LLM_CHECK_WITH_INFO(score_config.layer_to_block_stride_bytes.size() == score_layers,
-                            "score_config.layer_to_block_stride_bytes size mismatch, got=%zu need=%zu",
-                            score_config.layer_to_block_stride_bytes.size(),
-                            score_layers);
-    for (size_t l = 0; l < score_layers; ++l) {
-        config.layer_to_block_stride_bytes[l] = score_config.layer_to_block_stride_bytes[l];
-    }
 
     for (int m = 0; m < num_mtp_modules; ++m) {
-        RTP_LLM_CHECK_WITH_INFO(propose_config.layer_to_block_stride_bytes.size() == static_cast<size_t>(mtp_layer_num),
-                                "sub_cfg.layer_to_block_stride_bytes size mismatch, got=%zu need=%u",
-                                propose_config.layer_to_block_stride_bytes.size(),
-                                mtp_layer_num);
         auto sub_cfg = config.mergeMTPModule(propose_config, m, main_layer_num);
         sub_cfg->finalizeBlockNums(static_cast<uint32_t>(block_num), runtime_config);
         config.mtp_sub_configs.push_back(sub_cfg);

@@ -152,7 +152,7 @@ protected:
         cache_config.kv_block_stride_bytes = spec->block_size_bytes();
         initializeSingleGroup(cache_config, spec);
 
-        auto pool_cfg   = BlockPoolConfigHelper::createConfig(cache_config);
+        auto pool_cfg   = BlockPoolConfigHelper::createConfigForGroup(cache_config, "default");
         auto layout_cfg = pool_cfg.memory_layouts[0];
 
         layout_cfg.enable_kv_scale          = false;
@@ -258,7 +258,7 @@ TEST_F(MemoryLayoutStrategyTest, InitializationWithScaleTensor) {
     cache_config.kv_scale_stride_bytes = spec->scale_block_size_bytes();
     initializeSingleGroup(cache_config, spec);
 
-    auto pool_cfg = BlockPoolConfigHelper::createConfig(cache_config);
+    auto pool_cfg = BlockPoolConfigHelper::createConfigForGroup(cache_config, "default");
     auto config   = pool_cfg.memory_layouts[0];  // keep enable_kv_scale=true
 
     auto  kv_cache_tensor = torch::zeros({static_cast<int64_t>(config.kv_block_pool_size_bytes)}, torch::kInt8);
@@ -423,7 +423,7 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadFp16UsesBy
     cache_config.kv_block_stride_bytes     = spec->block_size_bytes();
     initializeSingleGroup(cache_config, spec);
 
-    auto pool_cfg = BlockPoolConfigHelper::createConfig(cache_config);
+    auto pool_cfg = BlockPoolConfigHelper::createConfigForGroup(cache_config, "default");
     auto config   = pool_cfg.memory_layouts[0];
 
     auto options = torch::TensorOptions().dtype(torch::kInt8).device(torch::kCPU);
@@ -499,7 +499,7 @@ TEST_F(MemoryLayoutStrategyTest, ConvertIndexToBufferPartitionedByHeadWithScale)
     cache_config.kv_scale_stride_bytes     = spec->scale_block_size_bytes();
     initializeSingleGroup(cache_config, spec);
 
-    auto pool_cfg = BlockPoolConfigHelper::createConfig(cache_config);
+    auto pool_cfg = BlockPoolConfigHelper::createConfigForGroup(cache_config, "default");
     auto config   = pool_cfg.memory_layouts[0];  // keep enable_kv_scale=true
 
     auto options = torch::TensorOptions().dtype(torch::kInt8).device(torch::kCPU);
@@ -667,7 +667,7 @@ TEST_F(MemoryLayoutStrategyTest, BlockPoolConfigPropagatesKernelBlockSplitButKee
     cache_config.kv_block_stride_bytes     = spec->block_size_bytes();
     initializeSingleGroup(cache_config, spec);
 
-    auto pool_config = BlockPoolConfigHelper::createConfig(cache_config);
+    auto pool_config = BlockPoolConfigHelper::createConfigForGroup(cache_config, "default");
     ASSERT_EQ(pool_config.memory_layouts.size(), 1u);
     auto layout_config = pool_config.memory_layouts[0];
     EXPECT_EQ(layout_config.kernel_blocks_per_kv_block, 2u);

@@ -25,12 +25,9 @@ private:
     std::shared_ptr<const CacheTopology> cache_topology;
 
 public:
-    std::vector<int> layer_to_block_stride_bytes;
-    bool             group_block_layout_initialized           = false;
-    bool             use_independent_block_pools              = false;
-    bool             use_typed_cache_regions                  = false;
-    bool             use_opaque_kv_cache_store                = false;
-    bool             disable_decode_first_malloc_device_reuse = false;
+    bool use_typed_cache_regions                  = false;
+    bool use_opaque_kv_cache_store                = false;
+    bool disable_decode_first_malloc_device_reuse = false;
 
     rtp_llm::DataType dtype         = rtp_llm::DataType::TYPE_INVALID;
     uint32_t          layer_num     = 0;  // the number of main model layers
@@ -89,8 +86,7 @@ public:
     size_t kv_scale_stride_bytes = 0;
 
     // Attention-specific configuration
-    int    linear_step     = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
-    int    group_layer_num = 1;  // Number of layers per group for hybrid attention
+    int    linear_step = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
     size_t explicitly_sized_pool_reserve_bytes = 0;
 
     // mtp-model configurations
@@ -163,6 +159,14 @@ public:
 
     size_t blockSizeBytesForGroup(std::string_view tag) const {
         return layerIdsForGroup(tag).size() * (kvBlockStrideBytesForGroup(tag) + kvScaleStrideBytesForGroup(tag));
+    }
+
+    size_t layerBlockStrideBytes(int layer_id) const {
+        size_t stride = 0;
+        for (const auto& group : groupsForLayer(layer_id)) {
+            stride = std::max(stride, group.get().kv_block_stride_bytes + group.get().kv_scale_stride_bytes);
+        }
+        return stride;
     }
 
     uint32_t localKvHeadNumForGroup(std::string_view tag) const {

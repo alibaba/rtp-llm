@@ -183,7 +183,6 @@ private:
         const size_t all_group_num       = full_group_tags_.size() + other_group_tags_.size();
         cache_config_.layer_num          = all_group_num * layer_num;
         cache_config_.layer_all_num      = all_group_num * layer_num;
-        cache_config_.group_layer_num    = layer_num;
         cache_config_.block_num          = block_num;
         cache_config_.seq_size_per_block = seq_size_per_block;
         cache_config_.dtype              = rtp_llm::DataType::TYPE_FP16;
@@ -210,7 +209,6 @@ private:
                 makeTestGroupForConfig(cache_config_, linear_spec, std::move(layer_ids), CacheGroupType::LINEAR, tag));
         }
         setTestTopology(cache_config_, std::move(groups));
-        cache_config_.use_independent_block_pools = true;
 
         const size_t full_kv_block_stride_bytes   = full_spec->block_size_bytes();
         const size_t linear_kv_block_stride_bytes = linear_spec->block_size_bytes();
@@ -219,17 +217,11 @@ private:
         cache_config_.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
         cache_config_.kv_block_size_bytes   = 0;
         cache_config_.kv_scale_size_bytes   = 0;
-        cache_config_.layer_to_block_stride_bytes.assign(static_cast<size_t>(cache_config_.layer_all_num), 0);
         for (const auto& group : cache_config_.topology().groups()) {
             cache_config_.kv_block_size_bytes += group.layer_ids.size() * group.kv_block_stride_bytes;
             cache_config_.kv_scale_size_bytes += group.layer_ids.size() * group.kv_scale_stride_bytes;
-            const auto layer_stride = static_cast<int>(group.kv_block_stride_bytes + group.kv_scale_stride_bytes);
-            for (int layer_id : group.layer_ids) {
-                cache_config_.layer_to_block_stride_bytes[static_cast<size_t>(layer_id)] = layer_stride;
-            }
         }
         cache_config_.block_size_bytes = cache_config_.kv_block_size_bytes + cache_config_.kv_scale_size_bytes;
-        cache_config_.group_block_layout_initialized = true;
     }
 };
 

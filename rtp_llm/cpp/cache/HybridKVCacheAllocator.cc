@@ -94,9 +94,14 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
     // back to the logical-block coordinate system.
     const int cp_scale              = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
     int       min_full_reuse_blocks = static_cast<int>(cache_keys.size());
+    bool      has_reusable_full     = false;
     std::unordered_map<std::string, BlockIndicesType> full_matched_blocks;
 
     for (const auto& tag : full_group_tags_) {
+        if (skipReuseCacheGroup(tag)) {
+            continue;
+        }
+        has_reusable_full     = true;
         auto match_result     = kv_cache_groups_.at(tag)->match(cache_keys);
         min_full_reuse_blocks = std::min(min_full_reuse_blocks, static_cast<int>(match_result.reuse_blocks));
         full_matched_blocks.emplace(tag, std::move(match_result.block_indices));
@@ -106,6 +111,9 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
     std::unordered_map<std::string, BlockIdxType>     linear_tail_blocks;
     std::unordered_map<std::string, BlockIndicesType> swa_tail_blocks;
     const bool has_tail_groups = !linear_group_tags_.empty() || !swa_group_tags_.empty();
+    if (!has_reusable_full && !has_tail_groups) {
+        return 0;
+    }
     for (; pos >= 0 && has_tail_groups; --pos) {
         bool                                              all_tail_groups_matched = true;
         std::unordered_map<std::string, BlockIdxType>     candidate_linear_tail_blocks;
@@ -145,6 +153,9 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
     }
 
     for (const auto& tag : full_group_tags_) {
+        if (skipReuseCacheGroup(tag)) {
+            continue;
+        }
         BlockIndicesType full_blocks = std::move(full_matched_blocks.at(tag));
         if (static_cast<int>(full_blocks.size()) > reuse_blocks_len) {
             full_blocks.resize(static_cast<size_t>(reuse_blocks_len));

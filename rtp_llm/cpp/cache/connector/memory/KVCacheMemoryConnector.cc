@@ -215,11 +215,7 @@ void KVCacheMemoryConnector::initBlockPool() {
     if (!use_prefix_tree_memory_cache_ && !use_typed_memory_layout) {
         size_t layer_block_size = 0;
         for (size_t layer = 0; layer < cache_config_.layer_all_num; ++layer) {
-            if (layer < cache_config_.layer_to_block_stride_bytes.size()) {
-                layer_block_size += static_cast<size_t>(cache_config_.layer_to_block_stride_bytes[layer]);
-            } else {
-                layer_block_size += cache_config_.kv_block_stride_bytes + cache_config_.kv_scale_stride_bytes;
-            }
+            layer_block_size += cache_config_.layerBlockStrideBytes(static_cast<int>(layer));
         }
         RTP_LLM_CHECK_WITH_INFO(layer_block_size > 0, "legacy memory block size is invalid");
         block_pool_ = createBlockPool(layer_block_size, memory_cache_size_mb);
@@ -349,11 +345,7 @@ size_t KVCacheMemoryConnector::memoryCacheBlockSizeBytes() const {
     if (!usePrefixTreeMemoryCache() && !supportsTypedPrefixCacheLayout(slots)) {
         size_t block_size = 0;
         for (size_t layer = 0; layer < cache_config_.layer_all_num; ++layer) {
-            if (layer < cache_config_.layer_to_block_stride_bytes.size()) {
-                block_size += static_cast<size_t>(cache_config_.layer_to_block_stride_bytes[layer]);
-            } else {
-                block_size += cache_config_.kv_block_stride_bytes + cache_config_.kv_scale_stride_bytes;
-            }
+            block_size += cache_config_.layerBlockStrideBytes(static_cast<int>(layer));
         }
         return block_size;
     }
@@ -508,10 +500,7 @@ KVCacheMemoryConnector::buildLayerGroupSlots(const CacheConfig& cache_config) {
         if (kv_stride + scale_stride > 0) {
             return kv_stride + scale_stride;
         }
-        if (layer_id >= 0 && static_cast<size_t>(layer_id) < cache_config.layer_to_block_stride_bytes.size()) {
-            return static_cast<size_t>(cache_config.layer_to_block_stride_bytes[static_cast<size_t>(layer_id)]);
-        }
-        return cache_config.kv_block_stride_bytes + cache_config.kv_scale_stride_bytes;
+        return cache_config.layerBlockStrideBytes(layer_id);
     };
 
     for (size_t layer = 0; layer < layer_num; ++layer) {
@@ -558,8 +547,7 @@ bool KVCacheMemoryConnector::supportsTypedPrefixCacheLayout(const std::vector<La
     if (slots.empty() || !hasTypedLayerGroupSlots(slots)) {
         return false;
     }
-    if (!cache_config_.use_typed_cache_regions || !cache_config_.use_opaque_kv_cache_store
-        || !cache_config_.use_independent_block_pools) {
+    if (!cache_config_.use_typed_cache_regions || !cache_config_.use_opaque_kv_cache_store) {
         return false;
     }
     if (cache_config_.groupNums() == 0 || cache_config_.topology().layers().size() < cache_config_.layer_all_num) {
@@ -2147,9 +2135,7 @@ bool KVCacheMemoryConnector::copyDiskItem(const NormalizedCopyItem&          ite
         size_t     byte_off = 0;
         for (size_t layer = 0; layer < cache_config_.layer_all_num; ++layer) {
             const auto gpu_block    = item.gpu_blocks[layer];
-            const auto layer_stride = layer < cache_config_.layer_to_block_stride_bytes.size() ?
-                                          static_cast<size_t>(cache_config_.layer_to_block_stride_bytes[layer]) :
-                                          cache_config_.kv_block_stride_bytes + cache_config_.kv_scale_stride_bytes;
+            const auto layer_stride = cache_config_.layerBlockStrideBytes(static_cast<int>(layer));
             if (isNullBlockIdx(gpu_block)) {
                 byte_off += layer_stride;
                 continue;
@@ -2249,9 +2235,7 @@ bool KVCacheMemoryConnector::prepareLayerCopyBuffers(BlockIdxType               
     size_t byte_off = 0;
     for (size_t layer = 0; layer < layer_num; ++layer) {
         const auto gpu_block    = gpu_blocks.at(layer);
-        const auto layer_stride = layer < cache_config_.layer_to_block_stride_bytes.size() ?
-                                      static_cast<size_t>(cache_config_.layer_to_block_stride_bytes[layer]) :
-                                      cache_config_.kv_block_stride_bytes + cache_config_.kv_scale_stride_bytes;
+        const auto layer_stride = cache_config_.layerBlockStrideBytes(static_cast<int>(layer));
 
         if (isNullBlockIdx(gpu_block)) {
             byte_off += layer_stride;

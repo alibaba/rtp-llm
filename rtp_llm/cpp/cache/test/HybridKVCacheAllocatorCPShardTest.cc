@@ -37,7 +37,6 @@ CacheConfig makeCPHybridConfig() {
     config.seq_size_per_block        = 4;
     config.kernel_seq_size_per_block = 2;
     config.linear_step               = 2;
-    config.group_layer_num           = 2;
 
     auto linear_spec = makeResolvedLinearSpec(config.dtype,
                                               1,
@@ -55,23 +54,14 @@ CacheConfig makeCPHybridConfig() {
                     {makeTestGroupForConfig(config, linear_spec, {0, 1}, CacheGroupType::LINEAR, "linear"),
                      makeTestGroupForConfig(config, full_spec, {2, 3}, CacheGroupType::FULL, "full")});
 
-    config.use_independent_block_pools = true;
-    config.kv_block_stride_bytes       = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
-    config.kv_block_size_bytes         = 0;
+    config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
+    config.kv_block_size_bytes   = 0;
     for (const auto& group : config.topology().groups()) {
         config.kv_block_size_bytes += group.layer_ids.size() * group.kv_block_stride_bytes;
     }
     config.kv_scale_stride_bytes = 0;
     config.kv_scale_size_bytes   = 0;
     config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-    config.layer_to_block_stride_bytes.assign(config.layer_all_num, 0);
-    for (const auto& group : config.topology().groups()) {
-        for (int layer_id : group.layer_ids) {
-            config.layer_to_block_stride_bytes[static_cast<size_t>(layer_id)] =
-                static_cast<int>(group.kv_block_stride_bytes);
-        }
-    }
-    config.group_block_layout_initialized = true;
 
     return config;
 }
@@ -178,8 +168,8 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ReuseHitOnLastRankCanonicalKey) {
     // localCacheKeys(cp_rank=cp_size-1=1, cp_size=2) selects indices {1,3} => {101, 103}.
     // initMallocForCommonLen drops the last for matching => match_keys = {101}.
     // Joint match requires the linear group's tail to also resolve, so seed both groups with key 101.
-    seedCache(allocator->groupBlockPools().at("full"), shared_cache, "full", CacheKeysType{101});
-    seedCache(allocator->groupBlockPools().at("linear"), shared_cache, "linear", CacheKeysType{101});
+    seedCache(allocator->blockPool("full"), shared_cache, "full", CacheKeysType{101});
+    seedCache(allocator->blockPool("linear"), shared_cache, "linear", CacheKeysType{101});
 
     auto batch_res = makeBatchRes(1, config, CacheKeysType{100, 101, 102, 103});
     auto tokens    = makeTokens(1, 16, 4);
@@ -206,7 +196,7 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, ShardedAllocSkipsReuseWhenDisabled) {
 
     auto shared_cache = allocator->sharedBlockCache();
 
-    seedCache(allocator->groupBlockPools().at("full"), shared_cache, "full", CacheKeysType{101});
+    seedCache(allocator->blockPool("full"), shared_cache, "full", CacheKeysType{101});
 
     auto batch_res = makeBatchRes(1, config, CacheKeysType{100, 101, 102, 103});
     auto tokens    = makeTokens(1, 16, 4);

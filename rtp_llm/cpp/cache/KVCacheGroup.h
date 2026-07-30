@@ -81,6 +81,7 @@ public:
     int                     seqSizePerBlock() const;
     const std::string&      tag() const;
     const GroupBase&        config() const;
+    const BlockPoolPtr&     blockPool() const;
     const CacheGroupPolicy& policy() const;
     bool                    prefixReuseEnabled() const;
     CacheEvictPolicy        evictPolicy() const;

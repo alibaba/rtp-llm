@@ -193,15 +193,27 @@ void KVCacheAllocator::blockBatchCopy(const std::vector<GroupBlockIdPair>& copy_
 }
 
 size_t KVCacheAllocator::freeBlocksNum() const {
-    return block_pool_ ? block_pool_->freeBlocksNum() : 0;
+    size_t blocks = 0;
+    for (const auto& group : config_.topology().groups()) {
+        blocks += blockPool(group.tag)->freeBlocksNum();
+    }
+    return blocks;
 }
 
 int64_t KVCacheAllocator::getMrCostTimeMs() const {
-    return block_pool_ ? block_pool_->getMrCostTimeMs() : 0;
+    int64_t cost_ms = 0;
+    for (const auto& group : config_.topology().groups()) {
+        cost_ms += blockPool(group.tag)->getMrCostTimeMs();
+    }
+    return cost_ms;
 }
 
 size_t KVCacheAllocator::availableBlocksNum() const {
-    return block_pool_ ? block_pool_->availableBlocksNum() : 0;
+    size_t blocks = 0;
+    for (const auto& group : config_.topology().groups()) {
+        blocks += blockPool(group.tag)->availableBlocksNum();
+    }
+    return blocks;
 }
 
 BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_to_free) {
@@ -268,68 +280,84 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
 }
 
 void KVCacheAllocator::blockCacheFree(const BatchKVCacheResourcePtr& batch_kv_cache_resource) {
-    if (!block_pool_ || !batch_kv_cache_resource) {
+    if (!batch_kv_cache_resource) {
         return;
     }
 
-    BlockIndicesType                 blocks_to_free;
-    std::unordered_set<BlockIdxType> seen_blocks;
-    for (int batch_id = 0; batch_id < batch_kv_cache_resource->batchSize(); ++batch_id) {
-        for (const auto& group : batch_kv_cache_resource->groupBlocks(batch_id)) {
-            for (const auto block_idx : group.block_ids->blocks()) {
+    for (const auto& config_group : config_.topology().groups()) {
+        BlockIndicesType                 blocks_to_free;
+        std::unordered_set<BlockIdxType> seen_blocks;
+        for (int batch_id = 0; batch_id < batch_kv_cache_resource->batchSize(); ++batch_id) {
+            const auto& blocks = batch_kv_cache_resource->blocks(batch_id, config_group.tag);
+            for (const auto block_idx : blocks) {
                 if (isNullBlockIdx(block_idx) || !seen_blocks.insert(block_idx).second) {
                     continue;
                 }
                 blocks_to_free.push_back(block_idx);
             }
         }
-    }
-    if (!blocks_to_free.empty()) {
-        block_pool_->blockCacheFree(blocks_to_free);
+        if (!blocks_to_free.empty()) {
+            blockPool(config_group.tag)->blockCacheFree(blocks_to_free);
+        }
     }
 }
 
 size_t KVCacheAllocator::requestRefBlocksNum() const {
-    return block_pool_->requestRefBlocksNum();
+    size_t blocks = 0;
+    for (const auto& group : config_.topology().groups()) {
+        blocks += blockPool(group.tag)->requestRefBlocksNum();
+    }
+    return blocks;
 }
 
 size_t KVCacheAllocator::connectorRefBlocksNum() const {
-    return block_pool_->connectorRefBlocksNum();
+    size_t blocks = 0;
+    for (const auto& group : config_.topology().groups()) {
+        blocks += blockPool(group.tag)->connectorRefBlocksNum();
+    }
+    return blocks;
 }
 
 size_t KVCacheAllocator::blockCacheRefBlocksNum() const {
-    return block_pool_ ? block_pool_->blockCacheRefBlocksNum() : 0;
+    size_t blocks = 0;
+    for (const auto& group : config_.topology().groups()) {
+        blocks += blockPool(group.tag)->blockCacheRefBlocksNum();
+    }
+    return blocks;
 }
 
 size_t KVCacheAllocator::notInUseBlocksNum() const {
-    return block_pool_ ? block_pool_->notInUseBlocksNum() : 0;
+    size_t blocks = 0;
+    for (const auto& group : config_.topology().groups()) {
+        blocks += blockPool(group.tag)->notInUseBlocksNum();
+    }
+    return blocks;
 }
 
 size_t KVCacheAllocator::availableTokensNum() const {
-    if (!block_pool_) {
-        return 0;
-    }
     size_t min_tokens = std::numeric_limits<size_t>::max();
     for (const auto& group : config_.topology().groups()) {
-        min_tokens =
-            std::min(min_tokens, block_pool_->availableBlocksNum() * logicalSeqSizePerBlockForCapacity(group.tag));
+        min_tokens = std::min(
+            min_tokens, blockPool(group.tag)->availableBlocksNum() * logicalSeqSizePerBlockForCapacity(group.tag));
     }
     return min_tokens != std::numeric_limits<size_t>::max() ? min_tokens : 0;
 }
 
 size_t KVCacheAllocator::totalTokensNum() const {
-    if (!block_pool_) {
-        return 0;
-    }
     size_t min_tokens = std::numeric_limits<size_t>::max();
     for (const auto& group : config_.topology().groups()) {
-        min_tokens = std::min(min_tokens, block_pool_->totalBlocksNum() * logicalSeqSizePerBlockForCapacity(group.tag));
+        min_tokens =
+            std::min(min_tokens, blockPool(group.tag)->totalBlocksNum() * logicalSeqSizePerBlockForCapacity(group.tag));
     }
     return min_tokens != std::numeric_limits<size_t>::max() ? min_tokens : 0;
 }
 
 size_t KVCacheAllocator::totalBlocksNum() const {
-    return block_pool_ ? block_pool_->totalBlocksNum() : 0;
+    size_t blocks = 0;
+    for (const auto& group : config_.topology().groups()) {
+        blocks += blockPool(group.tag)->totalBlocksNum();
+    }
+    return blocks;
 }
 
 size_t KVCacheAllocator::maxAvailableTokensNum() const {
@@ -375,8 +403,8 @@ std::vector<std::string> KVCacheAllocator::independentEvictionTags() const {
 }
 
 void KVCacheAllocator::regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store) {
-    if (block_pool_) {
-        block_pool_->regUserMr(model_id, std::move(cache_store));
+    for (const auto& group : config_.topology().groups()) {
+        blockPool(group.tag)->regUserMr(model_id, cache_store);
     }
 }
 

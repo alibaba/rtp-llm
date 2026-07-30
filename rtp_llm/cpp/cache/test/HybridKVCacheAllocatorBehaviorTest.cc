@@ -46,7 +46,7 @@ static CacheConfig makeTinyHybridConfig() {
 }
 
 static BlockPoolPtr poolFor(const HybridPoolKVCacheAllocatorPtr& allocator, std::string_view tag) {
-    return allocator->groupBlockPools().at(std::string(tag));
+    return allocator->blockPool(std::string(tag));
 }
 
 static void setGroupBlockNum(CacheConfig& config, uint32_t block_num) {
@@ -413,13 +413,14 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IndependentPoolsSupportOnlyLinearGroups) 
     setTestTopology(cache_config,
                     {makeTestGroupForConfig(cache_config, linear0, {0}, CacheGroupType::LINEAR, "linear0"),
                      makeTestGroupForConfig(cache_config, linear1, {1}, CacheGroupType::LINEAR, "linear1")});
-    cache_config.use_independent_block_pools = true;
     ASSERT_EQ(cache_config.groupNums(), 2);
 
     auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(cache_config, AllocationType::DEVICE);
     EXPECT_TRUE(allocator->init());
-    EXPECT_EQ(allocator->getBlockPool(), nullptr);
-    EXPECT_EQ(allocator->groupBlockPools().size(), 2u);
+    EXPECT_THROW(allocator->blockPool("default"), std::out_of_range);
+    EXPECT_NE(allocator->blockPool("linear0"), nullptr);
+    EXPECT_NE(allocator->blockPool("linear1"), nullptr);
+    EXPECT_EQ(allocator->poolCount(), 2u);
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, TopologyRejectsSpecPolicyTypeMismatch) {
@@ -749,8 +750,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, MergeMtpAliasErrorIdentifiesSourceAndTarg
         CacheGroupType::FULL,
         /*layer_num=*/2,
         /*block_num=*/4);
-    main_config.group_layer_num = 2;
-    auto propose_config         = makeSimpleMhaCacheConfig(
+    auto propose_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/4, DataType::TYPE_FP16);
     auto propose_groups         = propose_config.topology().groups();
     auto propose_layers         = propose_config.topology().layers();
@@ -792,11 +792,10 @@ TEST_F(HybridPoolKVCacheAllocatorTest, MergeMtpDoesNotAliasMultiGroupProposeConf
     }
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, MergeMtpRejectsShortTargetGroup) {
+TEST_F(HybridPoolKVCacheAllocatorTest, MergeMtpUsesGroupLocalMainLayerCount) {
     CacheConfig main_config;
-    main_config.layer_num       = 5;
-    main_config.layer_all_num   = 5;
-    main_config.group_layer_num = 3;
+    main_config.layer_num     = 5;
+    main_config.layer_all_num = 5;
     setTestTopology(
         main_config,
         {makeTestGroupForConfig(
@@ -806,19 +805,17 @@ TEST_F(HybridPoolKVCacheAllocatorTest, MergeMtpRejectsShortTargetGroup) {
                                 {3, 4},
                                 CacheGroupType::LINEAR,
                                 "linear")});
-    main_config.layer_to_block_stride_bytes.assign(6, 1);
 
     auto propose_config = makeSimpleLinearCacheConfig(
         /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
-    EXPECT_THROW(main_config.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/5),
-                 std::runtime_error);
+    auto sub_config = main_config.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/5);
+    ASSERT_NE(sub_config, nullptr);
+    EXPECT_EQ(main_config.layerIdsForGroup("linear"), (std::vector<int>{3, 4, 5}));
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, MergeMtpRejectsPartialOrReorderedSourceGroup) {
     auto main_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
-    main_config.group_layer_num = 2;
-    main_config.layer_to_block_stride_bytes.assign(4, 1);
 
     CacheConfig partial_source;
     partial_source.layer_num     = 2;
@@ -832,7 +829,6 @@ TEST_F(HybridPoolKVCacheAllocatorTest, MergeMtpRejectsPartialOrReorderedSourceGr
                                 "default"),
          makeTestGroupForConfig(
              partial_source, makeMhaSpec("aux", 4, DataType::TYPE_FP16, 1, 1), {1}, CacheGroupType::FULL, "aux")});
-    partial_source.layer_to_block_stride_bytes.assign(2, 1);
     EXPECT_THROW(main_config.mergeMTPModule(partial_source, /*module_index=*/0, /*main_layer_num=*/2),
                  std::runtime_error);
 

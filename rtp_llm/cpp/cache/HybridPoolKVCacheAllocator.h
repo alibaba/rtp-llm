@@ -42,9 +42,12 @@ public:
     void    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr) override;
     int64_t getMrCostTimeMs() const override;
 
-    // Per-pool access for diagnostics / per-pool metrics reporting.
-    const std::unordered_map<std::string, BlockPoolPtr>& groupBlockPools() const {
-        return group_block_pools_;
+    BlockPoolPtr blockPool(std::string_view tag) const override {
+        return kv_cache_groups_.at(std::string(tag))->blockPool();
+    }
+
+    size_t poolCount() const {
+        return kv_cache_groups_.size();
     }
 
 private:
@@ -62,8 +65,7 @@ private:
     size_t
     reserveBlocksForPool(std::string_view tag, size_t reserve_blocks, size_t total_reservable_available_blocks) const;
 
-    std::unordered_map<std::string, BlockPoolPtr> group_block_pools_;
-    RoleType                                      role_type_{RoleType::PDFUSION};
+    RoleType role_type_{RoleType::PDFUSION};
 };
 
 using HybridPoolKVCacheAllocatorPtr = std::shared_ptr<HybridPoolKVCacheAllocator>;

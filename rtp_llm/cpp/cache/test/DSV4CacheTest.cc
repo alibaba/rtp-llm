@@ -179,7 +179,6 @@ static void setGroupBlockNumsForTest(CacheConfig& config, const std::unordered_m
         group.block_num = block_nums.at(group.tag);
     }
     config.setTopology(std::move(groups), config.topology().layers());
-    config.group_block_layout_initialized = true;
 }
 
 static void initDsv4BatchGroups(BatchKVCacheResource& batch_res, const CacheConfig& config) {
@@ -187,7 +186,7 @@ static void initDsv4BatchGroups(BatchKVCacheResource& batch_res, const CacheConf
 }
 
 static BlockPoolPtr dsv4PoolFor(const HybridPoolKVCacheAllocatorPtr& allocator, std::string_view tag) {
-    return allocator->groupBlockPools().at(std::string(tag));
+    return allocator->blockPool(std::string(tag));
 }
 
 static std::vector<int> makeProLayerCompressRatios() {
@@ -425,8 +424,7 @@ TEST(CacheConfigTest, TopologyRemainsTheSingleSourceAcrossSupportedUpdates) {
         }
     }
     config.setTopology(std::move(groups), config.topology().layers());
-    config.group_block_layout_initialized = true;
-    const auto layout_topology            = config.topologyPtr();
+    const auto layout_topology = config.topologyPtr();
 
     EXPECT_NE(layout_topology.get(), policy_topology.get());
     EXPECT_EQ(config.blockNumForGroup("full"), 17u);
@@ -803,7 +801,6 @@ TEST(HybridPoolConfigCreatorTest, HybridAttentionUsesGroupOwnedPools) {
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createBasicConfig(makeHybridAttentionModelConfig(), pc, false, 0);
 
-    EXPECT_TRUE(config.use_independent_block_pools);
     ASSERT_EQ(config.groupNums(), 2);
     EXPECT_EQ(config.typeForGroup("full"), CacheGroupType::FULL);
     EXPECT_EQ(config.typeForGroup("linear"), CacheGroupType::LINEAR);
@@ -916,7 +913,6 @@ TEST(HybridPoolConfigCreatorTest, HybridAttentionDerivesGroupPoolsWithoutModelSw
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createBasicConfig(makeHybridAttentionModelConfig(), pc, false, 0);
 
-    EXPECT_TRUE(config.use_independent_block_pools);
     ASSERT_EQ(config.groupNums(), 2);
     EXPECT_EQ(config.group("linear").block_num, 0u);
     EXPECT_EQ(config.group("full").block_num, 0u);
@@ -1531,7 +1527,6 @@ TEST(CacheConfigTest, FinalizeBlockNumsUpdatesSingleAndMigratedHybridPools) {
     auto hybrid_config = CacheConfigCreator::createBasicConfig(makeHybridAttentionModelConfig(), pc, false, 0);
     hybrid_config.finalizeBlockNums(123, runtime_config);
     EXPECT_EQ(hybrid_config.block_num, 123u);
-    EXPECT_TRUE(hybrid_config.use_independent_block_pools);
     EXPECT_EQ(hybrid_config.blockNumForGroup("linear"), 123u);
     EXPECT_EQ(hybrid_config.blockNumForGroup("full"), 123u);
     EXPECT_EQ(hybrid_config.explicitly_sized_pool_reserve_bytes, 0u);
@@ -2029,9 +2024,8 @@ TEST_F(DSV4AllocatorTest, InitAndBasicProperties) {
     EXPECT_EQ(config.groupNums(), 7);
     EXPECT_EQ(allocator->seqSizePerBlock(), static_cast<int>(config.seq_size_per_block));
     size_t expected_total_blocks = 0;
-    for (const auto& [tag, pool] : allocator->groupBlockPools()) {
-        (void)tag;
-        expected_total_blocks += pool->totalBlocksNum();
+    for (const auto& group : config.topology().groups()) {
+        expected_total_blocks += allocator->blockPool(group.tag)->totalBlocksNum();
     }
     EXPECT_EQ(allocator->totalBlocksNum(), expected_total_blocks);
     EXPECT_EQ(allocator->freeBlocksNum(), expected_total_blocks);
@@ -2080,9 +2074,8 @@ TEST_F(DSV4AllocatorTest, FlashInitAndBasicProperties) {
     EXPECT_EQ(config.groupNums(), 7);
     EXPECT_EQ(config.layer_num, 43u);
     size_t expected_total_blocks = 0;
-    for (const auto& [tag, pool] : allocator->groupBlockPools()) {
-        (void)tag;
-        expected_total_blocks += pool->totalBlocksNum();
+    for (const auto& group : config.topology().groups()) {
+        expected_total_blocks += allocator->blockPool(group.tag)->totalBlocksNum();
     }
     EXPECT_EQ(allocator->totalBlocksNum(), expected_total_blocks);
 }
@@ -2110,8 +2103,8 @@ TEST_F(DSV4AllocatorTest, BlockPoolCreatedWithCorrectTensors) {
     auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::DEVICE);
     ASSERT_TRUE(allocator->init());
 
-    EXPECT_EQ(allocator->getBlockPool(), nullptr);
-    EXPECT_EQ(allocator->groupBlockPools().size(), static_cast<size_t>(config.groupNums()));
+    EXPECT_THROW(allocator->blockPool("default"), std::out_of_range);
+    EXPECT_EQ(allocator->poolCount(), static_cast<size_t>(config.groupNums()));
 
     // allLayerCacheBase should return tensors for all 61 layers
     auto layout = allocator->allLayerCacheBase();

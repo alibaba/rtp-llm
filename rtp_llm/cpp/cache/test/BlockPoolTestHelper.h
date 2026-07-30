@@ -134,7 +134,7 @@ inline BlockPoolConfig createTestConfig(size_t            k_block_stride_bytes =
     groups.at(0).local_kv_head_num = test_spec->local_kv_head_num;
     cache_config.setTopology(std::move(groups), cache_config.topology().layers());
 
-    return BlockPoolConfigHelper::createConfig(cache_config);
+    return BlockPoolConfigHelper::createConfigForGroup(cache_config, "default");
 }
 
 inline void createDevice() {

@@ -70,9 +70,7 @@ protected:
 
         createDevice();
         allocator_ = std::make_shared<MockKVCacheAllocator>(cache_config_);
-        // KVCacheConnectorCoordinator::asyncRead/asyncWrite logs free/available blocks via KVCacheAllocator.
-        // Those methods assume allocator_->block_pool_ is non-null. In UT we use a mock allocator, so set a
-        // minimal BlockPool here to avoid crashes/hangs in tests that exercise coordinator paths.
+        // Coordinator metrics resolve the pool through the configured group tag.
         {
             const size_t block_stride_bytes =
                 cache_config_.block_size_bytes / static_cast<size_t>(std::max(1u, cache_config_.layer_all_num));
@@ -80,7 +78,7 @@ protected:
                 cache_config_.layer_all_num, cache_config_.block_num, block_stride_bytes, cache_config_.dtype);
             auto pool = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
             RTP_LLM_CHECK(pool->init());
-            allocator_->block_pool_ = pool;
+            ON_CALL(*allocator_, blockPool(::testing::_)).WillByDefault(::testing::Return(pool));
         }
 
         coordinator_ = std::make_shared<KVCacheConnectorCoordinator>(cache_config_,
@@ -222,11 +220,10 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnFalse_WhenMemoryConfigInvalid
 
 #ifdef USE_REMOTE_KV_CACHE
 TEST_F(KVCacheConnectorCoordinatorTest, InitFailsFastForIndependentBlockPoolsWithRemoteCache) {
-    auto cache_config                        = cache_config_;
-    cache_config.use_independent_block_pools = true;
-    auto kv_cache_config                     = kv_cache_config_;
-    kv_cache_config.reuse_cache              = true;
-    kv_cache_config.enable_remote_cache      = true;
+    auto cache_config                   = cache_config_;
+    auto kv_cache_config                = kv_cache_config_;
+    kv_cache_config.reuse_cache         = true;
+    kv_cache_config.enable_remote_cache = true;
 
     auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
         cache_config, kv_cache_config, runtime_config_, ParallelismConfig{}, SpeculativeExecutionConfig{}, allocator_);
@@ -292,11 +289,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemoryEnabled_HappyP
     KVCacheConfig kv_cache_config;
     RuntimeConfig runtime_config;
     // Keep block size reasonably large so block_num doesn't explode in createBlockPool().
-    cache_config.block_size_bytes = 1024;
-    // Memory connector requires per-layer block stride bytes.
-    cache_config.layer_to_block_stride_bytes.assign(static_cast<size_t>(cache_config.layer_num),
-                                                    cache_config.block_size_bytes);
-
+    cache_config.block_size_bytes                = 1024;
     kv_cache_config.enable_memory_cache          = true;
     kv_cache_config.reuse_cache                  = true;
     kv_cache_config.memory_cache_size_mb         = 1;
@@ -304,7 +297,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemoryEnabled_HappyP
     runtime_config.worker_grpc_addrs             = {"127.0.0.1:12345"};
 
     auto allocator = std::make_shared<MockKVCacheAllocator>(cache_config);
-    // KVCacheConnectorCoordinator::init logs free/available blocks via KVCacheAllocator. Ensure block_pool_ is valid.
+    // Coordinator metrics resolve the pool through the configured group tag.
     {
         const size_t block_stride_bytes =
             cache_config.block_size_bytes / static_cast<size_t>(std::max(1u, cache_config.layer_all_num));
@@ -312,7 +305,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemoryEnabled_HappyP
             cache_config.layer_all_num, cache_config.block_num, block_stride_bytes, cache_config.dtype);
         auto pool = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
         ASSERT_TRUE(pool->init());
-        allocator->block_pool_ = pool;
+        ON_CALL(*allocator, blockPool(::testing::_)).WillByDefault(::testing::Return(pool));
     }
 
     auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
@@ -385,9 +378,6 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenIncrKVCacheRefR
     coordinator_->allocator_  = allocator_;
 
     // Coordinator logs free/available blocks before calling incrKVCacheRef().
-    // MockKVCacheAllocator doesn't initialize its internal BlockPool unless we set it up explicitly.
-    // Without this, allocator_->freeBlocksNum() / availableBlocksNum() will dereference a null BlockPool and
-    // the test process can crash/hang.
     {
         auto pool_config = BlockPoolConfigHelper::createConfig(cache_config_.layer_all_num,
                                                                /*block_num=*/1,
@@ -395,7 +385,7 @@ TEST_F(KVCacheConnectorCoordinatorTest, AsyncRead_ReturnNull_WhenIncrKVCacheRefR
                                                                /*dtype=*/cache_config_.dtype);
         auto pool        = std::make_shared<BlockPool>(pool_config, AllocationType::HOST);
         ASSERT_TRUE(pool->init());
-        allocator_->block_pool_ = pool;
+        ON_CALL(*allocator_, blockPool(::testing::_)).WillByDefault(::testing::Return(pool));
     }
 
     KVCacheResource resource;

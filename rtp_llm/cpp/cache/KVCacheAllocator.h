@@ -79,9 +79,7 @@ public:
     MallocResult malloc(const MallocInfo& malloc_info);
     virtual void blockBatchCopy(const std::vector<GroupBlockIdPair>& copy_mapping);
 
-    BlockPoolPtr getBlockPool() const {
-        return block_pool_;
-    }
+    virtual BlockPoolPtr blockPool(std::string_view tag) const = 0;
 
     SharedBlockCachePtr sharedBlockCache() const {
         return shared_block_cache_;
@@ -160,7 +158,6 @@ protected:
 
     CacheConfig                        config_;
     AllocationType                     allocation_type_;
-    BlockPoolPtr                       block_pool_;
     SharedBlockCachePtr                shared_block_cache_;
     std::shared_ptr<CPSlotMapper>      cp_slot_mapper_;
     const kmonitor::MetricsReporterPtr metrics_reporter_           = nullptr;

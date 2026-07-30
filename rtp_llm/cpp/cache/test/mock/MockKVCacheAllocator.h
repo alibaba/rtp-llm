@@ -27,6 +27,7 @@ public:
                 convertIndexToBuffer,
                 (int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id),
                 (const, override));
+    MOCK_METHOD(BlockPoolPtr, blockPool, (std::string_view tag), (const, override));
     MOCK_METHOD(std::shared_ptr<KVCacheResource>,
                 incrKVCacheRef,
                 (const KVCacheResource& kvcache_resource, const CacheKeysType& cache_keys, bool is_connector),
