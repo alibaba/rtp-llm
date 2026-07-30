@@ -58,6 +58,10 @@ from rtp_llm.models_py.modules.kimi_k3.reference.kda_reference import (
 from rtp_llm.models_py.triton_kernels.kimi_kda import (
     chunk_kda,
     fused_recurrent_kda,
+    kimi_k3_rms_norm_strided,
+    kimi_k3_situ,
+    kimi_k3_store_linear_cache_state,
+    kimi_k3_two_way_attn_res,
     kimi_kda_rms_norm_sigmoid_gate,
     kimi_kda_short_conv_decode,
     kimi_kda_short_conv_prefill,
@@ -479,6 +483,18 @@ def _row_parallel_linear(
 
 
 def _rms_norm(x: torch.Tensor, weight: torch.Tensor, eps: float) -> torch.Tensor:
+    if _perf_fusions_enabled() and x.is_cuda:
+        if x.ndim == 2 and x.stride(-1) == 1 and not x.is_contiguous():
+            return kimi_k3_rms_norm_strided(x, weight, eps)
+        output = torch.empty_like(x)
+        compute_ops.rtp_llm_ops.rmsnorm(
+            output,
+            x,
+            weight,
+            float(eps),
+            torch.cuda.current_stream().cuda_stream,
+        )
+        return output
     x_float = x.float()
     normalized = x_float * torch.rsqrt(
         x_float.square().mean(dim=-1, keepdim=True) + eps
@@ -562,6 +578,8 @@ def _situ(
     beta: float,
     linear_beta: Optional[float],
 ) -> torch.Tensor:
+    if _perf_fusions_enabled() and gate.is_cuda:
+        return kimi_k3_situ(gate, up, beta, linear_beta)
     gate_float = gate.float()
     up_float = up.float()
     activated_gate = beta * torch.tanh(gate_float / beta) * torch.sigmoid(gate_float)
@@ -588,6 +606,14 @@ def _attention_residual(
     ):
         raise ValueError(
             "AttnRes block_residual must have shape [tokens, blocks, hidden]"
+        )
+    if _perf_fusions_enabled() and prefix_sum.is_cuda and block_residual.shape[1] == 1:
+        return kimi_k3_two_way_attn_res(
+            prefix_sum,
+            block_residual,
+            norm_weight,
+            projection_weight,
+            eps,
         )
     candidates = torch.cat((block_residual, prefix_sum.unsqueeze(1)), dim=1)
     candidates_float = candidates.float()
@@ -636,6 +662,7 @@ def _packed_causal_depthwise_conv1d(
     mode: KDAExecutionMode = "prefill",
     use_initial_state: Optional[bool] = None,
     sequence_ranges: Optional[list[tuple[int, int]]] = None,
+    final_state_outputs: Optional[list[torch.Tensor]] = None,
 ) -> tuple[torch.Tensor, torch.Tensor]:
     """Packed KDA short convolution matching Dummy/FLA arithmetic.
 
@@ -667,14 +694,22 @@ def _packed_causal_depthwise_conv1d(
             f"{tuple(initial_state.shape)}"
         )
 
+    if final_state_outputs is not None and len(final_state_outputs) != len(ranges):
+        raise ValueError(
+            "KDA short conv final-state output count must match packed sequences: "
+            f"outputs={len(final_state_outputs)} sequences={len(ranges)}"
+        )
     outputs: list[torch.Tensor] = []
     final_states: list[torch.Tensor] = []
     for sequence_idx, (start, end) in enumerate(ranges):
         sequence = x[start:end]
         history = initial_state[sequence_idx].to(dtype=x.dtype)
-        combined = torch.cat((history, sequence.transpose(0, 1)), dim=-1)
         if end == start:
             output = x.new_empty((0, channels))
+            combined = torch.cat((history, sequence.transpose(0, 1)), dim=-1)
+            final_state = (
+                combined[:, -history_size:] if history_size else combined[:, :0]
+            )
         elif x.is_cuda and mode == "decode":
             if end - start != 1:
                 raise ValueError(
@@ -686,8 +721,12 @@ def _packed_causal_depthwise_conv1d(
                 weight,
                 history,
             ).unsqueeze(0)
+            combined = torch.cat((history, sequence.transpose(0, 1)), dim=-1)
+            final_state = (
+                combined[:, -history_size:] if history_size else combined[:, :0]
+            )
         elif x.is_cuda and mode == "prefill":
-            output = kimi_kda_short_conv_prefill(
+            output, kernel_final_state = kimi_kda_short_conv_prefill(
                 sequence,
                 weight,
                 history,
@@ -696,13 +735,26 @@ def _packed_causal_depthwise_conv1d(
                     if use_initial_state is None
                     else use_initial_state
                 ),
+                final_state=(
+                    None
+                    if final_state_outputs is None
+                    else final_state_outputs[sequence_idx]
+                ),
             )
+            if _perf_fusions_enabled():
+                final_state = kernel_final_state
+            else:
+                combined = torch.cat((history, sequence.transpose(0, 1)), dim=-1)
+                final_state = (
+                    combined[:, -history_size:] if history_size else combined[:, :0]
+                )
         elif mode not in ("prefill", "decode"):
             raise ValueError(f"unsupported KDA convolution mode {mode!r}")
         else:
             # CPU-only reference.  CUDA must use the kernels above because
             # separate Torch multiply/add kernels do not preserve FLA's FMA
             # and reduction semantics.
+            combined = torch.cat((history, sequence.transpose(0, 1)), dim=-1)
             token_count = end - start
             weight_float = weight.float()
             output_float = (
@@ -714,10 +766,13 @@ def _packed_causal_depthwise_conv1d(
                     * weight_float[:, tap]
                 )
             output = (output_float * torch.sigmoid(output_float)).to(dtype=x.dtype)
+            final_state = (
+                combined[:, -history_size:] if history_size else combined[:, :0]
+            )
         outputs.append(output)
-        final_states.append(
-            combined[:, -history_size:] if history_size else combined[:, :0]
-        )
+        final_states.append(final_state)
+    if len(outputs) == 1:
+        return outputs[0], final_states[0].unsqueeze(0)
     return torch.cat(outputs, dim=0), torch.stack(final_states, dim=0)
 
 
@@ -931,6 +986,38 @@ class KimiK3LinearCacheAdapter:
         if page_size <= 0:
             raise ValueError("linear cache seq_size_per_block must be positive")
 
+        if _perf_fusions_enabled() and len(past_lengths) == 1:
+            past_length = past_lengths[0]
+            if (
+                self._is_fake_stream(attention_inputs)
+                or past_length == 0
+                or self._is_fake_block_row(block_map[0])
+            ):
+                conv_states = conv_cache.new_zeros(
+                    3, self.projection_size, self.history_size
+                )
+                recurrent = ssm_cache.new_zeros(
+                    1, self.local_heads, self.head_dim, self.head_dim
+                )
+                return KimiKDAState(
+                    q_conv_state=conv_states[0:1],
+                    k_conv_state=conv_states[1:2],
+                    v_conv_state=conv_states[2:3],
+                    recurrent_state=recurrent,
+                )
+            block_id = self._block_id(block_map, 0, past_length - 1, page_size)
+            packed_conv = conv_cache[block_id].transpose(0, 1)
+            q_state, k_state, v_state = torch.split(
+                packed_conv, self.projection_size, dim=0
+            )
+            # FlashKDA and the physical SSM cache both use [H,V,K].
+            return KimiKDAState(
+                q_conv_state=q_state.unsqueeze(0),
+                k_conv_state=k_state.unsqueeze(0),
+                v_conv_state=v_state.unsqueeze(0),
+                recurrent_state=ssm_cache[block_id].unsqueeze(0),
+            )
+
         recurrent_states: list[torch.Tensor] = []
         q_states: list[torch.Tensor] = []
         k_states: list[torch.Tensor] = []
@@ -1016,6 +1103,8 @@ class KimiK3LinearCacheAdapter:
         attention_inputs: PyAttentionInputs,
         sequence_idx: int,
         absolute_position: int,
+        *,
+        block_map: Optional[list[list[int]]] = None,
     ) -> bool:
         """Store one sequence state when its linear page is materialized.
 
@@ -1031,7 +1120,9 @@ class KimiK3LinearCacheAdapter:
         if self._is_fake_stream(attention_inputs):
             return False
         ssm_cache, conv_cache = self._views(kv_cache)
-        block_map = self._block_map(attention_inputs)
+        block_map = (
+            self._block_map(attention_inputs) if block_map is None else block_map
+        )
         page_size = int(kv_cache.seq_size_per_block)
         if page_size <= 0:
             raise ValueError("linear cache seq_size_per_block must be positive")
@@ -1051,6 +1142,16 @@ class KimiK3LinearCacheAdapter:
         ssm_cache: torch.Tensor,
         conv_cache: torch.Tensor,
     ) -> None:
+        if _perf_fusions_enabled():
+            kimi_k3_store_linear_cache_state(
+                state.recurrent_state[state_index],
+                state.q_conv_state[state_index],
+                state.k_conv_state[state_index],
+                state.v_conv_state[state_index],
+                ssm_cache[block_id],
+                conv_cache[block_id],
+            )
+            return
         ssm_cache[block_id].copy_(
             state.recurrent_state[state_index]
             .transpose(-1, -2)
@@ -1215,6 +1316,7 @@ class KimiK3KDA(nn.Module):
         *,
         mode: KDAExecutionMode,
         cu_seqlens: torch.Tensor,
+        output_target: Optional[torch.Tensor] = None,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """Run the KDA delta-net core (l2norm + decay gate + scan).
 
@@ -1241,13 +1343,27 @@ class KimiK3KDA(nn.Module):
                 cu_seqlens=cu_seqlens,
             )
 
-        # Both kernels mutate initial_state in place; feed a private fp32 clone
-        # so the cached state stays pristine and gets a fresh final-state tensor.
-        state_in = (
-            None
-            if recurrent_state is None
-            else recurrent_state.float().contiguous().clone()
+        copy_free_flash_prefill = (
+            _perf_fusions_enabled()
+            and self._kda_backend == "flash_kda"
+            and mode == "prefill"
         )
+        if copy_free_flash_prefill:
+            state_in = recurrent_state
+            if state_in is not None and (
+                state_in.dtype != torch.float32 or not state_in.is_contiguous()
+            ):
+                raise ValueError(
+                    "K3 FlashKDA fused state must be contiguous FP32 V-first"
+                )
+        else:
+            # Accuracy/recurrent kernels may mutate initial_state. Feed a
+            # private canonical [H,K,V] clone and convert at the kernel edge.
+            state_in = (
+                None
+                if recurrent_state is None
+                else recurrent_state.float().contiguous().clone()
+            )
         if mode == "prefill":
             if self._kda_backend == "flash_kda":
                 try:
@@ -1271,9 +1387,13 @@ class KimiK3KDA(nn.Module):
                     raise RuntimeError("FlashKDA requires K3's finite gate lower bound")
 
                 state_v_first = (
-                    None
-                    if state_in is None
-                    else state_in.transpose(-1, -2).contiguous()
+                    state_in
+                    if copy_free_flash_prefill
+                    else (
+                        None
+                        if state_in is None
+                        else state_in.transpose(-1, -2).contiguous()
+                    )
                 )
                 sequence_count = int(cu_seqlens.numel() - 1)
                 final_state_v_first = torch.empty(
@@ -1290,7 +1410,12 @@ class KimiK3KDA(nn.Module):
                     ),
                     device=q.device,
                 )
-                output = torch.empty_like(v)
+                output = torch.empty_like(v) if output_target is None else output_target
+                if tuple(output.shape) != tuple(v.shape) or not output.is_contiguous():
+                    raise ValueError(
+                        "FlashKDA output target must be contiguous and match V: "
+                        f"output={tuple(output.shape)} v={tuple(v.shape)}"
+                    )
                 workspace = _flash_kda_workspace(flash_kda, q, cu_seqlens)
                 device_index = q.device.index if q.device.index is not None else 0
                 if device_index not in _FLASH_KDA_LOGGED_DEVICES:
@@ -1322,7 +1447,11 @@ class KimiK3KDA(nn.Module):
                         cu_seqlens=cu_seqlens.contiguous(),
                         workspace=workspace,
                     )
-                final_state = final_state_v_first.transpose(-1, -2).contiguous()
+                final_state = (
+                    final_state_v_first
+                    if copy_free_flash_prefill
+                    else final_state_v_first.transpose(-1, -2).contiguous()
+                )
                 return output.to(dtype=q.dtype), final_state
 
             # Dummy/FLA executes KDA with ``transpose_state_layout=True``.
@@ -1434,11 +1563,19 @@ class KimiK3KDA(nn.Module):
         past_lengths, _ = self.cache_adapter._lengths(
             attention_inputs, cu_seqlens, mode="prefill"
         )
+        block_map = self.cache_adapter._block_map(attention_inputs)
         page_size = int(kv_cache.seq_size_per_block)
         if page_size <= 0:
             raise ValueError("linear cache seq_size_per_block must be positive")
 
         packed_outputs: list[torch.Tensor] = []
+        fused_output = (
+            q_projected.new_empty(
+                1, q_projected.shape[0], self.local_heads, self.head_dim
+            )
+            if _perf_fusions_enabled()
+            else None
+        )
         packed_q: list[torch.Tensor] = []
         packed_k: list[torch.Tensor] = []
         packed_v: list[torch.Tensor] = []
@@ -1540,6 +1677,11 @@ class KimiK3KDA(nn.Module):
                         prepared_k.append(k_work)
                         prepared_alpha.append(alpha)
                         prepared_beta.append(beta)
+                beta_for_core = raw_beta[cursor:segment_end].reshape(
+                    1, segment_length, self.local_heads
+                )
+                if not (_perf_fusions_enabled() and self._kda_backend == "flash_kda"):
+                    beta_for_core = beta_for_core.float()
                 with _perf_profile(
                     f"{page_prefix}.flashkda_prepare_recurrence_and_output"
                 ):
@@ -1548,16 +1690,20 @@ class KimiK3KDA(nn.Module):
                         k.reshape(head_shape),
                         v.reshape(head_shape),
                         raw_gate[cursor:segment_end].reshape(head_shape),
-                        raw_beta[cursor:segment_end]
-                        .float()
-                        .reshape(1, segment_length, self.local_heads),
+                        beta_for_core,
                         self.weights[W.linear_attn_alog],
                         self.weights[W.linear_attn_dt_b_kda],
                         recurrent_state,
                         mode="prefill",
                         cu_seqlens=segment_cu_seqlens,
+                        output_target=(
+                            None
+                            if fused_output is None
+                            else fused_output[:, cursor:segment_end]
+                        ),
                     )
-                packed_outputs.append(segment_output.squeeze(0))
+                if fused_output is None:
+                    packed_outputs.append(segment_output.squeeze(0))
                 segment_state = KimiKDAState(
                     q_conv_state=q_state,
                     k_conv_state=k_state,
@@ -1574,6 +1720,7 @@ class KimiK3KDA(nn.Module):
                         attention_inputs,
                         sequence_idx,
                         absolute_position + segment_length - 1,
+                        block_map=block_map,
                     )
                 cursor = segment_end
                 absolute_position += segment_length
@@ -1583,7 +1730,9 @@ class KimiK3KDA(nn.Module):
             v_finals.append(v_state[0])
             recurrent_finals.append(recurrent_state[0])
 
-        if packed_outputs:
+        if fused_output is not None:
+            output = fused_output
+        elif packed_outputs:
             output = torch.cat(packed_outputs, dim=0).unsqueeze(0)
             if trace_enabled:
                 record_accuracy_tensor(
@@ -1624,6 +1773,13 @@ class KimiK3KDA(nn.Module):
                     )
         else:
             output = q_projected.new_empty(1, 0, self.local_heads, self.head_dim)
+        if _perf_fusions_enabled() and len(ranges) == 1:
+            return output, KimiKDAState(
+                q_conv_state=q_state,
+                k_conv_state=k_state,
+                v_conv_state=v_state,
+                recurrent_state=recurrent_state,
+            )
         return output, KimiKDAState(
             q_conv_state=torch.stack(q_finals),
             k_conv_state=torch.stack(k_finals),

@@ -21,6 +21,7 @@ def _kimi_kda_short_conv_prefill_kernel(
     history,
     weight,
     output,
+    final_state,
     T,
     stride_x_t,
     stride_x_d,
@@ -30,11 +31,14 @@ def _kimi_kda_short_conv_prefill_kernel(
     stride_w_w,
     stride_o_t,
     stride_o_d,
+    stride_f_d,
+    stride_f_w,
     D: tl.constexpr,
     W: tl.constexpr,
     BW: tl.constexpr,
     BT: tl.constexpr,
     BD: tl.constexpr,
+    LAST_T_BLOCK: tl.constexpr,
     USE_HISTORY: tl.constexpr,
 ):
     """Forward kernel matching FLA causal_conv1d_fwd_kernel."""
@@ -108,6 +112,34 @@ def _kimi_kda_short_conv_prefill_kernel(
         boundary_check=(0, 1),
     )
 
+    # Export only the W-1 values needed by the next physical page. This avoids
+    # materializing [history, x.T] and slicing it again in Python.
+    o_h = tl.arange(0, BW)
+    history_size = W - 1
+    combined_idx = T + o_h
+    from_history = combined_idx < history_size
+    history_idx = combined_idx
+    x_idx = combined_idx - history_size
+    b_final_history = tl.load(
+        history + o_d[:, None] * stride_h_d + history_idx[None, :] * stride_h_w,
+        mask=m_d[:, None] & (o_h[None, :] < history_size) & from_history[None, :],
+        other=0,
+    )
+    b_final_x = tl.load(
+        x + x_idx[None, :] * stride_x_t + o_d[:, None] * stride_x_d,
+        mask=m_d[:, None]
+        & (o_h[None, :] < history_size)
+        & (~from_history[None, :])
+        & (x_idx[None, :] >= 0)
+        & (x_idx[None, :] < T),
+        other=0,
+    )
+    tl.store(
+        final_state + o_d[:, None] * stride_f_d + o_h[None, :] * stride_f_w,
+        b_final_history + b_final_x,
+        mask=m_d[:, None] & (o_h[None, :] < history_size) & (i_t == LAST_T_BLOCK),
+    )
+
 
 @triton.jit
 def _kimi_kda_short_conv_decode_kernel(
@@ -175,7 +207,8 @@ def kimi_kda_short_conv_prefill(
     history: torch.Tensor,
     *,
     use_history: bool,
-) -> torch.Tensor:
+    final_state: torch.Tensor | None = None,
+) -> tuple[torch.Tensor, torch.Tensor]:
     """Run FLA-compatible causal short convolution for one packed sequence."""
 
     if x.ndim != 2 or weight.ndim != 2 or history.ndim != 2:
@@ -190,11 +223,28 @@ def kimi_kda_short_conv_prefill(
             f"{(channels, kernel_size - 1)}, got {tuple(history.shape)}"
         )
     if token_count == 0:
-        return torch.empty_like(x)
+        if final_state is None:
+            final_state = history.clone()
+        else:
+            final_state.copy_(history)
+        return torch.empty_like(x), final_state
     if not x.is_cuda:
         raise ValueError("KDA Triton short conv requires CUDA input")
 
     output = torch.empty_like(x, memory_format=torch.contiguous_format)
+    if final_state is None:
+        final_state = torch.empty_like(history, memory_format=torch.contiguous_format)
+    elif tuple(final_state.shape) != tuple(history.shape):
+        raise ValueError(
+            "KDA short conv final_state must have shape "
+            f"{tuple(history.shape)}, got {tuple(final_state.shape)}"
+        )
+    elif final_state.dtype != x.dtype or final_state.device != x.device:
+        raise ValueError(
+            "KDA short conv final_state must match input dtype/device: "
+            f"input={x.dtype}/{x.device}, "
+            f"final={final_state.dtype}/{final_state.device}"
+        )
     block_t = 64
     block_d = 64
     grid = (
@@ -206,6 +256,7 @@ def kimi_kda_short_conv_prefill(
         history,
         weight,
         output,
+        final_state,
         token_count,
         x.stride(0),
         x.stride(1),
@@ -215,15 +266,18 @@ def kimi_kda_short_conv_prefill(
         weight.stride(1),
         output.stride(0),
         output.stride(1),
+        final_state.stride(0),
+        final_state.stride(1),
         D=channels,
         W=kernel_size,
         BW=triton.next_power_of_2(kernel_size),
         BT=block_t,
         BD=block_d,
+        LAST_T_BLOCK=triton.cdiv(token_count, block_t) - 1,
         USE_HISTORY=use_history,
         num_warps=4,
     )
-    return output
+    return output, final_state
 
 
 @torch.compiler.disable
