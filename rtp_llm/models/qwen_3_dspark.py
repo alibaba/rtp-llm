@@ -14,7 +14,9 @@ the markov_head weights and uses greedy argmax at stage D, DSpark loads the
 markov head and applies the low-rank transition-bias chain.
 """
 
-from typing import List
+from typing import Any, List
+
+import torch
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_factory_register import register_model
@@ -27,6 +29,20 @@ from rtp_llm.utils.util import get_config_from_path
 
 class Qwen3DFlashWeight(QWenV3Weight):
     """DFlash draft weights: Qwen3 backbone + fc + hidden_norm (no Markov head)."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Reduced draft vocab (speculators vocab pruning): the converted ckpt
+        # carries a top-level d2t map (ABSOLUTE target ids — the converter
+        # normalizes the speculators offset convention) alongside a trimmed
+        # lm_head/markov_w2.  Probed from the ckpt inventory like the eagle
+        # vocab_prune path; full-vocab drafts declare nothing extra.
+        self._has_d2t = False
+
+    def _process_meta(self, meta_dicts: Any, weight_keys: List[str]):
+        super()._process_meta(meta_dicts, weight_keys)
+        if "d2t" in weight_keys:
+            self._has_d2t = True
 
     def _draft_extra_weights(self) -> List[AtomicWeight]:
         """Draft-head weights beyond the shared DFlash base; empty for DFlash."""
@@ -60,6 +76,15 @@ class Qwen3DFlashWeight(QWenV3Weight):
                 identity,
             ),
         ]
+        if self._has_d2t:
+            weights.append(
+                AtomicWeight(
+                    W.multi_tokens_predict_d2t_map,
+                    [CkptWeightInfo("d2t", identity)],
+                    identity,
+                    data_type=torch.int64,
+                )
+            )
         weights.extend(self._draft_extra_weights())
 
         layer_weights: List[List[WeightModule]] = [

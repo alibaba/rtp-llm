@@ -115,8 +115,11 @@ class Qwen3DSparkModel(Qwen3DFlashModel):
             (corrected.shape[0], k), dtype=torch.int64, device=corrected.device
         )
         for i in range(k):
+            # bias/argmax run in the draft vocab; prev feeds markov_w1, which
+            # is target-vocab, so map each pick before chaining (identity for
+            # full-vocab drafts).
             corrected[:, i] += self.markov_head.bias(prev)
-            prev = corrected[:, i].argmax(dim=-1)
+            prev = self.map_draft_to_target(corrected[:, i].argmax(dim=-1))
             tokens[:, i] = prev
         return tokens, corrected
 

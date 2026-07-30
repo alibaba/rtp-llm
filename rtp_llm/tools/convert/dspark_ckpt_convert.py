@@ -141,6 +141,15 @@ def main() -> int:
 
     with open(os.path.join(args.src, "config.json")) as f:
         src_cfg = json.load(f)
+    def normalize_tensor(name: str, tensor: torch.Tensor) -> torch.Tensor:
+        if name == "d2t":
+            # speculators stores d2t as OFFSETS (target_id = draft_id +
+            # d2t[draft_id]); RTP's mappingDraft2Target / sampler scatter
+            # treat d2t as ABSOLUTE target ids, so normalize here and let the
+            # RTP-format checkpoint carry the RTP convention.
+            return torch.arange(tensor.numel(), dtype=tensor.dtype) + tensor
+        return tensor
+
     src_st = os.path.join(args.src, "model.safetensors")
 
     num_layers = src_cfg["transformer_layer_config"]["num_hidden_layers"]
@@ -155,7 +164,7 @@ def main() -> int:
                 continue
             if name.startswith("markov_head."):
                 has_markov = True
-            tensors[map_name(name)] = f.get_tensor(name)
+            tensors[map_name(name)] = normalize_tensor(name, f.get_tensor(name))
 
     # Shape sanity on the load-bearing extras.
     hidden = src_cfg["transformer_layer_config"]["hidden_size"]

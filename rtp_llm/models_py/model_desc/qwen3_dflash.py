@@ -193,6 +193,29 @@ class Qwen3DFlashModel(GptModelBase):
         self.tp_size = parallelism_config.tp_size
         self.lm_head_weight = weights.get_global_weight(W.lm_head)  # [V(/tp), H]
 
+        # Reduced draft vocab (speculators vocab pruning): lm_head/markov_w2
+        # emit draft-vocab logits and d2t maps each argmax pick back to the
+        # target vocab (ABSOLUTE ids — the ckpt converter normalizes the
+        # speculators offset convention).  markov_w1 / embed_tokens stay
+        # target-vocab, so anchors and chained prev tokens index them directly.
+        self.d2t = weights.get_global_weight_or_none(W.multi_tokens_predict_d2t_map)
+        if self.d2t is not None:
+            self.d2t = self.d2t.long()
+            assert self.tp_size == 1, (
+                "reduced draft vocab (d2t) is not wired for tp > 1 yet: the "
+                "vocab-shard merge slices by the target vocab size"
+            )
+            assert self.d2t.numel() == self.lm_head_weight.shape[0], (
+                f"d2t rows ({self.d2t.numel()}) != draft lm_head rows "
+                f"({self.lm_head_weight.shape[0]})"
+            )
+        elif self.tp_size == 1:
+            assert self.lm_head_weight.shape[0] >= self.vocab_size, (
+                f"draft lm_head rows ({self.lm_head_weight.shape[0]}) < target "
+                f"vocab ({self.vocab_size}) but no d2t map was loaded — a "
+                "trimmed draft vocab requires the ckpt's d2t tensor"
+            )
+
         # Stage B rope: same op/cache/interleave flags as the block-forward path.
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.flashinfer_rotary_emb import (
             MhaRotaryEmbeddingOp,
@@ -500,17 +523,25 @@ class Qwen3DFlashModel(GptModelBase):
 
     # ---- Stage D (virtual seam) -----------------------------------------
 
+    def map_draft_to_target(self, draft_ids: torch.Tensor) -> torch.Tensor:
+        """Draft-vocab argmax picks -> target-vocab token ids (identity for
+        full-vocab drafts)."""
+        if self.d2t is None:
+            return draft_ids
+        return self.d2t[draft_ids]
+
     def markov_correct(
         self, base_logits: torch.Tensor, anchor_ids: torch.Tensor
     ) -> tuple[torch.Tensor, torch.Tensor]:
         """DFlash stage D: greedy argmax, no transition bias.
 
-        base_logits: [B, k, V]; anchor_ids: [B] int64 (unused by DFlash, kept
-        for the uniform signature the DSpark subclass overrides).
-        Returns (tokens [B, k] int64, corrected_logits [B, k, V] fp32).
+        base_logits: [B, k, V_draft]; anchor_ids: [B] int64 (unused by DFlash,
+        kept for the uniform signature the DSpark subclass overrides).
+        Returns (tokens [B, k] int64 TARGET-vocab ids, corrected_logits
+        [B, k, V_draft] fp32).
         """
         corrected = base_logits.float()
-        return corrected.argmax(dim=-1), corrected
+        return self.map_draft_to_target(corrected.argmax(dim=-1)), corrected
 
     # ---- Full pipeline --------------------------------------------------
 
