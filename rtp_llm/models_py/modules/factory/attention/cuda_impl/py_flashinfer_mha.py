@@ -101,20 +101,6 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.max_seq_len = attn_configs.max_seq_len
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         self.enable_cuda_graph = attn_inputs.is_cuda_graph
-        self.fixed_q_cuda_graph_plan = bool(
-            getattr(
-                attn_inputs,
-                "prefill_cuda_graph_fixed_q_per_request",
-                False,
-            )
-        )
-        if (
-            self.fixed_q_cuda_graph_plan
-            and attn_inputs.prefill_cuda_graph_copy_params is not None
-        ):
-            raise RuntimeError(
-                "fixed-Q FlashInfer planning requires compact prefill CUDA graph inputs"
-            )
         self.prefill_cuda_graph_copy_params = None
         # Pre-allocated buffers for CUDA graph copy path (avoid per-forward allocation)
         self._aligned_q_buf = None
@@ -125,6 +111,9 @@ class PyFlashinferPrefillPagedAttnOp(object):
             "HND",
             backend=backend,
         )
+        # prepare() installs graph-owned metadata buffers before the first
+        # graph plan. Eager prefill must retain FlashInfer's normal mode.
+        self.prefill_wrapper._use_cuda_graph = self.enable_cuda_graph
 
     def __del__(self):
         release_py_flashinfer_workspace_buffer(self.g_workspace_buffer)
@@ -164,11 +153,11 @@ class PyFlashinferPrefillPagedAttnOp(object):
             qo_indptr = attn_inputs.cu_seqlens[: attn_inputs.input_lengths.size(0) + 1]
 
         if self.enable_cuda_graph and self.prefill_wrapper._qo_indptr_buf is None:
-            # FlashInfer graph-mode planning assumes one request may own almost
-            # every Q row. For an explicitly fixed per-request Q layout that
-            # selects an oversized CTA tile. Keep stable metadata buffers but
-            # plan from the real Q layout instead.
-            self.prefill_wrapper._use_cuda_graph = not self.fixed_q_cuda_graph_plan
+            # Both full-capacity and compact graphs need FlashInfer's fixed
+            # padded grid. In particular, compact draft-prefill enables
+            # split-KV below, so the number of active KV chunks may change at
+            # replay even though its Q layout and batch size are fixed.
+            self.prefill_wrapper._use_cuda_graph = True
             self.prefill_wrapper._qo_indptr_buf = qo_indptr
             self.prefill_wrapper._paged_kv_indptr_buf = (
                 self.fmha_params.decode_page_indptr_d
@@ -226,24 +215,22 @@ class PyFlashinferPrefillPagedAttnOp(object):
             )
             qo_indptr = self.qo_indptr
 
-        # The fixed-Q schedule is captured once. Replay updates the aliased
-        # paged-KV metadata buffers above, but must not re-plan a different
-        # schedule into an already captured graph.
-        if not (self.fixed_q_cuda_graph_plan and forbid_realloc):
-            self.prefill_wrapper.plan(
-                qo_indptr,
-                self.fmha_params.decode_page_indptr_d,
-                self.fmha_params.page_indice_d,
-                self.fmha_params.paged_kv_last_page_len_d,
-                self.local_head_num,
-                self.local_kv_head_num,
-                self.head_dim_qk,
-                self.page_size,
-                causal=True,
-                q_data_type=self.datatype,
-                kv_data_type=self.kv_datatype,
-                disable_split_kv=self.fixed_q_cuda_graph_plan,
-            )
+        # CUDA graphs use a fixed padded grid with dynamic split-KV schedules.
+        # Re-plan before every replay to refresh chunk mappings and
+        # block_valid_mask in stable workspace buffers.
+        self.prefill_wrapper.plan(
+            qo_indptr,
+            self.fmha_params.decode_page_indptr_d,
+            self.fmha_params.page_indice_d,
+            self.fmha_params.paged_kv_last_page_len_d,
+            self.local_head_num,
+            self.local_kv_head_num,
+            self.head_dim_qk,
+            self.page_size,
+            causal=True,
+            q_data_type=self.datatype,
+            kv_data_type=self.kv_datatype,
+        )
         return self.fmha_params
 
     @staticmethod
@@ -701,10 +688,10 @@ class PyFlashinferDecodeAttnOp(object):
         )
 
     def prepare(self, attn_inputs: PyAttentionInputs):
-        # FlashInfer's captured decode schedule is not safe when a graph planned
-        # for many KV pages is replayed with fewer pages. Plan CUDA Graphs with
-        # the minimum one-token KV length. Replay refreshes both the in-place
-        # metadata and FlashInfer's derived plan_info below.
+        # The capture-time plan only establishes the graph-compatible kernel
+        # structure. Use a minimum one-token placeholder for capture, then
+        # replace its page-dependent split schedule with the live plan before
+        # every replay.
         planning_sequence_lengths = attn_inputs.sequence_lengths
         if getattr(attn_inputs, "is_cuda_graph", False):
             planning_sequence_lengths = torch.zeros_like(attn_inputs.sequence_lengths)

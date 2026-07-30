@@ -470,9 +470,10 @@ def _target_verify_impl_class():
                 block_table,
                 self.seq_size_per_block,
             )
-            # The target-verify capture plan is derived from MAX_SEQ_LEN, while
-            # replay uses the live prefix lengths. Refresh the page-dependent
-            # FlashInfer plan after updating the stable paged-KV metadata.
+            # Capture uses MAX_SEQ_LEN, but FlashInfer's split schedule is not
+            # a reusable upper bound: chunk mappings, merge indptr, and the
+            # valid-CTA mask describe the exact planned KV lengths. Refresh it
+            # after updating the stable paged-KV metadata for this replay.
             self._plan_decode_wrapper(attn_inputs)
 
         def forward(self, query, kv_cache, params):
