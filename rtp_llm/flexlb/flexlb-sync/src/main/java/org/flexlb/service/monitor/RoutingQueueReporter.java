@@ -61,7 +61,7 @@ public class RoutingQueueReporter {
     }
 
     public void reportQueueSize(long queueSize) {
-        monitor.report(ROUTING_QUEUE_LENGTH, FlexMetricTags.of("type", "mainQueue"), queueSize);
+        monitor.report(ROUTING_QUEUE_LENGTH, tags, queueSize);
     }
 
     public void reportQueueWaitingMetric(long waitTimeMs) {

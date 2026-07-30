@@ -340,7 +340,10 @@ public class EngineHealthReporter {
     }
 
     public void reportPrefillBalanceMasterEvent(ZkMasterEvent event) {
-        monitor.report(ZK_MASTER_EVENT, FlexMetricTags.of("event", event.name()), 1.0);
+        monitor.report(
+                ZK_MASTER_EVENT,
+                FlexMetricTags.of("event", event.name()),
+                System.currentTimeMillis());
     }
 
     public void reportThreadPoolInfo(String metricName, String name, ThreadPoolExecutor engineSyncExecutor) {

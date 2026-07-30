@@ -2,6 +2,7 @@ package org.flexlb.cache.match;
 
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.dao.kvcm.KvcmHealthSnapshot;
 import org.flexlb.engine.grpc.client.KvcmGrpcClient;
@@ -19,18 +20,31 @@ import java.util.concurrent.atomic.AtomicReference;
 public class CacheMatchFailoverManager {
 
     private final boolean autoSwitchEnabled;
+    private final boolean kvcmEnabled;
     private final KvcmGrpcClient kvcmGrpcClient;
+    private final CacheMetricsReporter cacheMetricsReporter;
     private final AtomicBoolean manualFallbackActive = new AtomicBoolean();
-    private final AtomicReference<CacheMatchSource> activeSource =
-            new AtomicReference<>(CacheMatchSource.KVCM);
+    private final AtomicReference<CacheMatchSource> activeSource;
     private final AtomicLong lastFailoverTimeMs = new AtomicLong();
     private final AtomicReference<String> lastFailoverReason = new AtomicReference<>("initial");
 
-    public CacheMatchFailoverManager(CacheMatchConfiguration configuration, KvcmGrpcClient kvcmGrpcClient) {
+    public CacheMatchFailoverManager(
+            CacheMatchConfiguration configuration,
+            KvcmGrpcClient kvcmGrpcClient,
+            CacheMetricsReporter cacheMetricsReporter) {
         this.autoSwitchEnabled = configuration.isAutoSwitchEnabled();
+        this.kvcmEnabled = configuration.isKvcmEnabled();
         this.kvcmGrpcClient = kvcmGrpcClient;
-        this.kvcmGrpcClient.setHealthSnapshotListener(this::updateFromKvcmHealth);
-        updateFromKvcmHealth(this.kvcmGrpcClient.healthSnapshot());
+        this.cacheMetricsReporter = cacheMetricsReporter;
+        CacheMatchSource initialSource = kvcmEnabled
+                ? CacheMatchSource.KVCM
+                : CacheMatchSource.LOCAL_SYNC;
+        this.activeSource = new AtomicReference<>(initialSource);
+        this.cacheMetricsReporter.reportActiveCacheMatchSource(initialSource);
+        if (kvcmEnabled) {
+            this.kvcmGrpcClient.setHealthSnapshotListener(this::updateFromKvcmHealth);
+            updateFromKvcmHealth(this.kvcmGrpcClient.healthSnapshot());
+        }
     }
 
     public CacheMatchSource activeSource() {
@@ -42,24 +56,32 @@ public class CacheMatchFailoverManager {
      * This method is called after every scheduled heartbeat and must remain idempotent.
      */
     void updateFromKvcmHealth(KvcmHealthSnapshot health) {
+        if (!kvcmEnabled) {
+            return;
+        }
+
         // A manual fallback is an operator override and has higher priority than health updates.
         if (manualFallbackActive.get()) {
+            cacheMetricsReporter.reportActiveCacheMatchSource(activeSource());
             return;
         }
 
         // Healthy snapshots converge the cache source back to KVCM.
         if (health.isHealthy()) {
             updateActiveSource(CacheMatchSource.KVCM, "KVCM heartbeat recovered");
+            cacheMetricsReporter.reportActiveCacheMatchSource(activeSource());
             return;
         }
 
         // Unhealthy snapshots activate Local Standby only when automatic failover is enabled.
         if (autoSwitchEnabled) {
             updateActiveSource(CacheMatchSource.LOCAL_STANDBY, health.lastStateChangeReason());
+            cacheMetricsReporter.reportActiveCacheMatchSource(activeSource());
             return;
         }
 
         // Keep the current source unchanged and wait for an explicit manual fallback.
+        cacheMetricsReporter.reportActiveCacheMatchSource(activeSource());
         log.warn("KVCM is unavailable but automatic failover is disabled; manual failover is required, reason={}, "
                         + "consecutiveQueryFailures={}, consecutiveHeartbeatFailures={}",
                 health.lastStateChangeReason(),
@@ -104,6 +126,7 @@ public class CacheMatchFailoverManager {
             if (activeSource.compareAndSet(currentSource, desiredSource)) {
                 lastFailoverReason.set(reason);
                 lastFailoverTimeMs.set(System.currentTimeMillis());
+                cacheMetricsReporter.reportCacheMatchSourceChange(currentSource, desiredSource);
                 if (desiredSource == CacheMatchSource.LOCAL_STANDBY) {
                     log.warn("Local Standby cache fallback activated, reason={}", reason);
                 } else {

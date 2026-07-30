@@ -3,6 +3,7 @@ package org.flexlb.service.monitor;
 import io.netty.channel.EventLoopGroup;
 import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
+import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
@@ -19,6 +20,8 @@ import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
+import static org.mockito.ArgumentMatchers.doubleThat;
+import static org.mockito.ArgumentMatchers.eq;
 
 class EngineHealthReporterTest {
 
@@ -54,6 +57,19 @@ class EngineHealthReporterTest {
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.local.standby.predicted.ratio",
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+    }
+
+    @Test
+    void shouldReportZkMasterEventTime() {
+        long beforeReport = System.currentTimeMillis();
+
+        reporter.reportPrefillBalanceMasterEvent(ZkMasterEvent.MASTER_TAKE_LEADERSHIP);
+
+        long afterReport = System.currentTimeMillis();
+        verify(monitor).report(
+                eq("app.engine.zk.master.event"),
+                eq(FlexMetricTags.of("event", ZkMasterEvent.MASTER_TAKE_LEADERSHIP.name())),
+                doubleThat(value -> value >= beforeReport && value <= afterReport));
     }
 
     @Test

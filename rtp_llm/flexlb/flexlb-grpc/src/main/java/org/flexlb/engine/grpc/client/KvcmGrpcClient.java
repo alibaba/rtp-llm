@@ -10,6 +10,7 @@ import org.flexlb.dao.kvcm.KvcmHealthState;
 import org.flexlb.dao.route.KvcmConfig;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.core.GrpcTarget;
+import org.flexlb.engine.grpc.monitor.KvcmMetricsReporter;
 import org.flexlb.exception.KvcmQueryException;
 import org.flexlb.kvcm.grpc.ErrorCode;
 import org.flexlb.kvcm.grpc.GetHostCacheStateRequest;
@@ -50,6 +51,7 @@ public class KvcmGrpcClient {
     private final KvcmLeaderResolver leaderResolver;
     private final KvcmWorkerMetadataResolver workerMetadataResolver;
     private final ApplicationWarmupState applicationWarmupState;
+    private final KvcmMetricsReporter metricsReporter;
     private final ScheduledExecutorService refreshExecutor;
     private final int heartbeatFailureThreshold;
     private final int queryFailureThreshold;
@@ -70,11 +72,13 @@ public class KvcmGrpcClient {
                           KvcmMetaServiceClient metaServiceClient,
                           KvcmLeaderResolver leaderResolver,
                           KvcmWorkerMetadataResolver workerMetadataResolver,
-                          ApplicationWarmupState applicationWarmupState) {
+                          ApplicationWarmupState applicationWarmupState,
+                          KvcmMetricsReporter metricsReporter) {
         this.metaServiceClient = metaServiceClient;
         this.leaderResolver = leaderResolver;
         this.workerMetadataResolver = workerMetadataResolver;
         this.applicationWarmupState = applicationWarmupState;
+        this.metricsReporter = metricsReporter;
         this.config = configuration.getKvcmConfig();
         this.enabled = configuration.isKvcmEnabled();
 
@@ -163,6 +167,7 @@ public class KvcmGrpcClient {
                     recordQueryFailure();
                     throw failure;
                 }
+                metricsReporter.reportQueryRetry(attemptIndex + 1);
                 log.debug("KVCM cache query failed; retrying, requestId={}, attempt={}, maxRetryCount={}",
                         requestId, attemptIndex + 1, maxQueryRetryCount, failure);
             }

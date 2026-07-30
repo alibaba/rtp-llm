@@ -13,6 +13,7 @@ import org.flexlb.cache.match.localstandby.LocalStandbyCacheManager;
 import org.flexlb.cache.match.localstandby.LocalStandbyCacheMatchProvider;
 import org.flexlb.cache.match.localstandby.LocalStandbyComparisonService;
 import org.flexlb.cache.match.localsync.LocalSyncCacheMatchProvider;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.dao.kvcm.KvcmHealthSnapshot;
 import org.springframework.stereotype.Component;
@@ -34,9 +35,19 @@ public class CacheMatchQueryOrchestrator {
     private final CacheMatchFailoverManager failoverManager;
     private final LocalStandbyComparisonService comparisonService;
     private final LocalStandbyHashService localStandbyHashService;
+    private final CacheMetricsReporter cacheMetricsReporter;
     private final CacheMatchConfiguration configuration;
 
-    public CacheMatchQueryOrchestrator(LocalSyncCacheMatchProvider localSyncProvider, KvcmCacheMatchProvider kvcmProvider, LocalStandbyCacheMatchProvider localStandbyProvider, LocalStandbyCacheManager localStandbyCacheManager, CacheMatchFailoverManager failoverManager, LocalStandbyComparisonService comparisonService, LocalStandbyHashService localStandbyHashService, CacheMatchConfiguration configuration) {
+    public CacheMatchQueryOrchestrator(
+            LocalSyncCacheMatchProvider localSyncProvider,
+            KvcmCacheMatchProvider kvcmProvider,
+            LocalStandbyCacheMatchProvider localStandbyProvider,
+            LocalStandbyCacheManager localStandbyCacheManager,
+            CacheMatchFailoverManager failoverManager,
+            LocalStandbyComparisonService comparisonService,
+            LocalStandbyHashService localStandbyHashService,
+            CacheMetricsReporter cacheMetricsReporter,
+            CacheMatchConfiguration configuration) {
         this.localSyncProvider = localSyncProvider;
         this.kvcmProvider = kvcmProvider;
         this.localStandbyProvider = localStandbyProvider;
@@ -44,6 +55,7 @@ public class CacheMatchQueryOrchestrator {
         this.failoverManager = failoverManager;
         this.comparisonService = comparisonService;
         this.localStandbyHashService = localStandbyHashService;
+        this.cacheMetricsReporter = cacheMetricsReporter;
         this.configuration = configuration;
         log.info("Cache match query orchestrator initialized: mode={}, autoSwitchEnabled={}, source={}",
                 configuration.getConfiguredMode(),
@@ -58,6 +70,7 @@ public class CacheMatchQueryOrchestrator {
         }
         CacheMatchSource source = failoverManager.activeSource();
         if (source == CacheMatchSource.LOCAL_STANDBY) {
+            cacheMetricsReporter.reportStandbyFallback("active_source");
             return queryLocalStandby(query, startTimeNs);
         }
         if (query.blockCacheKeys() == null || query.blockCacheKeys().isEmpty()) {
@@ -71,6 +84,7 @@ public class CacheMatchQueryOrchestrator {
             return result(matches, CacheMatchSource.KVCM, startTimeNs, query.blockSize());
         } catch (RuntimeException e) {
             log.warn("KVCM cache query failed; requestId={}, action=LOCAL_STANDBY", query.requestId(), e);
+            cacheMetricsReporter.reportStandbyFallback("kvcm_query_failure");
             return queryLocalStandby(query, startTimeNs);
         }
     }

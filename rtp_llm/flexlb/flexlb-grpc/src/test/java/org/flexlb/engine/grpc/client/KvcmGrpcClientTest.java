@@ -21,6 +21,7 @@ import org.flexlb.discovery.RoutingServiceDiscovery;
 import org.flexlb.discovery.ServiceDiscoveryType;
 import org.flexlb.engine.grpc.core.GrpcChannelFactory;
 import org.flexlb.engine.grpc.core.GrpcTarget;
+import org.flexlb.engine.grpc.monitor.KvcmMetricsReporter;
 import org.flexlb.enums.KvCacheGroupMode;
 import org.flexlb.exception.KvcmQueryException;
 import org.flexlb.kvcm.grpc.CommonResponseHeader;
@@ -61,6 +62,7 @@ class KvcmGrpcClientTest {
     private Server seedServer;
     private Server leaderServer;
     private KvcmGrpcClient client;
+    private final KvcmMetricsReporter metricsReporter = Mockito.mock(KvcmMetricsReporter.class);
 
     @BeforeEach
     void setUp() throws IOException {
@@ -137,7 +139,8 @@ class KvcmGrpcClientTest {
                 metaServiceClient,
                 leaderResolver,
                 workerMetadataResolver,
-                () -> true);
+                () -> true,
+                metricsReporter);
         List<KvcmHealthState> healthSnapshots = new ArrayList<>();
         client.setHealthSnapshotListener(snapshot -> healthSnapshots.add(snapshot.state()));
 
@@ -193,7 +196,8 @@ class KvcmGrpcClientTest {
                 metaServiceClient,
                 leaderResolver,
                 workerMetadataResolver,
-                warmupFinished::get);
+                warmupFinished::get,
+                metricsReporter);
 
         client.refreshKvcmServiceStateSafely();
         client.refreshKvcmServiceStateSafely();
@@ -248,7 +252,8 @@ class KvcmGrpcClientTest {
                 metaServiceClient,
                 leaderResolver,
                 workerMetadataResolver,
-                warmupFinished::get);
+                warmupFinished::get,
+                metricsReporter);
 
         assertThrows(KvcmQueryException.class, this::queryMockClient);
         assertEquals(KvcmHealthState.HEALTHY, client.healthSnapshot().state());
@@ -303,7 +308,8 @@ class KvcmGrpcClientTest {
                 metaServiceClient,
                 leaderResolver,
                 workerMetadataResolver,
-                () -> true);
+                () -> true,
+                metricsReporter);
         Mockito.verify(leaderResolver, Mockito.timeout(1_000)).refresh();
         int heartbeatSuccessesBeforeQueries =
                 client.healthSnapshot().consecutiveHeartbeatSuccesses();
@@ -315,12 +321,16 @@ class KvcmGrpcClientTest {
                 client.healthSnapshot().consecutiveHeartbeatSuccesses());
         Mockito.verify(metaServiceClient, Mockito.times(3)).getHostCacheState(
                 any(GrpcTarget.class), any(GetHostCacheStateRequest.class), anyLong());
+        Mockito.verify(metricsReporter).reportQueryRetry(1);
+        Mockito.verify(metricsReporter).reportQueryRetry(2);
 
         assertThrows(KvcmQueryException.class, this::queryMockClient);
         assertEquals(2, client.healthSnapshot().consecutiveQueryFailures());
         assertEquals(KvcmHealthState.UNHEALTHY, client.healthSnapshot().state());
         Mockito.verify(metaServiceClient, Mockito.times(6)).getHostCacheState(
                 any(GrpcTarget.class), any(GetHostCacheStateRequest.class), anyLong());
+        Mockito.verify(metricsReporter, Mockito.times(2)).reportQueryRetry(1);
+        Mockito.verify(metricsReporter, Mockito.times(2)).reportQueryRetry(2);
 
         querySucceeds.set(true);
         assertTrue(queryMockClient().isEmpty());
@@ -375,7 +385,8 @@ class KvcmGrpcClientTest {
                 metaServiceClient,
                 new KvcmLeaderResolver(configuration, serviceDiscovery, metaServiceClient),
                 new KvcmWorkerMetadataResolver(configuration, workerStatusProvider(mode)),
-                () -> true);
+                () -> true,
+                metricsReporter);
     }
 
     private WorkerStatusProvider workerStatusProvider(KvCacheGroupMode mode) {

@@ -11,6 +11,7 @@ import org.flexlb.cache.match.localstandby.LocalStandbyCacheManager;
 import org.flexlb.cache.match.localstandby.LocalStandbyCacheMatchProvider;
 import org.flexlb.cache.match.localstandby.LocalStandbyComparisonService;
 import org.flexlb.cache.match.localsync.LocalSyncCacheMatchProvider;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.route.KvcmConfig;
@@ -51,6 +52,8 @@ class CacheMatchQueryOrchestratorTest {
             mock(LocalStandbyComparisonService.class);
     private final LocalStandbyHashService localStandbyHashService =
             mock(LocalStandbyHashService.class);
+    private final CacheMetricsReporter cacheMetricsReporter =
+            mock(CacheMetricsReporter.class);
     private final CacheMatchQuery query = new CacheMatchQuery(
             "request-1",
             List.of(11L, 22L),
@@ -92,6 +95,7 @@ class CacheMatchQueryOrchestratorTest {
         assertEquals(4096, result.blockSize());
         assertEquals(1, result.matches().get("10.0.0.2:8080"));
         verify(comparisonService, never()).trackLocalStandbyPrediction(query);
+        verify(cacheMetricsReporter).reportStandbyFallback("kvcm_query_failure");
     }
 
     @Test
@@ -170,6 +174,7 @@ class CacheMatchQueryOrchestratorTest {
         verify(localStandbyHashService, never()).getHashResult(any(), any(), anyLong());
         verify(localStandbyProvider, never())
                 .findMatchingEngines(any(), any(), any(Long.class), any(), any());
+        verify(cacheMetricsReporter).reportStandbyFallback("active_source");
     }
 
     @Test
@@ -250,6 +255,7 @@ class CacheMatchQueryOrchestratorTest {
                 failoverManager,
                 comparisonService,
                 localStandbyHashService,
+                cacheMetricsReporter,
                 new CacheMatchConfiguration(
                         modelMetaConfig(kvcmEnabled, autoSwitch)));
     }

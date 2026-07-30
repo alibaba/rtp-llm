@@ -180,6 +180,26 @@ public class MetricConstant {
     public static final String CACHE_LOCAL_STANDBY_MAPPING_COUNT = "app.cache.local.standby.mapping.count";
 
     /**
+     * Current cache matching source. The active source is reported as 1 and the inactive source as 0.
+     */
+    public static final String CACHE_MATCH_ACTIVE_SOURCE = "app.cache.match.active.source";
+
+    /**
+     * Cache matching source transitions.
+     */
+    public static final String CACHE_MATCH_SOURCE_CHANGE_QPS = "app.cache.match.source.change.qps";
+
+    /**
+     * Requests routed through Local Standby because KVCM is unavailable or already in fallback.
+     */
+    public static final String CACHE_MATCH_STANDBY_FALLBACK_QPS = "app.cache.match.standby.fallback.qps";
+
+    /**
+     * KVCM cache query retry attempts.
+     */
+    public static final String KVCM_QUERY_RETRY_QPS = "app.cache.kvcm.query.retry.qps";
+
+    /**
      * Cache request total count
      */
     public static final String CACHE_REQUEST_TOTAL = "app.cache.request.total";

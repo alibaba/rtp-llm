@@ -1,6 +1,7 @@
 package org.flexlb.cache.match;
 
 import org.flexlb.cache.domain.CacheMatchSource;
+import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.dao.kvcm.KvcmHealthSnapshot;
@@ -26,10 +27,12 @@ class CacheMatchFailoverManagerTest {
     @Test
     void automaticallyFollowsKvcmClientHealth() {
         KvcmGrpcClient client = mock(KvcmGrpcClient.class);
+        CacheMetricsReporter metricsReporter = mock(CacheMetricsReporter.class);
         when(client.healthSnapshot()).thenReturn(
                 health(KvcmHealthState.HEALTHY, 0, 0, 0, "initial"));
         CacheMatchFailoverManager manager =
-                new CacheMatchFailoverManager(configuration(true), client);
+                new CacheMatchFailoverManager(
+                        configuration(true), client, metricsReporter);
         Consumer<KvcmHealthSnapshot> healthSnapshotListener = healthSnapshotListener(client);
 
         healthSnapshotListener.accept(
@@ -41,6 +44,10 @@ class CacheMatchFailoverManagerTest {
                 health(KvcmHealthState.HEALTHY, 0, 3, 0, "heartbeat recovery"));
         assertEquals(CacheMatchSource.KVCM, manager.activeSource());
         assertEquals("KVCM heartbeat recovered", manager.lastFailoverReason());
+        verify(metricsReporter).reportCacheMatchSourceChange(
+                CacheMatchSource.KVCM, CacheMatchSource.LOCAL_STANDBY);
+        verify(metricsReporter).reportCacheMatchSourceChange(
+                CacheMatchSource.LOCAL_STANDBY, CacheMatchSource.KVCM);
     }
 
     @Test
@@ -50,7 +57,8 @@ class CacheMatchFailoverManagerTest {
                 health(KvcmHealthState.UNHEALTHY, 3, 0, 10, "query failure"));
         when(client.healthSnapshot()).thenAnswer(ignored -> currentHealth.get());
         CacheMatchFailoverManager manager =
-                new CacheMatchFailoverManager(configuration(false), client);
+                new CacheMatchFailoverManager(
+                        configuration(false), client, mock(CacheMetricsReporter.class));
         Consumer<KvcmHealthSnapshot> healthSnapshotListener = healthSnapshotListener(client);
 
         assertEquals(CacheMatchSource.KVCM, manager.activeSource());
@@ -76,7 +84,8 @@ class CacheMatchFailoverManagerTest {
         when(client.healthSnapshot())
                 .thenReturn(health(KvcmHealthState.HEALTHY, 0, 3, 0, "heartbeat recovery"));
         CacheMatchFailoverManager manager =
-                new CacheMatchFailoverManager(configuration(true), client);
+                new CacheMatchFailoverManager(
+                        configuration(true), client, mock(CacheMetricsReporter.class));
 
         manager.activateFallbackManually();
 
@@ -93,7 +102,8 @@ class CacheMatchFailoverManagerTest {
                 health(KvcmHealthState.UNHEALTHY, 3, 0, 0, "heartbeat failure"));
         when(client.healthSnapshot()).thenAnswer(ignored -> currentHealth.get());
         CacheMatchFailoverManager manager =
-                new CacheMatchFailoverManager(configuration(true), client);
+                new CacheMatchFailoverManager(
+                        configuration(true), client, mock(CacheMetricsReporter.class));
         Consumer<KvcmHealthSnapshot> healthSnapshotListener = healthSnapshotListener(client);
 
         manager.activateFallbackManually();
