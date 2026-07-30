@@ -35,6 +35,8 @@ class ServerArgsSetTest(TestCase):
         os.environ["MAX_SEQ_LEN"] = "4096"
         os.environ["FRONTEND_PRE_STOP_DRAIN_SECONDS"] = "2.5"
         os.environ["DASH_SC_GRPC_PRE_STOP_DRAIN_SECONDS"] = "9"
+        os.environ["MM_IMAGE_MIN_DIMENSION"] = "12"
+        os.environ["MM_IMAGE_MAX_ASPECT_RATIO"] = "150.5"
 
         sys.argv = ["prog"]
 
@@ -75,6 +77,8 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(py_env_configs.runtime_config.warm_up, True)  # bool in C++
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
         # It will be set when ModelConfig is created from model_args
+        self.assertEqual(py_env_configs.vit_config.mm_image_min_dimension, 12)
+        self.assertEqual(py_env_configs.vit_config.mm_image_max_aspect_ratio, 150.5)
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""

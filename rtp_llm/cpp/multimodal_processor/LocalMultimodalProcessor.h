@@ -73,6 +73,18 @@ private:
                 return mm_embedding_res;
             } catch (py::error_already_set& e) {
                 std::string error_msg = e.what();
+                try {
+                    py::gil_scoped_acquire gil;
+                    py::object             exc = py::reinterpret_borrow<py::object>(e.value());
+                    if (exc && py::hasattr(exc, "exception_type")) {
+                        const auto exception_type = exc.attr("exception_type").cast<int>();
+                        const auto message = py::hasattr(exc, "message") ? exc.attr("message").cast<std::string>() :
+                                                                           py::str(exc).cast<std::string>();
+                        return ErrorInfo(static_cast<ErrorCode>(exception_type), message);
+                    }
+                } catch (...) {
+                    // Fall through to the legacy error mapping.
+                }
                 if (error_msg.find("download failed") != std::string::npos) {
                     return ErrorInfo(ErrorCode::MM_DOWNLOAD_FAILED, error_msg);
                 }

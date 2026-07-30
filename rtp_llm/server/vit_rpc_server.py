@@ -7,6 +7,7 @@ import grpc
 import torch
 
 from rtp_llm.config.engine_config import EngineConfig
+from rtp_llm.config.exceptions import FtRuntimeException
 from rtp_llm.config.log_config import setup_logging
 from rtp_llm.config.py_config_modules import PyEnvConfigs
 from rtp_llm.config.server_config_setup import setup_and_configure_server
@@ -172,6 +173,15 @@ class MultimodalRpcServer(MultimodalRpcServiceServicer):
                 {"source": "vit_server", "reason": "request_too_large"},
             )
             context.abort(grpc.StatusCode.INVALID_ARGUMENT, str(e))
+        except FtRuntimeException as e:
+            kmonitor.report(
+                AccMetrics.VIT_RPC_SERVER_ERROR_QPS_METRIC,
+                1,
+                {"source": "vit_server", "reason": "runtime_error"},
+            )
+            context.abort(
+                grpc.StatusCode.INTERNAL, f"[{e.exception_type.name}] {e.message}"
+            )
         except Exception:
             kmonitor.report(
                 AccMetrics.VIT_RPC_SERVER_ERROR_QPS_METRIC,

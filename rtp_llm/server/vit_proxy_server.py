@@ -13,6 +13,7 @@ from typing import Optional
 
 import grpc
 
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     CacheStatusPB,
     CacheVersionPB,
@@ -30,10 +31,9 @@ from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.multimodal.mm_profiler import MMProfiler
 
-# Default per-request gRPC timeout for proxy → worker forwarding. Prevents a slow or
-# hung worker from exhausting the 200-thread proxy pool (see RemoteMultimodalEmbedding).
-# Per-request override comes from MMPreprocessConfigPB.mm_timeout_ms if set (>0).
-DEFAULT_PROXY_RPC_TIMEOUT_SECONDS = 30.0
+# Default per-request gRPC timeout for proxy -> worker forwarding. Per-request
+# override comes from MMPreprocessConfigPB.mm_timeout_ms if set (>0).
+DEFAULT_PROXY_RPC_TIMEOUT_SECONDS = VitConfig.DEFAULT_MM_TIMEOUT_MS / 1000.0
 STATUS_CHECK_TIMEOUT_SEC = 1.0
 # Only UNAVAILABLE triggers worker failover (and marking the worker unhealthy).
 # RESOURCE_EXHAUSTED (scheduler queue backpressure) is deliberately NOT here: by
@@ -46,20 +46,19 @@ RETRYABLE_WORKER_RPC_CODES = {
 }
 
 
-def _resolve_rpc_timeout_seconds(request: "MultimodalInputsPB") -> float:
+def _resolve_rpc_timeout_seconds(
+    request: "MultimodalInputsPB",
+    default_timeout_seconds: float = DEFAULT_PROXY_RPC_TIMEOUT_SECONDS,
+) -> float:
     """Pick per-request gRPC timeout. Uses the max mm_timeout_ms across the request's
     multimodal inputs (the deadline that should bound the longest preprocess); falls
-    back to DEFAULT_PROXY_RPC_TIMEOUT_SECONDS when none is configured."""
+    back to the configured server timeout when none is configured."""
     max_timeout_ms = 0
     for mm_input in request.multimodal_inputs:
         cfg_ms = mm_input.mm_preprocess_config.mm_timeout_ms
         if cfg_ms > max_timeout_ms:
             max_timeout_ms = cfg_ms
-    return (
-        max_timeout_ms / 1000.0
-        if max_timeout_ms > 0
-        else DEFAULT_PROXY_RPC_TIMEOUT_SECONDS
-    )
+    return max_timeout_ms / 1000.0 if max_timeout_ms > 0 else default_timeout_seconds
 
 
 def _now_us() -> int:
@@ -279,9 +278,11 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         self,
         load_balancer: LoadBalancer,
         connection_pool: WorkerConnectionPool,
+        default_rpc_timeout_seconds: float = DEFAULT_PROXY_RPC_TIMEOUT_SECONDS,
     ):
         self.load_balancer = load_balancer
         self.connection_pool = connection_pool
+        self.default_rpc_timeout_seconds = default_rpc_timeout_seconds
         self.profiler = MMProfiler()
         kmonitor.init()
 
@@ -343,7 +344,9 @@ class VitProxyRpcServer(MultimodalRpcServiceServicer):
         last_error: Optional[Exception] = None
         exhausted_workers = False
         try:
-            timeout_s = _resolve_rpc_timeout_seconds(request)
+            timeout_s = _resolve_rpc_timeout_seconds(
+                request, self.default_rpc_timeout_seconds
+            )
             while len(attempted_workers) < len(self.load_balancer.worker_addresses):
                 worker_address = None
                 try:
@@ -569,17 +572,20 @@ class VitProxyServer:
         worker_addresses: list[str],
         external_grpc_port: int,
         load_balance_strategy: str = "round_robin",
+        default_rpc_timeout_seconds: float = DEFAULT_PROXY_RPC_TIMEOUT_SECONDS,
     ):
         """
         Args:
             worker_addresses: 工作进程地址列表，格式如 ['localhost:9202', 'localhost:9203']
             external_grpc_port: 外部 gRPC 端口，代理服务器监听此端口
             load_balance_strategy: 负载均衡策略，'round_robin' 或 'least_connections'
+            default_rpc_timeout_seconds: 请求未指定超时时间时的默认值
         """
         self.worker_addresses = worker_addresses
         self.external_grpc_port = external_grpc_port
         self.load_balancer = LoadBalancer(worker_addresses, load_balance_strategy)
         self.connection_pool = WorkerConnectionPool(worker_addresses)
+        self.default_rpc_timeout_seconds = default_rpc_timeout_seconds
         self.rpc_server = None
         self.proxy_servicer: Optional[VitProxyRpcServer] = None
 
@@ -597,7 +603,9 @@ class VitProxyServer:
         )
 
         self.proxy_servicer = VitProxyRpcServer(
-            self.load_balancer, self.connection_pool
+            self.load_balancer,
+            self.connection_pool,
+            self.default_rpc_timeout_seconds,
         )
         add_MultimodalRpcServiceServicer_to_server(self.proxy_servicer, self.rpc_server)
 

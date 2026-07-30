@@ -24,7 +24,7 @@ from uvicorn import Config, Server
 from uvicorn.loops.auto import auto_loop_setup
 
 from rtp_llm.config.log_config import setup_logging
-from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.py_config_modules import PyEnvConfigs, VitConfig
 from rtp_llm.config.uvicorn_config import get_uvicorn_logging_config
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import StatusVersionPB
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2_grpc import (
@@ -74,10 +74,14 @@ def vit_proxy_start_server(
 
     # 创建并启动代理服务器（gRPC）
     load_balance_strategy = py_env_configs.vit_config.vit_proxy_load_balance_strategy
+    default_timeout_ms = (
+        py_env_configs.vit_config.mm_timeout_ms or VitConfig.DEFAULT_MM_TIMEOUT_MS
+    )
     proxy_server = VitProxyServer(
         worker_addresses=worker_addresses,
         external_grpc_port=grpc_port,
         load_balance_strategy=load_balance_strategy,
+        default_rpc_timeout_seconds=default_timeout_ms / 1000.0,
     )
     logging.info(f"[VIT_PROXY] Using load balance strategy: {load_balance_strategy}")
 
