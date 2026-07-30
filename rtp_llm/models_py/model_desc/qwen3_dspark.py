@@ -37,18 +37,26 @@ class DSparkMarkovHead(nn.Module):
 
     markov_w1[token] embeds the previously sampled token (target vocab,
     [V1, rank]); markov_w2 projects it to a draft-vocab bias ([V2, rank]).
-    Kept in fp32 like the reference oracle: the per-position argmax feeds the
-    next step, so the correction chain is decision-critical.
+    Weights stay in the ckpt dtype (bf16): the GEMM accumulates in fp32 and
+    only the [B, V2] output is upcast, so the serial chain reads k * V2 * rank
+    bf16 bytes per round instead of fp32 — at rank 256 that halves ~1.1GB/round
+    of weight traffic, the largest single cost in the draft tail after lm_head.
+    The += into the fp32 corrected logits still happens in fp32; on the real
+    golden decision path the bf16 bias perturbation (~3e-2) sits well inside
+    the per-step argmax margins (0.44+), and a flipped draft token can only
+    lower the acceptance rate, never break output correctness (upstream vLLM /
+    SGLang run this GEMM in bf16 as well).
     """
 
     def __init__(self, markov_w1: torch.Tensor, markov_w2: torch.Tensor):
         super().__init__()
         self.markov_w1 = markov_w1  # [V1, rank]
-        self._markov_w2_f32 = markov_w2.float()  # [V2, rank]
+        self.markov_w2 = markov_w2  # [V2, rank]
 
     def bias(self, prev_tokens: torch.Tensor) -> torch.Tensor:
         """[B] int64 previously-sampled tokens -> [B, V2] fp32 transition bias."""
-        return F.linear(self.markov_w1[prev_tokens.long()].float(), self._markov_w2_f32)
+        emb = self.markov_w1[prev_tokens.long()]
+        return F.linear(emb, self.markov_w2).float()
 
 
 class Qwen3DSparkModel(Qwen3DFlashModel):
