@@ -1956,6 +1956,39 @@ class MSAAttention(nn.Module):
             owner_tokens_per_block=self.page_size,
         )
 
+    def _zero_scratch_padding_tail(self, kv_lens: Any, bsz: int) -> None:
+        """Zero each request's scratch slots between kv_len and its page end.
+
+        Zigzag CP pads a request's prefill tokens up to a multiple of
+        ``2 * cp_size`` and places the padding at the tail of the padded
+        sequence, which is exactly the range rank 0's second segment covers.
+        That segment reaches fmha as ``qo_offset + segment_len == padded_len``
+        while ``kv_segment_lens`` carries the real ``prefix + input_len``, so the
+        padded queries get a causal limit past the real KV length. Scratch is
+        only sourced over ``[0, kv_len)`` and the scratch pools are reused across
+        requests without clearing, so those slots would otherwise return the
+        previous request's residual K/V and idx_K -- and a residual idx_K can win
+        the top-k block selection outright. Padding stays below ``2 * cp_size``
+        and ``page_size`` is a multiple of it, so the overflow never leaves the
+        request's last page.
+        """
+        page = int(self.page_size)
+        seq_len = int(self._scratch_seq_len)
+        if page <= 0 or seq_len <= 0:
+            return
+        for b in range(int(bsz)):
+            kv_len = int(kv_lens[b])
+            tail = (-kv_len) % page
+            if tail == 0:
+                continue
+            lo = b * seq_len + kv_len
+            hi = min(lo + tail, (b + 1) * seq_len)
+            if hi <= lo:
+                continue
+            for scratch in (self._scratch_k, self._scratch_v, self._scratch_idx_k):
+                if scratch is not None and hi <= scratch.shape[0]:
+                    scratch[lo:hi] = 0
+
     def _source_cp_from_packed(
         self,
         kv_cache: LayerKVCache,
@@ -2365,6 +2398,13 @@ class MSAAttention(nn.Module):
                 "prefill_cp_chunk_lengths; got "
                 f"local_tokens={local_tokens}, chunks={chunk_lengths_cpu}"
             )
+        # Zigzag splits each chunk into two equal halves; an odd chunk would make
+        # ``chunk // 2 * 2`` drop a token, leaving its output row unwritten.
+        if any(int(x) % 2 != 0 for x in chunk_lengths_cpu):
+            raise RuntimeError(
+                "MSA CP prefill requires even per-request chunk lengths for "
+                f"zigzag CP; got chunks={chunk_lengths_cpu}"
+            )
 
         # Bring shuffle_indices back to CPU once; we compute local_positions
         # entirely on CPU with numpy (cheap, all inputs are small ints) and
@@ -2505,6 +2545,7 @@ class MSAAttention(nn.Module):
             attn_inputs,
             device,
         )
+        self._zero_scratch_padding_tail(kv_lens_cpu, bsz)
 
         # PD separation: register this MSA layer's paged K/V (and idx_K on the
         # scale region) with the cache store, exactly like the non-CP prefill
@@ -2688,6 +2729,14 @@ class MSAAttention(nn.Module):
                     "MSA CP prefill expects rank-local token count to match "
                     "prefill_cp_chunk_lengths; got "
                     f"local_tokens={local_tokens}, chunks={chunk_lengths_cpu}"
+                )
+            # Zigzag splits each chunk into two equal halves; an odd chunk would
+            # make ``chunk // 2 * 2`` drop a token, leaving its output row
+            # unwritten.
+            if any(int(x) % 2 != 0 for x in chunk_lengths_cpu):
+                raise RuntimeError(
+                    "MSA CP prefill requires even per-request chunk lengths for "
+                    f"zigzag CP; got chunks={chunk_lengths_cpu}"
                 )
             shuffle_cpu = shuffle_pinned.tolist()
 
@@ -2991,6 +3040,7 @@ class MSAAttention(nn.Module):
                     device,
                     slot_mapping=slot_mapping,
                 )
+        self._zero_scratch_padding_tail(kv_lens_cpu_list, bsz)
 
         if (
             kv_cache is not None
