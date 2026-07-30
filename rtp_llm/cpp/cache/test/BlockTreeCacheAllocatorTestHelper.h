@@ -118,7 +118,7 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
         }
     }
 
-    cache->insert(nullptr, keys, slots);
+    cache->insert(keys, slots);
     for (const auto& [pool, blocks] : request_holds) {
         pool->decRef(blocks, BlockRefType::REQUEST);
     }

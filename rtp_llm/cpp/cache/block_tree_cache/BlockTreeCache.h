@@ -19,7 +19,6 @@ namespace rtp_llm {
 
 class BlockTreeTaskPool;
 class BlockTransferDispatcher;
-class HybridKVCacheAllocator;
 struct CacheStats {
     size_t tree_node_count{0};
     size_t device_heap_total_size{0};
@@ -125,7 +124,6 @@ public:
     using TierWatermark = BlockTreeCacheConfig::TierWatermark;
 
     BlockTreeCache(std::unique_ptr<BlockTree>               tree,
-                   std::vector<GroupSetPtr>                 group_sets,
                    BlockTreeCacheConfig                     config,
                    std::shared_ptr<StorageBackend>          storage_backend,
                    std::unique_ptr<BlockTransferDispatcher> transfer_dispatcher,
@@ -135,8 +133,7 @@ public:
     bool init();
 
     BlockTreeMatchResult match(const CacheKeysType& cache_keys);
-    void                 insert(TreeNode*                                         parent,
-                                const CacheKeysType&                              cache_keys,
+    void                 insert(const CacheKeysType&                              cache_keys,
                                 const std::vector<std::vector<GroupSetResource>>& resources);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
@@ -187,7 +184,7 @@ public:
         return tree_.get();
     }
     const std::vector<GroupSetPtr>& groupSets() const {
-        return group_sets_;
+        return tree_->groupSets();
     }
     std::shared_ptr<StorageBackend> storageBackend() const {
         return storage_backend_;
@@ -215,23 +212,12 @@ public:
     }
 
 private:
-    friend class HybridKVCacheAllocator;
-
-    void insertSparse(TreeNode*                                         parent,
-                      const CacheKeysType&                              cache_keys,
-                      const std::vector<std::vector<GroupSetResource>>& resources);
-    void insertImpl(TreeNode*                                         parent,
-                    const CacheKeysType&                              cache_keys,
-                    const std::vector<std::vector<GroupSetResource>>& resources,
-                    bool                                              allow_sparse_resources);
-    void drainTreeHolds();
     void checkWatermark();
     void reserveInFlightDeviceReleaseCreditsLocked(const std::vector<EvictionReleaseCredit>& release_credits);
     void settleInFlightDeviceReleaseCreditsLocked(const std::vector<EvictionReleaseCredit>& release_credits) noexcept;
 
     BlockTreeCacheConfig       config_;
     std::unique_ptr<BlockTree> tree_;
-    std::vector<GroupSetPtr>   group_sets_;
     // Reusable topology group_id -> GroupSet/member position. Non-reusable groups
     // never enter this index or the BlockTree resource space.
     ReusableGroupLocations                   reusable_group_locations_;

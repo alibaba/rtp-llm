@@ -13,7 +13,7 @@ public:
     std::unique_ptr<MatchValidator> createMatchValidator() override;
 
     // SWA window lock: only lock nodes within sliding_window_size from path tail.
-    size_t computeReuseBlockCount(size_t matched_block_count, const std::vector<TreeNode*>& path) const override;
+    size_t computeReuseBlockCount(size_t matched_block_count) const override;
 
     size_t slidingWindowSize() const {
         return sliding_window_size_;
@@ -32,7 +32,7 @@ class SWAMatchValidator: public MatchValidator {
 public:
     explicit SWAMatchValidator(size_t sliding_window_size, size_t seq_size_per_block);
 
-    bool validate(const TreeNode* node, const GroupSetResource& resource) override;
+    bool validate(const GroupSetResource& resource) override;
 
     bool connectedToRoot() const {
         return connected_to_root_;

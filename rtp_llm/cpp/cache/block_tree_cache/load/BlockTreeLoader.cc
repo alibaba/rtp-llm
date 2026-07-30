@@ -13,8 +13,8 @@
 
 namespace rtp_llm {
 
-BlockTreeLoader::BlockTreeLoader(std::vector<GroupSetPtr>&      group_sets,
-                                 BlockTreeEvictor&              evictor,
+BlockTreeLoader::BlockTreeLoader(const std::vector<GroupSetPtr>& group_sets,
+                                 BlockTreeEvictor&                   evictor,
                                  BlockTransferDispatcher*       transfer_dispatcher,
                                  BlockTreeTaskPool*             task_pool,
                                  BlockTreeCacheMetricsReporter& metrics_reporter,
@@ -40,8 +40,8 @@ BlockTreeLoader::BlockTreeLoader(std::vector<GroupSetPtr>&      group_sets,
 BlockTreeLoadResult BlockTreeLoader::prepareLoadLocked(const std::vector<TreeNode*>& matched_path,
                                                        size_t                        ready_matched_block_count) {
     BlockTreeLoadResult result;
-    const size_t        logical_matched_block_count = matched_path.size();
-    if (logical_matched_block_count == 0) {
+    const size_t        matched_block_count = matched_path.size();
+    if (matched_block_count == 0) {
         return result;
     }
 
@@ -49,11 +49,11 @@ BlockTreeLoadResult BlockTreeLoader::prepareLoadLocked(const std::vector<TreeNod
     for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
         const GroupSetPtr& group_set         = group_sets_[group_set_id];
         const size_t       ready_reuse_count = std::min(
-            group_set->computeReuseBlockCount(ready_matched_block_count, matched_path), ready_matched_block_count);
+            group_set->computeReuseBlockCount(ready_matched_block_count), ready_matched_block_count);
         const size_t ready_reuse_begin   = ready_matched_block_count - ready_reuse_count;
         const size_t logical_reuse_count = std::min(
-            group_set->computeReuseBlockCount(logical_matched_block_count, matched_path), logical_matched_block_count);
-        for (size_t i = logical_matched_block_count - logical_reuse_count; i < logical_matched_block_count; ++i) {
+            group_set->computeReuseBlockCount(matched_block_count), matched_block_count);
+        for (size_t i = matched_block_count - logical_reuse_count; i < matched_block_count; ++i) {
             if (i >= ready_reuse_begin && i < ready_matched_block_count) {
                 continue;
             }
@@ -64,7 +64,7 @@ BlockTreeLoadResult BlockTreeLoader::prepareLoadLocked(const std::vector<TreeNod
     }
 
     if (!pending_load_items.empty()) {
-        result.load_ticket = prepareLoadTicket(pending_load_items, logical_matched_block_count);
+        result.load_ticket = prepareLoadTicket(pending_load_items, matched_block_count);
         if (result.load_ticket == nullptr) {
             result.load_blocks      = 0;
             result.host_load_blocks = 0;
@@ -175,7 +175,7 @@ bool BlockTreeLoader::prepareJoinedLoadItem(LoadTicket::PendingLoadItem&        
         return false;
     }
     item.target_device_blocks = target_blocks.value();
-    if (item.target_device_blocks.size() != group_sets_[item.group_set_id]->devicePoolCount()) {
+    if (item.target_device_blocks.size() != group_sets_[item.group_set_id]->devicePools().size()) {
         item.target_device_blocks.clear();
         return false;
     }
@@ -207,7 +207,7 @@ bool BlockTreeLoader::reserveLoadItems(const LoadTicket::PendingLoadItems& items
         if (item.node->group_set_resources[item.group_set_id].transfer_state != expected_state) {
             return false;
         }
-        const size_t expected_source_count = item.source_tier == Tier::DEVICE ? group_set->devicePoolCount() : 1;
+        const size_t expected_source_count = item.source_tier == Tier::DEVICE ? group_set->devicePools().size() : 1;
         if (item.source_blocks.size() != expected_source_count
             || group_set->getTopTier(item.node->group_set_resources[item.group_set_id]) != item.source_tier
             || group_set->getBlocks(item.node->group_set_resources[item.group_set_id], item.source_tier)
@@ -444,7 +444,7 @@ bool BlockTreeLoader::settleLoadNolock(LoadTaskRunner::Task& task, bool copy_suc
                                 item.group_set_id,
                                 static_cast<void*>(item.node));
         if (settlement_success && item.source_tier != Tier::DEVICE
-            && (item.target_device_blocks.size() != group_set->devicePoolCount()
+            && (item.target_device_blocks.size() != group_set->devicePools().size()
                 || item.node->group_set_resources[item.group_set_id].transfer_state
                        != GroupSetTransferState::LOADING)) {
             RTP_LLM_LOG_WARNING("completion state mismatch, group_set=%zu", item.group_set_id);
@@ -475,7 +475,7 @@ bool BlockTreeLoader::settleLoadNolock(LoadTaskRunner::Task& task, bool copy_suc
                 group_set->unreferenceBlocks(target_holder, BlockRefType::REQUEST);
                 group_set->unreferenceBlocks(MultiNodeResource{group_set_id, item.source_tier, {item.source_blocks}},
                                              BlockRefType::BLOCK_CACHE);
-                group_set->evictFromTier(item.node, resource, item.source_tier);
+                group_set->evictFromTier(resource, item.source_tier);
                 task.target_installed[item_index] = true;
                 tree_data_mutated                 = true;
                 RTP_LLM_CHECK_WITH_INFO(finishLoad(item.node, group_set_id, item.source_tier, true),

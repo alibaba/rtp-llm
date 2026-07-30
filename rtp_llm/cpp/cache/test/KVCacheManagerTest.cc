@@ -1555,7 +1555,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     std::vector<FullPrefixSnapshot> full_prefix_before_swa_pressure;
     {
         const auto find_a = manager->blockTreeCache()->tree()->findNode(keys_a);
-        ASSERT_EQ(find_a.path.size(), keys_a.size());
+        ASSERT_EQ(find_a.size(), keys_a.size());
         const auto& group_sets = manager->blockTreeCache()->groupSets();
         for (size_t group_set_id = 0; group_set_id < group_sets.size(); ++group_set_id) {
             const auto& group_set = group_sets[group_set_id];
@@ -1563,7 +1563,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
                 continue;
             }
             FullPrefixSnapshot snapshot{group_set_id, {}};
-            for (TreeNode* node : find_a.path) {
+            for (TreeNode* node : find_a) {
                 snapshot.blocks_per_node.push_back(node->group_set_resources[group_set_id].device_blocks);
             }
             full_prefix_before_swa_pressure.push_back(std::move(snapshot));
@@ -1603,8 +1603,8 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
         const auto& group_sets = manager->blockTreeCache()->groupSets();
         const auto  find_a     = manager->blockTreeCache()->tree()->findNode(keys_a);
         const auto  find_b     = manager->blockTreeCache()->tree()->findNode(keys_b);
-        ASSERT_EQ(find_a.path.size(), keys_a.size());
-        ASSERT_EQ(find_b.path.size(), keys_b.size());
+        ASSERT_EQ(find_a.size(), keys_a.size());
+        ASSERT_EQ(find_b.size(), keys_b.size());
         for (size_t group_set_id = 0; group_set_id < group_sets.size(); ++group_set_id) {
             const auto& group_set = group_sets[group_set_id];
             if (group_set->groupType() != CacheGroupType::SWA) {
@@ -1615,7 +1615,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
                 ASSERT_LT(pool->freeBlocksNum(), 2u)
                     << "SWA pool must not satisfy the next request without eviction, group_set_id=" << group_set_id;
             }
-            for (const auto* path : {&find_a.path, &find_b.path}) {
+            for (const auto* path : {&find_a, &find_b}) {
                 for (TreeNode* node : *path) {
                     const GroupSetResource& slot = node->group_set_resources[group_set_id];
                     if (!slot.hasTier(Tier::DEVICE)) {
@@ -1649,16 +1649,16 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     // a missing SWA tail cannot hide preservation behind the joint ready boundary.
     {
         const auto find_a = manager->blockTreeCache()->tree()->findNode(keys_a);
-        ASSERT_EQ(find_a.path.size(), keys_a.size());
+        ASSERT_EQ(find_a.size(), keys_a.size());
         const auto& group_sets = manager->blockTreeCache()->groupSets();
         for (const FullPrefixSnapshot& snapshot : full_prefix_before_swa_pressure) {
             ASSERT_LT(snapshot.group_set_id, group_sets.size());
             const auto& group_set = group_sets[snapshot.group_set_id];
             auto        validator = group_set->createMatchValidator();
-            ASSERT_EQ(snapshot.blocks_per_node.size(), find_a.path.size());
-            for (size_t path_index = 0; path_index < find_a.path.size(); ++path_index) {
-                const GroupSetResource& slot = find_a.path[path_index]->group_set_resources[snapshot.group_set_id];
-                ASSERT_TRUE(validator->validate(find_a.path[path_index], slot));
+            ASSERT_EQ(snapshot.blocks_per_node.size(), find_a.size());
+            for (size_t path_index = 0; path_index < find_a.size(); ++path_index) {
+                const GroupSetResource& slot = find_a[path_index]->group_set_resources[snapshot.group_set_id];
+                ASSERT_TRUE(validator->validate(slot));
                 ASSERT_EQ(slot.device_blocks, snapshot.blocks_per_node[path_index]);
                 ASSERT_EQ(slot.device_blocks.size(), group_set->devicePools().size());
                 for (size_t pool_index = 0; pool_index < slot.device_blocks.size(); ++pool_index) {

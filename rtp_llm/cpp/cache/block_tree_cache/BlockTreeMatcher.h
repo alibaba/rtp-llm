@@ -21,7 +21,6 @@ using ReusableGroupLocations = std::unordered_map<size_t, ReusableGroupLocation>
 class BlockTreeMatcher {
 public:
     BlockTreeMatcher(BlockTree*                    tree,
-                     std::vector<GroupSetPtr>&     group_sets,
                      const ReusableGroupLocations& reusable_group_locations,
                      BlockTreeEvictor&             evictor);
 
@@ -34,15 +33,11 @@ public:
                                            const std::vector<MultiNodeResource>& matched_resources) const;
 
 private:
-    void   validateMatchedResource(const MultiNodeResource& resource) const;
-    void   prepareReadyMatchedResourcesLocked(const std::vector<TreeNode*>& matched_path,
-                                              const std::vector<bool>&      candidate_logically_valid,
-                                              BlockTreeMatchResult&         result);
-    size_t computeReadyMatchedBlockCount(const std::vector<TreeNode*>& matched_path,
-                                         const std::vector<bool>&      candidate_logically_valid) const;
+    void prepareReadyMatchedResourcesLocked(const std::vector<TreeNode*>& matched_path,
+                                            const std::vector<bool>&      candidate_valid,
+                                            BlockTreeMatchResult&         result);
 
     BlockTree*                    tree_;
-    std::vector<GroupSetPtr>&     group_sets_;
     const ReusableGroupLocations& reusable_group_locations_;
     BlockTreeEvictor&             evictor_;
 };

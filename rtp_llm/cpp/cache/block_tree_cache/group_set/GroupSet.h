@@ -7,7 +7,6 @@
 
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
@@ -16,6 +15,7 @@
 namespace rtp_llm {
 
 class LoadTicket;
+struct TreeNode;
 
 struct MultiNodeResource {
     size_t                                 group_set_id{0};
@@ -43,8 +43,8 @@ struct BlockTreeMatchResult {
 
 class MatchValidator {
 public:
-    virtual ~MatchValidator()                                                     = default;
-    virtual bool validate(const TreeNode* node, const GroupSetResource& resource) = 0;
+    virtual ~MatchValidator() = default;
+    virtual bool validate(const GroupSetResource& resource) = 0;
 };
 
 enum class TransferType {
@@ -92,13 +92,11 @@ public:
     }
     virtual std::unique_ptr<MatchValidator> createMatchValidator() = 0;
 
-    virtual void evictFromTier(TreeNode* node, GroupSetResource& resource, Tier tier);
+    virtual void evictFromTier(GroupSetResource& resource, Tier tier);
 
-    virtual TransferDescriptor buildTransfer(TreeNode* node, TransferType type);
+    virtual TransferDescriptor buildTransfer(const GroupSetResource& resource, TransferType type);
 
-    bool isLeafAtTier(const TreeNode* node, Tier tier) const;
-
-    virtual size_t computeReuseBlockCount(size_t matched_block_count, const std::vector<TreeNode*>& path) const = 0;
+    virtual size_t computeReuseBlockCount(size_t matched_block_count) const = 0;
 
     void setHostPool(std::shared_ptr<HostBlockPool> pool) {
         host_pool_ = std::move(pool);
@@ -116,10 +114,6 @@ public:
     }
     std::shared_ptr<BlockTreeDiskBlockPool> diskPool() const {
         return disk_pool_;
-    }
-
-    size_t devicePoolCount() const {
-        return device_pools_.size();
     }
 
     bool hasAllocatedDeviceBlocks(const std::vector<BlockIdxType>& blocks) const;
@@ -192,7 +186,7 @@ public:
     // Highest tier (DEVICE > HOST > DISK) holding this resource's data, else NONE.
     Tier getTopTier(const GroupSetResource& resource) const;
 
-    virtual bool isEvictable(const TreeNode& node, Tier tier) const;
+    virtual bool isEvictable(const GroupSetResource& resource, Tier tier) const;
 
 protected:
     std::vector<DeviceBlockPoolPtr>         device_pools_;

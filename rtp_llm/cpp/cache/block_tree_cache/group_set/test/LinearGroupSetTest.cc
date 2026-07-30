@@ -2,6 +2,7 @@
 
 #include <unordered_set>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/LinearGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 
@@ -61,8 +62,8 @@ TEST_F(LinearGroupSetTest, AnyNodeWithDataIsEvictable) {
     setDeviceBlock(b, 0);
 
     // LINEAR has no leaf/topology requirement; both nodes are eligible.
-    EXPECT_TRUE(group_->isEvictable(*a, Tier::DEVICE));
-    EXPECT_TRUE(group_->isEvictable(*b, Tier::DEVICE));
+    EXPECT_TRUE(group_->isEvictable(a->group_set_resources[0], Tier::DEVICE));
+    EXPECT_TRUE(group_->isEvictable(b->group_set_resources[0], Tier::DEVICE));
 
     delete a;
     delete b;
@@ -72,7 +73,7 @@ TEST_F(LinearGroupSetTest, EvictFromTierDevice) {
     auto* node = makeNode(100);
     setDeviceBlock(node, 0);
 
-    group_->evictFromTier(node, node->group_set_resources[0], Tier::DEVICE);
+    group_->evictFromTier(node->group_set_resources[0], Tier::DEVICE);
 
     // Device blocks are cleared; heap ownership no longer lives on the group.
     EXPECT_FALSE(node->group_set_resources[0].hasTier(Tier::DEVICE));
@@ -85,10 +86,10 @@ TEST_F(LinearGroupSetTest, MatchValidatorHasData) {
 
     auto* node_with = makeNode(100);
     setDeviceBlock(node_with, 0);
-    EXPECT_TRUE(validator->validate(node_with, node_with->group_set_resources[0]));
+    EXPECT_TRUE(validator->validate(node_with->group_set_resources[0]));
 
     auto* node_empty = makeNode(200);
-    EXPECT_FALSE(validator->validate(node_empty, node_empty->group_set_resources[0]));
+    EXPECT_FALSE(validator->validate(node_empty->group_set_resources[0]));
 
     delete node_with;
     delete node_empty;
@@ -107,8 +108,8 @@ TEST_F(LinearGroupSetTest, MatchValidatorBusyResourceInvalidWithoutLatch) {
 
         // Point-state semantics: a busy node is unusable on its own but must
         // not poison later nodes.
-        EXPECT_FALSE(validator->validate(busy_node, busy_node->group_set_resources[0]));
-        EXPECT_TRUE(validator->validate(usable_node, usable_node->group_set_resources[0]));
+        EXPECT_FALSE(validator->validate(busy_node->group_set_resources[0]));
+        EXPECT_TRUE(validator->validate(usable_node->group_set_resources[0]));
 
         delete busy_node;
         delete usable_node;
@@ -122,15 +123,15 @@ TEST_F(LinearGroupSetTest, MatchValidatorAllowsLoadingResource) {
     node->group_set_resources[0].host_block     = 15;
     node->group_set_resources[0].transfer_state = GroupSetTransferState::LOADING;
 
-    EXPECT_TRUE(validator->validate(node, node->group_set_resources[0]));
+    EXPECT_TRUE(validator->validate(node->group_set_resources[0]));
 
     delete node;
 }
 
 TEST_F(LinearGroupSetTest, EmptyResourceIsNotEvictable) {
     auto* node = makeNode(100);
-    EXPECT_FALSE(group_->isEvictable(*node, Tier::DEVICE));
-    EXPECT_FALSE(group_->isEvictable(*node, Tier::HOST));
+    EXPECT_FALSE(group_->isEvictable(node->group_set_resources[0], Tier::DEVICE));
+    EXPECT_FALSE(group_->isEvictable(node->group_set_resources[0], Tier::HOST));
     delete node;
 }
 

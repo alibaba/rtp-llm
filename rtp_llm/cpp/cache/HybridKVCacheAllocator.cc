@@ -537,12 +537,12 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
         for (size_t group_set_id = 0; group_set_id < group_sets.size(); ++group_set_id) {
             const auto& group_set = group_sets[group_set_id];
             if (!group_set || group_set->groupSetId() != group_set_id || group_set->groupIds().empty()
-                || group_set->groupIds().size() != group_set->devicePoolCount()) {
+                || group_set->groupIds().size() != group_set->devicePools().size()) {
                 mapping_valid = false;
                 break;
             }
             for (auto& per_key_resources : resources) {
-                per_key_resources[group_set_id].device_blocks.assign(group_set->devicePoolCount(), NULL_BLOCK_IDX);
+                per_key_resources[group_set_id].device_blocks.assign(group_set->devicePools().size(), NULL_BLOCK_IDX);
             }
             for (size_t member_index = 0; member_index < group_set->groupIds().size(); ++member_index) {
                 const int group_id = static_cast<int>(group_set->groupIds()[member_index]);
@@ -606,7 +606,7 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
         }
         insert_keys.resize(publish_prefix);
         resources.resize(publish_prefix);
-        block_tree_cache_->insertSparse(nullptr, insert_keys, resources);
+        block_tree_cache_->insert(insert_keys, resources);
     }
 }
 

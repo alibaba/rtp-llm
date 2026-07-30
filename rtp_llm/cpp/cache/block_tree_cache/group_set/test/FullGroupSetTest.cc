@@ -2,6 +2,7 @@
 
 #include <unordered_set>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/FullGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 
@@ -19,6 +20,7 @@ protected:
         group_     = std::make_shared<FullGroupSet>();
         auto group = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 1);
         group_->initialize(0, makeTestTopology({std::move(group)}), {0}, {pool_});
+        tree_ = std::make_unique<BlockTree>(std::vector<GroupSetPtr>{group_});
     }
 
     void TearDown() override {
@@ -61,6 +63,7 @@ protected:
     DeviceBlockPoolPtr               pool_;
     std::unordered_set<BlockIdxType> held_blocks_;
     std::shared_ptr<FullGroupSet>    group_;
+    std::unique_ptr<BlockTree>       tree_;
 };
 
 TEST_F(FullGroupSetTest, DeviceLeafDetection) {
@@ -78,11 +81,11 @@ TEST_F(FullGroupSetTest, DeviceLeafDetection) {
     setDeviceBlock(c, 0);
 
     // C is DeviceLeaf (no children with device value)
-    EXPECT_TRUE(group_->isLeafAtTier(c, Tier::DEVICE));
+    EXPECT_TRUE(tree_->isLeafAtTier(c, 0, Tier::DEVICE));
     // B is NOT DeviceLeaf (child C has device value)
-    EXPECT_FALSE(group_->isLeafAtTier(b, Tier::DEVICE));
+    EXPECT_FALSE(tree_->isLeafAtTier(b, 0, Tier::DEVICE));
     // A is NOT DeviceLeaf (child B has device value)
-    EXPECT_FALSE(group_->isLeafAtTier(a, Tier::DEVICE));
+    EXPECT_FALSE(tree_->isLeafAtTier(a, 0, Tier::DEVICE));
 
     delete a;
     delete b;
@@ -98,13 +101,13 @@ TEST_F(FullGroupSetTest, DeviceLeafAfterChildEviction) {
     setDeviceBlock(a, 0);
     setDeviceBlock(b, 0);
 
-    EXPECT_FALSE(group_->isLeafAtTier(a, Tier::DEVICE));
+    EXPECT_FALSE(tree_->isLeafAtTier(a, 0, Tier::DEVICE));
 
     // Evict B's device data
     clearDeviceBlock(b, 0);
 
     // Now A should be DeviceLeaf
-    EXPECT_TRUE(group_->isLeafAtTier(a, Tier::DEVICE));
+    EXPECT_TRUE(tree_->isLeafAtTier(a, 0, Tier::DEVICE));
 
     delete a;
     delete b;
@@ -120,8 +123,10 @@ TEST_F(FullGroupSetTest, DeviceCandidateEligibility) {
     setDeviceBlock(a, 0);
     setDeviceBlock(b, 0);
 
-    EXPECT_TRUE(group_->isEvictable(*b, Tier::DEVICE));
-    EXPECT_FALSE(group_->isEvictable(*a, Tier::DEVICE));
+    EXPECT_TRUE(group_->isEvictable(b->group_set_resources[0], Tier::DEVICE)
+                && tree_->isLeafAtTier(b, 0, Tier::DEVICE));
+    EXPECT_FALSE(group_->isEvictable(a->group_set_resources[0], Tier::DEVICE)
+                 && tree_->isLeafAtTier(a, 0, Tier::DEVICE));
 
     delete a;
     delete b;
@@ -131,7 +136,7 @@ TEST_F(FullGroupSetTest, EvictFromTierDevice) {
     auto* a = makeNode(100);
     setDeviceBlock(a, 0);
 
-    group_->evictFromTier(a, a->group_set_resources[0], Tier::DEVICE);
+    group_->evictFromTier(a->group_set_resources[0], Tier::DEVICE);
 
     // Device blocks should be cleared
     EXPECT_FALSE(a->group_set_resources[0].hasTier(Tier::DEVICE));
@@ -143,7 +148,7 @@ TEST_F(FullGroupSetTest, EvictFromTierHost) {
     auto* a = makeNode(100);
     setHostBlock(a, 0, 15);
 
-    group_->evictFromTier(a, a->group_set_resources[0], Tier::HOST);
+    group_->evictFromTier(a->group_set_resources[0], Tier::HOST);
 
     EXPECT_FALSE(a->group_set_resources[0].hasTier(Tier::HOST));
 
@@ -154,7 +159,7 @@ TEST_F(FullGroupSetTest, EvictFromTierDisk) {
     auto* a = makeNode(100);
     setDiskSlot(a, 0, 8);
 
-    group_->evictFromTier(a, a->group_set_resources[0], Tier::DISK);
+    group_->evictFromTier(a->group_set_resources[0], Tier::DISK);
 
     EXPECT_FALSE(a->group_set_resources[0].hasTier(Tier::DISK));
 
@@ -167,7 +172,7 @@ TEST_F(FullGroupSetTest, MatchValidatorFullPathValid) {
     auto* node = makeNode(100);
     setDeviceBlock(node, 0);
 
-    EXPECT_TRUE(validator->validate(node, node->group_set_resources[0]));
+    EXPECT_TRUE(validator->validate(node->group_set_resources[0]));
 
     delete node;
 }
@@ -178,7 +183,7 @@ TEST_F(FullGroupSetTest, MatchValidatorHostDataValid) {
     auto* node = makeNode(100);
     setHostBlock(node, 0, 15);
 
-    EXPECT_TRUE(validator->validate(node, node->group_set_resources[0]));
+    EXPECT_TRUE(validator->validate(node->group_set_resources[0]));
 
     delete node;
 }
@@ -189,7 +194,7 @@ TEST_F(FullGroupSetTest, MatchValidatorEmptyInvalid) {
     auto* node = makeNode(100);
     // No data in any tier
 
-    EXPECT_FALSE(validator->validate(node, node->group_set_resources[0]));
+    EXPECT_FALSE(validator->validate(node->group_set_resources[0]));
 
     delete node;
 }
@@ -207,8 +212,8 @@ TEST_F(FullGroupSetTest, MatchValidatorBusyResourceBreaksPrefixLikeHole) {
 
         // Busy resource is unusable, and the FULL prefix latch keeps later usable
         // nodes invalid so device reuse stays contiguous from the root.
-        EXPECT_FALSE(validator->validate(busy_node, busy_node->group_set_resources[0]));
-        EXPECT_FALSE(validator->validate(usable_node, usable_node->group_set_resources[0]));
+        EXPECT_FALSE(validator->validate(busy_node->group_set_resources[0]));
+        EXPECT_FALSE(validator->validate(usable_node->group_set_resources[0]));
 
         delete busy_node;
         delete usable_node;
@@ -222,7 +227,7 @@ TEST_F(FullGroupSetTest, MatchValidatorAllowsLoadingResource) {
     setHostBlock(node, 0, 15);
     node->group_set_resources[0].transfer_state = GroupSetTransferState::LOADING;
 
-    EXPECT_TRUE(validator->validate(node, node->group_set_resources[0]));
+    EXPECT_TRUE(validator->validate(node->group_set_resources[0]));
 
     delete node;
 }
@@ -232,7 +237,7 @@ TEST_F(FullGroupSetTest, BuildTransferD2H) {
     const BlockIdxType device_block = setDeviceBlock(node, 0);
     ASSERT_NE(device_block, NULL_BLOCK_IDX);
 
-    TransferDescriptor desc = group_->buildTransfer(node, TransferType::DEVICE_TO_HOST);
+    TransferDescriptor desc = group_->buildTransfer(node->group_set_resources[0], TransferType::DEVICE_TO_HOST);
     EXPECT_EQ(desc.source_tier, Tier::DEVICE);
     EXPECT_EQ(desc.target_tier, Tier::HOST);
     EXPECT_EQ(desc.group_set_id, 0);
@@ -254,9 +259,9 @@ TEST_F(FullGroupSetTest, HostLeafDetection) {
     setHostBlock(b, 0, 25);
 
     // B is HostLeaf (no child with host value)
-    EXPECT_TRUE(group_->isLeafAtTier(b, Tier::HOST));
+    EXPECT_TRUE(tree_->isLeafAtTier(b, 0, Tier::HOST));
     // A is NOT HostLeaf (child B has host value)
-    EXPECT_FALSE(group_->isLeafAtTier(a, Tier::HOST));
+    EXPECT_FALSE(tree_->isLeafAtTier(a, 0, Tier::HOST));
 
     delete a;
     delete b;
@@ -268,7 +273,8 @@ TEST_F(FullGroupSetTest, HostCandidateEligibility) {
     setHostBlock(a, 0, 15);
 
     // A host-leaf holding host data is candidate-eligible.
-    EXPECT_TRUE(group_->isEvictable(*a, Tier::HOST));
+    EXPECT_TRUE(group_->isEvictable(a->group_set_resources[0], Tier::HOST)
+                && tree_->isLeafAtTier(a, 0, Tier::HOST));
 
     delete a;
 }
@@ -282,8 +288,10 @@ TEST_F(FullGroupSetTest, HostCandidateNotEligibleWhenNonLeaf) {
     setHostBlock(b, 0, 25);
 
     // A has a child still holding host data, so it is not a host-leaf.
-    EXPECT_FALSE(group_->isEvictable(*a, Tier::HOST));
-    EXPECT_TRUE(group_->isEvictable(*b, Tier::HOST));
+    EXPECT_FALSE(group_->isEvictable(a->group_set_resources[0], Tier::HOST)
+                 && tree_->isLeafAtTier(a, 0, Tier::HOST));
+    EXPECT_TRUE(group_->isEvictable(b->group_set_resources[0], Tier::HOST)
+                && tree_->isLeafAtTier(b, 0, Tier::HOST));
 
     delete a;
     delete b;
@@ -292,7 +300,8 @@ TEST_F(FullGroupSetTest, HostCandidateNotEligibleWhenNonLeaf) {
 TEST_F(FullGroupSetTest, NoDataNotEligible) {
     auto* a = makeNode(100);
     // No data at any tier -> not a leaf at that tier -> not eligible.
-    EXPECT_FALSE(group_->isEvictable(*a, Tier::DEVICE));
+    EXPECT_FALSE(group_->isEvictable(a->group_set_resources[0], Tier::DEVICE)
+                 && tree_->isLeafAtTier(a, 0, Tier::DEVICE));
     delete a;
 }
 

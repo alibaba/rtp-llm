@@ -21,11 +21,8 @@ public:
     using SettledFn         = BlockTreeEvictor::SettledFn;
     using RemoteWriteFn     = BlockTreeEvictor::RemoteWriteFn;
 
-    explicit EvictionTaskRunner(ExecuteTransferFn execute_transfer);
-
     EvictionTaskRunner(ExecuteTransferFn              execute_transfer,
-                       std::vector<GroupSetPtr>&      group_sets,
-                       BlockTree*                     tree,
+                       const std::vector<GroupSetPtr>& group_sets,
                        const BlockTransferDispatcher* transfer_dispatcher,
                        BlockTreeTaskPool*             task_pool,
                        BlockTreeCacheMetricsReporter& metrics_reporter,
@@ -57,9 +54,8 @@ private:
     static int
     transferTimeoutMs(const BlockTreeEvictor::EvictionPlan& plan, int memory_timeout_ms, int disk_timeout_ms);
 
-    ExecuteTransferFn              execute_transfer_;
-    std::vector<GroupSetPtr>*      group_sets_{nullptr};
-    BlockTree*                     tree_{nullptr};
+    ExecuteTransferFn               execute_transfer_;
+    const std::vector<GroupSetPtr>& group_sets_;
     const BlockTransferDispatcher* transfer_dispatcher_{nullptr};
     BlockTreeTaskPool*             task_pool_{nullptr};
     BlockTreeCacheMetricsReporter* metrics_reporter_{nullptr};

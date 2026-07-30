@@ -72,7 +72,7 @@ cc_test(
     name = "block_tree_test",
     srcs = ["BlockTreeTest.cc"],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + [":block_tree_cache_test_utils"],
     env = {},
 )
 

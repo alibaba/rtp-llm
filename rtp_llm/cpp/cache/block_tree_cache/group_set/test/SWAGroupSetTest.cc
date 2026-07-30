@@ -2,6 +2,7 @@
 
 #include <unordered_set>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/SWAGroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 
@@ -75,8 +76,8 @@ TEST_F(SWAGroupSetTest, AnyNodeWithDataIsEvictable) {
     setDeviceBlock(b, 0);
 
     // Both A and B are candidate-eligible even though A has a child holding data.
-    EXPECT_TRUE(group_->isEvictable(*a, Tier::DEVICE));
-    EXPECT_TRUE(group_->isEvictable(*b, Tier::DEVICE));
+    EXPECT_TRUE(group_->isEvictable(a->group_set_resources[0], Tier::DEVICE));
+    EXPECT_TRUE(group_->isEvictable(b->group_set_resources[0], Tier::DEVICE));
 
     delete a;
     delete b;
@@ -94,9 +95,9 @@ TEST_F(SWAGroupSetTest, WindowValidatorConnectedPath) {
     setDeviceBlock(b, 0);
     setDeviceBlock(c, 0);
 
-    EXPECT_TRUE(validator->validate(a, a->group_set_resources[0]));
-    EXPECT_TRUE(validator->validate(b, b->group_set_resources[0]));
-    EXPECT_TRUE(validator->validate(c, c->group_set_resources[0]));
+    EXPECT_TRUE(validator->validate(a->group_set_resources[0]));
+    EXPECT_TRUE(validator->validate(b->group_set_resources[0]));
+    EXPECT_TRUE(validator->validate(c->group_set_resources[0]));
 
     EXPECT_TRUE(swa_validator->connectedToRoot());
     // 3 blocks * 64 tokens = 192
@@ -119,18 +120,18 @@ TEST_F(SWAGroupSetTest, WindowValidatorGapRequiresEnoughWindowAfterReset) {
     setDeviceBlock(c, 0);
     setDeviceBlock(d, 0);
 
-    EXPECT_TRUE(validator->validate(a, a->group_set_resources[0]));
+    EXPECT_TRUE(validator->validate(a->group_set_resources[0]));
     EXPECT_TRUE(swa_validator->connectedToRoot());
     EXPECT_EQ(swa_validator->accumulatedLength(), 64u);
 
-    EXPECT_FALSE(validator->validate(b, b->group_set_resources[0]));
+    EXPECT_FALSE(validator->validate(b->group_set_resources[0]));
     EXPECT_FALSE(swa_validator->connectedToRoot());
     EXPECT_EQ(swa_validator->accumulatedLength(), 0u);
 
-    EXPECT_FALSE(validator->validate(c, c->group_set_resources[0]));
+    EXPECT_FALSE(validator->validate(c->group_set_resources[0]));
     EXPECT_EQ(swa_validator->accumulatedLength(), 64u);
 
-    EXPECT_TRUE(validator->validate(d, d->group_set_resources[0]));
+    EXPECT_TRUE(validator->validate(d->group_set_resources[0]));
     EXPECT_EQ(swa_validator->accumulatedLength(), 128u);
 
     delete a;
@@ -152,10 +153,10 @@ TEST_F(SWAGroupSetTest, WindowValidatorMultitierNoReset) {
     b->group_set_resources[0].host_block = 15;
     setDeviceBlock(c, 0);
 
-    EXPECT_TRUE(validator->validate(a, a->group_set_resources[0]));
+    EXPECT_TRUE(validator->validate(a->group_set_resources[0]));
     // B has host data -> !is_empty() is true -> no reset
-    EXPECT_TRUE(validator->validate(b, b->group_set_resources[0]));
-    EXPECT_TRUE(validator->validate(c, c->group_set_resources[0]));
+    EXPECT_TRUE(validator->validate(b->group_set_resources[0]));
+    EXPECT_TRUE(validator->validate(c->group_set_resources[0]));
 
     auto* swa_validator = dynamic_cast<SWAMatchValidator*>(validator.get());
     EXPECT_TRUE(swa_validator->connectedToRoot());
@@ -166,28 +167,8 @@ TEST_F(SWAGroupSetTest, WindowValidatorMultitierNoReset) {
     delete c;
 }
 
-TEST_F(SWAGroupSetTest, ComputeReferenceCountCountsHostAndDiskBlocks) {
-    TreeNode* a = makeNode(100);
-    TreeNode* b = makeNode(200);
-    TreeNode* c = makeNode(300);
-    TreeNode* d = makeNode(400);
-
-    setHostBlock(a, 0, 10);
-    a->group_set_resources[0].disk_slot = 11;
-    setHostBlock(b, 0, 20);
-    b->group_set_resources[0].disk_slot = 21;
-    setHostBlock(c, 0, 30);
-    c->group_set_resources[0].disk_slot = 31;
-    setHostBlock(d, 0, 40);
-    d->group_set_resources[0].disk_slot = 41;
-
-    std::vector<TreeNode*> path = {a, b, c, d};
-    EXPECT_EQ(group_->computeReuseBlockCount(path.size(), path), 2u);
-
-    delete a;
-    delete b;
-    delete c;
-    delete d;
+TEST_F(SWAGroupSetTest, ComputeReuseBlockCountCapsAtWindowSize) {
+    EXPECT_EQ(group_->computeReuseBlockCount(4), 2u);
 }
 
 TEST_F(SWAGroupSetTest, WindowValidatorBusyResourceResetsLikeHole) {
@@ -205,16 +186,16 @@ TEST_F(SWAGroupSetTest, WindowValidatorBusyResourceResetsLikeHole) {
         setDeviceBlock(d, 0);
         b->group_set_resources[0].transfer_state = state;
 
-        EXPECT_TRUE(validator->validate(a, a->group_set_resources[0]));
+        EXPECT_TRUE(validator->validate(a->group_set_resources[0]));
 
         // Busy resource has data but is owned by an in-flight transfer: it must
         // behave exactly like a hole and reset the window accumulation.
-        EXPECT_FALSE(validator->validate(b, b->group_set_resources[0]));
+        EXPECT_FALSE(validator->validate(b->group_set_resources[0]));
         EXPECT_FALSE(swa_validator->connectedToRoot());
         EXPECT_EQ(swa_validator->accumulatedLength(), 0u);
 
-        EXPECT_FALSE(validator->validate(c, c->group_set_resources[0]));
-        EXPECT_TRUE(validator->validate(d, d->group_set_resources[0]));
+        EXPECT_FALSE(validator->validate(c->group_set_resources[0]));
+        EXPECT_TRUE(validator->validate(d->group_set_resources[0]));
         EXPECT_EQ(swa_validator->accumulatedLength(), 128u);
 
         delete a;
@@ -231,24 +212,9 @@ TEST_F(SWAGroupSetTest, WindowValidatorAllowsLoadingResource) {
     setHostBlock(node, 0, 15);
     node->group_set_resources[0].transfer_state = GroupSetTransferState::LOADING;
 
-    EXPECT_TRUE(validator->validate(node, node->group_set_resources[0]));
+    EXPECT_TRUE(validator->validate(node->group_set_resources[0]));
 
     delete node;
-}
-
-TEST_F(SWAGroupSetTest, ComputeReuseBlockCountSkipsBusyResources) {
-    TreeNode* a = makeNode(100);
-    TreeNode* b = makeNode(200);
-    setHostBlock(a, 0, 10);
-    setHostBlock(b, 0, 20);
-    b->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
-
-    // The busy tail resource cannot be locked for reuse; only A counts.
-    std::vector<TreeNode*> path = {a, b};
-    EXPECT_EQ(group_->computeReuseBlockCount(path.size(), path), 1u);
-
-    delete a;
-    delete b;
 }
 
 TEST_F(SWAGroupSetTest, IndependentEvictionDoesNotAffectFull) {
@@ -257,7 +223,7 @@ TEST_F(SWAGroupSetTest, IndependentEvictionDoesNotAffectFull) {
     const BlockIdxType full_block = setDeviceBlock(node, 0);  // Full data
     setDeviceBlock(node, 1);                                  // SWA data
 
-    group_->evictFromTier(node, node->group_set_resources[1], Tier::DEVICE);
+    group_->evictFromTier(node->group_set_resources[1], Tier::DEVICE);
 
     // SWA data cleared
     EXPECT_FALSE(node->group_set_resources[1].hasTier(Tier::DEVICE));
@@ -275,9 +241,9 @@ TEST_F(SWAGroupSetTest, EvictabilityRequiresTierDataButNotLeafTopology) {
     b->parent        = a;
     setDeviceBlock(a, 0);
 
-    EXPECT_TRUE(group_->isEvictable(*a, Tier::DEVICE));
-    EXPECT_FALSE(group_->isEvictable(*a, Tier::HOST));
-    EXPECT_FALSE(group_->isEvictable(*b, Tier::DEVICE));
+    EXPECT_TRUE(group_->isEvictable(a->group_set_resources[0], Tier::DEVICE));
+    EXPECT_FALSE(group_->isEvictable(a->group_set_resources[0], Tier::HOST));
+    EXPECT_FALSE(group_->isEvictable(b->group_set_resources[0], Tier::DEVICE));
 
     delete a;
     delete b;

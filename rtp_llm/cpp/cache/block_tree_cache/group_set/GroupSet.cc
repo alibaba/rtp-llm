@@ -106,7 +106,7 @@ const GroupBase& GroupSet::groupAt(size_t member_index) const {
     return topology_->groupById(group_ids_[member_index]);
 }
 
-void GroupSet::evictFromTier(TreeNode* node, GroupSetResource& resource, Tier tier) {
+void GroupSet::evictFromTier(GroupSetResource& resource, Tier tier) {
     // Clear only the tier's block fields; heap membership is owned by BlockTreeEvictor.
     switch (tier) {
         case Tier::DEVICE:
@@ -125,9 +125,7 @@ void GroupSet::evictFromTier(TreeNode* node, GroupSetResource& resource, Tier ti
     }
 }
 
-TransferDescriptor GroupSet::buildTransfer(TreeNode* node, TransferType type) {
-    auto& resource = node->group_set_resources[groupSetId()];
-
+TransferDescriptor GroupSet::buildTransfer(const GroupSetResource& resource, TransferType type) {
     switch (type) {
         case TransferType::DEVICE_TO_HOST:
             return TransferDescriptor::deviceToHost(groupSetId(), resource.device_blocks, NULL_BLOCK_IDX);
@@ -140,45 +138,6 @@ TransferDescriptor GroupSet::buildTransfer(TreeNode* node, TransferType type) {
         default:
             return {};
     }
-}
-
-bool GroupSet::isLeafAtTier(const TreeNode* node, Tier tier) const {
-    const size_t group_set_id = groupSetId();
-    RTP_LLM_CHECK_WITH_INFO(node != nullptr && group_set_id < node->group_set_resources.size(),
-                            "GroupSet::isLeafAtTier invalid node/group_set_id=%zu",
-                            group_set_id);
-    auto& resource = node->group_set_resources[group_set_id];
-
-    bool has_value = false;
-    switch (tier) {
-        case Tier::DEVICE:
-            has_value = hasCompleteDeviceValue(resource);
-            break;
-        case Tier::HOST:
-            has_value = resource.hasTier(Tier::HOST);
-            break;
-        case Tier::DISK:
-            has_value = resource.hasTier(Tier::DISK);
-            break;
-        default:
-            RTP_LLM_CHECK_WITH_INFO(
-                false, "GroupSet::isLeafAtTier invalid tier=%d group_set_id=%zu", static_cast<int>(tier), group_set_id);
-    }
-    if (!has_value) {
-        return false;
-    }
-
-    for (const auto& [key, child] : node->children) {
-        (void)key;
-        RTP_LLM_CHECK_WITH_INFO(child != nullptr && group_set_id < child->group_set_resources.size(),
-                                "GroupSet::isLeafAtTier invalid child/group_set_id=%zu",
-                                group_set_id);
-        auto& child_resource = child->group_set_resources[group_set_id];
-        if (child_resource.hasTier(tier)) {
-            return false;
-        }
-    }
-    return true;
 }
 
 bool GroupSet::hasCompleteDeviceValue(const GroupSetResource& resource) const {
@@ -397,13 +356,7 @@ void GroupSet::setBlocks(GroupSetResource& resource, Tier tier, const std::vecto
     }
 }
 
-bool GroupSet::isEvictable(const TreeNode& node, Tier tier) const {
-    const size_t group_set_id = groupSetId();
-    if (group_set_id >= node.group_set_resources.size()) {
-        return false;
-    }
-    const auto& resource = node.group_set_resources[group_set_id];
-
+bool GroupSet::isEvictable(const GroupSetResource& resource, Tier tier) const {
     // A block is evictable only when its sole holder is the cache reference
     // (refCount == 1). When no pool owns the block, treat it as evictable.
     auto pool_evictable = [](const auto& pool, BlockIdxType block) {

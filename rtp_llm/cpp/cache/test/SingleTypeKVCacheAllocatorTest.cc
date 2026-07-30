@@ -119,7 +119,8 @@ BlockIdxType seedSingleTypeLowerTier(BlockTreeCache& cache, Tier source_tier, Ca
     } else {
         slots[0][0].disk_slot = source_block;
     }
-    EXPECT_NE(cache.tree()->insertNode(nullptr, CacheKeysType{key}, slots).leaf, nullptr);
+    const BlockTreeInsertResult insert_result = cache.tree()->insertNode(CacheKeysType{key}, slots);
+    EXPECT_EQ(insert_result.inserted_nodes.size(), 1u);
     return source_block;
 }
 
@@ -594,7 +595,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, OrdinaryAllocationEvictsOnlyAfterTreeEntr
     allocator_->free(FreeInfo{seed, seed_tokens});
     EXPECT_EQ(device_pool->refCount(seed_block), 1u);
     EXPECT_TRUE(allocator_->malloc(pressure_malloc).success);
-    EXPECT_EQ(allocator_->blockTreeCacheOwner()->tree()->findNode(CacheKeysType{100}).matched_blocks, 0u);
+    EXPECT_TRUE(allocator_->blockTreeCacheOwner()->tree()->findNode(CacheKeysType{100}).empty());
     EXPECT_NE(std::find(pressure->blocks(0, 0).begin(), pressure->blocks(0, 0).end(), seed_block),
               pressure->blocks(0, 0).end())
         << "the freed numeric id may be immediately reused by the pressure request";
@@ -797,8 +798,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LowerTierHitFollowedByOuterIncrFailureNev
         EXPECT_EQ(snapshot_after.version, snapshot_before.version);
         EXPECT_EQ(snapshot_after.keys, snapshot_before.keys);
         const auto find = cache->tree()->findNode(CacheKeysType{100});
-        ASSERT_NE(find.matched_node, nullptr);
-        const auto& slot = find.matched_node->group_set_resources[0];
+        ASSERT_FALSE(find.empty());
+        const auto& slot = find.back()->group_set_resources[0];
         EXPECT_EQ(slot.transfer_state, GroupSetTransferState::IDLE);
         if (source_tier == Tier::HOST) {
             EXPECT_EQ(slot.host_block, source_block);
@@ -848,8 +849,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SuccessfulOuterAllocationCommitsLoadExact
     EXPECT_GT(per_rank_transfer_engine->submitCount(), 0u);
 
     const auto find = cache->tree()->findNode(CacheKeysType{100});
-    ASSERT_NE(find.matched_node, nullptr);
-    const auto& slot = find.matched_node->group_set_resources.front();
+    ASSERT_FALSE(find.empty());
+    const auto& slot = find.back()->group_set_resources.front();
     ASSERT_EQ(slot.device_blocks.size(), 1u);
     const BlockIdxType published_target = slot.device_blocks.front();
     const auto&        device_pool      = cache->groupSets().front()->devicePools().front();
@@ -865,7 +866,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SuccessfulOuterAllocationCommitsLoadExact
     cache->onBlocksReleased();
     cache->waitForPendingTasks();
     EXPECT_EQ(cache->getKeySnapshot(/*limit=*/16).version, before_watermark_retry.version);
-    EXPECT_EQ(find.matched_node->group_set_resources.front().device_blocks, (BlockIndicesType{published_target}));
+    EXPECT_EQ(find.back()->group_set_resources.front().device_blocks, (BlockIndicesType{published_target}));
     EXPECT_EQ(cache->evictForGroup(0, 1), 0);
 
     allocator_->free(FreeInfo{resource, token_ids});

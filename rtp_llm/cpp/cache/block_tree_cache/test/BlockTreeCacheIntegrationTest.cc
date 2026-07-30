@@ -205,10 +205,9 @@ private:
 class BlockTreeCacheIntegrationTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        auto                     tree       = std::make_unique<BlockTree>(1);
         auto                     full_group = std::make_shared<FullGroupSet>();
         std::vector<GroupSetPtr> groups     = {full_group};
-        cache_                              = makeBlockTreeCacheForTest(std::move(tree), std::move(groups));
+        cache_                              = makeBlockTreeCacheForTest(std::move(groups));
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -364,7 +363,6 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
 
     auto disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
 
-    auto tree = std::make_unique<BlockTree>(1);
     auto full = std::make_shared<FullGroupSet>();
     full->setHostPool(host_pool);
     full->setDiskPool(disk_pool);
@@ -382,19 +380,19 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     cfg.enable_disk_cache   = true;
     cfg.enable_load         = false;
 
-    auto cache = makeBlockTreeCacheForTest(std::move(tree), std::move(groups), std::move(cfg));
+    auto cache = makeBlockTreeCacheForTest(std::move(groups), std::move(cfg));
     ASSERT_NE(cache, nullptr);
     auto scripted_copy = std::make_shared<ScriptedPerRankBlockTransferEngine>(std::vector<GroupSetPtr>{full});
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*cache, scripted_copy);
 
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].host_block = host_block;
-    ASSERT_TRUE(insertGroupSetResources(*cache, nullptr, {100}, resources));
+    ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
 
     auto before = cache->tree()->findNode({100});
-    ASSERT_NE(before.matched_node, nullptr);
+    ASSERT_FALSE(before.empty());
     ASSERT_EQ(cache->getStats().host_heap_total_size, 1u);
-    const CandidateMeta before_meta     = before.matched_node->group_set_resources[0].candidate_meta;
+    const CandidateMeta before_meta     = before.back()->group_set_resources[0].candidate_meta;
     const auto          snapshot_before = cache->getKeySnapshot(/*limit=*/8);
     EXPECT_EQ(snapshot_before.keys, (CacheKeysType{100}));
 
@@ -408,8 +406,8 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     cache->waitForPendingTasks();
 
     auto after_failure = cache->tree()->findNode({100});
-    ASSERT_NE(after_failure.matched_node, nullptr);
-    const auto& failed_resource = after_failure.matched_node->group_set_resources[0];
+    ASSERT_FALSE(after_failure.empty());
+    const auto& failed_resource = after_failure.back()->group_set_resources[0];
     EXPECT_EQ(failed_resource.transfer_state, GroupSetTransferState::IDLE);
     EXPECT_EQ(failed_resource.host_block, host_block);
     EXPECT_FALSE(failed_resource.hasTier(Tier::DISK));
@@ -431,8 +429,8 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     cache->waitForPendingTasks();
 
     auto find = cache->tree()->findNode({100});
-    ASSERT_NE(find.matched_node, nullptr);
-    const auto& resource = find.matched_node->group_set_resources[0];
+    ASSERT_FALSE(find.empty());
+    const auto& resource = find.back()->group_set_resources[0];
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
     EXPECT_FALSE(resource.hasTier(Tier::HOST));
     EXPECT_TRUE(resource.hasTier(Tier::DISK));
@@ -598,7 +596,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettleme
         config.enable_memory_cache = true;
         config.enable_disk_cache   = true;
         config.enable_load         = true;
-        auto cache = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1), std::move(groups), std::move(config));
+        auto cache = makeBlockTreeCacheForTest(std::move(groups), std::move(config));
         ASSERT_NE(cache, nullptr);
 
         auto pausable_per_rank_transfer_engine =
@@ -609,7 +607,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettleme
         ASSERT_NE(source_block, NULL_BLOCK_IDX);
         std::vector<std::vector<GroupSetResource>> source_resources(1, std::vector<GroupSetResource>(1));
         source_resources[0][0].disk_slot = source_block;
-        ASSERT_TRUE(insertGroupSetResources(*cache, nullptr, {100}, source_resources));
+        ASSERT_TRUE(insertGroupSetResources(*cache, {100}, source_resources));
 
         BlockTreeMatchResult result = cache->match({100});
         ASSERT_NE(result.load_ticket, nullptr);
@@ -954,7 +952,7 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
             EXPECT_TRUE(second.load_ticket->joinedLoad(item_index));
             const size_t                     group_set_id   = second.load_ticket->groupSetId(item_index);
             const std::vector<BlockIdxType>& joined_targets = second.load_ticket->targetDeviceBlocks(item_index);
-            ASSERT_EQ(joined_targets.size(), environment->groups[group_set_id]->devicePoolCount());
+            ASSERT_EQ(joined_targets.size(), environment->groups[group_set_id]->devicePools().size());
             for (size_t pool_index = 0; pool_index < joined_targets.size(); ++pool_index) {
                 DeviceBlockPoolPtr pool = environment->groups[group_set_id]->devicePools()[pool_index];
                 ASSERT_NE(pool, nullptr);
@@ -1152,10 +1150,10 @@ TEST_F(BlockTreeCacheIntegrationTest, EvictionExplicitNoneIsNotNormalized) {
     environment->scripted_per_rank_transfer_engine->clear();
     EXPECT_TRUE(BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(*environment->cache, 1, Tier::DEVICE, Tier::NONE));
     environment->cache->waitForPendingTasks();
-    BlockTreeFindResult result = environment->cache->tree()->findNode(environment->keys);
-    ASSERT_NE(result.matched_node, nullptr);
-    EXPECT_EQ(result.matched_node->group_set_resources[1].transfer_state, GroupSetTransferState::IDLE);
-    EXPECT_EQ(environment->groups[1]->getTopTier(result.matched_node->group_set_resources[1]), Tier::NONE);
+    auto result = environment->cache->tree()->findNode(environment->keys);
+    ASSERT_FALSE(result.empty());
+    EXPECT_EQ(result.back()->group_set_resources[1].transfer_state, GroupSetTransferState::IDLE);
+    EXPECT_EQ(environment->groups[1]->getTopTier(result.back()->group_set_resources[1]), Tier::NONE);
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
 }
 
@@ -1178,7 +1176,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadRequestOnlyKeepsDiskResidency) {
     config.enable_disk_cache        = true;
     config.enable_load              = true;
     std::vector<GroupSetPtr> groups = {group};
-    auto cache = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1), std::move(groups), std::move(config));
+    auto cache = makeBlockTreeCacheForTest(std::move(groups), std::move(config));
     ASSERT_NE(cache, nullptr);
 
     const size_t       disk_free_before = disk_pool->freeBlocksNum();
@@ -1186,7 +1184,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadRequestOnlyKeepsDiskResidency) {
     ASSERT_FALSE(isNullBlockIdx(source_block));
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].disk_slot = source_block;
-    ASSERT_TRUE(insertGroupSetResources(*cache, nullptr, {100}, resources));
+    ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
 
     BlockTreeMatchResult result = cache->match({100});
     ASSERT_NE(result.load_ticket, nullptr);
@@ -1204,9 +1202,9 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadRequestOnlyKeepsDiskResidency) {
     ASSERT_NE(context, nullptr);
     context->waitDone();
     ASSERT_TRUE(context->success());
-    BlockTreeFindResult find_result = cache->tree()->findNode({100});
-    ASSERT_NE(find_result.matched_node, nullptr);
-    const GroupSetResource& resource = find_result.matched_node->group_set_resources[0];
+    auto find_result = cache->tree()->findNode({100});
+    ASSERT_FALSE(find_result.empty());
+    const GroupSetResource& resource = find_result.back()->group_set_resources[0];
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
     EXPECT_EQ(resource.disk_slot, source_block);
     EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
@@ -2125,11 +2123,11 @@ TEST_F(BlockTreeCacheIntegrationTest, SparseDisconnectedSWADoesNotPublishVacuous
     environment->insertRequestPath();
     environment->releaseRequestRefs();
 
-    BlockTreeFindResult find = environment->cache->tree()->findNode(environment->keys);
-    ASSERT_EQ(find.path.size(), kPathLength);
+    auto find = environment->cache->tree()->findNode(environment->keys);
+    ASSERT_EQ(find.size(), kPathLength);
     std::vector<BlockIdxType> swa_host_blocks;
     for (size_t path_index = 0; path_index < kPathLength; ++path_index) {
-        GroupSetResource& swa_resource = find.path[path_index]->group_set_resources[1];
+        GroupSetResource& swa_resource = find[path_index]->group_set_resources[1];
         ASSERT_TRUE(swa_resource.hasTier(Tier::DEVICE));
         const std::vector<BlockIdxType> old_device_blocks =
             environment->groups[1]->getBlocks(swa_resource, Tier::DEVICE);

@@ -349,7 +349,7 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
         insert_keys.resize(block_num);
         const auto& group_sets = block_tree_cache_->groupSets();
         if (group_sets.size() != 1 || !group_sets[0] || group_sets[0]->groupIds() != std::vector<size_t>{0}
-            || group_sets[0]->devicePoolCount() != 1) {
+            || group_sets[0]->devicePools().size() != 1) {
             RTP_LLM_LOG_WARNING("SingleType insert rejected inconsistent GroupSet membership");
             continue;
         }
@@ -366,7 +366,7 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
             has_valid                    = true;
         }
         if (has_valid) {
-            block_tree_cache_->insert(nullptr, insert_keys, slots);
+            block_tree_cache_->insert(insert_keys, slots);
         }
     }
 }

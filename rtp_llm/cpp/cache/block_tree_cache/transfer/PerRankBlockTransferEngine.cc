@@ -164,10 +164,10 @@ TransferStatus PerRankBlockTransferEngine::validateRequest(const TransferDescrip
 
 TransferStatus PerRankBlockTransferEngine::validateDeviceBlocks(const TransferDescriptor& desc,
                                                                 const GroupSet&           group_set) const {
-    if (desc.device_blocks.size() != group_set.devicePoolCount()) {
+    if (desc.device_blocks.size() != group_set.devicePools().size()) {
         RTP_LLM_LOG_WARNING("device block count %zu != pool count %zu group_set=%zu",
                             desc.device_blocks.size(),
-                            group_set.devicePoolCount(),
+                            group_set.devicePools().size(),
                             desc.group_set_id);
         return TransferStatus::INVALID_ARGS;
     }

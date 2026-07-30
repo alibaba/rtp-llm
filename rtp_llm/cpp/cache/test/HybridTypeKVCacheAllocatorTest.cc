@@ -620,14 +620,14 @@ TEST_F(HybridTypeKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly
     allocator->blockTreeCacheOwner()->onBlocksReleased();
 
     const auto tree_path = allocator->blockTreeCacheOwner()->tree()->findNode(seed_keys);
-    ASSERT_EQ(tree_path.path.size(), seed_keys.size());
-    for (size_t index = 0; index < tree_path.path.size(); ++index) {
-        EXPECT_EQ(tree_path.path[index]->cache_key, seed_keys[index]);
+    ASSERT_EQ(tree_path.size(), seed_keys.size());
+    for (size_t index = 0; index < tree_path.size(); ++index) {
+        EXPECT_EQ(tree_path[index]->cache_key, seed_keys[index]);
         if (generated_dependencies[index].has_parent) {
-            ASSERT_EQ(tree_path.path[index]->parent, tree_path.path[index - 1]);
-            EXPECT_EQ(tree_path.path[index]->parent->cache_key, generated_dependencies[index].parent_key);
+            ASSERT_EQ(tree_path[index]->parent, tree_path[index - 1]);
+            EXPECT_EQ(tree_path[index]->parent->cache_key, generated_dependencies[index].parent_key);
         } else {
-            EXPECT_EQ(tree_path.path[index]->parent, allocator->blockTreeCacheOwner()->tree()->root());
+            EXPECT_EQ(tree_path[index]->parent, allocator->blockTreeCacheOwner()->tree()->root());
         }
     }
     auto seeded_match = allocator->blockTreeCacheOwner()->match(seed_keys);

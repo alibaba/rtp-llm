@@ -106,7 +106,6 @@ makeBroadcastManager(const std::vector<MultiRankBlockTransferRpcConfig>&        
 }
 
 static std::unique_ptr<BlockTreeCache> makeBroadcastCache(const std::shared_ptr<BroadcastManager>& broadcast_manager) {
-    std::unique_ptr<BlockTree>    tree = std::make_unique<BlockTree>(1);
     std::shared_ptr<FullGroupSet> full = std::make_shared<FullGroupSet>();
     full->setHostPool(makeHostPool(256, 8));
     DeviceBlockPoolPtr device_pool = makeDevicePool({{256, 0}}, 8, "multi_rank_engine_device");
@@ -114,8 +113,7 @@ static std::unique_ptr<BlockTreeCache> makeBroadcastCache(const std::shared_ptr<
         {block_transfer_engine_test::makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 256)});
     full->initialize(0, topology, {0}, {device_pool});
     std::vector<GroupSetPtr> groups = {full};
-    return makeBlockTreeCacheForTest(std::move(tree),
-                                     std::move(groups),
+    return makeBlockTreeCacheForTest(std::move(groups),
                                      BlockTreeCacheConfig{},
                                      /*storage_backend=*/nullptr,
                                      broadcast_manager);
@@ -166,10 +164,9 @@ static void expectSingleGroupBlock(const MemoryOperationRequestPB::CopyItem& ite
 class MultiRankBlockTransferEngineTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        auto                     tree       = std::make_unique<BlockTree>(1);
         auto                     full_group = std::make_shared<FullGroupSet>();
         std::vector<GroupSetPtr> groups     = {full_group};
-        cache_                              = makeBlockTreeCacheForTest(std::move(tree), std::move(groups));
+        cache_                              = makeBlockTreeCacheForTest(std::move(groups));
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -181,14 +178,13 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastManagerStoredCorrectly) {
     auto                     broadcast_mgr = std::make_shared<BroadcastManager>(worker_addrs);
     ASSERT_TRUE(broadcast_mgr->init());
 
-    auto                     tree   = std::make_unique<BlockTree>(1);
     auto                     full   = std::make_shared<FullGroupSet>();
     std::vector<GroupSetPtr> groups = {full};
 
     BlockTreeCacheConfig cfg;
     cfg.enable_device_cache = true;
 
-    auto cache = makeBlockTreeCacheForTest(std::move(tree), std::move(groups), std::move(cfg), nullptr, broadcast_mgr);
+    auto cache = makeBlockTreeCacheForTest(std::move(groups), std::move(cfg), nullptr, broadcast_mgr);
 
     // Verify BroadcastManager is stored (access via internal member)
     EXPECT_EQ(cache->transfer_dispatcher_->multi_rank_engine_->broadcast_manager_, broadcast_mgr);
@@ -276,14 +272,13 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadCommitsDeviceResource)
     config.enable_memory_cache                        = true;
     config.enable_load                                = true;
     std::vector<GroupSetPtr>                   groups = {group};
-    std::unique_ptr<BlockTreeCache>            cache  = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1),
-                                                                      std::move(groups),
+    std::unique_ptr<BlockTreeCache>            cache  = makeBlockTreeCacheForTest(std::move(groups),
                                                                       std::move(config),
                                                                       /*storage_backend=*/nullptr,
                                                                       broadcast_manager);
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].host_block = host_block;
-    ASSERT_TRUE(insertGroupSetResources(*cache, nullptr, {100}, resources));
+    ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
     BlockTreeMatchResult match = cache->match({100});
     ASSERT_NE(match.load_ticket, nullptr);
     ASSERT_EQ(match.load_ticket->items().size(), 1u);
@@ -294,9 +289,9 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadCommitsDeviceResource)
     ASSERT_TRUE(context->success());
     cache->waitForPendingTasks();
 
-    BlockTreeFindResult find_result = cache->tree()->findNode({100});
-    ASSERT_NE(find_result.matched_node, nullptr);
-    const GroupSetResource& resource = find_result.matched_node->group_set_resources[0];
+    auto find_result = cache->tree()->findNode({100});
+    ASSERT_FALSE(find_result.empty());
+    const GroupSetResource& resource = find_result.back()->group_set_resources[0];
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
     EXPECT_FALSE(resource.hasTier(Tier::HOST));
     EXPECT_EQ(resource.device_blocks, (std::vector<BlockIdxType>{device_block}));
@@ -342,14 +337,13 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadFailureKeepsSourceReso
     config.enable_memory_cache                        = true;
     config.enable_load                                = true;
     std::vector<GroupSetPtr>                   groups = {group};
-    std::unique_ptr<BlockTreeCache>            cache  = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1),
-                                                                      std::move(groups),
+    std::unique_ptr<BlockTreeCache>            cache  = makeBlockTreeCacheForTest(std::move(groups),
                                                                       std::move(config),
                                                                       /*storage_backend=*/nullptr,
                                                                       broadcast_manager);
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].host_block = host_block;
-    ASSERT_TRUE(insertGroupSetResources(*cache, nullptr, {100}, resources));
+    ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
     BlockTreeMatchResult match = cache->match({100});
     ASSERT_NE(match.load_ticket, nullptr);
     ASSERT_EQ(match.load_ticket->items().size(), 1u);
@@ -360,9 +354,9 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadFailureKeepsSourceReso
     ASSERT_FALSE(context->success());
     cache->waitForPendingTasks();
 
-    BlockTreeFindResult find_result = cache->tree()->findNode({100});
-    ASSERT_NE(find_result.matched_node, nullptr);
-    const GroupSetResource& resource = find_result.matched_node->group_set_resources[0];
+    auto find_result = cache->tree()->findNode({100});
+    ASSERT_FALSE(find_result.empty());
+    const GroupSetResource& resource = find_result.back()->group_set_resources[0];
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
     EXPECT_TRUE(resource.hasTier(Tier::HOST));
     EXPECT_EQ(resource.host_block, host_block);
@@ -403,23 +397,22 @@ TEST_F(MultiRankBlockTransferEngineTest, LoadCompletionStateMismatchDoesNotInsta
     BlockTreeCacheConfig config;
     config.enable_memory_cache                        = true;
     std::vector<GroupSetPtr>                   groups = {group};
-    std::unique_ptr<BlockTreeCache>            cache  = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1),
-                                                                      std::move(groups),
+    std::unique_ptr<BlockTreeCache>            cache  = makeBlockTreeCacheForTest(std::move(groups),
                                                                       std::move(config),
                                                                       /*storage_backend=*/nullptr,
                                                                       broadcast_manager);
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].host_block = host_block;
-    ASSERT_TRUE(insertGroupSetResources(*cache, nullptr, {100}, resources));
-    BlockTreeFindResult find_result = cache->tree()->findNode({100});
-    ASSERT_NE(find_result.matched_node, nullptr);
+    ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
+    auto find_result = cache->tree()->findNode({100});
+    ASSERT_FALSE(find_result.empty());
 
     group->referenceBlocks(MultiNodeResource{0, Tier::HOST, {{host_block}}}, BlockRefType::REQUEST);
-    ASSERT_TRUE(cache->loader_.reserveLoad(find_result.matched_node, 0, Tier::HOST, {host_block}));
-    ASSERT_TRUE(cache->loader_.beginLoad(find_result.matched_node, 0, Tier::HOST));
+    ASSERT_TRUE(cache->loader_.reserveLoad(find_result.back(), 0, Tier::HOST, {host_block}));
+    ASSERT_TRUE(cache->loader_.beginLoad(find_result.back(), 0, Tier::HOST));
 
     LoadTicket::PendingLoadItem item;
-    item.node                                       = find_result.matched_node;
+    item.node                                       = find_result.back();
     item.group_set_id                               = 0;
     item.source_tier                                = Tier::HOST;
     item.source_blocks                              = {host_block};
@@ -429,11 +422,11 @@ TEST_F(MultiRankBlockTransferEngineTest, LoadCompletionStateMismatchDoesNotInsta
     ASSERT_TRUE(cache->loader_.load_task_runner_.createTask({item}, {group}, context, task));
     ASSERT_NE(task, nullptr);
     ASSERT_TRUE(cache->loader_.load_join_registry_.start(
-        find_result.matched_node, 0, item.target_device_blocks, task->context));
-    find_result.matched_node->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
+        find_result.back(), 0, item.target_device_blocks, task->context));
+    find_result.back()->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
     cache->loader_.runLoadTask(task);
 
-    GroupSetResource& resource = find_result.matched_node->group_set_resources[0];
+    GroupSetResource& resource = find_result.back()->group_set_resources[0];
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::DEMOTING);
     EXPECT_EQ(resource.host_block, host_block);
     EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
@@ -473,14 +466,13 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadUsesSingleDirectStage)
     config.enable_disk_cache                          = true;
     config.enable_load                                = true;
     std::vector<GroupSetPtr>                   groups = {group};
-    std::unique_ptr<BlockTreeCache>            cache  = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1),
-                                                                      std::move(groups),
+    std::unique_ptr<BlockTreeCache>            cache  = makeBlockTreeCacheForTest(std::move(groups),
                                                                       std::move(config),
                                                                       /*storage_backend=*/nullptr,
                                                                       broadcast_manager);
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].disk_slot = disk_block;
-    ASSERT_TRUE(insertGroupSetResources(*cache, nullptr, {100}, resources));
+    ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
     BlockTreeMatchResult match = cache->match({100});
     ASSERT_NE(match.load_ticket, nullptr);
     ASSERT_EQ(match.load_ticket->items().size(), 1u);
@@ -491,9 +483,9 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadUsesSingleDirectStage)
     ASSERT_TRUE(context->success());
     cache->waitForPendingTasks();
 
-    BlockTreeFindResult find_result = cache->tree()->findNode({100});
-    ASSERT_NE(find_result.matched_node, nullptr);
-    const GroupSetResource& resource = find_result.matched_node->group_set_resources[0];
+    auto find_result = cache->tree()->findNode({100});
+    ASSERT_FALSE(find_result.empty());
+    const GroupSetResource& resource = find_result.back()->group_set_resources[0];
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
     EXPECT_FALSE(resource.hasTier(Tier::DISK));
     EXPECT_EQ(resource.device_blocks, (std::vector<BlockIdxType>{device_block}));
@@ -541,26 +533,25 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionSuccessCommitsPlan) {
     config.enable_memory_cache             = true;
     config.enable_disk_cache               = true;
     std::vector<GroupSetPtr>        groups = {full};
-    std::unique_ptr<BlockTreeCache> cache  = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1),
-                                                                      std::move(groups),
+    std::unique_ptr<BlockTreeCache> cache  = makeBlockTreeCacheForTest(std::move(groups),
                                                                       std::move(config),
                                                                       /*storage_backend=*/nullptr,
                                                                       broadcast_manager);
 
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].host_block = host_block;
-    ASSERT_TRUE(insertGroupSetResources(*cache, nullptr, {100}, resources));
-    BlockTreeFindResult before = cache->tree()->findNode({100});
-    ASSERT_NE(before.matched_node, nullptr);
+    ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
+    auto before = cache->tree()->findNode({100});
+    ASSERT_FALSE(before.empty());
     ASSERT_EQ(cache->getStats().host_heap_total_size, 1u);
 
     cache->setTierWatermark(Tier::HOST, 0.01, 0);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     cache->waitForPendingTasks();
 
-    BlockTreeFindResult after = cache->tree()->findNode({100});
-    ASSERT_NE(after.matched_node, nullptr);
-    const GroupSetResource& resource = after.matched_node->group_set_resources[0];
+    auto after = cache->tree()->findNode({100});
+    ASSERT_FALSE(after.empty());
+    const GroupSetResource& resource = after.back()->group_set_resources[0];
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
     EXPECT_FALSE(resource.hasTier(Tier::HOST));
     EXPECT_TRUE(resource.hasTier(Tier::DISK));
@@ -608,14 +599,13 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDeviceEvictionBypassesHostWith
     config.enable_memory_cache                        = false;
     config.enable_disk_cache                          = true;
     std::vector<GroupSetPtr>                   groups = {full};
-    auto                                       cache  = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1),
-                                           std::move(groups),
+    auto                                       cache  = makeBlockTreeCacheForTest(std::move(groups),
                                            std::move(config),
                                            /*storage_backend=*/nullptr,
                                            broadcast_manager);
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = device.per_node.front();
-    ASSERT_TRUE(insertGroupSetResources(*cache, nullptr, {100}, resources));
+    ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
     full->unreferenceBlocks(device, BlockRefType::REQUEST);
     cache->onBlocksReleased();
 
@@ -623,9 +613,9 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDeviceEvictionBypassesHostWith
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     cache->waitForPendingTasks();
 
-    BlockTreeFindResult after = cache->tree()->findNode({100});
-    ASSERT_NE(after.matched_node, nullptr);
-    const GroupSetResource& resource = after.matched_node->group_set_resources[0];
+    auto after = cache->tree()->findNode({100});
+    ASSERT_FALSE(after.empty());
+    const GroupSetResource& resource = after.back()->group_set_resources[0];
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
     EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
     EXPECT_TRUE(resource.hasTier(Tier::DISK));
@@ -667,14 +657,13 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastD2DiskFailureRollsBackDeviceSo
     config.enable_memory_cache                        = false;
     config.enable_disk_cache                          = true;
     std::vector<GroupSetPtr>                   groups = {full};
-    auto                                       cache  = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1),
-                                           std::move(groups),
+    auto                                       cache  = makeBlockTreeCacheForTest(std::move(groups),
                                            std::move(config),
                                            /*storage_backend=*/nullptr,
                                            broadcast_manager);
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = device.per_node.front();
-    ASSERT_TRUE(insertGroupSetResources(*cache, nullptr, {100}, resources));
+    ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
     full->unreferenceBlocks(device, BlockRefType::REQUEST);
     cache->onBlocksReleased();
 
@@ -682,9 +671,9 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastD2DiskFailureRollsBackDeviceSo
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     cache->waitForPendingTasks();
 
-    BlockTreeFindResult after = cache->tree()->findNode({100});
-    ASSERT_NE(after.matched_node, nullptr);
-    const GroupSetResource& resource = after.matched_node->group_set_resources[0];
+    auto after = cache->tree()->findNode({100});
+    ASSERT_FALSE(after.empty());
+    const GroupSetResource& resource = after.back()->group_set_resources[0];
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
     EXPECT_EQ(resource.device_blocks, (std::vector<BlockIdxType>{device_block}));
     EXPECT_FALSE(resource.hasTier(Tier::DISK));
@@ -721,26 +710,25 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastEvictionFailureRollsBackPlan) 
     config.enable_memory_cache             = true;
     config.enable_disk_cache               = true;
     std::vector<GroupSetPtr>        groups = {full};
-    std::unique_ptr<BlockTreeCache> cache  = makeBlockTreeCacheForTest(std::make_unique<BlockTree>(1),
-                                                                      std::move(groups),
+    std::unique_ptr<BlockTreeCache> cache  = makeBlockTreeCacheForTest(std::move(groups),
                                                                       std::move(config),
                                                                       /*storage_backend=*/nullptr,
                                                                       broadcast_manager);
 
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].host_block = host_block;
-    ASSERT_TRUE(insertGroupSetResources(*cache, nullptr, {100}, resources));
-    BlockTreeFindResult before = cache->tree()->findNode({100});
-    ASSERT_NE(before.matched_node, nullptr);
+    ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
+    auto before = cache->tree()->findNode({100});
+    ASSERT_FALSE(before.empty());
     ASSERT_EQ(cache->getStats().host_heap_total_size, 1u);
 
     cache->setTierWatermark(Tier::HOST, 0.01, 0);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     cache->waitForPendingTasks();
 
-    BlockTreeFindResult after = cache->tree()->findNode({100});
-    ASSERT_NE(after.matched_node, nullptr);
-    const GroupSetResource& resource = after.matched_node->group_set_resources[0];
+    auto after = cache->tree()->findNode({100});
+    ASSERT_FALSE(after.empty());
+    const GroupSetResource& resource = after.back()->group_set_resources[0];
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
     EXPECT_TRUE(resource.hasTier(Tier::HOST));
     EXPECT_FALSE(resource.hasTier(Tier::DISK));
@@ -763,7 +751,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BuildEvictionTransferRequestIncludesPri
     initializeBroadcastGroups({primary_group, cascade_group});
     std::vector<GroupSetPtr>        groups = {primary_group, cascade_group};
     std::unique_ptr<BlockTreeCache> cache =
-        makeBlockTreeCacheForTest(std::make_unique<BlockTree>(2), std::move(groups));
+        makeBlockTreeCacheForTest(std::move(groups));
     ASSERT_NE(cache, nullptr);
 
     BlockTreeEvictor::EvictionPlan plan;

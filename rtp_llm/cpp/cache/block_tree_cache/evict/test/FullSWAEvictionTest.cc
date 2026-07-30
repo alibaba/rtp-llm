@@ -14,12 +14,11 @@ using block_tree_cache_test::makeBlockTreeCacheForTest;
 class FullSWAEvictionTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        std::unique_ptr<BlockTree> tree   = std::make_unique<BlockTree>(2);
         auto                       full   = std::make_shared<FullGroupSet>();
         auto                       swa    = std::make_shared<SWAGroupSet>(128, 64);
         std::vector<GroupSetPtr>   groups = {full, swa};
         cache_                            = makeBlockTreeCacheForTest(
-            std::move(tree), std::move(groups), BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+            std::move(groups), BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
     }
 
     void insertPath(const CacheKeysType& keys, BlockIdxType full_block, BlockIdxType swa_block) {
@@ -28,7 +27,7 @@ protected:
             resources[i][0].device_blocks = {static_cast<BlockIdxType>(full_block + i)};
             resources[i][1].device_blocks = {static_cast<BlockIdxType>(swa_block + i)};
         }
-        cache_->insert(nullptr, keys, resources);
+        cache_->insert(keys, resources);
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -71,17 +70,16 @@ TEST_F(FullSWAEvictionTest, FullReclaimCascadesToSWA) {
 //   Reclaiming [300] deletes the leaf and prunes both empty ancestors.
 // ---------------------------------------------------------------------------
 TEST_F(FullSWAEvictionTest, SWAOnlySequentialDrain) {
-    std::unique_ptr<BlockTree>      tree      = std::make_unique<BlockTree>(1);
     auto                            swa       = std::make_shared<SWAGroupSet>(128, 64);
     std::vector<GroupSetPtr>        groups    = {swa};
     std::unique_ptr<BlockTreeCache> swa_cache = makeBlockTreeCacheForTest(
-        std::move(tree), std::move(groups), BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+        std::move(groups), BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
 
     std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {20};
     resources[1][0].device_blocks = {21};
     resources[2][0].device_blocks = {22};
-    swa_cache->insert(nullptr, {100, 200, 300}, resources);
+    swa_cache->insert({100, 200, 300}, resources);
 
     EXPECT_EQ(swa_cache->getStats().device_heap_total_size, 3u);
 

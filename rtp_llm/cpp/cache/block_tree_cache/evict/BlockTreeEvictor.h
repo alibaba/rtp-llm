@@ -59,13 +59,9 @@ public:
         std::vector<bool> cascade_success;
     };
 
-    BlockTreeEvictor(std::vector<GroupSetPtr>& group_sets,
-                     ExecuteTransferFn         execute_transfer,
-                     bool                      enable_reverse_eviction);
-    BlockTreeEvictor(std::vector<GroupSetPtr>&      group_sets,
+    BlockTreeEvictor(BlockTree*                     tree,
                      ExecuteTransferFn              execute_transfer,
                      bool                           enable_reverse_eviction,
-                     BlockTree*                     tree,
                      const BlockTransferDispatcher* transfer_dispatcher,
                      BlockTreeTaskPool*             task_pool,
                      BlockTreeCacheMetricsReporter& metrics_reporter,
@@ -91,7 +87,7 @@ public:
     // Re-evaluate candidacy for every tree node across all group sets.
     // Called after external refcount changes (e.g. request free) that may make
     // previously non-evictable blocks evictable.
-    void refreshAllCandidates(const BlockTree& tree);
+    void refreshAllCandidates();
     // A node's topology changed (e.g. became a leaf after child deletion).
     void onTopologyChanged(TreeNode* parent);
     // A node is about to be removed from the tree: drop it from all heaps.
@@ -108,7 +104,7 @@ public:
     std::vector<EvictionMove>   chooseWatermarkVictims(GroupSet& group_set, Tier tier, double watermark_ratio);
     std::optional<EvictionPlan> buildPlan(EvictionMove eviction_move);
     bool submitLocked(EvictionMove& eviction_move, std::vector<EvictionReleaseCredit>* release_credits = nullptr);
-    void complete(BlockTree& tree, const EvictionPlan& plan, const CopyResultSet& results);
+    void complete(const EvictionPlan& plan, const CopyResultSet& results);
     void rollbackPreparedPlan(const EvictionPlan& plan);
     void writeRemoteThrough(const std::shared_ptr<StorageBackend>& storage_backend,
                             CacheKeyType                           cache_key,
@@ -134,6 +130,7 @@ private:
     // The single candidate-eligibility gate (design section 4.3). Upserts the
     // node when ready, erases it otherwise. Idempotent.
     void refreshCandidate(GroupSet& group_set, TreeNode* node, Tier tier);
+    bool isEvictable(const GroupSet& group_set, const TreeNode* node, Tier tier) const;
 
     std::optional<EvictionMove> chooseVictimInGroupSet(GroupSet& group_set, Tier tier);
     static Tier                 defaultTargetTier(Tier source);
@@ -147,13 +144,13 @@ private:
     void                reserveSource(const EvictionMove& eviction_move);
     bool                restoreSource(const EvictionMove& eviction_move);
     void                releaseTargetBlocks(const EvictionMove& eviction_move);
-    bool                applyMoveCompletion(GroupSetPtr& group_set, const EvictionMove& move);
-    void                finalizeEviction(BlockTree& tree, TreeNode* node);
-    bool                shouldDeleteNode(const BlockTree& tree, const TreeNode* node) const;
+    bool                applyMoveCompletion(const GroupSetPtr& group_set, const EvictionMove& move);
+    void                finalizeEviction(TreeNode* node);
+    bool                shouldDeleteNode(const TreeNode* node) const;
     std::vector<size_t> reusableGroupSetIds() const;
     size_t              computeGroupSetExcess(const GroupSet& group_set, Tier tier, double ratio) const;
 
-    std::vector<GroupSetPtr>&           group_sets_;
+    BlockTree*                          tree_;
     std::unique_ptr<EvictionTaskRunner> task_runner_;
     bool                                enable_reverse_eviction_{false};
 

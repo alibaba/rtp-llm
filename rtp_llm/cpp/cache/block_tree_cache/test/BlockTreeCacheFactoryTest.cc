@@ -890,9 +890,8 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
     cache->onBlocksReleased();
 
     auto find = cache->tree()->findNode(CacheKeysType{703});
-    ASSERT_EQ(find.matched_blocks, 1u);
-    ASSERT_NE(find.matched_node, nullptr);
-    TreeNode* node = find.matched_node;
+    ASSERT_EQ(find.size(), 1u);
+    TreeNode* node = find.back();
     ASSERT_EQ(node->group_set_resources.size(), 2u);
 
     const int    b_layer = config.layerIdsForGroup(1).front();
@@ -918,7 +917,7 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
     GroupSetResource incoming_b;
     incoming_b.device_blocks = {original_blocks[1]};
     const std::vector<std::vector<GroupSetResource>> refill_resources{{incoming_a, incoming_b}};
-    cache->insert(nullptr, CacheKeysType{703}, refill_resources);
+    cache->insert(CacheKeysType{703}, refill_resources);
 
     const auto after_refill = cache->getKeySnapshot(/*limit=*/16);
     EXPECT_EQ(after_refill.version, before_refill.version + 1);
@@ -940,7 +939,7 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
 
     const size_t a_ref_before_duplicate = group_set_a->devicePools()[0]->refCount(refill_a->front());
     const auto   before_duplicate       = cache->getKeySnapshot(/*limit=*/16);
-    cache->insert(nullptr, CacheKeysType{703}, refill_resources);
+    cache->insert(CacheKeysType{703}, refill_resources);
     const auto after_duplicate = cache->getKeySnapshot(/*limit=*/16);
     EXPECT_EQ(after_duplicate.version, before_duplicate.version);
     EXPECT_EQ(group_set_a->devicePools()[0]->refCount(refill_a->front()), a_ref_before_duplicate);
@@ -954,7 +953,7 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
     GroupSetResource nonempty_incoming_a;
     nonempty_incoming_a.device_blocks = {nonempty_replacement->front()};
     const auto before_nonempty        = cache->getKeySnapshot(/*limit=*/16);
-    cache->insert(nullptr, CacheKeysType{703}, {{nonempty_incoming_a, incoming_b}});
+    cache->insert(CacheKeysType{703}, {{nonempty_incoming_a, incoming_b}});
     EXPECT_EQ(cache->getKeySnapshot(/*limit=*/16).version, before_nonempty.version);
     EXPECT_EQ(node->group_set_resources[0].device_blocks, (BlockIndicesType{refill_a->front()}));
     EXPECT_EQ(group_set_a->devicePools()[0]->refCount(refill_a->front()), a_ref_before_duplicate);
@@ -974,7 +973,7 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
     GroupSetResource blocked_incoming_a;
     blocked_incoming_a.device_blocks = {host_replacement->front()};
     const auto before_host           = cache->getKeySnapshot(/*limit=*/16);
-    cache->insert(nullptr, CacheKeysType{703}, {{blocked_incoming_a, incoming_b}});
+    cache->insert(CacheKeysType{703}, {{blocked_incoming_a, incoming_b}});
     EXPECT_EQ(cache->getKeySnapshot(/*limit=*/16).version, before_host.version);
     EXPECT_EQ(node->group_set_resources[0].host_block, host_a);
     EXPECT_FALSE(node->group_set_resources[0].hasTier(Tier::DEVICE));
@@ -986,7 +985,7 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
         SCOPED_TRACE(state == GroupSetTransferState::DEMOTING ? "demoting" : "loading");
         node->group_set_resources[0].transfer_state = state;
         const auto before_in_flight                 = cache->getKeySnapshot(/*limit=*/16);
-        cache->insert(nullptr, CacheKeysType{703}, {{blocked_incoming_a, incoming_b}});
+        cache->insert(CacheKeysType{703}, {{blocked_incoming_a, incoming_b}});
         EXPECT_EQ(cache->getKeySnapshot(/*limit=*/16).version, before_in_flight.version);
         EXPECT_TRUE(node->group_set_resources[0].is_empty());
         EXPECT_EQ(node->group_set_resources[0].transfer_state, state);
@@ -1006,7 +1005,7 @@ TEST_F(BlockTreeCacheFactoryTest, InsertRejectsWrongShapeAndFailsFastOnInvalidGr
     auto       cache     = createBlockTreeCache(config, KVCacheConfig{}, allocator);
     ASSERT_NE(cache, nullptr);
     ASSERT_EQ(cache->groupSets().size(), 1u);
-    ASSERT_EQ(cache->groupSets()[0]->devicePoolCount(), 2u);
+    ASSERT_EQ(cache->groupSets()[0]->devicePools().size(), 2u);
 
     const auto groups = allocator->cacheGroups();
     ASSERT_EQ(groups.size(), 2u);
@@ -1022,7 +1021,7 @@ TEST_F(BlockTreeCacheFactoryTest, InsertRejectsWrongShapeAndFailsFastOnInvalidGr
     auto expect_rejected_without_mutation = [&](CacheKeyType                               key,
                                                 std::vector<std::vector<GroupSetResource>> resources) {
         const auto before = cache->getKeySnapshot(/*limit=*/32);
-        cache->insert(nullptr, CacheKeysType{key}, resources);
+        cache->insert(CacheKeysType{key}, resources);
         const auto after = cache->getKeySnapshot(/*limit=*/32);
         EXPECT_EQ(after.version, before.version);
         EXPECT_EQ(after.keys, before.keys);
@@ -1039,7 +1038,7 @@ TEST_F(BlockTreeCacheFactoryTest, InsertRejectsWrongShapeAndFailsFastOnInvalidGr
         const auto before          = cache->getKeySnapshot(/*limit=*/32);
         const auto first_refcount  = groups[0]->blockPool()->refCount(first->front());
         const auto second_refcount = groups[1]->blockPool()->refCount(second->front());
-        EXPECT_ANY_THROW(cache->insert(nullptr, CacheKeysType{key}, resources));
+        EXPECT_ANY_THROW(cache->insert(CacheKeysType{key}, resources));
         const auto after = cache->getKeySnapshot(/*limit=*/32);
         EXPECT_EQ(after.version, before.version);
         EXPECT_EQ(after.keys, before.keys);
@@ -1055,10 +1054,6 @@ TEST_F(BlockTreeCacheFactoryTest, InsertRejectsWrongShapeAndFailsFastOnInvalidGr
     GroupSetResource partially_null;
     partially_null.device_blocks = {first->front(), NULL_BLOCK_IDX};
     expect_failfast_without_cache_hold(/*key=*/713, {{partially_null}});
-
-    GroupSetResource null_only;
-    null_only.device_blocks = {NULL_BLOCK_IDX, NULL_BLOCK_IDX};
-    expect_failfast_without_cache_hold(/*key=*/714, {{null_only}});
 
     groups[0]->blockPool()->decRef(*first, BlockRefType::REQUEST);
     groups[1]->blockPool()->decRef(*second, BlockRefType::REQUEST);
@@ -1316,15 +1311,15 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
         ASSERT_NE(group, nullptr);
         ASSERT_NE(group->hostPool(), nullptr);
         ASSERT_NE(group->diskPool(), nullptr);
-        ASSERT_EQ(group->groupIds().size(), group->devicePoolCount());
+        ASSERT_EQ(group->groupIds().size(), group->devicePools().size());
         ASSERT_EQ(group->topology(), cache_config.topologyPtr());
-        EXPECT_EQ(group->groupIds().size(), group->devicePoolCount());
+        EXPECT_EQ(group->groupIds().size(), group->devicePools().size());
         EXPECT_EQ(group->hostPool()->payloadBytes(), group->payloadBytes());
         EXPECT_EQ(group->diskPool()->payloadBytes(), group->payloadBytes());
 
         MultiNodeResource device_blocks = group->allocateBlocks(Tier::DEVICE, 1, BlockRefType::REQUEST);
         ASSERT_EQ(device_blocks.per_node.size(), 1u);
-        ASSERT_EQ(device_blocks.per_node[0].size(), group->devicePoolCount());
+        ASSERT_EQ(device_blocks.per_node[0].size(), group->devicePools().size());
         const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::REQUEST);
         const BlockIdxType disk_block = group->allocateSingleBlock(Tier::DISK, BlockRefType::REQUEST);
         ASSERT_NE(host_block, NULL_BLOCK_IDX);

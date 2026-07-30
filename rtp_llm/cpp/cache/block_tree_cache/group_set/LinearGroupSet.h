@@ -12,12 +12,12 @@ public:
     LinearGroupSet();
 
     std::unique_ptr<MatchValidator> createMatchValidator() override;
-    size_t computeReuseBlockCount(size_t matched_block_count, const std::vector<TreeNode*>& path) const override;
+    size_t computeReuseBlockCount(size_t matched_block_count) const override;
 };
 
 class LinearMatchValidator: public MatchValidator {
 public:
-    bool validate(const TreeNode* node, const GroupSetResource& resource) override;
+    bool validate(const GroupSetResource& resource) override;
 };
 
 }  // namespace rtp_llm

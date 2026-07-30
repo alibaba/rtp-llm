@@ -356,7 +356,6 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
         group_sets.push_back(std::move(group_set));
     }
 
-    auto   tree            = std::make_unique<BlockTree>(group_sets.size());
     size_t combined_stride = 0;
     for (const auto& group_set : group_sets) {
         const size_t stride = alignUp(group_set->payloadBytes(), kPoolAlignment);
@@ -457,8 +456,9 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     auto task_pool = std::make_unique<BlockTreeTaskPool>(
         static_cast<size_t>(config.eviction_thread_pool_size), 1000, "BlockTreeEvictionPool");
 
+    auto tree = std::make_unique<BlockTree>(std::move(group_sets));
+
     auto result = std::make_shared<BlockTreeCache>(std::move(tree),
-                                                   std::move(group_sets),
                                                    std::move(config),
                                                    std::move(storage_backend),
                                                    std::move(transfer_dispatcher),

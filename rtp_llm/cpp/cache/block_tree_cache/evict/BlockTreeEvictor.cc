@@ -17,17 +17,9 @@ bool BlockTreeEvictor::EvictionPlan::needsCopy() const {
               });
 }
 
-BlockTreeEvictor::BlockTreeEvictor(std::vector<GroupSetPtr>& group_sets,
-                                   ExecuteTransferFn         execute_transfer,
-                                   bool                      enable_reverse_eviction):
-    group_sets_(group_sets),
-    task_runner_(std::make_unique<EvictionTaskRunner>(std::move(execute_transfer))),
-    enable_reverse_eviction_(enable_reverse_eviction) {}
-
-BlockTreeEvictor::BlockTreeEvictor(std::vector<GroupSetPtr>&      group_sets,
+BlockTreeEvictor::BlockTreeEvictor(BlockTree*                     tree,
                                    ExecuteTransferFn              execute_transfer,
                                    bool                           enable_reverse_eviction,
-                                   BlockTree*                     tree,
                                    const BlockTransferDispatcher* transfer_dispatcher,
                                    BlockTreeTaskPool*             task_pool,
                                    BlockTreeCacheMetricsReporter& metrics_reporter,
@@ -39,10 +31,9 @@ BlockTreeEvictor::BlockTreeEvictor(std::vector<GroupSetPtr>&      group_sets,
                                    CreditsFn                      settle_credits,
                                    SettledFn                      settled,
                                    RemoteWriteFn                  remote_write):
-    group_sets_(group_sets),
+    tree_(tree),
     task_runner_(std::make_unique<EvictionTaskRunner>(std::move(execute_transfer),
-                                                      group_sets,
-                                                      tree,
+                                                      tree->groupSets(),
                                                       transfer_dispatcher,
                                                       task_pool,
                                                       metrics_reporter,
@@ -74,8 +65,8 @@ void BlockTreeEvictor::init(EvictionPolicy device_policy, EvictionPolicy host_po
     // GroupSetFactory has already validated that group_set_id equals the vector
     // position. Own one heap per (group set, tier).
     heaps_.clear();
-    heaps_.resize(group_sets_.size());
-    for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
+    heaps_.resize(tree_->groupSets().size());
+    for (size_t group_set_id = 0; group_set_id < tree_->groupSets().size(); ++group_set_id) {
         auto& tier_heaps  = heaps_[group_set_id];
         tier_heaps.device = std::make_unique<EvictionHeap>(device_policy);
         tier_heaps.host   = std::make_unique<EvictionHeap>(host_policy);
@@ -128,6 +119,13 @@ Tier BlockTreeEvictor::defaultTargetTier(Tier source) {
     }
 }
 
+bool BlockTreeEvictor::isEvictable(const GroupSet& group_set, const TreeNode* node, Tier tier) const {
+    const size_t            group_set_id = group_set.groupSetId();
+    const GroupSetResource& resource     = node->group_set_resources[group_set_id];
+    return group_set.isEvictable(resource, tier)
+           && (group_set.groupType() != CacheGroupType::FULL || tree_->isLeafAtTier(node, group_set_id, tier));
+}
+
 // ---- Candidate eligibility gate (design section 4.3) ----
 void BlockTreeEvictor::refreshCandidate(GroupSet& group_set, TreeNode* node, Tier tier) {
     if (node == nullptr || tier == Tier::NONE) {
@@ -145,7 +143,7 @@ void BlockTreeEvictor::refreshCandidate(GroupSet& group_set, TreeNode* node, Tie
     }
     auto& resource = node->group_set_resources[group_set_id];
 
-    if (resource.transfer_state != GroupSetTransferState::IDLE || !group_set.isEvictable(*node, tier)) {
+    if (resource.transfer_state != GroupSetTransferState::IDLE || !isEvictable(group_set, node, tier)) {
         heap->erase(node);
         return;
     }
@@ -153,10 +151,10 @@ void BlockTreeEvictor::refreshCandidate(GroupSet& group_set, TreeNode* node, Tie
 }
 
 void BlockTreeEvictor::refreshCandidate(TreeNode* node, size_t group_set_id) {
-    if (node == nullptr || group_set_id >= group_sets_.size() || group_set_id >= node->group_set_resources.size()) {
+    if (node == nullptr || group_set_id >= tree_->groupSets().size() || group_set_id >= node->group_set_resources.size()) {
         return;
     }
-    const GroupSetPtr& group_set = group_sets_[group_set_id];
+    const GroupSetPtr& group_set = tree_->groupSets()[group_set_id];
     if (group_set == nullptr) {
         return;
     }
@@ -169,10 +167,10 @@ void BlockTreeEvictor::refreshCandidate(TreeNode* node, size_t group_set_id) {
 }
 
 void BlockTreeEvictor::onTierEntered(TreeNode* node, size_t group_set_id, Tier tier) {
-    if (node == nullptr || group_set_id >= group_sets_.size() || group_set_id >= node->group_set_resources.size()) {
+    if (node == nullptr || group_set_id >= tree_->groupSets().size() || group_set_id >= node->group_set_resources.size()) {
         return;
     }
-    const GroupSetPtr& group_set = group_sets_[group_set_id];
+    const GroupSetPtr& group_set = tree_->groupSets()[group_set_id];
     GroupSetResource&  resource  = node->group_set_resources[group_set_id];
     if (group_set == nullptr || group_set->getTopTier(resource) != tier) {
         return;
@@ -188,46 +186,31 @@ void BlockTreeEvictor::onInsertCommitted(const BlockTreeInsertResult& result) {
     // node topology. Existing fills precede the newly created suffix in tree
     // traversal order, so admit them first and preserve that ordering in the
     // eviction policy clocks.
-    for (const auto& adopted : result.adopted_resources) {
-        if (adopted.node == nullptr || adopted.group_set_id >= group_sets_.size()
-            || adopted.group_set_id >= adopted.node->group_set_resources.size()) {
-            continue;
-        }
-        const size_t group_set_id = adopted.group_set_id;
-        GroupSetPtr& group_set    = group_sets_[group_set_id];
-        if (group_set == nullptr) {
-            continue;
-        }
-        GroupSetResource& resource                 = adopted.node->group_set_resources[group_set_id];
-        resource.candidate_meta.last_access_seq    = ++access_seq_;
-        resource.candidate_meta.admission_seq      = ++admission_seq_;
-        resource.candidate_meta.hit_count          = 0;
-        resource.candidate_meta.tier_enter_time_us = currentTimeUs();
-        refreshCandidate(*group_set, adopted.node, group_set->getTopTier(resource));
+    for (const auto& adopted : result.adopted_nodes) {
+        for (size_t group_set_id : adopted.second) {
+            const GroupSetPtr& group_set = tree_->groupSets()[group_set_id];
+            GroupSetResource& resource                 = adopted.first->group_set_resources[group_set_id];
+            resource.candidate_meta.last_access_seq    = ++access_seq_;
+            resource.candidate_meta.admission_seq      = ++admission_seq_;
+            resource.candidate_meta.hit_count          = 0;
+            resource.candidate_meta.tier_enter_time_us = currentTimeUs();
+            refreshCandidate(*group_set, adopted.first, group_set->getTopTier(resource));
 
-        // A group-set fill can make its direct FULL parent cease to be a leaf
-        // at this tier. For other group types the refresh remains idempotent.
-        TreeNode* parent = adopted.node->parent;
-        if (parent != nullptr && parent->parent != nullptr && group_set_id < parent->group_set_resources.size()) {
-            refreshCandidate(*group_set, parent, group_set->getTopTier(parent->group_set_resources[group_set_id]));
+            TreeNode* parent = adopted.first->parent;
+            if (parent->parent != nullptr) {
+                refreshCandidate(*group_set, parent, group_set->getTopTier(parent->group_set_resources[group_set_id]));
+            }
         }
     }
 
     // Every newly inserted node is offered to every group set. FULL's topology
     // predicate filters interior nodes; SWA/LINEAR admit every ready node.
-    for (const auto& inserted : result.inserted_nodes) {
-        TreeNode* node = inserted.node;
-        if (node == nullptr) {
-            continue;
-        }
+    for (TreeNode* node : result.inserted_nodes) {
         const uint64_t access             = ++access_seq_;
         const uint64_t admit              = ++admission_seq_;
         const int64_t  tier_enter_time_us = currentTimeUs();
-        for (auto& group_set : group_sets_) {
+        for (auto& group_set : tree_->groupSets()) {
             const size_t group_set_id = group_set->groupSetId();
-            if (group_set_id >= node->group_set_resources.size()) {
-                continue;
-            }
             GroupSetResource& resource                 = node->group_set_resources[group_set_id];
             resource.candidate_meta.last_access_seq    = access;
             resource.candidate_meta.admission_seq      = admit;
@@ -241,15 +224,11 @@ void BlockTreeEvictor::onInsertCommitted(const BlockTreeInsertResult& result) {
     // attached below an existing FULL leaf, its direct parent is not in that
     // list and must be refreshed once. Higher ancestors keep the same direct
     // children, and root never participates in eviction.
-    TreeNode* existing_parent = result.inserted_nodes.empty() || result.inserted_nodes.front().node == nullptr ?
-                                    nullptr :
-                                    result.inserted_nodes.front().node->parent;
+    TreeNode* existing_parent =
+        result.inserted_nodes.empty() ? nullptr : result.inserted_nodes.front()->parent;
     if (existing_parent != nullptr && existing_parent->parent != nullptr) {
-        for (auto& group_set : group_sets_) {
+        for (auto& group_set : tree_->groupSets()) {
             const size_t group_set_id = group_set->groupSetId();
-            if (group_set_id >= existing_parent->group_set_resources.size()) {
-                continue;
-            }
             refreshCandidate(
                 *group_set, existing_parent, group_set->getTopTier(existing_parent->group_set_resources[group_set_id]));
         }
@@ -262,7 +241,7 @@ void BlockTreeEvictor::onMatched(const std::vector<TreeNode*>& path) {
         if (node == nullptr) {
             continue;
         }
-        for (auto& group_set : group_sets_) {
+        for (auto& group_set : tree_->groupSets()) {
             const size_t group_set_id = group_set->groupSetId();
             if (group_set_id >= node->group_set_resources.size()) {
                 continue;
@@ -286,10 +265,10 @@ void BlockTreeEvictor::onMatched(const std::vector<TreeNode*>& path) {
 
 void BlockTreeEvictor::refreshCandidatesAfterRelease(const MultiNodeResource& set) {
     const size_t group_set_id = set.group_set_id;
-    if (group_set_id >= group_sets_.size()) {
+    if (group_set_id >= tree_->groupSets().size()) {
         return;
     }
-    auto& group_set = group_sets_[group_set_id];
+    auto& group_set = tree_->groupSets()[group_set_id];
     for (TreeNode* node : set.tree_nodes) {
         if (node == nullptr || group_set_id >= node->group_set_resources.size()) {
             continue;
@@ -298,13 +277,13 @@ void BlockTreeEvictor::refreshCandidatesAfterRelease(const MultiNodeResource& se
     }
 }
 
-void BlockTreeEvictor::refreshAllCandidates(const BlockTree& tree) {
-    for (const auto& node_ptr : tree.nodes()) {
+void BlockTreeEvictor::refreshAllCandidates() {
+    for (const auto& node_ptr : tree_->nodes()) {
         TreeNode* node = node_ptr.get();
         if (node == nullptr) {
             continue;
         }
-        for (auto& group_set : group_sets_) {
+        for (auto& group_set : tree_->groupSets()) {
             const size_t group_set_id = group_set->groupSetId();
             if (group_set_id >= node->group_set_resources.size()) {
                 continue;
@@ -318,7 +297,7 @@ void BlockTreeEvictor::onTopologyChanged(TreeNode* parent) {
     if (parent == nullptr) {
         return;
     }
-    for (auto& group_set : group_sets_) {
+    for (auto& group_set : tree_->groupSets()) {
         const size_t group_set_id = group_set->groupSetId();
         if (group_set_id >= parent->group_set_resources.size()) {
             continue;
@@ -331,7 +310,7 @@ void BlockTreeEvictor::onNodeAboutToRemove(TreeNode* node) {
     if (node == nullptr) {
         return;
     }
-    for (auto& group_set : group_sets_) {
+    for (auto& group_set : tree_->groupSets()) {
         for (auto tier : {Tier::DEVICE, Tier::HOST, Tier::DISK}) {
             if (auto* heap = heapFor(group_set->groupSetId(), tier)) {
                 heap->erase(node);
@@ -389,7 +368,7 @@ std::optional<EvictionMove> BlockTreeEvictor::chooseVictimInGroupSet(GroupSet& g
         }
 
         auto& resource = node->group_set_resources[group_set_id];
-        if (resource.transfer_state != GroupSetTransferState::IDLE || !group_set.isEvictable(*node, tier)) {
+        if (resource.transfer_state != GroupSetTransferState::IDLE || !isEvictable(group_set, node, tier)) {
             continue;  // dropped from heap; will be refreshed on release
         }
 
@@ -398,7 +377,7 @@ std::optional<EvictionMove> BlockTreeEvictor::chooseVictimInGroupSet(GroupSet& g
 }
 
 std::optional<EvictionMove> BlockTreeEvictor::chooseVictim(Tier tier) {
-    for (auto& group_set : group_sets_) {
+    for (auto& group_set : tree_->groupSets()) {
         auto eviction_move = chooseVictimInGroupSet(*group_set, tier);
         if (!eviction_move.has_value()) {
             continue;
@@ -417,10 +396,10 @@ std::optional<EvictionMove> BlockTreeEvictor::chooseVictim(Tier tier) {
 }
 
 std::optional<EvictionMove> BlockTreeEvictor::chooseVictim(size_t group_set_id, Tier tier) {
-    if (group_set_id >= group_sets_.size()) {
+    if (group_set_id >= tree_->groupSets().size()) {
         return std::nullopt;
     }
-    const auto& group_set = group_sets_[group_set_id];
+    const auto& group_set = tree_->groupSets()[group_set_id];
     if (group_set == nullptr || group_set->groupSetId() != group_set_id) {
         return std::nullopt;
     }
@@ -493,7 +472,7 @@ std::optional<BlockTreeEvictor::EvictionPlan> BlockTreeEvictor::buildPlan(Evicti
     return plan;
 }
 
-void BlockTreeEvictor::complete(BlockTree& tree, const EvictionPlan& plan, const CopyResultSet& results) {
+void BlockTreeEvictor::complete(const EvictionPlan& plan, const CopyResultSet& results) {
     if (plan.primary.node == nullptr) {
         return;
     }
@@ -504,9 +483,9 @@ void BlockTreeEvictor::complete(BlockTree& tree, const EvictionPlan& plan, const
     }
 
     auto primary_group_set_id = plan.primary.group_set_id;
-    if (primary_group_set_id < group_sets_.size()
+    if (primary_group_set_id < tree_->groupSets().size()
         && primary_group_set_id < plan.primary.node->group_set_resources.size()) {
-        auto& group_set = group_sets_[primary_group_set_id];
+        auto& group_set = tree_->groupSets()[primary_group_set_id];
         RTP_LLM_LOG_DEBUG("primary group_set[%zu] node_key=%ld source=%s target=%s",
                           plan.primary.group_set_id,
                           plan.primary.node->cache_key,
@@ -525,13 +504,13 @@ void BlockTreeEvictor::complete(BlockTree& tree, const EvictionPlan& plan, const
         }
 
         auto group_set_id = cascade_move.group_set_id;
-        if (group_set_id >= group_sets_.size() || cascade_move.node == nullptr
+        if (group_set_id >= tree_->groupSets().size() || cascade_move.node == nullptr
             || group_set_id >= cascade_move.node->group_set_resources.size()) {
             releaseTargetBlocks(cascade_move);
             continue;
         }
 
-        auto& group_set = group_sets_[group_set_id];
+        auto& group_set = tree_->groupSets()[group_set_id];
         RTP_LLM_LOG_DEBUG("cascade group_set[%zu] node_key=%ld source=%s target=%s",
                           cascade_move.group_set_id,
                           cascade_move.node->cache_key,
@@ -540,13 +519,13 @@ void BlockTreeEvictor::complete(BlockTree& tree, const EvictionPlan& plan, const
         applyMoveCompletion(group_set, cascade_move);
     }
 
-    finalizeEviction(tree, plan.primary.node);
+    finalizeEviction(plan.primary.node);
 }
 
 // Move source blocks out of the resource, install target blocks (if demoting), clear
 // the transfer state, and re-admit the node at its new tier. Source blocks were
 // held only by cache.
-bool BlockTreeEvictor::applyMoveCompletion(GroupSetPtr& group_set, const EvictionMove& move) {
+bool BlockTreeEvictor::applyMoveCompletion(const GroupSetPtr& group_set, const EvictionMove& move) {
     auto& resource = move.node->group_set_resources[move.group_set_id];
     if (resource.transfer_state != GroupSetTransferState::DEMOTING) {
         RTP_LLM_LOG_WARNING("state mismatch, group_set=%zu node_key=%ld", move.group_set_id, move.node->cache_key);
@@ -566,7 +545,7 @@ bool BlockTreeEvictor::applyMoveCompletion(GroupSetPtr& group_set, const Evictio
     // installed while the state is still non-IDLE, then IDLE is published last.
     group_set->unreferenceBlocks(MultiNodeResource{move.group_set_id, move.source_tier, {move.source_blocks}},
                                  BlockRefType::BLOCK_CACHE);
-    group_set->evictFromTier(move.node, resource, move.source_tier);
+    group_set->evictFromTier(resource, move.source_tier);
     resource.transfer_state = GroupSetTransferState::IDLE;
     RTP_LLM_CHECK_WITH_INFO(!resource.hasTier(Tier::DEVICE) || group_set->hasCompleteDeviceValue(resource),
                             "eviction settlement produced invalid steady state: group_set_id=%zu node_key=%ld",
@@ -622,7 +601,7 @@ EvictionMove BlockTreeEvictor::makeMove(TreeNode* node, size_t group_set_id, Tie
     eviction_move.source_tier  = source_tier;
     eviction_move.target_tier  = target_tier;
 
-    if (node == nullptr || group_set_id >= node->group_set_resources.size() || group_set_id >= group_sets_.size()) {
+    if (node == nullptr || group_set_id >= node->group_set_resources.size() || group_set_id >= tree_->groupSets().size()) {
         return eviction_move;
     }
 
@@ -630,7 +609,7 @@ EvictionMove BlockTreeEvictor::makeMove(TreeNode* node, size_t group_set_id, Tie
     // absent values, so the source_blocks.empty() guard still holds.
     eviction_move.source_tier_enter_time_us = node->group_set_resources[group_set_id].candidate_meta.tier_enter_time_us;
     eviction_move.source_blocks =
-        group_sets_[group_set_id]->getBlocks(node->group_set_resources[group_set_id], source_tier);
+        tree_->groupSets()[group_set_id]->getBlocks(node->group_set_resources[group_set_id], source_tier);
     return eviction_move;
 }
 
@@ -647,14 +626,14 @@ bool BlockTreeEvictor::prepareMove(EvictionMove& eviction_move) {
         }
     };
 
-    if (group_set_id >= group_sets_.size() || group_sets_[group_set_id] == nullptr
-        || group_sets_[group_set_id]->groupSetId() != group_set_id
+    if (group_set_id >= tree_->groupSets().size() || tree_->groupSets()[group_set_id] == nullptr
+        || tree_->groupSets()[group_set_id]->groupSetId() != group_set_id
         || group_set_id >= node->group_set_resources.size()) {
         erase_stale_source();
         return false;
     }
 
-    auto& group_set         = *group_sets_[group_set_id];
+    auto& group_set         = *tree_->groupSets()[group_set_id];
     auto& resource          = node->group_set_resources[group_set_id];
     auto  reject_stale_move = [&]() {
         erase_stale_source();
@@ -671,7 +650,7 @@ bool BlockTreeEvictor::prepareMove(EvictionMove& eviction_move) {
         || resource.transfer_state != GroupSetTransferState::IDLE
         || group_set.getTopTier(resource) != eviction_move.source_tier
         || group_set.getBlocks(resource, eviction_move.source_tier) != eviction_move.source_blocks
-        || !group_set.isEvictable(*node, eviction_move.source_tier)) {
+        || !isEvictable(group_set, node, eviction_move.source_tier)) {
         return reject_stale_move();
     }
 
@@ -707,7 +686,7 @@ void BlockTreeEvictor::reserveSource(const EvictionMove& eviction_move) {
 // state and re-evaluate candidacy at the source tier.
 bool BlockTreeEvictor::restoreSource(const EvictionMove& eviction_move) {
     auto group_set_id = eviction_move.group_set_id;
-    if (eviction_move.node == nullptr || group_set_id >= group_sets_.size()
+    if (eviction_move.node == nullptr || group_set_id >= tree_->groupSets().size()
         || group_set_id >= eviction_move.node->group_set_resources.size()) {
         return false;
     }
@@ -719,11 +698,11 @@ bool BlockTreeEvictor::restoreSource(const EvictionMove& eviction_move) {
     }
     resource.transfer_state = GroupSetTransferState::IDLE;
     RTP_LLM_CHECK_WITH_INFO(!resource.hasTier(Tier::DEVICE)
-                                || group_sets_[group_set_id]->hasCompleteDeviceValue(resource),
+                                || tree_->groupSets()[group_set_id]->hasCompleteDeviceValue(resource),
                             "eviction rollback produced invalid steady state: group_set_id=%zu node_key=%ld",
                             eviction_move.group_set_id,
                             eviction_move.node->cache_key);
-    refreshCandidate(*group_sets_[group_set_id], eviction_move.node, eviction_move.source_tier);
+    refreshCandidate(*tree_->groupSets()[group_set_id], eviction_move.node, eviction_move.source_tier);
     return true;
 }
 
@@ -732,35 +711,35 @@ void BlockTreeEvictor::releaseTargetBlocks(const EvictionMove& eviction_move) {
         return;
     }
     auto group_set_id = eviction_move.group_set_id;
-    if (group_set_id >= group_sets_.size()) {
+    if (group_set_id >= tree_->groupSets().size()) {
         return;
     }
-    auto& group_set = group_sets_[group_set_id];
+    auto& group_set = tree_->groupSets()[group_set_id];
     for (auto block : eviction_move.target_blocks) {
         group_set->releaseSingleBlock(eviction_move.target_tier, block, BlockRefType::EVICTION);
     }
 }
 
-void BlockTreeEvictor::finalizeEviction(BlockTree& tree, TreeNode* node) {
-    if (shouldDeleteNode(tree, node)) {
+void BlockTreeEvictor::finalizeEviction(TreeNode* node) {
+    if (shouldDeleteNode(node)) {
         RTP_LLM_LOG_DEBUG("deleting empty node key=%ld", node->cache_key);
         TreeNode* parent = node->parent;
         onNodeAboutToRemove(node);  // drop from all heaps before the pointer dies
-        tree.removeNode(node);
-        TreeNode* surviving_ancestor = tree.removeEmptyAncestors(parent, reusableGroupSetIds());
-        if (surviving_ancestor != nullptr && surviving_ancestor != tree.root()) {
+        tree_->removeNode(node);
+        TreeNode* surviving_ancestor = tree_->removeEmptyAncestors(parent, reusableGroupSetIds());
+        if (surviving_ancestor != nullptr && surviving_ancestor != tree_->root()) {
             onTopologyChanged(surviving_ancestor);
         }
-    } else if (node->parent && node->parent != tree.root()) {
+    } else if (node->parent && node->parent != tree_->root()) {
         onTopologyChanged(node->parent);
     }
 }
 
-bool BlockTreeEvictor::shouldDeleteNode(const BlockTree& tree, const TreeNode* node) const {
-    if (node == nullptr || node == tree.root() || !node->children.empty()) {
+bool BlockTreeEvictor::shouldDeleteNode(const TreeNode* node) const {
+    if (node == nullptr || node == tree_->root() || !node->children.empty()) {
         return false;
     }
-    for (const auto& group_set : group_sets_) {
+    for (const auto& group_set : tree_->groupSets()) {
         const size_t group_set_id = group_set->groupSetId();
         if (group_set_id >= node->group_set_resources.size()
             || !node->group_set_resources[group_set_id].is_removable()) {
@@ -772,7 +751,7 @@ bool BlockTreeEvictor::shouldDeleteNode(const BlockTree& tree, const TreeNode* n
 
 std::vector<size_t> BlockTreeEvictor::reusableGroupSetIds() const {
     std::vector<size_t> ids;
-    for (const auto& group_set : group_sets_) {
+    for (const auto& group_set : tree_->groupSets()) {
         ids.push_back(group_set->groupSetId());
     }
     return ids;
@@ -785,7 +764,7 @@ std::vector<size_t> BlockTreeEvictor::selectCascadeGroupSets(const TreeNode* nod
     std::vector<size_t> result;
 
     const GroupSetPtr* source_group_set = nullptr;
-    for (const auto& group_set : group_sets_) {
+    for (const auto& group_set : tree_->groupSets()) {
         if (group_set->groupSetId() == source_group_set_id) {
             source_group_set = &group_set;
             break;
@@ -796,8 +775,8 @@ std::vector<size_t> BlockTreeEvictor::selectCascadeGroupSets(const TreeNode* nod
         return result;
     }
 
-    if (enable_reverse_eviction && (*source_group_set)->isLeafAtTier(node, tier)) {
-        for (const auto& group_set : group_sets_) {
+    if (enable_reverse_eviction && tree_->isLeafAtTier(node, source_group_set_id, tier)) {
+        for (const auto& group_set : tree_->groupSets()) {
             if (group_set->groupSetId() != source_group_set_id) {
                 result.push_back(group_set->groupSetId());
             }
@@ -808,7 +787,7 @@ std::vector<size_t> BlockTreeEvictor::selectCascadeGroupSets(const TreeNode* nod
     // Forward cascading is intrinsic to group-set priority: when a high-priority
     // resource is evicted, lower-priority resources on the same node follow.
     CacheGroupType source_type = (*source_group_set)->groupType();
-    for (const auto& group_set : group_sets_) {
+    for (const auto& group_set : tree_->groupSets()) {
         bool below = false;
         switch (source_type) {
             case CacheGroupType::FULL:

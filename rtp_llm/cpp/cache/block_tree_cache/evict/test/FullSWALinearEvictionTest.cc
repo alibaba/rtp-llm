@@ -15,13 +15,12 @@ using block_tree_cache_test::makeBlockTreeCacheForTest;
 class FullSWALinearEvictionTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        std::unique_ptr<BlockTree> tree   = std::make_unique<BlockTree>(3);
         auto                       full   = std::make_shared<FullGroupSet>();
         auto                       swa    = std::make_shared<SWAGroupSet>(128, 64);
         auto                       linear = std::make_shared<LinearGroupSet>();
         std::vector<GroupSetPtr>   groups = {full, swa, linear};
         cache_                            = makeBlockTreeCacheForTest(
-            std::move(tree), std::move(groups), BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+            std::move(groups), BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
     }
 
     void insertPath(const CacheKeysType& keys, BlockIdxType full_b, BlockIdxType swa_b, BlockIdxType lin_b) {
@@ -31,7 +30,7 @@ protected:
             resources[i][1].device_blocks = {static_cast<BlockIdxType>(swa_b + i)};
             resources[i][2].device_blocks = {static_cast<BlockIdxType>(lin_b + i)};
         }
-        cache_->insert(nullptr, keys, resources);
+        cache_->insert(keys, resources);
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -178,19 +177,18 @@ TEST_F(FullSWALinearEvictionTest, ForkBothBranchesEvictable) {
 //   Reclaiming SWA[200] cascades LINEAR[200], deletes [200], then prunes empty [100].
 // ---------------------------------------------------------------------------
 TEST_F(FullSWALinearEvictionTest, SWAReclaimCascadesToLinear) {
-    std::unique_ptr<BlockTree>      tree          = std::make_unique<BlockTree>(2);
     auto                            swa           = std::make_shared<SWAGroupSet>(128, 64);
     auto                            linear        = std::make_shared<LinearGroupSet>();
     std::vector<GroupSetPtr>        groups        = {swa, linear};
     std::unique_ptr<BlockTreeCache> swa_lin_cache = makeBlockTreeCacheForTest(
-        std::move(tree), std::move(groups), BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+        std::move(groups), BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
 
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(2));
     resources[0][0].device_blocks = {20};
     resources[0][1].device_blocks = {30};
     resources[1][0].device_blocks = {21};
     resources[1][1].device_blocks = {31};
-    swa_lin_cache->insert(nullptr, {100, 200}, resources);
+    swa_lin_cache->insert({100, 200}, resources);
 
     EXPECT_EQ(swa_lin_cache->getStats().tree_node_count, 2u);
     EXPECT_EQ(swa_lin_cache->getStats().device_heap_total_size, 4u);

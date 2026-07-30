@@ -33,8 +33,8 @@ public:
     // Invoked with the shared cache mutex held.
     using SettledFn = std::function<void(bool tree_data_mutated, bool check_watermark)>;
 
-    BlockTreeLoader(std::vector<GroupSetPtr>&      group_sets,
-                    BlockTreeEvictor&              evictor,
+    BlockTreeLoader(const std::vector<GroupSetPtr>& group_sets,
+                    BlockTreeEvictor&                   evictor,
                     BlockTransferDispatcher*       transfer_dispatcher,
                     BlockTreeTaskPool*             task_pool,
                     BlockTreeCacheMetricsReporter& metrics_reporter,
@@ -74,7 +74,7 @@ private:
     bool beginLoad(TreeNode* node, size_t group_set_id, Tier source);
     bool finishLoad(TreeNode* node, size_t group_set_id, Tier source, bool copy_ok);
 
-    std::vector<GroupSetPtr>&           group_sets_;
+    const std::vector<GroupSetPtr>&           group_sets_;
     BlockTreeEvictor&                   evictor_;
     BlockTransferDispatcher*            transfer_dispatcher_;
     BlockTreeTaskPool*                  task_pool_;

@@ -61,10 +61,10 @@ bool LoadTaskRunner::prepareTransferItem(Task& task, size_t item_index) {
         RTP_LLM_LOG_WARNING("invalid group set id, group_set=%zu", item.group_set_id);
         return false;
     }
-    if (item.target_device_blocks.size() != group_set->devicePoolCount()) {
+    if (item.target_device_blocks.size() != group_set->devicePools().size()) {
         RTP_LLM_LOG_WARNING("target block count mismatch, group_set=%zu expected=%zu actual=%zu",
                             item.group_set_id,
-                            group_set->devicePoolCount(),
+                            group_set->devicePools().size(),
                             item.target_device_blocks.size());
         return false;
     }

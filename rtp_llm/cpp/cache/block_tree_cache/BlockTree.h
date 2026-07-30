@@ -2,46 +2,30 @@
 
 #include <memory>
 #include <unordered_set>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 
 namespace rtp_llm {
 
-struct BlockTreeFindResult {
-    TreeNode* matched_node{nullptr};
-    size_t    matched_blocks{0};
-    std::vector<TreeNode*> path;
-};
-
-struct BlockTreeInsertedNode {
-    TreeNode* node{nullptr};
-    size_t    input_index{0};
-};
-
-struct BlockTreeAdoptedResource {
-    TreeNode* node{nullptr};
-    size_t    input_index{0};
-    size_t    group_set_id{0};
-};
-
 struct BlockTreeInsertResult {
-    TreeNode*                             leaf{nullptr};
-    std::vector<BlockTreeInsertedNode>    inserted_nodes;
-    std::vector<BlockTreeAdoptedResource> adopted_resources;
-    std::vector<bool>                     inserted_mask;
+    std::vector<TreeNode*> inserted_nodes;
+    std::vector<std::pair<TreeNode*, std::vector<size_t>>> adopted_nodes;
 };
 
 class BlockTree {
 public:
-    explicit BlockTree(size_t group_set_resource_count);
+    explicit BlockTree(std::vector<GroupSetPtr> group_sets);
     ~BlockTree();
 
-    BlockTreeFindResult findNode(const CacheKeysType& cache_keys) const;
+    std::vector<TreeNode*> findNode(const CacheKeysType& cache_keys) const;
 
-    BlockTreeInsertResult insertNode(TreeNode*                                         parent,
-                                     const CacheKeysType&                              cache_keys,
+    bool isLeafAtTier(const TreeNode* node, size_t group_set_id, Tier tier) const;
+
+    BlockTreeInsertResult insertNode(const CacheKeysType&                              cache_keys,
                                      const std::vector<std::vector<GroupSetResource>>& resources);
 
     void removeNode(TreeNode* node);
@@ -51,23 +35,20 @@ public:
     TreeNode* root() const {
         return root_.get();
     }
-    size_t groupSetResourceCount() const {
-        return group_set_resource_count_;
+    const std::vector<GroupSetPtr>& groupSets() const {
+        return group_sets_;
     }
-    size_t nodeCount() const {
-        return node_pool_.size();
-    }
-
     const std::vector<std::unique_ptr<TreeNode>>& nodes() const {
         return node_pool_;
     }
 
 private:
     TreeNode* createNode(CacheKeyType key, TreeNode* parent);
+    void      releaseNodeHolds(TreeNode* node);
 
+    std::vector<GroupSetPtr>               group_sets_;
     std::unique_ptr<TreeNode>              root_;
     std::vector<std::unique_ptr<TreeNode>> node_pool_;
-    size_t                                 group_set_resource_count_;
 };
 
 }  // namespace rtp_llm

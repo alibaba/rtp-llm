@@ -57,15 +57,15 @@ BlockIdxType poolMalloc(IBlockPool& pool);
 size_t unreferencedBlocksNum(const IBlockPool& pool);
 size_t treeCachedBlocksNum(const IBlockPool& pool);
 
+void prepareGroupSetsForTest(std::vector<GroupSetPtr>& group_sets);
+
 std::unique_ptr<BlockTreeCache>
-makeBlockTreeCacheForTest(std::unique_ptr<BlockTree>        tree,
-                          std::vector<GroupSetPtr>          group_sets,
+makeBlockTreeCacheForTest(std::vector<GroupSetPtr>          group_sets,
                           BlockTreeCacheConfig              config            = {},
                           std::shared_ptr<StorageBackend>   storage_backend   = nullptr,
                           std::shared_ptr<BroadcastManager> broadcast_manager = nullptr);
 
 bool insertGroupSetResources(BlockTreeCache&                                   cache,
-                             TreeNode*                                         parent,
                              const CacheKeysType&                              cache_keys,
                              const std::vector<std::vector<GroupSetResource>>& resources);
 
