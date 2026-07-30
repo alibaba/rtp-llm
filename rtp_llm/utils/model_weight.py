@@ -1168,6 +1168,7 @@ class W:
     multi_tokens_predict_enorm = "multi_tokens_predict_enorm.weight"
     multi_tokens_predict_hnorm = "multi_tokens_predict_hnorm.weight"
     multi_tokens_predict_eh_proj = "multi_tokens_predict_eh_proj.weight"
+    multi_tokens_predict_eh_proj_s = "multi_tokens_predict_eh_proj.weight_scale"
     multi_tokens_predict_final_ln_gamma = "multi_tokens_predict_final_layernorm.gamma"
     multi_tokens_predict_final_ln_beta = "multi_tokens_predict_final_layernorm.beta"
     multi_tokens_predict_d2t_map = "multi_tokens_predict_d2t_map"
@@ -1494,6 +1495,7 @@ class W:
         multi_tokens_predict_enorm: sp_id,
         multi_tokens_predict_hnorm: sp_id,
         multi_tokens_predict_eh_proj: sp_id,
+        multi_tokens_predict_eh_proj_s: sp_id,
         multi_tokens_predict_final_ln_gamma: sp_id,
         multi_tokens_predict_final_ln_beta: sp_id,
         multi_tokens_predict_d2t_map: sp_id,

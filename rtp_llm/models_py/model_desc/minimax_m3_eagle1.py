@@ -13,6 +13,18 @@ from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 
+_FP8_DTYPES = (torch.float8_e4m3fn, torch.float8_e4m3fnuz)
+
+
+def _gemm_input_width(weight: torch.Tensor) -> int:
+    """K of a loaded 2-D GEMM weight, independent of the loader's layout.
+
+    The BF16 loader stores ``[K, N]`` (``CudaF16Linear`` transposes at init),
+    while the quantized loaders keep the checkpoint's ``[N, K]``.
+    """
+    return int(weight.shape[1] if weight.dtype in _FP8_DTYPES else weight.shape[0])
+
+
 class MiniMaxM3Eagle1DecoderLayer(nn.Module):
     def __init__(
         self,
@@ -98,17 +110,19 @@ class MiniMaxM3Eagle1Model(GptModelBase):
         self.fc = LinearFactory.create_linear_from_weights(
             weights.weights[0],
             W.multi_tokens_predict_eh_proj,
+            W.multi_tokens_predict_eh_proj_s,
             quant_config=model_config.quant_config,
         )
-        fc_weight = weights.weights[0][W.multi_tokens_predict_eh_proj]
-        self.fc_input_width = int(fc_weight.shape[0])
+        self.fc_input_width = _gemm_input_width(
+            weights.weights[0][W.multi_tokens_predict_eh_proj]
+        )
         self.hidden_size = int(model_config.hidden_size)
         if self.fc_input_width != self.hidden_size * 2:
             raise RuntimeError(
                 "MiniMax-M3 EAGLE1 HASS fc input width must be 2x hidden size, "
                 f"got {self.fc_input_width} for hidden size {self.hidden_size}"
             )
-        attn_input_width = int(weights.weights[0][W.attn_qkv_w].shape[0])
+        attn_input_width = _gemm_input_width(weights.weights[0][W.attn_qkv_w])
         if attn_input_width != self.hidden_size:
             raise RuntimeError(
                 "MiniMax-M3 EAGLE1 HASS attention input width must be hidden size, "
