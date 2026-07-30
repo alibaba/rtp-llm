@@ -256,7 +256,7 @@ if [[ "${role}" == "PREFILL" ]] \
         "${python_bin}" -m pip install \
             --no-deps --upgrade \
             --target "${operator_overlay}" \
-            "${operator_bundle}/cuda_linear_attention-0.1.2+rtp.f7495b8.1-cp310-cp310-linux_x86_64.whl" \
+            "${operator_bundle}/cuda_linear_attention-0.1.2+rtp.1854323.1-cp310-cp310-linux_x86_64.whl" \
             "${operator_bundle}/deep_gemm-2.6.1-cp310-cp310-linux_x86_64.whl" \
             "${operator_bundle}/flash_kda-0.0.1-cp310-cp310-linux_x86_64.whl" \
             "${operator_bundle}/flash_linear_attention-0.5.0+rtp.3a9ce1c.2-py3-none-any.whl"

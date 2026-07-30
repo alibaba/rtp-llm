@@ -4,9 +4,11 @@ This directory is the self-contained launcher for the K3 performance-only path:
 
 - TP8 / EP8, batch 1, 65,536 input tokens, one generated token.
 - `KDA -> KDA -> KDA -> MLA`, with three MoE layers.
-- cuLA `f7495b8e4a9886339f6d877efc073f025250c80d` is the default KDA
+- cuLA `18543238473028425b81482e9e569161453bf2d6` is the default KDA
   backend. Its SM100 kernel publishes exact FP32 recurrent-state checkpoints
-  every 4K tokens without splitting the 64K recurrence.
+  every 4K tokens without splitting the 64K recurrence. This revision also
+  supports packed varlen checkpoints and accepts non-contiguous beta logits;
+  the current K3 optimized path uses its fixed-length checkpoint API.
 - FlashKDA `fa7eb894824a` remains selectable for same-branch A/B profiling.
 - cuLA uses FLA `3a9ce1c83a13994d824dbb3421e2989d330bb38b` plus the pinned
   Python 3.10 / Triton 3.6 compatibility patch.
