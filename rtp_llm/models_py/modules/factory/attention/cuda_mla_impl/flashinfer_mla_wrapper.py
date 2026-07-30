@@ -1,4 +1,5 @@
 import os
+from contextlib import nullcontext
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -149,17 +150,34 @@ class MlaFlashInferImplBase(MlaImplBase):
             topk_indices is None
         ), "topk_indices should be None for MlaFlashInferImplBase"
         assert self.rope_impl is not None and self.fmha_params is not None
+
+        def profile(stage: str, shape: tuple[int, ...]):
+            if os.environ.get("KIMI_K3_PERF_MODE", "0").strip() != "1":
+                return nullcontext()
+            shape_text = "x".join(str(dim) for dim in shape)
+            return torch.autograd.profiler.record_function(
+                f"layer.{layer_id}.mla.{stage}[shape={shape_text}]"
+            )
+
         q_pe = q[:, :, self.fmha_impl.qk_nope_head_dim :]
 
         # Apply RoPE to Q and K
-        self.rope_impl.forward(q_pe, k_pe, self.rope_params)
+        with profile("nope_rope_adapter", tuple(q_pe.shape)):
+            self.rope_impl.forward(q_pe, k_pe, self.rope_params)
 
         # Write compressed KV and position-encoded K to cache
-        self.kv_cache_write_op.forward(compressed_kv, k_pe, kv_cache, self.rope_params)
+        with profile(
+            "kv_cache_update_normalized_latent_plus_suffix",
+            tuple(compressed_kv.shape),
+        ):
+            self.kv_cache_write_op.forward(
+                compressed_kv, k_pe, kv_cache, self.rope_params
+            )
 
-        common.apply_write_cache_store(
-            self.write_cache_store_impl, self.attn_inputs, kv_cache
-        )
+        with profile("cache_store_publish_noop_for_standalone_prefill", ()):
+            common.apply_write_cache_store(
+                self.write_cache_store_impl, self.attn_inputs, kv_cache
+            )
 
         # Split query for FMHA
         q_nope, q_pe = torch.split(
@@ -168,7 +186,8 @@ class MlaFlashInferImplBase(MlaImplBase):
             dim=-1,
         )
         assert self.fmha_impl is not None
-        res = self.fmha_impl.forward(q_nope, q_pe, kv_cache, layer_id)
+        with profile("flashinfer_causal_attention_context", tuple(q.shape)):
+            res = self.fmha_impl.forward(q_nope, q_pe, kv_cache, layer_id)
         return res
 
 

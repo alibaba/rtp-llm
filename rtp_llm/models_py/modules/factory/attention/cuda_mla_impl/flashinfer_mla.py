@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Any, Dict, List, Optional
 
 import torch
@@ -162,6 +163,7 @@ def concat_and_cast_mha_k_triton(
 
 class MlaFlashInferPrefillOp(object):
     _triton_compat_warned = False  # Class variable to track warning status
+    _k3_perf_wrapper_cache: dict[tuple[Any, ...], Any] = {}
 
     def __init__(
         self,
@@ -204,27 +206,82 @@ class MlaFlashInferPrefillOp(object):
                 device=torch.device("cuda", torch.cuda.current_device()),
             )
 
-        self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
-            g_workspace_buffer,
-            "NHD",
-            backend="auto",
-            use_cuda_graph=False,
+        self._k3_cache_plan = (
+            os.environ.get("KIMI_K3_PERF_FUSIONS", "0").strip() == "1"
+        )
+        self.prefill_wrapper = (
+            None
+            if self._k3_cache_plan
+            else BatchPrefillWithRaggedKVCacheWrapper(
+                g_workspace_buffer,
+                "NHD",
+                backend="auto",
+                use_cuda_graph=False,
+            )
         )
 
     def plan(self, mla_params: Any):
-        self.prefill_wrapper.plan(
-            mla_params.qo_indptr_d,
-            mla_params.prefill_ragged_kv_len_indptr_d,
-            self.num_heads,
-            self.num_heads,
-            self.qk_rope_head_dim + self.qk_nope_head_dim,
-            self.v_head_dim,
-            sm_scale=(1.0 / (self.qk_rope_head_dim + self.qk_nope_head_dim) ** 0.5)
-            * self.softmax_extra_scale,
-            causal=True,
-            q_data_type=torch.bfloat16,
-            kv_data_type=torch.bfloat16,
-        )
+        if self._k3_cache_plan:
+            qo_host = mla_params.qo_indptr_h
+            kv_host = mla_params.prefill_ragged_kv_len_indptr_h
+            signature = (
+                torch.cuda.current_device(),
+                tuple(int(value) for value in qo_host.tolist()),
+                tuple(int(value) for value in kv_host.tolist()),
+                self.num_heads,
+                self.qk_rope_head_dim + self.qk_nope_head_dim,
+                self.v_head_dim,
+                self.scale,
+                self.softmax_extra_scale,
+            )
+            cached_wrapper = self._k3_perf_wrapper_cache.get(signature)
+            if cached_wrapper is not None:
+                self.prefill_wrapper = cached_wrapper
+                self._k3_perf_plan_signature = signature
+            elif getattr(self, "_k3_perf_plan_signature", None) != signature:
+                if self.prefill_wrapper is None:
+                    self.prefill_wrapper = BatchPrefillWithRaggedKVCacheWrapper(
+                        g_workspace_buffer,
+                        "NHD",
+                        backend="auto",
+                        use_cuda_graph=False,
+                    )
+                self.prefill_wrapper.plan(
+                    mla_params.qo_indptr_d,
+                    mla_params.prefill_ragged_kv_len_indptr_d,
+                    self.num_heads,
+                    self.num_heads,
+                    self.qk_rope_head_dim + self.qk_nope_head_dim,
+                    self.v_head_dim,
+                    sm_scale=(
+                        1.0
+                        / (self.qk_rope_head_dim + self.qk_nope_head_dim) ** 0.5
+                    )
+                    * self.softmax_extra_scale,
+                    causal=True,
+                    q_data_type=torch.bfloat16,
+                    kv_data_type=torch.bfloat16,
+                )
+                self._k3_perf_wrapper_cache[signature] = self.prefill_wrapper
+                self._k3_perf_plan_signature = signature
+        else:
+            assert self.prefill_wrapper is not None
+            self.prefill_wrapper.plan(
+                mla_params.qo_indptr_d,
+                mla_params.prefill_ragged_kv_len_indptr_d,
+                self.num_heads,
+                self.num_heads,
+                self.qk_rope_head_dim + self.qk_nope_head_dim,
+                self.v_head_dim,
+                sm_scale=(
+                    1.0 / (self.qk_rope_head_dim + self.qk_nope_head_dim) ** 0.5
+                )
+                * self.softmax_extra_scale,
+                causal=True,
+                q_data_type=torch.bfloat16,
+                kv_data_type=torch.bfloat16,
+            )
+        assert self.prefill_wrapper is not None
         self.reuse_cache_page_indice = mla_params.reuse_cache_page_indice_d
         self.qo_indptr = mla_params.qo_indptr_d
         self.batch_reuse_info_vec = mla_params.batch_reuse_info_vec_d

@@ -179,7 +179,11 @@ class MlaAttention(nn.Module):
                 dim=-1,
             )
             with self._profile_stage("q_latent_rmsnorm", q):
-                q_c = self.q_a_layernorm(q.contiguous())
+                q_c = self.q_a_layernorm(
+                    q
+                    if getattr(self, "_perf_accepts_strided_latent", False)
+                    else q.contiguous()
+                )
             with self._profile_stage("q_up_projection_local_heads", q_c):
                 q = self.q_b_proj(q_c)
         else:
@@ -201,7 +205,11 @@ class MlaAttention(nn.Module):
         )
 
         with self._profile_stage("kv_latent_rmsnorm", compressed_kv):
-            compressed_kv = self.kv_a_layernorm(compressed_kv.contiguous())
+            compressed_kv = self.kv_a_layernorm(
+                compressed_kv
+                if getattr(self, "_perf_accepts_strided_latent", False)
+                else compressed_kv.contiguous()
+            )
 
         with self._profile_stage("sparse_indexer_or_dense_noop", q_view):
             topk_indices = self._run_sparse_indexer(

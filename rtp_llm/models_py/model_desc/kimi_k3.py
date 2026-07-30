@@ -58,6 +58,7 @@ from rtp_llm.models_py.modules.kimi_k3.reference.kda_reference import (
 from rtp_llm.models_py.triton_kernels.kimi_kda import (
     chunk_kda,
     fused_recurrent_kda,
+    kimi_k3_interleave_tp_hidden,
     kimi_k3_rms_norm_strided,
     kimi_k3_situ,
     kimi_k3_store_linear_cache_state,
@@ -387,8 +388,15 @@ class _KimiK3SplitQKVAProjection(nn.Module):
         super().__init__()
         self.q_a_weight = q_a_weight
         self.kv_a_weight = kv_a_weight
+        self.fused_weight = (
+            torch.cat((q_a_weight, kv_a_weight), dim=-1).contiguous()
+            if _perf_fusions_enabled()
+            else None
+        )
 
     def forward(self, hidden_states: torch.Tensor) -> torch.Tensor:
+        if self.fused_weight is not None:
+            return _linear(hidden_states, self.fused_weight)
         # The original K3 model owns two nn.Linear modules.  Concatenating
         # their weights and issuing one wider GEMM can select a different
         # cuBLAS kernel and changes BF16 results enough to cross a later MoE
@@ -467,6 +475,12 @@ def _row_parallel_linear(
         and x.dtype in (torch.float16, torch.bfloat16)
         and weight.dtype == x.dtype
     ):
+        if _perf_fusions_enabled() and reduce_scatter_tokens:
+            # The optimized SP path keeps the projection and token
+            # ReduceScatter in BF16. This avoids materializing a full-token
+            # FP32 result and the subsequent aten::_to_copy. Accuracy mode
+            # retains the diagnostic FP32 collective boundary below.
+            return reduce_scatter(torch.mm(x, weight), group=Group.TP)
         output = torch.mm(x, weight, out_dtype=torch.float32)
         output = (
             reduce_scatter(output, group=Group.TP)
@@ -2088,6 +2102,7 @@ class KimiK3MLA(MlaAttention):
         self.weights = weights
         self.trace_prefix = f"layer.{layer_idx}.mla" if layer_idx >= 0 else "mla"
         self._perf_profile_prefix = self.trace_prefix if _perf_mode_enabled() else None
+        self._perf_accepts_strided_latent = _perf_fusions_enabled()
         tp_size = int(parallelism_config.get_attn_tp_size())
         total_heads = int(config.attn_config.head_num)
         if total_heads % tp_size:
@@ -4260,6 +4275,12 @@ class KimiK3Model(GptModelBase):
         if self.parallelism_config.get_attn_tp_size() > 1:
             tokens, local_hidden = hidden_states.shape
             hidden_states = all_gather(hidden_states, group=Group.TP)
+            if _perf_fusions_enabled():
+                return kimi_k3_interleave_tp_hidden(
+                    hidden_states,
+                    tokens,
+                    self.parallelism_config.get_attn_tp_size(),
+                )
             hidden_states = (
                 hidden_states.reshape(
                     self.parallelism_config.get_attn_tp_size(),

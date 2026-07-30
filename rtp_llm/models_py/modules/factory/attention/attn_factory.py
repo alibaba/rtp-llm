@@ -1,4 +1,5 @@
 import logging
+import os
 from typing import Callable, Dict, List, Optional, Union
 
 from rtp_llm.model_loader.model_weight_info import ModelWeights
@@ -42,12 +43,28 @@ def get_mla_impl(
 
         cos_sin_cache = weight.get_global_weight(W.rope_cos_sin_cache)
         # TODO: support fast path for cp prefill
-        use_fast_path = (
-            attn_inputs.is_prefill
-            and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
-            and not (
-                parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
+        if (
+            os.environ.get("KIMI_K3_USE_HOST_METADATA", "0") == "1"
+            and attn_inputs.is_prefill
+        ):
+            input_host = getattr(attn_inputs, "input_lengths_host", None)
+            prefix_host = getattr(attn_inputs, "prefix_lengths_host", None)
+            if input_host is None or not input_host.numel():
+                raise RuntimeError(
+                    "K3 host-metadata attention selection requires input lengths"
+                )
+            total_kv_tokens = sum(int(value) for value in input_host.tolist())
+            if prefix_host is not None and prefix_host.numel():
+                total_kv_tokens += sum(int(value) for value in prefix_host.tolist())
+            use_fast_path = total_kv_tokens <= attn_configs.indexer_topk
+        else:
+            use_fast_path = (
+                attn_inputs.is_prefill
+                and attn_inputs.cu_kv_seqlens.max().item()
+                <= attn_configs.indexer_topk
             )
+        use_fast_path = use_fast_path and not (
+            parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
         )
 
         if not use_fast_path and not impl.support_parallelism_config(
