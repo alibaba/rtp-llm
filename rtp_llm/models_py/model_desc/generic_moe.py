@@ -49,7 +49,7 @@ except ImportError:
 
 
 class _FusedSharedExpertSentinel(nn.Module):
-    """Marker for shared expert folded into ``fp8_fp4_mega_moe_fused``."""
+    """Marker for a shared expert folded into a MegaMoE kernel."""
 
     accepts_fp8_input = False
 
@@ -139,27 +139,44 @@ class GenericMoeLayer(nn.Module):
         use_ep_shared_allreduce_at_init = (
             self.add_shared_expert and self.ffn_tp_size > 1 and is_ep_mode
         )
-        self._use_mega_moe_fused_shared = moe_config.moe_strategy == "mega_moe_fused"
+        fused_shared_strategies = ("mega_moe_fused", "mega_moe_fp8_se")
+        self._use_mega_moe_fused_shared = (
+            moe_config.moe_strategy in fused_shared_strategies
+        )
         if self._use_mega_moe_fused_shared:
             if not self.add_shared_expert:
-                raise ValueError("moe_strategy=mega_moe_fused requires shared experts")
+                raise ValueError(
+                    f"moe_strategy={moe_config.moe_strategy} requires shared experts"
+                )
             if shared_expert_gate_weight is not None:
                 raise ValueError(
-                    "moe_strategy=mega_moe_fused does not support shared_expert_gate"
+                    f"moe_strategy={moe_config.moe_strategy} does not support "
+                    "shared_expert_gate"
                 )
             if use_ep_shared_allreduce_at_init:
                 raise ValueError(
-                    "moe_strategy=mega_moe_fused does not support EP shared-expert "
-                    "all-reduce with ffn_tp_size > 1"
+                    f"moe_strategy={moe_config.moe_strategy} does not support EP "
+                    "shared-expert all-reduce with ffn_tp_size > 1"
                 )
 
-        if moe_config.moe_strategy in ("mega_moe", "mega_moe_fp8", "mega_moe_fused"):
+        if moe_config.moe_strategy in (
+            "mega_moe",
+            "mega_moe_fp8",
+            "mega_moe_fp8_se",
+            "mega_moe_fused",
+        ):
             if moe_config.moe_strategy == "mega_moe_fused":
                 from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_fused_wrapper import (
                     MegaMoeFusedWrapper,
                 )
 
                 wrapper_cls = MegaMoeFusedWrapper
+            elif moe_config.moe_strategy == "mega_moe_fp8_se":
+                from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_fp8_se_wrapper import (
+                    MegaMoeFp8SEWrapper,
+                )
+
+                wrapper_cls = MegaMoeFp8SEWrapper
             elif moe_config.moe_strategy == "mega_moe_fp8":
                 from rtp_llm.models_py.modules.glm5_mega_moe.mega_moe_fp8_wrapper import (
                     MegaMoeFp8Wrapper,

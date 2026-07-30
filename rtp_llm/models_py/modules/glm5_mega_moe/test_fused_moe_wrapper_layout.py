@@ -6,6 +6,7 @@ import torch
 
 from rtp_llm.models_py.modules.glm5_mega_moe import (
     mega_moe,
+    mega_moe_fp8_se_wrapper,
     mega_moe_fp8_wrapper,
     mega_moe_fused_wrapper,
     mega_moe_wrapper,
@@ -146,6 +147,40 @@ class MegaMoeWrapperLayoutTest(unittest.TestCase):
             )
 
         self.assertEqual(_FakeMegaMoE.instance.params["swiglu_limit"], 10.0)
+
+    def test_fp8_se_wrapper_loads_routed_and_shared_fp8_weights(self):
+        config = _config(hidden_size=8, inter=4, swiglu_limit=10.0)
+        up_w = torch.full((2, 4, 8), 3, dtype=torch.float32).to(torch.float8_e4m3fn)
+        gate_w = torch.full((2, 4, 8), 7, dtype=torch.float32).to(torch.float8_e4m3fn)
+        routed_w2 = torch.zeros((2, 8, 4), dtype=torch.float32).to(torch.float8_e4m3fn)
+        shared_w13 = torch.full((8, 8), 5, dtype=torch.float32).to(torch.float8_e4m3fn)
+        shared_w2 = torch.full((8, 4), 11, dtype=torch.float32).to(torch.float8_e4m3fn)
+        weights = {
+            W.moe_w1: torch.cat([up_w, gate_w], dim=1),
+            W.moe_s1: torch.ones((2, 8, 1), dtype=torch.int32),
+            W.moe_w2: routed_w2,
+            W.moe_s2: torch.ones((2, 8, 1), dtype=torch.int32),
+            W.ffn_w13: shared_w13,
+            W.ffn_s13: torch.ones((8, 2), dtype=torch.int32),
+            W.ffn_w2: shared_w2,
+            W.ffn_s2: torch.ones((8, 1), dtype=torch.int32),
+        }
+
+        with patch.object(mega_moe_fp8_se_wrapper, "GLM5MegaMoEFP8SE", _FakeMegaMoE):
+            mega_moe_fp8_se_wrapper.MegaMoeFp8SEWrapper(
+                config, _parallelism(), weights, moe_config=None, layer_idx=0
+            )
+
+        captured_routed = _FakeMegaMoE.instance.fp8_kwargs
+        torch.testing.assert_close(captured_routed["w1_fp8"], gate_w)
+        torch.testing.assert_close(captured_routed["w3_fp8"], up_w)
+        torch.testing.assert_close(captured_routed["w2_fp8"], routed_w2)
+        captured_shared = _FakeMegaMoE.instance.shared_fp8_kwargs
+        torch.testing.assert_close(captured_shared["w1_w"], shared_w13)
+        torch.testing.assert_close(captured_shared["w2_w"], shared_w2)
+        for key in (W.ffn_w13, W.ffn_s13, W.ffn_w2, W.ffn_s2):
+            self.assertNotIn(key, weights)
+        self.assertTrue(_FakeMegaMoE.instance.fused_shared_jit_warmed)
 
     def test_from_params_swiglu_limit_defaults_to_ten(self):
         moe = mega_moe.GLM5MegaMoE.from_params(
