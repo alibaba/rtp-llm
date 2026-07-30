@@ -6,9 +6,9 @@ namespace torch_ext {
 
 // Persistent radix-select TopK for the DeepSeek-V4 sparse-attention indexer.
 //
-// Vendored from vLLM (`csrc/persistent_topk.cuh` + `csrc/topk.cu`,
-// commit ``b55d830``).  Replaces ``torch.topk`` on the indexer decode hot
-// path: at K=512 / T_max=2048 torch.topk burns ~30us; this kernel runs in
+// Adapted from the optimized SGLang radix-select implementation in
+// `sglang_modify`. Replaces `torch.topk` on the indexer decode hot path:
+// at K=512 / T_max=2048 torch.topk burns ~30us; this kernel runs in
 // ~5-10us and writes -1 padding past per-row ``lengths`` directly into
 // the output buffer (fold of the previous fill_/copy_/masked_fill_ chain).
 //

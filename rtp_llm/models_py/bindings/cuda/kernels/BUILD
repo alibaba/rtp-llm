@@ -8,6 +8,15 @@ sm100_cuda_copts = copts() + cuda_default_copts_without_arch() + [
     '--cuda-include-ptx=sm_100a', '--cuda-gpu-arch=sm_100a',
 ]
 
+# SGLang cluster-group TopK requires SM90+, and this host is reported by the
+# CUDA Runtime as SM103. Keep native SM100/SM100a coverage for production and
+# add an exact SM103 cubin instead of compiling unsupported SM80-SM89 variants.
+dsv4_topk_cuda_copts = copts() + cuda_default_copts_without_arch() + [
+    '--cuda-include-ptx=sm_100', '--cuda-gpu-arch=sm_100',
+    '--cuda-include-ptx=sm_100a', '--cuda-gpu-arch=sm_100a',
+    '--cuda-include-ptx=sm_103', '--cuda-gpu-arch=sm_103',
+]
+
 cuda_deps = [
     "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
     ":cuda_utils_common",
@@ -164,13 +173,14 @@ cc_library(
     hdrs = [
         "dsv4_persistent_topk.h",
         "dsv4_persistent_topk.cuh",
+        "dsv4_persistent_topk_compat.cuh",
     ],
     deps = [
         "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
         ":cuda_utils_common",
         "//rtp_llm/cpp/utils:core_utils",
     ] + torch_deps(),
-    copts = cuda_copts(),
+    copts = dsv4_topk_cuda_copts,
     visibility = ["//visibility:public"],
 )
 

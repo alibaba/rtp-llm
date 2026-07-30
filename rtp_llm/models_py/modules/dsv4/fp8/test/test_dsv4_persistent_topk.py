@@ -91,6 +91,37 @@ def _assert_equiv(
     print(f"  [{tag}] N={N} k={k} L_max={int(lengths.max())} OK")
 
 
+def _assert_value_equiv(
+    out: torch.Tensor,
+    logits: torch.Tensor,
+    lengths: torch.Tensor,
+    k: int,
+    *,
+    tag: str,
+):
+    """Check top-k equivalence without requiring identical indices for ties."""
+    N, _ = logits.shape
+    out_h = out.cpu()
+    for r in range(N):
+        L = int(lengths[r].item())
+        keep = min(k, L)
+        valid = out_h[r, :keep].long()
+        pad = out_h[r, keep:]
+
+        assert (pad == -1).all(), f"{tag}: row {r} pad not -1: {pad.tolist()[:8]}..."
+        assert ((valid >= 0) & (valid < L)).all(), f"{tag}: row {r} has an invalid index"
+        assert torch.unique(valid).numel() == keep, f"{tag}: row {r} has duplicate indices"
+
+        actual = logits[r, valid.to(logits.device)].sort().values
+        expected = logits[r, :L].topk(keep, sorted=False).values.sort().values
+        assert torch.equal(actual, expected), (
+            f"{tag}: row {r} top-{keep} value multiset mismatch.\n"
+            f"  actual tail: {actual[-8:].tolist()}\n"
+            f"  expected tail: {expected[-8:].tolist()}"
+        )
+    print(f"  [{tag}] N={N} k={k} L_max={int(lengths.max())} OK")
+
+
 # ---------------------------------------------------------------------------
 # Correctness
 # ---------------------------------------------------------------------------
@@ -116,6 +147,38 @@ def _make(
         lengths = torch.zeros(N, dtype=torch.int32, device="cuda")
     else:
         raise ValueError(lengths_mode)
+    return logits, lengths
+
+
+def _make_single_coarse_bin(
+    N: int, T: int
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Build unique, increasing FP32 values in one FP16 coarse bin.
+
+    Consecutive FP32 bit patterns starting at 1.0 remain strictly ordered.
+    For the lengths below they also share one ``decode_bin`` and one
+    ``convert_to_uint8`` bin, deterministically overflowing the corresponding
+    threshold-candidate buffer.
+    """
+    bits = torch.arange(
+        0x3F800000,
+        0x3F800000 + T,
+        dtype=torch.int32,
+        device="cuda",
+    )
+    logits = bits.view(torch.float32).unsqueeze(0).expand(N, -1).contiguous()
+    lengths = torch.full((N,), T, dtype=torch.int32, device="cuda")
+    return logits, lengths
+
+
+def _make_negative_single_coarse_bin(
+    N: int, T: int
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Build unique, increasing negative FP32 values in one FP16 coarse bin."""
+    offsets = torch.arange(T, dtype=torch.int64, device="cuda")
+    bits = (0xBFD00000 - offsets).to(torch.int32)  # -1.625 toward zero
+    logits = bits.view(torch.float32).unsqueeze(0).expand(N, -1).contiguous()
+    lengths = torch.full((N,), T, dtype=torch.int32, device="cuda")
     return logits, lengths
 
 
@@ -218,6 +281,79 @@ def test_long_seq_radix_path():
     _assert_equiv(out, logits, lengths, k=2048, tag="radix L=64K")
 
 
+def test_histogram_2048_candidate_overflow_exact():
+    """DBUF=3708 overflow must rescan the full row instead of truncating."""
+    N, T = 1, 4095
+    logits, lengths = _make_single_coarse_bin(N, T)
+    for K in (512, 1024, 2048):
+        out = _run(logits, lengths, k=K, max_seq_len=T)
+        _assert_equiv(out, logits, lengths, k=K, tag="histogram_2048 overflow")
+
+
+def test_histogram_256_candidate_overflow_exact():
+    """The medium path starts above 8192, already beyond its 4096 capacity."""
+    N, T = 1, 8193
+    logits, lengths = _make_single_coarse_bin(N, T)
+    for K in (512, 1024, 2048):
+        out = _run(logits, lengths, k=K, max_seq_len=T)
+        _assert_equiv(out, logits, lengths, k=K, tag="histogram_256 overflow")
+
+
+def test_histogram_256_overflow_with_fp32_pivot_ties_exact():
+    """Overflow fallback must select the right value multiset across pivot ties.
+
+    The old implementation refines only the first 4096 collected candidates
+    and therefore misses the globally largest values at the end of this row.
+    """
+    N, T, K = 1, 8193, 512
+    logits, lengths = _make_single_coarse_bin(N, T)
+
+    # Keep 256 values strictly above the pivot and make 512 values equal to
+    # it. Any 256 of the tied indices are valid members of the final top-512.
+    pivot = logits[0, T - K].clone()
+    logits[:, T - 768 : T - 256] = pivot
+
+    out = _run(logits, lengths, k=K, max_seq_len=T)
+    _assert_value_equiv(
+        out,
+        logits,
+        lengths,
+        k=K,
+        tag="histogram_256 overflow with FP32 pivot ties",
+    )
+
+
+def test_histogram_256_negative_candidate_overflow_exact():
+    """Overflow fallback must preserve ordered-FP32 semantics for negatives."""
+    N, T, K = 1, 8193, 512
+    logits, lengths = _make_negative_single_coarse_bin(N, T)
+    out = _run(logits, lengths, k=K, max_seq_len=T)
+    _assert_equiv(
+        out,
+        logits,
+        lengths,
+        k=K,
+        tag="histogram_256 negative overflow",
+    )
+
+
+def test_filtered_topk_candidate_overflow_exact():
+    """B>32 selects FilteredTopK when 128KB shared memory is available."""
+    N, T = 33, 32768
+    logits, lengths = _make_single_coarse_bin(N, T)
+    for K in (512, 1024, 2048):
+        out = _run(logits, lengths, k=K, max_seq_len=T)
+        _assert_equiv(out, logits, lengths, k=K, tag="FilteredTopK overflow")
+
+
+def test_single_coarse_bin_large_radix_exact():
+    """The existing large full-radix path stays exact on adversarial input."""
+    N, T, K = 1, 65536, 512
+    logits, lengths = _make_single_coarse_bin(N, T)
+    out = _run(logits, lengths, k=K, max_seq_len=T)
+    _assert_equiv(out, logits, lengths, k=K, tag="large radix single-bin")
+
+
 def test_zero_length_row():
     """lengths[r] == 0 must yield an all-(-1) row."""
     logits, lengths = _make(2, 1024, seed=8, lengths_mode="full")
@@ -310,6 +446,12 @@ if __name__ == "__main__":
     test_mtp_batched_decode_flattened_bs_rows()
     test_filtered_path_b64()
     test_long_seq_radix_path()
+    test_histogram_2048_candidate_overflow_exact()
+    test_histogram_256_candidate_overflow_exact()
+    test_histogram_256_overflow_with_fp32_pivot_ties_exact()
+    test_histogram_256_negative_candidate_overflow_exact()
+    test_filtered_topk_candidate_overflow_exact()
+    test_single_coarse_bin_large_radix_exact()
     test_zero_length_row()
     test_lengths_2d_accepted()
     print("\n== Benchmark ==")
