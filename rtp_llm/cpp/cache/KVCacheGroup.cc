@@ -197,8 +197,4 @@ bool KVCacheGroup::isReservable() const {
     return policy().reservable;
 }
 
-CacheMemoryPlacement KVCacheGroup::memoryPlacement() const {
-    return policy().memory_placement;
-}
-
 }  // namespace rtp_llm
