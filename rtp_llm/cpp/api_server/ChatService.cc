@@ -18,7 +18,14 @@ std::shared_ptr<GenerateInput> ChatService::fillGenerateInput(int64_t           
     std::shared_ptr<GenerateInput> input = std::make_shared<GenerateInput>();
     input->request_id                    = request_id;
     input->begin_time_us                 = autil::TimeUtility::currentTimeInMicroSeconds();
-    input->generate_config               = openai_endpoint_->extract_generation_config(chat_request);
+    try {
+        input->generate_config = openai_endpoint_->extract_generation_config(chat_request);
+    } catch (const HttpApiServerException&) {
+        throw;  // already typed
+    } catch (const std::exception& e) {
+        throw HttpApiServerException(HttpApiServerException::ERROR_GENERATE_CONFIG_FORMAT,
+                                     std::string("openai endpoint config error: ") + e.what());
+    }
     metric_reporter_->reportFTInputTokenLengthMetric(input->generate_config->select_tokens_id.size());
     metric_reporter_->reportFTNumBeansMetric(input->generate_config->maxNumBeams());
 
@@ -196,7 +203,12 @@ void ChatService::chatCompletions(const std::unique_ptr<http_server::HttpRespons
 
     AccessLogWrapper::logQueryAccess(body, request_id, chat_request.private_request);
 
-    auto       chat_render    = openai_endpoint_->getChatRender();
+    auto chat_render = openai_endpoint_->getChatRender();
+    if (chat_render == nullptr) {
+        throw HttpApiServerException(
+            HttpApiServerException::UNSUPPORTED_OPERATION,
+            "chat_render is null: chat completions endpoint requires a chat template / render config");
+    }
     const auto rendered_input = chat_render->render_chat_request(body);
 
     auto input  = fillGenerateInput(request_id, chat_request, rendered_input);
@@ -231,7 +243,12 @@ void ChatService::chatRender(const std::unique_ptr<http_server::HttpResponseWrit
     ChatCompletionRequest chat_request;
     FromJsonString(chat_request, body);
 
-    auto        chat_render    = openai_endpoint_->getChatRender();
+    auto chat_render = openai_endpoint_->getChatRender();
+    if (chat_render == nullptr) {
+        throw HttpApiServerException(
+            HttpApiServerException::UNSUPPORTED_OPERATION,
+            "chat_render is null: chat completions endpoint requires a chat template / render config");
+    }
     const auto  rendered_input = chat_render->render_chat_request(body);
     std::string debug_info     = openai_endpoint_->getDebugInfo(chat_request, rendered_input);
 
