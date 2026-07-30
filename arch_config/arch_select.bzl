@@ -1,6 +1,5 @@
 # to wrapper target relate with different system config
 load("@pip_gpu_cuda12_9_torch//:requirements.bzl", requirement_gpu_cuda12_9="requirement")
-load("@pip_gpu_cuda12_torch//:requirements.bzl", requirement_gpu_cuda12="requirement")  # TODO(pip_unify): Remove after internal overlay migration
 load("@pip_cuda12_arm_torch//:requirements.bzl", requirement_cuda12_arm="requirement")
 load("@pip_gpu_rocm_torch//:requirements.bzl", requirement_gpu_rocm="requirement")
 load("@rtp_llm//bazel:defs.bzl", "copy_so")
@@ -86,6 +85,9 @@ def whl_deps():
 
 def platform_deps():
     return select({
+        # aarch64: decord has no aarch64 wheel; video decoding (LLaVA-style
+        # multimodal video input) is not supported on arm. Runtime raises a
+        # clear error via the decord import guard in the video path.
         "@rtp_llm//:using_cuda12_arm": [],
         "@rtp_llm//:using_rocm": ["pyyaml==6.0.2","decord==0.6.0"],
         "//conditions:default": ["decord==0.6.0"],

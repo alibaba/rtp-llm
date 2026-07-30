@@ -146,7 +146,7 @@ def parse_lock_versions(path):
     direct_urls = 0
     with open(path, "r", encoding="utf-8") as fh:
         for raw in fh:
-            if "@ https" in raw:
+            if "@ https" in strip_comment(raw):
                 direct_urls += 1
             line = raw.rstrip("\n")
             if not line or line[0] in "# \t-":

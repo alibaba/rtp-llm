@@ -6,6 +6,8 @@ on:
   pull_request:
     paths:
       - "deps/**"
+      - "arch_config/arch_select.bzl"
+      - "rtp_llm/BUILD"
 
 permissions:
   contents: read
