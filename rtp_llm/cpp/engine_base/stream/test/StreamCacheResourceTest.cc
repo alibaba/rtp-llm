@@ -53,7 +53,8 @@ protected:
     void prepareResourceWithInputTokens(const std::vector<int>& input_tokens,
                                         bool                    reuse_cache = false,
                                         RoleType                role_type   = RoleType::PDFUSION) {
-        prepareResourceWithCacheConfig(init_config(), input_tokens, reuse_cache, role_type);
+        prepareResourceWithCacheConfig(
+            init_config(), input_tokens, reuse_cache, role_type, /*expected_initial_free_blocks=*/8);
     }
 
     void prepareHybridResourceWithInputTokens(const std::vector<int>& input_tokens,
@@ -66,16 +67,18 @@ protected:
                                                                             /*group_layer_num=*/2),
                                        input_tokens,
                                        reuse_cache,
-                                       role_type);
+                                       role_type,
+                                       /*expected_initial_free_blocks=*/16);
     }
 
     void prepareResourceWithCacheConfig(const CacheConfig&      cache_config,
                                         const std::vector<int>& input_tokens,
                                         bool                    reuse_cache,
-                                        RoleType                role_type) {
+                                        RoleType                role_type,
+                                        size_t                  expected_initial_free_blocks) {
         cache_manager_ = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/false, /*metrics_reporter=*/nullptr);
         ASSERT_TRUE(cache_manager_->init());
-        ASSERT_EQ(cache_manager_->freeBlocksNum(), 8);
+        ASSERT_EQ(cache_manager_->freeBlocksNum(), expected_initial_free_blocks);
         ResourceContext resource_context;
         resource_context.cache_manager = cache_manager_;
         resource_context.reuse_cache   = reuse_cache;

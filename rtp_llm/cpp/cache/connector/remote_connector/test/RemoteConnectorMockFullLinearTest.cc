@@ -5,7 +5,7 @@
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/test/RemoteConnectorMockTestBase.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
-#include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/config/StaticConfig.h"
@@ -164,7 +164,7 @@ private:
             EXPECT_CALL(*mock_client_factory_, CreateMetaClient(_, _))
                 .WillOnce(Invoke(
                     [&](const std::string&, const kv_cache_manager::InitParams&) { return std::move(meta_client); }));
-            auto allocator = std::make_shared<HybridTypeKVCacheAllocator>(cache_config_);
+            auto allocator = std::make_shared<HybridPoolKVCacheAllocator>(cache_config_);
             ASSERT_TRUE(allocator->init());
             remote_connectors_.push_back(std::make_shared<RemoteConnector>(cache_config_,
                                                                            kv_cache_config_,
@@ -210,20 +210,26 @@ private:
                 makeTestGroupForConfig(cache_config_, linear_spec, std::move(layer_ids), CacheGroupType::LINEAR, tag));
         }
         setTestTopology(cache_config_, std::move(groups));
+        cache_config_.use_independent_block_pools = true;
 
         const size_t full_kv_block_stride_bytes   = full_spec->block_size_bytes();
         const size_t linear_kv_block_stride_bytes = linear_spec->block_size_bytes();
         ASSERT_GE(full_kv_block_stride_bytes, linear_kv_block_stride_bytes);
         cache_config_.kv_block_stride_bytes = full_kv_block_stride_bytes;
-        cache_config_.kv_block_size_bytes =
-            static_cast<size_t>(cache_config_.group_layer_num) * cache_config_.kv_block_stride_bytes;
         cache_config_.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
-        cache_config_.kv_scale_size_bytes =
-            static_cast<size_t>(cache_config_.group_layer_num) * cache_config_.kv_scale_stride_bytes;
-        cache_config_.block_size_bytes      = cache_config_.kv_block_size_bytes + cache_config_.kv_scale_size_bytes;
-        const size_t per_layer_stride_bytes = cache_config_.kv_block_stride_bytes + cache_config_.kv_scale_stride_bytes;
-        cache_config_.layer_to_block_stride_bytes.assign(static_cast<size_t>(cache_config_.layer_all_num),
-                                                         static_cast<int>(per_layer_stride_bytes));
+        cache_config_.kv_block_size_bytes   = 0;
+        cache_config_.kv_scale_size_bytes   = 0;
+        cache_config_.layer_to_block_stride_bytes.assign(static_cast<size_t>(cache_config_.layer_all_num), 0);
+        for (const auto& group : cache_config_.topology().groups()) {
+            cache_config_.kv_block_size_bytes += group.layer_ids.size() * group.kv_block_stride_bytes;
+            cache_config_.kv_scale_size_bytes += group.layer_ids.size() * group.kv_scale_stride_bytes;
+            const auto layer_stride = static_cast<int>(group.kv_block_stride_bytes + group.kv_scale_stride_bytes);
+            for (int layer_id : group.layer_ids) {
+                cache_config_.layer_to_block_stride_bytes[static_cast<size_t>(layer_id)] = layer_stride;
+            }
+        }
+        cache_config_.block_size_bytes = cache_config_.kv_block_size_bytes + cache_config_.kv_scale_size_bytes;
+        cache_config_.group_block_layout_initialized = true;
     }
 };
 

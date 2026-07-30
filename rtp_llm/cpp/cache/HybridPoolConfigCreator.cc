@@ -26,9 +26,47 @@ void validateHybridPoolDescs(const ModelConfig& model_config, uint32_t kernel_to
                             "hybrid-pool desc config requires non-negative gen_num_per_cycle, got %d",
                             gen_num_per_cycle);
 
+    const auto& attention_types = model_config.hybrid_attention_config.hybrid_attention_types;
+    if (!attention_types.empty()) {
+        RTP_LLM_CHECK_WITH_INFO(attention_types.size() == static_cast<size_t>(model_config.num_layers),
+                                "hybrid_attention_types size %zu != num_layers %ld",
+                                attention_types.size(),
+                                model_config.num_layers);
+    }
+
     for (int64_t layer_id = 0; layer_id < model_config.num_layers; ++layer_id) {
         const auto& layer_descs = model_config.kv_cache_spec_descs[static_cast<size_t>(layer_id)];
         RTP_LLM_CHECK_WITH_INFO(!layer_descs.empty(), "hybrid-pool desc config layer %ld has no descs", layer_id);
+        if (!attention_types.empty() && layer_descs.size() == 1) {
+            const auto& desc                    = layer_descs.front();
+            const auto  attention_type          = attention_types[static_cast<size_t>(layer_id)];
+            const bool  is_attention_bound_desc = desc.cache_type == KVCacheSpecType::MultiHeadAttention
+                                                 || desc.cache_type == KVCacheSpecType::MultiHeadLatentAttention
+                                                 || desc.cache_type == KVCacheSpecType::LinearAttention
+                                                 || attention_type == HybridAttentionType::SLIDING_WINDOW;
+            if (is_attention_bound_desc) {
+                CacheGroupType expected_type = CacheGroupType::FULL;
+                switch (attention_type) {
+                    case HybridAttentionType::LINEAR:
+                        expected_type = CacheGroupType::LINEAR;
+                        break;
+                    case HybridAttentionType::SLIDING_WINDOW:
+                        expected_type = CacheGroupType::SWA;
+                        break;
+                    case HybridAttentionType::NONE:
+                        expected_type = CacheGroupType::FULL;
+                        break;
+                }
+                const auto actual_type = SpecBuilder::groupType(desc);
+                RTP_LLM_CHECK_WITH_INFO(
+                    actual_type == expected_type,
+                    "hybrid attention layer %ld desc tag=%s cache group type %d does not match attention type %d",
+                    layer_id,
+                    desc.tag.c_str(),
+                    static_cast<int>(actual_type),
+                    static_cast<int>(expected_type));
+            }
+        }
         for (const auto& desc : layer_descs) {
             if (desc.entry_count_mode == OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED) {
                 RTP_LLM_CHECK_WITH_INFO(
@@ -199,6 +237,31 @@ buildGroupsFromLayerSpecs(const LayerKVCacheSpecDescs& layer_descs,
     return {std::move(groups), std::move(layers)};
 }
 
+size_t physicalRegionCopies(const GroupBase& group) {
+    RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "cache spec tag=%s is null", group.tag.c_str());
+    RTP_LLM_CHECK_WITH_INFO(group.kernel_seq_size_per_block > 0
+                                && group.seq_size_per_block % group.kernel_seq_size_per_block == 0,
+                            "hybrid-pool tag=%s has invalid physical/kernel shape %zu/%zu",
+                            group.tag.c_str(),
+                            group.seq_size_per_block,
+                            group.kernel_seq_size_per_block);
+    switch (group.spec->type) {
+        case KVCacheSpecType::MultiHeadAttention:
+        case KVCacheSpecType::MultiHeadLatentAttention:
+        case KVCacheSpecType::LinearAttention:
+            // Attention specs already describe one complete physical KV block.
+            return 1;
+        case KVCacheSpecType::OpaqueKV:
+        case KVCacheSpecType::OpaqueState:
+            // Opaque regions describe one kernel block and are packed into the
+            // owning physical block.
+            return group.seq_size_per_block / group.kernel_seq_size_per_block;
+        default:
+            RTP_LLM_FAIL("unknown KVCacheSpecType=%d", static_cast<int>(group.spec->type));
+    }
+    return 1;
+}
+
 void setupIndependentPoolSizes(CacheConfig&           config,
                                std::vector<GroupBase> groups,
                                std::vector<LayerBase> layers,
@@ -218,20 +281,14 @@ void setupIndependentPoolSizes(CacheConfig&           config,
         const auto   layer_count      = static_cast<uint32_t>(group.layer_ids.size());
         const size_t kernel_kv_stride = spec->block_size_bytes();
         const auto   kernel_scale     = spec->scale_block_size_bytes();
-        RTP_LLM_CHECK_WITH_INFO(group.kernel_seq_size_per_block > 0
-                                    && group.seq_size_per_block % group.kernel_seq_size_per_block == 0,
-                                "hybrid-pool tag=%s has invalid physical/kernel shape %zu/%zu",
-                                group.tag.c_str(),
-                                group.seq_size_per_block,
-                                group.kernel_seq_size_per_block);
-        const size_t group_bpk      = group.seq_size_per_block / group.kernel_seq_size_per_block;
-        const size_t kv_stride      = kernel_kv_stride * group_bpk;
-        const size_t scale_stride   = kernel_scale * group_bpk;
-        group.block_num             = 0;
-        group.kv_block_stride_bytes = kv_stride;
-        group.kv_scale_stride_bytes = scale_stride;
-        const auto type             = group.policy.group_type;
-        const bool is_paged_group   = type == CacheGroupType::FULL || type == CacheGroupType::LINEAR;
+        const size_t group_bpk        = physicalRegionCopies(group);
+        const size_t kv_stride        = kernel_kv_stride * group_bpk;
+        const size_t scale_stride     = kernel_scale * group_bpk;
+        group.block_num               = 0;
+        group.kv_block_stride_bytes   = kv_stride;
+        group.kv_scale_stride_bytes   = scale_stride;
+        const auto type               = group.policy.group_type;
+        const bool is_paged_group     = type == CacheGroupType::FULL || type == CacheGroupType::LINEAR;
         if (is_paged_group && group.policy.explicit_block_num == 0) {
             total_kv_block_bytes += static_cast<size_t>(layer_count) * kv_stride;
             total_scale_block_bytes += static_cast<size_t>(layer_count) * scale_stride;

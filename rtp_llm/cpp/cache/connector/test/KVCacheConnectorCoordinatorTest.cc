@@ -220,6 +220,21 @@ TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnFalse_WhenMemoryConfigInvalid
     EXPECT_EQ(coordinator->update_thread_, nullptr);  // should not start update thread if memory init failed
 }
 
+#ifdef USE_REMOTE_KV_CACHE
+TEST_F(KVCacheConnectorCoordinatorTest, InitFailsFastForIndependentBlockPoolsWithRemoteCache) {
+    auto cache_config                        = cache_config_;
+    cache_config.use_independent_block_pools = true;
+    auto kv_cache_config                     = kv_cache_config_;
+    kv_cache_config.reuse_cache              = true;
+    kv_cache_config.enable_remote_cache      = true;
+
+    auto coordinator = std::make_shared<KVCacheConnectorCoordinator>(
+        cache_config, kv_cache_config, runtime_config_, ParallelismConfig{}, SpeculativeExecutionConfig{}, allocator_);
+    EXPECT_THROW(coordinator->init(), std::runtime_error);
+    EXPECT_EQ(coordinator->update_thread_, nullptr);
+}
+#endif
+
 TEST_F(KVCacheConnectorCoordinatorTest, Init_ReturnTrue_WhenMemorySkipped_AndStopsUpdateThread) {
     CacheConfig   cache_config = makeSimpleMhaCacheConfig(/*layer_num=*/1,
                                                         /*block_num=*/1,

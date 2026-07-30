@@ -15,7 +15,7 @@
 #include "rtp_llm/cpp/cache/connector/memory/MemoryAsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/memory/MemoryBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/memory/test/mock/TestRpcService.h"
-#include "rtp_llm/cpp/cache/HybridTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
@@ -164,7 +164,7 @@ private:
                                                        /*group_layer_num=*/2,
                                                        /*local_head_num_kv=*/8,
                                                        /*size_per_head=*/128);
-        allocator_    = std::make_shared<HybridTypeKVCacheAllocator>(cache_config_, AllocationType::DEVICE);
+        allocator_    = std::make_shared<HybridPoolKVCacheAllocator>(cache_config_, AllocationType::DEVICE);
         ASSERT_TRUE(allocator_->init());
         connector_ =
             std::make_shared<KVCacheMemoryConnector>(cache_config_, kv_cache_config_, allocator_, server_addrs_);
@@ -1904,6 +1904,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_D2H_SingleLayer) {
 
     // 给gpu_buf填充数据
     setBlockInfosContent(gpu_bufs, 'a');
+    check_cuda_value(cudaDeviceSynchronize());
 
     // 为确保索引有效，仍然预先创建并分配一个块
     auto pool = ensureBlockPool(total);
@@ -1985,6 +1986,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_D2H_MultiLayer_ValidatesByteOffsets
         ASSERT_GT(sumBlockInfosBytes(gpu_bufs), 0u);
         setBlockInfosContent(gpu_bufs, static_cast<char>('k' + lb.layer_id));
     }
+    check_cuda_value(cudaDeviceSynchronize());
 
     // Allocate one memory block for the merged layout (one cache-key across all layers).
     size_t total_bytes = 0;

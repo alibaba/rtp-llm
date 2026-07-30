@@ -609,15 +609,25 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
     }
     setTestTopology(config, std::move(groups));
 
-    config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
-    config.kv_block_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = full_spec->scale_block_size_bytes();
-    config.kv_scale_size_bytes   = static_cast<size_t>(config.group_layer_num) * config.kv_scale_stride_bytes;
-    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+    config.use_independent_block_pools = true;
+    config.kv_block_stride_bytes       = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
+    config.kv_scale_stride_bytes = std::max(full_spec->scale_block_size_bytes(), linear_spec->scale_block_size_bytes());
+    config.kv_block_size_bytes   = 0;
+    config.kv_scale_size_bytes   = 0;
+    for (const auto& group : config.topology().groups()) {
+        config.kv_block_size_bytes += group.layer_ids.size() * group.kv_block_stride_bytes;
+        config.kv_scale_size_bytes += group.layer_ids.size() * group.kv_scale_stride_bytes;
+    }
+    config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
 
-    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
-                                              static_cast<int>(per_layer_stride_bytes));
+    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num), 0);
+    for (const auto& group : config.topology().groups()) {
+        const auto stride = static_cast<int>(group.kv_block_stride_bytes + group.kv_scale_stride_bytes);
+        for (int layer_id : group.layer_ids) {
+            config.layer_to_block_stride_bytes[static_cast<size_t>(layer_id)] = stride;
+        }
+    }
+    config.group_block_layout_initialized = true;
     return config;
 }
 
