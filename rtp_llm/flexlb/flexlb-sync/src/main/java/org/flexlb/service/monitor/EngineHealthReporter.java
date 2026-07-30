@@ -10,6 +10,7 @@ import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
+import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
@@ -258,6 +259,8 @@ public class EngineHealthReporter {
         int localTaskMapSize = workerStatus.getLocalTaskMap() != null ? workerStatus.getLocalTaskMap().size() : 0;
         monitor.report(ENGINE_LOCAL_TASK_MAP_SIZE, metricTags, localTaskMapSize);
 
+        reportCacheCapacityMetrics(modelName, workerStatus);
+
         metricTags = FlexMetricTags.of(
                 "engineIp", workerStatus.getIp(),
                 "role", workerStatus.getRole());
@@ -276,32 +279,43 @@ public class EngineHealthReporter {
                     "role", workerStatus.getRole());
             monitor.report(CACHE_STATUS_CHECK_SUCCESS_PERIOD, metricTags, (double) System.nanoTime() / 1000 - cacheLastUpdateTime);
         }
-        if (workerStatus.getCacheStatus() != null) {
-            long blockSize = workerStatus.getCacheStatus().getBlockSize();
-            long cacheKeySize = workerStatus.getCacheStatus().getCacheKeySize();
+        CacheStatus cacheStatus = workerStatus.getCacheStatus();
+        if (cacheStatus != null) {
+            // Cache key details are available only from the legacy GetCacheStatus response.
             FlexMetricTags metricTags = FlexMetricTags.of(
                     "model", modelName,
                     "engineIp", workerStatus.getIp(),
                     "role", workerStatus.getRole());
-            monitor.report(CACHE_BLOCK_SIZE, metricTags, blockSize);
-            monitor.report(CACHE_KEY_SIZE, metricTags, cacheKeySize);
+            monitor.report(CACHE_KEY_SIZE, metricTags, cacheStatus.getCacheKeySize());
+        }
+    }
+
+    /**
+     * Reports the shared capacity snapshot populated by either GetWorkerStatus or GetCacheStatus.
+     */
+    private void reportCacheCapacityMetrics(String modelName, WorkerStatus workerStatus) {
+        CacheStatus cacheStatus = workerStatus.getCacheStatus();
+        if (cacheStatus == null) {
+            return;
         }
 
+        FlexMetricTags metricTags = FlexMetricTags.of(
+                "model", modelName,
+                "engineIp", workerStatus.getIp(),
+                "role", workerStatus.getRole());
+        if (cacheStatus.getBlockSize() > 0) {
+            monitor.report(CACHE_BLOCK_SIZE, metricTags, cacheStatus.getBlockSize());
+        }
         long usedKvCacheTokens = workerStatus.getUsedKvCacheTokens().get();
         long availableKvCacheTokens = workerStatus.getAvailableKvCacheTokens().get();
         long totalKvCacheTokens = usedKvCacheTokens + availableKvCacheTokens;
 
-        FlexMetricTags kvCacheMetricTags = FlexMetricTags.of(
-                "model", modelName,
-                "engineIp", workerStatus.getIp(),
-                "role", workerStatus.getRole());
-
-        monitor.report(CACHE_USED_KV_CACHE_TOKENS, kvCacheMetricTags, usedKvCacheTokens);
-        monitor.report(CACHE_AVAILABLE_KV_CACHE_TOKENS, kvCacheMetricTags, availableKvCacheTokens);
-        monitor.report(CACHE_TOTAL_KV_CACHE_TOKENS, kvCacheMetricTags, totalKvCacheTokens);
+        monitor.report(CACHE_USED_KV_CACHE_TOKENS, metricTags, usedKvCacheTokens);
+        monitor.report(CACHE_AVAILABLE_KV_CACHE_TOKENS, metricTags, availableKvCacheTokens);
+        monitor.report(CACHE_TOTAL_KV_CACHE_TOKENS, metricTags, totalKvCacheTokens);
         if (totalKvCacheTokens > 0) {
             double usedRatio = (usedKvCacheTokens * 1.0 / totalKvCacheTokens) * 100;
-            monitor.report(CACHE_USED_KV_CACHE_RATIO, kvCacheMetricTags, usedRatio);
+            monitor.report(CACHE_USED_KV_CACHE_RATIO, metricTags, usedRatio);
         }
     }
 

@@ -4,6 +4,8 @@ import io.netty.channel.EventLoopGroup;
 import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.constant.ZkMasterEvent;
+import org.flexlb.dao.master.CacheStatus;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
@@ -16,6 +18,8 @@ import reactor.netty.resources.LoopResources;
 import java.util.Map;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.mockito.ArgumentMatchers.any;
+import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
@@ -70,6 +74,54 @@ class EngineHealthReporterTest {
                 eq("app.engine.zk.master.event"),
                 eq(FlexMetricTags.of("event", ZkMasterEvent.MASTER_TAKE_LEADERSHIP.name())),
                 doubleThat(value -> value >= beforeReport && value <= afterReport));
+    }
+
+    @Test
+    void shouldReportCacheCapacityMetricsFromSharedWorkerStatus() {
+        WorkerStatus workerStatus = workerStatusWithCacheStatus();
+        workerStatus.updateKvCacheTokens(200, 800);
+
+        reporter.reportStatusCheckerSuccess("test-model", workerStatus, 0, 0);
+
+        FlexMetricTags expectedTags = FlexMetricTags.of(
+                "model", "test-model",
+                "engineIp", "10.0.0.1",
+                "role", "PREFILL");
+        verify(monitor).report("app.cache.block.size", expectedTags, 64.0);
+        verify(monitor).report("app.cache.used.kv.cache.tokens", expectedTags, 200.0);
+        verify(monitor).report("app.cache.available.kv.cache.tokens", expectedTags, 800.0);
+        verify(monitor).report("app.cache.total.kv.cache.tokens", expectedTags, 1000.0);
+        verify(monitor).report("app.cache.used.kv.cache.ratio", expectedTags, 20.0);
+        verify(monitor, never()).report(eq("app.cache.key.size"), any(FlexMetricTags.class), anyDouble());
+    }
+
+    @Test
+    void shouldNotReportCacheCapacityMetricsWithoutCacheStatus() {
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setIp("10.0.0.1");
+        workerStatus.setRole("PREFILL");
+
+        reporter.reportStatusCheckerSuccess("test-model", workerStatus, 0, 0);
+
+        verify(monitor, never()).report(eq("app.cache.block.size"), any(FlexMetricTags.class), anyDouble());
+        verify(monitor, never()).report(eq("app.cache.used.kv.cache.tokens"), any(FlexMetricTags.class), anyDouble());
+        verify(monitor, never()).report(eq("app.cache.available.kv.cache.tokens"), any(FlexMetricTags.class), anyDouble());
+        verify(monitor, never()).report(eq("app.cache.total.kv.cache.tokens"), any(FlexMetricTags.class), anyDouble());
+        verify(monitor, never()).report(eq("app.cache.used.kv.cache.ratio"), any(FlexMetricTags.class), anyDouble());
+    }
+
+    @Test
+    void shouldKeepCacheKeyMetricOnCacheStatusCheckerPath() {
+        WorkerStatus workerStatus = workerStatusWithCacheStatus();
+
+        reporter.reportCacheStatusCheckerSuccess("test-model", workerStatus);
+
+        FlexMetricTags expectedTags = FlexMetricTags.of(
+                "model", "test-model",
+                "engineIp", "10.0.0.1",
+                "role", "PREFILL");
+        verify(monitor).report("app.cache.key.size", expectedTags, 7.0);
+        verify(monitor, never()).report(eq("app.cache.block.size"), any(FlexMetricTags.class), anyDouble());
     }
 
     @Test
@@ -146,5 +198,16 @@ class EngineHealthReporterTest {
                 org.mockito.ArgumentMatchers.eq("app.cache.hit.comparison.local.standby.predicted.ratio"),
                 org.mockito.ArgumentMatchers.any(FlexMetricTags.class),
                 org.mockito.ArgumentMatchers.anyDouble());
+    }
+
+    private WorkerStatus workerStatusWithCacheStatus() {
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setIp("10.0.0.1");
+        workerStatus.setRole("PREFILL");
+        workerStatus.setCacheStatus(CacheStatus.builder()
+                .blockSize(64)
+                .cacheKeySize(7)
+                .build());
+        return workerStatus;
     }
 }
