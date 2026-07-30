@@ -274,6 +274,7 @@ class IndexerOp(nn.Module):
         block_size: int = 128,
         scale_fmt: str = "ue8m0",
         is_neox_style: bool = True,
+        use_glm5_indexer_topk: bool = False,
     ):
         """
         Initialize IndexerOp.
@@ -298,6 +299,12 @@ class IndexerOp(nn.Module):
         self.block_size = block_size
         self.scale_fmt = scale_fmt
         self.is_neox_style = is_neox_style
+        self.use_glm5_indexer_topk = use_glm5_indexer_topk
+        self._paged_topk_op = (
+            rtp_llm_ops.topk_glm5_indexer
+            if use_glm5_indexer_topk
+            else rtp_llm_ops.dsv4_persistent_topk
+        )
 
     def _head_dim_with_sf(self) -> int:
         return self.index_head_dim + self.index_head_dim // self.block_size * 4
@@ -787,7 +794,7 @@ class IndexerOp(nn.Module):
         topk_result = logits.new_empty(
             (logits.shape[0], self.index_topk), dtype=torch.int32
         )
-        rtp_llm_ops.dsv4_persistent_topk(
+        self._paged_topk_op(
             logits,
             lengths,
             topk_result,

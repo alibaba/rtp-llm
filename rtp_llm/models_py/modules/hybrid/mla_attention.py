@@ -48,6 +48,7 @@ class MlaAttention(nn.Module):
         global_weights: Optional[Dict[str, torch.Tensor]] = None,
         has_indexer: Optional[bool] = None,
         reuse_topk_indices: bool = False,
+        use_glm5_indexer_topk: bool = False,
     ):
         super().__init__()
         self.attn_config = attn_config
@@ -79,6 +80,7 @@ class MlaAttention(nn.Module):
                 quant_config,
                 hw_kernel_config,
                 parallelism_config,
+                use_glm5_indexer_topk=use_glm5_indexer_topk,
             )
         else:
             self.indexer = None

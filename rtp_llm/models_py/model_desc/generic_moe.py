@@ -410,6 +410,7 @@ class GenericMoeDecoderLayer(nn.Module):
                 global_weights=global_weights,
                 has_indexer=dsa_layer_has_indexer(config, layer_idx),
                 reuse_topk_indices=dsa_layer_skips_topk(config, layer_idx),
+                use_glm5_indexer_topk=(config.model_type == "glm_5"),
             )
         else:
             attn_configs = config.getAttentionConfigs(
