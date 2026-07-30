@@ -19,29 +19,20 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 
-namespace rtp_llm::block_tree_cache_test {
-class LoadShutdownTestPeer {
-public:
-    static void setShutdownWaitObserver(LoadTicketRegistry& registry, const std::function<void()>& observer) {
-        std::lock_guard<std::mutex> lock(registry.mutex_);
-        registry.shutdown_wait_observer_for_test_ = observer;
-    }
-
-    static void setShutdownWaitObserver(BlockTreeCache& cache, const std::function<void()>& observer) {
-        setShutdownWaitObserver(*cache.loader_.load_ticket_registry_, observer);
-    }
-
-    static void setPendingTaskWaitObserver(BlockTreeCache& cache, const std::function<void()>& observer) {
-        std::lock_guard<std::mutex> lock(cache.task_pool_->wait_mutex_);
-        cache.task_pool_->pending_task_wait_observer_for_test_ = observer;
-    }
-};
-}  // namespace rtp_llm::block_tree_cache_test
-
 namespace rtp_llm {
 namespace {
 using namespace block_tree_cache_test;
-using PendingLoadItem = LoadTicket::PendingLoadItem;
+using PendingLoadItem = LoadAsyncContext::PendingLoadItem;
+
+std::shared_ptr<LoadAsyncContext> getLoadContext(const BlockTreeMatchResult& result) {
+    return std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
+}
+
+std::shared_ptr<LoadAsyncContext> takeLoadContext(BlockTreeMatchResult& result) {
+    std::shared_ptr<LoadAsyncContext> context = getLoadContext(result);
+    result.async_context.reset();
+    return context;
+}
 
 std::vector<DeviceBlockPoolPtr> makeStructuralDevicePools(size_t count, const std::string& pool_name_prefix) {
     static std::atomic<size_t>      next_pool_id{0};
@@ -214,25 +205,6 @@ private:
     std::condition_variable cv_;
     bool                    entered_{false};
     bool                    finished_{false};
-};
-
-class CountedEvent {
-public:
-    void notify() {
-        std::lock_guard<std::mutex> lock(mutex_);
-        ++count_;
-        cv_.notify_all();
-    }
-
-    void waitUntilCount(size_t expected_count) {
-        std::unique_lock<std::mutex> lock(mutex_);
-        cv_.wait(lock, [this, expected_count] { return count_ >= expected_count; });
-    }
-
-private:
-    std::mutex              mutex_;
-    std::condition_variable cv_;
-    size_t                  count_{0};
 };
 
 class BlockTreeCacheTest: public ::testing::Test {
@@ -552,7 +524,7 @@ TEST_F(BlockTreeCacheTest, EmptyKeysAreNoOps) {
     EXPECT_EQ(result.matched_node, nullptr);
     EXPECT_EQ(result.matched_blocks, 0u);
     EXPECT_TRUE(result.matched_resources.empty());
-    EXPECT_EQ(result.load_ticket, nullptr);
+    EXPECT_EQ(result.async_context, nullptr);
 }
 
 TEST_F(BlockTreeCacheTest, ThreadSafety) {
@@ -1415,17 +1387,18 @@ TEST_F(BlockTreeCacheTest, LoadOnlyReloadsSWAWindow) {
     EXPECT_TRUE(result.matched_resources.empty());
     EXPECT_EQ(result.host_load_blocks, 2u);
     EXPECT_EQ(result.load_blocks, 2u);
-    ASSERT_NE(result.load_ticket, nullptr);
-    EXPECT_EQ(result.load_ticket->logicalMatchedBlocks(), 4u);
-    ASSERT_EQ(result.load_ticket->itemCount(), 6u);
-    const auto count_exact_item =
-        [&ticket =
-             *result.load_ticket](size_t group_set_id, Tier source_tier, size_t path_index, BlockIdxType source_block) {
+    std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
+    ASSERT_NE(load_context, nullptr);
+    EXPECT_EQ(load_context->logicalMatchedBlocks(), 4u);
+    const LoadAsyncContext::PendingLoadItems& items = load_context->items();
+    ASSERT_EQ(items.size(), 6u);
+    const std::function<size_t(size_t, Tier, size_t, BlockIdxType)> count_exact_item =
+        [&items](size_t group_set_id, Tier source_tier, size_t path_index, BlockIdxType source_block) {
             size_t count = 0;
-            for (size_t item_index = 0; item_index < ticket.itemCount(); ++item_index) {
-                count += ticket.groupSetId(item_index) == group_set_id && ticket.sourceTier(item_index) == source_tier
-                         && ticket.pathIndex(item_index) == path_index
-                         && ticket.sourceBlocks(item_index) == std::vector<BlockIdxType>{source_block};
+            for (size_t item_index = 0; item_index < items.size(); ++item_index) {
+                count += items[item_index].group_set_id == group_set_id && items[item_index].source_tier == source_tier
+                         && items[item_index].path_index == path_index
+                         && items[item_index].source_blocks == std::vector<BlockIdxType>{source_block};
             }
             return count;
         };
@@ -1479,22 +1452,24 @@ TEST_F(BlockTreeCacheTest, LoadPlanningIgnoresBusySwaResourceOutsideTrailingWind
         EXPECT_TRUE(result.matched_resources.empty());
         EXPECT_EQ(result.host_load_blocks, 2u);
         EXPECT_EQ(result.load_blocks, 2u);
-        ASSERT_NE(result.load_ticket, nullptr);
-        EXPECT_EQ(result.load_ticket->logicalMatchedBlocks(), 4u);
-        ASSERT_EQ(result.load_ticket->itemCount(), 6u);
+        std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
+        ASSERT_NE(load_context, nullptr);
+        EXPECT_EQ(load_context->logicalMatchedBlocks(), 4u);
+        const LoadAsyncContext::PendingLoadItems& items = load_context->items();
+        ASSERT_EQ(items.size(), 6u);
 
         size_t swa_item_count = 0;
-        for (size_t item_index = 0; item_index < result.load_ticket->itemCount(); ++item_index) {
-            if (result.load_ticket->groupSetId(item_index) != 1) {
+        for (size_t item_index = 0; item_index < items.size(); ++item_index) {
+            if (items[item_index].group_set_id != 1) {
                 continue;
             }
             ++swa_item_count;
-            EXPECT_GE(result.load_ticket->pathIndex(item_index), 2u);
-            EXPECT_EQ(result.load_ticket->sourceTier(item_index), Tier::HOST);
+            EXPECT_GE(items[item_index].path_index, 2u);
+            EXPECT_EQ(items[item_index].source_tier, Tier::HOST);
         }
         EXPECT_EQ(swa_item_count, 2u);
 
-        result.load_ticket.reset();
+        load_context.reset();
     }
 }
 
@@ -1548,7 +1523,7 @@ TEST_F(BlockTreeCacheTest, LoadDetectsHostData) {
 
 static std::unique_ptr<BlockTreeCache> makeHostOnlyLoadCache(std::vector<DeviceBlockPoolPtr> device_pools = {}) {
     if (device_pools.empty()) {
-        device_pools.push_back(makeDevicePool({{1, 0}}, 1, "load_ticket_abort"));
+        device_pools.push_back(makeDevicePool({{1, 0}}, 1, "load_context_abort"));
     }
     for (const DeviceBlockPoolPtr& device_pool : device_pools) {
         RTP_LLM_CHECK(device_pool != nullptr);
@@ -1591,7 +1566,7 @@ static std::unique_ptr<BlockTreeCache> makeHostOnlyLoadCache(std::vector<DeviceB
     return cache;
 }
 
-TEST_F(BlockTreeCacheTest, PendingLoadTicketHardStopsSecondMatchUntilAbort) {
+TEST_F(BlockTreeCacheTest, PendingLoadContextHardStopsSecondMatchUntilAbort) {
     std::unique_ptr<BlockTreeCache> cache = makeHostOnlyLoadCache();
     ASSERT_NE(cache, nullptr);
 
@@ -1603,18 +1578,19 @@ TEST_F(BlockTreeCacheTest, PendingLoadTicketHardStopsSecondMatchUntilAbort) {
     const BlockIdxType source_block = source_node->group_set_resources[0].host_block;
     ASSERT_NE(source_block, NULL_BLOCK_IDX);
 
-    BlockTreeMatchResult first_match = cache->match({200});
-    ASSERT_NE(first_match.load_ticket, nullptr);
+    BlockTreeMatchResult              first_match   = cache->match({200});
+    std::shared_ptr<LoadAsyncContext> first_context = takeLoadContext(first_match);
+    ASSERT_NE(first_context, nullptr);
     EXPECT_EQ(source_node->group_set_resources[0].transfer_state, GroupSetTransferState::LOAD_PENDING);
     EXPECT_EQ(host_pool->refCount(source_block), 2u);
 
     BlockTreeMatchResult second_match = cache->match({200});
     EXPECT_EQ(second_match.matched_node, nullptr);
     EXPECT_EQ(second_match.matched_blocks, 0u);
-    EXPECT_EQ(second_match.load_ticket, nullptr);
+    EXPECT_EQ(second_match.async_context, nullptr);
     EXPECT_EQ(host_pool->refCount(source_block), 2u);
 
-    first_match.load_ticket.reset();
+    first_context.reset();
     EXPECT_EQ(source_node->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
     EXPECT_EQ(host_pool->refCount(source_block), 1u);
 }
@@ -1661,9 +1637,10 @@ TEST_F(BlockTreeCacheTest, LoadPreparedPrefixFailureRollsBackAllSourceAndTargetH
     const BlockTreeInsertResult insert_result = cache->tree()->insertNode({100}, resources);
     ASSERT_EQ(insert_result.inserted_nodes.size(), 1u);
 
-    BlockTreeMatchResult result = cache->match({100});
-    ASSERT_NE(result.load_ticket, nullptr);
-    LoadTicket::PendingLoadItems& items = result.load_ticket->items_;
+    BlockTreeMatchResult              result       = cache->match({100});
+    std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
+    ASSERT_NE(load_context, nullptr);
+    const LoadAsyncContext::PendingLoadItems& items = load_context->items();
     ASSERT_EQ(items.size(), 2u);
     ASSERT_EQ(items[0].group_set_id, 0);
     ASSERT_EQ(items[1].group_set_id, 1);
@@ -1675,9 +1652,14 @@ TEST_F(BlockTreeCacheTest, LoadPreparedPrefixFailureRollsBackAllSourceAndTargetH
     // and takes its target holder; beginLoad for the duplicate observes the
     // same resource already LOADING and fails with one prepared item and one
     // untouched trailing item. Add the matching source planning hold explicitly
-    // so every item in the synthetic ticket owns exactly one source hold.
+    // so every item in the synthetic context owns exactly one source hold.
     PendingLoadItem duplicate_first_item = items.front();
-    items.insert(items.begin() + 1, std::move(duplicate_first_item));
+    LoadAsyncContext::PendingLoadItems::iterator inserted_item =
+        load_context->items_.insert(load_context->items_.begin() + 1, std::move(duplicate_first_item));
+    ASSERT_EQ(inserted_item, load_context->items_.begin() + 1);
+    std::vector<bool>::iterator inserted_joined =
+        load_context->joined_load_.insert(load_context->joined_load_.begin() + 1, false);
+    ASSERT_EQ(inserted_joined, load_context->joined_load_.begin() + 1);
     first_group->referenceBlocks(
         MultiNodeResource{0, Tier::HOST, {{items.front().node, {first_source}}}}, BlockRefType::REQUEST);
     ASSERT_EQ(items.size(), 3u);
@@ -1692,9 +1674,9 @@ TEST_F(BlockTreeCacheTest, LoadPreparedPrefixFailureRollsBackAllSourceAndTargetH
     second_device_pool->incRef(second_request_targets, BlockRefType::REQUEST);
     const BlockIdxType first_target  = first_request_targets.front();
     const BlockIdxType second_target = second_request_targets.front();
-    items[0].target_device_blocks    = {first_target};
-    items[1].target_device_blocks    = {first_target};
-    items[2].target_device_blocks    = {second_target};
+    ASSERT_TRUE(load_context->bindTargetDeviceBlocks(0, {first_target}));
+    ASSERT_TRUE(load_context->bindTargetDeviceBlocks(1, {first_target}));
+    ASSERT_TRUE(load_context->bindTargetDeviceBlocks(2, {second_target}));
 
     const size_t first_refs_before  = first_device_pool->refCount(first_target);
     const size_t second_refs_before = second_device_pool->refCount(second_target);
@@ -1703,7 +1685,7 @@ TEST_F(BlockTreeCacheTest, LoadPreparedPrefixFailureRollsBackAllSourceAndTargetH
     ASSERT_TRUE(first_device_pool->isAllocated(first_target));
     ASSERT_TRUE(second_device_pool->isAllocated(second_target));
 
-    EXPECT_EQ(result.load_ticket->commit(), nullptr);
+    EXPECT_FALSE(load_context->commit());
     EXPECT_EQ(per_rank_transfer_engine->submitCount(), 0u);
 
     // The first item's acquired target holder and both of its source planning
@@ -1726,9 +1708,9 @@ TEST_F(BlockTreeCacheTest, LoadPreparedPrefixFailureRollsBackAllSourceAndTargetH
     EXPECT_EQ(find.back()->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
     EXPECT_EQ(find.back()->group_set_resources[1].transfer_state, GroupSetTransferState::IDLE);
 
-    result.load_ticket.reset();
-    EXPECT_EQ(first_host_pool->refCount(first_source), 1u) << "committed ticket must not release source twice";
-    EXPECT_EQ(second_host_pool->refCount(second_source), 1u) << "committed ticket must not release source twice";
+    load_context.reset();
+    EXPECT_EQ(first_host_pool->refCount(first_source), 1u) << "committed context must not release source twice";
+    EXPECT_EQ(second_host_pool->refCount(second_source), 1u) << "committed context must not release source twice";
     first_device_pool->decRef(first_request_targets, BlockRefType::REQUEST);
     second_device_pool->decRef(second_request_targets, BlockRefType::REQUEST);
 }
@@ -1766,10 +1748,11 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackCoreHoldersAndRetainsReque
     ASSERT_EQ(insert_result.inserted_nodes.size(), 1u);
     const size_t source_ref_before = host_pool->refCount(source_block);
 
-    BlockTreeMatchResult result = cache->match({100});
-    ASSERT_NE(result.load_ticket, nullptr);
-    ASSERT_EQ(result.load_ticket->items().size(), 1u);
-    EXPECT_EQ(result.load_ticket->groupSetId(0), 0);
+    BlockTreeMatchResult              result       = cache->match({100});
+    std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
+    ASSERT_NE(load_context, nullptr);
+    ASSERT_EQ(load_context->items().size(), 1u);
+    EXPECT_EQ(load_context->items()[0].group_set_id, 0);
     EXPECT_EQ(host_pool->refCount(source_block), source_ref_before + 1);
 
     const BlockIdList request_targets = device_pool->malloc(1).value();
@@ -1777,17 +1760,16 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackCoreHoldersAndRetainsReque
     device_pool->incRef(request_targets, BlockRefType::REQUEST);
     const BlockIdxType request_target = request_targets.front();
     EXPECT_EQ(device_pool->refCount(request_target), 1u);
-    result.load_ticket->items_.front().target_device_blocks = {request_target};
+    ASSERT_TRUE(load_context->bindTargetDeviceBlocks(0, {request_target}));
     ASSERT_EQ(device_pool->refCount(request_target), 1u);
 
     BlockTreeCacheTestPeer::ScopedQueueRejectionGuard rejection_guard(*cache);
     ASSERT_TRUE(rejection_guard.armed());
     ASSERT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
 
-    std::shared_ptr<AsyncContext> context = result.load_ticket->commit();
-    ASSERT_NE(context, nullptr);
-    EXPECT_TRUE(context->done());
-    EXPECT_FALSE(context->success());
+    EXPECT_FALSE(load_context->commit());
+    EXPECT_TRUE(load_context->done());
+    EXPECT_FALSE(load_context->success());
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
     EXPECT_EQ(per_rank_transfer_engine->submitCount(), 0u);
     EXPECT_EQ(host_pool->refCount(source_block), source_ref_before);
@@ -1801,8 +1783,9 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackCoreHoldersAndRetainsReque
     EXPECT_EQ(find.back()->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
 
     EXPECT_TRUE(rejection_guard.restore());
-    result.load_ticket.reset();
-    EXPECT_EQ(host_pool->refCount(source_block), source_ref_before) << "committed ticket must not release source twice";
+    load_context.reset();
+    EXPECT_EQ(host_pool->refCount(source_block), source_ref_before)
+        << "committed context must not release source twice";
     cache->waitForPendingTasks();
     device_pool->decRef(request_targets, BlockRefType::REQUEST);
 }
@@ -1854,11 +1837,12 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackMixedDeviceAndHostItems) {
     ASSERT_EQ(resident_device_pool->refCount(resident_block), 1u);
     ASSERT_EQ(host_pool->refCount(host_block), 1u);
 
-    BlockTreeMatchResult result = cache->match({100});
-    ASSERT_NE(result.load_ticket, nullptr);
-    ASSERT_EQ(result.load_ticket->itemCount(), 2u);
-    EXPECT_EQ(result.load_ticket->sourceTier(0), Tier::DEVICE);
-    EXPECT_EQ(result.load_ticket->sourceTier(1), Tier::HOST);
+    BlockTreeMatchResult              result       = cache->match({100});
+    std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
+    ASSERT_NE(load_context, nullptr);
+    ASSERT_EQ(load_context->items().size(), 2u);
+    EXPECT_EQ(load_context->items()[0].source_tier, Tier::DEVICE);
+    EXPECT_EQ(load_context->items()[1].source_tier, Tier::HOST);
     EXPECT_EQ(resident_device_pool->refCount(resident_block), 2u);
     EXPECT_EQ(host_pool->refCount(host_block), 2u);
 
@@ -1866,15 +1850,14 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackMixedDeviceAndHostItems) {
     ASSERT_NE(request_target, NULL_BLOCK_IDX);
     target_device_pool->incRef(request_target, BlockRefType::REQUEST);
     ASSERT_EQ(target_device_pool->refCount(request_target), 1u);
-    ASSERT_TRUE(result.load_ticket->bindTargetDeviceBlocks(0, {resident_block}));
-    ASSERT_TRUE(result.load_ticket->bindTargetDeviceBlocks(1, {request_target}));
+    ASSERT_TRUE(load_context->bindTargetDeviceBlocks(0, {resident_block}));
+    ASSERT_TRUE(load_context->bindTargetDeviceBlocks(1, {request_target}));
 
     BlockTreeCacheTestPeer::ScopedQueueRejectionGuard rejection_guard(*cache);
     ASSERT_TRUE(rejection_guard.armed());
-    std::shared_ptr<AsyncContext> context = result.load_ticket->commit();
-    ASSERT_NE(context, nullptr);
-    EXPECT_TRUE(context->done());
-    EXPECT_FALSE(context->success());
+    EXPECT_FALSE(load_context->commit());
+    EXPECT_TRUE(load_context->done());
+    EXPECT_FALSE(load_context->success());
     EXPECT_EQ(per_rank_transfer_engine->submitCount(), 0u);
     EXPECT_EQ(resident_device_pool->refCount(resident_block), 1u);
     EXPECT_EQ(host_pool->refCount(host_block), 1u);
@@ -1887,55 +1870,48 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackMixedDeviceAndHostItems) {
     EXPECT_EQ(find.back()->group_set_resources[1].transfer_state, GroupSetTransferState::IDLE);
 
     EXPECT_TRUE(rejection_guard.restore());
-    result.load_ticket.reset();
+    load_context.reset();
     EXPECT_EQ(resident_device_pool->refCount(resident_block), 1u);
     EXPECT_EQ(host_pool->refCount(host_block), 1u);
     target_device_pool->decRef(request_target, BlockRefType::REQUEST);
 }
 
-// Deferred load: match() plans (references the source blocks) but does NOT execute
-// load. The result carries a LoadTicket; the allocator binds request-owned
-// device targets before committing it. Dropping it uncommitted aborts (unreferences
-// the source) without allocating or copying anything.
+// Deferred load: match() plans and references source blocks without executing.
+// The allocator binds request-owned targets before committing the context.
 
-// Not committing the ticket: no device block is allocated and no async copy is submitted;
-// the ticket destructor aborts safely.
-TEST_F(BlockTreeCacheTest, LoadTicketAbortSkipsLoad) {
+// Dropping an uncommitted context performs RAII abort without submitting a copy.
+TEST_F(BlockTreeCacheTest, LoadContextAbortSkipsLoad) {
     auto cache = makeHostOnlyLoadCache();
 
-    auto result = cache->match({200});
-    ASSERT_NE(result.load_ticket, nullptr);
-    EXPECT_FALSE(result.load_ticket->empty());
-    EXPECT_EQ(result.load_ticket->logicalMatchedBlocks(), 1u);
-    // Counters reflect the planned load; match() submits nothing async and leaves
-    // async_context null (the async context is produced only at commit).
+    BlockTreeMatchResult              result       = cache->match({200});
+    std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
+    ASSERT_NE(load_context, nullptr);
+    EXPECT_FALSE(load_context->empty());
+    EXPECT_EQ(load_context->logicalMatchedBlocks(), 1u);
+    // Counters reflect the planned load; match() submits nothing asynchronously.
     EXPECT_EQ(result.matched_blocks, 0u);
     EXPECT_EQ(result.matched_node, nullptr);
     EXPECT_TRUE(result.matched_resources.empty());
     EXPECT_EQ(result.host_load_blocks, 1u);
     EXPECT_EQ(result.load_blocks, 1u);
-    EXPECT_EQ(result.async_context, nullptr);
-
-    // Drop the ticket without committing => RAII abort (source unreferenced). No async
-    // task was ever submitted, so waitForPendingTasks returns immediately.
-    result.load_ticket.reset();
+    load_context.reset();
     cache->releaseMatchedResources(result.matched_resources);
     cache->waitForPendingTasks();
 }
 
-// Committing the ticket uses the allocator-owned device target and submits the async
-// copy, yielding a non-null AsyncContext.
-TEST_F(BlockTreeCacheTest, LoadTicketCommitTriggersLoad) {
+// Committing the context uses the allocator-owned target and submits the copy.
+TEST_F(BlockTreeCacheTest, LoadContextCommitTriggersLoad) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
-    DeviceBlockPoolPtr device_pool = makeDevicePool({{1, 0}}, 1, "load_ticket_commit");
+    DeviceBlockPoolPtr device_pool = makeDevicePool({{1, 0}}, 1, "load_context_commit");
     ASSERT_NE(device_pool, nullptr);
     std::unique_ptr<BlockTreeCache> cache = makeHostOnlyLoadCache({device_pool});
 
-    BlockTreeMatchResult result = cache->match({200});
-    ASSERT_NE(result.load_ticket, nullptr);
-    EXPECT_EQ(result.load_ticket->logicalMatchedBlocks(), 1u);
+    BlockTreeMatchResult              result       = cache->match({200});
+    std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
+    ASSERT_NE(load_context, nullptr);
+    EXPECT_EQ(load_context->logicalMatchedBlocks(), 1u);
     EXPECT_EQ(result.matched_blocks, 0u);
     EXPECT_EQ(result.matched_node, nullptr);
     EXPECT_TRUE(result.matched_resources.empty());
@@ -1947,11 +1923,10 @@ TEST_F(BlockTreeCacheTest, LoadTicketCommitTriggersLoad) {
     device_pool->incRef(request_targets, BlockRefType::REQUEST);
     const BlockIdxType request_target = request_targets.front();
     EXPECT_EQ(device_pool->refCount(request_target), 1u);
-    ASSERT_EQ(result.load_ticket->items().size(), 1u);
-    result.load_ticket->items_[0].target_device_blocks = {request_target};
+    ASSERT_EQ(load_context->items().size(), 1u);
+    ASSERT_TRUE(load_context->bindTargetDeviceBlocks(0, {request_target}));
 
-    std::shared_ptr<AsyncContext> context = result.load_ticket->commit();
-    EXPECT_NE(context, nullptr);
+    EXPECT_TRUE(load_context->commit());
 
     cache->releaseMatchedResources(result.matched_resources);
     cache->waitForPendingTasks();
@@ -1978,36 +1953,37 @@ TEST_F(BlockTreeCacheTest, MalformedLoadTargetFailsBeforeStateMutationAndAllowsR
     ASSERT_NE(source_block, NULL_BLOCK_IDX);
     ASSERT_EQ(host_pool->refCount(source_block), 1u);
 
-    BlockTreeMatchResult malformed = cache->match({200});
-    ASSERT_NE(malformed.load_ticket, nullptr);
+    BlockTreeMatchResult              malformed         = cache->match({200});
+    std::shared_ptr<LoadAsyncContext> malformed_context = takeLoadContext(malformed);
+    ASSERT_NE(malformed_context, nullptr);
     const BlockIdList malformed_targets = device_pools[0]->malloc(1).value();
     ASSERT_EQ(malformed_targets.size(), 1u);
     device_pools[0]->incRef(malformed_targets, BlockRefType::REQUEST);
     const size_t malformed_target_ref_count = device_pools[0]->refCount(malformed_targets.front());
-    ASSERT_TRUE(malformed.load_ticket->bindTargetDeviceBlocks(0, malformed_targets));
-    EXPECT_EQ(malformed.load_ticket->commit(), nullptr);
+    ASSERT_TRUE(malformed_context->bindTargetDeviceBlocks(0, malformed_targets));
+    EXPECT_FALSE(malformed_context->commit());
     EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
     EXPECT_EQ(node->group_set_resources[0].host_block, source_block);
     EXPECT_FALSE(node->group_set_resources[0].hasTier(Tier::DEVICE));
     EXPECT_EQ(host_pool->refCount(source_block), 1u);
     EXPECT_EQ(device_pools[0]->refCount(malformed_targets.front()), malformed_target_ref_count);
-    malformed.load_ticket.reset();
+    malformed_context.reset();
     device_pools[0]->decRef(malformed_targets, BlockRefType::REQUEST);
 
-    BlockTreeMatchResult retry = cache->match({200});
-    ASSERT_NE(retry.load_ticket, nullptr);
+    BlockTreeMatchResult              retry         = cache->match({200});
+    std::shared_ptr<LoadAsyncContext> retry_context = takeLoadContext(retry);
+    ASSERT_NE(retry_context, nullptr);
     BlockIdList request_targets;
     for (const DeviceBlockPoolPtr& device_pool : device_pools) {
         const BlockIdxType target = device_pool->malloc().value();
         device_pool->incRef(target, BlockRefType::REQUEST);
         request_targets.push_back(target);
     }
-    ASSERT_TRUE(retry.load_ticket->bindTargetDeviceBlocks(0, request_targets));
+    ASSERT_TRUE(retry_context->bindTargetDeviceBlocks(0, request_targets));
 
-    const std::shared_ptr<AsyncContext> context = retry.load_ticket->commit();
-    ASSERT_NE(context, nullptr);
-    context->waitDone();
-    EXPECT_TRUE(context->success());
+    ASSERT_TRUE(retry_context->commit());
+    retry_context->waitDone();
+    EXPECT_TRUE(retry_context->success());
     EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
     EXPECT_EQ(node->group_set_resources[0].device_blocks, request_targets);
     EXPECT_FALSE(host_pool->isAllocated(source_block));
@@ -2212,7 +2188,7 @@ TEST_F(BlockTreeCacheTest, ShutdownDrainsOnlyHoldsRemainingAfterPartialMixedTier
     EXPECT_FALSE(disk_pool->isAllocated(disk_block));
 }
 
-TEST_F(BlockTreeCacheTest, LoadTicketOutlivesHostAndDiskCacheShutdown) {
+TEST_F(BlockTreeCacheTest, LoadContextOutlivesHostAndDiskCacheShutdown) {
     for (Tier source_tier : {Tier::HOST, Tier::DISK}) {
         SCOPED_TRACE(tierName(source_tier));
 
@@ -2245,17 +2221,17 @@ TEST_F(BlockTreeCacheTest, LoadTicketOutlivesHostAndDiskCacheShutdown) {
         }
         ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
 
-        BlockTreeMatchResult result = cache->match({100});
-        ASSERT_NE(result.load_ticket, nullptr);
-        ASSERT_FALSE(result.load_ticket->empty());
-        ASSERT_EQ(result.load_ticket->items().size(), 1u);
-        EXPECT_EQ(result.load_ticket->items()[0].source_tier, source_tier);
-        EXPECT_EQ(result.load_ticket->items()[0].source_blocks, (BlockIndicesType{source_block}));
+        BlockTreeMatchResult              result            = cache->match({100});
+        std::shared_ptr<LoadAsyncContext> outliving_context = takeLoadContext(result);
+        ASSERT_NE(outliving_context, nullptr);
+        ASSERT_FALSE(outliving_context->empty());
+        ASSERT_EQ(outliving_context->items().size(), 1u);
+        EXPECT_EQ(outliving_context->items()[0].source_tier, source_tier);
+        EXPECT_EQ(outliving_context->items()[0].source_blocks, (BlockIndicesType{source_block}));
         EXPECT_EQ(source_pool.refCount(source_block), 2u);
 
-        std::shared_ptr<LoadTicket> outliving_ticket = std::move(result.load_ticket);
-        ThreadCompletion            destruction;
-        std::thread                 destroy_thread([cache = std::move(cache), &destruction]() mutable {
+        ThreadCompletion destruction;
+        std::thread      destroy_thread([cache = std::move(cache), &destruction]() mutable {
             destruction.markEntered();
             cache.reset();
             destruction.markFinished();
@@ -2266,308 +2242,20 @@ TEST_F(BlockTreeCacheTest, LoadTicketOutlivesHostAndDiskCacheShutdown) {
         EXPECT_TRUE(destruction.finished());
         EXPECT_FALSE(source_pool.isAllocated(source_block));
         EXPECT_EQ(source_pool.freeBlocksNum(), 2u);
-        EXPECT_EQ(outliving_ticket->commit(), nullptr);
-        EXPECT_EQ(outliving_ticket->commit(), nullptr);
+        EXPECT_FALSE(outliving_context->commit());
+        EXPECT_FALSE(outliving_context->commit());
         EXPECT_EQ(source_pool.freeBlocksNum(), 2u);
 
-        outliving_ticket.reset();
+        outliving_context.reset();
         EXPECT_EQ(source_pool.freeBlocksNum(), 2u);
     }
 }
 
-TEST_F(BlockTreeCacheTest, LoadTicketKeepsExplicitLogicalDepthIndependentOfItemPositions) {
-    size_t abort_calls = 0;
-    auto   registry =
-        std::make_shared<LoadTicketRegistry>([](const LoadTicket&) { return std::shared_ptr<AsyncContext>{}; },
-                                             [&](const LoadTicket& ticket) {
-                                                 const auto& items = ticket.items();
-                                                 ++abort_calls;
-                                                 EXPECT_EQ(items.size(), 1u);
-                                             });
-
-    PendingLoadItem pending_item;
-    pending_item.path_index            = 1;
-    std::shared_ptr<LoadTicket> ticket = registry->createTicket({pending_item}, /*logical_matched_blocks=*/7, nullptr);
-    ASSERT_NE(ticket, nullptr);
-    EXPECT_EQ(ticket->logicalMatchedBlocks(), 7u);
-    ASSERT_EQ(ticket->items().size(), 1u);
-    EXPECT_EQ(ticket->items().front().path_index, 1u);
-
-    ticket.reset();
-    EXPECT_EQ(abort_calls, 1u);
-}
-
-TEST_F(BlockTreeCacheTest, TicketRegistryShutdownWaitsForClaimedCommit) {
-    CallbackBarrier  commit_callback;
-    ThreadCompletion shutdown_detached_abort;
-    ThreadCompletion shutdown;
-    std::atomic<int> commit_calls{0};
-    std::atomic<int> abort_calls{0};
-
-    auto registry = std::make_shared<LoadTicketRegistry>(
-        [&](const LoadTicket&) {
-            ++commit_calls;
-            commit_callback.enterAndWait();
-            return std::shared_ptr<AsyncContext>{};
-        },
-        [&](const LoadTicket& ticket) {
-            const auto& items = ticket.items();
-            ++abort_calls;
-            EXPECT_EQ(items.size(), 1u);
-            if (items.size() == 1u) {
-                EXPECT_EQ(items[0].group_set_id, 1);
-            }
-            shutdown_detached_abort.markEntered();
-        });
-    PendingLoadItem pending_item;
-    pending_item.group_set_id          = 0;
-    std::shared_ptr<LoadTicket> ticket = registry->createTicket({pending_item}, 0, nullptr);
-    ASSERT_NE(ticket, nullptr);
-    PendingLoadItem shutdown_pending_item;
-    shutdown_pending_item.group_set_id                  = 1;
-    std::shared_ptr<LoadTicket> shutdown_pending_ticket = registry->createTicket({shutdown_pending_item}, 0, nullptr);
-    ASSERT_NE(shutdown_pending_ticket, nullptr);
-
-    std::shared_ptr<AsyncContext> commit_result;
-    std::thread                   commit_thread([&] { commit_result = ticket->commit(); });
-    commit_callback.waitUntilEntered();
-    EXPECT_EQ(commit_calls.load(), 1);
-    EXPECT_EQ(abort_calls.load(), 0);
-
-    std::thread shutdown_thread([&] {
-        registry->shutdown();
-        shutdown.markFinished();
-    });
-    shutdown_detached_abort.waitUntilEntered();
-    EXPECT_FALSE(shutdown.finished());
-    EXPECT_EQ(abort_calls.load(), 1);
-
-    commit_callback.release();
-    commit_thread.join();
-    shutdown_thread.join();
-    EXPECT_TRUE(shutdown.finished());
-    EXPECT_EQ(commit_result, nullptr);
-    EXPECT_EQ(commit_calls.load(), 1);
-    EXPECT_EQ(abort_calls.load(), 1);
-    EXPECT_EQ(ticket->commit(), nullptr);
-    EXPECT_EQ(ticket->commit(), nullptr);
-    ticket.reset();
-    EXPECT_EQ(shutdown_pending_ticket->commit(), nullptr);
-    shutdown_pending_ticket.reset();
-    EXPECT_EQ(commit_calls.load(), 1);
-    EXPECT_EQ(abort_calls.load(), 1);
-    EXPECT_EQ(registry->createTicket({pending_item}, 0, nullptr), nullptr);
-    registry->shutdown();
-}
-
-TEST_F(BlockTreeCacheTest, TicketRegistryCloseDetachesAndAbortsOnce) {
-    auto host_pool   = makeHostPool(1, 2);
-    auto device_pools = makeStructuralDevicePools(1, "ticket_close");
-    auto full = std::make_shared<FullGroupSet>(device_pools, host_pool, nullptr);
-    initializeTestGroupSet(full, device_pools);
-    const BlockIdxType source_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::REQUEST);
-    ASSERT_NE(source_block, NULL_BLOCK_IDX);
-    host_pool->incRef(source_block, BlockRefType::REQUEST);
-    EXPECT_EQ(host_pool->refCount(source_block), 2u);
-
-    CallbackBarrier  abort_callback;
-    ThreadCompletion shutdown;
-    std::atomic<int> commit_calls{0};
-    std::atomic<int> abort_calls{0};
-    auto             registry = std::make_shared<LoadTicketRegistry>(
-        [&](const LoadTicket&) {
-            ++commit_calls;
-            return std::shared_ptr<AsyncContext>{};
-        },
-        [&](const LoadTicket& ticket) {
-            const auto& items = ticket.items();
-            ++abort_calls;
-            EXPECT_EQ(items.size(), 1u);
-            host_pool->decRef(source_block, BlockRefType::REQUEST);
-            abort_callback.enterAndWait();
-        });
-    PendingLoadItem pending_item;
-    pending_item.group_set_id          = 0;
-    pending_item.source_tier           = Tier::HOST;
-    pending_item.source_blocks         = {source_block};
-    std::shared_ptr<LoadTicket> ticket = registry->createTicket({pending_item}, 0, nullptr);
-    ASSERT_NE(ticket, nullptr);
-
-    std::thread shutdown_thread([&] {
-        shutdown.markEntered();
-        registry->shutdown();
-        shutdown.markFinished();
-    });
-    abort_callback.waitUntilEntered();
-    EXPECT_FALSE(shutdown.finished());
-    EXPECT_EQ(host_pool->refCount(source_block), 1u);
-    EXPECT_EQ(abort_calls.load(), 1);
-    EXPECT_EQ(commit_calls.load(), 0);
-    EXPECT_EQ(ticket->commit(), nullptr);
-    EXPECT_EQ(ticket->commit(), nullptr);
-    ticket.reset();
-    EXPECT_EQ(abort_calls.load(), 1);
-
-    abort_callback.release();
-    shutdown_thread.join();
-    EXPECT_TRUE(shutdown.finished());
-    EXPECT_EQ(abort_calls.load(), 1);
-    EXPECT_EQ(commit_calls.load(), 0);
-    full->releaseSingleBlock(Tier::HOST, source_block, BlockRefType::REQUEST);
-    EXPECT_EQ(host_pool->freeBlocksNum(), 2u);
-}
-
-TEST_F(BlockTreeCacheTest, TicketRegistryConcurrentShutdownCallersShareDetachedAbortCompletion) {
-    CallbackBarrier   abort_callback;
-    CountedEvent      shutdown_waits;
-    ThreadCompletion  first_shutdown;
-    ThreadCompletion  second_shutdown;
-    std::atomic<int>  commit_calls{0};
-    std::atomic<int>  abort_calls{0};
-    std::atomic<bool> abort_released{false};
-    std::atomic<int>  shutdown_returns_before_release{0};
-    auto              registry = std::make_shared<LoadTicketRegistry>(
-        [&](const LoadTicket&) {
-            ++commit_calls;
-            return std::shared_ptr<AsyncContext>{};
-        },
-        [&](const LoadTicket& ticket) {
-            const auto& items = ticket.items();
-            ++abort_calls;
-            EXPECT_EQ(items.size(), 1u);
-            if (items.size() == 1u) {
-                EXPECT_EQ(items[0].group_set_id, 7);
-            }
-            abort_callback.enterAndWait();
-        });
-    LoadShutdownTestPeer::setShutdownWaitObserver(*registry, [&shutdown_waits] { shutdown_waits.notify(); });
-    PendingLoadItem pending_item;
-    pending_item.group_set_id          = 7;
-    std::shared_ptr<LoadTicket> ticket = registry->createTicket({pending_item}, 0, nullptr);
-    ASSERT_NE(ticket, nullptr);
-
-    std::thread first_shutdown_thread([&] {
-        registry->shutdown();
-        if (!abort_released.load()) {
-            ++shutdown_returns_before_release;
-        }
-        first_shutdown.markFinished();
-    });
-    abort_callback.waitUntilEntered();
-    EXPECT_FALSE(first_shutdown.finished());
-
-    std::thread second_shutdown_thread([&] {
-        registry->shutdown();
-        if (!abort_released.load()) {
-            ++shutdown_returns_before_release;
-        }
-        second_shutdown.markFinished();
-    });
-    shutdown_waits.waitUntilCount(1);
-    EXPECT_FALSE(first_shutdown.finished());
-    EXPECT_FALSE(second_shutdown.finished());
-    EXPECT_EQ(abort_calls.load(), 1);
-    EXPECT_EQ(commit_calls.load(), 0);
-
-    abort_released.store(true);
-    abort_callback.release();
-    first_shutdown_thread.join();
-    second_shutdown_thread.join();
-    EXPECT_TRUE(first_shutdown.finished());
-    EXPECT_TRUE(second_shutdown.finished());
-    EXPECT_EQ(shutdown_returns_before_release.load(), 0);
-    EXPECT_EQ(abort_calls.load(), 1);
-    EXPECT_EQ(commit_calls.load(), 0);
-
-    registry->shutdown();
-    EXPECT_EQ(ticket->commit(), nullptr);
-    EXPECT_EQ(ticket->commit(), nullptr);
-    ticket.reset();
-    registry->shutdown();
-    EXPECT_EQ(abort_calls.load(), 1);
-    EXPECT_EQ(commit_calls.load(), 0);
-    EXPECT_EQ(registry->createTicket({pending_item}, 0, nullptr), nullptr);
-    LoadShutdownTestPeer::setShutdownWaitObserver(*registry, std::function<void()>{});
-}
-
-TEST_F(BlockTreeCacheTest, TicketRegistryShutdownWaitsForAbortInFlight) {
-    auto host_pool   = makeHostPool(1, 2);
-    auto device_pools = makeStructuralDevicePools(1, "ticket_abort_inflight");
-    auto full = std::make_shared<FullGroupSet>(device_pools, host_pool, nullptr);
-    initializeTestGroupSet(full, device_pools);
-    const BlockIdxType source_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::REQUEST);
-    ASSERT_NE(source_block, NULL_BLOCK_IDX);
-    host_pool->incRef(source_block, BlockRefType::REQUEST);
-    EXPECT_EQ(host_pool->refCount(source_block), 2u);
-
-    CallbackBarrier  abort_callback;
-    ThreadCompletion shutdown_detached_abort;
-    ThreadCompletion shutdown;
-    std::atomic<int> commit_calls{0};
-    std::atomic<int> abort_calls{0};
-    auto             registry = std::make_shared<LoadTicketRegistry>(
-        [&](const LoadTicket&) {
-            ++commit_calls;
-            return std::shared_ptr<AsyncContext>{};
-        },
-        [&](const LoadTicket& ticket) {
-            const auto& items = ticket.items();
-            ++abort_calls;
-            EXPECT_EQ(items.size(), 1u);
-            if (items.size() == 1u && items[0].group_set_id == 0) {
-                host_pool->decRef(source_block, BlockRefType::REQUEST);
-                abort_callback.enterAndWait();
-                return;
-            }
-            if (items.size() == 1u) {
-                EXPECT_EQ(items[0].group_set_id, 1);
-            }
-            shutdown_detached_abort.markEntered();
-        });
-    PendingLoadItem pending_item;
-    pending_item.group_set_id          = 0;
-    pending_item.source_tier           = Tier::HOST;
-    pending_item.source_blocks         = {source_block};
-    std::shared_ptr<LoadTicket> ticket = registry->createTicket({pending_item}, 0, nullptr);
-    ASSERT_NE(ticket, nullptr);
-    PendingLoadItem shutdown_pending_item;
-    shutdown_pending_item.group_set_id                  = 1;
-    std::shared_ptr<LoadTicket> shutdown_pending_ticket = registry->createTicket({shutdown_pending_item}, 0, nullptr);
-    ASSERT_NE(shutdown_pending_ticket, nullptr);
-
-    std::thread abort_thread([ticket = std::move(ticket)]() mutable { ticket.reset(); });
-    abort_callback.waitUntilEntered();
-    EXPECT_EQ(abort_calls.load(), 1);
-    EXPECT_EQ(commit_calls.load(), 0);
-    EXPECT_EQ(host_pool->refCount(source_block), 1u);
-
-    std::thread shutdown_thread([&] {
-        registry->shutdown();
-        shutdown.markFinished();
-    });
-    shutdown_detached_abort.waitUntilEntered();
-    EXPECT_FALSE(shutdown.finished());
-    EXPECT_EQ(abort_calls.load(), 2);
-
-    abort_callback.release();
-    abort_thread.join();
-    shutdown_thread.join();
-    EXPECT_TRUE(shutdown.finished());
-    EXPECT_EQ(abort_calls.load(), 2);
-    EXPECT_EQ(commit_calls.load(), 0);
-    EXPECT_EQ(shutdown_pending_ticket->commit(), nullptr);
-    shutdown_pending_ticket.reset();
-    EXPECT_EQ(abort_calls.load(), 2);
-    EXPECT_EQ(registry->createTicket({pending_item}, 0, nullptr), nullptr);
-    full->releaseSingleBlock(Tier::HOST, source_block, BlockRefType::REQUEST);
-    EXPECT_EQ(host_pool->freeBlocksNum(), 2u);
-}
-
-// A no-match match() plans nothing and returns a null ticket (never created).
-TEST_F(BlockTreeCacheTest, EmptyMatchYieldsNoTicket) {
+// A no-match match() plans nothing and returns no async context.
+TEST_F(BlockTreeCacheTest, EmptyMatchYieldsNoAsyncContext) {
     auto result = cache_->match({100, 200, 300});  // empty tree => no match
     EXPECT_EQ(result.matched_node, nullptr);
-    EXPECT_EQ(result.load_ticket, nullptr);
+    EXPECT_EQ(result.async_context, nullptr);
 }
 
 }  // namespace

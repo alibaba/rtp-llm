@@ -1,7 +1,7 @@
 #pragma once
 
+#include <cstdint>
 #include <memory>
-#include <optional>
 #include <unordered_map>
 #include <vector>
 
@@ -12,14 +12,17 @@ namespace rtp_llm {
 
 class LoadJoinRegistry {
 public:
+    bool getTargetBlocks(TreeNode* node, size_t group_set_id, std::vector<BlockIdxType>& target_blocks) const;
     bool start(TreeNode*                                node,
                size_t                                   group_set_id,
                const std::vector<BlockIdxType>&         target_blocks,
                const std::shared_ptr<LoadAsyncContext>& context);
-    std::optional<std::vector<BlockIdxType>>
-         join(TreeNode* node, size_t group_set_id, const std::shared_ptr<LoadAsyncContext>& context);
+    bool join(TreeNode*                                node,
+              size_t                                   group_set_id,
+              const std::shared_ptr<LoadAsyncContext>& context,
+              std::vector<BlockIdxType>&               target_blocks);
     bool finish(TreeNode* node, size_t group_set_id, bool success);
-    bool eraseForContext(TreeNode* node, size_t group_set_id, const std::shared_ptr<LoadAsyncContext>& context);
+    bool eraseForContext(TreeNode* node, size_t group_set_id, uint64_t context_id);
 
 private:
     struct Key {
@@ -40,11 +43,16 @@ private:
     };
 
     struct Record {
-        std::vector<BlockIdxType>                      target_blocks;
-        std::vector<std::shared_ptr<LoadAsyncContext>> contexts;
+        using ContextMap = std::unordered_map<uint64_t, std::weak_ptr<LoadAsyncContext>>;
+
+        std::vector<BlockIdxType> target_blocks;
+        // Joining a load must not extend its context lifetime; the context owns RAII abort.
+        ContextMap contexts;
     };
 
-    std::unordered_map<Key, Record, KeyHash> records_;
+    using RecordMap = std::unordered_map<Key, Record, KeyHash>;
+
+    RecordMap records_;
 };
 
 }  // namespace rtp_llm

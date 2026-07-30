@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadTaskRunner.h"
 
 #include <exception>
+#include <functional>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
@@ -9,80 +10,38 @@
 
 namespace rtp_llm {
 
-bool LoadTaskRunner::createTask(const LoadTicket::PendingLoadItems&      items,
-                                const std::vector<GroupSetPtr>&          group_sets,
-                                const std::shared_ptr<LoadAsyncContext>& context,
-                                TaskPtr&                                 task) {
-    task.reset();
-    if (context == nullptr) {
-        RTP_LLM_LOG_ERROR("invalid load task context");
-        return false;
-    }
-
-    LoadTicket::PendingLoadItems task_items;
-    std::vector<GroupSetPtr>     task_item_group_sets;
-    for (const LoadTicket::PendingLoadItem& item : items) {
-        if (item.group_set_id >= group_sets.size()) {
-            RTP_LLM_LOG_ERROR("invalid load task group set, group_set_id=%zu", item.group_set_id);
-            return false;
-        }
-        const GroupSetPtr& group_set = group_sets[item.group_set_id];
-        if (group_set == nullptr || group_set->groupSetId() != item.group_set_id) {
-            RTP_LLM_LOG_ERROR("mismatched load task group set, group_set_id=%zu", item.group_set_id);
-            return false;
-        }
-        if (item.joined_load) {
+LoadTaskRunner::TaskPtr LoadTaskRunner::createTask(const LoadAsyncContext::PendingLoadItems& items,
+                                                   const std::vector<bool>&                  joined_load,
+                                                   const std::vector<GroupSetPtr>&           group_sets,
+                                                   const std::shared_ptr<LoadAsyncContext>&  context) {
+    LoadAsyncContext::PendingLoadItems task_items;
+    std::vector<GroupSetPtr>           task_item_group_sets;
+    for (size_t item_index = 0; item_index < items.size(); ++item_index) {
+        const LoadAsyncContext::PendingLoadItem& item      = items[item_index];
+        const GroupSetPtr&                       group_set = group_sets[item.group_set_id];
+        if (joined_load[item_index]) {
             continue;
         }
         task_items.push_back(item);
         task_item_group_sets.push_back(group_set);
     }
     if (task_items.empty()) {
-        return true;
+        return nullptr;
     }
 
-    task                  = std::make_shared<Task>();
+    TaskPtr task          = std::make_shared<Task>();
     task->items           = std::move(task_items);
     task->item_group_sets = std::move(task_item_group_sets);
     task->target_installed.assign(task->items.size(), false);
     task->context = context;
-    return true;
+    return task;
 }
 
 bool LoadTaskRunner::prepareTransferItem(Task& task, size_t item_index) {
-    if (item_index >= task.items.size() || item_index >= task.item_group_sets.size()) {
-        RTP_LLM_LOG_WARNING("invalid load item index, index=%zu count=%zu", item_index, task.items.size());
-        return false;
-    }
-
-    const LoadTicket::PendingLoadItem& item      = task.items[item_index];
-    const GroupSetPtr&                 group_set = task.item_group_sets[item_index];
-    if (group_set == nullptr || group_set->groupSetId() != item.group_set_id) {
-        RTP_LLM_LOG_WARNING("invalid group set id, group_set=%zu", item.group_set_id);
-        return false;
-    }
-    if (item.target_device_blocks.size() != group_set->devicePools().size()) {
-        RTP_LLM_LOG_WARNING("target block count mismatch, group_set=%zu expected=%zu actual=%zu",
-                            item.group_set_id,
-                            group_set->devicePools().size(),
-                            item.target_device_blocks.size());
-        return false;
-    }
+    const LoadAsyncContext::PendingLoadItem& item      = task.items[item_index];
+    const GroupSetPtr&                       group_set = task.item_group_sets[item_index];
     if (item.source_tier == Tier::DEVICE) {
-        if (item.source_blocks.empty() || item.source_blocks != item.target_device_blocks) {
-            RTP_LLM_LOG_WARNING("resident identity changed, group_set=%zu", item.group_set_id);
-            return false;
-        }
         return true;
-    }
-    if (item.node == nullptr) {
-        RTP_LLM_LOG_WARNING("invalid copy item node, group_set=%zu", item.group_set_id);
-        return false;
-    }
-    if ((item.source_tier != Tier::HOST && item.source_tier != Tier::DISK) || item.source_blocks.size() != 1) {
-        RTP_LLM_LOG_WARNING(
-            "invalid copy item, group_set=%zu source=%s", item.group_set_id, tierName(item.source_tier));
-        return false;
     }
 
     if (item.source_tier == Tier::HOST) {
@@ -112,7 +71,7 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
                                  bool                           prepared) {
     size_t host_transfer_blocks = 0;
     size_t disk_transfer_blocks = 0;
-    for (const LoadTicket::PendingLoadItem& item : task.items) {
+    for (const LoadAsyncContext::PendingLoadItem& item : task.items) {
         if (item.source_tier == Tier::HOST) {
             ++host_transfer_blocks;
         } else if (item.source_tier == Tier::DISK) {
@@ -120,11 +79,11 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
         }
     }
 
-    int64_t host_transfer_begin_time_us = 0;
-    int64_t disk_transfer_begin_time_us = 0;
-    bool    host_transfer_started       = false;
-    bool    disk_transfer_started       = false;
-    auto    finish_metrics              = [&](bool success) {
+    int64_t                         host_transfer_begin_time_us = 0;
+    int64_t                         disk_transfer_begin_time_us = 0;
+    bool                            host_transfer_started       = false;
+    bool                            disk_transfer_started       = false;
+    const std::function<void(bool)> finish_metrics              = [&](bool success) {
         if (host_transfer_started) {
             host_transfer_started = false;
             metrics_reporter.reportTransferFinished(
@@ -174,9 +133,9 @@ void LoadTaskRunner::releaseTaskResources(const Task& task) {
 
 void LoadTaskRunner::releaseUninstalledTargetHolders(const Task& task) {
     for (size_t item_index = 0; item_index < task.items.size(); ++item_index) {
-        const LoadTicket::PendingLoadItem& item      = task.items[item_index];
-        const GroupSetPtr&                 group_set = task.item_group_sets[item_index];
-        if (item.source_tier == Tier::DEVICE || task.target_installed[item_index] || group_set == nullptr) {
+        const LoadAsyncContext::PendingLoadItem& item      = task.items[item_index];
+        const GroupSetPtr&                       group_set = task.item_group_sets[item_index];
+        if (item.source_tier == Tier::DEVICE || task.target_installed[item_index]) {
             continue;
         }
         group_set->unreferenceBlocks(MultiNodeResource{item.group_set_id, Tier::DEVICE, {{item.node, item.target_device_blocks}}},

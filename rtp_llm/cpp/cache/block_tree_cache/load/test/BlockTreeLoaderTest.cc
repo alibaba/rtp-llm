@@ -34,15 +34,16 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
 
     BlockTreeMatchResult result = environment->cache->match(environment->keys);
     EXPECT_EQ(result.matched_blocks, 0u);
-    ASSERT_NE(result.load_ticket, nullptr);
+    std::shared_ptr<LoadAsyncContext> load_context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
+    ASSERT_NE(load_context, nullptr);
     EXPECT_EQ(result.load_blocks, 2u);
     EXPECT_EQ(result.host_load_blocks, 2u);
     EXPECT_EQ(result.disk_load_blocks, 0u);
 
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> request_targets;
-    for (size_t item_index = 0; item_index < result.load_ticket->itemCount(); ++item_index) {
+    for (size_t item_index = 0; item_index < load_context->items().size(); ++item_index) {
         std::vector<BlockIdxType> targets;
-        const size_t              group_set_id = result.load_ticket->groupSetId(item_index);
+        const size_t              group_set_id = load_context->items()[item_index].group_set_id;
         for (const DeviceBlockPoolPtr& pool : environment->groups.at(group_set_id)->devicePools()) {
             const BlockIdList blocks = pool->malloc(1).value();
             ASSERT_EQ(blocks.size(), 1u);
@@ -50,18 +51,19 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
             targets.push_back(blocks.front());
             request_targets.emplace_back(pool, blocks.front());
         }
-        ASSERT_TRUE(result.load_ticket->bindTargetDeviceBlocks(item_index, std::move(targets)));
+        ASSERT_TRUE(load_context->bindTargetDeviceBlocks(item_index, std::move(targets)));
     }
 
-    std::shared_ptr<AsyncContext> context = result.load_ticket->commit();
-    ASSERT_NE(context, nullptr);
+    ASSERT_TRUE(load_context->commit());
+    std::shared_ptr<AsyncContext> context = load_context;
     context->waitDone();
     ASSERT_TRUE(context->done());
     EXPECT_TRUE(context->success());
     EXPECT_TRUE(environment->allResourcesAtTier(Tier::DEVICE));
     environment->expectPayloads();
 
-    result.load_ticket.reset();
+    result.async_context.reset();
+    load_context.reset();
     environment->reclaimAll();
     for (const auto& [pool, block] : request_targets) {
         releaseDeviceBlocksAndNotify(*environment->cache, pool, {block}, BlockRefType::REQUEST);
@@ -70,7 +72,7 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
     environment->expectFullyReclaimed();
 }
 
-TEST(BlockTreeLoaderTest, LoadStateMachineRejectsDuplicateBeginAndRestoresSource) {
+TEST(BlockTreeLoaderTest, LoadStateMachineRejectsDuplicateTransitionAndRestoresSource) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -88,25 +90,29 @@ TEST(BlockTreeLoaderTest, LoadStateMachineRejectsDuplicateBeginAndRestoresSource
     ASSERT_FALSE(find_result.empty());
 
     constexpr size_t  group_set_id = 0;
-    GroupSetResource& resource      = find_result.back()->group_set_resources[group_set_id];
-    const std::vector<BlockIdxType> source_blocks = resource.getBlocks(Tier::HOST);
+    GroupSetResource& resource = find_result.back()->group_set_resources[group_set_id];
 
-    ASSERT_TRUE(
-        environment->cache->loader_.reserveLoad(find_result.back(), group_set_id, Tier::HOST, source_blocks));
+    ASSERT_TRUE(environment->cache->loader_.changeTransferState(
+        find_result.back(), group_set_id, GroupSetTransferState::IDLE, GroupSetTransferState::LOAD_PENDING));
+    environment->cache->evictor_.refreshCandidate(find_result.back(), group_set_id);
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOAD_PENDING);
-    ASSERT_TRUE(environment->cache->loader_.beginLoad(find_result.back(), group_set_id, Tier::HOST));
+    ASSERT_TRUE(environment->cache->loader_.changeTransferState(
+        find_result.back(), group_set_id, GroupSetTransferState::LOAD_PENDING, GroupSetTransferState::LOADING));
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOADING);
-    EXPECT_FALSE(environment->cache->loader_.beginLoad(find_result.back(), group_set_id, Tier::HOST));
+    EXPECT_FALSE(environment->cache->loader_.changeTransferState(
+        find_result.back(), group_set_id, GroupSetTransferState::LOAD_PENDING, GroupSetTransferState::LOADING));
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOADING);
 
-    ASSERT_TRUE(environment->cache->loader_.finishLoad(find_result.back(), group_set_id, Tier::HOST, false));
+    ASSERT_TRUE(environment->cache->loader_.changeTransferState(
+        find_result.back(), group_set_id, GroupSetTransferState::LOADING, GroupSetTransferState::IDLE));
+    environment->cache->evictor_.refreshCandidate(find_result.back(), group_set_id);
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
 
     environment->reclaimAll();
     environment->expectFullyReclaimed();
 }
 
-TEST(BlockTreeLoaderTest, FinishLoadDoesNotOverwriteForeignTransferState) {
+TEST(BlockTreeLoaderTest, ChangeTransferStateDoesNotOverwriteForeignTransferState) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -125,7 +131,8 @@ TEST(BlockTreeLoaderTest, FinishLoadDoesNotOverwriteForeignTransferState) {
 
     GroupSetResource& resource = find_result.back()->group_set_resources[0];
     resource.transfer_state    = GroupSetTransferState::DEMOTING;
-    EXPECT_FALSE(environment->cache->loader_.finishLoad(find_result.back(), 0, Tier::HOST, false));
+    EXPECT_FALSE(environment->cache->loader_.changeTransferState(
+        find_result.back(), 0, GroupSetTransferState::LOADING, GroupSetTransferState::IDLE));
     EXPECT_EQ(resource.transfer_state, GroupSetTransferState::DEMOTING);
 
     resource.transfer_state = GroupSetTransferState::IDLE;

@@ -19,15 +19,6 @@
 namespace rtp_llm::block_tree_cache_test {
 class LoadShutdownTestPeer {
 public:
-    static void setShutdownWaitObserver(LoadTicketRegistry& registry, const std::function<void()>& observer) {
-        std::lock_guard<std::mutex> lock(registry.mutex_);
-        registry.shutdown_wait_observer_for_test_ = observer;
-    }
-
-    static void setShutdownWaitObserver(BlockTreeCache& cache, const std::function<void()>& observer) {
-        setShutdownWaitObserver(*cache.loader_.load_ticket_registry_, observer);
-    }
-
     static void setPendingTaskWaitObserver(BlockTreeCache& cache, const std::function<void()>& observer) {
         std::lock_guard<std::mutex> lock(cache.task_pool_->wait_mutex_);
         cache.task_pool_->pending_task_wait_observer_for_test_ = observer;
@@ -38,7 +29,17 @@ public:
 namespace rtp_llm {
 namespace {
 using namespace block_tree_cache_test;
-using PendingLoadItem = LoadTicket::PendingLoadItem;
+using PendingLoadItem = LoadAsyncContext::PendingLoadItem;
+
+std::shared_ptr<LoadAsyncContext> getLoadContext(const BlockTreeMatchResult& result) {
+    return std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
+}
+
+std::shared_ptr<LoadAsyncContext> takeLoadContext(BlockTreeMatchResult& result) {
+    std::shared_ptr<LoadAsyncContext> context = getLoadContext(result);
+    result.async_context.reset();
+    return context;
+}
 
 class PausablePerRankBlockTransferEngine: public PerRankBlockTransferEngine {
 public:
@@ -260,7 +261,6 @@ void expectUnpublishedResult(const BlockTreeMatchResult& result) {
     EXPECT_EQ(result.matched_blocks, 0u);
     EXPECT_EQ(result.matched_node, nullptr);
     EXPECT_TRUE(result.matched_resources.empty());
-    EXPECT_EQ(result.async_context, nullptr);
 }
 
 void expectAggregatedReadyResult(const BlockTreeCache&       cache,
@@ -296,12 +296,12 @@ void expectPlanningSourceRefCounts(const FullSWAEnvironment& environment, Tier t
     }
 }
 
-size_t ticketItemCountForGroupSet(const std::shared_ptr<LoadTicket>& ticket, size_t group_set_id) {
-    if (ticket == nullptr) {
+size_t contextItemCountForGroupSet(const std::shared_ptr<LoadAsyncContext>& context, size_t group_set_id) {
+    if (context == nullptr) {
         return 0;
     }
     return static_cast<size_t>(
-        std::count_if(ticket->items().begin(), ticket->items().end(), [group_set_id](const PendingLoadItem& item) {
+        std::count_if(context->items().begin(), context->items().end(), [group_set_id](const PendingLoadItem& item) {
             return item.group_set_id == group_set_id;
         }));
 }
@@ -322,7 +322,7 @@ void runSingleMaintenance(FullSWAEnvironment& environment, Tier tier, double rat
     environment.cache->setTierWatermark(tier, 0.0, 0);
 }
 
-BlockTreeMatchResult makePartialReadyDeviceTicket(FullSWAEnvironment& environment) {
+BlockTreeMatchResult makePartialReadyDeviceContext(FullSWAEnvironment& environment) {
     environment.insertRequestPath();
     BlockTreeMatchResult prefix_hold = environment.cache->match({environment.keys[0], environment.keys[1]});
     EXPECT_EQ(prefix_hold.matched_blocks, 2u);
@@ -333,10 +333,11 @@ BlockTreeMatchResult makePartialReadyDeviceTicket(FullSWAEnvironment& environmen
     environment.scripted_per_rank_transfer_engine->clear();
     BlockTreeMatchResult result = environment.cache->match(environment.keys);
     EXPECT_EQ(result.matched_blocks, 2u);
-    EXPECT_NE(result.load_ticket, nullptr);
-    if (result.load_ticket != nullptr) {
-        EXPECT_EQ(ticketItemCountForGroupSet(result.load_ticket, 0), 2u);
-        EXPECT_EQ(ticketItemCountForGroupSet(result.load_ticket, 1), 2u);
+    const std::shared_ptr<LoadAsyncContext> context = getLoadContext(result);
+    EXPECT_NE(context, nullptr);
+    if (context != nullptr) {
+        EXPECT_EQ(contextItemCountForGroupSet(context, 0), 2u);
+        EXPECT_EQ(contextItemCountForGroupSet(context, 1), 2u);
     }
     return result;
 }
@@ -397,7 +398,7 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
 
     BlockTreeMatchResult host_match = cache->match({100});
     expectUnpublishedResult(host_match);
-    EXPECT_EQ(host_match.load_ticket, nullptr);
+    EXPECT_EQ(host_match.async_context, nullptr);
 
     scripted_copy->enqueue(/*success=*/false);
     cache->setTierWatermark(Tier::HOST, 0.01, 0);
@@ -447,7 +448,7 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     EXPECT_EQ(snapshot_after_success.keys, snapshot_before.keys);
     BlockTreeMatchResult disk_match = cache->match({100});
     expectUnpublishedResult(disk_match);
-    EXPECT_EQ(disk_match.load_ticket, nullptr);
+    EXPECT_EQ(disk_match.async_context, nullptr);
     EXPECT_EQ(scripted_copy->submitCount(), 1u);
 
     cache->setTierWatermark(Tier::HOST, 0.0, 0);
@@ -537,7 +538,7 @@ TEST_F(BlockTreeCacheIntegrationTest, OneShotCascadeFailureRollsBackSWAAndRetrie
     environment->expectFullyReclaimed();
 }
 
-TEST_F(BlockTreeCacheIntegrationTest, UncommittedLoadTicketReleasesSourceReferences) {
+TEST_F(BlockTreeCacheIntegrationTest, UncommittedLoadContextReleasesSourceReferences) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -546,12 +547,13 @@ TEST_F(BlockTreeCacheIntegrationTest, UncommittedLoadTicketReleasesSourceReferen
     environment->releaseRequestRefs();
     demoteTo(*environment, Tier::HOST);
 
-    BlockTreeMatchResult result = environment->cache->match(environment->keys);
-    ASSERT_NE(result.load_ticket, nullptr);
-    EXPECT_FALSE(result.load_ticket->empty());
+    BlockTreeMatchResult              result       = environment->cache->match(environment->keys);
+    std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
+    ASSERT_NE(load_context, nullptr);
+    EXPECT_FALSE(load_context->empty());
     expectPlanningSourceRefCounts(*environment, Tier::HOST);
 
-    result.load_ticket.reset();
+    load_context.reset();
     for (size_t path_index = 0; path_index < environment->keys.size(); ++path_index) {
         const std::vector<GroupSetResource> resources = environment->resourcesForPathNode(path_index);
         ASSERT_EQ(resources.size(), 2u);
@@ -594,7 +596,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettleme
         config.enable_memory_cache = true;
         config.enable_disk_cache   = true;
         config.enable_load         = true;
-        auto cache = makeBlockTreeCacheForTest(std::move(groups), std::move(config));
+        auto cache                 = makeBlockTreeCacheForTest(std::move(groups), std::move(config));
         ASSERT_NE(cache, nullptr);
 
         auto pausable_per_rank_transfer_engine =
@@ -607,11 +609,12 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettleme
         source_resources[0][0].disk_slot = source_block;
         ASSERT_TRUE(insertGroupSetResources(*cache, {100}, source_resources));
 
-        BlockTreeMatchResult result = cache->match({100});
-        ASSERT_NE(result.load_ticket, nullptr);
-        ASSERT_EQ(result.load_ticket->items().size(), 1u);
-        EXPECT_EQ(result.load_ticket->items()[0].source_tier, Tier::DISK);
-        EXPECT_EQ(result.load_ticket->items()[0].source_blocks, (std::vector<BlockIdxType>{source_block}));
+        BlockTreeMatchResult              result  = cache->match({100});
+        std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
+        ASSERT_NE(context, nullptr);
+        ASSERT_EQ(context->items().size(), 1u);
+        EXPECT_EQ(context->items()[0].source_tier, Tier::DISK);
+        EXPECT_EQ(context->items()[0].source_blocks, (std::vector<BlockIdxType>{source_block}));
         EXPECT_EQ(disk_pool->refCount(source_block), 2u);
 
         const BlockIdList request_targets = device_pool->malloc(1).value();
@@ -619,11 +622,9 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettleme
         device_pool->incRef(request_targets, BlockRefType::REQUEST);
         const BlockIdxType target_block = request_targets.front();
         EXPECT_EQ(device_pool->refCount(target_block), 1u);
-        result.load_ticket->items_[0].target_device_blocks = {target_block};
-        std::shared_ptr<LoadTicket> outliving_ticket       = std::move(result.load_ticket);
+        ASSERT_TRUE(context->bindTargetDeviceBlocks(0, {target_block}));
 
-        std::shared_ptr<AsyncContext> context = outliving_ticket->commit();
-        ASSERT_NE(context, nullptr);
+        ASSERT_TRUE(context->commit());
         pausable_per_rank_transfer_engine->waitUntilEntered();
         EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(), 1u);
         EXPECT_EQ(disk_pool->refCount(source_block), 2u);
@@ -632,7 +633,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettleme
         EXPECT_EQ(device_pool->freeBlocksNum(), device_free_before - 1);
         EXPECT_EQ(host_pool->freeBlocksNum(), host_free_before);
         EXPECT_EQ(disk_pool->freeBlocksNum(), disk_free_before - 1);
-        EXPECT_EQ(outliving_ticket->commit(), nullptr);
+        EXPECT_FALSE(context->commit());
 
         ThreadCompletion destruction;
         LoadShutdownTestPeer::setPendingTaskWaitObserver(*cache, [&destruction] { destruction.markEntered(); });
@@ -679,8 +680,8 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettleme
         EXPECT_EQ(device_pool->refCount(target_block), 1u);
         EXPECT_EQ(device_pool->freeBlocksNum(), device_free_before - 1);
 
-        EXPECT_EQ(outliving_ticket->commit(), nullptr);
-        outliving_ticket.reset();
+        EXPECT_FALSE(context->commit());
+        context.reset();
         EXPECT_TRUE(device_pool->isAllocated(target_block));
         EXPECT_EQ(device_pool->refCount(target_block), 1u);
 
@@ -849,12 +850,11 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
             EXPECT_EQ(resource.transfer_state, GroupSetTransferState::DEMOTING);
         }
 
-        // Racing match while the node is DEMOTING: hard-stop, no reusable prefix,
-        // no ticket. The Device source keeps only its single cache hold.
+        // Racing match while the node is DEMOTING returns no reusable prefix or context.
         BlockTreeMatchResult during = environment->cache->match(environment->keys);
         EXPECT_EQ(during.matched_blocks, 0u);
         EXPECT_EQ(during.matched_node, nullptr);
-        EXPECT_EQ(during.load_ticket, nullptr);
+        EXPECT_EQ(during.async_context, nullptr);
         EXPECT_TRUE(during.matched_resources.empty());
         for (const auto& [pool, block] : device_sources) {
             EXPECT_TRUE(pool->isAllocated(block));
@@ -872,11 +872,12 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
         // load source (no device-ready prefix yet).
         BlockTreeMatchResult after = environment->cache->match(environment->keys);
         EXPECT_EQ(after.matched_blocks, 0u);
-        ASSERT_NE(after.load_ticket, nullptr);
-        for (const PendingLoadItem& item : after.load_ticket->items()) {
+        std::shared_ptr<LoadAsyncContext> after_context = takeLoadContext(after);
+        ASSERT_NE(after_context, nullptr);
+        for (const PendingLoadItem& item : after_context->items()) {
             EXPECT_EQ(item.source_tier, Tier::HOST);
         }
-        after.load_ticket.reset();  // abort the uncommitted ticket -> resource back to IDLE
+        after_context.reset();
         environment->cache->releaseMatchedResources(after.matched_resources);
 
         environment->reclaimAll();
@@ -899,11 +900,12 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
         environment->releaseRequestRefs();
         demoteTo(*environment, Tier::HOST);
 
-        BlockTreeMatchResult first = environment->cache->match(environment->keys);
-        ASSERT_NE(first.load_ticket, nullptr);
+        BlockTreeMatchResult              first   = environment->cache->match(environment->keys);
+        std::shared_ptr<LoadAsyncContext> context = takeLoadContext(first);
+        ASSERT_NE(context, nullptr);
         std::vector<std::pair<IBlockPool*, BlockIdxType>>        host_sources;
         std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> request_targets;
-        for (LoadTicket::PendingLoadItem& item : first.load_ticket->items_) {
+        for (LoadAsyncContext::PendingLoadItem& item : context->items_) {
             ASSERT_EQ(item.source_tier, Tier::HOST);
             ASSERT_EQ(item.source_blocks.size(), 1u);
             host_sources.emplace_back(environment->host_pools[static_cast<size_t>(item.group_set_id)].get(),
@@ -919,8 +921,7 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
         }
 
         pausable_copy->enablePause();
-        std::shared_ptr<AsyncContext> context = first.load_ticket->commit();
-        ASSERT_NE(context, nullptr);
+        ASSERT_TRUE(context->commit());
         const bool h2d_copy_entered = pausable_copy->waitUntilEnteredFor(kRaceWaitTimeout);
         if (!h2d_copy_entered) {
             pausable_copy->release();  // never leave a paused engine blocking teardown
@@ -944,12 +945,15 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
         BlockTreeMatchResult second              = environment->cache->match(environment->keys);
         EXPECT_EQ(second.matched_blocks, 0u);
         EXPECT_EQ(second.matched_node, nullptr);
-        ASSERT_NE(second.load_ticket, nullptr);
+        std::shared_ptr<LoadAsyncContext> joined_context = takeLoadContext(second);
+        ASSERT_NE(joined_context, nullptr);
         EXPECT_TRUE(second.matched_resources.empty());
-        for (size_t item_index = 0; item_index < second.load_ticket->itemCount(); ++item_index) {
-            EXPECT_TRUE(second.load_ticket->joinedLoad(item_index));
-            const size_t                     group_set_id   = second.load_ticket->groupSetId(item_index);
-            const std::vector<BlockIdxType>& joined_targets = second.load_ticket->targetDeviceBlocks(item_index);
+        ASSERT_EQ(joined_context->items().size(), joined_context->joinedLoadItems().size());
+        for (size_t item_index = 0; item_index < joined_context->items().size(); ++item_index) {
+            EXPECT_TRUE(joined_context->joinedLoadItems()[item_index]);
+            const LoadAsyncContext::PendingLoadItem& item           = joined_context->items()[item_index];
+            const size_t                             group_set_id   = item.group_set_id;
+            const std::vector<BlockIdxType>&         joined_targets = item.target_device_blocks;
             ASSERT_EQ(joined_targets.size(), environment->groups[group_set_id]->devicePools().size());
             for (size_t pool_index = 0; pool_index < joined_targets.size(); ++pool_index) {
                 DeviceBlockPoolPtr pool = environment->groups[group_set_id]->devicePools()[pool_index];
@@ -957,8 +961,7 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
                 pool->incRef(joined_targets[pool_index], BlockRefType::REQUEST);
             }
         }
-        std::shared_ptr<AsyncContext> joined_context = second.load_ticket->commit();
-        ASSERT_NE(joined_context, nullptr);
+        ASSERT_TRUE(joined_context->commit());
         EXPECT_FALSE(joined_context->done());
         EXPECT_EQ(pausable_copy->submitCount(), submits_before_join);
         for (const auto& [pool, block] : host_sources) {
@@ -971,12 +974,13 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
         }
         environment->cache->releaseMatchedResources(second.matched_resources);
 
-        BlockTreeMatchResult abandoned = environment->cache->match(environment->keys);
-        ASSERT_NE(abandoned.load_ticket, nullptr);
-        for (size_t item_index = 0; item_index < abandoned.load_ticket->itemCount(); ++item_index) {
-            EXPECT_TRUE(abandoned.load_ticket->joinedLoad(item_index));
+        BlockTreeMatchResult              abandoned         = environment->cache->match(environment->keys);
+        std::shared_ptr<LoadAsyncContext> abandoned_context = takeLoadContext(abandoned);
+        ASSERT_NE(abandoned_context, nullptr);
+        for (size_t item_index = 0; item_index < abandoned_context->items().size(); ++item_index) {
+            EXPECT_TRUE(abandoned_context->joinedLoadItems()[item_index]);
         }
-        abandoned.load_ticket.reset();
+        abandoned_context.reset();
         for (const std::pair<DeviceBlockPoolPtr, BlockIdxType>& target : request_targets) {
             EXPECT_TRUE(target.first->isAllocated(target.second));
             EXPECT_EQ(target.first->refCount(target.second), 3u);
@@ -1002,11 +1006,11 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
         // no load.
         BlockTreeMatchResult after = environment->cache->match(environment->keys);
         EXPECT_EQ(after.matched_blocks, 1u);
-        EXPECT_EQ(after.load_ticket, nullptr);
+        EXPECT_EQ(after.async_context, nullptr);
         environment->cache->releaseMatchedResources(after.matched_resources);
 
-        first.load_ticket.reset();
-        second.load_ticket.reset();
+        context.reset();
+        joined_context.reset();
         environment->reclaimAll();
         for (const auto& [pool, block] : request_targets) {
             releaseDeviceBlocksAndNotify(*environment->cache, pool, {block}, BlockRefType::REQUEST);
@@ -1076,9 +1080,10 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
     environment->scripted_per_rank_transfer_engine->clear();
     BlockTreeMatchResult result = environment->cache->match(environment->keys);
     expectUnpublishedResult(result);
-    ASSERT_NE(result.load_ticket, nullptr);
+    std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
+    ASSERT_NE(context, nullptr);
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> request_targets;
-    for (LoadTicket::PendingLoadItem& item : result.load_ticket->items_) {
+    for (LoadAsyncContext::PendingLoadItem& item : context->items_) {
         ASSERT_EQ(item.source_tier, Tier::DISK);
         item.target_device_blocks.clear();
         for (const DeviceBlockPoolPtr& pool : environment->groups.at(item.group_set_id)->devicePools()) {
@@ -1089,8 +1094,7 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
             request_targets.emplace_back(pool, blocks.front());
         }
     }
-    auto context = result.load_ticket->commit();
-    ASSERT_NE(context, nullptr);
+    ASSERT_TRUE(context->commit());
     context->waitDone();
     ASSERT_TRUE(context->done());
     EXPECT_TRUE(context->success());
@@ -1102,7 +1106,7 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
     expectAggregatedReadyResult(*environment->cache, rematch, /*full_blocks=*/1, /*swa_blocks=*/1);
     environment->releaseMatch(rematch);
 
-    result.load_ticket.reset();
+    context.reset();
     environment->reclaimAll();
     for (const auto& [pool, block] : request_targets) {
         releaseDeviceBlocksAndNotify(*environment->cache, pool, {block}, BlockRefType::REQUEST);
@@ -1171,7 +1175,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadRequestOnlyKeepsDiskResidency) {
     config.enable_disk_cache        = true;
     config.enable_load              = true;
     std::vector<GroupSetPtr> groups = {group};
-    auto cache = makeBlockTreeCacheForTest(std::move(groups), std::move(config));
+    auto                     cache  = makeBlockTreeCacheForTest(std::move(groups), std::move(config));
     ASSERT_NE(cache, nullptr);
 
     const size_t       disk_free_before = disk_pool->freeBlocksNum();
@@ -1181,20 +1185,20 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadRequestOnlyKeepsDiskResidency) {
     resources[0][0].disk_slot = source_block;
     ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
 
-    BlockTreeMatchResult result = cache->match({100});
-    ASSERT_NE(result.load_ticket, nullptr);
-    ASSERT_EQ(result.load_ticket->items().size(), 1u);
-    EXPECT_EQ(result.load_ticket->items()[0].source_tier, Tier::DISK);
-    EXPECT_EQ(result.load_ticket->items()[0].source_blocks, (std::vector<BlockIdxType>{source_block}));
+    BlockTreeMatchResult              result  = cache->match({100});
+    std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
+    ASSERT_NE(context, nullptr);
+    ASSERT_EQ(context->items().size(), 1u);
+    EXPECT_EQ(context->items()[0].source_tier, Tier::DISK);
+    EXPECT_EQ(context->items()[0].source_blocks, (std::vector<BlockIdxType>{source_block}));
 
     const size_t      device_free_before = device_pool->freeBlocksNum();
     const BlockIdList request_targets    = device_pool->malloc(1).value();
     ASSERT_EQ(request_targets.size(), 1u);
     device_pool->incRef(request_targets, BlockRefType::REQUEST);
-    result.load_ticket->items_[0].target_device_blocks = request_targets;
+    context->items_[0].target_device_blocks = request_targets;
 
-    std::shared_ptr<AsyncContext> context = result.load_ticket->commit();
-    ASSERT_NE(context, nullptr);
+    ASSERT_TRUE(context->commit());
     context->waitDone();
     ASSERT_TRUE(context->success());
     auto find_result = cache->tree()->findNode({100});
@@ -1206,13 +1210,14 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadRequestOnlyKeepsDiskResidency) {
     EXPECT_EQ(disk_pool->refCount(source_block), 1u);
     EXPECT_EQ(device_pool->refCount(request_targets.front()), 1u);
 
-    BlockTreeMatchResult rematch = cache->match({100});
-    ASSERT_NE(rematch.load_ticket, nullptr);
-    for (const LoadTicket::PendingLoadItem& item : rematch.load_ticket->items()) {
+    BlockTreeMatchResult              rematch         = cache->match({100});
+    std::shared_ptr<LoadAsyncContext> rematch_context = takeLoadContext(rematch);
+    ASSERT_NE(rematch_context, nullptr);
+    for (const LoadAsyncContext::PendingLoadItem& item : rematch_context->items()) {
         EXPECT_EQ(item.source_tier, Tier::DISK);
     }
-    rematch.load_ticket.reset();
-    result.load_ticket.reset();
+    rematch_context.reset();
+    context.reset();
     device_pool->decRef(request_targets, BlockRefType::REQUEST);
     EXPECT_EQ(device_pool->freeBlocksNum(), device_free_before);
     cache.reset();
@@ -1221,7 +1226,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadRequestOnlyKeepsDiskResidency) {
 
 class BlockTreeCacheLowerTierTest: public ::testing::TestWithParam<Tier> {};
 
-TEST_P(BlockTreeCacheLowerTierTest, FullSWA_MatchLowerTierOnlyReturnsTicketWithoutPublishing) {
+TEST_P(BlockTreeCacheLowerTierTest, FullSWA_MatchLowerTierOnlyReturnsContextWithoutPublishing) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -1235,15 +1240,16 @@ TEST_P(BlockTreeCacheLowerTierTest, FullSWA_MatchLowerTierOnlyReturnsTicketWitho
     environment->scripted_per_rank_transfer_engine->clear();
     BlockTreeMatchResult result = environment->cache->match(environment->keys);
     expectUnpublishedResult(result);
-    ASSERT_NE(result.load_ticket, nullptr);
-    EXPECT_FALSE(result.load_ticket->empty());
-    EXPECT_EQ(result.load_ticket->logicalMatchedBlocks(), kPathLength);
-    EXPECT_EQ(result.load_ticket->logicalMatchedBlocks(GetParam()), kPathLength);
+    std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
+    ASSERT_NE(context, nullptr);
+    EXPECT_FALSE(context->empty());
+    EXPECT_EQ(context->logicalMatchedBlocks(), kPathLength);
+    EXPECT_EQ(context->logicalMatchedBlocks(GetParam()), kPathLength);
     EXPECT_EQ(result.load_blocks, 6u);
     EXPECT_EQ(result.host_load_blocks, GetParam() == Tier::HOST ? 6u : 0u);
     EXPECT_EQ(result.disk_load_blocks, GetParam() == Tier::DISK ? 6u : 0u);
-    EXPECT_EQ(ticketItemCountForGroupSet(result.load_ticket, 0), 4u);
-    EXPECT_EQ(ticketItemCountForGroupSet(result.load_ticket, 1), 2u);
+    EXPECT_EQ(contextItemCountForGroupSet(context, 0), 4u);
+    EXPECT_EQ(contextItemCountForGroupSet(context, 1), 2u);
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
     expectPlanningSourceRefCounts(*environment, GetParam());
     if (GetParam() == Tier::HOST) {
@@ -1253,7 +1259,7 @@ TEST_P(BlockTreeCacheLowerTierTest, FullSWA_MatchLowerTierOnlyReturnsTicketWitho
     }
 
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> request_targets;
-    for (LoadTicket::PendingLoadItem& item : result.load_ticket->items_) {
+    for (LoadAsyncContext::PendingLoadItem& item : context->items_) {
         item.target_device_blocks.clear();
         const auto& device_pools = environment->groups.at(item.group_set_id)->devicePools();
         for (const DeviceBlockPoolPtr& pool : device_pools) {
@@ -1269,18 +1275,16 @@ TEST_P(BlockTreeCacheLowerTierTest, FullSWA_MatchLowerTierOnlyReturnsTicketWitho
         ASSERT_NE(item.node, nullptr);
     }
 
-    std::shared_ptr<AsyncContext> context = result.load_ticket->commit();
-    ASSERT_NE(context, nullptr);
-    EXPECT_EQ(result.load_ticket->commit(), nullptr);
+    ASSERT_TRUE(context->commit());
+    EXPECT_FALSE(context->commit());
     context->waitDone();
     ASSERT_TRUE(context->done());
     EXPECT_TRUE(context->success());
     expectUnpublishedResult(result);
-    EXPECT_EQ(result.async_context, nullptr);
 
     const size_t submits_after_commit = environment->scripted_per_rank_transfer_engine->submitCount();
     EXPECT_GT(submits_after_commit, 0u);
-    EXPECT_EQ(result.load_ticket->commit(), nullptr);
+    EXPECT_FALSE(context->commit());
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), submits_after_commit);
 
     BlockTreeMatchResult rematch = environment->cache->match(environment->keys);
@@ -1304,7 +1308,7 @@ TEST_P(BlockTreeCacheLowerTierTest, FullSWA_MatchLowerTierOnlyReturnsTicketWitho
     environment->expectFullyReclaimed();
 }
 
-TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesTicketAndReleasesAllWorkerHolds) {
+TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesContextAndReleasesAllWorkerHolds) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -1339,13 +1343,14 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesTicketAndReleasesAll
         disk_free_before.push_back(pool->freeBlocksNum());
     }
 
-    BlockTreeMatchResult result = environment->cache->match(environment->keys);
-    ASSERT_NE(result.load_ticket, nullptr);
-    ASSERT_FALSE(result.load_ticket->empty());
+    BlockTreeMatchResult              result  = environment->cache->match(environment->keys);
+    std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
+    ASSERT_NE(context, nullptr);
+    ASSERT_FALSE(context->empty());
 
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> request_targets;
-    for (size_t item_index = 0; item_index < result.load_ticket->itemCount(); ++item_index) {
-        const size_t                           group_set_id = result.load_ticket->groupSetId(item_index);
+    for (size_t item_index = 0; item_index < context->items().size(); ++item_index) {
+        const size_t                           group_set_id = context->items()[item_index].group_set_id;
         const std::vector<DeviceBlockPoolPtr>& device_pools = environment->groups.at(group_set_id)->devicePools();
         std::vector<BlockIdxType>              item_targets;
         item_targets.reserve(device_pools.size());
@@ -1357,11 +1362,10 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesTicketAndReleasesAll
             item_targets.push_back(block);
             request_targets.emplace_back(pool, block);
         }
-        ASSERT_TRUE(result.load_ticket->bindTargetDeviceBlocks(item_index, std::move(item_targets)));
+        ASSERT_TRUE(context->bindTargetDeviceBlocks(item_index, std::move(item_targets)));
     }
 
-    std::shared_ptr<AsyncContext> context = result.load_ticket->commit();
-    ASSERT_NE(context, nullptr);
+    ASSERT_TRUE(context->commit());
     environment->cache->waitForPendingTasks();
 
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*environment->cache), 0);
@@ -1371,10 +1375,11 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesTicketAndReleasesAll
     for (const GroupSetResource& resource : environment->resourcesForPathNode(0)) {
         EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
     }
-    for (size_t item_index = 0; item_index < result.load_ticket->itemCount(); ++item_index) {
-        const size_t group_set_id = result.load_ticket->groupSetId(item_index);
-        ASSERT_EQ(result.load_ticket->sourceBlocks(item_index).size(), 1u);
-        const BlockIdxType source_block = result.load_ticket->sourceBlocks(item_index).front();
+    for (size_t item_index = 0; item_index < context->items().size(); ++item_index) {
+        const LoadAsyncContext::PendingLoadItem& item         = context->items()[item_index];
+        const size_t                             group_set_id = item.group_set_id;
+        ASSERT_EQ(item.source_blocks.size(), 1u);
+        const BlockIdxType source_block = item.source_blocks.front();
         const IBlockPool&  source_pool  = GetParam() == Tier::HOST ?
                                               static_cast<const IBlockPool&>(*environment->host_pools.at(group_set_id)) :
                                               static_cast<const IBlockPool&>(*environment->disk_pools.at(group_set_id));
@@ -1397,28 +1402,6 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesTicketAndReleasesAll
     EXPECT_NO_THROW(environment->cache.reset());
 }
 
-TEST(LoadTicketMetricsTest, DeduplicatesPathAndPrefersLowerTier) {
-    std::shared_ptr<LoadTicketRegistry> registry =
-        std::make_shared<LoadTicketRegistry>(LoadTicketRegistry::CommitCallback{}, LoadTicketRegistry::AbortCallback{});
-    std::vector<PendingLoadItem> items(5);
-    items[0].path_index  = 0;
-    items[0].source_tier = Tier::DEVICE;
-    items[1].path_index  = 0;
-    items[1].source_tier = Tier::HOST;
-    items[2].path_index  = 0;
-    items[2].source_tier = Tier::DISK;
-    items[3].path_index  = 1;
-    items[3].source_tier = Tier::DEVICE;
-    items[4].path_index  = 1;
-    items[4].source_tier = Tier::HOST;
-
-    std::shared_ptr<LoadTicket> ticket = registry->createTicket(items, 2, nullptr);
-    ASSERT_NE(ticket, nullptr);
-    EXPECT_EQ(ticket->logicalMatchedBlocks(Tier::DEVICE), 0u);
-    EXPECT_EQ(ticket->logicalMatchedBlocks(Tier::HOST), 1u);
-    EXPECT_EQ(ticket->logicalMatchedBlocks(Tier::DISK), 1u);
-}
-
 TEST_P(BlockTreeCacheLowerTierTest, CancelPausedLoadStillInstallsTransferredTargets) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
@@ -1436,17 +1419,18 @@ TEST_P(BlockTreeCacheLowerTierTest, CancelPausedLoadStillInstallsTransferredTarg
 
     const auto snapshot_before = environment->cache->getKeySnapshot(/*limit=*/32);
 
-    BlockTreeMatchResult result = environment->cache->match(environment->keys);
-    ASSERT_NE(result.load_ticket, nullptr);
-    ASSERT_FALSE(result.load_ticket->empty());
-    EXPECT_EQ(result.load_ticket->logicalMatchedBlocks(), kPathLength);
+    BlockTreeMatchResult              result  = environment->cache->match(environment->keys);
+    std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
+    ASSERT_NE(context, nullptr);
+    ASSERT_FALSE(context->empty());
+    EXPECT_EQ(context->logicalMatchedBlocks(), kPathLength);
     struct SourceRef {
         IBlockPool*  pool;
         BlockIdxType block;
     };
     std::vector<SourceRef>                                   source_refs;
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> target_blocks;
-    for (LoadTicket::PendingLoadItem& item : result.load_ticket->items_) {
+    for (LoadAsyncContext::PendingLoadItem& item : context->items_) {
         ASSERT_EQ(item.source_tier, GetParam());
         IBlockPool* source_pool = GetParam() == Tier::HOST ?
                                       static_cast<IBlockPool*>(environment->host_pools[item.group_set_id].get()) :
@@ -1472,8 +1456,7 @@ TEST_P(BlockTreeCacheLowerTierTest, CancelPausedLoadStillInstallsTransferredTarg
     ASSERT_FALSE(target_blocks.empty());
 
     pausable_per_rank_transfer_engine->enablePause();
-    std::shared_ptr<AsyncContext> context = result.load_ticket->commit();
-    ASSERT_NE(context, nullptr);
+    ASSERT_TRUE(context->commit());
     pausable_per_rank_transfer_engine->waitUntilEntered();
     EXPECT_FALSE(context->done());
     EXPECT_TRUE(environment->cache->cancelLoad(context));
@@ -1487,7 +1470,7 @@ TEST_P(BlockTreeCacheLowerTierTest, CancelPausedLoadStillInstallsTransferredTarg
     EXPECT_GT(snapshot_after.version, snapshot_before.version);
     EXPECT_EQ(snapshot_after.keys, snapshot_before.keys);
 
-    for (const LoadTicket::PendingLoadItem& item : result.load_ticket->items()) {
+    for (const LoadAsyncContext::PendingLoadItem& item : context->items()) {
         ASSERT_NE(item.node, nullptr);
         ASSERT_LT(item.group_set_id, item.node->group_set_resources.size());
         const GroupSetResource& resource = item.node->group_set_resources[item.group_set_id];
@@ -1504,7 +1487,7 @@ TEST_P(BlockTreeCacheLowerTierTest, CancelPausedLoadStillInstallsTransferredTarg
     }
     environment->expectPayloads();
 
-    result.load_ticket.reset();
+    context.reset();
     environment->cache->waitForPendingTasks();
     for (const auto& [pool, block] : target_blocks) {
         releaseDeviceBlocksAndNotify(*environment->cache, pool, {block}, BlockRefType::REQUEST);
@@ -1530,9 +1513,10 @@ TEST_P(BlockTreeCacheLowerTierTest, CancelCompletionRaceSettlesExactlyOnce) {
     environment->releaseRequestRefs();
     demoteTo(*environment, GetParam());
 
-    BlockTreeMatchResult result = environment->cache->match(environment->keys);
-    ASSERT_NE(result.load_ticket, nullptr);
-    ASSERT_FALSE(result.load_ticket->empty());
+    BlockTreeMatchResult              result  = environment->cache->match(environment->keys);
+    std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
+    ASSERT_NE(context, nullptr);
+    ASSERT_FALSE(context->empty());
 
     struct SourceRef {
         IBlockPool*  pool;
@@ -1540,7 +1524,7 @@ TEST_P(BlockTreeCacheLowerTierTest, CancelCompletionRaceSettlesExactlyOnce) {
     };
     std::vector<SourceRef>                                   source_refs;
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> target_blocks;
-    for (LoadTicket::PendingLoadItem& item : result.load_ticket->items_) {
+    for (LoadAsyncContext::PendingLoadItem& item : context->items_) {
         IBlockPool* source_pool = GetParam() == Tier::HOST ?
                                       static_cast<IBlockPool*>(environment->host_pools[item.group_set_id].get()) :
                                       static_cast<IBlockPool*>(environment->disk_pools[item.group_set_id].get());
@@ -1559,8 +1543,7 @@ TEST_P(BlockTreeCacheLowerTierTest, CancelCompletionRaceSettlesExactlyOnce) {
     }
 
     pausable_per_rank_transfer_engine->enablePause();
-    std::shared_ptr<AsyncContext> context = result.load_ticket->commit();
-    ASSERT_NE(context, nullptr);
+    ASSERT_TRUE(context->commit());
     pausable_per_rank_transfer_engine->waitUntilEntered();
 
     ThreadCompletion race_start;
@@ -1587,7 +1570,7 @@ TEST_P(BlockTreeCacheLowerTierTest, CancelCompletionRaceSettlesExactlyOnce) {
         EXPECT_EQ(target_block.first->refCount(target_block.second), 2u);
     }
 
-    result.load_ticket.reset();
+    context.reset();
     environment->reclaimAll();
     for (const auto& [pool, block] : target_blocks) {
         releaseDeviceBlocksAndNotify(*environment->cache, pool, {block}, BlockRefType::REQUEST);
@@ -1624,9 +1607,10 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesLoadAndRestoresCandi
     const std::vector<size_t> host_free_before  = {environment->host_pools[0]->freeBlocksNum(),
                                                    environment->host_pools[1]->freeBlocksNum()};
 
-    BlockTreeMatchResult result = environment->cache->match(environment->keys);
-    ASSERT_NE(result.load_ticket, nullptr);
-    ASSERT_FALSE(result.load_ticket->empty());
+    BlockTreeMatchResult              result  = environment->cache->match(environment->keys);
+    std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
+    ASSERT_NE(context, nullptr);
+    ASSERT_FALSE(context->empty());
 
     struct SourceRef {
         IBlockPool*  pool;
@@ -1634,7 +1618,7 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesLoadAndRestoresCandi
     };
     std::vector<SourceRef>                                   source_refs;
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> target_blocks;
-    for (LoadTicket::PendingLoadItem& item : result.load_ticket->items_) {
+    for (LoadAsyncContext::PendingLoadItem& item : context->items_) {
         ASSERT_EQ(item.source_tier, GetParam());
         IBlockPool* source_pool = GetParam() == Tier::HOST ?
                                       static_cast<IBlockPool*>(environment->host_pools[item.group_set_id].get()) :
@@ -1658,32 +1642,32 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesLoadAndRestoresCandi
     ASSERT_FALSE(target_blocks.empty());
 
     pausable_per_rank_transfer_engine->enablePause();
-    std::shared_ptr<AsyncContext> context = result.load_ticket->commit();
-    ASSERT_NE(context, nullptr);
+    ASSERT_TRUE(context->commit());
     ASSERT_TRUE(pausable_per_rank_transfer_engine->waitUntilEnteredFor(kRaceWaitTimeout));
     EXPECT_FALSE(context->done());
     for (const auto& [pool, block] : target_blocks) {
         EXPECT_EQ(pool->refCount(block), 2u);
     }
 
-    const size_t         submits_before_join = pausable_per_rank_transfer_engine->submitCount();
-    BlockTreeMatchResult joined_result       = environment->cache->match(environment->keys);
-    ASSERT_NE(joined_result.load_ticket, nullptr);
-    ASSERT_FALSE(joined_result.load_ticket->empty());
-    for (size_t item_index = 0; item_index < joined_result.load_ticket->itemCount(); ++item_index) {
-        EXPECT_TRUE(joined_result.load_ticket->joinedLoad(item_index));
-        const size_t group_set_id = joined_result.load_ticket->groupSetId(item_index);
+    const size_t                      submits_before_join = pausable_per_rank_transfer_engine->submitCount();
+    BlockTreeMatchResult              joined_result       = environment->cache->match(environment->keys);
+    std::shared_ptr<LoadAsyncContext> joined_context      = takeLoadContext(joined_result);
+    ASSERT_NE(joined_context, nullptr);
+    ASSERT_FALSE(joined_context->empty());
+    for (size_t item_index = 0; item_index < joined_context->items().size(); ++item_index) {
+        EXPECT_TRUE(joined_context->joinedLoadItems()[item_index]);
+        const LoadAsyncContext::PendingLoadItem& item         = joined_context->items()[item_index];
+        const size_t                             group_set_id = item.group_set_id;
         ASSERT_LT(group_set_id, environment->groups.size());
-        const std::vector<BlockIdxType>& joined_targets     = joined_result.load_ticket->targetDeviceBlocks(item_index);
-        const std::vector<DeviceBlockPoolPtr>& device_pools = environment->groups[group_set_id]->devicePools();
+        const std::vector<BlockIdxType>&       joined_targets = item.target_device_blocks;
+        const std::vector<DeviceBlockPoolPtr>& device_pools   = environment->groups[group_set_id]->devicePools();
         ASSERT_EQ(joined_targets.size(), device_pools.size());
         for (size_t pool_index = 0; pool_index < joined_targets.size(); ++pool_index) {
             ASSERT_NE(device_pools[pool_index], nullptr);
             device_pools[pool_index]->incRef(joined_targets[pool_index], BlockRefType::REQUEST);
         }
     }
-    std::shared_ptr<AsyncContext> joined_context = joined_result.load_ticket->commit();
-    ASSERT_NE(joined_context, nullptr);
+    ASSERT_TRUE(joined_context->commit());
     EXPECT_FALSE(joined_context->done());
     EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(), submits_before_join);
     environment->cache->releaseMatchedResources(joined_result.matched_resources);
@@ -1726,12 +1710,13 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesLoadAndRestoresCandi
     }
     environment->expectPayloads();
 
-    BlockTreeMatchResult retry = environment->cache->match(environment->keys);
-    ASSERT_NE(retry.load_ticket, nullptr);
-    retry.load_ticket.reset();
+    BlockTreeMatchResult              retry         = environment->cache->match(environment->keys);
+    std::shared_ptr<LoadAsyncContext> retry_context = takeLoadContext(retry);
+    ASSERT_NE(retry_context, nullptr);
+    retry_context.reset();
 
-    result.load_ticket.reset();
-    joined_result.load_ticket.reset();
+    context.reset();
+    joined_context.reset();
     environment->reclaimAll();
     for (const auto& [pool, block] : target_blocks) {
         releaseDeviceBlocksAndNotify(*environment->cache, pool, {block}, BlockRefType::REQUEST);
@@ -1763,9 +1748,10 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadDirectTransferExceptionRestoresSou
     const std::vector<size_t>           host_free_before = {environment->host_pools[0]->freeBlocksNum(),
                                                             environment->host_pools[1]->freeBlocksNum()};
     BlockTreeMatchResult                result           = environment->cache->match(environment->keys);
-    ASSERT_NE(result.load_ticket, nullptr);
-    ASSERT_FALSE(result.load_ticket->empty());
-    const size_t disk_submit_count = result.load_ticket->items().size();
+    std::shared_ptr<LoadAsyncContext>   context          = takeLoadContext(result);
+    ASSERT_NE(context, nullptr);
+    ASSERT_FALSE(context->empty());
+    const size_t disk_submit_count = context->items().size();
     ASSERT_GT(disk_submit_count, 0u);
 
     pausable_per_rank_transfer_engine->setThrowOnSubmit(1);
@@ -1776,7 +1762,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadDirectTransferExceptionRestoresSou
     };
     std::vector<SourceRef>                                   source_refs;
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> target_blocks;
-    for (LoadTicket::PendingLoadItem& item : result.load_ticket->items_) {
+    for (LoadAsyncContext::PendingLoadItem& item : context->items_) {
         ASSERT_EQ(item.source_tier, Tier::DISK);
         ASSERT_EQ(item.source_blocks.size(), 1u);
         IBlockPool* source_pool = environment->disk_pools[item.group_set_id].get();
@@ -1794,8 +1780,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadDirectTransferExceptionRestoresSou
     }
 
     pausable_per_rank_transfer_engine->enablePause();
-    std::shared_ptr<AsyncContext> context = result.load_ticket->commit();
-    ASSERT_NE(context, nullptr);
+    ASSERT_TRUE(context->commit());
     pausable_per_rank_transfer_engine->waitUntilEntered();
     pausable_per_rank_transfer_engine->release();
     environment->cache->waitForPendingTasks();
@@ -1821,10 +1806,11 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadDirectTransferExceptionRestoresSou
     }
     environment->expectPayloads();
 
-    BlockTreeMatchResult retry = environment->cache->match(environment->keys);
-    ASSERT_NE(retry.load_ticket, nullptr);
-    retry.load_ticket.reset();
-    result.load_ticket.reset();
+    BlockTreeMatchResult              retry         = environment->cache->match(environment->keys);
+    std::shared_ptr<LoadAsyncContext> retry_context = takeLoadContext(retry);
+    ASSERT_NE(retry_context, nullptr);
+    retry_context.reset();
+    context.reset();
     environment->reclaimAll();
     for (const auto& [pool, block] : target_blocks) {
         releaseDeviceBlocksAndNotify(*environment->cache, pool, {block}, BlockRefType::REQUEST);
@@ -1863,7 +1849,7 @@ TEST_P(BlockTreeCacheLoadDisabledTest, LoadDisabled_DoesNotReportLowerTierHit) {
 
     BlockTreeMatchResult result = environment->cache->match(environment->keys);
     expectUnpublishedResult(result);
-    EXPECT_EQ(result.load_ticket, nullptr);
+    EXPECT_EQ(result.async_context, nullptr);
     EXPECT_EQ(result.load_blocks, 0u);
     EXPECT_EQ(result.host_load_blocks, 0u);
     EXPECT_EQ(result.disk_load_blocks, 0u);
@@ -1932,11 +1918,12 @@ TEST_F(BlockTreeCacheIntegrationTest, FullSWA_MatchPublishesOnlyReadyBoundary) {
     EXPECT_EQ(result.matched_blocks, 2u);
     ASSERT_EQ(result.matched_node->cache_key, environment->keys[1]);
     expectAggregatedReadyResult(*environment->cache, result, /*full_blocks=*/2, /*swa_blocks=*/2);
-    ASSERT_NE(result.load_ticket, nullptr);
-    EXPECT_EQ(result.load_ticket->logicalMatchedBlocks(), kPathLength);
-    EXPECT_EQ(ticketItemCountForGroupSet(result.load_ticket, 0), 2u);
-    EXPECT_EQ(ticketItemCountForGroupSet(result.load_ticket, 1), 2u);
-    for (const PendingLoadItem& item : result.load_ticket->items()) {
+    std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
+    ASSERT_NE(context, nullptr);
+    EXPECT_EQ(context->logicalMatchedBlocks(), kPathLength);
+    EXPECT_EQ(contextItemCountForGroupSet(context, 0), 2u);
+    EXPECT_EQ(contextItemCountForGroupSet(context, 1), 2u);
+    for (const PendingLoadItem& item : context->items()) {
         if (item.group_set_id == 0) {
             EXPECT_EQ(item.source_tier, Tier::DEVICE);
             EXPECT_GE(item.path_index, 2u);
@@ -1946,7 +1933,7 @@ TEST_F(BlockTreeCacheIntegrationTest, FullSWA_MatchPublishesOnlyReadyBoundary) {
     }
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
     environment->releaseMatch(result);
-    result.load_ticket.reset();
+    context.reset();
     environment->releaseRequestRefs();
     environment->reclaimAll();
     environment->expectFullyReclaimed();
@@ -1959,11 +1946,12 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadExplicitAbortImmediatelyRestores
 
     auto environment = FullSWAEnvironment::create();
     ASSERT_NE(environment, nullptr);
-    BlockTreeMatchResult result = makePartialReadyDeviceTicket(*environment);
-    ASSERT_NE(result.load_ticket, nullptr);
+    BlockTreeMatchResult              result  = makePartialReadyDeviceContext(*environment);
+    std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
+    ASSERT_NE(context, nullptr);
 
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> device_sources;
-    for (LoadTicket::PendingLoadItem& item : result.load_ticket->items_) {
+    for (LoadAsyncContext::PendingLoadItem& item : context->items_) {
         if (item.source_tier != Tier::DEVICE) {
             continue;
         }
@@ -1985,8 +1973,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadExplicitAbortImmediatelyRestores
     environment->expectPayloads();
     const size_t device_candidates_before_abort = environment->cache->getStats().device_heap_total_size;
 
-    std::shared_ptr<LoadTicket> ticket = std::move(result.load_ticket);
-    ticket.reset();
+    context.reset();
     const size_t device_candidates_after_abort = environment->cache->getStats().device_heap_total_size;
     EXPECT_GT(device_candidates_after_abort, device_candidates_before_abort);
     EXPECT_EQ(environment->cache->getStats().tree_node_count, tree_nodes_before);
@@ -1996,7 +1983,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadExplicitAbortImmediatelyRestores
     }
     environment->expectPayloads();
 
-    ticket.reset();
+    context.reset();
     EXPECT_EQ(environment->cache->getStats().device_heap_total_size, device_candidates_after_abort);
     EXPECT_EQ(environment->cache->evictForGroup(0, 2), 2);
     for (const auto& [pool, block] : device_sources) {
@@ -2019,12 +2006,13 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadAsyncCompletionRefreshesBeforeTe
         environment->groups, /*succeed=*/true, /*pause_enabled=*/false);
     BlockTreeCacheTestPeer::setPerRankBlockTransferEngineForTest(*environment->cache,
                                                                  pausable_per_rank_transfer_engine);
-    BlockTreeMatchResult result = makePartialReadyDeviceTicket(*environment);
-    ASSERT_NE(result.load_ticket, nullptr);
+    BlockTreeMatchResult              result  = makePartialReadyDeviceContext(*environment);
+    std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
+    ASSERT_NE(context, nullptr);
 
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> device_sources;
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> request_target_blocks;
-    for (LoadTicket::PendingLoadItem& item : result.load_ticket->items_) {
+    for (LoadAsyncContext::PendingLoadItem& item : context->items_) {
         item.target_device_blocks.clear();
         const auto& device_pools = environment->groups.at(item.group_set_id)->devicePools();
         if (item.source_tier == Tier::DEVICE) {
@@ -2057,9 +2045,8 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadAsyncCompletionRefreshesBeforeTe
     const size_t device_candidates_before = environment->cache->getStats().device_heap_total_size;
 
     pausable_per_rank_transfer_engine->enablePause();
-    std::shared_ptr<AsyncContext> context = result.load_ticket->commit();
-    ASSERT_NE(context, nullptr);
-    EXPECT_EQ(result.load_ticket->commit(), nullptr);
+    ASSERT_TRUE(context->commit());
+    EXPECT_FALSE(context->commit());
     pausable_per_rank_transfer_engine->waitUntilEntered();
     EXPECT_EQ(environment->cache->getStats().device_heap_total_size, device_candidates_before);
     for (const auto& [pool, block] : device_sources) {
@@ -2090,9 +2077,9 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadAsyncCompletionRefreshesBeforeTe
         EXPECT_FALSE(pool->isAllocated(block));
     }
 
-    result.load_ticket.reset();
     context->waitDone();
     EXPECT_TRUE(context->success());
+    context.reset();
     environment->cache->waitForPendingTasks();
     for (const auto& [pool, block] : request_target_blocks) {
         releaseDeviceBlocksAndNotify(*environment->cache, pool, {block}, BlockRefType::REQUEST);
@@ -2136,16 +2123,17 @@ TEST_F(BlockTreeCacheIntegrationTest, SparseDisconnectedSWADoesNotPublishVacuous
 
     BlockTreeMatchResult result = environment->cache->match(environment->keys);
     expectUnpublishedResult(result);
-    ASSERT_NE(result.load_ticket, nullptr);
-    EXPECT_EQ(result.load_ticket->logicalMatchedBlocks(), kPathLength);
-    EXPECT_EQ(ticketItemCountForGroupSet(result.load_ticket, 0), 4u);
-    EXPECT_EQ(ticketItemCountForGroupSet(result.load_ticket, 1), 2u);
+    std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
+    ASSERT_NE(context, nullptr);
+    EXPECT_EQ(context->logicalMatchedBlocks(), kPathLength);
+    EXPECT_EQ(contextItemCountForGroupSet(context, 0), 4u);
+    EXPECT_EQ(contextItemCountForGroupSet(context, 1), 2u);
     EXPECT_EQ(result.load_blocks, 2u);
     EXPECT_EQ(result.host_load_blocks, 2u);
     EXPECT_EQ(result.disk_load_blocks, 0u);
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
 
-    for (const PendingLoadItem& item : result.load_ticket->items()) {
+    for (const PendingLoadItem& item : context->items()) {
         if (item.group_set_id == 0) {
             EXPECT_EQ(item.source_tier, Tier::DEVICE);
             ASSERT_EQ(item.source_blocks.size(), 2u);
@@ -2159,7 +2147,7 @@ TEST_F(BlockTreeCacheIntegrationTest, SparseDisconnectedSWADoesNotPublishVacuous
         }
     }
 
-    result.load_ticket.reset();
+    context.reset();
     for (const auto& blocks : environment->request_blocks[0]) {
         EXPECT_EQ(environment->device_pools[0]->refCount(blocks[0]), 1u);
         EXPECT_EQ(environment->device_pools[1]->refCount(blocks[1]), 1u);

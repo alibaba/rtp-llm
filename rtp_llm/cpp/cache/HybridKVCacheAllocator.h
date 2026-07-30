@@ -10,7 +10,7 @@
 
 namespace rtp_llm {
 
-class LoadTicket;
+class LoadAsyncContext;
 
 class HybridKVCacheAllocator: public KVCacheAllocator, public std::enable_shared_from_this<HybridKVCacheAllocator> {
 public:
@@ -60,9 +60,9 @@ protected:
     int  reuseCache(const CacheKeysType&                 cache_keys,
                     BatchKVCacheResource&                kv_resource,
                     const std::shared_ptr<CPSlotMapper>& cp_mapper,
-                    std::shared_ptr<LoadTicket>&         ticket,
+                    std::shared_ptr<LoadAsyncContext>&   load_context,
                     std::vector<BlockIndicesType>&       referenced_blocks);
-    bool                       preflightLoadMappings(const std::shared_ptr<LoadTicket>& ticket) const;
+    bool preflightLoadMappings(const std::shared_ptr<LoadAsyncContext>& load_context) const;
     const std::vector<size_t>* groupIdsForGroupSet(size_t group_set_id) const;
 
     void referenceBlocksInGroup(int group_id, const BlockIndicesType& blocks, BlockRefType ref_type) const;

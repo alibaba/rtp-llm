@@ -17,6 +17,7 @@
 #include "rtp_llm/cpp/cache/SingleConfigCreator.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/config/MTPModelConfigHelper.h"
@@ -32,7 +33,7 @@ namespace rtp_llm {
 namespace test {
 
 using TestSingleTypeKVCacheAllocator = BlockTreeCacheTestAllocator<SingleTypeKVCacheAllocator>;
-using PendingLoadItem                = LoadTicket::PendingLoadItem;
+using PendingLoadItem                = LoadAsyncContext::PendingLoadItem;
 
 class CountingSingleTypePerRankBlockTransferEngine: public PerRankBlockTransferEngine {
 public:
@@ -678,7 +679,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, CPInsertAndAllocatorMatchShareLastRankCan
     block_pool->decRef(seed_blocks, BlockRefType::REQUEST);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, EarlyCommonMallocFailureAbortsTicketBeforeRequestTargetFree) {
+TEST_F(SingleTypeKVCacheAllocatorTest, EarlyCommonMallocFailureAbortsContextBeforeRequestTargetFree) {
     for (const Tier source_tier : {Tier::HOST, Tier::DISK}) {
         SCOPED_TRACE(source_tier == Tier::HOST ? "host" : "disk");
         ScopedSingleTypeDiskDirectory disk_directory;
@@ -697,18 +698,18 @@ TEST_F(SingleTypeKVCacheAllocatorTest, EarlyCommonMallocFailureAbortsTicketBefor
         const size_t free_before       = allocator_->freeBlocksNum();
         const auto   snapshot_before   = cache->getKeySnapshot(/*limit=*/16);
 
-        auto                     registry                 = cache->loader_.load_ticket_registry_;
-        auto                     original_abort           = registry->abort_callback_;
-        size_t                   abort_count              = 0;
-        size_t                   free_blocks_during_abort = free_before;
-        std::vector<std::string> events;
-        registry->abort_callback_ = [&](const LoadTicket& ticket) {
+        std::shared_ptr<LoadContextCoordinator> coordinator              = cache->loader_.load_context_coordinator_;
+        LoadContextCoordinator::AbortCallback   original_abort           = coordinator->abort_callback_;
+        size_t                                  abort_count              = 0;
+        size_t                                  free_blocks_during_abort = free_before;
+        std::vector<std::string>                events;
+        coordinator->abort_callback_ = [&](LoadAsyncContext& context) {
             ++abort_count;
-            const auto& items = ticket.items();
-            events.push_back("ticket_abort_begin");
+            const LoadAsyncContext::PendingLoadItems& items = context.items();
+            events.push_back("context_abort_begin");
             EXPECT_FALSE(items.empty());
             EXPECT_LT(allocator_->freeBlocksNum(), free_before);
-            original_abort(ticket);
+            original_abort(context);
             free_blocks_during_abort = allocator_->freeBlocksNum();
             EXPECT_LT(free_blocks_during_abort, free_before);
             const size_t source_ref_after_abort = source_tier == Tier::HOST ?
@@ -732,14 +733,14 @@ TEST_F(SingleTypeKVCacheAllocatorTest, EarlyCommonMallocFailureAbortsTicketBefor
         EXPECT_LT(free_blocks_during_abort, free_before);
         EXPECT_EQ(
             events,
-            (std::vector<std::string>{"ticket_abort_begin", "source_protection_released", "request_targets_freed"}));
+            (std::vector<std::string>{"context_abort_begin", "source_protection_released", "request_targets_freed"}));
         EXPECT_EQ(resource->curBlocksNum(), 0);
         EXPECT_EQ(allocator_->freeBlocksNum(), free_before);
         const auto snapshot_after = cache->getKeySnapshot(/*limit=*/16);
         EXPECT_EQ(snapshot_after.version, snapshot_before.version);
         EXPECT_EQ(snapshot_after.keys, snapshot_before.keys);
 
-        registry->abort_callback_ = std::move(original_abort);
+        coordinator->abort_callback_ = std::move(original_abort);
     }
 }
 
@@ -766,18 +767,18 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LowerTierHitFollowedByOuterIncrFailureNev
         const size_t free_before       = allocator_->freeBlocksNum();
         const auto   snapshot_before   = cache->getKeySnapshot(/*limit=*/16);
 
-        auto   registry            = cache->loader_.load_ticket_registry_;
-        auto   original_commit     = registry->commit_callback_;
-        auto   original_abort      = registry->abort_callback_;
-        size_t commit_count        = 0;
-        size_t abort_count         = 0;
-        registry->commit_callback_ = [&](const LoadTicket& ticket) {
+        std::shared_ptr<LoadContextCoordinator> coordinator     = cache->loader_.load_context_coordinator_;
+        LoadContextCoordinator::CommitCallback  original_commit = coordinator->commit_callback_;
+        LoadContextCoordinator::AbortCallback   original_abort  = coordinator->abort_callback_;
+        size_t                                  commit_count    = 0;
+        size_t                                  abort_count     = 0;
+        coordinator->commit_callback_ = [&](const std::shared_ptr<LoadAsyncContext>& context) {
             ++commit_count;
-            return original_commit(ticket);
+            return original_commit(context);
         };
-        registry->abort_callback_ = [&](const LoadTicket& ticket) {
+        coordinator->abort_callback_ = [&](LoadAsyncContext& context) {
             ++abort_count;
-            original_abort(ticket);
+            original_abort(context);
         };
 
         auto resource = createBatchKVCacheResource(/*batch_size=*/3, config);
@@ -809,8 +810,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, LowerTierHitFollowedByOuterIncrFailureNev
             EXPECT_EQ(slot.disk_slot, source_block);
             EXPECT_EQ(group->diskPool()->refCount(source_block), source_ref_before);
         }
-        registry->commit_callback_ = std::move(original_commit);
-        registry->abort_callback_  = std::move(original_abort);
+        coordinator->commit_callback_ = std::move(original_commit);
+        coordinator->abort_callback_  = std::move(original_abort);
     }
 }
 
@@ -829,12 +830,12 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SuccessfulOuterAllocationCommitsLoadExact
     cache->transfer_dispatcher_->per_rank_engine_ = per_rank_transfer_engine;
     ASSERT_NE(seedSingleTypeLowerTier(*cache, Tier::HOST, /*key=*/100), NULL_BLOCK_IDX);
 
-    auto   registry            = cache->loader_.load_ticket_registry_;
-    auto   original_commit     = registry->commit_callback_;
-    size_t commit_count        = 0;
-    registry->commit_callback_ = [&](const LoadTicket& ticket) {
+    std::shared_ptr<LoadContextCoordinator> coordinator     = cache->loader_.load_context_coordinator_;
+    LoadContextCoordinator::CommitCallback  original_commit = coordinator->commit_callback_;
+    size_t                                  commit_count    = 0;
+    coordinator->commit_callback_                           = [&](const std::shared_ptr<LoadAsyncContext>& context) {
         ++commit_count;
-        return original_commit(ticket);
+        return original_commit(context);
     };
 
     auto resource = createBatchKVCacheResource(/*batch_size=*/2, config);
@@ -869,7 +870,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, SuccessfulOuterAllocationCommitsLoadExact
     EXPECT_EQ(find.back()->group_set_resources.front().device_blocks, (BlockIndicesType{published_target}));
 
     allocator_->free(FreeInfo{resource, token_ids});
-    registry->commit_callback_ = std::move(original_commit);
+    coordinator->commit_callback_ = std::move(original_commit);
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, PrefixReuseDisabledSkipsMatchAndInsert) {

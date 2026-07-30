@@ -397,8 +397,7 @@ TEST_F(GenerateStreamStateTest, testIncrementalAsyncAllocationTerminatesBeforeMo
         .WillOnce(Return(MallocResult{/*success=*/true,
                                       /*reuse_len=*/0,
                                       /*match_cost_time_us=*/0,
-                                      async_context,
-                                      /*load_ticket=*/nullptr}));
+                                      async_context}));
     EXPECT_CALL(*mock_allocator, free(_)).WillOnce([&](const FreeInfo& free_info) {
         ++free_count;
         real_allocator->free(free_info);

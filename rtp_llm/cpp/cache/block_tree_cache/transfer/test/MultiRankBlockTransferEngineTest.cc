@@ -288,12 +288,12 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadCommitsDeviceResource)
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].host_block = host_block;
     ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
-    BlockTreeMatchResult match = cache->match({100});
-    ASSERT_NE(match.load_ticket, nullptr);
-    ASSERT_EQ(match.load_ticket->items().size(), 1u);
-    ASSERT_TRUE(match.load_ticket->bindTargetDeviceBlocks(0, {device_block}));
-    const auto context = match.load_ticket->commit();
+    BlockTreeMatchResult              match   = cache->match({100});
+    std::shared_ptr<LoadAsyncContext> context = std::dynamic_pointer_cast<LoadAsyncContext>(match.async_context);
     ASSERT_NE(context, nullptr);
+    ASSERT_EQ(context->items().size(), 1u);
+    ASSERT_TRUE(context->bindTargetDeviceBlocks(0, {device_block}));
+    ASSERT_TRUE(context->commit());
     context->waitDone();
     ASSERT_TRUE(context->success());
     cache->waitForPendingTasks();
@@ -353,12 +353,12 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadFailureKeepsSourceReso
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].host_block = host_block;
     ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
-    BlockTreeMatchResult match = cache->match({100});
-    ASSERT_NE(match.load_ticket, nullptr);
-    ASSERT_EQ(match.load_ticket->items().size(), 1u);
-    ASSERT_TRUE(match.load_ticket->bindTargetDeviceBlocks(0, {device_block}));
-    const auto context = match.load_ticket->commit();
+    BlockTreeMatchResult              match   = cache->match({100});
+    std::shared_ptr<LoadAsyncContext> context = std::dynamic_pointer_cast<LoadAsyncContext>(match.async_context);
     ASSERT_NE(context, nullptr);
+    ASSERT_EQ(context->items().size(), 1u);
+    ASSERT_TRUE(context->bindTargetDeviceBlocks(0, {device_block}));
+    ASSERT_TRUE(context->commit());
     context->waitDone();
     ASSERT_FALSE(context->success());
     cache->waitForPendingTasks();
@@ -416,22 +416,28 @@ TEST_F(MultiRankBlockTransferEngineTest, LoadCompletionStateMismatchDoesNotInsta
     auto find_result = cache->tree()->findNode({100});
     ASSERT_FALSE(find_result.empty());
 
-    group->referenceBlocks(MultiNodeResource{0, Tier::HOST, {{find_result.back(), {host_block}}}}, BlockRefType::REQUEST);
-    ASSERT_TRUE(cache->loader_.reserveLoad(find_result.back(), 0, Tier::HOST, {host_block}));
-    ASSERT_TRUE(cache->loader_.beginLoad(find_result.back(), 0, Tier::HOST));
+    group->referenceBlocks(
+        MultiNodeResource{0, Tier::HOST, {{find_result.back(), {host_block}}}}, BlockRefType::REQUEST);
+    ASSERT_TRUE(cache->loader_.changeTransferState(
+        find_result.back(), 0, GroupSetTransferState::IDLE, GroupSetTransferState::LOAD_PENDING));
+    cache->evictor_.refreshCandidate(find_result.back(), 0);
+    ASSERT_TRUE(cache->loader_.changeTransferState(
+        find_result.back(), 0, GroupSetTransferState::LOAD_PENDING, GroupSetTransferState::LOADING));
 
-    LoadTicket::PendingLoadItem item;
-    item.node                                       = find_result.back();
-    item.group_set_id                               = 0;
-    item.source_tier                                = Tier::HOST;
-    item.source_blocks                              = {host_block};
-    item.target_device_blocks                       = {device_block};
-    const std::shared_ptr<LoadAsyncContext> context = std::make_shared<LoadAsyncContext>(1);
-    LoadTaskRunner::TaskPtr                 task;
-    ASSERT_TRUE(cache->loader_.load_task_runner_.createTask({item}, {group}, context, task));
+    LoadAsyncContext::PendingLoadItem item;
+    item.node                                                 = find_result.back();
+    item.group_set_id                                         = 0;
+    item.source_tier                                          = Tier::HOST;
+    item.source_blocks                                        = {host_block};
+    item.target_device_blocks                                 = {device_block};
+    const std::shared_ptr<LoadContextCoordinator> coordinator = std::make_shared<LoadContextCoordinator>(
+        LoadContextCoordinator::CommitCallback{}, LoadContextCoordinator::AbortCallback{});
+    const std::shared_ptr<LoadAsyncContext> context = coordinator->create({item}, {false}, 1, 1);
+    ASSERT_NE(context, nullptr);
+    LoadTaskRunner::TaskPtr task = cache->loader_.load_task_runner_.createTask({item}, {false}, {group}, context);
     ASSERT_NE(task, nullptr);
-    ASSERT_TRUE(cache->loader_.load_join_registry_.start(
-        find_result.back(), 0, item.target_device_blocks, task->context));
+    ASSERT_TRUE(
+        cache->loader_.load_join_registry_.start(find_result.back(), 0, item.target_device_blocks, task->context));
     find_result.back()->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
     cache->loader_.runLoadTask(task);
 
@@ -481,12 +487,12 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadUsesSingleDirectStage)
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].disk_slot = disk_block;
     ASSERT_TRUE(insertGroupSetResources(*cache, {100}, resources));
-    BlockTreeMatchResult match = cache->match({100});
-    ASSERT_NE(match.load_ticket, nullptr);
-    ASSERT_EQ(match.load_ticket->items().size(), 1u);
-    ASSERT_TRUE(match.load_ticket->bindTargetDeviceBlocks(0, {device_block}));
-    const auto context = match.load_ticket->commit();
+    BlockTreeMatchResult              match   = cache->match({100});
+    std::shared_ptr<LoadAsyncContext> context = std::dynamic_pointer_cast<LoadAsyncContext>(match.async_context);
     ASSERT_NE(context, nullptr);
+    ASSERT_EQ(context->items().size(), 1u);
+    ASSERT_TRUE(context->bindTargetDeviceBlocks(0, {device_block}));
+    ASSERT_TRUE(context->commit());
     context->waitDone();
     ASSERT_TRUE(context->success());
     cache->waitForPendingTasks();
@@ -752,8 +758,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BuildEvictionTransferRequestIncludesPri
         makeBroadcastGroup("broadcast_cascade", host_pool, disk_pool);
     initializeBroadcastGroups({primary_group, cascade_group});
     std::vector<GroupSetPtr>        groups = {primary_group, cascade_group};
-    std::unique_ptr<BlockTreeCache> cache =
-        makeBlockTreeCacheForTest(std::move(groups));
+    std::unique_ptr<BlockTreeCache> cache  = makeBlockTreeCacheForTest(std::move(groups));
     ASSERT_NE(cache, nullptr);
 
     BlockTreeEvictor::EvictionPlan plan;

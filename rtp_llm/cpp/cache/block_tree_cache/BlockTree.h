@@ -13,7 +13,6 @@
 namespace rtp_llm {
 
 class AsyncContext;
-class LoadTicket;
 
 struct ReusableGroupLocation {
     size_t group_set_id{0};
@@ -32,7 +31,6 @@ struct BlockTreeMatchResult {
     size_t                        host_load_blocks{0};
     size_t                        disk_load_blocks{0};
     size_t                        remote_load_blocks{0};
-    std::shared_ptr<LoadTicket>   load_ticket;
 };
 
 struct BlockTreeInsertResult {

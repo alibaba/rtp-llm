@@ -10,6 +10,7 @@
 #include "rtp_llm/cpp/cache/KVCacheGroup.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 
@@ -37,32 +38,34 @@ bool KVCacheAllocator::init() {
 }
 
 MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
-    auto init_result = initMallocForCommonLen(malloc_info);
+    MallocResult init_result = initMallocForCommonLen(malloc_info);
     if (!init_result.success) {
         FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};
         free(free_info);
         return init_result;
     }
 
-    auto pending_load_ticket = std::move(init_result.load_ticket);
-    auto incr_result         = incrMalloc(malloc_info);
+    std::shared_ptr<AsyncContext> pending_async_context = std::move(init_result.async_context);
+    MallocResult                  incr_result           = incrMalloc(malloc_info);
     if (!incr_result.success) {
-        pending_load_ticket.reset();
+        pending_async_context.reset();
         FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};
         free(free_info);
         return incr_result;
     }
 
-    if (pending_load_ticket && !pending_load_ticket->empty()) {
-        init_result.async_context = pending_load_ticket->commit();
-        pending_load_ticket.reset();
-        if (!init_result.async_context) {
+    if (pending_async_context != nullptr) {
+        std::shared_ptr<LoadAsyncContext> load_context =
+            std::dynamic_pointer_cast<LoadAsyncContext>(pending_async_context);
+        if (load_context == nullptr || !load_context->commit()) {
+            load_context.reset();
+            pending_async_context.reset();
             FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};
             free(free_info);
             return {false, 0};
         }
+        init_result.async_context = std::move(pending_async_context);
     }
-    init_result.load_ticket.reset();
 
     if (metrics_reporter_ && malloc_info.enable_device_cache) {
         int64_t device_input_length = 0;

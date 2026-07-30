@@ -30,14 +30,13 @@ TEST(LoadTaskRunnerTest, CreateTaskAllowsNoTransferItems) {
     LoadTaskRunner runner;
     GroupSetPtr    group = makeTaskRunnerTestGroupSet();
 
-    LoadTicket::PendingLoadItem joined_item;
-    joined_item.group_set_id                        = 0;
-    joined_item.source_tier                         = Tier::HOST;
-    joined_item.joined_load                         = true;
-    const std::shared_ptr<LoadAsyncContext> context = std::make_shared<LoadAsyncContext>(1);
-    LoadTaskRunner::TaskPtr                 task    = std::make_shared<LoadTaskRunner::Task>();
-
-    ASSERT_TRUE(runner.createTask({joined_item}, {group}, context, task));
+    LoadAsyncContext::PendingLoadItem joined_item;
+    joined_item.group_set_id                                  = 0;
+    joined_item.source_tier                                   = Tier::HOST;
+    const std::shared_ptr<LoadContextCoordinator> coordinator = std::make_shared<LoadContextCoordinator>(
+        LoadContextCoordinator::CommitCallback{}, LoadContextCoordinator::AbortCallback{});
+    const std::shared_ptr<LoadAsyncContext> context = coordinator->create({joined_item}, {true}, 1, 1);
+    LoadTaskRunner::TaskPtr                 task    = runner.createTask({joined_item}, {true}, {group}, context);
     EXPECT_EQ(task, nullptr);
 }
 
@@ -60,8 +59,8 @@ TEST(LoadTaskRunnerTest, PreparationFailureSkipsTransfer) {
     BlockTransferDispatcher       dispatcher(engine);
     BlockTreeCacheMetricsReporter metrics_reporter;
 
-    LoadTaskRunner::Task        task;
-    LoadTicket::PendingLoadItem item;
+    LoadTaskRunner::Task              task;
+    LoadAsyncContext::PendingLoadItem item;
     item.group_set_id = 0;
     item.source_tier  = Tier::HOST;
     task.items.push_back(item);
