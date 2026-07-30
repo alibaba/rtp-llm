@@ -180,8 +180,30 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     sample_output.accept_tokens = output_token_ids_d;
     sample_output.accept_len    = output_accepted_token_num_d;
 
-    sample_output.accept_tokens_cpu = sample_output.accept_tokens.to(torch::kCPU, true);
-    sample_output.accept_len_cpu    = sample_output.accept_len.to(torch::kCPU, true);
+    // Pinned ping-pong destinations: a pageable dst turns this cudaMemcpyAsync
+    // into a synchronous staged copy on top of the mandatory wait for the
+    // producing kernels.
+    accept_cpu_slot_        = (accept_cpu_slot_ + 1) % accept_tokens_cpu_slots_.size();
+    auto& tokens_slot       = accept_tokens_cpu_slots_[accept_cpu_slot_];
+    auto& len_slot          = accept_len_cpu_slots_[accept_cpu_slot_];
+    const auto& tokens_src  = sample_output.accept_tokens;
+    const auto& len_src     = sample_output.accept_len;
+    if (!tokens_slot.defined() || tokens_slot.numel() < tokens_src.numel() || tokens_slot.dtype() != tokens_src.dtype()) {
+        tokens_slot = torch::empty(tokens_src.sizes(), tokens_src.options().device(torch::kCPU).pinned_memory(true));
+    }
+    if (!len_slot.defined() || len_slot.numel() < len_src.numel() || len_slot.dtype() != len_src.dtype()) {
+        len_slot = torch::empty(len_src.sizes(), len_src.options().device(torch::kCPU).pinned_memory(true));
+    }
+    auto tokens_dst = tokens_slot.numel() == tokens_src.numel() ?
+                          tokens_slot.view(tokens_src.sizes()) :
+                          tokens_slot.flatten().narrow(0, 0, tokens_src.numel()).view(tokens_src.sizes());
+    auto len_dst    = len_slot.numel() == len_src.numel() ?
+                          len_slot.view(len_src.sizes()) :
+                          len_slot.flatten().narrow(0, 0, len_src.numel()).view(len_src.sizes());
+    tokens_dst.copy_(tokens_src, /*non_blocking=*/true);
+    len_dst.copy_(len_src, /*non_blocking=*/true);
+    sample_output.accept_tokens_cpu = tokens_dst;
+    sample_output.accept_len_cpu    = len_dst;
     sample_output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
 }
 

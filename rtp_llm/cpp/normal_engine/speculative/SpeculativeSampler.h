@@ -1,5 +1,7 @@
 #pragma once
 
+#include <array>
+
 #include "absl/status/statusor.h"
 #include "c10/core/Event.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
@@ -68,6 +70,15 @@ protected:
     // Reusable buffer for draft_probs vocab-padding when draft/target vocab sizes differ.
     // Grow-only; reused across batchSample calls to avoid per-forward GPU allocation in hot path.
     mutable torch::Tensor draft_probs_padding_buffer_;
+
+    // Ping-pong pinned host destinations for the per-round accept D2H: a
+    // pageable destination makes cudaMemcpyAsync stage synchronously.  Two
+    // slots because the async bookkeeping worker may still be reading last
+    // round's tensors (it is synced before the next sampler input build, so
+    // at most one round is in flight).  Grow-only within each slot.
+    mutable std::array<torch::Tensor, 2> accept_tokens_cpu_slots_;
+    mutable std::array<torch::Tensor, 2> accept_len_cpu_slots_;
+    mutable size_t                       accept_cpu_slot_ = 0;
 };
 
 }  // namespace speculative
