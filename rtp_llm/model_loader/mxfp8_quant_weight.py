@@ -22,10 +22,19 @@ from rtp_llm.config.quant_config import (
 from rtp_llm.model_loader.load_config import LoadConfig
 from rtp_llm.model_loader.per_block_fp8_quant_weight import PerBlockFp8Weight
 from rtp_llm.model_loader.weight_module import CompositeWeight, WeightModule
-from rtp_llm.utils.model_weight import is_v4_weight
+from rtp_llm.utils.model_weight import W, is_v4_weight
 
 
 class Mxfp8Weight(PerBlockFp8Weight):
+    # Weights the MXFP8 path quantizes but the 128x128 FP8_PER_BLOCK loader does
+    # not, so they cannot live in the shared ``w8a8_weight_list``. These are all
+    # plain ``[N, K]`` GEMMs whose ckpt scale follows the ``.weight_scale_inv``
+    # convention, so ``_get_quant_weight_default`` builds the pair directly.
+    mx_only_weight_list: Dict[str, str] = {
+        # EAGLE1/MTP draft fc: cat(enorm(embed), hnorm(target_hidden)) -> hidden.
+        W.multi_tokens_predict_eh_proj: W.multi_tokens_predict_eh_proj_s,
+    }
+
     def __init__(
         self,
         src_weight_info: WeightModule,
@@ -33,7 +42,27 @@ class Mxfp8Weight(PerBlockFp8Weight):
         *args: Any,
         **kwargs: Any,
     ):
-        super().__init__(src_weight_info, quant_config, *args, **kwargs)
+        scale_name = self.mx_only_weight_list.get(src_weight_info.name)
+        if scale_name is not None:
+            # Bypass PerBlockFp8Weight's name-based if/elif chain, which does not
+            # know these names. The default builder derives the ckpt kernel/scale
+            # keys and leaves the tensor in ckpt ``[N, K]`` order, which is what
+            # the MXFP8 GEMM wants (the BF16 path's ``transpose`` is dropped).
+            self.group_size = quant_config.group_size()
+            kernel, scale = self._get_quant_weight_default(
+                src_weight_info, src_weight_info.name, scale_name
+            )
+            sub_weights = {kernel.name: kernel, scale.name: scale}
+            CompositeWeight.__init__(
+                self, sub_weights, quant_config=quant_config, *args, **kwargs
+            )
+            self.kernel = kernel
+            self.scale = scale
+        else:
+            super().__init__(src_weight_info, quant_config, *args, **kwargs)
+        self._force_scale_split_like_kernel()
+
+    def _force_scale_split_like_kernel(self) -> None:
         # TP-split fix for the (1,32) microscale.
         #
         # ``PerBlockFp8Weight`` is built for the 128x128 block-FP8 scale and
@@ -66,7 +95,10 @@ class Mxfp8Weight(PerBlockFp8Weight):
             quant_config, Fp8MxBlockWiseQuantConfig
         ):
             return False
-        if src_weight_info.name not in cls.w8a8_weight_list:
+        if (
+            src_weight_info.name not in cls.w8a8_weight_list
+            and src_weight_info.name not in cls.mx_only_weight_list
+        ):
             return False
         if is_v4_weight(src_weight_info):
             return False
