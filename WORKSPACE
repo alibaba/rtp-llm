@@ -25,7 +25,7 @@ maybe(
     new_git_repository,
     name = "xgrammar",
     remote = "git@gitlab.alibaba-inc.com:foundation_models/xgrammar_github.git",
-    commit = "4d145cc13d878c751ebeed36af1c013074be76bc",  # v0.2.2
+    commit = "3fb48bfd422a349b7278a7f9221dcff3dd50e654", 
     init_submodules = False,
     patch_cmds = [
         "git submodule update --init --depth=1 3rdparty/dlpack 3rdparty/picojson",
