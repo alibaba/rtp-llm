@@ -184,6 +184,9 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.dtype            = dataTypeToTorchType(description_.data_type);
     py_attn_inputs.is_prefill       = !decode_batch_size;
     py_attn_inputs.is_target_verify = inputs.is_target_verify;
+    // Host plan metadata rides along untouched (pinned host, read only at
+    // FlashInfer plan() time on CPU).
+    py_attn_inputs.dspark_plan_kv_pages_host = inputs.dspark_plan_kv_pages_host;
     RTP_LLM_CHECK_WITH_INFO(
         context_batch_size + decode_batch_size == batch_size,
         "batch size check failed context_batch_size[%ld] decode_batch_size[%ld] total_batch_size[%ld]",

@@ -93,6 +93,9 @@ void registerPyOpDefs(pybind11::module& m) {
         .def(pybind11::init<>())
         .def_readwrite("is_prefill", &PyAttentionInputs::is_prefill)
         .def_readwrite("is_cuda_graph", &PyAttentionInputs::is_cuda_graph)
+        .def_readwrite("dspark_plan_kv_pages_host",
+                       &PyAttentionInputs::dspark_plan_kv_pages_host,
+                       "host pinned int32 [batch] exact plan KV page counts, -1 = accept-dependent")
         .def_readwrite("is_target_verify", &PyAttentionInputs::is_target_verify)
         .def_readwrite("prefix_lengths", &PyAttentionInputs::prefix_lengths)
         .def_readwrite("sequence_lengths", &PyAttentionInputs::sequence_lengths)

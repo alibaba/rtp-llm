@@ -55,6 +55,17 @@ struct GptModelInputs {
     // default "ends at prefix length".  Used by the dense decode-tail path,
     // whose fixed k+1 window ends past the new committed prefix.
     torch::Tensor dspark_ctx_starts;
+    // Host (pinned) int32 [batch] channel for host-side FlashInfer planning,
+    // which replaces plan()'s blocking D2H of device metadata (a wait for the
+    // in-flight kernels those values depend on).  Per request:
+    //   > 0   : the EXACT kv token length of this forward — the host plan is
+    //           bitwise identical to the device plan on any backend;
+    //   <= -2 : -(page_count + 1) — the page count is determinate but the
+    //           length depends on the in-flight accept_len; safe only on fa2,
+    //           whose scheduler consumes nothing beyond page counts;
+    //   -1    : unknown (page-boundary-straddling window) — fall back.
+    // Undefined => device-planning path.
+    torch::Tensor dspark_plan_kv_pages_host;
 
     torch::Tensor attention_mask;  // [batch_size, seq_len, seq_len]
 

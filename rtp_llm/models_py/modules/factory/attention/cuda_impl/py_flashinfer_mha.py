@@ -83,12 +83,30 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.datatype = attn_configs.dtype
         self.max_seq_len = attn_configs.max_seq_len
         self.is_causal = attn_configs.is_causal
+        if backend == "auto" and not attn_configs.is_causal:
+            # Non-causal block attention = the dspark/dflash draft (model
+            # registration clears is_causal; normal prefill is causal).  Its
+            # per-round kv length is accept-dependent, so host-side planning
+            # can only ship an exact PAGE COUNT — fa2 is the one backend whose
+            # scheduler consumes nothing beyond page counts while run()
+            # re-derives kv lengths from the device buffers.  fa3 bakes the
+            # plan-time lengths into its kernel workspace (right-aligns the
+            # query block against them), so an inexact length silently
+            # corrupts attention there.
+            backend = "fa2"
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         self.enable_cuda_graph = attn_inputs.is_cuda_graph
         self.prefill_cuda_graph_copy_params = None
         # Pre-allocated buffers for CUDA graph copy path (avoid per-forward allocation)
         self._aligned_q_buf = None
         self._compact_out_buf = None
+        # Pinned host buffers for the host-side plan path (see prepare):
+        # planning from CPU metadata skips flashinfer's blocking .to("cpu") of
+        # device indptr, which otherwise stalls until the in-flight kernels
+        # (whose outputs those values depend on) drain.
+        self._host_plan_page_indptr = None
+        self._host_plan_last_page_len = None
+        self._host_plan_seq_lens = None
         # Use Paged KV Cache wrapper
         self.prefill_wrapper = BatchPrefillWithPagedKVCacheWrapper(
             self.g_workspace_buffer,
@@ -114,6 +132,8 @@ class PyFlashinferPrefillPagedAttnOp(object):
         forbid_realloc: True only when called from prepare_cuda_graph (replay); forbids buffer realloc.
         """
         check_attention_inputs(attn_inputs)
+        if self._try_host_plan(attn_inputs, forbid_realloc):
+            return self.fmha_params
         # Fill FlashInfer paged-KV plus batch/position metadata on device.
         self.fmha_params.fill_params_mha_device(
             attn_inputs.prefix_lengths,
@@ -206,6 +226,106 @@ class PyFlashinferPrefillPagedAttnOp(object):
             kv_data_type=self.datatype,
         )
         return self.fmha_params
+
+    def _try_host_plan(self, attn_inputs: PyAttentionInputs, forbid_realloc: bool) -> bool:
+        """Plan from host metadata when the exact KV page counts are host-known.
+
+        flashinfer's plan() pulls qo/kv indptr to the CPU (prefill.py:1796-1810);
+        with device tensors that D2H blocks until every in-flight kernel the
+        values depend on has drained (~one full verify forward per dspark
+        round).  The fa2 scheduler consumes ONLY per-request page counts, and
+        run() re-derives kv lengths from the persistent device buffers, so when
+        the engine ships exact page counts (dspark_plan_kv_pages_host, -1 =
+        accept-dependent round -> fall back) we plan from pinned host tensors:
+        qo from the exact cu_seqlens_host mirror, kv indptr from the counts.
+        plan() then copy_'s these host values into the persistent device
+        buffers, so the exact device metadata fill runs AFTER plan on the same
+        stream and re-writes them before any attention kernel reads them.
+        Steady replay only: the first (capture) call must keep the device path
+        that binds the wrapper's persistent buffers.
+        """
+        pages = attn_inputs.dspark_plan_kv_pages_host
+        if (
+            not forbid_realloc
+            or pages is None
+            or self.prefill_cuda_graph_copy_params is not None
+            or self.prefill_wrapper._qo_indptr_buf is None
+            or attn_inputs.cu_seqlens_host is None
+        ):
+            return False
+        # The replay attn_inputs carry the graph-padded batch; the engine's
+        # page counts cover only real requests.  Host planning must reproduce
+        # the device plan bit-for-bit, so only take it when they coincide
+        # (batch sizes in the capture set, e.g. the bs=1 steady state).
+        # Channel encoding: > 0 = exact kv token length (host plan is bitwise
+        # identical to the device plan on any backend); <= -2 = -(pages+1),
+        # page count determinate but length accept-dependent (safe only on
+        # fa2, whose scheduler consumes nothing beyond page counts); -1 = no.
+        batch = attn_inputs.input_lengths.size(0)
+        if pages.numel() != batch or attn_inputs.cu_seqlens_host.numel() < batch + 1:
+            return False
+        vals = pages
+        if bool((vals == -1).any()):
+            return False
+        exact_mode = bool((vals > 0).all())
+        if not exact_mode and getattr(self.prefill_wrapper, "_backend", None) != "fa2":
+            return False
+
+        if (
+            self._host_plan_page_indptr is None
+            or self._host_plan_page_indptr.size(0) < batch + 1
+        ):
+            self._host_plan_page_indptr = torch.zeros(
+                batch + 1, dtype=torch.int32, pin_memory=True
+            )
+            self._host_plan_last_page_len = torch.ones(
+                batch, dtype=torch.int32, pin_memory=True
+            )
+            self._host_plan_seq_lens = torch.empty(
+                batch, dtype=torch.int32, pin_memory=True
+            )
+        page_indptr = self._host_plan_page_indptr[: batch + 1]
+        last_page_len = self._host_plan_last_page_len[:batch]
+        seq_lens = self._host_plan_seq_lens[:batch]
+        if exact_mode:
+            kv_lens = vals.to(torch.int64)
+            page_counts = (kv_lens + self.page_size - 1) // self.page_size
+            seq_lens.copy_(kv_lens)
+            last_page_len.copy_((kv_lens - 1) % self.page_size + 1)
+        else:
+            page_counts = torch.where(vals > 0,
+                                      (vals.to(torch.int64) + self.page_size - 1) // self.page_size,
+                                      -vals.to(torch.int64) - 1)
+            # fa2 ignores lengths beyond page counts; keep consistent stand-ins.
+            seq_lens.copy_(page_counts * self.page_size)
+            last_page_len.fill_(self.page_size)
+        page_indptr[1 : batch + 1].copy_(torch.cumsum(page_counts, 0))
+
+        self.prefill_wrapper.plan(
+            attn_inputs.cu_seqlens_host[: batch + 1],
+            page_indptr,
+            self.fmha_params.page_indice_d,
+            last_page_len,
+            self.local_head_num,
+            self.local_kv_head_num,
+            self.head_dim_qk,
+            self.page_size,
+            causal=self.is_causal,
+            q_data_type=self.datatype,
+            kv_data_type=self.datatype,
+            seq_lens=seq_lens,
+        )
+        # Exact device metadata AFTER plan: overwrites the host stand-ins that
+        # plan() copied into the wrapper's persistent device buffers.
+        self.fmha_params.fill_params_mha_device(
+            attn_inputs.prefix_lengths,
+            attn_inputs.sequence_lengths,
+            attn_inputs.input_lengths,
+            attn_inputs.kv_cache_kernel_block_id_device,
+            self.page_size,
+            forbid_realloc,
+        )
+        return True
 
     @staticmethod
     def support(attn_inputs: PyAttentionInputs) -> bool:

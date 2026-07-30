@@ -555,6 +555,12 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         }
     }
 
+    // Fresh host plan metadata for this round's FlashInfer plan: a pinned host
+    // tensor consumed on CPU inside prepare_cuda_graph, never read by kernels,
+    // so a reference assignment (not a static-buffer mirror) is correct here.
+    py_model_inputs_.attention_inputs.dspark_plan_kv_pages_host =
+        inputs.attention_inputs.dspark_plan_kv_pages_host;
+
     // launch prepare_cuda_graph when attention inputs are ready.
     // GIL is required: this function may be invoked from an AsyncRunner worker thread
     // (MtpExecutor::decodeStep) and from the engine main thread (PyWrappedModel::forward),

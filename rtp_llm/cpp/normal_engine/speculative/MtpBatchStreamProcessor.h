@@ -177,5 +177,12 @@ protected:
     torch::Tensor dspark_lm_indexes_cache_;   // [cap] int32, arange(cap) * width
     torch::Tensor dspark_dummy_probs_;        // [cap, k, vocab] fp32 zeros
     torch::Tensor dspark_target_dummy_probs_;  // [cap, k+1, vocab] fp32 zeros
+
+    // Host FlashInfer-plan page counts (see OpData dspark_plan_kv_pages_host).
+    // Computed once per round in prepareDSparkVerifyModelInput from the gather
+    // host sequence_lengths (== verify prefix, both branches); the draft copy
+    // is stashed here and attached in updateDecodePostDSparkDraftModelInput.
+    torch::Tensor dspark_verify_plan_pages_;  // pinned host [cap]
+    torch::Tensor dspark_draft_plan_pages_;   // pinned host [cap]
 };
 }  // namespace rtp_llm

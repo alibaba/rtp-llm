@@ -838,6 +838,49 @@ void MtpBatchStreamProcessor::prepareDSparkVerifyModelInput(const StreamGroups& 
         // sequence_lengths (= cached token count) is the committed prefix.
         model_input.prefix_lengths = toCudaInt32(model_input.sequence_lengths, host_holder).clone();
     }
+
+    // Host FlashInfer-plan page counts.  The gather's host sequence_lengths
+    // (seqLength - 1) equals the verify prefix in BOTH branches above (the
+    // device next_seq_len is published together with the host seqLength by
+    // the same sync-mode bookkeeping; dspark rejects stream-async at init),
+    // so the verify plan is host-exact: seq = prefix + width.  The draft plan
+    // prefix additionally includes this round's accept_len in [1, width], so
+    // its page count is only determinate when the whole [prefix + width + 1,
+    // prefix + 2*width] window maps to one count; otherwise -1 => the impl
+    // falls back to device planning for that round.
+    {
+        const int64_t width = propose_step_ + 1;
+        const int64_t page  = (int64_t)(model_input.kernel_seq_size_per_block ? model_input.kernel_seq_size_per_block :
+                                                                                model_input.seq_size_per_block);
+        if (page > 0) {
+            const auto pinned_i32 = torch::TensorOptions(torch::kInt32).pinned_memory(true);
+            if (!dspark_verify_plan_pages_.defined() || dspark_verify_plan_pages_.size(0) < (int64_t)batch_size) {
+                dspark_verify_plan_pages_ = torch::empty({(int64_t)batch_size}, pinned_i32);
+                dspark_draft_plan_pages_  = torch::empty({(int64_t)batch_size}, pinned_i32);
+            }
+            // Channel encoding (see OpData): value > 0 = the EXACT kv token
+            // length (any backend can host-plan bitwise-identically to the
+            // device path); value <= -2 = -(page_count + 1), the page count is
+            // determinate but the length is accept-dependent (fa2-only, whose
+            // scheduler consumes nothing beyond page counts); -1 = unknown.
+            int32_t* vp  = dspark_verify_plan_pages_.data_ptr<int32_t>();
+            int32_t* dp  = dspark_draft_plan_pages_.data_ptr<int32_t>();
+            size_t   idx = 0;
+            for (const auto& stream : stream_groups.allStreams()) {
+                // Same host source the decode gather mirrors into
+                // sequence_lengths (seqLength - 1), which equals the verify
+                // prefix in both branches above.
+                const int64_t prefix = (int64_t)stream->seqLength() - 1;
+                vp[idx]              = (int32_t)(prefix + width);  // exact verify kv len
+                const int64_t lo     = (prefix + width + 1 + page - 1) / page;
+                const int64_t hi     = (prefix + 2 * width + page - 1) / page;
+                dp[idx]              = lo == hi ? (int32_t)(-(lo + 1)) : -1;
+                ++idx;
+            }
+            model_input.dspark_plan_kv_pages_host = dspark_verify_plan_pages_.narrow(0, 0, (int64_t)batch_size);
+        }
+    }
+
     setVerifyPairInputs(model_input, std::move(combo), batch_size, propose_step_ + 1, host_holder);
 }
 
@@ -991,6 +1034,13 @@ void MtpBatchStreamProcessor::updateDecodePostDSparkDraftModelInput(
     // input_lengths ([B] of k+1) and empty sequence_lengths carry over from
     // setVerifyPairInputs; draft logits are unused, keep them to anchor rows.
     model_input.lm_output_indexes = dsparkLmIndexes((int64_t)batch_size);
+
+    // Host plan page counts stashed by prepareDSparkVerifyModelInput this
+    // round (-1 rows: this round's page-boundary-straddling windows).
+    model_input.dspark_plan_kv_pages_host =
+        (dspark_draft_plan_pages_.defined() && dspark_draft_plan_pages_.size(0) >= (int64_t)batch_size) ?
+            dspark_draft_plan_pages_.narrow(0, 0, (int64_t)batch_size) :
+            torch::Tensor();
 }
 
 void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(

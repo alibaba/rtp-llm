@@ -207,6 +207,11 @@ struct PyAttentionInputs {
     // CUDA Graph mode flags
     bool is_cuda_graph = false;  // True when running in CUDA graph mode (capture or replay)
 
+    // Host (pinned) int32 [batch] host-planning channel — see
+    // GptModelInputs::dspark_plan_kv_pages_host for the value encoding
+    // (>0 exact kv len; <=-2 fa2-only page count; -1 fall back).
+    torch::Tensor dspark_plan_kv_pages_host;
+
     std::optional<PyContextParallelParams> context_parallel_info;
 
     // Headwise attention config (Python dict or None).
