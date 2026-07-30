@@ -208,23 +208,6 @@ TEST_F(CacheStoreAsyncWriterTest, InitAndWaitBasic) {
     ASSERT_EQ(3, counter.load());
 }
 
-TEST_F(CacheStoreAsyncWriterTest, ThreadPoolIsCreatedLazilyAndReusedAcrossCycles) {
-    // A writer exists per PyWrappedModel (plus one per MTP draft module), but only
-    // PD-separation prefill ever opens a cycle. Constructing one must not start worker
-    // threads, and cycles must share one pool rather than rebuilding it per forward.
-    // Private member reached via -fno-access-control, like the submit() cases below.
-    ASSERT_EQ(writer_->thread_pool_, nullptr);
-
-    writer_->init();
-    const auto* pool_after_first_init = writer_->thread_pool_.get();
-    ASSERT_NE(pool_after_first_init, nullptr);
-    writer_->waitAllDone();
-
-    writer_->init();
-    EXPECT_EQ(writer_->thread_pool_.get(), pool_after_first_init);
-    writer_->waitAllDone();
-}
-
 TEST_F(CacheStoreAsyncWriterTest, WaitAllDoneWhileIdleThrows) {
     ASSERT_ANY_THROW(writer_->waitAllDone());
 }

@@ -55,16 +55,6 @@ def reshape_paged_kv_cache(
     )
 
 
-def reset_half_pair_warn_state() -> None:
-    """Clear the half-pair warn rate-limiting state.
-
-    Exposed so tests get a defined starting point without reaching into module
-    internals. The rate-limiting scheme itself stays private: callers may rely on
-    "a half pair warns, and repeats are throttled", not on any particular schedule.
-    """
-    _half_pair_warn_counts.clear()
-
-
 def _resolve_cache_store_pair(
     attn_inputs: PyAttentionInputs,
 ) -> Optional[tuple[CacheStoreWriter, PyCacheStoreInputs]]:

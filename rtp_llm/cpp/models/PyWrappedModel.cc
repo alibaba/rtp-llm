@@ -396,41 +396,18 @@ PyWrappedModel::prepareWriteCacheParams(const GptModelInputs& inputs,
                              static_cast<unsigned long>(skipped_batches));
         return std::nullopt;
     }
-    // Mirrors of the runtimeWriteCacheStore host-tensor requirements (no new
-    // contracts): fail on the request thread with request context instead of in
-    // the background writer. The block table keeps only device/dtype checks
-    // because its rank legitimately varies here (grouped layouts slice it into
-    // per-tag 2-D views later).
-    RTP_LLM_CHECK_WITH_INFO(inputs.cache_keys.dim() == 2 && inputs.cache_keys.size(0) == context_batch_size
-                                && inputs.cache_keys.device().is_cpu()
-                                && inputs.cache_keys.scalar_type() == torch::kInt64,
-                            "cache-store cache_keys must be a CPU int64 [context_batch, keys] tensor "
+    // Only the per-batch count cross-checks live here. Rank, device and dtype for
+    // every host tensor are validated once in runtimeWriteCacheStore.
+    RTP_LLM_CHECK_WITH_INFO(inputs.cache_keys.size(0) == context_batch_size,
+                            "cache-store cache_keys rows=%ld does not match context batch=%ld",
+                            inputs.cache_keys.size(0),
+                            context_batch_size);
+    RTP_LLM_CHECK_WITH_INFO(inputs.prefix_lengths.defined() && inputs.prefix_lengths.numel() == context_batch_size,
+                            "cache-store prefix_lengths must have one entry per context request "
                             "(context batch=%ld)",
-                            context_batch_size);
-    RTP_LLM_CHECK_WITH_INFO(inputs.prefix_lengths.defined() && inputs.prefix_lengths.dim() == 1
-                                && inputs.prefix_lengths.device().is_cpu()
-                                && inputs.prefix_lengths.scalar_type() == torch::kInt32
-                                && inputs.prefix_lengths.numel() == context_batch_size,
-                            "cache-store prefix_lengths must be a CPU int32 1-D tensor with one entry per "
-                            "context request (context batch=%ld)",
-                            context_batch_size);
-    RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_block_id.defined() && inputs.kv_cache_block_id.device().is_cpu()
-                                && inputs.kv_cache_block_id.scalar_type() == torch::kInt32,
-                            "cache-store block table must be a defined CPU int32 tensor");
-    RTP_LLM_CHECK_WITH_INFO(inputs.request_pd_separation.defined() && inputs.request_pd_separation.dim() == 1
-                                && inputs.request_pd_separation.device().is_cpu()
-                                && inputs.request_pd_separation.scalar_type() == torch::kBool
-                                && inputs.request_pd_separation.numel() == context_batch_size,
-                            "cache-store request_pd_separation must be a CPU bool 1-D tensor with one entry per "
-                            "context request (context batch=%ld)",
                             context_batch_size);
     RTP_LLM_CHECK_WITH_INFO(cache_store_input_lengths_host.defined(),
                             "cache-store input lengths must be defined for eligible PD-prefill work");
-    RTP_LLM_CHECK_WITH_INFO(cache_store_input_lengths_host.device().is_cpu(),
-                            "cache-store input lengths must be a CPU tensor");
-    RTP_LLM_CHECK_WITH_INFO(cache_store_input_lengths_host.scalar_type() == torch::kInt32,
-                            "cache-store input lengths must use int32, got %s",
-                            c10::toString(cache_store_input_lengths_host.scalar_type()));
     RTP_LLM_CHECK_WITH_INFO(cache_store_input_lengths_host.numel() == inputs.input_lengths.numel(),
                             "cache-store input length count=%ld does not match model input length count=%ld",
                             cache_store_input_lengths_host.numel(),

@@ -3,7 +3,6 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
 #include <memory>
-#include <string>
 #include <utility>
 
 #include "autil/EnvUtil.h"
@@ -62,18 +61,6 @@ CacheStoreAsyncWriter::CacheStoreAsyncWriter(int                             dev
         }
     }
 
-    // No thread pool here: it is created by the first init() that gets far enough
-    // to start a cycle. See ensureThreadPoolLocked().
-}
-
-// A writer is constructed per PyWrappedModel (and once more per MTP draft module),
-// but only PD-separation prefill ever opens a cache-store cycle. Creating the pool
-// on first use keeps non-PD and decode-only processes from parking idle worker
-// threads for every model instance. state_mutex_ must be held by the caller.
-void CacheStoreAsyncWriter::ensureThreadPoolLocked() {
-    if (thread_pool_) {
-        return;
-    }
     constexpr size_t kThreadCount = 3;
     constexpr size_t kQueueSize   = 10000;
     auto pool = std::make_shared<autil::LockFreeThreadPool>(kThreadCount, kQueueSize, nullptr, "CacheStoreAsync");
@@ -106,41 +93,13 @@ CacheStoreAsyncWriter::~CacheStoreAsyncWriter() {
         state = state_;
     }
     if (state != State::IDLE) {
-        // Report what is being lost, not just that it happened. pending_count_ is a
-        // snapshot of admitted-but-unfinished tasks; stop() below joins the in-flight
-        // ones but its worker loop breaks on !_run without draining the queue (and
-        // LockFreeThreadPool::clearQueue() is a no-op), so queued-but-unstarted writes
-        // never run. Any stored background exception is lost as well - waitAllDone()
-        // is the only path that rethrows it.
-        const auto  unfinished = pending_count_.load(std::memory_order_acquire);
-        std::string stored_what;
-        {
-            std::lock_guard<std::mutex> ex_lock(exception_mutex_);
-            if (stored_exception_) {
-                try {
-                    std::rethrow_exception(stored_exception_);
-                } catch (const std::exception& e) {
-                    stored_what = e.what();
-                } catch (...) {
-                    stored_what = "<non-std exception>";
-                }
-            }
-        }
-        RTP_LLM_LOG_ERROR("CacheStoreAsyncWriter destroyed while %s - caller should call waitAllDone() before "
-                          "destruction; abandoning up to %ld unfinished write(s) (model_id=%zu, device_id=%d); "
-                          "stored background exception: %s",
-                          stateName(state),
-                          static_cast<long>(unfinished),
-                          cache_model_id_,
-                          device_id_,
-                          stored_what.empty() ? "none" : stored_what.c_str());
+        RTP_LLM_LOG_WARNING("CacheStoreAsyncWriter destroyed while %s - "
+                            "caller should call waitAllDone() before destruction",
+                            stateName(state));
     }
-    // UAF safety precondition: background tasks capture a raw `this` (see
-    // enqueueLocked) and touch pending_count_/wait_cv_/exception_mutex_ through
-    // PendingTaskGuard, so those members must outlive every admitted task.
-    // autil::LockFreeThreadPool::stop() -> join() joins every worker thread, so
-    // an executing task always finishes before the members below die - do not
-    // swap it for a non-joining shutdown.
+    // Background tasks capture a raw `this` and touch members through
+    // PendingTaskGuard; stop() joins the workers, so an executing task always
+    // finishes before those members die.
     if (thread_pool_) {
         thread_pool_->stop();
     }
@@ -195,10 +154,6 @@ void CacheStoreAsyncWriter::init() {
                                 cache_model_id_,
                                 device_id_);
     }
-
-    // Last fallible step before the state transition, so a pool that cannot start
-    // leaves the writer IDLE and retryable like every other failure above.
-    ensureThreadPoolLocked();
 
     pending_count_.store(0, std::memory_order_relaxed);
     {

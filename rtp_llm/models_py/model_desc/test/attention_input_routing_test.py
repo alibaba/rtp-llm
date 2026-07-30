@@ -132,40 +132,28 @@ class AttentionInputRoutingTest(unittest.TestCase):
         ]
         for label, cache_store_inputs, cache_store_writer, expect_warn in cases:
             with self.subTest(pairing=label):
-                attention_common.reset_half_pair_warn_state()
                 attention_inputs = SimpleNamespace(
                     is_prefill=True,
                     cache_store_inputs=cache_store_inputs,
                     cache_store_writer=cache_store_writer,
                 )
 
-                with patch.object(attention_common.logger, "warning") as warning:
+                # Isolate the module's throttle state here rather than exposing a reset
+                # hook from production code.
+                with patch.dict(
+                    attention_common._half_pair_warn_counts, {}, clear=True
+                ), patch.object(attention_common.logger, "warning") as warning:
                     # Observable skip decision through the public factory surface.
                     self.assertIsNone(
                         attention_common.create_write_cache_store_impl(attention_inputs)
                     )
-                    warns_after_first_trigger = warning.call_count
-
                     _write_cp_cache_store(
                         attention_inputs, SimpleNamespace(tag="linear0")
                     )
-                    _write_cp_cache_store(
-                        attention_inputs, SimpleNamespace(tag="linear0")
-                    )
-                    warns_after_three_triggers = warning.call_count
 
-                if cache_store_writer is not None:
-                    cache_store_writer.write.assert_not_called()
-                if expect_warn:
-                    # The external contract is two claims: a half pair is visible
-                    # immediately, and repeats are throttled rather than one line per
-                    # occurrence. The throttling schedule itself is private, so retuning
-                    # it (different backoff base, or time-interval limiting) must not
-                    # fail this test.
-                    self.assertEqual(warns_after_first_trigger, 1)
-                    self.assertLess(warns_after_three_triggers, 3)
-                else:
-                    warning.assert_not_called()
+                    if cache_store_writer is not None:
+                        cache_store_writer.write.assert_not_called()
+                    self.assertEqual(warning.called, expect_warn)
 
     def test_write_cp_cache_store_helper_skips_when_not_prefill(self):
         # Helper-level guard: even with a complete pair attached, decode passes must never

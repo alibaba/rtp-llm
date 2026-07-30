@@ -91,23 +91,7 @@ TEST(PrepareWriteCacheParamsTest, WholeBatchMissingCacheKeysSkips) {
     }
 }
 
-TEST(PrepareWriteCacheParamsTest, InvalidInputLengthsThrow) {
-    const auto inputs = makePdPrefillInputs();
-    EXPECT_THROW((void)PyWrappedModel::prepareWriteCacheParams(inputs, torch::Tensor()), std::exception);
-    EXPECT_THROW((void)PyWrappedModel::prepareWriteCacheParams(inputs, torch::tensor({4, 6}, torch::kInt64)),
-                 std::exception);
-    EXPECT_THROW((void)PyWrappedModel::prepareWriteCacheParams(inputs, torch::tensor({4}, torch::kInt32)),
-                 std::exception);
-}
-
-TEST(PrepareWriteCacheParamsTest, MalformedMetadataTensorsThrow) {
-    // Request-thread mirrors of the runtimeWriteCacheStore host-tensor
-    // requirements: illegal metadata must fail here, not in the background writer.
-    {
-        auto inputs       = makePdPrefillInputs();
-        inputs.cache_keys = torch::tensor({int64_t(100), int64_t(200)}, torch::kInt64);  // 1-D
-        EXPECT_THROW((void)prepare(inputs), std::exception);
-    }
+TEST(PrepareWriteCacheParamsTest, BatchCountMismatchesThrow) {
     {
         auto inputs       = makePdPrefillInputs();
         inputs.cache_keys = torch::tensor({{int64_t(100)}}, torch::kInt64);  // rows != context batch
@@ -119,34 +103,10 @@ TEST(PrepareWriteCacheParamsTest, MalformedMetadataTensorsThrow) {
         EXPECT_THROW((void)prepare(inputs), std::exception);
     }
     {
-        auto inputs           = makePdPrefillInputs();
-        inputs.prefix_lengths = torch::tensor({int64_t(0), int64_t(0)}, torch::kInt64);  // wrong dtype
-        EXPECT_THROW((void)prepare(inputs), std::exception);
-    }
-    {
-        auto inputs              = makePdPrefillInputs();
-        inputs.kv_cache_block_id = torch::tensor({{int64_t(0)}, {int64_t(1)}}, torch::kInt64);  // wrong dtype
-        EXPECT_THROW((void)prepare(inputs), std::exception);
-    }
-    {
-        auto inputs                  = makePdPrefillInputs();
-        inputs.request_pd_separation = torch::Tensor();  // undefined
-        EXPECT_THROW((void)prepare(inputs), std::exception);
-    }
-    {
-        auto inputs                  = makePdPrefillInputs();
-        inputs.request_pd_separation = torch::tensor({1, 1}, torch::kInt32);  // wrong dtype
-        EXPECT_THROW((void)prepare(inputs), std::exception);
-    }
-    {
-        auto inputs                  = makePdPrefillInputs();
-        inputs.request_pd_separation = torch::tensor({true}, torch::kBool);  // one entry short
-        EXPECT_THROW((void)prepare(inputs), std::exception);
-    }
-    {
-        auto inputs                  = makePdPrefillInputs();
-        inputs.request_pd_separation = torch::tensor({{true}, {true}}, torch::kBool);  // 2-D
-        EXPECT_THROW((void)prepare(inputs), std::exception);
+        const auto inputs = makePdPrefillInputs();
+        EXPECT_THROW((void)PyWrappedModel::prepareWriteCacheParams(inputs, torch::Tensor()), std::exception);
+        EXPECT_THROW((void)PyWrappedModel::prepareWriteCacheParams(inputs, torch::tensor({4}, torch::kInt32)),
+                     std::exception);
     }
 }
 

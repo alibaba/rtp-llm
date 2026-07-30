@@ -79,8 +79,8 @@ cc_test_wrapper(
     }),
     copts = test_copts,
     exec_properties = select({
-        "@//:using_cuda": {"gpu": "H20", "gpu_count": "2"},
-        "@//:using_rocm": {"gpu": "MI308X-ROCM7", "gpu_count": "2"},
+        "@//:using_cuda": {"gpu": "H20"},
+        "@//:using_rocm": {"gpu": "MI308X-ROCM7"},
         "//conditions:default": {},
     }),
 )

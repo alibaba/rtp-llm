@@ -42,8 +42,6 @@ private:
     // via -fno-access-control.
     void submit(std::function<void()> task);
     void enqueueLocked(std::function<void()> task);
-    // Creates the worker pool on first use. state_mutex_ must be held.
-    void ensureThreadPoolLocked();
 
     class PendingTaskGuard {
     public:

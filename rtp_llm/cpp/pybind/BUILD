@@ -66,8 +66,8 @@ cc_library(
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         "//rtp_llm/models_py/bindings/core:exec_ops_hdr",
-        # internal_source/rtp_llm/cpp/BUILD relies on //:rtp_compute_ops for these
-        # instead of declaring them; removing them breaks that build.
+        # This target's dep graph is what //:rtp_compute_ops consumers see;
+        # internal_source/rtp_llm/cpp/BUILD reaches these through it.
         "@havenask//aios/autil:base64",
         "@havenask//aios/autil:zlib",
     ] + torch_deps() + select_py_bindings() + select({

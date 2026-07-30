@@ -135,6 +135,9 @@ class CPFlashInferImpl(FMHAImplBase):
         # Create implementations
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
 
+        assert (
+            parallelism_config is not None
+        ), "CPFlashInferImpl requires a parallelism_config with prefill_cp_config"
         method = parallelism_config.prefill_cp_config.method
         self.fmha_impl = impl_map[method](attn_configs, attn_inputs, parallelism_config)
         self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQKVOut(attn_configs)
