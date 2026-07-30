@@ -392,8 +392,8 @@ absl::StatusOr<SamplerInputs> MtpBatchStreamProcessor::gatherSpecSamplerInput(
         copyScoreSamplerTokenIds(
             sampler_inputs.token_ids, complete_token_ids, batch_idx, static_cast<int64_t>(score_len), seq_len);
         batch_idx += static_cast<int64_t>(score_len);
-        RTP_LLM_LOG_DEBUG("stream [%s], sampler inputs token ids = [%s]",
-                          stream->streamLogTag().c_str(),
+        RTP_LLM_LOG_DEBUG("stream [%ld], sampler inputs token ids = [%s]",
+                          stream->streamId(),
                           tensorDebugStringWithData<int32_t>(sampler_inputs.token_ids).c_str());
     }
 
