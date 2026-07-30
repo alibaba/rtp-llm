@@ -437,7 +437,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
             cp_rank,
             cp_size);
         for (const auto& pair : block_plan) {
-            addBlock(pair.key_index, pair.offset_index);
+            addBlock(pair.cache_key_index, pair.block_table_index);
         }
 
         auto storeCallback = [layer_id = layer_kv.layer_id,
