@@ -26,15 +26,26 @@ environment: CPython 3.10, PyTorch 2.11.0+cu130, CUDA 13.0 and L20D/B300
 installed into an isolated runtime overlay; they do not change RTP's shared
 Bazel/Python dependency set.
 
-## One command
+## One command per KDA communication backend
 
 Run inside the CUDA13 `lhc_GPU` container as `luohaocheng.lhc`:
 
 ```bash
 cd /path/to/RTP-LLM
 CHECKPOINT_PATH=/data0/luohaocheng.lhc/Kimi-K3-4layers-preflight \
+KIMI_K3_KDA_COMM_BACKEND=rs_ag \
+  ./example/kimi_k3_prefill_perf/run_64k_timeline.sh
+
+CHECKPOINT_PATH=/data0/luohaocheng.lhc/Kimi-K3-4layers-preflight \
+KIMI_K3_KDA_COMM_BACKEND=a2a \
   ./example/kimi_k3_prefill_perf/run_64k_timeline.sh
 ```
+
+`rs_ag` is the safe default.  `a2a` is deliberately restricted to four-layer
+Prefill TP8/EP8 experiments: it pre-packs replicated KDA projection weights,
+uses SP→TP and TP→SP AllToAll around FlashKDA, and keeps only the low-rank
+forget-gate AllGather.  A startup memory guard includes an 8 GiB safety margin
+and rejects a full-model A2A configuration before weight replication.
 
 The inner `github-opensource` checkout still uses RTP-LLM's normal outer-repo
 layout: its `stub_source -> ../internal_source` link must resolve before Bazel
@@ -73,7 +84,10 @@ To rebuild from source:
 This clones the pinned FlashKDA, internal cuLA and DeepGEMM revisions,
 initializes their submodules, builds the patched FLA runtime, reuses cuLA's
 validated SM103 binary through its guarded prebuilt-wheel script, applies
-`patches/deepgemm_cuda13_float_nttp.patch`, and builds all operator wheels.
+`patches/deepgemm_cuda13_float_nttp.patch` and the cuLA dynamic checkpoint
+pointer fix, and builds all operator wheels.  The cuLA patch preserves the
+kernel math while making FP32 page-boundary state publication valid for
+CUTLASS DSL dynamic indices.
 
 ## Scope
 

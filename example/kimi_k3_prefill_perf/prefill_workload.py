@@ -92,22 +92,42 @@ def run_prefill(base_url: str, ids: list[int], timeout: int) -> tuple[float, lis
     return elapsed, [int(token_id) for token_id in output_ids]
 
 
-def warmup_converged(samples: list[float]) -> bool:
-    if len(samples) < 3:
+def warmup_converged(
+    samples: list[float],
+    *,
+    minimum: int,
+    window: int,
+    tolerance: float,
+) -> bool:
+    if len(samples) < minimum:
         return False
-    recent = samples[-3:]
+    recent = samples[-window:]
     median = statistics.median(recent)
-    return all(abs(value - median) <= median * 0.05 for value in recent)
+    return all(abs(value - median) <= median * tolerance for value in recent)
 
 
 def wait_for_traces(trace_dir: Path, trace_name: str, timeout: int) -> list[str]:
     deadline = time.monotonic() + timeout
-    expected = [trace_dir / f"{trace_name}_wr{rank}_1.json" for rank in range(8)]
     while time.monotonic() < deadline:
-        if all(path.is_file() and path.stat().st_size > 0 for path in expected):
-            return [str(path) for path in expected]
+        matches = [
+            sorted(trace_dir.glob(f"{trace_name}_wr{rank}_*.json"))
+            for rank in range(8)
+        ]
+        if all(
+            len(rank_matches) == 1
+            and rank_matches[0].is_file()
+            and rank_matches[0].stat().st_size > 0
+            for rank_matches in matches
+        ):
+            return [str(rank_matches[0]) for rank_matches in matches]
         time.sleep(2)
-    missing = [str(path) for path in expected if not path.is_file()]
+    missing = [
+        f"{trace_dir}/{trace_name}_wr{rank}_*.json"
+        for rank, rank_matches in enumerate(matches)
+        if len(rank_matches) != 1
+        or not rank_matches[0].is_file()
+        or rank_matches[0].stat().st_size == 0
+    ]
     raise TimeoutError(f"timed out waiting for traces: {missing}")
 
 
@@ -115,17 +135,35 @@ def main() -> None:
     parser = argparse.ArgumentParser()
     parser.add_argument("--base-url", default="http://127.0.0.1:27188")
     parser.add_argument("--length", type=int, default=65536)
+    parser.add_argument(
+        "--kda-comm-backend",
+        choices=("rs_ag", "a2a"),
+        default="rs_ag",
+    )
     parser.add_argument("--timeout", type=int, default=14400)
-    parser.add_argument("--max-warmups", type=int, default=6)
     parser.add_argument("--backend", choices=("cula", "flash_kda"), default="cula")
+    parser.add_argument("--min-warmups", type=int, default=10)
+    parser.add_argument("--max-warmups", type=int, default=20)
+    parser.add_argument("--stability-window", type=int, default=5)
+    parser.add_argument("--stability-percent", type=float, default=3.0)
+    parser.add_argument("--profile-repeats", type=int, default=1)
     parser.add_argument("--output-dir", type=Path, required=True)
     parser.add_argument("--trace-dir", type=Path, required=True)
     args = parser.parse_args()
 
     if args.length % 8:
         raise ValueError("Sequence Parallel performance input must be divisible by 8")
-    if args.max_warmups < 3:
-        raise ValueError("--max-warmups must be at least 3")
+    if args.min_warmups < 10:
+        raise ValueError("--min-warmups must be at least 10")
+    if args.max_warmups < args.min_warmups:
+        raise ValueError("--max-warmups must be >= --min-warmups")
+    if not 3 <= args.stability_window <= args.min_warmups:
+        raise ValueError("--stability-window must be in [3, min-warmups]")
+    if not 0.0 < args.stability_percent <= 5.0:
+        raise ValueError("--stability-percent must be in (0, 5]")
+    if args.profile_repeats < 1:
+        raise ValueError("--profile-repeats must be positive")
+    stability_tolerance = args.stability_percent / 100.0
 
     args.output_dir.mkdir(parents=True, exist_ok=True)
     args.trace_dir.mkdir(parents=True, exist_ok=True)
@@ -137,12 +175,18 @@ def main() -> None:
         "max_new_tokens": 1,
         "ignore_eos": True,
         "reuse_cache": False,
+        "kda_backend": args.backend,
+        "kda_comm_backend": args.kda_comm_backend,
         "warmup_policy": {
             "materialization_runs": 1,
-            "minimum_full_warmups": 3,
-            "convergence": "last three within median +/-5%",
+            "minimum_full_warmups": args.min_warmups,
+            "convergence": (
+                f"last {args.stability_window} within median "
+                f"+/-{args.stability_percent}%"
+            ),
             "maximum_full_warmups": args.max_warmups,
         },
+        "profile_repeats": args.profile_repeats,
     }
 
     print(f"[materialize] length={args.length}", flush=True)
@@ -159,36 +203,76 @@ def main() -> None:
             f"[warmup] iteration={iteration} elapsed={elapsed:.6f}s output={output}",
             flush=True,
         )
-        if warmup_converged(warmups):
+        if warmup_converged(
+            warmups,
+            minimum=args.min_warmups,
+            window=args.stability_window,
+            tolerance=stability_tolerance,
+        ):
             break
-    if not warmup_converged(warmups):
+    if not warmup_converged(
+        warmups,
+        minimum=args.min_warmups,
+        window=args.stability_window,
+        tolerance=stability_tolerance,
+    ):
         raise RuntimeError(f"representative 64K warmup did not converge: {warmups}")
     manifest["warmup_seconds"] = warmups
     manifest["warmup_count"] = len(warmups)
 
-    trace_name = f"k3_sp_{args.backend}_mega_prefill_{args.length}"
+    trace_name = (
+        f"k3_{args.kda_comm_backend}_{args.backend}_mega_prefill_"
+        f"{args.length}_steady"
+    )
+    # Keep Kineto alive for one profiler warmup plus the measured request.
+    # The first profiled request is deliberately excluded: it absorbs
+    # profiler startup and per-rank annotation initialization.  Capturing
+    # multiple measured 64K requests in one Kineto session can itself fill
+    # trace buffers unevenly and make later collectives look imbalanced.
     profile_response = post_json(
         args.base_url.rstrip("/") + "/start_profile",
         {
             "gen_timeline": True,
             "trace_name": trace_name,
             "start_step": 0,
-            "num_steps": 1,
+            "num_steps": args.profile_repeats + 1,
             "enable_all_rank": True,
         },
         60,
     )
-    manifest["profile_arm_response"] = profile_response
     print(f"[profile-arm] {profile_response}", flush=True)
     time.sleep(2)
 
     elapsed, output = run_prefill(args.base_url, ids, args.timeout)
-    manifest["profile_seconds"] = elapsed
-    manifest["profile_output_ids"] = output
-    manifest["trace_name"] = trace_name
-    print(f"[profile] elapsed={elapsed:.6f}s output={output}", flush=True)
+    profile_warmup = {
+        "seconds": elapsed,
+        "output_ids": output,
+        "excluded_from_measurement": True,
+    }
+    print(
+        f"[profile-warmup] elapsed={elapsed:.6f}s output={output}",
+        flush=True,
+    )
 
-    manifest["trace_files"] = wait_for_traces(args.trace_dir, trace_name, 600)
+    profiles: list[dict] = []
+    for repeat in range(1, args.profile_repeats + 1):
+        elapsed, output = run_prefill(args.base_url, ids, args.timeout)
+        print(
+            f"[profile] repeat={repeat} elapsed={elapsed:.6f}s output={output}",
+            flush=True,
+        )
+        profiles.append(
+            {
+                "repeat": repeat,
+                "seconds": elapsed,
+                "output_ids": output,
+            }
+        )
+    trace_files = wait_for_traces(args.trace_dir, trace_name, 600)
+    manifest["profile_trace_name"] = trace_name
+    manifest["profile_trace_files"] = trace_files
+    manifest["profile_warmup"] = profile_warmup
+    manifest["profiles"] = profiles
     output_path = args.output_dir / "run.json"
     output_path.write_text(json.dumps(manifest, indent=2), encoding="utf-8")
     print(json.dumps(manifest, indent=2), flush=True)

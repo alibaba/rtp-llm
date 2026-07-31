@@ -24,9 +24,10 @@ repo_root="$(cd -- "${script_dir}/../.." && pwd)"
 python_bin="${PYTHON_BIN:-/opt/conda310/bin/python3}"
 checkpoint="${CHECKPOINT_PATH:-/data0/luohaocheng.lhc/Kimi-K3-4layers-preflight}"
 start_port="${START_PORT:-27188}"
+kda_comm_backend="${KIMI_K3_KDA_COMM_BACKEND:-rs_ag}"
 timestamp="$(date +%Y%m%d-%H%M%S)"
 kda_backend="${KIMI_K3_KDA_BACKEND:-cula}"
-run_root="${RUN_ROOT:-${HOME}/kimi_k3_perf_runs/${timestamp}-k3-sp-${kda_backend}-mega-64k}"
+run_root="${RUN_ROOT:-${HOME}/kimi_k3_perf_runs/${timestamp}-k3-${kda_comm_backend}-${kda_backend}-mega-64k}"
 ops_overlay="${run_root}/runtime/ops"
 server_log="${run_root}/launcher.log"
 server_target="//example/kimi_k3_prefill_perf:kimi_k3_prefill_server"
@@ -66,6 +67,10 @@ if [[ ! -f "${repo_root}/deps/http.bzl" ]]; then
 fi
 if [[ ! -f "${checkpoint}/config.json" ]]; then
   echo "4-layer checkpoint not found: ${checkpoint}" >&2
+  exit 2
+fi
+if [[ "${kda_comm_backend}" != "rs_ag" && "${kda_comm_backend}" != "a2a" ]]; then
+  echo "KIMI_K3_KDA_COMM_BACKEND must be rs_ag or a2a" >&2
   exit 2
 fi
 if curl --silent --fail "http://127.0.0.1:${start_port}/health" >/dev/null 2>&1; then
@@ -140,8 +145,26 @@ if [[ -n "${KIMI_K3_BAZEL_OUTPUT_BASE:-}" ]]; then
   mkdir -p "${KIMI_K3_BAZEL_OUTPUT_BASE}"
   bazel_startup_args+=("--output_base=${KIMI_K3_BAZEL_OUTPUT_BASE}")
 fi
+bazel_build_args=("--config=cuda13" "--config=sm10x")
+if [[ -n "${KIMI_K3_XGRAMMAR_OVERRIDE:-}" ]]; then
+  if [[ ! -d "${KIMI_K3_XGRAMMAR_OVERRIDE}" ]]; then
+    echo "xgrammar override not found: ${KIMI_K3_XGRAMMAR_OVERRIDE}" >&2
+    exit 2
+  fi
+  bazel_build_args+=(
+    "--override_repository=xgrammar=${KIMI_K3_XGRAMMAR_OVERRIDE}"
+  )
+fi
 bazelisk "${bazel_startup_args[@]}" \
-  build --config=cuda13 --config=sm10x "${server_target}"
+  build "${bazel_build_args[@]}" "${server_target}"
+
+model_source="${repo_root}/rtp_llm/models_py/model_desc/kimi_k3.py"
+model_runfile="${repo_root}/bazel-bin/example/kimi_k3_prefill_perf/kimi_k3_prefill_server.runfiles/rtp_llm/rtp_llm/models_py/model_desc/kimi_k3.py"
+if [[ ! -f "${model_runfile}" ]] || ! cmp --silent "${model_source}" "${model_runfile}"; then
+  echo "Bazel runfiles do not match this checkout; refusing mislabeled profiling" >&2
+  sha256sum "${model_source}" "${model_runfile}" 2>/dev/null || true
+  exit 2
+fi
 
 if git rev-parse --is-inside-work-tree >/dev/null 2>&1; then
   git rev-parse HEAD >"${run_root}/snapshots/git_head.txt"
@@ -162,6 +185,7 @@ export CHECKPOINT_PATH="${checkpoint}"
 export START_PORT="${start_port}"
 export PYTHON_BIN="${python_bin}"
 export KIMI_K3_KDA_BACKEND="${kda_backend}"
+export KIMI_K3_KDA_COMM_BACKEND="${kda_comm_backend}"
 
 setsid "${script_dir}/launch_prefill_server.sh" >"${server_log}" 2>&1 &
 server_pid=$!
@@ -187,13 +211,14 @@ echo "[service] healthy on port ${start_port}"
   --base-url "http://127.0.0.1:${start_port}" \
   --length 65536 \
   --backend "${kda_backend}" \
+  --kda-comm-backend "${kda_comm_backend}" \
   --output-dir "${run_root}/measurements" \
   --trace-dir "${run_root}/traces" \
   | tee "${run_root}/measurements/console.log"
 
 nvidia-smi -q >"${run_root}/snapshots/nvidia_smi_after.txt"
 echo "[done] run_root=${run_root}"
-echo "[done] rank0_trace=${run_root}/traces/k3_sp_${kda_backend}_mega_prefill_65536_wr0_1.json"
+echo "[done] rank0_trace=${run_root}/traces/k3_${kda_comm_backend}_${kda_backend}_mega_prefill_65536_steady_wr0_1.json"
 
 if [[ "${KEEP_SERVER:-0}" == "1" ]]; then
   trap - EXIT INT TERM
