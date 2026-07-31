@@ -34,12 +34,6 @@ cc_library(
         ":fuse_copy_op",
         "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/models_py/bindings/common/kernels:fuse_copy_kernel",
-        # Not used by this package's own srcs. The internal PPU register library compiles
-        # //rtp_llm/models_py/bindings/core:exec_ops_srcs (ExecOps.cc) directly in its own
-        # srcs and picks up that source's compile deps through this target. A filegroup
-        # carries no deps, so DevicePin.h -- which ExecOps.cc includes for cudaPreRun() --
-        # has to be supplied here.
-        "//rtp_llm/cpp/utils:device_pin",
     ] + torch_deps() + select({
         "//:using_cuda": [
             "//rtp_llm/models_py/bindings/common/kernels:kernels_cu",

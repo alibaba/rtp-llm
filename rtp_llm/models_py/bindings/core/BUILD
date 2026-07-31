@@ -116,7 +116,6 @@ _EXEC_OPS_COMMON_DEPS = [
     "//rtp_llm/cpp/models/models_weight:weights_define",
     "//rtp_llm/cpp/cache:cache_group_type",
     "//rtp_llm/cpp/utils:core_utils",
-    "//rtp_llm/cpp/utils:device_pin",
     "//rtp_llm/cpp/utils:error_code",
     "//rtp_llm/cpp/pybind:th_utils",
     "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",

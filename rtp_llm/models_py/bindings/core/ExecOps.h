@@ -44,7 +44,6 @@ int64_t getDeviceId();
 void runtimeSyncAndCheck();
 void cudaSyncAndCheck();
 void cudaCheckLastError();
-void cudaPreRun(int device_id);
 
 // ===================================================================
 // Config accessors (set once during initRuntime)

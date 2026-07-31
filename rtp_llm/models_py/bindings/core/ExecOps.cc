@@ -8,7 +8,6 @@
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/StackTrace.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/ErrorCodeUtil.h"
 #include "autil/StackTracer.h"
@@ -528,10 +527,6 @@ void cudaCheckLastError() {
         RTP_LLM_LOG_ERROR("ROCm error: %s", hipGetErrorString(err));
     }
 #endif
-}
-
-void cudaPreRun(int device_id) {
-    setCurrentThreadDevice(device_id);
 }
 
 // ============================================================
