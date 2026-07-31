@@ -323,6 +323,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequestForMla(
             }
         }
     }
+    request.set_reuse_block_size(load_context.reuse_block_size);
     request.set_timeout_ms(load_context.timeout_ms);
     return request;
 }
@@ -385,6 +386,7 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
             }
         }
     }
+    request.set_reuse_block_size(load_context.reuse_block_size);
     request.set_timeout_ms(load_context.timeout_ms);
     return request;
 }
