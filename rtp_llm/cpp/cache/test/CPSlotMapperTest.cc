@@ -123,6 +123,43 @@ TEST_F(CPSlotMapperTest, NonShardedPassthrough) {
     EXPECT_EQ(mapper.effectiveSeqLenForAlloc(10), 10);
 }
 
+TEST_F(CPSlotMapperTest, BuildStorePlanNormalMappingKeepsLogicalIndices) {
+    CPSlotMapper     mapper(0, 2, 4);
+    CacheGroupPolicy policy = defaultCacheGroupPolicy(CacheGroupType::LINEAR);
+    policy.cp_mapping       = CpBlockMappingMode::NONE;
+
+    const auto plan = mapper.buildStorePlan(policy,
+                                            /*total_logical_blocks=*/5,
+                                            /*reuse_block_size=*/2,
+                                            /*use_hybrid=*/false);
+
+    ASSERT_EQ(plan.size(), 3);
+    EXPECT_EQ(plan[0].cache_key_index, 2);
+    EXPECT_EQ(plan[0].block_table_index, 2);
+    EXPECT_EQ(plan[1].cache_key_index, 3);
+    EXPECT_EQ(plan[1].block_table_index, 3);
+    EXPECT_EQ(plan[2].cache_key_index, 4);
+    EXPECT_EQ(plan[2].block_table_index, 4);
+}
+
+TEST_F(CPSlotMapperTest, BuildStorePlanRoundRobinMapsToRankLocalIndices) {
+    CPSlotMapper     mapper(/*cp_rank=*/1, /*cp_size=*/2, /*block_size=*/4);
+    CacheGroupPolicy policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
+
+    const auto plan = mapper.buildStorePlan(policy,
+                                            /*total_logical_blocks=*/6,
+                                            /*reuse_block_size=*/0,
+                                            /*use_hybrid=*/false);
+
+    ASSERT_EQ(plan.size(), 3);
+    EXPECT_EQ(plan[0].cache_key_index, 1);
+    EXPECT_EQ(plan[0].block_table_index, 0);
+    EXPECT_EQ(plan[1].cache_key_index, 3);
+    EXPECT_EQ(plan[1].block_table_index, 1);
+    EXPECT_EQ(plan[2].cache_key_index, 5);
+    EXPECT_EQ(plan[2].block_table_index, 2);
+}
+
 TEST_F(CPSlotMapperTest, BuildStorePlanUsesPolicyActiveTailBlocks) {
     CPSlotMapper mapper(0, 2, 4);
 
