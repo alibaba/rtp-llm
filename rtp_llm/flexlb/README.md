@@ -1,8 +1,8 @@
 # FlexLB - Intelligent Load Balancer for AI Model Inference
 
 [![License](https://img.shields.io/badge/License-Apache%202.0-blue.svg)](https://opensource.org/licenses/Apache-2.0)
-[![Java](https://img.shields.io/badge/Java-8+-red.svg)](https://www.oracle.com/java/)
-[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-2.7.1-brightgreen.svg)](https://spring.io/projects/spring-boot)
+[![Java](https://img.shields.io/badge/Java-21-red.svg)](https://openjdk.org/projects/jdk/21/)
+[![Spring Boot](https://img.shields.io/badge/Spring%20Boot-2.7.18-brightgreen.svg)](https://spring.io/projects/spring-boot)
 
 FlexLB is a high-performance, intelligent load balancer specifically designed for AI model inference workloads. It provides advanced load balancing strategies, request batching, caching mechanisms, and automatic failover to optimize the performance and reliability of AI service deployments.
 
@@ -30,45 +30,17 @@ FlexLB consists of four main modules:
 
 ### Prerequisites
 
-- Java 8 or higher
-- Maven 3.6+ (optional, project includes Maven Wrapper)
+- Java 21 (matches `java.version` in `pom.xml`; see `.sdkmanrc` for the recommended distribution)
 - ZooKeeper (optional, for master election)
+
+The project includes the Maven Wrapper (`./mvnw` on Unix/Linux/macOS, `mvnw.cmd` on Windows), so no separate Maven installation is required.
 
 ### Build
 
-This project includes Maven Wrapper, so you don't need to install Maven separately.
+See [AGENTS.md](AGENTS.md) for the full, authoritative list of build and test commands. The most common one:
 
-#### Using Maven Wrapper (Recommended)
-
-**Unix/Linux/macOS:**
 ```bash
 ./mvnw clean package -DskipTests
-```
-
-**Windows:**
-```bash
-mvnw.cmd clean package -DskipTests
-```
-
-#### Using System Maven
-```bash
-mvn clean package -DskipTests
-```
-
-#### Maven Wrapper Benefits
-- **Environment Consistency**: Ensures all developers use the same Maven version
-- **Simplified CI/CD**: No need to pre-install Maven in build environments
-- **Version Lock**: Project specifies the exact Maven version, avoiding compatibility issues
-
-#### Maven Wrapper Files
-The following Maven Wrapper files are included in the project (do not delete):
-```
-├── mvnw              # Unix/Linux/macOS script
-├── mvnw.cmd          # Windows script
-└── .mvn/
-    └── wrapper/
-        ├── maven-wrapper.jar        # Core Maven Wrapper JAR
-        └── maven-wrapper.properties # Configuration file
 ```
 
 ### Configuration
