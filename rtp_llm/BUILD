@@ -31,7 +31,12 @@ flashinfer_with_cache = [
     "flashinfer-python",
     "flashinfer-cubin",
     "nvidia-cutlass-dsl",
-    "flashinfer-jit-cache"
+    "flashinfer-jit-cache",
+]
+
+fa4 = [
+    "quack-kernels",
+    "torch-c-dlpack-ext",
 ]
 
 flashmla = [
@@ -135,13 +140,36 @@ requirement([
     "aiter",
     "fastsafetensors",
     "pybind11_stubgen",
-] + deep + flashinfer_with_cache + flashmla + rtp_kernel + flashattn)
+] + deep + flashinfer_with_cache + fa4 + flashmla + rtp_kernel + flashattn)
 
 
 py_library(
     name = "empty_target",
     srcs = [],
     deps = [],
+    visibility = ["//visibility:public"],
+)
+
+py_library(
+    name = "fa4_cute",
+    srcs = glob([
+        "third_party/vllm_flash_attention/**/*.py",
+    ]),
+    data = [
+        "third_party/vllm_flash_attention/AUTHORS",
+        "third_party/vllm_flash_attention/LICENSE",
+    ],
+    deps = select({
+        "@//:using_cuda12_9_x86": [
+            ":apache-tvm-ffi",
+            ":einops",
+            ":nvidia-cutlass-dsl",
+            ":quack-kernels",
+            ":torch",
+            ":torch-c-dlpack-ext",
+        ],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )
 

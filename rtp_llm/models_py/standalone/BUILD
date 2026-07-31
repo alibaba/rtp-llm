@@ -29,6 +29,10 @@ flashinfer_with_cache = [
     "//rtp_llm:nvidia-cutlass-dsl",
 ]
 
+fa4 = [
+    "//rtp_llm:fa4_cute",
+]
+
 flashmla = [
     "//rtp_llm:fast-hadamard-transform",
     "//rtp_llm:flash-mla",
@@ -82,7 +86,7 @@ py_library(
         ],
         "//conditions:default": [],
     }) + select({
-        "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
+        "@//:using_cuda12_9_x86": flashinfer_with_cache + fa4 + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache,
         "@//:cuda_pre_12_9": flashinfer,
         "//conditions:default": []

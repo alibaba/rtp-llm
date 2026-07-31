@@ -10,6 +10,10 @@ flashinfer_deps = [
     "//rtp_llm:flashinfer-python",
 ]
 
+fa4_deps = [
+    "//rtp_llm:fa4_cute",
+]
+
 # Library for attention reference implementation
 py_library(
     name = "atten_test_util",
@@ -32,6 +36,19 @@ py_test (
     env = {"GPU_COUNT": "1"},
     tags = ["open_skip", "SM100_ARM"],
     exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'}
+)
+
+py_test(
+    name = "test_py_flash_attn_v4",
+    srcs = ["test_py_flash_attn_v4.py"],
+    deps = py_test_deps + select({
+        "@//:using_cuda12_9_x86": fa4_deps,
+        "//conditions:default": [],
+    }),
+    tags = ["H20", "cuda12_9"],
+    exec_properties = {
+        "gpu": "H20",
+    },
 )
 
 # Test for PyFlashinferDecodeAttnOp decode attention implementation

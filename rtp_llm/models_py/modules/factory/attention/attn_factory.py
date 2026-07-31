@@ -115,6 +115,8 @@ def _is_fmha_impl_disabled(
         return not fmha_config.enable_flashinfer_trt_fmha_v2
     elif impl_class_name == "FlashInferTRTLLMFMHAv2PagedPrefillImpl":
         return not fmha_config.enable_paged_flashinfer_trt_fmha_v2
+    elif impl_class_name == "FlashAttn4TargetVerifyImpl":
+        return not fmha_config.enable_paged_open_source_fmha
     # FlashInfer TRT-LLM Gen implementations (SM100)
     elif impl_class_name in FLASHINFER_TRTLLM_GEN_IMPLS:
         return not fmha_config.enable_flashinfer_trtllm_gen
