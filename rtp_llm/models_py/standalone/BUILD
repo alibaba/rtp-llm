@@ -18,10 +18,6 @@ py_library(
     visibility = ["//visibility:public"],
 )
 
-flashinfer = [
-    "//rtp_llm:flashinfer-python",
-]
-
 flashinfer_with_cache = [
     "//rtp_llm:flashinfer-python",
     "//rtp_llm:flashinfer-cubin",

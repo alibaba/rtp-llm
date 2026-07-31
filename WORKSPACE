@@ -48,7 +48,7 @@ pip_deps()
 
 # COMPATIBILITY ALIAS: pip_ppu_torch resolves to the same cuda12_9 lockfile.
 # Kept for downstream BUILD files still referencing @pip_ppu_torch//...
-# TODO: Remove once all consumers migrate to @pip_gpu_cuda12_9_torch
+# TODO(pip_unify): remove after internal consumers migrate to @pip_gpu_cuda12_9_torch
 load("@pip_ppu_torch//:requirements.bzl", pip_ppu_torch_install_deps = "install_deps")
 pip_ppu_torch_install_deps()
 
@@ -57,7 +57,7 @@ pip_gpu_cuda12_9_torch_install_deps()
 
 # COMPATIBILITY ALIAS: pip_gpu_cuda12_torch resolves to the same cuda12_9 lockfile.
 # Kept for downstream BUILD files still referencing @pip_gpu_cuda12_torch//...
-# TODO: Remove once all consumers migrate to @pip_gpu_cuda12_9_torch
+# TODO(pip_unify): remove after internal consumers migrate to @pip_gpu_cuda12_9_torch
 load("@pip_gpu_cuda12_torch//:requirements.bzl", pip_gpu_cuda12_torch_install_deps = "install_deps")
 pip_gpu_cuda12_torch_install_deps()
 
