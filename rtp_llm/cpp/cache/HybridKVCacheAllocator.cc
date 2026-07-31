@@ -135,7 +135,7 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
     match_result.async_context.reset();
     const std::function<int()> fail_match = [&]() {
         load_context.reset();
-        std::vector<MultiNodeResource> matched_resources = std::move(match_result.matched_resources);
+        std::vector<MultiNodeResource> matched_resources = std::move(match_result.matched_device_resources);
         block_tree_cache_->releaseMatchedResources(matched_resources);
         return -1;
     };
@@ -145,12 +145,12 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
     if (!preflightLoadMappings(load_context)) {
         return fail_match();
     }
-    const int ready_reuse_blocks                           = static_cast<int>(match_result.matched_blocks);
+    const int ready_reuse_blocks                           = static_cast<int>(match_result.matched_device_blocks);
     const int logical_reuse_blocks                         = load_context != nullptr && !load_context->empty() ?
                                                                  static_cast<int>(load_context->logicalMatchedBlocks()) :
                                                                  ready_reuse_blocks;
     const std::function<BlockIndicesType(int)> groupBlocks = [&](int group_id) {
-        return block_tree_cache_->matchedBlocksForGroup(static_cast<size_t>(group_id), match_result.matched_resources);
+        return block_tree_cache_->matchedBlocksForGroup(static_cast<size_t>(group_id), match_result.matched_device_resources);
     };
 
     for (int group_id : full_group_ids_) {
@@ -245,7 +245,7 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
             referenced_blocks[static_cast<size_t>(group_id)] = std::move(valid);
         }
     }
-    block_tree_cache_->releaseMatchedResources(match_result.matched_resources);
+    block_tree_cache_->releaseMatchedResources(match_result.matched_device_resources);
     return logical_reuse_blocks;
 }
 

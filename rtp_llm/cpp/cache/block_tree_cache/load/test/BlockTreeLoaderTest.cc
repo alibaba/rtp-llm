@@ -33,12 +33,12 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
     ASSERT_TRUE(environment->allResourcesAtTier(Tier::HOST));
 
     BlockTreeMatchResult result = environment->cache->match(environment->keys);
-    EXPECT_EQ(result.matched_blocks, 0u);
+    EXPECT_EQ(result.matched_device_blocks, 0u);
     std::shared_ptr<LoadAsyncContext> load_context = std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
     ASSERT_NE(load_context, nullptr);
-    EXPECT_EQ(result.load_blocks, 2u);
-    EXPECT_EQ(result.host_load_blocks, 2u);
-    EXPECT_EQ(result.disk_load_blocks, 0u);
+    EXPECT_EQ(load_context->logicalMatchedBlocks(), 1u);
+    EXPECT_EQ(load_context->logicalMatchedBlocks(Tier::HOST), 1u);
+    EXPECT_EQ(load_context->logicalMatchedBlocks(Tier::DISK), 0u);
 
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> request_targets;
     for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {

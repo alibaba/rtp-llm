@@ -713,10 +713,10 @@ TEST_F(BlockTreeCacheFactoryTest, CompatibleInsertPacksOneGroupSetResourceInGrou
     const auto blocks = insertOneKeyThroughAllocator(config, allocator, /*key=*/700);
 
     auto match = cache->match(CacheKeysType{700});
-    ASSERT_EQ(match.matched_blocks, 1u);
-    ASSERT_EQ(cache->matchedBlocksForGroup(0, match.matched_resources), (BlockIndicesType{blocks[0]}));
-    ASSERT_EQ(cache->matchedBlocksForGroup(1, match.matched_resources), (BlockIndicesType{blocks[1]}));
-    cache->releaseMatchedResources(match.matched_resources);
+    ASSERT_EQ(match.matched_device_blocks, 1u);
+    ASSERT_EQ(cache->matchedBlocksForGroup(0, match.matched_device_resources), (BlockIndicesType{blocks[0]}));
+    ASSERT_EQ(cache->matchedBlocksForGroup(1, match.matched_device_resources), (BlockIndicesType{blocks[1]}));
+    cache->releaseMatchedResources(match.matched_device_resources);
 
     BlockReleaseBatch releases;
     releaseInsertedRequestBlocks(allocator, blocks, releases);
@@ -774,13 +774,13 @@ TEST_F(BlockTreeCacheFactoryTest, MiddleDisabledGroupIsExcludedWithoutShiftingRe
 
     const auto blocks = insertOneKeyThroughAllocator(config, allocator, /*key=*/701);
     auto       match  = cache->match(CacheKeysType{701});
-    ASSERT_EQ(match.matched_blocks, 1u);
-    EXPECT_TRUE(cache->matchedBlocksForGroup(1, match.matched_resources).empty());
+    ASSERT_EQ(match.matched_device_blocks, 1u);
+    EXPECT_TRUE(cache->matchedBlocksForGroup(1, match.matched_device_resources).empty());
     for (const size_t group_id : {0u, 2u}) {
-        ASSERT_EQ(cache->matchedBlocksForGroup(group_id, match.matched_resources),
+        ASSERT_EQ(cache->matchedBlocksForGroup(group_id, match.matched_device_resources),
                   (BlockIndicesType{blocks[group_id]}));
     }
-    cache->releaseMatchedResources(match.matched_resources);
+    cache->releaseMatchedResources(match.matched_device_resources);
 
     BlockReleaseBatch releases;
     releaseInsertedRequestBlocks(allocator, blocks, releases);
@@ -901,13 +901,13 @@ TEST_F(BlockTreeCacheFactoryTest, IncompatibleGroupsKeepSeparateGroupSetResource
     ASSERT_EQ(cache->groupSets().size(), 2u);
     const auto blocks = insertOneKeyThroughAllocator(config, allocator, /*key=*/702);
     auto       match  = cache->match(CacheKeysType{702});
-    ASSERT_EQ(match.matched_blocks, 1u);
-    EXPECT_EQ(cache->matchedBlocksForGroup(0, match.matched_resources), (BlockIndicesType{blocks[0]}));
-    EXPECT_EQ(cache->matchedBlocksForGroup(1, match.matched_resources), (BlockIndicesType{blocks[1]}));
+    ASSERT_EQ(match.matched_device_blocks, 1u);
+    EXPECT_EQ(cache->matchedBlocksForGroup(0, match.matched_device_resources), (BlockIndicesType{blocks[0]}));
+    EXPECT_EQ(cache->matchedBlocksForGroup(1, match.matched_device_resources), (BlockIndicesType{blocks[1]}));
     // Each block has one request holder, one tree holder, and one match holder.
     EXPECT_EQ(cache->groupSets()[0]->devicePools()[0]->refCount(blocks[0]), 3u);
     EXPECT_EQ(cache->groupSets()[1]->devicePools()[0]->refCount(blocks[1]), 3u);
-    cache->releaseMatchedResources(match.matched_resources);
+    cache->releaseMatchedResources(match.matched_device_resources);
     // Releasing the match leaves the request and tree holders alive.
     EXPECT_EQ(cache->groupSets()[0]->devicePools()[0]->refCount(blocks[0]), 2u);
     EXPECT_EQ(cache->groupSets()[1]->devicePools()[0]->refCount(blocks[1]), 2u);
@@ -1182,7 +1182,6 @@ TEST_F(BlockTreeCacheFactoryTest, CreatesDiskCacheWithoutMemoryCache) {
     ASSERT_NE(cache, nullptr);
     EXPECT_FALSE(cache->isMemoryCacheEnabled());
     EXPECT_TRUE(cache->isDiskCacheEnabled());
-    EXPECT_TRUE(cache->config().enable_load);
     EXPECT_EQ(cache->config().device_disk_staging_block_count, 4u);
     ASSERT_FALSE(cache->groupSets().empty());
     for (const auto& group_set : cache->groupSets()) {

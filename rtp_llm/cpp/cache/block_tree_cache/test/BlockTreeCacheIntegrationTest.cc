@@ -221,30 +221,12 @@ enum class DemotionFailureStage {
     H2DISK,
 };
 
-enum class DisabledLoadTierLayout {
-    HOST_ONLY,
-    DISK_ONLY,
-    HOST_AND_DISK,
-};
-
 std::string tierParamName(const ::testing::TestParamInfo<Tier>& info) {
     return info.param == Tier::HOST ? "Host" : "Disk";
 }
 
 std::string demotionFailureParamName(const ::testing::TestParamInfo<DemotionFailureStage>& info) {
     return info.param == DemotionFailureStage::D2H ? "D2H" : "H2Disk";
-}
-
-std::string disabledLoadTierLayoutName(const ::testing::TestParamInfo<DisabledLoadTierLayout>& info) {
-    switch (info.param) {
-        case DisabledLoadTierLayout::HOST_ONLY:
-            return "HostOnly";
-        case DisabledLoadTierLayout::DISK_ONLY:
-            return "DiskOnly";
-        case DisabledLoadTierLayout::HOST_AND_DISK:
-            return "HostAndDisk";
-    }
-    return "Unknown";
 }
 
 void demoteTo(FullSWAEnvironment& environment, Tier target_tier) {
@@ -257,25 +239,24 @@ void demoteTo(FullSWAEnvironment& environment, Tier target_tier) {
 }
 
 void expectUnpublishedResult(const BlockTreeMatchResult& result) {
-    EXPECT_EQ(result.matched_blocks, 0u);
-    EXPECT_EQ(result.matched_node, nullptr);
-    EXPECT_TRUE(result.matched_resources.empty());
+    EXPECT_EQ(result.matched_device_blocks, 0u);
+    EXPECT_TRUE(result.matched_device_resources.empty());
 }
 
 void expectAggregatedReadyResult(const BlockTreeCache&       cache,
                                  const BlockTreeMatchResult& result,
                                  size_t                      full_blocks,
                                  size_t                      swa_blocks) {
-    EXPECT_EQ(cache.matchedBlocksForGroup(0, result.matched_resources).size(), full_blocks);
-    EXPECT_EQ(cache.matchedBlocksForGroup(1, result.matched_resources).size(), full_blocks);
-    EXPECT_EQ(cache.matchedBlocksForGroup(2, result.matched_resources).size(), swa_blocks);
-    ASSERT_EQ(result.matched_resources.size(), 2u);
-    EXPECT_EQ(result.matched_resources[0].group_set_id, 0);
-    EXPECT_EQ(result.matched_resources[0].tier, Tier::DEVICE);
-    EXPECT_EQ(result.matched_resources[0].node_blocks.size(), full_blocks);
-    EXPECT_EQ(result.matched_resources[1].group_set_id, 1);
-    EXPECT_EQ(result.matched_resources[1].tier, Tier::DEVICE);
-    EXPECT_EQ(result.matched_resources[1].node_blocks.size(), swa_blocks);
+    EXPECT_EQ(cache.matchedBlocksForGroup(0, result.matched_device_resources).size(), full_blocks);
+    EXPECT_EQ(cache.matchedBlocksForGroup(1, result.matched_device_resources).size(), full_blocks);
+    EXPECT_EQ(cache.matchedBlocksForGroup(2, result.matched_device_resources).size(), swa_blocks);
+    ASSERT_EQ(result.matched_device_resources.size(), 2u);
+    EXPECT_EQ(result.matched_device_resources[0].group_set_id, 0);
+    EXPECT_EQ(result.matched_device_resources[0].tier, Tier::DEVICE);
+    EXPECT_EQ(result.matched_device_resources[0].node_blocks.size(), full_blocks);
+    EXPECT_EQ(result.matched_device_resources[1].group_set_id, 1);
+    EXPECT_EQ(result.matched_device_resources[1].tier, Tier::DEVICE);
+    EXPECT_EQ(result.matched_device_resources[1].node_blocks.size(), swa_blocks);
 }
 
 void expectPlanningSourceRefCounts(const FullSWAEnvironment& environment, Tier tier) {
@@ -324,14 +305,14 @@ void runSingleMaintenance(FullSWAEnvironment& environment, Tier tier, double rat
 BlockTreeMatchResult makePartialReadyDeviceContext(FullSWAEnvironment& environment) {
     environment.insertRequestPath();
     BlockTreeMatchResult prefix_hold = environment.cache->match({environment.keys[0], environment.keys[1]});
-    EXPECT_EQ(prefix_hold.matched_blocks, 2u);
+    EXPECT_EQ(prefix_hold.matched_device_blocks, 2u);
     environment.releaseRequestRefsForGroup(1);
     runSingleMaintenance(environment, Tier::DEVICE, 0.125);
     environment.releaseMatch(prefix_hold);
 
     environment.scripted_per_rank_transfer_engine->clear();
     BlockTreeMatchResult result = environment.cache->match(environment.keys);
-    EXPECT_EQ(result.matched_blocks, 2u);
+    EXPECT_EQ(result.matched_device_blocks, 2u);
     const std::shared_ptr<LoadAsyncContext> context = getLoadContext(result);
     EXPECT_NE(context, nullptr);
     if (context != nullptr) {
@@ -377,7 +358,6 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     cfg.enable_device_cache = false;
     cfg.enable_memory_cache = true;
     cfg.enable_disk_cache   = true;
-    cfg.enable_load         = false;
 
     auto cache = makeBlockTreeCacheForTest(std::move(groups), std::move(cfg));
     ASSERT_NE(cache, nullptr);
@@ -397,7 +377,9 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
 
     BlockTreeMatchResult host_match = cache->match({100});
     expectUnpublishedResult(host_match);
-    EXPECT_EQ(host_match.async_context, nullptr);
+    std::shared_ptr<LoadAsyncContext> host_context = takeLoadContext(host_match);
+    ASSERT_NE(host_context, nullptr);
+    host_context.reset();
 
     scripted_copy->enqueue(/*success=*/false);
     cache->setTierWatermark(Tier::HOST, 0.01, 0);
@@ -447,7 +429,9 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
     EXPECT_EQ(snapshot_after_success.keys, snapshot_before.keys);
     BlockTreeMatchResult disk_match = cache->match({100});
     expectUnpublishedResult(disk_match);
-    EXPECT_EQ(disk_match.async_context, nullptr);
+    std::shared_ptr<LoadAsyncContext> disk_context = takeLoadContext(disk_match);
+    ASSERT_NE(disk_context, nullptr);
+    disk_context.reset();
     EXPECT_EQ(scripted_copy->submitCount(), 1u);
 
     cache->setTierWatermark(Tier::HOST, 0.0, 0);
@@ -594,7 +578,6 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettleme
         config.enable_device_cache = true;
         config.enable_memory_cache = true;
         config.enable_disk_cache   = true;
-        config.enable_load         = true;
         auto cache                 = makeBlockTreeCacheForTest(std::move(groups), std::move(config));
         ASSERT_NE(cache, nullptr);
 
@@ -846,10 +829,9 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
 
         // Racing match while the node is DEMOTING returns no reusable prefix or context.
         BlockTreeMatchResult during = environment->cache->match(environment->keys);
-        EXPECT_EQ(during.matched_blocks, 0u);
-        EXPECT_EQ(during.matched_node, nullptr);
+        EXPECT_EQ(during.matched_device_blocks, 0u);
         EXPECT_EQ(during.async_context, nullptr);
-        EXPECT_TRUE(during.matched_resources.empty());
+        EXPECT_TRUE(during.matched_device_resources.empty());
         for (const auto& [pool, block] : device_sources) {
             EXPECT_TRUE(pool->isAllocated(block));
             EXPECT_EQ(pool->refCount(block), 1u);
@@ -865,14 +847,14 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
         // The node is now Host-resident: a fresh match surfaces it only as a Host
         // load source (no device-ready prefix yet).
         BlockTreeMatchResult after = environment->cache->match(environment->keys);
-        EXPECT_EQ(after.matched_blocks, 0u);
+        EXPECT_EQ(after.matched_device_blocks, 0u);
         std::shared_ptr<LoadAsyncContext> after_context = takeLoadContext(after);
         ASSERT_NE(after_context, nullptr);
         for (const TransferDescriptor& desc : after_context->loadDescs()) {
             EXPECT_EQ(desc.source_tier, Tier::HOST);
         }
         after_context.reset();
-        environment->cache->releaseMatchedResources(after.matched_resources);
+        environment->cache->releaseMatchedResources(after.matched_device_resources);
 
         environment->reclaimAll();
         environment->expectFullyReclaimed();
@@ -937,11 +919,10 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
 
         const size_t         submits_before_join = pausable_copy->submitCount();
         BlockTreeMatchResult second              = environment->cache->match(environment->keys);
-        EXPECT_EQ(second.matched_blocks, 0u);
-        EXPECT_EQ(second.matched_node, nullptr);
+        EXPECT_EQ(second.matched_device_blocks, 0u);
         std::shared_ptr<LoadAsyncContext> joined_context = takeLoadContext(second);
         ASSERT_NE(joined_context, nullptr);
-        EXPECT_TRUE(second.matched_resources.empty());
+        EXPECT_TRUE(second.matched_device_resources.empty());
         ASSERT_EQ(joined_context->loadDescs().size(), joined_context->joinedLoads().size());
         for (size_t desc_index = 0; desc_index < joined_context->loadDescs().size(); ++desc_index) {
             EXPECT_TRUE(joined_context->joinedLoads()[desc_index]);
@@ -966,7 +947,7 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
             EXPECT_TRUE(pool->isAllocated(block));
             EXPECT_EQ(pool->refCount(block), 3u);
         }
-        environment->cache->releaseMatchedResources(second.matched_resources);
+        environment->cache->releaseMatchedResources(second.matched_device_resources);
 
         BlockTreeMatchResult              abandoned         = environment->cache->match(environment->keys);
         std::shared_ptr<LoadAsyncContext> abandoned_context = takeLoadContext(abandoned);
@@ -999,9 +980,9 @@ TEST_F(BlockTreeCacheIntegrationTest, MatchHardStopsDuringDemotionAndJoinsLoad) 
         // The node is now Device-resident: a fresh match reuses it directly with
         // no load.
         BlockTreeMatchResult after = environment->cache->match(environment->keys);
-        EXPECT_EQ(after.matched_blocks, 1u);
+        EXPECT_EQ(after.matched_device_blocks, 1u);
         EXPECT_EQ(after.async_context, nullptr);
-        environment->cache->releaseMatchedResources(after.matched_resources);
+        environment->cache->releaseMatchedResources(after.matched_device_resources);
 
         context.reset();
         joined_context.reset();
@@ -1023,7 +1004,6 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
     FullSWAEnvironmentOptions options;
     options.path_length             = 1;
     options.enable_disk             = true;
-    options.enable_load             = true;
     options.enable_reverse_eviction = true;
     auto environment                = FullSWAEnvironment::create(options);
     ASSERT_NE(environment, nullptr);
@@ -1096,7 +1076,7 @@ TEST_F(BlockTreeCacheIntegrationTest, ReverseEvictionTieredEndToEnd) {
     environment->expectPayloads();
 
     BlockTreeMatchResult rematch = environment->cache->match(environment->keys);
-    ASSERT_EQ(rematch.matched_blocks, 1u);
+    ASSERT_EQ(rematch.matched_device_blocks, 1u);
     expectAggregatedReadyResult(*environment->cache, rematch, /*full_blocks=*/1, /*swa_blocks=*/1);
     environment->releaseMatch(rematch);
 
@@ -1167,7 +1147,6 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadRequestOnlyKeepsDiskResidency) {
     config.enable_device_cache      = false;
     config.enable_memory_cache      = false;
     config.enable_disk_cache        = true;
-    config.enable_load              = true;
     std::vector<GroupSetPtr> groups = {group};
     auto                     cache  = makeBlockTreeCacheForTest(std::move(groups), std::move(config));
     ASSERT_NE(cache, nullptr);
@@ -1239,9 +1218,6 @@ TEST_P(BlockTreeCacheLowerTierTest, FullSWA_MatchLowerTierOnlyReturnsContextWith
     EXPECT_FALSE(context->empty());
     EXPECT_EQ(context->logicalMatchedBlocks(), kPathLength);
     EXPECT_EQ(context->logicalMatchedBlocks(GetParam()), kPathLength);
-    EXPECT_EQ(result.load_blocks, 6u);
-    EXPECT_EQ(result.host_load_blocks, GetParam() == Tier::HOST ? 6u : 0u);
-    EXPECT_EQ(result.disk_load_blocks, GetParam() == Tier::DISK ? 6u : 0u);
     EXPECT_EQ(contextDescCountForGroupSet(context, 0), 4u);
     EXPECT_EQ(contextDescCountForGroupSet(context, 1), 2u);
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
@@ -1282,8 +1258,7 @@ TEST_P(BlockTreeCacheLowerTierTest, FullSWA_MatchLowerTierOnlyReturnsContextWith
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), submits_after_commit);
 
     BlockTreeMatchResult rematch = environment->cache->match(environment->keys);
-    EXPECT_EQ(rematch.matched_blocks, kPathLength);
-    ASSERT_NE(rematch.matched_node, nullptr);
+    EXPECT_EQ(rematch.matched_device_blocks, kPathLength);
     expectAggregatedReadyResult(*environment->cache, rematch, /*full_blocks=*/4, /*swa_blocks=*/2);
     environment->expectPayloads();
     environment->releaseMatch(rematch);
@@ -1664,7 +1639,7 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesLoadAndRestoresCandi
     ASSERT_TRUE(joined_context->commit());
     EXPECT_FALSE(joined_context->done());
     EXPECT_EQ(pausable_per_rank_transfer_engine->submitCount(), submits_before_join);
-    environment->cache->releaseMatchedResources(joined_result.matched_resources);
+    environment->cache->releaseMatchedResources(joined_result.matched_device_resources);
     for (const std::pair<DeviceBlockPoolPtr, BlockIdxType>& target_block : target_blocks) {
         EXPECT_EQ(target_block.first->refCount(target_block.second), 3u);
     }
@@ -1813,69 +1788,61 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadDirectTransferExceptionRestoresSou
     environment->expectFullyReclaimed();
 }
 
-class BlockTreeCacheLoadDisabledTest: public ::testing::TestWithParam<DisabledLoadTierLayout> {};
-
-TEST_P(BlockTreeCacheLoadDisabledTest, LoadDisabled_DoesNotReportLowerTierHit) {
+TEST_F(BlockTreeCacheIntegrationTest, MixedHostDiskContextAbortRestoresSources) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
 
-    FullSWAEnvironmentOptions options;
-    options.enable_load             = false;
-    options.enable_reverse_eviction = false;
-    auto environment                = FullSWAEnvironment::create(options);
+    auto environment = FullSWAEnvironment::create();
     ASSERT_NE(environment, nullptr);
-    // The M6 matrix is Load=false and Reverse=false. Assert the effective
-    // config so a fixture default change cannot silently alter the matrix.
-    ASSERT_FALSE(environment->cache->config().enable_load);
-    ASSERT_FALSE(environment->cache->config().enable_reverse_eviction);
     environment->insertRequestPath();
     environment->releaseRequestRefs();
-    if (GetParam() == DisabledLoadTierLayout::HOST_ONLY) {
-        demoteTo(*environment, Tier::HOST);
-    } else if (GetParam() == DisabledLoadTierLayout::DISK_ONLY) {
-        demoteTo(*environment, Tier::DISK);
-    } else {
-        demoteTo(*environment, Tier::HOST);
-        runSingleMaintenance(*environment, Tier::HOST, 0.125);
-    }
+    demoteTo(*environment, Tier::HOST);
+    runSingleMaintenance(*environment, Tier::HOST, 0.125);
     environment->scripted_per_rank_transfer_engine->clear();
 
     BlockTreeMatchResult result = environment->cache->match(environment->keys);
     expectUnpublishedResult(result);
-    EXPECT_EQ(result.async_context, nullptr);
-    EXPECT_EQ(result.load_blocks, 0u);
-    EXPECT_EQ(result.host_load_blocks, 0u);
-    EXPECT_EQ(result.disk_load_blocks, 0u);
+    std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
+    ASSERT_NE(context, nullptr);
+    EXPECT_EQ(context->logicalMatchedBlocks(), kPathLength);
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
-    if (GetParam() == DisabledLoadTierLayout::HOST_ONLY) {
-        EXPECT_TRUE(environment->allResourcesAtTier(Tier::HOST));
-    } else if (GetParam() == DisabledLoadTierLayout::DISK_ONLY) {
-        EXPECT_TRUE(environment->allResourcesAtTier(Tier::DISK));
-    } else {
-        bool saw_host = false;
-        bool saw_disk = false;
-        for (size_t path_index = 0; path_index < environment->keys.size(); ++path_index) {
-            for (const GroupSetResource& resource : environment->resourcesForPathNode(path_index)) {
-                EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
-                saw_host = saw_host || resource.hasTier(Tier::HOST);
-                saw_disk = saw_disk || resource.hasTier(Tier::DISK);
-            }
+
+    bool                                             saw_host = false;
+    bool                                             saw_disk = false;
+    std::vector<std::pair<IBlockPool*, BlockIdxType>> source_refs;
+    for (const TransferDescriptor& desc : context->loadDescs()) {
+        ASSERT_TRUE(desc.source_tier == Tier::HOST || desc.source_tier == Tier::DISK);
+        ASSERT_EQ(desc.source_blocks.size(), 1u);
+        saw_host = saw_host || desc.source_tier == Tier::HOST;
+        saw_disk = saw_disk || desc.source_tier == Tier::DISK;
+        IBlockPool* source_pool = desc.source_tier == Tier::HOST ?
+                                      static_cast<IBlockPool*>(environment->host_pools.at(desc.group_set_id).get()) :
+                                      static_cast<IBlockPool*>(environment->disk_pools.at(desc.group_set_id).get());
+        const BlockIdxType source_block = desc.source_blocks.front();
+        EXPECT_EQ(source_pool->refCount(source_block), 2u);
+        ASSERT_NE(desc.node, nullptr);
+        EXPECT_EQ(desc.node->group_set_resources[desc.group_set_id].transfer_state,
+                  GroupSetTransferState::LOAD_PENDING);
+        source_refs.emplace_back(source_pool, source_block);
+    }
+    EXPECT_TRUE(saw_host);
+    EXPECT_TRUE(saw_disk);
+
+    context.reset();
+    for (const auto& [source_pool, source_block] : source_refs) {
+        EXPECT_EQ(source_pool->refCount(source_block), 1u);
+    }
+    for (size_t path_index = 0; path_index < environment->keys.size(); ++path_index) {
+        for (const GroupSetResource& resource : environment->resourcesForPathNode(path_index)) {
+            EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+            EXPECT_FALSE(resource.hasTier(Tier::DEVICE));
         }
-        EXPECT_TRUE(saw_host);
-        EXPECT_TRUE(saw_disk);
     }
     environment->expectPayloads();
     environment->reclaimAll();
     environment->expectFullyReclaimed();
 }
-
-INSTANTIATE_TEST_SUITE_P(HostDiskAndMixed,
-                         BlockTreeCacheLoadDisabledTest,
-                         ::testing::Values(DisabledLoadTierLayout::HOST_ONLY,
-                                           DisabledLoadTierLayout::DISK_ONLY,
-                                           DisabledLoadTierLayout::HOST_AND_DISK),
-                         disabledLoadTierLayoutName);
 
 INSTANTIATE_TEST_SUITE_P(HostAndDisk,
                          BlockTreeCacheLowerTierTest,
@@ -1890,7 +1857,7 @@ TEST_F(BlockTreeCacheIntegrationTest, FullSWA_MatchPublishesOnlyReadyBoundary) {
     auto environment = FullSWAEnvironment::create();
     environment->insertRequestPath();
     BlockTreeMatchResult prefix_hold = environment->cache->match({environment->keys[0], environment->keys[1]});
-    ASSERT_EQ(prefix_hold.matched_blocks, 2u);
+    ASSERT_EQ(prefix_hold.matched_device_blocks, 2u);
     environment->releaseRequestRefsForGroup(1);
     runSingleMaintenance(*environment, Tier::DEVICE, 0.125);
     environment->releaseMatch(prefix_hold);
@@ -1909,8 +1876,7 @@ TEST_F(BlockTreeCacheIntegrationTest, FullSWA_MatchPublishesOnlyReadyBoundary) {
 
     environment->scripted_per_rank_transfer_engine->clear();
     BlockTreeMatchResult result = environment->cache->match(environment->keys);
-    EXPECT_EQ(result.matched_blocks, 2u);
-    ASSERT_EQ(result.matched_node->cache_key, environment->keys[1]);
+    EXPECT_EQ(result.matched_device_blocks, 2u);
     expectAggregatedReadyResult(*environment->cache, result, /*full_blocks=*/2, /*swa_blocks=*/2);
     std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
     ASSERT_NE(context, nullptr);
@@ -2122,9 +2088,6 @@ TEST_F(BlockTreeCacheIntegrationTest, SparseDisconnectedSWADoesNotPublishVacuous
     EXPECT_EQ(context->logicalMatchedBlocks(), kPathLength);
     EXPECT_EQ(contextDescCountForGroupSet(context, 0), 4u);
     EXPECT_EQ(contextDescCountForGroupSet(context, 1), 2u);
-    EXPECT_EQ(result.load_blocks, 2u);
-    EXPECT_EQ(result.host_load_blocks, 2u);
-    EXPECT_EQ(result.disk_load_blocks, 0u);
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
 
     for (const TransferDescriptor& desc : context->loadDescs()) {

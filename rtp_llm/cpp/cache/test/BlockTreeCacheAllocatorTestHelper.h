@@ -126,8 +126,8 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
     }
 
     auto match     = cache->match(keys);
-    result.success = match.matched_blocks == keys.size();
-    cache->releaseMatchedResources(match.matched_resources);
+    result.success = match.matched_device_blocks == keys.size();
+    cache->releaseMatchedResources(match.matched_device_resources);
     return result;
 }
 

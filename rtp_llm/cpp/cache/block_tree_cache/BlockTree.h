@@ -12,26 +12,12 @@
 
 namespace rtp_llm {
 
-class AsyncContext;
-
 struct ReusableGroupLocation {
     size_t group_set_id{0};
     size_t member_group_id{0};
 };
 
 using ReusableGroupLocations = std::unordered_map<size_t, ReusableGroupLocation>;
-
-struct BlockTreeMatchResult {
-    TreeNode* matched_node{nullptr};
-    size_t    matched_blocks{0};
-    std::vector<MultiNodeResource> matched_resources;
-
-    std::shared_ptr<AsyncContext> async_context;
-    size_t                        load_blocks{0};
-    size_t                        host_load_blocks{0};
-    size_t                        disk_load_blocks{0};
-    size_t                        remote_load_blocks{0};
-};
 
 struct BlockTreeInsertResult {
     std::vector<TreeNode*> inserted_nodes;

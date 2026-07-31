@@ -11,6 +11,8 @@
 
 namespace rtp_llm {
 
+struct TreeNode;
+
 enum class TransferStatus {
     OK,
     INVALID_ARGS,
@@ -42,6 +44,19 @@ isValidHostBufferView(const HostBufferView& view, size_t required_payload_bytes,
 // Unified operation descriptor for load, eviction, and transfer execution.
 // Business-only fields are ignored by transfer executors and RPC conversion.
 struct TransferDescriptor {
+    TransferDescriptor() = default;
+    TransferDescriptor(TreeNode*                 node,
+                       size_t                    group_set_id,
+                       size_t                    path_index,
+                       Tier                      source_tier,
+                       std::vector<BlockIdxType> source_blocks):
+        node(node),
+        group_set_id(group_set_id),
+        path_index(path_index),
+        source_tier(source_tier),
+        target_tier(Tier::DEVICE),
+        source_blocks(std::move(source_blocks)) {}
+
     static TransferDescriptor
     deviceToHost(size_t group_set_id, std::vector<BlockIdxType> device_blocks, BlockIdxType host_block) {
         TransferDescriptor desc;

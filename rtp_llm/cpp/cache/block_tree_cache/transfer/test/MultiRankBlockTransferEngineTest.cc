@@ -279,7 +279,6 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadCommitsDeviceResource)
 
     BlockTreeCacheConfig config;
     config.enable_memory_cache                        = true;
-    config.enable_load                                = true;
     std::vector<GroupSetPtr>                   groups = {group};
     std::unique_ptr<BlockTreeCache>            cache  = makeBlockTreeCacheForTest(std::move(groups),
                                                                       std::move(config),
@@ -344,7 +343,6 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadFailureKeepsSourceReso
 
     BlockTreeCacheConfig config;
     config.enable_memory_cache                        = true;
-    config.enable_load                                = true;
     std::vector<GroupSetPtr>                   groups = {group};
     std::unique_ptr<BlockTreeCache>            cache  = makeBlockTreeCacheForTest(std::move(groups),
                                                                       std::move(config),
@@ -479,7 +477,6 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadUsesSingleDirectStage)
     BlockTreeCacheConfig config;
     config.enable_memory_cache                        = true;
     config.enable_disk_cache                          = true;
-    config.enable_load                                = true;
     std::vector<GroupSetPtr>                   groups = {group};
     std::unique_ptr<BlockTreeCache>            cache  = makeBlockTreeCacheForTest(std::move(groups),
                                                                       std::move(config),

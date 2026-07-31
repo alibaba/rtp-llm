@@ -636,8 +636,8 @@ TEST_F(HybridTypeKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly
         }
     }
     auto seeded_match = allocator->blockTreeCacheOwner()->match(seed_keys);
-    ASSERT_EQ(seeded_match.matched_blocks, seed_keys.size());
-    allocator->blockTreeCacheOwner()->releaseMatchedResources(seeded_match.matched_resources);
+    ASSERT_EQ(seeded_match.matched_device_blocks, seed_keys.size());
+    allocator->blockTreeCacheOwner()->releaseMatchedResources(seeded_match.matched_device_resources);
 
     const auto& full_blocks   = seeded_blocks[static_cast<size_t>(full_group_id)];
     const auto& linear_blocks = seeded_blocks[static_cast<size_t>(linear_group_id)];
@@ -994,12 +994,12 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheInsertsOnlyFullBlocks) {
     allocator->insertIntoCache(insert_info);
 
     auto match = allocator->blockTreeCacheOwner()->match(CacheKeysType{100, 101, 102});
-    EXPECT_EQ(match.matched_blocks, 3u);
-    EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(full_group_id, match.matched_resources).size(),
+    EXPECT_EQ(match.matched_device_blocks, 3u);
+    EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(full_group_id, match.matched_device_resources).size(),
               3u);
-    EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(linear_group_id, match.matched_resources).size(),
+    EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(linear_group_id, match.matched_device_resources).size(),
               1u);
-    allocator->blockTreeCacheOwner()->releaseMatchedResources(match.matched_resources);
+    allocator->blockTreeCacheOwner()->releaseMatchedResources(match.matched_device_resources);
 }
 
 TEST_F(HybridTypeKVCacheAllocatorTest, DefaultHybridLinearPrefixReuseSupportsInsertThenReuse) {
@@ -1020,11 +1020,11 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DefaultHybridLinearPrefixReuseSupportsIns
 
     allocator->insertIntoCache(InsertInfo{seed_res, seed_tokens, /*is_resident=*/false});
     auto seed_match = allocator->blockTreeCacheOwner()->match(CacheKeysType{100, 101, 102});
-    EXPECT_EQ(seed_match.matched_blocks, 3u);
+    EXPECT_EQ(seed_match.matched_device_blocks, 3u);
     EXPECT_EQ(
-        allocator->blockTreeCacheOwner()->matchedBlocksForGroup(/*group_id=*/0, seed_match.matched_resources).size(),
+        allocator->blockTreeCacheOwner()->matchedBlocksForGroup(/*group_id=*/0, seed_match.matched_device_resources).size(),
         1u);
-    allocator->blockTreeCacheOwner()->releaseMatchedResources(seed_match.matched_resources);
+    allocator->blockTreeCacheOwner()->releaseMatchedResources(seed_match.matched_device_resources);
 
     auto hit_res    = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102, 103});
     auto hit_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);

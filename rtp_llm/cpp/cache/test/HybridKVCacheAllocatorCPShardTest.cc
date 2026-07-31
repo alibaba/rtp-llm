@@ -222,10 +222,10 @@ TEST_F(HybridKVCacheAllocatorCPShardTest, InsertIntoCacheUsesCanonicalKeysAndVir
     EXPECT_EQ(snapshot.keys, (CacheKeysType{101, 103}));
 
     auto match = allocator->blockTreeCacheOwner()->match(CacheKeysType{101, 103});
-    ASSERT_EQ(match.matched_blocks, 2u);
-    ASSERT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(full_group_id, match.matched_resources),
+    ASSERT_EQ(match.matched_device_blocks, 2u);
+    ASSERT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(full_group_id, match.matched_device_resources),
               full_blocks);
-    allocator->blockTreeCacheOwner()->releaseMatchedResources(match.matched_resources);
+    allocator->blockTreeCacheOwner()->releaseMatchedResources(match.matched_device_resources);
 }
 
 // 6) Two-malloc smoke: cp_size=4 sharding, request occupies 8 logical blocks ⇒ 2 per rank.

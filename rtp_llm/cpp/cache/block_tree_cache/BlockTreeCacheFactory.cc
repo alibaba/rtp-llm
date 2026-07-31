@@ -443,7 +443,6 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     config.enable_memory_cache    = host_enabled;
     config.enable_disk_cache      = disk_enabled;
     config.enable_remote_cache    = kv_cache_config.enable_remote_cache && storage_backend != nullptr;
-    config.enable_load            = host_enabled || disk_enabled;
     config.device_min_free_blocks = kv_cache_config.device_cache_min_free_blocks > 0 ?
                                         static_cast<size_t>(kv_cache_config.device_cache_min_free_blocks) :
                                         0;

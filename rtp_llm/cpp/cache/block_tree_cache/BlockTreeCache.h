@@ -9,7 +9,6 @@
 #include "rtp_llm/cpp/cache/BlockReleaseBatch.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeMatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/BlockTreeLoader.h"
@@ -51,9 +50,6 @@ struct BlockTreeCacheConfig {
     // Absolute device headroom. Applied after request references are released;
     // unlike ratio watermarks this maps directly to device_cache_min_free_blocks.
     size_t device_min_free_blocks{0};
-
-    // ---- Load control ----
-    bool enable_load{false};
 
     // ---- Reverse (leaf) cascade eviction control ----
     // When true, evicting any group set on a leaf node cascades to all other
@@ -176,9 +172,6 @@ public:
                 break;
         }
     }
-    void setEnableLoad(bool enable) {
-        config_.enable_load = enable;
-    }
 
     // Accessors
     BlockTree* tree() const {
@@ -225,7 +218,6 @@ private:
     BlockTreeCacheMetricsReporter            metrics_reporter_;
     mutable std::mutex                       mutex_;
     BlockTreeEvictor                         evictor_;
-    BlockTreeMatcher                         matcher_;
     bool                                     initialized_{false};
     // Protected by mutex_. Credits remain reserved from async queue acceptance
     // until the matching plan completes or rolls back.

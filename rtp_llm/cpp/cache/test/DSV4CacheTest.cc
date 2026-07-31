@@ -2396,7 +2396,7 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
     allocator->insertIntoCache(insert_info);
 
     auto match = allocator->blockTreeCacheOwner()->match(CacheKeysType{200, 201, 202});
-    EXPECT_EQ(match.matched_blocks, 3u);
+    EXPECT_EQ(match.matched_device_blocks, 3u);
 
     // HCA_STATE is runtime scratch state and must not be part of the declarative tree.
     for (int gid = 0; gid < 7; gid++) {
@@ -2405,11 +2405,11 @@ TEST_F(DSV4AllocatorTest, InsertIntoCacheAllGroups) {
             EXPECT_FALSE(containsReusableGroup(*allocator->blockTreeCacheOwner(), static_cast<size_t>(gid)));
             continue;
         }
-        EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(gid, match.matched_resources).size(),
+        EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(gid, match.matched_device_resources).size(),
                   config.typeForGroup(gid) == CacheGroupType::FULL ? 3u : 1u)
             << tag;
     }
-    allocator->blockTreeCacheOwner()->releaseMatchedResources(match.matched_resources);
+    allocator->blockTreeCacheOwner()->releaseMatchedResources(match.matched_device_resources);
 
     // Free all blocks
     for (int gid = 0; gid < 7; gid++) {
@@ -2456,7 +2456,7 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
     allocator->insertIntoCache(insert_info);
 
     auto match = allocator->blockTreeCacheOwner()->match(CacheKeysType{300, 301, 302});
-    EXPECT_EQ(match.matched_blocks, 3u);
+    EXPECT_EQ(match.matched_device_blocks, 3u);
 
     for (int gid = 0; gid < 7; gid++) {
         const auto& tag = config.tagForGroup(gid);
@@ -2464,11 +2464,11 @@ TEST_F(DSV4AllocatorTest, FlashInsertIntoCacheAllGroups) {
             EXPECT_FALSE(containsReusableGroup(*allocator->blockTreeCacheOwner(), static_cast<size_t>(gid)));
             continue;
         }
-        EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(gid, match.matched_resources).size(),
+        EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(gid, match.matched_device_resources).size(),
                   config.typeForGroup(gid) == CacheGroupType::FULL ? 3u : 1u)
             << tag;
     }
-    allocator->blockTreeCacheOwner()->releaseMatchedResources(match.matched_resources);
+    allocator->blockTreeCacheOwner()->releaseMatchedResources(match.matched_device_resources);
 
     for (int gid = 0; gid < 7; gid++) {
         block_pool->decRef(batch_res->blocks(0, gid), BlockRefType::REQUEST);

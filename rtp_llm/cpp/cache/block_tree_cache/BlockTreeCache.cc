@@ -56,9 +56,8 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
                 evictor_.writeRemoteThrough(storage_backend_, cache_key, group_set_id);
             }
         }),
-    matcher_(tree_.get(), evictor_),
     loader_(
-        tree_->groupSets(),
+        tree_.get(),
         evictor_,
         transfer_dispatcher_.get(),
         task_pool_.get(),
@@ -133,17 +132,8 @@ bool BlockTreeCache::executeTransfer(const TransferDescriptor& descriptor) {
 }
 
 BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
-    if (cache_keys.empty()) {
-        RTP_LLM_LOG_DEBUG("empty cache_keys, returning empty result");
-        return {};
-    }
-
     std::lock_guard<std::mutex> lock(mutex_);
-    auto [result, matched_path] = matcher_.matchLocked(cache_keys);
-    if (config_.enable_load) {
-        loader_.prepareLoadLocked(matched_path, result);
-    }
-    return std::move(result);
+    return loader_.matchLocked(cache_keys);
 }
 
 void BlockTreeCache::insert(const CacheKeysType&                              cache_keys,
@@ -198,12 +188,12 @@ int BlockTreeCache::evictForGroup(size_t group_id, size_t num_blocks) {
 
 void BlockTreeCache::releaseMatchedResources(const std::vector<MultiNodeResource>& resources) {
     std::lock_guard<std::mutex> lock(mutex_);
-    matcher_.releaseMatchedResourcesLocked(resources);
+    loader_.releaseMatchedResourcesLocked(resources);
 }
 
 BlockIndicesType BlockTreeCache::matchedBlocksForGroup(size_t                                group_id,
                                                        const std::vector<MultiNodeResource>& matched_resources) const {
-    return matcher_.matchedBlocksForGroup(group_id, matched_resources);
+    return loader_.matchedBlocksForGroup(group_id, matched_resources);
 }
 
 CacheStats BlockTreeCache::getStats() const {

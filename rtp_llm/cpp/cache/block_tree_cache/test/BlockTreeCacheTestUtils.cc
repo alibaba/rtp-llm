@@ -619,7 +619,6 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
     config.enable_device_cache     = true;
     config.enable_memory_cache     = true;
     config.enable_disk_cache       = options.enable_disk;
-    config.enable_load             = options.enable_load;
     config.enable_reverse_eviction = options.enable_reverse_eviction;
 
     environment->scripted_per_rank_transfer_engine =
@@ -681,8 +680,8 @@ void FullSWAEnvironment::releaseRequestRefsForGroup(int group_id) {
 }
 
 void FullSWAEnvironment::releaseMatch(BlockTreeMatchResult& result) {
-    cache->releaseMatchedResources(result.matched_resources);
-    result.matched_resources.clear();
+    cache->releaseMatchedResources(result.matched_device_resources);
+    result.matched_device_resources.clear();
 }
 
 void FullSWAEnvironment::setTierWatermark(Tier tier, double ratio) {

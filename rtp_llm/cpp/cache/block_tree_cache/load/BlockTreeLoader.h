@@ -6,6 +6,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadJoinRegistry.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/evict/BlockTreeEvictor.h"
@@ -18,47 +19,51 @@ namespace rtp_llm {
 class BlockTransferDispatcher;
 class BlockTreeTaskPool;
 
-// Owns the complete lower-tier-to-device load workflow. BlockTreeCache owns
-// synchronization and tree matching; BlockTreeLoader owns load planning,
-// context coordination, transfer execution, state transitions, and settlement.
+struct BlockTreeMatchResult {
+    size_t                         matched_device_blocks{0};
+    std::vector<MultiNodeResource> matched_device_resources;
+    std::shared_ptr<AsyncContext>  async_context;
+};
+
+// Owns matching and the complete lower-tier-to-device load workflow.
+// BlockTreeCache owns synchronization.
 class BlockTreeLoader {
 public:
     // Invoked with the shared cache mutex held.
     using SettledFn = std::function<void(bool tree_data_mutated, bool check_watermark)>;
 
-    BlockTreeLoader(const std::vector<GroupSetPtr>& group_sets,
-                    BlockTreeEvictor&               evictor,
-                    BlockTransferDispatcher*        transfer_dispatcher,
-                    BlockTreeTaskPool*              task_pool,
-                    BlockTreeCacheMetricsReporter&  metrics_reporter,
-                    std::mutex&                     mutex,
-                    int                             disk_timeout_ms,
-                    int                             host_timeout_ms,
-                    bool                            enable_device_cache,
-                    SettledFn                       settled);
+    BlockTreeLoader(BlockTree*                     tree,
+                    BlockTreeEvictor&              evictor,
+                    BlockTransferDispatcher*       transfer_dispatcher,
+                    BlockTreeTaskPool*             task_pool,
+                    BlockTreeCacheMetricsReporter& metrics_reporter,
+                    std::mutex&                    mutex,
+                    int                            disk_timeout_ms,
+                    int                            host_timeout_ms,
+                    bool                           enable_device_cache,
+                    SettledFn                      settled);
 
     // The caller must hold the shared BlockTreeCache mutex.
-    void prepareLoadLocked(const std::vector<TreeNode*>& matched_path, BlockTreeMatchResult& result);
+    BlockTreeMatchResult matchLocked(const CacheKeysType& cache_keys);
+    void releaseMatchedResourcesLocked(const std::vector<MultiNodeResource>& resources);
+    BlockIndicesType matchedBlocksForGroup(size_t                                group_id,
+                                           const std::vector<MultiNodeResource>& matched_resources) const;
     // The caller must hold the shared BlockTreeCache mutex.
     bool cancelLoadLocked(const std::shared_ptr<AsyncContext>& context);
     void shutdown();
 
 private:
-    void                              prepareMatchedLoadDescriptor(TreeNode*                           path_node,
-                                                             const GroupSetPtr&                  group_set,
-                                                             const GroupSetResource&             group_set_resource,
-                                                             size_t                              path_index,
-                                                             BlockTreeMatchResult&               result,
-                                                             std::vector<TransferDescriptor>&    pending_load_descs,
-                                                             std::vector<bool>&                  joined_load);
-    std::shared_ptr<LoadAsyncContext> prepareLoadContext(std::vector<TransferDescriptor>& load_descs,
-                                                         const std::vector<bool>&            joined_load,
-                                                         size_t                              logical_matched_blocks);
-    bool                              prepareJoinedLoadDescriptor(TransferDescriptor& desc);
-    bool reserveLoadDescriptors(const std::vector<TransferDescriptor>& load_descs, const std::vector<bool>& joined_load);
+    bool validMatch(std::vector<TreeNode*>& path, std::vector<bool>& candidate_valid) const;
+    BlockTreeMatchResult createMatchResult(std::vector<TreeNode*>& path);
+    std::shared_ptr<LoadAsyncContext> createLoadContext(std::vector<TransferDescriptor>& load_descs,
+                                                        const std::vector<bool>&         joined_load,
+                                                        size_t                           logical_matched_blocks);
+    bool prepareJoinedLoadDescriptor(TransferDescriptor& desc);
+    void reserveLoadDescriptors(const std::vector<TransferDescriptor>& load_descs,
+                                const std::vector<bool>&               joined_load);
     bool commitLoad(const std::shared_ptr<LoadAsyncContext>& context);
     void abortLoad(LoadAsyncContext& context);
-    void abortLoadNolock(const std::vector<TransferDescriptor>& load_descs,
+    void abortLoadLocked(const std::vector<TransferDescriptor>& load_descs,
                          const std::vector<bool>&                  joined_load,
                          size_t                                    prepared_desc_count,
                          uint64_t                                  context_id);
@@ -70,7 +75,7 @@ private:
                              GroupSetTransferState expected_state,
                              GroupSetTransferState target_state);
 
-    const std::vector<GroupSetPtr>&         group_sets_;
+    BlockTree*                              tree_;
     BlockTreeEvictor&                       evictor_;
     BlockTransferDispatcher*                transfer_dispatcher_;
     BlockTreeTaskPool*                      task_pool_;

@@ -76,14 +76,9 @@ cc_test(
     env = {},
 )
 
-cc_test(
-    name = "block_tree_matcher_test",
-    testonly = True,
-    srcs = ["BlockTreeMatcherTest.cc"],
-    copts = test_copts,
-    tags = ["exclusive"],
-    deps = test_deps + [":block_tree_cache_test_utils"],
-    env = {},
+test_suite(
+    name = "block_tree_loader_test",
+    tests = ["//rtp_llm/cpp/cache/block_tree_cache/load/test:block_tree_loader_test"],
 )
 
 cc_library(

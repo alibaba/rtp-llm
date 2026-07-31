@@ -220,9 +220,8 @@ protected:
 
 TEST_F(BlockTreeCacheTest, MatchEmptyThenFullAndPartialPath) {
     BlockTreeMatchResult empty_result = cache_->match({100, 200, 300});
-    EXPECT_EQ(empty_result.matched_node, nullptr);
-    EXPECT_EQ(empty_result.matched_blocks, 0u);
-    EXPECT_TRUE(empty_result.matched_resources.empty());
+    EXPECT_EQ(empty_result.matched_device_blocks, 0u);
+    EXPECT_TRUE(empty_result.matched_device_resources.empty());
 
     std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {42};
@@ -231,18 +230,14 @@ TEST_F(BlockTreeCacheTest, MatchEmptyThenFullAndPartialPath) {
     cache_->insert({100, 200, 300}, resources);
 
     BlockTreeMatchResult full_result = cache_->match({100, 200, 300});
-    ASSERT_NE(full_result.matched_node, nullptr);
-    EXPECT_EQ(full_result.matched_node->cache_key, 300);
-    EXPECT_EQ(full_result.matched_blocks, 3u);
-    EXPECT_EQ(cache_->matchedBlocksForGroup(0, full_result.matched_resources), (BlockIndicesType{42, 43, 44}));
-    cache_->releaseMatchedResources(full_result.matched_resources);
+    EXPECT_EQ(full_result.matched_device_blocks, 3u);
+    EXPECT_EQ(cache_->matchedBlocksForGroup(0, full_result.matched_device_resources), (BlockIndicesType{42, 43, 44}));
+    cache_->releaseMatchedResources(full_result.matched_device_resources);
 
     BlockTreeMatchResult partial_result = cache_->match({100, 200, 999});
-    ASSERT_NE(partial_result.matched_node, nullptr);
-    EXPECT_EQ(partial_result.matched_node->cache_key, 200);
-    EXPECT_EQ(partial_result.matched_blocks, 2u);
-    EXPECT_EQ(cache_->matchedBlocksForGroup(0, partial_result.matched_resources), (BlockIndicesType{42, 43}));
-    cache_->releaseMatchedResources(partial_result.matched_resources);
+    EXPECT_EQ(partial_result.matched_device_blocks, 2u);
+    EXPECT_EQ(cache_->matchedBlocksForGroup(0, partial_result.matched_device_resources), (BlockIndicesType{42, 43}));
+    cache_->releaseMatchedResources(partial_result.matched_device_resources);
 }
 
 TEST_F(BlockTreeCacheTest, InsertPublishesAndShutdownRetiresDeviceBlockMapping) {
@@ -291,12 +286,10 @@ TEST_F(BlockTreeCacheTest, MatchPartialPath) {
     ASSERT_TRUE(insertGroupSetResources(*cache_, {100, 200, 300}, resources));
 
     BlockTreeMatchResult result = cache_->match({100, 200, 300});
-    ASSERT_NE(result.matched_node, nullptr);
-    EXPECT_EQ(result.matched_node->cache_key, 100);
-    EXPECT_EQ(result.matched_blocks, 1u);
-    EXPECT_EQ(cache_->matchedBlocksForGroup(0, result.matched_resources), (BlockIndicesType{10}));
+    EXPECT_EQ(result.matched_device_blocks, 1u);
+    EXPECT_EQ(cache_->matchedBlocksForGroup(0, result.matched_device_resources), (BlockIndicesType{10}));
 
-    cache_->releaseMatchedResources(result.matched_resources);
+    cache_->releaseMatchedResources(result.matched_device_resources);
 }
 
 TEST_F(BlockTreeCacheTest, MatchFailsFastAtIdleResourceWithMultipleServingTiers) {
@@ -323,9 +316,8 @@ TEST_F(BlockTreeCacheTest, MatchDoesNotReuseBusyFullResource) {
     first_node->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
 
     const BlockTreeMatchResult result = cache_->match({100, 200});
-    EXPECT_EQ(result.matched_node, nullptr);
-    EXPECT_EQ(result.matched_blocks, 0u);
-    EXPECT_TRUE(result.matched_resources.empty());
+    EXPECT_EQ(result.matched_device_blocks, 0u);
+    EXPECT_TRUE(result.matched_device_resources.empty());
 
     first_node->group_set_resources[0].transfer_state = GroupSetTransferState::IDLE;
 }
@@ -351,17 +343,15 @@ TEST_F(BlockTreeCacheTest, MatchSkipsBusySwaResourceWithoutTruncatingFullPrefix)
         busy_node->group_set_resources[1].transfer_state = state;
 
         BlockTreeMatchResult result = multi_cache->match({100, 200, 300, 400});
-        ASSERT_NE(result.matched_node, nullptr);
-        EXPECT_EQ(result.matched_node->cache_key, 400);
-        EXPECT_EQ(result.matched_blocks, 4u);
-        EXPECT_EQ(multi_cache->matchedBlocksForGroup(0, result.matched_resources), (BlockIndicesType{10, 11, 12, 13}));
+        EXPECT_EQ(result.matched_device_blocks, 4u);
+        EXPECT_EQ(multi_cache->matchedBlocksForGroup(0, result.matched_device_resources), (BlockIndicesType{10, 11, 12, 13}));
         // SWA locks only the trailing window; the busy middle resource stays untouched.
-        EXPECT_EQ(multi_cache->matchedBlocksForGroup(1, result.matched_resources), (BlockIndicesType{22, 23}));
+        EXPECT_EQ(multi_cache->matchedBlocksForGroup(1, result.matched_device_resources), (BlockIndicesType{22, 23}));
         const auto& swa_pool = multi_cache->groupSets()[1]->devicePools()[0];
         EXPECT_EQ(swa_pool->refCount(21), 1u);  // cache hold only, no match reference
         EXPECT_EQ(swa_pool->refCount(22), 2u);
 
-        multi_cache->releaseMatchedResources(result.matched_resources);
+        multi_cache->releaseMatchedResources(result.matched_device_resources);
         busy_node->group_set_resources[1].transfer_state = GroupSetTransferState::IDLE;
     }
 }
@@ -385,12 +375,10 @@ TEST_F(BlockTreeCacheTest, MatchStillTruncatesAtBusyFullResource) {
     busy_node->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
 
     BlockTreeMatchResult result = multi_cache->match({100, 200, 300});
-    ASSERT_NE(result.matched_node, nullptr);
-    EXPECT_EQ(result.matched_node->cache_key, 100);
-    EXPECT_EQ(result.matched_blocks, 1u);
-    EXPECT_EQ(multi_cache->matchedBlocksForGroup(0, result.matched_resources), (BlockIndicesType{10}));
+    EXPECT_EQ(result.matched_device_blocks, 1u);
+    EXPECT_EQ(multi_cache->matchedBlocksForGroup(0, result.matched_device_resources), (BlockIndicesType{10}));
 
-    multi_cache->releaseMatchedResources(result.matched_resources);
+    multi_cache->releaseMatchedResources(result.matched_device_resources);
     busy_node->group_set_resources[0].transfer_state = GroupSetTransferState::IDLE;
 }
 
@@ -415,16 +403,14 @@ TEST_F(BlockTreeCacheTest, MatchSkipsBusyLinearResourceAndReusesTailState) {
         busy_node->group_set_resources[1].transfer_state = state;
 
         BlockTreeMatchResult result = multi_cache->match({100, 200, 300});
-        ASSERT_NE(result.matched_node, nullptr);
-        EXPECT_EQ(result.matched_node->cache_key, 300);
-        EXPECT_EQ(result.matched_blocks, 3u);
-        EXPECT_EQ(multi_cache->matchedBlocksForGroup(0, result.matched_resources), (BlockIndicesType{10, 11, 12}));
-        EXPECT_EQ(multi_cache->matchedBlocksForGroup(1, result.matched_resources), (BlockIndicesType{22}));
+        EXPECT_EQ(result.matched_device_blocks, 3u);
+        EXPECT_EQ(multi_cache->matchedBlocksForGroup(0, result.matched_device_resources), (BlockIndicesType{10, 11, 12}));
+        EXPECT_EQ(multi_cache->matchedBlocksForGroup(1, result.matched_device_resources), (BlockIndicesType{22}));
         const auto& linear_pool = multi_cache->groupSets()[1]->devicePools()[0];
         EXPECT_EQ(linear_pool->refCount(21), 1u);  // busy middle resource not referenced
         EXPECT_EQ(linear_pool->refCount(22), 2u);
 
-        multi_cache->releaseMatchedResources(result.matched_resources);
+        multi_cache->releaseMatchedResources(result.matched_device_resources);
         busy_node->group_set_resources[1].transfer_state = GroupSetTransferState::IDLE;
     }
 }
@@ -520,9 +506,8 @@ TEST_F(BlockTreeCacheTest, EmptyKeysAreNoOps) {
     EXPECT_EQ(stats_after.device_heap_total_size, stats_before.device_heap_total_size);
 
     BlockTreeMatchResult result = cache_->match({});
-    EXPECT_EQ(result.matched_node, nullptr);
-    EXPECT_EQ(result.matched_blocks, 0u);
-    EXPECT_TRUE(result.matched_resources.empty());
+    EXPECT_EQ(result.matched_device_blocks, 0u);
+    EXPECT_TRUE(result.matched_device_resources.empty());
     EXPECT_EQ(result.async_context, nullptr);
 }
 
@@ -570,12 +555,12 @@ TEST_F(BlockTreeCacheTest, ConcurrentDoubleMatch_LastReleaseReadmitsExactlyOnce)
             BlockTreeMatchResult result = cache_->match({100});
             {
                 std::unique_lock<std::mutex> lock(mutex);
-                matched_blocks[thread_id] = result.matched_blocks;
+                matched_blocks[thread_id] = result.matched_device_blocks;
                 ++matched_count;
                 cv.notify_all();
                 cv.wait(lock, [&] { return release_match[thread_id]; });
             }
-            cache_->releaseMatchedResources(result.matched_resources);
+            cache_->releaseMatchedResources(result.matched_device_resources);
             {
                 std::lock_guard<std::mutex> lock(mutex);
                 ++released_count;
@@ -744,11 +729,11 @@ TEST_F(BlockTreeCacheTest, ConcurrentMatchInsertSameAndForkedPrefixes) {
 
                 for (const CacheKeysType& keys : {CacheKeysType{100, 200}, CacheKeysType{100, fork_key}}) {
                     BlockTreeMatchResult match  = cache_->match(keys);
-                    const auto           blocks = cache_->matchedBlocksForGroup(0, match.matched_resources);
-                    if (match.matched_blocks != 2 || blocks.size() != 2 || blocks[0] != 10) {
+                    const auto           blocks = cache_->matchedBlocksForGroup(0, match.matched_device_resources);
+                    if (match.matched_device_blocks != 2 || blocks.size() != 2 || blocks[0] != 10) {
                         consistent.store(false);
                     }
-                    cache_->releaseMatchedResources(match.matched_resources);
+                    cache_->releaseMatchedResources(match.matched_device_resources);
                 }
             }
         });
@@ -907,10 +892,10 @@ TEST_F(BlockTreeCacheTest, FullMatch_PreservesPathAndPoolOrder) {
     EXPECT_TRUE(pool1->isAllocated(b_pool1));
 
     BlockTreeMatchResult result = cache->match({100, 200});
-    EXPECT_EQ(result.matched_blocks, 2u);
-    EXPECT_EQ(cache->matchedBlocksForGroup(0, result.matched_resources), (BlockIndicesType{a_pool0, b_pool0}));
-    EXPECT_EQ(cache->matchedBlocksForGroup(1, result.matched_resources), (BlockIndicesType{a_pool1, b_pool1}));
-    cache->releaseMatchedResources(result.matched_resources);
+    EXPECT_EQ(result.matched_device_blocks, 2u);
+    EXPECT_EQ(cache->matchedBlocksForGroup(0, result.matched_device_resources), (BlockIndicesType{a_pool0, b_pool0}));
+    EXPECT_EQ(cache->matchedBlocksForGroup(1, result.matched_device_resources), (BlockIndicesType{a_pool1, b_pool1}));
+    cache->releaseMatchedResources(result.matched_device_resources);
 
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 2, Tier::DEVICE), 2);
     cache->waitForPendingTasks();
@@ -1085,14 +1070,13 @@ TEST_F(BlockTreeCacheTest, InsertMatchReleaseReclaim_RefcountLifecycle) {
     EXPECT_EQ(pool->refCount(block), 1u);
 
     BlockTreeMatchResult result = cache->match({100});
-    EXPECT_EQ(result.matched_blocks, 1u);
-    EXPECT_EQ(cache->matchedBlocksForGroup(0, result.matched_resources), (BlockIndicesType{block}));
-    ASSERT_EQ(result.matched_resources.size(), 1u);
-    EXPECT_EQ(result.matched_resources[0].group_set_id, 0);
-    EXPECT_EQ(result.matched_resources[0].tier, Tier::DEVICE);
-    ASSERT_EQ(result.matched_resources[0].node_blocks.size(), 1u);
-    EXPECT_EQ(result.matched_resources[0].node_blocks[0].first, result.matched_node);
-    EXPECT_EQ(result.matched_resources[0].node_blocks[0].second, (std::vector<BlockIdxType>{block}));
+    EXPECT_EQ(result.matched_device_blocks, 1u);
+    EXPECT_EQ(cache->matchedBlocksForGroup(0, result.matched_device_resources), (BlockIndicesType{block}));
+    ASSERT_EQ(result.matched_device_resources.size(), 1u);
+    EXPECT_EQ(result.matched_device_resources[0].group_set_id, 0);
+    EXPECT_EQ(result.matched_device_resources[0].tier, Tier::DEVICE);
+    ASSERT_EQ(result.matched_device_resources[0].node_blocks.size(), 1u);
+    EXPECT_EQ(result.matched_device_resources[0].node_blocks[0].second, (std::vector<BlockIdxType>{block}));
     EXPECT_EQ(pool->refCount(block), 2u);
 
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 0);
@@ -1100,8 +1084,8 @@ TEST_F(BlockTreeCacheTest, InsertMatchReleaseReclaim_RefcountLifecycle) {
     EXPECT_EQ(pool->refCount(block), 2u);
     EXPECT_EQ(cache->getStats().tree_node_count, 1u);
 
-    cache->releaseMatchedResources(result.matched_resources);
-    result.matched_resources.clear();
+    cache->releaseMatchedResources(result.matched_device_resources);
+    result.matched_device_resources.clear();
     EXPECT_EQ(pool->refCount(block), 1u);
 
     EXPECT_EQ(BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE), 1);
@@ -1227,11 +1211,11 @@ TEST_F(BlockTreeCacheTest, MatchCollectsBlocksSelectedByGroupPolicy) {
     cache->insert({100, 200, 300}, resources);
 
     BlockTreeMatchResult result = cache->match({100, 200, 300});
-    EXPECT_EQ(result.matched_blocks, 3u);
-    EXPECT_EQ(cache->matchedBlocksForGroup(0, result.matched_resources), (BlockIndicesType{10, 11, 12}));
-    EXPECT_EQ(cache->matchedBlocksForGroup(1, result.matched_resources), (BlockIndicesType{22}));
-    EXPECT_EQ(cache->matchedBlocksForGroup(2, result.matched_resources), (BlockIndicesType{31, 32}));
-    cache->releaseMatchedResources(result.matched_resources);
+    EXPECT_EQ(result.matched_device_blocks, 3u);
+    EXPECT_EQ(cache->matchedBlocksForGroup(0, result.matched_device_resources), (BlockIndicesType{10, 11, 12}));
+    EXPECT_EQ(cache->matchedBlocksForGroup(1, result.matched_device_resources), (BlockIndicesType{22}));
+    EXPECT_EQ(cache->matchedBlocksForGroup(2, result.matched_device_resources), (BlockIndicesType{31, 32}));
+    cache->releaseMatchedResources(result.matched_device_resources);
 }
 
 TEST_F(BlockTreeCacheTest, MatchKeepsAggregatedDevicePoolsSeparate) {
@@ -1264,10 +1248,10 @@ TEST_F(BlockTreeCacheTest, MatchKeepsAggregatedDevicePoolsSeparate) {
     device_pools[1]->free(*pool1_prefix);
 
     BlockTreeMatchResult result = cache->match({100, 200});
-    EXPECT_EQ(result.matched_blocks, 2u);
-    EXPECT_EQ(cache->matchedBlocksForGroup(0, result.matched_resources), group0_blocks);
-    EXPECT_EQ(cache->matchedBlocksForGroup(1, result.matched_resources), group1_blocks);
-    cache->releaseMatchedResources(result.matched_resources);
+    EXPECT_EQ(result.matched_device_blocks, 2u);
+    EXPECT_EQ(cache->matchedBlocksForGroup(0, result.matched_device_resources), group0_blocks);
+    EXPECT_EQ(cache->matchedBlocksForGroup(1, result.matched_device_resources), group1_blocks);
+    cache->releaseMatchedResources(result.matched_device_resources);
 }
 
 TEST_F(BlockTreeCacheTest, ReorderedMembershipMapsBlocksByGroupId) {
@@ -1295,10 +1279,10 @@ TEST_F(BlockTreeCacheTest, ReorderedMembershipMapsBlocksByGroupId) {
     unreferenceDeviceBlocksForTest(*full, request_holder, BlockRefType::REQUEST);
 
     BlockTreeMatchResult result = cache->match({100, 200});
-    EXPECT_EQ(result.matched_blocks, 2u);
-    EXPECT_EQ(cache->matchedBlocksForGroup(0, result.matched_resources), group0_blocks);
-    EXPECT_EQ(cache->matchedBlocksForGroup(1, result.matched_resources), group1_blocks);
-    cache->releaseMatchedResources(result.matched_resources);
+    EXPECT_EQ(result.matched_device_blocks, 2u);
+    EXPECT_EQ(cache->matchedBlocksForGroup(0, result.matched_device_resources), group0_blocks);
+    EXPECT_EQ(cache->matchedBlocksForGroup(1, result.matched_device_resources), group1_blocks);
+    cache->releaseMatchedResources(result.matched_device_resources);
 }
 
 TEST_F(BlockTreeCacheTest, MatchRequiresSWAWindowAfterGap) {
@@ -1322,12 +1306,12 @@ TEST_F(BlockTreeCacheTest, MatchRequiresSWAWindowAfterGap) {
     ASSERT_TRUE(insertGroupSetResources(*cache, {100, 200, 300, 400}, resources));
 
     BlockTreeMatchResult partial = cache->match({100, 200, 300});
-    EXPECT_EQ(partial.matched_blocks, 1u);
-    cache->releaseMatchedResources(partial.matched_resources);
+    EXPECT_EQ(partial.matched_device_blocks, 1u);
+    cache->releaseMatchedResources(partial.matched_device_resources);
 
     BlockTreeMatchResult restored = cache->match({100, 200, 300, 400});
-    EXPECT_EQ(restored.matched_blocks, 4u);
-    cache->releaseMatchedResources(restored.matched_resources);
+    EXPECT_EQ(restored.matched_device_blocks, 4u);
+    cache->releaseMatchedResources(restored.matched_device_resources);
 }
 
 TEST_F(BlockTreeCacheTest, ParentBecomesDeviceLeafAfterChildReclaim) {
@@ -1370,7 +1354,6 @@ TEST_F(BlockTreeCacheTest, LoadOnlyReloadsSWAWindow) {
 
     std::vector<GroupSetPtr>        groups = {full, swa};
     std::unique_ptr<BlockTreeCache> cache  = makeBlockTreeCacheForTest(std::move(groups));
-    cache->setEnableLoad(true);
 
     std::vector<std::vector<GroupSetResource>> resources(4, std::vector<GroupSetResource>(2));
     for (size_t i = 0; i < resources.size(); ++i) {
@@ -1381,11 +1364,8 @@ TEST_F(BlockTreeCacheTest, LoadOnlyReloadsSWAWindow) {
     ASSERT_TRUE(insertGroupSetResources(*cache, {100, 200, 300, 400}, resources));
 
     BlockTreeMatchResult result = cache->match({100, 200, 300, 400});
-    EXPECT_EQ(result.matched_blocks, 0u);
-    EXPECT_EQ(result.matched_node, nullptr);
-    EXPECT_TRUE(result.matched_resources.empty());
-    EXPECT_EQ(result.host_load_blocks, 2u);
-    EXPECT_EQ(result.load_blocks, 2u);
+    EXPECT_EQ(result.matched_device_blocks, 0u);
+    EXPECT_TRUE(result.matched_device_resources.empty());
     std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
     ASSERT_NE(load_context, nullptr);
     EXPECT_EQ(load_context->logicalMatchedBlocks(), 4u);
@@ -1423,7 +1403,6 @@ TEST_F(BlockTreeCacheTest, LoadPlanningIgnoresBusySwaResourceOutsideTrailingWind
         std::unique_ptr<BlockTreeCache> cache =
             makeBlockTreeCacheForTest(std::move(groups));
         ASSERT_NE(cache, nullptr);
-        cache->setEnableLoad(true);
 
         std::vector<std::vector<GroupSetResource>> resources(4, std::vector<GroupSetResource>(2));
         for (size_t i = 0; i < resources.size(); ++i) {
@@ -1447,10 +1426,8 @@ TEST_F(BlockTreeCacheTest, LoadPlanningIgnoresBusySwaResourceOutsideTrailingWind
 
         BlockTreeMatchResult result                    = cache->match({100, 200, 300, 400});
         path[1]->group_set_resources[1].transfer_state = GroupSetTransferState::IDLE;
-        EXPECT_EQ(result.matched_blocks, 0u);
-        EXPECT_TRUE(result.matched_resources.empty());
-        EXPECT_EQ(result.host_load_blocks, 2u);
-        EXPECT_EQ(result.load_blocks, 2u);
+        EXPECT_EQ(result.matched_device_blocks, 0u);
+        EXPECT_TRUE(result.matched_device_resources.empty());
         std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
         ASSERT_NE(load_context, nullptr);
         EXPECT_EQ(load_context->logicalMatchedBlocks(), 4u);
@@ -1472,9 +1449,6 @@ TEST_F(BlockTreeCacheTest, LoadPlanningIgnoresBusySwaResourceOutsideTrailingWind
     }
 }
 
-// ---------------------------------------------------------------------------
-// Test: enable_load — match detects Host/Disk data needing reload
-// ---------------------------------------------------------------------------
 TEST_F(BlockTreeCacheTest, LoadDetectsHostData) {
     auto host_pool = makeHostPool(1, 1);
     ASSERT_NE(host_pool, nullptr);
@@ -1482,20 +1456,15 @@ TEST_F(BlockTreeCacheTest, LoadDetectsHostData) {
     std::vector<GroupSetPtr> groups = {full};
 
     std::unique_ptr<BlockTreeCache> cache = makeBlockTreeCacheForTest(std::move(groups));
-    cache->setEnableLoad(true);
 
     // Insert a node and manually set host data (simulating prior demotion).
     std::vector<std::vector<GroupSetResource>> resources(1, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {42};
     cache->insert({100}, resources);
 
-    // Reclaim without host demotion, then manually set up a host-only node.
-    // Instead, manually set up a node with host_block but no device_blocks
     BlockTreeCacheTestPeer::reclaimBlocksForTest(*cache, 1, Tier::DEVICE);
     cache->waitForPendingTasks();
 
-    // After reclaim without host enabled, node is deleted.
-    // Let's insert again and manually simulate host-only state
     std::vector<std::vector<GroupSetResource>> resources2(1, std::vector<GroupSetResource>(1));
     resources2[0][0].device_blocks = {55};
     cache->insert({200}, resources2);
@@ -1514,10 +1483,26 @@ TEST_F(BlockTreeCacheTest, LoadDetectsHostData) {
     resource.evictFromTier(Tier::DEVICE);
     full->unreferenceBlocks(device_resource, BlockRefType::BLOCK_CACHE);
 
-    // Match should detect load
-    auto result = cache->match({200});
-    EXPECT_EQ(result.host_load_blocks, 1u);
-    EXPECT_EQ(result.load_blocks, 1u);
+    const BlockIdxType host_block = resource.host_block;
+    EXPECT_EQ(host_pool->refCount(host_block), 1u);
+
+    BlockTreeMatchResult result = cache->match({200});
+    EXPECT_EQ(result.matched_device_blocks, 0u);
+    EXPECT_TRUE(result.matched_device_resources.empty());
+    std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
+    ASSERT_NE(load_context, nullptr);
+    EXPECT_EQ(load_context->logicalMatchedBlocks(), 1u);
+    ASSERT_EQ(load_context->loadDescs().size(), 1u);
+    EXPECT_EQ(load_context->loadDescs()[0].group_set_id, 0u);
+    EXPECT_EQ(load_context->loadDescs()[0].path_index, 0u);
+    EXPECT_EQ(load_context->loadDescs()[0].source_tier, Tier::HOST);
+    EXPECT_EQ(load_context->loadDescs()[0].source_blocks, (BlockIndicesType{host_block}));
+    EXPECT_EQ(resource.transfer_state, GroupSetTransferState::LOAD_PENDING);
+    EXPECT_EQ(host_pool->refCount(host_block), 2u);
+
+    load_context.reset();
+    EXPECT_EQ(resource.transfer_state, GroupSetTransferState::IDLE);
+    EXPECT_EQ(host_pool->refCount(host_block), 1u);
 }
 
 static std::unique_ptr<BlockTreeCache> makeHostOnlyLoadCache(std::vector<DeviceBlockPoolPtr> device_pools = {}) {
@@ -1536,7 +1521,6 @@ static std::unique_ptr<BlockTreeCache> makeHostOnlyLoadCache(std::vector<DeviceB
 
     BlockTreeCacheConfig config;
     config.enable_memory_cache = true;
-    config.enable_load         = true;
     std::unique_ptr<BlockTreeCache> cache =
         makeBlockTreeCacheForTest(std::move(groups), std::move(config));
     RTP_LLM_CHECK(cache != nullptr);
@@ -1584,8 +1568,7 @@ TEST_F(BlockTreeCacheTest, PendingLoadContextHardStopsSecondMatchUntilAbort) {
     EXPECT_EQ(host_pool->refCount(source_block), 2u);
 
     BlockTreeMatchResult second_match = cache->match({200});
-    EXPECT_EQ(second_match.matched_node, nullptr);
-    EXPECT_EQ(second_match.matched_blocks, 0u);
+    EXPECT_EQ(second_match.matched_device_blocks, 0u);
     EXPECT_EQ(second_match.async_context, nullptr);
     EXPECT_EQ(host_pool->refCount(source_block), 2u);
 
@@ -1617,7 +1600,6 @@ TEST_F(BlockTreeCacheTest, LoadPreparedPrefixFailureRollsBackAllSourceAndTargetH
 
     BlockTreeCacheConfig config;
     config.enable_memory_cache                 = true;
-    config.enable_load                         = true;
     std::vector<GroupSetPtr>        group_sets = {first_group, second_group};
     std::unique_ptr<BlockTreeCache> cache =
         makeBlockTreeCacheForTest(std::move(group_sets), std::move(config));
@@ -1731,7 +1713,6 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackCoreHoldersAndRetainsReque
 
     BlockTreeCacheConfig config;
     config.enable_memory_cache = true;
-    config.enable_load         = true;
     std::unique_ptr<BlockTreeCache> cache =
         makeBlockTreeCacheForTest(std::move(groups), std::move(config));
     ASSERT_NE(cache, nullptr);
@@ -1811,7 +1792,6 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackMixedDeviceAndHostDescript
 
     BlockTreeCacheConfig config;
     config.enable_memory_cache             = true;
-    config.enable_load                     = true;
     std::vector<GroupSetPtr>        groups = {resident_group, loading_group};
     std::unique_ptr<BlockTreeCache> cache =
         makeBlockTreeCacheForTest(std::move(groups), std::move(config));
@@ -1888,13 +1868,10 @@ TEST_F(BlockTreeCacheTest, LoadContextAbortSkipsLoad) {
     EXPECT_FALSE(load_context->empty());
     EXPECT_EQ(load_context->logicalMatchedBlocks(), 1u);
     // Counters reflect the planned load; match() submits nothing asynchronously.
-    EXPECT_EQ(result.matched_blocks, 0u);
-    EXPECT_EQ(result.matched_node, nullptr);
-    EXPECT_TRUE(result.matched_resources.empty());
-    EXPECT_EQ(result.host_load_blocks, 1u);
-    EXPECT_EQ(result.load_blocks, 1u);
+    EXPECT_EQ(result.matched_device_blocks, 0u);
+    EXPECT_TRUE(result.matched_device_resources.empty());
     load_context.reset();
-    cache->releaseMatchedResources(result.matched_resources);
+    cache->releaseMatchedResources(result.matched_device_resources);
     cache->waitForPendingTasks();
 }
 
@@ -1911,11 +1888,8 @@ TEST_F(BlockTreeCacheTest, LoadContextCommitTriggersLoad) {
     std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
     ASSERT_NE(load_context, nullptr);
     EXPECT_EQ(load_context->logicalMatchedBlocks(), 1u);
-    EXPECT_EQ(result.matched_blocks, 0u);
-    EXPECT_EQ(result.matched_node, nullptr);
-    EXPECT_TRUE(result.matched_resources.empty());
-    EXPECT_EQ(result.host_load_blocks, 1u);
-    EXPECT_EQ(result.load_blocks, 1u);
+    EXPECT_EQ(result.matched_device_blocks, 0u);
+    EXPECT_TRUE(result.matched_device_resources.empty());
 
     const BlockIdList request_targets = device_pool->malloc(1).value();
     ASSERT_EQ(request_targets.size(), 1u);
@@ -1927,7 +1901,7 @@ TEST_F(BlockTreeCacheTest, LoadContextCommitTriggersLoad) {
 
     EXPECT_TRUE(load_context->commit());
 
-    cache->releaseMatchedResources(result.matched_resources);
+    cache->releaseMatchedResources(result.matched_device_resources);
     cache->waitForPendingTasks();
     device_pool->decRef(request_targets, BlockRefType::REQUEST);
 }
@@ -2201,7 +2175,6 @@ TEST_F(BlockTreeCacheTest, LoadContextOutlivesHostAndDiskCacheShutdown) {
         BlockTreeCacheConfig config;
         config.enable_memory_cache      = true;
         config.enable_disk_cache        = true;
-        config.enable_load              = true;
         std::vector<GroupSetPtr> groups = {full};
         auto cache = makeBlockTreeCacheForTest(std::move(groups), std::move(config));
         ASSERT_NE(cache, nullptr);
@@ -2253,7 +2226,6 @@ TEST_F(BlockTreeCacheTest, LoadContextOutlivesHostAndDiskCacheShutdown) {
 // A no-match match() plans nothing and returns no async context.
 TEST_F(BlockTreeCacheTest, EmptyMatchYieldsNoAsyncContext) {
     auto result = cache_->match({100, 200, 300});  // empty tree => no match
-    EXPECT_EQ(result.matched_node, nullptr);
     EXPECT_EQ(result.async_context, nullptr);
 }
 

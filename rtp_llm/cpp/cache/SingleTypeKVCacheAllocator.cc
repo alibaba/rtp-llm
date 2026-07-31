@@ -121,11 +121,11 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         const bool has_async_context      = match_result.async_context != nullptr;
         load_context                      = std::dynamic_pointer_cast<LoadAsyncContext>(match_result.async_context);
         match_result.async_context.reset();
-        matched_resources = std::move(match_result.matched_resources);
+        matched_resources = std::move(match_result.matched_device_resources);
         if (has_async_context && load_context == nullptr) {
             return rollback();
         }
-        const size_t ready_blocks = match_result.matched_blocks;
+        const size_t ready_blocks = match_result.matched_device_blocks;
         reuse_blocks = load_context && !load_context->empty() ? load_context->logicalMatchedBlocks() : ready_blocks;
         BlockIndicesType ready_group_blocks = block_tree_cache_->matchedBlocksForGroup(0, matched_resources);
         block_ids_0.assign(BlockIndicesType(reuse_blocks, NULL_BLOCK_IDX));
