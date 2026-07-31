@@ -232,6 +232,13 @@ struct TopKConfig {
       float v_lo,
       float v_hi,
       uint32_t output_base) {
+    // The FP32 collect pass can classify an exact negative FP16 midpoint as
+    // "above" even though round-to-nearest-even put it in the threshold
+    // histogram bin. In that case count_gt may already fill the entire output
+    // while count_eq still overflows the tie buffer. Do not underflow
+    // problem.topk - output_base below.
+    if (output_base >= problem.topk) return;
+
     const uint32_t tx = threadIdx.x;
     if (tx == 0) {
       const uint32_t lo_key = extract_exact_bin(v_lo);
@@ -316,7 +323,9 @@ struct TopKConfig {
       if (value >= v_lo && value < v_hi &&
           extract_exact_bin(value) > pivot) {
         const uint32_t pos = atomicAdd(&smem->counter, 1u);
-        problem.emit(output_base + pos, idx);
+        if (pos < problem.topk - output_base) {
+          problem.emit(output_base + pos, idx);
+        }
       }
     }
     __syncthreads();
@@ -791,8 +800,9 @@ struct TopKStreaming : TopKRegister<2> {
     // Phase 4: Handle ties. Drive the output layout from the *collect* counts so it
     // is self-consistent with the fp32 classification above (rather than the fp16
     // histogram counts), even if rounding moves a boundary element between the
-    // "above" and "tie" sets. above_count is < topk by the threshold-bin invariant,
-    // so the count_gt guard above effectively never triggers.
+    // "above" and "tie" sets. An exact negative FP16 midpoint can make
+    // above_count reach topk; exact_boundary_scan_topk handles that case as an
+    // already-complete output.
     __syncthreads();
     const auto above_count = smem->count_gt;
     const auto equal_count = smem->count_eq;

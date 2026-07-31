@@ -122,6 +122,57 @@ def _assert_value_equiv(
     print(f"  [{tag}] N={N} k={k} L_max={int(lengths.max())} OK")
 
 
+def _assert_replay_value_equiv(
+    logits: torch.Tensor,
+    lengths: torch.Tensor,
+    k: int,
+    max_seq_len: int,
+    *,
+    replays: int,
+    tag: str,
+):
+    """Replay one input while reusing output/workspace and check exact values."""
+    N, _ = logits.shape
+    host_lengths = lengths.cpu().tolist()
+    expected = [
+        logits[r, : int(length)]
+        .topk(min(k, int(length)), sorted=False)
+        .values.sort()
+        .values
+        for r, length in enumerate(host_lengths)
+    ]
+    sentinel = torch.iinfo(torch.int32).min
+    out = torch.full((N, k), sentinel, dtype=torch.int32, device=logits.device)
+    ws = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device=logits.device)
+
+    for replay in range(replays):
+        out.fill_(sentinel)
+        rtp_llm_ops.topk_glm5_indexer(logits, lengths, out, ws, k, max_seq_len)
+        torch.cuda.synchronize()
+
+        out_h = out.cpu()
+        for r, length in enumerate(host_lengths):
+            length = int(length)
+            keep = min(k, length)
+            valid = out_h[r, :keep].long()
+            pad = out_h[r, keep:]
+            assert (pad == -1).all(), (
+                f"{tag}: replay {replay}, row {r} pad is not -1"
+            )
+            assert ((valid >= 0) & (valid < length)).all(), (
+                f"{tag}: replay {replay}, row {r} has an invalid index"
+            )
+            assert torch.unique(valid).numel() == keep, (
+                f"{tag}: replay {replay}, row {r} has duplicate indices"
+            )
+            actual = logits[r, valid.to(logits.device)].sort().values
+            assert torch.equal(actual, expected[r]), (
+                f"{tag}: replay {replay}, row {r} selected wrong values"
+            )
+
+    print(f"  [{tag}] {replays}/{replays} replays OK")
+
+
 # ---------------------------------------------------------------------------
 # Correctness
 # ---------------------------------------------------------------------------
@@ -179,6 +230,30 @@ def _make_negative_single_coarse_bin(
     bits = (0xBFD00000 - offsets).to(torch.int32)  # -1.625 toward zero
     logits = bits.view(torch.float32).unsqueeze(0).expand(N, -1).contiguous()
     lengths = torch.full((N,), T, dtype=torch.int32, device="cuda")
+    return logits, lengths
+
+
+def _make_negative_midpoint_overflow(
+    T: int,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Force count_gt >= K and count_eq > kMaxNumTie on a negative bin edge."""
+    assert T >= 6000
+
+    # High edge of the negative coarse bin containing -1.0. FP16
+    # round-to-nearest-even maps this exact midpoint back to -1.0 and therefore
+    # into the threshold histogram bin. The FP32 collect predicate classifies
+    # equality with v_hi as strictly above.
+    v_hi = torch.tensor(
+        (-1.0 + -0.99951171875) * 0.5, dtype=torch.float32
+    ).item()
+    logits = torch.full((1, T), -2.0, dtype=torch.float32, device="cuda")
+    logits[0, :3000] = v_hi
+
+    # More than kMaxNumTie distinct in-bin values force the exact fallback.
+    offsets = torch.arange(3000, dtype=torch.int64, device="cuda")
+    bits = (0xBF814000 + offsets).to(torch.int32)
+    logits[0, 3000:6000] = bits.view(torch.float32)
+    lengths = torch.tensor([T], dtype=torch.int32, device="cuda")
     return logits, lengths
 
 
@@ -279,6 +354,110 @@ def test_long_seq_radix_path():
     logits, lengths = _make(2, 65536, seed=7, lengths_mode="full")
     out = _run(logits, lengths, k=2048, max_seq_len=65536)
     _assert_equiv(out, logits, lengths, k=2048, tag="radix L=64K")
+
+
+def test_cluster_repeated_pivot_replay():
+    """Stress cross-CTA collect/publication and the exact overflow fallback.
+
+    B=8 and max_seq_len=262144 route to direct Cluster8. Each row repeats a
+    different 64-value page, so its exact pivot occurs 4096 times. This forces
+    DSMEM histogram reduction, cross-rank candidate aggregation, and a full-row
+    exact boundary scan on every replay.
+    """
+    rows, stride, valid, k = 8, 262592, 262144, 2048
+    generator = torch.Generator(device="cuda").manual_seed(20260731)
+    page = torch.randn(
+        (rows, 64), device="cuda", dtype=torch.float32, generator=generator
+    )
+    logits = page.repeat(1, (stride + 63) // 64)[:, :stride].contiguous()
+    logits[:, valid:] = -torch.inf
+    lengths = torch.full((rows,), valid, device="cuda", dtype=torch.int32)
+
+    _assert_replay_value_equiv(
+        logits,
+        lengths,
+        k,
+        valid,
+        replays=100,
+        tag="Cluster8 repeated pivot",
+    )
+
+
+def test_cluster_ragged_long_short_replay():
+    """Mix Cluster8 rows with the seq_len <= K trivial branch.
+
+    Dispatch is based on the launch-wide max_seq_len, while each cluster reads
+    its own row length. Direct dispatch assigns a separate hardware cluster to
+    each row; this verifies the ragged early-return protocol but does not rely
+    on persistent cross-row state.
+    """
+    rows, stride, valid, k = 8, 262592, 262144, 2048
+    generator = torch.Generator(device="cuda").manual_seed(2026073104)
+    page = torch.randn(
+        (rows, 64), device="cuda", dtype=torch.float32, generator=generator
+    )
+    logits = page.repeat(1, (stride + 63) // 64)[:, :stride].contiguous()
+    logits[:, valid:] = -torch.inf
+    lengths = torch.tensor(
+        [valid, 1024, valid, 1, valid, k, valid, 17],
+        device="cuda",
+        dtype=torch.int32,
+    )
+
+    _assert_replay_value_equiv(
+        logits,
+        lengths,
+        k,
+        valid,
+        replays=100,
+        tag="Cluster8 ragged long/short",
+    )
+
+
+def test_exact_boundary_negative_midpoint_output_bounds():
+    """Exact fallback must not write past output when collect already filled K.
+
+    Before the fix, the first K selected values looked correct, but the exact
+    fallback underflowed ``K - count_gt`` and overwrote 3000 int32 values in
+    the two guard rows backing this contiguous one-row output view.
+    """
+    T, K = 8193, 2048
+    sentinel = -123456789
+    logits, lengths = _make_negative_midpoint_overflow(T)
+    storage = torch.full(
+        (3, K), sentinel, dtype=torch.int32, device=logits.device
+    )
+    out = storage[:1]
+    ws = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device=logits.device)
+
+    rtp_llm_ops.topk_glm5_indexer(logits, lengths, out, ws, K, T)
+    torch.cuda.synchronize()
+
+    indices = out[0].long()
+    assert ((indices >= 0) & (indices < T)).all()
+    assert torch.unique(indices).numel() == K
+    actual = logits[0, indices].sort().values
+    expected = logits[0].topk(K, sorted=False).values.sort().values
+    assert torch.equal(actual, expected)
+    assert (storage[1:] == sentinel).all(), (
+        "exact_boundary_scan_topk wrote beyond output[:, topk]"
+    )
+    print("  [exact boundary negative midpoint output bounds] OK")
+
+
+def test_cluster_exact_boundary_negative_midpoint():
+    """Cluster8 exact fallback must not write beyond its shared output array."""
+    T, K = 262144, 2048
+    logits, lengths = _make_negative_midpoint_overflow(T)
+    out = _run(logits, lengths, k=K, max_seq_len=T)
+    torch.cuda.synchronize()
+    _assert_value_equiv(
+        out,
+        logits,
+        lengths,
+        k=K,
+        tag="Cluster8 exact boundary negative midpoint",
+    )
 
 
 def test_histogram_2048_candidate_overflow_exact():
@@ -446,6 +625,10 @@ if __name__ == "__main__":
     test_mtp_batched_decode_flattened_bs_rows()
     test_batched_streaming_path_b64()
     test_long_seq_radix_path()
+    test_cluster_repeated_pivot_replay()
+    test_cluster_ragged_long_short_replay()
+    test_exact_boundary_negative_midpoint_output_bounds()
+    test_cluster_exact_boundary_negative_midpoint()
     test_histogram_2048_candidate_overflow_exact()
     test_histogram_256_candidate_overflow_exact()
     test_histogram_256_overflow_with_fp32_pivot_ties_exact()
