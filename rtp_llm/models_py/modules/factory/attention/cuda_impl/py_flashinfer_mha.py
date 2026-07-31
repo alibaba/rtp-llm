@@ -1,4 +1,3 @@
-import os
 from typing import Any, Optional
 
 import torch
@@ -95,16 +94,14 @@ class PyFlashinferPrefillPagedAttnOp(object):
             # query block against them), so an inexact length silently
             # corrupts attention there.
             backend = "fa2"
-        if (
-            backend == "auto"
-            and attn_inputs.is_target_verify
-            and os.environ.get("RTP_LLM_DSPARK_VERIFY_FA2") == "1"
-        ):
-            # Stream-async preparation knob (default off): with async
-            # bookkeeping the host seqLength can lag one round, so even the
-            # verify plan only knows page counts -- which requires fa2
-            # semantics.  Flipping the verify backend changes near-tie greedy
-            # picks, so this needs its own output baselines.
+        if backend == "auto" and attn_inputs.is_target_verify:
+            # Speculative verify = a few query rows (k+1) against one long kv
+            # per sequence at small batch.  fa3 has no split-kv scheduler, so
+            # this shape occupies only ~batch*ceil(qo/tile) CTAs and leaves
+            # the rest of the SMs idle (measured ~10ms/round at 4.8k ctx,
+            # batch 1 on H20 vs ~1ms on fa2).  fa2 also plans from page
+            # counts alone, which is all the host-plan channel can guarantee
+            # once async bookkeeping lets host lengths lag a round.
             backend = "fa2"
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
         self.enable_cuda_graph = attn_inputs.is_cuda_graph

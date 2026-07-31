@@ -529,7 +529,11 @@ class ModelConfig(CppModelConfig):
         # note at that -1 in model_factory.py for the vLLM equivalence.
         self.capture_aux_hidden_layer_ids: Optional[List[int]] = None
         self.normalize_lm_head_weight: bool = False
-        self.enable_fp32_lm_head: bool = True
+        # bf16 by default: an fp32 lm_head doubles the logits GEMM cost on
+        # large vocabs for no accuracy the sampler can use (greedy picks and
+        # top-p mass only move on near-ties); opt back in per model if a
+        # deployment depends on the fp32 tie-breaks.
+        self.enable_fp32_lm_head: bool = False
         self.has_lm_head_bias: bool = False
         self.tie_word_embeddings: bool = False
         # Model loading related fields

@@ -363,8 +363,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
         // tp=1 fusion role: the dspark verify/draft inputs are already
         // device-state (anchor gather, propose rows, next_seq_len) and the
         // host-plan channel is lag-aware (hasPendingAsyncBookkeeping widens
-        // the kv window per lagged round; the verify wrapper then needs
-        // RTP_LLM_DSPARK_VERIFY_FA2=1 since only page counts stay
+        // the kv window per lagged round; verify always plans on fa2, whose
+        // scheduler consumes only page counts — the one quantity that stays
         // host-determinate).  The remaining two switches stay unsupported.
         RTP_LLM_CHECK_WITH_INFO(!useAsyncPrepare() && !useDeviceInput(),
                                 "dspark does not support RTP_LLM_MTP_ASYNC_PREPARE/RTP_LLM_DEVICE_INPUT");
