@@ -153,6 +153,13 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
         self.markov_head = DSparkMarkovHead(
             gw[W.v4_dspark_markov_w1], gw[W.v4_dspark_markov_w2]
         )
+        assert self.v4 is not None
+        for layer in self.v4.layers:
+            # Route A: the existing FlashMLA sparse kernel accepts arbitrary
+            # K row indices. P3's metadata builder explicitly appends the
+            # complete query block, yielding bidirectional intra-block
+            # visibility without a new attention kernel.
+            layer.attn.dspark_noncausal = True
 
     def cuda_graph_input_hidden_dim(self) -> int:
         return len(self.dspark_params.target_layer_ids) * int(self._v4_args.dim)

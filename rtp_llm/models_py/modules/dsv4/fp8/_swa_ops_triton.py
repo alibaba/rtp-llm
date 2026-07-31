@@ -268,6 +268,77 @@ def compute_window_topk_and_length_varlen(
     return topk_idxs, topk_length
 
 
+def build_dspark_noncausal_swa_indices(
+    *,
+    window_size: int,
+    cu_seqlens: torch.Tensor,
+    input_lengths: torch.Tensor,
+    prefix_lengths: torch.Tensor,
+    req_id_per_token: torch.Tensor,
+    workspace_stride: int = 0,
+) -> Tuple[torch.Tensor, torch.Tensor]:
+    """Explicit SWA indices for a DSpark query block.
+
+    Every query row sees the same set for its request: the last
+    ``window_size - query_len`` cached-prefix rows plus *all* query-block
+    rows, including positions to its right. With ``workspace_stride == 0``
+    indices address the request-major fresh ``kv_full``. Otherwise they
+    address the continuation workspace whose cached-prefix area has
+    ``min(prefix_len, window_size - 1)`` rows followed by all new K rows.
+
+    The output is fixed-width/right-padded and contains only device tensor
+    math, so it is safe under CUDA graph capture.
+    """
+    window_size = int(window_size)
+    workspace_stride = int(workspace_stride)
+    if window_size < 1:
+        raise ValueError(f"window_size must be positive, got {window_size}")
+    req = req_id_per_token.reshape(-1).to(dtype=torch.long)
+    cu = cu_seqlens.reshape(-1).to(device=req.device, dtype=torch.long)
+    query_lens = input_lengths.reshape(-1).to(device=req.device, dtype=torch.long)
+    prefix_lens = prefix_lengths.reshape(-1).to(
+        device=req.device, dtype=torch.long
+    )
+    if query_lens.numel() + 1 != cu.numel():
+        raise ValueError("cu_seqlens must have one more entry than input_lengths")
+    if prefix_lens.numel() != query_lens.numel():
+        raise ValueError("prefix_lengths/input_lengths batch mismatch")
+
+    query_len_per_token = query_lens.index_select(0, req)
+    keep_prefix_per_req = torch.minimum(
+        prefix_lens,
+        (window_size - query_lens).clamp_min(0),
+    )
+    valid_len = keep_prefix_per_req.index_select(0, req) + query_len_per_token
+    cols = torch.arange(window_size, device=req.device, dtype=torch.long)
+
+    if workspace_stride > 0:
+        cached_rows = torch.clamp(prefix_lens, max=window_size - 1)
+        start_per_req = (
+            torch.arange(query_lens.numel(), device=req.device, dtype=torch.long)
+            * workspace_stride
+            + cached_rows
+            - keep_prefix_per_req
+        )
+    else:
+        # Fresh path has no cached-prefix rows in kv_full. The cu-seqlens
+        # offsets isolate each request's query block in the flat K tensor.
+        # Keep CUDA metadata construction graph-safe: only perform the
+        # diagnostic value check for CPU callers. The runtime selects this
+        # branch only when ``any_cont`` is false.
+        if not prefix_lens.is_cuda and bool((prefix_lens != 0).any()):
+            raise ValueError("fresh DSpark kv_full indices require zero prefixes")
+        start_per_req = cu[:-1]
+
+    indices = start_per_req.index_select(0, req).unsqueeze(1) + cols.unsqueeze(0)
+    indices = torch.where(
+        cols.unsqueeze(0) < valid_len.unsqueeze(1),
+        indices,
+        torch.full_like(indices, -1),
+    )
+    return indices.to(torch.int32).contiguous(), valid_len.to(torch.int32)
+
+
 # ---------------------------------------------------------------------------
 # 2) Per-token SWA paged slot_mapping (write side)
 # ---------------------------------------------------------------------------

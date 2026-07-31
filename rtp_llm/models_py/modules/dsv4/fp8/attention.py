@@ -3992,6 +3992,16 @@ class AttentionFP8(nn.Module):
                 )
             )
             any_cont = bool((prefix_lengths > 0).any().item())
+            if bool(getattr(self, "dspark_noncausal", False)) and not any_cont:
+                topk_idxs, topk_length_kv_full = (
+                    _swa_ops.build_dspark_noncausal_swa_indices(
+                        window_size=win,
+                        cu_seqlens=cu_seqlens_for_k,
+                        input_lengths=input_lengths,
+                        prefix_lengths=prefix_lengths,
+                        req_id_per_token=req_id_per_token,
+                    )
+                )
 
         with record_function_range("dsv4.fp8.meta.swa_varlen"):
             swa_meta = self._build_swa_prefill_meta_varlen(
@@ -4006,6 +4016,25 @@ class AttentionFP8(nn.Module):
                 req_id_per_token=req_id_per_token,
                 topk_length_kv_full=topk_length_kv_full,
             )
+            if (
+                bool(getattr(self, "dspark_noncausal", False))
+                and any_cont
+                and swa_meta.combined_indices is not None
+            ):
+                combined_indices, combined_lens = (
+                    _swa_ops.build_dspark_noncausal_swa_indices(
+                        window_size=win,
+                        cu_seqlens=cu_seqlens,
+                        input_lengths=input_lengths,
+                        prefix_lengths=prefix_lengths,
+                        req_id_per_token=req_id_per_token,
+                        workspace_stride=swa_meta.M,
+                    )
+                )
+                swa_meta = swa_meta._replace(
+                    combined_indices=combined_indices,
+                    combined_lens=combined_lens,
+                )
 
         # Bind freqs_cis to this layer's compressor / indexer chain
         # (idempotent — safe to call from both standalone and meta-broadcast paths).
