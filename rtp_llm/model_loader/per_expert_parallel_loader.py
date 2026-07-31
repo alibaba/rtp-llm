@@ -23,7 +23,13 @@ class PerExpertParallelLoader(ParallelLoader):
             are handled by the normal broadcast path.
     """
 
-    def __init__(self, stacked_key_config: Dict[str, str], *args, **kwargs):
+    def __init__(
+        self,
+        stacked_key_config: Dict[str, str],
+        *args,
+        files_per_batch: int = 0,
+        **kwargs,
+    ):
         fst_ver = getattr(fastsafetensors, "__version__", "unknown")
         if not fst_ver.startswith(_REQUIRED_FST_VERSION):
             raise RuntimeError(
@@ -31,8 +37,36 @@ class PerExpertParallelLoader(ParallelLoader):
                 f"{_REQUIRED_FST_VERSION}*, current version: {fst_ver}. "
                 f"Internal API changes may cause breakage."
             )
+        if files_per_batch < 0:
+            raise ValueError("files_per_batch must be non-negative")
+        self.files_per_batch = files_per_batch
         super().__init__(*args, **kwargs)
         self.stacked_key_config = stacked_key_config or {}
+
+    def _create_batches(self, pg):
+        """Bound the GPU staging batch without changing tensor semantics.
+
+        ParallelLoader normally stages one checkpoint file per rank.  K3's
+        96-shard checkpoint can then hold tens of GiB of database-owned GPU
+        buffers while already-materialized model weights remain resident.
+        A smaller source-rank group preserves the same broadcasts and output
+        tensors while making the peak deterministic.
+        """
+
+        if self.files_per_batch <= 0:
+            return super()._create_batches(pg)
+        files_per_batch = min(self.files_per_batch, pg.size())
+        self.hf_weights_files = sorted(self.hf_weights_files)
+        logging.info(
+            "fastsafetensors bounded staging enabled: files_per_batch=%d "
+            "process_group_size=%d",
+            files_per_batch,
+            pg.size(),
+        )
+        return [
+            self.hf_weights_files[i : i + files_per_batch]
+            for i in range(0, len(self.hf_weights_files), files_per_batch)
+        ]
 
     def _consume_single_batch(self):
         # Mirrors ParallelLoader._consume_single_batch; only the key iteration
@@ -91,6 +125,13 @@ class PerExpertParallelLoader(ParallelLoader):
         )
 
         if self.queue_size < 0 and self.consumer_processed is not None:
+            # The next source shard is staged only after this acknowledgement.
+            # Return allocator-only fragments before permitting that staging:
+            # K3's largest full-model shards leave less than 1 GiB of headroom,
+            # so a few hundred MiB of inactive split blocks can otherwise make
+            # the next small materialization allocation fail nondeterministically.
+            if torch.cuda.is_available():
+                torch.cuda.empty_cache()
             self.consumer_processed.set()
 
     def _broadcast_per_expert(

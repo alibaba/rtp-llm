@@ -1,0 +1,23 @@
+diff --git a/cula/ops/kda/sm100/delta_h.py b/cula/ops/kda/sm100/delta_h.py
+index fa3276e..7ff24f1 100644
+--- a/cula/ops/kda/sm100/delta_h.py
++++ b/cula/ops/kda/sm100/delta_h.py
+@@ -1488,11 +1488,14 @@ class ChunkDeltaRuleFwdH:
+                                     v_coord + v_tile_idx * self.BV
+                                 )
+                                 if v_global < V:
+-                                    checkpoint_states_iter[
+-                                        checkpoint_base
++                                    checkpoint_element = cute.make_tensor(
++                                        checkpoint_states_iter
++                                        + checkpoint_base
+                                         + k_coord * V
+-                                        + v_global
+-                                    ] = tTR_rKV[ei]
++                                        + v_global,
++                                        cute.make_layout((1,)),
++                                    )
++                                    checkpoint_element[0] = tTR_rKV[ei]
+                     if cutlass.const_expr(PRINT_DEBUG):
+                         if is_debug_cta:
+                             if local_tidx == 0:

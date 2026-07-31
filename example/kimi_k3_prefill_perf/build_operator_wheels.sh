@@ -26,6 +26,8 @@ git -C "${work_root}/FlashKDA" submodule update --init --recursive
 git clone --recursive "${cula_repo}" "${work_root}/cuLA"
 git -C "${work_root}/cuLA" checkout "${cula_ref}"
 git -C "${work_root}/cuLA" submodule update --init --recursive
+git -C "${work_root}/cuLA" apply \
+  "${script_dir}/patches/cula_dynamic_checkpoint_pointer.patch"
 
 git clone --recursive "${deep_gemm_repo}" "${work_root}/DeepGEMM"
 git -C "${work_root}/DeepGEMM" checkout "${deep_gemm_ref}"

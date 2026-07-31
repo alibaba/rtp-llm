@@ -301,7 +301,27 @@ class CkptDatabase(BaseDatabase):
                 nogds=use_nogds,
             )
             if stacked_key_config:
-                loader = PerExpertParallelLoader(stacked_key_config, **loader_kwargs)
+                streaming = (
+                    os.environ.get("KIMI_K3_FASTSAFETENSORS_STREAMING", "0") == "1"
+                )
+                files_per_batch = int(
+                    os.environ.get(
+                        "KIMI_K3_FASTSAFETENSORS_FILES_PER_BATCH",
+                        "0",
+                    )
+                )
+                if streaming:
+                    # ParallelLoader's queue_size=0 acknowledges a batch as
+                    # soon as the consumer dequeues it.  queue_size=-1 defers
+                    # that acknowledgement until FilesBufferOnDevice.close(),
+                    # so the next GPU staging batch cannot overlap the current
+                    # materialization.
+                    loader_kwargs["queue_size"] = -1
+                loader = PerExpertParallelLoader(
+                    stacked_key_config,
+                    files_per_batch=files_per_batch,
+                    **loader_kwargs,
+                )
             else:
                 loader = ParallelLoader(**loader_kwargs)
             try:

@@ -1,5 +1,10 @@
 package(default_visibility = ["//visibility:public"])
 
+filegroup(
+    name = "kimi_k3_operator_wheels",
+    srcs = glob(["wheels/*"]),
+)
+
 py_binary(
     name = "kimi_k3_prefill_server",
     srcs = ["server_main.py"],
