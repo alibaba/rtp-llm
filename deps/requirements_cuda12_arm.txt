@@ -1,15 +1,15 @@
 -r requirements_base.txt
 # TODO(pip_unify): arm deep-ep drifts from x86 (1.2.1.10+d7d7b48) and the '+unknown.pai' local tag is not traceable to a source commit; rebuild with a git-commit local tag and align versions with x86.
-deep-ep==1.2.1.11+unknown.pai ; platform_machine == "aarch64"
-deep-gemm==2.1.1+local ; platform_machine == "aarch64"
-fast-hadamard-transform==1.0.4.post1 ; platform_machine == "aarch64"
-fast-safetensors==0.7.3+torch2.1.2.cu121 ; platform_machine == "aarch64"
-fastsafetensors==0.1.19rc5+ali ; platform_machine == "aarch64"
+deep-ep==1.2.1.11+unknown.pai
+deep-gemm==2.1.1+local
+fast-hadamard-transform==1.0.4.post1
+fast-safetensors==0.7.3+torch2.1.2.cu121
+fastsafetensors==0.1.19rc5+ali
 # NOTE: arm flash-attn wheel carries no build tag; it must be built against the torch version pinned below (torch 2.9 aarch64). Verify by import smoke on aarch64 when upgrading either pin.
-flash-attn==2.8.3 ; platform_machine == "aarch64"
+flash-attn==2.8.3
 flash-attn-3==3.0.0b1
 # NOTE: arm flash-mla (+47c35a7) is built from a different commit than x86 (+ca58fed); align to the same source commit when rebuilding.
-flash-mla==1.0.0+47c35a7 ; platform_machine == "aarch64"
+flash-mla==1.0.0+47c35a7
 flashinfer-cubin==0.6.6
 flashinfer-jit-cache==0.6.6
 flashinfer-python==0.6.6
@@ -20,6 +20,6 @@ nvidia-cutlass-dsl==4.4.1
 # pins on the SAME source commit (currently 125c29e5) and bump + regenerate both
 # lockfiles together, otherwise a one-sided regen would silently ship mismatched
 # rtp-kernel builds across architectures.
-rtp-kernel==0.1.0+125c29e5.20260422155252 ; platform_machine == "aarch64"
+rtp-kernel==0.1.0+125c29e5.20260422155252
 torch==2.9.0+cu129
 torchvision==0.24.0
