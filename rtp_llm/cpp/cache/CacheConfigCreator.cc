@@ -16,24 +16,6 @@ namespace rtp_llm {
 
 namespace {
 
-bool blockNumFitsBudget(uint32_t block_num, size_t total_budget_bytes, const KVCacheBlockBudget& budget, int step) {
-    if (budget.explicit_pool_reserve_bytes > total_budget_bytes) {
-        return false;
-    }
-
-    size_t remaining = total_budget_bytes - budget.explicit_pool_reserve_bytes;
-    if (budget.paged_block_bytes > 0) {
-        if (static_cast<size_t>(block_num) > remaining / budget.paged_block_bytes) {
-            return false;
-        }
-        remaining -= static_cast<size_t>(block_num) * budget.paged_block_bytes;
-    }
-
-    const auto safe_step  = static_cast<uint32_t>(std::max(1, step));
-    const auto swa_blocks = block_num / safe_step + (block_num % safe_step != 0 ? 1u : 0u);
-    return budget.swa_block_bytes == 0 || static_cast<size_t>(swa_blocks) <= remaining / budget.swa_block_bytes;
-}
-
 KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
     KVCacheBlockBudget budget;
     if (!config.use_independent_block_pools) {
@@ -146,18 +128,45 @@ uint32_t computeBlockNum(CacheConfig&                                     config
 uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlockBudget& budget, int linear_step) {
     RTP_LLM_CHECK_WITH_INFO(budget.paged_block_bytes > 0 || budget.swa_block_bytes > 0,
                             "kv cache block budget has zero marginal block bytes");
-
-    uint32_t low  = 0;
-    uint32_t high = std::numeric_limits<uint32_t>::max();
-    while (low < high) {
-        const uint32_t mid = low + static_cast<uint32_t>((static_cast<uint64_t>(high) - low + 1) / 2);
-        if (blockNumFitsBudget(mid, total_budget_bytes, budget, linear_step)) {
-            low = mid;
-        } else {
-            high = mid - 1;
-        }
+    if (budget.explicit_pool_reserve_bytes > total_budget_bytes) {
+        return 0;
     }
-    return low;
+
+    const size_t   remaining_budget = total_budget_bytes - budget.explicit_pool_reserve_bytes;
+    const uint32_t step             = static_cast<uint32_t>(std::max(1, linear_step));
+    const size_t   paged_bytes      = budget.paged_block_bytes;
+    const size_t   swa_bytes        = budget.swa_block_bytes;
+    constexpr auto max_blocks       = std::numeric_limits<uint32_t>::max();
+
+    // With no SWA pool, every block has the same cost.
+    if (swa_bytes == 0) {
+        return static_cast<uint32_t>(std::min<size_t>(remaining_budget / paged_bytes, max_blocks));
+    }
+
+    // One complete step contains `step` paged blocks and one SWA block. If
+    // that sum overflows size_t, no complete step can fit in a size_t budget.
+    const bool   step_cost_overflows = paged_bytes > (std::numeric_limits<size_t>::max() - swa_bytes) / step;
+    const size_t step_cost           = step_cost_overflows ? 0 : static_cast<size_t>(step) * paged_bytes + swa_bytes;
+    const size_t complete_steps =
+        step_cost_overflows ? 0 : std::min<size_t>(remaining_budget / step_cost, max_blocks / step);
+    const uint32_t complete_blocks = static_cast<uint32_t>(complete_steps * step);
+    if (complete_blocks == max_blocks) {
+        return max_blocks;
+    }
+
+    const size_t budget_after_complete_steps =
+        step_cost_overflows ? remaining_budget : remaining_budget - complete_steps * step_cost;
+    const uint32_t max_tail_blocks = std::min<uint32_t>(step - 1, max_blocks - complete_blocks);
+    if (max_tail_blocks == 0 || budget_after_complete_steps < swa_bytes) {
+        return complete_blocks;
+    }
+
+    // A non-empty partial step pays for one SWA block plus its paged blocks.
+    const size_t   tail_budget = budget_after_complete_steps - swa_bytes;
+    const uint32_t tail_blocks =
+        paged_bytes == 0 ? max_tail_blocks :
+                           static_cast<uint32_t>(std::min<size_t>(tail_budget / paged_bytes, max_tail_blocks));
+    return complete_blocks + tail_blocks;
 }
 
 LayerKVCacheSpecs CacheConfigCreator::buildLayerSpecsFromDescs(const LayerKVCacheSpecDescs& layer_descs,

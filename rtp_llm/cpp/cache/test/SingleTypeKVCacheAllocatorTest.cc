@@ -1,4 +1,5 @@
 #include <gtest/gtest.h>
+#include <limits>
 #include <memory>
 #include <vector>
 #include <set>
@@ -23,6 +24,40 @@
 
 namespace rtp_llm {
 namespace test {
+
+TEST(CacheConfigTest, BlockBudgetUsesExactArithmetic) {
+    const KVCacheBlockBudget mixed_budget{/*explicit_pool_reserve_bytes=*/10,
+                                          /*paged_block_bytes=*/3,
+                                          /*swa_block_bytes=*/5};
+
+    // cost(N) = 10 + 3*N + 5*ceil(N/4).
+    EXPECT_EQ(maxKVCacheBlockNumForBudget(17, mixed_budget, 4), 0u);
+    EXPECT_EQ(maxKVCacheBlockNumForBudget(18, mixed_budget, 4), 1u);
+    EXPECT_EQ(maxKVCacheBlockNumForBudget(27, mixed_budget, 4), 4u);
+    EXPECT_EQ(maxKVCacheBlockNumForBudget(34, mixed_budget, 4), 4u);
+    EXPECT_EQ(maxKVCacheBlockNumForBudget(35, mixed_budget, 4), 5u);
+    EXPECT_EQ(maxKVCacheBlockNumForBudget(44, mixed_budget, 4), 8u);
+    EXPECT_EQ(maxKVCacheBlockNumForBudget(51, mixed_budget, 4), 8u);
+    EXPECT_EQ(maxKVCacheBlockNumForBudget(52, mixed_budget, 4), 9u);
+
+    EXPECT_EQ(maxKVCacheBlockNumForBudget(
+                  101, {/*explicit_pool_reserve_bytes=*/1, /*paged_block_bytes=*/3, /*swa_block_bytes=*/0}, 4),
+              33u);
+    EXPECT_EQ(maxKVCacheBlockNumForBudget(
+                  30, {/*explicit_pool_reserve_bytes=*/10, /*paged_block_bytes=*/0, /*swa_block_bytes=*/5}, 4),
+              16u);
+    EXPECT_EQ(maxKVCacheBlockNumForBudget(9, mixed_budget, 4), 0u);
+
+    const auto max_size   = std::numeric_limits<size_t>::max();
+    const auto max_blocks = std::numeric_limits<uint32_t>::max();
+    EXPECT_EQ(maxKVCacheBlockNumForBudget(
+                  max_size, {/*explicit_pool_reserve_bytes=*/0, /*paged_block_bytes=*/1, /*swa_block_bytes=*/0}, 4),
+              max_blocks);
+    EXPECT_EQ(
+        maxKVCacheBlockNumForBudget(
+            max_size, {/*explicit_pool_reserve_bytes=*/0, /*paged_block_bytes=*/max_size, /*swa_block_bytes=*/1}, 4),
+        0u);
+}
 
 CacheConfig createSingleTypeTestConfig(int layer_num = 4, int block_num = 10, int seq_size_per_block = 8) {
     return makeSimpleMhaCacheConfig(/*layer_num=*/layer_num,
