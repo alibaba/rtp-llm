@@ -105,8 +105,8 @@ bool HybridKVCacheAllocator::preflightLoadMappings(
     if (load_context == nullptr || load_context->empty()) {
         return true;
     }
-    for (const LoadAsyncContext::PendingLoadItem& item : load_context->items()) {
-        const std::vector<size_t>* group_ids = groupIdsForGroupSet(item.group_set_id);
+    for (const TransferDescriptor& desc : load_context->loadDescs()) {
+        const std::vector<size_t>* group_ids = groupIdsForGroupSet(desc.group_set_id);
         if (group_ids == nullptr || group_ids->empty()) {
             return false;
         }
@@ -196,15 +196,16 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
     }
 
     if (load_context != nullptr) {
-        for (size_t item_index = 0; item_index < load_context->items().size(); ++item_index) {
-            if (load_context->items()[item_index].source_tier != Tier::DEVICE
-                && !load_context->joinedLoadItems()[item_index]) {
+        for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
+            if (load_context->loadDescs()[desc_index].source_tier != Tier::DEVICE
+                && !load_context->joinedLoads()[desc_index]) {
                 continue;
             }
-            const BlockIndicesType&    source_blocks = load_context->items()[item_index].source_blocks;
-            const std::vector<size_t>* group_ids = groupIdsForGroupSet(load_context->items()[item_index].group_set_id);
-            const BlockIndicesType& reusable_blocks = load_context->joinedLoadItems()[item_index] ?
-                                                          load_context->items()[item_index].target_device_blocks :
+            const BlockIndicesType&    source_blocks = load_context->loadDescs()[desc_index].source_blocks;
+            const std::vector<size_t>* group_ids =
+                groupIdsForGroupSet(load_context->loadDescs()[desc_index].group_set_id);
+            const BlockIndicesType& reusable_blocks = load_context->joinedLoads()[desc_index] ?
+                                                          load_context->loadDescs()[desc_index].target_blocks :
                                                           source_blocks;
             if (group_ids == nullptr || reusable_blocks.empty() || reusable_blocks.size() != group_ids->size()) {
                 return fail_match();
@@ -219,8 +220,8 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
                 const size_t         target_position =
                     type == CacheGroupType::LINEAR
                             || (type == CacheGroupType::SWA && !cpCompactSwaGroup(group_id, cp_mapper)) ?
-                                (load_context->items()[item_index].path_index + 1) * static_cast<size_t>(cp_scale) - 1 :
-                                load_context->items()[item_index].path_index;
+                                (load_context->loadDescs()[desc_index].path_index + 1) * static_cast<size_t>(cp_scale) - 1 :
+                                load_context->loadDescs()[desc_index].path_index;
                 auto& target = kv_resource.mutableBlockIds(0, group_id);
                 if (target_position >= target.blocksNum()
                     || (!isNullBlockIdx(target.blocks()[target_position])
@@ -294,15 +295,15 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
 
     std::vector<std::vector<size_t>> load_positions(static_cast<size_t>(kv_resource->groupNums()));
     if (load_context != nullptr && !load_context->empty()) {
-        for (size_t item_index = 0; item_index < load_context->items().size(); ++item_index) {
-            if (load_context->items()[item_index].source_tier == Tier::DEVICE) {
+        for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
+            if (load_context->loadDescs()[desc_index].source_tier == Tier::DEVICE) {
                 continue;
             }
-            if (load_context->joinedLoadItems()[item_index]) {
+            if (load_context->joinedLoads()[desc_index]) {
                 continue;
             }
             const std::vector<size_t>* group_ids =
-                groupIdsForGroupSet(load_context->items()[item_index].group_set_id);
+                groupIdsForGroupSet(load_context->loadDescs()[desc_index].group_set_id);
             if (group_ids == nullptr || group_ids->empty()) {
                 return rollback({});
             }
@@ -315,8 +316,8 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
                 const size_t         target_position =
                     type == CacheGroupType::LINEAR
                             || (type == CacheGroupType::SWA && !cpCompactSwaGroup(group_id, cp_mapper)) ?
-                                (load_context->items()[item_index].path_index + 1) * static_cast<size_t>(cp_scale) - 1 :
-                                load_context->items()[item_index].path_index;
+                                (load_context->loadDescs()[desc_index].path_index + 1) * static_cast<size_t>(cp_scale) - 1 :
+                                load_context->loadDescs()[desc_index].path_index;
                 auto& positions = load_positions[static_cast<size_t>(group_id)];
                 if (std::find(positions.begin(), positions.end(), target_position) == positions.end()) {
                     positions.push_back(target_position);
@@ -376,14 +377,14 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         }
     }
     if (load_context != nullptr && !load_context->empty()) {
-        for (size_t item_index = 0; item_index < load_context->items().size(); ++item_index) {
+        for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
             const std::vector<size_t>* group_ids =
-                groupIdsForGroupSet(load_context->items()[item_index].group_set_id);
+                groupIdsForGroupSet(load_context->loadDescs()[desc_index].group_set_id);
             if (group_ids == nullptr || group_ids->empty()) {
                 return rollback(original_sizes);
             }
-            const BlockIndicesType& source_blocks = load_context->items()[item_index].source_blocks;
-            BlockIndicesType        target_device_blocks;
+            const BlockIndicesType& source_blocks = load_context->loadDescs()[desc_index].source_blocks;
+            BlockIndicesType        target_blocks;
             for (size_t member_index = 0; member_index < group_ids->size(); ++member_index) {
                 const int            group_id = static_cast<int>((*group_ids)[member_index]);
                 if (group_id >= kv_resource->groupNums()) {
@@ -393,24 +394,24 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
                 const size_t         position =
                     type == CacheGroupType::LINEAR
                             || (type == CacheGroupType::SWA && !cpCompactSwaGroup(group_id, cp_mapper)) ?
-                                (load_context->items()[item_index].path_index + 1) * static_cast<size_t>(cp_scale) - 1 :
-                                load_context->items()[item_index].path_index;
+                                (load_context->loadDescs()[desc_index].path_index + 1) * static_cast<size_t>(cp_scale) - 1 :
+                                load_context->loadDescs()[desc_index].path_index;
                 const BlockIndicesType& blocks = kv_resource->blocks(0, group_id);
                 if (position >= blocks.size() || isNullBlockIdx(blocks[position])
-                    || (load_context->items()[item_index].source_tier == Tier::DEVICE
+                    || (load_context->loadDescs()[desc_index].source_tier == Tier::DEVICE
                         && (member_index >= source_blocks.size()
                             || blocks[position] != source_blocks[member_index]))) {
                     return rollback(original_sizes);
                 }
-                target_device_blocks.push_back(blocks[position]);
+                target_blocks.push_back(blocks[position]);
             }
-            if (load_context->joinedLoadItems()[item_index]) {
-                if (target_device_blocks != load_context->items()[item_index].target_device_blocks) {
+            if (load_context->joinedLoads()[desc_index]) {
+                if (target_blocks != load_context->loadDescs()[desc_index].target_blocks) {
                     return rollback(original_sizes);
                 }
                 continue;
             }
-            if (!load_context->bindTargetDeviceBlocks(item_index, std::move(target_device_blocks))) {
+            if (!load_context->bindTargetDeviceBlocks(desc_index, std::move(target_blocks))) {
                 return rollback(original_sizes);
             }
         }

@@ -143,7 +143,7 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, HostDiskDirectIoWritesAlignedStri
 TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitRejectsMalformedHostDiskDescriptors) {
     BlockIdxType host_block = poolMalloc(*host_pool_);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
-    const auto disk_block = poolMalloc(*disk_pool_);
+    const BlockIdxType disk_block = poolMalloc(*disk_pool_);
     ASSERT_NE(disk_block, NULL_BLOCK_IDX);
 
     expectStatus(per_rank_transfer_engine_,
@@ -158,10 +158,9 @@ TEST_F(PerRankBlockTransferEngineHostDiskTest, SubmitRejectsMalformedHostDiskDes
     expectStatus(per_rank_transfer_engine_,
                  makeDescriptor(Tier::DISK, Tier::HOST, {}, host_block, NULL_BLOCK_IDX),
                  TransferStatus::INVALID_ARGS);
-    // Valid endpoints but stray device blocks: only the isValid() gate rejects this shape.
-    expectStatus(per_rank_transfer_engine_,
-                 makeDescriptor(Tier::HOST, Tier::DISK, {3}, host_block, disk_block),
-                 TransferStatus::INVALID_ARGS);
+    TransferDescriptor malformed = makeDescriptor(Tier::HOST, Tier::DISK, {}, host_block, disk_block);
+    malformed.source_blocks.push_back(3);
+    expectStatus(per_rank_transfer_engine_, malformed, TransferStatus::INVALID_ARGS);
 
     host_pool_->free(host_block);
     disk_pool_->free(disk_block);

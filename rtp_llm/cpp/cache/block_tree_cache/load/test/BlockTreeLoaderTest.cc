@@ -41,9 +41,9 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
     EXPECT_EQ(result.disk_load_blocks, 0u);
 
     std::vector<std::pair<DeviceBlockPoolPtr, BlockIdxType>> request_targets;
-    for (size_t item_index = 0; item_index < load_context->items().size(); ++item_index) {
+    for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
         std::vector<BlockIdxType> targets;
-        const size_t              group_set_id = load_context->items()[item_index].group_set_id;
+        const size_t              group_set_id = load_context->loadDescs()[desc_index].group_set_id;
         for (const DeviceBlockPoolPtr& pool : environment->groups.at(group_set_id)->devicePools()) {
             const BlockIdList blocks = pool->malloc(1).value();
             ASSERT_EQ(blocks.size(), 1u);
@@ -51,7 +51,7 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
             targets.push_back(blocks.front());
             request_targets.emplace_back(pool, blocks.front());
         }
-        ASSERT_TRUE(load_context->bindTargetDeviceBlocks(item_index, std::move(targets)));
+        ASSERT_TRUE(load_context->bindTargetDeviceBlocks(desc_index, std::move(targets)));
     }
 
     ASSERT_TRUE(load_context->commit());

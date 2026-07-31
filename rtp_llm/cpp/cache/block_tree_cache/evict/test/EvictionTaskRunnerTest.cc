@@ -34,19 +34,19 @@ protected:
 
 BlockTreeEvictor::EvictionPlan makeCopyPlan() {
     BlockTreeEvictor::EvictionPlan plan;
-    plan.primary.group_set_id  = 0;
-    plan.primary.source_tier   = Tier::DEVICE;
-    plan.primary.target_tier   = Tier::HOST;
-    plan.primary.source_blocks = {1, 2};
-    plan.primary.target_blocks = {3};
+    plan.primary_desc.group_set_id  = 0;
+    plan.primary_desc.source_tier   = Tier::DEVICE;
+    plan.primary_desc.target_tier   = Tier::HOST;
+    plan.primary_desc.source_blocks = {1, 2};
+    plan.primary_desc.target_blocks = {3};
 
-    EvictionMove cascade;
-    cascade.group_set_id  = 1;
-    cascade.source_tier   = Tier::HOST;
-    cascade.target_tier   = Tier::DISK;
-    cascade.source_blocks = {4};
-    cascade.target_blocks = {5};
-    plan.cascade_moves.push_back(std::move(cascade));
+    TransferDescriptor cascade_desc;
+    cascade_desc.group_set_id  = 1;
+    cascade_desc.source_tier   = Tier::HOST;
+    cascade_desc.target_tier   = Tier::DISK;
+    cascade_desc.source_blocks = {4};
+    cascade_desc.target_blocks = {5};
+    plan.cascade_descs.push_back(std::move(cascade_desc));
     return plan;
 }
 
@@ -88,13 +88,13 @@ TEST_F(EvictionTaskRunnerTest, BuildTransferBatchIncludesPrimaryAndCascades) {
     ASSERT_TRUE(EvictionTaskRunner::buildTransferBatch(makeCopyPlan(), descriptors));
 
     ASSERT_EQ(descriptors.size(), 2u);
-    EXPECT_EQ(descriptors[0].device_blocks, (std::vector<BlockIdxType>{1, 2}));
-    EXPECT_EQ(descriptors[0].host_block, 3);
-    EXPECT_EQ(descriptors[1].host_block, 4);
-    EXPECT_EQ(descriptors[1].disk_block, 5);
+    EXPECT_EQ(descriptors[0].blocksAt(Tier::DEVICE), (std::vector<BlockIdxType>{1, 2}));
+    EXPECT_EQ(descriptors[0].singleBlockAt(Tier::HOST), 3);
+    EXPECT_EQ(descriptors[1].singleBlockAt(Tier::HOST), 4);
+    EXPECT_EQ(descriptors[1].singleBlockAt(Tier::DISK), 5);
 }
 
-TEST_F(EvictionTaskRunnerTest, BuildTransferBatchRejectsMalformedMoves) {
+TEST_F(EvictionTaskRunnerTest, BuildTransferBatchRejectsMalformedDescriptors) {
     const auto expect_rejected = [](void (*mutate)(BlockTreeEvictor::EvictionPlan&)) {
         auto plan = makeCopyPlan();
         mutate(plan);
@@ -103,24 +103,24 @@ TEST_F(EvictionTaskRunnerTest, BuildTransferBatchRejectsMalformedMoves) {
         EXPECT_TRUE(descriptors.empty());
     };
 
-    expect_rejected([](auto& plan) { plan.primary.source_blocks = {}; });
-    expect_rejected([](auto& plan) { plan.primary.source_blocks = {1, NULL_BLOCK_IDX}; });
-    expect_rejected([](auto& plan) { plan.primary.target_blocks = {}; });
-    expect_rejected([](auto& plan) { plan.primary.target_blocks = {3, 4}; });
-    expect_rejected([](auto& plan) { plan.primary.source_tier = Tier::DISK; });
-    expect_rejected([](auto& plan) { plan.cascade_moves[0].source_blocks = {4, 5}; });
-    expect_rejected([](auto& plan) { plan.cascade_moves[0].target_blocks = {NULL_BLOCK_IDX}; });
+    expect_rejected([](auto& plan) { plan.primary_desc.source_blocks = {}; });
+    expect_rejected([](auto& plan) { plan.primary_desc.source_blocks = {1, NULL_BLOCK_IDX}; });
+    expect_rejected([](auto& plan) { plan.primary_desc.target_blocks = {}; });
+    expect_rejected([](auto& plan) { plan.primary_desc.target_blocks = {3, 4}; });
+    expect_rejected([](auto& plan) { plan.primary_desc.source_tier = Tier::DISK; });
+    expect_rejected([](auto& plan) { plan.cascade_descs[0].source_blocks = {4, 5}; });
+    expect_rejected([](auto& plan) { plan.cascade_descs[0].target_blocks = {NULL_BLOCK_IDX}; });
 }
 
 TEST_F(EvictionTaskRunnerTest, DiskInvolvedPlanUsesDiskTimeoutEvenWhenSmaller) {
     auto plan = makeCopyPlan();
     EXPECT_EQ(EvictionTaskRunner::transferTimeoutMs(plan, 8000, 3000), 3000);
 
-    plan.primary.target_tier = Tier::DISK;
-    plan.cascade_moves.clear();
+    plan.primary_desc.target_tier = Tier::DISK;
+    plan.cascade_descs.clear();
     EXPECT_EQ(EvictionTaskRunner::transferTimeoutMs(plan, 8000, 3000), 3000);
 
-    plan.primary.target_tier = Tier::HOST;
+    plan.primary_desc.target_tier = Tier::HOST;
     EXPECT_EQ(EvictionTaskRunner::transferTimeoutMs(plan, 8000, 3000), 8000);
 }
 
@@ -133,19 +133,19 @@ TEST_F(EvictionTaskRunnerTest, DeviceEvictionBypassesDisabledHost) {
     runner.is_tier_enabled_ = [](Tier tier) { return tier == Tier::DISK; };
 
     BlockTreeEvictor::EvictionPlan plan;
-    plan.primary.group_set_id  = 0;
-    plan.primary.source_tier   = Tier::DEVICE;
-    plan.primary.target_tier   = runner.normalizeTargetTier(Tier::DEVICE);
-    plan.primary.source_blocks = {1, 2};
-    plan.primary.target_blocks = {3};
+    plan.primary_desc.group_set_id  = 0;
+    plan.primary_desc.source_tier   = Tier::DEVICE;
+    plan.primary_desc.target_tier   = runner.normalizeTargetTier(Tier::DEVICE);
+    plan.primary_desc.source_blocks = {1, 2};
+    plan.primary_desc.target_blocks = {3};
 
     const auto results = runner.performCopy(plan);
     ASSERT_TRUE(results.primary_success);
     ASSERT_EQ(descriptors.size(), 1u);
     EXPECT_EQ(descriptors[0].source_tier, Tier::DEVICE);
     EXPECT_EQ(descriptors[0].target_tier, Tier::DISK);
-    EXPECT_EQ(descriptors[0].device_blocks, (std::vector<BlockIdxType>{1, 2}));
-    EXPECT_EQ(descriptors[0].disk_block, 3);
+    EXPECT_EQ(descriptors[0].blocksAt(Tier::DEVICE), (std::vector<BlockIdxType>{1, 2}));
+    EXPECT_EQ(descriptors[0].singleBlockAt(Tier::DISK), 3);
 }
 
 TEST_F(EvictionTaskRunnerTest, TargetNormalizationUsesNearestEnabledTier) {

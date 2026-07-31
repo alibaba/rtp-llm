@@ -8,7 +8,7 @@
 
 namespace rtp_llm {
 
-LoadAsyncContext::LoadAsyncContext(PendingLoadItems                               items,
+LoadAsyncContext::LoadAsyncContext(std::vector<TransferDescriptor> load_descs,
                                    std::vector<bool>                              joined_load,
                                    size_t                                         logical_matched_blocks,
                                    size_t                                         pending_transfer_count,
@@ -16,7 +16,7 @@ LoadAsyncContext::LoadAsyncContext(PendingLoadItems                             
                                    const std::shared_ptr<LoadContextCoordinator>& coordinator):
     coordinator_(coordinator),
     context_id_(context_id),
-    items_(std::move(items)),
+    load_descs_(std::move(load_descs)),
     joined_load_(std::move(joined_load)),
     logical_matched_blocks_(logical_matched_blocks),
     remaining_transfer_count_(pending_transfer_count) {
@@ -33,16 +33,16 @@ LoadAsyncContext::~LoadAsyncContext() {
 void LoadAsyncContext::rebuildLogicalMatchedBlocksByTier() {
     logical_matched_blocks_by_tier_.fill(0);
     std::unordered_map<size_t, Tier> reuse_tier_by_path;
-    for (const PendingLoadItem& item : items_) {
-        if (item.source_tier < Tier::DEVICE || item.source_tier > Tier::DISK) {
+    for (const TransferDescriptor& desc : load_descs_) {
+        if (desc.source_tier < Tier::DEVICE || desc.source_tier > Tier::DISK) {
             continue;
         }
         const std::pair<std::unordered_map<size_t, Tier>::iterator, bool> insert_result =
-            reuse_tier_by_path.emplace(item.path_index, item.source_tier);
+            reuse_tier_by_path.emplace(desc.path_index, desc.source_tier);
         if (!insert_result.second
-            && (item.source_tier == Tier::DISK
-                || (item.source_tier == Tier::HOST && insert_result.first->second == Tier::DEVICE))) {
-            insert_result.first->second = item.source_tier;
+            && (desc.source_tier == Tier::DISK
+                || (desc.source_tier == Tier::HOST && insert_result.first->second == Tier::DEVICE))) {
+            insert_result.first->second = desc.source_tier;
         }
     }
     for (const std::pair<const size_t, Tier>& reuse_tier : reuse_tier_by_path) {
@@ -51,7 +51,7 @@ void LoadAsyncContext::rebuildLogicalMatchedBlocksByTier() {
 }
 
 bool LoadAsyncContext::empty() const {
-    return items_.empty();
+    return load_descs_.empty();
 }
 
 uint64_t LoadAsyncContext::contextId() const {
@@ -69,23 +69,23 @@ size_t LoadAsyncContext::logicalMatchedBlocks(Tier tier) const {
     return logical_matched_blocks_by_tier_[static_cast<size_t>(tier)];
 }
 
-bool LoadAsyncContext::bindTargetDeviceBlocks(size_t item_index, std::vector<BlockIdxType> target_device_blocks) {
-    if (item_index >= items_.size() || joined_load_.at(item_index)) {
+bool LoadAsyncContext::bindTargetDeviceBlocks(size_t desc_index, std::vector<BlockIdxType> target_device_blocks) {
+    if (desc_index >= load_descs_.size() || joined_load_.at(desc_index)) {
         return false;
     }
-    PendingLoadItem& item = items_[item_index];
-    if (item.source_tier == Tier::DEVICE && item.source_blocks != target_device_blocks) {
+    TransferDescriptor& desc = load_descs_[desc_index];
+    if (desc.source_tier == Tier::DEVICE && desc.source_blocks != target_device_blocks) {
         return false;
     }
-    item.target_device_blocks = std::move(target_device_blocks);
+    desc.target_blocks = std::move(target_device_blocks);
     return true;
 }
 
-const LoadAsyncContext::PendingLoadItems& LoadAsyncContext::items() const {
-    return items_;
+const std::vector<TransferDescriptor>& LoadAsyncContext::loadDescs() const {
+    return load_descs_;
 }
 
-const std::vector<bool>& LoadAsyncContext::joinedLoadItems() const {
+const std::vector<bool>& LoadAsyncContext::joinedLoads() const {
     return joined_load_;
 }
 
@@ -196,7 +196,7 @@ bool LoadAsyncContext::success() const {
 LoadContextCoordinator::LoadContextCoordinator(CommitCallback commit_callback, AbortCallback abort_callback):
     commit_callback_(std::move(commit_callback)), abort_callback_(std::move(abort_callback)) {}
 
-std::shared_ptr<LoadAsyncContext> LoadContextCoordinator::create(LoadAsyncContext::PendingLoadItems items,
+std::shared_ptr<LoadAsyncContext> LoadContextCoordinator::create(std::vector<TransferDescriptor> load_descs,
                                                                  std::vector<bool>                  joined_load,
                                                                  size_t logical_matched_blocks,
                                                                  size_t pending_transfer_count) {
@@ -212,7 +212,7 @@ std::shared_ptr<LoadAsyncContext> LoadContextCoordinator::create(LoadAsyncContex
         ++next_context_id_;
     }
 
-    return std::make_shared<LoadAsyncContext>(std::move(items),
+    return std::make_shared<LoadAsyncContext>(std::move(load_descs),
                                               std::move(joined_load),
                                               logical_matched_blocks,
                                               pending_transfer_count,

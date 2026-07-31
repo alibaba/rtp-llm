@@ -62,35 +62,38 @@ bool BlockTransferRequestConverter::validDiskBlock(BlockIdxType block, const Gro
 bool BlockTransferRequestConverter::directionFor(const TransferDescriptor&                descriptor,
                                                  const GroupSet&                          group_set,
                                                  MemoryOperationRequestPB::CopyDirection& request_direction) {
+    if (!descriptor.isExecutable()) {
+        return false;
+    }
     if (descriptor.source_tier == Tier::DEVICE && descriptor.target_tier == Tier::HOST) {
         request_direction = MemoryOperationRequestPB::D2H;
-        return validDeviceBlocks(descriptor.device_blocks, group_set)
-               && validHostBlock(descriptor.host_block, group_set);
+        return validDeviceBlocks(descriptor.blocksAt(Tier::DEVICE), group_set)
+               && validHostBlock(descriptor.singleBlockAt(Tier::HOST), group_set);
     }
     if (descriptor.source_tier == Tier::HOST && descriptor.target_tier == Tier::DEVICE) {
         request_direction = MemoryOperationRequestPB::H2D;
-        return validHostBlock(descriptor.host_block, group_set)
-               && validDeviceBlocks(descriptor.device_blocks, group_set);
+        return validHostBlock(descriptor.singleBlockAt(Tier::HOST), group_set)
+               && validDeviceBlocks(descriptor.blocksAt(Tier::DEVICE), group_set);
     }
     if (descriptor.source_tier == Tier::HOST && descriptor.target_tier == Tier::DISK) {
         request_direction = MemoryOperationRequestPB::H2DISK;
-        return descriptor.device_blocks.empty() && validHostBlock(descriptor.host_block, group_set)
-               && validDiskBlock(descriptor.disk_block, group_set);
+        return validHostBlock(descriptor.singleBlockAt(Tier::HOST), group_set)
+               && validDiskBlock(descriptor.singleBlockAt(Tier::DISK), group_set);
     }
     if (descriptor.source_tier == Tier::DISK && descriptor.target_tier == Tier::HOST) {
         request_direction = MemoryOperationRequestPB::DISK2H;
-        return descriptor.device_blocks.empty() && validDiskBlock(descriptor.disk_block, group_set)
-               && validHostBlock(descriptor.host_block, group_set);
+        return validDiskBlock(descriptor.singleBlockAt(Tier::DISK), group_set)
+               && validHostBlock(descriptor.singleBlockAt(Tier::HOST), group_set);
     }
     if (descriptor.source_tier == Tier::DEVICE && descriptor.target_tier == Tier::DISK) {
         request_direction = MemoryOperationRequestPB::D2DISK;
-        return validDeviceBlocks(descriptor.device_blocks, group_set)
-               && validDiskBlock(descriptor.disk_block, group_set);
+        return validDeviceBlocks(descriptor.blocksAt(Tier::DEVICE), group_set)
+               && validDiskBlock(descriptor.singleBlockAt(Tier::DISK), group_set);
     }
     if (descriptor.source_tier == Tier::DISK && descriptor.target_tier == Tier::DEVICE) {
         request_direction = MemoryOperationRequestPB::DISK2D;
-        return validDiskBlock(descriptor.disk_block, group_set)
-               && validDeviceBlocks(descriptor.device_blocks, group_set);
+        return validDiskBlock(descriptor.singleBlockAt(Tier::DISK), group_set)
+               && validDeviceBlocks(descriptor.blocksAt(Tier::DEVICE), group_set);
     }
     return false;
 }
@@ -227,35 +230,35 @@ bool BlockTransferRequestConverter::appendTransfer(const TransferDescriptor&    
 
     if (descriptor.source_tier == Tier::DEVICE && descriptor.target_tier == Tier::HOST) {
         item.set_backing_type(MemoryOperationRequestPB::MEMORY);
-        item.set_mem_block(descriptor.host_block);
-        setDeviceBlocks(descriptor.device_blocks, *group_set, item);
+        item.set_mem_block(descriptor.singleBlockAt(Tier::HOST));
+        setDeviceBlocks(descriptor.blocksAt(Tier::DEVICE), *group_set, item);
     } else if (descriptor.source_tier == Tier::HOST && descriptor.target_tier == Tier::DEVICE) {
         item.set_backing_type(MemoryOperationRequestPB::MEMORY);
-        item.set_mem_block(descriptor.host_block);
-        setDeviceBlocks(descriptor.device_blocks, *group_set, item);
+        item.set_mem_block(descriptor.singleBlockAt(Tier::HOST));
+        setDeviceBlocks(descriptor.blocksAt(Tier::DEVICE), *group_set, item);
     } else if (descriptor.source_tier == Tier::HOST && descriptor.target_tier == Tier::DISK) {
         item.set_backing_type(MemoryOperationRequestPB::DISK);
         item.set_mem_block(NULL_BLOCK_IDX);
-        item.set_disk_slot(descriptor.disk_block);
+        item.set_disk_slot(descriptor.singleBlockAt(Tier::DISK));
         item.set_src_backing_type(MemoryOperationRequestPB::MEMORY);
-        item.set_src_mem_block(descriptor.host_block);
+        item.set_src_mem_block(descriptor.singleBlockAt(Tier::HOST));
     } else if (descriptor.source_tier == Tier::DISK && descriptor.target_tier == Tier::HOST) {
         item.set_backing_type(MemoryOperationRequestPB::MEMORY);
-        item.set_mem_block(descriptor.host_block);
+        item.set_mem_block(descriptor.singleBlockAt(Tier::HOST));
         item.set_src_backing_type(MemoryOperationRequestPB::DISK);
-        item.set_src_disk_slot(descriptor.disk_block);
+        item.set_src_disk_slot(descriptor.singleBlockAt(Tier::DISK));
     } else if (descriptor.source_tier == Tier::DEVICE && descriptor.target_tier == Tier::DISK) {
         item.set_backing_type(MemoryOperationRequestPB::DISK);
         item.set_mem_block(NULL_BLOCK_IDX);
-        item.set_disk_slot(descriptor.disk_block);
-        setDeviceBlocks(descriptor.device_blocks, *group_set, item);
+        item.set_disk_slot(descriptor.singleBlockAt(Tier::DISK));
+        setDeviceBlocks(descriptor.blocksAt(Tier::DEVICE), *group_set, item);
     } else if (descriptor.source_tier == Tier::DISK && descriptor.target_tier == Tier::DEVICE) {
         // DISK2D has no primary non-device backing: source is src_disk_slot, target is group_blocks.
         // Leave primary backing_type at its proto3 default (not decoded).
         item.set_mem_block(NULL_BLOCK_IDX);
         item.set_src_backing_type(MemoryOperationRequestPB::DISK);
-        item.set_src_disk_slot(descriptor.disk_block);
-        setDeviceBlocks(descriptor.device_blocks, *group_set, item);
+        item.set_src_disk_slot(descriptor.singleBlockAt(Tier::DISK));
+        setDeviceBlocks(descriptor.blocksAt(Tier::DEVICE), *group_set, item);
     } else {
         return false;
     }

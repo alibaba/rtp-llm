@@ -22,7 +22,6 @@
 namespace rtp_llm {
 namespace {
 using namespace block_tree_cache_test;
-using PendingLoadItem = LoadAsyncContext::PendingLoadItem;
 
 std::shared_ptr<LoadAsyncContext> getLoadContext(const BlockTreeMatchResult& result) {
     return std::dynamic_pointer_cast<LoadAsyncContext>(result.async_context);
@@ -1390,24 +1389,24 @@ TEST_F(BlockTreeCacheTest, LoadOnlyReloadsSWAWindow) {
     std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
     ASSERT_NE(load_context, nullptr);
     EXPECT_EQ(load_context->logicalMatchedBlocks(), 4u);
-    const LoadAsyncContext::PendingLoadItems& items = load_context->items();
-    ASSERT_EQ(items.size(), 6u);
-    const std::function<size_t(size_t, Tier, size_t, BlockIdxType)> count_exact_item =
-        [&items](size_t group_set_id, Tier source_tier, size_t path_index, BlockIdxType source_block) {
+    const std::vector<TransferDescriptor>& load_descs = load_context->loadDescs();
+    ASSERT_EQ(load_descs.size(), 6u);
+    const std::function<size_t(size_t, Tier, size_t, BlockIdxType)> count_exact_desc =
+        [&load_descs](size_t group_set_id, Tier source_tier, size_t path_index, BlockIdxType source_block) {
             size_t count = 0;
-            for (size_t item_index = 0; item_index < items.size(); ++item_index) {
-                count += items[item_index].group_set_id == group_set_id && items[item_index].source_tier == source_tier
-                         && items[item_index].path_index == path_index
-                         && items[item_index].source_blocks == std::vector<BlockIdxType>{source_block};
+            for (size_t desc_index = 0; desc_index < load_descs.size(); ++desc_index) {
+                count += load_descs[desc_index].group_set_id == group_set_id && load_descs[desc_index].source_tier == source_tier
+                         && load_descs[desc_index].path_index == path_index
+                         && load_descs[desc_index].source_blocks == std::vector<BlockIdxType>{source_block};
             }
             return count;
         };
     for (size_t path_index = 0; path_index < 4; ++path_index) {
         EXPECT_EQ(
-            count_exact_item(/*group_id=*/0, Tier::DEVICE, path_index, static_cast<BlockIdxType>(10 + path_index)), 1);
+            count_exact_desc(/*group_id=*/0, Tier::DEVICE, path_index, static_cast<BlockIdxType>(10 + path_index)), 1);
     }
     for (size_t path_index = 2; path_index < 4; ++path_index) {
-        EXPECT_EQ(count_exact_item(/*group_id=*/1, Tier::HOST, path_index, (*host_blocks)[path_index]),
+        EXPECT_EQ(count_exact_desc(/*group_id=*/1, Tier::HOST, path_index, (*host_blocks)[path_index]),
                   1);
     }
 }
@@ -1455,19 +1454,19 @@ TEST_F(BlockTreeCacheTest, LoadPlanningIgnoresBusySwaResourceOutsideTrailingWind
         std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
         ASSERT_NE(load_context, nullptr);
         EXPECT_EQ(load_context->logicalMatchedBlocks(), 4u);
-        const LoadAsyncContext::PendingLoadItems& items = load_context->items();
-        ASSERT_EQ(items.size(), 6u);
+        const std::vector<TransferDescriptor>& load_descs = load_context->loadDescs();
+        ASSERT_EQ(load_descs.size(), 6u);
 
-        size_t swa_item_count = 0;
-        for (size_t item_index = 0; item_index < items.size(); ++item_index) {
-            if (items[item_index].group_set_id != 1) {
+        size_t swa_desc_count = 0;
+        for (size_t desc_index = 0; desc_index < load_descs.size(); ++desc_index) {
+            if (load_descs[desc_index].group_set_id != 1) {
                 continue;
             }
-            ++swa_item_count;
-            EXPECT_GE(items[item_index].path_index, 2u);
-            EXPECT_EQ(items[item_index].source_tier, Tier::HOST);
+            ++swa_desc_count;
+            EXPECT_GE(load_descs[desc_index].path_index, 2u);
+            EXPECT_EQ(load_descs[desc_index].source_tier, Tier::HOST);
         }
-        EXPECT_EQ(swa_item_count, 2u);
+        EXPECT_EQ(swa_desc_count, 2u);
 
         load_context.reset();
     }
@@ -1640,29 +1639,29 @@ TEST_F(BlockTreeCacheTest, LoadPreparedPrefixFailureRollsBackAllSourceAndTargetH
     BlockTreeMatchResult              result       = cache->match({100});
     std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
     ASSERT_NE(load_context, nullptr);
-    const LoadAsyncContext::PendingLoadItems& items = load_context->items();
-    ASSERT_EQ(items.size(), 2u);
-    ASSERT_EQ(items[0].group_set_id, 0);
-    ASSERT_EQ(items[1].group_set_id, 1);
+    const std::vector<TransferDescriptor>& load_descs = load_context->loadDescs();
+    ASSERT_EQ(load_descs.size(), 2u);
+    ASSERT_EQ(load_descs[0].group_set_id, 0);
+    ASSERT_EQ(load_descs[1].group_set_id, 1);
     EXPECT_EQ(first_host_pool->refCount(first_source), 2u);
     EXPECT_EQ(second_host_pool->refCount(second_source), 2u);
 
-    // Duplicate the first item immediately after itself. The complete batch passes
-    // preflight while both resources are IDLE. Preparation then claims the first item
+    // Duplicate the first descriptor immediately after itself. The complete batch passes
+    // preflight while both resources are IDLE. Preparation then claims the first descriptor
     // and takes its target holder; beginLoad for the duplicate observes the
-    // same resource already LOADING and fails with one prepared item and one
-    // untouched trailing item. Add the matching source planning hold explicitly
-    // so every item in the synthetic context owns exactly one source hold.
-    PendingLoadItem duplicate_first_item = items.front();
-    LoadAsyncContext::PendingLoadItems::iterator inserted_item =
-        load_context->items_.insert(load_context->items_.begin() + 1, std::move(duplicate_first_item));
-    ASSERT_EQ(inserted_item, load_context->items_.begin() + 1);
+    // same resource already LOADING and fails with one prepared descriptor and one
+    // untouched trailing descriptor. Add the matching source planning hold explicitly
+    // so every descriptor in the synthetic context owns exactly one source hold.
+    TransferDescriptor duplicate_first_desc = load_descs.front();
+    std::vector<TransferDescriptor>::iterator inserted_desc =
+        load_context->load_descs_.insert(load_context->load_descs_.begin() + 1, std::move(duplicate_first_desc));
+    ASSERT_EQ(inserted_desc, load_context->load_descs_.begin() + 1);
     std::vector<bool>::iterator inserted_joined =
         load_context->joined_load_.insert(load_context->joined_load_.begin() + 1, false);
     ASSERT_EQ(inserted_joined, load_context->joined_load_.begin() + 1);
     first_group->referenceBlocks(
-        MultiNodeResource{0, Tier::HOST, {{items.front().node, {first_source}}}}, BlockRefType::REQUEST);
-    ASSERT_EQ(items.size(), 3u);
+        MultiNodeResource{0, Tier::HOST, {{load_descs.front().node, {first_source}}}}, BlockRefType::REQUEST);
+    ASSERT_EQ(load_descs.size(), 3u);
     EXPECT_EQ(first_host_pool->refCount(first_source), 3u);
     EXPECT_EQ(second_host_pool->refCount(second_source), 2u);
 
@@ -1688,8 +1687,8 @@ TEST_F(BlockTreeCacheTest, LoadPreparedPrefixFailureRollsBackAllSourceAndTargetH
     EXPECT_FALSE(load_context->commit());
     EXPECT_EQ(per_rank_transfer_engine->submitCount(), 0u);
 
-    // The first item's acquired target holder and both of its source planning
-    // holds are gone; the unprepared trailing item's source hold is also gone.
+    // The first descriptor's acquired target holder and both of its source planning
+    // holds are gone; the unprepared trailing descriptor's source hold is also gone.
     // Request ownership remains untouched for both target blocks.
     EXPECT_EQ(first_host_pool->refCount(first_source), 1u);
     EXPECT_EQ(second_host_pool->refCount(second_source), 1u);
@@ -1751,8 +1750,8 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackCoreHoldersAndRetainsReque
     BlockTreeMatchResult              result       = cache->match({100});
     std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
     ASSERT_NE(load_context, nullptr);
-    ASSERT_EQ(load_context->items().size(), 1u);
-    EXPECT_EQ(load_context->items()[0].group_set_id, 0);
+    ASSERT_EQ(load_context->loadDescs().size(), 1u);
+    EXPECT_EQ(load_context->loadDescs()[0].group_set_id, 0);
     EXPECT_EQ(host_pool->refCount(source_block), source_ref_before + 1);
 
     const BlockIdList request_targets = device_pool->malloc(1).value();
@@ -1790,7 +1789,7 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackCoreHoldersAndRetainsReque
     device_pool->decRef(request_targets, BlockRefType::REQUEST);
 }
 
-TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackMixedDeviceAndHostItems) {
+TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackMixedDeviceAndHostDescriptors) {
     if (!cudaAvailable()) {
         GTEST_SKIP() << "CUDA not available";
     }
@@ -1840,9 +1839,9 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackMixedDeviceAndHostItems) {
     BlockTreeMatchResult              result       = cache->match({100});
     std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
     ASSERT_NE(load_context, nullptr);
-    ASSERT_EQ(load_context->items().size(), 2u);
-    EXPECT_EQ(load_context->items()[0].source_tier, Tier::DEVICE);
-    EXPECT_EQ(load_context->items()[1].source_tier, Tier::HOST);
+    ASSERT_EQ(load_context->loadDescs().size(), 2u);
+    EXPECT_EQ(load_context->loadDescs()[0].source_tier, Tier::DEVICE);
+    EXPECT_EQ(load_context->loadDescs()[1].source_tier, Tier::HOST);
     EXPECT_EQ(resident_device_pool->refCount(resident_block), 2u);
     EXPECT_EQ(host_pool->refCount(host_block), 2u);
 
@@ -1923,7 +1922,7 @@ TEST_F(BlockTreeCacheTest, LoadContextCommitTriggersLoad) {
     device_pool->incRef(request_targets, BlockRefType::REQUEST);
     const BlockIdxType request_target = request_targets.front();
     EXPECT_EQ(device_pool->refCount(request_target), 1u);
-    ASSERT_EQ(load_context->items().size(), 1u);
+    ASSERT_EQ(load_context->loadDescs().size(), 1u);
     ASSERT_TRUE(load_context->bindTargetDeviceBlocks(0, {request_target}));
 
     EXPECT_TRUE(load_context->commit());
@@ -2225,9 +2224,9 @@ TEST_F(BlockTreeCacheTest, LoadContextOutlivesHostAndDiskCacheShutdown) {
         std::shared_ptr<LoadAsyncContext> outliving_context = takeLoadContext(result);
         ASSERT_NE(outliving_context, nullptr);
         ASSERT_FALSE(outliving_context->empty());
-        ASSERT_EQ(outliving_context->items().size(), 1u);
-        EXPECT_EQ(outliving_context->items()[0].source_tier, source_tier);
-        EXPECT_EQ(outliving_context->items()[0].source_blocks, (BlockIndicesType{source_block}));
+        ASSERT_EQ(outliving_context->loadDescs().size(), 1u);
+        EXPECT_EQ(outliving_context->loadDescs()[0].source_tier, source_tier);
+        EXPECT_EQ(outliving_context->loadDescs()[0].source_blocks, (BlockIndicesType{source_block}));
         EXPECT_EQ(source_pool.refCount(source_block), 2u);
 
         ThreadCompletion destruction;

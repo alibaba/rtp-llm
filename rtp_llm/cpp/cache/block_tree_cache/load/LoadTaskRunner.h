@@ -16,8 +16,8 @@ class BlockTransferDispatcher;
 class LoadTaskRunner {
 public:
     struct Task {
-        LoadAsyncContext::PendingLoadItems items;
-        std::vector<GroupSetPtr>           item_group_sets;
+        std::vector<TransferDescriptor> load_descs;
+        std::vector<GroupSetPtr> desc_group_sets;
         std::vector<TransferDescriptor>    host_to_device_descriptors;
         std::vector<TransferDescriptor>    disk_to_device_descriptors;
         std::vector<bool>                  target_installed;
@@ -26,11 +26,11 @@ public:
     };
     using TaskPtr = std::shared_ptr<Task>;
 
-    TaskPtr createTask(const LoadAsyncContext::PendingLoadItems& items,
+    TaskPtr createTask(const std::vector<TransferDescriptor>& load_descs,
                        const std::vector<bool>&                  joined_load,
                        const std::vector<GroupSetPtr>&           group_sets,
                        const std::shared_ptr<LoadAsyncContext>&  context);
-    bool    prepareTransferItem(Task& task, size_t item_index);
+    bool    prepareTransferDescriptor(Task& task, size_t desc_index);
     bool    runTransfer(Task&                          task,
                         const BlockTransferDispatcher& transfer_dispatcher,
                         BlockTreeCacheMetricsReporter& metrics_reporter,

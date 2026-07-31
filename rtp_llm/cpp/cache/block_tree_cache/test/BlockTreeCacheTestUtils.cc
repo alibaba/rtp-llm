@@ -371,14 +371,14 @@ bool BlockTreeCacheTestPeer::demoteOneForGroupSetForTest(BlockTreeCache&     cac
     if (!cache.config_.isTierEnabled(tier)) {
         return false;
     }
-    auto eviction_move = cache.evictor_.chooseVictim(group_set_id, tier);
-    if (!eviction_move.has_value()) {
+    auto eviction_desc = cache.evictor_.chooseVictim(group_set_id, tier);
+    if (!eviction_desc.has_value()) {
         return false;
     }
     if (target_override.has_value()) {
-        eviction_move->target_tier = *target_override;
+        eviction_desc->target_tier = *target_override;
     }
-    return cache.evictor_.submitLocked(*eviction_move);
+    return cache.evictor_.submitLocked(*eviction_desc);
 }
 
 int BlockTreeCacheTestPeer::reclaimBlocksForTest(BlockTreeCache& cache, size_t num_blocks, Tier tier) {
@@ -389,15 +389,15 @@ int BlockTreeCacheTestPeer::reclaimBlocksForTest(BlockTreeCache& cache, size_t n
 
     int total_evicted = 0;
     for (size_t attempt = 0; attempt < num_blocks; ++attempt) {
-        auto eviction_move = cache.evictor_.chooseVictim(tier);
-        if (!eviction_move.has_value()) {
+        auto eviction_desc = cache.evictor_.chooseVictim(tier);
+        if (!eviction_desc.has_value()) {
             break;
         }
 
         // Tests use this entry to trigger eviction state transitions without
         // exposing a direct-reclaim operation on the production cache API.
-        eviction_move->target_tier = Tier::NONE;
-        if (cache.evictor_.submitLocked(*eviction_move)) {
+        eviction_desc->target_tier = Tier::NONE;
+        if (cache.evictor_.submitLocked(*eviction_desc)) {
             ++total_evicted;
         }
     }

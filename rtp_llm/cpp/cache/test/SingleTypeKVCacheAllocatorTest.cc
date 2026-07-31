@@ -33,7 +33,6 @@ namespace rtp_llm {
 namespace test {
 
 using TestSingleTypeKVCacheAllocator = BlockTreeCacheTestAllocator<SingleTypeKVCacheAllocator>;
-using PendingLoadItem                = LoadAsyncContext::PendingLoadItem;
 
 class CountingSingleTypePerRankBlockTransferEngine: public PerRankBlockTransferEngine {
 public:
@@ -705,9 +704,9 @@ TEST_F(SingleTypeKVCacheAllocatorTest, EarlyCommonMallocFailureAbortsContextBefo
         std::vector<std::string>                events;
         coordinator->abort_callback_ = [&](LoadAsyncContext& context) {
             ++abort_count;
-            const LoadAsyncContext::PendingLoadItems& items = context.items();
+            const std::vector<TransferDescriptor>& load_descs = context.loadDescs();
             events.push_back("context_abort_begin");
-            EXPECT_FALSE(items.empty());
+            EXPECT_FALSE(load_descs.empty());
             EXPECT_LT(allocator_->freeBlocksNum(), free_before);
             original_abort(context);
             free_blocks_during_abort = allocator_->freeBlocksNum();

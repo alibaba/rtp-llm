@@ -35,7 +35,7 @@ public:
                        SettledFn                      settled,
                        RemoteWriteFn                  remote_write);
     bool submitLocked(BlockTreeEvictor&                   evictor,
-                      EvictionMove&                       eviction_move,
+                      TransferDescriptor&                 eviction_desc,
                       std::vector<EvictionReleaseCredit>* release_credits = nullptr);
 
     BlockTreeEvictor::CopyResultSet performCopy(const BlockTreeEvictor::EvictionPlan& plan) const;
@@ -48,9 +48,8 @@ private:
                                                const BlockTreeEvictor::EvictionPlan&     plan,
                                                const std::vector<EvictionReleaseCredit>& release_credits);
     std::vector<EvictionReleaseCredit> collectReleaseCredits(const BlockTreeEvictor::EvictionPlan& plan) const;
-    bool                               executeTierCopy(const EvictionMove& eviction_move) const;
+    bool                               executeTierCopy(const TransferDescriptor& eviction_desc) const;
     Tier                               normalizeTargetTier(Tier source_tier) const;
-    static TransferDescriptor          buildTransferDescriptor(const EvictionMove& eviction_move);
     static int
     transferTimeoutMs(const BlockTreeEvictor::EvictionPlan& plan, int memory_timeout_ms, int disk_timeout_ms);
 

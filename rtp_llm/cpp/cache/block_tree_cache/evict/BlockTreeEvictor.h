@@ -45,12 +45,12 @@ public:
     using RemoteWriteFn     = std::function<void(CacheKeyType cache_key, size_t group_set_id)>;
 
     struct EvictionPlan {
-        EvictionMove              primary;
-        std::vector<EvictionMove> cascade_moves;
+        TransferDescriptor              primary_desc;
+        std::vector<TransferDescriptor> cascade_descs;
 
         bool needsCopy() const;
         bool empty() const {
-            return primary.node == nullptr;
+            return primary_desc.node == nullptr;
         }
     };
 
@@ -93,11 +93,11 @@ public:
     // ---- Eviction selection & migration (caller owns synchronization) ----
     // Selection, prepare, finish, and rollback mutate tree/group-set/pool/heap state
     // and must run under BlockTreeCache's mutex. Task execution is lock-free.
-    std::optional<EvictionMove> chooseVictim(Tier tier);
-    std::optional<EvictionMove> chooseVictim(size_t group_set_id, Tier tier);
-    std::vector<EvictionMove>   chooseWatermarkVictims(GroupSet& group_set, Tier tier, double watermark_ratio);
-    std::optional<EvictionPlan> buildPlan(EvictionMove eviction_move);
-    bool submitLocked(EvictionMove& eviction_move, std::vector<EvictionReleaseCredit>* release_credits = nullptr);
+    std::optional<TransferDescriptor> chooseVictim(Tier tier);
+    std::optional<TransferDescriptor> chooseVictim(size_t group_set_id, Tier tier);
+    std::vector<TransferDescriptor>   chooseWatermarkVictims(GroupSet& group_set, Tier tier, double watermark_ratio);
+    std::optional<EvictionPlan>       buildPlan(TransferDescriptor eviction_desc);
+    bool submitLocked(TransferDescriptor& eviction_desc, std::vector<EvictionReleaseCredit>* release_credits = nullptr);
     void complete(const EvictionPlan& plan, const CopyResultSet& results);
     void rollbackPreparedPlan(const EvictionPlan& plan);
     void writeRemoteThrough(const std::shared_ptr<StorageBackend>& storage_backend,
@@ -126,19 +126,19 @@ private:
     void refreshCandidate(GroupSet& group_set, TreeNode* node, Tier tier);
     bool isEvictable(const GroupSet& group_set, const TreeNode* node, Tier tier) const;
 
-    std::optional<EvictionMove> chooseVictimInGroupSet(GroupSet& group_set, Tier tier);
+    std::optional<TransferDescriptor> chooseVictimInGroupSet(GroupSet& group_set, Tier tier);
     static Tier                 defaultTargetTier(Tier source);
 
-    EvictionMove        makeMove(TreeNode* node, size_t group_set_id, Tier source_tier, Tier target_tier) const;
+    TransferDescriptor  makeDesc(TreeNode* node, size_t group_set_id, Tier source_tier, Tier target_tier) const;
     std::vector<size_t> selectCascadeGroupSets(const TreeNode* node,
                                                size_t          source_group_set_id,
                                                Tier            tier,
                                                bool            enable_reverse_eviction) const;
-    bool                prepareMove(EvictionMove& eviction_move);
-    void                reserveSource(const EvictionMove& eviction_move);
-    bool                restoreSource(const EvictionMove& eviction_move);
-    void                releaseTargetBlocks(const EvictionMove& eviction_move);
-    bool                applyMoveCompletion(const GroupSetPtr& group_set, const EvictionMove& move);
+    bool                prepareDesc(TransferDescriptor& eviction_desc);
+    void                reserveSource(const TransferDescriptor& eviction_desc);
+    bool                restoreSource(const TransferDescriptor& eviction_desc);
+    void                releaseTargetBlocks(const TransferDescriptor& eviction_desc);
+    bool                applyDescCompletion(const GroupSetPtr& group_set, const TransferDescriptor& eviction_desc);
     void                finalizeEviction(TreeNode* node);
     size_t              computeGroupSetExcess(const GroupSet& group_set, Tier tier, double ratio) const;
 

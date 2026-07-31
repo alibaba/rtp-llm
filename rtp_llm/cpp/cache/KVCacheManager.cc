@@ -609,7 +609,7 @@ bool KVCacheManager::executeFunction(const FunctionRequestPB& request, FunctionR
     for (int item_index = 0; item_index < memory_request.copy_items_size(); ++item_index) {
         const TransferDescriptor descriptor =
             BlockTransferRequestConverter::decodeTransfer(memory_request, item_index, block_tree_cache_->groupSets());
-        if (!descriptor.isValid()) {
+        if (!descriptor.isExecutable()) {
             RTP_LLM_LOG_WARNING("KVCacheManager::executeFunction: invalid grouped transfer item, index=%d", item_index);
             return false;
         }

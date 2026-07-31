@@ -12,7 +12,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/AsyncContext.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
 
@@ -20,17 +20,6 @@ class LoadContextCoordinator;
 
 class LoadAsyncContext: public AsyncContext {
 public:
-    struct PendingLoadItem {
-        TreeNode*                 node{nullptr};
-        size_t                    group_set_id{0};
-        size_t                    path_index{0};
-        Tier                      source_tier{Tier::NONE};
-        std::vector<BlockIdxType> source_blocks;
-        // DEVICE denotes an already-resident coordinate settled without a copy.
-        std::vector<BlockIdxType> target_device_blocks;
-    };
-    using PendingLoadItems = std::vector<PendingLoadItem>;
-
     enum class State : int {
         PENDING          = 0,
         CANCEL_REQUESTED = 1,
@@ -39,7 +28,7 @@ public:
         CANCELLED        = 4
     };
 
-    LoadAsyncContext(PendingLoadItems                               items,
+    LoadAsyncContext(std::vector<TransferDescriptor> load_descs,
                      std::vector<bool>                              joined_load,
                      size_t                                         logical_matched_blocks,
                      size_t                                         pending_transfer_count,
@@ -52,10 +41,10 @@ public:
     size_t   logicalMatchedBlocks() const;
     size_t   logicalMatchedBlocks(Tier tier) const;
 
-    bool bindTargetDeviceBlocks(size_t item_index, std::vector<BlockIdxType> target_device_blocks);
+    bool bindTargetDeviceBlocks(size_t desc_index, std::vector<BlockIdxType> target_device_blocks);
 
-    const PendingLoadItems&  items() const;
-    const std::vector<bool>& joinedLoadItems() const;
+    const std::vector<TransferDescriptor>& loadDescs() const;
+    const std::vector<bool>& joinedLoads() const;
 
     bool commit();
     void abort();
@@ -76,7 +65,7 @@ private:
     std::shared_ptr<LoadContextCoordinator> coordinator_;
     const uint64_t                          context_id_;
 
-    PendingLoadItems      items_;
+    std::vector<TransferDescriptor> load_descs_;
     std::vector<bool>     joined_load_;
     const size_t          logical_matched_blocks_{0};
     std::array<size_t, 3> logical_matched_blocks_by_tier_{};
@@ -95,7 +84,7 @@ public:
 
     LoadContextCoordinator(CommitCallback commit_callback, AbortCallback abort_callback);
 
-    std::shared_ptr<LoadAsyncContext> create(LoadAsyncContext::PendingLoadItems items,
+    std::shared_ptr<LoadAsyncContext> create(std::vector<TransferDescriptor> load_descs,
                                              std::vector<bool>                  joined_load,
                                              size_t                             logical_matched_blocks,
                                              size_t                             pending_transfer_count);

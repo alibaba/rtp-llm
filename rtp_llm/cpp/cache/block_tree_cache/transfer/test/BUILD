@@ -92,3 +92,11 @@ cc_test(
     deps = test_deps + [":block_transfer_engine_test_utils"],
     env = {},
 )
+
+cc_test(
+    name = "transfer_types_test",
+    srcs = ["TransferTypesTest.cc"],
+    copts = test_copts,
+    deps = test_deps,
+    env = {},
+)

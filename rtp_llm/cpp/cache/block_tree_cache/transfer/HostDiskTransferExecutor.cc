@@ -44,8 +44,8 @@ TransferStatus
 HostDiskTransferExecutor::hostToDisk(HostBufferView            host,
                                      const TransferDescriptor& desc,
                                      const GroupSet&           group_set) const {
-    const auto   disk_block  = desc.disk_block;
-    auto&        disk_pool   = *group_set.diskPool();
+    const BlockIdxType      disk_block  = desc.singleBlockAt(Tier::DISK);
+    BlockTreeDiskBlockPool& disk_pool   = *group_set.diskPool();
     const size_t payload     = group_set.payloadBytes();
     const size_t disk_stride = disk_pool.strideBytes();
     if (!isValidHostBufferView(host, payload, disk_stride)) {
@@ -61,7 +61,7 @@ HostDiskTransferExecutor::hostToDisk(HostBufferView            host,
     if (disk_stride > payload) {
         std::memset(static_cast<uint8_t*>(host.base) + payload, 0, disk_stride - payload);
     }
-    const auto status = disk_pool.write(disk_block, host.base, disk_stride);
+    const BlockIOStatus status = disk_pool.write(disk_block, host.base, disk_stride);
     if (status != BlockIOStatus::OK) {
         RTP_LLM_LOG_WARNING("write failed, disk=%d, status=%s", disk_block, blockIOStatusName(status));
         return blockIOStatusToTransferStatus(status);
@@ -73,8 +73,8 @@ TransferStatus
 HostDiskTransferExecutor::diskToHost(const TransferDescriptor& desc,
                                      const GroupSet&           group_set,
                                      HostBufferView            host) const {
-    const auto   disk_block  = desc.disk_block;
-    auto&        disk_pool   = *group_set.diskPool();
+    const BlockIdxType      disk_block  = desc.singleBlockAt(Tier::DISK);
+    BlockTreeDiskBlockPool& disk_pool   = *group_set.diskPool();
     const size_t payload     = group_set.payloadBytes();
     const size_t disk_stride = disk_pool.strideBytes();
     if (!isValidHostBufferView(host, payload, disk_stride)) {
@@ -85,7 +85,7 @@ HostDiskTransferExecutor::diskToHost(const TransferDescriptor& desc,
                             host.capacity_bytes);
         return TransferStatus::DISK_IO_ERROR;
     }
-    const auto status = disk_pool.read(disk_block, host.base, disk_stride);
+    const BlockIOStatus status = disk_pool.read(disk_block, host.base, disk_stride);
     if (status != BlockIOStatus::OK) {
         RTP_LLM_LOG_WARNING("read failed, disk=%d, status=%s", disk_block, blockIOStatusName(status));
         return blockIOStatusToTransferStatus(status);

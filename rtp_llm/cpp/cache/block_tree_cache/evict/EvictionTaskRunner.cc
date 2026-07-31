@@ -60,23 +60,23 @@ EvictionTaskRunner::EvictionTaskRunner(ExecuteTransferFn              execute_tr
     remote_write_(std::move(remote_write)) {}
 
 bool EvictionTaskRunner::submitLocked(BlockTreeEvictor&                   evictor,
-                                      EvictionMove&                       eviction_move,
+                                      TransferDescriptor&                 eviction_desc,
                                       std::vector<EvictionReleaseCredit>* release_credits) {
     if (release_credits != nullptr) {
         release_credits->clear();
     }
-    if (!isCanonicalEvictionTarget(eviction_move.source_tier, eviction_move.target_tier)) {
+    if (!isCanonicalEvictionTarget(eviction_desc.source_tier, eviction_desc.target_tier)) {
         RTP_LLM_LOG_WARNING("rejecting eviction move with non-canonical target: source=%s target=%s group_set=%zu",
-                            tierName(eviction_move.source_tier),
-                            tierName(eviction_move.target_tier),
-                            eviction_move.group_set_id);
+                            tierName(eviction_desc.source_tier),
+                            tierName(eviction_desc.target_tier),
+                            eviction_desc.group_set_id);
         return false;
     }
-    if (eviction_move.target_tier != Tier::NONE) {
-        eviction_move.target_tier = normalizeTargetTier(eviction_move.source_tier);
+    if (eviction_desc.target_tier != Tier::NONE) {
+        eviction_desc.target_tier = normalizeTargetTier(eviction_desc.source_tier);
     }
 
-    auto plan = evictor.buildPlan(eviction_move);
+    auto plan = evictor.buildPlan(eviction_desc);
     if (!plan.has_value()) {
         return false;
     }
@@ -85,7 +85,7 @@ bool EvictionTaskRunner::submitLocked(BlockTreeEvictor&                   evicto
     if (!plan->needsCopy()) {
         BlockTreeEvictor::CopyResultSet results;
         results.primary_success = true;
-        results.cascade_success.assign(plan->cascade_moves.size(), true);
+        results.cascade_success.assign(plan->cascade_descs.size(), true);
         evictor.complete(*plan, results);
         metrics_reporter_->reportEvictionFinished(*plan, results, group_sets_);
         settled_(true, false);
@@ -116,32 +116,32 @@ std::vector<EvictionReleaseCredit>
 EvictionTaskRunner::collectReleaseCredits(const BlockTreeEvictor::EvictionPlan& plan) const {
     std::vector<EvictionReleaseCredit>                  release_credits;
     std::set<std::pair<DeviceBlockPool*, BlockIdxType>> accepted_physical_releases;
-    auto                                                collect = [&](const EvictionMove& move) {
-        if (move.source_tier != Tier::DEVICE) {
+    auto                                                collect = [&](const TransferDescriptor& desc) {
+        if (desc.source_tier != Tier::DEVICE) {
             return;
         }
-        const size_t group_set_id = move.group_set_id;
+        const size_t group_set_id = desc.group_set_id;
         RTP_LLM_CHECK_WITH_INFO(group_set_id < group_sets_.size(),
                                 "eviction plan has invalid group_set_id=%zu group_set_count=%zu",
                                 group_set_id,
                                 group_sets_.size());
         const auto& pools = group_sets_[group_set_id]->devicePools();
-        RTP_LLM_CHECK_WITH_INFO(move.source_blocks.size() == pools.size(),
+        RTP_LLM_CHECK_WITH_INFO(desc.source_blocks.size() == pools.size(),
                                 "eviction plan DEVICE width mismatch: group_set_id=%zu expected=%zu actual=%zu",
                                 group_set_id,
                                 pools.size(),
-                                move.source_blocks.size());
+                                desc.source_blocks.size());
         for (size_t i = 0; i < pools.size(); ++i) {
             const auto& pool = pools[i];
-            if (!isNullBlockIdx(move.source_blocks[i])
-                && accepted_physical_releases.emplace(pool.get(), move.source_blocks[i]).second) {
-                release_credits.push_back({pool, move.source_blocks[i]});
+            if (!isNullBlockIdx(desc.source_blocks[i])
+                && accepted_physical_releases.emplace(pool.get(), desc.source_blocks[i]).second) {
+                release_credits.push_back({pool, desc.source_blocks[i]});
             }
         }
     };
-    collect(plan.primary);
-    for (const EvictionMove& cascade_move : plan.cascade_moves) {
-        collect(cascade_move);
+    collect(plan.primary_desc);
+    for (const TransferDescriptor& cascade_desc : plan.cascade_descs) {
+        collect(cascade_desc);
     }
     return release_credits;
 }
@@ -149,13 +149,13 @@ EvictionTaskRunner::collectReleaseCredits(const BlockTreeEvictor::EvictionPlan& 
 void EvictionTaskRunner::runTask(BlockTreeEvictor&                         evictor,
                                  const BlockTreeEvictor::EvictionPlan&     plan,
                                  const std::vector<EvictionReleaseCredit>& release_credits) {
-    const Tier    source_tier            = plan.primary.source_tier;
-    const Tier    target_tier            = plan.primary.target_tier;
-    const size_t  transfer_block_count   = plan.cascade_moves.size() + 1;
+    const Tier    source_tier            = plan.primary_desc.source_tier;
+    const Tier    target_tier            = plan.primary_desc.target_tier;
+    const size_t  transfer_block_count   = plan.cascade_descs.size() + 1;
     const int64_t transfer_begin_time_us = metrics_reporter_->reportTransferStarted(source_tier, target_tier);
     BlockTreeEvictor::CopyResultSet copy_results;
     copy_results.primary_success = false;
-    copy_results.cascade_success.assign(plan.cascade_moves.size(), false);
+    copy_results.cascade_success.assign(plan.cascade_descs.size(), false);
 
     auto finalization_action = [this,
                                 &evictor,
@@ -192,9 +192,9 @@ void EvictionTaskRunner::runTask(BlockTreeEvictor&                         evict
 
         CacheKeyType          remote_cache_key = 0;
         std::optional<size_t> remote_group_set_id;
-        if (copy_ok && plan.primary.node != nullptr) {
-            remote_cache_key    = plan.primary.node->cache_key;
-            remote_group_set_id = plan.primary.group_set_id;
+        if (copy_ok && plan.primary_desc.node != nullptr) {
+            remote_cache_key    = plan.primary_desc.node->cache_key;
+            remote_group_set_id = plan.primary_desc.group_set_id;
         }
 
         try {
@@ -223,7 +223,7 @@ void EvictionTaskRunner::runTask(BlockTreeEvictor&                         evict
                                                     copy_results.cascade_success.end(),
                                                     [](bool success) { return success; }));
             plan_succeeded = plan_terminalized && completion_succeeded && copy_results.primary_success
-                             && copy_results.cascade_success.size() == plan.cascade_moves.size()
+                             && copy_results.cascade_success.size() == plan.cascade_descs.size()
                              && std::all_of(copy_results.cascade_success.begin(),
                                             copy_results.cascade_success.end(),
                                             [](bool success) { return success; });
@@ -263,48 +263,48 @@ BlockTreeEvictor::CopyResultSet EvictionTaskRunner::performCopy(const BlockTreeE
     BlockTreeEvictor::CopyResultSet results;
     results.primary_success = true;
 
-    if (plan.primary.target_tier != Tier::NONE) {
-        results.primary_success = executeTierCopy(plan.primary);
+    if (plan.primary_desc.target_tier != Tier::NONE) {
+        results.primary_success = executeTierCopy(plan.primary_desc);
         if (!results.primary_success) {
             RTP_LLM_LOG_WARNING("primary copy FAILED "
                                 "group_set[%zu] node_key=%ld %s->%s",
-                                plan.primary.group_set_id,
-                                plan.primary.node ? plan.primary.node->cache_key : 0,
-                                tierName(plan.primary.source_tier),
-                                tierName(plan.primary.target_tier));
-            results.cascade_success.assign(plan.cascade_moves.size(), false);
+                                plan.primary_desc.group_set_id,
+                                plan.primary_desc.node ? plan.primary_desc.node->cache_key : 0,
+                                tierName(plan.primary_desc.source_tier),
+                                tierName(plan.primary_desc.target_tier));
+            results.cascade_success.assign(plan.cascade_descs.size(), false);
             return results;
         }
         RTP_LLM_LOG_DEBUG("primary copy OK "
                           "group_set[%zu] node_key=%ld %s->%s",
-                          plan.primary.group_set_id,
-                          plan.primary.node ? plan.primary.node->cache_key : 0,
-                          tierName(plan.primary.source_tier),
-                          tierName(plan.primary.target_tier));
+                          plan.primary_desc.group_set_id,
+                          plan.primary_desc.node ? plan.primary_desc.node->cache_key : 0,
+                          tierName(plan.primary_desc.source_tier),
+                          tierName(plan.primary_desc.target_tier));
     }
 
-    results.cascade_success.reserve(plan.cascade_moves.size());
-    for (const auto& cascade_move : plan.cascade_moves) {
+    results.cascade_success.reserve(plan.cascade_descs.size());
+    for (const auto& cascade_desc : plan.cascade_descs) {
         bool copy_ok = true;
-        if (cascade_move.target_tier != Tier::NONE) {
-            copy_ok = executeTierCopy(cascade_move);
+        if (cascade_desc.target_tier != Tier::NONE) {
+            copy_ok = executeTierCopy(cascade_desc);
         }
         results.cascade_success.push_back(copy_ok);
 
         if (!copy_ok) {
             RTP_LLM_LOG_WARNING("cascade copy FAILED "
                                 "group_set[%zu] node_key=%ld %s->%s",
-                                cascade_move.group_set_id,
-                                cascade_move.node ? cascade_move.node->cache_key : 0,
-                                tierName(cascade_move.source_tier),
-                                tierName(cascade_move.target_tier));
-        } else if (cascade_move.target_tier != Tier::NONE) {
+                                cascade_desc.group_set_id,
+                                cascade_desc.node ? cascade_desc.node->cache_key : 0,
+                                tierName(cascade_desc.source_tier),
+                                tierName(cascade_desc.target_tier));
+        } else if (cascade_desc.target_tier != Tier::NONE) {
             RTP_LLM_LOG_DEBUG("cascade copy OK "
                               "group_set[%zu] node_key=%ld %s->%s",
-                              cascade_move.group_set_id,
-                              cascade_move.node ? cascade_move.node->cache_key : 0,
-                              tierName(cascade_move.source_tier),
-                              tierName(cascade_move.target_tier));
+                              cascade_desc.group_set_id,
+                              cascade_desc.node ? cascade_desc.node->cache_key : 0,
+                              tierName(cascade_desc.source_tier),
+                              tierName(cascade_desc.target_tier));
         }
     }
     return results;
@@ -322,20 +322,19 @@ BlockTreeEvictor::CopyResultSet EvictionTaskRunner::runTransfer(const BlockTreeE
                                   && transfer_dispatcher_->executeMultiRank(
                                       descriptors, transferTimeoutMs(plan, memory_timeout_ms_, disk_timeout_ms_));
     results.primary_success = transfer_success;
-    results.cascade_success.assign(plan.cascade_moves.size(), transfer_success);
+    results.cascade_success.assign(plan.cascade_descs.size(), transfer_success);
     return results;
 }
 
-bool EvictionTaskRunner::executeTierCopy(const EvictionMove& eviction_move) const {
+bool EvictionTaskRunner::executeTierCopy(const TransferDescriptor& eviction_desc) const {
     if (!execute_transfer_) {
         return false;
     }
 
-    TransferDescriptor descriptor = buildTransferDescriptor(eviction_move);
-    if (!descriptor.isValid()) {
+    if (!eviction_desc.isExecutable()) {
         return false;
     }
-    return execute_transfer_(descriptor);
+    return execute_transfer_(eviction_desc);
 }
 
 Tier EvictionTaskRunner::normalizeTargetTier(Tier source_tier) const {
@@ -358,43 +357,22 @@ Tier EvictionTaskRunner::normalizeTargetTier(Tier source_tier) const {
     }
 }
 
-TransferDescriptor EvictionTaskRunner::buildTransferDescriptor(const EvictionMove& eviction_move) {
-    if (eviction_move.source_blocks.empty() || eviction_move.target_blocks.size() != 1) {
-        return {};
-    }
-
-    const BlockIdxType target = eviction_move.target_blocks[0];
-    if (eviction_move.source_tier == Tier::DEVICE && eviction_move.target_tier == Tier::HOST) {
-        return TransferDescriptor::deviceToHost(eviction_move.group_set_id, eviction_move.source_blocks, target);
-    }
-    if (eviction_move.source_tier == Tier::DEVICE && eviction_move.target_tier == Tier::DISK) {
-        return TransferDescriptor::deviceToDisk(eviction_move.group_set_id, eviction_move.source_blocks, target);
-    }
-    if (eviction_move.source_tier == Tier::HOST && eviction_move.target_tier == Tier::DISK
-        && eviction_move.source_blocks.size() == 1) {
-        return TransferDescriptor::hostToDisk(eviction_move.group_set_id, eviction_move.source_blocks[0], target);
-    }
-    return {};
-}
-
 bool EvictionTaskRunner::buildTransferBatch(const BlockTreeEvictor::EvictionPlan& plan,
                                             std::vector<TransferDescriptor>&      descriptors) {
     descriptors.clear();
-    descriptors.reserve(1 + plan.cascade_moves.size());
+    descriptors.reserve(1 + plan.cascade_descs.size());
 
-    TransferDescriptor primary_descriptor = buildTransferDescriptor(plan.primary);
-    if (!primary_descriptor.isValid()) {
+    if (!plan.primary_desc.isExecutable()) {
         return false;
     }
-    descriptors.push_back(std::move(primary_descriptor));
+    descriptors.push_back(plan.primary_desc);
 
-    for (const EvictionMove& cascade_move : plan.cascade_moves) {
-        TransferDescriptor cascade_descriptor = buildTransferDescriptor(cascade_move);
-        if (!cascade_descriptor.isValid()) {
+    for (const TransferDescriptor& cascade_desc : plan.cascade_descs) {
+        if (!cascade_desc.isExecutable()) {
             descriptors.clear();
             return false;
         }
-        descriptors.push_back(std::move(cascade_descriptor));
+        descriptors.push_back(cascade_desc);
     }
     return true;
 }
@@ -402,9 +380,9 @@ bool EvictionTaskRunner::buildTransferBatch(const BlockTreeEvictor::EvictionPlan
 int EvictionTaskRunner::transferTimeoutMs(const BlockTreeEvictor::EvictionPlan& plan,
                                           int                                   memory_timeout_ms,
                                           int                                   disk_timeout_ms) {
-    bool uses_disk = plan.primary.source_tier == Tier::DISK || plan.primary.target_tier == Tier::DISK;
-    for (const EvictionMove& cascade_move : plan.cascade_moves) {
-        if (cascade_move.source_tier == Tier::DISK || cascade_move.target_tier == Tier::DISK) {
+    bool uses_disk = plan.primary_desc.source_tier == Tier::DISK || plan.primary_desc.target_tier == Tier::DISK;
+    for (const TransferDescriptor& cascade_desc : plan.cascade_descs) {
+        if (cascade_desc.source_tier == Tier::DISK || cascade_desc.target_tier == Tier::DISK) {
             uses_disk = true;
             break;
         }

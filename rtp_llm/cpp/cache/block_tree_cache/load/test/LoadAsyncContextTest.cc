@@ -86,19 +86,19 @@ protected:
         coordinator_ = std::make_shared<LoadContextCoordinator>(std::move(commit_callback), std::move(abort_callback));
     }
 
-    LoadAsyncContext::PendingLoadItem makePendingHostItem() {
-        LoadAsyncContext::PendingLoadItem item;
-        item.source_tier   = Tier::HOST;
-        item.source_blocks = {11};
-        return item;
+    TransferDescriptor makePendingHostDescriptor() {
+        TransferDescriptor desc;
+        desc.source_tier   = Tier::HOST;
+        desc.source_blocks = {11};
+        return desc;
     }
 
-    std::shared_ptr<LoadAsyncContext> createRegisteredContext(LoadAsyncContext::PendingLoadItems items,
+    std::shared_ptr<LoadAsyncContext> createRegisteredContext(std::vector<TransferDescriptor> load_descs,
                                                               std::vector<bool>                  joined_load,
                                                               size_t                             logical_matched_blocks,
                                                               size_t pending_transfer_count) {
         const std::shared_ptr<LoadAsyncContext> context = coordinator_->create(
-            std::move(items), std::move(joined_load), logical_matched_blocks, pending_transfer_count);
+            std::move(load_descs), std::move(joined_load), logical_matched_blocks, pending_transfer_count);
         if (!coordinator_->registerContext(context)) {
             return nullptr;
         }
@@ -106,7 +106,7 @@ protected:
     }
 
     std::shared_ptr<LoadAsyncContext> makeContext(size_t pending_transfer_count) {
-        return createRegisteredContext({makePendingHostItem()}, {false}, 1, pending_transfer_count);
+        return createRegisteredContext({makePendingHostDescriptor()}, {false}, 1, pending_transfer_count);
     }
 
     std::shared_ptr<LoadAsyncContext> makeCommittedContext(size_t pending_transfer_count) {
@@ -122,45 +122,45 @@ protected:
     std::shared_ptr<LoadContextCoordinator> coordinator_;
 };
 
-TEST_F(LoadAsyncContextTest, KeepsJoinedMetadataOutsidePendingItem) {
-    LoadAsyncContext::PendingLoadItem first;
+TEST_F(LoadAsyncContextTest, KeepsJoinedMetadataOutsidePendingDescriptor) {
+    TransferDescriptor first;
     first.group_set_id  = 3;
     first.path_index    = 5;
     first.source_tier   = Tier::HOST;
     first.source_blocks = {11};
 
-    LoadAsyncContext::PendingLoadItem joined;
+    TransferDescriptor joined;
     joined.group_set_id         = 4;
     joined.path_index           = 6;
     joined.source_tier          = Tier::DISK;
     joined.source_blocks        = {12};
-    joined.target_device_blocks = {21};
+    joined.target_blocks = {21};
 
     const std::shared_ptr<LoadAsyncContext> context = createRegisteredContext({first, joined}, {false, true}, 7, 2);
     ASSERT_NE(context, nullptr);
 
-    EXPECT_EQ(context->items_.size(), 2u);
+    EXPECT_EQ(context->load_descs_.size(), 2u);
     EXPECT_FALSE(context->joined_load_[0]);
     EXPECT_TRUE(context->joined_load_[1]);
-    EXPECT_EQ(context->items_[0].group_set_id, 3u);
-    EXPECT_EQ(context->items_[1].path_index, 6u);
-    EXPECT_EQ(context->items_[1].target_device_blocks, (std::vector<BlockIdxType>{21}));
+    EXPECT_EQ(context->load_descs_[0].group_set_id, 3u);
+    EXPECT_EQ(context->load_descs_[1].path_index, 6u);
+    EXPECT_EQ(context->load_descs_[1].target_blocks, (std::vector<BlockIdxType>{21}));
     EXPECT_TRUE(context->bindTargetDeviceBlocks(0, {20}));
-    EXPECT_EQ(context->items_[0].target_device_blocks, (std::vector<BlockIdxType>{20}));
+    EXPECT_EQ(context->load_descs_[0].target_blocks, (std::vector<BlockIdxType>{20}));
     EXPECT_FALSE(context->bindTargetDeviceBlocks(1, {22}));
     context->abort();
     EXPECT_EQ(abort_count_, 1u);
 }
 
 TEST_F(LoadAsyncContextTest, CountsStrongestTierOncePerPath) {
-    LoadAsyncContext::PendingLoadItem device;
+    TransferDescriptor device;
     device.path_index  = 1;
     device.source_tier = Tier::DEVICE;
 
-    LoadAsyncContext::PendingLoadItem host = device;
+    TransferDescriptor host = device;
     host.source_tier                       = Tier::HOST;
 
-    LoadAsyncContext::PendingLoadItem disk = device;
+    TransferDescriptor disk = device;
     disk.path_index                        = 2;
     disk.source_tier                       = Tier::DISK;
 
@@ -177,7 +177,7 @@ TEST_F(LoadAsyncContextTest, CountsStrongestTierOncePerPath) {
 }
 
 TEST_F(LoadAsyncContextTest, ResidentTargetMustPreserveSourceIdentity) {
-    LoadAsyncContext::PendingLoadItem resident;
+    TransferDescriptor resident;
     resident.source_tier   = Tier::DEVICE;
     resident.source_blocks = {31, 32};
 
@@ -185,7 +185,7 @@ TEST_F(LoadAsyncContextTest, ResidentTargetMustPreserveSourceIdentity) {
     ASSERT_NE(context, nullptr);
 
     EXPECT_FALSE(context->bindTargetDeviceBlocks(0, {41, 42}));
-    EXPECT_TRUE(context->items_[0].target_device_blocks.empty());
+    EXPECT_TRUE(context->load_descs_[0].target_blocks.empty());
     EXPECT_TRUE(context->bindTargetDeviceBlocks(0, {31, 32}));
     context->abort();
 }

@@ -291,7 +291,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadCommitsDeviceResource)
     BlockTreeMatchResult              match   = cache->match({100});
     std::shared_ptr<LoadAsyncContext> context = std::dynamic_pointer_cast<LoadAsyncContext>(match.async_context);
     ASSERT_NE(context, nullptr);
-    ASSERT_EQ(context->items().size(), 1u);
+    ASSERT_EQ(context->loadDescs().size(), 1u);
     ASSERT_TRUE(context->bindTargetDeviceBlocks(0, {device_block}));
     ASSERT_TRUE(context->commit());
     context->waitDone();
@@ -356,7 +356,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadFailureKeepsSourceReso
     BlockTreeMatchResult              match   = cache->match({100});
     std::shared_ptr<LoadAsyncContext> context = std::dynamic_pointer_cast<LoadAsyncContext>(match.async_context);
     ASSERT_NE(context, nullptr);
-    ASSERT_EQ(context->items().size(), 1u);
+    ASSERT_EQ(context->loadDescs().size(), 1u);
     ASSERT_TRUE(context->bindTargetDeviceBlocks(0, {device_block}));
     ASSERT_TRUE(context->commit());
     context->waitDone();
@@ -424,20 +424,21 @@ TEST_F(MultiRankBlockTransferEngineTest, LoadCompletionStateMismatchDoesNotInsta
     ASSERT_TRUE(cache->loader_.changeTransferState(
         find_result.back(), 0, GroupSetTransferState::LOAD_PENDING, GroupSetTransferState::LOADING));
 
-    LoadAsyncContext::PendingLoadItem item;
-    item.node                                                 = find_result.back();
-    item.group_set_id                                         = 0;
-    item.source_tier                                          = Tier::HOST;
-    item.source_blocks                                        = {host_block};
-    item.target_device_blocks                                 = {device_block};
+    TransferDescriptor desc;
+    desc.node                                                 = find_result.back();
+    desc.group_set_id                                         = 0;
+    desc.source_tier                                          = Tier::HOST;
+    desc.target_tier                                          = Tier::DEVICE;
+    desc.source_blocks                                        = {host_block};
+    desc.target_blocks                                        = {device_block};
     const std::shared_ptr<LoadContextCoordinator> coordinator = std::make_shared<LoadContextCoordinator>(
         LoadContextCoordinator::CommitCallback{}, LoadContextCoordinator::AbortCallback{});
-    const std::shared_ptr<LoadAsyncContext> context = coordinator->create({item}, {false}, 1, 1);
+    const std::shared_ptr<LoadAsyncContext> context = coordinator->create({desc}, {false}, 1, 1);
     ASSERT_NE(context, nullptr);
-    LoadTaskRunner::TaskPtr task = cache->loader_.load_task_runner_.createTask({item}, {false}, {group}, context);
+    LoadTaskRunner::TaskPtr task = cache->loader_.load_task_runner_.createTask({desc}, {false}, {group}, context);
     ASSERT_NE(task, nullptr);
     ASSERT_TRUE(
-        cache->loader_.load_join_registry_.start(find_result.back(), 0, item.target_device_blocks, task->context));
+        cache->loader_.load_join_registry_.start(find_result.back(), 0, desc.target_blocks, task->context));
     find_result.back()->group_set_resources[0].transfer_state = GroupSetTransferState::DEMOTING;
     cache->loader_.runLoadTask(task);
 
@@ -490,7 +491,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadUsesSingleDirectStage)
     BlockTreeMatchResult              match   = cache->match({100});
     std::shared_ptr<LoadAsyncContext> context = std::dynamic_pointer_cast<LoadAsyncContext>(match.async_context);
     ASSERT_NE(context, nullptr);
-    ASSERT_EQ(context->items().size(), 1u);
+    ASSERT_EQ(context->loadDescs().size(), 1u);
     ASSERT_TRUE(context->bindTargetDeviceBlocks(0, {device_block}));
     ASSERT_TRUE(context->commit());
     context->waitDone();
@@ -762,19 +763,19 @@ TEST_F(MultiRankBlockTransferEngineTest, BuildEvictionTransferRequestIncludesPri
     ASSERT_NE(cache, nullptr);
 
     BlockTreeEvictor::EvictionPlan plan;
-    plan.primary.group_set_id  = 0;
-    plan.primary.source_tier   = Tier::HOST;
-    plan.primary.target_tier   = Tier::DISK;
-    plan.primary.source_blocks = {3};
-    plan.primary.target_blocks = {4};
+    plan.primary_desc.group_set_id  = 0;
+    plan.primary_desc.source_tier   = Tier::HOST;
+    plan.primary_desc.target_tier   = Tier::DISK;
+    plan.primary_desc.source_blocks = {3};
+    plan.primary_desc.target_blocks = {4};
 
-    EvictionMove cascade;
-    cascade.group_set_id  = 1;
-    cascade.source_tier   = Tier::HOST;
-    cascade.target_tier   = Tier::DISK;
-    cascade.source_blocks = {5};
-    cascade.target_blocks = {6};
-    plan.cascade_moves.push_back(cascade);
+    TransferDescriptor cascade_desc;
+    cascade_desc.group_set_id  = 1;
+    cascade_desc.source_tier   = Tier::HOST;
+    cascade_desc.target_tier   = Tier::DISK;
+    cascade_desc.source_blocks = {5};
+    cascade_desc.target_blocks = {6};
+    plan.cascade_descs.push_back(cascade_desc);
 
     std::vector<TransferDescriptor> descriptors;
     ASSERT_TRUE(cache->evictor_.taskRunner().buildTransferBatch(plan, descriptors));

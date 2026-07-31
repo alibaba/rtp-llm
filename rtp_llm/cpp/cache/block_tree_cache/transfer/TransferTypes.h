@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cstddef>
+#include <cstdint>
 #include <string>
 #include <utility>
 #include <vector>
@@ -38,6 +39,8 @@ isValidHostBufferView(const HostBufferView& view, size_t required_payload_bytes,
            && view.payload_bytes >= required_payload_bytes && view.capacity_bytes >= required_access_bytes;
 }
 
+// Unified operation descriptor for load, eviction, and transfer execution.
+// Business-only fields are ignored by transfer executors and RPC conversion.
 struct TransferDescriptor {
     static TransferDescriptor
     deviceToHost(size_t group_set_id, std::vector<BlockIdxType> device_blocks, BlockIdxType host_block) {
@@ -45,8 +48,8 @@ struct TransferDescriptor {
         desc.group_set_id  = group_set_id;
         desc.source_tier   = Tier::DEVICE;
         desc.target_tier   = Tier::HOST;
-        desc.device_blocks = std::move(device_blocks);
-        desc.host_block    = host_block;
+        desc.source_blocks = std::move(device_blocks);
+        desc.target_blocks = {host_block};
         return desc;
     }
 
@@ -56,28 +59,28 @@ struct TransferDescriptor {
         desc.group_set_id  = group_set_id;
         desc.source_tier   = Tier::HOST;
         desc.target_tier   = Tier::DEVICE;
-        desc.host_block    = host_block;
-        desc.device_blocks = std::move(device_blocks);
+        desc.source_blocks = {host_block};
+        desc.target_blocks = std::move(device_blocks);
         return desc;
     }
 
     static TransferDescriptor hostToDisk(size_t group_set_id, BlockIdxType host_block, BlockIdxType disk_block) {
         TransferDescriptor desc;
-        desc.group_set_id = group_set_id;
-        desc.source_tier  = Tier::HOST;
-        desc.target_tier  = Tier::DISK;
-        desc.host_block   = host_block;
-        desc.disk_block   = disk_block;
+        desc.group_set_id  = group_set_id;
+        desc.source_tier   = Tier::HOST;
+        desc.target_tier   = Tier::DISK;
+        desc.source_blocks = {host_block};
+        desc.target_blocks = {disk_block};
         return desc;
     }
 
     static TransferDescriptor diskToHost(size_t group_set_id, BlockIdxType disk_block, BlockIdxType host_block) {
         TransferDescriptor desc;
-        desc.group_set_id = group_set_id;
-        desc.source_tier  = Tier::DISK;
-        desc.target_tier  = Tier::HOST;
-        desc.disk_block   = disk_block;
-        desc.host_block   = host_block;
+        desc.group_set_id  = group_set_id;
+        desc.source_tier   = Tier::DISK;
+        desc.target_tier   = Tier::HOST;
+        desc.source_blocks = {disk_block};
+        desc.target_blocks = {host_block};
         return desc;
     }
 
@@ -87,8 +90,8 @@ struct TransferDescriptor {
         desc.group_set_id  = group_set_id;
         desc.source_tier   = Tier::DEVICE;
         desc.target_tier   = Tier::DISK;
-        desc.device_blocks = std::move(device_blocks);
-        desc.disk_block    = disk_block;
+        desc.source_blocks = std::move(device_blocks);
+        desc.target_blocks = {disk_block};
         return desc;
     }
 
@@ -98,56 +101,65 @@ struct TransferDescriptor {
         desc.group_set_id  = group_set_id;
         desc.source_tier   = Tier::DISK;
         desc.target_tier   = Tier::DEVICE;
-        desc.disk_block    = disk_block;
-        desc.device_blocks = std::move(device_blocks);
+        desc.source_blocks = {disk_block};
+        desc.target_blocks = std::move(device_blocks);
         return desc;
     }
 
-    // A descriptor is valid only when every endpoint of its direction is resolved.
-    bool isValid() const {
-        const bool device_resolved =
-            !device_blocks.empty() && std::none_of(device_blocks.begin(), device_blocks.end(), [](BlockIdxType block) {
-                return isNullBlockIdx(block);
-            });
-        const bool host_resolved = !isNullBlockIdx(host_block);
-        const bool disk_resolved = !isNullBlockIdx(disk_block);
-        if ((source_tier == Tier::DEVICE && target_tier == Tier::HOST)
-            || (source_tier == Tier::HOST && target_tier == Tier::DEVICE)) {
-            return device_resolved && host_resolved;
-        }
-        if ((source_tier == Tier::HOST && target_tier == Tier::DISK)
-            || (source_tier == Tier::DISK && target_tier == Tier::HOST)) {
-            return device_blocks.empty() && host_resolved && disk_resolved;
-        }
-        if ((source_tier == Tier::DEVICE && target_tier == Tier::DISK)
-            || (source_tier == Tier::DISK && target_tier == Tier::DEVICE)) {
-            return device_resolved && disk_resolved;
-        }
-        return false;
+    bool needsTransfer() const {
+        return target_tier != Tier::NONE && source_tier != target_tier;
+    }
+
+    const std::vector<BlockIdxType>& blocksAt(Tier tier) const {
+        return source_tier == tier ? source_blocks : target_blocks;
+    }
+
+    BlockIdxType singleBlockAt(Tier tier) const {
+        return blocksAt(tier)[0];
+    }
+
+    bool isExecutable() const {
+        const bool supported_direction =
+            (source_tier == Tier::DEVICE && (target_tier == Tier::HOST || target_tier == Tier::DISK))
+            || (source_tier == Tier::HOST && (target_tier == Tier::DEVICE || target_tier == Tier::DISK))
+            || (source_tier == Tier::DISK && (target_tier == Tier::DEVICE || target_tier == Tier::HOST));
+        return supported_direction && endpointResolved(source_tier, source_blocks)
+               && endpointResolved(target_tier, target_blocks);
     }
 
     std::string debugString() const {
-        std::string device_blocks_str;
-        for (size_t i = 0; i < device_blocks.size(); ++i) {
-            device_blocks_str += (i == 0 ? "" : ",") + std::to_string(device_blocks[i]);
-        }
-        return "TransferDescriptor{group_set_id=" + std::to_string(group_set_id) + ", direction="
-               + tierName(source_tier) + "->" + tierName(target_tier) + ", device_blocks=[" + device_blocks_str
-               + "], host_block=" + std::to_string(host_block) + ", disk_block=" + std::to_string(disk_block) + "}";
+        return "TransferDescriptor{group_set_id=" + std::to_string(group_set_id)
+               + ", direction=" + tierName(source_tier) + "->" + tierName(target_tier) + ", source_blocks=["
+               + blocksDebugString(source_blocks) + "], target_blocks=[" + blocksDebugString(target_blocks) + "]}";
     }
 
-    size_t group_set_id{0};
-    Tier   source_tier{Tier::NONE};
-    Tier   target_tier{Tier::NONE};
+    TreeNode*                 node{nullptr};
+    size_t                    group_set_id{0};
+    size_t                    path_index{0};
+    Tier                      source_tier{Tier::NONE};
+    Tier                      target_tier{Tier::NONE};
+    std::vector<BlockIdxType> source_blocks;
+    std::vector<BlockIdxType> target_blocks;
+    int64_t                   source_tier_enter_time_us{0};
 
-    // DEVICE -> HOST: source. HOST -> DEVICE: target.
-    std::vector<BlockIdxType> device_blocks;
+private:
+    static bool endpointResolved(Tier tier, const std::vector<BlockIdxType>& blocks) {
+        if (tier != Tier::DEVICE && tier != Tier::HOST && tier != Tier::DISK) {
+            return false;
+        }
+        if (blocks.empty() || (tier != Tier::DEVICE && blocks.size() != 1)) {
+            return false;
+        }
+        return std::none_of(blocks.begin(), blocks.end(), [](BlockIdxType block) { return isNullBlockIdx(block); });
+    }
 
-    // DEVICE -> HOST: target. HOST -> DEVICE / HOST -> DISK: source. DISK -> HOST: target.
-    BlockIdxType host_block{NULL_BLOCK_IDX};
-
-    // HOST -> DISK: target. DISK -> HOST: source.
-    BlockIdxType disk_block{NULL_BLOCK_IDX};
+    static std::string blocksDebugString(const std::vector<BlockIdxType>& blocks) {
+        std::string result;
+        for (size_t block_index = 0; block_index < blocks.size(); ++block_index) {
+            result += (block_index == 0 ? "" : ",") + std::to_string(blocks[block_index]);
+        }
+        return result;
+    }
 };
 
 }  // namespace rtp_llm

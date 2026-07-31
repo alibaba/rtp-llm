@@ -177,12 +177,12 @@ int BlockTreeCache::evictForGroup(size_t group_id, size_t num_blocks) {
     const size_t initial_free = device_pool->freeBlocksNum();
     size_t       reclaimed    = 0;
     while (reclaimed < num_blocks) {
-        auto eviction_move = evictor_.chooseVictim(location->group_set_id, Tier::DEVICE);
-        if (!eviction_move.has_value()) {
+        auto eviction_desc = evictor_.chooseVictim(location->group_set_id, Tier::DEVICE);
+        if (!eviction_desc.has_value()) {
             break;
         }
-        eviction_move->target_tier = Tier::NONE;
-        if (!evictor_.submitLocked(*eviction_move)) {
+        eviction_desc->target_tier = Tier::NONE;
+        if (!evictor_.submitLocked(*eviction_desc)) {
             break;
         }
         const size_t current_free = device_pool->freeBlocksNum();
@@ -393,13 +393,13 @@ void BlockTreeCache::checkWatermark() {
                 if (unavailable[group_set_id] || !group_set_has_uncovered_deficit(group_set)) {
                     continue;
                 }
-                auto eviction_move = evictor_.chooseVictim(group_set_id, Tier::DEVICE);
-                if (!eviction_move.has_value()) {
+                auto eviction_desc = evictor_.chooseVictim(group_set_id, Tier::DEVICE);
+                if (!eviction_desc.has_value()) {
                     unavailable[group_set_id] = true;
                     continue;
                 }
                 std::vector<EvictionReleaseCredit> release_credits;
-                if (!evictor_.submitLocked(*eviction_move, &release_credits)) {
+                if (!evictor_.submitLocked(*eviction_desc, &release_credits)) {
                     unavailable[group_set_id] = true;
                     continue;
                 }
@@ -437,8 +437,8 @@ void BlockTreeCache::checkWatermark() {
 
         for (auto& group_set : tree_->groupSets()) {
             auto victims = evictor_.chooseWatermarkVictims(*group_set, tier, wm.ratio);
-            for (auto& eviction_move : victims) {
-                evictor_.submitLocked(eviction_move);
+            for (auto& eviction_desc : victims) {
+                evictor_.submitLocked(eviction_desc);
             }
         }
     }

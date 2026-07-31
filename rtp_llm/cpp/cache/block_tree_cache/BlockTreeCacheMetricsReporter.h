@@ -56,7 +56,7 @@ public:
 
 private:
     static int transferDirectionIndex(Tier source_tier, Tier target_tier);
-    void       reportEvictionMove(const EvictionMove&             eviction_move,
+    void       reportEvictionTransfer(const TransferDescriptor&       desc,
                                   const std::vector<GroupSetPtr>& group_sets,
                                   int64_t                         finish_time_us) const;
 

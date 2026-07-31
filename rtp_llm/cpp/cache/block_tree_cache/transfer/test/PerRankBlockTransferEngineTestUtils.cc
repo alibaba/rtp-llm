@@ -309,12 +309,20 @@ TransferDescriptor makeDescriptor(Tier                             source_tier,
                                   BlockIdxType                     disk_block,
                                   size_t                           group_set_id) {
     TransferDescriptor desc;
-    desc.group_set_id  = group_set_id;
-    desc.source_tier   = source_tier;
-    desc.target_tier   = target_tier;
-    desc.device_blocks = device_blocks;
-    desc.host_block    = host_block;
-    desc.disk_block    = disk_block;
+    desc.group_set_id = group_set_id;
+    desc.source_tier  = source_tier;
+    desc.target_tier  = target_tier;
+
+    if (source_tier == Tier::DEVICE || (source_tier != Tier::HOST && source_tier != Tier::DISK)) {
+        desc.source_blocks = device_blocks;
+    } else {
+        desc.source_blocks = {source_tier == Tier::HOST ? host_block : disk_block};
+    }
+    if (target_tier == Tier::DEVICE || (target_tier != Tier::HOST && target_tier != Tier::DISK)) {
+        desc.target_blocks = device_blocks;
+    } else {
+        desc.target_blocks = {target_tier == Tier::HOST ? host_block : disk_block};
+    }
     return desc;
 }
 

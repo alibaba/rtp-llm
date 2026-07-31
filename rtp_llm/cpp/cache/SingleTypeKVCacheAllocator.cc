@@ -134,10 +134,10 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         }
 
         if (load_context && !load_context->empty()) {
-            for (size_t item_index = 0; item_index < load_context->items().size(); ++item_index) {
-                const BlockIndicesType& source_blocks = load_context->items()[item_index].source_blocks;
-                const size_t            path_index    = load_context->items()[item_index].path_index;
-                if (load_context->items()[item_index].source_tier == Tier::DEVICE) {
+            for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
+                const BlockIndicesType& source_blocks = load_context->loadDescs()[desc_index].source_blocks;
+                const size_t            path_index    = load_context->loadDescs()[desc_index].path_index;
+                if (load_context->loadDescs()[desc_index].source_tier == Tier::DEVICE) {
                     const BlockIdxType current = block_ids_0.blocks()[path_index];
                     if (!isNullBlockIdx(current) && current != source_blocks.front()) {
                         return rollback();
@@ -145,9 +145,9 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
                     block_ids_0.setAt(path_index, source_blocks.front());
                     continue;
                 }
-                if (load_context->joinedLoadItems()[item_index]) {
+                if (load_context->joinedLoads()[desc_index]) {
                     const std::vector<BlockIdxType>& joined_targets =
-                        load_context->items()[item_index].target_device_blocks;
+                        load_context->loadDescs()[desc_index].target_blocks;
                     const BlockIdxType current = block_ids_0.blocks()[path_index];
                     if (!isNullBlockIdx(current) && current != joined_targets.front()) {
                         return rollback();
@@ -174,14 +174,14 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
 
     std::vector<size_t> materialize_positions;
     if (load_context && !load_context->empty()) {
-        for (size_t item_index = 0; item_index < load_context->items().size(); ++item_index) {
-            if (load_context->items()[item_index].source_tier == Tier::DEVICE) {
+        for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
+            if (load_context->loadDescs()[desc_index].source_tier == Tier::DEVICE) {
                 continue;
             }
-            if (load_context->joinedLoadItems()[item_index]) {
+            if (load_context->joinedLoads()[desc_index]) {
                 continue;
             }
-            const size_t path_index = load_context->items()[item_index].path_index;
+            const size_t path_index = load_context->loadDescs()[desc_index].path_index;
             if (std::find(materialize_positions.begin(), materialize_positions.end(), path_index)
                 == materialize_positions.end()) {
                 materialize_positions.push_back(path_index);
@@ -219,21 +219,21 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     }
 
     if (load_context && !load_context->empty()) {
-        for (size_t item_index = 0; item_index < load_context->items().size(); ++item_index) {
-            const size_t path_index = load_context->items()[item_index].path_index;
+        for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
+            const size_t path_index = load_context->loadDescs()[desc_index].path_index;
             if (path_index >= block_ids_0.blocksNum() || isNullBlockIdx(block_ids_0.blocks()[path_index])) {
                 return rollback();
             }
             const BlockIdxType target = block_ids_0.blocks()[path_index];
-            if (load_context->joinedLoadItems()[item_index]) {
+            if (load_context->joinedLoads()[desc_index]) {
                 const std::vector<BlockIdxType>& joined_targets =
-                    load_context->items()[item_index].target_device_blocks;
+                    load_context->loadDescs()[desc_index].target_blocks;
                 if (joined_targets.size() != 1 || target != joined_targets.front()) {
                     return rollback();
                 }
                 continue;
             }
-            if (!load_context->bindTargetDeviceBlocks(item_index, {target})) {
+            if (!load_context->bindTargetDeviceBlocks(desc_index, {target})) {
                 return rollback();
             }
         }

@@ -44,26 +44,26 @@ public:
     void shutdown();
 
 private:
-    void                              prepareMatchedLoadItem(TreeNode*                           path_node,
+    void                              prepareMatchedLoadDescriptor(TreeNode*                           path_node,
                                                              const GroupSetPtr&                  group_set,
                                                              const GroupSetResource&             group_set_resource,
                                                              size_t                              path_index,
                                                              BlockTreeMatchResult&               result,
-                                                             LoadAsyncContext::PendingLoadItems& pending_load_items,
+                                                             std::vector<TransferDescriptor>&    pending_load_descs,
                                                              std::vector<bool>&                  joined_load);
-    std::shared_ptr<LoadAsyncContext> prepareLoadContext(LoadAsyncContext::PendingLoadItems& items,
+    std::shared_ptr<LoadAsyncContext> prepareLoadContext(std::vector<TransferDescriptor>& load_descs,
                                                          const std::vector<bool>&            joined_load,
                                                          size_t                              logical_matched_blocks);
-    bool                              prepareJoinedLoadItem(LoadAsyncContext::PendingLoadItem& item);
-    bool reserveLoadItems(const LoadAsyncContext::PendingLoadItems& items, const std::vector<bool>& joined_load);
+    bool                              prepareJoinedLoadDescriptor(TransferDescriptor& desc);
+    bool reserveLoadDescriptors(const std::vector<TransferDescriptor>& load_descs, const std::vector<bool>& joined_load);
     bool commitLoad(const std::shared_ptr<LoadAsyncContext>& context);
     void abortLoad(LoadAsyncContext& context);
-    void abortLoadNolock(const LoadAsyncContext::PendingLoadItems& items,
+    void abortLoadNolock(const std::vector<TransferDescriptor>& load_descs,
                          const std::vector<bool>&                  joined_load,
-                         size_t                                    prepared_item_count,
+                         size_t                                    prepared_desc_count,
                          uint64_t                                  context_id);
     void runLoadTask(const LoadTaskRunner::TaskPtr& task);
-    bool settleLoad(LoadTaskRunner::Task& task, bool copy_success);
+    bool settleLoadLocked(LoadTaskRunner::Task& task, bool copy_success);
 
     bool changeTransferState(TreeNode*             node,
                              size_t                group_set_id,

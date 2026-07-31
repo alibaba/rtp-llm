@@ -839,7 +839,7 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkCountsPrimaryAnd
     for (const auto& descriptor : descriptors) {
         ASSERT_EQ(descriptor.source_tier, Tier::DEVICE);
         ASSERT_EQ(descriptor.target_tier, Tier::HOST);
-        ASSERT_EQ(descriptor.device_blocks.size(), 1u);
+        ASSERT_EQ(descriptor.source_blocks.size(), 1u);
         submitted_groups.push_back(descriptor.group_set_id);
     }
     EXPECT_EQ(std::count(submitted_groups.begin(), submitted_groups.end(), 0), 1);

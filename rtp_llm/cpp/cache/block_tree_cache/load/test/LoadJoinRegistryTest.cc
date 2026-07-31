@@ -20,9 +20,10 @@ protected:
     }
 
     std::shared_ptr<LoadAsyncContext> makeContext(size_t pending_transfer_count) {
-        LoadAsyncContext::PendingLoadItem item;
-        item.source_tier = Tier::HOST;
-        return coordinator_->create({item}, {false}, 1, pending_transfer_count);
+        TransferDescriptor desc;
+        desc.source_tier = Tier::HOST;
+        desc.target_tier = Tier::DEVICE;
+        return coordinator_->create({desc}, {false}, 1, pending_transfer_count);
     }
 
     std::shared_ptr<LoadContextCoordinator> coordinator_;

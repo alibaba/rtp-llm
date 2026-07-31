@@ -79,7 +79,7 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
     plan.host.base          = host.base;
     plan.host.payload_bytes = required_host_bytes;
 
-    const auto& device_blocks = desc.device_blocks;
+    const std::vector<BlockIdxType>& device_blocks = desc.blocksAt(Tier::DEVICE);
     const auto& device_pools  = group_set.devicePools();
 
     int  first_device_index = -1;

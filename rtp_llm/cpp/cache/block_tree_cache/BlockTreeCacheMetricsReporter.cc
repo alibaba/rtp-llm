@@ -180,34 +180,34 @@ void BlockTreeCacheMetricsReporter::reportEvictionFinished(const BlockTreeEvicto
 
     const int64_t finish_time_us = currentTimeUs();
     if (results.primary_success) {
-        reportEvictionMove(plan.primary, group_sets, finish_time_us);
+        reportEvictionTransfer(plan.primary_desc, group_sets, finish_time_us);
     }
-    for (size_t move_index = 0; move_index < plan.cascade_moves.size(); ++move_index) {
-        if (move_index < results.cascade_success.size() && results.cascade_success[move_index]) {
-            reportEvictionMove(plan.cascade_moves[move_index], group_sets, finish_time_us);
+    for (size_t desc_index = 0; desc_index < plan.cascade_descs.size(); ++desc_index) {
+        if (desc_index < results.cascade_success.size() && results.cascade_success[desc_index]) {
+            reportEvictionTransfer(plan.cascade_descs[desc_index], group_sets, finish_time_us);
         }
     }
 }
 
-void BlockTreeCacheMetricsReporter::reportEvictionMove(const EvictionMove&             eviction_move,
+void BlockTreeCacheMetricsReporter::reportEvictionTransfer(const TransferDescriptor&       desc,
                                                        const std::vector<GroupSetPtr>& group_sets,
                                                        int64_t                         finish_time_us) const {
-    const size_t group_set_id = eviction_move.group_set_id;
+    const size_t group_set_id = desc.group_set_id;
     if (group_set_id >= group_sets.size()) {
         return;
     }
     const GroupSetPtr& group_set = group_sets[group_set_id];
-    if (group_set == nullptr || group_set->groupSetId() != eviction_move.group_set_id) {
+    if (group_set == nullptr || group_set->groupSetId() != desc.group_set_id) {
         return;
     }
 
     RtpLLMCacheEvictionMetricsCollector collector;
-    collector.source_tier     = tierName(eviction_move.source_tier);
-    collector.target_tier     = tierName(eviction_move.target_tier);
+    collector.source_tier     = tierName(desc.source_tier);
+    collector.target_tier     = tierName(desc.target_tier);
     collector.group_type      = metricCacheGroupTypeName(group_set->groupType());
     collector.report_eviction = true;
-    if (eviction_move.source_tier_enter_time_us > 0 && finish_time_us >= eviction_move.source_tier_enter_time_us) {
-        collector.lifetime_ms     = (finish_time_us - eviction_move.source_tier_enter_time_us) / 1000;
+    if (desc.source_tier_enter_time_us > 0 && finish_time_us >= desc.source_tier_enter_time_us) {
+        collector.lifetime_ms     = (finish_time_us - desc.source_tier_enter_time_us) / 1000;
         collector.report_lifetime = true;
     }
     metrics_reporter_->report<RtpLLMCacheEvictionMetrics, RtpLLMCacheEvictionMetricsCollector>(nullptr, &collector);

@@ -26,17 +26,17 @@ GroupSetPtr makeTaskRunnerTestGroupSet() {
     return makeTestGroupSet(0, topology, {0}, {std::move(pool)});
 }
 
-TEST(LoadTaskRunnerTest, CreateTaskAllowsNoTransferItems) {
+TEST(LoadTaskRunnerTest, CreateTaskAllowsNoTransferDescriptors) {
     LoadTaskRunner runner;
     GroupSetPtr    group = makeTaskRunnerTestGroupSet();
 
-    LoadAsyncContext::PendingLoadItem joined_item;
-    joined_item.group_set_id                                  = 0;
-    joined_item.source_tier                                   = Tier::HOST;
+    TransferDescriptor joined_desc;
+    joined_desc.group_set_id                                  = 0;
+    joined_desc.source_tier                                   = Tier::HOST;
     const std::shared_ptr<LoadContextCoordinator> coordinator = std::make_shared<LoadContextCoordinator>(
         LoadContextCoordinator::CommitCallback{}, LoadContextCoordinator::AbortCallback{});
-    const std::shared_ptr<LoadAsyncContext> context = coordinator->create({joined_item}, {true}, 1, 1);
-    LoadTaskRunner::TaskPtr                 task    = runner.createTask({joined_item}, {true}, {group}, context);
+    const std::shared_ptr<LoadAsyncContext> context = coordinator->create({joined_desc}, {true}, 1, 1);
+    LoadTaskRunner::TaskPtr                 task    = runner.createTask({joined_desc}, {true}, {group}, context);
     EXPECT_EQ(task, nullptr);
 }
 
@@ -60,10 +60,10 @@ TEST(LoadTaskRunnerTest, PreparationFailureSkipsTransfer) {
     BlockTreeCacheMetricsReporter metrics_reporter;
 
     LoadTaskRunner::Task              task;
-    LoadAsyncContext::PendingLoadItem item;
-    item.group_set_id = 0;
-    item.source_tier  = Tier::HOST;
-    task.items.push_back(item);
+    TransferDescriptor   desc;
+    desc.group_set_id = 0;
+    desc.source_tier  = Tier::HOST;
+    task.load_descs.push_back(desc);
     task.host_to_device_descriptors.push_back(TransferDescriptor::hostToDevice(0, 1, {1}));
 
     EXPECT_FALSE(runner.runTransfer(

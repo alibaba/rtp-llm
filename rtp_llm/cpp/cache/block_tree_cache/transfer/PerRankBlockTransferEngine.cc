@@ -87,14 +87,17 @@ TransferStatus PerRankBlockTransferEngine::execute(const TransferDescriptor& des
         case TransferPath::DEVICE_HOST:
             if (desc.source_tier == Tier::DEVICE) {
                 return device_host_executor_->deviceToHost(
-                    desc, *group_set, resolveHostView(*group_set, desc.host_block));
+                    desc, *group_set, resolveHostView(*group_set, desc.singleBlockAt(Tier::HOST)));
             }
-            return device_host_executor_->hostToDevice(resolveHostView(*group_set, desc.host_block), desc, *group_set);
+            return device_host_executor_->hostToDevice(
+                resolveHostView(*group_set, desc.singleBlockAt(Tier::HOST)), desc, *group_set);
         case TransferPath::HOST_DISK:
             if (desc.source_tier == Tier::HOST) {
-                return host_disk_executor_->hostToDisk(resolveHostView(*group_set, desc.host_block), desc, *group_set);
+                return host_disk_executor_->hostToDisk(
+                    resolveHostView(*group_set, desc.singleBlockAt(Tier::HOST)), desc, *group_set);
             }
-            return host_disk_executor_->diskToHost(desc, *group_set, resolveHostView(*group_set, desc.host_block));
+            return host_disk_executor_->diskToHost(
+                desc, *group_set, resolveHostView(*group_set, desc.singleBlockAt(Tier::HOST)));
         case TransferPath::DEVICE_DISK:
             return device_disk_executor_->execute(desc, *group_set);
         case TransferPath::UNSUPPORTED:
@@ -112,7 +115,7 @@ HostBufferView PerRankBlockTransferEngine::resolveHostView(const GroupSet& group
 
 TransferStatus PerRankBlockTransferEngine::validateRequest(const TransferDescriptor& desc,
                                                            const GroupSet*&          group_set) const {
-    if (!desc.isValid()) {
+    if (!desc.isExecutable()) {
         RTP_LLM_LOG_WARNING("invalid transfer descriptor %s", desc.debugString().c_str());
         return TransferStatus::INVALID_ARGS;
     }
@@ -130,16 +133,16 @@ TransferStatus PerRankBlockTransferEngine::validateRequest(const TransferDescrip
     const TransferPath path = classifyTransferPath(desc.source_tier, desc.target_tier);
 
     if (path == TransferPath::DEVICE_HOST || path == TransferPath::HOST_DISK) {
-        const auto host_pool = group_set->hostPool();
-        if (host_pool == nullptr || !host_pool->validBlock(desc.host_block)) {
+        const std::shared_ptr<HostBlockPool> host_pool = group_set->hostPool();
+        if (host_pool == nullptr || !host_pool->validBlock(desc.singleBlockAt(Tier::HOST))) {
             RTP_LLM_LOG_WARNING("transfer request has invalid host block group=%zu", desc.group_set_id);
             return TransferStatus::INVALID_ARGS;
         }
     }
 
     if (path == TransferPath::HOST_DISK || path == TransferPath::DEVICE_DISK) {
-        const auto disk_pool = group_set->diskPool();
-        if (disk_pool == nullptr || !disk_pool->validBlock(desc.disk_block)) {
+        const std::shared_ptr<BlockTreeDiskBlockPool> disk_pool = group_set->diskPool();
+        if (disk_pool == nullptr || !disk_pool->validBlock(desc.singleBlockAt(Tier::DISK))) {
             RTP_LLM_LOG_WARNING("transfer request has invalid disk block group=%zu", desc.group_set_id);
             return TransferStatus::INVALID_ARGS;
         }
@@ -159,15 +162,16 @@ TransferStatus PerRankBlockTransferEngine::validateRequest(const TransferDescrip
 
 TransferStatus PerRankBlockTransferEngine::validateDeviceBlocks(const TransferDescriptor& desc,
                                                                 const GroupSet&           group_set) const {
-    if (desc.device_blocks.size() != group_set.devicePools().size()) {
+    const std::vector<BlockIdxType>& device_blocks = desc.blocksAt(Tier::DEVICE);
+    if (device_blocks.size() != group_set.devicePools().size()) {
         RTP_LLM_LOG_WARNING("device block count %zu != pool count %zu group_set=%zu",
-                            desc.device_blocks.size(),
+                            device_blocks.size(),
                             group_set.devicePools().size(),
                             desc.group_set_id);
         return TransferStatus::INVALID_ARGS;
     }
-    for (size_t local_group_index = 0; local_group_index < desc.device_blocks.size(); ++local_group_index) {
-        const BlockIdxType        block = desc.device_blocks[local_group_index];
+    for (size_t local_group_index = 0; local_group_index < device_blocks.size(); ++local_group_index) {
+        const BlockIdxType        block = device_blocks[local_group_index];
         const DeviceBlockPoolPtr& pool  = group_set.devicePools()[local_group_index];
         if (pool == nullptr || !pool->validBlock(block)) {
             RTP_LLM_LOG_WARNING(

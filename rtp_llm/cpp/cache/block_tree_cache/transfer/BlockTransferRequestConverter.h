@@ -14,7 +14,7 @@ public:
                                const std::vector<GroupSetPtr>& group_sets,
                                MemoryOperationRequestPB&       request);
 
-    // Returns an invalid descriptor (isValid() == false) when the request cannot be decoded.
+    // Returns an invalid descriptor (isExecutable() == false) when the request cannot be decoded.
     static TransferDescriptor
     decodeTransfer(const MemoryOperationRequestPB& request, int item_index, const std::vector<GroupSetPtr>& group_sets);
 

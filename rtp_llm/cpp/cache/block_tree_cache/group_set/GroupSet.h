@@ -30,16 +30,6 @@ public:
     virtual bool validate(const GroupSetResource& resource) = 0;
 };
 
-struct EvictionMove {
-    TreeNode*                 node{nullptr};
-    size_t                    group_set_id{0};
-    Tier                      source_tier{Tier::NONE};
-    Tier                      target_tier{Tier::NONE};
-    std::vector<BlockIdxType> source_blocks;
-    std::vector<BlockIdxType> target_blocks;
-    int64_t                   source_tier_enter_time_us{0};
-};
-
 class GroupSet {
 public:
     GroupSet(std::vector<DeviceBlockPoolPtr> device_pools,

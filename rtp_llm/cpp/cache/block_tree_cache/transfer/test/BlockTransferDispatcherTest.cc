@@ -35,7 +35,7 @@ public:
         if (contexts_.empty()) {
             return okContext();
         }
-        auto context = contexts_.front();
+        std::shared_ptr<AsyncContext> context = contexts_.front();
         contexts_.pop_front();
         return context;
     }
@@ -121,6 +121,14 @@ void runPendingCase(bool succeed) {
     worker.join();
     ASSERT_TRUE(wait_entered) << "dispatcher returned without entering waitDone()";
     EXPECT_EQ(result.load(std::memory_order_acquire), succeed);
+}
+
+TEST(BlockTransferDispatcherTest, TransferDescriptorUsesPerRankEntry) {
+    std::shared_ptr<ScriptedPerRankEngine> engine = std::make_shared<ScriptedPerRankEngine>();
+    BlockTransferDispatcher                dispatcher(engine);
+
+    EXPECT_TRUE(dispatcher.executePerRank(TransferDescriptor::hostToDisk(0, 1, 1)));
+    EXPECT_EQ(engine->submitCount(), 1u);
 }
 
 TEST(BlockTransferDispatcherTest, EmptyBatchSucceedsWithoutAnEngine) {
