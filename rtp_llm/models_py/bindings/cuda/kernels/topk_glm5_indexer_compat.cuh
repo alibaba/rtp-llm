@@ -44,17 +44,15 @@ struct AlignedVector {
 
   public:
     SGL_DEVICE void load(const void* ptr, int64_t offset = 0) {
-        const auto* bytes = static_cast<const char*>(ptr) +
-                            offset * static_cast<int64_t>(sizeof(storage_t));
-        if ((reinterpret_cast<uintptr_t>(bytes) &
-             (alignof(storage_t) - 1)) == 0) {
-            storage_ = *reinterpret_cast<const storage_t*>(bytes);
-        } else {
-            const auto* values = reinterpret_cast<const T*>(bytes);
+        storage_ = reinterpret_cast<const storage_t*>(ptr)[offset];
+    }
+    SGL_DEVICE void load_unaligned(const void* ptr, int64_t offset = 0) {
+        const auto* values = reinterpret_cast<const T*>(
+            static_cast<const char*>(ptr) +
+            offset * static_cast<int64_t>(sizeof(storage_t)));
 #pragma unroll
-            for (std::size_t i = 0; i < N; ++i) {
-                storage_.data[i] = values[i];
-            }
+        for (std::size_t i = 0; i < N; ++i) {
+            storage_.data[i] = values[i];
         }
     }
     SGL_DEVICE void store(void* ptr, int64_t offset = 0) const {

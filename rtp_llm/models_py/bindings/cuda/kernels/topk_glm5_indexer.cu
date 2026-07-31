@@ -95,7 +95,7 @@ __device__ __forceinline__ void copy_output(
     }
 }
 
-template <int Level>
+template <int Level, bool kAlignedInput>
 __global__ __launch_bounds__(kBlockSize, kOccupancy)
 void main_kernel(const __grid_constant__ Params params) {
     auto problem = params.problem(blockIdx.x);
@@ -106,21 +106,21 @@ void main_kernel(const __grid_constant__ Params params) {
     __shared__ impl::MaxSmem<
         Register1::Smem, Register2::Smem, Register4::Smem, Streaming::Smem> smem;
     if constexpr (Level == -1) {
-        Register1::forward<false>(problem, &smem);
+        Register1::forward<false, kAlignedInput>(problem, &smem);
     } else if constexpr (Level == 0) {
-        Register2::forward<false>(problem, &smem);
+        Register2::forward<false, kAlignedInput>(problem, &smem);
     } else if constexpr (Level == 1) {
-        Register4::forward<false>(problem, &smem);
+        Register4::forward<false, kAlignedInput>(problem, &smem);
     } else {
         if (problem.seq_len <= kReg4MaxSeqLen) {
-            Register4::forward<false>(problem, &smem);
+            Register4::forward<false, kAlignedInput>(problem, &smem);
         } else {
-            Streaming::forward<false>(problem, &smem);
+            Streaming::forward<false, kAlignedInput>(problem, &smem);
         }
     }
 }
 
-template <typename ClusterImpl>
+template <typename ClusterImpl, bool kAlignedInput>
 __global__ __launch_bounds__(kBlockSize, kOccupancy)
 void direct_cluster_kernel(const __grid_constant__ Params params) {
     auto problem = params.problem(blockIdx.x);
@@ -135,12 +135,12 @@ void direct_cluster_kernel(const __grid_constant__ Params params) {
     auto* destination = problem.out;
     const auto cluster = cooperative_groups::this_cluster();
     problem.out = cluster.map_shared_rank(indices, worker_rank);
-    ClusterImpl::template forward<false>(problem, &smem);
+    ClusterImpl::template forward<false, kAlignedInput>(problem, &smem);
     cluster.sync();
     if (blockIdx.y == worker_rank) copy_output(problem, destination);
 }
 
-template <typename ClusterImpl>
+template <typename ClusterImpl, bool kAlignedInput>
 __global__ __launch_bounds__(kBlockSize, kOccupancy)
 void persistent_cluster_kernel(const __grid_constant__ Params params) {
     constexpr uint32_t cluster_size = ClusterImpl::kClusterSize;
@@ -155,7 +155,7 @@ void persistent_cluster_kernel(const __grid_constant__ Params params) {
             if (blockIdx.y == worker_rank) trivial(problem);
         } else {
             problem.out = cluster.map_shared_rank(indices, worker_rank);
-            ClusterImpl::template forward<false>(problem, &smem);
+            ClusterImpl::template forward<false, kAlignedInput>(problem, &smem);
             cluster.sync();
             if (blockIdx.y == worker_rank) copy_output(problem, destination);
         }
@@ -181,6 +181,127 @@ cudaError_t launch_cluster(Kernel kernel,
     config.attrs = &attr;
     config.numAttrs = 1;
     return cudaLaunchKernelEx(&config, kernel, params);
+}
+
+template <bool kAlignedInput>
+cudaError_t launch_topk(const Params& params,
+                        int64_t k,
+                        int64_t max_seq_len,
+                        cudaStream_t stream) {
+    const uint32_t batch = params.batch;
+    cudaError_t error = cudaSuccess;
+    if (max_seq_len <= kReg1MaxSeqLen && (batch <= 32 || k <= 1024)) {
+        main_kernel<-1, kAlignedInput>
+            <<<batch, kBlockSize, 0, stream>>>(params);
+    } else if (max_seq_len <= kReg2MaxSeqLen) {
+        main_kernel<0, kAlignedInput>
+            <<<batch, kBlockSize, 0, stream>>>(params);
+    } else if (max_seq_len <= kReg4MaxSeqLen) {
+        main_kernel<1, kAlignedInput>
+            <<<batch, kBlockSize, 0, stream>>>(params);
+    } else if (max_seq_len <= kCluster32KMaxSeqLen &&
+               batch <= kCluster8SmallBatchLimit) {
+        error = launch_cluster(
+            direct_cluster_kernel<Cluster8, kAlignedInput>,
+            params,
+            batch,
+            Cluster8::kClusterSize,
+            stream);
+    } else if (max_seq_len <= kCluster32KMaxSeqLen &&
+               batch <= kCluster4SmallBatchLimit) {
+        error = launch_cluster(
+            direct_cluster_kernel<Cluster4, kAlignedInput>,
+            params,
+            batch,
+            Cluster4::kClusterSize,
+            stream);
+    } else if (max_seq_len <= kCluster32KMaxSeqLen) {
+        main_kernel<2, kAlignedInput>
+            <<<batch, kBlockSize, 0, stream>>>(params);
+    } else if (max_seq_len <= kCluster64KMaxSeqLen &&
+               batch <= kCluster8SmallBatchLimit) {
+        error = launch_cluster(
+            direct_cluster_kernel<Cluster8, kAlignedInput>,
+            params,
+            batch,
+            Cluster8::kClusterSize,
+            stream);
+    } else if (max_seq_len <= kCluster64KMaxSeqLen &&
+               batch <= kCluster4BatchLimit) {
+        error = launch_cluster(
+            direct_cluster_kernel<Cluster4, kAlignedInput>,
+            params,
+            batch,
+            Cluster4::kClusterSize,
+            stream);
+    } else if (max_seq_len <= kCluster64KMaxSeqLen &&
+               batch <= kCluster2BatchLimit) {
+        error = launch_cluster(
+            direct_cluster_kernel<Cluster2, kAlignedInput>,
+            params,
+            batch,
+            Cluster2::kClusterSize,
+            stream);
+    } else if (max_seq_len <= kCluster64KMaxSeqLen) {
+        main_kernel<2, kAlignedInput>
+            <<<batch, kBlockSize, 0, stream>>>(params);
+    } else if (batch <= kCluster8LongBatchLimit) {
+        error = launch_cluster(
+            direct_cluster_kernel<Cluster8, kAlignedInput>,
+            params,
+            batch,
+            Cluster8::kClusterSize,
+            stream);
+    } else if (batch <= kCluster4BatchLimit &&
+               max_seq_len <= kCluster4MaxSeqLen) {
+        error = launch_cluster(
+            direct_cluster_kernel<Cluster4, kAlignedInput>,
+            params,
+            batch,
+            Cluster4::kClusterSize,
+            stream);
+    } else if (batch <= kCluster4BatchLimit) {
+        error = launch_cluster(
+            direct_cluster_kernel<Cluster8, kAlignedInput>,
+            params,
+            batch,
+            Cluster8::kClusterSize,
+            stream);
+    } else if (batch <= kCluster2BatchLimit &&
+               max_seq_len <= kCluster2MaxSeqLen) {
+        error = launch_cluster(
+            direct_cluster_kernel<Cluster2, kAlignedInput>,
+            params,
+            batch,
+            Cluster2::kClusterSize,
+            stream);
+    } else if (batch <= kCluster2BatchLimit) {
+        error = launch_cluster(
+            direct_cluster_kernel<Cluster4, kAlignedInput>,
+            params,
+            batch,
+            Cluster4::kClusterSize,
+            stream);
+    } else if (batch <= kCluster2LongBatchLimit && max_seq_len > 131072) {
+        error = launch_cluster(
+            direct_cluster_kernel<Cluster2, kAlignedInput>,
+            params,
+            batch,
+            Cluster2::kClusterSize,
+            stream);
+    } else if (!uniform_plan_uses_cluster(
+                   batch, static_cast<uint32_t>(max_seq_len))) {
+        main_kernel<2, kAlignedInput>
+            <<<batch, kBlockSize, 0, stream>>>(params);
+    } else {
+        error = launch_cluster(
+            persistent_cluster_kernel<Cluster8, kAlignedInput>,
+            params,
+            kPersistentClusters,
+            Cluster8::kClusterSize,
+            stream);
+    }
+    return error == cudaSuccess ? cudaGetLastError() : error;
 }
 
 }  // namespace
@@ -221,116 +342,16 @@ void topk_glm5_indexer(const torch::Tensor& scores,
         .batch = static_cast<uint32_t>(scores.size(0)),
         .topk = static_cast<uint32_t>(k),
     };
-    const uint32_t batch = params.batch;
     const auto stream = at::cuda::getCurrentCUDAStream();
-    cudaError_t error = cudaSuccess;
-    if (max_seq_len <= kReg1MaxSeqLen && (batch <= 32 || k <= 1024)) {
-        main_kernel<-1><<<batch, kBlockSize, 0, stream>>>(params);
-    } else if (max_seq_len <= kReg2MaxSeqLen) {
-        main_kernel<0><<<batch, kBlockSize, 0, stream>>>(params);
-    } else if (max_seq_len <= kReg4MaxSeqLen) {
-        main_kernel<1><<<batch, kBlockSize, 0, stream>>>(params);
-    } else if (max_seq_len <= kCluster32KMaxSeqLen &&
-               batch <= kCluster8SmallBatchLimit) {
-        error = launch_cluster(
-            direct_cluster_kernel<Cluster8>,
-            params,
-            batch,
-            Cluster8::kClusterSize,
-            stream);
-    } else if (max_seq_len <= kCluster32KMaxSeqLen &&
-               batch <= kCluster4SmallBatchLimit) {
-        error = launch_cluster(
-            direct_cluster_kernel<Cluster4>,
-            params,
-            batch,
-            Cluster4::kClusterSize,
-            stream);
-    } else if (max_seq_len <= kCluster32KMaxSeqLen) {
-        main_kernel<2><<<batch, kBlockSize, 0, stream>>>(params);
-    } else if (max_seq_len <= kCluster64KMaxSeqLen &&
-               batch <= kCluster8SmallBatchLimit) {
-        error = launch_cluster(
-            direct_cluster_kernel<Cluster8>,
-            params,
-            batch,
-            Cluster8::kClusterSize,
-            stream);
-    } else if (max_seq_len <= kCluster64KMaxSeqLen &&
-               batch <= kCluster4BatchLimit) {
-        error = launch_cluster(
-            direct_cluster_kernel<Cluster4>,
-            params,
-            batch,
-            Cluster4::kClusterSize,
-            stream);
-    } else if (max_seq_len <= kCluster64KMaxSeqLen &&
-               batch <= kCluster2BatchLimit) {
-        error = launch_cluster(
-            direct_cluster_kernel<Cluster2>,
-            params,
-            batch,
-            Cluster2::kClusterSize,
-            stream);
-    } else if (max_seq_len <= kCluster64KMaxSeqLen) {
-        main_kernel<2><<<batch, kBlockSize, 0, stream>>>(params);
-    } else if (batch <= kCluster8LongBatchLimit) {
-        error = launch_cluster(
-            direct_cluster_kernel<Cluster8>,
-            params,
-            batch,
-            Cluster8::kClusterSize,
-            stream);
-    } else if (batch <= kCluster4BatchLimit &&
-               max_seq_len <= kCluster4MaxSeqLen) {
-        error = launch_cluster(
-            direct_cluster_kernel<Cluster4>,
-            params,
-            batch,
-            Cluster4::kClusterSize,
-            stream);
-    } else if (batch <= kCluster4BatchLimit) {
-        error = launch_cluster(
-            direct_cluster_kernel<Cluster8>,
-            params,
-            batch,
-            Cluster8::kClusterSize,
-            stream);
-    } else if (batch <= kCluster2BatchLimit &&
-               max_seq_len <= kCluster2MaxSeqLen) {
-        error = launch_cluster(
-            direct_cluster_kernel<Cluster2>,
-            params,
-            batch,
-            Cluster2::kClusterSize,
-            stream);
-    } else if (batch <= kCluster2BatchLimit) {
-        error = launch_cluster(
-            direct_cluster_kernel<Cluster4>,
-            params,
-            batch,
-            Cluster4::kClusterSize,
-            stream);
-    } else if (batch <= kCluster2LongBatchLimit &&
-               max_seq_len > 131072) {
-        error = launch_cluster(
-            direct_cluster_kernel<Cluster2>,
-            params,
-            batch,
-            Cluster2::kClusterSize,
-            stream);
-    } else if (!uniform_plan_uses_cluster(
-                   batch, static_cast<uint32_t>(max_seq_len))) {
-        main_kernel<2><<<batch, kBlockSize, 0, stream>>>(params);
-    } else {
-        error = launch_cluster(
-            persistent_cluster_kernel<Cluster8>,
-            params,
-            kPersistentClusters,
-            Cluster8::kClusterSize,
-            stream);
-    }
-    if (error == cudaSuccess) error = cudaGetLastError();
+    constexpr uintptr_t kVectorAlignment = 16;
+    const bool aligned_input =
+        (reinterpret_cast<uintptr_t>(params.scores) % kVectorAlignment == 0) &&
+        ((params.stride * sizeof(float)) % kVectorAlignment == 0);
+    const cudaError_t error = aligned_input
+                                  ? launch_topk<true>(
+                                        params, k, max_seq_len, stream)
+                                  : launch_topk<false>(
+                                        params, k, max_seq_len, stream);
     TORCH_CHECK(error == cudaSuccess,
                 "GLM5 SGLang TopK launch failed: ", cudaGetErrorString(error));
 }

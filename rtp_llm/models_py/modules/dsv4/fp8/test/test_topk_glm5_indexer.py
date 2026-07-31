@@ -306,6 +306,71 @@ def test_padded_row_stride():
     _assert_equiv(out, logits, lengths, k=K, tag="padded row stride")
 
 
+def test_unaligned_score_view_paths():
+    """A column-offset view must use the scalar-safe input specialization."""
+    for rows, seq_len, k, tag in (
+        (3, 4096, 512, "Register1"),
+        (17, 32768, 2048, "Streaming"),
+        (1, 65536, 2048, "Cluster8"),
+    ):
+        generator = torch.Generator(device="cuda").manual_seed(
+            20260801 + rows + seq_len
+        )
+        base = torch.randn(
+            rows,
+            seq_len + 4,
+            dtype=torch.float32,
+            device="cuda",
+            generator=generator,
+        )
+        logits = base[:, 1 : seq_len + 1]
+        assert logits.stride(1) == 1
+        assert logits.stride(0) % 4 == 0
+        assert logits.data_ptr() % 16 != 0
+        lengths = torch.full(
+            (rows,), seq_len, dtype=torch.int32, device="cuda"
+        )
+        out = _run(logits, lengths, k=k, max_seq_len=seq_len)
+        _assert_equiv(
+            out,
+            logits,
+            lengths,
+            k=k,
+            tag=f"unaligned score view {tag}",
+        )
+
+
+def test_fp32_subnormal_ordering_exact():
+    """Build flags must not flush distinct FP32 subnormal scores to zero."""
+    for rows, seq_len, k, path in (
+        (1, 4095, 512, "Register1"),
+        (17, 16385, 512, "Streaming"),
+        (1, 65536, 2048, "Cluster8"),
+    ):
+        magnitude = torch.arange(
+            1, seq_len + 1, dtype=torch.int64, device="cuda"
+        )
+        for sign, sign_bits in (("positive", 0), ("negative", 0x80000000)):
+            bits = (magnitude | sign_bits).to(torch.int32)
+            logits = (
+                bits.view(torch.float32)
+                .unsqueeze(0)
+                .expand(rows, -1)
+                .contiguous()
+            )
+            lengths = torch.full(
+                (rows,), seq_len, dtype=torch.int32, device="cuda"
+            )
+            out = _run(logits, lengths, k=k, max_seq_len=seq_len)
+            _assert_equiv(
+                out,
+                logits,
+                lengths,
+                k=k,
+                tag=f"{path} {sign} FP32 subnormal ordering",
+            )
+
+
 def test_mtp_batched_decode_flattened_bs_rows():
     """MTP passes score as [B, S, T]; the op contract is [B*S, T]."""
     B, S, T, K = 4, 3, 2048, 512
@@ -412,6 +477,45 @@ def test_cluster_ragged_long_short_replay():
         replays=100,
         tag="Cluster8 ragged long/short",
     )
+
+
+def test_cluster_nonprimary_candidate_overflow_exact():
+    """A local tie-buffer overflow must reach the cluster-wide exact scan.
+
+    Put 4096 distinct FP32 values from one ordered-FP16 coarse bin entirely in
+    rank 1. Before the fix, that non-primary rank reported
+    ``min(actual_count, kMaxNumTie) == 2048``. With no candidates in the other
+    ranks, rank 0 mistook the truncated 2048-value buffer for the complete
+    threshold bin and returned an approximate TopK.
+
+    The batch sizes below route the same adversarial row through Cluster8,
+    Cluster4, and Cluster2. Remaining rows take the per-row trivial branch.
+    """
+    valid = 262144
+    candidate_count = 4096
+    offsets = torch.arange(candidate_count, dtype=torch.int64, device="cuda")
+    candidate_bits = (0xBFD00000 - offsets).to(torch.int32)
+    candidates = candidate_bits.view(torch.float32)
+    assert torch.unique(candidates.to(torch.float16)).numel() == 1
+
+    for rows, cluster_size in ((1, 8), (17, 4), (37, 2)):
+        logits = torch.full(
+            (rows, valid), -2.0, dtype=torch.float32, device="cuda"
+        )
+        chunk_size = valid // cluster_size
+        logits[0, chunk_size : chunk_size + candidate_count] = candidates
+        lengths = torch.ones(rows, dtype=torch.int32, device="cuda")
+        lengths[0] = valid
+
+        for k in (512, 1024, 2048):
+            out = _run(logits, lengths, k=k, max_seq_len=valid)
+            _assert_value_equiv(
+                out,
+                logits,
+                lengths,
+                k=k,
+                tag=f"Cluster{cluster_size} non-primary overflow",
+            )
 
 
 def test_exact_boundary_negative_midpoint_output_bounds():
@@ -622,11 +726,14 @@ if __name__ == "__main__":
     test_batched_decode_b4_varied()
     test_batched_decode_b16_half()
     test_padded_row_stride()
+    test_unaligned_score_view_paths()
+    test_fp32_subnormal_ordering_exact()
     test_mtp_batched_decode_flattened_bs_rows()
     test_batched_streaming_path_b64()
     test_long_seq_radix_path()
     test_cluster_repeated_pivot_replay()
     test_cluster_ragged_long_short_replay()
+    test_cluster_nonprimary_candidate_overflow_exact()
     test_exact_boundary_negative_midpoint_output_bounds()
     test_cluster_exact_boundary_negative_midpoint()
     test_histogram_2048_candidate_overflow_exact()

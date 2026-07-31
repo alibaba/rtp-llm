@@ -232,13 +232,6 @@ struct TopKConfig {
       float v_lo,
       float v_hi,
       uint32_t output_base) {
-    // The FP32 collect pass can classify an exact negative FP16 midpoint as
-    // "above" even though round-to-nearest-even put it in the threshold
-    // histogram bin. In that case count_gt may already fill the entire output
-    // while count_eq still overflows the tie buffer. Do not underflow
-    // problem.topk - output_base below.
-    if (output_base >= problem.topk) return;
-
     const uint32_t tx = threadIdx.x;
     if (tx == 0) {
       const uint32_t lo_key = extract_exact_bin(v_lo);
@@ -323,9 +316,7 @@ struct TopKConfig {
       if (value >= v_lo && value < v_hi &&
           extract_exact_bin(value) > pivot) {
         const uint32_t pos = atomicAdd(&smem->counter, 1u);
-        if (pos < problem.topk - output_base) {
-          problem.emit(output_base + pos, idx);
-        }
+        problem.emit(output_base + pos, idx);
       }
     }
     __syncthreads();
@@ -565,19 +556,32 @@ struct TopKRadixBase : TopKConfig {
   };
 
  protected:
-  template <typename F>
-  SGL_DEVICE static void for_each_input(const float* __restrict__ in, uint32_t seq_len, F&& fn) {
+  template <bool kAlignedInput, typename F>
+  SGL_DEVICE static void for_each_input(
+      const float* __restrict__ in, uint32_t seq_len, F&& fn) {
     const auto tx = threadIdx.x;
     const uint32_t num_full = seq_len / kVecSize;  // fully-in-bounds vectors
 
     vec_t next_vec;
     uint32_t vi = tx;
-    if (vi < num_full) next_vec.load(in, vi);
+    if (vi < num_full) {
+      if constexpr (kAlignedInput) {
+        next_vec.load(in, vi);
+      } else {
+        next_vec.load_unaligned(in, vi);
+      }
+    }
     while (vi < num_full) {
       const auto cur = next_vec;
       const auto base = vi * kVecSize;
       vi += kBlockSize;
-      if (vi < num_full) next_vec.load(in, vi);
+      if (vi < num_full) {
+        if constexpr (kAlignedInput) {
+          next_vec.load(in, vi);
+        } else {
+          next_vec.load_unaligned(in, vi);
+        }
+      }
 #pragma unroll
       for (uint32_t j = 0; j < kVecSize; ++j) {
         fn(cur[j], base + j);
@@ -643,7 +647,7 @@ struct TopKRegister : TopKRadixBase<12> {
   static constexpr uint32_t kMaxSeqLen = kBlockSize * kVecSize * kLocalVecs;
   using Smem = typename TopKRadixBase<12>::Smem;
 
-  template <bool kUsePDL>
+  template <bool kUsePDL, bool kAlignedInput>
   SGL_DEVICE static void forward(const TopKProblem problem, void* _smem) {
     const auto tx = threadIdx.x;
     const auto smem = static_cast<Smem*>(_smem);
@@ -676,7 +680,11 @@ struct TopKRegister : TopKRadixBase<12> {
     for (uint32_t i = 0; i < kLocalVecs; ++i) {
       const auto vi = tx + kBlockSize * i;
       if (vi >= num_full) break;
-      local_vecs[i].load(problem.in, vi);
+      if constexpr (kAlignedInput) {
+        local_vecs[i].load(problem.in, vi);
+      } else {
+        local_vecs[i].load_unaligned(problem.in, vi);
+      }
     }
 #pragma unroll
     for (uint32_t i = 0; i < kLocalVecs; ++i) {
@@ -730,8 +738,14 @@ struct TopKRegister : TopKRadixBase<12> {
     const auto above_count = smem->count_gt;
     const auto equal_count = smem->count_eq;
     if (__builtin_expect(equal_count > kMaxNumTie, 0)) {
-      return exact_boundary_scan_topk(
-          problem, &smem->tie.handle, v_lo, v_hi, above_count);
+      // A negative FP16 midpoint can make the FP32 collect count reach topk.
+      // In that case the output is already complete; do not underflow the
+      // exact scan's topk - output_base calculation.
+      if (above_count < topk) {
+        exact_boundary_scan_topk(
+            problem, &smem->tie.handle, v_lo, v_hi, above_count);
+      }
+      return;
     }
     const auto remain_topk = above_count < topk ? topk - above_count : 0;
     const auto tie_count = min(equal_count, kMaxNumTie);
@@ -747,7 +761,7 @@ struct TopKStreaming : TopKRegister<2> {
  public:
   static constexpr uint32_t kMaxSeqLen = std::numeric_limits<uint32_t>::max();
 
-  template <bool kUsePDL>
+  template <bool kUsePDL, bool kAlignedInput>
   SGL_DEVICE static void forward(const TopKProblem problem, void* _smem) {
     const auto tx = threadIdx.x;
     const auto smem = static_cast<Smem*>(_smem);
@@ -765,7 +779,7 @@ struct TopKStreaming : TopKRegister<2> {
     PDLWaitPrimary<kUsePDL>();
 
     // Phase 1: Load and build histogram
-    for_each_input(problem.in, problem.seq_len, [&](float val, uint32_t) {
+    for_each_input<kAlignedInput>(problem.in, problem.seq_len, [&](float val, uint32_t) {
       const auto bin = extract_coarse_bin<kHistBits>(val);
       atomicAdd(&smem->histogram[bin], 1);
     });
@@ -783,7 +797,7 @@ struct TopKStreaming : TopKRegister<2> {
     const float v_hi = coarse_bin_lower_bound<kHistBits>(threshold_bin + 1);
     const float v_lo = coarse_bin_lower_bound<kHistBits>(threshold_bin);
     const auto topk = problem.topk;
-    for_each_input(problem.in, problem.seq_len, [&](float val, uint32_t idx) {
+    for_each_input<kAlignedInput>(problem.in, problem.seq_len, [&](float val, uint32_t idx) {
       if (val >= v_hi) {
         const auto pos = atomicAdd(&smem->count_gt, 1);
         if (pos < topk) [[likely]] {
@@ -801,14 +815,17 @@ struct TopKStreaming : TopKRegister<2> {
     // is self-consistent with the fp32 classification above (rather than the fp16
     // histogram counts), even if rounding moves a boundary element between the
     // "above" and "tie" sets. An exact negative FP16 midpoint can make
-    // above_count reach topk; exact_boundary_scan_topk handles that case as an
+    // above_count reach topk; the overflow branch treats that as an
     // already-complete output.
     __syncthreads();
     const auto above_count = smem->count_gt;
     const auto equal_count = smem->count_eq;
     if (__builtin_expect(equal_count > kMaxNumTie, 0)) {
-      return exact_boundary_scan_topk(
-          problem, &smem->tie.handle, v_lo, v_hi, above_count);
+      if (above_count < topk) {
+        exact_boundary_scan_topk(
+            problem, &smem->tie.handle, v_lo, v_hi, above_count);
+      }
+      return;
     }
     const auto remain_topk = above_count < topk ? topk - above_count : 0;
     const auto tie_count = min(equal_count, kMaxNumTie);
@@ -837,7 +854,7 @@ struct TopKCluster : TopKRadixBase<10> {
   // the persistent kernel does PDLWaitPrimary once before its item loop and a
   // cluster.sync() after each forward(). Writes raw indices to out; the kernel's
   // transform pass applies the page-table transform.
-  template <bool kUsePDL>
+  template <bool kUsePDL, bool kAlignedInput>
   SGL_DEVICE static void forward(TopKProblem problem, void* _smem) {
     const auto tx = threadIdx.x;
     const auto smem = static_cast<Smem*>(_smem);
@@ -865,7 +882,7 @@ struct TopKCluster : TopKRadixBase<10> {
     PDLWaitPrimary<kUsePDL>();
 
     // Phase 1: Load and build histogram over this rank's contiguous chunk.
-    for_each_input(problem.in, local_seq_len, [&](float val, uint32_t) {
+    for_each_input<kAlignedInput>(problem.in, local_seq_len, [&](float val, uint32_t) {
       const auto bin = extract_coarse_bin<kHistBits>(val);
       atomicAdd(&smem->histogram[bin], 1);
     });
@@ -901,7 +918,7 @@ struct TopKCluster : TopKRadixBase<10> {
     const float v_hi = coarse_bin_lower_bound<kHistBits>(threshold_bin + 1);
     const float v_lo = coarse_bin_lower_bound<kHistBits>(threshold_bin);
     const auto cur_out = is_primary ? problem.out : smem->tmp_out;
-    for_each_input(problem.in, local_seq_len, [&](float val, uint32_t local_idx) {
+    for_each_input<kAlignedInput>(problem.in, local_seq_len, [&](float val, uint32_t local_idx) {
       const auto idx = chunk_start + local_idx;
       if (val >= v_hi) {
         const auto pos = atomicAdd(&smem->count_gt, 1);
@@ -924,7 +941,11 @@ struct TopKCluster : TopKRadixBase<10> {
     if (!is_primary) {
       __syncthreads();
       const auto local_above_count = smem->count_gt;
-      const auto local_equal_count = min(smem->count_eq, kMaxNumTie);
+      const auto local_equal_count = smem->count_eq;
+      // Report the exact count while keeping the fixed-size DSMEM copy. The
+      // previous min(count_eq, kMaxNumTie) hid a local overflow when all
+      // candidates lived in one non-primary rank, so rank 0 selected from the
+      // truncated buffer instead of rescanning the full row exactly.
       const auto smem_0 = cluster.map_shared_rank(smem, 0);
       if (tx == 0) {
         const auto gt = atomicAdd(&smem_0->count_gt, local_above_count);
@@ -959,8 +980,10 @@ struct TopKCluster : TopKRadixBase<10> {
       const auto above_count = smem->count_gt;
       const auto equal_count = smem->count_eq;
       if (__builtin_expect(equal_count > kMaxNumTie, 0)) {
-        exact_boundary_scan_topk(
-            problem, &smem->tie.handle, v_lo, v_hi, above_count);
+        if (above_count < topk) {
+          exact_boundary_scan_topk(
+              problem, &smem->tie.handle, v_lo, v_hi, above_count);
+        }
       } else {
         const auto remain_topk = above_count < topk ? topk - above_count : 0;
         handle_tie(
