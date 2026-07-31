@@ -354,6 +354,17 @@ py_test(
 )
 
 py_test(
+    name="model_config_missing_test",
+    srcs=[
+        "model_config_missing_test.py",
+    ],
+    data=[],
+    deps=["//rtp_llm:testlib"],
+    imports=[],
+    exec_properties={"gpu": "H20"},
+)
+
+py_test(
     name="test_transformers_imports",
     srcs=[
         "test_transformers_imports.py",
