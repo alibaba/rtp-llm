@@ -68,6 +68,17 @@ def _fp8_prefill_topk_canonicalize() -> bool:
     )
 
 
+def _use_paged_mqa_topk_histogram(num_rows: int, max_seq_len: int) -> bool:
+    """Route only shapes where fused histogram construction beats baseline."""
+    if os.environ.get("RTP_LLM_GLM5_MQA_TOPK_FUSION", "1") == "0":
+        return False
+    return (
+        max_seq_len >= 1024 * 1024
+        or (max_seq_len >= 512 * 1024 and num_rows >= 2)
+        or (max_seq_len >= 256 * 1024 and num_rows >= 64)
+    )
+
+
 def _canonicalize_topk_indices(indices: torch.Tensor) -> torch.Tensor:
     """Sort valid token indices while preserving trailing ``-1`` padding."""
     sentinel = torch.iinfo(indices.dtype).max
@@ -304,6 +315,11 @@ class IndexerOp(nn.Module):
             rtp_llm_ops.topk_glm5_indexer
             if use_glm5_indexer_topk
             else rtp_llm_ops.dsv4_persistent_topk
+        )
+        self._paged_hist_topk_op = (
+            getattr(rtp_llm_ops, "topk_glm5_indexer_from_histogram", None)
+            if use_glm5_indexer_topk
+            else None
         )
 
     def _head_dim_with_sf(self) -> int:
@@ -776,16 +792,33 @@ class IndexerOp(nn.Module):
                 deep_gemm.get_num_sms(),
             )
 
-        logits = deep_gemm.fp8_paged_mqa_logits(
-            q_fp8.unsqueeze(1),
-            kv_cache_fp8.view(dtype=torch.uint8),
-            weights,
-            kvlen_2d,
-            block_table,
-            schedule_metadata,
-            max_seq_len,
-            clean_logits=False,
+        use_histogram_fusion = (
+            self._paged_hist_topk_op is not None
+            and hasattr(deep_gemm, "fp8_paged_mqa_logits_with_histogram")
+            and _use_paged_mqa_topk_histogram(q_fp8.shape[0], max_seq_len)
         )
+        histograms = None
+        if use_histogram_fusion:
+            logits, histograms = deep_gemm.fp8_paged_mqa_logits_with_histogram(
+                q_fp8.unsqueeze(1),
+                kv_cache_fp8.view(dtype=torch.uint8),
+                weights,
+                kvlen_2d,
+                block_table,
+                schedule_metadata,
+                max_seq_len,
+            )
+        else:
+            logits = deep_gemm.fp8_paged_mqa_logits(
+                q_fp8.unsqueeze(1),
+                kv_cache_fp8.view(dtype=torch.uint8),
+                weights,
+                kvlen_2d,
+                block_table,
+                schedule_metadata,
+                max_seq_len,
+                clean_logits=False,
+            )
 
         assert (
             fmha_params.expanded_seq_lens.device == logits.device
@@ -794,14 +827,25 @@ class IndexerOp(nn.Module):
         topk_result = logits.new_empty(
             (logits.shape[0], self.index_topk), dtype=torch.int32
         )
-        self._paged_topk_op(
-            logits,
-            lengths,
-            topk_result,
-            _get_topk_workspace(logits.device),
-            self.index_topk,
-            max_seq_len,
-        )
+        if use_histogram_fusion:
+            self._paged_hist_topk_op(
+                logits,
+                lengths,
+                histograms,
+                topk_result,
+                _get_topk_workspace(logits.device),
+                self.index_topk,
+                max_seq_len,
+            )
+        else:
+            self._paged_topk_op(
+                logits,
+                lengths,
+                topk_result,
+                _get_topk_workspace(logits.device),
+                self.index_topk,
+                max_seq_len,
+            )
 
         if _pd_debug_enabled():
             if _pd_debug_take(f"paged:{self.index_topk}", 32):

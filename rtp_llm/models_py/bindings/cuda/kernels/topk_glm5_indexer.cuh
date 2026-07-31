@@ -834,6 +834,75 @@ struct TopKStreaming : TopKRegister<2> {
 };
 
 // ---------------------------------------------------------------------------
+// Precomputed-histogram path: paged MQA builds the 10-bit coarse histogram
+// while producing logits. TopK skips its first full logits read and performs
+// only threshold search, one collection scan, and exact tie handling.
+// ---------------------------------------------------------------------------
+
+struct TopKPrecomputedHistogram : TopKRadixBase<10> {
+ public:
+  using Base = TopKRadixBase<10>;
+  using Smem = typename Base::Smem;
+
+  template <bool kUsePDL, bool kAlignedInput>
+  SGL_DEVICE static void forward(
+      const TopKProblem problem,
+      const uint32_t* __restrict__ precomputed_histogram,
+      void* _smem) {
+    const auto tx = threadIdx.x;
+    const auto smem = static_cast<Smem*>(_smem);
+
+    // With programmatic dependent launch the consumer can be scheduled before
+    // the paged-MQA producer has finished.  The dependency wait must therefore
+    // precede the first read of both producer outputs (histogram and logits).
+    PDLWaitPrimary<kUsePDL>();
+    static_assert(kHistSize == kBlockSize);
+    smem->histogram[tx] = precomputed_histogram[tx];
+    if (tx == 0) {
+      smem->count_eq = 0;
+      smem->count_gt = 0;
+    }
+    __syncthreads();
+    find_threshold(problem.topk, problem.seq_len, smem);
+
+    const auto threshold_bin = smem->threshold_bin;
+    const float v_hi = coarse_bin_lower_bound<kHistBits>(threshold_bin + 1);
+    const float v_lo = coarse_bin_lower_bound<kHistBits>(threshold_bin);
+    const auto topk = problem.topk;
+    for_each_input<kAlignedInput>(problem.in, problem.seq_len, [&](float val, uint32_t idx) {
+      if (val >= v_hi) {
+        const auto pos = atomicAdd(&smem->count_gt, 1);
+        if (pos < topk) [[likely]] problem.emit(pos, idx);
+      } else if (val >= v_lo) {
+        const auto count_eq = atomicAdd(&smem->count_eq, 1);
+        if (count_eq < kMaxNumTie) [[likely]]
+          smem->tie.values[count_eq] = {val, idx};
+      }
+    });
+
+    __syncthreads();
+    const auto above_count = smem->count_gt;
+    const auto equal_count = smem->count_eq;
+    if (__builtin_expect(equal_count > kMaxNumTie, 0)) {
+      if (above_count < topk) {
+        exact_boundary_scan_topk(
+            problem, &smem->tie.handle, v_lo, v_hi, above_count);
+      }
+      return;
+    }
+    const auto remain_topk = above_count < topk ? topk - above_count : 0;
+    const auto tie_count = min(equal_count, kMaxNumTie);
+    handle_tie(
+        smem->tie.values,
+        problem,
+        above_count,
+        tie_count,
+        remain_topk,
+        &smem->tie.handle);
+  }
+};
+
+// ---------------------------------------------------------------------------
 // Cluster path: very long seq_len, small batch. `kClusterSize` blocks cooperate
 // on one batch element via distributed shared memory (one cluster per element).
 // ---------------------------------------------------------------------------
@@ -850,12 +919,31 @@ struct TopKCluster : TopKRadixBase<10> {
     int32_t tmp_out[kMaxTopK];
   };
 
-  // Process ONE batch element (one cluster). NO PDL and NO trailing barrier --
-  // the persistent kernel does PDLWaitPrimary once before its item loop and a
-  // cluster.sync() after each forward(). Writes raw indices to out; the kernel's
-  // transform pass applies the page-table transform.
+  // Process ONE batch element (one cluster). The precomputed-histogram caller
+  // enables PDL; the ordinary and persistent callers compile the wait away.
+  // There is no trailing barrier, so the kernel performs cluster.sync() after
+  // each forward(). Writes raw indices to out; the kernel's transform pass
+  // applies the page-table transform.
   template <bool kUsePDL, bool kAlignedInput>
   SGL_DEVICE static void forward(TopKProblem problem, void* _smem) {
+    forward_impl<kUsePDL, kAlignedInput, false>(problem, nullptr, _smem);
+  }
+
+  template <bool kUsePDL, bool kAlignedInput>
+  SGL_DEVICE static void forward_from_histogram(
+      TopKProblem problem,
+      const uint32_t* __restrict__ precomputed_histogram,
+      void* _smem) {
+    forward_impl<kUsePDL, kAlignedInput, true>(
+        problem, precomputed_histogram, _smem);
+  }
+
+ private:
+  template <bool kUsePDL, bool kAlignedInput, bool kPrecomputedHistogram>
+  SGL_DEVICE static void forward_impl(
+      TopKProblem problem,
+      const uint32_t* __restrict__ precomputed_histogram,
+      void* _smem) {
     const auto tx = threadIdx.x;
     const auto smem = static_cast<Smem*>(_smem);
     const auto cluster = cg::this_cluster();
@@ -869,7 +957,13 @@ struct TopKCluster : TopKRadixBase<10> {
     const uint32_t local_seq_len = chunk_finish - chunk_start;
     problem.in += chunk_start;
 
-    {
+    // This must be before any precomputed histogram/logits read.  For the
+    // ordinary path kUsePDL is false, so it compiles away.
+    PDLWaitPrimary<kUsePDL>();
+    if constexpr (kPrecomputedHistogram) {
+      static_assert(kHistSize == kBlockSize);
+      smem->histogram[tx] = precomputed_histogram[tx];
+    } else {
       typename Smem::kHistVec hist_vec;
       hist_vec.fill(0);
       smem->hist_vecs[tx] = hist_vec;
@@ -879,30 +973,31 @@ struct TopKCluster : TopKRadixBase<10> {
       smem->count_gt = 0;
     }
     __syncthreads();
-    PDLWaitPrimary<kUsePDL>();
 
-    // Phase 1: Load and build histogram over this rank's contiguous chunk.
-    for_each_input<kAlignedInput>(problem.in, local_seq_len, [&](float val, uint32_t) {
-      const auto bin = extract_coarse_bin<kHistBits>(val);
-      atomicAdd(&smem->histogram[bin], 1);
-    });
-    __syncthreads();
+    if constexpr (not kPrecomputedHistogram) {
+      // Phase 1: Load and build histogram over this rank's contiguous chunk.
+      for_each_input<kAlignedInput>(problem.in, local_seq_len, [&](float val, uint32_t) {
+        const auto bin = extract_coarse_bin<kHistBits>(val);
+        atomicAdd(&smem->histogram[bin], 1);
+      });
+      __syncthreads();
 
-    // Phase 1.5: reduce the histogram across the cluster
-    {
-      // 1-shot all-reduce: each rank owns kPartition consecutive bins;
-      // for each owned bin, gather the kClusterSize peer values (one per
-      // consecutive lane) via DSMEM, sum across the lanes, then scatter back.
-      cluster.sync();
-      static_assert(kHistSize == kBlockSize);  // we optimize on top of this
-      constexpr uint32_t kPartition = kHistSize / kClusterSize;
-      const auto start = this_rank * kPartition;
-      const auto which = start + tx / kClusterSize;
-      const auto peer_rank = tx % kClusterSize;
-      const auto addr = cluster.map_shared_rank(&smem->histogram[which], peer_rank);
-      const auto value = *addr;
-      *addr = warp::reduce_sum<kClusterSize>(value);
-      cluster.sync();
+      // Phase 1.5: reduce the histogram across the cluster.
+      {
+        // Each rank owns kPartition bins, gathers one value from every peer,
+        // then scatters the sum back through distributed shared memory.
+        cluster.sync();
+        static_assert(kHistSize == kBlockSize);
+        constexpr uint32_t kPartition = kHistSize / kClusterSize;
+        const auto start = this_rank * kPartition;
+        const auto which = start + tx / kClusterSize;
+        const auto peer_rank = tx % kClusterSize;
+        const auto addr =
+            cluster.map_shared_rank(&smem->histogram[which], peer_rank);
+        const auto value = *addr;
+        *addr = warp::reduce_sum<kClusterSize>(value);
+        cluster.sync();
+      }
     }
 
     // Phase 2: Find the threshold bin (uses global seq_len)

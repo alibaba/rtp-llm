@@ -276,6 +276,17 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
                   py::arg("k"),
                   py::arg("max_seq_len"));
 
+    rtp_ops_m.def("topk_glm5_indexer_from_histogram",
+                  &topk_glm5_indexer_from_histogram,
+                  "GLM5 exact SGLang TopK using a paged-MQA histogram",
+                  py::arg("logits"),
+                  py::arg("lengths"),
+                  py::arg("histograms"),
+                  py::arg("output"),
+                  py::arg("workspace"),
+                  py::arg("k"),
+                  py::arg("max_seq_len"));
+
     // Vendored from vLLM (csrc/sampler.cu::top_k_per_row_prefill).
     // Per-row TopK over [row_starts[r], row_ends[r]); returned indices
     // are relative to row_starts[r], padded with -1 past the per-row

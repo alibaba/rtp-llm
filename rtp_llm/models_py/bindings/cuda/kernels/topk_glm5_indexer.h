@@ -33,4 +33,17 @@ void topk_glm5_indexer(const torch::Tensor& logits,
                        int64_t k,
                        int64_t max_seq_len);
 
+// Exact SGLang TopK continuation for paged MQA that already produced one
+// 1024-bin ordered-FP16 histogram per row. It skips SGLang's histogram-building
+// logits pass, but retains the original 1024-thread collection and exact FP32
+// tie fallback.
+void topk_glm5_indexer_from_histogram(
+    const torch::Tensor& logits,
+    const torch::Tensor& lengths,
+    const torch::Tensor& histograms,
+    torch::Tensor& output,
+    torch::Tensor& workspace,
+    int64_t k,
+    int64_t max_seq_len);
+
 }  // namespace torch_ext

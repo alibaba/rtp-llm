@@ -35,6 +35,9 @@ from rtp_llm.ops.compute_ops import rtp_llm_ops
 # When the .so doesn't have the binding yet (pre-rebuild), exit cleanly so
 # CI / local runs report SKIP rather than ImportError.
 _HAS_OP = hasattr(rtp_llm_ops, "topk_glm5_indexer")
+_HAS_HISTOGRAM_OP = hasattr(
+    rtp_llm_ops, "topk_glm5_indexer_from_histogram"
+)
 
 WORKSPACE_BYTES = 1024 * 1024  # matches RADIX_TOPK_WORKSPACE_SIZE
 
@@ -62,6 +65,55 @@ def _run(logits, lengths, k, max_seq_len) -> torch.Tensor:
     out = torch.full((N, k), -1, dtype=torch.int32, device=logits.device)
     ws = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device=logits.device)
     rtp_llm_ops.topk_glm5_indexer(logits, lengths, out, ws, k, max_seq_len)
+    return out
+
+
+def _ordered_fp16_histogram(
+    logits: torch.Tensor, lengths: torch.Tensor
+) -> torch.Tensor:
+    """Build the exact 10-bit ordered-FP16 histogram produced by paged MQA."""
+    rows = []
+    for row, length in enumerate(lengths.view(-1).cpu().tolist()):
+        bits = (
+            logits[row, : int(length)]
+            .to(torch.float16)
+            .view(torch.int16)
+            .to(torch.int32)
+            & 0xFFFF
+        )
+        keys = torch.where(
+            (bits & 0x8000) != 0,
+            (~bits) & 0xFFFF,
+            bits | 0x8000,
+        )
+        rows.append(torch.bincount(keys >> 6, minlength=1024))
+    return torch.stack(rows).to(torch.int32)
+
+
+def _run_from_histogram(
+    logits: torch.Tensor,
+    lengths: torch.Tensor,
+    k: int,
+    max_seq_len: int,
+) -> torch.Tensor:
+    assert _HAS_HISTOGRAM_OP
+    histograms = _ordered_fp16_histogram(logits, lengths)
+    out = torch.full(
+        (logits.shape[0], k),
+        -1,
+        dtype=torch.int32,
+        device=logits.device,
+    )
+    ws = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device=logits.device)
+    rtp_llm_ops.topk_glm5_indexer_from_histogram(
+        logits,
+        lengths,
+        histograms,
+        out,
+        ws,
+        k,
+        max_seq_len,
+    )
     return out
 
 
@@ -369,6 +421,154 @@ def test_fp32_subnormal_ordering_exact():
                 k=k,
                 tag=f"{path} {sign} FP32 subnormal ordering",
             )
+
+
+def test_precomputed_histogram_dispatch_paths_exact():
+    """Precomputed finalize stays exact across 1/2/4/8-CTA routes."""
+    assert _HAS_HISTOGRAM_OP
+    for rows, seq_len, k, path in (
+        (1, 4095, 512, "single CTA"),
+        (9, 32768, 2048, "Cluster4 short"),
+        (37, 65536, 2048, "Cluster2 medium"),
+        (73, 65536, 2048, "single CTA batched"),
+        (1, 262144, 2048, "Cluster8 long"),
+        (33, 262144, 2048, "Cluster4 long"),
+        (65, 262144, 2048, "Cluster2 long"),
+    ):
+        logits, lengths = _make(
+            rows,
+            seq_len,
+            seed=20260802 + rows + seq_len,
+            lengths_mode="varied",
+        )
+        lengths.clamp_(min=k)
+        out = _run_from_histogram(logits, lengths, k, seq_len)
+        _assert_equiv(
+            out,
+            logits,
+            lengths,
+            k=k,
+            tag=f"precomputed histogram {path}",
+        )
+
+
+def test_precomputed_histogram_unaligned_input_exact():
+    """Histogram finalize must not issue a 16-byte load from an offset view."""
+    assert _HAS_HISTOGRAM_OP
+    for rows, seq_len, k, path in (
+        (3, 4096, 512, "single CTA"),
+        (1, 262144, 2048, "Cluster8"),
+    ):
+        generator = torch.Generator(device="cuda").manual_seed(
+            20260803 + rows + seq_len
+        )
+        storage = torch.randn(
+            rows,
+            seq_len + 4,
+            dtype=torch.float32,
+            device="cuda",
+            generator=generator,
+        )
+        logits = storage[:, 1 : seq_len + 1]
+        assert logits.stride(1) == 1 and logits.data_ptr() % 16 != 0
+        lengths = torch.full(
+            (rows,), seq_len, dtype=torch.int32, device="cuda"
+        )
+        out = _run_from_histogram(logits, lengths, k, seq_len)
+        _assert_equiv(
+            out,
+            logits,
+            lengths,
+            k=k,
+            tag=f"precomputed unaligned {path}",
+        )
+
+
+def test_precomputed_histogram_subnormal_ordering_exact():
+    """The skipped histogram pass must not change exact FP32 tie refinement."""
+    assert _HAS_HISTOGRAM_OP
+    seq_len, k = 4095, 512
+    magnitude = torch.arange(
+        1, seq_len + 1, dtype=torch.int64, device="cuda"
+    )
+    for sign, sign_bits in (("positive", 0), ("negative", 0x80000000)):
+        logits = (magnitude | sign_bits).to(torch.int32).view(torch.float32)
+        logits = logits.unsqueeze(0).contiguous()
+        lengths = torch.tensor([seq_len], dtype=torch.int32, device="cuda")
+        out = _run_from_histogram(logits, lengths, k, seq_len)
+        _assert_equiv(
+            out,
+            logits,
+            lengths,
+            k=k,
+            tag=f"precomputed {sign} FP32 subnormal ordering",
+        )
+
+
+def test_precomputed_histogram_cluster_overflow_exact():
+    """A non-primary local overflow must trigger the full-row exact rescan."""
+    assert _HAS_HISTOGRAM_OP
+    valid = 262144
+    candidate_count = 4096
+    offsets = torch.arange(candidate_count, dtype=torch.int64, device="cuda")
+    candidate_bits = (0xBFD00000 - offsets).to(torch.int32)
+    candidates = candidate_bits.view(torch.float32)
+    assert torch.unique(candidates.to(torch.float16)).numel() == 1
+
+    for rows, cluster_size in ((1, 8), (33, 4), (65, 2)):
+        logits = torch.full(
+            (rows, valid), -2.0, dtype=torch.float32, device="cuda"
+        )
+        chunk_size = valid // cluster_size
+        logits[0, chunk_size : chunk_size + candidate_count] = candidates
+        lengths = torch.ones(rows, dtype=torch.int32, device="cuda")
+        lengths[0] = valid
+        histograms = _ordered_fp16_histogram(logits, lengths)
+
+        for k in (512, 1024, 2048):
+            out = torch.full(
+                (rows, k), -1, dtype=torch.int32, device="cuda"
+            )
+            ws = torch.empty(
+                WORKSPACE_BYTES, dtype=torch.uint8, device="cuda"
+            )
+            rtp_llm_ops.topk_glm5_indexer_from_histogram(
+                logits, lengths, histograms, out, ws, k, valid
+            )
+            _assert_value_equiv(
+                out,
+                logits,
+                lengths,
+                k=k,
+                tag=f"precomputed Cluster{cluster_size} overflow",
+            )
+
+
+def test_precomputed_histogram_negative_midpoint_output_bounds():
+    """Precomputed exact fallback must not underflow K - count_gt."""
+    assert _HAS_HISTOGRAM_OP
+    seq_len, k = 8193, 2048
+    sentinel = -123456789
+    logits, lengths = _make_negative_midpoint_overflow(seq_len)
+    histograms = _ordered_fp16_histogram(logits, lengths)
+    storage = torch.full(
+        (3, k), sentinel, dtype=torch.int32, device="cuda"
+    )
+    out = storage[:1]
+    ws = torch.empty(WORKSPACE_BYTES, dtype=torch.uint8, device="cuda")
+    rtp_llm_ops.topk_glm5_indexer_from_histogram(
+        logits, lengths, histograms, out, ws, k, seq_len
+    )
+    torch.cuda.synchronize()
+
+    indices = out[0].long()
+    assert ((indices >= 0) & (indices < seq_len)).all()
+    assert torch.unique(indices).numel() == k
+    actual = logits[0, indices].sort().values
+    expected = logits[0].topk(k, sorted=False).values.sort().values
+    assert torch.equal(actual, expected)
+    assert (storage[1:] == sentinel).all()
+    print("  [precomputed negative midpoint output bounds] OK")
 
 
 def test_mtp_batched_decode_flattened_bs_rows():
@@ -728,6 +928,14 @@ if __name__ == "__main__":
     test_padded_row_stride()
     test_unaligned_score_view_paths()
     test_fp32_subnormal_ordering_exact()
+    if _HAS_HISTOGRAM_OP:
+        test_precomputed_histogram_dispatch_paths_exact()
+        test_precomputed_histogram_unaligned_input_exact()
+        test_precomputed_histogram_subnormal_ordering_exact()
+        test_precomputed_histogram_cluster_overflow_exact()
+        test_precomputed_histogram_negative_midpoint_output_bounds()
+    else:
+        print("  [precomputed histogram tests] SKIP: op not built")
     test_mtp_batched_decode_flattened_bs_rows()
     test_batched_streaming_path_b64()
     test_long_seq_radix_path()
