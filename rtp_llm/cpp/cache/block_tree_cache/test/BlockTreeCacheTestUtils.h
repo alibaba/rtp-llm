@@ -53,9 +53,11 @@ DeviceBlockPoolPtr
 makeDevicePool(const std::vector<DeviceLayerBufferSpec>& specs, size_t usable_count, const std::string& pool_name);
 
 BlockIdxType poolMalloc(IBlockPool& pool);
+MultiNodeResource allocateDeviceBlocksForTest(GroupSet& group_set, size_t count, BlockRefType ref_type);
 
 size_t unreferencedBlocksNum(const IBlockPool& pool);
 size_t treeCachedBlocksNum(const IBlockPool& pool);
+DeviceBlockPoolPtr makeStructuralDevicePool(size_t group_set_id);
 
 void prepareGroupSetsForTest(std::vector<GroupSetPtr>& group_sets);
 

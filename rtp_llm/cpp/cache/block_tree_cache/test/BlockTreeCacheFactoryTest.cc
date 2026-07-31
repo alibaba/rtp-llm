@@ -1047,10 +1047,6 @@ TEST_F(BlockTreeCacheFactoryTest, InsertRejectsWrongShapeAndFailsFastOnInvalidGr
         EXPECT_EQ(groups[1]->blockPool()->refCount(second->front()), second_refcount);
     };
 
-    GroupSetResource wrong_cardinality;
-    wrong_cardinality.device_blocks = {first->front()};
-    expect_failfast_without_cache_hold(/*key=*/712, {{wrong_cardinality}});
-
     GroupSetResource partially_null;
     partially_null.device_blocks = {first->front(), NULL_BLOCK_IDX};
     expect_failfast_without_cache_hold(/*key=*/713, {{partially_null}});
@@ -1068,7 +1064,6 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPoolGroupSetPayloadUsesTopologyLogicalSt
     ASSERT_NE(cache, nullptr);
     ASSERT_EQ(cache->groupSets().size(), 2u);
     for (const auto& group_set : cache->groupSets()) {
-        ASSERT_EQ(group_set->topology(), config.topologyPtr());
         size_t expected_payload = 0;
         for (const size_t group_id : group_set->groupIds()) {
             const auto& group = config.topology().groupById(group_id);
@@ -1112,7 +1107,6 @@ TEST_F(BlockTreeCacheFactoryTest, LegacySingleGroupAllowsMissingPhysicalStrideTa
 
     ASSERT_NE(cache, nullptr);
     ASSERT_EQ(cache->groupSets().size(), 1u);
-    ASSERT_EQ(cache->groupSets()[0]->topology(), config.topologyPtr());
     EXPECT_EQ(cache->groupSets()[0]->groupIds(), (std::vector<size_t>{0}));
     const size_t fallback_stride =
         config.topology().groupById(0).kv_block_stride_bytes + config.topology().groupById(0).kv_scale_stride_bytes;
@@ -1312,12 +1306,11 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
         ASSERT_NE(group->hostPool(), nullptr);
         ASSERT_NE(group->diskPool(), nullptr);
         ASSERT_EQ(group->groupIds().size(), group->devicePools().size());
-        ASSERT_EQ(group->topology(), cache_config.topologyPtr());
         EXPECT_EQ(group->groupIds().size(), group->devicePools().size());
         EXPECT_EQ(group->hostPool()->payloadBytes(), group->payloadBytes());
         EXPECT_EQ(group->diskPool()->payloadBytes(), group->payloadBytes());
 
-        MultiNodeResource device_blocks = group->allocateBlocks(Tier::DEVICE, 1, BlockRefType::REQUEST);
+        MultiNodeResource device_blocks = block_tree_cache_test::allocateDeviceBlocksForTest(*group, 1, BlockRefType::REQUEST);
         ASSERT_EQ(device_blocks.per_node.size(), 1u);
         ASSERT_EQ(device_blocks.per_node[0].size(), group->devicePools().size());
         const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::REQUEST);

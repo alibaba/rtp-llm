@@ -112,8 +112,7 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
                 device_blocks.resize(group_set->devicePools().size(), NULL_BLOCK_IDX);
                 device_blocks[pool_index] = blocks[path_index];
             }
-            const size_t group_id = group_set->groupIds()[pool_index];
-            result.blocks_by_tag.emplace(group_set->topology()->groupById(group_id).tag, blocks);
+            result.blocks_by_tag.emplace(group_set->groupAt(pool_index).tag, blocks);
             request_holds.emplace_back(device_pool, std::move(blocks));
         }
     }

@@ -9,7 +9,7 @@ namespace rtp_llm {
 // Uses Any-node heaps like SWA.
 class LinearGroupSet: public GroupSet {
 public:
-    LinearGroupSet();
+    using GroupSet::GroupSet;
 
     std::unique_ptr<MatchValidator> createMatchValidator() override;
     size_t computeReuseBlockCount(size_t matched_block_count) const override;

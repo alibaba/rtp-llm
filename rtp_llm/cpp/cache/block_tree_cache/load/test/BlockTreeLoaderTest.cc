@@ -87,10 +87,9 @@ TEST(BlockTreeLoaderTest, LoadStateMachineRejectsDuplicateBeginAndRestoresSource
     auto find_result = environment->cache->tree()->findNode(environment->keys);
     ASSERT_FALSE(find_result.empty());
 
-    constexpr size_t                group_set_id  = 0;
-    const GroupSetPtr&              group         = environment->groups.at(group_set_id);
-    GroupSetResource&               resource      = find_result.back()->group_set_resources[group_set_id];
-    const std::vector<BlockIdxType> source_blocks = group->getBlocks(resource, Tier::HOST);
+    constexpr size_t  group_set_id = 0;
+    GroupSetResource& resource      = find_result.back()->group_set_resources[group_set_id];
+    const std::vector<BlockIdxType> source_blocks = resource.getBlocks(Tier::HOST);
 
     ASSERT_TRUE(
         environment->cache->loader_.reserveLoad(find_result.back(), group_set_id, Tier::HOST, source_blocks));

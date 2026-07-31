@@ -11,7 +11,7 @@ std::vector<GroupSetPtr> makeGroupSets(size_t count) {
     std::vector<GroupSetPtr> group_sets;
     group_sets.reserve(count);
     for (size_t i = 0; i < count; ++i) {
-        group_sets.push_back(std::make_shared<FullGroupSet>());
+        group_sets.push_back(std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr));
     }
     block_tree_cache_test::prepareGroupSetsForTest(group_sets);
     return group_sets;
@@ -150,74 +150,69 @@ TEST(BlockTreeTest, FindEmptyKeys) {
 
 TEST(BlockTreeTest, RemoveLeafNode) {
     BlockTree tree(makeGroupSets(1));
-    tree.insertNode({100, 200, 300}, make2DResources(1, 3, 42));
+    auto resources = make2DResources(1, 3, 42);
+    resources.back()[0].device_blocks.clear();
+    tree.insertNode({100, 200, 300}, resources);
     EXPECT_EQ(tree.nodes().size(), 3u);
 
-    // Find and remove leaf node (300)
     auto result = tree.findNode({100, 200, 300});
     ASSERT_FALSE(result.empty());
-    tree.removeNode(result.back());
+    TreeNode* surviving_ancestor = tree.removeNodeAndEmptyAncestors(result.back());
+    EXPECT_EQ(surviving_ancestor->cache_key, 200);
     EXPECT_EQ(tree.nodes().size(), 2u);
 
-    // Node 300 should no longer be findable
     auto result2 = tree.findNode({100, 200, 300});
     EXPECT_EQ(result2.size(), 2u);
     EXPECT_EQ(result2.back()->cache_key, 200);
 }
 
-TEST(BlockTreeTest, RemoveEmptyAncestors) {
+TEST(BlockTreeTest, IsRemovableRequiresLeafWithRemovableGroupResources) {
+    BlockTree tree(makeGroupSets(2));
+    std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(2));
+    TreeNode* leaf = insertAndGetNode(tree, {100, 200}, resources);
+    ASSERT_NE(leaf, nullptr);
+
+    EXPECT_FALSE(tree.isRemovable(leaf->parent));
+    EXPECT_TRUE(tree.isRemovable(leaf));
+
+    leaf->group_set_resources[1].transfer_state = GroupSetTransferState::LOAD_PENDING;
+    EXPECT_FALSE(tree.isRemovable(leaf));
+}
+
+TEST(BlockTreeTest, RemoveNodeAndEmptyAncestors) {
     BlockTree tree(makeGroupSets(1));
-    // Insert root → 100 → 200 with empty group_set_resources (no data)
-    tree.insertNode({100, 200}, makeEmpty2DResources(2));
-    // Insert root → 100 → 200 → 300 with data only on the new leaf.
-    auto leaf_resources = makeEmpty2DResources(3);
-    leaf_resources[2][0].device_blocks = {42};
-    TreeNode* leaf                     = insertAndGetNode(tree, {100, 200, 300}, leaf_resources);
+    TreeNode* leaf = insertAndGetNode(tree, {100, 200, 300}, makeEmpty2DResources(3));
     EXPECT_EQ(tree.nodes().size(), 3u);
 
-    TreeNode* first_empty_ancestor = leaf->parent;
-
-    // Remove the leaf, then let removeEmptyAncestors prune 200 and 100.
-    tree.removeNode(leaf);
-    EXPECT_EQ(tree.nodes().size(), 2u);
-
-    TreeNode* surviving_ancestor = tree.removeEmptyAncestors(first_empty_ancestor, {0});
+    TreeNode* surviving_ancestor = tree.removeNodeAndEmptyAncestors(leaf);
     EXPECT_EQ(surviving_ancestor, tree.root());
     EXPECT_EQ(tree.nodes().size(), 0u);
 }
 
-TEST(BlockTreeTest, RemoveEmptyAncestorsStopsAtData) {
+TEST(BlockTreeTest, RemoveNodeAndEmptyAncestorsStopsAtData) {
     BlockTree tree(makeGroupSets(1));
-    // Insert 100 with data
     tree.insertNode({100}, make2DResources(1, 1, 10));
-    // Insert 100 → 200 with data (100 already exists, only 200 is new)
-    TreeNode* leaf = insertAndGetNode(tree, {100, 200}, make2DResources(1, 2, 20));
+    auto resources = make2DResources(1, 2, 20);
+    resources[1][0].device_blocks.clear();
+    TreeNode* leaf = insertAndGetNode(tree, {100, 200}, resources);
 
-    // Remove leaf 200
-    tree.removeNode(leaf);
+    TreeNode* surviving_ancestor = tree.removeNodeAndEmptyAncestors(leaf);
 
-    // removeEmptyAncestors from 100's position: 100 has data → stops
-    auto                result             = tree.findNode({100});
+    auto result = tree.findNode({100});
     ASSERT_FALSE(result.empty());
-    std::vector<size_t> reusable_groups    = {0};
-    TreeNode*           surviving_ancestor = tree.removeEmptyAncestors(result.back(), reusable_groups);
-
-    // 100 should still be in the tree (it has data in group 0)
     EXPECT_EQ(surviving_ancestor, result.back());
     EXPECT_EQ(tree.nodes().size(), 1u);
     auto check = tree.findNode({100});
     EXPECT_EQ(check.size(), 1u);
 }
 
-TEST(BlockTreeTest, RemoveEmptyAncestorsReturnsFirstSurvivorAfterPruning) {
+TEST(BlockTreeTest, RemoveNodeAndEmptyAncestorsReturnsFirstSurvivorAfterPruning) {
     BlockTree tree(makeGroupSets(1));
     tree.insertNode({100}, make2DResources(1, 1, 10));
     TreeNode* leaf = insertAndGetNode(tree, {100, 200, 300}, makeEmpty2DResources(3));
     ASSERT_NE(leaf, nullptr);
-    TreeNode* first_empty_ancestor = leaf->parent;
 
-    tree.removeNode(leaf);
-    TreeNode* surviving_ancestor = tree.removeEmptyAncestors(first_empty_ancestor, {0});
+    TreeNode* surviving_ancestor = tree.removeNodeAndEmptyAncestors(leaf);
 
     auto node100 = tree.findNode({100});
     ASSERT_FALSE(node100.empty());
@@ -365,13 +360,13 @@ TEST(BlockTreeTest, InsertSkipsBusyGroupButFillsOtherIdleGroupAndAddsSuffix) {
     EXPECT_EQ(result.inserted_nodes[0]->group_set_resources[1].device_blocks, (BlockIndicesType{31}));
 }
 
-TEST(BlockTreeTest, RemoveEmptyAncestorsStopsAtBusyEmptyNode) {
+TEST(BlockTreeTest, RemoveNodeAndEmptyAncestorsStopsAtBusyEmptyNode) {
     BlockTree tree(makeGroupSets(1));
     TreeNode* node = insertAndGetNode(tree, {100}, makeEmpty2DResources(1));
     ASSERT_NE(node, nullptr);
     node->group_set_resources[0].transfer_state = GroupSetTransferState::LOAD_PENDING;
 
-    EXPECT_EQ(tree.removeEmptyAncestors(node, {0}), node);
+    EXPECT_EQ(tree.removeNodeAndEmptyAncestors(node), node);
     EXPECT_EQ(tree.nodes().size(), 1u);
     EXPECT_EQ(node->parent, tree.root());
 }

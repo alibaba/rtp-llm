@@ -26,7 +26,9 @@ std::shared_ptr<const CacheTopology> makeTestTopology(std::vector<GroupBase> gro
 GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
                              std::shared_ptr<const CacheTopology> topology,
                              std::vector<size_t>                  group_ids,
-                             std::vector<DeviceBlockPoolPtr>      device_pools);
+                             std::vector<DeviceBlockPoolPtr>      device_pools,
+                             std::shared_ptr<HostBlockPool>       host_pool = nullptr,
+                             BlockTreeDiskBlockPoolPtr            disk_pool = nullptr);
 
 DeviceBlockPoolPtr makeTestDevicePool(const std::vector<std::pair<size_t, size_t>>& layer_bytes,
                                       size_t                                        usable_count,

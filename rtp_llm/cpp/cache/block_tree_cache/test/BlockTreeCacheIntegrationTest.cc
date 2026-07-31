@@ -205,7 +205,7 @@ private:
 class BlockTreeCacheIntegrationTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        auto                     full_group = std::make_shared<FullGroupSet>();
+        auto                     full_group = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
         std::vector<GroupSetPtr> groups     = {full_group};
         cache_                              = makeBlockTreeCacheForTest(std::move(groups));
     }
@@ -363,13 +363,12 @@ TEST_F(BlockTreeCacheIntegrationTest, HostDiskOnlyLifecycle) {
 
     auto disk_pool = makeDiskPool(256, 8, std::make_unique<MemoryDiskBlockIO>());
 
-    auto full = std::make_shared<FullGroupSet>();
-    full->setHostPool(host_pool);
-    full->setDiskPool(disk_pool);
     auto device_pool = makeDevicePool({{256, 0}}, 8, "watermark_host_to_disk");
+    auto full = std::make_shared<FullGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, disk_pool);
     auto topology    = block_transfer_engine_test::makeTestTopology(
         {block_transfer_engine_test::makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 256)});
-    full->initialize(0, topology, {0}, {device_pool});
+    full->initialize(0, topology, {0});
     const BlockIdxType host_block = full->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
     ASSERT_NE(host_block, NULL_BLOCK_IDX);
     std::vector<GroupSetPtr> groups = {full};
@@ -584,12 +583,11 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettleme
         const size_t      host_free_before   = host_pool->freeBlocksNum();
         const size_t      disk_free_before   = disk_pool->freeBlocksNum();
 
-        auto full = std::make_shared<FullGroupSet>();
-        full->setHostPool(host_pool);
-        full->setDiskPool(disk_pool);
+        auto full = std::make_shared<FullGroupSet>(
+            std::vector<DeviceBlockPoolPtr>{device_pool}, host_pool, disk_pool);
         auto topology = block_transfer_engine_test::makeTestTopology({block_transfer_engine_test::makeTestGroupBase(
             defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, kBlockBytes)});
-        full->initialize(0, topology, {0}, {device_pool});
+        full->initialize(0, topology, {0});
         std::vector<GroupSetPtr> groups = {full};
         BlockTreeCacheConfig     config;
         config.enable_device_cache = true;
@@ -1153,7 +1151,7 @@ TEST_F(BlockTreeCacheIntegrationTest, EvictionExplicitNoneIsNotNormalized) {
     auto result = environment->cache->tree()->findNode(environment->keys);
     ASSERT_FALSE(result.empty());
     EXPECT_EQ(result.back()->group_set_resources[1].transfer_state, GroupSetTransferState::IDLE);
-    EXPECT_EQ(environment->groups[1]->getTopTier(result.back()->group_set_resources[1]), Tier::NONE);
+    EXPECT_EQ(result.back()->group_set_resources[1].getTopTier(), Tier::NONE);
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
 }
 
@@ -1167,8 +1165,7 @@ TEST_F(BlockTreeCacheIntegrationTest, DiskLoadRequestOnlyKeepsDiskResidency) {
     auto             disk_pool     = makeDiskPool(payload_bytes, 4, std::make_unique<MemoryDiskBlockIO>());
     auto             topology      = block_transfer_engine_test::makeTestTopology(
         {block_transfer_engine_test::makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, payload_bytes)});
-    auto group = block_transfer_engine_test::makeTestGroupSet(0, topology, {0}, {device_pool});
-    group->setDiskPool(disk_pool);
+    auto group = block_transfer_engine_test::makeTestGroupSet(0, topology, {0}, {device_pool}, nullptr, disk_pool);
 
     BlockTreeCacheConfig config;
     config.enable_device_cache      = false;
@@ -2130,15 +2127,15 @@ TEST_F(BlockTreeCacheIntegrationTest, SparseDisconnectedSWADoesNotPublishVacuous
         GroupSetResource& swa_resource = find[path_index]->group_set_resources[1];
         ASSERT_TRUE(swa_resource.hasTier(Tier::DEVICE));
         const std::vector<BlockIdxType> old_device_blocks =
-            environment->groups[1]->getBlocks(swa_resource, Tier::DEVICE);
+            swa_resource.getBlocks(Tier::DEVICE);
         environment->groups[1]->unreferenceBlocks(MultiNodeResource{1, Tier::DEVICE, {old_device_blocks}},
                                                   BlockRefType::BLOCK_CACHE);
-        environment->groups[1]->setBlocks(swa_resource, Tier::DEVICE, {});
+        swa_resource.setBlocks(Tier::DEVICE, {});
         if (path_index >= 2) {
             const BlockIdxType host_block =
                 environment->groups[1]->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
             ASSERT_NE(host_block, NULL_BLOCK_IDX);
-            environment->groups[1]->setBlocks(swa_resource, Tier::HOST, {host_block});
+            swa_resource.setBlocks(Tier::HOST, {host_block});
             swa_host_blocks.push_back(host_block);
         }
     }

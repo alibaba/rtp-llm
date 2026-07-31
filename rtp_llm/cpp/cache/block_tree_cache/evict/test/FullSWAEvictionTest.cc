@@ -14,8 +14,8 @@ using block_tree_cache_test::makeBlockTreeCacheForTest;
 class FullSWAEvictionTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        auto                       full   = std::make_shared<FullGroupSet>();
-        auto                       swa    = std::make_shared<SWAGroupSet>(128, 64);
+        auto                       full   = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+        auto                       swa    = std::make_shared<SWAGroupSet>(128, 64, std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
         std::vector<GroupSetPtr>   groups = {full, swa};
         cache_                            = makeBlockTreeCacheForTest(
             std::move(groups), BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
@@ -70,7 +70,7 @@ TEST_F(FullSWAEvictionTest, FullReclaimCascadesToSWA) {
 //   Reclaiming [300] deletes the leaf and prunes both empty ancestors.
 // ---------------------------------------------------------------------------
 TEST_F(FullSWAEvictionTest, SWAOnlySequentialDrain) {
-    auto                            swa       = std::make_shared<SWAGroupSet>(128, 64);
+    auto                            swa       = std::make_shared<SWAGroupSet>(128, 64, std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
     std::vector<GroupSetPtr>        groups    = {swa};
     std::unique_ptr<BlockTreeCache> swa_cache = makeBlockTreeCacheForTest(
         std::move(groups), BlockTreeCacheConfig{.eviction_thread_pool_size = 2});

@@ -2,8 +2,6 @@
 
 namespace rtp_llm {
 
-FullGroupSet::FullGroupSet() = default;
-
 std::unique_ptr<MatchValidator> FullGroupSet::createMatchValidator() {
     return std::make_unique<FullMatchValidator>();
 }

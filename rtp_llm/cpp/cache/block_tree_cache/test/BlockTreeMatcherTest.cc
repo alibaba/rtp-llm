@@ -18,7 +18,7 @@ using namespace block_tree_cache_test;
 class BlockTreeMatcherTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        auto                     full_group = std::make_shared<FullGroupSet>();
+        auto                     full_group = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
         std::vector<GroupSetPtr> groups     = {full_group};
         cache_                              = makeBlockTreeCacheForTest(std::move(groups));
     }
@@ -70,9 +70,9 @@ TEST_F(BlockTreeMatcherTest, MatchLifecycleBalancesRequestReferences) {
 }
 
 TEST_F(BlockTreeMatcherTest, GroupPoliciesSelectTheirReadyReuseRanges) {
-    auto                     full   = std::make_shared<FullGroupSet>();
-    auto                     linear = std::make_shared<LinearGroupSet>();
-    auto                     swa    = std::make_shared<SWAGroupSet>(128, 64);
+    auto                     full   = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+    auto                     linear = std::make_shared<LinearGroupSet>(std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+    auto                     swa    = std::make_shared<SWAGroupSet>(128, 64, std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
     std::vector<GroupSetPtr> groups = {full, linear, swa};
     auto                     cache  = makeBlockTreeCacheForTest(std::move(groups));
 
@@ -97,8 +97,8 @@ TEST_F(BlockTreeMatcherTest, GroupPoliciesSelectTheirReadyReuseRanges) {
 }
 
 TEST_F(BlockTreeMatcherTest, SwaGapRequiresACompleteWindowForLogicalMatch) {
-    auto                     full   = std::make_shared<FullGroupSet>();
-    auto                     swa    = std::make_shared<SWAGroupSet>(128, 64);
+    auto                     full   = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+    auto                     swa    = std::make_shared<SWAGroupSet>(128, 64, std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
     std::vector<GroupSetPtr> groups = {full, swa};
     auto                     cache  = makeBlockTreeCacheForTest(std::move(groups));
 
@@ -127,8 +127,8 @@ TEST_F(BlockTreeMatcherTest, SwaGapRequiresACompleteWindowForLogicalMatch) {
 
 TEST_F(BlockTreeMatcherTest, BusySwaResourceOutsideWindowDoesNotTruncateLogicalMatch) {
     for (GroupSetTransferState state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOAD_PENDING}) {
-        auto                            full   = std::make_shared<FullGroupSet>();
-        auto                            swa    = std::make_shared<SWAGroupSet>(2, 1);
+        auto                            full   = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+        auto                            swa    = std::make_shared<SWAGroupSet>(2, 1, std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
         std::vector<GroupSetPtr>        groups = {full, swa};
         std::unique_ptr<BlockTreeCache> cache =
             makeBlockTreeCacheForTest(std::move(groups));
@@ -162,7 +162,7 @@ TEST_F(BlockTreeMatcherTest, BusySwaResourceOutsideWindowDoesNotTruncateLogicalM
 }
 
 TEST_F(BlockTreeMatcherTest, ZeroWindowSwaDoesNotReuseBusyResource) {
-    auto                     swa    = std::make_shared<SWAGroupSet>(0, 1);
+    auto                     swa    = std::make_shared<SWAGroupSet>(0, 1, std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
     std::vector<GroupSetPtr> groups = {swa};
     auto                     cache  = makeBlockTreeCacheForTest(std::move(groups));
 
@@ -192,8 +192,8 @@ TEST_F(BlockTreeMatcherTest, ZeroWindowSwaDoesNotReuseBusyResource) {
 
 TEST_F(BlockTreeMatcherTest, BusyLinearResourceDoesNotTruncateLaterPointState) {
     for (GroupSetTransferState state : {GroupSetTransferState::DEMOTING, GroupSetTransferState::LOAD_PENDING}) {
-        auto                            full   = std::make_shared<FullGroupSet>();
-        auto                            linear = std::make_shared<LinearGroupSet>();
+        auto                            full   = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+        auto                            linear = std::make_shared<LinearGroupSet>(std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
         std::vector<GroupSetPtr>        groups = {full, linear};
         std::unique_ptr<BlockTreeCache> cache =
             makeBlockTreeCacheForTest(std::move(groups));

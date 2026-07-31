@@ -17,15 +17,20 @@ protected:
     void SetUp() override {
         pool_ = block_tree_cache_test::makeDevicePool({{1, 0}}, 128, "full_group_set_test");
         ASSERT_NE(pool_, nullptr);
-        group_     = std::make_shared<FullGroupSet>();
+        host_pool_ = block_tree_cache_test::makeHostPool(1, 128);
+        ASSERT_NE(host_pool_, nullptr);
+        group_     = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_}, host_pool_, nullptr);
         auto group = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 1);
-        group_->initialize(0, makeTestTopology({std::move(group)}), {0}, {pool_});
+        group_->initialize(0, makeTestTopology({std::move(group)}), {0});
         tree_ = std::make_unique<BlockTree>(std::vector<GroupSetPtr>{group_});
     }
 
     void TearDown() override {
         for (const auto block : held_blocks_) {
             pool_->decRef(block, BlockRefType::REQUEST);
+        }
+        for (const auto block : held_host_blocks_) {
+            host_pool_->decRef(block, BlockRefType::REQUEST);
         }
     }
 
@@ -52,8 +57,15 @@ protected:
         node->group_set_resources[static_cast<size_t>(group_set_id)].device_blocks = {NULL_BLOCK_IDX};
     }
 
-    void setHostBlock(TreeNode* node, int group_set_id, BlockIdxType block) {
-        node->group_set_resources[static_cast<size_t>(group_set_id)].host_block = block;
+    void setHostBlock(TreeNode* node, int group_set_id) {
+        const auto block = host_pool_->malloc();
+        EXPECT_TRUE(block.has_value());
+        if (!block.has_value()) {
+            return;
+        }
+        host_pool_->incRef(block.value(), BlockRefType::REQUEST);
+        held_host_blocks_.insert(block.value());
+        node->group_set_resources[static_cast<size_t>(group_set_id)].host_block = block.value();
     }
 
     void setDiskSlot(TreeNode* node, int group_set_id, BlockIdxType disk_block) {
@@ -61,7 +73,9 @@ protected:
     }
 
     DeviceBlockPoolPtr               pool_;
+    std::shared_ptr<HostBlockPool>   host_pool_;
     std::unordered_set<BlockIdxType> held_blocks_;
+    std::unordered_set<BlockIdxType> held_host_blocks_;
     std::shared_ptr<FullGroupSet>    group_;
     std::unique_ptr<BlockTree>       tree_;
 };
@@ -136,7 +150,7 @@ TEST_F(FullGroupSetTest, EvictFromTierDevice) {
     auto* a = makeNode(100);
     setDeviceBlock(a, 0);
 
-    group_->evictFromTier(a->group_set_resources[0], Tier::DEVICE);
+    a->group_set_resources[0].evictFromTier(Tier::DEVICE);
 
     // Device blocks should be cleared
     EXPECT_FALSE(a->group_set_resources[0].hasTier(Tier::DEVICE));
@@ -146,9 +160,9 @@ TEST_F(FullGroupSetTest, EvictFromTierDevice) {
 
 TEST_F(FullGroupSetTest, EvictFromTierHost) {
     auto* a = makeNode(100);
-    setHostBlock(a, 0, 15);
+    setHostBlock(a, 0);
 
-    group_->evictFromTier(a->group_set_resources[0], Tier::HOST);
+    a->group_set_resources[0].evictFromTier(Tier::HOST);
 
     EXPECT_FALSE(a->group_set_resources[0].hasTier(Tier::HOST));
 
@@ -159,7 +173,7 @@ TEST_F(FullGroupSetTest, EvictFromTierDisk) {
     auto* a = makeNode(100);
     setDiskSlot(a, 0, 8);
 
-    group_->evictFromTier(a->group_set_resources[0], Tier::DISK);
+    a->group_set_resources[0].evictFromTier(Tier::DISK);
 
     EXPECT_FALSE(a->group_set_resources[0].hasTier(Tier::DISK));
 
@@ -181,7 +195,7 @@ TEST_F(FullGroupSetTest, MatchValidatorHostDataValid) {
     auto validator = group_->createMatchValidator();
 
     auto* node = makeNode(100);
-    setHostBlock(node, 0, 15);
+    setHostBlock(node, 0);
 
     EXPECT_TRUE(validator->validate(node->group_set_resources[0]));
 
@@ -224,7 +238,7 @@ TEST_F(FullGroupSetTest, MatchValidatorAllowsLoadingResource) {
     auto validator = group_->createMatchValidator();
 
     auto* node = makeNode(100);
-    setHostBlock(node, 0, 15);
+    setHostBlock(node, 0);
     node->group_set_resources[0].transfer_state = GroupSetTransferState::LOADING;
 
     EXPECT_TRUE(validator->validate(node->group_set_resources[0]));
@@ -239,9 +253,9 @@ TEST_F(FullGroupSetTest, HostLeafDetection) {
     b->parent        = a;
 
     // A: evicted from device, has host data
-    setHostBlock(a, 0, 15);
+    setHostBlock(a, 0);
     // B: evicted from device, has host data
-    setHostBlock(b, 0, 25);
+    setHostBlock(b, 0);
 
     // B is HostLeaf (no child with host value)
     EXPECT_TRUE(tree_->isLeafAtTier(b, 0, Tier::HOST));
@@ -255,7 +269,7 @@ TEST_F(FullGroupSetTest, HostLeafDetection) {
 TEST_F(FullGroupSetTest, HostCandidateEligibility) {
     auto* a = makeNode(100);
     // Evicted from device, has host data
-    setHostBlock(a, 0, 15);
+    setHostBlock(a, 0);
 
     // A host-leaf holding host data is candidate-eligible.
     EXPECT_TRUE(group_->isEvictable(a->group_set_resources[0], Tier::HOST)
@@ -269,8 +283,8 @@ TEST_F(FullGroupSetTest, HostCandidateNotEligibleWhenNonLeaf) {
     auto* b          = makeNode(200);
     a->children[200] = b;
     b->parent        = a;
-    setHostBlock(a, 0, 15);
-    setHostBlock(b, 0, 25);
+    setHostBlock(a, 0);
+    setHostBlock(b, 0);
 
     // A has a child still holding host data, so it is not a host-leaf.
     EXPECT_FALSE(group_->isEvictable(a->group_set_resources[0], Tier::HOST)
@@ -290,29 +304,24 @@ TEST_F(FullGroupSetTest, NoDataNotEligible) {
     delete a;
 }
 
-TEST_F(FullGroupSetTest, CompleteDeviceValueRequiresExactPoolCardinalityAndNoNullBlocks) {
+TEST_F(FullGroupSetTest, CompleteDeviceValueRequiresDeviceTierAndNoNullBlocks) {
     auto second_pool = block_tree_cache_test::makeDevicePool({{1, 0}}, 128, "full_group_set_test_second");
     ASSERT_NE(second_pool, nullptr);
-    auto      two_pool_group = std::make_shared<FullGroupSet>();
+    auto two_pool_group =
+        std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_, second_pool}, nullptr, nullptr);
     auto      first          = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::FULL), {0}, 1);
     GroupBase second         = first;
     two_pool_group->initialize(
-        0, makeTestTopology({std::move(first), std::move(second)}), {0, 1}, {pool_, second_pool});
+        0, makeTestTopology({std::move(first), std::move(second)}), {0, 1});
 
     GroupSetResource resource;
-    EXPECT_FALSE(two_pool_group->hasCompleteDeviceValue(resource));
-
-    resource.device_blocks = {10};
-    EXPECT_FALSE(two_pool_group->hasCompleteDeviceValue(resource));
+    EXPECT_FALSE(resource.hasCompleteDeviceValue());
 
     resource.device_blocks = {10, NULL_BLOCK_IDX};
-    EXPECT_FALSE(two_pool_group->hasCompleteDeviceValue(resource));
+    EXPECT_FALSE(resource.hasCompleteDeviceValue());
 
     resource.device_blocks = {10, 20};
-    EXPECT_TRUE(two_pool_group->hasCompleteDeviceValue(resource));
-
-    resource.device_blocks = {10, 20, 30};
-    EXPECT_FALSE(two_pool_group->hasCompleteDeviceValue(resource));
+    EXPECT_TRUE(resource.hasCompleteDeviceValue());
 }
 
 }  // namespace

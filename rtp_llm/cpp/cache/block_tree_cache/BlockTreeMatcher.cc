@@ -103,7 +103,7 @@ void BlockTreeMatcher::prepareReadyMatchedResourcesLocked(const std::vector<Tree
             for (size_t path_index = candidate_count - reuse_count; path_index < candidate_count; ++path_index) {
                 TreeNode*               path_node = matched_path[path_index];
                 const GroupSetResource& resource  = path_node->group_set_resources[group_set_id];
-                if (!resource.isMatchUsable() || !group_set->hasCompleteDeviceValue(resource)) {
+                if (!resource.isMatchUsable() || !resource.hasCompleteDeviceValue()) {
                     all_groups_ready = false;
                     break;
                 }
@@ -131,7 +131,7 @@ void BlockTreeMatcher::prepareReadyMatchedResourcesLocked(const std::vector<Tree
         for (size_t i = ready_reuse_begin; i < result.matched_blocks; ++i) {
             TreeNode*                       path_node          = matched_path[i];
             GroupSetResource&               group_set_resource = path_node->group_set_resources[group_set_id];
-            const std::vector<BlockIdxType> device_blocks      = group_set->getBlocks(group_set_resource, Tier::DEVICE);
+            const std::vector<BlockIdxType> device_blocks      = group_set_resource.getBlocks(Tier::DEVICE);
             matched_device_blocks.per_node.push_back(device_blocks);
             matched_device_blocks.tree_nodes.push_back(path_node);
         }

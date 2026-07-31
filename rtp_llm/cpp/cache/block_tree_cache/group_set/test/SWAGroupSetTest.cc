@@ -19,12 +19,15 @@ protected:
         ASSERT_NE(pool_, nullptr);
         group_ = std::make_shared<SWAGroupSet>(
             /*sliding_window_size=*/128,
-            /*seq_size_per_block=*/64);
+            /*seq_size_per_block=*/64,
+            std::vector<DeviceBlockPoolPtr>{pool_},
+            nullptr,
+            nullptr);
         auto policy                = defaultCacheGroupPolicy(CacheGroupType::SWA);
         policy.enable_prefix_reuse = true;
         policy.sliding_window_size = 128;
         auto group                 = makeTestGroupBase(std::move(policy), {0}, 1, 0, 128, 64);
-        group_->initialize(0, makeTestTopology({std::move(group)}), {0}, {pool_});
+        group_->initialize(0, makeTestTopology({std::move(group)}), {0});
     }
 
     void TearDown() override {
@@ -223,7 +226,7 @@ TEST_F(SWAGroupSetTest, IndependentEvictionDoesNotAffectFull) {
     const BlockIdxType full_block = setDeviceBlock(node, 0);  // Full data
     setDeviceBlock(node, 1);                                  // SWA data
 
-    group_->evictFromTier(node->group_set_resources[1], Tier::DEVICE);
+    node->group_set_resources[1].evictFromTier(Tier::DEVICE);
 
     // SWA data cleared
     EXPECT_FALSE(node->group_set_resources[1].hasTier(Tier::DEVICE));

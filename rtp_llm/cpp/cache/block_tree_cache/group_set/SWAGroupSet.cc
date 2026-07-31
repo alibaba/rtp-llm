@@ -2,8 +2,14 @@
 
 namespace rtp_llm {
 
-SWAGroupSet::SWAGroupSet(size_t sliding_window_size, size_t seq_size_per_block):
-    sliding_window_size_(sliding_window_size), seq_size_per_block_(seq_size_per_block) {}
+SWAGroupSet::SWAGroupSet(size_t                          sliding_window_size,
+                         size_t                          seq_size_per_block,
+                         std::vector<DeviceBlockPoolPtr> device_pools,
+                         std::shared_ptr<HostBlockPool>  host_pool,
+                         BlockTreeDiskBlockPoolPtr       disk_pool):
+    GroupSet(std::move(device_pools), std::move(host_pool), std::move(disk_pool)),
+    sliding_window_size_(sliding_window_size),
+    seq_size_per_block_(seq_size_per_block) {}
 
 std::unique_ptr<MatchValidator> SWAGroupSet::createMatchValidator() {
     return std::make_unique<SWAMatchValidator>(sliding_window_size_, seq_size_per_block_);

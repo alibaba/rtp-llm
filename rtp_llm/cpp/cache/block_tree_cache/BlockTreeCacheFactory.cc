@@ -60,14 +60,20 @@ int slidingWindowSize(const GroupBase& group, size_t group_id) {
     return group.policy.sliding_window_size;
 }
 
-GroupSetPtr createGroupSet(const GroupBase& group, size_t group_id) {
+GroupSetPtr createGroupSet(const GroupBase&                   group,
+                           size_t                             group_id,
+                           std::vector<DeviceBlockPoolPtr>    device_pools,
+                           std::shared_ptr<HostBlockPool>     host_pool,
+                           BlockTreeDiskBlockPoolPtr          disk_pool) {
     GroupSetPtr result;
     switch (group.policy.group_type) {
         case CacheGroupType::FULL:
-            result = std::make_shared<FullGroupSet>();
+            result = std::make_shared<FullGroupSet>(
+                std::move(device_pools), std::move(host_pool), std::move(disk_pool));
             break;
         case CacheGroupType::LINEAR:
-            result = std::make_shared<LinearGroupSet>();
+            result = std::make_shared<LinearGroupSet>(
+                std::move(device_pools), std::move(host_pool), std::move(disk_pool));
             break;
         case CacheGroupType::SWA: {
             const auto seq_size = group.seq_size_per_block;
@@ -75,7 +81,11 @@ GroupSetPtr createGroupSet(const GroupBase& group, size_t group_id) {
                                     "SWA group_id=%zu has invalid seq_size_per_block=%zu",
                                     group_id,
                                     seq_size);
-            result = std::make_shared<SWAGroupSet>(slidingWindowSize(group, group_id), static_cast<int>(seq_size));
+            result = std::make_shared<SWAGroupSet>(slidingWindowSize(group, group_id),
+                                                   static_cast<int>(seq_size),
+                                                   std::move(device_pools),
+                                                   std::move(host_pool),
+                                                   std::move(disk_pool));
             break;
         }
     }
@@ -233,6 +243,20 @@ AggregationPlan buildAggregationPlan(const CacheConfig& cache_config) {
     }
     return plan;
 }
+size_t computeGroupSetPayloadBytes(const CacheConfig& cache_config, const std::vector<int>& members) {
+    size_t payload_bytes = 0;
+    for (int group_id : members) {
+        RTP_LLM_CHECK_WITH_INFO(group_id >= 0, "invalid group_id=%d", group_id);
+        const size_t group_bytes = cache_config.blockSizeBytesForGroup(static_cast<size_t>(group_id));
+        RTP_LLM_CHECK_WITH_INFO(group_bytes > 0, "group_id=%d has zero payload", group_id);
+        RTP_LLM_CHECK_WITH_INFO(group_bytes <= std::numeric_limits<size_t>::max() - payload_bytes,
+                                "group set payload overflow at group_id=%d",
+                                group_id);
+        payload_bytes += group_bytes;
+    }
+    return payload_bytes;
+}
+
 
 }  // namespace
 
@@ -332,56 +356,39 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
                                 group_id,
                                 static_cast<int>(reusable));
     }
-    group_sets.reserve(plan.members.size());
-    for (size_t aggregate_index = 0; aggregate_index < plan.members.size(); ++aggregate_index) {
-        const auto&                     members = plan.members[aggregate_index];
-        const auto&                     first = cache_config.topology().groupById(static_cast<size_t>(members.front()));
-        const size_t                    group_set_id = aggregate_index;
-        auto                            group_set    = createGroupSet(first, static_cast<size_t>(members.front()));
-        std::vector<DeviceBlockPoolPtr> device_pools;
-        std::vector<size_t>             group_ids;
-        device_pools.reserve(members.size());
-        group_ids.reserve(members.size());
 
-        for (size_t member_index = 0; member_index < members.size(); ++member_index) {
-            const int group_id = members[member_index];
-            device_pools.push_back(group_pools[static_cast<size_t>(group_id)]);
-            group_ids.push_back(static_cast<size_t>(group_id));
-        }
-
-        group_set->initialize(group_set_id, cache_config.topologyPtr(), std::move(group_ids), std::move(device_pools));
-        RTP_LLM_LOG_INFO("createBlockTreeCache: group_set[%zu] membership sealed: payload_bytes=%zu",
-                         group_set_id,
-                         group_set->payloadBytes());
-        group_sets.push_back(std::move(group_set));
-    }
-
+    std::vector<size_t> group_set_payload_bytes;
+    group_set_payload_bytes.reserve(plan.members.size());
     size_t combined_stride = 0;
-    for (const auto& group_set : group_sets) {
-        const size_t stride = alignUp(group_set->payloadBytes(), kPoolAlignment);
+    for (const auto& members : plan.members) {
+        const size_t payload_bytes = computeGroupSetPayloadBytes(cache_config, members);
+        group_set_payload_bytes.push_back(payload_bytes);
+        const size_t stride = alignUp(payload_bytes, kPoolAlignment);
         RTP_LLM_CHECK_WITH_INFO(stride <= std::numeric_limits<size_t>::max() - combined_stride,
                                 "BlockTreeCache combined lower-tier stride overflow");
         combined_stride += stride;
     }
 
-    if (host_enabled && !group_sets.empty()) {
+    std::vector<std::shared_ptr<HostBlockPool>> host_pools(plan.members.size());
+    if (host_enabled && !plan.members.empty()) {
         const size_t bytes  = static_cast<size_t>(kv_cache_config.memory_cache_size_mb) * 1024UL * 1024UL;
         const size_t usable = computeHostUsableBlockCount(bytes, combined_stride);
         if (usable == 0) {
             RTP_LLM_LOG_ERROR("createBlockTreeCache: host budget is too small for one complete tree coordinate");
             return nullptr;
         }
-        for (size_t i = 0; i < group_sets.size(); ++i) {
-            const size_t payload = group_sets[i]->payloadBytes();
-            auto         pool    = createHostPool("block_tree_host_g" + std::to_string(i), payload, usable);
-            if (!pool) {
+        for (size_t group_set_id = 0; group_set_id < plan.members.size(); ++group_set_id) {
+            host_pools[group_set_id] = createHostPool("block_tree_host_g" + std::to_string(group_set_id),
+                                                      group_set_payload_bytes[group_set_id],
+                                                      usable);
+            if (!host_pools[group_set_id]) {
                 return nullptr;
             }
-            group_sets[i]->setHostPool(std::move(pool));
         }
     }
 
-    if (disk_enabled && !group_sets.empty()) {
+    std::vector<BlockTreeDiskBlockPoolPtr> disk_pools(plan.members.size());
+    if (disk_enabled && !plan.members.empty()) {
         const size_t bytes  = static_cast<size_t>(kv_cache_config.memory_cache_disk_size_mb) * 1024UL * 1024UL;
         const size_t usable = computeHostUsableBlockCount(bytes, combined_stride);
         if (usable == 0) {
@@ -393,19 +400,42 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
         if (!guard) {
             return nullptr;
         }
-        for (size_t i = 0; i < group_sets.size(); ++i) {
-            auto pool = createDiskPool(kv_cache_config,
-                                       guard,
-                                       "block_tree_disk_g" + std::to_string(i),
-                                       group_sets[i]->payloadBytes(),
-                                       usable,
-                                       parallelism_config.world_rank,
-                                       parallelism_config.local_rank);
-            if (!pool) {
+        for (size_t group_set_id = 0; group_set_id < plan.members.size(); ++group_set_id) {
+            disk_pools[group_set_id] = createDiskPool(kv_cache_config,
+                                                      guard,
+                                                      "block_tree_disk_g" + std::to_string(group_set_id),
+                                                      group_set_payload_bytes[group_set_id],
+                                                      usable,
+                                                      parallelism_config.world_rank,
+                                                      parallelism_config.local_rank);
+            if (!disk_pools[group_set_id]) {
                 return nullptr;
             }
-            group_sets[i]->setDiskPool(std::move(pool));
         }
+    }
+
+    group_sets.reserve(plan.members.size());
+    for (size_t group_set_id = 0; group_set_id < plan.members.size(); ++group_set_id) {
+        const auto&                     members = plan.members[group_set_id];
+        std::vector<DeviceBlockPoolPtr> device_pools;
+        std::vector<size_t>             group_ids;
+        device_pools.reserve(members.size());
+        group_ids.reserve(members.size());
+        for (int group_id : members) {
+            device_pools.push_back(group_pools[static_cast<size_t>(group_id)]);
+            group_ids.push_back(static_cast<size_t>(group_id));
+        }
+        const auto& first = cache_config.topology().groupById(group_ids.front());
+        auto group_set    = createGroupSet(first,
+                                        group_ids.front(),
+                                        std::move(device_pools),
+                                        std::move(host_pools[group_set_id]),
+                                        std::move(disk_pools[group_set_id]));
+        group_set->initialize(group_set_id, cache_config.topologyPtr(), std::move(group_ids));
+        RTP_LLM_LOG_INFO("createBlockTreeCache: group_set[%zu] membership sealed: payload_bytes=%zu",
+                         group_set_id,
+                         group_set->payloadBytes());
+        group_sets.push_back(std::move(group_set));
     }
 
     BlockTreeCacheConfig config;

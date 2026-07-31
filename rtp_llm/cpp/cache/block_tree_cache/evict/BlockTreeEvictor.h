@@ -90,8 +90,6 @@ public:
     void refreshAllCandidates();
     // A node's topology changed (e.g. became a leaf after child deletion).
     void onTopologyChanged(TreeNode* parent);
-    // A node is about to be removed from the tree: drop it from all heaps.
-    void                   onNodeAboutToRemove(TreeNode* node);
     CandidateStats         candidateStats() const;
     size_t                 candidateCount(size_t group_set_id, Tier tier) const;
     std::vector<TreeNode*> candidateNodes(size_t group_set_id, Tier tier) const;
@@ -146,8 +144,6 @@ private:
     void                releaseTargetBlocks(const EvictionMove& eviction_move);
     bool                applyMoveCompletion(const GroupSetPtr& group_set, const EvictionMove& move);
     void                finalizeEviction(TreeNode* node);
-    bool                shouldDeleteNode(const TreeNode* node) const;
-    std::vector<size_t> reusableGroupSetIds() const;
     size_t              computeGroupSetExcess(const GroupSet& group_set, Tier tier, double ratio) const;
 
     BlockTree*                          tree_;

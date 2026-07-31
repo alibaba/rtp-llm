@@ -59,7 +59,7 @@ DeviceCandidateBlocks collectDeviceCandidateBlocks(const std::vector<GroupSetPtr
                 continue;
             }
             const std::vector<BlockIdxType> blocks =
-                group_set->getBlocks(node->group_set_resources[group_set->groupSetId()], Tier::DEVICE);
+                node->group_set_resources[group_set->groupSetId()].getBlocks(Tier::DEVICE);
             const size_t block_count = std::min(blocks.size(), device_pools.size());
             for (size_t pool_index = 0; pool_index < block_count; ++pool_index) {
                 if (device_pools[pool_index] == nullptr || isNullBlockIdx(blocks[pool_index])) {

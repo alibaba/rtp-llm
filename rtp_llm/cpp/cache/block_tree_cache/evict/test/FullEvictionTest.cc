@@ -18,6 +18,7 @@ using block_tree_cache_test::makeBlockTreeCacheForTest;
 // which resources the evictor re-evaluates -- without any production-side hook.
 class CountingFullGroupSet: public FullGroupSet {
 public:
+    using FullGroupSet::FullGroupSet;
     bool isEvictable(const GroupSetResource& resource, Tier tier) const override {
         if (recording_) {
             checked_resources_.push_back(&resource);
@@ -33,7 +34,8 @@ public:
 class FullEvictionTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        auto                       full = std::make_shared<CountingFullGroupSet>();
+        auto                       full = std::make_shared<CountingFullGroupSet>(
+            std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
         counting_full_                  = full.get();
         std::vector<GroupSetPtr> groups = {full};
         cache_                          = makeBlockTreeCacheForTest(

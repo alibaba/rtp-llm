@@ -45,7 +45,7 @@ cc_test(
     srcs = ["BlockTreeEvictorTest.cc"],
     copts = test_copts,
     tags = ["exclusive"],
-    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils"],
+    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils"],
     env = {},
 )
 

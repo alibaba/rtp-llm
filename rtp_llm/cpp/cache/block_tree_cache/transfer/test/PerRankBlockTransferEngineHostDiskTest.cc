@@ -37,9 +37,12 @@ GroupSetPtr makeHostDiskGroup(size_t                                  group_set_
     policy.enable_prefix_reuse = true;
     auto topology              = makeTestTopology({makeTestGroupBase(policy, {0}, payload_bytes)});
     auto device_pool = makeTestDevicePool({{payload_bytes, 0}}, 2, "host_disk_group_" + std::to_string(group_set_id));
-    auto group       = makeTestGroupSet(group_set_id, std::move(topology), {0}, {std::move(device_pool)});
-    group->setHostPool(std::move(host_pool));
-    group->setDiskPool(std::move(disk_pool));
+    auto group = makeTestGroupSet(group_set_id,
+                                  std::move(topology),
+                                  {0},
+                                  {std::move(device_pool)},
+                                  std::move(host_pool),
+                                  std::move(disk_pool));
     return group;
 }
 

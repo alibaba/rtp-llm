@@ -15,9 +15,9 @@ BlockTree::BlockTree(std::vector<GroupSetPtr> group_sets): group_sets_(std::move
 }
 
 BlockTree::~BlockTree() {
-    releaseNodeHolds(root_.get());
+    releaseNode(root_.get());
     for (const std::unique_ptr<TreeNode>& node : node_pool_) {
-        releaseNodeHolds(node.get());
+        releaseNode(node.get());
     }
     for (auto& node : node_pool_) {
         node->children.clear();
@@ -26,23 +26,23 @@ BlockTree::~BlockTree() {
     root_->children.clear();
 }
 
-void BlockTree::releaseNodeHolds(TreeNode* node) {
+void BlockTree::releaseNode(TreeNode* node) {
     for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
         const GroupSetPtr& group_set = group_sets_[group_set_id];
         GroupSetResource&  resource  = node->group_set_resources[group_set_id];
-        if (!resource.device_blocks.empty() && resource.device_blocks.size() == group_set->devicePools().size()) {
+        if (resource.hasTier(Tier::DEVICE)) {
             group_set->unreferenceBlocks(
                 MultiNodeResource{group_set_id, Tier::DEVICE, {resource.device_blocks}},
                 BlockRefType::BLOCK_CACHE);
             std::fill(resource.device_blocks.begin(), resource.device_blocks.end(), NULL_BLOCK_IDX);
         }
-        if (!isNullBlockIdx(resource.host_block) && group_set->hostPool()) {
+        if (resource.hasTier(Tier::HOST)) {
             group_set->unreferenceBlocks(
                 MultiNodeResource{group_set_id, Tier::HOST, {{resource.host_block}}},
                 BlockRefType::BLOCK_CACHE);
             resource.host_block = NULL_BLOCK_IDX;
         }
-        if (!isNullBlockIdx(resource.disk_slot) && group_set->diskPool()) {
+        if (resource.hasTier(Tier::DISK)) {
             group_set->unreferenceBlocks(
                 MultiNodeResource{group_set_id, Tier::DISK, {{resource.disk_slot}}},
                 BlockRefType::BLOCK_CACHE);
@@ -87,9 +87,8 @@ std::vector<TreeNode*> BlockTree::findNode(const CacheKeysType& cache_keys) cons
 }
 
 bool BlockTree::isLeafAtTier(const TreeNode* node, size_t group_set_id, Tier tier) const {
-    const GroupSetPtr&      group_set = group_sets_[group_set_id];
-    const GroupSetResource& resource  = node->group_set_resources[group_set_id];
-    if (!(tier == Tier::DEVICE ? group_set->hasCompleteDeviceValue(resource) : resource.hasTier(tier))) {
+    const GroupSetResource& resource = node->group_set_resources[group_set_id];
+    if (!(tier == Tier::DEVICE ? resource.hasCompleteDeviceValue() : resource.hasTier(tier))) {
         return false;
     }
 
@@ -120,7 +119,7 @@ BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                
             const GroupSetPtr&      group_set = group_sets_[group_set_id];
             const GroupSetResource& resource  = resources[i][group_set_id];
             RTP_LLM_CHECK_WITH_INFO(resource.isValidSteadyState()
-                                        && (!resource.hasTier(Tier::DEVICE) || group_set->hasCompleteDeviceValue(resource)),
+                                        && (!resource.hasTier(Tier::DEVICE) || resource.hasCompleteDeviceValue()),
                                     "BlockTree insert requires an IDLE steady resource and complete DEVICE value: "
                                     "key=%ld group_set_id=%zu state=%d tiers=%zu expected_width=%zu actual_width=%zu",
                                     cache_keys[i],
@@ -153,7 +152,7 @@ BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                
                 existing.disk_slot      = NULL_BLOCK_IDX;
                 existing.transfer_state = GroupSetTransferState::IDLE;
                 existing.candidate_meta = {};
-                if (group_sets_[group_set_id]->hasCompleteDeviceValue(existing)) {
+                if (existing.hasCompleteDeviceValue()) {
                     group_sets_[group_set_id]->referenceBlocks(
                         MultiNodeResource{group_set_id, Tier::DEVICE, {existing.device_blocks}},
                         BlockRefType::BLOCK_CACHE);
@@ -171,7 +170,7 @@ BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                
             for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
                 const GroupSetPtr& group_set = group_sets_[group_set_id];
                 GroupSetResource&  resource  = current->group_set_resources[group_set_id];
-                if (group_set->hasCompleteDeviceValue(resource)) {
+                if (resource.hasCompleteDeviceValue()) {
                     group_set->referenceBlocks(
                         MultiNodeResource{group_set_id, Tier::DEVICE, {resource.device_blocks}},
                         BlockRefType::BLOCK_CACHE);
@@ -189,47 +188,30 @@ BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                
     return result;
 }
 
-void BlockTree::removeNode(TreeNode* node) {
-    RTP_LLM_LOG_DEBUG("removing node key=%ld, pool_size=%zu", node->cache_key, node_pool_.size());
-
-    TreeNode* parent = node->parent;
-    parent->children.erase(node->cache_key);
-    node->parent = nullptr;
-
-    auto it = std::find_if(node_pool_.begin(), node_pool_.end(), [node](const std::unique_ptr<TreeNode>& ptr) {
-        return ptr.get() == node;
-    });
-    node_pool_.erase(it);
+bool BlockTree::isRemovable(TreeNode* node) const {
+    return node != root_.get() && node->children.empty()
+           && std::all_of(node->group_set_resources.begin(),
+                          node->group_set_resources.end(),
+                          [](const GroupSetResource& resource) { return resource.is_removable(); });
 }
 
-TreeNode* BlockTree::removeEmptyAncestors(TreeNode* start_node, const std::vector<size_t>& reusable_group_set_ids) {
-    TreeNode* current       = start_node;
+TreeNode* BlockTree::removeNodeAndEmptyAncestors(TreeNode* node) {
+    TreeNode* current       = node;
     int       removed_count = 0;
-
-    while (current != root_.get()) {
-        if (!current->children.empty()) {
-            break;
-        }
-
-        bool removable = true;
-        for (size_t group_set_id : reusable_group_set_ids) {
-            if (!current->group_set_resources[group_set_id].is_removable()) {
-                removable = false;
-                break;
-            }
-        }
-
-        if (!removable) {
-            break;
-        }
-
+    while (isRemovable(current)) {
         TreeNode* parent = current->parent;
-        removeNode(current);
+        RTP_LLM_LOG_DEBUG("removing node key=%ld, pool_size=%zu", current->cache_key, node_pool_.size());
+        parent->children.erase(current->cache_key);
+        current->parent = nullptr;
+        auto it = std::find_if(node_pool_.begin(), node_pool_.end(), [current](const std::unique_ptr<TreeNode>& ptr) {
+            return ptr.get() == current;
+        });
+        node_pool_.erase(it);
         current = parent;
         removed_count++;
     }
     if (removed_count > 0) {
-        RTP_LLM_LOG_DEBUG("removed %d empty ancestors", removed_count);
+        RTP_LLM_LOG_DEBUG("removed %d nodes", removed_count);
     }
     return current;
 }

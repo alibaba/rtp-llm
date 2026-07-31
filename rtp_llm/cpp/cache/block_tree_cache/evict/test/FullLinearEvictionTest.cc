@@ -14,8 +14,8 @@ using block_tree_cache_test::makeBlockTreeCacheForTest;
 class FullLinearEvictionTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        auto                       full   = std::make_shared<FullGroupSet>();
-        auto                       linear = std::make_shared<LinearGroupSet>();
+        auto                       full   = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+        auto                       linear = std::make_shared<LinearGroupSet>(std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
         std::vector<GroupSetPtr>   groups = {full, linear};
         cache_                            = makeBlockTreeCacheForTest(
             std::move(groups), BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
@@ -68,7 +68,7 @@ TEST_F(FullLinearEvictionTest, FullReclaimCascadesToLinear) {
 //   Reclaiming [300] deletes the leaf and prunes both empty ancestors.
 // ---------------------------------------------------------------------------
 TEST_F(FullLinearEvictionTest, LinearOnlySequentialDrain) {
-    auto                            linear    = std::make_shared<LinearGroupSet>();
+    auto                            linear    = std::make_shared<LinearGroupSet>(std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
     std::vector<GroupSetPtr>        groups    = {linear};
     std::unique_ptr<BlockTreeCache> lin_cache = makeBlockTreeCacheForTest(
         std::move(groups), BlockTreeCacheConfig{.eviction_thread_pool_size = 2});

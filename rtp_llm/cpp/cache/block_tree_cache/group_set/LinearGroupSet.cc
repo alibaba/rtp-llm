@@ -2,8 +2,6 @@
 
 namespace rtp_llm {
 
-LinearGroupSet::LinearGroupSet() = default;
-
 std::unique_ptr<MatchValidator> LinearGroupSet::createMatchValidator() {
     return std::make_unique<LinearMatchValidator>();
 }

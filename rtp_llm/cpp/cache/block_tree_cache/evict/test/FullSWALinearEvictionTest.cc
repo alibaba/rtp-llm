@@ -15,9 +15,9 @@ using block_tree_cache_test::makeBlockTreeCacheForTest;
 class FullSWALinearEvictionTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        auto                       full   = std::make_shared<FullGroupSet>();
-        auto                       swa    = std::make_shared<SWAGroupSet>(128, 64);
-        auto                       linear = std::make_shared<LinearGroupSet>();
+        auto                       full   = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+        auto                       swa    = std::make_shared<SWAGroupSet>(128, 64, std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+        auto                       linear = std::make_shared<LinearGroupSet>(std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
         std::vector<GroupSetPtr>   groups = {full, swa, linear};
         cache_                            = makeBlockTreeCacheForTest(
             std::move(groups), BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
@@ -177,8 +177,8 @@ TEST_F(FullSWALinearEvictionTest, ForkBothBranchesEvictable) {
 //   Reclaiming SWA[200] cascades LINEAR[200], deletes [200], then prunes empty [100].
 // ---------------------------------------------------------------------------
 TEST_F(FullSWALinearEvictionTest, SWAReclaimCascadesToLinear) {
-    auto                            swa           = std::make_shared<SWAGroupSet>(128, 64);
-    auto                            linear        = std::make_shared<LinearGroupSet>();
+    auto                            swa           = std::make_shared<SWAGroupSet>(128, 64, std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+    auto                            linear        = std::make_shared<LinearGroupSet>(std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
     std::vector<GroupSetPtr>        groups        = {swa, linear};
     std::unique_ptr<BlockTreeCache> swa_lin_cache = makeBlockTreeCacheForTest(
         std::move(groups), BlockTreeCacheConfig{.eviction_thread_pool_size = 2});

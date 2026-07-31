@@ -132,6 +132,23 @@ BlockIdxType poolMalloc(IBlockPool& pool) {
     return block_transfer_engine_test::poolMalloc(pool);
 }
 
+MultiNodeResource allocateDeviceBlocksForTest(GroupSet& group_set, size_t count, BlockRefType ref_type) {
+    MultiNodeResource resource{group_set.groupSetId(), Tier::DEVICE};
+    resource.per_node.resize(count);
+    for (const auto& pool : group_set.devicePools()) {
+        const auto blocks = pool->malloc(count);
+        if (!blocks.has_value()) {
+            group_set.unreferenceBlocks(resource, ref_type);
+            return {};
+        }
+        pool->incRef(*blocks, ref_type);
+        for (size_t i = 0; i < count; ++i) {
+            resource.per_node[i].push_back((*blocks)[i]);
+        }
+    }
+    return resource;
+}
+
 size_t unreferencedBlocksNum(const IBlockPool& pool) {
     std::lock_guard<std::mutex> lock(pool.mutex_);
     size_t                      count = 0;
@@ -153,8 +170,6 @@ size_t treeCachedBlocksNum(const IBlockPool& pool) {
     }
     return count;
 }
-
-namespace {
 
 DeviceBlockPoolPtr makeStructuralDevicePool(size_t group_set_id) {
     constexpr size_t physical_block_count = 1024;
@@ -188,9 +203,11 @@ DeviceBlockPoolPtr makeStructuralDevicePool(size_t group_set_id) {
     return pool;
 }
 
+namespace {
+
 void prepareGroupSets(std::vector<GroupSetPtr>& group_sets) {
     const bool has_uninitialized = std::any_of(group_sets.begin(), group_sets.end(), [](const GroupSetPtr& group_set) {
-        return group_set != nullptr && group_set->topology() == nullptr;
+        return group_set != nullptr && group_set->groupIds().empty();
     });
     if (!has_uninitialized) {
         return;
@@ -200,7 +217,7 @@ void prepareGroupSets(std::vector<GroupSetPtr>& group_sets) {
     groups.reserve(group_sets.size());
     for (size_t group_set_id = 0; group_set_id < group_sets.size(); ++group_set_id) {
         const GroupSetPtr& group_set = group_sets[group_set_id];
-        RTP_LLM_CHECK(group_set != nullptr && group_set->topology() == nullptr);
+        RTP_LLM_CHECK(group_set != nullptr && group_set->groupIds().empty());
 
         CacheGroupType type               = CacheGroupType::FULL;
         size_t         seq_size_per_block = 1;
@@ -227,8 +244,7 @@ void prepareGroupSets(std::vector<GroupSetPtr>& group_sets) {
 
     auto topology = block_transfer_engine_test::makeTestTopology(std::move(groups));
     for (size_t group_set_id = 0; group_set_id < group_sets.size(); ++group_set_id) {
-        group_sets[group_set_id]->initialize(
-            group_set_id, topology, {group_set_id}, {makeStructuralDevicePool(group_set_id)});
+        group_sets[group_set_id]->initialize(group_set_id, topology, {group_set_id});
     }
 }
 
@@ -534,17 +550,18 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
     });
 
     auto full = block_transfer_engine_test::makeTestGroupSet(
-        0, environment->topology, {0, 1}, {environment->device_pools[0], environment->device_pools[1]});
-    full->setHostPool(environment->host_pools[0]);
-    if (options.enable_disk) {
-        full->setDiskPool(environment->disk_pools[0]);
-    }
-    auto swa =
-        block_transfer_engine_test::makeTestGroupSet(1, environment->topology, {2}, {environment->device_pools[2]});
-    swa->setHostPool(environment->host_pools[1]);
-    if (options.enable_disk) {
-        swa->setDiskPool(environment->disk_pools[1]);
-    }
+        0,
+        environment->topology,
+        {0, 1},
+        {environment->device_pools[0], environment->device_pools[1]},
+        environment->host_pools[0],
+        options.enable_disk ? environment->disk_pools[0] : nullptr);
+    auto swa = block_transfer_engine_test::makeTestGroupSet(1,
+                                                                  environment->topology,
+                                                                  {2},
+                                                                  {environment->device_pools[2]},
+                                                                  environment->host_pools[1],
+                                                                  options.enable_disk ? environment->disk_pools[1] : nullptr);
     environment->groups = {full, swa};
     BlockTreeCacheConfig config;
     config.enable_device_cache     = true;
@@ -575,8 +592,8 @@ std::unique_ptr<FullSWAEnvironment> FullSWAEnvironment::create(const FullSWAEnvi
 void FullSWAEnvironment::insertRequestPath() {
     ASSERT_TRUE(request_blocks.empty());
     request_blocks = {
-        groups[0]->allocateBlocks(Tier::DEVICE, options_.path_length, BlockRefType::REQUEST),
-        groups[1]->allocateBlocks(Tier::DEVICE, options_.path_length, BlockRefType::REQUEST),
+        allocateDeviceBlocksForTest(*groups[0], options_.path_length, BlockRefType::REQUEST),
+        allocateDeviceBlocksForTest(*groups[1], options_.path_length, BlockRefType::REQUEST),
     };
     ASSERT_EQ(request_blocks[0].per_node.size(), options_.path_length);
     ASSERT_EQ(request_blocks[1].per_node.size(), options_.path_length);

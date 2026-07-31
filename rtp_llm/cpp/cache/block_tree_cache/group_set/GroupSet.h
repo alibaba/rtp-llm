@@ -6,7 +6,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheTopology.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSetResource.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DeviceBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/DiskBlockPool.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/block_pool/HostBlockPool.h"
@@ -15,6 +15,7 @@
 namespace rtp_llm {
 
 class LoadTicket;
+struct TreeNode;
 
 struct MultiNodeResource {
     size_t                                 group_set_id{0};
@@ -58,22 +59,26 @@ struct EvictionMove {
 
 class GroupSet {
 public:
+    GroupSet(std::vector<DeviceBlockPoolPtr> device_pools,
+             std::shared_ptr<HostBlockPool>  host_pool,
+             BlockTreeDiskBlockPoolPtr       disk_pool);
+
     virtual ~GroupSet() = default;
 
     void initialize(size_t                               group_set_id,
                     std::shared_ptr<const CacheTopology> topology,
-                    std::vector<size_t>                  group_ids,
-                    std::vector<DeviceBlockPoolPtr>      device_pools);
+                    std::vector<size_t>                  group_ids);
 
-    size_t                                      groupSetId() const;
-    const std::shared_ptr<const CacheTopology>& topology() const {
-        return topology_;
+    size_t groupSetId() const {
+        return group_set_id_;
     }
     const std::vector<size_t>& groupIds() const {
         return group_ids_;
     }
-    const GroupBase& groupAt(size_t member_index) const;
-    size_t           payloadBytes() const {
+    const GroupBase& groupAt(size_t member_index) const {
+        return topology_->groupById(group_ids_[member_index]);
+    }
+    size_t payloadBytes() const {
         return payload_bytes_;
     }
     CacheGroupType groupType() const {
@@ -81,21 +86,11 @@ public:
     }
     virtual std::unique_ptr<MatchValidator> createMatchValidator() = 0;
 
-    virtual void evictFromTier(GroupSetResource& resource, Tier tier);
-
     virtual size_t computeReuseBlockCount(size_t matched_block_count) const = 0;
-
-    void setHostPool(std::shared_ptr<HostBlockPool> pool) {
-        host_pool_ = std::move(pool);
-    }
-    void setDiskPool(std::shared_ptr<BlockTreeDiskBlockPool> pool) {
-        disk_pool_ = std::move(pool);
-    }
 
     const std::vector<DeviceBlockPoolPtr>& devicePools() const {
         return device_pools_;
     }
-    bool                           hasCompleteDeviceValue(const GroupSetResource& resource) const;
     std::shared_ptr<HostBlockPool> hostPool() const {
         return host_pool_;
     }
@@ -161,28 +156,18 @@ public:
         return disk_pool_ ? disk_pool_->totalBlocksNum() : 0;
     }
 
-    MultiNodeResource allocateBlocks(Tier tier, size_t count, BlockRefType ref_type);
     void              referenceBlocks(const MultiNodeResource& set, BlockRefType ref_type) const;
     void              unreferenceBlocks(const MultiNodeResource& set, BlockRefType ref_type) const;
 
     BlockIdxType allocateSingleBlock(Tier tier, BlockRefType ref_type);
     void         releaseSingleBlock(Tier tier, BlockIdxType block, BlockRefType ref_type) const;
 
-    std::vector<BlockIdxType> getBlocks(const GroupSetResource& resource, Tier tier) const;
-    void                      setBlocks(GroupSetResource& resource, Tier tier, const std::vector<BlockIdxType>& blocks);
-    // Highest tier (DEVICE > HOST > DISK) holding this resource's data, else NONE.
-    Tier getTopTier(const GroupSetResource& resource) const;
-
     virtual bool isEvictable(const GroupSetResource& resource, Tier tier) const;
 
-protected:
+private:
     std::vector<DeviceBlockPoolPtr>         device_pools_;
     std::shared_ptr<HostBlockPool>          host_pool_;
     std::shared_ptr<BlockTreeDiskBlockPool> disk_pool_;
-
-private:
-    void validateBlockResource(const MultiNodeResource& resource) const;
-
     size_t                               group_set_id_{0};
     std::shared_ptr<const CacheTopology> topology_;
     std::vector<size_t>                  group_ids_;

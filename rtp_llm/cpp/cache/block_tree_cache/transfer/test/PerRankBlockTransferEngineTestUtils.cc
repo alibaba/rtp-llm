@@ -82,7 +82,9 @@ std::shared_ptr<const CacheTopology> makeTestTopology(std::vector<GroupBase> gro
 GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
                              std::shared_ptr<const CacheTopology> topology,
                              std::vector<size_t>                  group_ids,
-                             std::vector<DeviceBlockPoolPtr>      device_pools) {
+                             std::vector<DeviceBlockPoolPtr>      device_pools,
+                             std::shared_ptr<HostBlockPool>       host_pool,
+                             BlockTreeDiskBlockPoolPtr            disk_pool) {
     RTP_LLM_CHECK(topology != nullptr);
     RTP_LLM_CHECK(!group_ids.empty());
     const auto& first = topology->groupById(group_ids.front());
@@ -90,18 +92,21 @@ GroupSetPtr makeTestGroupSet(size_t                               group_set_id,
     GroupSetPtr group_set;
     switch (first.policy.group_type) {
         case CacheGroupType::FULL:
-            group_set = std::make_shared<FullGroupSet>();
+            group_set = std::make_shared<FullGroupSet>(device_pools, host_pool, disk_pool);
             break;
         case CacheGroupType::SWA:
             group_set = std::make_shared<SWAGroupSet>(static_cast<size_t>(first.policy.sliding_window_size),
-                                                      first.seq_size_per_block);
+                                                      first.seq_size_per_block,
+                                                      device_pools,
+                                                      host_pool,
+                                                      disk_pool);
             break;
         case CacheGroupType::LINEAR:
-            group_set = std::make_shared<LinearGroupSet>();
+            group_set = std::make_shared<LinearGroupSet>(device_pools, host_pool, disk_pool);
             break;
     }
     RTP_LLM_CHECK(group_set != nullptr);
-    group_set->initialize(group_set_id, std::move(topology), std::move(group_ids), std::move(device_pools));
+    group_set->initialize(group_set_id, std::move(topology), std::move(group_ids));
     return group_set;
 }
 

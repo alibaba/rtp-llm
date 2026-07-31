@@ -28,9 +28,8 @@ public:
     BlockTreeInsertResult insertNode(const CacheKeysType&                              cache_keys,
                                      const std::vector<std::vector<GroupSetResource>>& resources);
 
-    void removeNode(TreeNode* node);
-
-    TreeNode* removeEmptyAncestors(TreeNode* start_node, const std::vector<size_t>& group_set_ids);
+    bool      isRemovable(TreeNode* node) const;
+    TreeNode* removeNodeAndEmptyAncestors(TreeNode* node);
 
     TreeNode* root() const {
         return root_.get();
@@ -44,7 +43,7 @@ public:
 
 private:
     TreeNode* createNode(CacheKeyType key, TreeNode* parent);
-    void      releaseNodeHolds(TreeNode* node);
+    void      releaseNode(TreeNode* node);
 
     std::vector<GroupSetPtr>               group_sets_;
     std::unique_ptr<TreeNode>              root_;

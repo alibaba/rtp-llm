@@ -6,7 +6,7 @@
 #include <utility>
 #include <vector>
 
-#include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSetResource.h"
 
 namespace rtp_llm {
 

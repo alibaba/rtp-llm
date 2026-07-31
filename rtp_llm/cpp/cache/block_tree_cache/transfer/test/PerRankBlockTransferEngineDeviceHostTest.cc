@@ -158,9 +158,12 @@ static GroupSetPtr makeDeviceHostGroup(size_t                                  g
     auto                topology = makeTestTopology(std::move(groups));
     std::vector<size_t> group_ids(device_pools.size());
     std::iota(group_ids.begin(), group_ids.end(), 0);
-    auto group = makeTestGroupSet(group_set_id, std::move(topology), std::move(group_ids), std::move(device_pools));
-    group->setHostPool(std::move(host_pool));
-    group->setDiskPool(std::move(disk_pool));
+    auto group = makeTestGroupSet(group_set_id,
+                                  std::move(topology),
+                                  std::move(group_ids),
+                                  std::move(device_pools),
+                                  std::move(host_pool),
+                                  std::move(disk_pool));
     return group;
 }
 

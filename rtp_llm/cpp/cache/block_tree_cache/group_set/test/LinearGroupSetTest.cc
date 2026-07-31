@@ -17,9 +17,9 @@ protected:
     void SetUp() override {
         pool_ = block_tree_cache_test::makeDevicePool({{1, 0}}, 128, "linear_group_set_test");
         ASSERT_NE(pool_, nullptr);
-        group_     = std::make_shared<LinearGroupSet>();
+        group_     = std::make_shared<LinearGroupSet>(std::vector<DeviceBlockPoolPtr>{pool_}, nullptr, nullptr);
         auto group = makeTestGroupBase(defaultCacheGroupPolicy(CacheGroupType::LINEAR), {0}, 1);
-        group_->initialize(0, makeTestTopology({std::move(group)}), {0}, {pool_});
+        group_->initialize(0, makeTestTopology({std::move(group)}), {0});
     }
 
     void TearDown() override {
@@ -73,7 +73,7 @@ TEST_F(LinearGroupSetTest, EvictFromTierDevice) {
     auto* node = makeNode(100);
     setDeviceBlock(node, 0);
 
-    group_->evictFromTier(node->group_set_resources[0], Tier::DEVICE);
+    node->group_set_resources[0].evictFromTier(Tier::DEVICE);
 
     // Device blocks are cleared; heap ownership no longer lives on the group.
     EXPECT_FALSE(node->group_set_resources[0].hasTier(Tier::DEVICE));
