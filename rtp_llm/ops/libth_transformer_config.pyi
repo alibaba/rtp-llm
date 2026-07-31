@@ -923,8 +923,8 @@ class KVCacheSpecType:
     MHA: typing.ClassVar[KVCacheSpecType]
     MLA: typing.ClassVar[KVCacheSpecType]
     LINEAR: typing.ClassVar[KVCacheSpecType]
-    OPAQUE_KV: typing.ClassVar[KVCacheSpecType]
-    OPAQUE_STATE: typing.ClassVar[KVCacheSpecType]
+    COMPRESSED_KV_CACHE: typing.ClassVar[KVCacheSpecType]
+    SWA_STATE: typing.ClassVar[KVCacheSpecType]
     @property
     def name(self) -> str: ...
     @property

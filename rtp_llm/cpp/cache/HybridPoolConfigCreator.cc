@@ -102,8 +102,8 @@ uint32_t localKvHeadNumForDesc(const KVCacheSpecDesc&   desc,
         case KVCacheSpecType::LinearAttention:
             return linearLocalKvHeadNum(model_config, parallelism_config);
         case KVCacheSpecType::MultiHeadLatentAttention:
-        case KVCacheSpecType::OpaqueKV:
-        case KVCacheSpecType::OpaqueState:
+        case KVCacheSpecType::CompressedKVCache:
+        case KVCacheSpecType::SWAState:
             return 1;
         default:
             RTP_LLM_FAIL("unknown KVCacheSpecType=%d", static_cast<int>(desc.cache_type));
@@ -324,15 +324,15 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
             config, model_config.kv_cache_spec_descs, refreshed_specs, model_config, parallelism_config);
         for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
             const auto& spec               = config.specForGroup(gid);
-            config.use_typed_cache_regions = config.use_typed_cache_regions || spec->type == KVCacheSpecType::OpaqueKV
-                                             || spec->type == KVCacheSpecType::OpaqueState;
+            config.use_typed_cache_regions = config.use_typed_cache_regions || spec->type == KVCacheSpecType::CompressedKVCache
+                                             || spec->type == KVCacheSpecType::SWAState;
             config.use_opaque_kv_cache_store = config.use_opaque_kv_cache_store
-                                               || spec->type == KVCacheSpecType::OpaqueKV
-                                               || spec->type == KVCacheSpecType::OpaqueState;
+                                               || spec->type == KVCacheSpecType::CompressedKVCache
+                                               || spec->type == KVCacheSpecType::SWAState;
         }
         for (const auto& layer_descs : model_config.kv_cache_spec_descs) {
             for (const auto& desc : layer_descs) {
-                config.is_sparse = config.is_sparse || desc.cache_type == KVCacheSpecType::OpaqueKV;
+                config.is_sparse = config.is_sparse || desc.cache_type == KVCacheSpecType::CompressedKVCache;
             }
         }
         config.disable_decode_first_malloc_device_reuse =

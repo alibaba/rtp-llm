@@ -6,8 +6,8 @@ enum KVCacheSpecType {
     MultiHeadAttention,        // MHAKVCacheSpec: standard multi-head attention KV cache
     MultiHeadLatentAttention,  // MLAKVCacheSpec: MLA compressed latent KV cache
     LinearAttention,           // LinearKVCacheSpec: linear / SSM attention state cache
-    OpaqueKV,                  // Byte-addressed opaque paged KV pool
-    OpaqueState,               // Fixed-allocation opaque state cache
+    CompressedKVCache,                  // Byte-addressed opaque paged KV pool
+    SWAState,               // Fixed-allocation opaque state cache
 };
 
 inline const char* KVCacheSpecTypeToString(KVCacheSpecType t) {
@@ -18,10 +18,10 @@ inline const char* KVCacheSpecTypeToString(KVCacheSpecType t) {
             return "MultiHeadLatentAttention";
         case KVCacheSpecType::LinearAttention:
             return "LinearAttention";
-        case KVCacheSpecType::OpaqueKV:
-            return "OpaqueKV";
-        case KVCacheSpecType::OpaqueState:
-            return "OpaqueState";
+        case KVCacheSpecType::CompressedKVCache:
+            return "CompressedKVCache";
+        case KVCacheSpecType::SWAState:
+            return "SWAState";
         default:
             return "Unknown";
     }

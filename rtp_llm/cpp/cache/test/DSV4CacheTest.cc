@@ -16,7 +16,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
 #include "rtp_llm/cpp/cache/KVCacheGroup.h"
 #include "rtp_llm/cpp/cache/LinearKVCacheSpec.h"
-#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/Dsv4KVCacheSpec.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
@@ -54,7 +54,7 @@ std::shared_ptr<CompressedKVCacheSpec> buildCompressedSpec(const std::string& ta
                                                            size_t             block_size_bytes_alignment = 0) {
     KVCacheSpecDesc desc;
     desc.tag                          = tag;
-    desc.cache_type                   = KVCacheSpecType::OpaqueKV;
+    desc.cache_type                   = KVCacheSpecType::CompressedKVCache;
     desc.dtype                        = dtype;
     desc.entry_elems                  = entry_elems;
     desc.entry_dtype                  = dtype;
@@ -69,7 +69,7 @@ std::shared_ptr<CompressedKVCacheSpec> buildCompressedSpec(const std::string& ta
     return std::dynamic_pointer_cast<CompressedKVCacheSpec>(SpecBuilder::build(desc, ctx));
 }
 
-std::shared_ptr<FixedStateCacheSpec> buildFixedStateSpec(const std::string& tag,
+std::shared_ptr<SWAStateCacheSpec> buildFixedStateSpec(const std::string& tag,
                                                          uint32_t           entry_elems,
                                                          uint32_t           entries_per_block,
                                                          DataType           dtype,
@@ -78,7 +78,7 @@ std::shared_ptr<FixedStateCacheSpec> buildFixedStateSpec(const std::string& tag,
                                                          uint32_t           block_size_alignment_min_entries = 0) {
     KVCacheSpecDesc desc;
     desc.tag                                = tag;
-    desc.cache_type                         = KVCacheSpecType::OpaqueState;
+    desc.cache_type                         = KVCacheSpecType::SWAState;
     desc.dtype                              = dtype;
     desc.entry_elems                        = entry_elems;
     desc.explicit_entry_count               = entries_per_block;
@@ -90,14 +90,14 @@ std::shared_ptr<FixedStateCacheSpec> buildFixedStateSpec(const std::string& tag,
     SpecBuildContext ctx;
     ctx.dtype              = dtype;
     ctx.seq_size_per_block = kDsv4TokensPerBlock;
-    return std::dynamic_pointer_cast<FixedStateCacheSpec>(SpecBuilder::build(desc, ctx));
+    return std::dynamic_pointer_cast<SWAStateCacheSpec>(SpecBuilder::build(desc, ctx));
 }
 
 static size_t gidForTag(const CacheConfig& config, const std::string& tag) {
     return static_cast<size_t>(config.groupIdForTag(tag));
 }
 
-static size_t opaqueEntriesPerBlock(const OpaqueKVCacheSpec& spec, size_t entry_bytes) {
+static size_t opaqueEntriesPerBlock(const Dsv4KVCacheSpec& spec, size_t entry_bytes) {
     RTP_LLM_CHECK_WITH_INFO(entry_bytes > 0, "entry_bytes must be > 0");
     RTP_LLM_CHECK_WITH_INFO(spec.block_payload_bytes() % entry_bytes == 0,
                             "opaque payload bytes %zu must be divisible by entry bytes %zu",
@@ -374,7 +374,7 @@ TEST(CacheConfigTest, SetTopologyInstallsTagAndGroupTopology) {
     config.layer_all_num = 3;
 
     auto swa_spec =
-        std::dynamic_pointer_cast<FixedStateCacheSpec>(makeResolvedOpaqueSpec(true, "swa", DataType::TYPE_UINT8, 2, 1));
+        std::dynamic_pointer_cast<SWAStateCacheSpec>(makeResolvedOpaqueSpec(true, "swa", DataType::TYPE_UINT8, 2, 1));
     auto csa_spec = std::dynamic_pointer_cast<CompressedKVCacheSpec>(
         makeResolvedOpaqueSpec(false, "csa", DataType::TYPE_UINT8, 2, 1));
 
@@ -514,7 +514,7 @@ TEST(HybridPoolConfigCreatorTest, Dsv4ModelProvidedAlignmentPropagatesToCacheSpe
     const auto* csa_kv =
         dynamic_cast<const CompressedKVCacheSpec*>(config.specForGroup(gidForTag(config, "csa_kv")).get());
     const auto* swa_kv =
-        dynamic_cast<const FixedStateCacheSpec*>(config.specForGroup(gidForTag(config, "swa_kv")).get());
+        dynamic_cast<const SWAStateCacheSpec*>(config.specForGroup(gidForTag(config, "swa_kv")).get());
     ASSERT_NE(csa_kv, nullptr);
     ASSERT_NE(swa_kv, nullptr);
     EXPECT_EQ(csa_kv->block_size_bytes() % 1024u, 0u);
@@ -678,7 +678,7 @@ TEST(HybridPoolConfigCreatorTest, BasicConfigUsesModelDefaultPhysicalAndKernelBl
     const auto* idx_kv =
         dynamic_cast<const CompressedKVCacheSpec*>(config.specForGroup(gidForTag(config, "indexer_kv")).get());
     const auto* swa_kv =
-        dynamic_cast<const FixedStateCacheSpec*>(config.specForGroup(gidForTag(config, "swa_kv")).get());
+        dynamic_cast<const SWAStateCacheSpec*>(config.specForGroup(gidForTag(config, "swa_kv")).get());
     ASSERT_NE(csa_kv, nullptr);
     ASSERT_NE(hca_kv, nullptr);
     ASSERT_NE(idx_kv, nullptr);
@@ -1025,7 +1025,7 @@ TEST(GenericOpaqueCacheSpecTest, CompressedKVSpecReportsGenericKindsAndLayout) {
         "compressed", kDsv4Fp8KvEntryBytes, 64, DataType::TYPE_UINT8, 4, DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES);
     ASSERT_NE(spec, nullptr);
 
-    EXPECT_EQ(spec->type, KVCacheSpecType::OpaqueKV);
+    EXPECT_EQ(spec->type, KVCacheSpecType::CompressedKVCache);
     EXPECT_EQ(spec->block_size(), 64u * kDsv4Fp8KvEntryBytes);
     EXPECT_EQ(spec->block_size_bytes(), 37440u);
     EXPECT_EQ(spec->block_size() / kDsv4Fp8KvEntryBytes, 64u);
@@ -1044,7 +1044,7 @@ TEST(GenericOpaqueCacheSpecTest, OpaqueKVSpecUsesSingleRegionWithoutKVSplit) {
 TEST(GenericOpaqueCacheSpecTest, OpaqueKVSpecAllowsStrideLargerThanPayload) {
     KVCacheSpecDesc desc;
     desc.tag                         = "odd_bytes";
-    desc.cache_type                  = KVCacheSpecType::OpaqueKV;
+    desc.cache_type                  = KVCacheSpecType::CompressedKVCache;
     desc.dtype                       = DataType::TYPE_UINT8;
     desc.entry_elems                 = 2;
     desc.entry_dtype                 = DataType::TYPE_UINT8;
@@ -1065,7 +1065,7 @@ TEST(GenericOpaqueCacheSpecTest, FixedStateSpecCloneKeepsResolvedLayout) {
     auto original = buildFixedStateSpec("state", 32, 8, DataType::TYPE_FP32);
     ASSERT_NE(original, nullptr);
 
-    auto cloned = std::dynamic_pointer_cast<FixedStateCacheSpec>(original->clone());
+    auto cloned = std::dynamic_pointer_cast<SWAStateCacheSpec>(original->clone());
     ASSERT_NE(cloned, nullptr);
     EXPECT_EQ(cloned->block_size(), 8u * 32u);
     EXPECT_EQ(cloned->block_size_bytes(), 8u * 32u * 4u);
@@ -1082,7 +1082,7 @@ TEST(GenericOpaqueCacheSpecTest, FixedStateSpecReportsGenericKindsAndSlicesByEnt
 
     auto sliced = sliceStateBlockForPeer(*spec, {block}, 4, 2);
     ASSERT_EQ(sliced.size(), 1u);
-    EXPECT_EQ(spec->type, KVCacheSpecType::OpaqueState);
+    EXPECT_EQ(spec->type, KVCacheSpecType::SWAState);
     EXPECT_EQ(sliced[0].addr, storage + 2 * 2 * 32 * 4);
     EXPECT_EQ(sliced[0].size_bytes, 2u * 32u * 4u);
 }
@@ -1558,7 +1558,7 @@ TEST(CacheConfigTest, SpecBuilderDerivesHybridPoolRuntimeFieldsFromContext) {
 
     KVCacheSpecDesc compressed_desc;
     compressed_desc.tag                = "compressed";
-    compressed_desc.cache_type         = KVCacheSpecType::OpaqueKV;
+    compressed_desc.cache_type         = KVCacheSpecType::CompressedKVCache;
     compressed_desc.entry_elems        = 16;
     compressed_desc.compression_ratio  = 4;
     compressed_desc.entry_dtype        = DataType::TYPE_UINT8;
@@ -1574,7 +1574,7 @@ TEST(CacheConfigTest, SpecBuilderDerivesHybridPoolRuntimeFieldsFromContext) {
 
     KVCacheSpecDesc state_desc;
     state_desc.tag                                  = "state";
-    state_desc.cache_type                           = KVCacheSpecType::OpaqueState;
+    state_desc.cache_type                           = KVCacheSpecType::SWAState;
     state_desc.entry_elems                          = 32;
     state_desc.entry_dtype                          = DataType::TYPE_FP32;
     state_desc.block_stride_bytes_alignment         = 64;
@@ -1587,7 +1587,7 @@ TEST(CacheConfigTest, SpecBuilderDerivesHybridPoolRuntimeFieldsFromContext) {
     state_desc.cp->prefill_slice_layout             = CpPrefillSliceLayout::PAYLOAD;
     state_desc.cp->scale_seq_size                   = true;
 
-    auto prefill_state = std::dynamic_pointer_cast<FixedStateCacheSpec>(SpecBuilder::build(state_desc, ctx));
+    auto prefill_state = std::dynamic_pointer_cast<SWAStateCacheSpec>(SpecBuilder::build(state_desc, ctx));
     ASSERT_NE(prefill_state, nullptr);
     EXPECT_EQ(opaqueEntriesPerBlock(*prefill_state, 32u * getTypeSize(DataType::TYPE_FP32)), 6u);
     EXPECT_EQ(prefill_state->block_size_bytes(), 768u);
@@ -1599,7 +1599,7 @@ TEST(CacheConfigTest, SpecBuilderDerivesHybridPoolRuntimeFieldsFromContext) {
     decode_parallelism.prefill_cp_config.kv_cache_sharded = true;
     decode_parallelism.prefill_cp_config.prefill_cp_size  = 2;
     ctx.parallelism_config                                = &decode_parallelism;
-    auto decode_state = std::dynamic_pointer_cast<FixedStateCacheSpec>(SpecBuilder::build(state_desc, ctx));
+    auto decode_state = std::dynamic_pointer_cast<SWAStateCacheSpec>(SpecBuilder::build(state_desc, ctx));
     ASSERT_NE(decode_state, nullptr);
     EXPECT_EQ(opaqueEntriesPerBlock(*decode_state, 32u * getTypeSize(DataType::TYPE_FP32)), 12u);
     EXPECT_EQ(decode_state->seq_size_per_block, 256u);
@@ -1907,21 +1907,21 @@ TEST(HybridPoolConfigCreatorTest, MtpGenNum2RingEntriesMatch) {
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 7u);
     // Pool 3: INDEXER_STATE (ratio=4, overlap=1) → R=10
     auto* indexer_state =
-        dynamic_cast<const FixedStateCacheSpec*>(config.specForGroup(gidForTag(config, "indexer_state")).get());
+        dynamic_cast<const SWAStateCacheSpec*>(config.specForGroup(gidForTag(config, "indexer_state")).get());
     ASSERT_NE(indexer_state, nullptr);
     EXPECT_EQ(opaqueEntriesPerBlock(*indexer_state, kDsv4IndexerStateEntryBytes), 10u);
     // Pool 4: CSA_STATE (ratio=4, overlap=1) → R=10
     auto* csa_state =
-        dynamic_cast<const FixedStateCacheSpec*>(config.specForGroup(gidForTag(config, "csa_state")).get());
+        dynamic_cast<const SWAStateCacheSpec*>(config.specForGroup(gidForTag(config, "csa_state")).get());
     ASSERT_NE(csa_state, nullptr);
     EXPECT_EQ(opaqueEntriesPerBlock(*csa_state, kDsv4CsaStateEntryBytes), 10u);
     // Pool 5: HCA_STATE (ratio=128, overlap=0) → R=130
     auto* hca_state =
-        dynamic_cast<const FixedStateCacheSpec*>(config.specForGroup(gidForTag(config, "hca_state")).get());
+        dynamic_cast<const SWAStateCacheSpec*>(config.specForGroup(gidForTag(config, "hca_state")).get());
     ASSERT_NE(hca_state, nullptr);
     EXPECT_EQ(opaqueEntriesPerBlock(*hca_state, kDsv4HcaStateEntryBytes), 130u);
     // Pool 6: SWA_KV (window=128, overlap=0) → R=130, same as HCA_STATE
-    auto* swa_kv = dynamic_cast<const FixedStateCacheSpec*>(config.specForGroup(gidForTag(config, "swa_kv")).get());
+    auto* swa_kv = dynamic_cast<const SWAStateCacheSpec*>(config.specForGroup(gidForTag(config, "swa_kv")).get());
     ASSERT_NE(swa_kv, nullptr);
     EXPECT_EQ(swa_kv->tag, "swa_kv");
     EXPECT_EQ(opaqueEntriesPerBlock(*swa_kv, kDsv4KvEntryBytes), 130u);
@@ -1938,12 +1938,12 @@ TEST(HybridPoolConfigCreatorTest, PrefillCp8MtpGenNum2PadsStateRingBeforeSlicing
 
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 7u);
     auto* indexer_state =
-        dynamic_cast<const FixedStateCacheSpec*>(config.specForGroup(gidForTag(config, "indexer_state")).get());
+        dynamic_cast<const SWAStateCacheSpec*>(config.specForGroup(gidForTag(config, "indexer_state")).get());
     auto* csa_state =
-        dynamic_cast<const FixedStateCacheSpec*>(config.specForGroup(gidForTag(config, "csa_state")).get());
+        dynamic_cast<const SWAStateCacheSpec*>(config.specForGroup(gidForTag(config, "csa_state")).get());
     auto* hca_state =
-        dynamic_cast<const FixedStateCacheSpec*>(config.specForGroup(gidForTag(config, "hca_state")).get());
-    auto* swa_kv = dynamic_cast<const FixedStateCacheSpec*>(config.specForGroup(gidForTag(config, "swa_kv")).get());
+        dynamic_cast<const SWAStateCacheSpec*>(config.specForGroup(gidForTag(config, "hca_state")).get());
+    auto* swa_kv = dynamic_cast<const SWAStateCacheSpec*>(config.specForGroup(gidForTag(config, "swa_kv")).get());
     ASSERT_NE(indexer_state, nullptr);
     ASSERT_NE(csa_state, nullptr);
     ASSERT_NE(hca_state, nullptr);
@@ -1985,32 +1985,32 @@ TEST(HybridPoolConfigCreatorTest, DecodePrefillCp8MtpGenNum2ExpandsFixedAndSwaSl
     for (const auto& tag : {"indexer_state", "csa_state", "hca_state"}) {
         const auto prefill_gid = gidForTag(prefill_config, tag);
         const auto decode_gid  = gidForTag(decode_config, tag);
-        auto* prefill_spec = dynamic_cast<const FixedStateCacheSpec*>(prefill_config.specForGroup(prefill_gid).get());
-        auto* decode_spec  = dynamic_cast<const FixedStateCacheSpec*>(decode_config.specForGroup(decode_gid).get());
+        auto* prefill_spec = dynamic_cast<const SWAStateCacheSpec*>(prefill_config.specForGroup(prefill_gid).get());
+        auto* decode_spec  = dynamic_cast<const SWAStateCacheSpec*>(decode_config.specForGroup(decode_gid).get());
         ASSERT_NE(prefill_spec, nullptr) << tag;
         ASSERT_NE(decode_spec, nullptr) << tag;
         EXPECT_EQ(decode_spec->tag, prefill_spec->tag) << tag;
         const auto expected_entries = opaqueEntriesPerBlock(*prefill_spec, stateEntryBytesForTag(tag)) * cp_size;
         EXPECT_EQ(opaqueEntriesPerBlock(*decode_spec, stateEntryBytesForTag(tag)), expected_entries) << tag;
     }
-    auto* prefill_swa = dynamic_cast<const FixedStateCacheSpec*>(
+    auto* prefill_swa = dynamic_cast<const SWAStateCacheSpec*>(
         prefill_config.specForGroup(gidForTag(prefill_config, "swa_kv")).get());
     auto* decode_swa =
-        dynamic_cast<const FixedStateCacheSpec*>(decode_config.specForGroup(gidForTag(decode_config, "swa_kv")).get());
+        dynamic_cast<const SWAStateCacheSpec*>(decode_config.specForGroup(gidForTag(decode_config, "swa_kv")).get());
     ASSERT_NE(prefill_swa, nullptr);
     ASSERT_NE(decode_swa, nullptr);
     EXPECT_EQ(opaqueEntriesPerBlock(*prefill_swa, kDsv4KvEntryBytes), 136u);
     EXPECT_EQ(opaqueEntriesPerBlock(*decode_swa, kDsv4KvEntryBytes),
               opaqueEntriesPerBlock(*prefill_swa, kDsv4KvEntryBytes));
 
-    auto* indexer_state = dynamic_cast<const FixedStateCacheSpec*>(
+    auto* indexer_state = dynamic_cast<const SWAStateCacheSpec*>(
         decode_config.specForGroup(gidForTag(decode_config, "indexer_state")).get());
-    auto* csa_state = dynamic_cast<const FixedStateCacheSpec*>(
+    auto* csa_state = dynamic_cast<const SWAStateCacheSpec*>(
         decode_config.specForGroup(gidForTag(decode_config, "csa_state")).get());
-    auto* hca_state = dynamic_cast<const FixedStateCacheSpec*>(
+    auto* hca_state = dynamic_cast<const SWAStateCacheSpec*>(
         decode_config.specForGroup(gidForTag(decode_config, "hca_state")).get());
     auto* swa_kv =
-        dynamic_cast<const FixedStateCacheSpec*>(decode_config.specForGroup(gidForTag(decode_config, "swa_kv")).get());
+        dynamic_cast<const SWAStateCacheSpec*>(decode_config.specForGroup(gidForTag(decode_config, "swa_kv")).get());
     ASSERT_NE(indexer_state, nullptr);
     ASSERT_NE(csa_state, nullptr);
     ASSERT_NE(hca_state, nullptr);
@@ -2046,17 +2046,17 @@ TEST(HybridPoolConfigCreatorTest, DecodeExplicitPrefillCpSizeHandlesDp16) {
     for (const auto& tag : {"indexer_state", "csa_state", "hca_state"}) {
         const auto prefill_gid = gidForTag(prefill_config, tag);
         const auto decode_gid  = gidForTag(decode_config, tag);
-        auto* prefill_spec = dynamic_cast<const FixedStateCacheSpec*>(prefill_config.specForGroup(prefill_gid).get());
-        auto* decode_spec  = dynamic_cast<const FixedStateCacheSpec*>(decode_config.specForGroup(decode_gid).get());
+        auto* prefill_spec = dynamic_cast<const SWAStateCacheSpec*>(prefill_config.specForGroup(prefill_gid).get());
+        auto* decode_spec  = dynamic_cast<const SWAStateCacheSpec*>(decode_config.specForGroup(decode_gid).get());
         ASSERT_NE(prefill_spec, nullptr) << tag;
         ASSERT_NE(decode_spec, nullptr) << tag;
         const auto expected_entries = opaqueEntriesPerBlock(*prefill_spec, stateEntryBytesForTag(tag)) * cp_size;
         EXPECT_EQ(opaqueEntriesPerBlock(*decode_spec, stateEntryBytesForTag(tag)), expected_entries) << tag;
     }
-    auto* prefill_swa = dynamic_cast<const FixedStateCacheSpec*>(
+    auto* prefill_swa = dynamic_cast<const SWAStateCacheSpec*>(
         prefill_config.specForGroup(gidForTag(prefill_config, "swa_kv")).get());
     auto* decode_swa =
-        dynamic_cast<const FixedStateCacheSpec*>(decode_config.specForGroup(gidForTag(decode_config, "swa_kv")).get());
+        dynamic_cast<const SWAStateCacheSpec*>(decode_config.specForGroup(gidForTag(decode_config, "swa_kv")).get());
     ASSERT_NE(prefill_swa, nullptr);
     ASSERT_NE(decode_swa, nullptr);
     EXPECT_EQ(opaqueEntriesPerBlock(*prefill_swa, kDsv4KvEntryBytes), 136u);
@@ -2080,7 +2080,7 @@ TEST(CacheConfigTest, DSV4NonMtpSpConfigDoesNotInflateRing) {
     auto config = CacheConfigCreator::createConfig(mc, pc, rc, kvc, std::nullopt, std::make_optional(sp_none));
     ASSERT_EQ(static_cast<size_t>(config.groupNums()), 7u);
     // CSA_STATE (pool 4): ratio=4, overlap=1, gen_num=0 → R=8
-    auto* csa = dynamic_cast<const FixedStateCacheSpec*>(config.specForGroup(gidForTag(config, "csa_state")).get());
+    auto* csa = dynamic_cast<const SWAStateCacheSpec*>(config.specForGroup(gidForTag(config, "csa_state")).get());
     ASSERT_NE(csa, nullptr);
     EXPECT_EQ(opaqueEntriesPerBlock(*csa, kDsv4CsaStateEntryBytes), 8u) << "SP_TYPE_NONE should not inflate ring";
 }

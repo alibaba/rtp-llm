@@ -118,8 +118,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("MHA", KVCacheSpecType::MultiHeadAttention)
         .value("MLA", KVCacheSpecType::MultiHeadLatentAttention)
         .value("LINEAR", KVCacheSpecType::LinearAttention)
-        .value("OPAQUE_KV", KVCacheSpecType::OpaqueKV)
-        .value("OPAQUE_STATE", KVCacheSpecType::OpaqueState);
+        .value("COMPRESSED_KV_CACHE", KVCacheSpecType::CompressedKVCache)
+        .value("SWA_STATE", KVCacheSpecType::SWAState);
 
     py::enum_<CacheGroupType>(m, "CacheGroupType")
         .value("LINEAR", CacheGroupType::LINEAR)

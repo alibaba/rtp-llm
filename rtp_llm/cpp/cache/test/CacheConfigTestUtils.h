@@ -13,7 +13,7 @@
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/cache/MLAKVCacheSpec.h"
-#include "rtp_llm/cpp/cache/OpaqueKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/Dsv4KVCacheSpec.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 
@@ -193,7 +193,7 @@ inline KVCacheSpecPtr makeResolvedOpaqueSpec(bool               state_cache,
 
     KVCacheSpecDesc desc;
     desc.tag                         = tag.empty() ? "opaque" : tag;
-    desc.cache_type                  = state_cache ? KVCacheSpecType::OpaqueState : KVCacheSpecType::OpaqueKV;
+    desc.cache_type                  = state_cache ? KVCacheSpecType::SWAState : KVCacheSpecType::CompressedKVCache;
     desc.dtype                       = dtype;
     desc.entry_dtype                 = dtype;
     desc.entry_elems                 = 1;
@@ -218,7 +218,7 @@ inline KVCacheSpecDesc makeDsv4Desc(const std::string& tag,
     desc.entry_elems = entry_elems;
     desc.entry_dtype = dtype;
     if (kind == "compressed_kv") {
-        desc.cache_type        = KVCacheSpecType::OpaqueKV;
+        desc.cache_type        = KVCacheSpecType::CompressedKVCache;
         desc.is_state_cache    = false;
         desc.entry_count_mode  = OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED;
         desc.compression_ratio = compression_ratio;
@@ -228,7 +228,7 @@ inline KVCacheSpecDesc makeDsv4Desc(const std::string& tag,
         return desc;
     }
 
-    desc.cache_type          = KVCacheSpecType::OpaqueState;
+    desc.cache_type          = KVCacheSpecType::SWAState;
     desc.is_state_cache      = true;
     desc.entry_count_mode    = OpaqueBlockEntryCountMode::STATE_RING;
     desc.reuse               = CacheReusePolicyDesc{};
@@ -308,7 +308,7 @@ inline void setHybridAttentionKvCacheSpecs(ModelConfig& model_config) {
 
     KVCacheSpecDesc swa_desc = full_desc;
     swa_desc.tag             = "swa";
-    swa_desc.cache_type      = KVCacheSpecType::OpaqueState;
+    swa_desc.cache_type      = KVCacheSpecType::SWAState;
     swa_desc.entry_elems     = static_cast<uint32_t>(model_config.attn_config.size_per_head)
                            * static_cast<uint32_t>(model_config.attn_config.kv_head_num) * 2;
     swa_desc.explicit_entry_count = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
