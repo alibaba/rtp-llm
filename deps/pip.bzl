@@ -12,9 +12,9 @@ load("@rules_python//python:pip.bzl", "pip_parse")
 #     hard error and the resolve fails for non-pytorch packages (decord, etc.)
 #     even though they exist on the PyPI mirror.
 #   - mirrors.aliyun.com/pypi/simple: China-friendly PyPI mirror for base packages
-# Shared pip/pip-compile flags. Does NOT include PyTorch indexes, which differ
-# by target config (CUDA vs ROCm). Keeping them separate avoids uv asking every
-# package against both cu129 and rocm7.2 indexes during lockfile regeneration.
+# Shared pip/pip-compile flags. Does NOT include the PyTorch index, which is
+# CUDA-only. Keeping it separate avoids uv asking every package against the
+# cu129 index during lockfile regeneration.
 PIP_BASE_ARGS = [
     "--cache-dir=~/.cache/pip",
     # --index-url overrides the env's PIP_INDEX_URL (which intranet containers
@@ -30,9 +30,11 @@ PIP_CUDA_EXTRA_ARGS = PIP_BASE_ARGS + [
     "--extra-index-url=https://download.pytorch.org/whl/cu129/",
 ]
 
-PIP_ROCM_EXTRA_ARGS = PIP_BASE_ARGS + [
-    "--extra-index-url=https://download.pytorch.org/whl/rocm7.2/",
-]
+# ROCm uses only the base indexes (aliyun + OSS). The ROCm torch stack
+# (torch==2.9.1+git*, torchvision, triton, aiter, ...) is hosted on the OSS
+# simple index, so download.pytorch.org/whl/rocm7.2/ is redundant — and that
+# host times out / 403s from CI, failing the entire pip resolution.
+PIP_ROCM_EXTRA_ARGS = PIP_BASE_ARGS
 
 # Backwards-compatible alias for callers that do not yet care about config.
 # NOTE: This alias implies the CUDA context. ROCm callers MUST use

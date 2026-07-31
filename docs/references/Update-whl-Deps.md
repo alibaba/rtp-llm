@@ -48,7 +48,7 @@ uv pip compile requirements_cuda12_arm.txt --output-file requirements_lock_cuda1
 **ROCm x86_64:**
 
 ```bash
-uv pip compile requirements_rocm.txt --output-file requirements_lock_rocm.txt --python-version 3.10 --python-platform x86_64-manylinux_2_28 --generate-hashes --emit-index-url --index-strategy unsafe-best-match --index-url https://mirrors.aliyun.com/pypi/simple/ --extra-index-url https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/ --extra-index-url https://download.pytorch.org/whl/rocm7.2/
+uv pip compile requirements_rocm.txt --output-file requirements_lock_rocm.txt --python-version 3.10 --python-platform x86_64-manylinux_2_28 --generate-hashes --emit-index-url --index-strategy unsafe-best-match --index-url https://mirrors.aliyun.com/pypi/simple/ --extra-index-url https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/simple/
 ```
 
 The generated lock file starts with the command header followed by the resolved, hash-pinned entries:
