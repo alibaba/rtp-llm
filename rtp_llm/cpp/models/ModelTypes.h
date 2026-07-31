@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/models_py/bindings/core/TensorHolder.h"
+#include <array>
 #include <string>
 #include <utility>
 #include <memory>
@@ -98,6 +99,8 @@ enum GptModelInputIndex : size_t {
     gptModelInputLength,
 };
 
+using GptModelInputShapeHints = std::array<int64_t, GptModelInputIndex::gptModelInputLength>;
+
 // Bit positions for `tensorDeviceMap`. Only fields that participate in the
 // MTP/Eagle decode-prepare GPU path need a bit; other fields stay CPU.
 enum GptModelInputDeviceBit : uint32_t {
@@ -113,12 +116,15 @@ enum GptModelInputDeviceBit : uint32_t {
 };
 
 struct CacheStoreTensorSyncMetadata {
-    int32_t  input_lengths_count  = 0;
-    int32_t  prefix_lengths_count = 0;
+    int64_t  input_lengths_count  = 0;
+    int64_t  prefix_lengths_count = 0;
     uint32_t device_bits          = 0;
 };
 
 CacheStoreTensorSyncMetadata getCacheStoreTensorSyncMetadata(const GptModelInputs& inputs);
+GptModelInputShapeHints       getModelInputShapeHints(const GptModelInputs& inputs);
+torch::Tensor                 makeModelInputShapeHintsTensor(const GptModelInputs& inputs);
+std::array<int64_t, 2>        decodeMtpHiddenStatesShape(int64_t total_numel, int64_t rows);
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);
 
