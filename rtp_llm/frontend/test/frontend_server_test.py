@@ -18,6 +18,12 @@ class FakePipelinResponse(BaseModel):
 
 
 class FakeFrontendWorker(object):
+    def __init__(self):
+        self.close_called = False
+
+    async def close(self):
+        self.close_called = True
+
     def inference(self, prompt: str, *args: Any, **kwargs: Any):
         response_generator = self._inference(prompt, *args, **kwargs)
         return CompleteResponseAsyncGenerator(
@@ -35,6 +41,9 @@ class FakeFrontendWorker(object):
 
 
 class FakeRawRequest(object):
+    def __init__(self, headers: dict[str, str] | None = None):
+        self.headers = headers or {}
+
     async def is_disconnected(self):
         return False
 
@@ -82,6 +91,11 @@ class FrontendServerTest(TestCase):
         # test error input
         res = self.frontend_server.tokenizer_encode('{"text": "b c d e"}')
         self.assertEqual(json.loads(res.body.decode("utf-8"))["error_code"], 514)
+
+    def test_close_uses_production_frontend_server_contract(self):
+        asyncio.run(self.frontend_server.close())
+
+        self.assertTrue(self.frontend_server._frontend_worker.close_called)
 
 
 main()
