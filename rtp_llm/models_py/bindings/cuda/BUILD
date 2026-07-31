@@ -20,6 +20,7 @@ cc_library(
         "//rtp_llm/cpp/utils:stack_trace",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:static_config",
+        "@local_config_cuda//cuda:cuda_driver",
         "@local_config_cuda//cuda:nvml",
     ],
     copts = copts(),
