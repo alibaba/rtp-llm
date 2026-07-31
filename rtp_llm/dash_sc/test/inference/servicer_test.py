@@ -456,9 +456,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status_code"], 503)
         self.assertIn("route failed", payload["status_message"])
         self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.TASK_LIST_FULL)
-        self.assertEqual(
-            access_agg.backend_error_code, "8500_ROUTE_ERROR"
-        )
+        self.assertEqual(access_agg.backend_error_code, "8500_ROUTE_ERROR")
 
     async def test_stream_exception_yields_error_message(self) -> None:
         req = self._minimal_request()
@@ -1328,10 +1326,70 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(value, 1)
         self.assertEqual(tags["protocol"], "dash_sc_grpc")
 
-    async def test_phase2_strips_leading_thinking_then_close(self) -> None:
-        """Phase-2 model occasionally emits accidental thinking followed by
-        ``</think>`` before the real answer. The leading reasoning + close
-        sequence must be stripped so only post-close tokens reach the client."""
+    async def test_phase2_grammar_streams_each_backend_chunk_immediately(self) -> None:
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 1], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2_first = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20, 21], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2_final = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([22], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2_stream = _FakeAsyncStream([phase2_first, phase2_final])
+        visitor = _MultiStreamVisitor([_FakeAsyncStream([phase1]), phase2_stream])
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        responses = iter_real_model_stream_infer(
+            req,
+            [7, 8, 128821],
+            SamplingParams(
+                response_format=json.dumps({"type": "json_object"}),
+            ),
+            OtherParams(enable_thinking=True),
+            visitor,
+            rtp_llm_request_id=100,
+            echo_prefix_ids=[128821, 198],
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+            phase2_request_id_factory=lambda: 200,
+        )
+
+        first_phase2 = None
+        async for response in responses:
+            if response.infer_response.id.endswith("-2"):
+                first_phase2 = response
+                break
+
+        self.assertIsNotNone(first_phase2)
+        self.assertEqual(_gen_ids(first_phase2), [20, 21])
+        self.assertEqual(phase2_stream._emitted, 1)
+
+        remaining = await _drain(responses)
+        self.assertEqual([_gen_ids(chunk) for chunk in remaining], [[22]])
+
+    async def test_phase2_preserves_leading_thinking_then_close(self) -> None:
+        """Phase-2 output is streamed unchanged, matching DashLLM ownership."""
         req = self._minimal_request()
         phase1 = GenerateOutputs(
             generate_outputs=[
@@ -1392,18 +1450,16 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        # Phase-1 emits two chunks (truncated content then synthesised eos).
-        # Phase-2 sees [55, 56] (accidental thinking, buffered then dropped),
-        # then [128822, 271, 20, 21] (close + tail content). Client only sees
-        # [20, 21] from phase-2.
+        # Phase-2 servicer output is a transparent chunk-for-chunk pass-through.
         phase2_chunks = [c for c in chunks if c.infer_response.id.endswith("-2")]
-        self.assertEqual(len(phase2_chunks), 1)
-        self.assertEqual(_gen_ids(phase2_chunks[0]), [20, 21])
+        self.assertEqual(len(phase2_chunks), 2)
+        self.assertEqual(
+            [_gen_ids(chunk) for chunk in phase2_chunks],
+            [[55, 56], [128822, 271, 20, 21]],
+        )
 
-    async def test_phase2_strips_trailing_eos_artifact(self) -> None:
-        """Phase-2 ends with a structural ``</think>\\n\\n`` closing-tag
-        artifact mirroring the empty-think prompt body. That trailing
-        sequence must not leak into ``content``."""
+    async def test_phase2_preserves_trailing_think_close(self) -> None:
+        """Phase-2 trailing close tokens remain backend-owned output."""
         req = self._minimal_request()
         phase1 = GenerateOutputs(
             generate_outputs=[
@@ -1456,8 +1512,10 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
 
         phase2_chunks = [c for c in chunks if c.infer_response.id.endswith("-2")]
         self.assertEqual(len(phase2_chunks), 1)
-        # Trailing [128822, 271] is stripped; only the real answer ids survive.
-        self.assertEqual(_gen_ids(phase2_chunks[0]), [30, 31, 32])
+        self.assertEqual(
+            _gen_ids(phase2_chunks[0]),
+            [30, 31, 32, 128822, 271],
+        )
 
 
 class IterRealModelStreamInferEchoTest(unittest.IsolatedAsyncioTestCase):
