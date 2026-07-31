@@ -19,6 +19,7 @@ public:
         propose_step_(sp_config.gen_num_per_cycle),
         is_dspark_(sp_config.type == SP_TYPE_DSPARK),
         dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
+        dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor),
         dspark_vocab_size_(model_config.vocab_size) {}
 
     absl::Status dispatchPrefill(const StreamGroups& stream_groups,
@@ -70,8 +71,8 @@ public:
 
     // ---- DSpark/DFlash block-diffusion variants -------------------------
     // One non-causal draft block forward per round replaces the MTP
-    // shift/decode-chain: the draft input is always [anchor + k*mask] per
-    // stream, plus the target aux features to inject as draft context KV.
+    // shift/decode-chain. Official DSV4 uses [anchor + (k-1)*noise], while
+    // DFlash/speculators checkpoints use [anchor + k*mask].
 
     // Prefill seeding: anchor = target-sampled token, feature window = the
     // computed prompt suffix (prefix-cache reuse keeps its injected KV).
@@ -144,8 +145,10 @@ protected:
     // Grow-only caches for the dspark per-round constants: their contents
     // depend only on (batch_size, width), so rebuilding them every decode
     // round is pure allocator + launch overhead on the main thread.
+    int64_t       dsparkQueryWidth() const;
     torch::Tensor dsparkComboTokens(int64_t batch_size, const torch::Tensor& anchors);
-    torch::Tensor dsparkCtxLengths(int64_t batch_size);
+    torch::Tensor dsparkQueryLengths(int64_t batch_size);
+    torch::Tensor dsparkDenseCtxLengths(int64_t batch_size);
     torch::Tensor dsparkLmIndexes(int64_t batch_size);
     // Zero-filled stand-in consumed by the rejection kernel when a greedy-only
     // stream's draft probs were dropped on the PD wire: the kernel still
@@ -176,13 +179,15 @@ protected:
     // DSpark/DFlash block-diffusion draft (see the DSpark variants above).
     bool    is_dspark_            = false;
     int32_t dspark_mask_token_id_ = -1;
+    bool    dspark_sample_from_anchor_ = false;
 
     int64_t dspark_vocab_size_ = 0;
 
-    torch::Tensor dspark_combo_cache_;        // [cap, width] int32, mask-filled
-    torch::Tensor dspark_ctx_lengths_cache_;  // [cap] int32, filled with width
-    torch::Tensor dspark_lm_indexes_cache_;   // [cap] int32, arange(cap) * width
-    torch::Tensor dspark_dummy_probs_;        // [cap, k, vocab] fp32 zeros
+    torch::Tensor dspark_combo_cache_;              // [cap, query_width] int32
+    torch::Tensor dspark_query_lengths_cache_;       // [cap] = query_width
+    torch::Tensor dspark_dense_ctx_lengths_cache_;   // [cap] = target width k+1
+    torch::Tensor dspark_lm_indexes_cache_;           // [cap], query row bases
+    torch::Tensor dspark_dummy_probs_;                // [cap, k, vocab] fp32 zeros
     torch::Tensor dspark_target_dummy_probs_;  // [cap, k+1, vocab] fp32 zeros
 };
 }  // namespace rtp_llm

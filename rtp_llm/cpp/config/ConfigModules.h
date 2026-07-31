@@ -323,13 +323,16 @@ struct SpeculativeExecutionConfig {
     bool            force_score_context_attention = true;
     std::string     quantization                  = "";
     std::string     checkpoint_path               = "";
-    // DSpark/DFlash static commit length k; 0 = derive from the draft ckpt's
-    // speculative_tokens.  Must satisfy k + 1 <= ckpt block_size.
+    // DSpark/DFlash static proposal length k; 0 = derive from the draft ckpt.
     int64_t sp_dspark_propose_num = 0;
     // DSpark/DFlash mask token id from the draft ckpt config; the executor
     // builds each [anchor + k*mask] query block with it.  -1 = unset (filled
     // by model_factory from the draft ckpt when sp_type is dspark).
     int64_t sp_dspark_mask_token_id = -1;
+    // Official DSV4 DSpark uses k query rows (anchor + k-1 noise). DFlash and
+    // speculators-format checkpoints use 1+k query rows. Derived from the
+    // checkpoint; it is not a user-facing scheduling knob.
+    bool sp_dspark_sample_from_anchor = false;
     std::string     to_string() const;
 
     // Helper functions for enum conversion

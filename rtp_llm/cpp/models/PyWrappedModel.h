@@ -312,13 +312,14 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         // | Normal Model (decode)     | false                    | SP_TYPE_NONE   | -        | 1 (default)             |
         // | Target Model (verify)     | false                    | != SP_TYPE_NONE| 0        | gen_num_per_cycle + 1   |
         // | Draft Model (decode)      | false                    | != SP_TYPE_NONE| 1        | 1 (default)             |
-        // | DSpark Draft (decode)     | false                    | SP_TYPE_DSPARK | 1        | gen_num_per_cycle + 1   |
+        // | DSv4 DSpark Draft         | any                      | SP_TYPE_DSPARK | 1        | gen_num_per_cycle       |
+        // | Legacy DSpark Draft       | any                      | SP_TYPE_DSPARK | 1        | gen_num_per_cycle + 1   |
         // +---------------------------+--------------------------+----------------+----------+-------------------------+
-        // The DSpark draft's block forward is always a k+1-wide (anchor + k masks)
-        // query per request in BOTH decode-tail and seeding, so a single decode
-        // graph captures it -- unlike MTP, which needs a separate prefill draft
-        // object (decode width 1, prefill width gamma+1). See
-        // docs/dspark-two-phase-plan-2026-07-14.md 2.5.
+        // DSv4's sample_from_anchor checkpoint uses k query rows
+        // (anchor + k-1 masks), while legacy/speculators-format checkpoints use
+        // k+1 rows (anchor + k masks).  Target verification stays k+1 wide for
+        // both layouts.  Keep the draft capture width checkpoint-derived so
+        // eager and graph modes share exactly the same tensor contract.
         // clang-format on
 
         const bool is_dspark = params.sp_config.type == SP_TYPE_DSPARK;
@@ -331,7 +332,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
             // for target model verify, draft model prefill, and DSpark draft decode
             // Only use multi-token capture when SP is actually enabled;
             // gen_num_per_cycle may be >1 from config even when SP is disabled.
-            graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle + 1;
+            const bool is_dspark_draft = is_dspark && params.model_id;
+            graph_params.num_tokens_per_bs =
+                params.sp_config.gen_num_per_cycle
+                + ((!is_dspark_draft || !params.sp_config.sp_dspark_sample_from_anchor) ? 1 : 0);
         } else {
             graph_params.num_tokens_per_bs = 1;
         }

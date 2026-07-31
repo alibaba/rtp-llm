@@ -2,6 +2,7 @@ import json
 import logging
 import os
 import sys
+from dataclasses import replace
 from typing import Any, Dict, Optional, Type, Union
 
 import torch
@@ -439,19 +440,31 @@ class ModelFactory:
                 "(sp_model_type qwen_3_dspark / qwen_3_dflash), got "
                 f"model_type '{propose_model_config.model_type}'"
             )
-        # Static commit length k: flag overrides the ckpt's speculative_tokens.
-        # The query block is 1 + k wide and must fit the training block width.
+        # Static proposal length k: the official DSV4 checkpoint uses
+        # anchor-as-first (k query rows), while speculators-format DFlash/Qwen
+        # checkpoints use a 1+k fill-in query. Preserve that checkpoint
+        # semantic explicitly for the C++ executor.
         k = int(sp_config.sp_dspark_propose_num) or dspark_params.speculative_tokens
-        if k <= 0 or k + 1 > dspark_params.block_size:
+        sample_from_anchor = bool(
+            getattr(dspark_params, "sample_from_anchor", False)
+        )
+        query_width = k if sample_from_anchor else k + 1
+        if k <= 0 or query_width > dspark_params.block_size:
             raise ValueError(
-                f"invalid dspark propose num {k}: need 0 < k and k + 1 <= "
+                f"invalid dspark propose num {k}: need 0 < k and query width "
+                f"{query_width} <= "
                 f"ckpt block_size ({dspark_params.block_size})"
             )
-        dspark_params.speculative_tokens = k
+        resolved_dspark_params = replace(
+            dspark_params, speculative_tokens=k
+        )
+        propose_model_config.dspark_config = resolved_dspark_params
         # propose_step / verify width / lookahead reservation all key off this.
         sp_config.gen_num_per_cycle = k
-        # The executor builds each [anchor + k*mask] query block in C++.
+        # The executor builds either [anchor + (k-1)*mask] (DSV4) or
+        # [anchor + k*mask] (DFlash/speculators) in C++.
         sp_config.sp_dspark_mask_token_id = dspark_params.mask_token_id
+        sp_config.sp_dspark_sample_from_anchor = sample_from_anchor
 
         # Phase-2 knobs (confidence / STS / SPS, dspark-phase2-design §API) are
         # not implemented in phase 1 — reject them loudly instead of silently
@@ -488,6 +501,6 @@ class ModelFactory:
             )
         model_config.capture_aux_hidden_layer_ids = capture_ids
         logging.info(
-            f"dspark wiring: k={k} (block width {dspark_params.block_width}), "
+            f"dspark wiring: k={k} (query width {resolved_dspark_params.block_width}), "
             f"target capture layer ids (0-based) = {capture_ids}"
         )

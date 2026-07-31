@@ -9,11 +9,14 @@
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 
 #define private public
+#define protected public
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
+#undef protected
 #undef private
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
+#include "rtp_llm/cpp/models/logits_processor/SpecLogitsProcessor.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorStates.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
@@ -22,6 +25,19 @@
 using namespace std;
 
 namespace rtp_llm {
+
+class DSparkGrammarLikeProcessor: public BaseLogitsProcessor, public SpecLogitsProcessor {
+public:
+    void process(const SamplerInputs&, size_t, size_t) override {}
+    void updateMultiSeqStatus(const std::vector<int>&) override {}
+    void updateStatus(const torch::Tensor&, int32_t) override {}
+    bool isStateful() const override { return true; }
+    int64_t acceptedTokenLen() const override { return 0; }
+    bool isSpecVerifyEligible() const override { return true; }
+    int tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override {
+        return request.propose_step;
+    }
+};
 
 template<typename T>
 std::vector<T> toVec(const torch::Tensor& t) {
@@ -1184,6 +1200,43 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPdPrefillProposeRow) {
     EXPECT_FALSE(stream1->getSPOutputBuffer()->hidden_states.defined());
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testDSparkAnchorAsFirstQueryLayout) {
+    ModelConfig                 model_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+
+    const int64_t k = 3;
+    model_config.vocab_size                    = 16;
+    sp_config.type                             = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle                = k;
+    sp_config.sp_dspark_mask_token_id          = 9;
+    sp_config.sp_dspark_sample_from_anchor     = true;
+
+    MtpBatchStreamProcessor anchor_processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    auto anchors = torch::tensor({11, 12}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    EXPECT_EQ(3, anchor_processor.dsparkQueryWidth());
+    EXPECT_EQ((vector<int>{11, 9, 9, 12, 9, 9}),
+              toVec<int>(anchor_processor.dsparkComboTokens(2, anchors)));
+    EXPECT_EQ((vector<int>{3, 3}), toVec<int>(anchor_processor.dsparkQueryLengths(2)));
+    EXPECT_EQ((vector<int>{4, 4}), toVec<int>(anchor_processor.dsparkDenseCtxLengths(2)));
+    EXPECT_EQ((vector<int>{0, 3}), toVec<int>(anchor_processor.dsparkLmIndexes(2)));
+
+    // The source #1249 DFlash/speculators layout remains 1+k when the
+    // checkpoint does not opt into anchor-as-first.
+    sp_config.sp_dspark_sample_from_anchor = false;
+    MtpBatchStreamProcessor fill_processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    EXPECT_EQ(4, fill_processor.dsparkQueryWidth());
+    EXPECT_EQ((vector<int>{11, 9, 9, 9, 12, 9, 9, 9}),
+              toVec<int>(fill_processor.dsparkComboTokens(2, anchors)));
+    EXPECT_EQ((vector<int>{4, 4}), toVec<int>(fill_processor.dsparkQueryLengths(2)));
+    EXPECT_EQ((vector<int>{0, 4}), toVec<int>(fill_processor.dsparkLmIndexes(2)));
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testDSparkDraftSamplerOutputGreedyDummyProbs) {
     // PD wire gate: greedy (top1) streams ship no draft probs.  The sampler
     // input builder must substitute the persistent zero dummy (all-greedy and
@@ -1296,6 +1349,13 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkGreedySpecSamplerFastPath) {
         // Plain greedy pair -> eligible.
         std::list<GenerateStreamPtr> streams{make_stream(1), make_stream(2)};
         EXPECT_TRUE(processor.canUseGreedySpecSamplerFastPath(streams));
+
+        // xgrammar is a stateful SpecLogitsProcessor.  Even for top1 it must
+        // take the full verify-sampler path so its per-position bitmask can
+        // constrain both accepted draft tokens and the replacement token.
+        auto grammar = make_stream(9);
+        grammar->logits_processor_list_.push_back(std::make_shared<DSparkGrammarLikeProcessor>());
+        EXPECT_FALSE(processor.canUseGreedySpecSamplerFastPath({grammar}));
     }
 
     {

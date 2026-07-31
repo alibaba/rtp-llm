@@ -521,6 +521,15 @@ class DeepSeekV4Model(GptModelBase):
         idx_w = 2 * 2 * index_head_dim
         return main_w, idx_w
 
+    @staticmethod
+    def _first_indexer_for_jit_prewarm(layers):
+        """Return the first real sparse indexer, or None for SWA-only drafts."""
+        for layer in layers:
+            indexer = getattr(layer.attn, "indexer", None)
+            if indexer is not None:
+                return indexer
+        return None
+
     def _bind_runtime_buffers(self, device: torch.device) -> None:
         assert self.v4 is not None
         mtp_hidden = None
@@ -713,8 +722,8 @@ class DeepSeekV4Model(GptModelBase):
                 _run_triton_warmup_launch_with_retry,
             )
 
-            if len(self.v4.layers) > 2:
-                _idx = self.v4.layers[2].attn.indexer  # first CSA layer (ratio=4)
+            _idx = self._first_indexer_for_jit_prewarm(self.v4.layers)
+            if _idx is not None:
                 _H = int(_idx.n_heads)
                 _D = int(_idx.head_dim)
                 _ratio = max(int(_idx.compress_ratio), 1)

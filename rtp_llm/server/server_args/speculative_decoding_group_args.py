@@ -80,8 +80,9 @@ def init_speculative_decoding_group_args(parser, sp_config):
         bind_to=(sp_config, "sp_dspark_propose_num"),
         type=int,
         default=0,
-        help="DSpark/DFlash 静态提交长度 k;0 = 取 draft ckpt 的 speculative_tokens"
-        "(块宽 = k+1,须满足 k+1 <= ckpt block_size,越界启动报错)。",
+        help="DSpark/DFlash 静态提案长度 k;0 = 取 draft ckpt 的 speculative_tokens。"
+        "query 宽度由 checkpoint 决定：DSV4 anchor-as-first 为 k，"
+        "DFlash/speculators 为 k+1；越界启动报错。",
     )
 
     speculative_decoding_group.add_argument(

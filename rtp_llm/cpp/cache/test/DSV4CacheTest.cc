@@ -135,6 +135,22 @@ TEST(HybridPoolConfigCreatorTest, FlashLayerClassification) {
     EXPECT_EQ(config.global_layer_ids[6].size(), 43u);
 }
 
+TEST(HybridPoolConfigCreatorTest, PureSwaDsparkDraftAllowsNoPagedGroupsWithoutMtpReplication) {
+    ParallelismConfig pc;
+    auto config = HybridPoolConfigCreator::createConfig(
+        makeFlashMtpModelConfig(), pc, makeDsv4KvCacheConfig(), /*is_mtp=*/false, /*gen_num_per_cycle=*/4);
+
+    ASSERT_EQ(config.cache_specs.size(), static_cast<size_t>(kDsv4PoolNum));
+    for (size_t gid = 0; gid < 6; ++gid) {
+        EXPECT_TRUE(config.global_layer_ids[gid].empty()) << "gid=" << gid;
+    }
+    EXPECT_EQ(config.global_layer_ids[6], std::vector<int>({0}));
+    EXPECT_EQ(config.layer_to_group_id, std::vector<int>({6}));
+    EXPECT_EQ(config.kv_block_size_bytes, 1u);
+    EXPECT_EQ(config.block_size_bytes, 1u);
+    EXPECT_GT(config.swa_block_size_bytes, 0u);
+}
+
 TEST(HybridPoolConfigCreatorTest, MtpSwaOnlyLayerIsNotStripped) {
     ParallelismConfig pc;
     auto              config =

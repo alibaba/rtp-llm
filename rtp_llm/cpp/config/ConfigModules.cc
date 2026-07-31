@@ -308,7 +308,8 @@ std::string SpeculativeExecutionConfig::to_string() const {
         << "quantization: " << quantization << "\n"
         << "checkpoint_path: " << checkpoint_path << "\n"
         << "sp_dspark_propose_num: " << sp_dspark_propose_num << "\n"
-        << "sp_dspark_mask_token_id: " << sp_dspark_mask_token_id;
+        << "sp_dspark_mask_token_id: " << sp_dspark_mask_token_id << "\n"
+        << "sp_dspark_sample_from_anchor: " << sp_dspark_sample_from_anchor;
     return oss.str();
 }
 

@@ -5,7 +5,8 @@ The checkpoint contract differs in two load-bearing ways:
 
 * three ordinary V4 blocks are stored under ``mtp.{0,1,2}``;
 * ``sample_from_anchor`` uses exactly ``k`` query rows (anchor + ``k-1``
-  noise rows), and all rows predict a draft token.
+  noise rows), and all rows predict a draft token.  The checkpoint's
+  ``dspark_block_size`` is that prediction count, not anchor-plus-predictions.
 
 The implementation is deliberately a thin composition over
 :class:`DeepSeekV4Model`: target features are combined and written into each
@@ -54,7 +55,7 @@ class DeepSeekV4DSparkParams:
         params = cls(
             target_layer_ids=[int(x) for x in cfg["dspark_target_layer_ids"]],
             mask_token_id=int(cfg["dspark_noise_token_id"]),
-            speculative_tokens=block_size - 1,
+            speculative_tokens=block_size,
             block_size=block_size,
             markov_rank=int(cfg["dspark_markov_rank"]),
             proposal_type=str(cfg.get("dspark_proposal_type") or "greedy"),
@@ -62,7 +63,7 @@ class DeepSeekV4DSparkParams:
         )
         if not params.target_layer_ids:
             raise ValueError("dspark_target_layer_ids must not be empty")
-        if params.block_size < 2 or params.speculative_tokens < 1:
+        if params.block_size < 2:
             raise ValueError(f"invalid dspark_block_size={params.block_size}")
         if params.markov_rank < 1:
             raise ValueError(f"invalid dspark_markov_rank={params.markov_rank}")
@@ -77,7 +78,8 @@ class DeepSeekV4DSparkParams:
 
     @property
     def block_width(self) -> int:
-        # Official DSV4 layout: anchor + (k-1) noise rows, all k predict.
+        # Official DSV4 layout: anchor + (k-1) noise rows, all k predict;
+        # dspark_block_size is k (vLLM rejects a smaller speculative length).
         return self.speculative_tokens
 
 

@@ -8,6 +8,7 @@ import torch.nn.functional as F
 from torch import nn
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.model_factory import ModelFactory
 from rtp_llm.models.deepseek_v4 import DeepSeekV4DSpark, DeepSeekV4DSparkWeight
 from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import (
     DSparkMarkovHead,
@@ -42,13 +43,64 @@ class DeepSeekV4DSparkTest(unittest.TestCase):
         }
         params = DeepSeekV4DSparkParams.from_ckpt_config(cfg)
         self.assertEqual(params.target_layer_ids, [40, 41, 42])
-        self.assertEqual(params.speculative_tokens, 4)
-        self.assertEqual(params.block_width, 4)
+        self.assertEqual(params.speculative_tokens, 5)
+        self.assertEqual(params.block_width, 5)
         self.assertTrue(params.sample_from_anchor)
 
         real = DeepSeekV4DSpark._create_config(CKPT)
         self.assertEqual(real.num_layers, 3)
         self.assertEqual(real.attn_config.layer_compress_ratios, [0, 0, 0])
+
+    def test_model_factory_preserves_frozen_anchor_layout(self):
+        params = DeepSeekV4DSparkParams(
+            target_layer_ids=[40, 41, 42],
+            mask_token_id=128799,
+            speculative_tokens=5,
+            block_size=5,
+            markov_rank=256,
+        )
+        sp_config = SimpleNamespace(
+            sp_dspark_propose_num=3,
+            gen_num_per_cycle=1,
+            sp_dspark_mask_token_id=-1,
+            sp_dspark_sample_from_anchor=False,
+        )
+        target_config = SimpleNamespace(
+            num_layers=43, capture_aux_hidden_layer_ids=[]
+        )
+        propose_config = SimpleNamespace(dspark_config=params)
+
+        ModelFactory._setup_dspark_configs(
+            sp_config, target_config, propose_config
+        )
+
+        # The checkpoint config is frozen: setup replaces it instead of
+        # mutating the instance retained by an earlier loader stage.
+        self.assertEqual(params.speculative_tokens, 5)
+        self.assertEqual(propose_config.dspark_config.speculative_tokens, 3)
+        self.assertEqual(propose_config.dspark_config.block_width, 3)
+        self.assertEqual(sp_config.gen_num_per_cycle, 3)
+        self.assertEqual(sp_config.sp_dspark_mask_token_id, 128799)
+        self.assertTrue(sp_config.sp_dspark_sample_from_anchor)
+        self.assertEqual(target_config.capture_aux_hidden_layer_ids, [40, 41, 42])
+
+    def test_swa_only_draft_skips_sparse_indexer_jit_prewarm(self):
+        swa_layers = [
+            SimpleNamespace(attn=SimpleNamespace(indexer=None)) for _ in range(3)
+        ]
+        self.assertIsNone(
+            DeepSeekV4DSparkModel._first_indexer_for_jit_prewarm(swa_layers)
+        )
+
+        first_indexer = SimpleNamespace(n_heads=64)
+        target_layers = [
+            SimpleNamespace(attn=SimpleNamespace(indexer=None)),
+            SimpleNamespace(attn=SimpleNamespace(indexer=first_indexer)),
+        ]
+        self.assertIs(
+            DeepSeekV4DSparkModel._first_indexer_for_jit_prewarm(target_layers),
+            first_indexer,
+        )
 
     def test_combine_and_markov_match_dense_oracle(self):
         torch.manual_seed(7)
@@ -57,7 +109,7 @@ class DeepSeekV4DSparkTest(unittest.TestCase):
         model.dspark_params = DeepSeekV4DSparkParams(
             target_layer_ids=[1, 2, 3],
             mask_token_id=31,
-            speculative_tokens=4,
+            speculative_tokens=5,
             block_size=5,
             markov_rank=3,
         )

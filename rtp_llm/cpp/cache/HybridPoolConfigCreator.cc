@@ -145,7 +145,7 @@ size_t kernelBlocksPerKvBlockForGroup(const CacheConfig& config, size_t group_id
     return is_full ? config.kernelBlocksPerKvBlock() : 1;
 }
 
-void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
+void setupIndependentPoolSizes(CacheConfig& config) {
     config.use_independent_block_pools = true;
     const auto group_num               = static_cast<size_t>(config.groupNums());
     config.group_block_nums.resize(group_num, 0);
@@ -210,7 +210,15 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     config.state_block_size_bytes  = state_kv_block_bytes + state_scale_block_bytes;
     const size_t paged_block_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
     if (paged_block_bytes == 0) {
-        RTP_LLM_CHECK_WITH_INFO(is_mtp && config.use_typed_cache_regions,
+        // A DSV4 draft can be composed entirely of SWA-only layers.  This is
+        // true both for replicated one-layer MTP modules and for dspark's one
+        // multi-layer draft model, so it must not depend on the is_mtp flag
+        // (dspark intentionally keeps that flag false to avoid k-fold model
+        // replication in CacheConfigCreator::createSpConfig).  Keep a tiny
+        // paged-pool sentinel because the shared score/propose cache sizing
+        // still requires a non-zero divisor; all real draft bytes live in the
+        // fixed SWA pool.
+        RTP_LLM_CHECK_WITH_INFO(config.use_typed_cache_regions,
                                 "hybrid-pool paged groups produced zero block bytes");
         config.kv_block_size_bytes = 1;
         config.kv_scale_size_bytes = 0;
@@ -295,7 +303,7 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
     RTP_LLM_CHECK_WITH_INFO(!config.cache_specs.empty(), "hybrid-pool config produced no cache specs");
     setupGroupCounts(config);
     populateDefaultRegionMappings(config);
-    setupIndependentPoolSizes(config, is_mtp);
+    setupIndependentPoolSizes(config);
     if (!model_config.attn_config.layer_compress_ratios.empty()) {
         config.dsv4_fixed_pool_blocks     = kv_cache_config.dsv4_fixed_pool_blocks;
         config.dsv4_hca_state_pool_blocks = kv_cache_config.dsv4_hca_state_pool_blocks;

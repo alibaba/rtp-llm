@@ -451,6 +451,7 @@ def forward_decode(
 
     B = meta.batch_size
     q_len = meta.q_len_per_req
+    input_ids_2d = input_ids.view(B, q_len)
     _rt_on = _rt.ENABLED
     if _rt_on:
         _rt.begin(seqlen=int(input_ids.numel()))

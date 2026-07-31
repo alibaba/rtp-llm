@@ -712,8 +712,12 @@ void MtpBatchStreamProcessor::updatePrefillPostDraftModelInput(GptModelInputs&  
     model_input.combo_tokens  = toCudaInt32(combo_tokens_cpu, host_holder);
 }
 
+int64_t MtpBatchStreamProcessor::dsparkQueryWidth() const {
+    return propose_step_ + (dspark_sample_from_anchor_ ? 0 : 1);
+}
+
 torch::Tensor MtpBatchStreamProcessor::dsparkComboTokens(int64_t batch_size, const torch::Tensor& anchors) {
-    const int64_t width = propose_step_ + 1;
+    const int64_t width = dsparkQueryWidth();
     if (!dspark_combo_cache_.defined() || dspark_combo_cache_.size(0) < batch_size) {
         dspark_combo_cache_ = fullInt32OnCuda({batch_size, width}, dspark_mask_token_id_);
     }
@@ -726,15 +730,22 @@ torch::Tensor MtpBatchStreamProcessor::dsparkComboTokens(int64_t batch_size, con
     return combo.reshape({-1});
 }
 
-torch::Tensor MtpBatchStreamProcessor::dsparkCtxLengths(int64_t batch_size) {
-    if (!dspark_ctx_lengths_cache_.defined() || dspark_ctx_lengths_cache_.size(0) < batch_size) {
-        dspark_ctx_lengths_cache_ = fullInt32OnCuda({batch_size}, propose_step_ + 1);
+torch::Tensor MtpBatchStreamProcessor::dsparkQueryLengths(int64_t batch_size) {
+    if (!dspark_query_lengths_cache_.defined() || dspark_query_lengths_cache_.size(0) < batch_size) {
+        dspark_query_lengths_cache_ = fullInt32OnCuda({batch_size}, dsparkQueryWidth());
     }
-    return dspark_ctx_lengths_cache_.narrow(0, 0, batch_size);
+    return dspark_query_lengths_cache_.narrow(0, 0, batch_size);
+}
+
+torch::Tensor MtpBatchStreamProcessor::dsparkDenseCtxLengths(int64_t batch_size) {
+    if (!dspark_dense_ctx_lengths_cache_.defined() || dspark_dense_ctx_lengths_cache_.size(0) < batch_size) {
+        dspark_dense_ctx_lengths_cache_ = fullInt32OnCuda({batch_size}, propose_step_ + 1);
+    }
+    return dspark_dense_ctx_lengths_cache_.narrow(0, 0, batch_size);
 }
 
 torch::Tensor MtpBatchStreamProcessor::dsparkLmIndexes(int64_t batch_size) {
-    const int64_t width = propose_step_ + 1;
+    const int64_t width = dsparkQueryWidth();
     if (!dspark_lm_indexes_cache_.defined() || dspark_lm_indexes_cache_.size(0) < batch_size) {
         dspark_lm_indexes_cache_ = torch::arange(0, batch_size * width, width, cudaInt32Options());
     }
@@ -809,11 +820,11 @@ void MtpBatchStreamProcessor::updatePrefillPostDSparkDraftModelInput(GptModelInp
                                                                      const GptModelOutputs& model_output,
                                                                      const SamplerOutput&   sampler_output,
                                                                      TensorHolder&          host_holder) {
-    // Prefill seeding: the draft input is one [anchor + k*mask] block per
+    // Prefill seeding: the draft input is one checkpoint-layout query block per
     // stream, plus the target aux features of the computed prompt suffix for
     // the feature-KV injection pass (a reused prefix keeps the feature KV
     // injected when its blocks were first filled).
-    const int64_t width      = propose_step_ + 1;
+    const int64_t width      = dsparkQueryWidth();
     const int64_t batch_size = sampler_output.token_ids.size(0);
 
     RTP_LLM_CHECK_WITH_INFO(model_output.aux_hidden_states.defined(),
@@ -838,7 +849,7 @@ void MtpBatchStreamProcessor::updatePrefillPostDSparkDraftModelInput(GptModelInp
 
     model_input.combo_tokens     = combo_tokens;
     model_input.prefix_lengths   = reuse_lengths + suffix_lengths;  // = full prompt length
-    model_input.input_lengths    = dsparkCtxLengths(batch_size);
+    model_input.input_lengths    = dsparkQueryLengths(batch_size);
     model_input.sequence_lengths = emptyInt32OnCuda({0});
     // Draft logits are unused (the proposal comes back as draft_tokens/
     // draft_probs), so point lm_head at the anchor rows only.
@@ -998,8 +1009,10 @@ void MtpBatchStreamProcessor::updateDecodePostDSparkDraftModelInput(
     // Why injecting the rejected rows' (garbage) features is safe:
     //  - rows 0..accept_len-1 land on committed positions: valid features.
     //  - rows accept_len..k land on [prefix_new, old_prefix + k + 1), a
-    //    subrange of the tail block forward's own query window
-    //    [prefix_new, prefix_new + k + 1).  propose() injects BEFORE the block
+    //    subrange of the tail block forward's own query window. Official DSV4
+    //    uses [prefix_new, prefix_new + k); DFlash uses k+1 rows. In either
+    //    layout every garbage position is overwritten before attention reads.
+    //    propose() injects BEFORE the block
     //    forward, whose attention path (rope + cache append writes each layer
     //    before any read) overwrites those positions with its own K/V; the
     //    block only attends to [0, prefix_new) plus in-block rows, so the
@@ -1041,10 +1054,11 @@ void MtpBatchStreamProcessor::updateDecodePostDSparkDraftModelInput(
     // advances by accept_len.
     auto old_prefix                = toCudaInt32(model_input.prefix_lengths, host_holder).clone();
     model_input.dspark_ctx_starts  = old_prefix;
-    model_input.dspark_ctx_lengths = dsparkCtxLengths((int64_t)batch_size);
+    model_input.dspark_ctx_lengths = dsparkDenseCtxLengths((int64_t)batch_size);
     model_input.prefix_lengths     = old_prefix + accept_len_d;
-    // input_lengths ([B] of k+1) and empty sequence_lengths carry over from
-    // setVerifyPairInputs; draft logits are unused, keep them to anchor rows.
+    model_input.input_lengths      = dsparkQueryLengths((int64_t)batch_size);
+    // Empty sequence_lengths carries over from setVerifyPairInputs; draft
+    // logits are unused, keep lm indexes at the query-block row bases.
     model_input.lm_output_indexes = dsparkLmIndexes((int64_t)batch_size);
 }
 
