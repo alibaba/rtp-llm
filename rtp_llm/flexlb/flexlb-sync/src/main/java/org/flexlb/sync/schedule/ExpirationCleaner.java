@@ -1,8 +1,10 @@
 package org.flexlb.sync.schedule;
 
 import org.apache.commons.collections4.MapUtils;
+import org.flexlb.config.ConfigService;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.dao.pv.TaskConfirmationTimeoutPvLog;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
@@ -11,7 +13,9 @@ import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
+import org.flexlb.util.JsonUtils;
 import org.flexlb.util.Logger;
+import org.slf4j.LoggerFactory;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
@@ -19,21 +23,23 @@ import javax.annotation.PostConstruct;
 import java.util.Iterator;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
+import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.AtomicLong;
 
 @Component
 public class ExpirationCleaner {
 
     private static final String TASK_REMOVED = "task.removed";
+    private static final org.slf4j.Logger pvLogger = LoggerFactory.getLogger("pvLogger");
 
-    private final long taskTimeoutUs;
+    private final long taskConfirmTimeoutUs;
     private final long workerTimeoutUs;
     private final FlexMonitor monitor;
 
-    public ExpirationCleaner(FlexMonitor monitor) {
+    public ExpirationCleaner(FlexMonitor monitor, ConfigService configService) {
         this.monitor = monitor;
-        this.taskTimeoutUs = Long.parseLong(System.getenv().getOrDefault("TASK_TIMEOUT_US", "3000000"));  // Default 3s
-        this.workerTimeoutUs = Long.parseLong(System.getenv().getOrDefault("WORKER_TIMEOUT_US", "3000000")); // Default 3s
+        this.taskConfirmTimeoutUs = TimeUnit.MILLISECONDS.toMicros(configService.loadBalanceConfig().getTaskConfirmTimeoutMs());
+        this.workerTimeoutUs = Long.parseLong(System.getenv().getOrDefault("WORKER_TIMEOUT_US", "3000000"));
     }
 
     @PostConstruct
@@ -84,10 +90,9 @@ public class ExpirationCleaner {
                     task.updateTaskState(TaskStateEnum.CLEANED);
                     shouldRemove = true;
                 }
-                // Check if task is timed out
-                else if (task.isTimeout(currentTime, taskTimeoutUs)) {
-                    Logger.warn("Removing timeout task: {}, state: {}, age: {}ms, role: {}, worker: {}", requestId, task.getTaskState(),
-                            (currentTime - task.getLastActiveTimeUs()) / 1000, role, workerStatus.getIp());
+                // Keep the local prediction until WorkerStatus confirms the task or this window expires.
+                else if (task.getTaskState() == TaskStateEnum.IN_TRANSIT && task.isTimeout(currentTime, taskConfirmTimeoutUs)) {
+                    reportTaskConfirmationTimeout(requestId, task, workerStatus, role, currentTime);
                     reportTaskRemoved(workerStatus.getRole(), workerStatus.getIp(), "timeout");
                     task.updateTaskState(TaskStateEnum.CLEANED);
                     shouldRemove = true;
@@ -99,6 +104,26 @@ public class ExpirationCleaner {
                 }
             }
         }
+    }
+
+    private void reportTaskConfirmationTimeout(String requestId, TaskInfo task, WorkerStatus workerStatus,
+                                               RoleType role, long currentTimeUs) {
+        TaskConfirmationTimeoutPvLog event = new TaskConfirmationTimeoutPvLog(
+                TaskConfirmationTimeoutPvLog.EVENT_TYPE,
+                requestId,
+                role.getCode(),
+                workerStatus.getIp(),
+                workerStatus.getPort(),
+                task.getTaskState().getValue(),
+                TimeUnit.MICROSECONDS.toMillis(currentTimeUs - task.getLastActiveTimeUs()),
+                TimeUnit.MICROSECONDS.toMillis(taskConfirmTimeoutUs),
+                task.getInputLength(),
+                task.getPredictedPrefixLength(),
+                task.getCacheMatchSource(),
+                task.estimatePrefillTime());
+        String eventJson = JsonUtils.toStringOrEmpty(event);
+        Logger.warn("Task confirmation timed out: {}", eventJson);
+        pvLogger.info(eventJson);
     }
 
     private void reportTaskRemoved(String role, String ip, String type) {

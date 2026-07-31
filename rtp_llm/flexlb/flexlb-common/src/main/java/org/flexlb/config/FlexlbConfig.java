@@ -69,6 +69,11 @@ public class FlexlbConfig {
     private long routingRetryIntervalMs = 10;
 
     /**
+     * Maximum time to retain a locally tracked task while waiting for WorkerStatus confirmation.
+     */
+    private long taskConfirmTimeoutMs = 300_000;
+
+    /**
      * Prefill role queuing threshold
      * When below this threshold, the Worker is considered available
      */
