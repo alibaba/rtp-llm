@@ -387,6 +387,11 @@ def forward_layers(
     if _rt_on:
         _rt.record("prefill_embed_hc_expanded", h)
 
+    begin_aux_capture = getattr(v4, "begin_aux_hidden_capture", None)
+    aux_hidden_capture = (
+        begin_aux_capture() if begin_aux_capture is not None else None
+    )
+
     prefill_fast_layer_calls = _prefill_fast_path_layer_calls(v4)
     use_prefill_fast_path = _prefill_fast_path_enabled(
         v4, prepare_hidden_fn, prefill_fast_layer_calls
@@ -521,6 +526,8 @@ def forward_layers(
                     kv_cache=kv_cache,
                     block_tables_by_type=block_tables_by_type,
                 )  # [T, hc, dim]
+                if aux_hidden_capture is not None:
+                    v4.capture_aux_hidden(aux_hidden_capture, layer_idx, h)
                 if _rt_on:
                     _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
                 if write_cache_store_impl is not None:
@@ -567,6 +574,9 @@ def forward_layers(
         # on a near-full card. ``clear`` is idempotent (sets None per layer).
         if v4.fp8_kv_cache:
             clear_prefill_meta_shared_fp8(v4)
+
+    if begin_aux_capture is not None:
+        v4.finish_aux_hidden_capture(aux_hidden_capture)
 
     if v4._mtp_hidden_buffer is not None:
         _pre_hc_flat = h.flatten(-2)
@@ -730,4 +740,8 @@ def forward_prefill(
         attn_inputs=attn,
         prepare_hidden_fn=prepare_hidden_fn,
     )  # [T_total, dim]
-    return PyModelOutputs(hidden)
+    outputs = PyModelOutputs(hidden)
+    aux_hidden_states = getattr(v4, "_aux_hidden_states", None)
+    if aux_hidden_states is not None:
+        outputs.aux_hidden_states = aux_hidden_states
+    return outputs

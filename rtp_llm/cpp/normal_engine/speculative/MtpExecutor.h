@@ -76,7 +76,8 @@ public:
                                                        const ModelConfig&     model_config,
                                                        const RuntimeConfig&   runtime_config,
                                                        const ResourceContext& resource_context,
-                                                       int                    vocab_size);
+                                                       int                    vocab_size,
+                                                       bool                   is_dspark = false);
 
 protected:
     struct AcceptLenMetricsSnapshot {
@@ -198,6 +199,9 @@ private:
     DataType                                         data_type_;
     size_t                                           hidden_size_;
     size_t                                           propose_step_;
+    // Fixed-width block diffusion: one draft forward emits gamma proposals;
+    // unlike MTP there is no autoregressive draft loop or hidden-state chain.
+    bool                                             is_dspark_ = false;
     size_t                                           draft_vocab_size_;
     std::shared_ptr<ModelBase>                       draft_model_;
     std::shared_ptr<ModelBase>                       sp_prefill_draft_model_;

@@ -308,7 +308,8 @@ enum SpeculativeType {
     SP_TYPE_MTP           = 2,  // Multi-token prediction (DeepSeek-V3)
     SP_TYPE_EAGLE3        = 3,  // EAGLE-3
     SP_TYPE_EAGLE         = 4,  // EAGLE
-    SP_TYPE_DETERMINISTIC = 5   // Deterministic (Prompt-Lookup)
+    SP_TYPE_DETERMINISTIC = 5,  // Deterministic (Prompt-Lookup)
+    SP_TYPE_DSPARK        = 6   // DSpARK block-diffusion draft
 };
 
 struct SpeculativeExecutionConfig {
@@ -322,6 +323,9 @@ struct SpeculativeExecutionConfig {
     bool            force_score_context_attention = true;
     std::string     quantization                  = "";
     std::string     checkpoint_path               = "";
+    // DSpARK noise/mask token used to build each fixed-width draft block.
+    // Filled from the draft checkpoint by ModelFactory.
+    int64_t         sp_dspark_mask_token_id       = -1;
     std::string     to_string() const;
 
     // Helper functions for enum conversion

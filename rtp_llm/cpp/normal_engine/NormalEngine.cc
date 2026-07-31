@@ -97,6 +97,11 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
     if (propose_params_) {
         reserve_step_ = propose_params_->gen_num_per_circle + 1;
+        if (propose_params_->sp_type == SP_TYPE_DSPARK) {
+            // Target verify can append gamma+1 positions, then the same round
+            // seeds the next gamma-wide draft block beyond the accepted tail.
+            reserve_step_ = 2 * (propose_params_->gen_num_per_circle + 1);
+        }
     } else {
         reserve_step_ = 0;
     }
@@ -621,7 +626,8 @@ bool NormalEngine::isTimelineProfilingEnabled() const {
 
 bool NormalEngine::isMTPEagle() {
     if (propose_params_) {
-        return propose_params_->sp_type == SP_TYPE_MTP || propose_params_->sp_type == SP_TYPE_EAGLE;
+        return propose_params_->sp_type == SP_TYPE_MTP || propose_params_->sp_type == SP_TYPE_EAGLE
+               || propose_params_->sp_type == SP_TYPE_DSPARK;
     }
     return false;
 }
@@ -635,8 +641,9 @@ bool NormalEngine::isEagle() {
 
 void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
     if (isMTPEagle()) {
-        int propose_step   = sp_config.gen_num_per_cycle;
-        int mtp_vocab_size = propose_params_->getEngineInitParams().model_config_.vocab_size;
+        int        propose_step   = sp_config.gen_num_per_cycle;
+        int        mtp_vocab_size = propose_params_->getEngineInitParams().model_config_.vocab_size;
+        const bool is_dspark      = propose_params_->sp_type == SP_TYPE_DSPARK;
         switch (pd_sep_config.role_type) {
             case RoleType::PREFILL:
                 if (streams.empty()) {
@@ -647,7 +654,7 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
             case RoleType::DECODE:
                 if (streams.empty()) {
                     streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
-                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size));
+                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size, is_dspark));
                 }
                 break;
             case RoleType::PDFUSION: {
@@ -666,7 +673,7 @@ void NormalEngine::mayAddFakeStream(std::list<GenerateStreamPtr>& streams) {
                 }
                 if (!has_decode) {
                     streams.emplace_back(MtpExecutor::createMinFakeDecodeStream(
-                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size));
+                        propose_step, model_config_, runtime_config, resource_context_, mtp_vocab_size, is_dspark));
                 }
                 break;
             }

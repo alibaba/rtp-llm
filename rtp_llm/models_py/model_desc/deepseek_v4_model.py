@@ -313,6 +313,15 @@ class DeepSeekV4Model(GptModelBase):
             f"got {self._max_generate_batch_size}"
         )
         self._gen_num_per_cycle = int(model_config.gen_num_per_cycle)
+        # Python-only DSpARK config, populated on the target model by the
+        # speculative-engine setup. ``getattr`` keeps older ModelConfig
+        # bindings and all non-DSpARK paths unchanged.
+        self._capture_aux_hidden_layer_ids = tuple(
+            int(layer_id)
+            for layer_id in (
+                getattr(model_config, "capture_aux_hidden_layer_ids", None) or ()
+            )
+        )
         # MoE inter dim from V4 config: explicit (not inter_size which in RTP-LLM
         # is n_shared_experts * moe_intermediate_size for DeepSeek). Use moe_config
         # if available; else read from config's hidden_size-derived fallback.
@@ -635,6 +644,9 @@ class DeepSeekV4Model(GptModelBase):
                 self.v4 = V4Transformer(self._v4_args, mw=self.weight)
         finally:
             torch.set_default_dtype(prev_dtype)
+        self.v4.set_aux_hidden_capture_layer_ids(
+            self._capture_aux_hidden_layer_ids
+        )
 
         # Recompute RoPE cache on real device (precompute_freqs_cis under
         # meta context yields zeros; we need real values).
@@ -708,7 +720,10 @@ class DeepSeekV4Model(GptModelBase):
                 _run_triton_warmup_launch_with_retry,
             )
 
-            if len(self.v4.layers) > 2:
+            if (
+                len(self.v4.layers) > 2
+                and self.v4.layers[2].attn.indexer is not None
+            ):
                 _idx = self.v4.layers[2].attn.indexer  # first CSA layer (ratio=4)
                 _H = int(_idx.n_heads)
                 _D = int(_idx.head_dim)
@@ -1209,9 +1224,19 @@ class DeepSeekV4Model(GptModelBase):
             )
             T = max(inputs.input_ids.numel(), 1)
             device = self.v4.embed.weight.device
-            return PyModelOutputs(
-                torch.zeros(T, self._v4_args.dim, dtype=torch.bfloat16, device=device)
+            hidden = torch.zeros(
+                T, self._v4_args.dim, dtype=torch.bfloat16, device=device
             )
+            outputs = PyModelOutputs(hidden)
+            if self._capture_aux_hidden_layer_ids:
+                outputs.aux_hidden_states = torch.zeros(
+                    T,
+                    len(self._capture_aux_hidden_layer_ids),
+                    self._v4_args.dim,
+                    dtype=torch.bfloat16,
+                    device=device,
+                )
+            return outputs
         attn = inputs.attention_inputs
 
         # Subclass-overridable hidden-state preparation hooks.  When a

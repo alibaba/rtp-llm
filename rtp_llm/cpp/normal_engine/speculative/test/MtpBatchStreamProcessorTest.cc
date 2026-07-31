@@ -785,6 +785,52 @@ TEST_F(MtpBatchStreamProcessorTest, testprepareDecodeDraftModelInput) {
     expect_positions(model_input, {6, 3}, {7, 4});
 }
 
+TEST_F(MtpBatchStreamProcessorTest, testDSparkRuntimeGammaThreePrefillInputShapes) {
+    constexpr int32_t gamma   = 3;
+    constexpr int32_t mask_id = 12345;
+
+    ModelConfig                 model_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    SpeculativeExecutionConfig  sp_config;
+    cache_config.group_types          = {CacheGroupType::FULL};
+    sp_config.type                    = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle       = gamma;
+    sp_config.sp_dspark_mask_token_id = mask_id;
+
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    GptModelInputs model_input;
+    model_input.input_lengths  = torch::tensor({3, 2}, torch::kInt32);
+    model_input.prefix_lengths = torch::tensor({7, 4}, torch::kInt32);
+
+    GptModelOutputs model_output;
+    model_output.aux_hidden_states =
+        torch::arange(0, 60, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)).reshape({5, 12});
+
+    SamplerOutput sampler_output;
+    sampler_output.token_ids =
+        torch::tensor({10, 101, 20, 202}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA))
+            .reshape({2, 2});
+
+    TensorHolder host_holder;
+    processor.updatePrefillPostDSparkDraftModelInput(model_input, model_output, sampler_output, host_holder);
+
+    EXPECT_EQ((std::vector<int32_t>{101, mask_id, mask_id, 202, mask_id, mask_id}),
+              toVec<int32_t>(model_input.combo_tokens));
+    EXPECT_EQ((std::vector<int32_t>{3, 2}), toVec<int32_t>(model_input.dspark_ctx_lengths));
+    EXPECT_EQ((std::vector<int32_t>{0, 3}), toVec<int32_t>(model_input.dspark_ctx_starts));
+    EXPECT_EQ((std::vector<int32_t>{7, 4}), toVec<int32_t>(model_input.cache_store_prefix_lengths));
+    EXPECT_EQ((std::vector<int32_t>{6, 5}), toVec<int32_t>(model_input.cache_store_input_lengths));
+    EXPECT_EQ((std::vector<int32_t>{10, 6}), toVec<int32_t>(model_input.prefix_lengths));
+    EXPECT_EQ((std::vector<int32_t>{gamma, gamma}), toVec<int32_t>(model_input.input_lengths));
+    EXPECT_EQ((std::vector<int32_t>{0, gamma}), toVec<int32_t>(model_input.lm_output_indexes));
+    EXPECT_EQ(5, model_input.last_hidden_states.size(0));
+    EXPECT_EQ(12, model_input.last_hidden_states.size(1));
+}
+
 TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;

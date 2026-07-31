@@ -202,7 +202,13 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
         .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure")
         .def_readwrite(
-            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure");
+            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure")
+        .def_readwrite("dspark_ctx_lengths",
+                       &PyModelInputs::dspark_ctx_lengths,
+                       "Optional int32 [batch] DSpARK feature-window lengths")
+        .def_readwrite("dspark_ctx_starts",
+                       &PyModelInputs::dspark_ctx_starts,
+                       "Optional int32 [batch] DSpARK feature-window starts");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")
@@ -226,7 +232,13 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("params_ptr"),
              "Initialize with hidden states tensor and params pointer")
         .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
-        .def_readwrite("params_ptr", &PyModelOutputs::params_ptr, "Parameters pointer");
+        .def_readwrite("params_ptr", &PyModelOutputs::params_ptr, "Parameters pointer")
+        .def_readwrite("aux_hidden_states",
+                       &PyModelOutputs::aux_hidden_states,
+                       "Optional [token, layers, hidden] target features for DSpARK")
+        .def_readwrite("draft_tokens", &PyModelOutputs::draft_tokens, "Optional [batch, gamma] DSpARK draft tokens")
+        .def_readwrite(
+            "draft_probs", &PyModelOutputs::draft_probs, "Optional [batch, gamma, vocab] DSpARK draft probabilities");
 }
 
 }  // namespace torch_ext

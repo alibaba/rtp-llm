@@ -33,6 +33,9 @@ public:
         hidden_size_(graph_params.hidden_size),
         hc_mult_(static_cast<int>(graph_params.hc_mult)),
         sp_steps_(graph_params.sp_steps),
+        is_dspark_draft_(graph_params.is_dspark_draft),
+        input_hidden_rows_per_bs_(graph_params.input_hidden_rows_per_bs),
+        input_hidden_size_(graph_params.input_hidden_size),
         prefill_capture_seq_lens_(graph_params.prefill_capture_seq_lens),
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         model_data_type_(graph_params.model_data_type),
@@ -45,6 +48,12 @@ public:
         if (kernel_seq_size_per_block_ <= 0) {
             throw std::runtime_error("CudaGraphRunner constructor: kernel_tokens_per_block must be > 0.");
         }
+        if (input_hidden_rows_per_bs_ <= 0) {
+            input_hidden_rows_per_bs_ = num_tokens_per_bs_;
+        }
+        if (input_hidden_size_ == 0) {
+            input_hidden_size_ = hidden_size_ * hc_mult_;
+        }
         max_bs_               = graph_params.max_context_batch_size;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         py_forward_method_    = py_instance_.attr("forward");
@@ -53,7 +62,8 @@ public:
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, kernel_seq_size_per_block_: %d, \
-            hidden_size_: %d, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d, is_target_verify_: %d",
+            hidden_size_: %d, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d, is_target_verify_: %d, is_dspark_draft_: %d, \
+            input_hidden_rows_per_bs_: %d, input_hidden_size_: %zu",
                          enable_cuda_graph_,
                          max_bs_,
                          enable_cuda_graph_debug_mode_,
@@ -62,7 +72,10 @@ public:
                          hidden_size_,
                          num_tokens_per_bs_,
                          is_prefill_cuda_graph_mode_,
-                         is_target_verify_);
+                         is_target_verify_,
+                         is_dspark_draft_,
+                         input_hidden_rows_per_bs_,
+                         input_hidden_size_);
     }
 
     ~CudaGraphRunner() {
@@ -138,6 +151,9 @@ private:
     // input. The post-reduce output tensor still uses hidden_size_.
     int                     hc_mult_{1};
     int                     sp_steps_{0};
+    bool                    is_dspark_draft_{false};
+    int                     input_hidden_rows_per_bs_{0};
+    size_t                  input_hidden_size_{0};
     std::vector<int>        capture_range_;
     std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
     std::vector<int>        decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python

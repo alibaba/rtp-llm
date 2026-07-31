@@ -9,6 +9,21 @@
 
 namespace rtp_llm {
 
+CacheStoreTensorSyncMetadata getCacheStoreTensorSyncMetadata(const GptModelInputs& inputs) {
+    CacheStoreTensorSyncMetadata metadata;
+    metadata.input_lengths_count =
+        inputs.cache_store_input_lengths.defined() ? inputs.cache_store_input_lengths.numel() : 0;
+    metadata.prefix_lengths_count =
+        inputs.cache_store_prefix_lengths.defined() ? inputs.cache_store_prefix_lengths.numel() : 0;
+    if (inputs.cache_store_input_lengths.defined() && inputs.cache_store_input_lengths.is_cuda()) {
+        metadata.device_bits |= GptModelInputDeviceBit::kDeviceBitCacheStoreInputLengths;
+    }
+    if (inputs.cache_store_prefix_lengths.defined() && inputs.cache_store_prefix_lengths.is_cuda()) {
+        metadata.device_bits |= GptModelInputDeviceBit::kDeviceBitCacheStorePrefixLengths;
+    }
+    return metadata;
+}
+
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config) {
     if (parallelism_config.tp_size <= 1) {
         return;
@@ -72,6 +87,15 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
+    shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesRows] =
+        inputs.last_hidden_states.defined() ? inputs.last_hidden_states.size(0) : 0;
+    shape_hints_ptr[GptModelInputIndex::dsparkCtxLengths] =
+        inputs.dspark_ctx_lengths.defined() ? inputs.dspark_ctx_lengths.numel() : 0;
+    shape_hints_ptr[GptModelInputIndex::dsparkCtxStarts] =
+        inputs.dspark_ctx_starts.defined() ? inputs.dspark_ctx_starts.numel() : 0;
+    const auto cache_store_sync_metadata = getCacheStoreTensorSyncMetadata(inputs);
+    shape_hints_ptr[GptModelInputIndex::cacheStoreInputLengths] = cache_store_sync_metadata.input_lengths_count;
+    shape_hints_ptr[GptModelInputIndex::cacheStorePrefixLengths] = cache_store_sync_metadata.prefix_lengths_count;
     {
         // encode root-side tensor device for fields that may live on
         // GPU on the PDFUSION fast path, so non-root ranks can allocate matching
@@ -92,6 +116,13 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         if (inputs.lm_output_indexes.defined() && inputs.lm_output_indexes.is_cuda()) {
             device_bits |= GptModelInputDeviceBit::kDeviceBitLmOutputIndexes;
         }
+        if (inputs.dspark_ctx_lengths.defined() && inputs.dspark_ctx_lengths.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitDsparkCtxLengths;
+        }
+        if (inputs.dspark_ctx_starts.defined() && inputs.dspark_ctx_starts.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitDsparkCtxStarts;
+        }
+        device_bits |= cache_store_sync_metadata.device_bits;
         shape_hints_ptr[GptModelInputIndex::tensorDeviceMap] = static_cast<int32_t>(device_bits);
     }
 
@@ -209,13 +240,38 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)combo_position_ids_size});
         }
         if (shape_hints_ptr[GptModelInputIndex::mtpHiddenStates]) {
-            auto hidden_states_dim0 = (size_t)shape_hints_ptr[GptModelInputIndex::comboTokens];
+            auto hidden_states_dim0 = (size_t)shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesRows];
+            RTP_LLM_CHECK_WITH_INFO(hidden_states_dim0 > 0, "last_hidden_states must have a non-zero row count");
             auto hidden_states_dim1 = (size_t)hidden_states_size / hidden_states_dim0;
             RTP_LLM_CHECK(hidden_states_size % hidden_states_dim0 == 0);
             inputs.last_hidden_states =
                 allocBuf((rtp_llm::DataType)shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesDtype],
                          {hidden_states_dim0, hidden_states_dim1},
                          rtp_llm::AllocationType::DEVICE);
+        }
+        if (shape_hints_ptr[GptModelInputIndex::dsparkCtxLengths]) {
+            inputs.dspark_ctx_lengths =
+                allocBuf(rtp_llm::DataType::TYPE_INT32,
+                         {(size_t)shape_hints_ptr[GptModelInputIndex::dsparkCtxLengths]},
+                         pickAlloc(GptModelInputDeviceBit::kDeviceBitDsparkCtxLengths));
+        }
+        if (shape_hints_ptr[GptModelInputIndex::dsparkCtxStarts]) {
+            inputs.dspark_ctx_starts =
+                allocBuf(rtp_llm::DataType::TYPE_INT32,
+                         {(size_t)shape_hints_ptr[GptModelInputIndex::dsparkCtxStarts]},
+                         pickAlloc(GptModelInputDeviceBit::kDeviceBitDsparkCtxStarts));
+        }
+        if (shape_hints_ptr[GptModelInputIndex::cacheStoreInputLengths]) {
+            inputs.cache_store_input_lengths =
+                allocBuf(rtp_llm::DataType::TYPE_INT32,
+                         {(size_t)shape_hints_ptr[GptModelInputIndex::cacheStoreInputLengths]},
+                         pickAlloc(GptModelInputDeviceBit::kDeviceBitCacheStoreInputLengths));
+        }
+        if (shape_hints_ptr[GptModelInputIndex::cacheStorePrefixLengths]) {
+            inputs.cache_store_prefix_lengths =
+                allocBuf(rtp_llm::DataType::TYPE_INT32,
+                         {(size_t)shape_hints_ptr[GptModelInputIndex::cacheStorePrefixLengths]},
+                         pickAlloc(GptModelInputDeviceBit::kDeviceBitCacheStorePrefixLengths));
         }
         if (text_tokens_mask_size) {
             inputs.text_tokens_mask = allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)text_tokens_mask_size});
@@ -282,6 +338,18 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     }
     if (hidden_states_size) {
         collect(inputs.last_hidden_states);
+    }
+    if (shape_hints_ptr[GptModelInputIndex::dsparkCtxLengths]) {
+        collect(inputs.dspark_ctx_lengths);
+    }
+    if (shape_hints_ptr[GptModelInputIndex::dsparkCtxStarts]) {
+        collect(inputs.dspark_ctx_starts);
+    }
+    if (shape_hints_ptr[GptModelInputIndex::cacheStoreInputLengths]) {
+        collect(inputs.cache_store_input_lengths);
+    }
+    if (shape_hints_ptr[GptModelInputIndex::cacheStorePrefixLengths]) {
+        collect(inputs.cache_store_prefix_lengths);
     }
 
     // Classify tensors by device type (runtime check) and calculate packed sizes.

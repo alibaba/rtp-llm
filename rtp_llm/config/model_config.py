@@ -67,6 +67,10 @@ class ModelConfig(CppModelConfig):
     # Python-only fields that are allowed to be set
     _python_fields = {
         "is_mtp",
+        "dspark_noise_token_id",
+        "dspark_target_layer_ids",
+        "dspark_markov_rank",
+        "capture_aux_hidden_layer_ids",
         "normalize_lm_head_weight",
         "enable_fp32_lm_head",
         "has_lm_head_bias",
@@ -495,6 +499,13 @@ class ModelConfig(CppModelConfig):
         super().__init__(*args, **kwargs)
         # Additional Python-only fields
         self.is_mtp: bool = False
+        # DSpARK draft checkpoint metadata. Runtime proposal width comes only
+        # from sp_config.gen_num_per_cycle.
+        self.dspark_noise_token_id: Optional[int] = None
+        self.dspark_target_layer_ids: Optional[list[int]] = None
+        self.dspark_markov_rank: Optional[int] = None
+        # Target-side decoder layer outputs exported to the DSpARK draft.
+        self.capture_aux_hidden_layer_ids: Optional[list[int]] = None
         self.normalize_lm_head_weight: bool = False
         self.enable_fp32_lm_head: bool = True
         self.has_lm_head_bias: bool = False

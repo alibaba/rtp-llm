@@ -901,8 +901,28 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     int  target_last_token = new_tokens.data_ptr<int>()[num_new_tokens - 1];
     int* spec_tokens       = sp_output_buffer_->tokens.data_ptr<int>();
     spec_tokens[0]         = target_last_token;
-    spec_tokens[1]         = update_info.draft_token;
-    propose_token_         = {target_last_token, update_info.draft_token};
+    if (update_info.draft_tokens_cpu.defined()) {
+        const auto& proposal = update_info.draft_tokens_cpu;
+        RTP_LLM_CHECK_WITH_INFO(proposal.device().is_cpu() && proposal.scalar_type() == torch::kInt32,
+                                "full speculative proposal must be CPU int32");
+        RTP_LLM_CHECK_WITH_INFO(sp_output_buffer_->tokens.numel() >= proposal.numel() + 1,
+                                "speculative token buffer has %ld slots but full proposal needs %ld",
+                                sp_output_buffer_->tokens.numel(),
+                                proposal.numel() + 1);
+        std::copy(proposal.data_ptr<int32_t>(),
+                  proposal.data_ptr<int32_t>() + proposal.numel(),
+                  spec_tokens + 1);
+        propose_token_.resize(1 + proposal.numel());
+        propose_token_[0] = target_last_token;
+        std::copy(proposal.data_ptr<int32_t>(),
+                  proposal.data_ptr<int32_t>() + proposal.numel(),
+                  propose_token_.begin() + 1);
+    } else {
+        RTP_LLM_CHECK_WITH_INFO(sp_output_buffer_->tokens.numel() >= 2,
+                                "speculative token buffer must contain target and draft slots");
+        spec_tokens[1]  = update_info.draft_token;
+        propose_token_ = {target_last_token, update_info.draft_token};
+    }
 
     sp_output_buffer_->hidden_states = update_info.draft_hidden_states;
     sp_output_buffer_->all_probs     = update_info.draft_token_probs;
