@@ -40,6 +40,8 @@ public class DynamicWorkerManager {
     private final int maxTotalWorkers;
     private final AtomicInteger totalPermits;
     private static final int ADJUSTMENT_STEP = 1;
+    private static final long WATER_LEVEL_LOG_INTERVAL_MS = 10_000;
+    private volatile long lastWaterLevelLogTimeMs;
 
     public DynamicWorkerManager(ConfigService configService, ResourceMeasureFactory resourceMeasureFactory) {
         FlexlbConfig config = configService.loadBalanceConfig();
@@ -92,6 +94,9 @@ public class DynamicWorkerManager {
         double maxWaterLevel = 0.0;
 
         FlexlbConfig config = configService.loadBalanceConfig();
+        // 水位 debug 日志限流：默认每 10s 打印一次，allowedWorkers 变化时立即打印
+        long now = System.currentTimeMillis();
+        boolean shouldLog = now - lastWaterLevelLogTimeMs >= WATER_LEVEL_LOG_INTERVAL_MS;
         for (RoleType roleType : roleTypeList) {
             Map<String, WorkerStatus> workerStatusMap = modelWorkerStatus.getRoleStatusMap(roleType);
             ResourceMeasureIndicatorEnum indicator = config.getResourceMeasureIndicator(roleType);
@@ -99,14 +104,19 @@ public class DynamicWorkerManager {
             if (measure != null) {
                 double waterLevel = measure.calculateAverageWaterLevel(workerStatusMap);
                 maxWaterLevel = Math.max(maxWaterLevel, waterLevel);
-                Logger.debug("Role: {}, water level: {}%", roleType, waterLevel);
+                if (shouldLog) {
+                    Logger.debug("Role: {}, water level: {}%", roleType, waterLevel);
+                }
             }
         }
 
         int newAllowedWorkers = calculateAllowedWorkers(maxWaterLevel);
         int oldAllowedWorkers = allowedWorkers;
         allowedWorkers = newAllowedWorkers;
-        Logger.debug("Final water level: {}%, allowedWorkers: {} -> {}", maxWaterLevel, oldAllowedWorkers, newAllowedWorkers);
+        if (shouldLog || newAllowedWorkers != oldAllowedWorkers) {
+            lastWaterLevelLogTimeMs = now;
+            Logger.debug("Final water level: {}%, allowedWorkers: {} -> {}", maxWaterLevel, oldAllowedWorkers, newAllowedWorkers);
+        }
 
         adjustPermitCapacity(allowedWorkers);
     }

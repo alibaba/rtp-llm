@@ -88,6 +88,10 @@ if [ -z $SETENV_SETTED ]; then
         mkdir -p "$APP_HOME"/.default
         export SERVICE_PID=$APP_HOME/.default/${APP_NAME}.pid
         export SERVICE_OUT=$APP_HOME/logs/service_stdout.log
+        # dashscope 模式：java 输出直通容器 stdout（由平台采集），不落 service_stdout.log
+        case ",${SPRING_PROFILES_INCLUDE},${FLEXLB_ACTIVE_PROFILES},${SERVICE_OPTS}" in
+          *dashscope*) export SERVICE_OUT_TO_STDOUT=1 ;;
+        esac
         export MIDDLEWARE_LOGS="${HOME}/logs"
         export MIDDLEWARE_SNAPSHOTS="${HOME}/snapshots"
 

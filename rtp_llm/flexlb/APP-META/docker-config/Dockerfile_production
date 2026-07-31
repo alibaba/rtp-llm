@@ -1,8 +1,11 @@
-FROM hub.docker.alibaba-inc.com/aone/flexlb_base:20260727225941665668
+FROM hub.docker.alibaba-inc.com/aone/flexlb_base:20260731163019908478
 
 ############# production #################
 # 设置spring profile或者自定义的jvm参数。如果需要则打开下面的注释内容
-ENV SERVICE_OPTS="${SERVICE_OPTS} -Dspring.profiles.active=online"
+# FLEXLB_ACTIVE_PROFILES 可在部署时通过环境变量覆盖（如 online,dashscope）；
+# appctl.sh 使用 eval 启动 java，运行时才展开 ${FLEXLB_ACTIVE_PROFILES}
+ENV FLEXLB_ACTIVE_PROFILES=online
+ENV SERVICE_OPTS="${SERVICE_OPTS} -Dspring.profiles.active=\${FLEXLB_ACTIVE_PROFILES}"
 # 由于金山云bridge_vpc无法访问公网，因此跳过check
 ENV SKIP_CHECK_STATUS_TAOBAO="true"
 

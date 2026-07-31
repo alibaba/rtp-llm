@@ -8,9 +8,9 @@ listen_signal() {
 }
 
 detect_app_name() {
-    if [ "x$BUILD_APP_NAME" == "x" ];then
+    if [ "x$BUILD_APP_NAME" = "x" ];then
         local n=`cat $STARTUP | grep 'jbossctl restart' | grep '/home/admin' | head -1 | awk -F '/' '{print $4}'`
-        if [ "x$n" == "x" ];then
+        if [ "x$n" = "x" ];then
             echo `cat $STARTUP | grep '/home/admin' | head -1 | awk -F '/' '{print $4}'`
         else
             echo "$n"
@@ -23,7 +23,7 @@ detect_app_name() {
 
 prepare() {
     local app=`detect_app_name`
-    if [ "x$app" == "x" ];then
+    if [ "x$app" = "x" ];then
         echo "detect app name failed,  only support AONE docker." && exit 1
     fi
     echo "detected app name: $app"
@@ -45,14 +45,14 @@ do_start() {
     setsid $STARTUP
     local r=$?
     echo "$STARTUP exit code $r"
-    [[ $r -ne 0 ]] && echo "start failed, exit" && exit 1
+    [ "$r" -ne 0 ] && echo "start failed, exit" && exit 1
 }
 
 _test() {
     local STARTUP=./a
-    if [ "x$BUILD_APP_NAME" == "x" ];then
+    if [ "x$BUILD_APP_NAME" = "x" ];then
         local n=`cat $STARTUP | grep 'jbossctl restart' | grep '/home/admin' | head -1 | awk -F '/' '{print $4}'`
-        if [ "x$n" == "x" ];then
+        if [ "x$n" = "x" ];then
             echo `cat $STARTUP | grep '/home/admin' | head -1 | awk -F '/' '{print $4}'`
         else
             echo "$n"

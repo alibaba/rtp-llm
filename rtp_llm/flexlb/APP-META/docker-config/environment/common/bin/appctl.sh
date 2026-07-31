@@ -182,16 +182,23 @@ update_target() {
 }
 
 start_spring_boot() {
-    # prepare_service_out
-    # delete old SERVICE_OUT, keep last 20 logs
-    ls -t "$SERVICE_OUT".* 2>/dev/null | tail -n +$((20 + 1)) | xargs --no-run-if-empty rm -f
-    if [ -e "$SERVICE_OUT" ]; then
-        mv "$SERVICE_OUT" "$SERVICE_OUT.$(date '+%Y%m%d%H%M%S')" || exit1
-    fi
-    mkdir -p "$(dirname "${SERVICE_OUT}")" || exit1
-    touch "$SERVICE_OUT" || exit1
+    # dashscope 模式下 java 输出直通容器 stdout，其余模式落 SERVICE_OUT 文件并轮转
+    local REDIRECT_OUT="$SERVICE_OUT"
+    if [ "${SERVICE_OUT_TO_STDOUT:-0}" = "1" ]; then
+        REDIRECT_OUT=/proc/1/fd/1
+        echo "INFO: SERVICE_OUT_TO_STDOUT=1, spring boot output redirected to container stdout"
+    else
+        # prepare_service_out
+        # delete old SERVICE_OUT, keep last 20 logs
+        ls -t "$SERVICE_OUT".* 2>/dev/null | tail -n +$((20 + 1)) | xargs --no-run-if-empty rm -f
+        if [ -e "$SERVICE_OUT" ]; then
+            mv "$SERVICE_OUT" "$SERVICE_OUT.$(date '+%Y%m%d%H%M%S')" || exit1
+        fi
+        mkdir -p "$(dirname "${SERVICE_OUT}")" || exit1
+        touch "$SERVICE_OUT" || exit1
 
-    echo "INFO: spring boot service log: $SERVICE_OUT"
+        echo "INFO: spring boot service log: $SERVICE_OUT"
+    fi
 
     if [ ! -z "$SERVICE_PID" ]; then
         if [ -f "$SERVICE_PID" ]; then
@@ -241,7 +248,7 @@ start_spring_boot() {
                 -Dapp.location="\"${APP_HOME}/target/${APP_NAME}\"" \
                 -Djava.io.tmpdir="\"$SERVICE_TMPDIR\"" \
                 ${SPRING_BOOT_ARGS} "$@" \
-                >> "$SERVICE_OUT" 2>&1 "&"
+                >> "$REDIRECT_OUT" 2>&1 "&"
     else
         echo "Using classpath ${APP_HOME}/target/${APP_NAME}"
         eval exec "\"$JAVA_HOME/bin/java\"" $SERVICE_OPTS \
@@ -250,7 +257,7 @@ start_spring_boot() {
                 -Djava.endorsed.dirs="\"$JAVA_ENDORSED_DIRS\""  \
                 -Djava.io.tmpdir="\"$SERVICE_TMPDIR\"" \
                 org.springframework.boot.loader.JarLauncher ${SPRING_BOOT_ARGS} "$@" \
-                >> "$SERVICE_OUT" 2>&1 "&"
+                >> "$REDIRECT_OUT" 2>&1 "&"
     fi
 
     if [ ! -z "$SERVICE_PID" ]; then

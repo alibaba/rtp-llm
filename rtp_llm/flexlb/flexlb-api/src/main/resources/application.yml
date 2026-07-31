@@ -15,6 +15,8 @@ flexlb:
     provider: ${FLEXLB_MONITOR_PROVIDER:noop}
   log:
     path: ${FLEXLB_LOG_PATH:/home/admin/ai-whale/logs}
+    # application.log 和 pv.log 的独立路径，默认与 path 一致；dashscope profile 下覆盖为 /home/admin/logs
+    app-path: ${FLEXLB_APP_LOG_PATH:${flexlb.log.path}}
     async-queue-size: ${FLEXLB_LOG_ASYNC_QUEUE_SIZE:16384}
   # CPU-bound block hashing pool: use core threads first, queue pending work, then
   # expand up to max threads when the queue is full. Extra threads expire after keep-alive.

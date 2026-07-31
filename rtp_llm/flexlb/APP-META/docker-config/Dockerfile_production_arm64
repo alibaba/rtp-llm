@@ -1,8 +1,11 @@
-FROM hub.docker.alibaba-inc.com/aone/flexlb_base_arm64:2026_07_27_18_47_57bf944_arm64
+FROM hub.docker.alibaba-inc.com/aone/flexlb_base_arm64:2026_07_31_16_30_39f8ce0_arm64
 
 ARG APP_NAME=ai-whale
 ENV APP_NAME=${APP_NAME}
-ENV SERVICE_OPTS="${SERVICE_OPTS} -Dspring.profiles.active=online"
+# FLEXLB_ACTIVE_PROFILES 可在部署时通过环境变量覆盖（如 online,dashscope）；
+# appctl.sh 使用 eval 启动 java，运行时才展开 ${FLEXLB_ACTIVE_PROFILES}
+ENV FLEXLB_ACTIVE_PROFILES=online
+ENV SERVICE_OPTS="${SERVICE_OPTS} -Dspring.profiles.active=\${FLEXLB_ACTIVE_PROFILES}"
 ENV SKIP_CHECK_STATUS_TAOBAO=true
 ENV NGINX_SKIP=1
 

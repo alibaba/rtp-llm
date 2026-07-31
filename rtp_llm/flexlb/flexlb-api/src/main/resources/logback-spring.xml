@@ -5,10 +5,12 @@
 
     <springProperty scope="context" name="LOG_PATH"
                     source="flexlb.log.path" defaultValue="/home/admin/ai-whale/logs" />
+    <springProperty scope="context" name="APP_LOG_PATH"
+                    source="flexlb.log.app-path" defaultValue="/home/admin/ai-whale/logs" />
     <springProperty scope="context" name="ASYNC_LOG_QUEUE_SIZE"
                     source="flexlb.log.async-queue-size" defaultValue="16384" />
-    <property name="LOG_FILE" value="${LOG_PATH}/application.log" />
-    <property name="PV_LOG_FILE" value="${LOG_PATH}/pv.log" />
+    <property name="LOG_FILE" value="${APP_LOG_PATH}/application.log" />
+    <property name="PV_LOG_FILE" value="${APP_LOG_PATH}/pv.log" />
     <property name="SYNC_LOG_FILE" value="${LOG_PATH}/sync.log" />
     <property name="SYNC_CONSISTENCY_LOG_FILE" value="${LOG_PATH}/sync_consistency.log" />
     <property name="FLEXLB_LOG_FILE" value="${LOG_PATH}/flexlb.log" />
@@ -166,5 +168,16 @@
         <root level="INFO">
             <appender-ref ref="APPLICATION-async" />
         </root>
+    </springProfile>
+
+    <springProfile name="dashscope">
+        <!-- dashscope 环境：application.log 和 pv.log 写到 APP_LOG_PATH（application-dashscope.yml 覆盖为
+             /home/admin/logs）并输出 stdout；其余日志仍写 LOG_PATH（/home/admin/ai-whale/logs），不上 stdout -->
+        <root level="INFO">
+            <appender-ref ref="CONSOLE-async" />
+        </root>
+        <logger name="pvLogger" level="INFO" additivity="false">
+            <appender-ref ref="CONSOLE-async"/>
+        </logger>
     </springProfile>
 </configuration>
