@@ -128,6 +128,23 @@ case "${role}" in
 esac
 
 : "${CHECKPOINT_PATH:?CHECKPOINT_PATH is required}"
+# The generic same-host PD Smoke runner assigns START_PORT and
+# REMOTE_SERVER_PORT dynamically.  Derive the two explicit endpoints when the
+# launcher is invoked by that runner, while keeping explicit host:port values
+# mandatory for normal cross-host use.
+if [[ -z "${PREFILL_ENDPOINT:-}" \
+    && -z "${DECODE_ENDPOINT:-}" \
+    && -n "${START_PORT:-}" \
+    && -n "${REMOTE_SERVER_PORT:-}" ]]; then
+    if [[ "${role}" == "PREFILL" ]]; then
+        PREFILL_ENDPOINT="127.0.0.1:${START_PORT}"
+        DECODE_ENDPOINT="127.0.0.1:${REMOTE_SERVER_PORT}"
+    else
+        PREFILL_ENDPOINT="127.0.0.1:${REMOTE_SERVER_PORT}"
+        DECODE_ENDPOINT="127.0.0.1:${START_PORT}"
+    fi
+    export PREFILL_ENDPOINT DECODE_ENDPOINT
+fi
 : "${PREFILL_ENDPOINT:?PREFILL_ENDPOINT is required}"
 : "${DECODE_ENDPOINT:?DECODE_ENDPOINT is required}"
 
@@ -181,7 +198,7 @@ skip_build="${KIMI_K3_SKIP_BUILD:-0}"
     || die "KIMI_K3_SKIP_BUILD must be 0 or 1, got ${skip_build}"
 
 service_id="${KIMI_K3_SERVICE_ID:-kimi-k3-pd}"
-run_root="${KIMI_K3_RUN_ROOT:-${TMPDIR:-/tmp}/${service_id}}"
+run_root="${KIMI_K3_RUN_ROOT:-${SMOKE_ROLE_RUNTIME_DIR:-${TMPDIR:-/tmp}/${service_id}}}"
 # CpuTpBroadcaster appends a long per-rank UDS name.  Keep the default runtime
 # path short even when RUN_ROOT is an archival path.
 runtime_tmpdir="${KIMI_K3_TMPDIR:-/tmp/${service_id}-${role,,}}"
@@ -522,6 +539,24 @@ else
     use_deepep_moe=1
 fi
 export CUBLAS_WORKSPACE_CONFIG="${CUBLAS_WORKSPACE_CONFIG:-:4096:8}"
+# Bazel's CUDA toolchain may export absolute compiler paths that are valid
+# only inside an action sandbox.  FlashInfer reads CC/CXX directly when it
+# materializes an MLA kernel at runtime, so normalize stale paths before any
+# JIT starts.
+if [[ ! -x "${CC:-}" ]]; then
+    CC="$(command -v gcc || true)"
+    [[ -x "${CC}" ]] || die "FlashInfer JIT requires a host C compiler"
+    export CC
+fi
+if [[ ! -x "${CXX:-}" ]]; then
+    CXX="$(command -v g++ || true)"
+    [[ -x "${CXX}" ]] || die "FlashInfer/DeepGEMM JIT requires a host C++ compiler"
+    export CXX
+fi
+if [[ ! -x "${CUDAHOSTCXX:-}" ]]; then
+    CUDAHOSTCXX="${CXX}"
+    export CUDAHOSTCXX
+fi
 deepgemm_jit_compiler=none
 if [[ "${moe_backend}" == "deep_gemm_mega" ]]; then
     deepgemm_jit_compiler="${KIMI_K3_DEEPGEMM_JIT_COMPILER:-auto}"
