@@ -9,9 +9,15 @@ from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import (
     force_py_flashinfer,
     is_sm_100,
+    is_sm_100_or_newer,
 )
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
-from rtp_llm.ops import AttentionConfigs, FMHAType, ParallelismConfig
+from rtp_llm.ops import (
+    AttentionConfigs,
+    FMHAType,
+    KvCacheDataType,
+    ParallelismConfig,
+)
 from rtp_llm.ops.compute_ops import (
     FusedRopeKVCacheDecodeOp,
     FusedRopeKVCachePrefillOpQOut,
@@ -443,6 +449,7 @@ class FlashInferTRTLLMDecodeOp(object):
     def __init__(
         self,
         attn_configs: AttentionConfigs,
+        keep_query_dtype: bool = False,
     ):
         self.attn_configs = attn_configs
         self.head_dim = attn_configs.size_per_head
@@ -451,16 +458,26 @@ class FlashInferTRTLLMDecodeOp(object):
         self.seq_size_per_block = attn_configs.kernel_tokens_per_block
         self.local_head_num = attn_configs.head_num
         self.local_head_kv_num = attn_configs.kv_head_num
+        self.keep_query_dtype = keep_query_dtype
         self.workspace_buffer = get_trt_workspace_buffer()
 
     def __del__(self):
         release_trt_workspace_buffer(self.workspace_buffer)
 
-    def support(self, attention_inputs: PyAttentionInputs):
-        # On B300/SM103 the trtllm-gen FMHA kernels have no valid kernel image
-        # and hard-crash; force the pure-Python FlashInfer path instead.
-        if not is_sm_100() or force_py_flashinfer():
-            return False
+    def support(
+        self,
+        attention_inputs: PyAttentionInputs,
+        *,
+        relax_force_py: bool = False,
+    ):
+        if relax_force_py:
+            if not is_sm_100_or_newer():
+                return False
+        else:
+            # On B300/SM103 the trtllm-gen FMHA kernels have no valid kernel image
+            # and hard-crash; force the pure-Python FlashInfer path instead.
+            if not is_sm_100() or force_py_flashinfer():
+                return False
         try:
             from flashinfer.artifacts import ArtifactPath, CheckSumHash
             from flashinfer.jit.attention.modules import get_artifact
@@ -525,9 +542,9 @@ class FlashInferTRTLLMDecodeOp(object):
         kv_cache: Optional[LayerKVCache],
         fmha_params: FlashInferTRTLLMParams,
     ) -> torch.Tensor:
-        dtype = kv_cache.kv_cache_base.dtype
         q_type = q.dtype
-        q = q.to(dtype)
+        if not self.keep_query_dtype:
+            q = q.to(kv_cache.kv_cache_base.dtype)
         o_type = q_type
 
         q = q.contiguous().view(-1, self.local_head_num, self.head_dim)
@@ -668,8 +685,12 @@ class FlashInferTRTLLMSpecDecodeImpl(FMHAImplBase):
     ) -> bool:
         if attn_configs.use_mla:
             return False
+        if not is_sm_100_or_newer():
+            return False
+        if attn_configs.kv_cache_dtype != KvCacheDataType.FP8:
+            return False
         fmha_impl = FlashInferTRTLLMDecodeOp(attn_configs)
-        return fmha_impl.support(attn_inputs)
+        return fmha_impl.support(attn_inputs, relax_force_py=True)
 
     def forward(
         self,
@@ -723,7 +744,7 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
         self.need_rope_kv_cache = attn_configs.need_rope_kv_cache
-        self.fmha_impl = FlashInferTRTLLMDecodeOp(attn_configs)
+        self.fmha_impl = FlashInferTRTLLMDecodeOp(attn_configs, keep_query_dtype=True)
         self.rope_kvcache_impl = FusedRopeKVCacheDecodeOp(attn_configs)
         self.attn_configs = attn_configs
         self.attn_inputs = attn_inputs
@@ -744,10 +765,12 @@ class FlashInferTRTLLMDecodeImpl(FMHAImplBase):
     ) -> bool:
         if attn_configs.use_mla:
             return False
-        if force_py_flashinfer():
+        if not is_sm_100_or_newer():
+            return False
+        if attn_configs.kv_cache_dtype != KvCacheDataType.FP8:
             return False
         fmha_impl = FlashInferTRTLLMDecodeOp(attn_configs)
-        return fmha_impl.support(attn_inputs)
+        return fmha_impl.support(attn_inputs, relax_force_py=True)
 
     def forward(
         self,

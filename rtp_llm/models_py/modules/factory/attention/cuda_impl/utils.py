@@ -11,6 +11,11 @@ def is_sm_100() -> bool:
     return torch.cuda.get_device_capability()[0] in [10]
 
 
+@functools.cache
+def is_sm_100_or_newer() -> bool:
+    return torch.cuda.get_device_capability()[0] >= 10
+
+
 def force_py_flashinfer() -> bool:
     """Force the pure-Python FlashInfer attention impls even on Blackwell.
 

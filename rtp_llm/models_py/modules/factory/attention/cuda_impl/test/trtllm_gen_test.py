@@ -5,6 +5,7 @@ import sys
 from typing import List, Optional
 from unittest import SkipTest, TestCase, main
 
+import flashinfer
 import torch
 
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.atten_test_util import (
@@ -13,8 +14,11 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.atten_test_util 
     write_kv_cache,
 )
 from rtp_llm.models_py.modules.factory.attention.cuda_impl.trtllm_gen import (
+    FlashInferTRTLLMDecodeImpl,
     FlashInferTRTLLMDecodeOp,
+    FlashInferTRTLLMPrefillImpl,
     FlashInferTRTLLMPrefillOp,
+    FlashInferTRTLLMSpecDecodeImpl,
     _compute_cg_grid,
     _prepare_cg_decode_kernel,
     _prepare_cg_prefill_kernel,
@@ -25,7 +29,7 @@ from rtp_llm.test.utils.numeric_util import assert_close_with_mismatch_tolerance
 device = torch.device("cuda")
 
 from rtp_llm.ops import AttentionConfigs, KvCacheDataType
-from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs
+from rtp_llm.ops.compute_ops import LayerKVCache, PyAttentionInputs, get_typemeta
 
 
 def set_seed(seed: int):
@@ -101,6 +105,7 @@ class FlashInferPythonMHATest(TestCase):
         lengths: List[int],
         is_prefill: bool,
         use_prefill_op: bool,
+        keep_query_dtype: bool = False,
     ):
         """Test FlashInferTRTLLM attention with reference comparison.
 
@@ -110,6 +115,9 @@ class FlashInferPythonMHATest(TestCase):
                         if False, treat as sequence_lengths (decode data).
             use_prefill_op: if True, use FlashInferTRTLLMPrefillOp;
                             if False, use FlashInferTRTLLMDecodeOp.
+            keep_query_dtype: pass through to FlashInferTRTLLMDecodeOp; when True
+                        the query is left in BF16 instead of being cast to the
+                        KV cache dtype.
         """
         is_sm_100 = torch.cuda.get_device_capability()[0] in [10]
         if not is_sm_100:
@@ -188,7 +196,7 @@ class FlashInferPythonMHATest(TestCase):
                 ) - torch.arange(q_len_per_req).flip([0]).view(1, q_len_per_req)
                 last_token_idx = last_token_idx.reshape(-1)
             out_ref = out_ref[last_token_idx]
-            op = FlashInferTRTLLMDecodeOp(config)
+            op = FlashInferTRTLLMDecodeOp(config, keep_query_dtype=keep_query_dtype)
             q = q_ref[last_token_idx]
             attn_inputs.sequence_lengths -= 1
             input_params = op.prepare(attn_inputs)
@@ -241,6 +249,168 @@ class FlashInferPythonMHATest(TestCase):
             [11, 129, 255, 63],
             is_prefill=False,
             use_prefill_op=False,
+        )
+
+    def test_flashinfer_trtllm_decode_op_fp8_bf16_query(self):
+        self._test_flashinfer_trtllm_base(
+            torch.float8_e4m3fn,
+            [11, 129, 255, 63],
+            is_prefill=False,
+            use_prefill_op=False,
+            keep_query_dtype=True,
+        )
+
+
+class FlashInferTRTLLMDecodeGateTest(TestCase):
+    def setUp(self) -> None:
+        if not torch.cuda.is_available():
+            raise SkipTest("CUDA is not available")
+        if torch.cuda.get_device_capability()[0] < 10:
+            raise SkipTest("trtllm-gen decode requires SM >= 10")
+        self._saved_load_python_model = os.environ.get("LOAD_PYTHON_MODEL")
+        os.environ["LOAD_PYTHON_MODEL"] = "1"
+        set_seed(25536)
+        self.page_size = 64
+        self.num_pages = 1024
+
+    def tearDown(self) -> None:
+        if self._saved_load_python_model is None:
+            os.environ.pop("LOAD_PYTHON_MODEL", None)
+        else:
+            os.environ["LOAD_PYTHON_MODEL"] = self._saved_load_python_model
+
+    def _config(
+        self, kv_cache_dtype: KvCacheDataType, use_mla: bool = False
+    ) -> AttentionConfigs:
+        config = AttentionConfigs()
+        config.head_num = 64
+        config.kv_head_num = 8
+        config.size_per_head = 128
+        config.tokens_per_block = self.page_size
+        config.kernel_tokens_per_block = self.page_size
+        config.kv_cache_dtype = kv_cache_dtype
+        config.use_mla = use_mla
+        config.is_causal = True
+        config.fuse_qkv_add_bias = True
+        config.q_scaling = 1.0
+        return config
+
+    def _decode_inputs(self) -> PyAttentionInputs:
+        return gen_attention_inputs(
+            self.page_size, self.num_pages, sequence_lengths=[2, 129, 255, 63]
+        )
+
+    def test_decode_impl_claims_fp8_kv_under_load_python_model(self):
+        self.assertTrue(
+            FlashInferTRTLLMDecodeImpl.support(
+                self._config(KvCacheDataType.FP8), self._decode_inputs()
+            )
+        )
+
+    def test_decode_impl_declines_non_fp8_kv(self):
+        self.assertFalse(
+            FlashInferTRTLLMDecodeImpl.support(
+                self._config(KvCacheDataType.BASE), self._decode_inputs()
+            )
+        )
+
+    def test_decode_impl_declines_mla(self):
+        self.assertFalse(
+            FlashInferTRTLLMDecodeImpl.support(
+                self._config(KvCacheDataType.FP8, use_mla=True), self._decode_inputs()
+            )
+        )
+
+    def _verify_inputs(self) -> PyAttentionInputs:
+        return gen_attention_inputs(
+            self.page_size, self.num_pages, input_lengths=[6, 6, 6, 6]
+        )
+
+    def test_spec_decode_impl_claims_fp8_kv_under_load_python_model(self):
+        self.assertTrue(
+            FlashInferTRTLLMSpecDecodeImpl.support(
+                self._config(KvCacheDataType.FP8), self._verify_inputs()
+            )
+        )
+
+    def test_spec_decode_impl_declines_non_fp8_kv(self):
+        self.assertFalse(
+            FlashInferTRTLLMSpecDecodeImpl.support(
+                self._config(KvCacheDataType.BASE), self._verify_inputs()
+            )
+        )
+
+    def test_spec_decode_impl_declines_mla(self):
+        self.assertFalse(
+            FlashInferTRTLLMSpecDecodeImpl.support(
+                self._config(KvCacheDataType.FP8, use_mla=True), self._verify_inputs()
+            )
+        )
+
+    def test_prefill_impl_still_disabled_under_load_python_model(self):
+        self.assertFalse(
+            FlashInferTRTLLMPrefillImpl.support(
+                self._config(KvCacheDataType.FP8), self._verify_inputs()
+            )
+        )
+
+    def test_spec_decode_impl_casts_query_to_fp8(self):
+        self.assertEqual(
+            self._query_dtype_seen_by_kernel(
+                FlashInferTRTLLMSpecDecodeImpl, self._verify_inputs(), q_len_per_req=6
+            ),
+            torch.float8_e4m3fn,
+        )
+
+    def _query_dtype_seen_by_kernel(
+        self, impl_cls, attn_inputs: PyAttentionInputs, q_len_per_req: int
+    ) -> torch.dtype:
+        config = self._config(KvCacheDataType.FP8)
+        batch_size = attn_inputs.input_lengths.numel()
+        num_tokens = batch_size * q_len_per_req
+        q = torch.rand(
+            [num_tokens, config.head_num * config.size_per_head],
+            dtype=torch.bfloat16,
+            device=device,
+        )
+        attn_inputs.dtype = get_typemeta(q)
+        impl = impl_cls(config, attn_inputs)
+        kv_cache = LayerKVCache()
+        kv_cache.kv_cache_base = torch.zeros(
+            self.num_pages,
+            2,
+            config.kv_head_num,
+            self.page_size,
+            config.size_per_head,
+            dtype=torch.float8_e4m3fn,
+            device=device,
+        )
+
+        seen = []
+        real_kernel = flashinfer.decode.trtllm_batch_decode_with_kv_cache
+
+        def spy(*args, **kwargs):
+            query = kwargs.get("query", args[0] if args else None)
+            seen.append(query.dtype)
+            return torch.zeros(
+                query.shape, dtype=torch.bfloat16, device=query.device
+            )
+
+        flashinfer.decode.trtllm_batch_decode_with_kv_cache = spy
+        try:
+            impl.fmha_impl.forward(q, kv_cache, impl.fmha_params)
+        finally:
+            flashinfer.decode.trtllm_batch_decode_with_kv_cache = real_kernel
+
+        self.assertEqual(len(seen), 1)
+        return seen[0]
+
+    def test_decode_impl_keeps_query_in_bf16(self):
+        self.assertEqual(
+            self._query_dtype_seen_by_kernel(
+                FlashInferTRTLLMDecodeImpl, self._decode_inputs(), q_len_per_req=1
+            ),
+            torch.bfloat16,
         )
 
 
