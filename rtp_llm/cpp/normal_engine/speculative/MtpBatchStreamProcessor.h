@@ -16,7 +16,9 @@ public:
                             const SpeculativeExecutionConfig&  sp_config,
                             bool                               warm_up):
         NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
-        propose_step_(sp_config.gen_num_per_cycle) {}
+        propose_step_(sp_config.gen_num_per_cycle),
+        is_dspark_(sp_config.type == SP_TYPE_DSPARK),
+        dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)) {}
 
     absl::Status dispatchPrefill(const StreamGroups& stream_groups,
                                  const MergedOutput& prefill_output,
@@ -65,6 +67,30 @@ public:
                                           const SamplerOutput&   sampler_output,
                                           TensorHolder&          host_holder);
 
+    // DSpARK proposes a fixed-width block in one draft forward.  gamma is
+    // propose_step_: draft input is [anchor, noise x (gamma - 1)], while the
+    // target verifies [anchor, proposal x gamma].
+    void updatePrefillPostDSparkDraftModelInput(GptModelInputs&        model_input,
+                                                const GptModelOutputs& model_output,
+                                                const SamplerOutput&   sampler_output,
+                                                TensorHolder&          host_holder);
+
+    void prepareDSparkVerifyModelInput(const StreamGroups& stream_groups,
+                                       GptModelInputs&     model_input,
+                                       TensorHolder&       host_holder);
+
+    void updateDSparkDraftSamplerOutput(const StreamGroups& stream_groups,
+                                        SamplerOutput&      draft_sampler_output,
+                                        torch::Tensor&      draft_token_probs_d_t,
+                                        TensorHolder&       host_holder);
+
+    void updateDecodePostDSparkDraftModelInput(GptModelInputs&                              model_input,
+                                               const GptModelOutputs&                       model_output,
+                                               const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
+                                               size_t                                       batch_size,
+                                               torch::Tensor&                               hidden_states_d_t,
+                                               TensorHolder&                                host_holder);
+
     void updateDecodePostDraftModelInput(GptModelInputs&                              model_input,
                                          const GptModelOutputs&                       model_output,
                                          const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
@@ -104,6 +130,19 @@ protected:
     void gatherHiddenStates(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
 
 protected:
+    torch::Tensor dsparkComboTokens(int64_t batch_size, const torch::Tensor& anchors);
+    torch::Tensor dsparkDraftInputLengths(int64_t batch_size);
+    torch::Tensor dsparkDraftLmIndexes(int64_t batch_size);
+
     int propose_step_;
+    bool    is_dspark_            = false;
+    int32_t dspark_mask_token_id_ = -1;
+
+    // Decode-round constants are grow-only device buffers.  Keeping them on
+    // device is required by RTP_LLM_STREAM_ASYNC: no accept-length D2H is
+    // introduced on the scheduling thread.
+    torch::Tensor dspark_combo_cache_;
+    torch::Tensor dspark_input_lengths_cache_;
+    torch::Tensor dspark_lm_indexes_cache_;
 };
 }  // namespace rtp_llm

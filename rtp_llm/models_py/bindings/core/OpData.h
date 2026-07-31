@@ -52,6 +52,14 @@ struct GptModelInputs {
     // for mtp model
     torch::Tensor last_hidden_states;
 
+    // DSpARK feature-injection window. Each int32 [batch] entry selects the
+    // rows of last_hidden_states used by one request. Undefined means the
+    // whole available prefix (initial seeding).
+    torch::Tensor dspark_ctx_lengths;
+    // Optional int32 [batch] absolute start for each feature window. When it
+    // is undefined, the window ends at the request prefix length.
+    torch::Tensor dspark_ctx_starts;
+
     torch::Tensor attention_mask;  // [batch_size, seq_len, seq_len]
 
     // - single-type cache: [batch_size, block_nums]
@@ -73,6 +81,10 @@ struct GptModelInputs {
     torch::Tensor request_id;             // int64, [context_batch_size]
     torch::Tensor request_pd_separation;  // bool, [context_batch_size]
     torch::Tensor cache_keys;             // [context_batch_size]
+    // Optional PD cache-store range overrides. DSpARK attends from the full
+    // prompt but transfers the computed suffix plus its draft query block.
+    torch::Tensor cache_store_input_lengths;
+    torch::Tensor cache_store_prefix_lengths;
     size_t        kv_block_stride_bytes;
     size_t        kv_scale_stride_bytes;
     size_t        seq_size_per_block;
@@ -110,6 +122,13 @@ struct GptModelOutputs {
     torch::Tensor all_hidden_states;
     torch::Tensor all_logits;
     torch::Tensor softmax_result;
+
+    // Optional [token, capture_layers, hidden] target features for DSpARK.
+    torch::Tensor aux_hidden_states;
+    // Optional in-model DSpARK proposal: [batch, gamma] tokens and
+    // [batch, gamma, vocab] probabilities.
+    torch::Tensor draft_tokens;
+    torch::Tensor draft_probs;
 
     std::vector<torch::Tensor> moe_gating;
 };

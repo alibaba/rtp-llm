@@ -8,7 +8,7 @@ mock per-layer KV cache before wiring into RTP-LLM's GptModelBase.
 """
 
 from dataclasses import dataclass, field
-from typing import Dict, List, Optional
+from typing import Dict, List, Optional, Sequence
 
 import torch
 import torch.nn as nn
@@ -242,6 +242,82 @@ class V4Transformer(nn.Module):
         #   main / indexer — back-to-back on the compressor side stream.
         self._prefill_ws_main_w = 0
         self._prefill_ws_idx_w = 0
+
+        # DSpARK target-feature export. The target model config fills this
+        # with 0-based layer ids (V4-Flash uses 40/41/42); the empty tuple is
+        # the no-auxiliary-tensor default for ordinary inference and MTP.
+        self.capture_aux_hidden_layer_ids: tuple[int, ...] = ()
+        self._aux_hidden_states: Optional[torch.Tensor] = None
+
+    def set_aux_hidden_capture_layer_ids(self, layer_ids: Sequence[int]) -> None:
+        """Configure target residual-stream layers exported to DSpARK.
+
+        Each selected layer is reduced over the mHC axis *after* that layer,
+        matching the reference model's ``h.mean(dim=-2)`` semantics. Capture
+        order follows ``layer_ids`` rather than model traversal order.
+        """
+        capture_ids = tuple(int(layer_id) for layer_id in layer_ids)
+        if len(set(capture_ids)) != len(capture_ids):
+            raise ValueError(
+                "DSpARK auxiliary hidden capture layer ids must be unique, "
+                f"got {capture_ids}"
+            )
+        invalid_ids = [
+            layer_id
+            for layer_id in capture_ids
+            if layer_id < 0 or layer_id >= len(self.layers)
+        ]
+        if invalid_ids:
+            raise ValueError(
+                "DSpARK auxiliary hidden capture layer ids are out of range: "
+                f"invalid={invalid_ids}, num_layers={len(self.layers)}"
+            )
+        self.capture_aux_hidden_layer_ids = capture_ids
+
+    def begin_aux_hidden_capture(self) -> Optional[Dict[int, torch.Tensor]]:
+        """Clear the prior output and create per-forward capture storage."""
+        self._aux_hidden_states = None
+        if not self.capture_aux_hidden_layer_ids:
+            return None
+        return {}
+
+    def capture_aux_hidden(
+        self,
+        captured: Optional[Dict[int, torch.Tensor]],
+        layer_id: int,
+        hidden: torch.Tensor,
+    ) -> None:
+        if captured is not None and layer_id in self.capture_aux_hidden_layer_ids:
+            # hidden is [T, hc, H] in prefill and [B, S, hc, H] in decode.
+            # Keep the token layout untouched; in CP prefill it intentionally
+            # remains rank-local zigzag order here. PyWrappedModel restores
+            # this output to global token order before the executor feeds it
+            # to the draft; the draft's CP input processor then applies the
+            # same zigzag split as it does for combo_tokens.
+            captured[layer_id] = hidden.mean(dim=-2)
+
+    def finish_aux_hidden_capture(
+        self, captured: Optional[Dict[int, torch.Tensor]]
+    ) -> Optional[torch.Tensor]:
+        """Publish ``[..., selected_layers, hidden]`` for PyModelOutputs."""
+        if captured is None:
+            self._aux_hidden_states = None
+            return None
+        missing_ids = [
+            layer_id
+            for layer_id in self.capture_aux_hidden_layer_ids
+            if layer_id not in captured
+        ]
+        if missing_ids:
+            raise RuntimeError(
+                "DSpARK auxiliary hidden capture missed configured layers: "
+                f"missing={missing_ids}, configured={self.capture_aux_hidden_layer_ids}"
+            )
+        self._aux_hidden_states = torch.stack(
+            [captured[layer_id] for layer_id in self.capture_aux_hidden_layer_ids],
+            dim=-2,
+        )
+        return self._aux_hidden_states
 
     def _bind_runtime_buffers(
         self,

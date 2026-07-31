@@ -1179,6 +1179,40 @@ TEST_F(MtpExecutorTest, testMultiBatchDecode) {
     checkOutput(stream2, {3, 2, 1, 3, 0, 2, 2, 1}, {1, 2}, {0.0, 1.0, 0.0, 0.0}, {1.5, 1.55});
 }
 
+TEST_F(MtpExecutorTest, testDSparkRuntimeGammaThreeFakeDecodeAndFullProposalBufferShapes) {
+    constexpr int32_t gamma      = 3;
+    constexpr int32_t vocab_size = 16;
+
+    ModelConfig     model_config;
+    RuntimeConfig   runtime_config;
+    ResourceContext resource_context;
+    model_config.max_seq_len = 64;
+    model_config.vocab_size  = vocab_size;
+    model_config.hidden_size = 8;
+    model_config.data_type   = TYPE_FP16;
+
+    auto stream = MtpExecutor::createMinFakeDecodeStream(
+        gamma, model_config, runtime_config, resource_context, vocab_size, true);
+    auto sp_buffer = stream->getSPOutputBuffer();
+    ASSERT_NE(sp_buffer, nullptr);
+    EXPECT_EQ((std::vector<int64_t>{1, gamma + 1}), sp_buffer->tokens.sizes().vec());
+    EXPECT_EQ((std::vector<int64_t>{1, gamma, vocab_size}), sp_buffer->all_probs.sizes().vec());
+    EXPECT_EQ((std::vector<int64_t>{1, gamma}), stream->getProposeTokensGpu().sizes().vec());
+
+    auto proposal = torch::tensor({1, 2, 3}, torch::kInt32);
+    StreamSpecUpdateInfo update_info{torch::tensor({7}, torch::kInt32).reshape({1, 1}),
+                                     1,
+                                     -1,
+                                     torch::Tensor(),
+                                     torch::Tensor(),
+                                     torch::Tensor(),
+                                     proposal};
+    stream->specUpdate(update_info);
+
+    EXPECT_EQ((std::vector<int32_t>{7, 1, 2, 3}), toVec<int32_t>(sp_buffer->tokens));
+    EXPECT_EQ((std::vector<int>{7, 1, 2, 3}), stream->getProposeToken());
+}
+
 TEST_F(MtpExecutorTest, testDispatchStatePrepareKernel) {
     // Test invokeMtpDispatchStatePrepare correctness
     const int64_t batch_size = 8;

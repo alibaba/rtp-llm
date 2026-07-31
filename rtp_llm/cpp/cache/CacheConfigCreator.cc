@@ -230,7 +230,9 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     int num_mtp_modules = 1;
     if (is_mtp) {
         num_mtp_modules = sp_config.gen_num_per_cycle;
-        if (is_eagle) {
+        if (is_eagle || sp_config.type == SP_TYPE_DSPARK) {
+            // DSpARK is one multi-layer block-draft model; gamma is its
+            // proposal width, not a count of independent one-layer modules.
             num_mtp_modules = 1;
         }
     }

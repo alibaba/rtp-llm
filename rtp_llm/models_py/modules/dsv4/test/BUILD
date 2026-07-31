@@ -73,6 +73,23 @@ py_test(
 )
 
 py_test(
+    name = "test_dspark_cuda_graph_contract",
+    srcs = ["test_dspark_cuda_graph_contract.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
+    name = "test_dspark_runtime_config",
+    srcs = ["test_dspark_runtime_config.py"],
+    deps = [
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "test_cp_attention_merge",
     srcs = ["test_cp_attention_merge.py"],
     deps = _DSV4_TEST_DEPS,
