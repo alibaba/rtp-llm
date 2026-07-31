@@ -34,8 +34,8 @@ from typing import Dict
 import torch
 import torch.nn.functional as F
 
-from ...quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 from ..._profiler import record_function_range
+from ...quant_layouts import FP4_BLOCK, prepare_fp4_weight_scale_for_deepgemm
 from ..input_packer import get_mega_moe_input_packer
 from ..mega_fused_buf import (
     _get_or_create_mega_fused_buf,
@@ -326,6 +326,7 @@ class MegaMoEFusedStrategy(MegaMoEStrategy):
 
         with record_function_range("dsv4.moe.gate_linear_bf16"):
             scores_bf16 = F.linear(x, gate._weight_bf16())
+        gate._diagnose_router_inputs(scores_bf16)
 
         with record_function_range("dsv4.moe.mega_gate_pack"):
             if gate.hash:

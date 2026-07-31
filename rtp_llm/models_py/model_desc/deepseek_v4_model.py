@@ -677,6 +677,13 @@ class DeepSeekV4Model(GptModelBase):
                 "kernel missing from the JIT cache and may abort or corrupt the "
                 "graph; only use this combination with a fully warmed JIT cache."
             )
+        if device_str.startswith("cuda"):
+            from rtp_llm.models_py.modules.dsv4 import _nan_diag_triton as _nan_diag
+
+            # The detector is captured into every CUDA graph when explicitly
+            # enabled. Compile both input dtypes here so capture never triggers
+            # Triton JIT compilation.
+            _nan_diag.prewarm(device_str)
         if device_str.startswith("cuda") and prewarm_jit_kernels:
             from rtp_llm.models_py.modules.dsv4 import tilelang_kernels as _tl_kernels
 
@@ -1201,6 +1208,12 @@ class DeepSeekV4Model(GptModelBase):
         the PyWrappedModel with cache_manager==nullptr); only the prefill
         path needs to tolerate this — warmup never enters decode.
         """
+        from rtp_llm.models_py.modules.dsv4 import _nan_diag_triton as _nan_diag
+
+        _nan_diag.set_batch_context(
+            getattr(inputs.attention_inputs, "nan_diag_batch_id", None)
+        )
+
         if self.kv_cache is None:
             # Warmup-only PyWrappedModel: NormalExecutor builds it with
             # cache_manager==nullptr, so init_resources carries no kv_cache.

@@ -35,8 +35,8 @@ from ..mega_jit_warmup import (
     parse_mega_moe_jit_warmup_tokens_override,
 )
 from ..shared_expert import strict_fused_moe_enabled
-from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 from ..warmup_sync import sync_cuda_graph_warmup_ranks
+from .base import MoeCfg, RoutedExpertsStrategy, register_strategy
 
 _MEGA_MOE_JIT_WARMED_KEYS: set[tuple] = set()
 _MEGA_MOE_NVCC_TMPDIR_ENV = "DSV4_MEGA_MOE_NVCC_TMPDIR"
@@ -76,7 +76,9 @@ def _get_gate_pack_kernels():
 
 def _gate_pack_input_packer_env_allows() -> bool:
     mode = os.environ.get("DSV4_MEGA_MOE_INPUT_PACKER", "fused").strip().lower()
-    impl = os.environ.get("DSV4_MEGA_MOE_INPUT_PACKER_IMPL", "optimized").strip().lower()
+    impl = (
+        os.environ.get("DSV4_MEGA_MOE_INPUT_PACKER_IMPL", "optimized").strip().lower()
+    )
     return mode in ("auto", "fused") and impl == "optimized"
 
 
@@ -610,6 +612,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
 
         with record_function_range("dsv4.moe.gate_linear_bf16"):
             scores_bf16 = F.linear(x, gate._weight_bf16())
+        gate._diagnose_router_inputs(scores_bf16)
 
         with record_function_range("dsv4.moe.mega_gate_pack"):
             if gate.hash:
@@ -689,9 +692,7 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         rank = dist.get_rank(group)
         world_size = dist.get_world_size(group)
         device = self._mega_l1_w.device
-        _log_pre_kernel_barrier(
-            "enter", cfg.layer_id, rank, world_size, tokens, device
-        )
+        _log_pre_kernel_barrier("enter", cfg.layer_id, rank, world_size, tokens, device)
 
         if device.type == "cuda":
             with torch.cuda.device(device):
@@ -706,6 +707,4 @@ class MegaMoEStrategy(RoutedExpertsStrategy):
         else:
             dist.barrier(group=group)
 
-        _log_pre_kernel_barrier(
-            "leave", cfg.layer_id, rank, world_size, tokens, device
-        )
+        _log_pre_kernel_barrier("leave", cfg.layer_id, rank, world_size, tokens, device)

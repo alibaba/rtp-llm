@@ -331,6 +331,10 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                inputs.attention_inputs.prefix_lengths,
                py_model_inputs_.attention_inputs.prefix_lengths,
                state.current_batch_size * sizeof(int));
+    addD2DCopy(d2d_copies,
+               inputs.attention_inputs.nan_diag_batch_id,
+               py_model_inputs_.attention_inputs.nan_diag_batch_id,
+               sizeof(int64_t));
     // Strided 2D D2D copy for flat kv_cache_block_id
     addStridedD2DCopy(strided_d2d_copies,
                       d2d_copies,
@@ -519,7 +523,8 @@ bool CudaGraphRunner::tryGetRealGraphPrefillSeqLen(const PyModelInputs& inputs, 
     state.current_batch_size = inputs.attention_inputs.input_lengths.size(0);
     state.current_seq_len    = inferTotalTokensNoSync(inputs);
     if (state.current_seq_len <= 0) {
-        RTP_LLM_CHECK_WITH_INFO(false, "prefill cuda graph: cannot infer total tokens without CPU sync, fallback to normal run");
+        RTP_LLM_CHECK_WITH_INFO(
+            false, "prefill cuda graph: cannot infer total tokens without CPU sync, fallback to normal run");
         return false;
     }
     if (capture_range_.empty()) {
@@ -619,9 +624,9 @@ void CudaGraphRunner::initKernelInternalMemory() {
         torch::zeros({int(max_bs_ + 1)}, torch::TensorOptions(torch::kInt32).device(torch::kCPU)).pin_memory();
     torch::Tensor cu_kv_seqlens =
         torch::zeros({int(max_bs_ + 1)}, torch::TensorOptions(torch::kInt32).device(torch::kCPU).pinned_memory(true));
-    auto input_lengths  = capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths;
-    input_lengths       = input_lengths.is_cuda() ? input_lengths.cpu() : input_lengths;
-    auto prefix_lengths = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
+    auto input_lengths            = capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths;
+    input_lengths                 = input_lengths.is_cuda() ? input_lengths.cpu() : input_lengths;
+    auto       prefix_lengths     = capture_mem_hold_.py_model_inputs_.attention_inputs.prefix_lengths;
     const bool has_prefix_lengths = prefix_lengths.defined() && prefix_lengths.numel() > 0;
     prefix_lengths = has_prefix_lengths && prefix_lengths.is_cuda() ? prefix_lengths.cpu() : prefix_lengths;
 
@@ -641,6 +646,8 @@ int CudaGraphRunner::getCurrentRealGraphBs(const CudaGraphState& state) const {
 void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs) {
     inputs.attention_inputs.is_target_verify = is_target_verify_;
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
+    inputs.attention_inputs.nan_diag_batch_id =
+        torch::zeros({1}, torch::TensorOptions(torch::kInt64).device(torch::kCUDA));
 
     // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
     inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
@@ -786,13 +793,12 @@ void CudaGraphRunner::initCapture() {
 
         PyModelInputs inputs;
         // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
-        inputs.input_ids     = torch::zeros({max_num_token_}, options_cuda_int32_);
+        inputs.input_ids = torch::zeros({max_num_token_}, options_cuda_int32_);
         // DSv4 MTP draft consumes the target's pre-hc residual ([T, hc*dim])
         // as input_hiddens; for everyone else hc_mult_ == 1 so this matches
         // the post-reduce hidden size. The output tensor below stays at
         // hidden_size_ (post-reduce) regardless.
-        inputs.input_hiddens =
-            torch::zeros({max_num_token_, hidden_size_ * hc_mult_}, options_cuda_float_);
+        inputs.input_hiddens = torch::zeros({max_num_token_, hidden_size_ * hc_mult_}, options_cuda_float_);
         // Setup attention inputs using the extracted function
         initCaptureAttentionInputs(inputs, max_bs_, num_tokens_per_bs_);
 
@@ -953,12 +959,10 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     // the ``view(T, hc, dim)`` reshape.  Embedding prefill (num_tokens_per_bs_
     // == max_seq_len_) still slices to seq_len because it goes through
     // ``forward_prefill`` which expects flat ``T = input_ids.numel()``.
-    const bool draft_prefill_graph_mode =
-        is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
-    const int token_slice_len =
-        draft_prefill_graph_mode ? max_bs_ * num_tokens_per_bs_ : seq_len_or_tokens;
-    inputs.input_ids     = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
-    inputs.input_hiddens = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, token_slice_len);
+    const bool draft_prefill_graph_mode = is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
+    const int  token_slice_len          = draft_prefill_graph_mode ? max_bs_ * num_tokens_per_bs_ : seq_len_or_tokens;
+    inputs.input_ids                    = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
+    inputs.input_hiddens                = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, token_slice_len);
     inputs.attention_inputs.input_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, batch_size);
     inputs.attention_inputs.padding_offset =
@@ -995,6 +999,7 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
         capture_mem_hold_.py_model_inputs_.attention_inputs.decode_cu_seqlens_d.slice(0, 0, batch_size + 1);
     inputs.attention_inputs.sequence_lengths_plus_1_d =
         capture_mem_hold_.py_model_inputs_.attention_inputs.sequence_lengths_plus_1_d.slice(0, 0, batch_size);
+    inputs.attention_inputs.nan_diag_batch_id = capture_mem_hold_.py_model_inputs_.attention_inputs.nan_diag_batch_id;
 
     const auto& cap_attn = capture_mem_hold_.py_model_inputs_.attention_inputs;
     inputs.attention_inputs.kv_cache_kernel_block_id_device_by_group.clear();

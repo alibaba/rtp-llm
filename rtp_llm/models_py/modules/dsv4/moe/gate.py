@@ -21,6 +21,8 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from rtp_llm.models_py.modules.dsv4 import _nan_diag_triton as _nan_diag
+
 # P2 (plan_0427.md): single-Triton-kernel router-gate epilogue for
 # score_func='sqrtsoftplus'.  Replaces ~7 elementwise/reduce/topk launches
 # (softplus → sqrt → bias-add → topk → gather → sum → div → mul) with one
@@ -131,6 +133,7 @@ class Gate(nn.Module):
         Reads ``W.v4_router_w`` and either ``W.v4_router_tid2eid`` (hash
         layers) or ``W.v4_router_bias`` (non-hash)."""
         super().__init__()
+        self.layer_id = layer_id
         self.dim = dim
         self.topk = n_activated_experts
         self.score_func = score_func
@@ -172,6 +175,22 @@ class Gate(nn.Module):
             self._w_bf16 = cached
         return cached
 
+    def _diagnose_router_inputs(self, scores: torch.Tensor) -> None:
+        """Add read-only device checks when DSV4_NAN_DIAG is enabled."""
+        if not _nan_diag.ENABLED:
+            return
+        _nan_diag.report_nonfinite(
+            scores,
+            source_id=_nan_diag.SOURCE_ROUTER_SCORES,
+            layer_id=self.layer_id,
+        )
+        if self.bias is not None:
+            _nan_diag.report_nonfinite(
+                self.bias,
+                source_id=_nan_diag.SOURCE_ROUTER_BIAS,
+                layer_id=self.layer_id,
+            )
+
     def forward(
         self, x: torch.Tensor, input_ids: Optional[torch.Tensor] = None
     ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -196,6 +215,7 @@ class Gate(nn.Module):
         else:
             x_bf16 = x if x.dtype == torch.bfloat16 else x.to(torch.bfloat16)
             scores = F.linear(x_bf16, self._weight_bf16()).float()
+        self._diagnose_router_inputs(scores)
         if _dbg is not None:
             _rt.record_if_level(2, f"{_dbg}_linear_scores", scores)
 

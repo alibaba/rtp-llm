@@ -25,6 +25,7 @@ from typing import Dict, Optional
 import torch
 import torch.nn as nn
 
+from rtp_llm.models_py.modules.dsv4 import _nan_diag_triton as _nan_diag
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.chunk_env import (
     DEFAULT_DSV4_CHUNK_TOKENS,
@@ -263,10 +264,9 @@ class MoE(nn.Module):
         # (e.g. LocalLoopStrategy.experts ModuleList) propagate through
         # ``MoE.to(device)``.
         self._strategy = strategy_cls(cfg)
-        self._gate_pack_static = (
-            os.environ.get("MOEDBG", "0") == "0"
-            and self._strategy.can_use_gate_pack_static(self.gate)
-        )
+        self._gate_pack_static = os.environ.get(
+            "MOEDBG", "0"
+        ) == "0" and self._strategy.can_use_gate_pack_static(self.gate)
         self._strategy._gate_pack_warmup_enabled = self._gate_pack_static
         self._strategy._gate_pack_route_scale = float(self.gate.route_scale)
         self._strategy.setup_weights(layer_weights)
@@ -396,6 +396,14 @@ class MoE(nn.Module):
         _dbg = _rt.should_record_layer(self.layer_id)
         shape = x.size()
         x = x.view(-1, self.dim)
+        if _nan_diag.TEST_INJECT is not None:
+            _nan_diag.maybe_inject_test_nan(x, layer_id=self.layer_id)
+        if _nan_diag.ENABLED:
+            _nan_diag.report_nonfinite(
+                x,
+                source_id=_nan_diag.SOURCE_MOE_INPUT,
+                layer_id=self.layer_id,
+            )
         input_ids_flat = input_ids.flatten()
         if input_ids_flat.numel() != x.size(0):
             raise RuntimeError(

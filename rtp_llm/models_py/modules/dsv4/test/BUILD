@@ -192,6 +192,14 @@ py_test(
 )
 
 py_test(
+    name = "test_nan_diag_triton",
+    srcs = ["test_nan_diag_triton.py"],
+    deps = ["//rtp_llm/models_py:modules"],
+    tags = ["SM100_ARM"],
+    exec_properties = {"gpu": "SM100_ARM", "gpu_count": "1"},
+)
+
+py_test(
     name = "test_dsv4_kernel_jit_warmup",
     srcs = ["test_dsv4_kernel_jit_warmup.py"],
     deps = [

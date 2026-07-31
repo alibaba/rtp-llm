@@ -4,6 +4,7 @@
 #include "rtp_llm/cpp/utils/DebugUtils.h"
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
+#include <atomic>
 #include <cstdint>
 #include <stdexcept>
 #include <vector>
@@ -16,6 +17,7 @@
 #include <iostream>
 #include <numeric>
 #include <sstream>
+#include <unistd.h>
 #include "rtp_llm/cpp/models/ModelInputsLogger.h"
 #include "rtp_llm/cpp/utils/DevicePerfWrapper.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -28,6 +30,42 @@
 using namespace std;
 
 namespace rtp_llm {
+
+namespace {
+
+bool dsv4NanDiagEnabled() {
+    static const bool enabled = []() {
+        const char* value = std::getenv("DSV4_NAN_DIAG");
+        return value != nullptr && std::strcmp(value, "1") == 0;
+    }();
+    return enabled;
+}
+
+std::atomic<int64_t> dsv4_nan_diag_batch_seq{1};
+
+std::string sanitizeTraceIdForLog(const std::string& trace_id) {
+    constexpr size_t kMaxTraceIdBytes = 256;
+    std::string      result;
+    result.reserve(std::min(trace_id.size(), kMaxTraceIdBytes) + 8);
+    const size_t size = std::min(trace_id.size(), kMaxTraceIdBytes);
+    for (size_t i = 0; i < size; ++i) {
+        const unsigned char ch = static_cast<unsigned char>(trace_id[i]);
+        if (ch == '\\' || ch == '"') {
+            result.push_back('\\');
+            result.push_back(static_cast<char>(ch));
+        } else if (ch >= 0x20 && ch != 0x7f) {
+            result.push_back(static_cast<char>(ch));
+        } else {
+            result.push_back('?');
+        }
+    }
+    if (trace_id.size() > kMaxTraceIdBytes) {
+        result += "...";
+    }
+    return result;
+}
+
+}  // namespace
 
 static torch::Tensor layerRegionToGroupTensor(const std::optional<CacheLayerLayout>& layout_opt) {
     if (!layout_opt.has_value() || layout_opt->layer_region_to_group_id.empty()) {
@@ -203,6 +241,35 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.prefix_lengths   = prefix_lengths;
     py_attn_inputs.sequence_lengths = sequence_lengths;
     py_attn_inputs.input_lengths    = input_lengths;
+
+    if (dsv4NanDiagEnabled()) {
+        // Batch sequences are process-local. Prefix them with the process id so
+        // merged logs from DP/EP ranks still have an unambiguous correlation id.
+        const int64_t batch_seq = dsv4_nan_diag_batch_seq.fetch_add(1, std::memory_order_relaxed);
+        const int64_t batch_id  = (static_cast<int64_t>(::getpid()) << 32) | (batch_seq & 0xffffffffLL);
+        auto          batch_id_host =
+            torch::empty({1}, torch::TensorOptions(torch::kInt64).device(torch::kCPU).pinned_memory(true));
+        batch_id_host.data_ptr<int64_t>()[0] = batch_id;
+        buffer_holder_.hold_host(batch_id_host);
+        py_attn_inputs.nan_diag_batch_id =
+            batch_id_host.to(torch::TensorOptions(torch::kInt64).device(torch::kCUDA), /*non_blocking=*/true);
+
+        const bool has_trace_id = std::any_of(
+            inputs.trace_ids.begin(), inputs.trace_ids.end(), [](const std::string& id) { return !id.empty(); });
+        if (!inputs.warmup && has_trace_id) {
+            const char*        phase = inputs.sequence_lengths.numel() > 0 ? "decode" : "prefill";
+            std::ostringstream trace_map;
+            trace_map << "[DSV4_NAN_TRACE] batch=" << batch_id << " phase=" << phase << " trace_ids=[";
+            for (size_t i = 0; i < inputs.trace_ids.size(); ++i) {
+                if (i > 0) {
+                    trace_map << ",";
+                }
+                trace_map << "\"" << sanitizeTraceIdForLog(inputs.trace_ids[i]) << "\"";
+            }
+            trace_map << "]";
+            std::cerr << trace_map.str() << std::endl;
+        }
+    }
 
     if (inputs.kv_cache_kernel_block_id.defined() && inputs.kv_cache_kernel_block_id.dim() != 3) {
         RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs(kv_kernel_block_host)");
