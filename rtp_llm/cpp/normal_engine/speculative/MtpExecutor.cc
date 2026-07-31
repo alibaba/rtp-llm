@@ -1114,10 +1114,16 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             speculative_sampler_output.accept_tokens = torch::zeros(
                 {1, (int64_t)(propose_step_ + 1)}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
         } else {
+            const bool greedy_fast_path = batch_stream_processor_->canUseGreedySpecSamplerFastPath(streams);
             // gatherSpecSamplerInput reads host stream state updated by the previous
             // bookkeeping worker. DROP_BROAD_SYNC therefore needs this narrow sync
-            // unless the broad sync at decodeStep start already waited.
-            if (useStreamAsync() && useDropBroadSync()) {
+            // unless the broad sync at decodeStep start already waited.  The
+            // greedy fast path reads no host stream state (only immutable
+            // generate configs), so it skips the wait entirely; the bounded
+            // worker handoff in dispatchDecodeAsync still caps the pipeline
+            // at one round in flight, which keeps the pinned accept slot
+            // ping-pong and the lag-aware host plan window (<= 1 round) safe.
+            if (useStreamAsync() && useDropBroadSync() && !greedy_fast_path) {
                 RTP_LLM_PROFILE_SCOPE_DYNAMIC(
                     "executor.mtp.decode_step(wait_prev_bookkeeping_pre_sampler,stream_count=%zu)", streams.size());
                 spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
@@ -1127,7 +1133,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             }
 
             // target model sample
-            if (batch_stream_processor_->canUseGreedySpecSamplerFastPath(streams)) {
+            if (greedy_fast_path) {
                 // Plain-greedy batches skip the sampler-input gather (host
                 // loops + O(seq_len) token-history copy) and Sampler::forward
                 // entirely: rejection only needs the verify argmax ids, and
@@ -2104,6 +2110,17 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
                                               std::shared_ptr<torch::Event>                rejection_event,
                                               std::shared_ptr<torch::Event>                draft_event) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(dispatch_output_async)");
+
+    // Bounded pipeline: wait for the previous round's worker BEFORE enqueuing
+    // this one.  This is the latest possible wait site — the round's GPU work
+    // is already on the stream, so the wait overlaps it instead of stalling
+    // the next round's CPU prefix (the pre-sampler narrow sync only fires on
+    // the full-sampler path now).  Depth 1 is what the pinned accept slot
+    // ping-pong and the lag-aware host-plan window are sized for.
+    {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(wait_prev_bookkeeping_handoff)");
+        spec_bookkeeping_runner_.syncCpu();
+    }
 
     const auto& accept_len_gpu_all     = spec_decode_output.accept_len;
     const auto& accept_tokens_gpu_all  = spec_decode_output.accept_tokens;

@@ -21,6 +21,11 @@ public:
 
     void launch(std::function<void()> fn);
     void sync(const torch::Stream& wait_stream);
+    // CPU-only completion wait: blocks the calling thread until the pending
+    // task finishes, without chaining any GPU stream behind the worker's
+    // event.  Use for pipeline-depth bounding where the caller consumes no
+    // device output of the worker.
+    void syncCpu();
 
 private:
     void workerLoop();
