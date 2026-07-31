@@ -105,8 +105,6 @@ public:
     // Attention-specific configuration
     int    linear_step     = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
     int    group_layer_num = 1;  // Number of layers per group for hybrid attention
-    size_t explicitly_sized_pool_reserve_bytes = 0;
-
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
 
@@ -355,7 +353,8 @@ public:
                                  const std::vector<CacheGroupType>&   types,
                                  const std::vector<std::string>&      tags     = {},
                                  const std::vector<CacheGroupPolicy>& policies = {});
-    void        finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config);
+    size_t      explicitPoolReserveBytes() const;
+    void        finalizeBlockNums(uint32_t global_block_num);
     std::string debugString(size_t indent = 0) const;
 };
 

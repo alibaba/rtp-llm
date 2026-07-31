@@ -36,7 +36,7 @@ void validateHybridPoolDescs(const ModelConfig& model_config, uint32_t kernel_to
         const auto& layer_descs = model_config.kv_cache_spec_descs[static_cast<size_t>(layer_id)];
         RTP_LLM_CHECK_WITH_INFO(!layer_descs.empty(), "hybrid-pool desc config layer %ld has no descs", layer_id);
         for (const auto& desc : layer_descs) {
-            if (desc.entry_count_mode == OpaqueBlockEntryCountMode::KERNEL_BLOCK_COMPRESSED) {
+            if (desc.entry_count_mode == BlockEntryCountMode::KERNEL_BLOCK_COMPRESSED) {
                 RTP_LLM_CHECK_WITH_INFO(
                     desc.compression_ratio > 0,
                     "desc tag=%s derives entries from kernel block but has invalid compression_ratio=%u",
@@ -61,7 +61,7 @@ void validateHybridPoolDescs(const ModelConfig& model_config, uint32_t kernel_to
                     kCompressedKernelSeqSizeAlignment,
                     kCompressedKernelSeqSizeAlignment);
             }
-            if (desc.entry_count_mode == OpaqueBlockEntryCountMode::STATE_RING) {
+            if (desc.entry_count_mode == BlockEntryCountMode::STATE_RING) {
                 RTP_LLM_CHECK_WITH_INFO(desc.compression_ratio > 0,
                                         "state ring desc tag=%s requires positive compression_ratio",
                                         desc.tag.c_str());
@@ -269,7 +269,6 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
     } else {
         config.block_size_bytes = paged_block_bytes;
     }
-    config.explicitly_sized_pool_reserve_bytes = 0;
     config.setGroupBlockLayout(group_block_nums, group_kv_block_stride_bytes, group_kv_scale_stride_bytes);
 }
 

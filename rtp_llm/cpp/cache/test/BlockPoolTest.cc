@@ -125,8 +125,7 @@ TEST_F(BlockPoolTest, MTPConvertIndexGlobalIdMapping) {
     EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->layerIdsForGroup(0)[0], 0);
     EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->layerIdsForGroup(0)[0], 0);
 
-    RuntimeConfig runtime_config;
-    cache_cfg.finalizeBlockNums(/*global_block_num=*/3, runtime_config);
+    cache_cfg.finalizeBlockNums(/*global_block_num=*/3);
     EXPECT_EQ(cache_cfg.block_num, 3u);
     EXPECT_EQ(cache_cfg.mtp_sub_configs[0]->block_num, 3u);
     EXPECT_EQ(cache_cfg.mtp_sub_configs[1]->block_num, 3u);

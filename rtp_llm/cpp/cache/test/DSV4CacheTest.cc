@@ -428,7 +428,7 @@ TEST(CacheConfigTest, TopologyRemainsTheSingleSourceAcrossSupportedUpdates) {
     EXPECT_EQ(config.group("linear").kv_block_stride_bytes, 256u);
     EXPECT_EQ(policy_topology->group("linear").block_num, 0u);
 
-    config.finalizeBlockNums(/*global_block_num=*/23, RuntimeConfig{});
+    config.finalizeBlockNums(/*global_block_num=*/23);
     const auto finalized_topology = config.topologyPtr();
 
     EXPECT_NE(finalized_topology.get(), layout_topology.get());
@@ -882,9 +882,8 @@ TEST(HybridPoolConfigCreatorTest, HybridAttentionIndependentPoolUsesHybridPoolCo
     EXPECT_EQ(config.block_size_bytes,
               config.blockSizeBytesForGroup(linear_gid) + config.blockSizeBytesForGroup(full_gid));
 
-    RuntimeConfig runtime_config;
     config.linear_step = 4;
-    config.finalizeBlockNums(/*global_block_num=*/37, runtime_config);
+    config.finalizeBlockNums(/*global_block_num=*/37);
     EXPECT_EQ(config.blockNumForGroup(linear_gid), 37u);
     EXPECT_EQ(config.blockNumForGroup(full_gid), 37u);
 }
@@ -921,9 +920,8 @@ TEST(HybridPoolConfigCreatorTest, HybridAttentionIndependentPoolSplitsFullAndSwa
     EXPECT_EQ(config.block_size_bytes,
               config.blockSizeBytesForGroup(full_gid) + config.blockSizeBytesForGroup(linear_gid));
 
-    RuntimeConfig runtime_config;
     config.linear_step = 3;
-    config.finalizeBlockNums(/*global_block_num=*/10, runtime_config);
+    config.finalizeBlockNums(/*global_block_num=*/10);
     EXPECT_EQ(config.blockNumForGroup(full_gid), 10u);
     EXPECT_EQ(config.blockNumForGroup(linear_gid), 10u);
     EXPECT_EQ(config.blockNumForGroup(swa_gid), 4u);
@@ -1630,10 +1628,6 @@ TEST(CacheConfigTest, ExactBlockBudgetHandlesStepAndRoundingBoundaries) {
 }
 
 TEST(CacheConfigTest, FinalizeBlockNumsUpdatesGlobalBlockNumForSharedPools) {
-    RuntimeConfig runtime_config;
-    runtime_config.max_generate_batch_size                      = 8;
-    runtime_config.fifo_scheduler_config.max_context_batch_size = 4;
-
     ParallelismConfig pc;
     ModelConfig       single_model_config;
     single_model_config.num_layers                   = 1;
@@ -1642,27 +1636,35 @@ TEST(CacheConfigTest, FinalizeBlockNumsUpdatesGlobalBlockNumForSharedPools) {
     single_model_config.attn_config.tokens_per_block = 1;
     setDefaultKvCacheSpec(single_model_config);
     auto single_config = CacheConfigCreator::createBasicConfig(single_model_config, pc, false, 0);
-    single_config.finalizeBlockNums(123, runtime_config);
+    single_config.finalizeBlockNums(123);
     EXPECT_EQ(single_config.block_num, 123u);
     EXPECT_TRUE(single_config.groupBlockNumsSnapshot().empty());
     EXPECT_EQ(single_config.explicitPoolReserveBytes(), 0u);
 
     auto hybrid_config = CacheConfigCreator::createBasicConfig(makeHybridAttentionModelConfig(false), pc, false, 0);
-    hybrid_config.finalizeBlockNums(123, runtime_config);
+    hybrid_config.finalizeBlockNums(123);
     EXPECT_EQ(hybrid_config.block_num, 123u);
     EXPECT_FALSE(hybrid_config.use_independent_block_pools);
     EXPECT_TRUE(hybrid_config.groupBlockNumsSnapshot().empty());
     EXPECT_EQ(hybrid_config.explicitPoolReserveBytes(), 0u);
 }
 
-TEST(CacheConfigTest, FinalizeBlockNumsAppliesToIndependentPools) {
-    RuntimeConfig runtime_config;
-    runtime_config.max_generate_batch_size                      = 5;
-    runtime_config.fifo_scheduler_config.max_context_batch_size = 3;
+TEST(CacheConfigTest, ExplicitPoolReserveIsAvailableBeforeFinalization) {
+    ParallelismConfig pc;
+    auto              config        = CacheConfigCreator::createBasicConfig(makeProModelConfig(), pc, false, 0);
+    const auto        hca_state_gid = gidForTag(config, "hca_state");
+    const auto        before        = config.groupBlockNumsSnapshot();
 
+    const size_t expected_reserve = 256u * config.blockSizeBytesForGroup(hca_state_gid);
+    EXPECT_EQ(config.explicitPoolReserveBytes(), expected_reserve);
+    EXPECT_EQ(config.groupBlockNumsSnapshot(), before);
+    EXPECT_THROW(config.finalizeBlockNums(0), std::exception);
+}
+
+TEST(CacheConfigTest, FinalizeBlockNumsAppliesToIndependentPools) {
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createBasicConfig(makeProModelConfig(), pc, false, 0);
-    config.finalizeBlockNums(100, runtime_config);
+    config.finalizeBlockNums(100);
 
     ASSERT_EQ(config.groupBlockNumsSnapshot().size(), static_cast<size_t>(kDsv4PoolNum));
     const auto hca_state_gid = gidForTag(config, "hca_state");
@@ -1709,14 +1711,10 @@ TEST(CacheConfigTest, HcaStateReserveDeductedFromPagedBudget) {
 }
 
 TEST(CacheConfigTest, DSV4ExplicitHcaStatePoolBlocksIgnoreLinearStep) {
-    RuntimeConfig runtime_config;
-    runtime_config.max_generate_batch_size                      = 4;
-    runtime_config.fifo_scheduler_config.max_context_batch_size = 2;
-
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createBasicConfig(makeProModelConfig(), pc, false, 0);
     config.linear_step       = 4;
-    config.finalizeBlockNums(100, runtime_config);
+    config.finalizeBlockNums(100);
 
     // The explicit pool keeps its requested capacity. Non-explicit FULL/LINEAR
     // groups keep N, while non-explicit SWA groups use ceil(N / step).
@@ -2129,7 +2127,7 @@ static CacheConfig makeDSV4AllocatorConfig(bool use_flash = false) {
     ParallelismConfig pc;
     auto              config = CacheConfigCreator::createBasicConfig(mc, pc, false, 0);
     // Set enough blocks for tests (7 groups × N blocks each)
-    config.finalizeBlockNums(/*global_block_num=*/200, RuntimeConfig{});
+    config.finalizeBlockNums(/*global_block_num=*/200);
     return config;
 }
 
@@ -2996,7 +2994,7 @@ TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksDoNotReduceExplicitFixedPoolCap
 
 TEST_F(DSV4AllocatorTest, SWAGroupParticipatesInPrefixCacheReuse) {
     auto config = makeDSV4AllocatorConfig();
-    config.finalizeBlockNums(/*global_block_num=*/100, RuntimeConfig{});
+    config.finalizeBlockNums(/*global_block_num=*/100);
     auto allocator    = std::make_shared<HybridTypeKVCacheAllocator>(config);
     auto shared_cache = std::make_shared<SharedBlockCache>();
     allocator->setSharedBlockCache(shared_cache);
