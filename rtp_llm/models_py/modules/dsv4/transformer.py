@@ -319,6 +319,20 @@ class V4Transformer(nn.Module):
         )
         return self._aux_hidden_states
 
+    def take_aux_hidden_states(self) -> Optional[torch.Tensor]:
+        """Transfer the most recent DSpARK capture to the model output.
+
+        The prefill CP restore can temporarily need an output-sized buffer in
+        addition to the rank-local capture.  Keeping this module attribute
+        alive after publishing the output pins the rank-local storage for the
+        rest of the C++ post-processing path, which is several GiB at long
+        context lengths.  Clear the persistent owner while returning the same
+        tensor to the caller.
+        """
+        aux_hidden_states = self._aux_hidden_states
+        self._aux_hidden_states = None
+        return aux_hidden_states
+
     def _bind_runtime_buffers(
         self,
         mtp_hidden_buffer: Optional[torch.Tensor],
