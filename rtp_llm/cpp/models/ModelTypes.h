@@ -87,6 +87,7 @@ enum GptModelInputIndex : size_t {
     mtpHiddenStatesDtype,
     skipRun,
     gptModelRequestLength,  // length of request id & pd_separation
+    pdSeparation,
     isFakeStream,
     // Per-tensor device hint bitmap from root so non-root ranks allocate
     // matching GPU buffers and keep tpSync broadcast lanes consistent.
@@ -94,14 +95,32 @@ enum GptModelInputIndex : size_t {
     gptModelInputLength,
 };
 
-// Bit positions for `tensorDeviceMap`. Only fields that participate in the
-// MTP/Eagle decode-prepare GPU path need a bit; other fields stay CPU.
+// Bit positions for `tensorDeviceMap`. Every optionally CPU/CUDA tensor in the
+// packed TP broadcast needs a bit so all ranks build identical broadcast lanes.
 enum GptModelInputDeviceBit : uint32_t {
-    kDeviceBitComboTokens     = 1u << 0,
-    kDeviceBitInputLengths    = 1u << 1,
-    kDeviceBitSequenceLengths = 1u << 2,
-    kDeviceBitPrefixLengths   = 1u << 3,
-    kDeviceBitLmOutputIndexes = 1u << 4,
+    kDeviceBitComboTokens          = 1u << 0,
+    kDeviceBitInputLengths         = 1u << 1,
+    kDeviceBitSequenceLengths      = 1u << 2,
+    kDeviceBitPrefixLengths        = 1u << 3,
+    kDeviceBitLmOutputIndexes      = 1u << 4,
+    kDeviceBitKvCacheKernelBlockId = 1u << 5,
+    kDeviceBitKvCacheBlockId       = 1u << 6,
+    kDeviceBitKvCacheLayerToGroup  = 1u << 7,
+    kDeviceBitKvCacheGroupTypes    = 1u << 8,
+    kDeviceBitKvCacheUpdateMapping = 1u << 9,
+    kDeviceBitCacheKeys            = 1u << 10,
+    kDeviceBitRequestId            = 1u << 11,
+    kDeviceBitRequestPdSeparation  = 1u << 12,
+    kDeviceBitComboPositionIds     = 1u << 13,
+    kDeviceBitTextTokensMask       = 1u << 14,
+    kDeviceBitMmFeaturesLocs       = 1u << 15,
+    kPresenceInputLengthsHost      = 1u << 16,
+    kPresenceSequenceLengthsHost   = 1u << 17,
+    kPresencePrefixLengthsHost     = 1u << 18,
+    kPresenceKvKernelBlockIdHost   = 1u << 19,
+    kPresenceKvBlockIdHost         = 1u << 20,
+    kPresenceKvLayerToGroupHost    = 1u << 21,
+    kPresenceKvGroupTypesHost      = 1u << 22,
 };
 
 void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallelism_config);

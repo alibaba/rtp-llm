@@ -119,7 +119,7 @@ class MlaFlashInferImplBase(MlaImplBase):
         )
         sequence_lengths = (
             sequence_lengths
-            if sequence_lengths is not None
+            if sequence_lengths is not None and sequence_lengths.numel()
             else attn_inputs.sequence_lengths
         )
         input_lengths = (
@@ -374,6 +374,19 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
         is_cuda_graph: bool = False,
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
+        use_host_metadata = os.environ.get("KIMI_K3_USE_HOST_METADATA", "0") == "1"
+        sequence_lengths_host = (
+            getattr(attn_inputs, "sequence_lengths_host", None)
+            if use_host_metadata
+            else None
+        )
+        if sequence_lengths_host is not None and sequence_lengths_host.numel() > 0:
+            sequence_values = [int(value) for value in sequence_lengths_host.tolist()]
+            max_bs = len(sequence_values)
+            num_tokens = sum(sequence_values)
+        else:
+            max_bs = attn_inputs.sequence_lengths.size(0)
+            num_tokens = int(attn_inputs.sequence_lengths.sum().item())
         super().__init__(
             MlaFlashInferDecodeOp(
                 attn_configs.head_num,
@@ -385,9 +398,9 @@ class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
                 attn_configs.use_mla,
                 attn_configs.is_sparse,
                 weights,
-                max_bs=attn_inputs.sequence_lengths.size(0),
+                max_bs=max_bs,
                 max_context_len=max_seq_len,
-                num_tokens=int(attn_inputs.sequence_lengths.sum().item()),
+                num_tokens=num_tokens,
                 is_cuda_graph=is_cuda_graph,
             ),
             NewMlaRotaryEmbeddingOp(

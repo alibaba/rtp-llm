@@ -71,6 +71,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     shape_hints_ptr[GptModelInputIndex::skipRun] = inputs.skip_run;
     shape_hints_ptr[GptModelInputIndex::gptModelRequestLength] =
         inputs.request_id.defined() ? inputs.request_id.numel() : 0;
+    shape_hints_ptr[GptModelInputIndex::pdSeparation] = inputs.pd_separation;
     shape_hints_ptr[GptModelInputIndex::isFakeStream] = inputs.is_fake_stream;
     {
         // encode root-side tensor device for fields that may live on
@@ -92,6 +93,60 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         if (inputs.lm_output_indexes.defined() && inputs.lm_output_indexes.is_cuda()) {
             device_bits |= GptModelInputDeviceBit::kDeviceBitLmOutputIndexes;
         }
+        if (inputs.kv_cache_kernel_block_id.defined() && inputs.kv_cache_kernel_block_id.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitKvCacheKernelBlockId;
+        }
+        if (inputs.kv_cache_block_id.defined() && inputs.kv_cache_block_id.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitKvCacheBlockId;
+        }
+        if (inputs.kv_cache_layer_to_group.defined() && inputs.kv_cache_layer_to_group.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitKvCacheLayerToGroup;
+        }
+        if (inputs.kv_cache_group_types.defined() && inputs.kv_cache_group_types.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitKvCacheGroupTypes;
+        }
+        if (inputs.kv_cache_update_mapping.defined() && inputs.kv_cache_update_mapping.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitKvCacheUpdateMapping;
+        }
+        if (inputs.cache_keys.defined() && inputs.cache_keys.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitCacheKeys;
+        }
+        if (inputs.request_id.defined() && inputs.request_id.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitRequestId;
+        }
+        if (inputs.request_pd_separation.defined() && inputs.request_pd_separation.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitRequestPdSeparation;
+        }
+        if (inputs.combo_position_ids.defined() && inputs.combo_position_ids.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitComboPositionIds;
+        }
+        if (inputs.text_tokens_mask.defined() && inputs.text_tokens_mask.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitTextTokensMask;
+        }
+        if (inputs.mm_features_locs.defined() && inputs.mm_features_locs.is_cuda()) {
+            device_bits |= GptModelInputDeviceBit::kDeviceBitMmFeaturesLocs;
+        }
+        if (inputs.input_lengths_host_for_log.defined() && inputs.input_lengths_host_for_log.numel() > 0) {
+            device_bits |= GptModelInputDeviceBit::kPresenceInputLengthsHost;
+        }
+        if (inputs.sequence_lengths_host_for_log.defined() && inputs.sequence_lengths_host_for_log.numel() > 0) {
+            device_bits |= GptModelInputDeviceBit::kPresenceSequenceLengthsHost;
+        }
+        if (inputs.prefix_lengths_host_for_log.defined() && inputs.prefix_lengths_host_for_log.numel() > 0) {
+            device_bits |= GptModelInputDeviceBit::kPresencePrefixLengthsHost;
+        }
+        if (inputs.kv_cache_kernel_block_id_host.defined() && inputs.kv_cache_kernel_block_id_host.numel() > 0) {
+            device_bits |= GptModelInputDeviceBit::kPresenceKvKernelBlockIdHost;
+        }
+        if (inputs.kv_cache_block_id_host.defined() && inputs.kv_cache_block_id_host.numel() > 0) {
+            device_bits |= GptModelInputDeviceBit::kPresenceKvBlockIdHost;
+        }
+        if (inputs.kv_cache_layer_to_group_host.defined() && inputs.kv_cache_layer_to_group_host.numel() > 0) {
+            device_bits |= GptModelInputDeviceBit::kPresenceKvLayerToGroupHost;
+        }
+        if (inputs.kv_cache_group_types_host.defined() && inputs.kv_cache_group_types_host.numel() > 0) {
+            device_bits |= GptModelInputDeviceBit::kPresenceKvGroupTypesHost;
+        }
         shape_hints_ptr[GptModelInputIndex::tensorDeviceMap] = static_cast<int32_t>(device_bits);
     }
 
@@ -106,6 +161,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.need_all_logits              = shape_hints_ptr[GptModelInputIndex::needAllLogits];
     inputs.need_all_hidden_states       = shape_hints_ptr[GptModelInputIndex::needAllHiddenStates];
     inputs.skip_run                     = shape_hints_ptr[GptModelInputIndex::skipRun];
+    inputs.pd_separation                = shape_hints_ptr[GptModelInputIndex::pdSeparation];
     inputs.is_fake_stream               = shape_hints_ptr[GptModelInputIndex::isFakeStream];
     if (inputs.skip_run) {
         return;
@@ -174,11 +230,23 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.prefix_lengths   = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                            {context_batch_size},
                                          pickAlloc(GptModelInputDeviceBit::kDeviceBitPrefixLengths));
-        inputs.input_lengths_host_for_log =
-            allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths]});
-        inputs.sequence_lengths_host_for_log =
-            allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::sequenceLengths]});
-        inputs.prefix_lengths_host_for_log = allocBuf(rtp_llm::DataType::TYPE_INT32, {context_batch_size});
+        if (device_bits & GptModelInputDeviceBit::kPresenceInputLengthsHost) {
+            inputs.input_lengths_host_for_log =
+                allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::inputLengths]});
+        } else {
+            inputs.input_lengths_host_for_log = torch::Tensor();
+        }
+        if (device_bits & GptModelInputDeviceBit::kPresenceSequenceLengthsHost) {
+            inputs.sequence_lengths_host_for_log =
+                allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::sequenceLengths]});
+        } else {
+            inputs.sequence_lengths_host_for_log = torch::Tensor();
+        }
+        if (device_bits & GptModelInputDeviceBit::kPresencePrefixLengthsHost) {
+            inputs.prefix_lengths_host_for_log = allocBuf(rtp_llm::DataType::TYPE_INT32, {context_batch_size});
+        } else {
+            inputs.prefix_lengths_host_for_log = torch::Tensor();
+        }
         if (max_kernel_blocks != 0) {
             // kv_cache_kernel_block_id is now device-resident on the producer (rank 0). Allocate
             // the matching buffer on CUDA for non-root ranks so the gpu_packed branch below
@@ -186,40 +254,69 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             inputs.kv_cache_kernel_block_id = allocBuf(
                 rtp_llm::DataType::TYPE_INT32,
                 {kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_kernel_blocks},
-                rtp_llm::AllocationType::DEVICE);
-            inputs.kv_cache_update_mapping = allocBuf(
-                rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum], 2});
-            inputs.kv_cache_kernel_block_id_host = allocBuf(
-                rtp_llm::DataType::TYPE_INT32,
-                {kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_kernel_blocks});
+                pickAlloc(GptModelInputDeviceBit::kDeviceBitKvCacheKernelBlockId));
+            inputs.kv_cache_update_mapping =
+                allocBuf(rtp_llm::DataType::TYPE_INT32,
+                         {(size_t)shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum], 2},
+                         pickAlloc(GptModelInputDeviceBit::kDeviceBitKvCacheUpdateMapping));
+            if (device_bits & GptModelInputDeviceBit::kPresenceKvKernelBlockIdHost) {
+                inputs.kv_cache_kernel_block_id_host = allocBuf(
+                    rtp_llm::DataType::TYPE_INT32,
+                    {kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_kernel_blocks});
+            } else {
+                inputs.kv_cache_kernel_block_id_host = torch::Tensor();
+            }
         }
         if (max_blocks != 0) {
             inputs.kv_cache_block_id =
                 allocBuf(rtp_llm::DataType::TYPE_INT32,
-                         {kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_blocks});
+                         {kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_blocks},
+                         pickAlloc(GptModelInputDeviceBit::kDeviceBitKvCacheBlockId));
             if (inputs.pd_separation) {
                 inputs.cache_keys = allocBuf(rtp_llm::DataType::TYPE_INT64,
-                                             {context_batch_size, cache_keys_width ? cache_keys_width : max_blocks});
+                                             {context_batch_size, cache_keys_width ? cache_keys_width : max_blocks},
+                                             pickAlloc(GptModelInputDeviceBit::kDeviceBitCacheKeys));
             }
-            inputs.kv_cache_block_id_host =
-                allocBuf(rtp_llm::DataType::TYPE_INT32,
-                         {kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_blocks});
+            if (device_bits & GptModelInputDeviceBit::kPresenceKvBlockIdHost) {
+                inputs.kv_cache_block_id_host = allocBuf(
+                    rtp_llm::DataType::TYPE_INT32,
+                    {kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_blocks});
+            } else {
+                inputs.kv_cache_block_id_host = torch::Tensor();
+            }
         }
         if (layer_to_group_len) {
-            inputs.kv_cache_layer_to_group      = allocBuf(rtp_llm::DataType::TYPE_INT32, {layer_to_group_len});
-            inputs.kv_cache_layer_to_group_host = allocBuf(rtp_llm::DataType::TYPE_INT32, {layer_to_group_len});
+            inputs.kv_cache_layer_to_group = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                                      {layer_to_group_len},
+                                                      pickAlloc(GptModelInputDeviceBit::kDeviceBitKvCacheLayerToGroup));
+            if (device_bits & GptModelInputDeviceBit::kPresenceKvLayerToGroupHost) {
+                inputs.kv_cache_layer_to_group_host = allocBuf(rtp_llm::DataType::TYPE_INT32, {layer_to_group_len});
+            } else {
+                inputs.kv_cache_layer_to_group_host = torch::Tensor();
+            }
         }
         if (group_types_len) {
-            inputs.kv_cache_group_types      = allocBuf(rtp_llm::DataType::TYPE_INT32, {group_types_len});
-            inputs.kv_cache_group_types_host = allocBuf(rtp_llm::DataType::TYPE_INT32, {group_types_len});
+            inputs.kv_cache_group_types = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                                   {group_types_len},
+                                                   pickAlloc(GptModelInputDeviceBit::kDeviceBitKvCacheGroupTypes));
+            if (device_bits & GptModelInputDeviceBit::kPresenceKvGroupTypesHost) {
+                inputs.kv_cache_group_types_host = allocBuf(rtp_llm::DataType::TYPE_INT32, {group_types_len});
+            } else {
+                inputs.kv_cache_group_types_host = torch::Tensor();
+            }
         }
-        inputs.request_id            = allocBuf(rtp_llm::DataType::TYPE_INT64, {request_length});
-        inputs.request_pd_separation = allocBuf(rtp_llm::DataType::TYPE_BOOL, {request_length});
+        inputs.request_id = allocBuf(
+            rtp_llm::DataType::TYPE_INT64, {request_length}, pickAlloc(GptModelInputDeviceBit::kDeviceBitRequestId));
+        inputs.request_pd_separation = allocBuf(rtp_llm::DataType::TYPE_BOOL,
+                                                {request_length},
+                                                pickAlloc(GptModelInputDeviceBit::kDeviceBitRequestPdSeparation));
         inputs.lm_output_indexes     = allocBuf(rtp_llm::DataType::TYPE_INT32,
                                                 {(size_t)shape_hints_ptr[GptModelInputIndex::lmOutputIndexes]},
                                             pickAlloc(GptModelInputDeviceBit::kDeviceBitLmOutputIndexes));
         if (combo_position_ids_size) {
-            inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)combo_position_ids_size});
+            inputs.combo_position_ids = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                                 {(size_t)combo_position_ids_size},
+                                                 pickAlloc(GptModelInputDeviceBit::kDeviceBitComboPositionIds));
         }
         if (shape_hints_ptr[GptModelInputIndex::mtpHiddenStates]) {
             auto hidden_states_dim0 = (size_t)shape_hints_ptr[GptModelInputIndex::comboTokens];
@@ -231,10 +328,14 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                          rtp_llm::AllocationType::DEVICE);
         }
         if (text_tokens_mask_size) {
-            inputs.text_tokens_mask = allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)text_tokens_mask_size});
+            inputs.text_tokens_mask = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                               {(size_t)text_tokens_mask_size},
+                                               pickAlloc(GptModelInputDeviceBit::kDeviceBitTextTokensMask));
         }
         if (mm_features_locs_size) {
-            inputs.mm_features_locs = allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)mm_features_locs_size});
+            inputs.mm_features_locs = allocBuf(rtp_llm::DataType::TYPE_INT32,
+                                               {(size_t)mm_features_locs_size},
+                                               pickAlloc(GptModelInputDeviceBit::kDeviceBitMmFeaturesLocs));
         }
         if (mm_features_num) {
             std::vector<torch::Tensor> mm_features;
@@ -332,7 +433,6 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     }
 
     bool is_root = parallelism_config.tp_rank == 0;
-
     // Allocate one packed buffer per device type.
     // CPU buffer uses pinned memory (required by NCCL for host-side broadcast).
     torch::Tensor cpu_packed, gpu_packed;

@@ -1,3 +1,4 @@
+import fcntl
 import logging
 import os
 from typing import Any, Dict, List, Optional
@@ -29,42 +30,56 @@ def warmup_flashinfer_python():
     global warm_up_done
     if warm_up_done:
         return
-    warm_up_done = True
-    modules = []
-    for backend in ["fa2", "fa3"]:
-        if backend == "fa3" and not is_sm90a_supported(torch.device("cuda")):
-            continue
-        modules.append(
-            gen_batch_prefill_module(
-                backend,
-                torch.bfloat16,
-                torch.bfloat16,
-                torch.bfloat16,
-                torch.int32,
-                192,
-                128,
-                0,
-                False,
-                False,
-                False,
-            )
-        )
 
-    for backend in ["fa2", "fa3"]:
-        if backend == "fa3" and not is_sm90a_supported(torch.device("cuda")):
-            continue
-        modules.append(
-            gen_batch_mla_module(
-                backend,
-                torch.bfloat16,
-                torch.bfloat16,
-                torch.bfloat16,
-                torch.int32,
-                512,
-                64,
-                False,
-            )
-        )
+    # FlashInfer's Python JIT cache is shared by all local rank processes.
+    # Eight TP ranks can enter the first Decode request at the same time; loading
+    # or materializing the same generated extension concurrently has caused
+    # ranks to block in dlopen and eventually segfault.  Serialize this one-time
+    # process-local initialization.  Subsequent requests remain lock-free.
+    lock_dir = os.environ.get("TMPDIR", "/tmp")
+    os.makedirs(lock_dir, exist_ok=True)
+    lock_path = os.path.join(lock_dir, "rtp_llm_flashinfer_jit.lock")
+    with open(lock_path, "w", encoding="utf-8") as lock_file:
+        fcntl.flock(lock_file.fileno(), fcntl.LOCK_EX)
+        try:
+            modules = []
+            for backend in ["fa2", "fa3"]:
+                if backend == "fa3" and not is_sm90a_supported(torch.device("cuda")):
+                    continue
+                modules.append(
+                    gen_batch_prefill_module(
+                        backend,
+                        torch.bfloat16,
+                        torch.bfloat16,
+                        torch.bfloat16,
+                        torch.int32,
+                        192,
+                        128,
+                        0,
+                        False,
+                        False,
+                        False,
+                    )
+                )
+
+            for backend in ["fa2", "fa3"]:
+                if backend == "fa3" and not is_sm90a_supported(torch.device("cuda")):
+                    continue
+                modules.append(
+                    gen_batch_mla_module(
+                        backend,
+                        torch.bfloat16,
+                        torch.bfloat16,
+                        torch.bfloat16,
+                        torch.int32,
+                        512,
+                        64,
+                        False,
+                    )
+                )
+            warm_up_done = True
+        finally:
+            fcntl.flock(lock_file.fileno(), fcntl.LOCK_UN)
 
 
 def check_attention_inputs(attention_inputs: PyAttentionInputs) -> None:
@@ -206,9 +221,7 @@ class MlaFlashInferPrefillOp(object):
                 device=torch.device("cuda", torch.cuda.current_device()),
             )
 
-        self._k3_cache_plan = (
-            os.environ.get("KIMI_K3_PERF_FUSIONS", "0").strip() == "1"
-        )
+        self._k3_cache_plan = os.environ.get("KIMI_K3_PERF_FUSIONS", "0").strip() == "1"
         self.prefill_wrapper = (
             None
             if self._k3_cache_plan
@@ -254,8 +267,7 @@ class MlaFlashInferPrefillOp(object):
                     self.qk_rope_head_dim + self.qk_nope_head_dim,
                     self.v_head_dim,
                     sm_scale=(
-                        1.0
-                        / (self.qk_rope_head_dim + self.qk_nope_head_dim) ** 0.5
+                        1.0 / (self.qk_rope_head_dim + self.qk_nope_head_dim) ** 0.5
                     )
                     * self.softmax_extra_scale,
                     causal=True,
@@ -273,9 +285,7 @@ class MlaFlashInferPrefillOp(object):
                 self.num_heads,
                 self.qk_rope_head_dim + self.qk_nope_head_dim,
                 self.v_head_dim,
-                sm_scale=(
-                    1.0 / (self.qk_rope_head_dim + self.qk_nope_head_dim) ** 0.5
-                )
+                sm_scale=(1.0 / (self.qk_rope_head_dim + self.qk_nope_head_dim) ** 0.5)
                 * self.softmax_extra_scale,
                 causal=True,
                 q_data_type=torch.bfloat16,
