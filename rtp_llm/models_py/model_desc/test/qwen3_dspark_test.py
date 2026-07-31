@@ -396,9 +396,12 @@ class DSparkModelGoldenTest(unittest.TestCase):
         return caches
 
     def test_dense_scatter_matches_flashinfer_append(self):
-        """The device scatter write must produce the exact cache bytes the
-        ragged flashinfer-append path produces for the same window (layout
-        equivalence, page-crossing window)."""
+        """The shared scatter write must produce the exact cache bytes
+        flashinfer's append_paged_kv_cache produces for the same window
+        (layout equivalence, page-crossing window).  Since both inject paths
+        now scatter, the append oracle is invoked directly here."""
+        import flashinfer.page as page
+
         from rtp_llm.ops.compute_ops import PyAttentionInputs
 
         width = self.config.dspark_config.block_width
@@ -413,7 +416,41 @@ class DSparkModelGoldenTest(unittest.TestCase):
             with torch.no_grad():
                 fused = self.model.combine_hidden_states(aux_rows)
 
+                # Oracle arm: flashinfer append with hand-built page metadata
+                # over the same [start, start + width) window.
                 caches_append = self._with_fresh_caches()
+                n_pages = math.ceil((start + width) / PAGE_SIZE)
+                positions = torch.arange(
+                    start, start + width, dtype=torch.int32, device="cuda"
+                )
+                batch_indices = torch.zeros(width, dtype=torch.int32, device="cuda")
+                page_indices = block_ids_host.view(-1)[:n_pages].to("cuda")
+                page_indptr = torch.tensor(
+                    [0, n_pages], dtype=torch.int32, device="cuda"
+                )
+                last_page_len = torch.tensor(
+                    [start + width - (n_pages - 1) * PAGE_SIZE],
+                    dtype=torch.int32,
+                    device="cuda",
+                )
+                normed, dummy_q = self.model._prenorm_ctx_features(fused)
+                for i in range(self.config.num_layers):
+                    k, v = self.model.project_context_kv(normed, positions, i, dummy_q)
+                    kv_base = caches_append[i].kv_cache_base
+                    page.append_paged_kv_cache(
+                        k.to(kv_base.dtype),
+                        v.to(kv_base.dtype),
+                        batch_indices,
+                        positions,
+                        (kv_base[:, 0], kv_base[:, 1]),
+                        page_indices,
+                        page_indptr,
+                        last_page_len,
+                        "HND",
+                    )
+
+                # Ragged arm (prefill-seeding window arithmetic).
+                caches_ragged = self._with_fresh_caches()
                 ai = PyAttentionInputs()
                 ai.prefix_lengths = torch.tensor(
                     [start + width], dtype=torch.int32, device="cpu"
@@ -423,9 +460,10 @@ class DSparkModelGoldenTest(unittest.TestCase):
                     fused, ai, torch.tensor([width], dtype=torch.int32)
                 )
 
+                # Dense arm.  Host table only — the engine's standard path
+                # never fills kv_cache_block_id_device, so this exercises the
+                # H2D fallback.
                 caches_scatter = self._with_fresh_caches()
-                # Host table only — the engine's standard path never fills
-                # kv_cache_block_id_device, so this exercises the H2D fallback.
                 ai_dense = PyAttentionInputs()
                 ai_dense.kv_cache_block_id_host = block_ids_host
                 self.model.inject_context_kv(
@@ -440,9 +478,16 @@ class DSparkModelGoldenTest(unittest.TestCase):
                 self.assertTrue(
                     torch.equal(
                         caches_append[i].kv_cache_base,
+                        caches_ragged[i].kv_cache_base,
+                    ),
+                    f"layer {i}: ragged scatter differs from flashinfer append",
+                )
+                self.assertTrue(
+                    torch.equal(
+                        caches_append[i].kv_cache_base,
                         caches_scatter[i].kv_cache_base,
                     ),
-                    f"layer {i}: scatter write differs from flashinfer append",
+                    f"layer {i}: dense scatter differs from flashinfer append",
                 )
         finally:
             self.model.kv_cache = old_kv_cache
@@ -794,7 +839,8 @@ class MarkovCorrectAliasTest(unittest.TestCase):
         head = DSparkMarkovHead(
             torch.randn(self.VOCAB, self.RANK), torch.randn(self.VOCAB, self.RANK)
         )
-        return SimpleNamespace(markov_head=head)
+        # map_draft_to_target is identity for full-vocab drafts (no d2t map).
+        return SimpleNamespace(markov_head=head, map_draft_to_target=lambda ids: ids)
 
     def _run(self, dtype: torch.dtype):
         from rtp_llm.models_py.model_desc.qwen3_dspark import Qwen3DSparkModel

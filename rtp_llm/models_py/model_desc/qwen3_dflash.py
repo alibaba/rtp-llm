@@ -20,14 +20,15 @@ The query block is the speculators "bonus anchor" layout: 1+k wide, anchor
 predictions are read at the k mask positions.
 
 Stage B is a write-only pass over the paged KV cache (an independent
-projection pass by design, not part of any decoder forward): it reuses
-MhaRotaryEmbeddingOp + flashinfer append_paged_kv_cache with self-built page
-indices, eager-only, never captured by CUDA graph.  Stage C is a regular
-chunked-prefill decoder forward whose non-causal visibility comes entirely
-from attn_config.is_causal=False (the model registration sets it).
+projection pass by design, not part of any decoder forward): both the ragged
+(prefill-seeding) and dense (decode-tail) windows build (batch, position)
+indices with pure device tensor math and share one advanced-indexing scatter
+into the paged cache — no host-built ragged metadata, no D2H sync (layout
+equivalence with flashinfer append_paged_kv_cache is pinned by test).  Stage C
+is a regular chunked-prefill decoder forward whose non-causal visibility comes
+entirely from attn_config.is_causal=False (the model registration sets it).
 """
 
-import math
 from dataclasses import dataclass
 from typing import Any, List, Optional
 
@@ -278,56 +279,56 @@ class Qwen3DFlashModel(GptModelBase):
         normed = self.hidden_norm(fused)
         return normed, normed.new_zeros((normed.shape[0], 1, hd))
 
-    def _build_ctx_write_indices(
-        self,
-        attn_inputs: PyAttentionInputs,
-        ctx_lengths: torch.Tensor,  # [B] int, tokens to inject per request
-    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
-        """Self-built page indices for the write-only pass (eager, host-side).
-
-        The injection window of request i is [prefix_i - ctx_i, prefix_i): the
-        newly committed tokens, deliberately overwriting last round's
-        rejected-position KV (no-rollback overwrite semantics).
-        """
-        page_size = self.attn_configs.kernel_tokens_per_block
-        prefix = attn_inputs.prefix_lengths.tolist()
-        ctx = ctx_lengths.tolist()
-        block_table = attn_inputs.kv_cache_block_id_host
+    def _ctx_block_table(
+        self, attn_inputs: PyAttentionInputs, dev: torch.device
+    ) -> torch.Tensor:
+        """Device [B, pages] draft block table."""
+        block_table = attn_inputs.kv_cache_block_id_device
+        if block_table is None or block_table.numel() == 0:
+            # The standard engine path only publishes the pinned host table
+            # (kv_cache_block_id_device is a trtllm_gen/headwise extra); the
+            # async H2D upload keeps this path free of D2H syncs.
+            block_table = attn_inputs.kv_cache_block_id_host.to(
+                device=dev, non_blocking=True
+            )
         if block_table.dim() == 3:
             # Engine layout is [group, batch, blocks]; the dspark draft is a
             # single FULL cache group (hybrid/linear targets are out of
             # phase-1 scope), so its rows live in group 0.
             block_table = block_table[0]
+        return block_table
 
-        batch_indices: List[int] = []
-        positions: List[int] = []
-        page_indices: List[int] = []
-        page_indptr: List[int] = [0]
-        last_page_len: List[int] = []
-        for i, (p, c) in enumerate(zip(prefix, ctx)):
-            # c == 0 would mean a fully prefix-cached prompt; the engine always
-            # recomputes at least the last prompt token (input_lengths >= 1),
-            # so an empty window here is a broken caller, not a valid state.
-            assert 0 < c <= p, f"invalid ctx window: ctx={c}, prefix={p}"
-            n_pages = math.ceil(p / page_size)
-            page_indices.extend(block_table[i, :n_pages].tolist())
-            page_indptr.append(page_indptr[-1] + n_pages)
-            last_page_len.append(p - (n_pages - 1) * page_size)
-            batch_indices.extend([i] * c)
-            positions.extend(range(p - c, p))
+    def _scatter_ctx_kv(
+        self,
+        fused: torch.Tensor,  # [T, H] fused features, request-major
+        attn_inputs: PyAttentionInputs,
+        batch_idx: torch.Tensor,  # [T] int64, owning request per row
+        positions: torch.Tensor,  # [T] int32, absolute position per row
+    ) -> None:
+        """Project + scatter the rows' feature KV into the paged cache.
 
-        dev = torch.device("cuda")
+        Direct advanced-indexing scatter, layout-equivalent to flashinfer's
+        append_paged_kv_cache (pinned by test) but with no host-built ragged
+        page metadata: callers enqueue behind a busy stream without a D2H
+        sync (prefill seeding overlaps the target's drain), and fixed-shape
+        callers stay CUDA-graph capturable.
+        """
+        dev = fused.device
+        page_size = self.attn_configs.kernel_tokens_per_block
+        block_table = self._ctx_block_table(attn_inputs, dev)
+        pos_long = positions.long()
+        page_ids = block_table[batch_idx, pos_long // page_size].long()  # [T]
+        slots = pos_long % page_size
 
-        def to_dev(x: List[int]) -> torch.Tensor:
-            return torch.tensor(x, dtype=torch.int32, device=dev)
-
-        return (
-            to_dev(batch_indices),
-            to_dev(positions),
-            to_dev(page_indices),
-            to_dev(page_indptr),
-            to_dev(last_page_len),
-        )
+        assert self.kv_cache is not None, "kv_cache required for feature injection"
+        normed, dummy_q = self._prenorm_ctx_features(fused)
+        for layer_idx in range(self.layer_num):
+            k, v = self.project_context_kv(normed, positions, layer_idx, dummy_q)
+            base = self.kv_cache.get_layer_cache(layer_idx).kv_cache_base
+            # base is [P, 2, nkv, page, hd] (HND); advanced indices at dims
+            # 0/1/3 broadcast to the front => LHS shape [T, nkv, hd].
+            base[page_ids, 0, :, slots, :] = k.to(base.dtype)
+            base[page_ids, 1, :, slots, :] = v.to(base.dtype)
 
     def _inject_context_kv_dense(
         self,
@@ -335,13 +336,7 @@ class Qwen3DFlashModel(GptModelBase):
         attn_inputs: PyAttentionInputs,
         ctx_starts: torch.Tensor,  # [B] int32, window base per request
     ) -> None:
-        """Device fast path: fixed-width window [start, start + width).
-
-        Pure-device index math (no .tolist()/.item()/D2H) and a direct
-        advanced-indexing scatter into the paged cache — flashinfer's append
-        needs a host-built ragged page_indptr, which would reintroduce the
-        sync this path exists to remove.  Shapes are fixed given (B, width),
-        so the whole pass is CUDA-graph capturable later.
+        """Fixed-width window [start, start + width) per request (decode tail).
 
         Rows past a request's accept_len carry garbage (rejected-trajectory)
         features by design: they land inside the block forward's own query
@@ -359,35 +354,10 @@ class Qwen3DFlashModel(GptModelBase):
         starts = ctx_starts.to(device=dev, dtype=torch.int32, non_blocking=True)
         offsets = torch.arange(width, dtype=torch.int32, device=dev)
         positions = (starts.unsqueeze(1) + offsets).reshape(-1)  # [B*width]
-
-        page_size = self.attn_configs.kernel_tokens_per_block
-        block_table = attn_inputs.kv_cache_block_id_device
-        if block_table is None or block_table.numel() == 0:
-            # The standard engine path only publishes the pinned host table
-            # (kv_cache_block_id_device is a trtllm_gen/headwise extra); the
-            # async H2D upload keeps this path free of D2H syncs.
-            block_table = attn_inputs.kv_cache_block_id_host.to(
-                device=dev, non_blocking=True
-            )
-        if block_table.dim() == 3:
-            # [group, batch, blocks]; single FULL group in phase-1 => group 0.
-            block_table = block_table[0]
         batch_idx = torch.repeat_interleave(
             torch.arange(batch, dtype=torch.int64, device=dev), width
         )
-        pos_long = positions.long()
-        page_ids = block_table[batch_idx, pos_long // page_size].long()  # [B*width]
-        slots = pos_long % page_size
-
-        assert self.kv_cache is not None, "kv_cache required for feature injection"
-        normed, dummy_q = self._prenorm_ctx_features(fused)
-        for layer_idx in range(self.layer_num):
-            k, v = self.project_context_kv(normed, positions, layer_idx, dummy_q)
-            base = self.kv_cache.get_layer_cache(layer_idx).kv_cache_base
-            # base is [P, 2, nkv, page, hd] (HND); advanced indices at dims
-            # 0/1/3 broadcast to the front => LHS shape [B*width, nkv, hd].
-            base[page_ids, 0, :, slots, :] = k.to(base.dtype)
-            base[page_ids, 1, :, slots, :] = v.to(base.dtype)
+        self._scatter_ctx_kv(fused, attn_inputs, batch_idx, positions)
 
     def inject_context_kv(
         self,
@@ -399,52 +369,54 @@ class Qwen3DFlashModel(GptModelBase):
         """Write feature KV into the paged cache at the ctx positions.
 
         Write-only (no attention): per layer, project + k_norm + RoPE, then
-        flashinfer append_paged_kv_cache with self-built indices.  The query
-        block's own K/V are NOT written here — the block forward writes them
-        at the future positions as part of its regular attention path.
+        scatter into the paged cache.  The query block's own K/V are NOT
+        written here — the block forward writes them at the future positions
+        as part of its regular attention path.
 
         With ctx_starts given, the window is [starts[i], starts[i] + width)
-        and the device fast path runs instead (dense decode-tail seeding);
-        the ragged host path below stays for prefill seeding (naturally
-        variable-length prompt suffixes, outside any graph-capture scope).
+        (dense decode-tail seeding); otherwise the ragged window of request i
+        is [prefix_i - ctx_i, prefix_i) — the newly committed tokens,
+        deliberately overwriting last round's rejected-position KV
+        (no-rollback overwrite semantics).  Ragged row math needs the total
+        row count, which comes from fused.shape[0] instead of a device
+        reduction, keeping this path free of D2H syncs too.
         """
-        import flashinfer.page as page
-
         if ctx_starts is not None:
             self._inject_context_kv_dense(fused, attn_inputs, ctx_starts)
             return
 
         if ctx_lengths is None:
             ctx_lengths = attn_inputs.prefix_lengths
-        assert fused.shape[0] == int(ctx_lengths.sum().item()), (
-            f"input_hiddens rows ({fused.shape[0]}) != sum(ctx_lengths) "
-            f"({int(ctx_lengths.sum().item())})"
-        )
-        (
-            batch_indices,
-            positions,
-            page_indices,
-            page_indptr,
-            last_page_len,
-        ) = self._build_ctx_write_indices(attn_inputs, ctx_lengths)
-
-        assert self.kv_cache is not None, "kv_cache required for feature injection"
-        normed, dummy_q = self._prenorm_ctx_features(fused)
-        for layer_idx in range(self.layer_num):
-            k, v = self.project_context_kv(normed, positions, layer_idx, dummy_q)
-            layer_cache = self.kv_cache.get_layer_cache(layer_idx)
-            kv_base = layer_cache.kv_cache_base
-            page.append_paged_kv_cache(
-                k.to(kv_base.dtype),
-                v.to(kv_base.dtype),
-                batch_indices,
-                positions,
-                (kv_base[:, 0], kv_base[:, 1]),
-                page_indices,
-                page_indptr,
-                last_page_len,
-                "HND",
+        total = fused.shape[0]
+        if not ctx_lengths.is_cuda:
+            # Host-side sanity only on CPU metadata (UT paths): a CUDA read
+            # here would stall enqueue behind the whole stream queue.  ctx == 0
+            # would mean a fully prefix-cached prompt; the engine always
+            # recomputes at least the last prompt token (input_lengths >= 1),
+            # so an empty window is a broken caller, not a valid state.
+            assert total == int(ctx_lengths.sum()), (
+                f"input_hiddens rows ({total}) != sum(ctx_lengths) "
+                f"({int(ctx_lengths.sum())})"
             )
+            assert bool((ctx_lengths > 0).all()), (
+                f"invalid ctx window: {ctx_lengths.tolist()}"
+            )
+        dev = torch.device("cuda")
+        ctx = ctx_lengths.to(device=dev, dtype=torch.int64, non_blocking=True)
+        prefix = attn_inputs.prefix_lengths.to(
+            device=dev, dtype=torch.int64, non_blocking=True
+        )
+        batch = ctx.numel()
+        batch_idx = torch.repeat_interleave(
+            torch.arange(batch, dtype=torch.int64, device=dev),
+            ctx,
+            output_size=total,
+        )
+        # position of global row j in request i: window_start[i] + (j - row_base[i])
+        row_base = torch.cumsum(ctx, 0) - ctx  # exclusive prefix sum
+        offsets = torch.arange(total, dtype=torch.int64, device=dev)
+        positions = ((prefix - ctx - row_base)[batch_idx] + offsets).to(torch.int32)
+        self._scatter_ctx_kv(fused, attn_inputs, batch_idx, positions)
 
     # ---- Stage C ------------------------------------------------------
 
@@ -583,10 +555,11 @@ class Qwen3DFlashModel(GptModelBase):
 
         if ctx_lengths is None and ctx_starts is None:
             # Executor channel for the incremental (decode-tail) injection
-            # window; unset means "whole prefix" (prefill seeding).
+            # window; unset means "whole prefix" (prefill seeding).  Stays on
+            # its native device: the inject index math is device-side.
             ctx_from_inputs = inputs.dspark_ctx_lengths
             if ctx_from_inputs is not None and ctx_from_inputs.numel() > 0:
-                ctx_lengths = ctx_from_inputs.cpu()
+                ctx_lengths = ctx_from_inputs
 
         aux = inputs.input_hiddens
         if aux is not None and aux.numel() > 0:
