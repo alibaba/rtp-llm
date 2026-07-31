@@ -1,5 +1,8 @@
 #pragma once
 
+#include <cstdlib>
+#include <string>
+
 #include "rtp_llm/cpp/normal_engine/NormalBatchStreamProcessor.h"
 #include "rtp_llm/cpp/engine_base/stream/GenerateStream.h"
 #include "rtp_llm/cpp/normal_engine/speculative/SpeculativeSampler.h"
@@ -18,7 +21,13 @@ public:
         propose_step_(sp_config.gen_num_per_cycle),
         is_dspark_(sp_config.type == SP_TYPE_DSPARK),
         dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
-        dspark_vocab_size_(model_config.vocab_size) {}
+        dspark_vocab_size_(model_config.vocab_size) {
+        // Async bookkeeping makes the host seqLength lag-prone; the host-plan
+        // channel then always assumes one absorbable round (see the encode
+        // note in the .cc) instead of racing the worker's pending flag.
+        const char* stream_async = std::getenv("RTP_LLM_STREAM_ASYNC");
+        dspark_async_plan_       = is_dspark_ && stream_async && std::string(stream_async) == "1";
+    }
 
     absl::Status dispatchPrefill(const StreamGroups& stream_groups,
                                  const MergedOutput& prefill_output,
@@ -184,5 +193,6 @@ protected:
     // is stashed here and attached in updateDecodePostDSparkDraftModelInput.
     torch::Tensor dspark_verify_plan_pages_;  // pinned host [cap]
     torch::Tensor dspark_draft_plan_pages_;   // pinned host [cap]
+    bool          dspark_async_plan_ = false;
 };
 }  // namespace rtp_llm

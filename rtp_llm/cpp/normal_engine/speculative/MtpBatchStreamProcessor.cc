@@ -869,12 +869,32 @@ void MtpBatchStreamProcessor::prepareDSparkVerifyModelInput(const StreamGroups& 
             for (const auto& stream : stream_groups.allStreams()) {
                 // Same host source the decode gather mirrors into
                 // sequence_lengths (seqLength - 1), which equals the verify
-                // prefix in both branches above.
-                const int64_t prefix = (int64_t)stream->seqLength() - 1;
-                vp[idx]              = (int32_t)(prefix + width);  // exact verify kv len
-                const int64_t lo     = (prefix + width + 1 + page - 1) / page;
-                const int64_t hi     = (prefix + 2 * width + page - 1) / page;
-                dp[idx]              = lo == hi ? (int32_t)(-(lo + 1)) : -1;
+                // prefix in both branches above.  Under stream-async the host
+                // seqLength can lag by one round of bookkeeping; treat it as
+                // ALWAYS one round behind there (never peek the pending flag:
+                // the worker can finish between reading seqLength and the
+                // flag, and a fresh S misclassified as stale — or vice versa
+                // — puts the true kv length outside the window).  A fresh S
+                // with one extra unknown round still brackets the truth only
+                // if the window is anchored BELOW it, so widen downward too:
+                // lo uses accept >= 0 under async instead of >= 1.
+                const int64_t S      = (int64_t)stream->seqLength();
+                const int64_t lagged = dspark_async_plan_ ? 1 : 0;
+                // absorbable: a possibly-already-bookkept round contributes
+                // [0, width] tokens on top of S (0 when the worker already
+                // folded it in); strict: this round's accept is always ahead
+                // of S and contributes [1, width].
+                auto encode = [&](int64_t absorbable, int64_t strict) -> int32_t {
+                    const int64_t base = S - 1 + width;
+                    if (absorbable == 0 && strict == 0) {
+                        return (int32_t)base;  // exact kv len
+                    }
+                    const int64_t lo = (base + strict + page - 1) / page;
+                    const int64_t hi = (base + (absorbable + strict) * width + page - 1) / page;
+                    return lo == hi ? (int32_t)(-(lo + 1)) : -1;  // pages / unknown
+                };
+                vp[idx] = encode(lagged, 0);
+                dp[idx] = encode(lagged, 1);
                 ++idx;
             }
             model_input.dspark_plan_kv_pages_host = dspark_verify_plan_pages_.narrow(0, 0, (int64_t)batch_size);

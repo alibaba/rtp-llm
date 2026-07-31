@@ -359,12 +359,18 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     RTP_LLM_LOG_INFO("[speculative decoding] vocab_size_ = %d, draft_vocab_size_ = %d", vocab_size_, draft_vocab_size_);
 
     if (is_dspark_) {
-        // Phase-1a scope: sync eager PDFUSION only. Every unsupported axis
-        // fails at init instead of corrupting streams at runtime.
-        RTP_LLM_CHECK_WITH_INFO(!useStreamAsync() && !useDropBroadSync() && !useAsyncPrepare() && !useDeviceInput(),
-                                "dspark phase-1a does not support the async decode switches "
-                                "(RTP_LLM_STREAM_ASYNC/RTP_LLM_DROP_BROAD_SYNC/RTP_LLM_MTP_ASYNC_PREPARE/"
-                                "RTP_LLM_DEVICE_INPUT)");
+        // Async decode (stream-async bookkeeping worker) is supported for the
+        // tp=1 fusion role: the dspark verify/draft inputs are already
+        // device-state (anchor gather, propose rows, next_seq_len) and the
+        // host-plan channel is lag-aware (hasPendingAsyncBookkeeping widens
+        // the kv window per lagged round; the verify wrapper then needs
+        // RTP_LLM_DSPARK_VERIFY_FA2=1 since only page counts stay
+        // host-determinate).  The remaining two switches stay unsupported.
+        RTP_LLM_CHECK_WITH_INFO(!useAsyncPrepare() && !useDeviceInput(),
+                                "dspark does not support RTP_LLM_MTP_ASYNC_PREPARE/RTP_LLM_DEVICE_INPUT");
+        RTP_LLM_CHECK_WITH_INFO(!useStreamAsync()
+                                    || (params.parallelism_config.tp_size == 1 && role_type_ == RoleType::PDFUSION),
+                                "dspark stream-async decode is gated to tp_size == 1 fusion role");
         // PD separation (step 4): the prefill node ships {target, p1..pk} +
         // [1, k, vocab] probs over the gRPC side channel; the ctx feature KV
         // lives in the shared-pool draft layers and rides the standard KV
