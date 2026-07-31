@@ -876,6 +876,25 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // draft model prefill
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_forward)");
+        torch::Tensor local_dspark_aux_hidden;
+        if (cp_enabled && is_dspark_) {
+            // Target CP has already all-gathered aux_hidden_states on every
+            // rank. Re-broadcasting the full [T, capture_layers * hidden]
+            // tensor here would add ~6 GiB at 256K and ~24 GiB at 1M, plus an
+            // equally large packed staging buffer. Sync only the small input
+            // metadata and restore each rank's identical local gathered view.
+            if (isTpRank0()) {
+                local_dspark_aux_hidden = model_input.last_hidden_states;
+            } else {
+                const auto& aux = model_output.aux_hidden_states;
+                RTP_LLM_CHECK_WITH_INFO(aux.defined() && aux.dim() == 3,
+                                        "DSpARK CP prefill requires gathered aux_hidden_states [T, layers, hidden]");
+                local_dspark_aux_hidden = aux.reshape({aux.size(0), -1});
+            }
+            RTP_LLM_CHECK_WITH_INFO(local_dspark_aux_hidden.defined() && local_dspark_aux_hidden.numel() > 0,
+                                    "DSpARK CP prefill gathered aux_hidden_states must be non-empty");
+            model_input.last_hidden_states = torch::Tensor();
+        }
         // Under prefill CP the post-reduce hidden just copied by
         // updatePrefillPostDraftModelInput is not the tensor consumed by
         // DSV4 MTP.  Avoid broadcasting it; after sync each rank reloads the
@@ -885,6 +904,9 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             model_input.last_hidden_states = torch::Tensor();
         }
         tpSyncModelInputs(model_input, parallelism_config_);
+        if (local_dspark_aux_hidden.defined()) {
+            model_input.last_hidden_states = local_dspark_aux_hidden;
+        }
         maybePrintModelInput(model_input, "prefill post draft model");
         int64_t     start_time_us           = autil::TimeUtility::currentTimeInMicroSeconds();
         const auto& mtp_cache_cfg           = cache_manager_->getMTPModuleCacheConfig(0);

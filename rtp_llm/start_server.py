@@ -643,7 +643,12 @@ def _get_startup_real_warmup_speculative_reserve_step(
     sp_type = getattr(sp_config, "type", SpeculativeType.NONE)
     if sp_type in (None, "", SpeculativeType.NONE):
         return 0
-    return int(getattr(sp_config, "gen_num_per_cycle", 0) or 0) + 1
+    reserve_step = int(getattr(sp_config, "gen_num_per_cycle", 0) or 0) + 1
+    # Match NormalEngine's DSpARK reserve: one gamma+1 verify window plus
+    # another gamma+1 window used to seed the next fixed-width draft block.
+    if sp_type == SpeculativeType.DSPARK:
+        reserve_step *= 2
+    return reserve_step
 
 
 def _get_startup_real_warmup_request_token_len(
@@ -850,7 +855,9 @@ def _maybe_run_startup_real_warmup(py_env_configs: PyEnvConfigs) -> bool:
             "DSV4 startup real warmup failed, trace: %s",
             traceback.format_exc(),
         )
-        return False
+        # This warmup owns the startup health gate. Propagate the failure so
+        # the caller cannot mark an unhealthy process ready.
+        raise
 
 
 if __name__ == "__main__":
