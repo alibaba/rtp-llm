@@ -23,7 +23,7 @@ KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
         return budget;
     }
 
-    budget.explicit_pool_reserve_bytes = config.explicitly_sized_pool_reserve_bytes;
+    budget.explicit_pool_reserve_bytes = config.explicitPoolReserveBytes();
     for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
         if (config.usesExplicitIndependentBlocks(gid)) {
             continue;
@@ -101,14 +101,11 @@ uint32_t computeBlockNum(CacheConfig&                                     config
                          const std::optional<SpeculativeExecutionConfig>& sp_config) {
     if (kv_cache_config.test_block_num > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
-        config.finalizeBlockNums(kv_cache_config.test_block_num, runtime_config);
         return static_cast<uint32_t>(kv_cache_config.test_block_num);
     }
 
     const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
         runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
-    config.finalizeBlockNums(0, runtime_config);
-
     const auto block_budget = blockBudgetForConfig(config);
     if (block_budget.explicit_pool_reserve_bytes > 0) {
         RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size > block_budget.explicit_pool_reserve_bytes,
@@ -243,7 +240,7 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
     config.block_num            = static_cast<int>(block_num);
-    config.finalizeBlockNums(block_num, runtime_config);
+    config.finalizeBlockNums(block_num);
     RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %ld tokens", block_num, kv_cache_seq_len);
     if (kv_cache_seq_len < model_config.max_seq_len) {
         RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %ld tokens, less than max_seq_len %ld, "
@@ -292,9 +289,6 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         }
     }
 
-    score_config.finalizeBlockNums(0, runtime_config);
-    propose_config.finalizeBlockNums(0, runtime_config);
-
     uint32_t total_layer_num = score_config.layer_num;
     for (int i = 0; i < num_mtp_modules; ++i) {
         total_layer_num += propose_config.layer_num;
@@ -305,8 +299,10 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         total_block_size_bytes += propose_config.block_size_bytes;
     }
 
-    KVCacheBlockBudget joint_budget = blockBudgetForConfig(score_config);
-    addBlockBudget(joint_budget, blockBudgetForConfig(propose_config), static_cast<size_t>(num_mtp_modules));
+    const auto         score_budget   = blockBudgetForConfig(score_config);
+    const auto         propose_budget = blockBudgetForConfig(propose_config);
+    KVCacheBlockBudget joint_budget   = score_budget;
+    addBlockBudget(joint_budget, propose_budget, static_cast<size_t>(num_mtp_modules));
     const size_t explicit_pool_reserve = joint_budget.explicit_pool_reserve_bytes;
 
     size_t block_num = 0;
@@ -327,8 +323,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                 "sp kv cache: total budget %zu MiB, explicitly-sized pool reserve %zu MiB (score=%zu MiB + propose=%zu MiB x %d)",
                 kv_cache_mem_size / 1024 / 1024,
                 explicit_pool_reserve / 1024 / 1024,
-                score_config.explicitly_sized_pool_reserve_bytes / 1024 / 1024,
-                propose_config.explicitly_sized_pool_reserve_bytes / 1024 / 1024,
+                score_budget.explicit_pool_reserve_bytes / 1024 / 1024,
+                propose_budget.explicit_pool_reserve_bytes / 1024 / 1024,
                 num_mtp_modules);
         }
         block_num = maxKVCacheBlockNumForBudget(kv_cache_mem_size, joint_budget, joint_step);
@@ -365,11 +361,10 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
                                 propose_config.layer_to_block_stride_bytes.size(),
                                 mtp_layer_num);
         auto sub_cfg = config.mergeMTPModule(propose_config, m, main_layer_num);
-        sub_cfg->finalizeBlockNums(static_cast<uint32_t>(block_num), runtime_config);
         config.mtp_sub_configs.push_back(sub_cfg);
     }
 
-    config.finalizeBlockNums(static_cast<uint32_t>(block_num), runtime_config);
+    config.finalizeBlockNums(static_cast<uint32_t>(block_num));
     config.explicitly_sized_pool_reserve_bytes = explicit_pool_reserve;
 
     const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;

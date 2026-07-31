@@ -341,7 +341,8 @@ public:
                                  const std::vector<CacheGroupType>&   types,
                                  const std::vector<std::string>&      tags     = {},
                                  const std::vector<CacheGroupPolicy>& policies = {});
-    void        finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config);
+    size_t      explicitPoolReserveBytes() const;
+    void        finalizeBlockNums(uint32_t global_block_num);
     std::string debugString(size_t indent = 0) const;
 };
 
