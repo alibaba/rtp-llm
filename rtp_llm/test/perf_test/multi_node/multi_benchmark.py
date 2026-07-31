@@ -494,11 +494,17 @@ def multi_kill_script(copy_kill_config: Dict[str, Any], kill_log_path: str) -> N
             stdout=f,
             stderr=subprocess.STDOUT,
             text=True,
-            check=True,
+            check=False,
         )
         f.write(f"\n\n=== Kill Return Code: {result.returncode} ===\n")
         f.flush()
-    log_stage("Processes killed successfully", stage="KILL")
+    if result.returncode != 0:
+        log_stage(
+            f"multi_runner.sh kill exited with code {result.returncode}, continuing (best-effort)",
+            stage="WARNING",
+        )
+    else:
+        log_stage("Processes killed successfully", stage="KILL")
 
 
 def multi_copy_script(copy_copy_config: Dict[str, Any], copy_log_path: str) -> None:
@@ -521,11 +527,18 @@ def multi_copy_script(copy_copy_config: Dict[str, Any], copy_log_path: str) -> N
             stdout=f,
             stderr=subprocess.STDOUT,
             text=True,
-            check=True,
+            check=False,
         )
         f.write(f"\n\n=== Copy Test Results Return Code: {result.returncode} ===\n")
         f.flush()
-    log_stage("Test results copied successfully", stage="COPY")
+    if result.returncode != 0:
+        log_stage(
+            f"multi_runner.sh copy exited with code {result.returncode}, continuing (best-effort); "
+            "benchmark result may be valid but artifacts may be incomplete",
+            stage="WARNING",
+        )
+    else:
+        log_stage("Test results copied successfully", stage="COPY")
 
 
 def multi_clean_script(copy_clean_config: Dict[str, Any], clean_log_path: str) -> None:
@@ -548,11 +561,17 @@ def multi_clean_script(copy_clean_config: Dict[str, Any], clean_log_path: str) -
             stdout=f,
             stderr=subprocess.STDOUT,
             text=True,
-            check=True,
+            check=False,
         )
         f.write(f"\n\n=== Clean Return Code: {result.returncode} ===\n")
         f.flush()
-    log_stage("Log files cleaned successfully\n\n", stage="CLEAN")
+    if result.returncode != 0:
+        log_stage(
+            f"multi_runner.sh clean exited with code {result.returncode}, continuing (best-effort)",
+            stage="WARNING",
+        )
+    else:
+        log_stage("Log files cleaned successfully\n\n", stage="CLEAN")
 
 
 def multi_test_script(
