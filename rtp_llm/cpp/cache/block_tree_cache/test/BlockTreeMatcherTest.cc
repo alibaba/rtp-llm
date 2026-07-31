@@ -24,7 +24,7 @@ protected:
     }
 
     BlockTreeMatcher makeMatcher(BlockTreeCache& cache) {
-        return BlockTreeMatcher(cache.tree(), cache.reusable_group_locations_, cache.evictor_);
+        return BlockTreeMatcher(cache.tree(), cache.evictor_);
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -51,7 +51,7 @@ TEST_F(BlockTreeMatcherTest, MatchLifecycleBalancesRequestReferences) {
     ASSERT_EQ(pool->refCount(42), 1u);
     ASSERT_EQ(pool->refCount(43), 1u);
 
-    BlockTreeMatcher matcher(cache_->tree(), cache_->reusable_group_locations_, cache_->evictor_);
+    BlockTreeMatcher matcher(cache_->tree(), cache_->evictor_);
     std::lock_guard<std::mutex> lock(cache_->mutex_);
     auto [result, logical_matched_path] = matcher.matchLocked({100, 200});
 

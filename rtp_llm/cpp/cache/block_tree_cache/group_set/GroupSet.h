@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstdint>
 #include <memory>
+#include <utility>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/CacheTopology.h"
@@ -14,31 +15,12 @@
 
 namespace rtp_llm {
 
-class LoadTicket;
 struct TreeNode;
 
 struct MultiNodeResource {
-    size_t                                 group_set_id{0};
-    Tier                                   tier{Tier::DEVICE};
-    std::vector<std::vector<BlockIdxType>> per_node;
-    // Optional: tree nodes aligned with per_node, populated for match-protection
-    // sets so release can drive candidate refresh. Empty when not needed.
-    std::vector<TreeNode*> tree_nodes;
-};
-
-struct BlockTreeMatchResult {
-    TreeNode* matched_node{nullptr};
-    size_t    matched_blocks{0};
-
-    std::vector<MultiNodeResource> matched_resources;
-
-    std::shared_ptr<AsyncContext> async_context;
-    size_t                        load_blocks{0};
-    size_t                        host_load_blocks{0};
-    size_t                        disk_load_blocks{0};
-    size_t                        remote_load_blocks{0};
-
-    std::shared_ptr<LoadTicket> load_ticket;
+    size_t                                                       group_set_id{0};
+    Tier                                                         tier{Tier::DEVICE};
+    std::vector<std::pair<TreeNode*, std::vector<BlockIdxType>>> node_blocks;
 };
 
 class MatchValidator {
@@ -75,8 +57,8 @@ public:
     const std::vector<size_t>& groupIds() const {
         return group_ids_;
     }
-    const GroupBase& groupAt(size_t member_index) const {
-        return topology_->groupById(group_ids_[member_index]);
+    const GroupBase& groupAt(size_t member_group_id) const {
+        return topology_->groupById(group_ids_[member_group_id]);
     }
     size_t payloadBytes() const {
         return payload_bytes_;

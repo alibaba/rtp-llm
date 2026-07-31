@@ -218,9 +218,6 @@ private:
 
     BlockTreeCacheConfig       config_;
     std::unique_ptr<BlockTree> tree_;
-    // Reusable topology group_id -> GroupSet/member position. Non-reusable groups
-    // never enter this index or the BlockTree resource space.
-    ReusableGroupLocations                   reusable_group_locations_;
     std::shared_ptr<StorageBackend>          storage_backend_;
     std::unique_ptr<BlockTransferDispatcher> transfer_dispatcher_;
     std::unique_ptr<BlockTreeTaskPool>       task_pool_;

@@ -359,8 +359,9 @@ void expectTargetGroupsBoundById(const BlockTreeCachePtr& cache, const KVCacheAl
         const auto local_it =
             std::find((*group_set_it)->groupIds().begin(), (*group_set_it)->groupIds().end(), group_id);
         ASSERT_NE(local_it, (*group_set_it)->groupIds().end());
-        const size_t member_index = static_cast<size_t>(std::distance((*group_set_it)->groupIds().begin(), local_it));
-        const auto&  device_pool  = (*group_set_it)->devicePools()[member_index];
+        const size_t member_group_id =
+            static_cast<size_t>(std::distance((*group_set_it)->groupIds().begin(), local_it));
+        const auto& device_pool = (*group_set_it)->devicePools()[member_group_id];
         ASSERT_NE(device_pool, nullptr);
         EXPECT_EQ(device_pool.get(), target_group->blockPool().get());
     }
@@ -1310,20 +1311,20 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
         EXPECT_EQ(group->hostPool()->payloadBytes(), group->payloadBytes());
         EXPECT_EQ(group->diskPool()->payloadBytes(), group->payloadBytes());
 
-        MultiNodeResource device_blocks = block_tree_cache_test::allocateDeviceBlocksForTest(*group, 1, BlockRefType::REQUEST);
-        ASSERT_EQ(device_blocks.per_node.size(), 1u);
-        ASSERT_EQ(device_blocks.per_node[0].size(), group->devicePools().size());
+        block_tree_cache_test::MultiNodeBlocks device_blocks = block_tree_cache_test::allocateDeviceBlocksForTest(*group, 1, BlockRefType::REQUEST);
+        ASSERT_EQ(device_blocks.size(), 1u);
+        ASSERT_EQ(device_blocks[0].size(), group->devicePools().size());
         const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::REQUEST);
         const BlockIdxType disk_block = group->allocateSingleBlock(Tier::DISK, BlockRefType::REQUEST);
         ASSERT_NE(host_block, NULL_BLOCK_IDX);
         ASSERT_NE(disk_block, NULL_BLOCK_IDX);
 
         EXPECT_TRUE(factory_cache->executeTransfer(
-            TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks.per_node[0], host_block)));
+            TransferDescriptor::deviceToHost(group->groupSetId(), device_blocks[0], host_block)));
         EXPECT_TRUE(factory_cache->executeTransfer(
             TransferDescriptor::hostToDisk(group->groupSetId(), host_block, disk_block)));
 
-        group->unreferenceBlocks(device_blocks, BlockRefType::REQUEST);
+        block_tree_cache_test::unreferenceDeviceBlocksForTest(*group, device_blocks, BlockRefType::REQUEST);
         group->releaseSingleBlock(Tier::HOST, host_block, BlockRefType::REQUEST);
         group->releaseSingleBlock(Tier::DISK, disk_block, BlockRefType::REQUEST);
     }

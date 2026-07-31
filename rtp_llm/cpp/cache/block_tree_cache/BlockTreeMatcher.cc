@@ -7,10 +7,7 @@
 
 namespace rtp_llm {
 
-BlockTreeMatcher::BlockTreeMatcher(BlockTree*                    tree,
-                                   const ReusableGroupLocations& reusable_group_locations,
-                                   BlockTreeEvictor&             evictor):
-    tree_(tree), reusable_group_locations_(reusable_group_locations), evictor_(evictor) {}
+BlockTreeMatcher::BlockTreeMatcher(BlockTree* tree, BlockTreeEvictor& evictor): tree_(tree), evictor_(evictor) {}
 
 std::pair<BlockTreeMatchResult, std::vector<TreeNode*>> BlockTreeMatcher::matchLocked(const CacheKeysType& cache_keys) {
     BlockTreeMatchResult   result;
@@ -69,19 +66,18 @@ void BlockTreeMatcher::releaseMatchedResourcesLocked(const std::vector<MultiNode
 BlockIndicesType
 BlockTreeMatcher::matchedBlocksForGroup(size_t                                group_id,
                                         const std::vector<MultiNodeResource>& matched_resources) const {
-    const auto location_it = reusable_group_locations_.find(group_id);
-    if (location_it == reusable_group_locations_.end()) {
+    const ReusableGroupLocation* location = tree_->reusableGroupLocation(group_id);
+    if (location == nullptr) {
         return {};
     }
-    const ReusableGroupLocation& location = location_it->second;
     for (const auto& resource : matched_resources) {
-        if (resource.group_set_id != location.group_set_id) {
+        if (resource.group_set_id != location->group_set_id) {
             continue;
         }
         BlockIndicesType blocks;
-        blocks.reserve(resource.per_node.size());
-        for (const auto& node_blocks : resource.per_node) {
-            blocks.push_back(node_blocks[location.member_index]);
+        blocks.reserve(resource.node_blocks.size());
+        for (const auto& [_, node_blocks] : resource.node_blocks) {
+            blocks.push_back(node_blocks[location->member_group_id]);
         }
         return blocks;
     }
@@ -132,11 +128,10 @@ void BlockTreeMatcher::prepareReadyMatchedResourcesLocked(const std::vector<Tree
             TreeNode*                       path_node          = matched_path[i];
             GroupSetResource&               group_set_resource = path_node->group_set_resources[group_set_id];
             const std::vector<BlockIdxType> device_blocks      = group_set_resource.getBlocks(Tier::DEVICE);
-            matched_device_blocks.per_node.push_back(device_blocks);
-            matched_device_blocks.tree_nodes.push_back(path_node);
+            matched_device_blocks.node_blocks.emplace_back(path_node, device_blocks);
         }
 
-        if (!matched_device_blocks.per_node.empty()) {
+        if (!matched_device_blocks.node_blocks.empty()) {
             group_set->referenceBlocks(matched_device_blocks, BlockRefType::REQUEST);
             result.matched_resources.push_back(std::move(matched_device_blocks));
         }

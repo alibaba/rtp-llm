@@ -1,6 +1,5 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 
-#include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
@@ -40,23 +39,23 @@ bool GroupSet::hasAllocatedDeviceBlocks(const std::vector<BlockIdxType>& blocks)
 void GroupSet::referenceBlocks(const MultiNodeResource& set, BlockRefType ref_type) const {
     switch (set.tier) {
         case Tier::DEVICE:
-            for (const auto& node_blocks : set.per_node) {
-                for (size_t p = 0; p < node_blocks.size(); ++p) {
-                    device_pools_[p]->incRef(node_blocks[p], ref_type);
+            for (const auto& [_, blocks] : set.node_blocks) {
+                for (size_t p = 0; p < blocks.size(); ++p) {
+                    device_pools_[p]->incRef(blocks[p], ref_type);
                 }
             }
             break;
         case Tier::HOST:
             if (host_pool_) {
-                for (const auto& node_blocks : set.per_node)
-                    for (auto b : node_blocks)
+                for (const auto& [_, blocks] : set.node_blocks)
+                    for (auto b : blocks)
                         host_pool_->incRef(b, ref_type);
             }
             break;
         case Tier::DISK:
             if (disk_pool_) {
-                for (const auto& node_blocks : set.per_node)
-                    for (auto b : node_blocks)
+                for (const auto& [_, blocks] : set.node_blocks)
+                    for (auto b : blocks)
                         disk_pool_->incRef(b, ref_type);
             }
             break;
@@ -68,23 +67,23 @@ void GroupSet::referenceBlocks(const MultiNodeResource& set, BlockRefType ref_ty
 void GroupSet::unreferenceBlocks(const MultiNodeResource& set, BlockRefType ref_type) const {
     switch (set.tier) {
         case Tier::DEVICE:
-            for (const auto& node_blocks : set.per_node) {
-                for (size_t p = 0; p < node_blocks.size(); ++p) {
-                    device_pools_[p]->decRef(node_blocks[p], ref_type);
+            for (const auto& [_, blocks] : set.node_blocks) {
+                for (size_t p = 0; p < blocks.size(); ++p) {
+                    device_pools_[p]->decRef(blocks[p], ref_type);
                 }
             }
             break;
         case Tier::HOST:
             if (host_pool_) {
-                for (const auto& node_blocks : set.per_node)
-                    for (auto b : node_blocks)
+                for (const auto& [_, blocks] : set.node_blocks)
+                    for (auto b : blocks)
                         host_pool_->decRef(b, ref_type);
             }
             break;
         case Tier::DISK:
             if (disk_pool_) {
-                for (const auto& node_blocks : set.per_node)
-                    for (auto b : node_blocks)
+                for (const auto& [_, blocks] : set.node_blocks)
+                    for (auto b : blocks)
                         disk_pool_->decRef(b, ref_type);
             }
             break;

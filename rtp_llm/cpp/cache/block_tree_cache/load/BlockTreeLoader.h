@@ -18,13 +18,6 @@ namespace rtp_llm {
 class BlockTransferDispatcher;
 class BlockTreeTaskPool;
 
-struct BlockTreeLoadResult {
-    size_t                      load_blocks{0};
-    size_t                      host_load_blocks{0};
-    size_t                      disk_load_blocks{0};
-    std::shared_ptr<LoadTicket> load_ticket;
-};
-
 // Owns the complete lower-tier-to-device load workflow. BlockTreeCache owns
 // synchronization and tree matching; BlockTreeLoader owns load planning,
 // tickets, transfer execution, state transitions, and settlement.
@@ -45,7 +38,7 @@ public:
                     SettledFn                      settled);
 
     // The caller must hold the shared BlockTreeCache mutex.
-    BlockTreeLoadResult prepareLoadLocked(const std::vector<TreeNode*>& matched_path, size_t ready_matched_block_count);
+    void prepareLoadLocked(const std::vector<TreeNode*>& matched_path, BlockTreeMatchResult& result);
     // The caller must hold the shared BlockTreeCache mutex.
     bool cancelLoadLocked(const std::shared_ptr<AsyncContext>& context);
     void shutdown();
@@ -55,7 +48,7 @@ private:
                                                        const GroupSetPtr&            group_set,
                                                        const GroupSetResource&       group_set_resource,
                                                        size_t                        path_index,
-                                                       BlockTreeLoadResult&          result,
+                                                       BlockTreeMatchResult&         result,
                                                        LoadTicket::PendingLoadItems& pending_load_items);
     std::shared_ptr<LoadTicket> prepareLoadTicket(LoadTicket::PendingLoadItems& items, size_t logical_matched_blocks);
     bool prepareJoinedLoadItem(LoadTicket::PendingLoadItem& item, const std::shared_ptr<LoadAsyncContext>& context);

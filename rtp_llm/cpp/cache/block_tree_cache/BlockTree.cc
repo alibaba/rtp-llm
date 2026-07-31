@@ -8,10 +8,23 @@
 namespace rtp_llm {
 
 BlockTree::BlockTree(std::vector<GroupSetPtr> group_sets): group_sets_(std::move(group_sets)) {
+    for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
+        const auto& group_ids = group_sets_[group_set_id]->groupIds();
+        for (size_t member_group_id = 0; member_group_id < group_ids.size(); ++member_group_id) {
+            const size_t group_id = group_ids[member_group_id];
+            reusable_group_locations_.emplace(group_id, ReusableGroupLocation{group_set_id, member_group_id});
+        }
+    }
+
     root_            = std::make_unique<TreeNode>();
     root_->cache_key = 0;
     root_->parent    = nullptr;
     root_->group_set_resources.resize(group_sets_.size());
+}
+
+const ReusableGroupLocation* BlockTree::reusableGroupLocation(size_t group_id) const {
+    const auto location_it = reusable_group_locations_.find(group_id);
+    return location_it == reusable_group_locations_.end() ? nullptr : &location_it->second;
 }
 
 BlockTree::~BlockTree() {
@@ -32,19 +45,19 @@ void BlockTree::releaseNode(TreeNode* node) {
         GroupSetResource&  resource  = node->group_set_resources[group_set_id];
         if (resource.hasTier(Tier::DEVICE)) {
             group_set->unreferenceBlocks(
-                MultiNodeResource{group_set_id, Tier::DEVICE, {resource.device_blocks}},
+                MultiNodeResource{group_set_id, Tier::DEVICE, {{node, resource.device_blocks}}},
                 BlockRefType::BLOCK_CACHE);
             std::fill(resource.device_blocks.begin(), resource.device_blocks.end(), NULL_BLOCK_IDX);
         }
         if (resource.hasTier(Tier::HOST)) {
             group_set->unreferenceBlocks(
-                MultiNodeResource{group_set_id, Tier::HOST, {{resource.host_block}}},
+                MultiNodeResource{group_set_id, Tier::HOST, {{node, {resource.host_block}}}},
                 BlockRefType::BLOCK_CACHE);
             resource.host_block = NULL_BLOCK_IDX;
         }
         if (resource.hasTier(Tier::DISK)) {
             group_set->unreferenceBlocks(
-                MultiNodeResource{group_set_id, Tier::DISK, {{resource.disk_slot}}},
+                MultiNodeResource{group_set_id, Tier::DISK, {{node, {resource.disk_slot}}}},
                 BlockRefType::BLOCK_CACHE);
             resource.disk_slot = NULL_BLOCK_IDX;
         }
@@ -154,7 +167,7 @@ BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                
                 existing.candidate_meta = {};
                 if (existing.hasCompleteDeviceValue()) {
                     group_sets_[group_set_id]->referenceBlocks(
-                        MultiNodeResource{group_set_id, Tier::DEVICE, {existing.device_blocks}},
+                        MultiNodeResource{group_set_id, Tier::DEVICE, {{current, existing.device_blocks}}},
                         BlockRefType::BLOCK_CACHE);
                 }
                 adopted_group_set_ids.push_back(group_set_id);
@@ -172,7 +185,7 @@ BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                
                 GroupSetResource&  resource  = current->group_set_resources[group_set_id];
                 if (resource.hasCompleteDeviceValue()) {
                     group_set->referenceBlocks(
-                        MultiNodeResource{group_set_id, Tier::DEVICE, {resource.device_blocks}},
+                        MultiNodeResource{group_set_id, Tier::DEVICE, {{current, resource.device_blocks}}},
                         BlockRefType::BLOCK_CACHE);
                 }
             }

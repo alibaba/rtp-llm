@@ -184,10 +184,10 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
             if (group_ids == nullptr || reusable_blocks.size() != group_ids->size() || reusable_blocks.empty()) {
                 return fail_match();
             }
-            for (size_t member_index = 0; member_index < group_ids->size(); ++member_index) {
-                const int group_id = static_cast<int>((*group_ids)[member_index]);
+            for (size_t member_group_id = 0; member_group_id < group_ids->size(); ++member_group_id) {
+                const int group_id = static_cast<int>((*group_ids)[member_group_id]);
                 if (group_id >= kv_resource.groupNums() || skipReuseCacheGroup(group_id)
-                    || isNullBlockIdx(reusable_blocks[member_index])) {
+                    || isNullBlockIdx(reusable_blocks[member_group_id])) {
                     return fail_match();
                 }
                 const auto   type = config_.typeForGroup(static_cast<size_t>(group_id));
@@ -199,10 +199,10 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
                 auto& target = kv_resource.mutableBlockIds(0, group_id);
                 if (target_position >= target.blocksNum()
                     || (!isNullBlockIdx(target.blocks()[target_position])
-                        && target.blocks()[target_position] != reusable_blocks[member_index])) {
+                        && target.blocks()[target_position] != reusable_blocks[member_group_id])) {
                     return fail_match();
                 }
-                target.setAt(target_position, reusable_blocks[member_index]);
+                target.setAt(target_position, reusable_blocks[member_group_id]);
             }
         }
     }
@@ -353,8 +353,8 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
             const auto&      source_blocks = load_ticket->sourceBlocks(item_index);
             BlockIndicesType target_device_blocks;
             bool             valid = group_ids != nullptr && !group_ids->empty();
-            for (size_t member_index = 0; valid && member_index < group_ids->size(); ++member_index) {
-                const int group_id = static_cast<int>((*group_ids)[member_index]);
+            for (size_t member_group_id = 0; valid && member_group_id < group_ids->size(); ++member_group_id) {
+                const int group_id = static_cast<int>((*group_ids)[member_group_id]);
                 if (group_id >= kv_resource->groupNums()) {
                     valid = false;
                     break;
@@ -368,7 +368,8 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
                 const auto& blocks = kv_resource->blocks(0, group_id);
                 if (position >= blocks.size() || isNullBlockIdx(blocks[position])
                     || (load_ticket->sourceTier(item_index) == Tier::DEVICE
-                        && (member_index >= source_blocks.size() || blocks[position] != source_blocks[member_index]))) {
+                        && (member_group_id >= source_blocks.size()
+                            || blocks[position] != source_blocks[member_group_id]))) {
                     valid = false;
                     break;
                 }
@@ -544,8 +545,8 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
             for (auto& per_key_resources : resources) {
                 per_key_resources[group_set_id].device_blocks.assign(group_set->devicePools().size(), NULL_BLOCK_IDX);
             }
-            for (size_t member_index = 0; member_index < group_set->groupIds().size(); ++member_index) {
-                const int group_id = static_cast<int>(group_set->groupIds()[member_index]);
+            for (size_t member_group_id = 0; member_group_id < group_set->groupIds().size(); ++member_group_id) {
+                const int group_id = static_cast<int>(group_set->groupIds()[member_group_id]);
                 if (group_id >= group_nums || skipReuseCacheGroup(group_id)) {
                     mapping_valid = false;
                     break;
@@ -561,7 +562,7 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
                     if (position >= blocks.size() || isNullBlockIdx(blocks[position])) {
                         continue;
                     }
-                    resources[i][group_set_id].device_blocks[member_index] = blocks[position];
+                    resources[i][group_set_id].device_blocks[member_group_id] = blocks[position];
                 }
             }
             if (!mapping_valid) {

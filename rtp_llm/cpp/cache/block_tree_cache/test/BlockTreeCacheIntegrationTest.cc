@@ -273,10 +273,10 @@ void expectAggregatedReadyResult(const BlockTreeCache&       cache,
     ASSERT_EQ(result.matched_resources.size(), 2u);
     EXPECT_EQ(result.matched_resources[0].group_set_id, 0);
     EXPECT_EQ(result.matched_resources[0].tier, Tier::DEVICE);
-    EXPECT_EQ(result.matched_resources[0].per_node.size(), full_blocks);
+    EXPECT_EQ(result.matched_resources[0].node_blocks.size(), full_blocks);
     EXPECT_EQ(result.matched_resources[1].group_set_id, 1);
     EXPECT_EQ(result.matched_resources[1].tier, Tier::DEVICE);
-    EXPECT_EQ(result.matched_resources[1].per_node.size(), swa_blocks);
+    EXPECT_EQ(result.matched_resources[1].node_blocks.size(), swa_blocks);
 }
 
 void expectPlanningSourceRefCounts(const FullSWAEnvironment& environment, Tier tier) {
@@ -1976,8 +1976,8 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadExplicitAbortImmediatelyRestores
         }
         const auto& device_pools = environment->groups.at(item.group_set_id)->devicePools();
         ASSERT_EQ(device_pools.size(), item.source_blocks.size());
-        for (size_t member_index = 0; member_index < item.source_blocks.size(); ++member_index) {
-            device_sources.emplace_back(device_pools[member_index], item.source_blocks[member_index]);
+        for (size_t member_group_id = 0; member_group_id < item.source_blocks.size(); ++member_group_id) {
+            device_sources.emplace_back(device_pools[member_group_id], item.source_blocks[member_group_id]);
         }
     }
     ASSERT_EQ(device_sources.size(), 4u);
@@ -2037,8 +2037,8 @@ TEST_F(BlockTreeCacheIntegrationTest, DeviceLoadAsyncCompletionRefreshesBeforeTe
         if (item.source_tier == Tier::DEVICE) {
             ASSERT_EQ(device_pools.size(), item.source_blocks.size());
             item.target_device_blocks = item.source_blocks;
-            for (size_t member_index = 0; member_index < item.source_blocks.size(); ++member_index) {
-                device_sources.emplace_back(device_pools[member_index], item.source_blocks[member_index]);
+            for (size_t member_group_id = 0; member_group_id < item.source_blocks.size(); ++member_group_id) {
+                device_sources.emplace_back(device_pools[member_group_id], item.source_blocks[member_group_id]);
             }
             continue;
         }
@@ -2128,7 +2128,7 @@ TEST_F(BlockTreeCacheIntegrationTest, SparseDisconnectedSWADoesNotPublishVacuous
         ASSERT_TRUE(swa_resource.hasTier(Tier::DEVICE));
         const std::vector<BlockIdxType> old_device_blocks =
             swa_resource.getBlocks(Tier::DEVICE);
-        environment->groups[1]->unreferenceBlocks(MultiNodeResource{1, Tier::DEVICE, {old_device_blocks}},
+        environment->groups[1]->unreferenceBlocks(MultiNodeResource{1, Tier::DEVICE, {{find[path_index], old_device_blocks}}},
                                                   BlockRefType::BLOCK_CACHE);
         swa_resource.setBlocks(Tier::DEVICE, {});
         if (path_index >= 2) {
@@ -2167,7 +2167,7 @@ TEST_F(BlockTreeCacheIntegrationTest, SparseDisconnectedSWADoesNotPublishVacuous
     }
 
     result.load_ticket.reset();
-    for (const auto& blocks : environment->request_blocks[0].per_node) {
+    for (const auto& blocks : environment->request_blocks[0]) {
         EXPECT_EQ(environment->device_pools[0]->refCount(blocks[0]), 1u);
         EXPECT_EQ(environment->device_pools[1]->refCount(blocks[1]), 1u);
     }

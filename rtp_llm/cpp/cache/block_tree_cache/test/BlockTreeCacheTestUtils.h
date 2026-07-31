@@ -52,8 +52,16 @@ bool cudaAvailable();
 DeviceBlockPoolPtr
 makeDevicePool(const std::vector<DeviceLayerBufferSpec>& specs, size_t usable_count, const std::string& pool_name);
 
-BlockIdxType poolMalloc(IBlockPool& pool);
-MultiNodeResource allocateDeviceBlocksForTest(GroupSet& group_set, size_t count, BlockRefType ref_type);
+using MultiNodeBlocks = std::vector<std::vector<BlockIdxType>>;
+
+BlockIdxType    poolMalloc(IBlockPool& pool);
+MultiNodeBlocks allocateDeviceBlocksForTest(GroupSet& group_set, size_t count, BlockRefType ref_type);
+void referenceDeviceBlocksForTest(GroupSet& group_set, const MultiNodeBlocks& blocks, BlockRefType ref_type);
+void unreferenceDeviceBlocksForTest(GroupSet& group_set, const MultiNodeBlocks& blocks, BlockRefType ref_type);
+MultiNodeResource makeMultiNodeResourceForTest(size_t                       group_set_id,
+                                               Tier                         tier,
+                                               const std::vector<TreeNode*>& nodes,
+                                               const MultiNodeBlocks&       blocks);
 
 size_t unreferencedBlocksNum(const IBlockPool& pool);
 size_t treeCachedBlocksNum(const IBlockPool& pool);
@@ -164,7 +172,7 @@ public:
     std::vector<std::shared_ptr<HostBlockPool>>          host_pools;
     std::vector<std::shared_ptr<BlockTreeDiskBlockPool>> disk_pools;
     std::shared_ptr<const CacheTopology>                 topology;
-    std::vector<MultiNodeResource>                       request_blocks;
+    std::vector<MultiNodeBlocks>                          request_blocks;
     std::shared_ptr<ScriptedPerRankBlockTransferEngine>  scripted_per_rank_transfer_engine;
     std::unique_ptr<BlockTreeCache>                      cache;
 

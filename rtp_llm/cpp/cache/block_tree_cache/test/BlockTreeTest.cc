@@ -47,6 +47,38 @@ TEST(BlockTreeTest, EmptyTreeFindReturnsEmpty) {
     EXPECT_TRUE(result.empty());
 }
 
+TEST(BlockTreeTest, OwnsReusableGroupLocations) {
+    auto topology = block_transfer_engine_test::makeTestTopology(
+        {block_transfer_engine_test::makeTestGroupBase(),
+         block_transfer_engine_test::makeTestGroupBase(),
+         block_transfer_engine_test::makeTestGroupBase()});
+    std::vector<GroupSetPtr> group_sets{
+        block_transfer_engine_test::makeTestGroupSet(0, topology, {0, 2}, {}),
+        block_transfer_engine_test::makeTestGroupSet(1, topology, {1}, {}),
+    };
+
+    BlockTree tree(std::move(group_sets));
+
+    EXPECT_EQ(tree.reusableGroupCount(), 3u);
+
+    const auto* group_0 = tree.reusableGroupLocation(0);
+    ASSERT_NE(group_0, nullptr);
+    EXPECT_EQ(group_0->group_set_id, 0u);
+    EXPECT_EQ(group_0->member_group_id, 0u);
+
+    const auto* group_2 = tree.reusableGroupLocation(2);
+    ASSERT_NE(group_2, nullptr);
+    EXPECT_EQ(group_2->group_set_id, 0u);
+    EXPECT_EQ(group_2->member_group_id, 1u);
+
+    const auto* group_1 = tree.reusableGroupLocation(1);
+    ASSERT_NE(group_1, nullptr);
+    EXPECT_EQ(group_1->group_set_id, 1u);
+    EXPECT_EQ(group_1->member_group_id, 0u);
+
+    EXPECT_EQ(tree.reusableGroupLocation(3), nullptr);
+}
+
 TEST(BlockTreeTest, InsertSinglePath) {
     BlockTree tree(makeGroupSets(1));
     CacheKeysType keys      = {100, 200, 300};

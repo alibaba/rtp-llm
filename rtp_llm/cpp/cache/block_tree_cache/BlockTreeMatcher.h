@@ -1,7 +1,6 @@
 #pragma once
 
 #include <cstddef>
-#include <unordered_map>
 #include <utility>
 #include <vector>
 
@@ -11,18 +10,9 @@
 
 namespace rtp_llm {
 
-struct ReusableGroupLocation {
-    size_t group_set_id{0};
-    size_t member_index{0};
-};
-
-using ReusableGroupLocations = std::unordered_map<size_t, ReusableGroupLocation>;
-
 class BlockTreeMatcher {
 public:
-    BlockTreeMatcher(BlockTree*                    tree,
-                     const ReusableGroupLocations& reusable_group_locations,
-                     BlockTreeEvictor&             evictor);
+    BlockTreeMatcher(BlockTree* tree, BlockTreeEvictor& evictor);
 
     // Locked methods require the caller to hold BlockTreeCache's shared mutex.
     std::pair<BlockTreeMatchResult, std::vector<TreeNode*>> matchLocked(const CacheKeysType& cache_keys);
@@ -37,9 +27,8 @@ private:
                                             const std::vector<bool>&      candidate_valid,
                                             BlockTreeMatchResult&         result);
 
-    BlockTree*                    tree_;
-    const ReusableGroupLocations& reusable_group_locations_;
-    BlockTreeEvictor&             evictor_;
+    BlockTree*        tree_;
+    BlockTreeEvictor& evictor_;
 };
 
 }  // namespace rtp_llm

@@ -86,10 +86,10 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
     bool single_device      = true;
 
     size_t host_offset = 0;
-    for (size_t member_index = 0; member_index < group_set.groupIds().size(); ++member_index) {
-        const auto& group_base        = group_set.groupAt(member_index);
-        const auto  device_block      = device_blocks[member_index];
-        auto&       device_pool       = *device_pools[member_index];
+    for (size_t member_group_id = 0; member_group_id < group_set.groupIds().size(); ++member_group_id) {
+        const auto& group_base        = group_set.groupAt(member_group_id);
+        const auto  device_block      = device_blocks[member_group_id];
+        auto&       device_pool       = *device_pools[member_group_id];
         const int   pool_device_index = device_pool.deviceIndex();
 
         if (first_device_index < 0) {
@@ -112,11 +112,11 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
                 if (buffer_index >= buffers.size() || buffers[buffer_index].addr == nullptr
                     || buffers[buffer_index].size_bytes < logical_bytes) {
                     RTP_LLM_LOG_WARNING("physical buffer cannot cover logical payload group_set_id=%zu "
-                                        "member_index=%zu group_id=%zu local_layer=%zu buffer=%zu physical=%zu "
+                                        "member_group_id=%zu group_id=%zu local_layer=%zu buffer=%zu physical=%zu "
                                         "logical=%zu block=%d",
                                         desc.group_set_id,
-                                        member_index,
-                                        group_set.groupIds()[member_index],
+                                        member_group_id,
+                                        group_set.groupIds()[member_group_id],
                                         local_layer_index,
                                         buffer_index,
                                         buffer_index < buffers.size() ? buffers[buffer_index].size_bytes : 0,
@@ -130,7 +130,7 @@ DeviceHostCopyPlan DeviceHostTransferExecutor::lowerPlan(const TransferDescripto
                 tile.host_offset       = host_offset + layer_offset;
                 tile.bytes             = logical_bytes;
                 tile.device_index      = pool_device_index;
-                tile.member_index      = member_index;
+                tile.member_group_id   = member_group_id;
                 tile.local_layer_index = local_layer_index;
                 plan.copy_tiles.push_back(tile);
                 return true;

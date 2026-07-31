@@ -37,13 +37,12 @@ BlockTreeLoader::BlockTreeLoader(const std::vector<GroupSetPtr>& group_sets,
         std::make_shared<LoadTicketRegistry>([this](const LoadTicket& ticket) { return commitLoad(ticket); },
                                              [this](const LoadTicket& ticket) { abortLoad(ticket); })) {}
 
-BlockTreeLoadResult BlockTreeLoader::prepareLoadLocked(const std::vector<TreeNode*>& matched_path,
-                                                       size_t                        ready_matched_block_count) {
-    BlockTreeLoadResult result;
-    const size_t        matched_block_count = matched_path.size();
+void BlockTreeLoader::prepareLoadLocked(const std::vector<TreeNode*>& matched_path, BlockTreeMatchResult& result) {
+    const size_t matched_block_count = matched_path.size();
     if (matched_block_count == 0) {
-        return result;
+        return;
     }
+    const size_t ready_matched_block_count = result.matched_blocks;
 
     LoadTicket::PendingLoadItems pending_load_items;
     for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
@@ -71,7 +70,6 @@ BlockTreeLoadResult BlockTreeLoader::prepareLoadLocked(const std::vector<TreeNod
             result.disk_load_blocks = 0;
         }
     }
-    return result;
 }
 
 bool BlockTreeLoader::cancelLoadLocked(const std::shared_ptr<AsyncContext>& context) {
@@ -91,7 +89,7 @@ void BlockTreeLoader::prepareMatchedLoadItem(TreeNode*                     path_
                                              const GroupSetPtr&            group_set,
                                              const GroupSetResource&       group_set_resource,
                                              size_t                        path_index,
-                                             BlockTreeLoadResult&          result,
+                                             BlockTreeMatchResult&         result,
                                              LoadTicket::PendingLoadItems& pending_load_items) {
     // DEMOTING/LOAD_PENDING sources belong to another in-flight operation and
     // can neither be referenced nor joined; skip them like empty resources.
@@ -180,7 +178,7 @@ bool BlockTreeLoader::prepareJoinedLoadItem(LoadTicket::PendingLoadItem&        
         return false;
     }
     group_sets_[item.group_set_id]->referenceBlocks(
-        MultiNodeResource{item.group_set_id, Tier::DEVICE, {item.target_device_blocks}}, BlockRefType::REQUEST);
+        MultiNodeResource{item.group_set_id, Tier::DEVICE, {{item.node, item.target_device_blocks}}}, BlockRefType::REQUEST);
     return true;
 }
 
@@ -221,7 +219,7 @@ bool BlockTreeLoader::reserveLoadItems(const LoadTicket::PendingLoadItems& items
             continue;
         }
         group_sets_[item.group_set_id]->referenceBlocks(
-            MultiNodeResource{item.group_set_id, item.source_tier, {item.source_blocks}}, BlockRefType::REQUEST);
+            MultiNodeResource{item.group_set_id, item.source_tier, {{item.node, item.source_blocks}}}, BlockRefType::REQUEST);
     }
 
     for (const LoadTicket::PendingLoadItem& item : items) {
@@ -284,7 +282,7 @@ std::shared_ptr<AsyncContext> BlockTreeLoader::commitLoad(const LoadTicket& tick
         // Add an in-flight copy holder. It becomes a cache holder only after
         // the target blocks are installed into the tree resource.
         group_sets_[item.group_set_id]->referenceBlocks(
-            MultiNodeResource{item.group_set_id, Tier::DEVICE, {item.target_device_blocks}}, BlockRefType::REQUEST);
+            MultiNodeResource{item.group_set_id, Tier::DEVICE, {{item.node, item.target_device_blocks}}}, BlockRefType::REQUEST);
         ++prepared_item_count;
     }
 
@@ -303,7 +301,7 @@ std::shared_ptr<AsyncContext> BlockTreeLoader::commitLoad(const LoadTicket& tick
     for (const LoadTicket::PendingLoadItem& item : items) {
         if (item.joined_load) {
             group_sets_[item.group_set_id]->unreferenceBlocks(
-                MultiNodeResource{item.group_set_id, Tier::DEVICE, {item.target_device_blocks}}, BlockRefType::REQUEST);
+                MultiNodeResource{item.group_set_id, Tier::DEVICE, {{item.node, item.target_device_blocks}}}, BlockRefType::REQUEST);
         }
     }
     rollback_guard.dismiss();
@@ -339,7 +337,7 @@ void BlockTreeLoader::abortLoadUnsafe(const LoadTicket::PendingLoadItems&      i
             }
             if (!item.target_device_blocks.empty()) {
                 group_sets_[group_set_id]->unreferenceBlocks(
-                    MultiNodeResource{item.group_set_id, Tier::DEVICE, {item.target_device_blocks}},
+                    MultiNodeResource{item.group_set_id, Tier::DEVICE, {{item.node, item.target_device_blocks}}},
                     BlockRefType::REQUEST);
                 device_refs_released = true;
             }
@@ -353,13 +351,10 @@ void BlockTreeLoader::abortLoadUnsafe(const LoadTicket::PendingLoadItems&      i
                 }
             }
             group_sets_[group_set_id]->unreferenceBlocks(
-                MultiNodeResource{item.group_set_id, Tier::DEVICE, {item.target_device_blocks}}, BlockRefType::REQUEST);
+                MultiNodeResource{item.group_set_id, Tier::DEVICE, {{item.node, item.target_device_blocks}}}, BlockRefType::REQUEST);
         }
 
-        MultiNodeResource source_set{item.group_set_id, item.source_tier, {item.source_blocks}};
-        if (item.node != nullptr) {
-            source_set.tree_nodes = {item.node};
-        }
+        MultiNodeResource source_set{item.group_set_id, item.source_tier, {{item.node, item.source_blocks}}};
         group_sets_[group_set_id]->unreferenceBlocks(source_set, BlockRefType::REQUEST);
         if (item.source_tier != Tier::DEVICE) {
             if (fully_prepared) {
@@ -457,8 +452,7 @@ bool BlockTreeLoader::settleLoadNolock(LoadTaskRunner::Task& task, bool copy_suc
         const GroupSetPtr&                 group_set    = task.item_group_sets[item_index];
         const size_t                       group_set_id = item.group_set_id;
 
-        MultiNodeResource source_protection{group_set_id, item.source_tier, {item.source_blocks}};
-        source_protection.tree_nodes = {item.node};
+        MultiNodeResource source_protection{group_set_id, item.source_tier, {{item.node, item.source_blocks}}};
         group_set->unreferenceBlocks(source_protection, BlockRefType::REQUEST);
 
         if (item.source_tier == Tier::DEVICE) {
@@ -469,11 +463,11 @@ bool BlockTreeLoader::settleLoadNolock(LoadTaskRunner::Task& task, bool copy_suc
         GroupSetResource& resource = item.node->group_set_resources[group_set_id];
         if (settlement_success) {
             if (enable_device_cache_) {
-                MultiNodeResource target_holder{group_set_id, Tier::DEVICE, {item.target_device_blocks}};
+                MultiNodeResource target_holder{group_set_id, Tier::DEVICE, {{item.node, item.target_device_blocks}}};
                 resource.setBlocks(Tier::DEVICE, item.target_device_blocks);
                 group_set->referenceBlocks(target_holder, BlockRefType::BLOCK_CACHE);
                 group_set->unreferenceBlocks(target_holder, BlockRefType::REQUEST);
-                group_set->unreferenceBlocks(MultiNodeResource{group_set_id, item.source_tier, {item.source_blocks}},
+                group_set->unreferenceBlocks(MultiNodeResource{group_set_id, item.source_tier, {{item.node, item.source_blocks}}},
                                              BlockRefType::BLOCK_CACHE);
                 resource.evictFromTier(item.source_tier);
                 task.target_installed[item_index] = true;

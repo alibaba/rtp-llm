@@ -179,7 +179,7 @@ void LoadTaskRunner::releaseUninstalledTargetHolders(const Task& task) {
         if (item.source_tier == Tier::DEVICE || task.target_installed[item_index] || group_set == nullptr) {
             continue;
         }
-        group_set->unreferenceBlocks(MultiNodeResource{item.group_set_id, Tier::DEVICE, {item.target_device_blocks}},
+        group_set->unreferenceBlocks(MultiNodeResource{item.group_set_id, Tier::DEVICE, {{item.node, item.target_device_blocks}}},
                                      BlockRefType::REQUEST);
     }
 }

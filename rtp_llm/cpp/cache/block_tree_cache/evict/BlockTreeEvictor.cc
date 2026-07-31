@@ -269,8 +269,8 @@ void BlockTreeEvictor::refreshCandidatesAfterRelease(const MultiNodeResource& se
         return;
     }
     auto& group_set = tree_->groupSets()[group_set_id];
-    for (TreeNode* node : set.tree_nodes) {
-        if (node == nullptr || group_set_id >= node->group_set_resources.size()) {
+    for (const auto& [node, _] : set.node_blocks) {
+        if (group_set_id >= node->group_set_resources.size()) {
             continue;
         }
         refreshCandidate(*group_set, node, node->group_set_resources[group_set_id].getTopTier());
@@ -521,7 +521,7 @@ bool BlockTreeEvictor::applyMoveCompletion(const GroupSetPtr& group_set, const E
     }
 
     if (move.target_tier != Tier::NONE) {
-        MultiNodeResource target_holder{move.group_set_id, move.target_tier, {move.target_blocks}};
+        MultiNodeResource target_holder{move.group_set_id, move.target_tier, {{move.node, move.target_blocks}}};
         resource.setBlocks(move.target_tier, move.target_blocks);
         group_set->referenceBlocks(target_holder, BlockRefType::BLOCK_CACHE);
         group_set->unreferenceBlocks(target_holder, BlockRefType::EVICTION);
@@ -530,7 +530,7 @@ bool BlockTreeEvictor::applyMoveCompletion(const GroupSetPtr& group_set, const E
     // DEMOTING is the operation's ownership token. Release its saved source
     // cache hold before clearing the corresponding resource tier. The target is
     // installed while the state is still non-IDLE, then IDLE is published last.
-    group_set->unreferenceBlocks(MultiNodeResource{move.group_set_id, move.source_tier, {move.source_blocks}},
+    group_set->unreferenceBlocks(MultiNodeResource{move.group_set_id, move.source_tier, {{move.node, move.source_blocks}}},
                                  BlockRefType::BLOCK_CACHE);
     resource.evictFromTier(move.source_tier);
     resource.transfer_state = GroupSetTransferState::IDLE;

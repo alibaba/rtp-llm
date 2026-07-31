@@ -55,7 +55,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
                 evictor_.writeRemoteThrough(storage_backend_, cache_key, group_set_id);
             }
         }),
-    matcher_(tree_.get(), reusable_group_locations_, evictor_),
+    matcher_(tree_.get(), evictor_),
     loader_(
         tree_->groupSets(),
         evictor_,
@@ -73,15 +73,7 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
             if (check_watermark) {
                 checkWatermark();
             }
-        }) {
-    for (size_t group_set_id = 0; group_set_id < tree_->groupSets().size(); ++group_set_id) {
-        const auto& group_ids = tree_->groupSets()[group_set_id]->groupIds();
-        for (size_t member_index = 0; member_index < group_ids.size(); ++member_index) {
-            reusable_group_locations_.emplace(group_ids[member_index],
-                                              ReusableGroupLocation{group_set_id, member_index});
-        }
-    }
-}
+        }) {}
 
 bool BlockTreeCache::init() {
     if (initialized_) {
@@ -97,7 +89,7 @@ bool BlockTreeCache::init() {
                      "pool_threads=%d, storage_backend=%s, "
                      "device=%s, host=%s, disk=%s, remote=%s",
                      tree_->groupSets().size(),
-                     reusable_group_locations_.size(),
+                     tree_->reusableGroupCount(),
                      config_.eviction_thread_pool_size,
                      storage_backend_ ? "enabled" : "null",
                      config_.enable_device_cache ? "on" : "off",
@@ -148,11 +140,7 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
     std::lock_guard<std::mutex> lock(mutex_);
     auto [result, matched_path] = matcher_.matchLocked(cache_keys);
     if (config_.enable_load) {
-        BlockTreeLoadResult load_result = loader_.prepareLoadLocked(matched_path, result.matched_blocks);
-        result.load_blocks              = load_result.load_blocks;
-        result.host_load_blocks         = load_result.host_load_blocks;
-        result.disk_load_blocks         = load_result.disk_load_blocks;
-        result.load_ticket              = std::move(load_result.load_ticket);
+        loader_.prepareLoadLocked(matched_path, result);
     }
     return std::move(result);
 }
@@ -178,18 +166,17 @@ int BlockTreeCache::evictForGroup(size_t group_id, size_t num_blocks) {
     if (!config_.isTierEnabled(Tier::DEVICE)) {
         return 0;
     }
-    const auto location_it = reusable_group_locations_.find(group_id);
-    if (location_it == reusable_group_locations_.end()) {
+    const ReusableGroupLocation* location = tree_->reusableGroupLocation(group_id);
+    if (location == nullptr) {
         return 0;
     }
-    const ReusableGroupLocation& location    = location_it->second;
-    const GroupSetPtr&           group_set   = tree_->groupSets()[location.group_set_id];
-    const auto&                  device_pool = group_set->devicePools()[location.member_index];
+    const GroupSetPtr& group_set   = tree_->groupSets()[location->group_set_id];
+    const auto&        device_pool = group_set->devicePools()[location->member_group_id];
 
     const size_t initial_free = device_pool->freeBlocksNum();
     size_t       reclaimed    = 0;
     while (reclaimed < num_blocks) {
-        auto eviction_move = evictor_.chooseVictim(location.group_set_id, Tier::DEVICE);
+        auto eviction_move = evictor_.chooseVictim(location->group_set_id, Tier::DEVICE);
         if (!eviction_move.has_value()) {
             break;
         }
@@ -202,7 +189,7 @@ int BlockTreeCache::evictForGroup(size_t group_id, size_t num_blocks) {
     }
     RTP_LLM_LOG_DEBUG("group_id=%zu group_set[%zu] reclaimed %zu/%zu device blocks",
                       group_id,
-                      location.group_set_id,
+                      location->group_set_id,
                       reclaimed,
                       num_blocks);
     return static_cast<int>(reclaimed);

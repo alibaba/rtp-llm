@@ -132,19 +132,53 @@ BlockIdxType poolMalloc(IBlockPool& pool) {
     return block_transfer_engine_test::poolMalloc(pool);
 }
 
-MultiNodeResource allocateDeviceBlocksForTest(GroupSet& group_set, size_t count, BlockRefType ref_type) {
-    MultiNodeResource resource{group_set.groupSetId(), Tier::DEVICE};
-    resource.per_node.resize(count);
+MultiNodeBlocks allocateDeviceBlocksForTest(GroupSet& group_set, size_t count, BlockRefType ref_type) {
+    MultiNodeBlocks resource(count);
     for (const auto& pool : group_set.devicePools()) {
         const auto blocks = pool->malloc(count);
         if (!blocks.has_value()) {
-            group_set.unreferenceBlocks(resource, ref_type);
+            for (size_t i = 0; i < count; ++i) {
+                for (size_t pool_index = 0; pool_index < resource[i].size(); ++pool_index) {
+                    group_set.devicePools()[pool_index]->decRef(resource[i][pool_index], ref_type);
+                }
+            }
             return {};
         }
         pool->incRef(*blocks, ref_type);
         for (size_t i = 0; i < count; ++i) {
-            resource.per_node[i].push_back((*blocks)[i]);
+            resource[i].push_back((*blocks)[i]);
         }
+    }
+    return resource;
+}
+
+void referenceDeviceBlocksForTest(GroupSet& group_set, const MultiNodeBlocks& blocks, BlockRefType ref_type) {
+    for (const auto& node_blocks : blocks) {
+        RTP_LLM_CHECK(node_blocks.size() == group_set.devicePools().size());
+        for (size_t pool_index = 0; pool_index < node_blocks.size(); ++pool_index) {
+            group_set.devicePools()[pool_index]->incRef(node_blocks[pool_index], ref_type);
+        }
+    }
+}
+
+void unreferenceDeviceBlocksForTest(GroupSet& group_set, const MultiNodeBlocks& blocks, BlockRefType ref_type) {
+    for (const auto& node_blocks : blocks) {
+        RTP_LLM_CHECK(node_blocks.size() == group_set.devicePools().size());
+        for (size_t pool_index = 0; pool_index < node_blocks.size(); ++pool_index) {
+            group_set.devicePools()[pool_index]->decRef(node_blocks[pool_index], ref_type);
+        }
+    }
+}
+
+MultiNodeResource makeMultiNodeResourceForTest(size_t                        group_set_id,
+                                               Tier                          tier,
+                                               const std::vector<TreeNode*>& nodes,
+                                               const MultiNodeBlocks&        blocks) {
+    RTP_LLM_CHECK(nodes.size() == blocks.size());
+    MultiNodeResource resource{group_set_id, tier};
+    for (size_t i = 0; i < nodes.size(); ++i) {
+        RTP_LLM_CHECK(nodes[i] != nullptr);
+        resource.node_blocks.emplace_back(nodes[i], blocks[i]);
     }
     return resource;
 }
@@ -595,15 +629,15 @@ void FullSWAEnvironment::insertRequestPath() {
         allocateDeviceBlocksForTest(*groups[0], options_.path_length, BlockRefType::REQUEST),
         allocateDeviceBlocksForTest(*groups[1], options_.path_length, BlockRefType::REQUEST),
     };
-    ASSERT_EQ(request_blocks[0].per_node.size(), options_.path_length);
-    ASSERT_EQ(request_blocks[1].per_node.size(), options_.path_length);
+    ASSERT_EQ(request_blocks[0].size(), options_.path_length);
+    ASSERT_EQ(request_blocks[1].size(), options_.path_length);
     request_refs_released_.assign(2, false);
     fillRequestPayloads();
 
     std::vector<std::vector<GroupSetResource>> resources(options_.path_length, std::vector<GroupSetResource>(2));
     for (size_t path_index = 0; path_index < options_.path_length; ++path_index) {
-        resources[path_index][0].device_blocks = request_blocks[0].per_node[path_index];
-        resources[path_index][1].device_blocks = request_blocks[1].per_node[path_index];
+        resources[path_index][0].device_blocks = request_blocks[0][path_index];
+        resources[path_index][1].device_blocks = request_blocks[1][path_index];
     }
     cache->insert(keys, resources);
 }
@@ -622,8 +656,8 @@ void FullSWAEnvironment::releaseRequestRefsForGroup(int group_id) {
     }
     const std::vector<TreeNode*> path = topologyPath(*cache->tree(), keys);
     ASSERT_EQ(path.size(), options_.path_length);
-    MultiNodeResource released_blocks = request_blocks[static_cast<size_t>(group_id)];
-    released_blocks.tree_nodes        = path;
+    MultiNodeResource released_blocks = makeMultiNodeResourceForTest(
+        static_cast<size_t>(group_id), Tier::DEVICE, path, request_blocks[static_cast<size_t>(group_id)]);
     cache->releaseMatchedResources({released_blocks});
     request_refs_released_[static_cast<size_t>(group_id)] = true;
 }
@@ -692,7 +726,7 @@ std::vector<BlockIdxType> FullSWAEnvironment::blocksForDevicePool(size_t pool_id
     }
     const size_t group_id   = pool_id < 2 ? 0 : 1;
     const size_t pool_index = pool_id < 2 ? pool_id : 0;
-    for (const auto& node_blocks : request_blocks[group_id].per_node) {
+    for (const auto& node_blocks : request_blocks[group_id]) {
         result.push_back(node_blocks[pool_index]);
     }
     return result;
