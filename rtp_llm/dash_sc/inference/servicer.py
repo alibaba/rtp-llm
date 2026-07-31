@@ -17,11 +17,15 @@ from __future__ import annotations
 import inspect
 import logging
 from dataclasses import dataclass
-from typing import Any, AsyncIterator, Callable, Iterator, Optional
+from typing import Any, AsyncIterator, Callable, Optional
 
 import torch
 
-from rtp_llm.config.exceptions import ExceptionCategory, ExceptionType, FtRuntimeException
+from rtp_llm.config.exceptions import (
+    ExceptionCategory,
+    ExceptionType,
+    FtRuntimeException,
+)
 from rtp_llm.config.generate_config import GenerateConfig
 from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
@@ -315,48 +319,6 @@ def _phase2_input_ids_for_deepseek_v4(
     if matched_bos_ids and base[-len(matched_bos_ids) :] == matched_bos_ids:
         base = base[: -len(matched_bos_ids)]
     return base + list(empty_think_tokens)
-
-
-def _strip_trailing_eos(
-    generated_ids: list[int], eos_seq: tuple[int, ...]
-) -> list[int]:
-    """Drop a single trailing ``eos_seq`` match from ``generated_ids``.
-
-    Phase-2 sometimes ends its answer with a structural ``</think>\\n\\n``
-    closing tag mirroring the empty-think prompt body — that artifact must not
-    leak into the dashscope-side ``content`` field.
-    """
-    n = len(eos_seq)
-    if n == 0 or len(generated_ids) < n:
-        return generated_ids
-    if list(generated_ids[-n:]) == list(eos_seq):
-        return list(generated_ids[:-n])
-    return generated_ids
-
-
-def _split_on_first_close(
-    generated_ids: list[int],
-    close_token_id: Optional[int],
-    eos_seq: tuple[int, ...],
-) -> tuple[Optional[int], list[int]]:
-    """Find the first ``close_token_id`` and return ``(idx, post_close_ids)``.
-
-    The post-close suffix has the rest of ``eos_seq`` consumed if it appears
-    immediately after the close token, so a multi-token ``</think>\\n\\n`` is
-    treated as a single boundary. Returns ``(None, generated_ids)`` if the
-    close token is not present.
-    """
-    if close_token_id is None:
-        return None, list(generated_ids)
-    for i, tid in enumerate(generated_ids):
-        if tid == close_token_id:
-            tail_start = i + 1
-            if len(eos_seq) > 1:
-                rest = list(eos_seq[1:])
-                if list(generated_ids[tail_start : tail_start + len(rest)]) == rest:
-                    tail_start += len(rest)
-            return i, list(generated_ids[tail_start:])
-    return None, list(generated_ids)
 
 
 def _make_generate_input(
@@ -995,48 +957,6 @@ async def iter_real_model_stream_infer(
                 )
                 return response, stats
 
-            # Phase-2 sanitization. The phase-2 prompt ends with
-            # ``<think>\n</think>\n\n``; the model occasionally interprets that
-            # as "think + close again" instead of "content only from here".
-            # Two failure modes observed in MRCR:
-            #
-            #   Case A (leading thinking + answer):
-            #     phase-2 emits ``[reasoning..., </think>, answer...]``. Pre-
-            #     close tokens are accidental reasoning and must NOT reach
-            #     ``content``. Discard them, drop the close + eos rest, emit
-            #     only post-close.
-            #
-            #   Case B (clean answer + trailing eos artifact):
-            #     phase-2 emits ``[answer..., </think>\n\n]`` and then EOSes.
-            #     Pre-close tokens ARE the real content. Keep them, drop only
-            #     the trailing close + eos rest.
-            #
-            # The two cases are distinguished by whether tokens follow the
-            # close: post-close non-empty → Case A; post-close empty AND chunk
-            # finished → Case B; otherwise ambiguous (close split across
-            # chunks) → default to Case A so the next chunk's content streams
-            # cleanly. Pre-close chunks are buffered in ``phase2_pending``
-            # until classification completes.
-            phase2_pending: list[Any] = []
-            phase2_seen_close = False
-
-            def _flush_phase2_pending() -> (
-                Iterator[predict_v2_pb2.ModelStreamInferResponse]
-            ):
-                """Yield buffered chunks, stripping a trailing eos artifact
-                from whichever chunk carries the finish flag."""
-                for buf_go in phase2_pending:
-                    buf_out = buf_go.generate_outputs[0]
-                    if buf_out.finished and runtime.eos_tokens:
-                        buf_ids = _token_ids_list_from_generate_output(buf_out)
-                        cleaned = _strip_trailing_eos(buf_ids, runtime.eos_tokens)
-                        if cleaned != buf_ids:
-                            buf_out.output_ids = torch.tensor(
-                                cleaned, dtype=torch.int32
-                            )
-                    resp, stats = _build_phase2_response(buf_go)
-                    yield (resp, stats) if yield_access_stats else resp
-
             async for go in phase2_stream:
                 if not go.generate_outputs:
                     raise ValueError("empty generate_outputs in phase-2 backend chunk")
@@ -1044,59 +964,8 @@ async def iter_real_model_stream_infer(
                 generated_ids = _token_ids_list_from_generate_output(out_py)
                 if not generated_ids and not out_py.finished:
                     continue
-
-                if phase2_seen_close:
-                    # Past the boundary: trailing-eos cleanup on the final
-                    # chunk, otherwise pass through.
-                    if out_py.finished and runtime.eos_tokens:
-                        cleaned = _strip_trailing_eos(generated_ids, runtime.eos_tokens)
-                        if cleaned != generated_ids:
-                            generated_ids = cleaned
-                            out_py.output_ids = torch.tensor(
-                                generated_ids, dtype=torch.int32
-                            )
-                    if generated_ids or out_py.finished:
-                        resp, stats = _build_phase2_response(go)
-                        yield (resp, stats) if yield_access_stats else resp
-                    continue
-
-                close_idx, post_close = _split_on_first_close(
-                    generated_ids, think_close_token_id, runtime.eos_tokens
-                )
-                if close_idx is None:
-                    phase2_pending.append(go)
-                    if out_py.finished:
-                        # No close ever — buffered chunks are all content.
-                        for item in _flush_phase2_pending():
-                            yield item
-                        phase2_pending = []
-                    continue
-
-                if post_close:
-                    # Case A: discard pending + emit post-close.
-                    phase2_pending = []
-                    phase2_seen_close = True
-                    if out_py.finished and runtime.eos_tokens:
-                        post_close = _strip_trailing_eos(post_close, runtime.eos_tokens)
-                    out_py.output_ids = torch.tensor(post_close, dtype=torch.int32)
-                    if post_close or out_py.finished:
-                        resp, stats = _build_phase2_response(go)
-                        yield (resp, stats) if yield_access_stats else resp
-                elif out_py.finished:
-                    # Case B: pre-close is real content; keep it, drop close.
-                    pre_close = list(generated_ids[:close_idx])
-                    out_py.output_ids = torch.tensor(pre_close, dtype=torch.int32)
-                    phase2_pending.append(go)
-                    for item in _flush_phase2_pending():
-                        yield item
-                    phase2_pending = []
-                    phase2_seen_close = True
-                else:
-                    # Ambiguous: close split across chunks. Default to Case A
-                    # (drop pending + this chunk's pre-close); next chunk's
-                    # content will stream as content normally.
-                    phase2_pending = []
-                    phase2_seen_close = True
+                resp, stats = _build_phase2_response(go)
+                yield (resp, stats) if yield_access_stats else resp
     except FtRuntimeException as e:
         _set_access_backend_error_code(access_agg, e)
         error_spec = _dash_error_spec_for_ft_exception(e)
