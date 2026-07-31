@@ -33,7 +33,10 @@ cc_library(
 cc_library(
     name = "model_rpc_pool",
     srcs = [],
-    hdrs = ["RPCPool.h"],
+    hdrs = [
+        "GrpcLimits.h",
+        "RPCPool.h",
+    ],
     visibility = ["//visibility:public"],
     deps = [
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",

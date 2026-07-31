@@ -21,6 +21,9 @@ public:
 
     void launch(std::function<void()> fn);
     void sync(const torch::Stream& wait_stream);
+    // Wait only for the worker thread. Unlike sync(stream), this does not
+    // chain a caller GPU stream behind the worker event.
+    void syncCpu();
 
 private:
     void workerLoop();

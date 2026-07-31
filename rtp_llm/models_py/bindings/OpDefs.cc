@@ -142,6 +142,9 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<PyAttentionInputs>(m, "PyAttentionInputs")
         .def(pybind11::init<>())
         .def_readwrite("is_prefill", &PyAttentionInputs::is_prefill)
+        .def_readwrite("dspark_plan_kv_pages_host",
+                       &PyAttentionInputs::dspark_plan_kv_pages_host,
+                       "pinned host int32 DSpark attention planning metadata")
         .def_readwrite("is_cuda_graph", &PyAttentionInputs::is_cuda_graph)
         .def_readwrite("is_target_verify", &PyAttentionInputs::is_target_verify)
         .def_readwrite("prefix_lengths", &PyAttentionInputs::prefix_lengths)
@@ -202,7 +205,13 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("input_hiddens", &PyModelInputs::input_hiddens, "Input hidden states tensor")
         .def_readwrite("attention_inputs", &PyModelInputs::attention_inputs, "Attention inputs structure")
         .def_readwrite(
-            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure");
+            "bert_embedding_inputs", &PyModelInputs::bert_embedding_inputs, "BERT embedding inputs structure")
+        .def_readwrite("dspark_ctx_lengths",
+                       &PyModelInputs::dspark_ctx_lengths,
+                       "Optional int32 [batch] dspark feature-injection window lengths")
+        .def_readwrite("dspark_ctx_starts",
+                       &PyModelInputs::dspark_ctx_starts,
+                       "Optional int32 [batch] dspark feature-injection window start positions");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")
@@ -226,7 +235,16 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("params_ptr"),
              "Initialize with hidden states tensor and params pointer")
         .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
-        .def_readwrite("params_ptr", &PyModelOutputs::params_ptr, "Parameters pointer");
+        .def_readwrite("params_ptr", &PyModelOutputs::params_ptr, "Parameters pointer")
+        .def_readwrite("aux_hidden_states",
+                       &PyModelOutputs::aux_hidden_states,
+                       "Optional [token, layers, hidden] aux hidden states for dspark/dflash draft")
+        .def_readwrite("draft_tokens",
+                       &PyModelOutputs::draft_tokens,
+                       "Optional [batch, k] dspark draft tokens (sampling lives in the model)")
+        .def_readwrite("draft_probs",
+                       &PyModelOutputs::draft_probs,
+                       "Optional [batch, k, vocab] dspark draft probs for the rejection sampler");
 }
 
 }  // namespace torch_ext

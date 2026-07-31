@@ -83,6 +83,12 @@ public:
         return false;
     }
 
+    // DSpark/DFlash block-diffusion draft. PD paths treat it like MTP/Eagle
+    // (sp stays enabled, propose tokens cross the wire).
+    virtual bool isDSpark() {
+        return false;
+    }
+
     virtual bool updateEplbConfig(const EPLBConfig& config) {
         return false;
     }

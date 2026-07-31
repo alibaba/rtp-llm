@@ -267,8 +267,8 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
         auto propose_probs_t  = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_probs()));
         auto propose_hidden_t = pinGrpcTensor(QueryConverter::transTensor(generate_request.propose_hidden()));
 
-        sp_output_buffer->tensors_holder.push_back(std::move(propose_probs_t));
-        sp_output_buffer->tensors_holder.push_back(std::move(propose_hidden_t));
+        sp_output_buffer->side_channel.propose_probs  = std::move(propose_probs_t);
+        sp_output_buffer->side_channel.propose_hidden = std::move(propose_hidden_t);
         generate_stream->setSPOutputBuffer(sp_output_buffer);
     }
 

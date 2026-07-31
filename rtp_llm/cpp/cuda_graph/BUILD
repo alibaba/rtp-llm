@@ -49,6 +49,28 @@ cc_library(
 )
 
 cc_library(
+    name = "cuda_graph_host_utils",
+    srcs = ["cuda_graph_utils.cc"],
+    deps = torch_deps() + [
+        ":cuda_graph_hdrs_lib",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:profiling_scope",
+    ] + select({
+        "//:using_cuda": [
+            "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+            "@local_config_cuda//cuda:cuda_headers",
+            "@local_config_cuda//cuda:cudart",
+        ],
+        "@//:using_rocm": [
+            "@local_config_rocm//rocm:rocm_headers",
+            "@local_config_rocm//rocm:rocm",
+        ],
+        "//conditions:default": [],
+    }),
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "cuda_graph_impl",
     hdrs = [
         "cuda_graph_base.h",

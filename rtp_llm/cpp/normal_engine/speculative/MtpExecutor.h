@@ -195,9 +195,13 @@ private:
     size_t                                                                                     vocab_size_;
 
     // for mtp
-    DataType                                         data_type_;
-    size_t                                           hidden_size_;
-    size_t                                           propose_step_;
+    DataType data_type_;
+    size_t   hidden_size_;
+    size_t   propose_step_;
+    // DSpark/DFlash block-diffusion draft: one non-causal block forward
+    // proposes propose_step_ tokens (no MTP multi-step decode chain, sampling
+    // lives in the draft model).  Set from propose_params->sp_type.
+    bool                                             is_dspark_ = false;
     size_t                                           draft_vocab_size_;
     std::shared_ptr<ModelBase>                       draft_model_;
     std::shared_ptr<ModelBase>                       sp_prefill_draft_model_;
@@ -218,6 +222,13 @@ private:
     // group id tensors
     torch::Tensor target_kv_cache_layer_to_group;
     torch::Tensor draft_kv_cache_layer_to_group;
+
+    // Non-root dspark decode-tail NCCL receive buffers (grow-only, reused
+    // every round: the recv write and the draft forward read are ordered on
+    // the main CUDA stream, so the next round's recv cannot race the read).
+    torch::Tensor dspark_recv_aux_;          // [cap_rows, n_aux*H]
+    torch::Tensor dspark_recv_ctx_starts_;   // [cap] int32
+    torch::Tensor dspark_recv_ctx_lengths_;  // [cap] int32
 
     torch::Tensor d2t_map_;
 

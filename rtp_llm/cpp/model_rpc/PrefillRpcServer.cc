@@ -195,7 +195,7 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
         input->generate_config->gen_timeline = true;
     }
     input->generate_config->pd_separation = true;
-    if (engine_->isMTPEagle()) {
+    if (engine_->isMTPEagle() || engine_->isDSpark()) {
         input->generate_config->force_disable_sp_run = false;
     } else {
         input->generate_config->force_disable_sp_run = true;
@@ -425,14 +425,30 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
         RTP_LLM_CHECK_WITH_INFO(stream->getProposeToken().size() > 0,
                                 "mtp remote generate propose token should not be empty");
     }
+    if (engine_->isDSpark()) {
+        // The dspark decode node verifies the wire proposal as-is, so the full
+        // {target, p1..pk} row must have been assembled by the prefill step.
+        RTP_LLM_CHECK_WITH_INFO(stream->getProposeToken().size() > 1,
+                                "dspark remote generate needs the full propose row, got %zu tokens",
+                                stream->getProposeToken().size());
+    }
     generate_request.mutable_propose_token_ids()->CopyFrom(
         {stream->getProposeToken().begin(), stream->getProposeToken().end()});
 
     auto sp_output_buffer = stream->getSPOutputBuffer();
 
     if (sp_output_buffer) {
-        auto all_probs_cpu =
-            sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
+        torch::Tensor all_probs_cpu;
+        if (engine_->isDSpark() && stream->generateConfig()->top1()) {
+            // Greedy verification never reads draft probs (the rejection
+            // kernel's same_token short-circuit), so skip the [1, k, vocab]
+            // fp32 payload (~4 MiB per request at a 150k vocab); the decode
+            // node substitutes a persistent zero dummy.
+            all_probs_cpu = torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat32));
+        } else {
+            all_probs_cpu =
+                sp_output_buffer->all_probs.is_cuda() ? sp_output_buffer->all_probs.cpu() : sp_output_buffer->all_probs;
+        }
         torch::Tensor hidden_states_cpu;
         if (!sp_output_buffer->hidden_states.defined()) {
             // dummy hidden states, so datatype is not important

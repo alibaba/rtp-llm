@@ -97,6 +97,11 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
     if (propose_params_) {
         reserve_step_ = propose_params_->gen_num_per_circle + 1;
+        if (propose_params_->sp_type == SP_TYPE_DSPARK) {
+            // The DSpark tail forward proposes round t+1 within round t, so
+            // draft KV can extend by two fixed (k + 1)-wide blocks.
+            reserve_step_ = 2 * (propose_params_->gen_num_per_circle + 1);
+        }
     } else {
         reserve_step_ = 0;
     }
@@ -629,6 +634,13 @@ bool NormalEngine::isMTPEagle() {
 bool NormalEngine::isEagle() {
     if (propose_params_) {
         return propose_params_->sp_type == SP_TYPE_EAGLE;
+    }
+    return false;
+}
+
+bool NormalEngine::isDSpark() {
+    if (propose_params_) {
+        return propose_params_->sp_type == SP_TYPE_DSPARK;
     }
     return false;
 }

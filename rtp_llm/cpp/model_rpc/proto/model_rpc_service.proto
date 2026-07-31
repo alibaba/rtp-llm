@@ -269,6 +269,8 @@ message GenerateRequestPB {
     repeated int32 position_ids = 9;
     TensorPB propose_probs = 10;
     TensorPB propose_hidden = 11;
+    // Field 12 is intentionally left available for DSpark phase-2 confidence.
+    // The internal CP extension already occupies field 13 below.
     // CP size used by prefill node; > 1 means kv cache is page-RR sharded across
     // cp_size physical blocks per virtual block. Default 0 keeps backward
     // compatibility (treated as 1 by decode side).

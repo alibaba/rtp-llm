@@ -264,6 +264,11 @@ struct PyCacheStoreInputs {
     // CP-page-RR sharding context. (1, 0) = no sharding (legacy path).
     int cp_size = 1;
     int cp_rank = 0;
+
+    // Optional block-range overrides; kept last because this struct is
+    // brace-initialized positionally.
+    torch::Tensor store_input_lengths;
+    torch::Tensor store_prefix_lengths;
 };
 
 struct PyPrefillCudaGaphCopyParams {
@@ -286,6 +291,7 @@ struct PyContextParallelParams {
 struct PyAttentionInputs {
     bool          is_prefill{false};
     bool          is_target_verify{false};
+    torch::Tensor dspark_plan_kv_pages_host;
     torch::Tensor prefix_lengths;
     torch::Tensor sequence_lengths;
     torch::Tensor input_lengths;
@@ -346,12 +352,30 @@ struct PyModelInputs {
     torch::Tensor       input_hiddens;
     PyAttentionInputs   attention_inputs;
     BertEmbeddingInputs bert_embedding_inputs;
+    // dspark/dflash incremental feature injection window: int32 [batch] rows
+    // of input_hiddens per request, ending at the request's prefix length.
+    // Undefined = inject the whole prefix (prefill seeding semantics).
+    torch::Tensor dspark_ctx_lengths;
+    // Optional window base override: int32 [batch].  When defined, request i's
+    // window is [starts[i], starts[i] + lengths[i]) and the model takes the
+    // device fast path (fixed shapes, no host sync) in inject_context_kv.
+    torch::Tensor dspark_ctx_starts;
 };
 
 struct PyModelOutputs {
     torch::Tensor          hidden_states;
     rtp_llm::ParamsBasePtr params_ptr{nullptr};
     py::object             py_attn_params{py::none()};
+    // Optional multi-layer feature export for DFlash/DSpark draft models:
+    // [token, num_capture_layers, hidden], undefined unless the target model
+    // was configured to capture aux hidden states (G1, dspark-phase1 design).
+    torch::Tensor aux_hidden_states;
+    // Optional dspark/dflash draft proposal (G3: sampling lives in the model):
+    // draft_tokens [batch, k] int64, draft_probs [batch, k, vocab] fp32
+    // (Markov-corrected softmax q for the rejection sampler).  Undefined for
+    // every non-dspark model.
+    torch::Tensor draft_tokens;
+    torch::Tensor draft_probs;
 
     PyModelOutputs() = default;
 

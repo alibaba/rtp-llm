@@ -223,6 +223,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.dtype            = dataTypeToTorchType(description_.data_type);
     py_attn_inputs.is_prefill       = !decode_batch_size;
     py_attn_inputs.is_target_verify = inputs.is_target_verify;
+    py_attn_inputs.dspark_plan_kv_pages_host = inputs.dspark_plan_kv_pages_host;
     RTP_LLM_CHECK_WITH_INFO(
         context_batch_size + decode_batch_size == batch_size,
         "batch size check failed context_batch_size[%ld] decode_batch_size[%ld] total_batch_size[%ld]",
@@ -469,6 +470,12 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             cache_store_async_writer_.get(),
             device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_size) : 1,
             device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_rank) : 0};
+        if (inputs.cache_store_input_lengths.defined()) {
+            cache_store_inputs.store_input_lengths = async_to_pinned_host(inputs.cache_store_input_lengths);
+        }
+        if (inputs.cache_store_prefix_lengths.defined()) {
+            cache_store_inputs.store_prefix_lengths = async_to_pinned_host(inputs.cache_store_prefix_lengths);
+        }
         params = cache_store_inputs;
     }
     return params;
@@ -732,6 +739,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // the current stream and will be ordered correctly with the kernels below.
 
         auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs_, bert_embedding_inputs});
+        py_model_inputs.dspark_ctx_lengths = inputs.dspark_ctx_lengths;
+        py_model_inputs.dspark_ctx_starts = inputs.dspark_ctx_starts;
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
@@ -747,7 +756,31 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state_);
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
+            // DSpark draft: the graph captured the backbone only (head_hidden);
+            // run the eager lm_head + Markov + softmax tail here, reading the
+            // static head_hidden buffer BEFORE it is cloned below.  draft_tail
+            // fills draft_tokens/draft_probs as fresh (non-static) tensors, so
+            // the [B, k, V] distribution never persists as a graph output.
+            if (is_dspark_ && !use_spec_decoding_) {
+                py::gil_scoped_acquire gil;
+                auto tail_obj = py_model_.attr("draft_tail")(py_model_outputs, py_model_inputs);
+                py_model_outputs = tail_obj.cast<PyModelOutputs>();
+            }
             hidden_states = py_model_outputs.hidden_states.clone();
+            // Graph output buffers are reused across replays; detach copies of
+            // the optional dspark outputs.  draft_tokens/draft_probs are fresh
+            // eager tensors on the dspark path (clone is a harmless no-op-ish
+            // copy); aux_hidden_states may still alias a static buffer.
+            for (torch::Tensor* t :
+                 {&py_model_outputs.aux_hidden_states, &py_model_outputs.draft_tokens, &py_model_outputs.draft_probs}) {
+                if (t->defined()) {
+                    *t = t->clone();
+                }
+            }
+            RTP_LLM_CHECK_WITH_INFO(
+                !graph_runner_->aliasesGraphStaticStorage(py_model_outputs.draft_probs, graph_state_)
+                    && !graph_runner_->aliasesGraphStaticStorage(py_model_outputs.draft_tokens, graph_state_),
+                "dspark draft outputs must be cloned out of reusable graph buffers");
         } else {
             py::gil_scoped_acquire gil;
             RTP_LLM_PROFILE_SCOPE("py_model.forward(normal)");
@@ -776,6 +809,15 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         // this by reusing the standard "has any context stream" test
         // already used by callForwardPostLayers.
         const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
+        // Carry the optional dspark/dflash outputs (aux feature export +
+        // in-model draft proposal) through to the executor-facing struct
+        // (all undefined unless the model fills them).
+        auto attach_aux = [&py_model_outputs](GptModelOutputs outs) {
+            outs.aux_hidden_states = py_model_outputs.aux_hidden_states;
+            outs.draft_tokens      = py_model_outputs.draft_tokens;
+            outs.draft_probs       = py_model_outputs.draft_probs;
+            return outs;
+        };
         if (device_props_.enable_prefill_cp && has_context_request) {
             // When no consumer needs the full sequence hidden, gather only the
             // last-token rows lm_head needs instead of all-gathering+restoring the
@@ -784,12 +826,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             // ZigZagProcessor::handleOutputsLastHidden.
             if (!inputs.need_all_logits && !inputs.need_all_hidden_states) {
                 context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
-                return forwardPostLayersLastHidden(hidden_states, inputs);
+                return attach_aux(forwardPostLayersLastHidden(hidden_states, inputs));
             }
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
-            return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
+            return attach_aux(callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens));
         }
-        return callForwardPostLayers(hidden_states, inputs, true);
+        return attach_aux(callForwardPostLayers(hidden_states, inputs, true));
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());

@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/pybind/multi_gpu_gpt/RtpLLMOp.h"
+#include "rtp_llm/cpp/model_rpc/GrpcLimits.h"
 #include "rtp_llm/cpp/engine_base/EngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/ProposeModelEngineInitParams.h"
 #include "rtp_llm/cpp/engine_base/WeightsConverter.h"
@@ -43,7 +44,8 @@ std::unique_ptr<ProposeModelEngineInitParams>
 prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const EngineInitParams& base_params) {
     auto            sp_model = propose_model.attr("model");
     SpeculativeType sp_type  = propose_model.attr("sp_type").cast<SpeculativeType>();
-    RTP_LLM_CHECK(sp_type == SP_TYPE_MTP || sp_type == SP_TYPE_EAGLE3 || sp_type == SP_TYPE_EAGLE);
+    RTP_LLM_CHECK(sp_type == SP_TYPE_MTP || sp_type == SP_TYPE_EAGLE3 || sp_type == SP_TYPE_EAGLE
+                  || sp_type == SP_TYPE_DSPARK);
 
     std::unique_ptr<std::vector<std::unique_ptr<EngineInitParams>>> mtp_params =
         std::make_unique<std::vector<std::unique_ptr<EngineInitParams>>>();
@@ -57,6 +59,41 @@ prepareMTPEngineInitParams(size_t model_id, py::object propose_model, const Engi
     auto       py_layers_weights_vec = convertPyObjectToVec(py_layers_weights);
     size_t     model_num             = py_layers_weights_vec.size();
     size_t     gen_num_per_cycle     = base_params.sp_config.gen_num_per_cycle;
+
+    if (sp_type == SP_TYPE_DSPARK) {
+        // The dspark draft is ONE multi-layer model (typically 5 decoder
+        // layers), not gen_num_per_cycle single-layer MTP modules: keep the
+        // full model_config (num_layers as-is) and hand all layer weights to
+        // a single EngineInitParams.  gen_num_per_cycle == k (the block
+        // proposes k tokens per forward of this one model).
+        auto       gpt_weight = convert.createGptWeights(py_layers_weights, py_global_weights);
+        py::object py_eplb    = py::none();
+        mtp_params->push_back(std::make_unique<EngineInitParams>(model_id,
+                                                                 model_config,
+                                                                 base_params.parallelism_config,
+                                                                 base_params.runtime_config,
+                                                                 base_params.pd_sep_config,
+                                                                 base_params.concurrency_config,
+                                                                 base_params.fmha_config,
+                                                                 base_params.kv_cache_config,
+                                                                 base_params.profiling_debug_logging_config,
+                                                                 base_params.hw_kernel_config,
+                                                                 base_params.device_resource_config,
+                                                                 base_params.moe_config,
+                                                                 base_params.model_specific_config,
+                                                                 base_params.sp_config,
+                                                                 base_params.cache_store_config,
+                                                                 base_params.misc_config,
+                                                                 base_params.arpc_config,
+                                                                 base_params.grpc_config,
+                                                                 base_params.ffn_disaggregate_config,
+                                                                 base_params.vit_config,
+                                                                 std::move(*gpt_weight),
+                                                                 py::none(),
+                                                                 py_eplb));
+        return std::make_unique<ProposeModelEngineInitParams>(sp_type, gen_num_per_cycle, std::move(mtp_params));
+    }
+
     if (gen_num_per_cycle > 1 && py_layers_weights_vec.size() == 1) {
         RTP_LLM_LOG_WARNING("duplicate py_layers_weights_vec from 1 to sp_config.gen_num_per_cycle: %ld",
                             gen_num_per_cycle);
@@ -278,7 +315,8 @@ std::unique_ptr<ProposeModelEngineInitParams> RtpLLMOp::initProposeModel(py::obj
                                                                     py::none(),
                                                                     py_eplb);
             model_id_++;
-        } else if (sp_type == SP_TYPE_MTP || sp_type == SP_TYPE_EAGLE || sp_type == SP_TYPE_EAGLE3) {
+        } else if (sp_type == SP_TYPE_MTP || sp_type == SP_TYPE_EAGLE || sp_type == SP_TYPE_EAGLE3
+                   || sp_type == SP_TYPE_DSPARK) {
             params = prepareMTPEngineInitParams(model_id_, propose_model, base_params);
             if (sp_type == SP_TYPE_MTP) {
                 size_t gen_num_per_cycle = base_params.sp_config.gen_num_per_cycle;
@@ -338,6 +376,15 @@ void RtpLLMOp::initRPCServer(const EngineInitParams                        maga_
     grpc::ServerBuilder builder;
     const GrpcConfig&   grpc_config   = maga_init_params.grpc_config;
     auto                server_config = grpc_config.get_server_config();
+    // PD side-channel payloads can exceed gRPC's 4MB default (e.g. the dspark
+    // [1, k, vocab] propose probs, ~4.3MB fp32 at k=7). Raise the receive cap
+    // to a generous but finite bound instead of unlimited (-1) so one oversized
+    // message cannot force an unbounded allocation on every deployment's RPC
+    // port. Shared with the client pool (GrpcLimits.h, incl. payload audit);
+    // an explicit server_config entry still wins.
+    if (server_config.find(GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH) == server_config.end()) {
+        server_config[GRPC_ARG_MAX_RECEIVE_MESSAGE_LENGTH] = kGrpcMaxReceiveMessageBytes;
+    }
     for (auto it = server_config.begin(); it != server_config.end(); ++it) {
         RTP_LLM_LOG_INFO("grpc server add channel argument %s: %d", it->first.c_str(), it->second);
         builder.AddChannelArgument(it->first, it->second);

@@ -52,6 +52,19 @@ struct GptModelInputs {
     // for mtp model
     torch::Tensor last_hidden_states;
 
+    // dspark/dflash incremental feature injection window: int32 [batch],
+    // rows of last_hidden_states (aux features) per request, ending at the
+    // request's prefix length.  Undefined = inject the whole prefix (seeding).
+    torch::Tensor dspark_ctx_lengths;
+    // Optional window base override: int32 [batch].  When defined, request i's
+    // injection window is [starts[i], starts[i] + lengths[i]) instead of the
+    // default "ends at prefix length".  Used by the dense decode-tail path,
+    // whose fixed k+1 window ends past the new committed prefix.
+    torch::Tensor dspark_ctx_starts;
+    // Pinned-host planning metadata for DSpark attention. Undefined selects
+    // the device-planning path; P7 fills and consumes it.
+    torch::Tensor dspark_plan_kv_pages_host;
+
     torch::Tensor attention_mask;  // [batch_size, seq_len, seq_len]
 
     // - single-type cache: [batch_size, block_nums]
@@ -73,6 +86,11 @@ struct GptModelInputs {
     torch::Tensor request_id;             // int64, [context_batch_size]
     torch::Tensor request_pd_separation;  // bool, [context_batch_size]
     torch::Tensor cache_keys;             // [context_batch_size]
+    // Optional PD cache-store registration overrides. DSpark seeding attends
+    // with the full prompt prefix, while cache-store registration must use the
+    // block-aligned reuse and the suffix plus query width.
+    torch::Tensor cache_store_input_lengths;
+    torch::Tensor cache_store_prefix_lengths;
     size_t        kv_block_stride_bytes;
     size_t        kv_scale_stride_bytes;
     size_t        seq_size_per_block;
@@ -110,6 +128,13 @@ struct GptModelOutputs {
     torch::Tensor all_hidden_states;
     torch::Tensor all_logits;
     torch::Tensor softmax_result;
+    // Optional [token, num_capture_layers, hidden] target features for the
+    // DFlash/DSpark draft (undefined unless aux capture is configured).
+    torch::Tensor aux_hidden_states;
+    // Optional dspark/dflash draft proposal (undefined for other models):
+    // draft_tokens [batch, k] int64, draft_probs [batch, k, vocab] fp32.
+    torch::Tensor draft_tokens;
+    torch::Tensor draft_probs;
 
     std::vector<torch::Tensor> moe_gating;
 };

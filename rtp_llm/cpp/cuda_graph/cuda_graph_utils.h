@@ -14,12 +14,24 @@ namespace rtp_llm {
 void printTensorInfo(const std::string& name, const torch::Tensor& tensor, int max_print_size = 20);
 void debugPrintPyModelInputs(const torch_ext::PyModelInputs& inputs);
 
+// Host-side strided helpers for pinned block-table mirrors. Both expect src
+// and dst to share dimensionality (checked); a 1-D src refreshing a 2-D dst
+// would otherwise make zeroStridedHostTail wipe the rows just copied.
+void copyStridedHost(const torch::Tensor& src, torch::Tensor& dst);
+// Zero dst rows in [src.size(0), row_limit). A negative row_limit means the
+// full destination buffer.
+void zeroStridedHostTail(const torch::Tensor& src, torch::Tensor& dst, int64_t row_limit = -1);
+
 }  // namespace rtp_llm
 
 class CaptureMemoryHold {
 public:
     void setHiddenStates(at::Tensor hidden_states) {
         decoder_layer_hidden_states_ = hidden_states;
+    };
+
+    void setAuxHiddenStates(at::Tensor aux_hidden_states) {
+        decoder_layer_aux_hidden_states_ = aux_hidden_states;
     };
 
     CaptureMemoryHold() {}
@@ -39,6 +51,9 @@ public:
         py_model_inputs_.attention_inputs.kv_cache_layer_to_group = inputs.attention_inputs.kv_cache_layer_to_group;
         py_model_inputs_.attention_inputs.prefix_lengths          = inputs.attention_inputs.prefix_lengths;
         py_model_inputs_.input_ids                                = inputs.input_ids;
+        // DSpark: static window-base buffer bound into the captured forward
+        // (undefined for non-dspark graphs). Refreshed per replay.
+        py_model_inputs_.dspark_ctx_starts                        = inputs.dspark_ctx_starts;
 
         // for spec
         py_model_inputs_.input_hiddens                            = inputs.input_hiddens;
@@ -62,6 +77,10 @@ public:
 public:
     py::object               attn_pyobj_{py::none()};
     at::Tensor               decoder_layer_hidden_states_;
+    // DSpark target verify: second static graph output mirroring
+    // outputs.aux_hidden_states [tokens, n_aux, H] (the draft's fc input).
+    // Undefined for every other graph flavor.
+    at::Tensor               decoder_layer_aux_hidden_states_;
     torch_ext::PyModelInputs py_model_inputs_;
 };
 

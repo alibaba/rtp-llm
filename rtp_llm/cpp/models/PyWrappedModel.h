@@ -119,6 +119,8 @@ private:
     bool                               enable_cuda_graph_{false};
     bool                               is_prefill_cuda_graph_mode_{false};
     bool                               use_spec_decoding_{false};
+    // True on both the DSpark draft and target-verify wrappers.
+    bool                               is_dspark_{false};
     bool                               enable_device_perf_{false};
     bool                               check_nan_{false};
     std::shared_ptr<ModelInputsLogger> model_inputs_logger_;
@@ -310,15 +312,23 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         // | Normal Model (decode)     | false                    | SP_TYPE_NONE   | -        | 1 (default)             |
         // | Target Model (verify)     | false                    | != SP_TYPE_NONE| 0        | gen_num_per_cycle + 1   |
         // | Draft Model (decode)      | false                    | != SP_TYPE_NONE| 1        | 1 (default)             |
+        // | DSpark Draft (decode)     | false                    | SP_TYPE_DSPARK | 1        | gen_num_per_cycle + 1   |
         // +---------------------------+--------------------------+----------------+----------+-------------------------+
+        // The DSpark draft's block forward is always a k+1-wide (anchor + k masks)
+        // query per request in BOTH decode-tail and seeding, so a single decode
+        // graph captures it -- unlike MTP, which needs a separate prefill draft
+        // object (decode width 1, prefill width gamma+1). See
+        // docs/dspark-two-phase-plan-2026-07-14.md 2.5.
         // clang-format on
 
+        const bool is_dspark = params.sp_config.type == SP_TYPE_DSPARK;
+        is_dspark_           = is_dspark;
         if (is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
             // for embedding model
             graph_params.num_tokens_per_bs = params.max_seq_len;
         } else if (params.sp_config.type != SP_TYPE_NONE && params.sp_config.gen_num_per_cycle > 0
-                   && (!params.model_id || is_prefill_cuda_graph_mode)) {
-            // for target model verify and draft model prefill
+                   && (!params.model_id || is_prefill_cuda_graph_mode || (is_dspark && params.model_id))) {
+            // for target model verify, draft model prefill, and DSpark draft decode
             // Only use multi-token capture when SP is actually enabled;
             // gen_num_per_cycle may be >1 from config even when SP is disabled.
             graph_params.num_tokens_per_bs = params.sp_config.gen_num_per_cycle + 1;
@@ -335,6 +345,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
                                              && params.sp_config.gen_num_per_cycle > 0 && !params.model_id
                                              && !is_prefill_cuda_graph_mode;
         graph_params.is_target_verify = use_spec_decoding || is_target_verify_decode;
+        graph_params.is_dspark = is_dspark;
         if (params.sp_config.type != SP_TYPE_NONE) {
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
         }

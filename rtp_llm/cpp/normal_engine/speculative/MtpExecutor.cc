@@ -28,6 +28,7 @@
 #include "autil/TimeUtility.h"
 #include <limits>
 #include <cstdlib>
+#include <cstring>
 #include <memory>
 #include <thread>
 #include <random>
@@ -486,8 +487,42 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     propose_step_     = propose_params->gen_num_per_circle;
     vocab_size_       = params.model_config_.vocab_size;
     draft_vocab_size_ = propose_params->getEngineInitParams().model_config_.vocab_size;
+    is_dspark_        = propose_params->sp_type == SP_TYPE_DSPARK;
 
     RTP_LLM_LOG_INFO("[speculative decoding] vocab_size_ = %d, draft_vocab_size_ = %d", vocab_size_, draft_vocab_size_);
+
+    if (is_dspark_) {
+        // Phase-1a scope: sync eager PDFUSION only. Every unsupported axis
+        // fails at init instead of corrupting streams at runtime.
+        RTP_LLM_CHECK_WITH_INFO(!useStreamAsync() && !useDropBroadSync() && !useAsyncPrepare() && !useDeviceInput(),
+                                "dspark phase-1a does not support the async decode switches "
+                                "(RTP_LLM_STREAM_ASYNC/RTP_LLM_DROP_BROAD_SYNC/RTP_LLM_MTP_ASYNC_PREPARE/"
+                                "RTP_LLM_DEVICE_INPUT)");
+        RTP_LLM_CHECK_WITH_INFO(role_type_ == RoleType::PDFUSION || role_type_ == RoleType::PREFILL
+                                    || role_type_ == RoleType::DECODE,
+                                "dspark supports PDFUSION/PREFILL/DECODE roles, got role_type=%d",
+                                static_cast<int>(role_type_));
+        RTP_LLM_CHECK_WITH_INFO(!params.parallelism_config.prefill_cp_config.is_enabled()
+                                    && !params.parallelism_config.prefill_cp_config.is_prefill_enabled(),
+                                "dspark phase-1a does not support context parallel");
+        // CUDA graph (phase-1b): the single decode draft model captures the
+        // k+1-wide block forward + dense feature-KV injection; the runner keeps
+        // a static logical block table + dspark_ctx_starts refreshed per replay.
+        // Prefill seeding stays eager (canRun rejects the ragged prefill batch),
+        // so no separate sp_prefill_draft_model_ is created for dspark below.
+        // TP (step 3): tpSyncModelInputs broadcasts dspark_ctx_starts/lengths
+        // and the aux-width last_hidden_states; broadcastPostRejectionInputs
+        // carries the decode-tail extras (prefix_lengths + ctx window); the
+        // draft samples in-model, so draft_tail all-gathers the vocab-sharded
+        // lm_head logits itself. The fake-stream path (dp_size > 1) still has
+        // no k-wide propose state.
+        RTP_LLM_CHECK_WITH_INFO(params.parallelism_config.dp_size <= 1,
+                                "dspark does not support dp_size > 1 yet, got dp=%zu",
+                                (size_t)params.parallelism_config.dp_size);
+        RTP_LLM_CHECK_WITH_INFO(params.sp_config.sp_dspark_mask_token_id >= 0,
+                                "dspark requires sp_dspark_mask_token_id from the draft ckpt config, got %ld",
+                                (long)params.sp_config.sp_dspark_mask_token_id);
+    }
 
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
     tp_rank_            = params.parallelism_config.tp_rank;
@@ -637,8 +672,11 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                                   false,
                                                   draft_cache_layer_layout.layer_to_groups,
                                                   model_inputs_logger_));
-            // Create separate model for speculative prefill with CUDA graph if enabled (from params)
-            const bool enable_cuda_graph = params.hw_kernel_config.enable_cuda_graph;
+            // Create separate model for speculative prefill with CUDA graph if enabled (from params).
+            // DSpark uses a single decode draft object (its block forward is the
+            // same k+1 shape in decode-tail and seeding), so it never needs the
+            // separate prefill draft graph that MTP requires.
+            const bool enable_cuda_graph = params.hw_kernel_config.enable_cuda_graph && !is_dspark_;
             RTP_LLM_LOG_INFO(
                 "[speculative decoding] enable_cuda_graph=%d (set ENABLE_CUDA_GRAPH=1 when starting server to enable sp_prefill_draft_model_)",
                 static_cast<int>(enable_cuda_graph));
@@ -671,7 +709,11 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     const auto& draft_weights = propose_params->getEngineInitParams().gpt_weights;
     d2t_map_                  = draft_model_ ? draft_model_->weights_.d2t_map : draft_weights.d2t_map;
     speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_));
-    fast_topk_sampler_.reset(new speculative::FastTopKSampler(d2t_map_));
+    if (!is_dspark_) {
+        // dspark drafts sample in the model (draft_tokens/draft_probs on the
+        // model outputs); the executor-side top-k sampler stays unbuilt.
+        fast_topk_sampler_.reset(new speculative::FastTopKSampler(d2t_map_));
+    }
 
     RTP_LLM_LOG_INFO("[speculative decoding] d2t_map size: %ld", d2t_map_.defined() ? d2t_map_.numel() : 0);
 }
@@ -815,8 +857,13 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
                 model_input.combo_tokens  = saved_combo_tokens;
                 model_input.input_lengths = saved_input_lengths;
             }
-            batch_stream_processor_->updatePrefillPostDraftModelInput(
-                model_input, model_output, sampler_output, buffer_holder_);
+            if (is_dspark_) {
+                batch_stream_processor_->updatePrefillPostDSparkDraftModelInput(
+                    model_input, model_output, sampler_output, buffer_holder_);
+            } else {
+                batch_stream_processor_->updatePrefillPostDraftModelInput(
+                    model_input, model_output, sampler_output, buffer_holder_);
+            }
         }
     }
 
@@ -860,9 +907,19 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // draft model sample
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_sample)");
-        fast_topk_sampler_output       = fast_topk_sampler_->forward(draft_model_output.logits);
-        draft_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
-        draft_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
+        if (is_dspark_) {
+            // Sampling lives in the dspark draft: the block forward already
+            // returned the proposal, no executor-side top-k pass.
+            RTP_LLM_CHECK_WITH_INFO(draft_model_output.draft_tokens.defined()
+                                        && draft_model_output.draft_probs.defined(),
+                                    "dspark draft forward did not emit draft_tokens/draft_probs");
+            draft_sampler_output.token_ids = draft_model_output.draft_tokens;
+            draft_sampler_output.all_probs = draft_model_output.draft_probs;
+        } else {
+            fast_topk_sampler_output       = fast_topk_sampler_->forward(draft_model_output.logits);
+            draft_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
+            draft_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
+        }
     }
 
     // collect metrics
@@ -986,30 +1043,37 @@ void MtpExecutor::prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& 
         if (sp_output_buffer == nullptr) {
             continue;
         }
-        auto& tensors_holder = sp_output_buffer->tensors_holder;
-        if (tensors_holder.empty()) {
-            continue;
-        }
-        if (tensors_holder.size() != 2) {
-            RTP_LLM_LOG_WARNING("[mtp-grpc] skip grpc input: tensors_holder_size=%zu, stream=%ld",
-                                tensors_holder.size(),
-                                stream->streamId());
-            tensors_holder.clear();
+        auto& side_channel = sp_output_buffer->side_channel;
+        if (!side_channel.any()) {
             continue;
         }
         if (!sp_output_buffer->tokens.defined() || sp_output_buffer->tokens.dim() != 2
             || sp_output_buffer->tokens.size(0) < 1 || sp_output_buffer->tokens.size(1) < 2) {
             RTP_LLM_LOG_WARNING("[mtp-grpc] skip grpc input: invalid tokens, stream=%ld", stream->streamId());
-            tensors_holder.clear();
+            side_channel.clear();
             continue;
         }
 
-        const auto& propose_probs_t  = tensors_holder[0];
-        const auto& propose_hidden_t = tensors_holder[1];
-        RTP_LLM_CHECK_WITH_INFO(propose_probs_t.defined() && propose_probs_t.numel() > 0,
+        const auto& propose_probs_t  = side_channel.propose_probs;
+        const auto& propose_hidden_t = side_channel.propose_hidden;
+        const bool greedy_probs_skipped = is_dspark_ && stream->generateConfig()->top1()
+                                          && (!propose_probs_t.defined() || propose_probs_t.numel() == 0);
+        RTP_LLM_CHECK_WITH_INFO(greedy_probs_skipped || (propose_probs_t.defined() && propose_probs_t.numel() > 0),
                                 "[mtp-grpc] propose_probs must be non-empty, stream=%ld",
                                 stream->streamId());
-        if (propose_step_ > 1) {
+        if (is_dspark_) {
+            RTP_LLM_CHECK_WITH_INFO(sp_output_buffer->tokens.size(1) == static_cast<int64_t>(propose_step_) + 1,
+                                    "[dspark-grpc] wire tokens must be [1, k+1], got %ld cols (k=%zu), stream=%ld",
+                                    (long)sp_output_buffer->tokens.size(1),
+                                    propose_step_,
+                                    stream->streamId());
+            RTP_LLM_CHECK_WITH_INFO(
+                greedy_probs_skipped
+                    || (propose_probs_t.dim() == 3 && propose_probs_t.size(1) == static_cast<int64_t>(propose_step_)),
+                "[dspark-grpc] propose_probs must be [1, k, vocab], got dim=%ld, stream=%ld",
+                (long)propose_probs_t.dim(),
+                stream->streamId());
+        } else if (propose_step_ > 1) {
             const int64_t hidden_dim   = propose_hidden_t.defined() ? propose_hidden_t.dim() : -1;
             const int64_t hidden_numel = propose_hidden_t.defined() ? propose_hidden_t.numel() : -1;
             const bool    valid_hidden =
@@ -1022,18 +1086,21 @@ void MtpExecutor::prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& 
                                     hidden_numel);
         }
 
-        sp_output_buffer->all_probs     = to_cuda_async(propose_probs_t);
+        sp_output_buffer->all_probs     = greedy_probs_skipped ? torch::Tensor() : to_cuda_async(propose_probs_t);
         sp_output_buffer->hidden_states = to_cuda_async(propose_hidden_t);
 
-        auto       accept_len_cpu     = torch::ones({1}, pinned_i32);
-        auto       accept_tokens_cpu  = torch::zeros({1, static_cast<int64_t>(propose_step_ + 1)}, pinned_i32);
-        auto       propose_tokens_cpu = torch::empty({1}, pinned_i32);
-        auto       next_seq_len_cpu   = torch::empty({1}, pinned_i32);
-        auto*      token_ptr          = sp_output_buffer->tokens.data_ptr<int32_t>();
-        const auto seq_length         = stream->seqLength();
-        accept_tokens_cpu.data_ptr<int32_t>()[0]  = token_ptr[0];
-        propose_tokens_cpu.data_ptr<int32_t>()[0] = token_ptr[1];
-        next_seq_len_cpu.data_ptr<int32_t>()[0]   = seq_length;
+        auto  accept_len_cpu    = torch::ones({1}, pinned_i32);
+        auto  accept_tokens_cpu = torch::zeros({1, static_cast<int64_t>(propose_step_ + 1)}, pinned_i32);
+        auto  next_seq_len_cpu  = torch::empty({1}, pinned_i32);
+        auto* token_ptr         = sp_output_buffer->tokens.data_ptr<int32_t>();
+        auto  propose_tokens_cpu = is_dspark_ ? torch::empty({1, static_cast<int64_t>(propose_step_)}, pinned_i32) :
+                                                torch::empty({1}, pinned_i32);
+        std::memcpy(propose_tokens_cpu.data_ptr<int32_t>(),
+                    token_ptr + 1,
+                    static_cast<size_t>(propose_tokens_cpu.numel()) * sizeof(int32_t));
+        const auto seq_length                    = stream->seqLength();
+        accept_tokens_cpu.data_ptr<int32_t>()[0] = token_ptr[0];
+        next_seq_len_cpu.data_ptr<int32_t>()[0]  = seq_length;
 
         auto accept_len_gpu     = to_cuda_async(accept_len_cpu);
         auto accept_tokens_gpu  = to_cuda_async(accept_tokens_cpu);
@@ -1052,7 +1119,7 @@ void MtpExecutor::prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& 
             .next_real_seq_len      = seq_length,
         });
 
-        tensors_holder.clear();
+        side_channel.clear();
     }
 
     return;
@@ -1120,7 +1187,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_decode_input_and_tp_sync)");
         if (isTpRank0()) {
-            if (propose_step_ == 1) {
+            if (is_dspark_) {
+                batch_stream_processor_->prepareDSparkVerifyModelInput(stream_groups, model_input, buffer_holder_);
+            } else if (propose_step_ == 1) {
                 batch_stream_processor_->prepareOneStepSpecDecodeModelInput(stream_groups, model_input, buffer_holder_);
             } else {
                 batch_stream_processor_->prepareDecodeDraftModelInput(stream_groups, model_input, buffer_holder_);
@@ -1146,10 +1215,15 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     launchTargetVerifyPrepareAsync(model_input, batch_size);
 
-    if (propose_step_ > 1) {
+    // dspark proposed this round's k tokens in the PREVIOUS round's tail
+    // block forward — there is no per-round draft decode chain to run here.
+    if (propose_step_ > 1 && !is_dspark_) {
         model_input.kv_cache_layer_to_group = draft_kv_cache_layer_to_group;
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode start");
+        int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         draftModelDecode(model_input, stream_groups, draft_probs_list, draft_token_ids_t, model_forward_us);
+        metrics_collector.sp_engine_collector.propose_step_latency_us +=
+            autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
         RTP_LLM_LOG_DEBUG("[MTP decode] draftModelDecode end");
     }
 
@@ -1164,14 +1238,19 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     {
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         model_output          = runTargetVerifyForward(model_input, stream_groups);
-        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        int64_t span_us       = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        model_forward_us += span_us;
+        metrics_collector.sp_engine_collector.score_step_latency_us += span_us;
     }
 
     // trick: update draft sampler output after spec decode to avoid kernel launch overhead
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(update_draft_sampler_output)");
         if (!model_input.is_fake_stream) {
-            if (propose_step_ == 1) {
+            if (is_dspark_) {
+                batch_stream_processor_->updateDSparkDraftSamplerOutput(
+                    stream_groups, draft_sampler_output, draft_token_probs_d_t, buffer_holder_);
+            } else if (propose_step_ == 1) {
                 batch_stream_processor_->updateOneStepDraftSamplerOutput(
                     stream_groups, draft_sampler_output, draft_token_probs_d_t, buffer_holder_);
             } else {
@@ -1252,6 +1331,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         executor_collector.eplb_step_latency_us = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
     }
 
+    SamplerInputs sampler_input;
     SamplerOutput sampler_output;
     if (isTpRank0()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(rejection_sampling)");
@@ -1275,29 +1355,80 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             }
 
             // target model sample
-            CHECK_AND_RETURN_REF(sampler_input,
-                                 batch_stream_processor_->gatherSpecSamplerInput(
-                                     stream_groups, model_input, model_output, *spec_logits_result));
-            holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
-            sampler_output           = std::move(sampler_->forward(sampler_input));
+            if (batch_stream_processor_->canUseGreedySpecSamplerFastPath(streams)) {
+                // Plain-greedy batches skip the sampler-input gather (host
+                // loops + O(seq_len) token-history copy) and Sampler::forward
+                // entirely: rejection only needs the verify argmax ids, and
+                // greedy rows never read either probs buffer's contents.
+                RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(greedy_sampler_fast_path)");
+                sampler_output =
+                    batch_stream_processor_->buildGreedySpecSamplerOutput(model_output.logits, (int64_t)batch_size);
+            } else {
+                CHECK_AND_ASSIGN(
+                    sampler_input,
+                    batch_stream_processor_->gatherSpecSamplerInput(
+                        stream_groups, model_input, model_output, *spec_logits_result));
+                holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
+                sampler_output = std::move(sampler_->forward(sampler_input));
+            }
             sampler_output.all_probs = sampler_output.all_probs.reshape(
                 {(int64_t)batch_size, (int64_t)(propose_step_ + 1), (int64_t)vocab_size_});
 
             // rejection sampling
+            int64_t sampler_start_us   = autil::TimeUtility::currentTimeInMicroSeconds();
             speculative_sampler_output = speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
             applySpecLogitsAcceptLenCap(
                 sampler_input, sampler_output, speculative_sampler_output, batch_size, propose_step_);
+            metrics_collector.sp_engine_collector.speculative_sampler_latency_us +=
+                autil::TimeUtility::currentTimeInMicroSeconds() - sampler_start_us;
         }
 
-        batch_stream_processor_->updateDecodePostDraftModelInput(
-            model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, buffer_holder_);
+        if (is_dspark_) {
+            RTP_LLM_CHECK_WITH_INFO(!model_input.is_fake_stream,
+                                    "dspark decode does not support fake streams (dp>1 / perf-test paths)");
+            batch_stream_processor_->updateDecodePostDSparkDraftModelInput(
+                model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, buffer_holder_);
+        } else {
+            batch_stream_processor_->updateDecodePostDraftModelInput(
+                model_input, model_output, speculative_sampler_output, batch_size, hidden_states_d_t, buffer_holder_);
+        }
         if (metrics_reporter_) {
             accept_len_ready_event.record(cuda_graph::graphGetCurrentStream());
         }
     } else {
         model_input.lm_output_indexes =
             torch::empty({(int64_t)batch_size}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
-        model_input.last_hidden_states = model_output.all_hidden_states;
+        if (is_dspark_) {
+            // Receive buffers for broadcastPostRejectionInputs, shaped like
+            // rank 0's updateDecodePostDSparkDraftModelInput outputs: the tail
+            // draft input is the [B*(k+1), n_aux*H] aux export (the local aux
+            // is a same-shape replica — the residual stream is replicated
+            // across TP ranks), plus the [B] dense injection window pair.
+            RTP_LLM_CHECK_WITH_INFO(model_output.aux_hidden_states.defined(),
+                                    "dspark decode tail: target verify did not export aux_hidden_states");
+            // Separate storage, not a view: under CUDA graph the local aux is
+            // a slice of the target graph's static output buffer, which the
+            // NCCL receive below must not write into. The grow-only buffers
+            // are safe because receive and draft read share the main stream.
+            const auto&   aux      = model_output.aux_hidden_states;
+            const int64_t aux_rows = aux.size(0);
+            const int64_t aux_cols = aux.numel() / std::max<int64_t>(aux_rows, 1);
+            if (!dspark_recv_aux_.defined() || dspark_recv_aux_.size(0) < aux_rows
+                || dspark_recv_aux_.size(1) != aux_cols || dspark_recv_aux_.scalar_type() != aux.scalar_type()) {
+                dspark_recv_aux_ = torch::empty({aux_rows, aux_cols},
+                                                torch::TensorOptions().dtype(aux.scalar_type()).device(torch::kCUDA));
+            }
+            model_input.last_hidden_states = dspark_recv_aux_.narrow(0, 0, aux_rows);
+            const auto cuda_i32            = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+            if (!dspark_recv_ctx_starts_.defined() || dspark_recv_ctx_starts_.size(0) < (int64_t)batch_size) {
+                dspark_recv_ctx_starts_  = torch::empty({(int64_t)batch_size}, cuda_i32);
+                dspark_recv_ctx_lengths_ = torch::empty({(int64_t)batch_size}, cuda_i32);
+            }
+            model_input.dspark_ctx_starts  = dspark_recv_ctx_starts_.narrow(0, 0, (int64_t)batch_size);
+            model_input.dspark_ctx_lengths = dspark_recv_ctx_lengths_.narrow(0, 0, (int64_t)batch_size);
+        } else {
+            model_input.last_hidden_states = model_output.all_hidden_states;
+        }
     }
 
     // Record before broadcast/draft work so the worker waits only for
@@ -1315,7 +1446,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     {
         int64_t start_time_us      = autil::TimeUtility::currentTimeInMicroSeconds();
         draft_prefill_model_output = runDraftPrefillForward(model_input);
-        model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        int64_t span_us            = autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+        model_forward_us += span_us;
+        metrics_collector.sp_engine_collector.propose_step_latency_us += span_us;
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {
@@ -1327,9 +1460,18 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     SamplerOutput draft_prefill_sampler_output;
     {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_sample)");
-        auto fast_topk_sampler_output          = fast_topk_sampler_->forward(draft_prefill_model_output.logits);
-        draft_prefill_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
-        draft_prefill_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
+        if (is_dspark_) {
+            // The tail block forward already returned next round's proposal.
+            RTP_LLM_CHECK_WITH_INFO(draft_prefill_model_output.draft_tokens.defined()
+                                        && draft_prefill_model_output.draft_probs.defined(),
+                                    "dspark tail draft forward did not emit draft_tokens/draft_probs");
+            draft_prefill_sampler_output.token_ids = draft_prefill_model_output.draft_tokens;
+            draft_prefill_sampler_output.all_probs = draft_prefill_model_output.draft_probs;
+        } else {
+            auto fast_topk_sampler_output          = fast_topk_sampler_->forward(draft_prefill_model_output.logits);
+            draft_prefill_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
+            draft_prefill_sampler_output.token_ids = fast_topk_sampler_output.token_ids;
+        }
     }
 
     // Record after draft_model_sample so worker all_probs/token_ids reads wait
@@ -1659,6 +1801,14 @@ void MtpExecutor::broadcastPostRejectionInputs(GptModelInputs& model_input) {
         execBroadcast({{model_input.combo_tokens}, 0});
         execBroadcast({{model_input.last_hidden_states}, 0});
         execBroadcast({{model_input.lm_output_indexes}, 0});
+        if (is_dspark_) {
+            // The dspark tail rewrites the committed prefix (advanced by
+            // accept_len) and the dense injection window on rank 0; without
+            // these, non-root block forwards attend to the stale window.
+            execBroadcast({{model_input.prefix_lengths}, 0});
+            execBroadcast({{model_input.dspark_ctx_starts}, 0});
+            execBroadcast({{model_input.dspark_ctx_lengths}, 0});
+        }
     }
     model_input.kv_block_stride_bytes   = mtp_cache_cfg.kv_block_stride_bytes;
     model_input.kv_scale_stride_bytes   = mtp_cache_cfg.kv_scale_stride_bytes;
@@ -2113,10 +2263,10 @@ void MtpExecutor::publishSyncMtpDeviceState(const StreamGroups&                 
     auto next_seq_len_owned = torch::empty({batch_size}, cuda_i32);
     next_seq_len_owned.copy_(next_seq_len_cpu, /*non_blocking=*/true);
 
-    // Batch gather hidden states
+    // Batch gather hidden states (dspark keeps no cross-step hidden chain)
     torch::Tensor last_hidden_all;
     const auto    stream_hidden_len = static_cast<int64_t>(propose_step_ + 1);
-    if (propose_step_ > 1 && draft_all_hidden_full.defined()) {
+    if (propose_step_ > 1 && !is_dspark_ && draft_all_hidden_full.defined()) {
         const auto hidden_size = draft_all_hidden_full.size(1);
         auto       hidden_3d   = draft_all_hidden_full.reshape({batch_size, stream_hidden_len, hidden_size});
         auto       accept_i32  = accept_len_all.to(torch::kInt32);
@@ -2163,6 +2313,14 @@ absl::Status MtpExecutor::dispatchDecodeAsync(const StreamGroups&               
                                               std::shared_ptr<torch::Event>                rejection_event,
                                               std::shared_ptr<torch::Event>                draft_event) {
     RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(dispatch_output_async)");
+
+    // The pinned accept slots and per-stream device state are one round deep.
+    // Wait at the latest handoff point so the current round's GPU work can
+    // overlap the previous worker without either runner reusing its storage.
+    {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(wait_prev_bookkeeping_handoff)");
+        spec_bookkeeping_runner_.syncCpu();
+    }
 
     const auto& accept_len_gpu_all     = spec_decode_output.accept_len;
     const auto& accept_tokens_gpu_all  = spec_decode_output.accept_tokens;

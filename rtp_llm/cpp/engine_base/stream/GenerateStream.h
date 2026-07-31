@@ -52,9 +52,33 @@ struct StreamSpecUpdateInfo {
     // shape: [propose_step] (the per-stream slice). When defined, PDFUSION
     // path will skip D2H and consume this GPU tensor directly.
     torch::Tensor draft_token_gpu;
+    // CPU mirror of the FULL propose row, [propose_step] int32. Only filled
+    // for dspark PD-disaggregate streams: the dspark draft proposes the whole
+    // block at once and keeps no hidden chain, so the decode node cannot
+    // re-derive the row from one token the way multi-step MTP does.
+    torch::Tensor draft_tokens_cpu;
 
     bool update_remote_generate = true;
     bool force_update_info      = false;
+};
+
+// Speculative tensors handed over from the prefill node in PD-disaggregate
+// mode (gRPC side channel). Explicit tags replace the old positional
+// vector<Tensor> protocol (index 0 = probs, index 1 = hidden).
+// Reserved next: confidence (phase-2 confidence head); keep the proto field
+// numbering in model_rpc_service.proto in sync when adding members.
+struct SpSideChannelTensors {
+public:
+    torch::Tensor propose_probs;
+    torch::Tensor propose_hidden;
+
+    bool any() const {
+        return propose_probs.defined() || propose_hidden.defined();
+    }
+    void clear() {
+        propose_probs  = torch::Tensor();
+        propose_hidden = torch::Tensor();
+    }
 };
 
 struct SpeculativeExecutorStreamOutput {
@@ -84,8 +108,9 @@ public:
     torch::Tensor hidden_states;
     torch::Tensor all_probs;
 
-    // hold tensors from grpc
-    std::vector<torch::Tensor> tensors_holder;
+    // tensors from the PD-disaggregate grpc side channel; consumed (and
+    // cleared) by the first decode step on the decode node
+    SpSideChannelTensors side_channel;
 };
 using SpeculativeExecutorStreamOutputPtr = std::shared_ptr<SpeculativeExecutorStreamOutput>;
 
