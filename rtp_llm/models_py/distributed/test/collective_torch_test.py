@@ -17,12 +17,14 @@ from rtp_llm.models_py.distributed.collective_torch import (
     Group,
     _get_group,
     all_gather,
+    all_gather_trim,
     all_reduce,
     broadcast,
     destroy_distributed_environment,
     distributed_environment_initialized,
     init_distributed_environment,
     recv,
+    reduce_scatter_padded,
     send,
 )
 from rtp_llm.ops import NcclCommConfig, ParallelismConfig
@@ -326,6 +328,57 @@ def _test_all_collectives_worker(
         raise
 
 
+def _test_padded_rs_ag_worker(
+    rank: int, world_size: int, tp_size: int, dp_size: int, nccl_port: int
+):
+    """Exercise K3 Decode token-SP sizes around TP8."""
+
+    parallelism_config = ParallelismConfig()
+    base_port = nccl_port + 11
+    parallelism_config.world_rank = rank
+    parallelism_config.world_size = world_size
+    parallelism_config.local_rank = rank
+    parallelism_config.tp_size = tp_size
+    parallelism_config.dp_size = dp_size
+    torch.cuda.set_device(rank)
+    init_distributed_environment(
+        parallelism_config,
+        nccl_comm_config=NcclCommConfig(
+            nccl_ip="127.0.0.1",
+            tp_nccl_port=base_port - 2,
+            dp_tp_nccl_port=base_port - 10,
+            ffn_tp_nccl_port=base_port - 5,
+        ),
+        nccl_init_port=base_port - 11,
+        backend="nccl",
+        timeout=60,
+    )
+    try:
+        rank_sum = sum(range(world_size))
+        for logical_tokens in (1, 7, 8, 9):
+            base = torch.arange(
+                logical_tokens * 3,
+                dtype=torch.float32,
+                device=f"cuda:{rank}",
+            ).reshape(logical_tokens, 3)
+            partial = base + rank
+            local = reduce_scatter_padded(partial, group=Group.TP)
+            restored = all_gather_trim(
+                local,
+                logical_tokens,
+                group=Group.TP,
+            )
+            expected = base * world_size + rank_sum
+            assert torch.equal(restored, expected), (
+                f"rank {rank}, tokens {logical_tokens}: "
+                f"expected={expected.cpu()}, got={restored.cpu()}"
+            )
+        torch.distributed.barrier()
+        torch.cuda.synchronize()
+    finally:
+        destroy_distributed_environment()
+
+
 class TestCollectiveOperations(unittest.TestCase):
     """Test collective operations with real multiprocessing"""
 
@@ -407,6 +460,15 @@ class TestCollectiveOperations(unittest.TestCase):
             tp_size=1,
             dp_size=4,
             test_name="all_collectives_tp1_dp4",
+        )
+
+    def test_padded_reduce_scatter_all_gather_tp8(self):
+        self._run_test(
+            _test_padded_rs_ag_worker,
+            world_size=8,
+            tp_size=8,
+            dp_size=1,
+            test_name="padded_reduce_scatter_all_gather_tp8",
         )
 
 

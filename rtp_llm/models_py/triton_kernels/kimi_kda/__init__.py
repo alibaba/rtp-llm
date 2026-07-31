@@ -4,7 +4,9 @@ from rtp_llm.models_py.triton_kernels.kimi_kda.fused_recurrent import (
 )
 from rtp_llm.models_py.triton_kernels.kimi_kda.gate import fused_kda_gate
 from rtp_llm.models_py.triton_kernels.kimi_kda.perf_fusions import (
+    kimi_k3_a2a_unpack_rms_norm_sigmoid_gate,
     kimi_k3_interleave_tp_hidden,
+    kimi_k3_pack_a2a_projection,
     kimi_k3_rms_norm_strided,
     kimi_k3_situ,
     kimi_k3_store_linear_cache_state,
@@ -22,7 +24,9 @@ __all__ = [
     "chunk_kda",
     "fused_kda_gate",
     "fused_recurrent_kda",
+    "kimi_k3_a2a_unpack_rms_norm_sigmoid_gate",
     "kimi_k3_interleave_tp_hidden",
+    "kimi_k3_pack_a2a_projection",
     "kimi_k3_rms_norm_strided",
     "kimi_k3_situ",
     "kimi_k3_store_linear_cache_state",

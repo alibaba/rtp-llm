@@ -69,6 +69,190 @@ def kimi_k3_interleave_tp_hidden(
 
 
 @triton.jit
+def _pack_a2a_projection_kernel(
+    projected,
+    packed,
+    tokens,
+    elements,
+    payload: tl.constexpr,
+    tp_size: tl.constexpr,
+    block: tl.constexpr,
+):
+    offsets = tl.program_id(0) * block + tl.arange(0, block)
+    mask = offsets < elements
+    destination = offsets // (tokens * payload)
+    destination_offset = offsets % (tokens * payload)
+    token = destination_offset // payload
+    column = destination_offset % payload
+    source_offset = token * (tp_size * payload) + destination * payload + column
+    value = tl.load(projected + source_offset, mask=mask)
+    tl.store(packed + offsets, value, mask=mask)
+
+
+@torch.compiler.disable
+def kimi_k3_pack_a2a_projection(
+    projected: torch.Tensor,
+    tp_size: int,
+    *,
+    output: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Pack token-major projection columns into destination-major A2A chunks."""
+
+    if not projected.is_cuda or projected.ndim != 2 or not projected.is_contiguous():
+        raise ValueError(
+            "K3 KDA A2A projection pack requires a contiguous rank-2 CUDA tensor"
+        )
+    if tp_size <= 1 or projected.shape[1] % tp_size:
+        raise ValueError(
+            "K3 KDA A2A projection width must be divisible by TP: "
+            f"shape={tuple(projected.shape)}, tp={tp_size}"
+        )
+    payload = projected.shape[1] // tp_size
+    expected_shape = (tp_size, projected.shape[0], payload)
+    if output is None:
+        output = torch.empty(
+            expected_shape,
+            dtype=projected.dtype,
+            device=projected.device,
+        )
+    elif (
+        tuple(output.shape) != expected_shape
+        or output.dtype != projected.dtype
+        or output.device != projected.device
+        or not output.is_contiguous()
+    ):
+        raise ValueError(
+            "K3 KDA A2A projection pack output mismatch: "
+            f"got={tuple(output.shape)}, expected={expected_shape}"
+        )
+    block = 1024
+    _pack_a2a_projection_kernel[(triton.cdiv(projected.numel(), block),)](
+        projected,
+        output,
+        projected.shape[0],
+        projected.numel(),
+        payload=payload,
+        tp_size=tp_size,
+        block=block,
+        num_warps=4,
+    )
+    return output
+
+
+@triton.jit
+def _a2a_unpack_rms_norm_sigmoid_gate_kernel(
+    received,
+    gate,
+    weight,
+    output,
+    token_rows,
+    total_rows,
+    eps,
+    local_heads: tl.constexpr,
+    total_heads: tl.constexpr,
+    head_dim: tl.constexpr,
+    block_rows: tl.constexpr,
+    block_features: tl.constexpr,
+):
+    row_offsets = (tl.program_id(0) * block_rows + tl.arange(0, block_rows))[:, None]
+    feature_offsets = tl.arange(0, block_features)[None, :]
+    mask = (row_offsets < total_rows) & (feature_offsets < head_dim)
+
+    token = row_offsets // total_heads
+    global_head = row_offsets % total_heads
+    source_rank = global_head // local_heads
+    local_head = global_head % local_heads
+    received_offsets = (
+        (source_rank * token_rows + token) * local_heads + local_head
+    ) * head_dim + feature_offsets
+    values = tl.load(received + received_offsets, mask=mask, other=0.0).to(tl.float32)
+    normalized_values = tl.where(feature_offsets < head_dim, values, 0.0)
+    variance = tl.sum(normalized_values * normalized_values, axis=1) / head_dim
+    inverse_rms = 1.0 / tl.sqrt(variance + eps)
+
+    output_offsets = row_offsets * head_dim + feature_offsets
+    gate_values = tl.load(gate + output_offsets, mask=mask, other=0.0).to(tl.float32)
+    norm_weight = tl.load(
+        weight + feature_offsets,
+        mask=feature_offsets < head_dim,
+        other=0.0,
+    ).to(tl.float32)
+    result = values * inverse_rms[:, None] * norm_weight * tl.sigmoid(gate_values)
+    tl.store(output + output_offsets, result, mask=mask)
+
+
+@torch.compiler.disable
+def kimi_k3_a2a_unpack_rms_norm_sigmoid_gate(
+    received: torch.Tensor,
+    gate: torch.Tensor,
+    weight: torch.Tensor,
+    eps: float,
+    *,
+    output: Optional[torch.Tensor] = None,
+) -> torch.Tensor:
+    """Fuse source-head unpack, per-head RMSNorm and KDA sigmoid output gate."""
+
+    if not received.is_cuda or received.ndim != 4 or not received.is_contiguous():
+        raise ValueError(
+            "K3 KDA A2A receive must be contiguous [source,tokens,heads,dim]"
+        )
+    tp_size, token_rows, local_heads, head_dim = received.shape
+    total_heads = tp_size * local_heads
+    expected_gate_shape = (1, token_rows, total_heads, head_dim)
+    if tuple(gate.shape) != expected_gate_shape or not gate.is_contiguous():
+        raise ValueError(
+            "K3 KDA A2A gate shape mismatch: "
+            f"got={tuple(gate.shape)}, expected={expected_gate_shape}"
+        )
+    if weight.shape != (head_dim,):
+        raise ValueError(
+            f"K3 KDA A2A norm weight must have shape {(head_dim,)}, got "
+            f"{tuple(weight.shape)}"
+        )
+    if (
+        received.dtype != gate.dtype
+        or received.device != gate.device
+        or received.device != weight.device
+    ):
+        raise ValueError("K3 KDA A2A receive/gate/norm tensors must match")
+    if output is None:
+        output = torch.empty_like(gate)
+    elif (
+        tuple(output.shape) != expected_gate_shape
+        or output.dtype != gate.dtype
+        or output.device != gate.device
+        or not output.is_contiguous()
+    ):
+        raise ValueError("K3 KDA A2A fused output buffer does not match gate")
+
+    total_rows = token_rows * total_heads
+    block_features = triton.next_power_of_2(head_dim)
+    if triton.cdiv(total_rows, 2048 * 32) == 1:
+        block_rows = 16
+        num_warps = 16
+    else:
+        block_rows = 32
+        num_warps = 4
+    _a2a_unpack_rms_norm_sigmoid_gate_kernel[(triton.cdiv(total_rows, block_rows),)](
+        received,
+        gate,
+        weight,
+        output,
+        token_rows,
+        total_rows,
+        float(eps),
+        local_heads=local_heads,
+        total_heads=total_heads,
+        head_dim=head_dim,
+        block_rows=block_rows,
+        block_features=block_features,
+        num_warps=num_warps,
+        num_stages=3,
+    )
+    return output
+
+
+@triton.jit
 def _rms_norm_strided_kernel(
     x,
     weight,
@@ -91,10 +275,15 @@ def _rms_norm_strided_kernel(
     ).to(tl.float32)
     values = tl.where(mask, values, 0.0)
     inverse_rms = tl.rsqrt(tl.sum(values * values, axis=0) / hidden_size + eps)
+    # K3's source RMSNorm rounds the normalized activation to BF16 before
+    # applying the BF16 affine weight.  Keeping both operations in FP32 and
+    # rounding only the final product changes one ULP at every layer, which
+    # can cross a near-tied MoE routing boundary after recurrent Decode.
+    normalized = (values * inverse_rms).to(tl.bfloat16)
     gamma = tl.load(weight + offsets, mask=mask, other=0.0).to(tl.float32)
     tl.store(
         output + row * stride_o_m + offsets * stride_o_n,
-        values * inverse_rms * gamma,
+        normalized.to(tl.float32) * gamma,
         mask=mask,
     )
 
@@ -442,7 +631,9 @@ def kimi_k3_store_linear_cache_state(
 
 
 __all__ = [
+    "kimi_k3_a2a_unpack_rms_norm_sigmoid_gate",
     "kimi_k3_interleave_tp_hidden",
+    "kimi_k3_pack_a2a_projection",
     "kimi_k3_rms_norm_strided",
     "kimi_k3_situ",
     "kimi_k3_store_linear_cache_state",
