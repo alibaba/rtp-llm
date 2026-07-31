@@ -313,6 +313,10 @@ class DeepSeekV4Model(GptModelBase):
             f"got {self._max_generate_batch_size}"
         )
         self._gen_num_per_cycle = int(model_config.gen_num_per_cycle)
+        self._capture_aux_hidden_layer_ids = tuple(
+            int(layer_id)
+            for layer_id in (model_config.capture_aux_hidden_layer_ids or [])
+        )
         # MoE inter dim from V4 config: explicit (not inter_size which in RTP-LLM
         # is n_shared_experts * moe_intermediate_size for DeepSeek). Use moe_config
         # if available; else read from config's hidden_size-derived fallback.
@@ -635,6 +639,7 @@ class DeepSeekV4Model(GptModelBase):
                 self.v4 = V4Transformer(self._v4_args, mw=self.weight)
         finally:
             torch.set_default_dtype(prev_dtype)
+        self.v4.capture_aux_hidden_layer_ids = self._capture_aux_hidden_layer_ids
 
         # Recompute RoPE cache on real device (precompute_freqs_cis under
         # meta context yields zeros; we need real values).

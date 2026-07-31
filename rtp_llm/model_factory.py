@@ -488,6 +488,6 @@ class ModelFactory:
             )
         model_config.capture_aux_hidden_layer_ids = capture_ids
         logging.info(
-            f"dspark wiring: k={k} (block width {k + 1}), "
+            f"dspark wiring: k={k} (block width {dspark_params.block_width}), "
             f"target capture layer ids (0-based) = {capture_ids}"
         )

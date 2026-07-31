@@ -930,6 +930,7 @@ _V4_FP8_WEIGHT_LIST: Dict[str, str] = {
     W.v4_shared_w13_w: W.v4_shared_w13_s,
     W.v4_mtp_e_proj_w: W.v4_mtp_e_proj_s,
     W.v4_mtp_h_proj_w: W.v4_mtp_h_proj_s,
+    W.v4_dspark_main_proj_w: W.v4_dspark_main_proj_s,
 }
 
 # Register V4 names into the base class whitelist so support() and the

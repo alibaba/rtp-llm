@@ -27,7 +27,7 @@ import functools
 import json
 import logging
 import os
-from typing import List
+from typing import Any, List
 
 import torch
 
@@ -817,5 +817,130 @@ class DeepSeekV4Mtp(DeepSeekV4, DeepSeekV3Mtp):
         return DeepSeekV4MtpWeight
 
 
+class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
+    """Three-layer DSpark draft stored under the target checkpoint's mtp.* keys."""
+
+    _LAYER_PREFIX: str = "mtp.{i}"
+
+    def _process_meta(self, meta_dict: Any, weight_keys: List[str]):  # type: ignore[override]
+        super()._process_meta(meta_dict, weight_keys)
+        # Draft layers use the normal learned router, including layer zero;
+        # none of them carries the main model's hash-router table.
+        self._num_hash_layers = 0
+
+    def _get_weight_info(self) -> ModelWeightInfo:
+        layer_weights: List[List[WeightModule]] = [
+            self._get_hf_layer_weight_info(layer_id)
+            for layer_id in range(self._num_layers)
+        ]
+        weights: List[WeightModule] = [
+            AtomicWeight(
+                W.embedding,
+                [CkptWeightInfo("embed.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                W.lm_head,
+                [CkptWeightInfo("head.weight", identity)],
+                identity,
+                data_type=torch.bfloat16,
+            ),
+            AtomicWeight(
+                W.v4_dspark_main_proj_w,
+                [CkptWeightInfo("mtp.0.main_proj.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                W.v4_dspark_main_norm,
+                [CkptWeightInfo("mtp.0.main_norm.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                W.final_ln_gamma,
+                [CkptWeightInfo("mtp.2.norm.weight", identity)],
+                identity,
+            ),
+            AtomicWeight(
+                W.final_ln_beta,
+                [],
+                functools.partial(zeros, shape=[self._hidden_size]),
+            ),
+            AtomicWeight(
+                W.v4_hc_head_base,
+                [CkptWeightInfo("mtp.2.hc_head_base", identity)],
+                identity,
+                data_type=torch.float32,
+            ),
+            AtomicWeight(
+                W.v4_hc_head_fn,
+                [CkptWeightInfo("mtp.2.hc_head_fn", identity)],
+                identity,
+                data_type=torch.float32,
+            ),
+            AtomicWeight(
+                W.v4_hc_head_scale,
+                [CkptWeightInfo("mtp.2.hc_head_scale", identity)],
+                identity,
+                data_type=torch.float32,
+            ),
+            AtomicWeight(
+                W.v4_dspark_markov_w1,
+                [CkptWeightInfo("mtp.2.markov_head.markov_w1.weight", identity)],
+                identity,
+                data_type=torch.bfloat16,
+            ),
+            AtomicWeight(
+                W.v4_dspark_markov_w2,
+                [CkptWeightInfo("mtp.2.markov_head.markov_w2.weight", identity)],
+                identity,
+                data_type=torch.bfloat16,
+            ),
+        ]
+        return ModelWeightInfo(layer_weights=layer_weights, weights=weights)
+
+
+class DeepSeekV4DSpark(DeepSeekV4):
+    """DSv4 block-diffusion draft with a three-layer Markov-corrected head."""
+
+    @classmethod
+    def _create_config(cls, ckpt_path: str):
+        from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import (
+            DeepSeekV4DSparkParams,
+        )
+
+        config = super()._create_config(ckpt_path)
+        with open(os.path.join(ckpt_path, "config.json")) as reader:
+            config_json = json.loads(reader.read())
+        config.dspark_config = DeepSeekV4DSparkParams.from_ckpt_config(config_json)
+        config.num_layers = len(config.dspark_config.target_layer_ids)
+        config.attn_config.layer_compress_ratios = [0] * config.num_layers
+        config.moe_layer_index = list(range(config.num_layers))
+        config.num_hash_layers = 0
+        config.is_mtp = True
+        return config
+
+    def _create_python_model(self):
+        from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import (
+            DeepSeekV4DSparkModel,
+        )
+
+        self.py_model = DeepSeekV4DSparkModel(
+            self.model_config,
+            self.parallelism_config,
+            self.weight,
+            self.moe_config,
+            max_generate_batch_size=self.max_generate_batch_size,
+            fmha_config=self.fmha_config,
+            py_hw_kernel_config=self.hw_kernel_config,
+            device_resource_config=self.device_resource_config,
+        )
+        return self.py_model
+
+    @staticmethod
+    def get_weight_cls():
+        return DeepSeekV4DSparkWeight
+
+
 register_model("deepseek_v4", DeepSeekV4, ["DeepseekV4ForCausalLM"])
 register_model("deepseek_v4_mtp", DeepSeekV4Mtp, ["DeepseekV4ForCausalLMNextN"])
+register_model("deepseek_v4_dspark", DeepSeekV4DSpark, ["DSparkDraftModel"])

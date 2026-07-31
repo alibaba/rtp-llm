@@ -315,10 +315,27 @@ def forward_layers(
         h = prepare_hidden_fn(input_ids=input_ids, meta=attn_metadata)
     if _rt_on:
         _rt.record("decode_embed_hc_expanded", h)
+    capture_ids = v4.capture_aux_hidden_layer_ids
+    aux_hidden_states = [] if capture_ids else None
     for layer in v4.layers:
         h = layer.forward_decode(h, attn_metadata, input_ids, kv_cache=kv_cache)
+        if aux_hidden_states is not None and layer.layer_id in capture_ids:
+            # DSv4 layers carry the mHC lanes in the penultimate axis. The
+            # official DSpark target contract mean-pools those lanes before
+            # concatenating the selected layers for main_proj.
+            aux_hidden_states.append(h.mean(dim=-2))
         if _rt_on:
             _rt.record(f"decode_layer{layer.layer_id:02d}_out", h)
+    if aux_hidden_states is not None:
+        assert len(aux_hidden_states) == len(capture_ids), (
+            f"captured {len(aux_hidden_states)} DSV4 aux layers, expected "
+            f"{len(capture_ids)} from {capture_ids}"
+        )
+        v4._last_aux_hidden_states = torch.stack(aux_hidden_states, dim=2).reshape(
+            B * q_len, len(capture_ids), h.size(-1)
+        )
+    else:
+        v4._last_aux_hidden_states = None
     if v4._mtp_hidden_buffer is not None:
         _pre_hc_flat = h.flatten(-2).reshape(-1, h.size(-2) * h.size(-1))
         v4._write_mtp_hidden_buffer(
@@ -484,4 +501,7 @@ def forward_decode(
             extra["start_pos"] = start_pos.detach().cpu()
         _rt.dump(step=v4._dbg_step, extra=extra)
         v4._dbg_step += 1
-    return PyModelOutputs(hidden)
+    outputs = PyModelOutputs(hidden)
+    if v4._last_aux_hidden_states is not None:
+        outputs.aux_hidden_states = v4._last_aux_hidden_states
+    return outputs

@@ -231,6 +231,11 @@ class V4Transformer(nn.Module):
         self.register_buffer("_mtp_last_hidden_buffer", None, persistent=False)
         self._mtp_hidden_valid_tokens = 0
         self._mtp_last_hidden_valid_tokens = 0
+        # Target-only DSpark feature capture. Empty on every ordinary/MTP
+        # model, so the hot layer loops pay one false branch and allocate no
+        # tensors. Layer ids are post-block, zero-based checkpoint ids.
+        self.capture_aux_hidden_layer_ids: tuple[int, ...] = ()
+        self._last_aux_hidden_states: Optional[torch.Tensor] = None
         # Max-sized per-forward prefill workspace dims (plain ints; not buffers).
         # Filled by ``_bind_prefill_workspace_dims`` at init; read by
         # ``forward_layers`` to build a per-forward ``PrefillWorkspace``.

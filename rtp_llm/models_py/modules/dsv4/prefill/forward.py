@@ -512,6 +512,8 @@ def forward_layers(
                 if prefill_fast_layer_calls is not None
                 else v4.layers
             )
+            capture_ids = v4.capture_aux_hidden_layer_ids
+            aux_hidden_states = [] if capture_ids else None
             for layer_idx, layer_call in enumerate(layer_calls):
                 h = layer_call(
                     h,  # [T, hc, dim]
@@ -521,6 +523,11 @@ def forward_layers(
                     kv_cache=kv_cache,
                     block_tables_by_type=block_tables_by_type,
                 )  # [T, hc, dim]
+                if aux_hidden_states is not None and layer_idx in capture_ids:
+                    # DSpark consumes one H-wide feature per selected target
+                    # layer; mean-pool the mHC lanes exactly as the official
+                    # DSV4 DSpark target path does.
+                    aux_hidden_states.append(h.mean(dim=-2))
                 if _rt_on:
                     _rt.record(f"prefill_layer{layer_idx:02d}_out", h)
                 if write_cache_store_impl is not None:
@@ -567,6 +574,15 @@ def forward_layers(
         # on a near-full card. ``clear`` is idempotent (sets None per layer).
         if v4.fp8_kv_cache:
             clear_prefill_meta_shared_fp8(v4)
+
+    if aux_hidden_states is not None:
+        assert len(aux_hidden_states) == len(capture_ids), (
+            f"captured {len(aux_hidden_states)} DSV4 aux layers, expected "
+            f"{len(capture_ids)} from {capture_ids}"
+        )
+        v4._last_aux_hidden_states = torch.stack(aux_hidden_states, dim=1)
+    else:
+        v4._last_aux_hidden_states = None
 
     if v4._mtp_hidden_buffer is not None:
         _pre_hc_flat = h.flatten(-2)
@@ -730,4 +746,7 @@ def forward_prefill(
         attn_inputs=attn,
         prepare_hidden_fn=prepare_hidden_fn,
     )  # [T_total, dim]
-    return PyModelOutputs(hidden)
+    outputs = PyModelOutputs(hidden)
+    if v4._last_aux_hidden_states is not None:
+        outputs.aux_hidden_states = v4._last_aux_hidden_states
+    return outputs
