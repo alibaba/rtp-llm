@@ -291,6 +291,74 @@ class TestPyFlashinferDecodeAttnOp(BaseAttentionTest):
                 seq_size_per_block=64,
             )
 
+    def test_fp8_kv_decode_matches_bf16_kv(self):
+        """FP8 cache decode stays numerically close to the same BF16 cache."""
+        batch_size = 2
+        sequence_lengths = [32, 64]
+        config = self._create_config(
+            head_num=16,
+            head_num_kv=8,
+            size_per_head=128,
+            seq_size_per_block=64,
+            data_type="bf16",
+        )
+        attn_inputs = self._create_attention_inputs(
+            batch_size,
+            sequence_lengths,
+            config.seq_size_per_block,
+            dtype=torch.bfloat16,
+        )
+        total_blocks = self._calculate_total_blocks(
+            sequence_lengths, config.seq_size_per_block
+        )
+        base_cache = torch.randn(
+            total_blocks,
+            2,
+            config.head_num_kv,
+            config.seq_size_per_block,
+            config.size_per_head,
+            dtype=torch.bfloat16,
+            device=self.device,
+        )
+        q = self._create_query_tensor(
+            batch_size,
+            config.head_num,
+            config.size_per_head,
+            dtype=torch.bfloat16,
+        )
+
+        quantized_cache = base_cache.to(torch.float8_e4m3fn)
+
+        def run(cache: torch.Tensor, kv_cache_type: KvCacheDataType):
+            original_cache_type = config.attn_configs.kv_cache_dtype
+            try:
+                config.attn_configs.kv_cache_dtype = kv_cache_type
+                op = PyFlashinferDecodeAttnOp(config.attn_configs, attn_inputs)
+                fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
+                op.set_params(fmha_params)
+                params = op.prepare(attn_inputs)
+                kv_cache = LayerKVCache()
+                kv_cache.kv_cache_base = cache
+                if cache.dtype == torch.float8_e4m3fn:
+                    kv_cache.kv_scale_base = torch.ones(
+                        total_blocks,
+                        2 * config.head_num_kv * config.seq_size_per_block,
+                        dtype=torch.float32,
+                        device=self.device,
+                    )
+                return op.forward(q, kv_cache, params)
+            finally:
+                config.attn_configs.kv_cache_dtype = original_cache_type
+
+        # Use the same quantized values for both paths so this comparison
+        # measures FP8 cache reads rather than the cache quantization error.
+        bf16_output = run(quantized_cache.to(torch.bfloat16), KvCacheDataType.BASE)
+        fp8_output = run(quantized_cache, KvCacheDataType.FP8)
+
+        torch.testing.assert_close(
+            fp8_output.float(), bf16_output.float(), rtol=1e-2, atol=1e-2
+        )
+
 
 class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
     """Test CUDA graph buffer management for PyFlashinferDecodeAttnOp.
