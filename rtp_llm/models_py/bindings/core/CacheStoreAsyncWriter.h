@@ -11,7 +11,7 @@
 #include <optional>
 
 #include "autil/ThreadPool.h"
-#include "rtp_llm/models_py/bindings/OpDefs.h"
+#include "rtp_llm/models_py/bindings/CacheStoreWriter.h"
 
 namespace rtp_llm {
 

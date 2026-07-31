@@ -8,7 +8,6 @@
 #include "rtp_llm/cpp/utils/KVCacheUtils.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
-#include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/StackTrace.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/ErrorCodeUtil.h"
 #include "autil/StackTracer.h"
@@ -150,11 +149,33 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                             int                                  cp_rank,
                             int                                  cp_size,
                             std::shared_ptr<torch::Event>        pre_created_event) {
-    const auto&  param              = cache_store_inputs;
+    const auto& param = cache_store_inputs;
+    const auto  requireHostTensor =
+        [](const torch::Tensor& tensor, const char* name, int64_t expected_dim, c10::ScalarType expected_type) {
+            RTP_LLM_CHECK_WITH_INFO(tensor.defined(), "cache-store %s must be defined", name);
+            RTP_LLM_CHECK_WITH_INFO(tensor.dim() == expected_dim,
+                                    "cache-store %s must be %ld-D, got dim=%ld",
+                                    name,
+                                    expected_dim,
+                                    tensor.dim());
+            RTP_LLM_CHECK_WITH_INFO(tensor.device().is_cpu(), "cache-store %s must be a CPU tensor", name);
+            RTP_LLM_CHECK_WITH_INFO(tensor.scalar_type() == expected_type,
+                                    "cache-store %s must use %s, got %s",
+                                    name,
+                                    c10::toString(expected_type),
+                                    c10::toString(tensor.scalar_type()));
+        };
+
+    requireHostTensor(param.request_id, "request_id", 1, torch::kInt64);
     const size_t context_batch_size = static_cast<size_t>(param.request_id.numel());
     if (context_batch_size == 0) {
         return;
     }
+    requireHostTensor(param.input_lengths_host, "input_lengths_host", 1, torch::kInt32);
+    requireHostTensor(param.prefix_lengths_host, "prefix_lengths_host", 1, torch::kInt32);
+    requireHostTensor(param.host_kv_cache_offset, "host_kv_cache_offset", 2, torch::kInt32);
+    requireHostTensor(param.request_pd_separation, "request_pd_separation", 1, torch::kBool);
+    requireHostTensor(param.cache_keys, "cache_keys", 2, torch::kInt64);
 
     if (!cache_store) {
         RTP_LLM_LOG_DEBUG("cache_store is null, skip writeCacheStore");
@@ -172,18 +193,17 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     RTP_LLM_CHECK_WITH_INFO(
         !layer_kv.tag.empty(), "cache-store write requires a cache tag for layer=%d", layer_kv.layer_id);
 
-    RTP_LLM_CHECK_WITH_INFO(param.host_kv_cache_offset.defined() && param.host_kv_cache_offset.dim() == 2,
-                            "cache-store block table for tag=%s must be tag-local [batch, blocks]",
-                            layer_kv.tag.c_str());
     const size_t max_blocks_per_batch = static_cast<size_t>(param.host_kv_cache_offset.size(1));
-    const auto*  offset_addr          = param.host_kv_cache_offset.data_ptr<int32_t>();
 
     const auto& group = cache_config.groupForLayer(layer_kv.layer_id, layer_kv.tag);
+    RTP_LLM_CHECK_WITH_INFO(
+        group.spec != nullptr, "cache-store tag=%s has no KVCacheSpec attached", layer_kv.tag.c_str());
 
     // Physical address stride and logical transfer length differ for a shared pool:
     // blocks use the allocation-wide stride, while each tag transfers only its group-local bytes.
-    const bool   use_group_local_storage_layout = cache_config.use_independent_block_pools;
-    const size_t seq_size_per_block             = static_cast<size_t>(layer_kv.seq_size_per_block);
+    const bool use_group_local_storage_layout = cache_config.use_independent_block_pools;
+    // LayerKVCache may expose kernel-page views; CacheStore keys and block IDs use physical pages.
+    const size_t seq_size_per_block = group.seq_size_per_block;
     const size_t kv_block_stride_bytes =
         use_group_local_storage_layout ? group.kv_block_stride_bytes : cache_config.kv_block_stride_bytes;
     const size_t kv_scale_stride_bytes =
@@ -223,29 +243,48 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
     const bool kv_scale_gpu_mem = has_kv_scale && layer_kv.kv_scale_base.is_cuda();
 
     const size_t total_batch_size = static_cast<size_t>(param.input_lengths_host.numel());
-    RTP_LLM_CHECK_WITH_INFO(param.prefix_lengths_host.numel() == static_cast<int64_t>(context_batch_size)
-                                && param.request_pd_separation.numel() == static_cast<int64_t>(context_batch_size)
-                                && total_batch_size >= context_batch_size
-                                && param.host_kv_cache_offset.size(0) == static_cast<int64_t>(total_batch_size)
-                                && param.cache_keys.defined() && param.cache_keys.dim() == 2
-                                && param.cache_keys.size(0) == static_cast<int64_t>(context_batch_size),
-                            "inconsistent cache-store batch tensor shapes for tag=%s",
-                            layer_kv.tag.c_str());
+    RTP_LLM_CHECK_WITH_INFO(param.prefix_lengths_host.numel() == static_cast<int64_t>(context_batch_size),
+                            "cache-store tag=%s prefix_lengths numel=%ld != context batch=%zu",
+                            layer_kv.tag.c_str(),
+                            param.prefix_lengths_host.numel(),
+                            context_batch_size);
+    RTP_LLM_CHECK_WITH_INFO(param.request_pd_separation.numel() == static_cast<int64_t>(context_batch_size),
+                            "cache-store tag=%s request_pd_separation numel=%ld != context batch=%zu",
+                            layer_kv.tag.c_str(),
+                            param.request_pd_separation.numel(),
+                            context_batch_size);
+    RTP_LLM_CHECK_WITH_INFO(total_batch_size >= context_batch_size,
+                            "cache-store tag=%s input_lengths numel=%zu < context batch=%zu",
+                            layer_kv.tag.c_str(),
+                            total_batch_size,
+                            context_batch_size);
+    RTP_LLM_CHECK_WITH_INFO(param.host_kv_cache_offset.size(0) == static_cast<int64_t>(total_batch_size),
+                            "cache-store tag=%s block table rows=%ld != total batch=%zu",
+                            layer_kv.tag.c_str(),
+                            param.host_kv_cache_offset.size(0),
+                            total_batch_size);
+    RTP_LLM_CHECK_WITH_INFO(param.cache_keys.size(0) == static_cast<int64_t>(context_batch_size),
+                            "cache-store tag=%s cache_keys rows=%ld != context batch=%zu",
+                            layer_kv.tag.c_str(),
+                            param.cache_keys.size(0),
+                            context_batch_size);
 
     const size_t decoder_batch_size = total_batch_size - context_batch_size;
     // cache_keys is laid out [batch, global_max_blocks]; this logical width is INDEPENDENT
     // of `max_blocks_per_batch` (which is per-group offset width and may be smaller
     // for CP-sharded FULL groups whose offset is rank-local-compact).
     const size_t cache_keys_per_batch  = static_cast<size_t>(param.cache_keys.size(1));
-    const auto*  input_lengths_host    = param.input_lengths_host.data_ptr<int32_t>();
-    const auto*  prefix_lengths_host   = param.prefix_lengths_host.data_ptr<int32_t>();
-    const auto*  request_ids           = param.request_id.data_ptr<int64_t>();
-    const auto*  request_pd_separation = param.request_pd_separation.data_ptr<bool>();
+    const auto   host_kv_cache_offset  = param.host_kv_cache_offset.accessor<int32_t, 2>();
+    const auto   input_lengths_host    = param.input_lengths_host.accessor<int32_t, 1>();
+    const auto   prefix_lengths_host   = param.prefix_lengths_host.accessor<int32_t, 1>();
+    const auto   request_ids           = param.request_id.accessor<int64_t, 1>();
+    const auto   request_pd_separation = param.request_pd_separation.accessor<bool, 1>();
     const auto   cache_keys            = param.cache_keys.accessor<int64_t, 2>();
 
     RTP_LLM_LOG_DEBUG("write cache store, context_batch_size is %zu", context_batch_size);
     for (size_t batch_id = 0; batch_id < context_batch_size; ++batch_id) {
-        if (!request_pd_separation[batch_id]) {
+        const auto context_index = static_cast<int64_t>(batch_id);
+        if (!request_pd_separation[context_index]) {
             continue;
         }
 
@@ -253,7 +292,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                                             && seq_size_per_block % static_cast<size_t>(cp_size) == 0;
         const size_t canonical_seq_size_per_block =
             uses_cp_canonical_keys ? seq_size_per_block / static_cast<size_t>(cp_size) : seq_size_per_block;
-        const int prefix_length = prefix_lengths_host[batch_id];
+        const int prefix_length = prefix_lengths_host[context_index];
         RTP_LLM_CHECK_WITH_INFO(prefix_length % static_cast<int>(canonical_seq_size_per_block) == 0,
                                 "cache-store tag=%s prefix_length=%d is not aligned to canonical "
                                 "tokens_per_block=%zu (physical tokens_per_block=%zu, cp_size=%d)",
@@ -263,9 +302,10 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                                 seq_size_per_block,
                                 cp_size);
 
-        const int input_length    = input_lengths_host[decoder_batch_size + batch_id];
-        const int reuse_block_num = prefix_length / static_cast<int>(seq_size_per_block);
-        const int block_num =
+        const auto input_index     = static_cast<int64_t>(decoder_batch_size + batch_id);
+        const int  input_length    = input_lengths_host[input_index];
+        const int  reuse_block_num = prefix_length / static_cast<int>(seq_size_per_block);
+        const int  block_num =
             (input_length + static_cast<int>(seq_size_per_block) - 1) / static_cast<int>(seq_size_per_block);
         const int canonical_reuse_block_num = prefix_length / static_cast<int>(canonical_seq_size_per_block);
         const int canonical_block_num       = (input_length + static_cast<int>(canonical_seq_size_per_block) - 1)
@@ -277,7 +317,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
             continue;
         }
 
-        const int64_t request_id     = request_ids[batch_id];
+        const int64_t request_id     = request_ids[context_index];
         auto          event          = pre_created_event ? pre_created_event : runtimeCreateEvent();
         auto          request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
         RTP_LLM_LOG_DEBUG(
@@ -297,8 +337,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                 std::to_string(cache_keys[static_cast<int64_t>(batch_id)][static_cast<int64_t>(key_index)]),
                 layer_kv.layer_id,
                 layer_kv.tag);
-            const int32_t block_id =
-                offset_addr[(decoder_batch_size + batch_id) * max_blocks_per_batch + static_cast<size_t>(offset_index)];
+            const int32_t block_id = host_kv_cache_offset[input_index][static_cast<int64_t>(offset_index)];
             // Host block-offset tables use -1 as the null block sentinel.
             if (block_id == -1) {
                 RTP_LLM_LOG_DEBUG(
@@ -467,10 +506,6 @@ void cudaCheckLastError() {
         RTP_LLM_LOG_ERROR("ROCm error: %s", hipGetErrorString(err));
     }
 #endif
-}
-
-void cudaPreRun(int device_id) {
-    setCurrentThreadDevice(device_id);
 }
 
 // ============================================================

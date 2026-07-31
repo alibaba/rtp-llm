@@ -118,6 +118,20 @@ static torch_ext::PyCacheStoreInputs makePyCacheStoreInputs(size_t tokens_per_bl
     return inputs;
 }
 
+static torch::Tensor makeNonContiguousVector(const torch::Tensor& values, int64_t gap_value) {
+    auto storage = torch::empty({values.numel(), 2}, values.options());
+    storage.select(1, 0).copy_(values);
+    storage.select(1, 1).fill_(gap_value);
+    return storage.select(1, 0);
+}
+
+static torch::Tensor makeNonContiguousMatrix(const torch::Tensor& values, int64_t gap_value) {
+    auto storage = torch::full({values.size(0), values.size(1) * 2}, gap_value, values.options());
+    auto view    = storage.slice(/*dim=*/1, /*start=*/0, /*end=*/values.size(1) * 2, /*step=*/2);
+    view.copy_(values);
+    return view;
+}
+
 static std::shared_ptr<KVCacheSpec> makeTestSpec(const std::string& tag, size_t tokens_per_block, bool mla_cache) {
     std::shared_ptr<KVCacheSpec> spec = mla_cache ?
                                             std::static_pointer_cast<KVCacheSpec>(std::make_shared<MLAKVCacheSpec>()) :
@@ -203,7 +217,7 @@ static std::string cacheKeyAt(const torch_ext::PyCacheStoreInputs& inputs,
     return makeCacheKey(model_id, std::to_string(inputs.cache_keys.data_ptr<int64_t>()[index]), layer_id, tag);
 }
 
-static void expectMlaPhysicalViewUsesExplicitStride(const torch::Tensor& kv_cache_base) {
+static void expectMlaPhysicalViewUsesExplicitStride(const torch::Tensor& kv_cache_base, size_t blocks_to_write = 4) {
     constexpr size_t physical_block_num        = 4;
     constexpr size_t physical_tokens_per_block = 8;
     constexpr int    kernel_tokens_per_block   = 2;
@@ -212,7 +226,8 @@ static void expectMlaPhysicalViewUsesExplicitStride(const torch::Tensor& kv_cach
     const size_t explicit_stride = static_cast<size_t>(kv_cache_base.nbytes()) / physical_block_num;
     auto         cache_store     = std::make_shared<MockCacheStore>();
     auto         inputs          = makePyCacheStoreInputs(physical_tokens_per_block, physical_block_num);
-    auto         config          = makeCacheConfig(physical_tokens_per_block,
+    inputs.input_lengths_host.fill_(static_cast<int64_t>(physical_tokens_per_block * blocks_to_write));
+    auto config = makeCacheConfig(physical_tokens_per_block,
                                   explicit_stride,
                                   /*physical_scale_stride=*/0,
                                   physical_block_num,
@@ -233,12 +248,12 @@ static void expectMlaPhysicalViewUsesExplicitStride(const torch::Tensor& kv_cach
 
     ASSERT_EQ(cache_store->records.size(), 1u);
     const auto& record = cache_store->records.front();
-    ASSERT_EQ(record.block_count, physical_block_num);
-    ASSERT_EQ(record.blocks.size(), physical_block_num);
+    ASSERT_EQ(record.block_count, blocks_to_write);
+    ASSERT_EQ(record.blocks.size(), blocks_to_write);
 
     const auto base_addr   = reinterpret_cast<uintptr_t>(kv_cache_base.data_ptr());
     const auto storage_end = base_addr + static_cast<size_t>(kv_cache_base.nbytes());
-    for (size_t block_id = 0; block_id < physical_block_num; ++block_id) {
+    for (size_t block_id = 0; block_id < blocks_to_write; ++block_id) {
         const std::string key = "kv_" + cacheKeyAt(inputs, block_id, 0);
         const auto        it  = record.blocks.find(key);
         ASSERT_NE(it, record.blocks.end()) << "missing block " << key;
@@ -383,11 +398,46 @@ TEST_F(ExecOpsTest, testRuntimeMaskLogits) {
     runtimeSyncAndCheck();
 }
 
+TEST_F(ExecOpsTest, testWriteCacheStoreRejectsUndefinedRequestId) {
+    auto inputs       = makePyCacheStoreInputs(/*tokens_per_block=*/2, /*block_num=*/1);
+    inputs.request_id = torch::Tensor();
+    auto config       = makeCacheConfig(/*tokens_per_block=*/2,
+                                  /*physical_kv_stride=*/64,
+                                  /*physical_scale_stride=*/0,
+                                  /*block_num=*/1,
+                                  "default",
+                                  /*layer_id=*/0,
+                                  defaultCacheGroupPolicy(CacheGroupType::FULL),
+                                  /*add_dummy_group=*/false,
+                                  /*mla_cache=*/true);
+
+    torch_ext::LayerKVCache layer_cache;
+    layer_cache.kv_cache_base      = torch::zeros({1, 64}, torch::kUInt8);
+    layer_cache.seq_size_per_block = 2;
+    layer_cache.layer_id           = 0;
+    layer_cache.tag                = "default";
+
+    try {
+        runtimeWriteCacheStore(inputs,
+                               layer_cache,
+                               config,
+                               std::make_shared<MockCacheStore>(),
+                               /*cache_model_id=*/0,
+                               /*cp_rank=*/0,
+                               /*cp_size=*/1,
+                               nullptr);
+        FAIL() << "expected an undefined request_id to fail";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("request_id must be defined"), std::string::npos);
+    }
+}
+
 TEST_F(ExecOpsTest, testWriteCacheStoreMlaBf16PhysicalViewUsesExplicitStride) {
     // Four physical blocks, each containing four kernel blocks. The old shape heuristic treated the leading
-    // dimension as kernel-block count and inflated the physical stride by 4x.
+    // dimension as kernel-block count and inflated the physical stride by 4x. Writing two physical blocks also
+    // distinguishes the physical page size from the smaller kernel page exposed by LayerKVCache.
     auto kv_cache_base = torch::zeros({4, 8, 16}, torch::kBFloat16);
-    expectMlaPhysicalViewUsesExplicitStride(kv_cache_base);
+    expectMlaPhysicalViewUsesExplicitStride(kv_cache_base, /*blocks_to_write=*/2);
 }
 
 TEST_F(ExecOpsTest, testWriteCacheStoreMlaFp8PackedPhysicalViewUsesExplicitStride) {
@@ -929,7 +979,7 @@ TEST_F(ExecOpsTest, testWriteCacheStoreUsesCacheModelIdInKeyNamespace) {
               cache_store->records[0].blocks.end());
 }
 
-TEST_F(ExecOpsTest, testWriteCacheStoreReadsNonContiguousCacheKeysByLogicalIndex) {
+TEST_F(ExecOpsTest, testWriteCacheStoreReadsNonContiguousHostMetadata) {
     auto cache_store             = std::make_shared<MockCacheStore>();
     auto inputs                  = makePyCacheStoreInputs(/*tokens_per_block=*/2, /*block_num=*/1);
     inputs.input_lengths_host    = torch::tensor({2, 2}, torch::kInt32);
@@ -937,9 +987,19 @@ TEST_F(ExecOpsTest, testWriteCacheStoreReadsNonContiguousCacheKeysByLogicalIndex
     inputs.host_kv_cache_offset  = torch::tensor({{0}, {1}}, torch::kInt32);
     inputs.request_id            = torch::tensor({int64_t(42), int64_t(43)}, torch::kInt64);
     inputs.request_pd_separation = torch::tensor({true, true}, torch::kBool);
-    const auto contiguous_cache_keys =
-        torch::tensor({{int64_t(100), int64_t(200)}, {int64_t(101), int64_t(201)}}, torch::kInt64);
-    inputs.cache_keys = contiguous_cache_keys.transpose(0, 1);
+    inputs.cache_keys            = torch::tensor({{int64_t(100)}, {int64_t(200)}}, torch::kInt64);
+
+    inputs.host_kv_cache_offset  = makeNonContiguousMatrix(inputs.host_kv_cache_offset, /*gap_value=*/99);
+    inputs.input_lengths_host    = makeNonContiguousVector(inputs.input_lengths_host, /*gap_value=*/0);
+    inputs.prefix_lengths_host   = makeNonContiguousVector(inputs.prefix_lengths_host, /*gap_value=*/1);
+    inputs.request_id            = makeNonContiguousVector(inputs.request_id, /*gap_value=*/999);
+    inputs.request_pd_separation = makeNonContiguousVector(inputs.request_pd_separation, /*gap_value=*/false);
+    inputs.cache_keys            = makeNonContiguousMatrix(inputs.cache_keys, /*gap_value=*/999);
+    ASSERT_FALSE(inputs.host_kv_cache_offset.is_contiguous());
+    ASSERT_FALSE(inputs.input_lengths_host.is_contiguous());
+    ASSERT_FALSE(inputs.prefix_lengths_host.is_contiguous());
+    ASSERT_FALSE(inputs.request_id.is_contiguous());
+    ASSERT_FALSE(inputs.request_pd_separation.is_contiguous());
     ASSERT_FALSE(inputs.cache_keys.is_contiguous());
 
     auto                    config = makeCacheConfig(/*tokens_per_block=*/2,

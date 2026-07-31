@@ -14,6 +14,7 @@ cc_library(
     deps = [
         "//rtp_llm/cpp/models:models",
         "//rtp_llm/cpp/engine_base:engine_base",
+        "//rtp_llm/cpp/utils:device_pin",
         "//rtp_llm/cpp/engine_base/stream:generate_config",
         "//rtp_llm/cpp/engine_base:worker_status_info",
         "//rtp_llm/cpp/engine_base:profiler",

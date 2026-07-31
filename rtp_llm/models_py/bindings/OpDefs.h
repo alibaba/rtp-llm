@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecBase.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
+#include "rtp_llm/models_py/bindings/CacheStoreWriter.h"
 #include "rtp_llm/models_py/bindings/ParamsBase.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -257,23 +258,6 @@ struct PyCacheStoreInputs {
     torch::Tensor request_pd_separation;  // bool, [context]
     torch::Tensor cache_keys;             // int64, [context, global key width]
 };
-
-}  // namespace torch_ext
-
-namespace rtp_llm {
-
-// Python-facing write contract. The concrete writer owns scheduling and CacheStore state.
-class CacheStoreWriter {
-public:
-    virtual ~CacheStoreWriter() = default;
-
-    virtual void write(const torch_ext::PyCacheStoreInputs& cache_store_inputs,
-                       const torch_ext::LayerKVCache&       layer_kv) = 0;
-};
-
-}  // namespace rtp_llm
-
-namespace torch_ext {
 
 struct PyPrefillCudaGaphCopyParams {
     // for embedding model cuda graph capture, the attenton batch size is padded to max_batch_size,
