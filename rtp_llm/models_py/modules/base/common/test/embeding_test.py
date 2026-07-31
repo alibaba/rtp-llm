@@ -14,6 +14,7 @@ class EmbedingTest(TestCase):
     DTYPES = [torch.half, torch.bfloat16]
     NUM_TOKENS = [7, 83, 4096]
     HIDDEN_SIZES = [768, 769, 770, 771, 5120, 5124, 5125, 5126, 8192, 8199]
+    VOCAB_SIZE = 131072
 
     def setUp(self) -> None:
         if not torch.cuda.is_available():
@@ -22,13 +23,13 @@ class EmbedingTest(TestCase):
 
     def _run_embeding_test(self, num_tokens: int, hidden_size: int, dtype: _dtype):
         torch.manual_seed(0)
-        w = torch.randn(131072, hidden_size, dtype=dtype)
+        w = torch.randn(self.VOCAB_SIZE, hidden_size, dtype=dtype)
         model_config = ModelConfig()
         model_config.attn_config.head_num = 1
         model_config.attn_config.size_per_head = 1
         model_config.num_layers = 1
         model_config.max_seq_len = 1
-        model_config.vocab_size = 1
+        model_config.vocab_size = self.VOCAB_SIZE
         
         parallelism_config = ParallelismConfig()
         parallelism_config.tp_size = 1
