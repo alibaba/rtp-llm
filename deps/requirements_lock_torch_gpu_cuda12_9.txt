@@ -792,13 +792,13 @@ flash-mla==1.0.0+ca58fed \
     --hash=sha256:960fecb602f90f0f882b6e460f9ddebaec0c3cedca3b01594330445c90afaa5e
     # via -r requirements_torch_gpu_cuda12_9.txt
 flashinfer-cubin==0.6.9 \
-    --hash=sha256:d4adf132ef0d0f7a85433c438466d0855abeddb7ed18fff86c30f992b7fcfffd
+    --hash=sha256:bbc02f9e0e547e90e8bc1b2f6a6c140bca7d0be8a85d3bc58100b92288f14f50
     # via -r requirements_torch_gpu_cuda12_9.txt
 flashinfer-jit-cache==0.6.9 \
-    --hash=sha256:6c9b571fa8b47a7ad4dbc8e7ad1e74e49e44cad9247383da39a75083f27b2544
+    --hash=sha256:4466c7991931e8b030ab36fad052ee2cd0ceeb41c741f30076a025f81d4ff8a8
     # via -r requirements_torch_gpu_cuda12_9.txt
 flashinfer-python==0.6.9 \
-    --hash=sha256:449125202602aed5be37b5ed3af2d83c39c124cf4fe051a8260f81e52140b6f1
+    --hash=sha256:991bb0906eba8a37e8ae306fdee5deb2e648569210d62e292f6c8156ddb2774b
     # via
     #   -r requirements_torch_gpu_cuda12_9.txt
     #   rtp-kernel
