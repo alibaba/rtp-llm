@@ -90,6 +90,15 @@ py_test(
 )
 
 py_test(
+    name = "test_aux_hidden_capture",
+    srcs = ["test_aux_hidden_capture.py"],
+    deps = [
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:testlib",
+    ],
+)
+
+py_test(
     name = "test_cp_attention_merge",
     srcs = ["test_cp_attention_merge.py"],
     deps = _DSV4_TEST_DEPS,

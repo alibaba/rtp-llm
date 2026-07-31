@@ -50,6 +50,20 @@ class AuxHiddenCaptureTest(unittest.TestCase):
         self.assertIsNone(transformer.begin_aux_hidden_capture())
         self.assertIsNone(transformer._aux_hidden_states)
 
+    def test_take_capture_transfers_ownership(self) -> None:
+        transformer = _capture_harness()
+        transformer.set_aux_hidden_capture_layer_ids((1,))
+        captured = transformer.begin_aux_hidden_capture()
+        hidden = torch.arange(2 * 4 * 3, dtype=torch.float32).reshape(2, 4, 3)
+        transformer.capture_aux_hidden(captured, 1, hidden)
+        published = transformer.finish_aux_hidden_capture(captured)
+
+        taken = transformer.take_aux_hidden_states()
+
+        self.assertIs(taken, published)
+        self.assertIsNone(transformer._aux_hidden_states)
+        self.assertIsNone(transformer.take_aux_hidden_states())
+
     def test_invalid_layer_configuration_is_rejected(self) -> None:
         transformer = _capture_harness()
         with self.assertRaises(ValueError):

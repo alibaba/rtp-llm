@@ -499,7 +499,7 @@ def forward_decode(
         _rt.dump(step=v4._dbg_step, extra=extra)
         v4._dbg_step += 1
     outputs = PyModelOutputs(hidden)
-    aux_hidden_states = getattr(v4, "_aux_hidden_states", None)
+    aux_hidden_states = v4.take_aux_hidden_states()
     if aux_hidden_states is not None:
         outputs.aux_hidden_states = aux_hidden_states.reshape(
             B * q_len,
