@@ -150,8 +150,9 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
                 // Report success even when version is not updated
                 engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus,
-                    Optional.ofNullable(runningTaskInfo).map(Map::size).orElse(0),
-                    Optional.ofNullable(finishedTaskInfo).map(Map::size).orElse(0));
+                        Optional.ofNullable(waitingTaskInfo).map(Map::size).orElse(0),
+                        Optional.ofNullable(runningTaskInfo).map(Map::size).orElse(0),
+                        Optional.ofNullable(finishedTaskInfo).map(Map::size).orElse(0));
 
                 logWorkerStatusUpdate(startTime, workerStatus);
                 return;
@@ -180,6 +181,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
             workerStatus.updateRunningQueueTime();
 
             engineHealthReporter.reportStatusCheckerSuccess(modelName, workerStatus,
+                    Optional.ofNullable(waitingTaskInfo).map(Map::size).orElse(0),
                     Optional.ofNullable(runningTaskInfo).map(Map::size).orElse(0),
                     Optional.ofNullable(finishedTaskInfo).map(Map::size).orElse(0));
 

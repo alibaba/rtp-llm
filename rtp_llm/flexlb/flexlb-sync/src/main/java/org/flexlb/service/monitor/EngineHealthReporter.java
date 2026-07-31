@@ -71,6 +71,7 @@ import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_FAIL;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_CHECK_SUCCESS_PERIOD;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_VISITOR_RT;
 import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_VISITOR_SUCCESS_QPS;
+import static org.flexlb.constant.MetricConstant.ENGINE_WAITING_TASK_INFO_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_STEP_LATENCY_VAR;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_NUMBER;
@@ -126,6 +127,7 @@ public class EngineHealthReporter {
         this.monitor.register(ENGINE_BALANCING_THREAD_POOL_INFO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_FINISHED_TASK_LIST_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_RUNNING_TASK_INFO_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+        this.monitor.register(ENGINE_WAITING_TASK_INFO_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_KEY_SIZE, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         this.monitor.register(ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
@@ -236,6 +238,7 @@ public class EngineHealthReporter {
 
     public void reportStatusCheckerSuccess(String modelName,
                                            WorkerStatus workerStatus,
+                                           int waitingTaskInfoSize,
                                            int runningTaskInfoSize,
                                            int finishedTaskListSize) {
 
@@ -266,6 +269,7 @@ public class EngineHealthReporter {
                 "role", workerStatus.getRole());
 
         monitor.report(ENGINE_FINISHED_TASK_LIST_SIZE, metricTags, finishedTaskListSize);
+        monitor.report(ENGINE_WAITING_TASK_INFO_SIZE, metricTags, waitingTaskInfoSize);
         monitor.report(ENGINE_RUNNING_TASK_INFO_SIZE, metricTags, runningTaskInfoSize);
     }
 

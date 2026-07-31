@@ -71,6 +71,11 @@ public class MetricConstant {
     public static final String ENGINE_RUNNING_TASK_INFO_SIZE = "app.engine.health.check.running.task.info.size";
 
     /**
+     * Engine waiting task info size
+     */
+    public static final String ENGINE_WAITING_TASK_INFO_SIZE = "app.engine.health.check.waiting.task.info.size";
+
+    /**
      * Prefill master node monitoring
      */
     public static final String ZK_MASTER_NODE = "app.engine.zk.master.node";

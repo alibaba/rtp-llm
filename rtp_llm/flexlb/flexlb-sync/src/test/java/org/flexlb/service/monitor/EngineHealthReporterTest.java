@@ -77,11 +77,27 @@ class EngineHealthReporterTest {
     }
 
     @Test
+    void shouldReportWorkerTaskCounts() {
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setIp("10.0.0.1");
+        workerStatus.setRole("PREFILL");
+
+        reporter.reportStatusCheckerSuccess("test-model", workerStatus, 2, 3, 4);
+
+        FlexMetricTags expectedTags = FlexMetricTags.of(
+                "engineIp", "10.0.0.1",
+                "role", "PREFILL");
+        verify(monitor).report("app.engine.health.check.waiting.task.info.size", expectedTags, 2.0);
+        verify(monitor).report("app.engine.health.check.running.task.info.size", expectedTags, 3.0);
+        verify(monitor).report("app.engine.health.check.finished.task.list.size", expectedTags, 4.0);
+    }
+
+    @Test
     void shouldReportCacheCapacityMetricsFromSharedWorkerStatus() {
         WorkerStatus workerStatus = workerStatusWithCacheStatus();
         workerStatus.updateKvCacheTokens(200, 800);
 
-        reporter.reportStatusCheckerSuccess("test-model", workerStatus, 0, 0);
+        reporter.reportStatusCheckerSuccess("test-model", workerStatus, 0, 0, 0);
 
         FlexMetricTags expectedTags = FlexMetricTags.of(
                 "model", "test-model",
@@ -101,7 +117,7 @@ class EngineHealthReporterTest {
         workerStatus.setIp("10.0.0.1");
         workerStatus.setRole("PREFILL");
 
-        reporter.reportStatusCheckerSuccess("test-model", workerStatus, 0, 0);
+        reporter.reportStatusCheckerSuccess("test-model", workerStatus, 0, 0, 0);
 
         verify(monitor, never()).report(eq("app.cache.block.size"), any(FlexMetricTags.class), anyDouble());
         verify(monitor, never()).report(eq("app.cache.used.kv.cache.tokens"), any(FlexMetricTags.class), anyDouble());
