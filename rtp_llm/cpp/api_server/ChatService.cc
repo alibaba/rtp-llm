@@ -22,6 +22,10 @@ std::shared_ptr<GenerateInput> ChatService::fillGenerateInput(int64_t           
         input->generate_config = openai_endpoint_->extract_generation_config(chat_request);
     } catch (const HttpApiServerException&) {
         throw;  // already typed
+    } catch (const py::error_already_set&) {
+        // Let pybind11 exceptions propagate so the router layer's dedicated
+        // python-exception handler (with its distinct logging) still applies.
+        throw;
     } catch (const std::exception& e) {
         throw HttpApiServerException(HttpApiServerException::ERROR_GENERATE_CONFIG_FORMAT,
                                      std::string("openai endpoint config error: ") + e.what());
