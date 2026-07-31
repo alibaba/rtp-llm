@@ -47,7 +47,7 @@ cc_library(
         "MHAKVCacheSpec.h",
         "LinearKVCacheSpec.h",
         "MLAKVCacheSpec.h",
-        "OpaqueKVCacheSpec.h",
+        "Dsv4KVCacheSpec.h",
     ],
     copts = copts(),
     visibility = ["//visibility:public"],

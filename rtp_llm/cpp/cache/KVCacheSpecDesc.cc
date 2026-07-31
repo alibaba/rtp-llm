@@ -14,10 +14,10 @@ KVCacheSpecPtr SpecBuilder::build(const KVCacheSpecDesc& desc, const SpecBuildCo
             return MLAKVCacheSpec::build(desc, ctx);
         case KVCacheSpecType::LinearAttention:
             return LinearKVCacheSpec::build(desc, ctx);
-        case KVCacheSpecType::OpaqueKV:
+        case KVCacheSpecType::CompressedKVCache:
             return CompressedKVCacheSpec::build(desc, ctx);
-        case KVCacheSpecType::OpaqueState:
-            return FixedStateCacheSpec::build(desc, ctx);
+        case KVCacheSpecType::SWAState:
+            return SWAStateCacheSpec::build(desc, ctx);
     }
     RTP_LLM_CHECK_WITH_INFO(false, "unknown KVCacheSpecType=%d", static_cast<int>(desc.cache_type));
     return nullptr;
@@ -30,11 +30,11 @@ CacheGroupType SpecBuilder::groupType(const KVCacheSpecDesc& desc) {
     switch (desc.cache_type) {
         case KVCacheSpecType::LinearAttention:
             return CacheGroupType::LINEAR;
-        case KVCacheSpecType::OpaqueState:
+        case KVCacheSpecType::SWAState:
             return CacheGroupType::SWA;
         case KVCacheSpecType::MultiHeadAttention:
         case KVCacheSpecType::MultiHeadLatentAttention:
-        case KVCacheSpecType::OpaqueKV:
+        case KVCacheSpecType::CompressedKVCache:
             return CacheGroupType::FULL;
     }
     return CacheGroupType::FULL;

@@ -167,7 +167,7 @@ private:
         const auto spec_type = group.spec->type;
         if (group.policy.group_type != rtp_llm::CacheGroupType::FULL
             || spec_type == rtp_llm::KVCacheSpecType::LinearAttention
-            || spec_type == rtp_llm::KVCacheSpecType::OpaqueState) {
+            || spec_type == rtp_llm::KVCacheSpecType::SWAState) {
             return result;
         }
 
@@ -229,7 +229,7 @@ private:
             return result;
         }
 
-        if (spec_type == rtp_llm::KVCacheSpecType::OpaqueKV) {
+        if (spec_type == rtp_llm::KVCacheSpecType::CompressedKVCache) {
             RTP_LLM_CHECK_WITH_INFO(buffers.kv_addr.is_contiguous() && buffers.kv_addr.numel() % kernel_block_num == 0,
                                     "opaque KV cache cannot be expanded for layer=%d tag=%s",
                                     layer_id,
