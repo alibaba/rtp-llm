@@ -222,28 +222,36 @@ def execute_task(
     test_success_flag = False
     for i in range(num_retry_times + 1):
         # Run subprocess and redirect both stdout and stderr to file
-        with open(task_test_output_path, "a", encoding="utf-8") as f:
-            f.write(f"=== OUTPUT {i} ===\n")
-            f.flush()
-            result = subprocess.run(
-                multi_runner_args,
-                env=multi_runner_env,
-                stdout=f,
-                stderr=subprocess.STDOUT,
-                text=True,
-                check=True,
+        result = None
+        try:
+            with open(task_test_output_path, "a", encoding="utf-8") as f:
+                f.write(f"=== OUTPUT {i} ===\n")
+                f.flush()
+                result = subprocess.run(
+                    multi_runner_args,
+                    env=multi_runner_env,
+                    stdout=f,
+                    stderr=subprocess.STDOUT,
+                    text=True,
+                    check=False,
+                )
+                f.write(f"\n\n=== Return Code: {result.returncode} ===\n")
+                f.flush()
+        finally:
+            # kill task processes after every attempt, even if subprocess.run raises
+            multi_kill_script(
+                {
+                    "ip_lists": task_config["ip_lists"],
+                    "run_user": task_config["run_user"],
+                    "ssh_port": task_config["ssh_port"],
+                },
+                kill_log_path=task_kill_output_path,
             )
-            f.write(f"\n\n=== Return Code: {result.returncode} ===\n")
-            f.flush()
-        # kill task processes
-        multi_kill_script(
-            {
-                "ip_lists": task_config["ip_lists"],
-                "run_user": task_config["run_user"],
-                "ssh_port": task_config["ssh_port"],
-            },
-            kill_log_path=task_kill_output_path,
-        )
+        if result is not None and result.returncode != 0:
+            log_stage(
+                f"multi_runner test exited with code {result.returncode}, attempt {i+1}/{num_retry_times+1}",
+                stage="WARNING",
+            )
         # Check if test was successful and extract table
         table_content = extract_table_from_log(task_test_output_path)
         if table_content:
