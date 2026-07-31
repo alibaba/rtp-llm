@@ -42,6 +42,7 @@ cc_library(
         "KVCacheSpec.h",
         "KVCacheSpecBase.h",
         "KVCacheSpecDesc.h",
+        "KVCacheSpecType.h",
         "MHAKVCacheSpec.h",
         "LinearKVCacheSpec.h",
         "MLAKVCacheSpec.h",

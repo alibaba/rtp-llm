@@ -8,20 +8,13 @@
 #include <utility>
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
+#include "rtp_llm/cpp/cache/KVCacheSpecType.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 
 namespace rtp_llm {
-
-enum KVCacheSpecType {
-    MultiHeadAttention,        // MHAKVCacheSpec: standard multi-head attention KV cache
-    MultiHeadLatentAttention,  // MLAKVCacheSpec: MLA compressed latent KV cache
-    LinearAttention,           // LinearKVCacheSpec: linear / SSM attention state cache
-    OpaqueKV,                  // Byte-addressed opaque paged KV pool
-    OpaqueState,               // Fixed-allocation opaque state cache
-};
 
 inline KVPartitionBytes splitKVPartitionBytes(size_t      full_block_bytes,
                                               size_t      k_block_bytes,
@@ -68,23 +61,6 @@ inline KVPartitionBytes splitKVPartitionBytes(size_t      full_block_bytes,
     const size_t k_partition_sz  = static_cast<size_t>(head_cnt) * k_partition_bytes_per_head;
     const size_t v_partition_sz  = static_cast<size_t>(head_cnt) * v_partition_bytes_per_head;
     return {k_partition_off, k_partition_sz, v_partition_off, v_partition_sz};
-}
-
-inline const char* KVCacheSpecTypeToString(KVCacheSpecType t) {
-    switch (t) {
-        case KVCacheSpecType::MultiHeadAttention:
-            return "MultiHeadAttention";
-        case KVCacheSpecType::MultiHeadLatentAttention:
-            return "MultiHeadLatentAttention";
-        case KVCacheSpecType::LinearAttention:
-            return "LinearAttention";
-        case KVCacheSpecType::OpaqueKV:
-            return "OpaqueKV";
-        case KVCacheSpecType::OpaqueState:
-            return "OpaqueState";
-        default:
-            return "Unknown";
-    }
 }
 
 struct KVCacheSpec;
