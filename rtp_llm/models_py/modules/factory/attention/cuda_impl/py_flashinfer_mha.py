@@ -95,10 +95,9 @@ class PyFlashinferPrefillPagedAttnOp(object):
         self.page_size = attn_configs.kernel_tokens_per_block
         self.datatype = attn_configs.dtype
         self.kv_cache_dtype = attn_configs.kv_cache_dtype
-        if self.kv_cache_dtype == KvCacheDataType.FP8:
-            self.kv_datatype = torch.float8_e4m3fn
-        else:
-            self.kv_datatype = self.datatype
+        self.kv_datatype = (
+            _configured_kv_cache_torch_dtype(self.kv_cache_dtype) or self.datatype
+        )
         self.max_seq_len = attn_configs.max_seq_len
         self.is_causal = attn_configs.is_causal
         self.fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
@@ -443,6 +442,9 @@ class PyFlashinferPrefillImplBase(FMHAImplBase):
             num_kv_heads=attn_configs.kv_head_num,
             head_size=attn_configs.size_per_head,
             token_per_block=attn_configs.kernel_tokens_per_block,
+            kv_cache_dtype=_configured_kv_cache_torch_dtype(
+                attn_configs.kv_cache_dtype
+            ),
         )
         self.create_params(attn_inputs)
         self.fmha_impl.prepare(attn_inputs)
