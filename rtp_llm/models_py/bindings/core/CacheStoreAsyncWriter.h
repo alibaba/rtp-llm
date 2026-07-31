@@ -78,11 +78,7 @@ private:
     std::exception_ptr       stored_exception_;
     State                    state_{State::IDLE};
     uint64_t                 cycle_id_{0};
-    // Guarded by state_mutex_. True only for a cycle admitted without a CacheStore
-    // under the CACHE_STORE_SKIP_WRITE_WHEN_UNREADY rollback switch; write() then
-    // no-ops for the whole cycle (degraded skip mode; see init()).
-    bool skip_cycle_writes_{false};
-    int  device_id_{-1};
+    int                      device_id_{-1};
 
     const std::shared_ptr<KVCacheManager> cache_manager_;
     // Selected once during construction and immutable for the writer lifetime.

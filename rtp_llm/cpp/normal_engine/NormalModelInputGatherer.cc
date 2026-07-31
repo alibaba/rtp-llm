@@ -386,21 +386,22 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
             copyKvCacheBlocksToModelInput(
                 model_input, kv_cache, i, ctx.batch_idx, ctx.max_blocks_num, config_.kernel_blocks_per_kv_block);
 
-            // Per-row cache_keys contract: PD prefill rows must always carry cache_keys.
-            // KVCacheManager::malloc unconditionally derives them for every scheduled stream
-            // (initCacheKeys covers even the final partial block), so a miss here is a real
-            // producer bug. stream->hasCacheKeys() is any-row semantics and also guards the
-            // empty-resource case (streams without KV cache), so it must stay in front of the
-            // row-local cacheKeys(i) access; the row-local check is what prevents a
-            // zero-filled row from being published as real keys (visible only as decode-side
-            // load timeouts).
+            // Per-row cache_keys contract: PD prefill rows are expected to carry cache_keys,
+            // but KVCacheManager::malloc derives them on two paths. The first malloc takes
+            // initCacheKeys, which covers even the final partial block; later mallocs take
+            // updateCacheKeys, which drops a trailing partial key and appends only whole
+            // blocks, so a sub-block-length sequence can end up with none. A miss is
+            // therefore not provably a producer bug, which is why the branch below keeps an
+            // escape hatch instead of asserting outright.
+            // stream->hasCacheKeys() is any-row semantics and also guards the empty-resource
+            // case (streams without KV cache), so it must stay in front of the row-local
+            // cacheKeys(i) access; the row-local check is what prevents a zero-filled row
+            // from being published as real keys (visible only as decode-side load timeouts).
             const bool row_has_cache_keys = stream->hasCacheKeys() && !stream->cacheKeys(i).empty();
             if (config_.role_type == RoleType::PREFILL && stream->queryPdSep() && !row_has_cache_keys) {
-                // Operational escape hatch, in the same style as CacheStoreAsyncWriter's
-                // CACHE_STORE_SKIP_WRITE_WHEN_UNREADY: failing here aborts the whole
-                // gather and takes down every co-batched request, so a deployment that
-                // hits an unforeseen key-less path needs a way to degrade without a
-                // rebuild.
+                // Operational escape hatch: failing here aborts the whole gather and
+                // takes down every co-batched request, so a deployment that hits an
+                // unforeseen key-less path needs a way to degrade without a rebuild.
                 //
                 // This is a temporary degraded skip-row mode, NOT a restoration of any
                 // historical behavior. The pre-existing code guarded the memcpy with

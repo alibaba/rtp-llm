@@ -13,7 +13,6 @@
 #include <utility>
 #include <vector>
 
-#include "autil/EnvUtil.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
@@ -217,10 +216,6 @@ TEST_F(CacheStoreAsyncWriterTest, SubmitWhileIdleThrows) {
 }
 
 TEST_F(CacheStoreAsyncWriterTest, InitWithoutCacheStoreFailsAndCanRetryAfterInjection) {
-    // Pin fail-fast semantics: a rollback switch pre-set in the calling
-    // environment must not turn this contract test into a silent pass.
-    autil::EnvGuard force_fail_fast("CACHE_STORE_SKIP_WRITE_WHEN_UNREADY", "0");
-
     auto manager = std::make_shared<KVCacheManager>(makeWriterTestCacheConfig(/*tokens_per_block=*/1), /*warmup=*/true);
     CacheStoreAsyncWriter writer(/*device_id=*/2, manager, /*cache_model_id=*/19);
 
@@ -240,43 +235,6 @@ TEST_F(CacheStoreAsyncWriterTest, InitWithoutCacheStoreFailsAndCanRetryAfterInje
 
     manager->setCacheStore(cache_store_);
     ASSERT_NO_THROW(writer.init());
-    ASSERT_NO_THROW(writer.waitAllDone());
-}
-
-TEST_F(CacheStoreAsyncWriterTest, MissingCacheStoreRollbackSwitchSkipsCycleWrites) {
-    // Outer guard pins the default fail-fast semantics (and restores the caller's
-    // original value on exit); the inner guard flips the rollback switch on for
-    // the degraded-skip section only.
-    autil::EnvGuard force_fail_fast("CACHE_STORE_SKIP_WRITE_WHEN_UNREADY", "0");
-
-    auto manager = std::make_shared<KVCacheManager>(makeWriterTestCacheConfig(/*tokens_per_block=*/1), /*warmup=*/true);
-    CacheStoreAsyncWriter writer(/*device_id=*/-1, manager);
-
-    torch_ext::PyCacheStoreInputs inputs;
-    torch_ext::LayerKVCache       layer_cache;
-    layer_cache.layer_id = 0;
-    layer_cache.tag      = "full";
-
-    {
-        // Degraded-skip mode: the cycle is admitted, write() drops the work without side
-        // effects, and the cycle drains clean. The early return precedes write()'s
-        // CUDA/ROCm build guard.
-        autil::EnvGuard rollback_switch("CACHE_STORE_SKIP_WRITE_WHEN_UNREADY", "1");
-        ASSERT_NO_THROW(writer.init());
-        EXPECT_TRUE(writer.skip_cycle_writes_);
-        ASSERT_NO_THROW(writer.write(inputs, layer_cache));
-        EXPECT_EQ(0, writer.pending_count_.load());
-        ASSERT_NO_THROW(writer.waitAllDone());
-        EXPECT_EQ(CacheStoreAsyncWriter::State::IDLE, writer.state_);
-    }
-
-    // Switch cleared: the default fail-fast contract is back.
-    ASSERT_ANY_THROW(writer.init());
-
-    // A later cycle with an injected CacheStore must not inherit the skip flag.
-    manager->setCacheStore(cache_store_);
-    ASSERT_NO_THROW(writer.init());
-    EXPECT_FALSE(writer.skip_cycle_writes_);
     ASSERT_NO_THROW(writer.waitAllDone());
 }
 

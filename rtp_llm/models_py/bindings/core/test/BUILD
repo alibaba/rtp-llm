@@ -87,7 +87,6 @@ cc_test_wrapper(
         "//rtp_llm/models_py/bindings/core:cache_store_async_writer",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
-        "@havenask//aios/autil:env_util",
     ] + torch_deps() + select({
         "@//:using_cuda": [
             "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",

@@ -153,12 +153,26 @@ class CPFlashInferImpl(FMHAImplBase):
 
     @classmethod
     def support(cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs):
-        # Unconditionally True because eligibility is governed elsewhere: when
-        # prefill CP is enabled the factory admits only impls whose
-        # support_prefill_cp() is True (FMHAImplBase.support_parallelism_config),
-        # and this impl registers last in PREFILL_MHA_IMPS so earlier impls win
-        # when CP is disabled.
+        # Eligibility is decided by support_parallelism_config() below, which sees the
+        # CP config; nothing here depends on attn_configs/attn_inputs.
         return True
+
+    @classmethod
+    def support_parallelism_config(
+        cls, parallelism_config: Optional[ParallelismConfig]
+    ) -> bool:
+        # Narrower than the base class, which admits any impl when prefill CP is off and
+        # would leave this one selectable purely by registration order. Deciding here
+        # keeps __init__ off the non-CP path instead of relying on it to raise and on the
+        # factory to swallow that exception.
+        #
+        # is_enabled() and impl_map membership coincide today (PrefillCPConfig::is_enabled
+        # excludes exactly DISABLED/UNKNOWN/PREFILL_CP); the second clause is what keeps a
+        # newly added rotate method from reaching __init__ as a KeyError.
+        if parallelism_config is None:
+            return False
+        cp_config = parallelism_config.prefill_cp_config
+        return cp_config.is_enabled() and cp_config.method in impl_map
 
     def fmha_type(self) -> FMHAType:
         return FMHAType.CP_FLASH_INFER
