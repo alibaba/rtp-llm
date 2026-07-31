@@ -60,7 +60,8 @@ CpGroupLayout CPSlotMapper::layoutForGroup(const CacheConfig& config, size_t gid
     layout.mapping = policy.cp_mapping;
     // FULL groups use page/block-level CP mapping. Byte slicing is only valid for
     // state/SWA-style groups whose writer stores matching sliced payloads.
-    layout.slice = policy.group_type == CacheGroupType::FULL ? CpBlockSliceMode::NONE : policy.cp_slice;
+    const auto& spec = config.specForGroup(gid);
+    layout.slice    = policy.group_type != CacheGroupType::FULL && spec != nullptr && spec->cpSlice();
     return layout;
 }
 
@@ -154,40 +155,42 @@ std::vector<BlockInfo> CPSlotMapper::sliceBlockForPeer(const CacheConfig&     co
                                                        std::vector<BlockInfo> parts,
                                                        size_t                 peer_idx) const {
     const auto layout = layoutForGroup(config, gid);
-    if (!isSharded() || layout.slice == CpBlockSliceMode::NONE) {
+    if (!isSharded() || !layout.slice) {
         return parts;
     }
     RTP_LLM_CHECK_WITH_INFO(parts.size() == 1, "CP byte slicing expects one block part, got %zu", parts.size());
     RTP_LLM_CHECK_WITH_INFO(
         peer_idx < static_cast<size_t>(cp_size_), "CP slice peer_idx=%zu out of cp_size=%d", peer_idx, cp_size_);
-    auto spec = config.specForGroup(gid);
+    const auto& spec = config.specForGroup(gid);
     RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "CP slice got null spec for gid=%zu", gid);
+    const auto packed_spec = std::dynamic_pointer_cast<const PackedEntryKVCacheSpec>(spec);
+    RTP_LLM_CHECK_WITH_INFO(packed_spec != nullptr,
+                            "CP byte slicing requires a packed-entry spec for gid=%zu tag=%s",
+                            gid,
+                            spec->tag.c_str());
+    // This operation projects PREFILL rank-local rows into a DECODE-owned full
+    // block. Passing a rank-local PREFILL spec would slice the row a second time.
+    RTP_LLM_CHECK_WITH_INFO(!packed_spec->isCpLocalSliced(),
+                            "CP byte slicing requires a full-block spec for gid=%zu tag=%s",
+                            gid,
+                            spec->tag.c_str());
     auto& block = parts[0];
     RTP_LLM_CHECK_WITH_INFO(block.addr != nullptr, "CP byte slicing got null block addr");
 
-    size_t slice_bytes = 0;
-    if (layout.slice == CpBlockSliceMode::EQUAL_BYTES) {
-        RTP_LLM_CHECK_WITH_INFO(block.size_bytes % static_cast<size_t>(cp_size_) == 0,
-                                "CP block bytes %zu not divisible by cp_size %d",
-                                block.size_bytes,
-                                cp_size_);
-        slice_bytes = block.size_bytes / static_cast<size_t>(cp_size_);
-    } else {
-        const auto payload_bytes = spec->k_block_payload_bytes();
-        RTP_LLM_CHECK_WITH_INFO(payload_bytes > 0, "CP payload slicing requires positive payload bytes");
-        RTP_LLM_CHECK_WITH_INFO(payload_bytes % static_cast<size_t>(cp_size_) == 0,
-                                "CP payload bytes %zu not divisible by cp_size %d",
-                                payload_bytes,
-                                cp_size_);
-        slice_bytes = payload_bytes / static_cast<size_t>(cp_size_);
-    }
+    const size_t full_stride_bytes = packed_spec->fullBlockStrideBytes();
+    RTP_LLM_CHECK_WITH_INFO(full_stride_bytes > 0, "CP block slicing requires positive block stride");
+    RTP_LLM_CHECK_WITH_INFO(block.size_bytes == full_stride_bytes,
+                            "CP slice tag=%s expects a full block, got %zu vs spec stride %zu",
+                            spec->tag.c_str(),
+                            block.size_bytes,
+                            full_stride_bytes);
+    RTP_LLM_CHECK_WITH_INFO(full_stride_bytes % static_cast<size_t>(cp_size_) == 0,
+                            "CP block stride %zu not divisible by cp_size %d",
+                            full_stride_bytes,
+                            cp_size_);
+    const size_t slice_bytes = full_stride_bytes / static_cast<size_t>(cp_size_);
 
     const size_t slice_offset = slice_bytes * peer_idx;
-    RTP_LLM_CHECK_WITH_INFO(slice_offset + slice_bytes <= block.size_bytes,
-                            "CP slice [%zu, %zu) exceeds block bytes %zu",
-                            slice_offset,
-                            slice_offset + slice_bytes,
-                            block.size_bytes);
     block.addr       = static_cast<void*>(static_cast<char*>(block.addr) + slice_offset);
     block.size_bytes = slice_bytes;
     return parts;
@@ -219,7 +222,7 @@ KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& so
         dst_blocks.reserve(selected_keys.size());
 
         const auto layout = layoutForGroup(config, static_cast<size_t>(gid));
-        if (layout.slice != CpBlockSliceMode::NONE) {
+        if (layout.slice) {
             for (size_t i = 0; i < selected_keys.size(); ++i) {
                 dst_blocks.push_back(i < src_blocks.size() ? src_blocks[i] : NULL_BLOCK_IDX);
             }

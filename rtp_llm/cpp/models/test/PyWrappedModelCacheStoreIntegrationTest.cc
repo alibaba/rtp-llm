@@ -35,7 +35,7 @@ struct TestCacheSpec: public KVCacheSpec {
     TestCacheSpec(std::string cache_tag, size_t tokens_per_block, size_t bytes): bytes_(bytes) {
         tag                = std::move(cache_tag);
         seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
-        type               = KVCacheSpecType::OpaqueState;
+        type               = KVCacheSpecType::SWAState;
     }
 
     size_t block_size() const override {

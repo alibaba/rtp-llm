@@ -94,7 +94,7 @@ CacheConfig makeCpFullPlusSwaCacheConfig(bool cp_compact_swa_group, size_t cp_si
                                  rtp_llm::TYPE_FP16,
                                  /*local_head_num_kv=*/1,
                                  /*size_per_head=*/128);
-    auto swa_spec  = makeMhaSpec(/*tag=*/"swa_kv",
+    auto swa_spec = makeMhaSpec(/*tag=*/"swa_kv",
                                 swa_tokens_per_block,
                                 rtp_llm::TYPE_FP16,
                                 /*local_head_num_kv=*/1,
@@ -103,7 +103,28 @@ CacheConfig makeCpFullPlusSwaCacheConfig(bool cp_compact_swa_group, size_t cp_si
     auto full_policy = defaultCacheGroupPolicy(CacheGroupType::FULL);
     auto swa_policy  = defaultCacheGroupPolicy(CacheGroupType::SWA);
     if (cp_compact_swa_group) {
-        swa_policy.cp_slice = CpBlockSliceMode::EQUAL_BYTES;
+        KVCacheSpecDesc desc;
+        desc.tag                  = "swa_kv";
+        desc.cache_type           = KVCacheSpecType::SWAState;
+        desc.dtype                = DataType::TYPE_FP16;
+        desc.entry_dtype          = DataType::TYPE_FP16;
+        desc.entry_elems          = 256;
+        desc.entry_count_mode     = BlockEntryCountMode::EXPLICIT;
+        desc.explicit_entry_count = swa_tokens_per_block;
+        desc.group_type           = CacheGroupType::SWA;
+        desc.cp                    = CacheCpPolicyDesc{};
+        desc.cp->slice             = true;
+
+        ParallelismConfig parallelism;
+        parallelism.role_type                          = RoleType::PREFILL;
+        parallelism.tp_size                            = cp_size;
+        parallelism.prefill_cp_config.kv_cache_sharded = true;
+        SpecBuildContext ctx;
+        ctx.dtype                   = DataType::TYPE_FP16;
+        ctx.seq_size_per_block      = swa_tokens_per_block;
+        ctx.kernel_tokens_per_block = full_tokens_per_block;
+        ctx.parallelism_config      = &parallelism;
+        swa_spec                    = SpecBuilder::build(desc, ctx);
     }
 
     config.fromGroupedSpecs({full_spec, swa_spec},

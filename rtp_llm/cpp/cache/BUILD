@@ -22,6 +22,7 @@ cc_library(
     ],
     copts = copts(),
     visibility = ["//visibility:public"],
+    deps = ["//rtp_llm/cpp/utils:core_utils"],
 )
 
 cc_library(

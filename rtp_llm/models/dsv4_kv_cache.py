@@ -43,7 +43,7 @@ from rtp_llm.ops import (
     DataType,
     KVCacheSpecDesc,
     KVCacheSpecType,
-    OpaqueBlockEntryCountMode,
+    BlockEntryCountMode,
 )
 
 # Byte-exact FP8 entry sizes of the DSv4 MLA/indexer kernels.  The pools are
@@ -93,7 +93,7 @@ def _make_dsv4_desc(
     if kind == _COMPRESSED_KV_KIND:
         desc.cache_type = KVCacheSpecType.COMPRESSED_KV_CACHE
         desc.is_state_cache = False
-        desc.entry_count_mode = OpaqueBlockEntryCountMode.KERNEL_BLOCK_COMPRESSED
+        desc.entry_count_mode = BlockEntryCountMode.KERNEL_BLOCK_COMPRESSED
         desc.compression_ratio = compression_ratio
         if desc.entry_elems == DSV4_FP8_KV_ENTRY_BYTES:
             desc.block_stride_bytes_alignment = DSV4_FP8_MLA_BLOCK_ALIGNMENT_BYTES
@@ -104,7 +104,7 @@ def _make_dsv4_desc(
 
     desc.cache_type = KVCacheSpecType.SWA_STATE
     desc.is_state_cache = True
-    desc.entry_count_mode = OpaqueBlockEntryCountMode.STATE_RING
+    desc.entry_count_mode = BlockEntryCountMode.STATE_RING
 
     reuse = CacheReusePolicyDesc()
     reuse.evict_policy = CacheEvictPolicy.INDEPENDENT

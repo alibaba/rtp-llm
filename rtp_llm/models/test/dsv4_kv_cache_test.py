@@ -26,7 +26,7 @@ from rtp_llm.ops import (
     KvCacheDataType,
     KVCacheSpecDesc,
     KVCacheSpecType,
-    OpaqueBlockEntryCountMode,
+    BlockEntryCountMode,
 )
 
 # CSA / HCA / SWA / SWA / CSA -- covers every routing branch plus a repeat.
@@ -94,7 +94,7 @@ class Dsv4KvCacheSpecTest(TestCase):
             self.assertFalse(by_tag[tag].is_state_cache, tag)
             self.assertEqual(
                 by_tag[tag].entry_count_mode,
-                OpaqueBlockEntryCountMode.KERNEL_BLOCK_COMPRESSED,
+                BlockEntryCountMode.KERNEL_BLOCK_COMPRESSED,
                 tag,
             )
             self.assertEqual(by_tag[tag].dtype, DataType.TYPE_UINT8, tag)
@@ -103,7 +103,7 @@ class Dsv4KvCacheSpecTest(TestCase):
             self.assertEqual(by_tag[tag].cache_type, KVCacheSpecType.SWA_STATE, tag)
             self.assertTrue(by_tag[tag].is_state_cache, tag)
             self.assertEqual(
-                by_tag[tag].entry_count_mode, OpaqueBlockEntryCountMode.STATE_RING, tag
+                by_tag[tag].entry_count_mode, BlockEntryCountMode.STATE_RING, tag
             )
             self.assertTrue(by_tag[tag].state_ring_include_gen_num_per_cycle, tag)
             self.assertEqual(

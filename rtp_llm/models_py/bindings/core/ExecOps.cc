@@ -322,6 +322,13 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
         const int64_t request_id     = request_ids[context_index];
         auto          event          = pre_created_event ? pre_created_event : runtimeCreateEvent();
         auto          request_blocks = std::make_shared<RequestBlockBuffer>(std::to_string(request_id), event);
+        if (cp_size > 1) {
+            RTP_LLM_CHECK_WITH_INFO(cp_rank >= 0 && cp_rank < cp_size,
+                                    "cache-store tag=%s invalid cp_rank=%d cp_size=%d",
+                                    layer_kv.tag.c_str(),
+                                    cp_rank,
+                                    cp_size);
+        }
         RTP_LLM_LOG_DEBUG(
             "write cache store, request id is %ld, blocks num is %d", static_cast<long>(request_id), total_blocks);
 
@@ -357,18 +364,6 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                 return;
             }
 
-            if (cp_size > 1 && group.policy.cp_slice != CpBlockSliceMode::NONE) {
-                RTP_LLM_CHECK_WITH_INFO(cp_rank >= 0 && cp_rank < cp_size,
-                                        "cache-store tag=%s invalid cp_rank=%d cp_size=%d",
-                                        layer_kv.tag.c_str(),
-                                        cp_rank,
-                                        cp_size);
-                // The prefill topology already materializes each rank's local
-                // STATE/SWA row. Send that complete local row from offset zero;
-                // decode applies the peer-rank offset in the corresponding
-                // full row. Dividing here would slice an already-sliced row.
-            }
-
             const bool use_opaque_key_prefix = cache_config.use_opaque_kv_cache_store || use_group_cache_transfer_policy
                                                || group.spec->type == KVCacheSpecType::MultiHeadLatentAttention;
             void*                 kv_addr = kv_cache_data + static_cast<size_t>(block_id) * kv_block_stride_bytes;
@@ -382,7 +377,7 @@ void runtimeWriteCacheStore(const torch_ext::PyCacheStoreInputs& cache_store_inp
                               layer_kv.layer_id,
                               cp_rank,
                               cp_size,
-                              static_cast<int>(group.policy.cp_slice),
+                              static_cast<int>(group.spec->cpSlice()),
                               key_index,
                               offset_index,
                               block_id,

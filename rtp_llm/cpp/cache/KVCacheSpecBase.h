@@ -73,6 +73,10 @@ struct KVCacheSpec {
 
     KVCacheSpecType type = KVCacheSpecType::MultiHeadAttention;
 
+    bool cpSlice() const {
+        return cp_slice_;
+    }
+
     virtual size_t block_size() const   = 0;
     virtual size_t k_block_size() const = 0;
     virtual size_t v_block_size() const = 0;
@@ -115,7 +119,7 @@ struct KVCacheSpec {
            << ";k_block_payload_bytes=" << k_block_payload_bytes()
            << ";v_block_payload_bytes=" << v_block_payload_bytes() << ";scale_block_bytes=" << scale_block_size_bytes()
            << ";k_scale_block_bytes=" << k_scale_block_size_bytes()
-           << ";v_scale_block_bytes=" << v_scale_block_size_bytes();
+           << ";v_scale_block_bytes=" << v_scale_block_size_bytes() << ";cp_slice=" << cp_slice_;
         return os.str();
     }
 
@@ -132,6 +136,7 @@ protected:
         os << indent1 << "type=" << KVCacheSpecTypeToString(type) << "(" << static_cast<int>(type) << ")\n";
         os << indent1 << "dtype=" << static_cast<int>(memoryLayoutDType()) << "\n";
         os << indent1 << "seq_size_per_block=" << seq_size_per_block << "\n";
+        os << indent1 << "cp_slice=" << cp_slice_ << "\n";
         os << indent1 << "block_size=" << block_size() << "\n";
         os << indent1 << "k_block_size=" << k_block_size() << "\n";
         os << indent1 << "v_block_size=" << v_block_size() << "\n";
@@ -146,6 +151,12 @@ protected:
         os << indent1 << "v_scale_block_size_bytes=" << v_scale_block_size_bytes() << "\n";
         return os.str();
     }
+
+private:
+    // Derived once from CacheCpPolicyDesc::slice by SpecBuilder.
+    bool cp_slice_ = false;
+
+    friend class SpecBuilder;
 };
 
 }  // namespace rtp_llm

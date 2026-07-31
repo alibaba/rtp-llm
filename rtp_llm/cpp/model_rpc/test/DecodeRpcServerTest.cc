@@ -93,6 +93,33 @@ TEST(DecodeRpcServerTest, CPShardedLoadRequestReadsFromEveryPrefillPeer) {
     EXPECT_EQ(request.cache_keys(1), 102);
 }
 
+TEST(DecodeRpcServerTest, CpLoadRoutingCoversFullAndSlicedGroups) {
+    for (int cp_size : {1, 2, 4}) {
+        for (int peer_idx = 0; peer_idx < cp_size; ++peer_idx) {
+            EXPECT_TRUE(DecodeRpcServer::shouldLoadCpGroupFromPeer(
+                /*is_page_level_rr=*/true, CacheGroupType::FULL, /*group_uses_cp_slice=*/false, peer_idx));
+            EXPECT_EQ(DecodeRpcServer::shouldLoadCpBlockFromPeer(
+                          /*is_page_level_rr=*/true, CacheGroupType::FULL, /*block_pos=*/7, peer_idx, cp_size),
+                      peer_idx == 7 % cp_size);
+            EXPECT_TRUE(DecodeRpcServer::shouldLoadCpGroupFromPeer(
+                /*is_page_level_rr=*/true, CacheGroupType::SWA, /*group_uses_cp_slice=*/true, peer_idx));
+            EXPECT_EQ(DecodeRpcServer::shouldLoadCpGroupFromPeer(
+                          /*is_page_level_rr=*/true, CacheGroupType::LINEAR, /*group_uses_cp_slice=*/false, peer_idx),
+                      peer_idx == 0);
+        }
+    }
+    EXPECT_TRUE(DecodeRpcServer::shouldLoadCpBlockFromPeer(
+        /*is_page_level_rr=*/false, CacheGroupType::FULL, /*block_pos=*/3, /*peer_idx=*/1, /*prefill_cp_size=*/2));
+}
+
+TEST(DecodeRpcServerTest, RemotePrefillCpMustMatchLocalConfigAndPeerCount) {
+    EXPECT_TRUE(DecodeRpcServer::validateRemotePrefillCp(2, 2, 2).ok());
+    EXPECT_TRUE(DecodeRpcServer::validateRemotePrefillCp(1, 1, 0).ok());
+    EXPECT_FALSE(DecodeRpcServer::validateRemotePrefillCp(2, 4, 2).ok());
+    EXPECT_FALSE(DecodeRpcServer::validateRemotePrefillCp(4, 4, 2).ok());
+    EXPECT_FALSE(DecodeRpcServer::validateRemotePrefillCp(0, 1, 1).ok());
+}
+
 TEST(DecodeRpcServerTest, CPShardedMlaLoadRequestReadsFromEveryPrefillPeer) {
     DecodeRpcServer server;
     server.resource_.workers = {"decode-0", "decode-1"};

@@ -324,7 +324,8 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
             config, model_config.kv_cache_spec_descs, refreshed_specs, model_config, parallelism_config);
         for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
             const auto& spec               = config.specForGroup(gid);
-            config.use_typed_cache_regions = config.use_typed_cache_regions || spec->type == KVCacheSpecType::CompressedKVCache
+            config.use_typed_cache_regions = config.use_typed_cache_regions
+                                             || spec->type == KVCacheSpecType::CompressedKVCache
                                              || spec->type == KVCacheSpecType::SWAState;
             config.use_opaque_kv_cache_store = config.use_opaque_kv_cache_store
                                                || spec->type == KVCacheSpecType::CompressedKVCache

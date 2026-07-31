@@ -34,23 +34,16 @@ enum class CpBlockMappingMode : int8_t {
     COMPACT_LAST_RANK = 2,
 };
 
-enum class CpBlockSliceMode : int8_t {
-    NONE          = 0,
-    EQUAL_BYTES   = 1,
-    PAYLOAD_BYTES = 2,
-};
-
 struct CacheGroupPolicy {
-    CacheGroupType       group_type             = CacheGroupType::FULL;
-    bool                 enable_prefix_reuse    = true;
-    CacheEvictPolicy     evict_policy           = CacheEvictPolicy::CHAIN;
-    bool                 reservable             = true;
-    uint32_t             explicit_block_num     = 0;
-    bool                 charge_to_paged_budget = false;
-    uint32_t             active_tail_blocks     = 0;
-    bool                 validate_tail_blocks   = true;
-    CpBlockMappingMode   cp_mapping             = CpBlockMappingMode::NONE;
-    CpBlockSliceMode     cp_slice               = CpBlockSliceMode::NONE;
+    CacheGroupType     group_type             = CacheGroupType::FULL;
+    bool               enable_prefix_reuse    = true;
+    CacheEvictPolicy   evict_policy           = CacheEvictPolicy::CHAIN;
+    bool               reservable             = true;
+    uint32_t           explicit_block_num     = 0;
+    bool               charge_to_paged_budget = false;
+    uint32_t           active_tail_blocks     = 0;
+    bool               validate_tail_blocks   = true;
+    CpBlockMappingMode cp_mapping             = CpBlockMappingMode::NONE;
 };
 
 // One cache-store registration step: pair a cache key from the full logical

@@ -758,6 +758,28 @@ ErrorInfo DecodeRpcServer::loadCacheSyncForTp(DecodeGenerateContext& decode_cont
     return ErrorInfo::OkStatus();
 }
 
+bool DecodeRpcServer::shouldLoadCpGroupFromPeer(bool           is_page_level_rr,
+                                                CacheGroupType group_type,
+                                                bool           group_uses_cp_slice,
+                                                int            peer_idx) {
+    if (!is_page_level_rr || group_type == CacheGroupType::FULL) {
+        return true;
+    }
+    return group_uses_cp_slice || peer_idx == 0;
+}
+
+bool DecodeRpcServer::shouldLoadCpBlockFromPeer(bool           is_page_level_rr,
+                                                CacheGroupType group_type,
+                                                size_t         block_pos,
+                                                int            peer_idx,
+                                                int            prefill_cp_size) {
+    if (!is_page_level_rr || group_type != CacheGroupType::FULL) {
+        return true;
+    }
+    RTP_LLM_CHECK_WITH_INFO(prefill_cp_size > 0, "prefill_cp_size must be positive");
+    return static_cast<int>(block_pos % static_cast<size_t>(prefill_cp_size)) == peer_idx;
+}
+
 ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     RTP_LLM_PROFILE_FUNCTION();
     AtomicGuard request_guard(onflight_load_cache_requests_);
@@ -829,34 +851,29 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 cfg.groupNums());
         return cfg.tagForGroup(gid);
     };
-    auto cpMapperForGroup = [&](const CacheConfig& cfg, size_t gid) {
-        return CPSlotMapper(load_context.prefill_cp_size - 1,
-                            load_context.prefill_cp_size,
-                            static_cast<int>(cfg.seqSizePerBlockForGroup(gid)));
-    };
+    std::vector<std::shared_ptr<CPSlotMapper>> cp_mappers(static_cast<size_t>(cache_config.groupNums()));
+    std::vector<CpGroupLayout>                 cp_layouts(static_cast<size_t>(cache_config.groupNums()));
+    for (size_t gid = 0; gid < static_cast<size_t>(cache_config.groupNums()); ++gid) {
+        cp_mappers[gid] = std::make_shared<CPSlotMapper>(load_context.prefill_cp_size - 1,
+                                                        load_context.prefill_cp_size,
+                                                        static_cast<int>(cache_config.seqSizePerBlockForGroup(gid)));
+        cp_layouts[gid] = cp_mappers[gid]->layoutForGroup(cache_config, gid);
+    }
     auto groupUsesCpSlice = [&](const CacheConfig& cfg, size_t gid) {
         if (load_context.prefill_cp_size <= 1 || static_cast<int>(gid) >= cfg.groupNums()) {
             return false;
         }
-        return cpMapperForGroup(cfg, gid).layoutForGroup(cfg, gid).slice != CpBlockSliceMode::NONE;
+        return cp_layouts[gid].slice;
     };
     auto shouldLoadGroupFromPeer = [&](const CacheConfig& cfg, CacheGroupType group_type, size_t gid, int peer_idx) {
-        if (!is_page_level_rr) {
-            return true;
-        }
-        if (group_type == CacheGroupType::FULL) {
-            return true;
-        }
         // Some specs are CP-sliced inside one logical block on prefill, while
         // decode still owns the full block. Pull every peer slice and place it
         // into the destination offset declared by the spec.
-        return groupUsesCpSlice(cfg, gid) || peer_idx == 0;
+        return shouldLoadCpGroupFromPeer(is_page_level_rr, group_type, groupUsesCpSlice(cfg, gid), peer_idx);
     };
     auto shouldLoadBlockFromPeer = [&](CacheGroupType group_type, size_t block_pos, int peer_idx) {
-        if (!is_page_level_rr || group_type != CacheGroupType::FULL) {
-            return true;
-        }
-        return (static_cast<int>(block_pos) % load_context.prefill_cp_size) == peer_idx;
+        return shouldLoadCpBlockFromPeer(
+            is_page_level_rr, group_type, block_pos, peer_idx, load_context.prefill_cp_size);
     };
     auto sliceCpDestinationForPeer = [&](std::vector<BlockInfo> parts,
                                          const CacheConfig&     cfg,
@@ -865,7 +882,7 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         if (!is_page_level_rr || !groupUsesCpSlice(cfg, gid) || load_context.prefill_cp_size <= 1) {
             return parts;
         }
-        return cpMapperForGroup(cfg, gid).sliceBlockForPeer(cfg, gid, std::move(parts), static_cast<size_t>(peer_idx));
+        return cp_mappers[gid]->sliceBlockForPeer(cfg, gid, std::move(parts), static_cast<size_t>(peer_idx));
     };
     auto isCompactFixedBlockTable = [&](const CacheConfig& cfg, size_t gid) {
         if (!is_page_level_rr || !groupUsesCpSlice(cfg, gid) || load_context.prefill_cp_size <= 1) {
@@ -1245,30 +1262,57 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
         return grpc::Status::OK;
     }
 
-    std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
-    const auto&               cache_config       = engine_->resourceContext().cache_manager->cacheConfig();
-    const auto&               topology           = cache_config.topology();
-    GroupBlockIds             block_ids_by_group = decodeGroupBlockIds(*request, topology);
+    ErrorInfo error_info = ErrorInfo::OkStatus();
+    try {
+        std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
+        const auto& cache_config = engine_->resourceContext().cache_manager->cacheConfig();
+        const auto& topology     = cache_config.topology();
+        GroupBlockIds block_ids_by_group = decodeGroupBlockIds(*request, topology);
+        std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
 
-    std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
-
-    // TODO(xinfei.sxf) add retry
-    auto error_info = loadCache({request->request_id(),
-                                 request->request_key(),
-                                 peer_addrs,
-                                 cache_keys,
-                                 block_ids_by_group,
-                                 request->reuse_block_size(),
-                                 request->timeout_ms(),
-                                 request->partition_count(),
-                                 request->partition_id(),
-                                 server_context,
-                                 request->prefill_cp_size() > 0 ? request->prefill_cp_size() : 1});
+        const auto& prefill_cp_config = maga_init_params_.parallelism_config.prefill_cp_config;
+        const int configured_cp_size =
+            prefill_cp_config.is_prefill_enabled() ? prefill_cp_config.prefill_cp_size : 1;
+        const int requested_cp_size = request->prefill_cp_size() > 0 ? request->prefill_cp_size() : 1;
+        error_info = validateRemotePrefillCp(requested_cp_size, configured_cp_size, peer_addrs.size());
+        if (error_info.ok()) {
+            // TODO(xinfei.sxf) add retry
+            error_info = loadCache({request->request_id(),
+                                    request->request_key(),
+                                    peer_addrs,
+                                    cache_keys,
+                                    block_ids_by_group,
+                                    request->reuse_block_size(),
+                                    request->timeout_ms(),
+                                    request->partition_count(),
+                                    request->partition_id(),
+                                    server_context,
+                                    requested_cp_size});
+        }
+    } catch (const std::exception& e) {
+        error_info = ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                               std::string("invalid remote cache load request: ") + e.what());
+    }
     response->mutable_error_info()->set_error_code(transErrorCodeToRPC(error_info.code()));
     response->mutable_error_info()->set_error_message(error_info.ToString());
     response->set_done_time_us(currentTimeUs());
     RTP_LLM_LOG_DEBUG("request: %s, remote load cache grpc done", request->request_key().c_str());
     return grpc::Status::OK;
+}
+
+ErrorInfo DecodeRpcServer::validateRemotePrefillCp(int requested_cp_size, int configured_cp_size, size_t peer_count) {
+    if (requested_cp_size <= 0 || configured_cp_size <= 0) {
+        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "prefill CP size must be positive");
+    }
+    if (requested_cp_size != configured_cp_size) {
+        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                         "remote prefill_cp_size does not match local decode configuration");
+    }
+    if (requested_cp_size > 1 && peer_count != static_cast<size_t>(requested_cp_size)) {
+        return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                         "prefill peer count does not match configured prefill_cp_size");
+    }
+    return ErrorInfo::OkStatus();
 }
 
 GroupBlockIds DecodeRpcServer::decodeGroupBlockIds(const BroadcastLoadRequestPB& request,
