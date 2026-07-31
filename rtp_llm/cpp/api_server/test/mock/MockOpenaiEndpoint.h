@@ -17,6 +17,7 @@ public:
 
 public:
     MOCK_METHOD1(extract_generation_config, std::shared_ptr<GenerateConfig>(const ChatCompletionRequest&));
+    MOCK_METHOD0(getChatRender, std::shared_ptr<ChatRender>());
 };
 
 }  // namespace rtp_llm
