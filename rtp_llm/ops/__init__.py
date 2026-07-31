@@ -122,8 +122,6 @@ try:
         CacheStoreConfig,
         CacheTailPolicyDesc,
         CpBlockMappingMode,
-        CpBlockSliceMode,
-        CpPrefillSliceLayout,
         DashScGrpcConfig,
         KVCacheSpecType,
         OpaqueBlockEntryCountMode,

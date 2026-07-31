@@ -28,8 +28,7 @@ std::string cacheGroupPolicySummary(const CacheGroupPolicy& policy) {
        << ", charge_to_paged_budget=" << policy.charge_to_paged_budget
        << ", active_tail_blocks=" << policy.active_tail_blocks
        << ", validate_tail_blocks=" << policy.validate_tail_blocks
-       << ", cp_mapping=" << static_cast<int>(policy.cp_mapping) << ", cp_slice=" << static_cast<int>(policy.cp_slice)
-       << '}';
+       << ", cp_mapping=" << static_cast<int>(policy.cp_mapping) << '}';
     return os.str();
 }
 
@@ -130,7 +129,7 @@ bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy
            && lhs.explicit_block_num == rhs.explicit_block_num
            && lhs.charge_to_paged_budget == rhs.charge_to_paged_budget
            && lhs.active_tail_blocks == rhs.active_tail_blocks && lhs.validate_tail_blocks == rhs.validate_tail_blocks
-           && lhs.cp_mapping == rhs.cp_mapping && lhs.cp_slice == rhs.cp_slice;
+           && lhs.cp_mapping == rhs.cp_mapping;
 }
 
 void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers) {

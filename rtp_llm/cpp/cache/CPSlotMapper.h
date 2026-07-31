@@ -13,7 +13,7 @@ struct CacheConfig;
 
 struct CpGroupLayout {
     CpBlockMappingMode mapping            = CpBlockMappingMode::NONE;
-    CpBlockSliceMode   slice              = CpBlockSliceMode::NONE;
+    bool               slice              = false;
     size_t             active_tail_blocks = 0;
 
     bool usesCpCanonicalKeys() const {
