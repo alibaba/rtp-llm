@@ -81,6 +81,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.dspark_ctx_lengths.defined() ? inputs.dspark_ctx_lengths.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::dsparkCtxStarts] =
         inputs.dspark_ctx_starts.defined() ? inputs.dspark_ctx_starts.numel() : 0;
+    shape_hints_ptr[GptModelInputIndex::dsparkPlanKvPagesHost] =
+        inputs.dspark_plan_kv_pages_host.defined() ? inputs.dspark_plan_kv_pages_host.numel() : 0;
     {
         // encode root-side tensor device for fields that may live on
         // GPU on the PDFUSION fast path, so non-root ranks can allocate matching
@@ -266,6 +268,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                                                 {(size_t)shape_hints_ptr[GptModelInputIndex::dsparkCtxStarts]},
                                                 pickAlloc(GptModelInputDeviceBit::kDeviceBitDsparkCtxStarts));
         }
+        if (shape_hints_ptr[GptModelInputIndex::dsparkPlanKvPagesHost]) {
+            // Always a host tensor: consumed on CPU at FlashInfer plan() time.
+            inputs.dspark_plan_kv_pages_host =
+                allocBuf(rtp_llm::DataType::TYPE_INT32,
+                         {(size_t)shape_hints_ptr[GptModelInputIndex::dsparkPlanKvPagesHost]});
+        }
         if (text_tokens_mask_size) {
             inputs.text_tokens_mask = allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)text_tokens_mask_size});
         }
@@ -353,6 +361,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     }
     if (shape_hints_ptr[GptModelInputIndex::dsparkCtxStarts]) {
         collect(inputs.dspark_ctx_starts);
+    }
+    if (shape_hints_ptr[GptModelInputIndex::dsparkPlanKvPagesHost]) {
+        collect(inputs.dspark_plan_kv_pages_host);
     }
 
     // Classify tensors by device type (runtime check) and calculate packed sizes.

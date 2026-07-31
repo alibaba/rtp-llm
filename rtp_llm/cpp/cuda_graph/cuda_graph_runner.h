@@ -49,18 +49,15 @@ public:
         max_bs_               = graph_params.max_context_batch_size;
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         // The DSpark draft's forward is split into backbone (A+B+C ->
-        // head_hidden) and draft_tail (lm_head + Markov + softmax).  Default
-        // (dspark_capture_tail): capture the FULL forward including the tail,
-        // mirroring vLLM's FULL-graph DSpark speculator; the [B, k, V] draft
+        // head_hidden) and draft_tail (lm_head + Markov + softmax).  The
+        // decode graph always captures the FULL forward including the tail
+        // (vLLM's FULL-graph DSpark speculator boundary); the [B, k, V] draft
         // distribution lives in one shared static buffer (per-instance
-        // slices, like aux).  Fallback (tail off, e.g. tp>1 or kill switch):
-        // capture the backbone only and let the engine run draft_tail eagerly
-        // after replay.  The target-verify graph (also is_dspark_) captures
-        // the whole forward as usual.  The prefill graph never captures the
-        // tail — only the decode forward surfaces draft outputs.
-        capture_draft_tail_ = is_dspark_ && !is_target_verify_ && !is_prefill_cuda_graph_mode_
-                              && graph_params.dspark_capture_tail;
-        const bool capture_backbone_only = is_dspark_ && !is_target_verify_ && !capture_draft_tail_;
+        // slices, like aux).  The target-verify graph (also is_dspark_)
+        // captures the whole forward as usual.  The prefill graph captures
+        // the backbone only — decode is the only forward that surfaces draft
+        // outputs.
+        const bool capture_backbone_only = is_dspark_ && !is_target_verify_ && is_prefill_cuda_graph_mode_;
         py_forward_method_ =
             py_instance_.attr(capture_backbone_only ? "forward_backbone" : "forward");
         options_cuda_int32_   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA).requires_grad(false);
@@ -68,7 +65,7 @@ public:
         options_cuda_float_ = torch::TensorOptions().dtype(model_data_type_).device(torch::kCUDA).requires_grad(false);
         RTP_LLM_LOG_INFO("Initialize CudaGraphRunner with parameters below: \n \
             enable_cuda_graph_: %d, max_bs_: %d, enable_cuda_graph_debug_mode_: %d, max_seq_len_: %d, kernel_seq_size_per_block_: %d, \
-            hidden_size_: %d, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d, is_target_verify_: %d, capture_draft_tail_: %d",
+            hidden_size_: %d, num_tokens_per_bs_: %d, is_prefill_cuda_graph_mode_: %d, is_target_verify_: %d",
                          enable_cuda_graph_,
                          max_bs_,
                          enable_cuda_graph_debug_mode_,
@@ -77,8 +74,7 @@ public:
                          hidden_size_,
                          num_tokens_per_bs_,
                          is_prefill_cuda_graph_mode_,
-                         is_target_verify_,
-                         capture_draft_tail_);
+                         is_target_verify_);
     }
 
     ~CudaGraphRunner() {
@@ -104,10 +100,6 @@ public:
     int            getCurrentRealGraphBs(const CudaGraphState& state) const;
     PyModelOutputs forward(const PyModelInputs& inputs, CudaGraphState& state) override;
     void           initCapture() override;
-    bool           capturesDraftTail() const override {
-        return capture_draft_tail_;
-    }
-
     // Executable side of the wrapper-clone contract: true when t still aliases
     // the selected graph instance's reusable static output buffers (which the
     // next replay overwrites). PyWrappedModel checks this after cloning the
@@ -159,7 +151,6 @@ private:
     bool                    is_dspark_{false};
     // DSpark draft: full forward (incl. lm_head + Markov + softmax tail)
     // captured; wrapper skips the eager draft_tail after replay.
-    bool                    capture_draft_tail_{false};
     cuda_graph::GraphStream capture_stream_;
     bool                    enable_cuda_graph_debug_mode_{false};
     size_t                  max_bs_{1};

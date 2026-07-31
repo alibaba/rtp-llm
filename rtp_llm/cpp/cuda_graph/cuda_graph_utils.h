@@ -92,7 +92,7 @@ public:
     // DSpark draft full-tail capture: static output buffers mirroring
     // outputs.draft_tokens [B, k] and draft_probs [B, k, V] (batch-major,
     // slices of one max-batch allocation).  Undefined unless the draft graph
-    // captured the tail (dspark_capture_tail).
+    // captured the tail (dspark decode graphs always do).
     at::Tensor               dspark_draft_tokens_;
     at::Tensor               dspark_draft_probs_;
     torch_ext::PyModelInputs py_model_inputs_;

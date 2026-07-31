@@ -817,28 +817,14 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state_);
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
-            // DSpark draft, backbone-only graph boundary (tail not captured —
-            // tp>1 or DSPARK_GRAPH_TAIL=0): run the eager lm_head + Markov +
-            // softmax tail here, reading the static head_hidden buffer BEFORE
-            // it is cloned below.  When the graph captured the full tail
-            // (capturesDraftTail), draft_tokens/draft_probs already sit in
-            // static buffers and the clone loop below detaches them.
-            if (is_dspark_ && !use_spec_decoding_ && !graph_runner_->capturesDraftTail()) {
-                py::gil_scoped_acquire gil;
-                auto                   tail_obj = py_model_.attr("draft_tail")(py_model_outputs, py_model_inputs);
-                py_model_outputs                = tail_obj.cast<PyModelOutputs>();
-            }
             hidden_states = py_model_outputs.hidden_states.clone();
             // Graph output buffers are reused across replays; detach copies of
-            // the optional dspark outputs.  On the full-tail boundary
-            // draft_tokens/draft_probs alias static graph buffers, so this
-            // clone is load-bearing — the next replay overwrites them, AND
+            // the optional dspark outputs.  draft_tokens/draft_probs alias
+            // static graph buffers, so this clone is load-bearing — the next
+            // replay overwrites them, AND
             // MtpExecutor::publishSyncMtpDeviceState relies on it to skip its
             // own all_probs clone for dspark (per-stream views alias this
-            // storage directly).  On the backbone-only boundary they are fresh
-            // eager tensors from draft_tail (clone redundant there, but do not
-            // remove it — the publish-side contract above still needs
-            // step-local storage on the full-tail boundary).
+            // storage directly).
             // aux_hidden_states may alias a static buffer on the target-verify
             // graph.
             for (torch::Tensor* t :

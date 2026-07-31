@@ -32,7 +32,6 @@ struct GraphParams {
     // FULL-graph DSpark speculator.  Adds two static output buffers
     // (draft_tokens [maxB, k] + draft_probs [maxB, k, V]); the model wrapper
     // decides eligibility (draft instance, tp==1, kill switch).
-    bool                 dspark_capture_tail          = false;
     int                  max_seq_len                  = 0;
     int                  tokens_per_block             = 0;  // physical kv block size
     int                  kernel_tokens_per_block      = 0;  // must be explicitly configured
@@ -73,10 +72,6 @@ public:
     // DSpark draft: true when the graph captured the full forward including
     // the lm_head + Markov + softmax tail, so the wrapper must NOT run the
     // eager draft_tail after replay.
-    virtual bool capturesDraftTail() const {
-        return false;
-    }
-
     // True when t still aliases the selected graph instance's reusable static
     // output buffers (overwritten by the next replay). Lets the wrapper turn
     // its "outputs must be cloned out of graph storage" contract into a check.

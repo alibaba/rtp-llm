@@ -86,6 +86,10 @@ enum GptModelInputIndex : size_t {
     mtpHiddenStatesRows,
     dsparkCtxLengths,  // numel of dspark_ctx_lengths ([batch] int32)
     dsparkCtxStarts,   // numel of dspark_ctx_starts ([batch] int32)
+    // numel of dspark_plan_kv_pages_host ([batch] int32, host pinned): the
+    // host FlashInfer-plan channel; broadcast so non-root ranks can plan
+    // without the blocking device D2H too.
+    dsparkPlanKvPagesHost,
     // Per-tensor device hint bitmap from root so non-root ranks allocate
     // matching GPU buffers and keep tpSync broadcast lanes consistent.
     tensorDeviceMap,

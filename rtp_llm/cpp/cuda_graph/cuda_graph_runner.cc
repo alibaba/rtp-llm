@@ -1067,7 +1067,7 @@ void CudaGraphRunner::initCapture() {
         // (MtpBatchStreamProcessor) hard-requires the export; fail fast at
         // capture time if the model's capture_aux_hidden_layer_ids wiring is
         // missing instead of asserting mid-stream.
-        if ((is_dspark_ && is_target_verify_) || capture_draft_tail_) {
+        if (is_dspark_ && !is_prefill_cuda_graph_mode_) {
             py::gil_scoped_acquire gil;
             auto                   probe_outputs = probe_outputs_obj.cast<PyModelOutputs>();
             if (is_target_verify_) {

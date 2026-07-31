@@ -558,7 +558,7 @@ class Qwen3DFlashModel(GptModelBase):
         Markov + softmax tail (stage D).  Two graph boundaries exist: the
         default full-tail graph captures forward (backbone + tail, vLLM
         FULL-graph boundary); the backbone-only graph (tp>1 or
-        DSPARK_GRAPH_TAIL=0) captures forward_backbone and runs draft_tail
+        prefill seeding) captures forward_backbone and runs draft_tail
         eagerly after replay.
         """
         width = self.dspark_params.block_width
@@ -642,7 +642,7 @@ class Qwen3DFlashModel(GptModelBase):
         """Backbone-only graph entry: stages A+B+C, output = head_hidden.
 
         The CUDA graph runner binds this when the tail is not captured (tp>1
-        or DSPARK_GRAPH_TAIL=0); the engine then runs draft_tail eagerly after
+        graphs); the engine then runs draft_tail eagerly after
         replay to produce draft_tokens/draft_probs.  The default full-tail
         graph binds forward instead.
         """
@@ -678,7 +678,7 @@ class Qwen3DFlashModel(GptModelBase):
 
         Used on the non-graph path (canRun false, e.g. prefill seeding).  The
         default full-tail CUDA graph captures this method whole; the
-        backbone-only boundary (tp>1 or DSPARK_GRAPH_TAIL=0) captures
+        backbone-only boundary (prefill graphs) captures
         forward_backbone and runs draft_tail eagerly after replay.  All paths
         keep the same output contract.
 
