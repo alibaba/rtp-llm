@@ -444,13 +444,25 @@ py_library(
 )
 
 py_library(
+    name = "telemetry",
+    srcs = glob([
+        "telemetry/*.py",
+    ]),
+    visibility = ["//visibility:public"],
+    # NOTE: no requirement() deps on purpose: the open-source lock has no
+    # opentelemetry (internal lock does), and tracing.py degrades to no-op
+    # when the import fails, so both builds stay green.
+)
+
+py_library(
     name = "frontend",
     srcs = glob([
         "frontend/*.py",
         "frontend/**/*.py",
     ]),
     deps = [
-        ":openai_api"
+        ":openai_api",
+        ":telemetry",
     ]
 )
 
@@ -685,6 +697,9 @@ whl_reqs = [
     "concurrent_log_handler",
     "apache-tvm-ffi",
     "xgrammar==0.2.5",
+    # OTel trace runtime; version mix keeps protobuf==4.25 (see internal lock)
+    "opentelemetry-sdk==1.44.0",
+    "opentelemetry-exporter-otlp-proto-http==1.15.0",
 ] + whl_deps() + platform_deps() + xft_dep
 
 py_wheel(
