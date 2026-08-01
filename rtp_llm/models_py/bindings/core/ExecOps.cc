@@ -1,5 +1,6 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
+#include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/distribute/CpuTpBroadcaster.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -21,6 +22,7 @@
 #include <atomic>
 #include <algorithm>
 #include <memory>
+#include <stdexcept>
 #if USING_CUDA
 #include <c10/cuda/CUDAGuard.h>
 #elif USING_ROCM
@@ -378,18 +380,43 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
             addBlock(pair.key_index, pair.offset_index);
         }
 
-        auto storeCallback = [layer_id = param.layer_id, request_id](bool success, CacheStoreErrorCode ec) {
-            if (!success) {
-                RTP_LLM_LOG_WARNING(
-                    "query [%ld], layer id [%d], call store kv cache failed, ec is %d, error msg is [%s]",
-                    request_id,
-                    layer_id,
-                    ec,
-                    ErrorCodeToString(transCacheStoreErrorCode(ec)).c_str());
-            }
-        };
         if (request_blocks->getBlocksCount() > 0) {
-            cache_store->store(request_blocks, storeCallback);
+            CacheStoreAsyncWriter::StoreCompletionCallback store_completion;
+            if (param.track_store_completion) {
+                RTP_LLM_CHECK_WITH_INFO(param.cache_store_async_writer != nullptr,
+                                        "DSpARK cache-store publication wait requires CacheStoreAsyncWriter");
+                store_completion = param.cache_store_async_writer->registerStoreCompletion();
+            }
+
+            auto storeCallback = [layer_id = param.layer_id, request_id, store_completion](bool success,
+                                                                                          CacheStoreErrorCode ec) {
+                if (!success) {
+                    RTP_LLM_LOG_WARNING(
+                        "query [%ld], layer id [%d], call store kv cache failed, ec is %d, error msg is [%s]",
+                        request_id,
+                        layer_id,
+                        ec,
+                        ErrorCodeToString(transCacheStoreErrorCode(ec)).c_str());
+                }
+                if (store_completion) {
+                    if (success) {
+                        store_completion(nullptr);
+                    } else {
+                        store_completion(std::make_exception_ptr(std::runtime_error(
+                            "DSpARK cache-store publication failed for request " + std::to_string(request_id)
+                            + ", layer " + std::to_string(layer_id) + ", error code "
+                            + std::to_string(static_cast<int>(ec)))));
+                    }
+                }
+            };
+            try {
+                cache_store->store(request_blocks, storeCallback);
+            } catch (...) {
+                if (store_completion) {
+                    store_completion(std::current_exception());
+                }
+                throw;
+            }
         } else {
             RTP_LLM_LOG_DEBUG("skip cache store because all selected blocks are null, request id [%ld], layer id [%d]",
                               request_id,

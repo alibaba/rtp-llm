@@ -155,6 +155,14 @@ public:
     // No-op when no attention inputs have been prepared yet.
     virtual void updateKVCacheKernelBlockId(const GptModelInputs& inputs) {}
 
+    // DSpARK draft PD prefill waits until the model's asynchronous CacheStore writes
+    // are actually published.  Implementations may convert publication
+    // failures into a per-forward error so the executor can synchronize the
+    // result across TP ranks before deciding whether to dispatch to decode.
+    virtual std::string waitCacheStorePublication() {
+        return {};
+    }
+
     // Optional spec-decode hand-off: target model exposes the pre-output-projection
     // residual buffer (DSv4: pre-``hc_head`` ``[T, hc*D]``) so MtpExecutor can
     // swap it into ``last_hidden_states`` before each draft forward instead of

@@ -199,6 +199,49 @@ bool MtpExecutor::isTpRank0() const {
     return tp_rank_ == 0;
 }
 
+bool MtpExecutor::finishDSparkPrefillCachePublication(const GptModelInputs&               model_input,
+                                                      const std::list<GenerateStreamPtr>& streams) {
+    if (!is_dspark_ || model_input.warmup || !model_input.pd_separation) {
+        return true;
+    }
+
+    RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(dspark_cache_store_publication)");
+    const std::string draft_error = draft_model_->waitCacheStorePublication();
+    const bool        local_ok    = draft_error.empty();
+
+    if (!local_ok) {
+        RTP_LLM_LOG_ERROR("DSpARK draft cache-store publication failed on TP rank %d: draft=[%s]",
+                          tp_rank_,
+                          draft_error.c_str());
+    }
+
+    bool global_ok = local_ok;
+    if (parallelism_config_.tp_size > 1) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(dspark_cache_store_tp_sync)");
+        cuda_graph::GraphStreamGuard stream_guard(
+            cuda_graph::toGraphStream(dspark_cache_store_sync_stream_));
+        RTP_LLM_CHECK_WITH_INFO(dspark_cache_store_status_.defined(),
+                                "DSpARK cache-store TP status buffer is not initialized");
+        dspark_cache_store_status_.fill_(local_ok ? 1 : 0);
+        auto global_status =
+            execAllReduce({dspark_cache_store_status_, ReduceOp::Min, false, ParallelMode::TP}).buffer;
+        global_ok = global_status.item<int32_t>() != 0;
+    }
+
+    if (!global_ok && isTpRank0()) {
+        std::string error_message = "DSpARK draft cache-store publication failed before decode dispatch";
+        if (!draft_error.empty()) {
+            error_message += "; draft: " + draft_error;
+        }
+        for (const auto& stream : streams) {
+            if (stream->isActive()) {
+                stream->reportError(ErrorCode::CACHE_STORE_STORE_FAILED, error_message);
+            }
+        }
+    }
+    return global_ok;
+}
+
 void MtpExecutor::maybeOverrideLastHiddenWithMtpBuffer(GptModelInputs& model_input,
                                                        ModelBase&      source,
                                                        bool            request_actual_rows) {
@@ -500,7 +543,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     draft_prefill_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
     spec_logits_verify_runner_(std::make_unique<SpecLogitsVerifyRunner>()),
     spec_logits_verify_async_runner_(cuda_graph::graphGetStreamFromPool(true)),
-    spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)) {
+    spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)),
+    dspark_cache_store_sync_stream_(cuda_graph::graphGetStreamFromPool(true)) {
     data_type_        = params.model_config_.data_type;
     hidden_size_      = params.model_config_.hidden_size * params.model_config_.hc_mult;
     propose_step_     = propose_params->gen_num_per_circle;
@@ -528,6 +572,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     enable_detail_log_  = params.profiling_debug_logging_config.enable_detail_log;
     tp_rank_            = params.parallelism_config.tp_rank;
     parallelism_config_ = params.parallelism_config;
+    if (is_dspark_ && parallelism_config_.tp_size > 1) {
+        dspark_cache_store_status_ = torch::empty(
+            {1}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    }
     RTP_LLM_LOG_INFO("enable_detail_log_ = %d, tp_rank_ = %d", enable_detail_log_, tp_rank_);
     if (params.profiling_debug_logging_config.enable_model_inputs_log) {
         model_inputs_logger_ =
@@ -625,7 +673,9 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                         false,
                                         true,
                                         target_cache_layer_layout.layer_to_groups,
-                                        model_inputs_logger_));
+                                        model_inputs_logger_,
+                                        false,
+                                        false));
     }
 
     is_linear_attention_model_ = target_cache_config.linear_group_num > 0;
@@ -673,6 +723,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                                   false,
                                                   draft_cache_layer_layout.layer_to_groups,
                                                   model_inputs_logger_,
+                                                  is_dspark_,
                                                   is_dspark_));
             // Create separate model for speculative prefill with CUDA graph if enabled (from params)
             const bool enable_cuda_graph = params.hw_kernel_config.enable_cuda_graph && !is_dspark_;
@@ -688,6 +739,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                                                  false,
                                                                  draft_cache_layer_layout.layer_to_groups,
                                                                  model_inputs_logger_,
+                                                                 is_dspark_,
                                                                  is_dspark_));
             }
         }
@@ -798,6 +850,39 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     }
 
     metrics_collector.not_skip = true;
+
+    // Any status return or exception after the target forward must still drain
+    // DSpARK's local writer tasks/publication.  Otherwise the next prefill
+    // cycle sees a still-running writer, while late CacheStore work continues
+    // to alias KV pages that the failed request may release.  The normal path
+    // performs the TP-wide completion check below and then disarms this local
+    // fallback; unwinding deliberately avoids collectives.
+    struct DSparkCacheStoreDrainGuard {
+        bool       armed;
+        ModelBase* draft;
+
+        ~DSparkCacheStoreDrainGuard() {
+            if (!armed) {
+                return;
+            }
+            try {
+                const auto draft_error = draft->waitCacheStorePublication();
+                if (!draft_error.empty()) {
+                    RTP_LLM_LOG_ERROR("DSpARK local draft cache-store drain on prefill exit failed: draft=[%s]",
+                                      draft_error.c_str());
+                }
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_ERROR("DSpARK local cache-store drain threw on prefill exit: %s", e.what());
+            } catch (...) {
+                RTP_LLM_LOG_ERROR("DSpARK local cache-store drain threw an unknown exception on prefill exit");
+            }
+        }
+
+        void disarm() {
+            armed = false;
+        }
+    } cache_store_drain_guard{is_dspark_ && !model_input.warmup && model_input.pd_separation,
+                              draft_model_.get()};
 
     // release model input before forward
     releaseAllModelBuffers();
@@ -919,6 +1004,13 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         }
         draft_model_output = std::move(draft_model_->forward(model_input));
         model_forward_us += autil::TimeUtility::currentTimeInMicroSeconds() - start_time_us;
+    }
+
+    const bool dspark_cache_store_ok = finishDSparkPrefillCachePublication(model_input, streams);
+    cache_store_drain_guard.disarm();
+    if (!dspark_cache_store_ok) {
+        cudaSyncAndCheck();
+        return absl::OkStatus();
     }
 
     if (!isTpRank0() || warm_up_ || streams.size() == 0 || model_input.is_fake_stream) {

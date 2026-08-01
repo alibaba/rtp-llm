@@ -3,6 +3,9 @@
 #include "rtp_llm/models_py/bindings/core/CacheStoreAsyncWriter.h"
 
 #include <atomic>
+#include <chrono>
+#include <future>
+#include <stdexcept>
 #include <thread>
 #include <vector>
 
@@ -145,6 +148,88 @@ TEST_F(CacheStoreAsyncWriterTest, DoubleWaitAllDoneThrows) {
     writer.init();
     writer.waitAllDone();
     ASSERT_ANY_THROW(writer.waitAllDone());
+}
+
+TEST_F(CacheStoreAsyncWriterTest, WaitIncludesDelayedStoreCompletion) {
+    using namespace std::chrono_literals;
+
+    CacheStoreAsyncWriter writer;
+    writer.init(/*track_store_completions=*/true);
+
+    std::promise<CacheStoreAsyncWriter::StoreCompletionCallback> registered;
+    auto registered_future = registered.get_future();
+    writer.submit([&writer, &registered]() { registered.set_value(writer.registerStoreCompletion()); });
+    auto completion = registered_future.get();
+
+    auto waiter = std::async(std::launch::async, [&writer]() { writer.waitAllDone(); });
+    EXPECT_EQ(std::future_status::timeout, waiter.wait_for(20ms));
+
+    completion(nullptr);
+    ASSERT_EQ(std::future_status::ready, waiter.wait_for(1s));
+    ASSERT_NO_THROW(waiter.get());
+}
+
+TEST_F(CacheStoreAsyncWriterTest, DeferredPublicationBlocksNextCycleButNotSubmissionFinish) {
+    using namespace std::chrono_literals;
+
+    CacheStoreAsyncWriter writer;
+    writer.init(/*track_store_completions=*/true);
+
+    std::promise<CacheStoreAsyncWriter::StoreCompletionCallback> registered;
+    auto registered_future = registered.get_future();
+    writer.submit([&writer, &registered]() { registered.set_value(writer.registerStoreCompletion()); });
+    auto completion = registered_future.get();
+
+    writer.finishSubmissions();
+    ASSERT_TRUE(writer.state_ == CacheStoreAsyncWriter::State::IDLE);
+    ASSERT_ANY_THROW(writer.init());
+
+    auto waiter = std::async(std::launch::async, [&writer]() { writer.waitStoreCompletions(); });
+    EXPECT_EQ(std::future_status::timeout, waiter.wait_for(20ms));
+    completion(nullptr);
+    ASSERT_EQ(std::future_status::ready, waiter.wait_for(1s));
+    ASSERT_NO_THROW(waiter.get());
+
+    ASSERT_NO_THROW(writer.init());
+    ASSERT_NO_THROW(writer.waitAllDone());
+}
+
+TEST_F(CacheStoreAsyncWriterTest, StoreCompletionFailureIsPropagated) {
+    CacheStoreAsyncWriter writer;
+    writer.init(/*track_store_completions=*/true);
+
+    std::promise<CacheStoreAsyncWriter::StoreCompletionCallback> registered;
+    auto registered_future = registered.get_future();
+    writer.submit([&writer, &registered]() { registered.set_value(writer.registerStoreCompletion()); });
+    auto completion = registered_future.get();
+    completion(std::make_exception_ptr(std::runtime_error("store publish failed")));
+
+    try {
+        writer.waitAllDone();
+        FAIL() << "expected store completion exception";
+    } catch (const std::runtime_error& e) {
+        ASSERT_STREQ("store publish failed", e.what());
+    }
+    ASSERT_TRUE(writer.state_ == CacheStoreAsyncWriter::State::IDLE);
+
+    writer.init();
+    ASSERT_NO_THROW(writer.waitAllDone());
+    ASSERT_TRUE(writer.state_ == CacheStoreAsyncWriter::State::IDLE);
+}
+
+TEST_F(CacheStoreAsyncWriterTest, StoreCompletionsDoNotDriftAcrossManyCycles) {
+    CacheStoreAsyncWriter writer;
+
+    for (int cycle = 0; cycle < 1000; ++cycle) {
+        writer.init(/*track_store_completions=*/true);
+        std::promise<CacheStoreAsyncWriter::StoreCompletionCallback> registered;
+        auto registered_future = registered.get_future();
+        writer.submit([&writer, &registered]() { registered.set_value(writer.registerStoreCompletion()); });
+        auto completion = registered_future.get();
+        completion(nullptr);
+        writer.waitAllDone();
+        ASSERT_TRUE(writer.state_ == CacheStoreAsyncWriter::State::IDLE);
+    }
 }
 
 }  // namespace rtp_llm

@@ -268,6 +268,9 @@ struct PyCacheStoreInputs {
     // Undefined keeps the attention input/prefix lengths.
     torch::Tensor store_input_lengths;
     torch::Tensor store_prefix_lengths;
+
+    // Appended to preserve positional aggregate initialization above.
+    bool track_store_completion = false;
 };
 
 struct PyPrefillCudaGaphCopyParams {

@@ -55,7 +55,8 @@ public:
                    bool                               use_spec_decoding          = false,
                    const std::vector<int>&            kv_cache_layer_to_group    = {},
                    std::shared_ptr<ModelInputsLogger> model_inputs_logger        = nullptr,
-                   bool                               is_dspark_draft             = false);
+                   bool                               is_dspark_draft              = false,
+                   bool                               track_cache_store_completion = false);
     ~PyWrappedModel();
 
     // Context parallelism is a model-input policy, not merely a process-group
@@ -75,9 +76,13 @@ public:
     void            prepareAttentionInputs(const GptModelInputs& inputs) override;
     void            prepareAttentionInputs(const GptModelInputs& inputs, bool skip_forward_event_sync);
     void            updateKVCacheKernelBlockId(const GptModelInputs& inputs) override;
+    std::string     waitCacheStorePublication() override;
 
 private:
     std::optional<PyCacheStoreInputs> prepareWriteCacheParams(const GptModelInputs& inputs);
+    void                              beginCacheStoreCycle();
+    void                              finishCacheStoreForward();
+    void                              finishCacheStoreCycleOnException() noexcept;
 
 private:
     // Helper functions to reduce code duplication
@@ -116,6 +121,7 @@ private:
     const rtp_llm::ExecProperties device_props_;
     const bool                    enable_prefill_cp_;
     const bool                    is_dspark_draft_;
+    const bool                    track_cache_store_completion_;
     const rtp_llm::MlaOpsType                mla_ops_type_;
     const size_t                             layer_num_;
     const GptModelDescription                description_;
@@ -137,6 +143,8 @@ private:
 
     std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
     std::unique_ptr<CacheStoreAsyncWriter>     cache_store_async_writer_;
+    bool                                       cache_store_cycle_active_{false};
+    bool                                       cache_store_publication_pending_{false};
 
     // Accumulated H2D copies from tensorHoldHostAndToCuda(); flushed as one kernel per forward.
     FusedD2DCopyParams d2d_copies_;
@@ -157,10 +165,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
                                       bool                               use_spec_decoding,
                                       const std::vector<int>&            kv_cache_layer_to_group,
                                       std::shared_ptr<ModelInputsLogger> model_inputs_logger,
-                                      bool                               is_dspark_draft):
+                                      bool                               is_dspark_draft,
+                                      bool                               track_cache_store_completion):
     device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
     enable_prefill_cp_(shouldEnablePrefillContextParallel(device_props_.enable_prefill_cp, is_dspark_draft)),
     is_dspark_draft_(is_dspark_draft),
+    track_cache_store_completion_(track_cache_store_completion),
     mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
     description_(params.description),

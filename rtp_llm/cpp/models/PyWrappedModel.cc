@@ -469,6 +469,7 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             cache_store_async_writer_.get(),
             device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_size) : 1,
             device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_rank) : 0};
+        cache_store_inputs.track_store_completion = track_cache_store_completion_;
         if (inputs.cache_store_input_lengths.defined()) {
             cache_store_inputs.store_input_lengths = async_to_pinned_host(inputs.cache_store_input_lengths);
         }
@@ -478,6 +479,98 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
         params = cache_store_inputs;
     }
     return params;
+}
+
+void PyWrappedModel::beginCacheStoreCycle() {
+    cache_store_async_writer_->init(track_cache_store_completion_);
+    cache_store_cycle_active_ = true;
+}
+
+void PyWrappedModel::finishCacheStoreForward() {
+    RTP_LLM_CHECK_WITH_INFO(cache_store_cycle_active_,
+                            "finishCacheStoreForward called without an active cycle");
+    if (track_cache_store_completion_) {
+        // The Python forward has synchronously submitted all writer work, but
+        // those CPU tasks and the CacheStore publication they register remain
+        // asynchronous.  MtpExecutor drains both only at the final prefill
+        // dispatch boundary, preserving their overlap with the DSpARK draft
+        // head kernels and C++ post-processing.
+        return;
+    } else {
+        try {
+            cache_store_async_writer_->waitAllDone();
+            cache_store_cycle_active_ = false;
+        } catch (...) {
+            cache_store_cycle_active_ = false;
+            throw;
+        }
+    }
+}
+
+void PyWrappedModel::finishCacheStoreCycleOnException() noexcept {
+    if (!track_cache_store_completion_) {
+        return;
+    }
+    try {
+        // Do not detach a retained CacheStore task: it still aliases request KV
+        // memory.  Drain publication before the enclosing model exception can
+        // release/reuse that memory.
+        if (cache_store_cycle_active_) {
+            cache_store_async_writer_->finishSubmissions();
+            cache_store_cycle_active_        = false;
+            cache_store_publication_pending_ = true;
+        }
+        if (cache_store_publication_pending_) {
+            const auto publication_error = waitCacheStorePublication();
+            if (!publication_error.empty()) {
+                RTP_LLM_LOG_ERROR("DSpARK cache-store publication also failed while unwinding: %s",
+                                  publication_error.c_str());
+            }
+        }
+    } catch (...) {
+        RTP_LLM_LOG_ERROR("DSpARK cache-store cycle drain unexpectedly failed while unwinding model forward");
+    }
+}
+
+std::string PyWrappedModel::waitCacheStorePublication() {
+    RTP_LLM_PROFILE_SCOPE("py_model.waitCacheStorePublication");
+    if (cache_store_cycle_active_) {
+        try {
+            {
+                RTP_LLM_PROFILE_SCOPE("py_model.waitCacheStorePublication(finish_submissions)");
+                cache_store_async_writer_->finishSubmissions();
+            }
+            cache_store_cycle_active_        = false;
+            cache_store_publication_pending_ = true;
+        } catch (const std::exception& e) {
+            cache_store_cycle_active_ = false;
+            RTP_LLM_LOG_ERROR("DSpARK cache-store submission drain failed: %s", e.what());
+            return e.what();
+        } catch (...) {
+            cache_store_cycle_active_ = false;
+            RTP_LLM_LOG_ERROR("DSpARK cache-store submission drain failed with an unknown exception");
+            return "unknown cache-store submission failure";
+        }
+    }
+    if (!cache_store_publication_pending_) {
+        return {};
+    }
+    try {
+        {
+            RTP_LLM_PROFILE_SCOPE("py_model.waitCacheStorePublication(wait_publication)");
+            cache_store_async_writer_->waitStoreCompletions();
+        }
+        cache_store_publication_pending_ = false;
+        return {};
+    } catch (const std::exception& e) {
+        cache_store_publication_pending_ = false;
+        RTP_LLM_LOG_ERROR("DSpARK cache-store publication failed: %s", e.what());
+        return e.what();
+    } catch (...) {
+        cache_store_publication_pending_ = false;
+        RTP_LLM_LOG_ERROR("DSpARK cache-store publication failed with an unknown exception");
+        return "unknown cache-store publication failure";
+    }
 }
 
 GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs) {
@@ -530,7 +623,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
     }
 
     if (!inputs.warmup && inputs.pd_separation) {
-        cache_store_async_writer_->init();
+        beginCacheStoreCycle();
     }
 
     fusedCopy(d2d_copies_);
@@ -549,7 +642,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                             input_list.size());
 
     if (!inputs.warmup && inputs.pd_separation) {
-        cache_store_async_writer_->waitAllDone();
+        finishCacheStoreForward();
     }
 
     // TODO: merge hidden states in one tensor
@@ -628,7 +721,6 @@ void PyWrappedModel::prepareAttentionInputs(const GptModelInputs& inputs, bool s
     }
     if (!inputs.warmup && inputs.pd_separation) {
         attention_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
-        cache_store_async_writer_->init();
     }
     {
         RTP_LLM_PROFILE_SCOPE("py_model.prepareAttentionInputs(setup_kv_cache)");
@@ -764,6 +856,12 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs_, bert_embedding_inputs});
         py_model_inputs.dspark_ctx_lengths = inputs.dspark_ctx_lengths;
         py_model_inputs.dspark_ctx_starts  = inputs.dspark_ctx_starts;
+        // Attention inputs may be prepared asynchronously. Start the writer
+        // only when this call can actually submit cache-store work, so an
+        // earlier prepare failure cannot strand the cycle in RUNNING state.
+        if (!inputs.warmup && inputs.pd_separation) {
+            beginCacheStoreCycle();
+        }
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
@@ -799,7 +897,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         py_model_outputs.hidden_states = torch::Tensor();
 
         if (!inputs.warmup && inputs.pd_separation) {
-            cache_store_async_writer_->waitAllDone();
+            finishCacheStoreForward();
         }
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
@@ -872,12 +970,15 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         return attach_dspark_outputs(callForwardPostLayers(hidden_states, inputs, true));
 
     } catch (const py::error_already_set& e) {
+        finishCacheStoreCycleOnException();
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
         throw std::runtime_error(std::string("pybind11 error during forward call on Python instance: ") + e.what());
     } catch (const std::exception& e) {
+        finishCacheStoreCycleOnException();
         RTP_LLM_LOG_ERROR("C++ error during forward call on Python instance: %s", e.what());
         throw std::runtime_error(std::string("C++ error during forward call on Python instance: ") + e.what());
     } catch (...) {
+        finishCacheStoreCycleOnException();
         RTP_LLM_LOG_ERROR("An unknown error occurred during forward call on Python instance.");
         throw std::runtime_error("An unknown error occurred during forward call on Python instance.");
     }

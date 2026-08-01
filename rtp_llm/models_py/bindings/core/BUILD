@@ -129,6 +129,7 @@ cc_library(
         "ExecOps.cc",
     ],
     deps = [
+        ":cache_store_async_writer",
         ":device_data",
         ":op_data",
         ":type_convert",
@@ -208,6 +209,7 @@ cc_library(
         "ExecOps.cc",
     ],
     deps = [
+        ":cache_store_async_writer",
         ":device_data",
         ":op_data",
         ":type_convert",

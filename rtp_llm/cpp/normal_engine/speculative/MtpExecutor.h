@@ -151,6 +151,13 @@ protected:
                                               bool            request_actual_rows = false);
     void maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output, ModelBase& source);
 
+    // DSpARK emits substantially more cache-store work than one-layer MTP.
+    // Keep publication asynchronous across target sampling + draft forward,
+    // then synchronize completion across TP ranks immediately before decode
+    // dispatch so a slow rank cannot strand decode loads and connector refs.
+    bool finishDSparkPrefillCachePublication(const GptModelInputs&               model_input,
+                                             const std::list<GenerateStreamPtr>& streams);
+
     // Env-gated stream-async switch. Default off unless
     // RTP_LLM_STREAM_ASYNC=1 is exported at server start.
     bool useStreamAsync() const;
@@ -202,6 +209,7 @@ private:
     // Fixed-width block diffusion: one draft forward emits gamma proposals;
     // unlike MTP there is no autoregressive draft loop or hidden-state chain.
     bool                                             is_dspark_ = false;
+    torch::Tensor                                    dspark_cache_store_status_;
     size_t                                           draft_vocab_size_;
     std::shared_ptr<ModelBase>                       draft_model_;
     std::shared_ptr<ModelBase>                       sp_prefill_draft_model_;
@@ -241,5 +249,9 @@ private:
     // Bookkeeping worker for stream-async decode dispatch. It owns a CUDA
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.
     AsyncRunner spec_bookkeeping_runner_;
+
+    // Keep the DSpARK publication-status collective off the model stream so
+    // checking a one-element status does not implicitly drain draft kernels.
+    torch::Stream dspark_cache_store_sync_stream_;
 };
 };  // namespace rtp_llm

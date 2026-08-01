@@ -18,6 +18,8 @@
 
 namespace rtp_llm {
 
+class CacheStoreAsyncWriter;
+
 enum class ParallelMode {
     TP        = 0,
     DP        = 1,
@@ -235,6 +237,11 @@ struct CacheStoreInputs {
     // contention on background threads. nullptr means writeCacheStore will
     // create an event on the spot (single-threaded / C++ path).
     std::shared_ptr<torch::Event> pre_created_event = nullptr;
+
+    // DSpARK-only publication barrier.  Ordinary target/Eagle writes keep the
+    // legacy behavior and do not register CacheStore::store callbacks here.
+    CacheStoreAsyncWriter* cache_store_async_writer = nullptr;
+    bool                   track_store_completion   = false;
 };
 
 struct AttentionCommonInputs {
