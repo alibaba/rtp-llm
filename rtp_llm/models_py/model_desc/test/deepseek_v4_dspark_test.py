@@ -11,7 +11,11 @@ from torch import nn
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
 from rtp_llm.model_factory import ModelFactory
 from rtp_llm.model_loader.loader import ModelLoader
-from rtp_llm.models.deepseek_v4 import DeepSeekV4DSpark, DeepSeekV4DSparkWeight
+from rtp_llm.models.deepseek_v4 import (
+    DeepSeekV4,
+    DeepSeekV4DSpark,
+    DeepSeekV4DSparkWeight,
+)
 from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import (
     DSparkMarkovHead,
     DeepSeekV4DSparkModel,
@@ -37,6 +41,12 @@ class _AddLayer(nn.Module):
 
 
 class DeepSeekV4DSparkTest(unittest.TestCase):
+    def test_target_config_excludes_appended_dspark_layers(self):
+        real = DeepSeekV4._create_config(CKPT)
+        self.assertEqual(real.num_layers, 43)
+        self.assertEqual(len(real.attn_config.layer_compress_ratios), 43)
+        self.assertNotEqual(real.attn_config.layer_compress_ratios[-1], 0)
+
     def test_config_uses_target_layer_count_not_num_nextn(self):
         cfg = {
             "dspark_block_size": 5,
