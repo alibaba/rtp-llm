@@ -95,10 +95,16 @@ CacheStoreAsyncWriter::StoreCompletionCallback CacheStoreAsyncWriter::registerSt
                             "CacheStoreAsyncWriter: missing store completion state while RUNNING");
     completion_state->pending_count.fetch_add(1, std::memory_order_acq_rel);
 
-    // CacheStore's callback contract is once-only. Keep the success path
-    // lock-free; only failures contend on the exception mutex, and only the
-    // final completion wakes the waiter.
-    return [completion_state](std::exception_ptr exception) {
+    // CacheStore implementations should invoke their callback once, but the
+    // synchronous store() error path may race with a callback. Make each token
+    // idempotent so a duplicate cannot consume another publication's count.
+    auto completion_token = std::make_shared<StoreCompletionToken>(completion_state);
+    return [completion_token](std::exception_ptr exception) {
+        if (completion_token->completed.exchange(true, std::memory_order_acq_rel)) {
+            RTP_LLM_LOG_WARNING("CacheStoreAsyncWriter: duplicate store completion ignored");
+            return;
+        }
+        const auto& completion_state = completion_token->state;
         if (exception) {
             std::lock_guard<std::mutex> lock(completion_state->exception_mutex);
             if (!completion_state->stored_exception) {
@@ -106,10 +112,7 @@ CacheStoreAsyncWriter::StoreCompletionCallback CacheStoreAsyncWriter::registerSt
             }
         }
         const auto previous = completion_state->pending_count.fetch_sub(1, std::memory_order_acq_rel);
-        if (previous <= 0) {
-            RTP_LLM_LOG_ERROR("CacheStoreAsyncWriter: store completion counter underflow");
-            return;
-        }
+        RTP_LLM_CHECK_WITH_INFO(previous > 0, "CacheStoreAsyncWriter: store completion counter underflow");
         if (previous == 1) {
             std::lock_guard<std::mutex> lock(completion_state->wait_mutex);
             completion_state->cv.notify_one();

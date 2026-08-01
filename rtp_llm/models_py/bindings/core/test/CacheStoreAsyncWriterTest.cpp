@@ -217,6 +217,33 @@ TEST_F(CacheStoreAsyncWriterTest, StoreCompletionFailureIsPropagated) {
     ASSERT_TRUE(writer.state_ == CacheStoreAsyncWriter::State::IDLE);
 }
 
+TEST_F(CacheStoreAsyncWriterTest, DuplicateCompletionCannotConsumeAnotherPublication) {
+    using namespace std::chrono_literals;
+
+    CacheStoreAsyncWriter writer;
+    writer.init(/*track_store_completions=*/true);
+
+    std::promise<std::vector<CacheStoreAsyncWriter::StoreCompletionCallback>> registered;
+    auto registered_future = registered.get_future();
+    writer.submit([&writer, &registered]() {
+        std::vector<CacheStoreAsyncWriter::StoreCompletionCallback> completions;
+        completions.emplace_back(writer.registerStoreCompletion());
+        completions.emplace_back(writer.registerStoreCompletion());
+        registered.set_value(std::move(completions));
+    });
+    auto completions = registered_future.get();
+
+    completions[0](nullptr);
+    completions[0](std::make_exception_ptr(std::runtime_error("duplicate must be ignored")));
+
+    auto waiter = std::async(std::launch::async, [&writer]() { writer.waitAllDone(); });
+    EXPECT_EQ(std::future_status::timeout, waiter.wait_for(20ms));
+
+    completions[1](nullptr);
+    ASSERT_EQ(std::future_status::ready, waiter.wait_for(1s));
+    ASSERT_NO_THROW(waiter.get());
+}
+
 TEST_F(CacheStoreAsyncWriterTest, StoreCompletionsDoNotDriftAcrossManyCycles) {
     CacheStoreAsyncWriter writer;
 

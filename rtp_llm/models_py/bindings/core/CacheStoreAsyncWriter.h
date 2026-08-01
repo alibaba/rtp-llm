@@ -61,6 +61,13 @@ private:
         std::exception_ptr      stored_exception;
     };
 
+    struct StoreCompletionToken {
+        explicit StoreCompletionToken(std::shared_ptr<StoreCompletionState> state): state(std::move(state)) {}
+
+        std::shared_ptr<StoreCompletionState> state;
+        std::atomic<bool>                      completed{false};
+    };
+
     autil::ThreadPoolBasePtr thread_pool_;
     std::atomic<int64_t>     pending_count_{0};
     std::mutex               state_mutex_;
