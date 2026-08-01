@@ -266,8 +266,10 @@ private:
 
     AsyncRunner                             target_verify_prepare_runner_;
     AsyncRunner                             draft_prefill_prepare_runner_;
-    AsyncRunner                             spec_logits_verify_async_runner_;
+    // Declare the worker after its target so reverse-order destruction joins
+    // the worker before releasing the runner it calls.
     std::unique_ptr<SpecLogitsVerifyRunner> spec_logits_verify_runner_;
+    AsyncRunner                             spec_logits_verify_async_runner_;
 
     // Bookkeeping worker for stream-async decode dispatch. It owns a CUDA
     // stream + thread and runs D2H/specUpdate/KV release off the main thread.

@@ -26,7 +26,9 @@ public:
         int                          propose_step  = 0;
         size_t                       vocab_size    = 0;
 
-        // Shape [B, P], dtype int32/int64, CPU or CUDA.
+        // Shape [B, P] or [B, P + 1], dtype int32/int64, CPU or CUDA.
+        // The wider form carries an anchor in column 0; processors only see
+        // the P proposal columns.
         torch::Tensor                 draft_tokens;
         std::shared_ptr<torch::Event> draft_tokens_ready_event;
     };

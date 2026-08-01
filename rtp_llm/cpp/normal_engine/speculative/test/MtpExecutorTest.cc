@@ -1,6 +1,8 @@
 #include <algorithm>
 #include <memory>
 #include <chrono>
+#include <mutex>
+#include <thread>
 #include "torch/all.h"
 #include "gtest/gtest.h"
 
@@ -37,9 +39,10 @@ struct MtpExecutorTestConfig {
     size_t vocab_size          = 4;
     size_t num_layers          = 1;
     size_t gen_num_per_cycle   = 4;
-    size_t vocab_size_override = 0;  // 0 means use vocab_size
-    SpeculativeType sp_type              = SP_TYPE_MTP;
-    int64_t         dspark_mask_token_id = -1;
+    size_t          vocab_size_override      = 0;  // 0 means use vocab_size
+    SpeculativeType sp_type                  = SP_TYPE_MTP;
+    int64_t         dspark_mask_token_id     = -1;
+    bool            dspark_sample_from_anchor = false;
 };
 
 template<typename T>
@@ -304,6 +307,14 @@ public:
     }
 
     int tryAcceptAndFillBitmask(const SpecLogitsProcessorRequest& request) override {
+        {
+            std::lock_guard<std::mutex> lock(observation_mutex_);
+            invocation_thread_id_ = std::this_thread::get_id();
+            observed_draft_tokens_.clear();
+            if (request.draft_tokens != nullptr && request.propose_step > 0) {
+                observed_draft_tokens_.assign(request.draft_tokens, request.draft_tokens + request.propose_step);
+            }
+        }
         if (request.propose_step <= 0 || request.bitmask_cpu_out == nullptr) {
             return request.propose_step;
         }
@@ -320,9 +331,23 @@ public:
         return request.propose_step;
     }
 
+    std::thread::id invocationThreadId() const {
+        std::lock_guard<std::mutex> lock(observation_mutex_);
+        return invocation_thread_id_;
+    }
+
+    std::vector<int32_t> observedDraftTokens() const {
+        std::lock_guard<std::mutex> lock(observation_mutex_);
+        return observed_draft_tokens_;
+    }
+
 private:
     int32_t rejected_token_;
     int64_t accepted_token_len_;
+
+    mutable std::mutex   observation_mutex_;
+    std::thread::id      invocation_thread_id_;
+    std::vector<int32_t> observed_draft_tokens_;
 };
 
 struct MtpExecutorComponents {
@@ -403,9 +428,10 @@ public:
         model_config.max_seq_len          = test_config.max_seq_len;
         model_config.vocab_size           = test_config.vocab_size;
         model_config.num_layers           = test_config.num_layers;
-        sp_config.gen_num_per_cycle       = test_config.gen_num_per_cycle;
-        sp_config.type                    = test_config.sp_type;
-        sp_config.sp_dspark_mask_token_id = test_config.dspark_mask_token_id;
+        sp_config.gen_num_per_cycle            = test_config.gen_num_per_cycle;
+        sp_config.type                         = test_config.sp_type;
+        sp_config.sp_dspark_mask_token_id      = test_config.dspark_mask_token_id;
+        sp_config.sp_dspark_sample_from_anchor = test_config.dspark_sample_from_anchor;
 
         resource_context.cache_manager =
             std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
@@ -921,6 +947,94 @@ TEST_F(MtpExecutorTest, testDecodeSpecLogitsCapReplacesInvalidDraftWithTargetTok
     ASSERT_TRUE(status.ok());
 
     checkOutput(stream, {0, 1, 2, 1}, {1, 2}, {0.0, 0.0, 1.0, 0.0}, {0.21, 0.22});
+}
+
+TEST_F(MtpExecutorTest, testDSparkSpecLogitsVerifyUsesAsyncWorkerAndSkipsAnchor) {
+    constexpr int32_t gamma      = 3;
+    constexpr int32_t vocab_size = 4;
+
+    MtpExecutorTestConfig test_config;
+    test_config.vocab_size                = vocab_size;
+    test_config.gen_num_per_cycle         = gamma;
+    test_config.vocab_size_override       = vocab_size;
+    test_config.sp_type                   = SP_TYPE_DSPARK;
+    test_config.dspark_mask_token_id      = 0;
+    test_config.dspark_sample_from_anchor = true;
+    auto components                       = createMtpExecutorComponents(test_config);
+
+    GenerateStreamPtr stream = createContextStream(
+        components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    auto sp_buffer          = std::make_shared<SpeculativeExecutorStreamOutput>();
+    sp_buffer->propose_step = gamma;
+    sp_buffer->tokens       = torch::empty({1, gamma + 1}, torch::kInt32);
+    stream->setSPOutputBuffer(sp_buffer);
+
+    auto proposal_cpu = torch::tensor({3, 2, 1}, torch::kInt32);
+    auto proposal_gpu = proposal_cpu.to(torch::kCUDA);
+    StreamSpecUpdateInfo spec_update_info{torch::tensor({{2}}, torch::kInt32),
+                                          1,
+                                          -1,
+                                          torch::Tensor(),
+                                          torch::Tensor(),
+                                          proposal_gpu,
+                                          proposal_cpu};
+    stream->specUpdate(spec_update_info);
+
+    auto processor = std::make_shared<RejectDraftTokenSpecProcessor>(3, stream->outputTokenLen());
+    stream->logits_processor_list_.push_back(processor);
+    const auto main_thread_id = std::this_thread::get_id();
+
+    GptModelInputs target_input;
+    target_input.combo_tokens      = torch::tensor({2, 3, 2, 1}, torch::kInt32);
+    target_input.input_lengths     = torch::tensor({gamma + 1}, torch::kInt32);
+    target_input.prefix_lengths    = torch::tensor({2}, torch::kInt32);
+    target_input.lm_output_indexes = torch::arange(0, gamma + 1, torch::kInt32);
+
+    GptModelOutputs target_output;
+    target_output.logits = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f,
+                                          0.5f, 0.4f, 0.3f, 0.2f,
+                                          0.2f, 0.6f, 0.1f, 0.1f,
+                                          0.7f, 0.1f, 0.1f, 0.1f})
+                               .reshape({gamma + 1, vocab_size})
+                               .to(torch::kCUDA);
+    target_output.aux_hidden_states =
+        torch::arange(0, 2 * (gamma + 1), torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA))
+            .reshape({gamma + 1, 2});
+    target_output.all_hidden_states = target_output.aux_hidden_states;
+    components.fake_target_model->setInputs({target_input});
+    components.fake_target_model->setOutputs({target_output});
+
+    auto sampler_input         = SamplerInputs{target_output.logits.clone()};
+    sampler_input.logits[0][3] = BaseLogitsProcessor::neg_inf;
+    SamplerOutput target_sampler_output{torch::tensor({1, 2, 1, 0}, torch::kInt32).reshape({gamma + 1, 1})};
+    target_sampler_output.all_probs = torch::eye(vocab_size, torch::kFloat32).to(torch::kCUDA);
+    components.fake_sampler->setInputs({sampler_input});
+    components.fake_sampler->setOutputs({target_sampler_output});
+
+    GptModelInputs draft_input;
+    draft_input.combo_tokens       = torch::tensor({1, 0, 0}, torch::kInt32);
+    draft_input.input_lengths      = torch::tensor({gamma}, torch::kInt32);
+    draft_input.prefix_lengths     = torch::tensor({3}, torch::kInt32);
+    draft_input.lm_output_indexes  = torch::tensor({0}, torch::kInt32);
+    draft_input.last_hidden_states = target_output.aux_hidden_states;
+
+    GptModelOutputs draft_output;
+    draft_output.draft_tokens = torch::tensor({{2, 1, 3}}, torch::kInt32).to(torch::kCUDA);
+    components.fake_draft_model->setInputs({draft_input});
+    components.fake_draft_model->setOutputs({draft_output});
+
+    setupFakeModels(components.executor.get(),
+                    std::move(components.fake_target_model),
+                    std::move(components.fake_draft_model),
+                    std::move(components.fake_fast_topk_sampler),
+                    std::move(components.fake_speculative_sampler),
+                    std::move(components.fake_sampler));
+
+    auto status = components.executor->process({stream});
+    ASSERT_TRUE(status.ok()) << status.ToString();
+    EXPECT_NE(std::thread::id(), processor->invocationThreadId());
+    EXPECT_NE(main_thread_id, processor->invocationThreadId());
+    EXPECT_EQ((std::vector<int32_t>{3, 2, 1}), processor->observedDraftTokens());
 }
 
 TEST_F(MtpExecutorTest, testDecodeOneStepSpecLogitsCapReplacesInvalidDraftWithTargetToken) {
