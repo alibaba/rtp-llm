@@ -68,6 +68,12 @@ private:
                                           const std::vector<RequiredPositions>* required_positions) const;
 
     bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const override;
+    void logMallocFailure(const MallocInfo& malloc_info,
+                          const char*       phase,
+                          int               failed_batch,
+                          int               failed_group,
+                          bool              incremental,
+                          int               failed_need_blocks) const override;
 
 protected:
     MallocStatus evaluatePreparedInitCapacity(const MallocInfo&      malloc_info,
