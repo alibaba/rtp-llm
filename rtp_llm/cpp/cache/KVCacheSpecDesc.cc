@@ -58,8 +58,10 @@ CacheGroupPolicy SpecBuilder::groupPolicy(const KVCacheSpecDesc& desc) {
         if (desc.capacity->reservable.has_value()) {
             policy.reservable = *desc.capacity->reservable;
         }
-        if (desc.capacity->explicit_block_num.has_value()) {
-            policy.explicit_block_num = *desc.capacity->explicit_block_num;
+        if (desc.capacity->fixed_block_num.has_value()) {
+            RTP_LLM_CHECK_WITH_INFO(
+                *desc.capacity->fixed_block_num > 0, "fixed cache capacity for tag=%s must be > 0", desc.tag.c_str());
+            policy.fixed_block_num = *desc.capacity->fixed_block_num;
         }
         if (desc.capacity->charge_to_paged_budget.has_value()) {
             policy.charge_to_paged_budget = *desc.capacity->charge_to_paged_budget;

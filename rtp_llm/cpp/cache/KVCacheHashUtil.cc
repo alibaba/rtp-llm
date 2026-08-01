@@ -6,74 +6,78 @@
 
 namespace rtp_llm {
 
-void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
-                   CompleteTokenIdsPtr     complete_token_ids,
-                   int                     seq_size_per_block) {
+void initCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource, CompleteTokenIdsPtr complete_token_ids) {
     const int batch_size = batch_kv_cache_resource->batchSize();
     const int seq_len    = complete_token_ids->seqLength();
 
-    // Initial fill: compute cache_keys for all blocks, including the final partial block.
-    const int desired_blocks = (seq_len + seq_size_per_block - 1) / seq_size_per_block;  // ceil
-
     for (int i = 0; i < batch_size; ++i) {
-        batch_kv_cache_resource->clearCacheKeys(i);
+        auto* token_ids = complete_token_ids->data(i);
+        auto& resource  = batch_kv_cache_resource->cacheResource(i);
+        resource.requestPrefix().rebuild(token_ids, static_cast<size_t>(seq_len));
+        RTP_LLM_CHECK_WITH_INFO(resource.topology() != nullptr, "initCacheKeys requires resource topology");
+        for (const auto& group : resource.topology()->groups()) {
+            const int span           = static_cast<int>(group.seq_size_per_block);
+            const int desired_blocks = (seq_len + span - 1) / span;
+            batch_kv_cache_resource->clearCacheKeys(i, group.tag);
 
-        int64_t rolling_hash = 0;
-        auto*   token_ids    = complete_token_ids->data(i);
-        for (int index = 0; index < desired_blocks; ++index) {
-            const int pos       = index * seq_size_per_block;
-            const int block_len = std::min(seq_size_per_block, seq_len - pos);
-            rolling_hash        = rtp_llm::hashInt64Array(rolling_hash, token_ids + pos, token_ids + pos + block_len);
-            batch_kv_cache_resource->pushBackCacheKey(i, rolling_hash);
+            int64_t rolling_hash = 0;
+            for (int index = 0; index < desired_blocks; ++index) {
+                const int pos       = index * span;
+                const int block_len = std::min(span, seq_len - pos);
+                rolling_hash = rtp_llm::hashInt64Array(rolling_hash, token_ids + pos, token_ids + pos + block_len);
+                batch_kv_cache_resource->pushBackCacheKey(i, group.tag, rolling_hash);
+            }
+            auto& resource = batch_kv_cache_resource->cacheResource(i);
+            resource.setLastBlockAligned(group.tag, seq_len % span == 0);
+            resource.ensureLinearBlockDependencies(group.tag);
         }
-    }
-
-    batch_kv_cache_resource->setLastBlockAligned(seq_len % seq_size_per_block == 0);
-    for (int i = 0; i < batch_size; ++i) {
-        batch_kv_cache_resource->cacheResource(i).ensureLinearBlockDependencies();
     }
 }
 
-void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource,
-                     CompleteTokenIdsPtr     complete_token_ids,
-                     int                     seq_size_per_block) {
+void updateCacheKeys(BatchKVCacheResourcePtr batch_kv_cache_resource, CompleteTokenIdsPtr complete_token_ids) {
     const int batch_size = batch_kv_cache_resource->batchSize();
     const int seq_len    = complete_token_ids->seqLength();
 
     for (int i = 0; i < batch_size; ++i) {
-        const auto& keys         = batch_kv_cache_resource->cacheKeys(i);
-        const int   total_blocks = seq_len / seq_size_per_block;  // floor, only full blocks
-
-        // If last_block_aligned was false previously, the last cache key corresponds to a partial block.
-        // Drop it before we append new full-block cache keys.
-        if (!batch_kv_cache_resource->lastBlockAligned() && !keys.empty()) {
-            batch_kv_cache_resource->popBackCacheKey(i);
+        auto* token_ids = complete_token_ids->data(i);
+        auto& resource  = batch_kv_cache_resource->cacheResource(i);
+        resource.requestPrefix().rebuild(token_ids, static_cast<size_t>(seq_len));
+        RTP_LLM_CHECK_WITH_INFO(resource.topology() != nullptr, "updateCacheKeys requires resource topology");
+        for (const auto& group : resource.topology()->groups()) {
+            const int span         = static_cast<int>(group.seq_size_per_block);
+            const int total_blocks = seq_len / span;
+            auto&     keys         = resource.cacheKeys(group.tag);
+            if (!resource.lastBlockAligned(group.tag) && !keys.empty()) {
+                keys.pop_back();
+            }
+            int64_t hash      = keys.empty() ? 0 : keys.back();
+            int     start_idx = static_cast<int>(keys.size());
+            for (int index = start_idx; index < total_blocks; ++index) {
+                const int pos = index * span;
+                hash          = rtp_llm::hashInt64Array(hash, token_ids + pos, token_ids + pos + span);
+                keys.push_back(hash);
+            }
+            resource.setLastBlockAligned(group.tag, true);
+            resource.ensureLinearBlockDependencies(group.tag);
         }
-
-        auto*   token_ids = complete_token_ids->data(i);
-        int64_t hash      = keys.empty() ? 0 : keys.back();
-        int     start_idx = static_cast<int>(keys.size());
-
-        for (int index = start_idx; index < total_blocks; ++index) {
-            const int pos = index * seq_size_per_block;
-            hash          = rtp_llm::hashInt64Array(hash, token_ids + pos, token_ids + pos + (int)seq_size_per_block);
-            batch_kv_cache_resource->pushBackCacheKey(i, hash);
-        }
-    }
-
-    // After incremental update we guarantee all existing keys are for full blocks.
-    batch_kv_cache_resource->setLastBlockAligned(true);
-    for (int i = 0; i < batch_size; ++i) {
-        batch_kv_cache_resource->cacheResource(i).ensureLinearBlockDependencies();
     }
 }
 
 void dropLastPartialBlock(BatchKVCacheResourcePtr batch_kv_cache_resource) {
-    if (batch_kv_cache_resource->lastBlockAligned()) {
-        return;
+    for (int batch_id = 0; batch_id < batch_kv_cache_resource->batchSize(); ++batch_id) {
+        auto& resource = batch_kv_cache_resource->cacheResource(batch_id);
+        RTP_LLM_CHECK_WITH_INFO(resource.topology() != nullptr, "dropLastPartialBlock requires resource topology");
+        for (const auto& group : resource.topology()->groups()) {
+            if (resource.lastBlockAligned(group.tag)) {
+                continue;
+            }
+            auto& keys = resource.cacheKeys(group.tag);
+            RTP_LLM_CHECK_WITH_INFO(!keys.empty(), "partial block is missing its cache key, tag=%s", group.tag.c_str());
+            keys.pop_back();
+            resource.setLastBlockAligned(group.tag, true);
+            resource.ensureLinearBlockDependencies(group.tag);
+        }
     }
-    batch_kv_cache_resource->popBackAllBatchCacheKeys();
-    batch_kv_cache_resource->setLastBlockAligned(true);
 }
 
 }  // namespace rtp_llm

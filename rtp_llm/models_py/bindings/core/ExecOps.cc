@@ -183,19 +183,38 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     const bool             use_group_cache_transfer_policy = param.kv_cache_group_policies.size() > 1;
 
     const auto seq_it = param.tokens_per_block_by_group.find(param.tag);
+    RTP_LLM_CHECK_WITH_INFO(!use_group_cache_transfer_policy || seq_it != param.tokens_per_block_by_group.end(),
+                            "multi-group cache-store metadata has no physical tokens_per_block for tag=%s",
+                            param.tag.c_str());
     const auto seq_size_per_block =
         seq_it != param.tokens_per_block_by_group.end() ? seq_it->second : param.tokens_per_block;
     const auto kv_stride_it = param.kv_block_stride_bytes_by_group.find(param.tag);
+    RTP_LLM_CHECK_WITH_INFO(!use_group_cache_transfer_policy
+                                || kv_stride_it != param.kv_block_stride_bytes_by_group.end(),
+                            "multi-group cache-store metadata has no KV stride for tag=%s",
+                            param.tag.c_str());
     const auto kv_block_stride_bytes =
         kv_stride_it != param.kv_block_stride_bytes_by_group.end() ? kv_stride_it->second : param.kv_block_stride_bytes;
-    const auto scale_stride_it       = param.kv_scale_stride_bytes_by_group.find(param.tag);
+    const auto scale_stride_it = param.kv_scale_stride_bytes_by_group.find(param.tag);
+    RTP_LLM_CHECK_WITH_INFO(!use_group_cache_transfer_policy
+                                || scale_stride_it != param.kv_scale_stride_bytes_by_group.end(),
+                            "multi-group cache-store metadata has no scale stride for tag=%s",
+                            param.tag.c_str());
     const auto kv_scale_stride_bytes = scale_stride_it != param.kv_scale_stride_bytes_by_group.end() ?
                                            scale_stride_it->second :
                                            param.kv_scale_stride_bytes;
     const auto kv_transfer_it        = param.kv_block_transfer_bytes_by_group.find(param.tag);
+    RTP_LLM_CHECK_WITH_INFO(!use_group_cache_transfer_policy
+                                || kv_transfer_it != param.kv_block_transfer_bytes_by_group.end(),
+                            "multi-group cache-store metadata has no KV transfer size for tag=%s",
+                            param.tag.c_str());
     const auto kv_block_transfer_bytes =
         kv_transfer_it != param.kv_block_transfer_bytes_by_group.end() ? kv_transfer_it->second : kv_block_stride_bytes;
-    const auto scale_transfer_it       = param.kv_scale_transfer_bytes_by_group.find(param.tag);
+    const auto scale_transfer_it = param.kv_scale_transfer_bytes_by_group.find(param.tag);
+    RTP_LLM_CHECK_WITH_INFO(!use_group_cache_transfer_policy
+                                || scale_transfer_it != param.kv_scale_transfer_bytes_by_group.end(),
+                            "multi-group cache-store metadata has no scale transfer size for tag=%s",
+                            param.tag.c_str());
     const auto kv_scale_transfer_bytes = scale_transfer_it != param.kv_scale_transfer_bytes_by_group.end() ?
                                              scale_transfer_it->second :
                                              kv_scale_stride_bytes;

@@ -11,6 +11,7 @@
 #include <vector>
 
 #include "rtp_llm/cpp/utils/AssertUtils.h"
+#include "rtp_llm/cpp/cache/RequestPrefixResource.h"
 
 namespace rtp_llm {
 
@@ -26,6 +27,7 @@ inline bool isNullBlockIdx(BlockIdxType block_idx) {
 }
 
 using CacheKeysType    = std::vector<CacheKeyType>;
+using CacheKeysByGroup = std::unordered_map<std::string, CacheKeysType>;
 using BlockIndicesType = std::vector<BlockIdxType>;
 
 struct BlockDependency {
@@ -80,9 +82,13 @@ private:
     size_t           kernel_blocks_per_kv_block_ = 1;
 };
 
-struct TaggedBlockIds {
+struct CacheGroupResource {
     std::string               tag;
     std::shared_ptr<BlockIds> block_ids;
+    CacheKeysType             cache_keys;
+    BlockDependenciesType     block_dependencies;
+    bool                      cache_keys_are_cp_canonical{false};
+    bool                      last_block_aligned{false};
 };
 
 class KVCacheResource;
@@ -162,56 +168,96 @@ public:
     const BlockIds&   blockIdsForLayer(int layer_id, std::string_view tag) const;
     LayerBlockIdsView blockIdsForLayer(int layer_id) const;
 
-    int layerNum() const;
-    int groupNums() const;
+    int                                         layerNum() const;
+    int                                         groupNums() const;
+    size_t                                      physicalBlockSpan(std::string_view tag) const;
+    const std::shared_ptr<const CacheTopology>& topology() const {
+        return topology_;
+    }
 
-    const std::vector<TaggedBlockIds>& groupBlocks() const;
+    RequestPrefixResource& requestPrefix() {
+        return request_prefix_;
+    }
+    const RequestPrefixResource& requestPrefix() const {
+        return request_prefix_;
+    }
 
+    const std::vector<CacheGroupResource>& groupResources() const;
+    const std::vector<CacheGroupResource>& groupBlocks() const {
+        return groupResources();
+    }
+
+    CacheKeysType&       cacheKeys(std::string_view tag);
+    const CacheKeysType& cacheKeys(std::string_view tag) const;
     CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
+    void                 setCacheKeys(std::string_view tag, const CacheKeysType& keys);
+    void                 setCacheKeys(std::string_view tag, CacheKeysType&& keys);
     void                 setCacheKeys(const CacheKeysType& keys);
     void                 setCacheKeys(CacheKeysType&& keys);
-    bool                 cacheKeysAreCpCanonical() const;
-    void                 setCacheKeysAreCpCanonical(bool cache_keys_are_cp_canonical);
+    bool                 cacheKeysAreCpCanonical(std::string_view tag) const;
+    bool                 cacheKeysAreCpCanonical() const {
+        return cacheKeysAreCpCanonical(strictSingleGroupTag());
+    }
+    void setCacheKeysAreCpCanonical(std::string_view tag, bool cache_keys_are_cp_canonical);
+    void setCacheKeysAreCpCanonical(bool value) {
+        setCacheKeysAreCpCanonical(strictSingleGroupTag(), value);
+    }
 
+    BlockDependenciesType&       blockDependencies(std::string_view tag);
+    const BlockDependenciesType& blockDependencies(std::string_view tag) const;
     BlockDependenciesType&       blockDependencies();
     const BlockDependenciesType& blockDependencies() const;
-    void                         setBlockDependencies(const BlockDependenciesType& dependencies);
-    void                         setBlockDependencies(BlockDependenciesType&& dependencies);
-    void                         rebuildLinearBlockDependencies();
-    void                         ensureLinearBlockDependencies();
+    void                         setBlockDependencies(std::string_view tag, const BlockDependenciesType& dependencies);
+    void                         setBlockDependencies(std::string_view tag, BlockDependenciesType&& dependencies);
+    void                         setBlockDependencies(BlockDependenciesType&& dependencies) {
+        setBlockDependencies(strictSingleGroupTag(), std::move(dependencies));
+    }
+    void rebuildLinearBlockDependencies(std::string_view tag);
+    void rebuildLinearBlockDependencies();
+    void ensureLinearBlockDependencies(std::string_view tag);
+    void ensureLinearBlockDependencies() {
+        ensureLinearBlockDependencies(strictSingleGroupTag());
+    }
 
     // Return rank-local cache keys: every cp_size-th key starting from cp_rank.
-    // localCacheKeys(r, s)[i] == cacheKeys()[i * s + r]
-    // Note: when cacheKeys().size() % cp_size != 0 (e.g. 1 real block, cp_size=2),
+    // localCacheKeys(tag, r, s)[i] == cacheKeys(tag)[i * s + r]
+    // Note: when cacheKeys(tag).size() % cp_size != 0 (e.g. 1 real block, cp_size=2),
     // localCacheKeys may return fewer entries than blocks().size().  This is
     // intentional — padding blocks carry no real data and must NOT participate in
     // device cache insert, PD transfer, or connector operations.  Downstream code
     // (e.g. insertIntoCache) already uses min(keys, blocks) to handle this.
-    CacheKeysType localCacheKeys(int cp_rank, int cp_size) const {
+    CacheKeysType localCacheKeys(std::string_view tag, int cp_rank, int cp_size) const {
         CacheKeysType local;
-        for (int i = cp_rank; i < static_cast<int>(cache_keys.size()); i += cp_size) {
-            local.push_back(cache_keys[i]);
+        const auto&   keys = cacheKeys(tag);
+        for (int i = cp_rank; i < static_cast<int>(keys.size()); i += cp_size) {
+            local.push_back(keys[i]);
         }
         return local;
     }
 
+    size_t reuseTokenNum() const;
+    size_t deviceReuseTokenNum() const;
+    size_t memoryReuseTokenNum() const;
+    size_t remoteReuseTokenNum() const;
+
     size_t reuseBlockNum() const;
-
     size_t deviceReuseBlockNum() const;
-    void   setDeviceReuseBlockNum(size_t device_reuse_blocks_num);
-
     size_t memoryReuseBlockNum() const;
-    void   setMemoryReuseBlockNum(size_t memory_reuse_blocks_num);
-
     size_t remoteReuseBlockNum() const;
-    void   setRemoteReuseBlockNum(size_t remote_reuse_blocks_num);
 
+    void setDeviceReuseTokenNum(size_t tokens);
+    void setMemoryReuseTokenNum(size_t tokens);
+    void setRemoteReuseTokenNum(size_t tokens);
+
+    void setDeviceReuseBlockNum(size_t blocks);
+    void setMemoryReuseBlockNum(size_t blocks);
+    void setRemoteReuseBlockNum(size_t blocks);
+
+    bool lastBlockAligned(std::string_view tag) const;
+    void setLastBlockAligned(std::string_view tag, bool last_block_aligned);
     bool lastBlockAligned() const;
     void setLastBlockAligned(bool last_block_aligned);
-
-    size_t remoteReuseBlocksNum() const;
-    void   setRemoteReuseBlocksNum(size_t remote_reuse_blocks_num);
 
     void swapBlocks(std::string_view tag, size_t rhs, size_t lhs);
 
@@ -223,19 +269,15 @@ private:
     size_t groupOffset(std::string_view tag) const;
     bool   layerContainsTag(int layer_id, std::string_view tag) const;
 
-    const std::vector<std::string>& groupTagsForLayer(int layer_id) const;
+    const std::vector<std::string>&      groupTagsForLayer(int layer_id) const;
+    std::shared_ptr<const CacheTopology> topology_;
+    CacheGroupResource&                  groupResource(std::string_view tag);
+    const CacheGroupResource&            groupResource(std::string_view tag) const;
+    const std::string&                   strictSingleGroupTag() const;
 
-    std::shared_ptr<const CacheTopology>    topology_;
-    std::vector<TaggedBlockIds>             group_block_ids_;
+    std::vector<CacheGroupResource>         group_resources_;
     std::unordered_map<std::string, size_t> group_offset_by_tag_;
-    CacheKeysType                           cache_keys;
-    BlockDependenciesType                   block_dependencies;
-    bool                                    cache_keys_are_cp_canonical_{false};
-
-    size_t device_reuse_block_num_{0};
-    size_t memory_reuse_block_num_{0};
-    size_t remote_reuse_block_num_{0};
-    bool   last_block_aligned_{false};
+    RequestPrefixResource                   request_prefix_;
 };
 
 using KVCacheResourcePtr = std::shared_ptr<KVCacheResource>;

@@ -89,7 +89,7 @@ void copyKvCacheBlocksToModelInput(GptModelInputs&             model_input,
     if (warm_up || model_input.block_tables_by_group.empty()) {
         return;
     }
-    for (const auto& group : kv_cache.groupBlocks(stream_batch_idx)) {
+    for (const auto& group : kv_cache.groupResources(stream_batch_idx)) {
         auto table_it = model_input.block_tables_by_group.find(group.tag);
         RTP_LLM_CHECK_WITH_INFO(table_it != model_input.block_tables_by_group.end(),
                                 "KV cache resource has unconfigured tag=%s",
@@ -231,7 +231,7 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
             for (const auto& stream : streams) {
                 const auto& resource = *stream->kvCachePtr();
                 for (int batch = 0; batch < stream->currentBatchSize(); ++batch) {
-                    for (const auto& group : resource.groupBlocks(batch)) {
+                    for (const auto& group : resource.groupResources(batch)) {
                         auto width_it = widths.find(group.tag);
                         RTP_LLM_CHECK_WITH_INFO(
                             width_it != widths.end(), "KV cache resource has unconfigured tag=%s", group.tag.c_str());
@@ -267,9 +267,13 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
         for (const auto& [tag, group] : config_.kv_cache_groups) {
             const auto [width, kernel_width] = widths.at(tag);
             GroupBlockTable table;
-            table.tag       = tag;
-            table.type      = group.type;
-            table.block_ids = physical_backing.narrow(0, physical_offset, total_batch_size * width)
+            table.tag                       = tag;
+            table.type                      = group.type;
+            table.seq_size_per_block        = group.seq_size_per_block;
+            table.kernel_seq_size_per_block = group.kernel_seq_size_per_block;
+            table.kv_block_stride_bytes     = group.kv_block_stride_bytes;
+            table.kv_scale_stride_bytes     = group.kv_scale_stride_bytes;
+            table.block_ids                 = physical_backing.narrow(0, physical_offset, total_batch_size * width)
                                   .view({static_cast<int64_t>(total_batch_size), static_cast<int64_t>(width)});
             table.kernel_block_ids =
                 kernel_backing.narrow(0, kernel_offset, total_batch_size * kernel_width)
@@ -295,10 +299,6 @@ GptModelInputs NormalModelInputGatherer::allocateModelInputBuffers(const StreamG
         model_input.mm_features_locs = torch::empty({(int64_t)multimodal_features_len}, pinned_i32);
     }
 
-    model_input.kv_block_stride_bytes     = config_.block_stride_bytes;
-    model_input.kv_scale_stride_bytes     = config_.scale_stride_bytes;
-    model_input.seq_size_per_block        = config_.seq_size_per_block;
-    model_input.kernel_seq_size_per_block = config_.kernel_seq_size_per_block;
     model_input.pd_separation             = config_.role_type == RoleType::PREFILL;
     model_input.warmup                    = config_.warm_up;
     model_input.decode_entrance           = config_.decode_entrance;
@@ -413,16 +413,18 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
 
             copyKvCacheBlocksToModelInput(model_input, kv_cache, i, ctx.batch_idx, config_.warm_up);
 
-            if (ctx.max_blocks_num && config_.role_type == RoleType::PREFILL && stream->hasCacheKeys()) {
-                RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(stream->cacheKeys(i).size())
-                                            <= model_input.cache_keys.size(1),
+            if (ctx.max_blocks_num && config_.role_type == RoleType::PREFILL) {
+                const auto& keys = stream->requestPrefix(i).keys();
+                RTP_LLM_CHECK_WITH_INFO(static_cast<int64_t>(keys.size()) <= model_input.cache_keys.size(1),
                                         "cache_keys overflow: stream keys=%zu tensor width=%ld",
-                                        stream->cacheKeys(i).size(),
+                                        keys.size(),
                                         model_input.cache_keys.size(1));
-                std::memcpy(model_input.cache_keys.data_ptr<int64_t>()
-                                + prefill_batch_idx * model_input.cache_keys.size(1),
-                            stream->cacheKeys(i).data(),
-                            stream->cacheKeys(i).size() * sizeof(int64_t));
+                if (!keys.empty()) {
+                    std::memcpy(model_input.cache_keys.data_ptr<int64_t>()
+                                    + prefill_batch_idx * model_input.cache_keys.size(1),
+                                keys.data(),
+                                keys.size() * sizeof(int64_t));
+                }
             }
 
             *(model_input.request_id.data_ptr<int64_t>() + prefill_batch_idx) = stream->streamId();

@@ -338,9 +338,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error("Invalid DashScGrpcConfig state!");
                 DashScGrpcConfig c;
                 try {
-                    py::dict client_dict = t[0].cast<py::dict>();
-                    py::dict server_dict = t[1].cast<py::dict>();
-                    int      mw          = (t.size() == 3) ? t[2].cast<int>() : 4;
+                    py::dict           client_dict = t[0].cast<py::dict>();
+                    py::dict           server_dict = t[1].cast<py::dict>();
+                    int                mw          = (t.size() == 3) ? t[2].cast<int>() : 4;
                     std::ostringstream oss;
                     oss << "{\"client_config\": {";
                     bool first = true;
@@ -1658,18 +1658,18 @@ PYBIND11_MODULE(libth_transformer_config, m) {
     py::class_<CacheCapacityPolicyDesc>(m, "CacheCapacityPolicyDesc")
         .def(py::init<>())
         .def_readwrite("reservable", &CacheCapacityPolicyDesc::reservable)
-        .def_readwrite("explicit_block_num", &CacheCapacityPolicyDesc::explicit_block_num)
+        .def_readwrite("fixed_block_num", &CacheCapacityPolicyDesc::fixed_block_num)
         .def_readwrite("charge_to_paged_budget", &CacheCapacityPolicyDesc::charge_to_paged_budget)
         .def(py::pickle(
             [](const CacheCapacityPolicyDesc& self) {
-                return py::make_tuple(self.reservable, self.explicit_block_num, self.charge_to_paged_budget);
+                return py::make_tuple(self.reservable, self.fixed_block_num, self.charge_to_paged_budget);
             },
             [](py::tuple t) {
                 CacheCapacityPolicyDesc c;
                 if (t.size() != 3)
                     throw std::runtime_error("Invalid CacheCapacityPolicyDesc state!");
                 c.reservable             = t[0].cast<std::optional<bool>>();
-                c.explicit_block_num     = t[1].cast<std::optional<uint32_t>>();
+                c.fixed_block_num        = t[1].cast<std::optional<uint32_t>>();
                 c.charge_to_paged_budget = t[2].cast<std::optional<bool>>();
                 return c;
             }));

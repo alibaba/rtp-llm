@@ -34,7 +34,7 @@ absl::StatusOr<std::unordered_map<std::string, SystemPromptParams>> SystemPrompt
         if (insert_kv_cache) {
             auto&                                   kv_cache = stream->kvCacheMutable();
             std::map<std::string, std::vector<int>> blocks_by_group;
-            for (const auto& group : kv_cache.groupBlocks(0)) {
+            for (const auto& group : kv_cache.groupResources(0)) {
                 RTP_LLM_CHECK(group.block_ids != nullptr);
                 RTP_LLM_CHECK(!group.block_ids->blocks().empty());
                 blocks_by_group.emplace(group.tag, group.block_ids->blocks());

@@ -140,7 +140,7 @@ CacheEvictPolicy KVCacheGroup::evictPolicy() const {
 }
 
 uint32_t KVCacheGroup::explicitBlockNum() const {
-    return policy().explicit_block_num;
+    return policy().fixed_block_num;
 }
 
 size_t KVCacheGroup::activeTailBlocks() const {

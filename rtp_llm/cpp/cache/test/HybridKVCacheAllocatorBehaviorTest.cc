@@ -693,7 +693,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, MergeMtpRejectsIncompatibleDefaultFullGro
 
     auto target_with_different_policy    = target;
     auto target_policy                   = target_with_different_policy.topology().group("full").policy;
-    target_policy.explicit_block_num     = 2;
+    target_policy.fixed_block_num        = 2;
     target_policy.charge_to_paged_budget = true;
     target_with_different_policy.setGroupPolicies({{"full", target_policy}});
     expect_no_compatible_alias(target_with_different_policy, compatible_propose);

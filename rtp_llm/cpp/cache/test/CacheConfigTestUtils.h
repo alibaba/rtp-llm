@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <cstddef>
 #include <cstdint>
+#include <limits>
 #include <memory>
 #include <numeric>
 #include <optional>
@@ -102,12 +103,9 @@ inline GroupBase makeTestGroupForConfig(const CacheConfig&              config,
                             static_cast<int>(group.policy.group_type),
                             static_cast<int>(type));
     group.layer_ids                 = std::move(layer_ids);
-    group.block_num                 = config.block_num;
-    group.seq_size_per_block        = group.spec->seq_size_per_block > 0 ? group.spec->seq_size_per_block :
-                                                                           std::max<size_t>(1, config.seq_size_per_block);
-    group.kernel_seq_size_per_block = type == CacheGroupType::FULL && config.kernel_seq_size_per_block > 0 ?
-                                          std::min(config.kernel_seq_size_per_block, group.seq_size_per_block) :
-                                          group.seq_size_per_block;
+    group.block_num                 = 0;
+    group.seq_size_per_block        = std::max<size_t>(1, group.spec->seq_size_per_block);
+    group.kernel_seq_size_per_block = group.seq_size_per_block;
     group.kv_block_stride_bytes     = group.spec->block_size_bytes();
     group.kv_scale_stride_bytes     = group.spec->scale_block_size_bytes();
     return group;
@@ -131,6 +129,14 @@ inline void setTestTopology(CacheConfig& config, std::vector<GroupBase> groups) 
         }
     }
     config.setTopology(std::move(groups), std::move(layers));
+}
+
+inline void applyUniformTestBlockCount(CacheConfig& config, uint64_t block_num) {
+    RTP_LLM_CHECK_WITH_INFO(config.groupNums() > 0, "test block count requires topology");
+    const auto physical_span = config.topology().groups().front().seq_size_per_block;
+    RTP_LLM_CHECK_WITH_INFO(physical_span > 0 && block_num <= std::numeric_limits<uint64_t>::max() / physical_span,
+                            "test token capacity overflow");
+    config.applyTokenCapacity(block_num * physical_span);
 }
 
 inline std::shared_ptr<const CacheTopology> makeTestCacheTopology(int                                  group_num,
@@ -320,7 +326,7 @@ inline KVCacheSpecDesc makeDsv4Desc(const std::string& tag,
         desc.cp->prefill_slice_layout         = CpPrefillSliceLayout::PAYLOAD;
         desc.cp->slice                        = CpBlockSliceMode::PAYLOAD_BYTES;
         desc.capacity                         = CacheCapacityPolicyDesc{};
-        desc.capacity->explicit_block_num     = 256;
+        desc.capacity->fixed_block_num        = 256;
         desc.capacity->charge_to_paged_budget = true;
         desc.reuse->enable_prefix_reuse       = false;
         desc.tail                             = CacheTailPolicyDesc{};
@@ -448,8 +454,13 @@ inline void setDsv4ExplicitPoolBlocks(ModelConfig& model_config, const std::stri
                 if (!desc.capacity.has_value()) {
                     desc.capacity = CacheCapacityPolicyDesc{};
                 }
-                desc.capacity->explicit_block_num     = block_num;
-                desc.capacity->charge_to_paged_budget = block_num > 0;
+                if (block_num == 0) {
+                    desc.capacity->fixed_block_num.reset();
+                    desc.capacity->charge_to_paged_budget = false;
+                } else {
+                    desc.capacity->fixed_block_num        = block_num;
+                    desc.capacity->charge_to_paged_budget = true;
+                }
             }
         }
     }
@@ -512,22 +523,15 @@ inline KVCacheSpecPtr makeLinearSpec(const std::string& tag,
 inline CacheConfig
 makeSingleGroupCacheConfig(KVCacheSpecPtr spec, CacheGroupType group_type, int layer_num, int block_num) {
     CacheConfig config;
-    config.dtype                     = spec->memoryLayoutDType();
-    config.layer_num                 = static_cast<uint32_t>(layer_num);
-    config.layer_all_num             = static_cast<uint32_t>(layer_num);
-    config.block_num                 = static_cast<uint32_t>(block_num);
-    config.seq_size_per_block        = spec->seq_size_per_block;
-    config.kernel_seq_size_per_block = spec->seq_size_per_block;
+    config.dtype         = spec->memoryLayoutDType();
+    config.layer_num     = static_cast<uint32_t>(layer_num);
+    config.layer_all_num = static_cast<uint32_t>(layer_num);
 
     std::vector<int> layer_ids(static_cast<size_t>(layer_num));
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
-    config.fromGroupedSpecs({spec}, {layer_ids}, {group_type}, {spec->tag});
-
-    config.kv_block_stride_bytes = spec->block_size_bytes();
-    config.kv_block_size_bytes   = static_cast<size_t>(layer_num) * config.kv_block_stride_bytes;
-    config.kv_scale_stride_bytes = spec->scale_block_size_bytes();
-    config.kv_scale_size_bytes   = static_cast<size_t>(layer_num) * config.kv_scale_stride_bytes;
-    config.block_size_bytes      = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+    setTestTopology(config,
+                    {makeTestGroupForConfig(config, spec, std::move(layer_ids), group_type, std::string(spec->tag))});
+    applyUniformTestBlockCount(config, static_cast<uint64_t>(block_num));
 
     return config;
 }
@@ -565,14 +569,10 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
                                                   uint32_t          local_head_num_kv = 1,
                                                   uint32_t          size_per_head     = 1) {
     CacheConfig config;
-    config.dtype                     = dtype;
-    config.layer_num                 = static_cast<uint32_t>(layer_num);
-    config.layer_all_num             = static_cast<uint32_t>(layer_num);
-    config.block_num                 = static_cast<uint32_t>(block_num);
-    config.seq_size_per_block        = tokens_per_block;
-    config.kernel_seq_size_per_block = tokens_per_block;
-    const int layers_per_group       = std::max(group_layer_num, 1);
-    config.linear_step               = 2;
+    config.dtype               = dtype;
+    config.layer_num           = static_cast<uint32_t>(layer_num);
+    config.layer_all_num       = static_cast<uint32_t>(layer_num);
+    const int layers_per_group = std::max(group_layer_num, 1);
 
     if (layer_num <= 0 || (layer_num % layers_per_group) != 0 || (layer_num / layers_per_group) < 2) {
         return makeSimpleMhaCacheConfig(
@@ -602,16 +602,7 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
         }
     }
     setTestTopology(config, std::move(groups));
-
-    config.kv_block_stride_bytes = std::max(full_spec->block_size_bytes(), linear_spec->block_size_bytes());
-    config.kv_scale_stride_bytes = std::max(full_spec->scale_block_size_bytes(), linear_spec->scale_block_size_bytes());
-    config.kv_block_size_bytes   = 0;
-    config.kv_scale_size_bytes   = 0;
-    for (const auto& group : config.topology().groups()) {
-        config.kv_block_size_bytes += group.layer_ids.size() * group.kv_block_stride_bytes;
-        config.kv_scale_size_bytes += group.layer_ids.size() * group.kv_scale_stride_bytes;
-    }
-    config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
+    applyUniformTestBlockCount(config, static_cast<uint64_t>(block_num));
 
     return config;
 }

@@ -14,16 +14,10 @@
 
 namespace rtp_llm {
 
-struct KVCacheBlockBudget {
-    size_t explicit_pool_reserve_bytes = 0;
-    size_t paged_block_bytes           = 0;
-    size_t swa_block_bytes             = 0;
-};
-
-// Returns the largest global block count whose independent-pool backing fits
-// in total_budget_bytes:
-//   explicit reserve + N * paged bytes + ceil(N / linear_step) * SWA bytes.
-uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlockBudget& budget, int linear_step);
+// Returns the largest joint token capacity whose complete set of tag-local
+// pools fits in total_budget_bytes. LOGICAL groups use ceil(tokens / physical
+// span) blocks. FIXED groups use their descriptor count and cap the result.
+uint64_t maxKVCacheTokenCapacityForBudget(size_t total_budget_bytes, const CacheConfig& config);
 
 class CacheConfigCreator {
 public:

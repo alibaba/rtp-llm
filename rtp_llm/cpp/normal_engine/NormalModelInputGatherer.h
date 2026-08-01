@@ -16,7 +16,11 @@ namespace rtp_llm {
 
 struct ModelInputCacheGroup {
     CacheGroupType type                       = CacheGroupType::FULL;
+    size_t         seq_size_per_block         = 1;
+    size_t         kernel_seq_size_per_block  = 1;
     size_t         kernel_blocks_per_kv_block = 1;
+    size_t         kv_block_stride_bytes      = 0;
+    size_t         kv_scale_stride_bytes      = 0;
 };
 
 struct NormalModelInputGathererConfig {
@@ -29,10 +33,6 @@ struct NormalModelInputGathererConfig {
     size_t                                      position_id_len_factor{};
     RoleType                                    role_type{};
     bool                                        decode_entrance{};
-    size_t                                      block_stride_bytes{};
-    size_t                                      scale_stride_bytes{};
-    size_t                                      seq_size_per_block{};
-    size_t                                      kernel_seq_size_per_block{};
     bool                                        use_opaque_kv_cache_store = false;
     std::map<std::string, ModelInputCacheGroup> kv_cache_groups;
     bool                                        warm_up{};

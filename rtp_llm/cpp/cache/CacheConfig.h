@@ -132,6 +132,7 @@ public:
     const GroupBase& groupForLayer(int layer_id, std::string_view tag) const {
         return topology().groupForLayer(layer_id, tag);
     }
+    const GroupBase& physicalGroupForLayer(int layer_id, std::string_view tag) const;
 
     const std::shared_ptr<const KVCacheSpec>& specForGroup(std::string_view tag) const {
         return group(tag).spec;
@@ -157,17 +158,9 @@ public:
         return group(tag).kv_scale_stride_bytes;
     }
 
-    size_t blockSizeBytesForGroup(std::string_view tag) const {
-        return layerIdsForGroup(tag).size() * (kvBlockStrideBytesForGroup(tag) + kvScaleStrideBytesForGroup(tag));
-    }
+    size_t blockSizeBytesForGroup(std::string_view tag) const;
 
-    size_t layerBlockStrideBytes(int layer_id) const {
-        size_t stride = 0;
-        for (const auto& group : groupsForLayer(layer_id)) {
-            stride = std::max(stride, group.get().kv_block_stride_bytes + group.get().kv_scale_stride_bytes);
-        }
-        return stride;
-    }
+    size_t layerBlockStrideBytes(int layer_id) const;
 
     uint32_t localKvHeadNumForGroup(std::string_view tag) const {
         const auto& group_config = group(tag);
@@ -183,12 +176,16 @@ public:
     std::shared_ptr<CacheConfig>
     mergeMTPModule(const CacheConfig& propose_config, int module_index, uint32_t main_layer_num);
 
-    uint32_t explicitIndependentBlocks(std::string_view tag) const {
-        return policyForGroup(tag).explicit_block_num;
+    uint32_t fixedBlocks(std::string_view tag) const {
+        return policyForGroup(tag).fixed_block_num;
+    }
+
+    bool usesFixedBlocks(std::string_view tag) const {
+        return policyForGroup(tag).fixed_block_num > 0;
     }
 
     bool usesExplicitIndependentBlocks(std::string_view tag) const {
-        return explicitIndependentBlocks(tag) > 0;
+        return usesFixedBlocks(tag);
     }
 
     CacheGroupPolicy policyForGroup(std::string_view tag) const {
@@ -197,9 +194,17 @@ public:
 
     static bool samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs);
 
-    void        setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers);
-    void        finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig& runtime_config);
-    std::string debugString(size_t indent = 0) const;
+    void     setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers);
+    void     applyTokenCapacity(uint64_t capacity_tokens);
+    uint64_t tokenCapacity() const;
+    void     finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig&) {
+        block_num = global_block_num;
+        if (global_block_num > 0) {
+            applyTokenCapacity(static_cast<uint64_t>(global_block_num) * seq_size_per_block);
+        }
+    }
+    const std::string& singleReusableGroupTag() const;
+    std::string        debugString(size_t indent = 0) const;
 };
 
 }  // namespace rtp_llm

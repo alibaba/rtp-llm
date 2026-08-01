@@ -126,9 +126,19 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
         if (!src.defined() || src.numel() <= 0)
             return;
         if (src.dim() < 2) {
+            RTP_LLM_CHECK_WITH_INFO(src.numel() <= dst.numel(),
+                                    "CUDA graph copy source elements=%ld exceed destination elements=%ld",
+                                    src.numel(),
+                                    dst.numel());
             d2d_copies.add(src.data_ptr(), dst.data_ptr(), src.numel() * src.element_size());
             return;
         }
+        RTP_LLM_CHECK_WITH_INFO(dst.dim() >= 2 && src.size(0) <= dst.size(0) && src.size(1) <= dst.size(1),
+                                "CUDA graph copy source shape=[%ld,%ld] exceeds destination shape=[%ld,%ld]",
+                                src.size(0),
+                                src.size(1),
+                                dst.dim() >= 1 ? dst.size(0) : 0,
+                                dst.dim() >= 2 ? dst.size(1) : 0);
         strided_d2d_copies.add(src.data_ptr(),
                                dst.data_ptr(),
                                src.size(0),
@@ -144,9 +154,19 @@ void CudaGraphRunner::prepareInputs(const PyModelInputs& inputs, CudaGraphState&
             return;
         RTP_LLM_PROFILE_SCOPE("stridedCopyHost");
         if (src.dim() < 2) {
+            RTP_LLM_CHECK_WITH_INFO(src.numel() <= dst.numel(),
+                                    "CUDA graph host copy source elements=%ld exceed destination elements=%ld",
+                                    src.numel(),
+                                    dst.numel());
             memcpy(dst.data_ptr(), src.data_ptr(), src.numel() * src.element_size());
             return;
         }
+        RTP_LLM_CHECK_WITH_INFO(dst.dim() >= 2 && src.size(0) <= dst.size(0) && src.size(1) <= dst.size(1),
+                                "CUDA graph host copy source shape=[%ld,%ld] exceeds destination shape=[%ld,%ld]",
+                                src.size(0),
+                                src.size(1),
+                                dst.dim() >= 1 ? dst.size(0) : 0,
+                                dst.dim() >= 2 ? dst.size(1) : 0);
         const size_t nrows      = src.size(0);
         const size_t row_bytes  = src.size(1) * src.element_size();
         const size_t src_stride = src.stride(0) * src.element_size();
@@ -484,8 +504,21 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
         }
         for (const auto& [tag, type] : kv_cache_groups_) {
             (void)type;
-            if (inputs.attention_inputs_by_group.find(tag) == inputs.attention_inputs_by_group.end()) {
+            const auto input_it = inputs.attention_inputs_by_group.find(tag);
+            if (input_it == inputs.attention_inputs_by_group.end()) {
                 RTP_LLM_LOG_WARNING("Tagged kv cache is missing tag=%s, fallback to normal run.", tag.c_str());
+                return false;
+            }
+            const auto captured_it = capture_mem_hold_.py_model_inputs_.attention_inputs_by_group.find(tag);
+            if (captured_it == capture_mem_hold_.py_model_inputs_.attention_inputs_by_group.end()) {
+                RTP_LLM_LOG_WARNING("CUDA graph capture is missing tag=%s, fallback to normal run.", tag.c_str());
+                return false;
+            }
+            const auto& src = input_it->second.kv_cache_kernel_block_id;
+            const auto& dst = captured_it->second.kv_cache_kernel_block_id;
+            if (!src.defined() || !dst.defined() || src.dim() != 2 || dst.dim() != 2 || src.size(0) > dst.size(0)
+                || src.size(1) > dst.size(1)) {
+                RTP_LLM_LOG_WARNING("Tagged kv cache shape mismatch for tag=%s, fallback to normal run.", tag.c_str());
                 return false;
             }
         }
@@ -625,11 +658,26 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     if (kv_cache_groups_.size() > 1) {
         for (const auto& [tag, type] : kv_cache_groups_) {
             (void)type;
-            auto group_inputs = inputs.attention_inputs;
+            const auto    physical_it   = physical_tokens_per_block_by_group_.find(tag);
+            const auto    kernel_it     = kernel_tokens_per_block_by_group_.find(tag);
+            const int64_t physical_span = physical_it == physical_tokens_per_block_by_group_.end() ?
+                                              static_cast<int64_t>(seq_size_per_block_) :
+                                              static_cast<int64_t>(physical_it->second);
+            const int64_t kernel_span   = kernel_it == kernel_tokens_per_block_by_group_.end() ?
+                                              static_cast<int64_t>(kernel_seq_size_per_block_) :
+                                              static_cast<int64_t>(kernel_it->second);
+            RTP_LLM_CHECK_WITH_INFO(physical_span > 0 && kernel_span > 0 && physical_span % kernel_span == 0,
+                                    "invalid CUDA graph cache shape for tag=%s physical=%ld kernel=%ld",
+                                    tag.c_str(),
+                                    physical_span,
+                                    kernel_span);
+            const int64_t tag_physical_blocks = (max_seq_len_ + physical_span - 1) / physical_span + sp_steps_;
+            const int64_t tag_kernel_blocks   = tag_physical_blocks * physical_span / kernel_span;
+            auto          group_inputs        = inputs.attention_inputs;
             group_inputs.kv_cache_kernel_block_id_device =
-                torch::zeros({int(max_bs_), max_blocks}, options_cuda_int32_);
+                torch::zeros({int(max_bs_), tag_kernel_blocks}, options_cuda_int32_);
             group_inputs.kv_cache_kernel_block_id =
-                torch::zeros({int(max_bs_), max_blocks}, options_cpu_int32_).pin_memory();
+                torch::zeros({int(max_bs_), tag_kernel_blocks}, options_cpu_int32_).pin_memory();
             const auto [it, inserted] = inputs.attention_inputs_by_group.emplace(tag, std::move(group_inputs));
             (void)it;
             RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate CUDA graph KV cache tag=%s", tag.c_str());

@@ -185,6 +185,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         if (params.kv_cache_layer_layout.has_value()) {
             for (const auto& group : params.kv_cache_layer_layout->topology().groups()) {
                 graph_params.kv_cache_groups.emplace(group.tag, group.policy.group_type);
+                graph_params.physical_tokens_per_block_by_group.emplace(group.tag, group.seq_size_per_block);
+                graph_params.kernel_tokens_per_block_by_group.emplace(group.tag, group.kernel_seq_size_per_block);
             }
         }
         // Derive combo_position_ids capture-buffer factor from the C++ rope_config:

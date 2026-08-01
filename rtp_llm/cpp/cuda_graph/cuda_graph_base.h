@@ -36,6 +36,8 @@ struct GraphParams {
     std::vector<int> decode_capture_batch_sizes;
     // Golden cache-group identity and metadata for CUDA graph capture/replay.
     std::map<std::string, CacheGroupType> kv_cache_groups;
+    std::map<std::string, size_t>         physical_tokens_per_block_by_group;
+    std::map<std::string, size_t>         kernel_tokens_per_block_by_group;
     // Per-token position-id factor for combo_position_ids capture buffer.
     // 0 = model does not use combo_position_ids (no buffer allocated, capture skips it).
     // >0 = factor (e.g. Mrope = rope_config.index_factor). Sourced from

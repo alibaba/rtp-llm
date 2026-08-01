@@ -183,9 +183,7 @@ absl::StatusOr<GenerateStreamPtr> NormalEngine::preRun(const std::shared_ptr<Gen
                                                          mode == preRunMode::prefill_warm_up);
     if (mode == preRunMode::decode_warm_up) {
         stream->setIsContextStream(false);
-        size_t seq_size_per_block = model_config_.attn_config.tokens_per_block;
-        size_t reserved_blocks    = (stream->seqLength() + seq_size_per_block - 1) / seq_size_per_block + reserve_step_;
-        stream->fakeInitKVBlock(reserved_blocks);
+        stream->fakeInitKVBlockForTokens(stream->seqLength(), reserve_step_);
     } else if (mode == preRunMode::build_system_prompt) {
         stream->setReserveStep(reserve_step_);
         THROW_IF_STATUS_ERROR(stream->initKVBlock());
@@ -267,8 +265,9 @@ WarmUpResult NormalEngine::decodeWarmUp(const EngineInitParams& params) {
     fake_input->generate_config->calculate_loss       = int(runtime_config.warm_up_with_loss);
     rtp_llm::setTraceMemory(true);
 
-    auto cache_config      = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, 0);
-    cache_config.block_num = 5;
+    auto cache_config = CacheConfigCreator::createBasicConfig(model_config_, parallelism_config, false, 0);
+    cache_config.applyTokenCapacity(static_cast<uint64_t>(5)
+                                    * static_cast<uint64_t>(model_config_.attn_config.tokens_per_block));
     ParallelismConfig temp_parallelism_config;
     RuntimeConfig     temp_runtime_config;
     auto              cache_manager = make_shared<KVCacheManager>(
@@ -341,10 +340,7 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
         auto result = CacheConfigCreator::createConfig(
             model_config_, parallelism_config, runtime_config, kv_cache_config, warm_up_result);
         RTP_LLM_LOG_INFO("create cache manager with config %s", result.debugString().c_str());
-        RTP_LLM_LOG_INFO("create cache manager with block nums %d, block size %ld KB",
-                         result.block_num,
-                         result.block_size_bytes / 1024);
-        RTP_LLM_LOG_INFO("create cache manager with linear step %d", result.linear_step);
+        RTP_LLM_LOG_INFO("create cache manager with joint token capacity %lu", result.tokenCapacity());
         resource_context_.cache_manager = make_shared<KVCacheManager>(
             result, false, metrics_reporter_, kv_cache_config, parallelism_config, runtime_config);
         resource_context_.role_type = pd_sep_config.role_type;

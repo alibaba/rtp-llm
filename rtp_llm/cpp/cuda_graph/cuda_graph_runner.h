@@ -36,6 +36,8 @@ public:
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         model_data_type_(graph_params.model_data_type),
         kv_cache_groups_(graph_params.kv_cache_groups),
+        physical_tokens_per_block_by_group_(graph_params.physical_tokens_per_block_by_group),
+        kernel_tokens_per_block_by_group_(graph_params.kernel_tokens_per_block_by_group),
         position_id_len_factor_(graph_params.position_id_len_factor) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
@@ -156,6 +158,8 @@ private:
     cuda_graph::GraphPoolHandle            shared_graph_pool_{};
 
     std::map<std::string, CacheGroupType> kv_cache_groups_;
+    std::map<std::string, size_t>         physical_tokens_per_block_by_group_;
+    std::map<std::string, size_t>         kernel_tokens_per_block_by_group_;
     int                                   position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
     mutable std::atomic<uint64_t>         combo_position_fallback_count_{0};
 

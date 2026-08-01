@@ -114,13 +114,9 @@ inline BlockPoolConfig createTestConfig(size_t            k_block_stride_bytes =
     test_spec->v_scale_bytes = v_scale_stride_bytes;
 
     rtp_llm::CacheConfig cache_config;
-    cache_config.layer_num             = kLayerNum;
-    cache_config.layer_all_num         = kLayerNum;
-    cache_config.block_num             = kBlockNum;
-    cache_config.dtype                 = dtype;
-    cache_config.seq_size_per_block    = seq_size_per_block;
-    cache_config.kv_block_stride_bytes = k_block_stride_bytes + v_block_stride_bytes;
-    cache_config.kv_scale_stride_bytes = k_scale_stride_bytes + v_scale_stride_bytes;
+    cache_config.layer_num     = kLayerNum;
+    cache_config.layer_all_num = kLayerNum;
+    cache_config.dtype         = dtype;
 
     std::vector<int> layer_ids(kLayerNum);
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
@@ -133,6 +129,7 @@ inline BlockPoolConfig createTestConfig(size_t            k_block_stride_bytes =
     }
     groups.at(0).local_kv_head_num = test_spec->local_kv_head_num;
     cache_config.setTopology(std::move(groups), cache_config.topology().layers());
+    test::applyUniformTestBlockCount(cache_config, kBlockNum);
 
     return BlockPoolConfigHelper::createConfigForGroup(cache_config, "default");
 }
