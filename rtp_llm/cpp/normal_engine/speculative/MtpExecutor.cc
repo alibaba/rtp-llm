@@ -2311,14 +2311,14 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
         // entirely absent TP root needs one fake, avoiding a mixed real+fake
         // StreamGroups::is_fake_stream classification.
         fill_phase_fakes(target_only_streams, /*require_both_pdfusion_roles=*/false);
-        RTP_LLM_LOG_INFO("[dspark-route] target-only phase local_streams=%zu", target_only_streams.size());
+        RTP_LLM_LOG_DEBUG("[dspark-route] target-only phase local_streams=%zu", target_only_streams.size());
         RETURN_IF_STATUS_ERROR(targetOnlyProcess(target_only_streams, schedule_time_us));
     }
     if (global_has_speculative) {
         // MTP/DSpark PDFUSION executes prefill and decode as separate phases,
         // so both roles must be present (real or fake) on every DP participant.
         fill_phase_fakes(speculative_streams, /*require_both_pdfusion_roles=*/true);
-        RTP_LLM_LOG_INFO("[dspark-route] speculative phase local_streams=%zu", speculative_streams.size());
+        RTP_LLM_LOG_DEBUG("[dspark-route] speculative phase local_streams=%zu", speculative_streams.size());
         RETURN_IF_STATUS_ERROR(processSpeculative(speculative_streams, schedule_time_us));
     }
     return absl::OkStatus();
