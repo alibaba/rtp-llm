@@ -71,8 +71,21 @@ RTP_LLM_CACHE_TOTAL_REUSE_LEN = "rtp_llm.cache.total_reuse_len"
 RTP_LLM_CACHE_LOCAL_REUSE_LEN = "rtp_llm.cache.local_reuse_len"
 RTP_LLM_CACHE_REMOTE_REUSE_LEN = "rtp_llm.cache.remote_reuse_len"
 # PD node selection outcome on the master_route span (low-cardinality enum:
-# "master" | "domain_fallback" | "request" | "none").
+# Final route-source chain. A request can provide a partial role list and then
+# be completed by domain routing, hence the explicit combined values.
+# "master" | "domain_fallback" | "master+domain_fallback" |
+# "request" | "request+domain_fallback" | "none".
 RTP_LLM_ROUTE_SOURCE = "rtp_llm.route.source"
+RTP_LLM_ROUTE_SOURCE_VALUES = frozenset(
+    {
+        "master",
+        "domain_fallback",
+        "master+domain_fallback",
+        "request",
+        "request+domain_fallback",
+        "none",
+    }
+)
 
 # Proactive queue rejection diagnostics on the master_route span (set only on
 # the TRAFFIC_LIMIT_ERROR path): cached FlexLB queue length observed at
