@@ -21,7 +21,7 @@ public:
         is_dspark_(sp_config.type == SP_TYPE_DSPARK),
         dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
         dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor),
-        dspark_use_gumbel_(sp_config.draft_sample_method == "probabilistic"),
+        dspark_use_gumbel_(sp_config.useProbabilisticDraftSampling()),
         dspark_use_fp64_gumbel_(sp_config.use_fp64_gumbel) {}
 
     absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups,

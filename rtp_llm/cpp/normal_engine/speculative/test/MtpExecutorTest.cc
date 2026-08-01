@@ -1500,6 +1500,15 @@ TEST_F(MtpExecutorTest, testDSparkGrpcProbabilisticProposalRequiresAndRestoresQ)
     EXPECT_FALSE(sp_buffer->side_channel.any());
 }
 
+TEST_F(MtpExecutorTest, testDSparkProbabilisticModeAcceptsVllmGumbelAlias) {
+    SpeculativeExecutionConfig config;
+    EXPECT_FALSE(config.useProbabilisticDraftSampling());
+    config.draft_sample_method = "probabilistic";
+    EXPECT_TRUE(config.useProbabilisticDraftSampling());
+    config.draft_sample_method = "gumbel";
+    EXPECT_TRUE(config.useProbabilisticDraftSampling());
+}
+
 TEST_F(MtpExecutorTest, testDSparkAcceptsSamplingAndIssuesReplaySeedBeforeMutation) {
     MtpExecutorTestConfig test_config;
     test_config.sp_type              = SP_TYPE_DSPARK;

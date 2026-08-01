@@ -504,7 +504,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     vocab_size_       = params.model_config_.vocab_size;
     draft_vocab_size_ = propose_params->getEngineInitParams().model_config_.vocab_size;
     is_dspark_        = propose_params->sp_type == SP_TYPE_DSPARK;
-    dspark_use_gumbel_ = is_dspark_ && params.sp_config.draft_sample_method == "probabilistic";
+    dspark_use_gumbel_ = is_dspark_ && params.sp_config.useProbabilisticDraftSampling();
     model_config_     = params.model_config_;
     runtime_config_   = params.runtime_config;
 
@@ -542,8 +542,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 "dspark requires sp_dspark_mask_token_id from the draft ckpt config, got %ld",
                                 (long)params.sp_config.sp_dspark_mask_token_id);
         RTP_LLM_CHECK_WITH_INFO(params.sp_config.draft_sample_method == "greedy"
-                                    || params.sp_config.draft_sample_method == "probabilistic",
-                                "dspark draft_sample_method must be greedy or probabilistic, got '%s'",
+                                    || params.sp_config.useProbabilisticDraftSampling(),
+                                "dspark draft_sample_method must be greedy, probabilistic, or gumbel, got '%s'",
                                 params.sp_config.draft_sample_method.c_str());
     }
 

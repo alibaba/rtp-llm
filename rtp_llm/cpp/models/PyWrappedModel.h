@@ -374,8 +374,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
                                              && !is_prefill_cuda_graph_mode;
         graph_params.is_target_verify = use_spec_decoding || is_target_verify_decode;
         graph_params.is_dspark = is_dspark;
-        graph_params.dspark_use_gumbel =
-            is_dspark && params.sp_config.draft_sample_method == "probabilistic";
+        graph_params.dspark_use_gumbel = is_dspark && params.sp_config.useProbabilisticDraftSampling();
         graph_params.dspark_use_fp64_gumbel = is_dspark && params.sp_config.use_fp64_gumbel;
         if (params.sp_config.type != SP_TYPE_NONE) {
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;

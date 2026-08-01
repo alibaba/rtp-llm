@@ -336,12 +336,17 @@ struct SpeculativeExecutionConfig {
     // DSpark proposal selection, aligned with vLLM. "greedy" is the default
     // and uses an implicit one-hot q in rejection sampling. "probabilistic"
     // samples from the temperature-processed draft distribution and retains
-    // that q for the standard probability-ratio/residual verifier.
+    // that q for the standard probability-ratio/residual verifier. vLLM calls
+    // the latter mode "gumbel"; accept that spelling as a compatibility alias.
     std::string draft_sample_method = "greedy";
     // vLLM-compatible optional fp64 Gumbel noise/reduction. Disabled by
     // default because fp64 is substantially slower on inference GPUs.
     bool use_fp64_gumbel = false;
     std::string     to_string() const;
+
+    bool useProbabilisticDraftSampling() const {
+        return draft_sample_method == "probabilistic" || draft_sample_method == "gumbel";
+    }
 
     // Helper functions for enum conversion
     static SpeculativeType from_string(const std::string& str);
