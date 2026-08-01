@@ -4,7 +4,7 @@ rtp llm custom ops
 
 from __future__ import annotations
 
-from typing import Any
+import typing
 
 import libth_transformer
 import torch

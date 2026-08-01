@@ -24,6 +24,54 @@ using namespace std;
 
 namespace rtp_llm {
 
+namespace {
+
+// Pairs init() with waitAllDone() so an exception between them still returns the
+// writer to IDLE. Without this a single failed forward leaves it RUNNING, and every
+// later init() trips its IDLE precondition -- the instance can never publish again.
+class CacheStoreWriteCycleGuard {
+public:
+    CacheStoreWriteCycleGuard(const std::shared_ptr<CacheStoreAsyncWriter>& writer, bool has_work):
+        writer_(writer), active_(has_work) {
+        if (active_) {
+            writer_->init();
+        }
+    }
+
+    ~CacheStoreWriteCycleGuard() {
+        if (!active_) {
+            return;
+        }
+        active_ = false;
+        // Swallowed on purpose: this runs while another exception may be unwinding.
+        try {
+            writer_->waitAllDone();
+        } catch (const std::exception& e) {
+            RTP_LLM_LOG_ERROR("failed to drain CacheStore writer while unwinding forward: %s", e.what());
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("failed to drain CacheStore writer while unwinding forward: unknown exception");
+        }
+    }
+
+    // Normal path: let a drain failure propagate to the caller.
+    void finish() {
+        if (!active_) {
+            return;
+        }
+        active_ = false;
+        writer_->waitAllDone();
+    }
+
+    CacheStoreWriteCycleGuard(const CacheStoreWriteCycleGuard&)            = delete;
+    CacheStoreWriteCycleGuard& operator=(const CacheStoreWriteCycleGuard&) = delete;
+
+private:
+    std::shared_ptr<CacheStoreAsyncWriter> writer_;
+    bool                                   active_{false};
+};
+
+}  // namespace
+
 torch::Tensor PyWrappedModel::tensorHoldHostAndToCuda(const torch::Tensor& tensor) {
     if (tensor.device().is_cuda()) {
         return tensor;
@@ -366,9 +414,8 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                                               bert_embedding_inputs});
     }
 
-    if (!inputs.warmup && inputs.pd_separation) {
-        cache_store_async_writer_->init();
-    }
+    const bool                has_cache_store_work = !inputs.warmup && inputs.pd_separation;
+    CacheStoreWriteCycleGuard cache_store_write_cycle(cache_store_async_writer_, has_cache_store_work);
 
     fusedCopy(d2d_copies_);
 
@@ -385,9 +432,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                             py_model_outputs.size(),
                             input_list.size());
 
-    if (!inputs.warmup && inputs.pd_separation) {
-        cache_store_async_writer_->waitAllDone();
-    }
+    cache_store_write_cycle.finish();
 
     // TODO: merge hidden states in one tensor
     torch::Tensor hidden_states;
@@ -507,9 +552,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
                 attention_inputs.cache_store_writer = cache_store_async_writer_;
             }
         }
-        if (!inputs.warmup && inputs.pd_separation) {
-            cache_store_async_writer_->init();
-        }
+        const bool                has_cache_store_work = !inputs.warmup && inputs.pd_separation;
+        CacheStoreWriteCycleGuard cache_store_write_cycle(cache_store_async_writer_, has_cache_store_work);
         calculatePaddingOffset(attention_inputs);
         attention_inputs.padding_offset = tensorHoldHostAndToCuda(attention_inputs.padding_offset);
         auto attention_inputs_by_tag    = setupKVCacheForAttentionInputs(attention_inputs, inputs);
@@ -557,9 +601,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             hidden_states         = py_model_outputs.hidden_states.clone();
         }
 
-        if (!inputs.warmup && inputs.pd_separation) {
-            cache_store_async_writer_->waitAllDone();
-        }
+        cache_store_write_cycle.finish();
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
         const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
