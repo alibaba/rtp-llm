@@ -94,6 +94,7 @@ private:
     static std::string
     makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);
     static std::vector<MTPModuleLoadPlan> makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params);
+    static grpc::Status                   generateRequestReadFailureStatus(bool cancelled);
     static void                           logReadFailures(int64_t                         request_id,
                                                           const std::string&              peer_addr,
                                                           ErrorCode                       error_code,

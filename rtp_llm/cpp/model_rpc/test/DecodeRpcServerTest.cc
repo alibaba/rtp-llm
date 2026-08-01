@@ -238,4 +238,18 @@ TEST(DecodeRpcServerTest, ReadTimeoutLogsKeysAndCancellationIsSilent) {
     EXPECT_EQ(log_content.find("cancelled_key"), std::string::npos);
 }
 
+TEST(DecodeRpcServerTest, CancelledGenerateRequestReadUsesCancelledStatus) {
+    const auto status = DecodeRpcServer::generateRequestReadFailureStatus(/*cancelled=*/true);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::CANCELLED);
+    EXPECT_EQ(status.error_message(), "request is cancelled");
+}
+
+TEST(DecodeRpcServerTest, NonCancelledGenerateRequestReadPreservesFailure) {
+    const auto status = DecodeRpcServer::generateRequestReadFailureStatus(/*cancelled=*/false);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+    EXPECT_EQ(status.error_message(), "poll generate request failed");
+}
+
 }  // namespace rtp_llm
