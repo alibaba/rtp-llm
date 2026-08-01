@@ -282,11 +282,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         enable_cuda_graph_ = false;
     }
     if (enable_cuda_graph_ && is_dspark && !params.model_id && py_model_class_name == "DeepSeekV4Model") {
-        // Correctness fallback backed by the P5 target-only probe: DSV4's
-        // existing target CUDA graph is not eager-equivalent under TP2 (it
-        // changes greedy tokens even without a speculative executor). Keep
-        // the DSpark draft full-tail graph enabled, but execute target verify
-        // eagerly until the independent target graph gate is fixed.
+        // DSV4's existing target CUDA graph is not eager-equivalent under TP2:
+        // a target-only probe changes greedy tokens without a speculative
+        // executor. Keep the DSpark draft full-tail graph enabled, but execute
+        // target verify eagerly until the independent target graph gate is
+        // fixed.
         RTP_LLM_LOG_WARNING(
             "Disable target CUDA graph for DSpark: target-only TP2 graph/eager equivalence gate is not satisfied; "
             "the draft CUDA graph remains enabled");

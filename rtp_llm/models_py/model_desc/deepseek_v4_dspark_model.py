@@ -160,10 +160,10 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
         )
         assert self.v4 is not None
         for layer in self.v4.layers:
-            # Route A: the existing FlashMLA sparse kernel accepts arbitrary
-            # K row indices. P3's metadata builder explicitly appends the
-            # complete query block, yielding bidirectional intra-block
-            # visibility without a new attention kernel.
+            # The existing FlashMLA sparse kernel accepts arbitrary K row
+            # indices. DSpark metadata appends the complete query block,
+            # yielding bidirectional intra-block visibility without a new
+            # attention kernel.
             layer.attn.dspark_noncausal = True
 
     def cuda_graph_input_hidden_dim(self) -> int:
@@ -272,7 +272,9 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
             attn._kv_cache = self.kv_cache
             attn._block_tables_by_type = block_tables
             if attn._swa_cp_byte_sliced():
-                raise NotImplementedError("DSpark CP byte-sliced injection lands in P6")
+                raise NotImplementedError(
+                    "DSpark feature-KV injection does not support a CP byte-sliced SWA cache"
+                )
             pool = attn._pool_view_3d_fp8(SWA_KV)
             if pool is None:
                 raise RuntimeError(f"DSpark layer {layer.layer_id} SWA FP8 pool unavailable")
