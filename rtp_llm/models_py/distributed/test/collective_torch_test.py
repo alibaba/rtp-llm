@@ -251,6 +251,11 @@ def _test_all_collectives_worker(
         nccl_init_port = base_port - 11
         parallelism_config.world_rank = rank
         parallelism_config.world_size = world_size
+        # This test launches every rank on one host. Keep the topology metadata
+        # faithful so the intra-node TP broadcaster and local-world control
+        # reducer are both bootstrapped and torn down by the lifecycle under
+        # test, instead of silently taking their cross-node NCCL fallbacks.
+        parallelism_config.local_world_size = world_size
         parallelism_config.local_rank = (
             rank % torch.cuda.device_count() if torch.cuda.is_available() else 0
         )
