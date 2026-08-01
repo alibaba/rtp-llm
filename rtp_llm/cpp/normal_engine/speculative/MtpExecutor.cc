@@ -498,8 +498,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     collect_metrics_stream_(cuda_graph::graphGetStreamFromPool(true)),
     target_verify_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
     draft_prefill_prepare_runner_(cuda_graph::graphGetStreamFromPool(true)),
-    spec_logits_verify_async_runner_(cuda_graph::graphGetStreamFromPool(true)),
     spec_logits_verify_runner_(std::make_unique<SpecLogitsVerifyRunner>()),
+    spec_logits_verify_async_runner_(cuda_graph::graphGetStreamFromPool(true)),
     spec_bookkeeping_runner_(cuda_graph::graphGetStreamFromPool(true)) {
     data_type_        = params.model_config_.data_type;
     hidden_size_      = params.model_config_.hidden_size * params.model_config_.hc_mult;
@@ -1257,6 +1257,55 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     auto draft_tokens_ready_event = std::make_shared<torch::Event>(cuda_graph::makeGraphEvent());
     draft_tokens_ready_event->record(cuda_graph::graphGetCurrentStream());
 
+    auto launch_spec_logits_verify_async = [&](torch::Tensor                 draft_tokens,
+                                               std::shared_ptr<torch::Event> tokens_ready_event) {
+        if (useStreamAsync() && useDropBroadSync()) {
+            RTP_LLM_PROFILE_SCOPE_DYNAMIC(
+                "executor.mtp.decode_step(wait_prev_bookkeeping_pre_spec_logits,stream_count=%zu)", streams.size());
+            spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
+            stream_groups                           = StreamGroups(streams);
+            prev_bookkeeping_synced_for_spec_logits = true;
+        }
+
+        auto spec_streams = streams;
+        spec_logits_verify_async_runner_.launch([this,
+                                                 spec_streams = std::move(spec_streams),
+                                                 draft_tokens = std::move(draft_tokens),
+                                                 tokens_ready_event = std::move(tokens_ready_event),
+                                                 spec_logits_result]() mutable {
+            RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_logits_verify_async_worker)");
+            try {
+                *spec_logits_result = buildSpecLogitsVerifyInline(
+                    spec_streams, draft_tokens, std::move(tokens_ready_event));
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_ERROR("spec logits async worker failed: %s", e.what());
+                throw;
+            } catch (...) {
+                RTP_LLM_LOG_ERROR("spec logits async worker failed with unknown exception");
+                throw;
+            }
+        });
+        spec_logits_async_launched = true;
+    };
+
+    // DSpARK proposals are already part of the target-verify input as
+    // [anchor, p1..p_gamma] per stream. Launch spec-logits verification now so
+    // its D2H and CPU mask construction overlap the target forward. The runner
+    // accepts P+1 columns and skips the anchor internally.
+    if (spec_logits_processor_present && is_dspark_ && propose_step_ > 1) {
+        RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(launch_dspark_spec_logits_verify_async)");
+        const int64_t expected_verify_tokens =
+            static_cast<int64_t>(batch_size) * static_cast<int64_t>(propose_step_ + 1);
+        const int64_t actual_verify_tokens =
+            model_input.combo_tokens.defined() ? model_input.combo_tokens.numel() : -1;
+        RTP_LLM_CHECK_WITH_INFO(
+            actual_verify_tokens == expected_verify_tokens,
+            "dspark spec logits verify tokens mismatch: got %ld, expected %ld",
+            actual_verify_tokens,
+            expected_verify_tokens);
+        launch_spec_logits_verify_async(model_input.combo_tokens, draft_tokens_ready_event);
+    }
+
     // Launch draft-prefill prepare BEFORE target verify forward so it overlaps
     // with target verify GPU work instead of running serially after it. Sync
     // on this prepare happens just before draft_model_forward below.
@@ -1295,34 +1344,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
     if (spec_logits_processor_present && propose_step_ > 1 && draft_token_ids_t.defined()) {
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(launch_spec_logits_verify_async)");
-        if (useStreamAsync() && useDropBroadSync()) {
-            RTP_LLM_PROFILE_SCOPE_DYNAMIC(
-                "executor.mtp.decode_step(wait_prev_bookkeeping_pre_spec_logits,stream_count=%zu)", streams.size());
-            spec_bookkeeping_runner_.sync(cuda_graph::graphGetCurrentStream());
-            stream_groups                           = StreamGroups(streams);
-            prev_bookkeeping_synced_for_spec_logits = true;
-        }
-
-        auto spec_streams = streams;
-        auto draft_tokens = draft_token_ids_t;
-        spec_logits_verify_async_runner_.launch([this,
-                                                 spec_streams = std::move(spec_streams),
-                                                 draft_tokens,
-                                                 draft_tokens_ready_event,
-                                                 spec_logits_result]() mutable {
-            RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(spec_logits_verify_async_worker)");
-            try {
-                *spec_logits_result =
-                    buildSpecLogitsVerifyInline(spec_streams, draft_tokens, std::move(draft_tokens_ready_event));
-            } catch (const std::exception& e) {
-                RTP_LLM_LOG_ERROR("spec logits async worker failed: %s", e.what());
-                throw;
-            } catch (...) {
-                RTP_LLM_LOG_ERROR("spec logits async worker failed with unknown exception");
-                throw;
-            }
-        });
-        spec_logits_async_launched = true;
+        launch_spec_logits_verify_async(draft_token_ids_t, draft_tokens_ready_event);
     }
 
     if (spec_logits_processor_present && !spec_logits_async_launched) {
