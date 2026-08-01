@@ -706,7 +706,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             return forwardMicroBatched(inputs);
         }
         PyContextParallelParams cp_params;
-        if (device_props_.enable_prefill_cp) {
+        if (enable_prefill_cp_) {
             context_parallel_processor_->handleInputs(const_cast<GptModelInputs&>(inputs), cp_params);
         }
 
@@ -731,7 +731,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             prepareAttentionInputs(inputs, /*skip_forward_event_sync=*/true);
         }
 
-        if (device_props_.enable_prefill_cp) {
+        if (enable_prefill_cp_) {
             attention_inputs_.context_parallel_info = cp_params;
         }
 
@@ -797,6 +797,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_outputs      = outputs.cast<PyModelOutputs>();
             hidden_states         = py_model_outputs.hidden_states.clone();
         }
+        // The cloned tensor is the only hidden-state owner needed below. Drop
+        // the Python output's rank-local tensor before CP post-processing so a
+        // long-context gather/restore can reuse that storage.
+        py_model_outputs.hidden_states = torch::Tensor();
 
         if (!inputs.warmup && inputs.pd_separation) {
             cache_store_async_writer_->waitAllDone();
@@ -821,17 +825,51 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             outs.draft_probs       = py_model_outputs.draft_probs;
             return outs;
         };
-        if (device_props_.enable_prefill_cp && has_context_request) {
+        if (is_dspark_draft_) {
+            GptModelOutputs outs;
+            outs.hidden_states     = hidden_states;
+            outs.all_hidden_states = hidden_states;
+            return attach_aux(std::move(outs));
+        }
+        if (enable_prefill_cp_ && has_context_request) {
             // When no consumer needs the full sequence hidden, gather only the
             // last-token rows lm_head needs instead of all-gathering+restoring the
             // full [seq, hidden] (the 14 GiB block at the 1M-prefill OOM). The
             // gather is a small [num_lm, hidden] all-reduce-sum; see
             // ZigZagProcessor::handleOutputsLastHidden.
-            if (!inputs.need_all_logits && !inputs.need_all_hidden_states) {
+            const bool need_full_hidden = inputs.need_all_logits || inputs.need_all_hidden_states;
+            size_t     num_valid_tokens = 0;
+            if (!need_full_hidden) {
                 context_parallel_processor_->handleOutputsLastHidden(hidden_states, inputs, cp_params);
+            } else {
+                num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
+            }
+            if (py_model_outputs.aux_hidden_states.defined()) {
+                RTP_LLM_CHECK_WITH_INFO(py_model_outputs.aux_hidden_states.dim() == 3,
+                                        "DSpARK aux_hidden_states must be [token, layers, hidden], got dim=%d",
+                                        static_cast<int>(py_model_outputs.aux_hidden_states.dim()));
+                const auto capture_layers = py_model_outputs.aux_hidden_states.size(1);
+                const auto hidden_size    = py_model_outputs.aux_hidden_states.size(2);
+                auto       aux_flat       = py_model_outputs.aux_hidden_states.reshape(
+                    {py_model_outputs.aux_hidden_states.size(0), capture_layers * hidden_size});
+                // The Python model transferred its persistent capture owner to
+                // this output. Drop that final field owner before handleOutputs
+                // takes and replaces aux_flat, allowing the rank-local capture
+                // storage to be reclaimed during the CP restore.
+                py_model_outputs.aux_hidden_states = torch::Tensor();
+                const auto aux_valid_tokens = context_parallel_processor_->handleOutputs(aux_flat, inputs, cp_params);
+                if (need_full_hidden) {
+                    RTP_LLM_CHECK_WITH_INFO(aux_valid_tokens == num_valid_tokens,
+                                            "DSpARK aux CP token count mismatch: %zu vs %zu",
+                                            aux_valid_tokens,
+                                            num_valid_tokens);
+                }
+                py_model_outputs.aux_hidden_states =
+                    aux_flat.reshape({(int64_t)aux_valid_tokens, capture_layers, hidden_size});
+            }
+            if (!need_full_hidden) {
                 return attach_aux(forwardPostLayersLastHidden(hidden_states, inputs));
             }
-            size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
             return attach_aux(callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens));
         }
         return attach_aux(callForwardPostLayers(hidden_states, inputs, true));

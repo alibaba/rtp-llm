@@ -57,6 +57,10 @@ public:
                    std::shared_ptr<ModelInputsLogger> model_inputs_logger        = nullptr);
     ~PyWrappedModel();
 
+    static constexpr bool shouldEnablePrefillContextParallel(bool configured, bool bypass) {
+        return configured && !bypass;
+    }
+
     GptModelOutputs forward(const GptModelInputs& inputs) override;
     GptModelOutputs forwardMicroBatched(const GptModelInputs& inputs);
     void            releaseBuffers() override;
@@ -104,6 +108,8 @@ private:
 
     // Member variables (formerly inherited from GptModel)
     const rtp_llm::ExecProperties            device_props_;
+    const bool                               enable_prefill_cp_;
+    const bool                               is_dspark_draft_;
     const rtp_llm::MlaOpsType                mla_ops_type_;
     const size_t                             layer_num_;
     const GptModelDescription                description_;
@@ -146,8 +152,11 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
                                       bool                               is_prefill_cuda_graph_mode,
                                       bool                               use_spec_decoding,
                                       const std::vector<int>&            kv_cache_layer_to_group,
-                                      std::shared_ptr<ModelInputsLogger> model_inputs_logger):
+    std::shared_ptr<ModelInputsLogger> model_inputs_logger):
     device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
+    enable_prefill_cp_(shouldEnablePrefillContextParallel(
+        device_props_.enable_prefill_cp, params.sp_config.type == SP_TYPE_DSPARK && params.model_id != 0)),
+    is_dspark_draft_(params.sp_config.type == SP_TYPE_DSPARK && params.model_id != 0),
     mla_ops_type_(params.mla_ops_type),
     layer_num_(params.weights.layers.size()),
     description_(params.description),
@@ -402,10 +411,12 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
 
     cache_store_async_writer_ = std::make_unique<CacheStoreAsyncWriter>(params.parallelism_config.local_rank);
 
-    if (device_props_.enable_prefill_cp) {
+    if (enable_prefill_cp_) {
         context_parallel_processor_ =
             ContextParallelProcessorFactory::create(ProcessorType::ZIG_ZAG, params.parallelism_config);
         RTP_LLM_LOG_INFO("Context parallel processor initialized with ZIG_ZAG strategy.");
+    } else if (device_props_.enable_prefill_cp && is_dspark_draft_) {
+        RTP_LLM_LOG_INFO("Context parallel input splitting bypassed for fixed-block DSpark draft model.");
     }
 
     RTP_LLM_LOG_INFO("PyWrappedModel initialized done.");

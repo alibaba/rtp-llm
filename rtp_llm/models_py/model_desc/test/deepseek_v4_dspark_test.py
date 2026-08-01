@@ -17,6 +17,7 @@ from rtp_llm.models_py.model_desc.deepseek_v4_dspark_model import (
     DeepSeekV4DSparkParams,
 )
 from rtp_llm.models_py.modules.dsv4.decode.forward import forward_layers
+from rtp_llm.models_py.modules.dsv4.transformer import V4Transformer
 from rtp_llm.utils.model_weight import W
 from rtp_llm.ops import TaskType
 
@@ -259,6 +260,12 @@ class DeepSeekV4DSparkTest(unittest.TestCase):
         expected_l2 = embedded + 1.0 + 2.0 + 3.0
         expected = torch.stack([expected_l0, expected_l2], dim=2).reshape(2, 2, 3)
         torch.testing.assert_close(v4._last_aux_hidden_states, expected)
+
+        published = v4._last_aux_hidden_states
+        taken = V4Transformer.take_aux_hidden_states(v4)
+        self.assertIs(taken, published)
+        self.assertIsNone(v4._last_aux_hidden_states)
+        self.assertIsNone(V4Transformer.take_aux_hidden_states(v4))
 
     def test_weight_descriptor_and_checkpoint_inventory(self):
         descriptor = DeepSeekV4DSparkWeight.__new__(DeepSeekV4DSparkWeight)

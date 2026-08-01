@@ -76,7 +76,8 @@ public:
                                                        const ModelConfig&     model_config,
                                                        const RuntimeConfig&   runtime_config,
                                                        const ResourceContext& resource_context,
-                                                       int                    vocab_size);
+                                                       int                    vocab_size,
+                                                       bool                   is_dspark = false);
 
 protected:
     struct AcceptLenMetricsSnapshot {

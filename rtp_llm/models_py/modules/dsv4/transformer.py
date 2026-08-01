@@ -248,6 +248,12 @@ class V4Transformer(nn.Module):
         self._prefill_ws_main_w = 0
         self._prefill_ws_idx_w = 0
 
+    def take_aux_hidden_states(self) -> Optional[torch.Tensor]:
+        """Transfer the latest target auxiliary capture to the output owner."""
+        aux_hidden_states = self._last_aux_hidden_states
+        self._last_aux_hidden_states = None
+        return aux_hidden_states
+
     def _bind_runtime_buffers(
         self,
         mtp_hidden_buffer: Optional[torch.Tensor],
@@ -558,3 +564,4 @@ class V4Transformer(nn.Module):
                 h[:, -1].to(self.head_weight.dtype), self.head_weight
             ).float()
         return h
+

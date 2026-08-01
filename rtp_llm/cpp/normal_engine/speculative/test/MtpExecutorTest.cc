@@ -1400,4 +1400,24 @@ TEST_F(MtpExecutorTest, testDSparkGreedyDraftOutputUsesPersistentDummyProbs) {
     EXPECT_EQ(first.all_probs.data_ptr(), second.all_probs.data_ptr());
 }
 
+TEST_F(MtpExecutorTest, testDSparkFakeDecodeStreamCarriesFullProposalRow) {
+    constexpr int64_t k = 5;
+    MtpExecutorTestConfig test_config;
+    auto components = createMtpExecutorComponents(test_config);
+
+    auto stream = MtpExecutor::createMinFakeDecodeStream(k,
+                                                        components.model_config,
+                                                        components.runtime_config,
+                                                        components.resource_context,
+                                                        components.model_config.vocab_size,
+                                                        /*is_dspark=*/true);
+    ASSERT_TRUE(stream->isFakeStream());
+    const auto sp_buffer = stream->getSPOutputBuffer();
+    ASSERT_NE(sp_buffer, nullptr);
+    EXPECT_EQ((std::vector<int64_t>{1, k + 1}), sp_buffer->tokens.sizes().vec());
+    EXPECT_FALSE(sp_buffer->all_probs.defined());
+    EXPECT_EQ((std::vector<int64_t>{1, k}), stream->getProposeTokensGpu().sizes().vec());
+    EXPECT_EQ((std::vector<int64_t>{1, k + 1}), stream->getAcceptTokensGpu().sizes().vec());
+}
+
 }  // namespace rtp_llm

@@ -747,6 +747,7 @@ def forward_prefill(
         prepare_hidden_fn=prepare_hidden_fn,
     )  # [T_total, dim]
     outputs = PyModelOutputs(hidden)
-    if v4._last_aux_hidden_states is not None:
-        outputs.aux_hidden_states = v4._last_aux_hidden_states
+    aux_hidden_states = v4.take_aux_hidden_states()
+    if aux_hidden_states is not None:
+        outputs.aux_hidden_states = aux_hidden_states
     return outputs
