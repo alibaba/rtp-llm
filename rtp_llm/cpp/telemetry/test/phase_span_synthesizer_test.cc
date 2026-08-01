@@ -331,7 +331,7 @@ TEST_F(PhaseSpanSynthesizerTest, KvLoadSpanMarksErrorOnFailure) {
                          31000000,
                          42,
                          /*ok=*/false,
-                         "CACHE_STORE_LOAD_BUFFER_TIMEOUT",
+                         "DependencyFailure",
                          8307,
                          "CACHE_STORE_LOAD_BUFFER_TIMEOUT");
     parent->End();
@@ -344,9 +344,34 @@ TEST_F(PhaseSpanSynthesizerTest, KvLoadSpanMarksErrorOnFailure) {
     ASSERT_NE(load, nullptr);
     EXPECT_EQ(load->GetStatus(), trace_api::StatusCode::kError);
     EXPECT_EQ(load->GetDescription(), "KV cache loading timed out while waiting for a buffer");
-    EXPECT_EQ(getStringAttribute(load, "error.type"), "CACHE_STORE_LOAD_BUFFER_TIMEOUT");
+    EXPECT_EQ(getStringAttribute(load, "error.type"), "DependencyFailure");
     EXPECT_EQ(getInt64Attribute(load, "rtp_llm.error.code"), 8307);
     EXPECT_EQ(getStringAttribute(load, "rtp_llm.error.reason"), "CACHE_STORE_LOAD_BUFFER_TIMEOUT");
+}
+
+TEST_F(PhaseSpanSynthesizerTest, KvLoadSpanUsesLowCardinalityCancelledType) {
+    auto parent = createParentSpan("rtp_llm.decode_remote_generate");
+
+    synthesizeKvLoadSpan(parent,
+                         4000000,
+                         4069000,
+                         42,
+                         /*ok=*/false,
+                         "Cancelled",
+                         8100,
+                         "CANCELLED");
+    parent->End();
+
+    EXPECT_TRUE(TelemetryRuntime::shutdown(5000));
+    const auto spans = span_data_->GetSpans();
+    ASSERT_EQ(spans.size(), 2u);
+    auto* load = findSpan(spans, "load_cache");
+    ASSERT_NE(load, nullptr);
+    EXPECT_EQ(load->GetStatus(), trace_api::StatusCode::kError);
+    EXPECT_EQ(load->GetDescription(), "KV cache loading was cancelled");
+    EXPECT_EQ(getStringAttribute(load, "error.type"), "Cancelled");
+    EXPECT_EQ(getInt64Attribute(load, "rtp_llm.error.code"), 8100);
+    EXPECT_EQ(getStringAttribute(load, "rtp_llm.error.reason"), "CANCELLED");
 }
 
 TEST_F(PhaseSpanSynthesizerTest, KvLoadSpanInvalidWindowIsSkipped) {

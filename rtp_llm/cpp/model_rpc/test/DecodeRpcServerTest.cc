@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServer.h"
+#include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
 #include "rtp_llm/cpp/testing/TestLogCapture.h"
 
@@ -236,6 +237,89 @@ TEST(DecodeRpcServerTest, ReadTimeoutLogsKeysAndCancellationIsSilent) {
     const auto log_content = log_capture.content();
     EXPECT_NE(log_content.find("timeout_key"), std::string::npos);
     EXPECT_EQ(log_content.find("cancelled_key"), std::string::npos);
+}
+
+TEST(DecodeRpcServerTest, CancelledGenerateRequestReadUsesCancelledStatus) {
+    const auto status = DecodeRpcServer::generateRequestReadFailureStatus(/*cancelled=*/true);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::CANCELLED);
+    EXPECT_EQ(status.error_message(), "request is cancelled");
+}
+
+TEST(DecodeRpcServerTest, NonCancelledGenerateRequestReadPreservesFailure) {
+    const auto status = DecodeRpcServer::generateRequestReadFailureStatus(/*cancelled=*/false);
+
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INTERNAL);
+    EXPECT_EQ(status.error_message(), "poll generate request failed");
+}
+
+TEST(DecodeRpcServerTest, CacheLoadTimeoutClassifiedAsDependencyFailure) {
+    // The cache timeouts map onto DEADLINE_EXCEEDED, so a predicate keyed on the
+    // gRPC status would mislabel this upstream KV-transfer failure as a local
+    // deadline of the decode node.
+    const ErrorInfo    error_info(ErrorCode::LOAD_CACHE_TIMEOUT, "load cache timeout");
+    const grpc::Status error_status(transErrorCodeToGrpc(error_info.code()), error_info.ToString());
+    ASSERT_EQ(error_status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
+
+    EXPECT_STREQ(DecodeRpcServer::phaseErrorType(
+                     /*request_ok=*/false, DecodeStatInfo::loadCacheFromPrefill, error_info, error_status),
+                 "DependencyFailure");
+}
+
+TEST(DecodeRpcServerTest, CacheStoreLoadBufferTimeoutClassifiedAsDependencyFailure) {
+    const ErrorInfo    error_info(ErrorCode::CACHE_STORE_LOAD_BUFFER_TIMEOUT, "load buffer timeout");
+    const grpc::Status error_status(transErrorCodeToGrpc(error_info.code()), error_info.ToString());
+    ASSERT_EQ(error_status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
+
+    EXPECT_STREQ(DecodeRpcServer::phaseErrorType(
+                     /*request_ok=*/false, DecodeStatInfo::loadCacheFromPrefill, error_info, error_status),
+                 "DependencyFailure");
+}
+
+TEST(DecodeRpcServerTest, CancelledDuringCacheLoadKeepsCancelledClassification) {
+    // A client going away while KV cache is still arriving is not a failure of the
+    // Prefill dependency, so the stage alone must not decide the classification.
+    const ErrorInfo    error_info(ErrorCode::CANCELLED, "request is cancelled");
+    const grpc::Status error_status(transErrorCodeToGrpc(error_info.code()), error_info.ToString());
+    ASSERT_EQ(error_status.error_code(), grpc::StatusCode::CANCELLED);
+
+    EXPECT_STREQ(DecodeRpcServer::phaseErrorType(
+                     /*request_ok=*/false, DecodeStatInfo::loadCacheFromPrefill, error_info, error_status),
+                 "Cancelled");
+}
+
+TEST(DecodeRpcServerTest, CancelledCacheLoadClassificationDoesNotRequireTransportStatus) {
+    const ErrorInfo error_info(ErrorCode::CANCELLED, "request is cancelled");
+
+    EXPECT_STREQ(DecodeRpcServer::phaseErrorType(
+                     /*request_ok=*/false, DecodeStatInfo::loadCacheFromPrefill, error_info, grpc::Status::OK),
+                 "Cancelled");
+}
+
+TEST(DecodeRpcServerTest, DeadlineOutsideCacheLoadKeepsStatusClassification) {
+    const ErrorInfo    error_info(ErrorCode::GENERATE_TIMEOUT, "generate timeout");
+    const grpc::Status error_status(transErrorCodeToGrpc(error_info.code()), error_info.ToString());
+    ASSERT_EQ(error_status.error_code(), grpc::StatusCode::DEADLINE_EXCEEDED);
+
+    EXPECT_STREQ(DecodeRpcServer::phaseErrorType(
+                     /*request_ok=*/false, DecodeStatInfo::localGenerate, error_info, error_status),
+                 "DeadlineExceeded");
+}
+
+TEST(DecodeRpcServerTest, ExceptionUnwindingWithoutStatusIsClassifiedAsException) {
+    // PhaseSpanSynthesisScope reports unwinding while error_status is still OK:
+    // nothing set a gRPC status on the way out.
+    EXPECT_STREQ(DecodeRpcServer::phaseErrorType(
+                     /*request_ok=*/false, DecodeStatInfo::localGenerate, ErrorInfo::OkStatus(), grpc::Status::OK),
+                 "Exception");
+}
+
+TEST(DecodeRpcServerTest, SuccessfulRequestHasNoPhaseErrorType) {
+    EXPECT_EQ(DecodeRpcServer::phaseErrorType(/*request_ok=*/true,
+                                              DecodeStatInfo::loadCacheFromPrefill,
+                                              ErrorInfo(ErrorCode::LOAD_CACHE_TIMEOUT, "ignored"),
+                                              grpc::Status(grpc::StatusCode::DEADLINE_EXCEEDED, "ignored")),
+              nullptr);
 }
 
 }  // namespace rtp_llm

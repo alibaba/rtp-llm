@@ -47,6 +47,7 @@ test_deps = [
     "@com_google_googletest//:gtest_main",
     "@havenask//aios/autil:base64",
     "@havenask//aios/autil:zlib",
+    "@io_opentelemetry_cpp//exporters/memory:in_memory_span_exporter",
 ] + torch_deps() + device_impl_target() + cuda13_torch_link_deps
 
 # cc_test(
