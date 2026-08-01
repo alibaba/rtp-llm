@@ -46,10 +46,8 @@ public:
             total_sampler_batch_size_in_ += stream->needTilingForSampling() ? next_batch_size : cur_batch_size;
             total_sampler_batch_size_out_ += next_batch_size;
             max_blocks_num_ = std::max(max_blocks_num_, stream->curBlocksNum());
-            if (stream->hasCacheKeys()) {
-                for (int32_t batch_id = 0; batch_id < cur_batch_size; ++batch_id) {
-                    max_cache_keys_num_ = std::max(max_cache_keys_num_, stream->cacheKeys(batch_id).size());
-                }
+            for (int32_t batch_id = 0; batch_id < cur_batch_size; ++batch_id) {
+                max_cache_keys_num_ = std::max(max_cache_keys_num_, stream->requestPrefix(batch_id).keys().size());
             }
             max_seq_len_ = std::max(max_seq_len_, (size_t)stream->seqLength());
             total_score_batch_size_ += stream->scoreLen();

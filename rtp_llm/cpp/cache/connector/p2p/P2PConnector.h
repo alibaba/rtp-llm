@@ -43,14 +43,15 @@ public:
     }
 
 public:
-    std::shared_ptr<AsyncMatchContext> asyncMatch(const KVCacheResourcePtr&    resource,
-                                                  const std::shared_ptr<Meta>& meta) override;
+    bool bindRequestResource(const KVCacheResourcePtr& resource, const std::shared_ptr<Meta>& meta) override;
+    std::shared_ptr<AsyncMatchContext> asyncMatch(const RequestPrefixMatchView& view,
+                                                  const std::shared_ptr<Meta>&  meta) override;
 
     std::shared_ptr<AsyncContext> asyncRead(const KVCacheResourcePtr&                 resource,
                                             const std::shared_ptr<Meta>&              meta,
                                             const std::shared_ptr<AsyncMatchContext>& match_context,
-                                            int                                       start_read_block_index,
-                                            int                                       read_block_num) override;
+                                            size_t                                    start_token,
+                                            size_t                                    token_count) override;
 
     std::shared_ptr<AsyncContext> asyncWrite(const KVCacheResourcePtr&    resource,
                                              const std::shared_ptr<Meta>& meta) override;

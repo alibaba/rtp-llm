@@ -49,7 +49,7 @@ protected:
         prefill_server_.reset();
     }
 
-    // 创建有效的 KVCacheResource（使用 initGroups + groupBlocks/blocks/cacheKeys 公开 API）
+    // 创建有效的 KVCacheResource（使用 initGroups + groupResources/blocks/cacheKeys 公开 API）
     KVCacheResourcePtr createValidKVCacheResource(int num_layers = 2, int blocks_per_layer = 2) {
         auto                          resource = std::make_shared<KVCacheResource>();
         std::vector<std::vector<int>> layer_to_group_ids(num_layers);
@@ -59,13 +59,11 @@ protected:
         resource->initGroups(test::makeTestCacheTopology(num_layers, num_layers, layer_to_group_ids));
 
         for (int layer_id = 0; layer_id < num_layers; ++layer_id) {
+            const auto tag = "group" + std::to_string(layer_id);
             for (int i = 0; i < blocks_per_layer; ++i) {
-                resource->mutableBlockIds("group" + std::to_string(layer_id)).add({i});
+                resource->mutableBlockIds(tag).add({i});
+                resource->cacheKeys(tag).push_back(1000 + layer_id * blocks_per_layer + i);
             }
-        }
-
-        for (int i = 0; i < num_layers * blocks_per_layer; ++i) {
-            resource->cacheKeys().push_back(1000 + i);
         }
 
         return resource;
@@ -85,6 +83,15 @@ protected:
         auto resource = std::make_shared<KVCacheResource>();
         resource->initGroups(test::makeTestCacheTopology(/*group_num=*/1, /*layer_num=*/1, {{0}}));
         return resource;
+    }
+
+    NativeTransferSelections allSelections(const KVCacheResourcePtr& resource) const {
+        NativeTransferSelections selections;
+        for (const auto& group : resource->topology()->groups()) {
+            const size_t end_token = resource->cacheKeys(group.tag).size() * group.seq_size_per_block;
+            selections.emplace(group.tag, projectTokenRangeForGroup(group, 0, end_token, true));
+        }
+        return selections;
     }
 
     // 等待 async context 完成，调用 checkDone() 以便异常在测试线程中抛出
@@ -254,7 +261,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnNotNull_AllSuccess) {
     auto meta     = createMockMeta(2001, "test_async_read_1", currentTimeMs() + 5000);
 
     // block_range: {start_block_idx, block_count}, use -1 for block_count to include all blocks
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = scheduler_->asyncRead(resource, meta, allSelections(resource));
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -276,7 +283,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_WaitDone_UnblocksWhenCheckDoneComple
     auto resource = createValidKVCacheResource(2, 2);
     auto meta     = createMockMeta(2010, "test_async_read_wait_done", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = scheduler_->asyncRead(resource, meta, allSelections(resource));
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -307,7 +314,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_WaitDone_UnblocksWhenCheckDoneComple
 TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnNull_NullResource) {
     auto meta = createMockMeta(2002, "test_async_read_null_resource", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(nullptr, meta, {0, -1});
+    auto result = scheduler_->asyncRead(nullptr, meta, {});
 
     EXPECT_FALSE(result.ok());
     EXPECT_EQ(result.context, nullptr);
@@ -323,7 +330,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnNull_EmptyResource) {
     auto resource = std::make_shared<KVCacheResource>();
     auto meta     = createMockMeta(2003, "test_async_read_empty", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = scheduler_->asyncRead(resource, meta, {});
 
     EXPECT_FALSE(result.ok());
     EXPECT_EQ(result.context, nullptr);
@@ -341,7 +348,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_BroadcastFailed) {
     auto resource = createValidKVCacheResource(2, 2);
     auto meta     = createMockMeta(2004, "test_async_read_broadcast_fail", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = scheduler_->asyncRead(resource, meta, allSelections(resource));
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -364,7 +371,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_LoadFailed) {
     auto resource = createValidKVCacheResource(2, 2);
     auto meta     = createMockMeta(2005, "test_async_read_load_fail", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = scheduler_->asyncRead(resource, meta, allSelections(resource));
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -388,7 +395,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_BothFailed) {
     auto resource = createValidKVCacheResource(2, 2);
     auto meta     = createMockMeta(2006, "test_async_read_both_fail", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = scheduler_->asyncRead(resource, meta, allSelections(resource));
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -407,7 +414,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_PrefillTimeout) {
     auto resource = createValidKVCacheResource(2, 2);
     auto meta     = createMockMeta(2007, "test_async_read_prefill_timeout", currentTimeMs() + 50);
 
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = scheduler_->asyncRead(resource, meta, allSelections(resource));
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -430,7 +437,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ThrowException_BroadcastTimeout) {
     auto resource = createValidKVCacheResource(2, 2);
     auto meta     = createMockMeta(2008, "test_async_read_broadcast_timeout", currentTimeMs() + 50);
 
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = scheduler_->asyncRead(resource, meta, allSelections(resource));
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -451,7 +458,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_CancelBroadcast_WhenPrefillFailed) {
     auto resource = createValidKVCacheResource(2, 2);
     auto meta     = createMockMeta(3001, "test_cancel_broadcast_when_prefill_failed", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = scheduler_->asyncRead(resource, meta, allSelections(resource));
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -488,7 +495,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_CancelPrefill_WhenBroadcastFailed) {
     auto resource = createValidKVCacheResource(2, 2);
     auto meta     = createMockMeta(3002, "test_cancel_prefill_when_broadcast_failed", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = scheduler_->asyncRead(resource, meta, allSelections(resource));
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -545,7 +552,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_TransferNotDone_HoldDelaysDoneAndSup
     auto resource = createValidKVCacheResource(2, 2);
     auto meta     = createMockMeta(5010, "test_transfer_not_done_hold", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = scheduler_->asyncRead(resource, meta, allSelections(resource));
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
@@ -595,7 +602,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_TransferNotDone_ZeroHold_CompletesIm
     auto resource = createValidKVCacheResource(2, 2);
     auto meta     = createMockMeta(5011, "test_transfer_not_done_zero_hold", currentTimeMs() + 5000);
 
-    auto result = scheduler_->asyncRead(resource, meta, {0, -1});
+    auto result = scheduler_->asyncRead(resource, meta, allSelections(resource));
     ASSERT_TRUE(result.ok());
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);

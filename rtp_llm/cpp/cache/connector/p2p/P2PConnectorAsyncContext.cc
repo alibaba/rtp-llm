@@ -10,16 +10,8 @@ namespace rtp_llm {
 
 /*----------------------------------------------- P2PConnectorAsyncMatchContext
  * -------------------------------------------------*/
-size_t P2PConnectorAsyncMatchContext::matchedBlockCount() const {
-    if (resource_ == nullptr) {
-        return 0;
-    }
-
-    size_t matched_blocks = 0;
-    for (const auto& group : resource_->groupBlocks()) {
-        matched_blocks = std::max(matched_blocks, group.block_ids->blocksNum());
-    }
-    return matched_blocks;
+size_t P2PConnectorAsyncMatchContext::matchedTokenCount() const {
+    return matched_token_count_;
 }
 
 bool P2PConnectorAsyncMatchContext::done() const {

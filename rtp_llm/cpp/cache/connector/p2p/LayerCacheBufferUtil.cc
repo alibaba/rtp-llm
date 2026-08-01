@@ -32,7 +32,7 @@ std::optional<TransferWindow> getTransferWindow(const KVCacheResource& resource,
         return std::nullopt;
     }
 
-    const auto& cache_keys                = resource.cacheKeys();
+    const auto& cache_keys                = resource.cacheKeys(cache_tag);
     const auto& block_ids                 = resource.blocksForLayer(layer_id, cache_tag);
     const auto  rank                      = static_cast<size_t>(cp_rank);
     const auto  world_size                = static_cast<size_t>(cp_size);
@@ -66,6 +66,41 @@ std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(
             auto buffer = convertLayer(
                 resource, batch_id, layer_id, std::string(entry.tag), start_block_idx, block_count, cp_rank, cp_size);
             if (buffer) {
+                layer_cache_buffers.push_back(std::move(buffer));
+            }
+        }
+    }
+    return layer_cache_buffers;
+}
+
+std::vector<std::shared_ptr<LayerCacheBuffer>>
+LayerCacheBufferUtil::convert(KVCacheResource& resource, int batch_id, const NativeTransferSelections& selections) {
+    (void)batch_id;
+    std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
+    for (int layer_id = 0; layer_id < resource.layerNum(); ++layer_id) {
+        for (const auto& entry : resource.blockIdsForLayer(layer_id)) {
+            const std::string tag(entry.tag);
+            const auto        selection_it = selections.find(tag);
+            if (selection_it == selections.end()) {
+                continue;
+            }
+            const auto& selection = selection_it->second;
+            RTP_LLM_CHECK_WITH_INFO(selection.owned_global_positions.size() == selection.local_positions.size(),
+                                    "P2P transfer selection has mismatched global/local positions for tag=%s",
+                                    tag.c_str());
+            const auto& cache_keys = resource.cacheKeys(tag);
+            const auto& block_ids  = resource.blocksForLayer(layer_id, tag);
+            auto        buffer     = std::make_shared<LayerCacheBuffer>(layer_id, tag);
+            for (size_t i = 0; i < selection.local_positions.size(); ++i) {
+                const size_t global_pos = selection.owned_global_positions[i];
+                const size_t local_pos  = selection.local_positions[i];
+                if (global_pos >= cache_keys.size() || local_pos >= block_ids.size()
+                    || isNullBlockIdx(block_ids.at(local_pos))) {
+                    continue;
+                }
+                buffer->addBlockId(cache_keys.at(global_pos), block_ids.at(local_pos));
+            }
+            if (!buffer->blockIdMap().empty()) {
                 layer_cache_buffers.push_back(std::move(buffer));
             }
         }

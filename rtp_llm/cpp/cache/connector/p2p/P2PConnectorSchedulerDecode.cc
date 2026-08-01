@@ -40,7 +40,7 @@ void P2PConnectorSchedulerDecode::stopChecker() {
 }
 
 P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncRead(
-    const KVCacheResourcePtr& resource, const std::shared_ptr<Meta>& meta, const std::pair<int, int>& block_range) {
+    const KVCacheResourcePtr& resource, const std::shared_ptr<Meta>& meta, const NativeTransferSelections& selections) {
     if (!meta || !resource) {
         RTP_LLM_LOG_WARNING("asyncRead: meta or resource is null");
         return {nullptr, ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "meta or resource is null")};
@@ -79,7 +79,7 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
     }
 
     auto collector           = std::make_shared<DecodeSchedulerMetricsCollector>(metrics_reporter_);
-    auto layer_cache_buffers = LayerCacheBufferUtil::convert(*resource, 0, block_range.first, block_range.second);
+    auto layer_cache_buffers = LayerCacheBufferUtil::convert(*resource, 0, selections);
     if (layer_cache_buffers.empty()) {
         RTP_LLM_LOG_WARNING("asyncRead: layer_cache_buffers is empty");
         collector->success = false;

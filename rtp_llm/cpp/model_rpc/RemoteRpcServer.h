@@ -24,6 +24,10 @@ private:
     void initCacheStore(const EngineInitParams& params, rtp_llm::ProposeModelEngineInitParams* propose_params);
 
 protected:
+    virtual grpc::Status validateBeforeCacheStoreInit() const {
+        return grpc::Status::OK;
+    }
+
     std::string                 process_id_;
     RemoteServerResource        resource_;
     std::atomic<size_t>         loading_cache_requests_{0};

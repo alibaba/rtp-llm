@@ -35,10 +35,7 @@ public:
     bool              use_mla       = false;
     bool              is_sparse     = false;
 
-    // Block configuration
-    uint32_t block_num                 = 0;
-    size_t   seq_size_per_block        = 1;
-    size_t   kernel_seq_size_per_block = 0;
+    int linear_step = 1;  // Runtime sparsification policy.
 
     size_t seqSizePerBlockForGroup(std::string_view tag) const {
         return group(tag).seq_size_per_block;
@@ -62,32 +59,6 @@ public:
             std::string(tag).c_str());
         return std::max<size_t>(1, group_seq / group_kernel);
     }
-
-    // Legacy scalar view: how many kernel blocks fit inside one global physical block.
-    size_t kernelBlocksPerKvBlock() const {
-        if (kernel_seq_size_per_block == 0) {
-            return 1;
-        }
-        RTP_LLM_CHECK_WITH_INFO(seq_size_per_block % kernel_seq_size_per_block == 0,
-                                "seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
-                                seq_size_per_block,
-                                kernel_seq_size_per_block);
-        return std::max<size_t>(1, seq_size_per_block / kernel_seq_size_per_block);
-    }
-
-    // Block sizing information
-    // ---- Per-block sizes (all layers) ----
-    size_t kv_block_size_bytes = 0;
-    size_t kv_scale_size_bytes = 0;
-    size_t block_size_bytes    = 0;  // (kv + scales together)
-
-    // ---- Per-block strides (one layer) ----
-    size_t kv_block_stride_bytes = 0;
-    size_t kv_scale_stride_bytes = 0;
-
-    // Attention-specific configuration
-    int    linear_step = 1;  // For Linear attention: keep one cache block every `linear_step` blocks
-    size_t explicitly_sized_pool_reserve_bytes = 0;
 
     // mtp-model configurations
     std::vector<std::shared_ptr<CacheConfig>> mtp_sub_configs;
@@ -132,7 +103,6 @@ public:
     const GroupBase& groupForLayer(int layer_id, std::string_view tag) const {
         return topology().groupForLayer(layer_id, tag);
     }
-    const GroupBase& physicalGroupForLayer(int layer_id, std::string_view tag) const;
 
     const std::shared_ptr<const KVCacheSpec>& specForGroup(std::string_view tag) const {
         return group(tag).spec;
@@ -160,7 +130,8 @@ public:
 
     size_t blockSizeBytesForGroup(std::string_view tag) const;
 
-    size_t layerBlockStrideBytes(int layer_id) const;
+    const GroupBase& physicalGroupForLayer(int layer_id, std::string_view tag) const;
+    size_t           layerBlockStrideBytes(int layer_id) const;
 
     uint32_t localKvHeadNumForGroup(std::string_view tag) const {
         const auto& group_config = group(tag);
@@ -184,27 +155,16 @@ public:
         return policyForGroup(tag).fixed_block_num > 0;
     }
 
-    bool usesExplicitIndependentBlocks(std::string_view tag) const {
-        return usesFixedBlocks(tag);
-    }
-
     CacheGroupPolicy policyForGroup(std::string_view tag) const {
         return group(tag).policy;
     }
 
     static bool samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy& rhs);
 
-    void     setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers);
-    void     applyTokenCapacity(uint64_t capacity_tokens);
-    uint64_t tokenCapacity() const;
-    void     finalizeBlockNums(uint32_t global_block_num, const RuntimeConfig&) {
-        block_num = global_block_num;
-        if (global_block_num > 0) {
-            applyTokenCapacity(static_cast<uint64_t>(global_block_num) * seq_size_per_block);
-        }
-    }
-    const std::string& singleReusableGroupTag() const;
-    std::string        debugString(size_t indent = 0) const;
+    void        setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers);
+    void        applyTokenCapacity(uint64_t capacity_tokens);
+    uint64_t    tokenCapacity() const;
+    std::string debugString(size_t indent = 0) const;
 };
 
 }  // namespace rtp_llm

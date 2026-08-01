@@ -271,13 +271,4 @@ KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& so
     return selected;
 }
 
-KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& source,
-                                                       const CacheConfig&     config,
-                                                       const CacheKeysType&   selected_keys) const {
-    RTP_LLM_CHECK_WITH_INFO(source.groupResources().size() == 1,
-                            "legacy connector projection requires exactly one tagged group, got %zu",
-                            source.groupResources().size());
-    return projectConnectorResource(source, config, source.groupResources().front().tag, selected_keys);
-}
-
 }  // namespace rtp_llm

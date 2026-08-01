@@ -42,13 +42,13 @@ public:
     bool init();
 
     // for rank_0:
-    std::shared_ptr<AsyncMatchContext> asyncMatch(const std::shared_ptr<KVCacheResource>& resource,
-                                                  const std::shared_ptr<Meta>&            meta) override;
+    std::shared_ptr<AsyncMatchContext> asyncMatch(const RequestPrefixMatchView& view,
+                                                  const std::shared_ptr<Meta>&  meta) override;
     std::shared_ptr<AsyncContext>      asyncRead(const std::shared_ptr<KVCacheResource>&   resource,
                                                  const std::shared_ptr<Meta>&              meta,
                                                  const std::shared_ptr<AsyncMatchContext>& match_context,
-                                                 int                                       start_read_block_index,
-                                                 int                                       read_block_num) override;
+                                                 size_t                                    start_token,
+                                                 size_t                                    token_count) override;
     std::shared_ptr<AsyncContext>      asyncWrite(const std::shared_ptr<KVCacheResource>& resource,
                                                   const std::shared_ptr<Meta>&            meta) override;
     std::shared_ptr<AsyncContext>
@@ -60,7 +60,8 @@ public:
 private:
     // for rank_0:
     using ActualUriGather = std::vector<std::vector<kv_cache_manager::LocationSpecUnit*>>;
-    void asyncMatchTask(const std::shared_ptr<KVCacheResource>&         resource,
+    void asyncMatchTask(std::vector<CacheKeyType>                       keys,
+                        size_t                                          block_mask,
                         const std::shared_ptr<Meta>&                    meta,
                         const std::shared_ptr<RemoteAsyncMatchContext>& async_context);
     void asyncReadTask(const std::shared_ptr<KVCacheResource>&             resource,
@@ -126,6 +127,7 @@ private:
     std::shared_ptr<InitParams>                      init_params_;
 
     std::unique_ptr<remote_connector::GroupPolicy> group_policy_;
+    std::string                                    remote_group_tag_;
     const kmonitor::MetricsReporterPtr             metrics_reporter_;
 };
 
@@ -171,7 +173,8 @@ protected:
 
 class RemoteAsyncMatchContext: public AsyncMatchContext {
 public:
-    explicit RemoteAsyncMatchContext(size_t prev_reuse_blocks_num): prev_reuse_blocks_num_(prev_reuse_blocks_num) {}
+    explicit RemoteAsyncMatchContext(size_t prev_reuse_blocks_num, size_t native_span):
+        prev_reuse_blocks_num_(prev_reuse_blocks_num), native_span_(native_span) {}
     ~RemoteAsyncMatchContext() override = default;
 
     bool done() const override;
@@ -179,8 +182,11 @@ public:
     void waitDone() override {
         return;
     }
-    size_t matchedBlockCount() const override {
-        return matched_block_count_;
+    size_t matchedTokenCount() const override {
+        return matched_block_count_ * native_span_;
+    }
+    size_t nativeBlockSpan() const {
+        return native_span_;
     }
 
     inline RemoteConnectorState::State state() const {
@@ -214,6 +220,7 @@ private:
 
     size_t                                       prev_reuse_blocks_num_ = 0;
     size_t                                       matched_block_count_   = 0;
+    size_t                                       native_span_           = 1;
     std::shared_ptr<kv_cache_manager::Locations> locations_ptr_ = std::make_shared<kv_cache_manager::Locations>();
     std::string                                  trace_id_;
     RemoteConnectorState                         state_;

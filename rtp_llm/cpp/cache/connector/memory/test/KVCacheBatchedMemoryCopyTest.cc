@@ -88,9 +88,6 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     config.dtype                     = rtp_llm::DataType::TYPE_UINT8;
     config.layer_num                 = use_flash ? 43 : 61;
     config.layer_all_num             = config.layer_num;
-    config.block_num                 = 512;
-    config.seq_size_per_block        = 256;
-    config.kernel_seq_size_per_block = 256;
     config.use_typed_cache_regions   = true;
     config.use_opaque_kv_cache_store = true;
     config.is_sparse                 = true;
@@ -121,14 +118,14 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     }
     const std::vector<size_t>     group_kv_block_stride_bytes = {64, 16, 32, 48, 80, 40, 96};
     const std::vector<size_t>     group_kv_scale_stride_bytes(kDsv4PoolNum, 0);
-    const std::vector<uint32_t>   group_block_nums(kDsv4PoolNum, config.block_num);
+    const std::vector<uint32_t>   group_block_nums(kDsv4PoolNum, 512u);
     std::vector<std::vector<int>> layers_by_group(kDsv4PoolNum);
     auto                          make_spec = [&](size_t gid) -> KVCacheSpecPtr {
         return makeResolvedOpaqueSpec(group_types[gid] != CacheGroupType::FULL,
                                       group_tags[gid],
                                       config.dtype,
                                       group_kv_block_stride_bytes[gid],
-                                      static_cast<uint32_t>(config.seq_size_per_block));
+                                      256u);
     };
 
     auto add_tag = [&](size_t layer, const std::string& tag, int gid) {
@@ -253,8 +250,9 @@ public:
                     continue;
                 }
                 const bool host_group = host_groups_.count(group.tag) > 0;
-                auto       tensor = torch::empty({static_cast<int64_t>(config.block_num), static_cast<int64_t>(stride)},
-                                           host_group ? host_options : cuda_options);
+                auto       tensor     = torch::empty(
+                    {static_cast<int64_t>(config.blockNumForGroup(group.tag)), static_cast<int64_t>(stride)},
+                    host_group ? host_options : cuda_options);
                 if (host_group) {
                     tensor = tensor.pin_memory();
                 }
@@ -277,7 +275,7 @@ public:
         const auto tensor_it = tensors_.find(k);
         const auto stride_it = strides_.find(k);
         if (tensor_it == tensors_.end() || stride_it == strides_.end() || block_id < 0
-            || static_cast<uint32_t>(block_id) >= config_.block_num) {
+            || static_cast<uint32_t>(block_id) >= config_.blockNumForGroup(tag)) {
             return {};
         }
         const auto& tensor       = tensor_it->second;
@@ -302,7 +300,7 @@ public:
         return nullptr;
     }
 
-    std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource&, const CacheKeysType&, bool) override {
+    std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource&, const CacheKeysByGroup&, bool) override {
         return nullptr;
     }
 
@@ -318,7 +316,7 @@ public:
     }
 
     int seqSizePerBlock() const override {
-        return static_cast<int>(config_.seq_size_per_block);
+        return static_cast<int>(config_.seqSizePerBlockForGroup("hca_kv"));
     }
 
     int singleBatchNeedBlocks(const BatchKVCacheResourcePtr&, int, int) const override {
@@ -409,6 +407,73 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeKindRequiredUsesRuntimeNullSlots) {
     }
 }
 
+TEST(KVCacheBatchedMemoryCopyTest, EndpointProjectionMapsPhysicalOrdinalToCompactLocalIndex) {
+    auto config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+
+    KVCacheConfig            kv_config;
+    std::vector<std::string> server_addrs = {"127.0.0.1:1"};
+    auto                     connector =
+        std::make_shared<KVCacheMemoryConnector>(config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+
+    KVCacheResource resource;
+    initResourceGroupsForConfig(resource, config);
+    resource.cacheKeys("csa_kv")         = {901, 902};
+    resource.blockDependencies("csa_kv") = {rootDep(/*ordinal=*/2), rootDep(/*ordinal=*/2)};
+
+    const auto ordinal_index = connector->buildNativeOrdinalIndex(resource);
+    const auto projected = connector->nativeItemForOrdinal(resource, ordinal_index, "csa_kv", /*physical_ordinal=*/2);
+    ASSERT_TRUE(projected.has_value());
+    EXPECT_EQ(projected->local_index, 0u);
+    EXPECT_EQ(projected->cache_key, 901);
+    EXPECT_EQ(projected->dependency.ordinal, 2u);
+    EXPECT_FALSE(
+        connector->nativeItemForOrdinal(resource, ordinal_index, "csa_kv", /*physical_ordinal=*/0).has_value());
+}
+
+TEST(KVCacheBatchedMemoryCopyTest, EndpointWriteAggregatesSharedNativeKeyMasksAcrossTags) {
+    auto config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
+
+    KVCacheConfig kv_config;
+    kv_config.memory_cache_size_mb                    = 64;
+    kv_config.memory_cache_sync_timeout_ms            = 1000;
+    kv_config.enable_prefix_tree_memory_cache         = true;
+    kv_config.enable_legacy_memory_connector_fallback = false;
+
+    std::vector<std::string> server_addrs = {"127.0.0.1:1"};
+    auto                     connector =
+        std::make_shared<KVCacheMemoryConnector>(config, kv_config, std::shared_ptr<KVCacheAllocator>(), server_addrs);
+    ASSERT_TRUE(connector->init());
+
+    KVCacheResource resource;
+    initResourceGroupsForConfig(resource, config);
+    std::vector<int32_t> tokens(257, 1);
+    resource.requestPrefix().rebuild(tokens.data(), tokens.size());
+    resource.resizeBlocks(/*reserver_blocks=*/1, NULL_BLOCK_IDX);
+    for (const auto& group : config.topology().groups()) {
+        if (!group.policy.enable_prefix_reuse) {
+            continue;
+        }
+        const CacheKeyType shared_key         = group.policy.group_type == CacheGroupType::FULL ? 901 : 902;
+        resource.cacheKeys(group.tag)         = {shared_key};
+        resource.blockDependencies(group.tag) = {rootDep()};
+        resource.mutableBlockIds(group.tag).setAt(0, 10);
+    }
+
+    const auto slots             = connector->layerGroupSlots();
+    const auto layer_attn_blocks = connector->resourceLayerRegionBlocks(resource, slots);
+    bool       no_need_write     = true;
+    auto       plan = connector->buildEndpointCopyPlanForWrite(resource, layer_attn_blocks, slots, no_need_write);
+    ASSERT_NE(plan, nullptr);
+    EXPECT_FALSE(no_need_write);
+    ASSERT_EQ(plan->copy_infos.size(), 2u);
+
+    for (const auto& info : plan->copy_infos) {
+        const auto valid_slots = std::count_if(
+            info.slot_valid_mask.begin(), info.slot_valid_mask.end(), [](uint8_t value) { return value != 0; });
+        EXPECT_GT(valid_slots, 1) << "shared native key must retain every contributing tag slot";
+    }
+}
+
 TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWritePlanSkipsHCAStateAndKeepsRuntimeSlotMask) {
     auto config = makeCompactDsv4TypedMemoryCopyConfig(/*use_flash=*/true);
 
@@ -436,19 +501,20 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWritePlanSkipsHCAStateAndKeepsRunti
     ASSERT_EQ(config.groupForLayer(hca_layer, "swa_kv").tag, "swa_kv");
 
     KVCacheResource resource;
-    resource.cacheKeys() = {901, 902};
     initResourceGroupsForConfig(resource, config);
+    const std::string key_tag   = "hca_kv";
+    resource.cacheKeys(key_tag) = {901, 902};
     resource.resizeBlocks(/*reserver_blocks=*/2, NULL_BLOCK_IDX);
 
     resource.mutableBlockIds("hca_kv").assign({11, 12});
     resource.mutableBlockIds("hca_state").assign({51, 52});
     resource.mutableBlockIds("swa_kv").assign({61, NULL_BLOCK_IDX});
-    resource.ensureLinearBlockDependencies();
+    resource.ensureLinearBlockDependencies(key_tag);
 
     const auto layer_attn_blocks = connector->resourceLayerRegionBlocks(resource, slots);
     bool       no_need_write     = true;
-    auto       plan              = connector->buildPrefixCopyPlanForWrite(resource.cacheKeys(),
-                                                       resource.blockDependencies(),
+    auto       plan              = connector->buildPrefixCopyPlanForWrite(resource.cacheKeys(key_tag),
+                                                       resource.blockDependencies(key_tag),
                                                        layer_attn_blocks,
                                                        slots,
                                                        /*start_index=*/0,
@@ -506,12 +572,13 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadRejectsCompressedOnlyWhenStateS
     ASSERT_TRUE(connector->supportsTypedPrefixCacheLayout(slots));
 
     KVCacheResource resource;
-    resource.cacheKeys() = {901, 902};
     initResourceGroupsForConfig(resource, config);
+    const std::string key_tag   = "hca_kv";
+    resource.cacheKeys(key_tag) = {901, 902};
     resource.resizeBlocks(/*reserver_blocks=*/2, NULL_BLOCK_IDX);
     resource.mutableBlockIds("hca_kv").assign({11, 12});
     resource.mutableBlockIds("swa_kv").assign({61, 62});
-    resource.ensureLinearBlockDependencies();
+    resource.ensureLinearBlockDependencies(key_tag);
 
     const auto layer_attn_blocks = connector->resourceLayerRegionBlocks(resource, slots);
     const auto compressed_mask =
@@ -530,10 +597,10 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadRejectsCompressedOnlyWhenStateS
     copy_info.mem_block       = mem_blocks[0];
     copy_info.block_size      = connector->prefixKindBlockSize(CacheBlockKind::COMPRESSED_KV, slots);
     copy_info.slot_valid_mask = compressed_mask;
-    connector->putPrefixToCache(copy_info, resource.blockDependencies()[0], slots);
+    connector->putPrefixToCache(copy_info, resource.blockDependencies(key_tag)[0], slots);
 
-    auto read_plan = connector->buildPrefixCopyPlanForRead(resource.cacheKeys(),
-                                                           resource.blockDependencies(),
+    auto read_plan = connector->buildPrefixCopyPlanForRead(resource.cacheKeys(key_tag),
+                                                           resource.blockDependencies(key_tag),
                                                            layer_attn_blocks,
                                                            slots,
                                                            /*start_index=*/0,
@@ -561,12 +628,13 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadAllowsStateOnlyWhenCompressedNo
     ASSERT_TRUE(connector->supportsTypedPrefixCacheLayout(slots));
 
     KVCacheResource resource;
-    resource.cacheKeys() = {901, 902};
     initResourceGroupsForConfig(resource, config);
+    const std::string key_tag   = "hca_kv";
+    resource.cacheKeys(key_tag) = {901, 902};
     resource.resizeBlocks(/*reserver_blocks=*/2, NULL_BLOCK_IDX);
     resource.mutableBlockIds("hca_kv").assign({0, NULL_BLOCK_IDX});
     resource.mutableBlockIds("swa_kv").assign({61, 62});
-    resource.ensureLinearBlockDependencies();
+    resource.ensureLinearBlockDependencies(key_tag);
 
     const auto layer_attn_blocks = connector->resourceLayerRegionBlocks(resource, slots);
     const auto compressed_mask =
@@ -585,10 +653,10 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeReadAllowsStateOnlyWhenCompressedNo
     copy_info.mem_block       = mem_blocks[0];
     copy_info.block_size      = connector->prefixKindBlockSize(CacheBlockKind::STATE_SWA_KV, slots);
     copy_info.slot_valid_mask = state_mask;
-    connector->putPrefixToCache(copy_info, resource.blockDependencies()[0], slots);
+    connector->putPrefixToCache(copy_info, resource.blockDependencies(key_tag)[0], slots);
 
-    auto read_plan = connector->buildPrefixCopyPlanForRead(resource.cacheKeys(),
-                                                           resource.blockDependencies(),
+    auto read_plan = connector->buildPrefixCopyPlanForRead(resource.cacheKeys(key_tag),
+                                                           resource.blockDependencies(key_tag),
                                                            layer_attn_blocks,
                                                            slots,
                                                            /*start_index=*/0,
@@ -1102,9 +1170,10 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWriteAllocationFailureDoesNotDouble
     const CacheKeysType cache_keys{101, 102};
     KVCacheResource     resource;
     initResourceGroupsForConfig(resource, config);
+    const std::string key_tag = "hca_kv";
     resource.resizeBlocks(static_cast<int>(cache_keys.size()), NULL_BLOCK_IDX);
-    resource.setCacheKeys(cache_keys);
-    resource.ensureLinearBlockDependencies();
+    resource.setCacheKeys(key_tag, cache_keys);
+    resource.ensureLinearBlockDependencies(key_tag);
 
     for (const auto& group : config.topology().groups()) {
         auto& blocks = resource.mutableBlockIds(group.tag);
@@ -1118,7 +1187,7 @@ TEST(KVCacheBatchedMemoryCopyTest, PrefixTreeWriteAllocationFailureDoesNotDouble
     bool       no_need_write     = true;
 
     auto plan = connector->buildPrefixCopyPlanForWrite(cache_keys,
-                                                       resource.blockDependencies(),
+                                                       resource.blockDependencies(key_tag),
                                                        layer_attn_blocks,
                                                        slots,
                                                        /*start_index=*/0,

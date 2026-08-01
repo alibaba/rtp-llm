@@ -22,7 +22,7 @@ std::string getBitHashStr(uint64_t bithash, size_t width = 64) {
 bool validateResourceGroupBlocks(const KVCacheResource&       resource,
                                  const GroupPolicy::GroupMap& expected_groups,
                                  size_t                       required_block_count) {
-    const auto& resource_groups = resource.groupBlocks();
+    const auto& resource_groups = resource.groupResources();
     if (resource_groups.size() != expected_groups.size()) {
         RTP_LLM_LOG_WARNING(
             "group size not equal, expect [%zu], real [%zu]", expected_groups.size(), resource_groups.size());
@@ -156,10 +156,10 @@ bool DefaultLayerGroupPolicy::filterNeedLoadLocations(const kv_cache_manager::Lo
 
 bool DefaultLayerGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
                                                  std::vector<std::string>& location_spec_group_names) const {
-    const auto& cache_keys = resource->cacheKeys();
+    const auto& cache_keys = resource->cacheKeys(wireKeyTag());
     RTP_LLM_CHECK(!cache_keys.empty());
     size_t valid_keys_size = cache_keys.size();
-    if (!resource->lastBlockAligned()) {
+    if (!resource->lastBlockAligned(wireKeyTag())) {
         valid_keys_size--;
     }
     if (!validateResourceGroupBlocks(*resource, groups_, valid_keys_size)) {
@@ -330,10 +330,10 @@ bool FullOtherGroupPolicy::init() {
 
 bool FullOtherGroupPolicy::getNeedWriteGroups(const std::shared_ptr<KVCacheResource>& resource,
                                               std::vector<std::string>&               location_spec_group_names) const {
-    const auto& cache_keys = resource->cacheKeys();
+    const auto& cache_keys = resource->cacheKeys(wireKeyTag());
     RTP_LLM_CHECK(!cache_keys.empty());
     size_t valid_keys_size = cache_keys.size();
-    if (!resource->lastBlockAligned()) {
+    if (!resource->lastBlockAligned(wireKeyTag())) {
         valid_keys_size--;
     }
     if (!validateResourceGroupBlocks(*resource, groups_, valid_keys_size)) {

@@ -13,6 +13,10 @@ grpc::Status RemoteRpcServer::init(const EngineInitParams&                      
     if (!ret.ok()) {
         return ret;
     }
+    ret = validateBeforeCacheStoreInit();
+    if (!ret.ok()) {
+        return ret;
+    }
     initLocalHostInfo();
     initLocalPeerInfo();
     initCacheStore(maga_init_params, propose_params_ptr);

@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/Types.h"
 #include <vector>
 #include <memory>
@@ -26,6 +27,9 @@ public:
                                                                   int              block_count     = -1,
                                                                   int              cp_rank         = 0,
                                                                   int              cp_size         = 1);
+
+    static std::vector<std::shared_ptr<LayerCacheBuffer>>
+    convert(KVCacheResource& resource, int batch_id, const NativeTransferSelections& selections);
 
     static std::shared_ptr<LayerCacheBuffer> convertLayer(KVCacheResource&   resource,
                                                           int                batch_id,

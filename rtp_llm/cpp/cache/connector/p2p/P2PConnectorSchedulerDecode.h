@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
@@ -40,7 +41,7 @@ public:
     // asyncRead from Meta (extracts routing from Meta::p2pRouting())
     AsyncReadResult asyncRead(const KVCacheResourcePtr&       resource,
                               const std::shared_ptr<Meta>&    meta,
-                              const std::pair<int, int>&      block_range);
+                              const NativeTransferSelections& selections);
 
 private:
     struct AsyncReadCallResults {
@@ -49,16 +50,16 @@ private:
     };
 
     std::optional<AsyncReadCallResults>
-    startAsyncReadCalls(int64_t                                               request_id,
-                        const std::string&                                    prefill_ip,
-                        uint32_t                                              prefill_port,
-                        const std::string&                                    unique_key,
-                        int64_t                                               deadline_ms,
-                        const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-                        GenerateStream*                                       generate_stream,
+    startAsyncReadCalls(int64_t                                                 request_id,
+                        const std::string&                                      prefill_ip,
+                        uint32_t                                                prefill_port,
+                        const std::string&                                      unique_key,
+                        int64_t                                                 deadline_ms,
+                        const std::vector<std::shared_ptr<LayerCacheBuffer>>&   layer_cache_buffers,
+                        GenerateStream*                                         generate_stream,
                         const std::shared_ptr<DecodeSchedulerMetricsCollector>& collector,
-                        ErrorInfo&                                            out_error,
-                        int                                                   prefill_tp_size = 0);
+                        ErrorInfo&                                              out_error,
+                        int                                                     prefill_tp_size = 0);
 
 private:
     const P2PConnectorSchedulerConfig                    config_;

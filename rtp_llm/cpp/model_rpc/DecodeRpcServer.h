@@ -3,6 +3,7 @@
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/DecodeGenerateContext.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include <map>
@@ -91,16 +92,22 @@ private:
     static std::string
     makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);
     static std::vector<MTPModuleLoadPlan> makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params);
-    static void                           logReadFailures(int64_t                         request_id,
-                                                          const std::string&              peer_addr,
-                                                          ErrorCode                       error_code,
-                                                          const std::string&              error_message,
-                                                          const std::vector<std::string>& buffer_debug_infos);
+    static grpc::Status
+    validateNormalCacheStoreWireSpan(const CacheConfig& config, size_t expected_span, const std::string& topology_name);
+    static grpc::Status validateNormalCacheStoreTopologies(const CacheConfig& config);
+    static void         logReadFailures(int64_t                         request_id,
+                                        const std::string&              peer_addr,
+                                        ErrorCode                       error_code,
+                                        const std::string&              error_message,
+                                        const std::vector<std::string>& buffer_debug_infos);
 
 private:
     autil::ThreadPoolBasePtr thread_pool_;
     std::atomic<size_t>      onflight_load_cache_requests_{0};
     size_t                   model_id;
+
+protected:
+    grpc::Status validateBeforeCacheStoreInit() const override;
 };
 
 }  // namespace rtp_llm

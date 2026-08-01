@@ -227,27 +227,12 @@ const CacheGroupResource& KVCacheResource::groupResource(std::string_view tag) c
     return group_resources_[groupOffset(tag)];
 }
 
-const std::string& KVCacheResource::strictSingleGroupTag() const {
-    RTP_LLM_CHECK_WITH_INFO(group_resources_.size() == 1,
-                            "legacy cache resource adapter requires exactly one tagged group, got %zu",
-                            group_resources_.size());
-    return group_resources_.front().tag;
-}
-
 CacheKeysType& KVCacheResource::cacheKeys(std::string_view tag) {
     return groupResource(tag).cache_keys;
 }
 
 const CacheKeysType& KVCacheResource::cacheKeys(std::string_view tag) const {
     return groupResource(tag).cache_keys;
-}
-
-CacheKeysType& KVCacheResource::cacheKeys() {
-    return cacheKeys(strictSingleGroupTag());
-}
-
-const CacheKeysType& KVCacheResource::cacheKeys() const {
-    return cacheKeys(strictSingleGroupTag());
 }
 
 void KVCacheResource::setCacheKeys(std::string_view tag, const CacheKeysType& keys) {
@@ -264,14 +249,6 @@ void KVCacheResource::setCacheKeys(std::string_view tag, CacheKeysType&& keys) {
     rebuildLinearBlockDependencies(tag);
 }
 
-void KVCacheResource::setCacheKeys(const CacheKeysType& keys) {
-    setCacheKeys(strictSingleGroupTag(), keys);
-}
-
-void KVCacheResource::setCacheKeys(CacheKeysType&& keys) {
-    setCacheKeys(strictSingleGroupTag(), std::move(keys));
-}
-
 bool KVCacheResource::cacheKeysAreCpCanonical(std::string_view tag) const {
     return groupResource(tag).cache_keys_are_cp_canonical;
 }
@@ -286,14 +263,6 @@ BlockDependenciesType& KVCacheResource::blockDependencies(std::string_view tag) 
 
 const BlockDependenciesType& KVCacheResource::blockDependencies(std::string_view tag) const {
     return groupResource(tag).block_dependencies;
-}
-
-BlockDependenciesType& KVCacheResource::blockDependencies() {
-    return blockDependencies(strictSingleGroupTag());
-}
-
-const BlockDependenciesType& KVCacheResource::blockDependencies() const {
-    return blockDependencies(strictSingleGroupTag());
 }
 
 void KVCacheResource::setBlockDependencies(std::string_view tag, const BlockDependenciesType& dependencies) {
@@ -320,10 +289,6 @@ void KVCacheResource::rebuildLinearBlockDependencies(std::string_view tag) {
     }
 }
 
-void KVCacheResource::rebuildLinearBlockDependencies() {
-    rebuildLinearBlockDependencies(strictSingleGroupTag());
-}
-
 void KVCacheResource::ensureLinearBlockDependencies(std::string_view tag) {
     const auto& resource = groupResource(tag);
     if (resource.block_dependencies.size() == resource.cache_keys.size()) {
@@ -348,22 +313,6 @@ size_t KVCacheResource::remoteReuseTokenNum() const {
     return request_prefix_.remoteReuseTokens();
 }
 
-size_t KVCacheResource::reuseBlockNum() const {
-    return reuseTokenNum() / physicalBlockSpan(strictSingleGroupTag());
-}
-
-size_t KVCacheResource::deviceReuseBlockNum() const {
-    return deviceReuseTokenNum() / physicalBlockSpan(strictSingleGroupTag());
-}
-
-size_t KVCacheResource::memoryReuseBlockNum() const {
-    return memoryReuseTokenNum() / physicalBlockSpan(strictSingleGroupTag());
-}
-
-size_t KVCacheResource::remoteReuseBlockNum() const {
-    return remoteReuseTokenNum() / physicalBlockSpan(strictSingleGroupTag());
-}
-
 void KVCacheResource::setDeviceReuseTokenNum(size_t tokens) {
     request_prefix_.setDeviceReuseTokens(tokens);
 }
@@ -376,32 +325,12 @@ void KVCacheResource::setRemoteReuseTokenNum(size_t tokens) {
     request_prefix_.setRemoteReuseTokens(tokens);
 }
 
-void KVCacheResource::setDeviceReuseBlockNum(size_t blocks) {
-    setDeviceReuseTokenNum(blocks * physicalBlockSpan(strictSingleGroupTag()));
-}
-
-void KVCacheResource::setMemoryReuseBlockNum(size_t blocks) {
-    setMemoryReuseTokenNum(blocks * physicalBlockSpan(strictSingleGroupTag()));
-}
-
-void KVCacheResource::setRemoteReuseBlockNum(size_t blocks) {
-    setRemoteReuseTokenNum(blocks * physicalBlockSpan(strictSingleGroupTag()));
-}
-
 bool KVCacheResource::lastBlockAligned(std::string_view tag) const {
     return groupResource(tag).last_block_aligned;
 }
 
 void KVCacheResource::setLastBlockAligned(std::string_view tag, bool value) {
     groupResource(tag).last_block_aligned = value;
-}
-
-bool KVCacheResource::lastBlockAligned() const {
-    return lastBlockAligned(strictSingleGroupTag());
-}
-
-void KVCacheResource::setLastBlockAligned(bool value) {
-    setLastBlockAligned(strictSingleGroupTag(), value);
 }
 
 std::string KVCacheResource::debugString() const {

@@ -49,7 +49,7 @@ cc_test(
 cc_test(
     name = "remote_connector_mock_full_linear_test",
     srcs = [
-        "RemoteConnectorMockFullLinearTest.cc",
+        "RemoteConnectorStrictSingleGroupTest.cc",
     ],
     copts = test_copts,
     exec_properties = {"gpu": "H20"},

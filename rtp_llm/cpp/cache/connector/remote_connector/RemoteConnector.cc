@@ -180,8 +180,8 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
                                             register_buffer_addr,
                                             register_buffer_size};
     init_params_ = std::make_shared<RemoteConnector::InitParams>(std::move(init_params));
-    RTP_LLM_CHECK_WITH_INFO(cache_config.groupNums() > 0,
-                            "remote connector requires an initialized cache topology with at least one group");
+    RTP_LLM_CHECK_WITH_INFO(cache_config.groupNums() == 1, "remote connector requires exactly one cache group");
+    remote_group_tag_ = cache_config.topology().groups().front().tag;
     std::vector<std::string> full_group_tags, linear_group_tags;
     for (const auto& group : cache_config.topology().groups()) {
         if (cache_config.typeForGroup(group.tag) == CacheGroupType::FULL) {
@@ -195,7 +195,7 @@ RemoteConnector::RemoteConnector(const CacheConfig&                        cache
             std::make_unique<remote_connector::FullLayerGroupPolicy>(allocator, full_group_tags, linear_group_tags);
     } else {
         group_policy_ = std::make_unique<remote_connector::FullLinearLayerGroupPolicy>(
-            allocator, full_group_tags, linear_group_tags, std::max(1, cache_config.linear_step));
+            allocator, full_group_tags, linear_group_tags, 1);
     }
 }
 
@@ -279,7 +279,17 @@ remote_connector::ClientWrapper::ConfigMap RemoteConnector::genClientConfig() {
     auto sdk_backend_configs_str = init_params_->kv_cache_config.reco_model_sdk_config;
     autil::legacy::FromJsonString(sdk_wrapper_config->sdk_backend_configs(), sdk_backend_configs_str);
 
-    uint32_t block_size = init_params_->cache_config.seq_size_per_block;
+    const auto& topology_groups = init_params_->cache_config.topology().groups();
+    RTP_LLM_CHECK_WITH_INFO(!topology_groups.empty(), "remote connector requires cache groups");
+    const uint32_t block_size = static_cast<uint32_t>(topology_groups.front().seq_size_per_block);
+    for (const auto& group : topology_groups) {
+        RTP_LLM_CHECK_WITH_INFO(group.seq_size_per_block == block_size,
+                                "remote SDK model deployment does not support heterogeneous physical spans: "
+                                "tag=%s span=%zu expected=%u",
+                                group.tag.c_str(),
+                                group.seq_size_per_block,
+                                block_size);
+    }
 
     // ModelDeployment
     const auto& model_name   = init_params_->runtime_config.model_name;
@@ -423,8 +433,8 @@ void RemoteConnector::printInfo() const {
         return nullptr;                                                                                                \
     }
 
-std::shared_ptr<AsyncMatchContext> RemoteConnector::asyncMatch(const std::shared_ptr<KVCacheResource>& resource,
-                                                               const std::shared_ptr<Meta>&            meta) {
+std::shared_ptr<AsyncMatchContext> RemoteConnector::asyncMatch(const RequestPrefixMatchView& view,
+                                                               const std::shared_ptr<Meta>&  meta) {
     if (!meta) {
         RTP_LLM_LOG_WARNING("async match failed, meta is null");
         return nullptr;
@@ -432,16 +442,21 @@ std::shared_ptr<AsyncMatchContext> RemoteConnector::asyncMatch(const std::shared
     if (!meta->enableRemoteCache()) {
         return nullptr;
     }
-    if (!resource) {
-        RTP_LLM_LOG_WARNING("async match failed, resource is null");
-        return nullptr;
-    }
-
-    auto async_match_context = std::make_shared<RemoteAsyncMatchContext>(resource->reuseBlockNum());  // only gpu now
+    RTP_LLM_CHECK_WITH_INFO(init_params_->cache_config.groupNums() == 1,
+                            "remote connector requires exactly one cache group");
+    const auto& group = init_params_->cache_config.topology().groups().front();
+    RTP_LLM_CHECK_WITH_INFO(view.matchSpanTokens() == group.seq_size_per_block,
+                            "remote connector requires request match span=%zu to equal native span=%zu",
+                            view.matchSpanTokens(),
+                            group.seq_size_per_block);
+    const size_t              block_mask = view.reuseTokens() / group.seq_size_per_block;
+    std::vector<CacheKeyType> keys(view.keys().begin(),
+                                   view.keys().begin() + view.matchLimitTokens() / view.matchSpanTokens());
+    auto async_match_context = std::make_shared<RemoteAsyncMatchContext>(block_mask, group.seq_size_per_block);
     auto ec                  = thread_pool_->pushTask(
-        [this, resource, meta, async_match_context]() {
+        [this, keys = std::move(keys), block_mask, meta, async_match_context]() mutable {
             async_match_context->setState(RemoteConnectorState::State::RCS_START);
-            this->asyncMatchTask(resource, meta, async_match_context);
+            this->asyncMatchTask(std::move(keys), block_mask, meta, async_match_context);
         },
         false);
     CHECK_THREAD_POOL_EC("asyncMatch", async_match_context, ec);
@@ -451,8 +466,8 @@ std::shared_ptr<AsyncMatchContext> RemoteConnector::asyncMatch(const std::shared
 std::shared_ptr<AsyncContext> RemoteConnector::asyncRead(const std::shared_ptr<KVCacheResource>&   resource,
                                                          const std::shared_ptr<Meta>&              meta,
                                                          const std::shared_ptr<AsyncMatchContext>& match_context,
-                                                         int start_read_block_index,
-                                                         int read_block_num) {
+                                                         size_t                                    start_token,
+                                                         size_t                                    token_count) {
     if (!resource) {
         RTP_LLM_LOG_WARNING("async read failed, resource is null");
         return nullptr;
@@ -460,8 +475,18 @@ std::shared_ptr<AsyncContext> RemoteConnector::asyncRead(const std::shared_ptr<K
 
     if (const auto& remote_match_context = std::dynamic_pointer_cast<RemoteAsyncMatchContext>(match_context);
         remote_match_context != nullptr) {
-        auto async_context = std::make_shared<RemoteConnectorAsyncContext>();
-        auto ec            = thread_pool_->pushTask(
+        const size_t native_span = remote_match_context->nativeBlockSpan();
+        if (start_token % native_span != 0 || token_count == 0 || token_count % native_span != 0) {
+            RTP_LLM_LOG_WARNING("remote async read rejected unaligned token range, start=%zu count=%zu span=%zu",
+                                start_token,
+                                token_count,
+                                native_span);
+            return nullptr;
+        }
+        const int start_read_block_index = static_cast<int>(start_token / native_span);
+        const int read_block_num         = static_cast<int>(token_count / native_span);
+        auto      async_context          = std::make_shared<RemoteConnectorAsyncContext>();
+        auto      ec                     = thread_pool_->pushTask(
             [this, resource, start_read_block_index, read_block_num, async_context, remote_match_context]() {
                 async_context->setState(RemoteConnectorState::State::RCS_START);
                 this->asyncReadTask(
@@ -583,26 +608,14 @@ bool RemoteConnector::copyCache(const RemoteOperationRequestPB& request, RemoteO
         }                                                                                                              \
     } while (0)
 
-void RemoteConnector::asyncMatchTask(const std::shared_ptr<KVCacheResource>&         resource,
+void RemoteConnector::asyncMatchTask(std::vector<CacheKeyType>                       keys,
+                                     size_t                                          block_mask,
                                      const std::shared_ptr<Meta>&                    meta,
                                      const std::shared_ptr<RemoteAsyncMatchContext>& async_context) {
-    RTP_LLM_LOG_DEBUG(
-        "asyncMatchTask, deviceReuseBlockNum[%d], memoryReuseBlockNum[%d],  remoteReuseBlockNum[%d], cacheKeysSize[%zu]",
-        resource->deviceReuseBlockNum(),
-        resource->memoryReuseBlockNum(),
-        resource->remoteReuseBlockNum(),
-        resource->cacheKeys().size());
+    RTP_LLM_LOG_DEBUG("asyncMatchTask, reused blocks[%zu], cacheKeysSize[%zu]", block_mask, keys.size());
 
-    // do not match last block, whether last block aligned or not
-    auto keys = resource->cacheKeys();
-
-    if (!keys.empty()) {
-        keys.pop_back();
-    }
-
-    std::string                       match_trace_id = "match_" + meta->trace_id();
-    kv_cache_manager::BlockMaskOffset block_mask     = resource->reuseBlockNum();
-    MatchMetricsHelper                helper(match_trace_id, metrics_reporter_);
+    std::string        match_trace_id = "match_" + meta->trace_id();
+    MatchMetricsHelper helper(match_trace_id, metrics_reporter_);
     RETURN_IF(block_mask >= keys.size(), match);
     const std::string&          unique_id  = meta->unique_id();
     kv_cache_manager::QueryType query_type = kv_cache_manager::QueryType::QT_PREFIX_MATCH;
@@ -627,12 +640,13 @@ void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResource>&     
                                     int                                                 reuse_size,
                                     const std::shared_ptr<RemoteConnectorAsyncContext>& async_context,
                                     const std::shared_ptr<RemoteAsyncMatchContext>&     match_context) {
+    const size_t native_span = init_params_->cache_config.topology().groups().front().seq_size_per_block;
     RTP_LLM_LOG_DEBUG(
-        "asyncReadTask, deviceReuseBlockNum[%d], memoryReuseBlockNum[%d], remoteReuseBlockNum[%d], cacheKeysSize[%zu]",
-        resource->deviceReuseBlockNum(),
-        resource->memoryReuseBlockNum(),
-        resource->remoteReuseBlockNum(),
-        resource->cacheKeys().size());
+        "asyncReadTask, deviceReuseBlocks[%d], memoryReuseBlocks[%d], remoteReuseBlocks[%d], cacheKeysSize[%zu]",
+        resource->deviceReuseTokenNum() / native_span,
+        resource->memoryReuseTokenNum() / native_span,
+        resource->remoteReuseTokenNum() / native_span,
+        resource->cacheKeys(remote_group_tag_).size());
     const std::string& match_trace_id = match_context->trace_id();
     RTP_LLM_LOG_DEBUG("start_block_index:[%d], reuse_size:[%d]", start_block_index, reuse_size);
     assert(start_block_index >= match_context->prev_reuse_blocks_num());
@@ -669,22 +683,24 @@ void RemoteConnector::asyncReadTask(const std::shared_ptr<KVCacheResource>&     
         broadcast_result->success(), RCS_ERROR, "Read failed for grpc status, trace_id [%s]", match_trace_id.c_str());
     // TODO : maybe not all locations are loaded successfuly
     helper.collector.remote_read_fail_qps  = false;
-    helper.collector.remote_read_token_num = new_reuse_block_num * init_params_->cache_config.seq_size_per_block;
+    const size_t reuse_tokens              = static_cast<size_t>(new_reuse_block_num) * native_span;
+    helper.collector.remote_read_token_num = reuse_tokens;
+    resource->setRemoteReuseTokenNum(reuse_tokens);
     async_context->setState(RemoteConnectorState::State::RCS_SUCCESS);
-    resource->setRemoteReuseBlockNum(new_reuse_block_num);
 }
 
 void RemoteConnector::asyncWriteTask(const std::shared_ptr<KVCacheResource>&             resource,
                                      const std::shared_ptr<Meta>&                        meta,
                                      const std::shared_ptr<RemoteConnectorAsyncContext>& async_context) {
+    const size_t native_span = init_params_->cache_config.topology().groups().front().seq_size_per_block;
     RTP_LLM_LOG_DEBUG(
-        "asyncWriteTask, deviceReuseBlockNum[%d], memoryReuseBlockNum[%d],  remoteReuseBlockNum[%d], cacheKeysSize[%zu]",
-        resource->deviceReuseBlockNum(),
-        resource->memoryReuseBlockNum(),
-        resource->remoteReuseBlockNum(),
-        resource->cacheKeys().size());
-    auto keys = resource->cacheKeys();
-    if (!keys.empty() && !resource->lastBlockAligned()) {
+        "asyncWriteTask, deviceReuseBlocks[%d], memoryReuseBlocks[%d], remoteReuseBlocks[%d], cacheKeysSize[%zu]",
+        resource->deviceReuseTokenNum() / native_span,
+        resource->memoryReuseTokenNum() / native_span,
+        resource->remoteReuseTokenNum() / native_span,
+        resource->cacheKeys(remote_group_tag_).size());
+    auto keys = resource->cacheKeys(remote_group_tag_);
+    if (!keys.empty() && !resource->lastBlockAligned(remote_group_tag_)) {
         keys.pop_back();
     }
     WriteMetricsHelper          helper(meta->trace_id(), metrics_reporter_);

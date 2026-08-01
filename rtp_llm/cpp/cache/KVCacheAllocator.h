@@ -58,15 +58,6 @@ public:
     virtual std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource&  kvcache_resource,
                                                             const CacheKeysByGroup& cache_keys_by_group,
                                                             bool                    is_connector = false)                   = 0;
-    std::shared_ptr<KVCacheResource>         incrKVCacheRef(const KVCacheResource& kvcache_resource,
-                                                            const CacheKeysType&   cache_keys,
-                                                            bool                   is_connector = false) {
-        RTP_LLM_CHECK_WITH_INFO(kvcache_resource.groupResources().size() == 1,
-                                "legacy cache-key adapter requires exactly one tagged group, got %zu",
-                                kvcache_resource.groupResources().size());
-        CacheKeysByGroup cache_keys_by_group{{kvcache_resource.groupResources().front().tag, cache_keys}};
-        return incrKVCacheRef(kvcache_resource, cache_keys_by_group, is_connector);
-    }
 
     virtual GroupedCacheLayerLayout allLayerCacheBase() const                                          = 0;
     virtual bool                    updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,

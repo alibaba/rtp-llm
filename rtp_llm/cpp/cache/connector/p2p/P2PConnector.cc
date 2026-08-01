@@ -7,6 +7,8 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorker.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
+#include "rtp_llm/cpp/cache/RequestPrefixResource.h"
+#include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "autil/NetUtil.h"
 #include "rtp_llm/cpp/utils/StringUtil.h"
@@ -52,23 +54,31 @@ bool P2PConnector::init() {
     return true;
 }
 
-std::shared_ptr<AsyncMatchContext> P2PConnector::asyncMatch(const KVCacheResourcePtr&    resource,
-                                                            const std::shared_ptr<Meta>& meta) {
+bool P2PConnector::bindRequestResource(const KVCacheResourcePtr& resource, const std::shared_ptr<Meta>& meta) {
     if (!meta || !resource || !meta->generateStream()) {
-        RTP_LLM_LOG_WARNING("asyncMatch failed, meta is null or resource is null or generate_stream is null");
-        return nullptr;
+        RTP_LLM_LOG_WARNING("bindRequestResource failed, meta/resource/generate_stream is null");
+        return false;
     }
-
     if (config_.role_type == RoleType::PREFILL) {
         if (!stream_store_->addResource(meta, resource)) {
-            RTP_LLM_LOG_WARNING("asyncMatch failed, stream_store add resource failed");
-            return nullptr;
+            RTP_LLM_LOG_WARNING("bindRequestResource failed, stream_store add resource failed");
+            return false;
         }
+    }
+    return true;
+}
+
+std::shared_ptr<AsyncMatchContext> P2PConnector::asyncMatch(const RequestPrefixMatchView& view,
+                                                            const std::shared_ptr<Meta>&  meta) {
+    if (!meta || !meta->generateStream()) {
+        RTP_LLM_LOG_WARNING("asyncMatch failed, meta or generate_stream is null");
         return nullptr;
     }
-
+    if (config_.role_type == RoleType::PREFILL) {
+        return nullptr;
+    }
     if (config_.role_type == RoleType::DECODE) {
-        return std::make_shared<P2PConnectorAsyncMatchContext>(resource);
+        return std::make_shared<P2PConnectorAsyncMatchContext>(view.tokenExtent());
     }
     RTP_LLM_LOG_WARNING("asyncMatch failed, unsupported role type %d", config_.role_type);
     return nullptr;
@@ -77,14 +87,25 @@ std::shared_ptr<AsyncMatchContext> P2PConnector::asyncMatch(const KVCacheResourc
 std::shared_ptr<AsyncContext> P2PConnector::asyncRead(const KVCacheResourcePtr&                 resource,
                                                       const std::shared_ptr<Meta>&              meta,
                                                       const std::shared_ptr<AsyncMatchContext>& match_context,
-                                                      int                                       start_read_block_index,
-                                                      int                                       read_block_num) {
+                                                      size_t                                    start_token,
+                                                      size_t                                    token_count) {
     if (!meta || !resource || !meta->generateStream()) {
         RTP_LLM_LOG_WARNING("asyncRead failed, meta is null");
         return nullptr;
     }
 
-    std::pair<int, int> block_range{start_read_block_index, read_block_num};
+    if (token_count == 0) {
+        RTP_LLM_LOG_WARNING("asyncRead rejected empty token range start=%zu", start_token);
+        return nullptr;
+    }
+    const size_t end_token = start_token + token_count;
+    RTP_LLM_CHECK_WITH_INFO(end_token >= start_token, "P2P token range overflow");
+    NativeTransferSelections selections;
+    for (const auto& group : resource->topology()->groups()) {
+        auto selection = projectTokenRangeForGroup(
+            group, start_token, end_token, false, config_.worker_config.cp_rank, config_.worker_config.cp_size);
+        selections.emplace(group.tag, std::move(selection));
+    }
 
     if (scheduler_ == nullptr) {
         RTP_LLM_LOG_WARNING("asyncRead failed, scheduler not ready (only tp_rank 0 has scheduler)");
@@ -92,7 +113,7 @@ std::shared_ptr<AsyncContext> P2PConnector::asyncRead(const KVCacheResourcePtr& 
     }
 
     if (config_.role_type == RoleType::DECODE) {
-        auto result = scheduler_->asyncRead(resource, meta, block_range);
+        auto result = scheduler_->asyncRead(resource, meta, selections);
         if (!result.ok()) {
             RTP_LLM_LOG_WARNING("asyncRead failed, unique_key: %s, error: %s",
                                 meta->p2pRouting().value_or(Meta::P2PRoutingContext{}).unique_key.c_str(),

@@ -28,17 +28,17 @@ public:
 
     ~StreamCacheResource() = default;
 
-    void                 init(int batch_size);
-    bool                 hasCacheKeys() const;
-    const CacheKeysType& cacheKeys(int32_t batch_id) const;
-    absl::Status         initKVBlock();
-    absl::Status         incrKVBlock();
-    void                 fakeInitKVBlock(size_t reserved_blocks = 0);
-    int                  tryReleaseKVBlock(size_t nums);
-    void                 freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
-    void                 releaseResource();
-    bool                 asyncLoadCache();
-    bool                 loadCacheDone();
+    void                         init(int batch_size);
+    const RequestPrefixResource& requestPrefix(int32_t batch_id) const;
+    absl::Status                 initKVBlock();
+    absl::Status                 incrKVBlock();
+    void                         fakeInitKVBlock(size_t reserved_blocks = 0);
+    void                         fakeInitKVBlockForTokens(size_t token_capacity, size_t reserve_blocks = 0);
+    int                          tryReleaseKVBlock(size_t nums);
+    void                         freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
+    void                         releaseResource();
+    bool                         asyncLoadCache();
+    bool                         loadCacheDone();
 
     // swap all linear groups rhs and lhs
     void swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs);

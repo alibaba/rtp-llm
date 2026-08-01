@@ -6,6 +6,7 @@
 #include <memory>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/RequestPrefixResource.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 
@@ -109,6 +110,50 @@ TEST(RequestPrefixResourceTest, TierUpdatesAndCopiesShareOneSynchronizedSnapshot
     EXPECT_EQ(copy.memoryReuseTokens(), 4u);
     EXPECT_EQ(copy.remoteReuseTokens(), 4u);
     EXPECT_EQ(copy.reuseTokens(), 12u);
+}
+
+TEST(KVCacheTransferProjectorTest, HeterogeneousFullCountsAndPartialDirectTail) {
+    GroupBase span4;
+    span4.tag                = "four";
+    span4.seq_size_per_block = 4;
+    span4.policy             = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    GroupBase span6          = span4;
+    span6.tag                = "six";
+    span6.seq_size_per_block = 6;
+
+    const auto four = projectTokenRangeForGroup(span4, 12, 36, true);
+    const auto six  = projectTokenRangeForGroup(span6, 12, 36, true);
+    EXPECT_EQ(four.global_positions.size(), 6u);
+    EXPECT_EQ(six.global_positions.size(), 4u);
+    EXPECT_EQ(four.global_positions.front(), 3u);
+    EXPECT_EQ(six.global_positions.front(), 2u);
+
+    const auto partial = projectTokenRangeForGroup(span6, 12, 37, false);
+    EXPECT_EQ(partial.global_positions.size(), 5u);
+    EXPECT_EQ(partial.global_positions.back(), 6u);
+
+    const auto unaligned = projectTokenRangeForGroup(span6, 13, 37, false);
+    EXPECT_EQ(unaligned.global_positions.front(), 2u);
+    EXPECT_EQ(unaligned.global_positions.back(), 6u);
+    EXPECT_ANY_THROW(projectTokenRangeForGroup(span6, 13, 36, true));
+}
+
+TEST(KVCacheTransferProjectorTest, TailAndCpSelectionsRemainExplicit) {
+    GroupBase tail;
+    tail.tag                       = "state";
+    tail.seq_size_per_block        = 4;
+    tail.policy                    = defaultCacheGroupPolicy(CacheGroupType::SWA);
+    tail.policy.active_tail_blocks = 2;
+    const auto tail_selection      = projectTokenRangeForGroup(tail, 0, 36, true);
+    EXPECT_EQ(tail_selection.global_positions, (std::vector<size_t>{7, 8}));
+
+    GroupBase cp;
+    cp.tag                = "full";
+    cp.seq_size_per_block = 4;
+    cp.policy             = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    const auto rank1      = projectTokenRangeForGroup(cp, 0, 36, true, 1, 2);
+    EXPECT_EQ(rank1.local_positions, (std::vector<size_t>{0, 1, 2, 3}));
+    EXPECT_EQ(rank1.global_positions.size(), 9u);
 }
 
 }  // namespace

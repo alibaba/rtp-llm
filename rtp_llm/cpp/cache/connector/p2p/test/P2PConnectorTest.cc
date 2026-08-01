@@ -75,7 +75,7 @@ protected:
         tp_broadcast_servers_.clear();
     }
 
-    // 创建有效的 KVCacheResource（使用 initGroups + groupBlocks/blocks/cacheKeys 公开 API）
+    // 创建有效的 KVCacheResource（使用 initGroups + groupResources/blocks/cacheKeys 公开 API）
     KVCacheResourcePtr createValidKVCacheResource(int num_layers = 2, int blocks_per_layer = 2) {
         auto                          resource = std::make_shared<KVCacheResource>();
         std::vector<std::vector<int>> layer_to_group_ids(num_layers);
@@ -88,11 +88,8 @@ protected:
             const std::string tag = "group" + std::to_string(layer_id);
             for (int i = 0; i < blocks_per_layer; ++i) {
                 resource->mutableBlockIds(tag).add({i});
+                resource->cacheKeys(tag).push_back(1000 + layer_id * blocks_per_layer + i);
             }
-        }
-
-        for (int i = 0; i < num_layers * blocks_per_layer; ++i) {
-            resource->cacheKeys().push_back(1000 + i);
         }
 
         return resource;
@@ -203,16 +200,17 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnCancelled_WhenWaitResourceEntryCancell
     EXPECT_NE(response.error_message().find("cancelled"), std::string::npos);
 }
 
-TEST_F(P2PConnectorTest, AsyncMatchContext_MatchedBlockCountSupportsHybridGroups) {
-    auto resource         = std::make_shared<KVCacheResource>();
-    resource->cacheKeys() = {1000, 1001, 1002};
+TEST_F(P2PConnectorTest, AsyncMatchContext_ReportsRequestTokenExtent) {
+    auto resource = std::make_shared<KVCacheResource>();
     resource->initGroups(test::makeTestCacheTopology(/*group_num=*/4, /*layer_num=*/2, {{1}, {3}}));
+    resource->cacheKeys("group1") = {1000, 1001, 1002};
+    resource->cacheKeys("group3") = {1000, 1001, 1002};
     resource->mutableBlockIds("group1").assign({10, 11, 12});
     resource->mutableBlockIds("group3").assign({30, 31, 32});
     ASSERT_GT(resource->groupNums(), 1);
 
-    P2PConnectorAsyncMatchContext ctx(resource);
-    EXPECT_EQ(ctx.matchedBlockCount(), 3u);
+    P2PConnectorAsyncMatchContext ctx(/*matched_token_count=*/12);
+    EXPECT_EQ(ctx.matchedTokenCount(), 12u);
 }
 
 // 测试: scheduler_->sendKVCache 失败，返回 INTERNAL 错误
@@ -226,7 +224,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenSchedulerHandleReadFailed
     auto        resource    = createValidKVCacheResource(2, 2);
     auto        stream      = createGenerateStream(unique_key, request_id, timeout_ms);
     auto        meta        = createMockMeta(stream.get());
-    connector_->asyncMatch(resource, meta);
+    ASSERT_TRUE(connector_->bindRequestResource(resource, meta));
 
     // 3. 设置 TestRpcServer 返回失败（用于 scheduler_->sendKVCache）
     for (auto& server : tp_broadcast_servers_) {
@@ -252,7 +250,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnInternal_WhenWaitSideChannelTimeout) {
     auto        resource    = createValidKVCacheResource(2, 2);
     auto        stream      = createGenerateStream(unique_key, request_id, timeout_ms);
     auto        meta        = createMockMeta(stream.get());
-    connector_->asyncMatch(resource, meta);
+    ASSERT_TRUE(connector_->bindRequestResource(resource, meta));
 
     // 2. 设置 TestRpcServer 返回成功（用于 scheduler_->sendKVCache）
     for (auto& server : tp_broadcast_servers_) {
@@ -284,7 +282,7 @@ TEST_F(P2PConnectorTest, HandleRead_ReturnOk_WithNotifySideChannelMechanism) {
     auto        resource    = createValidKVCacheResource(2, 2);
     auto        stream      = createGenerateStream(unique_key, request_id, timeout_ms);
     auto        meta        = createMockMeta(stream.get());
-    connector_->asyncMatch(resource, meta);
+    ASSERT_TRUE(connector_->bindRequestResource(resource, meta));
 
     // 2. 设置 TestRpcServer 返回成功（用于 scheduler_->sendKVCache）
     for (auto& server : tp_broadcast_servers_) {

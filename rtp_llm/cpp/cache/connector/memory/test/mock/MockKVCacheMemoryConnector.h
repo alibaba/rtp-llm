@@ -27,15 +27,15 @@ public:
 public:
     MOCK_METHOD(std::shared_ptr<AsyncMatchContext>,
                 asyncMatch,
-                (const std::shared_ptr<KVCacheResource>& resource, const std::shared_ptr<Meta>& meta),
+                (const RequestPrefixMatchView& view, const std::shared_ptr<Meta>& meta),
                 (override));
     MOCK_METHOD(std::shared_ptr<AsyncContext>,
                 asyncRead,
                 (const std::shared_ptr<KVCacheResource>&   resource,
                  const std::shared_ptr<Meta>&              meta,
                  const std::shared_ptr<AsyncMatchContext>& match_context,
-                 int                                       start_read_block_index,
-                 int                                       read_block_num),
+                 size_t                                    start_token,
+                 size_t                                    token_count),
                 (override));
     MOCK_METHOD(std::shared_ptr<AsyncContext>,
                 asyncWrite,

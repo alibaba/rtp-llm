@@ -103,12 +103,8 @@ void GenerateStream::resetBeginTime(int64_t begin_time_us) {
     begin_time_us_ = begin_time_us;
 }
 
-bool GenerateStream::hasCacheKeys() const {
-    return stream_cache_resource_->hasCacheKeys();
-}
-
-const CacheKeysType& GenerateStream::cacheKeys(int32_t batch_id) const {
-    return stream_cache_resource_->cacheKeys(batch_id);
+const RequestPrefixResource& GenerateStream::requestPrefix(int32_t batch_id) const {
+    return stream_cache_resource_->requestPrefix(batch_id);
 }
 
 absl::Status GenerateStream::initKVBlock() {
@@ -124,6 +120,11 @@ absl::Status GenerateStream::initKVBlock() {
 void GenerateStream::fakeInitKVBlock(size_t reserved_blocks) {
     std::lock_guard<std::mutex> lock(*mutex_);
     stream_cache_resource_->fakeInitKVBlock(reserved_blocks);
+}
+
+void GenerateStream::fakeInitKVBlockForTokens(size_t token_capacity, size_t reserve_blocks) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    stream_cache_resource_->fakeInitKVBlockForTokens(token_capacity, reserve_blocks);
 }
 
 absl::Status GenerateStream::incrKVBlock() {
