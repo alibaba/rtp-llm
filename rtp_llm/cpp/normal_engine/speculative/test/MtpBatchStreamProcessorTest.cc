@@ -1187,7 +1187,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPdPrefillProposeRow) {
     target_output.sampler_output.token_ids = torch::tensor({2, -1, 1, 1, 2, 3}, torch::kInt32).reshape({2, 3});
 
     MergedOutput draft_output;
-    // Coupled dspark transports only the [B, k] proposal row.  It never
+    // Greedy DSpark transports only the [B, k] proposal row.  It never
     // materializes or stores a [B, k, vocab] draft probability tensor.
     draft_output.sampler_output.token_ids = torch::tensor({1L, 2L, 3L, 0L, 1L, 2L}, torch::kInt64).reshape({2, k});
 
@@ -1297,9 +1297,9 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkAnchorAsFirstQueryLayout) {
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testDSparkDraftSamplerOutputIsTokenOnly) {
-    // Gumbel-coupled DSpark verifies token equality in both greedy and
-    // stochastic modes.  Draft probabilities are neither required nor
-    // retained, including when an older sender still populates the field.
+    // Default greedy DSpark uses vLLM's implicit one-hot proposal contract:
+    // draft probabilities are neither required nor retained, including when
+    // an older sender still populates the field.
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -1345,7 +1345,8 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkDraftSamplerOutputIsTokenOnly) {
     }
 
     {
-        // Mixed batch: discard a legacy probability carrier instead of
+        // Mixed request settings do not change the globally configured draft
+        // method. Discard a legacy probability carrier instead of
         // letting it reintroduce [B,k,V] ownership.
         auto real_probs = torch::rand({1, k, vocab}, torch::TensorOptions().dtype(torch::kFloat32)).cuda();
         std::list<GenerateStreamPtr> streams{make_stream(3, 0, real_probs), make_stream(4, 1, torch::Tensor())};
@@ -1359,7 +1360,8 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkDraftSamplerOutputIsTokenOnly) {
     }
 
     {
-        // Sampling without draft probs is the native coupled contract.
+        // A stochastic target paired with greedy draft still uses implicit
+        // one-hot q and therefore does not allocate [B,k,V].
         std::list<GenerateStreamPtr> streams{make_stream(5, 0, torch::Tensor())};
         StreamGroups                 groups(streams);
         SamplerOutput                out;
@@ -1369,6 +1371,55 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkDraftSamplerOutputIsTokenOnly) {
         EXPECT_FALSE(probs_d.defined());
         EXPECT_EQ((std::vector<int64_t>{1, k}), out.token_ids.sizes().vec());
     }
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testDSparkProbabilisticDraftCarriesQ) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+
+    const int64_t k     = 3;
+    const int64_t vocab = 4;
+    model_config.max_seq_len          = 2048;
+    model_config.vocab_size           = vocab;
+    model_config.num_layers           = 1;
+    sp_config.gen_num_per_cycle       = k;
+    sp_config.type                    = SP_TYPE_DSPARK;
+    sp_config.sp_dspark_mask_token_id = 3;
+    sp_config.draft_sample_method     = "probabilistic";
+
+    ResourceContext resource_context;
+    auto make_stream = [&](int block_id, const torch::Tensor& probs) {
+        auto stream = createContextStream(model_config, runtime_config, resource_context, {1, 2}, block_id);
+        stream->generateConfig()->do_sample = true;
+        stream->generateConfig()->top_k     = 0;
+        stream->getSPOutputBuffer()->propose_tokens_gpu = torch::tensor({1, 2, 3}, torch::kInt32).cuda();
+        stream->getSPOutputBuffer()->all_probs          = probs;
+        return stream;
+    };
+
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    TensorHolder holder;
+    auto q0 = torch::softmax(torch::rand({1, k, vocab}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)), -1);
+    auto q1 = torch::softmax(torch::rand({1, k, vocab}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA)), -1);
+    std::list<GenerateStreamPtr> streams{make_stream(1, q0), make_stream(2, q1)};
+    StreamGroups                 groups(streams);
+    SamplerOutput                out;
+    torch::Tensor                probs_d;
+    processor.updateDSparkDraftSamplerOutput(groups, out, probs_d, holder);
+    ASSERT_TRUE(out.all_probs.defined());
+    EXPECT_EQ((std::vector<int64_t>{2, k, vocab}), out.all_probs.sizes().vec());
+    EXPECT_TRUE(torch::allclose(out.all_probs, torch::cat({q0, q1}, 0)));
+    EXPECT_EQ(out.all_probs.data_ptr(), probs_d.data_ptr());
+
+    std::list<GenerateStreamPtr> missing{make_stream(3, torch::Tensor())};
+    StreamGroups                 missing_groups(missing);
+    EXPECT_ANY_THROW(processor.updateDSparkDraftSamplerOutput(missing_groups, out, probs_d, holder));
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testDSparkGreedySpecSamplerFastPath) {

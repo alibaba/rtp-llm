@@ -361,7 +361,7 @@ void MtpBatchStreamProcessor::prepareDSparkSamplingMetadata(const StreamGroups& 
     if (!is_dspark_) {
         return;
     }
-    model_input.need_draft_probs   = false;
+    model_input.need_draft_probs   = dspark_use_gumbel_ && needsDSparkTargetProbabilities(stream_groups.allStreams());
     model_input.dspark_use_gumbel  = dspark_use_gumbel_;
     model_input.dspark_use_fp64_gumbel = dspark_use_fp64_gumbel_;
     const auto streams             = stream_groups.allStreams();
@@ -417,6 +417,10 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
     RTP_LLM_CHECK(!stream_groups.empty());
     auto all_streams      = stream_groups.allStreams();
     bool return_all_probs = stream_groups.needReturnAllProbs();
+    // Standard rejection needs target p for every stochastic row even when
+    // the caller did not request probabilities in the response. Greedy-only
+    // batches retain the zero-softmax fast path.
+    const bool need_rejection_probs = needsDSparkTargetProbabilities(all_streams);
 
     for (auto& stream : all_streams) {
         RTP_LLM_CHECK_WITH_INFO(stream->maxBatchSize() == 1, "stream tile num must be 1 in ScoreExecutor");
@@ -454,7 +458,7 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
 
     auto vocab_size           = (size_t)model_output.logits.size(1);
     sampler_inputs.vocab_size = vocab_size;
-    if (return_all_probs) {
+    if (return_all_probs || need_rejection_probs) {
         sampler_inputs.all_probs = torch::zeros({(int64_t)total_batch_size, (int64_t)vocab_size},
                                                 torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     }
@@ -828,7 +832,7 @@ bool MtpBatchStreamProcessor::canUseGreedySpecSamplerFastPath(const std::list<Ge
     return true;
 }
 
-bool MtpBatchStreamProcessor::needsDSparkCoupledTargetProbs(
+bool MtpBatchStreamProcessor::needsDSparkTargetProbabilities(
     const std::list<GenerateStreamPtr>& streams) const {
     if (!is_dspark_) {
         return false;
@@ -860,7 +864,8 @@ SamplerOutput MtpBatchStreamProcessor::buildGreedySpecSamplerOutput(const torch:
     return sampler_output;
 }
 
-SamplerOutput MtpBatchStreamProcessor::buildDSparkDraftSamplerOutput(const GptModelOutputs& model_output) {
+SamplerOutput MtpBatchStreamProcessor::buildDSparkDraftSamplerOutput(const GptModelOutputs& model_output,
+                                                                     bool need_draft_probs) {
     RTP_LLM_CHECK_WITH_INFO(model_output.draft_tokens.defined(),
                             "dspark draft forward did not emit draft_tokens");
     RTP_LLM_CHECK_WITH_INFO(model_output.draft_tokens.dim() == 2
@@ -871,6 +876,17 @@ SamplerOutput MtpBatchStreamProcessor::buildDSparkDraftSamplerOutput(const GptMo
                             propose_step_);
     SamplerOutput output;
     output.token_ids = model_output.draft_tokens;
+    RTP_LLM_CHECK_WITH_INFO(!need_draft_probs || model_output.draft_probs.defined(),
+                            "probabilistic dspark draft did not emit q");
+    if (model_output.draft_probs.defined()) {
+        RTP_LLM_CHECK_WITH_INFO(model_output.draft_probs.dim() == 3
+                                    && model_output.draft_probs.size(0) == model_output.draft_tokens.size(0)
+                                    && model_output.draft_probs.size(1) == static_cast<int64_t>(propose_step_)
+                                    && model_output.draft_probs.size(2) == static_cast<int64_t>(vocab_size_),
+                                "probabilistic dspark q must be [B,k,V] with target V=%d",
+                                vocab_size_);
+        output.all_probs = model_output.draft_probs;
+    }
     return output;
 }
 
@@ -912,7 +928,6 @@ void MtpBatchStreamProcessor::updatePrefillPostDSparkDraftModelInput(GptModelInp
     // Draft logits are unused (the proposal tokens, and optional probabilities,
     // come back on the model output), so point lm_head at anchor rows only.
     model_input.lm_output_indexes = dsparkLmIndexes(batch_size);
-    model_input.need_draft_probs  = false;
 }
 
 void MtpBatchStreamProcessor::prepareDSparkVerifyModelInput(const StreamGroups& stream_groups,
@@ -985,8 +1000,29 @@ void MtpBatchStreamProcessor::updateDSparkDraftSamplerOutput(const StreamGroups&
 
     draft_sampler_output.token_ids = torch::stack(token_rows, 0);  // [B, k]
 
-    draft_token_probs_d_t          = torch::Tensor();
-    draft_sampler_output.all_probs = torch::Tensor();
+    const bool need_draft_probs = dspark_use_gumbel_ && needsDSparkTargetProbabilities(stream_groups.allStreams());
+    if (need_draft_probs) {
+        std::vector<torch::Tensor> prob_rows;
+        prob_rows.reserve(batch_size);
+        for (const auto& stream : stream_groups.allStreams()) {
+            const auto& device_probs = stream->getDraftAllProbsGpu();
+            auto        sp_buffer    = stream->getSPOutputBuffer();
+            torch::Tensor stored_probs =
+                device_probs.defined() ? device_probs : (sp_buffer ? sp_buffer->all_probs : torch::Tensor());
+            RTP_LLM_CHECK_WITH_INFO(stored_probs.defined() && stored_probs.dim() == 3
+                                        && stored_probs.size(0) == 1
+                                        && stored_probs.size(1) == static_cast<int64_t>(propose_step_)
+                                        && stored_probs.size(2) == static_cast<int64_t>(vocab_size_),
+                                    "probabilistic dspark q missing or malformed for stream %ld",
+                                    stream->streamId());
+            prob_rows.push_back(stored_probs);
+        }
+        draft_token_probs_d_t          = torch::cat(prob_rows, 0);
+        draft_sampler_output.all_probs = draft_token_probs_d_t;
+    } else {
+        draft_token_probs_d_t          = torch::Tensor();
+        draft_sampler_output.all_probs = torch::Tensor();
+    }
 }
 
 void MtpBatchStreamProcessor::updateDecodePostDSparkDraftModelInput(
@@ -1056,7 +1092,6 @@ void MtpBatchStreamProcessor::updateDecodePostDSparkDraftModelInput(
     // Empty sequence_lengths carries over from setVerifyPairInputs; draft
     // logits are unused, keep lm indexes at the query-block row bases.
     model_input.lm_output_indexes = dsparkLmIndexes((int64_t)batch_size);
-    model_input.need_draft_probs  = false;
 }
 
 void MtpBatchStreamProcessor::prepareDSparkDraftReceiverMetadata(GptModelInputs& model_input, int64_t batch_size) {
@@ -1071,7 +1106,6 @@ void MtpBatchStreamProcessor::prepareDSparkDraftReceiverMetadata(GptModelInputs&
     model_input.combo_tokens = dspark_combo_cache_.narrow(0, 0, batch_size).reshape({-1});
     model_input.input_lengths = dsparkQueryLengths(batch_size);
     model_input.lm_output_indexes = dsparkLmIndexes(batch_size);
-    model_input.need_draft_probs = false;
 }
 
 void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(
@@ -1214,14 +1248,12 @@ void MtpBatchStreamProcessor::preparePrefillSpecUpdateInfo(const StreamGroups&  
             }
         }
 
-        // Coupled DSpark verification compares tokens generated from the same
-        // (seed, absolute-position) Gumbel key.  It deliberately carries no
-        // draft probability tensor.  Legacy MTP still needs its q distribution
-        // for ratio/residual verification and keeps the defensive device clone.
+        // Greedy DSpark carries no q. Probabilistic DSpark and legacy MTP both
+        // retain the exact distribution that produced the proposal.
         torch::Tensor propose_all_probs;
-        if (!is_dspark_) {
+        if (!is_dspark_ || draft_sampler_output.all_probs.defined()) {
             RTP_LLM_CHECK_WITH_INFO(draft_sampler_output.all_probs.defined(),
-                                    "legacy MTP prefill requires draft all_probs");
+                                    "probabilistic speculative prefill requires draft all_probs");
             propose_all_probs = draft_sampler_output.all_probs
                                     .narrow(0, batch_idx_out, next_batch_size)
                                     .to(torch::kCUDA)
@@ -1269,12 +1301,12 @@ void MtpBatchStreamProcessor::prepareDecodeSpecUpdateInfo(
         auto cur_batch_size  = stream->currentBatchSize();
         auto next_batch_size = stream->nextBatchSize();
 
-        // The coupled DSpark path transports only proposal tokens.  The
-        // probability slice below is part of the legacy MTP verifier contract.
+        // Greedy DSpark transports only proposal tokens. Probabilistic DSpark
+        // transports q through the same owner seam as legacy MTP.
         torch::Tensor propose_all_probs;
-        if (!is_dspark_) {
+        if (!is_dspark_ || draft_sampler_output.all_probs.defined()) {
             RTP_LLM_CHECK_WITH_INFO(draft_sampler_output.all_probs.defined(),
-                                    "legacy MTP decode requires draft all_probs");
+                                    "probabilistic speculative decode requires draft all_probs");
             propose_all_probs = draft_sampler_output.all_probs
                                     .narrow(0, batch_idx_out, next_batch_size)
                                     .to(torch::kCUDA)

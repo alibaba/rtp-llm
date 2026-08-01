@@ -17,10 +17,11 @@ public:
                             bool                               warm_up):
         NormalBatchStreamProcessor(model_config, pd_sep_config, profiling_debug_logging_config, cache_config, warm_up),
         propose_step_(sp_config.gen_num_per_cycle),
+        vocab_size_(model_config.vocab_size),
         is_dspark_(sp_config.type == SP_TYPE_DSPARK),
         dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
         dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor),
-        dspark_use_gumbel_(sp_config.draft_sample_method == "gumbel"),
+        dspark_use_gumbel_(sp_config.draft_sample_method == "probabilistic"),
         dspark_use_fp64_gumbel_(sp_config.use_fp64_gumbel) {}
 
     absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups,
@@ -90,8 +91,8 @@ public:
                                        GptModelInputs&     model_input,
                                        TensorHolder&       host_holder);
 
-    // Token-only draft output for coupled verification, from the per-stream
-    // state stored last round: token_ids [B, k] int32; no draft probabilities.
+    // Draft output from per-stream state stored last round. Greedy carries
+    // token_ids [B,k] only; probabilistic additionally carries q [B,k,V].
     void updateDSparkDraftSamplerOutput(const StreamGroups& stream_groups,
                                         SamplerOutput&      draft_sampler_output,
                                         torch::Tensor&      draft_token_probs_d_t,
@@ -167,19 +168,20 @@ public:
     // Greedy spec-sampler fast path (dspark decode).  When every stream is
     // plain greedy with no logit shaping (penalties, ngram bans, logits
     // processors, beams/tiling) and no probs/logits/loss returns, the
-    // coupled verifier's accept decision reads only proposal and target argmax
+    // greedy verifier's accept decision reads only proposal and target argmax
     // IDs, so no probability buffer exists on either side.
     // The whole sampler-input gather (host loops + O(seq_len) token-history
     // copy) and Sampler::forward (penalty kernels + [B*(k+1), V] softmax)
     // then collapse to one argmax over the verify logits.
     bool          canUseGreedySpecSamplerFastPath(const std::list<GenerateStreamPtr>& streams) const;
-    bool          needsDSparkCoupledTargetProbs(const std::list<GenerateStreamPtr>& streams) const;
+    bool          needsDSparkTargetProbabilities(const std::list<GenerateStreamPtr>& streams) const;
     SamplerOutput buildGreedySpecSamplerOutput(const torch::Tensor& logits, int64_t batch_size);
-    SamplerOutput buildDSparkDraftSamplerOutput(const GptModelOutputs& model_output);
+    SamplerOutput buildDSparkDraftSamplerOutput(const GptModelOutputs& model_output, bool need_draft_probs = false);
 
 protected:
 
     int propose_step_;
+    int vocab_size_;
     // DSpark/DFlash block-diffusion draft (see the DSpark variants above).
     bool    is_dspark_            = false;
     int32_t dspark_mask_token_id_ = -1;

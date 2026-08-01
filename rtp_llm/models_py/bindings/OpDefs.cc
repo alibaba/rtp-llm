@@ -217,13 +217,13 @@ void registerPyOpDefs(pybind11::module& m) {
                        "Optional float32 [batch] DSpark sampling temperatures; zero is greedy")
         .def_readwrite("dspark_use_gumbel",
                        &PyModelInputs::dspark_use_gumbel,
-                       "Whether the DSpark proposal tail uses coupled Gumbel sampling")
+                       "Whether the DSpark proposal tail uses probabilistic Gumbel sampling")
         .def_readwrite("dspark_use_fp64_gumbel",
                        &PyModelInputs::dspark_use_fp64_gumbel,
                        "Whether DSpark Gumbel noise/reduction uses vLLM's fp64 mode")
         .def_readwrite("need_draft_probs",
                        &PyModelInputs::need_draft_probs,
-                       "Legacy proposal-probability request; DSpark always leaves probabilities undefined");
+                       "Whether the draft must return q for probability-ratio rejection");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")

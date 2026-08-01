@@ -440,10 +440,8 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
 
     if (sp_output_buffer && !target_only) {
         torch::Tensor all_probs_cpu;
-        if (engine_->isDSpark()) {
-            // Coupled DSpark verification ships only {target, p1..pk}.  Greedy
-            // and Gumbel sampling both avoid the [1, k, vocab] draft payload;
-            // target re-sampling uses the request seed and absolute positions.
+        if (engine_->isDSpark() && !sp_output_buffer->all_probs.defined()) {
+            // Greedy DSpark uses implicit one-hot q and stays token-only.
             all_probs_cpu = torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat32));
         } else {
             all_probs_cpu =

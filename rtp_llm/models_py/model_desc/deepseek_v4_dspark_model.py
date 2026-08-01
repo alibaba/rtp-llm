@@ -363,16 +363,28 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
         previous = anchor_ids.long()
         for step in range(width):
             logits_i = base_logits[:, step].float() + self.markov_head.bias(previous)
+            processed_logits_i = logits_i
             if use_gumbel:
                 if seeds is None or positions is None or temperatures is None:
                     raise ValueError("DSpark Gumbel sampling requires seeds, positions, and temperatures")
+                # Materialize temperature exactly once and use that very
+                # tensor for both proposal sampling and q. This mirrors
+                # vLLM's output_processed_logits seam and prevents acceptance
+                # probabilities from drifting from the distribution that
+                # actually produced the proposal.
+                safe_temperature = torch.where(
+                    temperatures == 0.0,
+                    torch.ones_like(temperatures),
+                    temperatures,
+                )
+                processed_logits_i = logits_i / safe_temperature[:, None]
                 previous = rtp_llm_ops.gumbel_sample(
-                    logits_i.contiguous(),
+                    processed_logits_i.contiguous(),
                     seeds.contiguous(),
                     positions[:, step].contiguous(),
                     temperatures.contiguous(),
                     False,
-                    True,
+                    False,
                     use_fp64_gumbel,
                 )
             else:
@@ -380,7 +392,7 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
             previous = self.map_draft_to_target(previous)
             tokens[:, step] = previous
             if return_corrected:
-                corrected_steps.append(logits_i)
+                corrected_steps.append(processed_logits_i)
         corrected = (
             torch.stack(corrected_steps, dim=1)
             if return_corrected
@@ -458,7 +470,12 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
             positions = prefix[:, None] + torch.arange(
                 width, device=base_logits.device, dtype=torch.long
             )[None, :]
-        tokens, _ = self.markov_correct(
+        need_draft_probs = bool(getattr(inputs, "need_draft_probs", False))
+        if need_draft_probs and not use_gumbel:
+            raise RuntimeError(
+                "DSpark draft probabilities are only valid with probabilistic sampling"
+            )
+        tokens, corrected = self.markov_correct(
             base_logits,
             anchors,
             seeds=seeds,
@@ -466,11 +483,14 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
             temperatures=temperatures,
             use_gumbel=use_gumbel,
             use_fp64_gumbel=use_fp64_gumbel,
-            return_corrected=False,
+            return_corrected=need_draft_probs,
         )
         outputs.draft_tokens = tokens
-        # Coupled verification consumes tokens only in both greedy and
-        # stochastic modes. Leave the fresh output's draft_probs undefined.
+        if need_draft_probs:
+            # corrected is the exact temperature-processed carrier consumed
+            # by Gumbel sampling above, equivalent to vLLM's retained
+            # output_processed_logits buffer.
+            outputs.draft_probs = torch.softmax(corrected, dim=-1, dtype=torch.float32)
         return outputs
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:

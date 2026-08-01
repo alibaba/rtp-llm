@@ -151,10 +151,10 @@ protected:
                         std::list<GenerateStreamPtr>&       prefill_streams,
                         std::list<GenerateStreamPtr>&       decode_streams);
 
-    // Validate request combinations that cannot use the coupled DSpark path.
+    // Validate request combinations that cannot use the DSpark draft path.
     // History-dependent and beam modes are partitioned into the shared-target
     // fallback before this validation; ordinary temperature/top-k/top-p
-    // sampling is supported by the vLLM-compatible Gumbel coupling.
+    // sampling is supported by vLLM-compatible ratio/residual rejection.
     absl::Status validateDSparkGenerateConfigs(const std::list<GenerateStreamPtr>& streams) const;
 
     // Spec-decode hand-off: when the source model exposes a pre-output-projection
@@ -217,7 +217,7 @@ private:
     // proposes propose_step_ tokens (no MTP multi-step decode chain, sampling
     // lives in the draft model).  Set from propose_params->sp_type.
     bool                                             is_dspark_ = false;
-    bool                                             dspark_use_fp64_gumbel_ = false;
+    bool                                             dspark_use_gumbel_ = false;
     size_t                                           draft_vocab_size_;
     std::shared_ptr<ModelBase>                       draft_model_;
     std::shared_ptr<ModelBase>                       sp_prefill_draft_model_;

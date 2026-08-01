@@ -363,7 +363,7 @@ struct PyModelInputs {
     torch::Tensor dspark_sampling_temperatures;
     bool          dspark_use_gumbel{false};
     bool          dspark_use_fp64_gumbel{false};
-    // Legacy probability flag. DSpark always leaves draft_probs undefined.
+    // DSpark probabilistic mode emits q; greedy leaves it undefined.
     bool need_draft_probs{true};
 };
 
@@ -376,9 +376,8 @@ struct PyModelOutputs {
     // was configured to capture aux hidden states (G1, dspark-phase1 design).
     torch::Tensor aux_hidden_states;
     // Optional dspark/dflash draft proposal (G3: sampling lives in the model):
-    // draft_tokens [batch, k] int64. Gumbel-coupled DSpark verification is
-    // token-only, so draft_probs stays undefined in greedy and sampling modes;
-    // the field remains for legacy non-DSpark proposal implementations.
+    // draft_tokens [batch,k] int64. Greedy is token-only; probabilistic mode
+    // returns q [batch,k,vocab] for standard rejection sampling.
     torch::Tensor draft_tokens;
     torch::Tensor draft_probs;
 

@@ -170,6 +170,10 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
     weights_               = params.weights;
     model_id_              = params.model_id;
     kv_cache_layer_layout_ = params.kv_cache_layer_layout;
+    RTP_LLM_CHECK_WITH_INFO(!(params.sp_config.type == SP_TYPE_DSPARK
+                              && int(device_props_.enable_layer_micro_batch) != 0),
+                            "DSpark does not support ENABLE_LAYER_MICRO_BATCH; disable it to avoid dropping "
+                            "draft_tokens/draft_probs from the model output");
     if (abs(description_.residual_scalar - 1.0) > 1e-6) {
         auto residual_tensor = torch::tensor({(float)description_.residual_scalar}, torch::kFloat32).cuda();
 #if USING_CUDA
@@ -371,7 +375,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         graph_params.is_target_verify = use_spec_decoding || is_target_verify_decode;
         graph_params.is_dspark = is_dspark;
         graph_params.dspark_use_gumbel =
-            is_dspark && params.sp_config.draft_sample_method == "gumbel";
+            is_dspark && params.sp_config.draft_sample_method == "probabilistic";
         graph_params.dspark_use_fp64_gumbel = is_dspark && params.sp_config.use_fp64_gumbel;
         if (params.sp_config.type != SP_TYPE_NONE) {
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;

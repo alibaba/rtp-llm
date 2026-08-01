@@ -90,9 +90,9 @@ def init_speculative_decoding_group_args(parser, sp_config):
         env_name="DRAFT_SAMPLE_METHOD",
         bind_to=(sp_config, "draft_sample_method"),
         type=str,
-        choices=["greedy", "gumbel"],
-        default="gumbel",
-        help="DSpark draft proposal method; gumbel shares the target's seeded position key.",
+        choices=["greedy", "probabilistic"],
+        default="greedy",
+        help="DSpark draft proposal method; probabilistic retains q for standard rejection sampling.",
     )
 
     speculative_decoding_group.add_argument(

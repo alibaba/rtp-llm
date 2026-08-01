@@ -70,49 +70,6 @@ int issueDSparkSeed(int64_t request_id) {
     return static_cast<int>(x & 0x7FFFFFFFULL);
 }
 
-void applyDSparkCoupledPrefillSample(const std::list<GenerateStreamPtr>& streams,
-                                     SamplerOutput&                      sampler_output,
-                                     TensorHolder&                       holder,
-                                     bool                                use_fp64_gumbel) {
-    RTP_LLM_CHECK_WITH_INFO(sampler_output.all_probs.defined(),
-                            "DSpark prefill coupling requires target processed logits");
-    const int64_t batch_size = static_cast<int64_t>(streams.size());
-    auto options = torch::TensorOptions().pinned_memory(true);
-    auto seeds_host = torch::empty({batch_size}, options.dtype(torch::kInt64));
-    auto positions_host = torch::empty({batch_size}, options.dtype(torch::kInt64));
-    auto temperatures_host = torch::empty({batch_size}, options.dtype(torch::kFloat32));
-    auto* seeds_ptr = seeds_host.data_ptr<int64_t>();
-    auto* positions_ptr = positions_host.data_ptr<int64_t>();
-    auto* temperatures_ptr = temperatures_host.data_ptr<float>();
-    int64_t row = 0;
-    for (const auto& stream : streams) {
-        const auto& config = stream->generateConfig();
-        RTP_LLM_CHECK_WITH_INFO(config->random_seed.has_value(),
-                                "DSpark prefill coupling requires an issued request seed");
-        seeds_ptr[row] = config->random_seed.value();
-        // The prefill target predicts absolute position prompt_len; its
-        // predecessor Gumbel key is prompt_len-1.
-        positions_ptr[row] = static_cast<int64_t>(stream->seqLength()) - 1;
-        temperatures_ptr[row] =
-            (config->do_sample && !config->top1() && config->temperature != 0.0F) ? 1.0F : 0.0F;
-        ++row;
-    }
-    holder.hold_host(seeds_host);
-    holder.hold_host(positions_host);
-    holder.hold_host(temperatures_host);
-    auto device = getTorchCudaDevice();
-    auto seeds = seeds_host.to(device, /*non_blocking=*/true);
-    auto positions = positions_host.to(device, /*non_blocking=*/true);
-    auto temperatures = temperatures_host.to(device, /*non_blocking=*/true);
-    // DSpark reuses the legacy SamplerOutput field as a carrier, but its
-    // contents are processed logits; no probability tensor is retained.
-    auto processed_logits = sampler_output.all_probs.reshape({batch_size, -1}).contiguous();
-    sampler_output.token_ids =
-        execGumbelSample({processed_logits, seeds, positions, temperatures, false, false, use_fp64_gumbel})
-            .reshape({batch_size, 1})
-            .to(torch::kInt32);
-}
-
 void holdSamplerInputHostBuffers(TensorHolder& holder, const SamplerInputs& inputs) {
     holder.hold_host(inputs.token_ids);
     holder.hold_host(inputs.input_lengths);
@@ -444,9 +401,10 @@ makeFakeSPOutputBuffer(
     auto fake_hidden_states = torch::zeros(
         {1, (int64_t)hidden_size}, torch::TensorOptions().dtype(dataTypeToTorchType(data_type)).device(torch::kCUDA));
     sp_buffer->propose_step  = propose_step;
-    sp_buffer->all_probs = is_dspark ? torch::Tensor() :
-                                      torch::zeros({1, (int64_t)vocab_size},
-                                                   torch::TensorOptions().dtype(torch::kFloat).device(torch::kCUDA));
+    sp_buffer->all_probs = is_dspark ?
+                                  torch::Tensor() :
+                                  torch::zeros({1, static_cast<int64_t>(vocab_size)},
+                                               torch::TensorOptions().dtype(torch::kFloat).device(torch::kCUDA));
     sp_buffer->tokens = torch::zeros({1, is_dspark ? (int64_t)propose_step + 1 : 2}, torch::kInt32);
     sp_buffer->hidden_states = fake_hidden_states;
 
@@ -546,7 +504,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     vocab_size_       = params.model_config_.vocab_size;
     draft_vocab_size_ = propose_params->getEngineInitParams().model_config_.vocab_size;
     is_dspark_        = propose_params->sp_type == SP_TYPE_DSPARK;
-    dspark_use_fp64_gumbel_ = is_dspark_ && params.sp_config.use_fp64_gumbel;
+    dspark_use_gumbel_ = is_dspark_ && params.sp_config.draft_sample_method == "probabilistic";
     model_config_     = params.model_config_;
     runtime_config_   = params.runtime_config;
 
@@ -567,9 +525,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 "dspark supports PDFUSION/PREFILL/DECODE roles, got role_type=%d",
                                 static_cast<int>(role_type_));
         // CUDA graph: the single decode draft model captures feature injection,
-        // checkpoint-width backbone, lm_head and the token-only Markov sampler
-        // while independently accepting the target's k+1-wide aux window. The
-        // runner refreshes block metadata, seeds and temperatures per replay.
+        // checkpoint-width backbone, lm_head, Markov sampler and optional q
+        // output while independently accepting the target's k+1-wide aux
+        // window. The runner refreshes block metadata, seeds and temperatures
+        // per replay.
         // Prefill seeding stays eager (canRun rejects the ragged prefill batch),
         // so no separate sp_prefill_draft_model_ is created for dspark below.
         // TP (step 3): tpSyncModelInputs broadcasts dspark_ctx_starts/lengths
@@ -583,8 +542,8 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                 "dspark requires sp_dspark_mask_token_id from the draft ckpt config, got %ld",
                                 (long)params.sp_config.sp_dspark_mask_token_id);
         RTP_LLM_CHECK_WITH_INFO(params.sp_config.draft_sample_method == "greedy"
-                                    || params.sp_config.draft_sample_method == "gumbel",
-                                "dspark draft_sample_method must be greedy or gumbel, got '%s'",
+                                    || params.sp_config.draft_sample_method == "probabilistic",
+                                "dspark draft_sample_method must be greedy or probabilistic, got '%s'",
                                 params.sp_config.draft_sample_method.c_str());
     }
 
@@ -777,13 +736,12 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     // directly in target-token space.  A reduced-vocabulary DSpark needs the
     // vLLM-style persistent -inf target-vocab buffer and per-step d2t scatter
     // *before* Gumbel sampling; mapping only the winning token changes the
-    // coupled distribution.  Refuse that unsupported checkpoint shape at
+    // proposal distribution. Refuse that unsupported checkpoint shape at
     // startup instead of silently producing incorrect proposals.
     RTP_LLM_CHECK_WITH_INFO(!is_dspark_ || !d2t_map_.defined() || d2t_map_.numel() == 0,
                             "reduced-vocabulary DSpark requires pre-sampling d2t scatter; "
                             "this build supports full-vocabulary DSV4 DSpark only");
-    speculative_sampler_.reset(
-        new speculative::SpeculativeSampler(d2t_map_, propose_step_, dspark_use_fp64_gumbel_));
+    speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_));
     if (!is_dspark_) {
         // dspark drafts pick tokens in the model (and emit probabilities only
         // when requested); the executor-side top-k sampler stays unbuilt.
@@ -922,15 +880,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
             CHECK_AND_RETURN_REF(sampler_input,
                                  batch_stream_processor_->gatherSamplerInput(stream_groups, model_input, model_output));
             holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
-            const bool dspark_sampling =
-                is_dspark_ && batch_stream_processor_->needsDSparkCoupledTargetProbs(streams);
-            if (dspark_sampling) {
-                sampler_output.all_probs = sampler_->prepareDSparkCoupledLogits(sampler_input);
-                applyDSparkCoupledPrefillSample(
-                    streams, sampler_output, buffer_holder_, dspark_use_fp64_gumbel_);
-            } else {
-                sampler_output = std::move(sampler_->forward(sampler_input));
-            }
+            sampler_output = std::move(sampler_->forward(sampler_input));
             // Restore the full combo_tokens / input_lengths before the MTP
             // shift logic — under CP both were mutated to rank-local by the
             // target forward's handleInputs and the shift formula assumes a
@@ -1016,9 +966,11 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(draft_model_sample)");
         if (is_dspark_) {
             // Sampling lives in the dspark draft: the block forward already
-            // returned the token proposal. Greedy and Gumbel modes both omit
-            // the V-wide draft distribution entirely.
-            draft_sampler_output = batch_stream_processor_->buildDSparkDraftSamplerOutput(draft_model_output);
+            // returned the token proposal. Greedy omits q; probabilistic mode
+            // returns the exact V-wide q only when stochastic verification
+            // requests it.
+            draft_sampler_output = batch_stream_processor_->buildDSparkDraftSamplerOutput(
+                draft_model_output, model_input.need_draft_probs);
         } else {
             fast_topk_sampler_output       = fast_topk_sampler_->forward(draft_model_output.logits);
             draft_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
@@ -1166,6 +1118,17 @@ void MtpExecutor::prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& 
                                     (long)sp_output_buffer->tokens.size(1),
                                     propose_step_,
                                     stream->streamId());
+            const auto& config = stream->generateConfig();
+            const bool need_draft_probs =
+                dspark_use_gumbel_ && config->do_sample && !config->top1();
+            if (need_draft_probs) {
+                RTP_LLM_CHECK_WITH_INFO(propose_probs_t.defined() && propose_probs_t.dim() == 3
+                                            && propose_probs_t.size(0) == 1
+                                            && propose_probs_t.size(1) == static_cast<int64_t>(propose_step_)
+                                            && propose_probs_t.size(2) == static_cast<int64_t>(draft_vocab_size_),
+                                        "[dspark-grpc] probabilistic q must be [1,k,V], stream=%ld",
+                                        stream->streamId());
+            }
         } else if (propose_step_ > 1) {
             RTP_LLM_CHECK_WITH_INFO(propose_probs_t.defined() && propose_probs_t.numel() > 0,
                                     "[mtp-grpc] propose_probs must be non-empty, stream=%ld",
@@ -1182,9 +1145,13 @@ void MtpExecutor::prepareGrpcMtpDeviceState(const std::list<GenerateStreamPtr>& 
                                     hidden_numel);
         }
 
-        // Gumbel-coupled DSpark verification is token-only for both greedy and
-        // sampling.  Legacy MTP retains its probability side channel.
-        sp_output_buffer->all_probs     = is_dspark_ ? torch::Tensor() : to_cuda_async(propose_probs_t);
+        // Greedy DSpark is token-only; probabilistic DSpark and legacy MTP
+        // retain q through the existing side channel.
+        const auto& config = stream->generateConfig();
+        const bool need_draft_probs =
+            is_dspark_ && dspark_use_gumbel_ && config->do_sample && !config->top1();
+        sp_output_buffer->all_probs =
+            (is_dspark_ && !need_draft_probs) ? torch::Tensor() : to_cuda_async(propose_probs_t);
         sp_output_buffer->hidden_states = to_cuda_async(propose_hidden_t);
 
         auto  accept_len_cpu    = torch::ones({1}, pinned_i32);
@@ -1488,13 +1455,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
                     batch_stream_processor_->gatherSpecSamplerInput(
                         stream_groups, model_input, model_output, *spec_logits_result));
                 holdSamplerInputHostBuffers(buffer_holder_, sampler_input);
-                const bool dspark_sampling =
-                    is_dspark_ && batch_stream_processor_->needsDSparkCoupledTargetProbs(streams);
-                if (dspark_sampling) {
-                    sampler_output.all_probs = sampler_->prepareDSparkCoupledLogits(sampler_input);
-                } else {
-                    sampler_output = std::move(sampler_->forward(sampler_input));
-                }
+                sampler_output = std::move(sampler_->forward(sampler_input));
             }
             if (sampler_output.all_probs.defined()) {
                 sampler_output.all_probs = sampler_output.all_probs.reshape(
@@ -1504,9 +1465,9 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             // rejection sampling
             int64_t sampler_start_us   = autil::TimeUtility::currentTimeInMicroSeconds();
             speculative_sampler_output =
-                is_dspark_ ? speculative_sampler_->forwardCoupled(
-                                 streams, draft_sampler_output, sampler_output, model_input.prefix_lengths) :
-                             speculative_sampler_->forward(streams, draft_sampler_output, sampler_output);
+                sampler_output.all_probs.defined() ?
+                    speculative_sampler_->forward(streams, draft_sampler_output, sampler_output) :
+                    speculative_sampler_->forwardGreedy(streams, draft_sampler_output, sampler_output);
             applySpecLogitsAcceptLenCap(
                 sampler_input, sampler_output, speculative_sampler_output, batch_size, propose_step_);
             metrics_collector.sp_engine_collector.speculative_sampler_latency_us +=
@@ -1605,8 +1566,8 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(draft_model_sample)");
         if (is_dspark_) {
             // The tail block forward already returned next round's proposal.
-            draft_prefill_sampler_output =
-                batch_stream_processor_->buildDSparkDraftSamplerOutput(draft_prefill_model_output);
+            draft_prefill_sampler_output = batch_stream_processor_->buildDSparkDraftSamplerOutput(
+                draft_prefill_model_output, model_input.need_draft_probs);
         } else {
             auto fast_topk_sampler_output          = fast_topk_sampler_->forward(draft_prefill_model_output.logits);
             draft_prefill_sampler_output.all_probs = fast_topk_sampler_output.all_probs;
@@ -2051,18 +2012,17 @@ void MtpExecutor::prepareStreams(const std::list<GenerateStreamPtr>& streams,
         } else {
             stream->setScoreLen(propose_step_ + 1);
             if (stream->getSPOutputBuffer() == nullptr && stream->isPerfTest()) {
-                auto sp_output_buffer = makeFakeSPOutputBuffer(
-                    data_type_, hidden_size_, draft_vocab_size_, propose_step_, is_dspark_);
+                auto sp_output_buffer =
+                    makeFakeSPOutputBuffer(data_type_, hidden_size_, draft_vocab_size_, propose_step_, is_dspark_);
                 stream->setSPOutputBuffer(sp_output_buffer);
             }
             decode_streams.push_back(stream);
         }
 
         // init sp output buffer if not exist
-        // Classic rejection sampling consumes p/q for every speculative row.
-        // DSpark's Gumbel-coupled verifier consumes only proposal and target
-        // token IDs; preserve the user's return_all_probs request instead of
-        // forcing a full-vocab response tensor into every greedy batch.
+        // Legacy MTP always materializes draft q. DSpark keeps its vLLM-style
+        // global draft method instead: greedy uses implicit one-hot q, while
+        // probabilistic owns q internally without forcing it into responses.
         if (!is_dspark_) {
             stream->setReturnAllProbs(true);
         }
@@ -2211,7 +2171,7 @@ absl::Status MtpExecutor::process(const std::list<GenerateStreamPtr>& streams, i
 
     // Seed issuance is an API contract, not a speculative-only detail.  Do it
     // before partitioning so target-only penalty/beam requests are replayable
-    // and echo the same engine-issued seed as coupled requests.
+    // and echo the same engine-issued seed for reproducible requests.
     RETURN_IF_STATUS_ERROR(validateDSparkGenerateConfigs(streams));
 
     std::list<GenerateStreamPtr> target_only_streams;

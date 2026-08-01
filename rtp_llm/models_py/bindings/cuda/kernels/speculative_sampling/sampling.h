@@ -26,5 +26,6 @@ cudaError_t invokeRejectionSampling(DType*       draft_probs,
                                     int          batch_size,
                                     int          num_speculative_tokens,
                                     int          target_vocab_size,
+                                    bool         has_draft_probs,
                                     cudaStream_t stream);
 }  // namespace rtp_llm

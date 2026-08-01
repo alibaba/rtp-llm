@@ -109,8 +109,9 @@ struct GptModelInputs {
     // CP prefill exit must materialize the full [seq, hidden] all_hidden_states
     // (true) or may gather only the last-token rows lm_head needs (false).
     bool need_all_hidden_states = false;
-    // Legacy non-DSpark speculative-sampling probability materialization.
-    // DSpark's §5.8 coupled verifier never consumes a draft distribution.
+    // Draft-q materialization. DSpark greedy leaves this false and uses an
+    // implicit one-hot proposal distribution; probabilistic DSpark sets it
+    // true and retains [B,k,V] q for standard rejection sampling.
     bool need_draft_probs       = true;
     bool need_moe_gating        = false;
     bool warmup                 = false;
@@ -374,12 +375,12 @@ struct GumbelSampleParams {
     bool use_fp64           = false;
 };
 
-struct CoupledTokenVerifyParams {
+struct GreedyTokenVerifyParams {
     const torch::Tensor& draft_tokens;
     const torch::Tensor& target_tokens;
 };
 
-struct CoupledTokenVerifyOutput {
+struct GreedyTokenVerifyOutput {
     torch::Tensor accept_tokens;
     torch::Tensor accept_len;
 };

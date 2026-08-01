@@ -75,18 +75,6 @@ TEST_F(SpeculativeSamplingKernelTest, GumbelSampleFp64_MatchesVllmGolden) {
     EXPECT_TRUE(torch::equal(shifted, shifted_expected));
 }
 
-TEST_F(SpeculativeSamplingKernelTest, GumbelTemperature_MatchesVllmZeroOneContract) {
-    auto logits = torch::tensor({1.0F, 2.0F, 3.0F,
-                                 1.0F, 2.0F, 3.0F,
-                                 1.0F, 2.0F, 3.0F}, floatCuda()).view({3, 3});
-    auto temperatures = torch::tensor({0.0F, 1.0F, 0.5F}, floatCuda());
-    rtp_llm::applyGumbelTemperature(logits, temperatures);
-    auto expected = torch::tensor({1.0F, 2.0F, 3.0F,
-                                   1.0F, 2.0F, 3.0F,
-                                   2.0F, 4.0F, 6.0F}, floatCuda()).view({3, 3});
-    EXPECT_TRUE(torch::equal(logits, expected));
-}
-
 TEST_F(SpeculativeSamplingKernelTest, GumbelSample_RejectsEmptyBatchBeforeKernelLaunch) {
     auto logits = torch::empty({0, 16}, floatCuda());
     auto seeds = torch::empty({0}, int64Cuda());
@@ -96,7 +84,6 @@ TEST_F(SpeculativeSamplingKernelTest, GumbelSample_RejectsEmptyBatchBeforeKernel
     EXPECT_THROW(
         rtp_llm::gumbelSample(logits, seeds, positions, temperatures, false, true),
         c10::Error);
-    EXPECT_THROW(rtp_llm::applyGumbelTemperature(logits, temperatures), c10::Error);
 }
 
 TEST_F(SpeculativeSamplingKernelTest, GumbelSample_ProcessedProbabilitiesUseSameCoupling) {
@@ -124,12 +111,12 @@ TEST_F(SpeculativeSamplingKernelTest, GumbelSample_ProcessedProbabilitiesUseSame
     EXPECT_EQ(sampled_argmax, expected_argmax);
 }
 
-TEST_F(SpeculativeSamplingKernelTest, CoupledTokenVerify_StopsAtFirstMismatchAndAddsBonus) {
+TEST_F(SpeculativeSamplingKernelTest, GreedyTokenVerify_StopsAtFirstMismatchAndAddsBonus) {
     auto draft = torch::tensor(std::vector<int64_t>{1, 2, 3, 4, 5, 6, 7, 8, 9}, int64Cuda()).view({3, 3});
     auto target = torch::tensor(std::vector<int32_t>{1, 2, 3, 10, 40, 5, 6, 11, 7, 8, 90, 12}, intCuda())
                       .view({3, 4});
 
-    auto [tokens, lengths] = rtp_llm::coupledTokenVerify(draft, target);
+    auto [tokens, lengths] = rtp_llm::greedyTokenVerify(draft, target);
 
     auto expected_tokens = torch::tensor(std::vector<int32_t>{1, 2, 3, 10, 40, 0, 0, 0, 7, 8, 90, 0}, intCuda())
                                .view({3, 4});
@@ -138,11 +125,11 @@ TEST_F(SpeculativeSamplingKernelTest, CoupledTokenVerify_StopsAtFirstMismatchAnd
     EXPECT_TRUE(torch::equal(lengths, expected_lengths));
 }
 
-TEST_F(SpeculativeSamplingKernelTest, CoupledTokenVerify_SupportsInt32DraftAndInt64Target) {
+TEST_F(SpeculativeSamplingKernelTest, GreedyTokenVerify_SupportsInt32DraftAndInt64Target) {
     auto draft = torch::tensor(std::vector<int32_t>{3, 4}, intCuda()).view({1, 2});
     auto target = torch::tensor(std::vector<int64_t>{3, 9, 10}, int64Cuda()).view({1, 3});
 
-    auto [tokens, lengths] = rtp_llm::coupledTokenVerify(draft, target);
+    auto [tokens, lengths] = rtp_llm::greedyTokenVerify(draft, target);
 
     auto expected_tokens = torch::tensor(std::vector<int32_t>{3, 9, 0}, intCuda()).view({1, 3});
     auto expected_lengths = torch::tensor(std::vector<int32_t>{2}, intCuda());
@@ -189,6 +176,7 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_AllAccept) {
                                                                batch_size,
                                                                num_spec,
                                                                vocab_size,
+                                                               true,
                                                                stream_);
     ASSERT_EQ(status, cudaSuccess);
     cudaStreamSynchronize(stream_);
@@ -243,6 +231,7 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_ImmediateReject) {
                                                                batch_size,
                                                                num_spec,
                                                                vocab_size,
+                                                               true,
                                                                stream_);
     ASSERT_EQ(status, cudaSuccess);
     cudaStreamSynchronize(stream_);
@@ -305,6 +294,7 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_PartialAccept) {
                                                                batch_size,
                                                                num_spec,
                                                                vocab_size,
+                                                               true,
                                                                stream_);
     ASSERT_EQ(status, cudaSuccess);
     cudaStreamSynchronize(stream_);
@@ -323,8 +313,90 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_PartialAccept) {
 
 TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_BatchSizeZero) {
     auto status = rtp_llm::invokeRejectionSampling<float, int>(
-        nullptr, nullptr, nullptr, nullptr, nullptr, 1, nullptr, nullptr, nullptr, 0, 3, 16, stream_);
+        nullptr, nullptr, nullptr, nullptr, nullptr, 1, nullptr, nullptr, nullptr, 0, 3, 16, false, stream_);
     ASSERT_EQ(status, cudaSuccess);
+}
+
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_ProbabilisticSameTokenStillUsesRatio) {
+    const int batch_size    = 1;
+    const int num_spec      = 1;
+    const int vocab_size    = 16;
+    const int target_stride = 1;
+
+    auto draft_probs  = torch::zeros({batch_size, num_spec, vocab_size}, floatCuda());
+    auto target_probs = torch::zeros({batch_size, num_spec + 1, vocab_size}, floatCuda());
+    draft_probs.index_put_({0, 0, 3}, 0.9f);
+    draft_probs.index_put_({0, 0, 7}, 0.1f);
+    target_probs.index_put_({0, 0, 3}, 0.1f);
+    target_probs.index_put_({0, 0, 7}, 0.9f);
+    target_probs.index_put_({0, 1, 7}, 1.0f);
+
+    auto draft_token_ids  = torch::full({batch_size, num_spec}, 3, intCuda());
+    // Deliberately report the same independently sampled target token.  The
+    // ratio 0.5 * 0.9 < 0.1 is false, so this row must still reject.
+    auto target_token_ids = torch::full({batch_size, num_spec + 1, target_stride}, 3, intCuda());
+    auto uniform_samples  = torch::tensor({{0.5f, 0.0f}}, floatCuda());
+    auto output_token_ids = torch::full({batch_size, num_spec + 1}, -1, intCuda());
+    auto output_accepted_token_num = torch::zeros({batch_size}, intCuda());
+    auto do_sample = torch::ones({batch_size}, boolCuda());
+
+    auto status = rtp_llm::invokeRejectionSampling<float, int>(draft_probs.data_ptr<float>(),
+                                                               draft_token_ids.data_ptr<int>(),
+                                                               uniform_samples.data_ptr<float>(),
+                                                               target_probs.data_ptr<float>(),
+                                                               target_token_ids.data_ptr<int>(),
+                                                               target_stride,
+                                                               output_token_ids.data_ptr<int>(),
+                                                               output_accepted_token_num.data_ptr<int>(),
+                                                               do_sample.data_ptr<bool>(),
+                                                               batch_size,
+                                                               num_spec,
+                                                               vocab_size,
+                                                               true,
+                                                               stream_);
+    ASSERT_EQ(status, cudaSuccess);
+    cudaStreamSynchronize(stream_);
+    EXPECT_EQ(output_accepted_token_num.cpu()[0].item<int>(), 1);
+    EXPECT_EQ(output_token_ids.cpu()[0][0].item<int>(), 7);
+}
+
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_ImplicitOneHotDraftDistribution) {
+    const int batch_size    = 1;
+    const int num_spec      = 1;
+    const int vocab_size    = 16;
+    const int target_stride = 1;
+
+    auto target_probs = torch::zeros({batch_size, num_spec + 1, vocab_size}, floatCuda());
+    target_probs.index_put_({0, 0, 3}, 0.1f);
+    target_probs.index_put_({0, 0, 7}, 0.9f);
+    target_probs.index_put_({0, 1, 7}, 1.0f);
+    auto draft_token_ids  = torch::full({batch_size, num_spec}, 3, intCuda());
+    auto target_token_ids = torch::full({batch_size, num_spec + 1, target_stride}, 3, intCuda());
+    auto uniform_samples  = torch::tensor({{0.5f, 0.0f}}, floatCuda());
+    auto output_token_ids = torch::full({batch_size, num_spec + 1}, -1, intCuda());
+    auto output_accepted_token_num = torch::zeros({batch_size}, intCuda());
+    auto do_sample = torch::ones({batch_size}, boolCuda());
+
+    // No draft_probs allocation: q is the one-hot distribution at proposal 3.
+    auto status = rtp_llm::invokeRejectionSampling<float, int>(nullptr,
+                                                               draft_token_ids.data_ptr<int>(),
+                                                               uniform_samples.data_ptr<float>(),
+                                                               target_probs.data_ptr<float>(),
+                                                               target_token_ids.data_ptr<int>(),
+                                                               target_stride,
+                                                               output_token_ids.data_ptr<int>(),
+                                                               output_accepted_token_num.data_ptr<int>(),
+                                                               do_sample.data_ptr<bool>(),
+                                                               batch_size,
+                                                               num_spec,
+                                                               vocab_size,
+                                                               false,
+                                                               stream_);
+    ASSERT_EQ(status, cudaSuccess);
+    cudaStreamSynchronize(stream_);
+    EXPECT_EQ(output_accepted_token_num.cpu()[0].item<int>(), 1);
+    // Residual is p with the proposal coordinate removed, hence token 7.
+    EXPECT_EQ(output_token_ids.cpu()[0][0].item<int>(), 7);
 }
 
 // ─────────────────────────────────────────────────────────────────────────────

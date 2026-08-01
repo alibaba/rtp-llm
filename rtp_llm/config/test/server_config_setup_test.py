@@ -26,6 +26,7 @@ class GenerateConfigTest(TestCase):
 
     def test_dspark_sampling_config_pickle_round_trip(self):
         config = SpeculativeExecutionConfig()
+        self.assertEqual(config.draft_sample_method, "greedy")
         config.draft_sample_method = "greedy"
         config.use_fp64_gumbel = True
 

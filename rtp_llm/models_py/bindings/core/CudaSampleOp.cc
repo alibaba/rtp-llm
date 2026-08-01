@@ -31,10 +31,8 @@ torch::Tensor gumbelSample(const torch::Tensor& values,
                            bool                 input_is_probs,
                            bool                 apply_temperature,
                            bool                 use_fp64);
-void applyGumbelTemperature(torch::Tensor logits, const torch::Tensor& temperatures);
-std::tuple<torch::Tensor, torch::Tensor> coupledTokenVerify(const torch::Tensor& draft_tokens,
-                                                            const torch::Tensor& target_tokens);
-torch::Tensor prepareGumbelTargetLogitsCuda(const GreedyParams& params);
+std::tuple<torch::Tensor, torch::Tensor> greedyTokenVerify(const torch::Tensor& draft_tokens,
+                                                           const torch::Tensor& target_tokens);
 #endif
 
 torch::Tensor gumbelSampling(const GumbelSampleParams& params) {
@@ -47,24 +45,16 @@ torch::Tensor gumbelSampling(const GumbelSampleParams& params) {
                         params.apply_temperature,
                         params.use_fp64);
 #else
-    throw std::runtime_error("Gumbel-coupled DSpark sampling is CUDA-only");
+    throw std::runtime_error("DSpark probabilistic proposal sampling is CUDA-only");
 #endif
 }
 
-CoupledTokenVerifyOutput coupledTokenVerification(const CoupledTokenVerifyParams& params) {
+GreedyTokenVerifyOutput greedyTokenVerification(const GreedyTokenVerifyParams& params) {
 #if USING_CUDA
-    auto [tokens, lengths] = coupledTokenVerify(params.draft_tokens, params.target_tokens);
+    auto [tokens, lengths] = greedyTokenVerify(params.draft_tokens, params.target_tokens);
     return {std::move(tokens), std::move(lengths)};
 #else
-    throw std::runtime_error("Gumbel-coupled DSpark verification is CUDA-only");
-#endif
-}
-
-torch::Tensor prepareGumbelTargetLogits(const GreedyParams& params) {
-#if USING_CUDA
-    return prepareGumbelTargetLogitsCuda(params);
-#else
-    throw std::runtime_error("Gumbel-coupled DSpark sampling is CUDA-only");
+    throw std::runtime_error("DSpark greedy verification is CUDA-only");
 #endif
 }
 
@@ -403,91 +393,6 @@ GreedyOutput sampleGreedy(const GreedyParams& params) {
     return flashinferSampleGreedy(params, transposed_tokens);
 }
 
-torch::Tensor prepareGumbelTargetLogitsCuda(const GreedyParams& params) {
-    // This is the target half of vLLM's Gumbel coupling. Grammar and other
-    // stateless processors have already run in Sampler::preprocessLogits.
-    // Apply vLLM's exact T=0/1 early-return division here: RTP's generic
-    // temperature penalty divides by (T + 1e-6), which can change a same-seed
-    // Gumbel winner at a close boundary. Stateful penalties are routed to the
-    // target-only sampler before reaching this seam.
-    const auto batch_size = params.logits.size(0);
-
-    bool has_not_do_sample = params.do_sample.has_value()
-                             && std::any_of(params.do_sample.value().data_ptr<bool>(),
-                                            params.do_sample.value().data_ptr<bool>() + batch_size,
-                                            [](bool value) { return !value; });
-    bool need_do_sample = !params.do_sample.has_value()
-                          || std::any_of(params.do_sample.value().data_ptr<bool>(),
-                                         params.do_sample.value().data_ptr<bool>() + batch_size,
-                                         [](bool value) { return value; });
-    if (need_do_sample) {
-        torch::Tensor selected_logits;
-        torch::Tensor mask_tensor;
-        if (has_not_do_sample) {
-            auto do_sample_gpu = params.do_sample.value().to(torch::kCUDA, /*non_blocking=*/true);
-            mask_tensor        = do_sample_gpu.reshape({batch_size, 1}).logical_not();
-            selected_logits    = params.logits.masked_select(mask_tensor);
-        }
-        auto temperature_gpu = params.temperature.to(torch::kCUDA, /*non_blocking=*/true).contiguous();
-        applyGumbelTemperature(params.logits, temperature_gpu);
-        if (has_not_do_sample) {
-            params.logits.masked_scatter_(mask_tensor, selected_logits);
-        }
-    }
-
-    // FlashInfer's host metadata normalization is in-place. Keep this seam
-    // side-effect free because the same request metadata is reused to build
-    // the per-position Gumbel keys after target-logit preprocessing.
-    auto top_k = params.top_k.clone();
-    auto top_p = params.top_p.clone();
-    auto* top_k_ptr = top_k.data_ptr<int32_t>();
-    auto* top_p_ptr = top_p.data_ptr<float>();
-    std::transform(top_p_ptr, top_p_ptr + batch_size, top_p_ptr, [](float value) {
-        return std::abs(value) < 1e-7F ? 1.0F : value;
-    });
-    const bool all_top_k_no_limit =
-        std::all_of(top_k_ptr, top_k_ptr + batch_size, [](int32_t value) { return value <= 0; });
-    const bool all_top_p_one = std::all_of(top_p_ptr, top_p_ptr + batch_size, [](float value) {
-        return std::abs(value - 1.0F) < 1e-7F;
-    });
-    auto cur_stream = at::cuda::getCurrentCUDAStream().stream();
-
-    if (all_top_k_no_limit && all_top_p_one) {
-        return params.logits;
-    }
-
-    // Preserve temperature-processed logits as the Gumbel carrier. Top-k/p
-    // need probabilities to determine their support, but that workspace is
-    // transient; only the existing model logits survive this function. Keep
-    // this allocation below the no-filter fast path: the common unrestricted
-    // sampling case must not materialize an otherwise-unused [B, vocab]
-    // probability tensor.
-    auto raw_probs = torch::softmax(params.logits, -1);
-    auto filtered_probs = torch::empty_like(params.logits);
-    if (all_top_k_no_limit) {
-        top_p_renorm_probs(raw_probs, filtered_probs, top_p, 1.0, reinterpret_cast<uintptr_t>(cur_stream));
-        params.logits.masked_fill_(filtered_probs <= 0.0F, -std::numeric_limits<float>::infinity());
-        return params.logits;
-    }
-
-    // FlashInfer interprets top_k literally. RTP uses <=0 for no limit, so
-    // normalize only the mixed/limited case, exactly as sampleGreedy does.
-    std::transform(top_k_ptr, top_k_ptr + batch_size, top_k_ptr, [](int32_t value) {
-        return value <= 0 ? 1 << 30 : value;
-    });
-    if (all_top_p_one) {
-        top_k_renorm_probs(raw_probs, filtered_probs, top_k, 0, reinterpret_cast<uintptr_t>(cur_stream));
-        params.logits.masked_fill_(filtered_probs <= 0.0F, -std::numeric_limits<float>::infinity());
-        return params.logits;
-    }
-
-    auto top_k_probs = torch::empty_like(params.logits);
-    top_k_renorm_probs(raw_probs, top_k_probs, top_k, 1.0, reinterpret_cast<uintptr_t>(cur_stream));
-    top_p_renorm_probs(top_k_probs, filtered_probs, top_p, 1.0, reinterpret_cast<uintptr_t>(cur_stream));
-    params.logits.masked_fill_(filtered_probs <= 0.0F, -std::numeric_limits<float>::infinity());
-    return params.logits;
-}
-
 void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
     auto stream = at::cuda::getCurrentCUDAStream().stream();
     chain_speculative_sampling(params.draft_probs_d,
@@ -502,26 +407,31 @@ void chainSpeculativeSampling(const SpeculativeSamplingParams& params) {
 }
 
 void rejectionSampling(const RejectionSamplingParams& params) {
-    RTP_LLM_CHECK(params.draft_probs_d.is_cuda());
     RTP_LLM_CHECK(params.draft_token_ids_d.is_cuda());
     RTP_LLM_CHECK(params.target_probs_d.is_cuda());
 
-    int  batch_size             = params.draft_probs_d.size(0);
-    int  num_speculative_tokens = params.draft_probs_d.size(1);
+    const bool has_draft_probs  = params.draft_probs_d.defined();
+    int  batch_size             = params.draft_token_ids_d.size(0);
+    int  num_speculative_tokens = params.draft_token_ids_d.size(1);
     int  target_vocab_size      = params.target_probs_d.size(2);
     int  target_token_stride    = params.target_token_ids_d.size(1);
     auto stream                 = at::cuda::getCurrentCUDAStream().stream();
 
-    RTP_LLM_CHECK(params.draft_probs_d.dim() == 3);
     RTP_LLM_CHECK(params.draft_token_ids_d.dim() == 2);
     RTP_LLM_CHECK(params.target_probs_d.dim() == 3);
     RTP_LLM_CHECK(params.draft_token_ids_d.size(0) == batch_size);
     RTP_LLM_CHECK(params.draft_token_ids_d.size(1) == num_speculative_tokens);
     RTP_LLM_CHECK(params.target_probs_d.size(0) == batch_size);
     RTP_LLM_CHECK(params.target_probs_d.size(1) == num_speculative_tokens + 1);
-    RTP_LLM_CHECK(params.draft_probs_d.size(2) == target_vocab_size);
+    if (has_draft_probs) {
+        RTP_LLM_CHECK(params.draft_probs_d.is_cuda());
+        RTP_LLM_CHECK(params.draft_probs_d.dim() == 3);
+        RTP_LLM_CHECK(params.draft_probs_d.size(0) == batch_size);
+        RTP_LLM_CHECK(params.draft_probs_d.size(1) == num_speculative_tokens);
+        RTP_LLM_CHECK(params.draft_probs_d.size(2) == target_vocab_size);
+    }
 
-    check_cuda_value(invokeRejectionSampling(params.draft_probs_d.data_ptr<float>(),
+    check_cuda_value(invokeRejectionSampling(has_draft_probs ? params.draft_probs_d.data_ptr<float>() : nullptr,
                                              params.draft_token_ids_d.data_ptr<int32_t>(),
                                              params.uniform_samples_d.data_ptr<float>(),
                                              params.target_probs_d.data_ptr<float>(),
@@ -533,6 +443,7 @@ void rejectionSampling(const RejectionSamplingParams& params) {
                                              batch_size,
                                              num_speculative_tokens,
                                              target_vocab_size,
+                                             has_draft_probs,
                                              stream));
 }
 

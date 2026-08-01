@@ -190,27 +190,6 @@ __global__ void finalizeGumbelArgmaxKernel(const AccT* __restrict__ local_values
     }
 }
 
-__global__ void applyGumbelTemperatureKernel(float* __restrict__ logits,
-                                              const float* __restrict__ temperatures,
-                                              int64_t rows,
-                                              int64_t vocab_size) {
-    const int64_t row = blockIdx.y;
-    if (row >= rows) {
-        return;
-    }
-    const float temperature = temperatures[row];
-    if (temperature == 0.0F || temperature == 1.0F) {
-        return;
-    }
-    const int64_t block_start = static_cast<int64_t>(blockIdx.x) * kVocabBlockSize;
-    for (int64_t local_col = threadIdx.x; local_col < kVocabBlockSize; local_col += blockDim.x) {
-        const int64_t col = block_start + local_col;
-        if (col < vocab_size) {
-            logits[row * vocab_size + col] /= temperature;
-        }
-    }
-}
-
 template<bool INPUT_IS_PROBS, bool APPLY_TEMPERATURE, bool USE_FP64>
 torch::Tensor launchGumbelSample(const torch::Tensor& values,
                                  const torch::Tensor& seeds,
@@ -244,7 +223,7 @@ torch::Tensor launchGumbelSample(const torch::Tensor& values,
 }
 
 template<typename DraftT, typename TargetT>
-__global__ void coupledTokenVerifyKernel(const DraftT* __restrict__ draft_tokens,
+__global__ void greedyTokenVerifyKernel(const DraftT* __restrict__ draft_tokens,
                                          const TargetT* __restrict__ target_tokens,
                                          int32_t* __restrict__ output_tokens,
                                          int32_t* __restrict__ output_lengths,
@@ -267,21 +246,21 @@ __global__ void coupledTokenVerifyKernel(const DraftT* __restrict__ draft_tokens
 }
 
 template<typename DraftT>
-void launchCoupledTokenVerify(const torch::Tensor& draft_tokens,
-                              const torch::Tensor& target_tokens,
-                              torch::Tensor&       output_tokens,
-                              torch::Tensor&       output_lengths,
-                              cudaStream_t         stream) {
+void launchGreedyTokenVerify(const torch::Tensor& draft_tokens,
+                             const torch::Tensor& target_tokens,
+                             torch::Tensor&       output_tokens,
+                             torch::Tensor&       output_lengths,
+                             cudaStream_t         stream) {
     const auto rows  = draft_tokens.size(0);
     const auto width = target_tokens.size(1);
     if (target_tokens.scalar_type() == torch::kInt64) {
-        coupledTokenVerifyKernel<DraftT, int64_t><<<rows, 1, 0, stream>>>(draft_tokens.data_ptr<DraftT>(),
+        greedyTokenVerifyKernel<DraftT, int64_t><<<rows, 1, 0, stream>>>(draft_tokens.data_ptr<DraftT>(),
                                                                          target_tokens.data_ptr<int64_t>(),
                                                                          output_tokens.data_ptr<int32_t>(),
                                                                          output_lengths.data_ptr<int32_t>(),
                                                                          width);
     } else {
-        coupledTokenVerifyKernel<DraftT, int32_t><<<rows, 1, 0, stream>>>(draft_tokens.data_ptr<DraftT>(),
+        greedyTokenVerifyKernel<DraftT, int32_t><<<rows, 1, 0, stream>>>(draft_tokens.data_ptr<DraftT>(),
                                                                          target_tokens.data_ptr<int32_t>(),
                                                                          output_tokens.data_ptr<int32_t>(),
                                                                          output_lengths.data_ptr<int32_t>(),
@@ -355,55 +334,31 @@ torch::Tensor gumbelSample(const torch::Tensor& values,
     return output;
 }
 
-void applyGumbelTemperature(torch::Tensor logits, const torch::Tensor& temperatures) {
-    TORCH_CHECK(logits.is_cuda() && temperatures.is_cuda(),
-                "applyGumbelTemperature expects CUDA tensors");
-    TORCH_CHECK(logits.scalar_type() == torch::kFloat32 && logits.dim() == 2 && logits.is_contiguous(),
-                "applyGumbelTemperature logits must be contiguous float32 [rows, vocab]");
-    TORCH_CHECK(temperatures.scalar_type() == torch::kFloat32 && temperatures.is_contiguous(),
-                "applyGumbelTemperature temperatures must be contiguous float32");
-    TORCH_CHECK(logits.device() == temperatures.device(),
-                "applyGumbelTemperature inputs must be on the same CUDA device");
-    TORCH_CHECK(temperatures.numel() == logits.size(0),
-                "applyGumbelTemperature metadata rows do not match logits");
-    TORCH_CHECK(logits.size(0) > 0 && logits.size(1) > 0,
-                "applyGumbelTemperature requires non-empty logits");
-    c10::cuda::CUDAGuard guard(logits.device());
-    auto stream = at::cuda::getCurrentCUDAStream(logits.device().index()).stream();
-    const int64_t vocab_blocks = (logits.size(1) + kVocabBlockSize - 1) / kVocabBlockSize;
-    const dim3 grid(static_cast<unsigned int>(vocab_blocks), static_cast<unsigned int>(logits.size(0)));
-    applyGumbelTemperatureKernel<<<grid, kThreads, 0, stream>>>(logits.data_ptr<float>(),
-                                                                temperatures.data_ptr<float>(),
-                                                                logits.size(0),
-                                                                logits.size(1));
-    C10_CUDA_KERNEL_LAUNCH_CHECK();
-}
-
-std::tuple<torch::Tensor, torch::Tensor> coupledTokenVerify(const torch::Tensor& draft_tokens,
-                                                            const torch::Tensor& target_tokens) {
+std::tuple<torch::Tensor, torch::Tensor> greedyTokenVerify(const torch::Tensor& draft_tokens,
+                                                           const torch::Tensor& target_tokens) {
     TORCH_CHECK(draft_tokens.is_cuda() && target_tokens.is_cuda(),
-                "coupledTokenVerify expects CUDA tensors");
+                "greedyTokenVerify expects CUDA tensors");
     TORCH_CHECK(draft_tokens.dim() == 2 && target_tokens.dim() == 2,
-                "coupledTokenVerify expects draft [B,k] and target [B,k+1]");
+                "greedyTokenVerify expects draft [B,k] and target [B,k+1]");
     TORCH_CHECK(draft_tokens.size(0) == target_tokens.size(0)
                     && target_tokens.size(1) == draft_tokens.size(1) + 1,
-                "coupledTokenVerify shape mismatch");
+                "greedyTokenVerify shape mismatch");
     TORCH_CHECK(draft_tokens.is_contiguous() && target_tokens.is_contiguous(),
-                "coupledTokenVerify inputs must be contiguous");
+                "greedyTokenVerify inputs must be contiguous");
     TORCH_CHECK((draft_tokens.scalar_type() == torch::kInt32 || draft_tokens.scalar_type() == torch::kInt64)
                     && (target_tokens.scalar_type() == torch::kInt32 || target_tokens.scalar_type() == torch::kInt64),
-                "coupledTokenVerify token tensors must be int32 or int64");
+                "greedyTokenVerify token tensors must be int32 or int64");
     TORCH_CHECK(draft_tokens.device() == target_tokens.device(),
-                "coupledTokenVerify inputs must be on the same CUDA device");
+                "greedyTokenVerify inputs must be on the same CUDA device");
     c10::cuda::CUDAGuard guard(draft_tokens.device());
     auto int_options = draft_tokens.options().dtype(torch::kInt32);
     auto output_tokens = torch::empty(target_tokens.sizes(), int_options);
     auto output_lengths = torch::empty({draft_tokens.size(0)}, int_options);
     auto stream = at::cuda::getCurrentCUDAStream(draft_tokens.device().index()).stream();
     if (draft_tokens.scalar_type() == torch::kInt64) {
-        launchCoupledTokenVerify<int64_t>(draft_tokens, target_tokens, output_tokens, output_lengths, stream);
+        launchGreedyTokenVerify<int64_t>(draft_tokens, target_tokens, output_tokens, output_lengths, stream);
     } else {
-        launchCoupledTokenVerify<int32_t>(draft_tokens, target_tokens, output_tokens, output_lengths, stream);
+        launchGreedyTokenVerify<int32_t>(draft_tokens, target_tokens, output_tokens, output_lengths, stream);
     }
     C10_CUDA_KERNEL_LAUNCH_CHECK();
     return {output_tokens, output_lengths};

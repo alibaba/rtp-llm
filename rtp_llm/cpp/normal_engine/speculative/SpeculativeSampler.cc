@@ -66,7 +66,8 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         torch::zeros({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
     int stream_idx = 0;
     for (const GenerateStreamPtr& stream : streams) {
-        do_sample[stream_idx] = !stream->generateConfig()->top1();
+        const auto& config = stream->generateConfig();
+        do_sample[stream_idx] = config->do_sample && !config->top1();
         stream_idx++;
     }
     buffer_holder_.hold_host(do_sample);
@@ -96,7 +97,10 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
     torch::Tensor output_accepted_token_num_d = torch::zeros(
         {(long)batch_size}, torch::TensorOptions().device(target_device).dtype(torch::kInt32).requires_grad(false));
 
-    if (draft_token_probs_d_t.size(2) != target_token_probs_d_t.size(2)) {
+    RTP_LLM_CHECK_WITH_INFO(target_token_probs_d_t.defined() && target_token_probs_d_t.dim() == 3,
+                            "stochastic rejection requires target probabilities [B,k+1,V]");
+    if (draft_token_probs_d_t.defined()
+        && draft_token_probs_d_t.size(2) != target_token_probs_d_t.size(2)) {
         const int64_t target_vocab_size = target_token_probs_d_t.size(2);
         const int64_t num_spec          = draft_token_probs_d_t.size(1);
 
@@ -211,15 +215,14 @@ void SpeculativeSampler::publishAcceptToHost(SpeculativeSamplerOutput& sample_ou
     sample_output.transfer_done_event->record(cuda_graph::graphGetCurrentStream());
 }
 
-SpeculativeSamplerOutput SpeculativeSampler::forwardCoupled(const std::list<GenerateStreamPtr>& streams,
-                                                            SamplerOutput& draft_sampler_output,
-                                                            SamplerOutput& target_sampler_output,
-                                                            const torch::Tensor& target_prefix_lengths) {
-    RTP_LLM_PROFILE_SCOPE("speculative_sampler.forwardCoupled");
+SpeculativeSamplerOutput SpeculativeSampler::forwardGreedy(const std::list<GenerateStreamPtr>& streams,
+                                                           SamplerOutput& draft_sampler_output,
+                                                           SamplerOutput& target_sampler_output) {
+    RTP_LLM_PROFILE_SCOPE("speculative_sampler.forwardGreedy");
     buffer_holder_.release();
     const int64_t batch_size = static_cast<int64_t>(streams.size());
     const int64_t width      = static_cast<int64_t>(propose_step_) + 1;
-    RTP_LLM_CHECK_WITH_INFO(batch_size > 0, "coupled verifier requires a non-empty batch");
+    RTP_LLM_CHECK_WITH_INFO(batch_size > 0, "greedy verifier requires a non-empty batch");
 
     auto draft_tokens = draft_sampler_output.token_ids;
     if (!draft_tokens.is_cuda()) {
@@ -228,77 +231,18 @@ SpeculativeSamplerOutput SpeculativeSampler::forwardCoupled(const std::list<Gene
     }
     draft_tokens = draft_tokens.reshape({batch_size, width - 1}).contiguous();
 
-    bool has_coupled_logits = false;
-    for (const auto& stream : streams) {
-        const auto& config = stream->generateConfig();
-        has_coupled_logits |= config->do_sample && !config->top1();
-        RTP_LLM_CHECK_WITH_INFO(config->random_seed.has_value(),
-                                "DSpark coupled sampling requires an issued request seed");
+    auto target_ids = target_sampler_output.token_ids;
+    RTP_LLM_CHECK_WITH_INFO(target_ids.defined(), "greedy verifier requires target token_ids");
+    if (!target_ids.is_cuda()) {
+        buffer_holder_.hold_host(target_ids);
+        target_ids = target_ids.to(getTorchCudaDevice(), /*non_blocking=*/true);
     }
-
-    torch::Tensor seeds_host;
-    torch::Tensor temperatures_host;
-    if (has_coupled_logits) {
-        auto metadata_options = torch::TensorOptions().pinned_memory(true);
-        seeds_host = torch::empty({batch_size * width}, metadata_options.dtype(torch::kInt64));
-        temperatures_host = torch::empty({batch_size * width}, metadata_options.dtype(torch::kFloat32));
-        auto* seeds_ptr = seeds_host.data_ptr<int64_t>();
-        auto* temperatures_ptr = temperatures_host.data_ptr<float>();
-        int64_t row = 0;
-        for (const auto& stream : streams) {
-            const auto& config = stream->generateConfig();
-            const bool stochastic =
-                config->do_sample && !config->top1() && config->temperature != 0.0F;
-            for (int64_t col = 0; col < width; ++col) {
-                seeds_ptr[row * width + col] = static_cast<int64_t>(config->random_seed.value());
-                // Target logits already contain temperature/top-k/top-p and
-                // grammar transforms. One enables noise; zero is argmax.
-                temperatures_ptr[row * width + col] = stochastic ? 1.0F : 0.0F;
-            }
-            ++row;
-        }
-    }
-
-    torch::Tensor target_tokens;
-    if (has_coupled_logits) {
-        RTP_LLM_CHECK_WITH_INFO(target_sampler_output.all_probs.defined(),
-                                "DSpark coupled sampling requires target processed logits");
-        buffer_holder_.hold_host(seeds_host);
-        buffer_holder_.hold_host(temperatures_host);
-        auto seeds = seeds_host.to(getTorchCudaDevice(), /*non_blocking=*/true);
-        auto temperatures = temperatures_host.to(getTorchCudaDevice(), /*non_blocking=*/true);
-        auto prefix = target_prefix_lengths.to(
-            torch::TensorOptions().device(getTorchCudaDevice()).dtype(torch::kInt64), /*non_blocking=*/true);
-        auto positions = (prefix.reshape({batch_size, 1})
-                          + torch::arange(width,
-                                          torch::TensorOptions()
-                                              .device(getTorchCudaDevice())
-                                              .dtype(torch::kInt64)))
-                             .reshape({batch_size * width})
+    const int64_t target_stride = target_ids.size(1);
+    auto target_tokens = target_ids.reshape({batch_size, width, target_stride})
+                             .select(2, target_stride - 1)
                              .contiguous();
-        // The field is the existing SamplerOutput carrier, but for coupled
-        // DSpark it holds processed target logits (not probabilities).
-        auto processed_logits = target_sampler_output.all_probs.reshape({batch_size * width, -1}).contiguous();
-        target_tokens = execGumbelSample(
-                            {processed_logits, seeds, positions, temperatures, /*input_is_probs=*/false,
-                             /*apply_temperature=*/false, use_fp64_gumbel_})
-                            .reshape({batch_size, width});
-        target_sampler_output.token_ids = target_tokens.reshape({batch_size * width, 1}).to(torch::kInt32);
-    } else {
-        auto target_ids = target_sampler_output.token_ids;
-        RTP_LLM_CHECK_WITH_INFO(target_ids.defined(),
-                                "DSpark greedy coupling requires target argmax token_ids");
-        if (!target_ids.is_cuda()) {
-            buffer_holder_.hold_host(target_ids);
-            target_ids = target_ids.to(getTorchCudaDevice(), /*non_blocking=*/true);
-        }
-        const int64_t target_stride = target_ids.size(1);
-        target_tokens = target_ids.reshape({batch_size, width, target_stride})
-                            .select(2, target_stride - 1)
-                            .contiguous();
-    }
 
-    auto verified = execCoupledTokenVerify({draft_tokens, target_tokens});
+    auto verified = execGreedyTokenVerify({draft_tokens, target_tokens});
     SpeculativeSamplerOutput output;
     output.accept_tokens = std::move(verified.accept_tokens);
     output.accept_len    = std::move(verified.accept_len);

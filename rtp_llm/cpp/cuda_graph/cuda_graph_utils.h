@@ -38,6 +38,10 @@ public:
         draft_tokens_ = draft_tokens;
     };
 
+    void setDraftProbs(at::Tensor draft_probs) {
+        draft_probs_ = draft_probs;
+    };
+
     CaptureMemoryHold() {}
 
     CaptureMemoryHold(at::Tensor hidden_states, torch_ext::PyModelInputs& inputs, bool is_embedding):
@@ -62,6 +66,7 @@ public:
         py_model_inputs_.dspark_sampling_temperatures             = inputs.dspark_sampling_temperatures;
         py_model_inputs_.dspark_use_gumbel                        = inputs.dspark_use_gumbel;
         py_model_inputs_.dspark_use_fp64_gumbel                   = inputs.dspark_use_fp64_gumbel;
+        py_model_inputs_.need_draft_probs                         = inputs.need_draft_probs;
 
         // for spec
         py_model_inputs_.input_hiddens                            = inputs.input_hiddens;
@@ -91,6 +96,9 @@ public:
     at::Tensor               decoder_layer_aux_hidden_states_;
     // DSpark full-tail graph output [batch, k] int64.
     at::Tensor               draft_tokens_;
+    // Probabilistic DSpark full-tail output [batch,k,V] fp32. Retain the
+    // graph-produced storage directly to avoid a duplicate full-vocab buffer.
+    at::Tensor               draft_probs_;
     torch_ext::PyModelInputs py_model_inputs_;
 };
 

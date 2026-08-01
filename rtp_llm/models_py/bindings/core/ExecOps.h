@@ -82,8 +82,7 @@ void fusedStridedCopy(const FusedStridedCopyParams& params);
 
 GreedyOutput     execSampleGreedy(const GreedyParams& params);
 torch::Tensor    execGumbelSample(const GumbelSampleParams& params);
-CoupledTokenVerifyOutput execCoupledTokenVerify(const CoupledTokenVerifyParams& params);
-torch::Tensor    execPrepareGumbelTargetLogits(const GreedyParams& params);
+GreedyTokenVerifyOutput execGreedyTokenVerify(const GreedyTokenVerifyParams& params);
 BeamSearchOutput execSampleBeamSearch(const BeamSearchParams& params);
 void             execChainSpeculativeSampling(const SpeculativeSamplingParams& params);
 void             execRejectionSampling(const RejectionSamplingParams& params);

@@ -41,8 +41,7 @@ void             chainSpeculativeSampling(const SpeculativeSamplingParams& param
 void             rejectionSampling(const RejectionSamplingParams& params);
 void             mappingDraft2Target(const MappingDraft2TargetParams& params);
 torch::Tensor    gumbelSampling(const GumbelSampleParams& params);
-CoupledTokenVerifyOutput coupledTokenVerification(const CoupledTokenVerifyParams& params);
-torch::Tensor    prepareGumbelTargetLogits(const GreedyParams& params);
+GreedyTokenVerifyOutput greedyTokenVerification(const GreedyTokenVerifyParams& params);
 void             multiMergeCopy(const MultiMergeCopyParams& params);
 }  // namespace rtp_llm
 
@@ -541,12 +540,8 @@ torch::Tensor execGumbelSample(const GumbelSampleParams& params) {
     return gumbelSampling(params);
 }
 
-CoupledTokenVerifyOutput execCoupledTokenVerify(const CoupledTokenVerifyParams& params) {
-    return coupledTokenVerification(params);
-}
-
-torch::Tensor execPrepareGumbelTargetLogits(const GreedyParams& params) {
-    return prepareGumbelTargetLogits(params);
+GreedyTokenVerifyOutput execGreedyTokenVerify(const GreedyTokenVerifyParams& params) {
+    return greedyTokenVerification(params);
 }
 
 BeamSearchOutput execSampleBeamSearch(const BeamSearchParams& params) {

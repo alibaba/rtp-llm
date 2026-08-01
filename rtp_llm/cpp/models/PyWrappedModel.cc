@@ -1239,7 +1239,6 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 micro_model_inputs.cache_keys = inputs.cache_keys.defined() ?
                                                     inputs.cache_keys.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                                                     torch::Tensor();
-
                 token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, (size_t)slice_token_num});
 
                 micro_batch_inputs.push_back(micro_model_inputs);
@@ -1275,7 +1274,6 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCUDA));
                 micro_model_inputs.lm_output_indexes =
                     inputs.lm_output_indexes.narrow(0, sliced_batch_idx, d_micro_batch_size);
-
                 token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, d_micro_batch_size});
 
                 micro_batch_inputs.push_back(micro_model_inputs);
@@ -1320,7 +1318,6 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 micro_model_inputs.cache_keys = inputs.cache_keys.defined() ?
                                                     inputs.cache_keys.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                                                     torch::Tensor();
-
                 token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, (size_t)slice_token_num});
 
                 micro_batch_inputs.push_back(micro_model_inputs);

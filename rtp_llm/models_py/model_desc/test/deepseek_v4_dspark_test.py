@@ -196,13 +196,14 @@ class DeepSeekV4DSparkTest(unittest.TestCase):
         model = DeepSeekV4DSparkModel.__new__(DeepSeekV4DSparkModel)
         nn.Module.__init__(model)
         model.markov_head = DSparkMarkovHead(torch.zeros(5, 1), torch.zeros(5, 1))
-        base = torch.zeros(1, 3, 5)
+        base = torch.arange(15, dtype=torch.float32).reshape(1, 3, 5)
         anchor = torch.tensor([4])
         seeds = torch.tensor([17])
         positions = torch.tensor([[10, 11, 12]])
         temperatures = torch.tensor([0.8])
         sampled = iter((torch.tensor([1]), torch.tensor([3]), torch.tensor([2])))
         predecessors = []
+        sampled_logits = []
 
         def fake_sample(
             logits,
@@ -217,7 +218,8 @@ class DeepSeekV4DSparkTest(unittest.TestCase):
             self.assertEqual(seed.item(), 17)
             self.assertAlmostEqual(temperature.item(), 0.8)
             self.assertFalse(input_is_probs)
-            self.assertTrue(apply_temperature)
+            self.assertFalse(apply_temperature)
+            sampled_logits.append(logits.clone())
             self.assertFalse(use_fp64)
             return next(sampled)
 
@@ -238,6 +240,7 @@ class DeepSeekV4DSparkTest(unittest.TestCase):
 
         self.assertTrue(torch.equal(tokens, torch.tensor([[1, 3, 2]])))
         self.assertEqual(predecessors, [10, 11, 12])
+        torch.testing.assert_close(torch.stack(sampled_logits, dim=1), base / 0.8)
         self.assertEqual(corrected.numel(), 0)
 
     def test_draft_tail_anchor_accepts_native_and_verify_carriers(self):
@@ -268,14 +271,21 @@ class DeepSeekV4DSparkTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "B\\*k or B\\*\\(k\\+1\\)"):
             model._anchor_ids_from_block_inputs(torch.zeros(11), head_hidden)
 
-    def test_draft_tail_never_materializes_probabilities(self):
+    def test_draft_tail_materializes_q_only_for_probabilistic_mode(self):
         model = DeepSeekV4DSparkModel.__new__(DeepSeekV4DSparkModel)
         nn.Module.__init__(model)
         model.compute_base_logits = lambda hidden: torch.tensor(
             [[[0.0, 2.0, 1.0], [3.0, 0.0, 1.0]]]
         )
         model._anchor_ids_from_block_inputs = lambda input_ids, hidden: torch.tensor([0])
-        model.markov_correct = lambda logits, anchors, **kwargs: (logits.argmax(-1), torch.empty(0))
+        model.markov_correct = lambda logits, anchors, **kwargs: (
+            logits.argmax(-1),
+            (
+                logits / kwargs["temperatures"][:, None, None]
+                if kwargs["return_corrected"]
+                else torch.empty(0)
+            ),
+        )
 
         outputs = SimpleNamespace(
             hidden_states=torch.zeros(2, 4), draft_tokens=None, draft_probs=None
@@ -291,8 +301,15 @@ class DeepSeekV4DSparkTest(unittest.TestCase):
 
         outputs.draft_probs = None
         inputs.need_draft_probs = True
+        inputs.dspark_use_gumbel = True
+        inputs.dspark_use_fp64_gumbel = False
+        inputs.dspark_sampling_seeds = torch.tensor([7], dtype=torch.long)
+        inputs.dspark_sampling_temperatures = torch.tensor([0.5])
+        inputs.attention_inputs = SimpleNamespace(prefix_lengths=torch.tensor([3]))
         result = model.draft_tail(outputs, inputs)
-        self.assertIsNone(result.draft_probs)
+        expected_q = torch.softmax(model.compute_base_logits(outputs.hidden_states) / 0.5, dim=-1)
+        self.assertTrue(torch.allclose(result.draft_probs, expected_q))
+        self.assertEqual(result.draft_probs.shape, (1, 2, 3))
 
     def test_target_aux_capture_mean_pools_mhc_lanes(self):
         v4 = SimpleNamespace()

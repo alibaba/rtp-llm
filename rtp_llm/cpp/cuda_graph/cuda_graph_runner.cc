@@ -225,6 +225,8 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
     if (is_dspark_ && !is_target_verify_) {
         RTP_LLM_CHECK_WITH_INFO(inputs.dspark_use_gumbel == py_model_inputs_.dspark_use_gumbel,
                                 "DSpark draft sampling policy changed after graph capture");
+        RTP_LLM_CHECK_WITH_INFO(inputs.need_draft_probs == py_model_inputs_.need_draft_probs,
+                                "DSpark draft probability policy changed after graph capture");
         RTP_LLM_CHECK_WITH_INFO(inputs.dspark_use_fp64_gumbel == py_model_inputs_.dspark_use_fp64_gumbel,
                                 "DSpark Gumbel precision changed after graph capture");
         RTP_LLM_CHECK_WITH_INFO(inputs.dspark_sampling_seeds.defined()
@@ -564,6 +566,11 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         if (draft_tokens.defined()) {
             outputs.draft_tokens = draft_tokens.slice(0, 0, state.current_batch_size);
         }
+        const auto& draft_probs =
+            graph_instances_[state.current_real_graph_bs].mem_hold_.draft_probs_;
+        if (draft_probs.defined()) {
+            outputs.draft_probs = draft_probs.slice(0, 0, state.current_batch_size);
+        }
     }
     // record forward done event
     forward_event_.record(cuda_graph::graphGetCurrentStream());
@@ -652,6 +659,13 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
             || inputs.dspark_ctx_starts.numel() == 0) {
             return false;
         }
+        // A probabilistic graph owns a persistent [B,k,V] q output, while an
+        // all-greedy request must not materialize q. Do not replay a graph
+        // captured with the other output contract; the eager fallback keeps
+        // all-greedy batches on the zero-full-probs path.
+        if (inputs.need_draft_probs != dspark_use_gumbel_) {
+            return false;
+        }
         return tryGetRealGraphDecodeBatchSize(inputs, state);
     }
 
@@ -721,7 +735,8 @@ bool CudaGraphRunner::aliasesGraphStaticStorage(const torch::Tensor& t, const Cu
     const void* p    = t.storage().data();
     for (const at::Tensor* static_tensor : {&hold.decoder_layer_hidden_states_,
                                             &hold.decoder_layer_aux_hidden_states_,
-                                            &hold.draft_tokens_}) {
+                                            &hold.draft_tokens_,
+                                            &hold.draft_probs_}) {
         if (static_tensor->defined() && static_tensor->storage().data() == p) {
             return true;
         }
@@ -934,6 +949,7 @@ void CudaGraphRunner::initCapture() {
                 torch::zeros({int(max_bs_)}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
             inputs.dspark_use_gumbel = dspark_use_gumbel_;
             inputs.dspark_use_fp64_gumbel = dspark_use_fp64_gumbel_;
+            inputs.need_draft_probs = dspark_use_gumbel_;
         }
         // Setup attention inputs using the extracted function
         initCaptureAttentionInputs(inputs, max_bs_, num_tokens_per_bs_);
@@ -985,6 +1001,11 @@ void CudaGraphRunner::initCapture() {
             draft_sizes[0] = static_cast<int64_t>(max_bs_);
             capture_mem_hold_.setDraftTokens(
                 torch::zeros(draft_sizes, probe_outputs.draft_tokens.options()));
+            if (dspark_use_gumbel_) {
+                RTP_LLM_CHECK_WITH_INFO(probe_outputs.draft_probs.defined()
+                                            && probe_outputs.draft_probs.dim() == 3,
+                                        "probabilistic DSpark graph probe did not produce q [B,k,V]");
+            }
         }
         initCaptureAttentionInputsPost();
         logCudaGraphPoolMemory("before_capture");
@@ -1098,6 +1119,14 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                                         "dspark full-tail capture: forward did not produce draft_tokens");
                 graph_instances_[key].mem_hold_.draft_tokens_.copy_(outputs.draft_tokens);
             }
+            if (is_dspark_ && !is_target_verify_ && dspark_use_gumbel_) {
+                RTP_LLM_CHECK_WITH_INFO(outputs.draft_probs.defined() && outputs.draft_probs.dim() == 3,
+                                        "probabilistic DSpark capture did not produce q [B,k,V]");
+                // This graph-produced tensor has stable pool storage across
+                // replay. Retain it directly instead of capturing a second
+                // [B,k,V] copy into a duplicate static buffer.
+                graph_instances_[key].mem_hold_.setDraftProbs(outputs.draft_probs);
+            }
             graph.capture_end();
         }
 
@@ -1161,6 +1190,7 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
             capture_mem_hold_.py_model_inputs_.dspark_sampling_temperatures.slice(0, 0, batch_size);
         inputs.dspark_use_gumbel = capture_mem_hold_.py_model_inputs_.dspark_use_gumbel;
         inputs.dspark_use_fp64_gumbel = capture_mem_hold_.py_model_inputs_.dspark_use_fp64_gumbel;
+        inputs.need_draft_probs = capture_mem_hold_.py_model_inputs_.need_draft_probs;
     }
     inputs.attention_inputs.input_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, batch_size);
