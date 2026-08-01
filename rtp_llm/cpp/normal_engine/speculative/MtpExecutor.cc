@@ -206,12 +206,18 @@ bool MtpExecutor::finishDSparkPrefillCachePublication(const GptModelInputs&     
     }
 
     RTP_LLM_PROFILE_SCOPE("executor.mtp.prefill_step(dspark_cache_store_publication)");
-    const std::string draft_error = draft_model_->waitCacheStorePublication();
-    const bool        local_ok    = draft_error.empty();
+    // The target and draft writers feed the same unordered, multi-worker
+    // NormalCacheStore queue. Completing every draft callback therefore does
+    // not imply that an earlier target task has published. Drain both models
+    // before decode is allowed to request either key set.
+    const std::string target_error = model_->waitCacheStorePublication();
+    const std::string draft_error  = draft_model_->waitCacheStorePublication();
+    const bool        local_ok     = target_error.empty() && draft_error.empty();
 
     if (!local_ok) {
-        RTP_LLM_LOG_ERROR("DSpARK draft cache-store publication failed on TP rank %d: draft=[%s]",
+        RTP_LLM_LOG_ERROR("DSpARK cache-store publication failed on TP rank %d: target=[%s], draft=[%s]",
                           tp_rank_,
+                          target_error.c_str(),
                           draft_error.c_str());
     }
 
@@ -229,7 +235,10 @@ bool MtpExecutor::finishDSparkPrefillCachePublication(const GptModelInputs&     
     }
 
     if (!global_ok && isTpRank0()) {
-        std::string error_message = "DSpARK draft cache-store publication failed before decode dispatch";
+        std::string error_message = "DSpARK cache-store publication failed before decode dispatch";
+        if (!target_error.empty()) {
+            error_message += "; target: " + target_error;
+        }
         if (!draft_error.empty()) {
             error_message += "; draft: " + draft_error;
         }
@@ -675,7 +684,7 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
                                         target_cache_layer_layout.layer_to_groups,
                                         model_inputs_logger_,
                                         false,
-                                        false));
+                                        is_dspark_));
     }
 
     is_linear_attention_model_ = target_cache_config.linear_group_num > 0;
@@ -859,29 +868,38 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
     // fallback; unwinding deliberately avoids collectives.
     struct DSparkCacheStoreDrainGuard {
         bool       armed;
+        ModelBase* target;
         ModelBase* draft;
 
         ~DSparkCacheStoreDrainGuard() {
             if (!armed) {
                 return;
             }
-            try {
-                const auto draft_error = draft->waitCacheStorePublication();
-                if (!draft_error.empty()) {
-                    RTP_LLM_LOG_ERROR("DSpARK local draft cache-store drain on prefill exit failed: draft=[%s]",
-                                      draft_error.c_str());
+            auto drain = [](ModelBase* model, const char* name) {
+                try {
+                    const auto error = model->waitCacheStorePublication();
+                    if (!error.empty()) {
+                        RTP_LLM_LOG_ERROR("DSpARK local %s cache-store drain on prefill exit failed: %s=[%s]",
+                                          name,
+                                          name,
+                                          error.c_str());
+                    }
+                } catch (const std::exception& e) {
+                    RTP_LLM_LOG_ERROR("DSpARK local %s cache-store drain threw on prefill exit: %s", name, e.what());
+                } catch (...) {
+                    RTP_LLM_LOG_ERROR("DSpARK local %s cache-store drain threw an unknown exception on prefill exit",
+                                      name);
                 }
-            } catch (const std::exception& e) {
-                RTP_LLM_LOG_ERROR("DSpARK local cache-store drain threw on prefill exit: %s", e.what());
-            } catch (...) {
-                RTP_LLM_LOG_ERROR("DSpARK local cache-store drain threw an unknown exception on prefill exit");
-            }
+            };
+            drain(target, "target");
+            drain(draft, "draft");
         }
 
         void disarm() {
             armed = false;
         }
     } cache_store_drain_guard{is_dspark_ && !model_input.warmup && model_input.pd_separation,
+                              model_.get(),
                               draft_model_.get()};
 
     // release model input before forward

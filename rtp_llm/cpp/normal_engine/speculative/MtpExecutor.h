@@ -152,9 +152,10 @@ protected:
     void maybeOverrideLastHiddenWithMtpBuffer(GptModelOutputs& model_output, ModelBase& source);
 
     // DSpARK emits substantially more cache-store work than one-layer MTP.
-    // Keep publication asynchronous across target sampling + draft forward,
-    // then synchronize completion across TP ranks immediately before decode
-    // dispatch so a slow rank cannot strand decode loads and connector refs.
+    // Keep target and draft publication asynchronous across target sampling +
+    // draft forward, then synchronize both models' completion across TP ranks
+    // immediately before decode dispatch so a slow rank cannot strand decode
+    // loads and connector refs.
     bool finishDSparkPrefillCachePublication(const GptModelInputs&               model_input,
                                              const std::list<GenerateStreamPtr>& streams);
 
