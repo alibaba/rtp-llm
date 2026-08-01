@@ -1,12 +1,23 @@
 deepseek_test_deps = [
+    "//rtp_llm:aiohttp",
     "//rtp_llm:config",
     "//rtp_llm:device",
+    "//rtp_llm:fastapi",
     "//rtp_llm:ops",
+    "//rtp_llm:psutil",
+    "//rtp_llm:pydantic",
     "//rtp_llm:safetensors",
     "//rtp_llm:torch",
+    "//rtp_llm:transformers",
     "//rtp_llm:utils",
     "//rtp_llm/models_py:new_weight_loader",
-]
+] + select({
+    "@//:using_rocm": [
+        "//rtp_llm:aiter",
+        "//rtp_llm:triton",
+    ],
+    "//conditions:default": [],
+})
 
 py_test(
     name = "test_deepseek_newloader",
@@ -18,12 +29,6 @@ py_test(
     name = "test_deepseek_newloader_gpu",
     srcs = ["test_deepseek_newloader.py"],
     main = "test_deepseek_newloader.py",
-    args = [
-        "DeepSeekNewloaderTest.test_moe_cuda_noaux_router_matches_reference",
-        "DeepSeekNewloaderTest.test_moe_cuda_fast_select_topk_matches_reference",
-        "DeepSeekNewloaderTest.test_mla_online_fused_fp8_projection_matches_bf16_reference",
-        "DeepSeekNewloaderTest.test_mla_prequantized_fp8_kernel_views_execute_numerically",
-    ],
     exec_properties = {
         "gpu": "H20",
         "gpu_count": "1",
@@ -36,9 +41,6 @@ py_test(
     name = "test_deepseek_newloader_rocm_gpu",
     srcs = ["test_deepseek_newloader.py"],
     main = "test_deepseek_newloader.py",
-    args = [
-        "DeepSeekNewloaderTest.test_moe_rocm_noaux_reference_router_matches_expected",
-    ],
     exec_properties = {
         "gpu": "MI308X-ROCM7",
         "gpu_count": "1",

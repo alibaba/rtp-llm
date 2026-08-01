@@ -281,6 +281,10 @@ class DeepSeekV32MlaAttention(RtpModule):
         self.layer_idx = layer_idx
         self.tp_size = tp_size
         self.quant_config = quant_config
+        self._online_fp8 = (
+            quant_config is not None and quant_config.quant_type == "fp8_block_online"
+        )
+        self._checkpoint_weights_released = False
 
         # The checkpoint stores the A projections as FP8 per-block tensors.
         # Preserve their scale parameters during streaming load. Postprocessing
@@ -357,12 +361,19 @@ class DeepSeekV32MlaAttention(RtpModule):
         # Each head contributes (nope+v) contiguous rows, so a plain column
         # split lands whole heads on each rank; self.num_heads (= num_heads //
         # tp_size) then matches the loaded weight in the kc/vc derivation below.
+        # Online FP8 leaves are quantized one at a time before parent post-load
+        # hooks run. Keep kv_b in the checkpoint dtype until this attention
+        # module has derived the exact kc/vc decode views; process_weights then
+        # creates a separate FP8 runtime view for prefill on CUDA.
+        kv_b_quant_config = (
+            QuantizationConfig(quant_type="none") if self._online_fp8 else quant_config
+        )
         self.kv_b_proj = ColumnParallelLinear(
             input_size=kv_lora_rank,
             output_size=num_heads * (nope_head_dim + v_head_dim),
             tp_size=tp_size,
             tp_rank=tp_rank,
-            quant_config=quant_config,
+            quant_config=kv_b_quant_config,
             prefix="kv_b_proj",
             bias=False,
             params_dtype=params_dtype,
@@ -385,11 +396,18 @@ class DeepSeekV32MlaAttention(RtpModule):
         self.register_buffer("_fused_qkv_a_s", None, persistent=False)
         self._fused_qkv_a_runtime: Optional[nn.Module] = None
         self.register_buffer("_kv_b_w", None, persistent=False)
+        self.register_buffer("_kv_b_runtime_w", None, persistent=False)
+        self.register_buffer("_kv_b_runtime_s", None, persistent=False)
         self.register_buffer("_kc_w", None, persistent=False)
         self.register_buffer("_vc_w", None, persistent=False)
         self.indexer: Optional[nn.Module] = None
 
     def load_weights(self, weights):
+        if self._checkpoint_weights_released:
+            raise RuntimeError(
+                "MLA checkpoint weights were released after runtime layout "
+                "construction; rebuild the model before loading new weights"
+            )
         if self.q_lora_rank == 0:
             items = weights.items() if isinstance(weights, dict) else weights
             weights = {
@@ -488,19 +506,33 @@ class DeepSeekV32MlaAttention(RtpModule):
             .contiguous()
             .view(self.kv_lora_rank, head_num, nope + v_head)
         )
-        # _kv_b_w: [kv_lora_rank, head_num * (nope + v_head)] — transposed kv_b
-        # for FlashInfer prefill (matches legacy DeepSeekV2's `transpose` rule).
-        # Decode/absorb paths use _kc_w / _vc_w instead.
-        kv_b_scale = _fp8_scale_parameter(self.kv_b_proj)
-        self._kv_b_w = (
-            None
-            if kv_b_scale is not None
-            else t.view(self.kv_lora_rank, head_num * (nope + v_head)).contiguous()
-        )
         # _kc_w shape: [head_num, nope, kv_lora_rank]
         self._kc_w = t[:, :, :nope].permute(1, 2, 0).contiguous()
         # _vc_w shape: [head_num, kv_lora_rank, v_head]
         self._vc_w = t[:, :, nope:].transpose(0, 1).contiguous()
+        # _kv_b_w: [kv_lora_rank, head_num * (nope + v_head)] — transposed kv_b
+        # for BF16 FlashInfer prefill. Decode/absorb always consumes the exact
+        # BF16 checkpoint-derived kc/vc views above. CUDA online-FP8 builds a
+        # separate quantized prefill view only after those derivations.
+        kv_b_scale = _fp8_scale_parameter(self.kv_b_proj)
+        if self._online_fp8 and not is_hip:
+            from rtp_llm.models_py.kernels.cuda.fp8_quant import per_block_cast_to_fp8
+
+            runtime_weight, runtime_scale = per_block_cast_to_fp8(
+                kv_b_w,
+                use_ue8m0=False,
+            )
+            (
+                self._kv_b_runtime_w,
+                self._kv_b_runtime_s,
+            ) = _prepare_fused_fp8_runtime_weight(runtime_weight, runtime_scale)
+            self._kv_b_w = None
+        else:
+            self._kv_b_w = (
+                None
+                if kv_b_scale is not None
+                else t.view(self.kv_lora_rank, head_num * (nope + v_head)).contiguous()
+            )
 
     def _build_mla_kernel_weights(self) -> Dict[str, torch.Tensor]:
         """Assemble the W.* dict that MlaImplBase expects at forward time."""
@@ -558,7 +590,17 @@ class DeepSeekV32MlaAttention(RtpModule):
         # absorb/decode paths.
         kv_b_weight = self.kv_b_proj.weight.data
         kv_b_scale = _fp8_scale_parameter(self.kv_b_proj)
-        if kv_b_scale is not None:
+        if self._kv_b_runtime_w is not None:
+            if self._kv_b_runtime_s is None:
+                raise RuntimeError("online-FP8 MLA kv_b runtime scale is missing")
+            (
+                weights[W.mla_kv_b_w],
+                weights[W.mla_kv_b_s],
+            ) = _kernel_fp8_weight_and_scale(
+                self._kv_b_runtime_w,
+                self._kv_b_runtime_s,
+            )
+        elif kv_b_scale is not None:
             (
                 weights[W.mla_kv_b_w],
                 weights[W.mla_kv_b_s],
@@ -580,18 +622,21 @@ class DeepSeekV32MlaAttention(RtpModule):
         NewModelLoader validation and every child quantization post-load hook
         must finish before this method runs. The top-level model therefore
         calls it only after `_build_mla_kernel_weights()` has captured the
-        runtime tensors consumed by attention factories.
+        runtime tensors consumed by attention factories. This transition is
+        intentionally irreversible: weight refresh requires rebuilding the
+        module so checkpoint-shaped parameters and quantization state exist.
         """
         if self._fused_qkv_a_w is None:
             raise RuntimeError("MLA runtime weights must be built before release")
         parameter_names = ("weight", "weight_scale", "weight_scale_inv")
         _release_parameter_storage(self.q_a_proj, parameter_names)
         _release_parameter_storage(self.kv_a_proj_with_mqa, parameter_names)
-        # BF16 prefill consumes the transposed `_kv_b_w` copy. FP8 prefill
-        # consumes kv_b_proj weight/scale directly through the kernel layout,
-        # so that storage must remain live.
+        # BF16 and online-FP8 prefill consume derived runtime copies.
+        # Pre-quantized FP8 consumes kv_b_proj weight/scale directly through
+        # the kernel layout, so only that checkpoint storage must remain live.
         if _fp8_scale_parameter(self.kv_b_proj) is None:
             _release_parameter_storage(self.kv_b_proj, parameter_names)
+        self._checkpoint_weights_released = True
 
     def _run_sparse_indexer(
         self,

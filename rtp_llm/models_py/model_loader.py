@@ -186,6 +186,20 @@ class NewLoaderConfig:
                 raise ValueError(
                     f"Invalid {prefix} partition: rank={rank}, size={size}"
                 )
+            if prefix in ("attn_tp", "ffn_tp"):
+                if size not in (1, self.tp_size):
+                    raise ValueError(
+                        f"{size_name}={size} must be either 1 or the physical "
+                        f"tp_size={self.tp_size}; independent TP subgroups are "
+                        "not supported by Group.TP collectives"
+                    )
+                expected_rank = 0 if size == 1 else self.tp_rank
+                if rank != expected_rank:
+                    raise ValueError(
+                        f"{rank_name}={rank} does not match the supported "
+                        f"{prefix} topology: expected rank={expected_rank} for "
+                        f"size={size}"
+                    )
         if self.ep_size <= 0 or not 0 <= self.ep_rank < self.ep_size:
             raise ValueError(
                 f"Invalid EP partition: rank={self.ep_rank}, size={self.ep_size}"

@@ -11,6 +11,7 @@ Key design:
   - Shared expert reuses the common TP/FP8-safe DeepSeek MLP.
 """
 
+import logging
 from typing import Any, Optional
 
 import torch
@@ -27,15 +28,40 @@ from rtp_llm.models_py.quant_methods.base import QuantizationConfig
 from .mlp import DeepSeekV32MLP
 
 _VALID_TOPK_METHODS = {"greedy", "group_limited_greedy", "noaux_tc"}
+logger = logging.getLogger(__name__)
 
 
-def _normalize_topk_method(topk_method: str) -> str:
+def normalize_topk_method(topk_method: str) -> str:
     if not isinstance(topk_method, str):
         raise TypeError(f"topk_method must be a string, got {topk_method!r}")
     normalized = "greedy" if topk_method == "gready" else topk_method
     if normalized not in _VALID_TOPK_METHODS:
         raise ValueError(f"unsupported DeepSeek topk_method={topk_method!r}")
     return normalized
+
+
+def _mask_scores_by_group(
+    scores_for_choice: torch.Tensor,
+    group_scores: torch.Tensor,
+    n_group: int,
+    topk_group: int,
+) -> torch.Tensor:
+    """Mask experts outside the selected routing groups."""
+    group_size = scores_for_choice.shape[-1] // n_group
+    selected_groups = torch.topk(
+        group_scores,
+        k=topk_group,
+        dim=-1,
+        sorted=False,
+    ).indices
+    group_mask = torch.zeros_like(group_scores, dtype=torch.bool)
+    group_mask.scatter_(1, selected_groups, True)
+    expert_mask = (
+        group_mask.unsqueeze(-1)
+        .expand(-1, -1, group_size)
+        .reshape_as(scores_for_choice)
+    )
+    return scores_for_choice.masked_fill(~expert_mask, float("-inf"))
 
 
 def _validate_routing_args(
@@ -104,18 +130,12 @@ def _select_deepseek_topk(
     candidate_scores = scores
     if group_limited:
         group_scores = scores.view(-1, n_group, group_size).amax(dim=-1)
-        selected_groups = torch.topk(
+        candidate_scores = _mask_scores_by_group(
+            scores,
             group_scores,
-            k=topk_group,
-            dim=-1,
-            sorted=False,
-        ).indices
-        group_mask = torch.zeros_like(group_scores, dtype=torch.bool)
-        group_mask.scatter_(1, selected_groups, True)
-        expert_mask = (
-            group_mask.unsqueeze(-1).expand(-1, -1, group_size).reshape_as(scores)
+            n_group,
+            topk_group,
         )
-        candidate_scores = scores.masked_fill(~expert_mask, float("-inf"))
 
     topk_weights, topk_ids = torch.topk(
         candidate_scores,
@@ -172,20 +192,12 @@ def _select_deepseek_noaux_topk(
         dim=-1,
         sorted=False,
     ).values.sum(dim=-1)
-    selected_groups = torch.topk(
+    candidate_scores = _mask_scores_by_group(
+        scores_for_choice,
         group_scores,
-        k=topk_group,
-        dim=-1,
-        sorted=False,
-    ).indices
-    group_mask = torch.zeros_like(group_scores, dtype=torch.bool)
-    group_mask.scatter_(1, selected_groups, True)
-    expert_mask = (
-        group_mask.unsqueeze(-1)
-        .expand(-1, -1, group_size)
-        .reshape_as(scores_for_choice)
+        n_group,
+        topk_group,
     )
-    candidate_scores = scores_for_choice.masked_fill(~expert_mask, float("-inf"))
     topk_ids = torch.topk(
         candidate_scores,
         k=top_k,
@@ -292,7 +304,7 @@ class DeepSeekV32MoEBlock(RtpModule):
             raise TypeError("moe_config.fake_balance_expert must be a bool")
         if scoring_func not in (0, 1):
             raise ValueError(f"unsupported DeepSeek scoring_func={scoring_func}")
-        topk_method = _normalize_topk_method(topk_method)
+        topk_method = normalize_topk_method(topk_method)
         if correction_bias != (topk_method == "noaux_tc"):
             raise ValueError(
                 "correction_bias must be enabled exactly for noaux_tc routing"
@@ -362,9 +374,28 @@ class DeepSeekV32MoEBlock(RtpModule):
         # GroupTopK is a CUDA-only fused op. ROCm and CPU use the exact
         # reference algorithm below instead of failing during construction.
         self._use_fast_group_topk = (
-            correction_bias and get_device_type() == DeviceType.Cuda
+            correction_bias
+            and get_device_type() == DeviceType.Cuda
+            and not (top_k == 1 and has_moe_norm)
         )
         self.group_topk = GroupTopK() if self._use_fast_group_topk else None
+        if (
+            get_device_type() == DeviceType.Cuda
+            and not self._use_fast_select_topk
+            and not self._use_fast_group_topk
+        ):
+            logger.info(
+                "DeepSeek layer %d uses reference PyTorch MoE routing "
+                "(method=%s scoring_func=%d groups=%d/%d scaling=%s "
+                "renormalize=%s)",
+                layer_idx,
+                topk_method,
+                scoring_func,
+                topk_group,
+                n_group,
+                routed_scaling_factor,
+                has_moe_norm,
+            )
         if fake_balance_expert:
             if parallelism_config is None:
                 raise ValueError(

@@ -11,9 +11,9 @@ from safetensors.torch import save_file
 
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.device.device_type import DeviceType, get_device_type
+from rtp_llm.models_py.distributed.collective_torch import Group
 from rtp_llm.models_py.model_loader import NewLoaderConfig, NewModelLoader
 from rtp_llm.models_py.module_base import RtpModule
-from rtp_llm.models_py.modules.factory import LinearFactory
 from rtp_llm.models_py.new_models.deepseek_v3.attention import (
     DeepSeekV32MlaAttention,
     _kernel_fp8_weight_and_scale,
@@ -26,6 +26,7 @@ from rtp_llm.models_py.new_models.deepseek_v3.language import (
     _extract_config_values,
 )
 from rtp_llm.models_py.new_models.deepseek_v3.mlp import DeepSeekV32MLP
+from rtp_llm.models_py.new_models.deepseek_v3.model import DeepSeekV32Indexer
 from rtp_llm.models_py.new_models.deepseek_v3.moe import (
     DeepSeekV32MoEBlock,
     _select_deepseek_noaux_topk,
@@ -48,36 +49,35 @@ from rtp_llm.utils.model_weight import W
 
 
 def _model_config(*, sparse=False, q_lora_rank=4):
-    return types.SimpleNamespace(
-        model_type="deepseek3",
-        hidden_size=8,
-        num_layers=4,
-        vocab_size=16,
-        max_seq_len=128,
-        rms_norm_eps=1e-6,
-        expert_num=8,
-        moe_k=2,
-        scoring_func=1,
-        routed_scaling_factor=1.0,
-        moe_n_group=2,
-        moe_topk_group=1,
-        has_moe_norm=True,
-        enable_fp32_lm_head=False,
-        tie_word_embeddings=False,
-        attn_config=types.SimpleNamespace(
-            head_num=4,
-            q_lora_rank=q_lora_rank,
-            kv_lora_rank=4,
-            nope_head_dim=2,
-            rope_head_dim=2,
-            v_head_dim=2,
-            is_sparse=sparse,
-            indexer_head_dim=4,
-            indexer_head_num=2,
-            indexer_topk=8,
-            kernel_tokens_per_block=64,
-        ),
-    )
+    config = ModelConfig()
+    config.model_type = "deepseek3"
+    config.hidden_size = 8
+    config.num_layers = 4
+    config.vocab_size = 16
+    config.max_seq_len = 128
+    config.layernorm_eps = 1e-6
+    config.expert_num = 8
+    config.moe_k = 2
+    config.scoring_func = 1
+    config.routed_scaling_factor = 1.0
+    config.moe_n_group = 2
+    config.moe_topk_group = 1
+    config.has_moe_norm = True
+    config.enable_fp32_lm_head = False
+    config.tie_word_embeddings = False
+    config.attn_config.head_num = 4
+    config.attn_config.q_lora_rank = q_lora_rank
+    config.attn_config.kv_lora_rank = 4
+    config.attn_config.nope_head_dim = 2
+    config.attn_config.rope_head_dim = 2
+    config.attn_config.v_head_dim = 2
+    config.attn_config.use_mla = True
+    config.attn_config.is_sparse = sparse
+    config.attn_config.indexer_head_dim = 4
+    config.attn_config.indexer_head_num = 2
+    config.attn_config.indexer_topk = 8
+    config.attn_config.kernel_tokens_per_block = 64
+    return config
 
 
 def _raw_config():
@@ -162,15 +162,17 @@ def _dense_loader_config_json():
     return config
 
 
-def _dense_checkpoint_weights():
-    def values(shape, offset):
-        count = math.prod(shape)
-        return (
-            torch.arange(offset, offset + count, dtype=torch.float32).reshape(shape)
-            / max(count, 1)
-            - 0.5
-        )
+def _deterministic_values(shape, offset):
+    count = math.prod(shape)
+    return (
+        torch.arange(offset, offset + count, dtype=torch.float32).reshape(shape)
+        / max(count, 1)
+        - 0.5
+    )
 
+
+def _dense_checkpoint_weights():
+    values = _deterministic_values
     return {
         "model.embed_tokens.weight": values((16, 8), 0),
         "model.layers.0.input_layernorm.weight": values((8,), 3) + 1.0,
@@ -198,12 +200,6 @@ def _mtp_loader_model_config(checkpoint_path):
     config.moe_k = 1
     config.data_type = "fp32"
     config.activation_type = "SiGLU"
-    # The test intentionally loads CPU tensors.  Preserve their layout while
-    # still executing the real MoE post-load validation/factory hook; device
-    # shuffling is covered by the GPU loader/smoke suites.
-    config.exported_device = types.SimpleNamespace(
-        shuffle_moe_weight=lambda tensor, data_type, name: tensor,
-    )
     return config
 
 
@@ -237,14 +233,7 @@ def _mtp_loader_config_json():
 
 
 def _mtp_checkpoint_weights():
-    def values(shape, offset):
-        count = math.prod(shape)
-        return (
-            torch.arange(offset, offset + count, dtype=torch.float32).reshape(shape)
-            / max(count, 1)
-            - 0.5
-        )
-
+    values = _deterministic_values
     prefix = "model.layers.1."
     weights = {
         prefix + "embed_tokens.weight": values((16, 8), 0),
@@ -373,6 +362,73 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 ),
             )
         )
+
+        rope_parameters_yarn = _build_rope_cache(
+            {
+                "qk_rope_head_dim": rope_dim,
+                "rope_parameters": {
+                    "rope_type": "yarn",
+                    "rope_theta": base,
+                    "factor": factor,
+                    "original_max_position_embeddings": original_max,
+                    "beta_fast": beta_fast,
+                    "beta_slow": beta_slow,
+                    "mscale": mscale,
+                    "mscale_all_dim": mscale_all_dim,
+                },
+            },
+            max_seq_len,
+            torch.device("cpu"),
+        )
+        self.assertTrue(torch.equal(rope_parameters_yarn, yarn))
+
+    def test_rope_cache_rejects_ambiguous_or_incomplete_scaling(self):
+        base_config = {"qk_rope_head_dim": 8}
+        with self.assertRaisesRegex(ValueError, "unsupported.*rope_type"):
+            _build_rope_cache(
+                {
+                    **base_config,
+                    "rope_parameters": {
+                        "rope_type": "linear",
+                        "factor": 2.0,
+                    },
+                },
+                32,
+                torch.device("cpu"),
+            )
+        with self.assertRaisesRegex(ValueError, "missing keys"):
+            _build_rope_cache(
+                {
+                    **base_config,
+                    "rope_parameters": {
+                        "rope_type": "yarn",
+                        "factor": 2.0,
+                    },
+                },
+                32,
+                torch.device("cpu"),
+            )
+        with self.assertRaisesRegex(ValueError, "conflicting"):
+            _build_rope_cache(
+                {
+                    **base_config,
+                    "rope_scaling": {
+                        "factor": 2.0,
+                        "original_max_position_embeddings": 16,
+                        "mscale": 1.0,
+                        "mscale_all_dim": 1.0,
+                    },
+                    "rope_parameters": {
+                        "rope_type": "yarn",
+                        "factor": 4.0,
+                        "original_max_position_embeddings": 16,
+                        "mscale": 1.0,
+                        "mscale_all_dim": 1.0,
+                    },
+                },
+                32,
+                torch.device("cpu"),
+            )
 
     def test_registry_aliases_are_typed(self):
         for model_type in (
@@ -513,6 +569,12 @@ class DeepSeekNewloaderTest(unittest.TestCase):
 
     def test_mtp_new_model_loader_reads_only_appended_draft_weights(self):
         weights = _mtp_checkpoint_weights()
+        # The test intentionally loads CPU tensors. Preserve their layout while
+        # still executing the real MoE post-load validation/factory hook; device
+        # shuffling is covered by the GPU loader/smoke suites.
+        cpu_device = types.SimpleNamespace(
+            shuffle_moe_weight=lambda tensor, data_type, name: tensor,
+        )
         with tempfile.TemporaryDirectory() as checkpoint_path:
             with open(
                 f"{checkpoint_path}/config.json",
@@ -521,19 +583,23 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             ) as config_file:
                 json.dump(_mtp_loader_config_json(), config_file)
             save_file(weights, f"{checkpoint_path}/model.safetensors")
-            model = NewModelLoader(
-                model_config=_mtp_loader_model_config(checkpoint_path),
-                load_config=NewLoaderConfig(
-                    tp_size=1,
-                    tp_rank=0,
-                    ep_size=1,
-                    ep_rank=0,
-                    compute_dtype=torch.float32,
-                    device="cpu",
-                    parallelism_config=_single_rank_parallelism_config(),
-                ),
-                model_path=checkpoint_path,
-            ).load()
+            with mock.patch(
+                "rtp_llm.models_py.layers.moe_experts.get_current_device",
+                return_value=cpu_device,
+            ):
+                model = NewModelLoader(
+                    model_config=_mtp_loader_model_config(checkpoint_path),
+                    load_config=NewLoaderConfig(
+                        tp_size=1,
+                        tp_rank=0,
+                        ep_size=1,
+                        ep_rank=0,
+                        compute_dtype=torch.float32,
+                        device="cpu",
+                        parallelism_config=_single_rank_parallelism_config(),
+                    ),
+                    model_path=checkpoint_path,
+                ).load()
 
         self.assertIsInstance(model, DeepSeekV32MTPForCausalLM)
         self.assertEqual(model._checkpoint_prefix, "model.layers.1.")
@@ -778,6 +844,32 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertEqual(cfg["moe_layer_index"], [3])
         self.assertEqual(cfg["topk_method"], "greedy")
 
+    def test_new_loader_rejects_unsupported_attention_and_ffn_tp_groups(self):
+        with self.assertRaisesRegex(ValueError, "independent TP subgroups"):
+            NewLoaderConfig(
+                tp_size=4,
+                tp_rank=2,
+                attn_tp_size=2,
+                attn_tp_rank=1,
+            )
+        with self.assertRaisesRegex(ValueError, "expected rank=2"):
+            NewLoaderConfig(
+                tp_size=4,
+                tp_rank=2,
+                ffn_tp_size=4,
+                ffn_tp_rank=1,
+            )
+        config = NewLoaderConfig(
+            tp_size=4,
+            tp_rank=2,
+            attn_tp_size=1,
+            attn_tp_rank=0,
+            ffn_tp_size=4,
+            ffn_tp_rank=2,
+        )
+        self.assertEqual((config.attn_tp_size, config.attn_tp_rank), (1, 0))
+        self.assertEqual((config.ffn_tp_size, config.ffn_tp_rank), (4, 2))
+
     def test_raw_router_config_is_canonical(self):
         raw = _raw_config()
         raw.update(
@@ -805,6 +897,121 @@ class DeepSeekNewloaderTest(unittest.TestCase):
                 _load_config(),
                 _raw_config(),
             )
+
+    def test_config_rejects_legacy_expanded_mha_fallback(self):
+        config = _model_config()
+        config.mla_ops_type = "MHA"
+        with self.assertRaisesRegex(ValueError, "requires an MLA attention backend"):
+            _extract_config_values(config, _load_config(), _raw_config())
+
+    def test_sparse_indexer_fast_and_sparse_call_sequences(self):
+        class FakeIndexerOp(torch.nn.Module):
+            def __init__(self):
+                super().__init__()
+                self.calls = []
+
+            def apply_rope_and_rotate_k(self, key, positions):
+                self.calls.append(("rotate_k", positions))
+                return key + 1
+
+            def quant_k_only(self, key, kv_cache, slot_mapping):
+                self.calls.append(("quant_k_only", key, kv_cache, slot_mapping))
+
+            def apply_rope_and_rotate_q_k(self, query, key, positions):
+                self.calls.append(("rotate_q_k", positions))
+                return query + 2, key + 3
+
+            def quant_q_k(self, query, key, kv_cache, slot_mapping):
+                self.calls.append(("quant_q_k", kv_cache, slot_mapping))
+                q_scale = torch.ones(
+                    query.shape[0],
+                    query.shape[1],
+                    1,
+                    dtype=query.dtype,
+                )
+                return query, q_scale
+
+            def _get_topk_ragged(
+                self,
+                q_fp8,
+                weights,
+                kv_cache,
+                fmha_params,
+                attention_inputs,
+            ):
+                self.calls.append(("topk_ragged", kv_cache, attention_inputs))
+                return torch.tensor([[1], [0]], dtype=torch.int32)
+
+        fake_op = FakeIndexerOp()
+        with (
+            mock.patch(
+                "rtp_llm.models_py.new_models.deepseek_v3.model.IndexerOp",
+                return_value=fake_op,
+            ),
+            torch.device("cpu"),
+        ):
+            indexer = DeepSeekV32Indexer(
+                index_n_heads=1,
+                index_head_dim=2,
+                index_topk=1,
+                rope_head_dim=2,
+                hidden_size=2,
+                q_lora_rank=2,
+                layer_idx=0,
+                layernorm_eps=1e-6,
+                blocksize=64,
+                is_neox_style=False,
+                params_dtype=torch.float32,
+            )
+        indexer.wq_b = torch.nn.Identity()
+        indexer.wk = torch.nn.Identity()
+        indexer.k_norm = torch.nn.Identity()
+        indexer.weights_proj = torch.nn.Linear(2, 1, bias=False)
+        indexer.weights_proj.weight.data.fill_(1.0)
+
+        hidden_states = torch.tensor([[1.0, 2.0], [3.0, 4.0]])
+        q_lora = torch.tensor([[0.5, 1.5], [2.5, 3.5]])
+        positions = torch.tensor([0, 1], dtype=torch.int32)
+        slot_mapping = torch.tensor([4, 5], dtype=torch.int32)
+        fmha_params = types.SimpleNamespace(
+            positions_d=positions,
+            slot_mapping=slot_mapping,
+        )
+        kv_cache = object()
+
+        result = indexer(
+            hidden_states,
+            q_lora,
+            kv_cache,
+            fmha_params,
+            types.SimpleNamespace(is_prefill=False),
+            use_fast_path=True,
+        )
+        self.assertIsNone(result)
+        self.assertEqual(
+            [call[0] for call in fake_op.calls], ["rotate_k", "quant_k_only"]
+        )
+        self.assertIs(fake_op.calls[1][2], kv_cache)
+
+        fake_op.calls.clear()
+        attention_inputs = types.SimpleNamespace(is_prefill=True)
+        result = indexer(
+            hidden_states,
+            q_lora,
+            kv_cache,
+            fmha_params,
+            attention_inputs,
+            use_fast_path=False,
+        )
+        self.assertTrue(
+            torch.equal(result, torch.tensor([[1], [0]], dtype=torch.int32))
+        )
+        self.assertEqual(
+            [call[0] for call in fake_op.calls],
+            ["rotate_q_k", "quant_q_k", "topk_ragged"],
+        )
+        self.assertIs(fake_op.calls[-1][1], kv_cache)
+        self.assertIs(fake_op.calls[-1][2], attention_inputs)
 
     def test_grouped_router_rejects_invalid_expert_partition(self):
         raw = _raw_config()
@@ -847,6 +1054,52 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         }
         self.assertTrue(derived.isdisjoint(dict(attention.named_parameters())))
         self.assertTrue(derived.isdisjoint(attention.state_dict()))
+
+    def test_no_q_lora_tp2_forward_uses_rank_local_heads(self):
+        attention = DeepSeekV32MlaAttention(
+            hidden_size=8,
+            num_heads=4,
+            q_lora_rank=0,
+            kv_lora_rank=4,
+            nope_head_dim=2,
+            rope_head_dim=2,
+            v_head_dim=2,
+            layer_idx=0,
+            tp_size=2,
+            tp_rank=1,
+            params_dtype=torch.float32,
+        )
+        for parameter in attention.parameters():
+            parameter.data.zero_()
+        attention.kv_a_layernorm.weight.data.fill_(1.0)
+        attention.process_weights_after_loading()
+
+        class ZeroFmha:
+            def forward(self, q, compressed_kv, k_pe, *args):
+                self.shapes = (
+                    tuple(q.shape),
+                    tuple(compressed_kv.shape),
+                    tuple(k_pe.shape),
+                )
+                return torch.zeros(
+                    q.shape[0],
+                    q.shape[1] * 2,
+                    dtype=q.dtype,
+                    device=q.device,
+                )
+
+        fmha_impl = ZeroFmha()
+        hidden_states = torch.randn(3, 8)
+        with mock.patch(
+            "rtp_llm.models_py.new_models.deepseek_v3.attention.all_reduce",
+            side_effect=lambda tensor, group: tensor,
+        ) as reduce_mock:
+            output = attention(hidden_states, fmha_impl)
+
+        self.assertEqual(fmha_impl.shapes, ((3, 2, 4), (3, 4), (3, 2)))
+        self.assertEqual(tuple(output.shape), (3, 8))
+        reduce_mock.assert_called_once()
+        self.assertIs(reduce_mock.call_args.kwargs["group"], Group.TP)
 
     def test_mla_output_projection_defers_tp_reduction_to_attention(self):
         attention = DeepSeekV32MlaAttention(
@@ -1002,6 +1255,8 @@ class DeepSeekNewloaderTest(unittest.TestCase):
         self.assertGreater(attention.o_proj.weight.numel(), 0)
         self.assertEqual(weights[W.mla_fusedqkrope_w].data_ptr(), fused_qkv_a_ptr)
         self.assertEqual(weights[W.mla_kv_b_w].data_ptr(), kv_b_ptr)
+        with self.assertRaisesRegex(RuntimeError, "rebuild the model"):
+            attention.load_weights({})
 
     def test_mla_fp8_kernel_views_keep_scales_without_bf16_qb_copy(self):
         attention = DeepSeekV32MlaAttention(
@@ -1209,6 +1464,45 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             self.assertEqual(block._use_fast_group_topk, expect_fast)
             self.assertEqual(block.group_topk is not None, expect_fast)
             self.assertEqual(group_topk.call_count, int(expect_fast))
+
+    def test_noaux_top1_normalization_uses_reference_path_on_cuda(self):
+        with (
+            mock.patch(
+                "rtp_llm.models_py.new_models.deepseek_v3.moe.get_device_type",
+                return_value=DeviceType.Cuda,
+            ),
+            mock.patch(
+                "rtp_llm.models_py.new_models.deepseek_v3.moe.GroupTopK"
+            ) as group_topk,
+            torch.device("cpu"),
+        ):
+            block = DeepSeekV32MoEBlock(
+                hidden_size=8,
+                moe_intermediate_size=4,
+                num_experts=4,
+                top_k=1,
+                layer_idx=0,
+                tp_size=1,
+                tp_rank=0,
+                ep_size=1,
+                ep_rank=0,
+                model_config=_router_model_config(moe_k=1, has_moe_norm=True),
+                parallelism_config=_single_rank_parallelism_config(),
+                moe_config=types.SimpleNamespace(fake_balance_expert=False),
+                quant_config=None,
+                params_dtype=torch.float32,
+                has_shared_expert=False,
+                scoring_func=1,
+                routed_scaling_factor=1.0,
+                n_group=2,
+                topk_group=1,
+                topk_method="noaux_tc",
+                has_moe_norm=True,
+                correction_bias=True,
+            )
+        self.assertFalse(block._use_fast_group_topk)
+        self.assertIsNone(block.group_topk)
+        group_topk.assert_not_called()
 
     def test_non_noaux_router_avoids_cuda_select_topk_on_other_devices(self):
         parallelism_config = _single_rank_parallelism_config()
@@ -1780,23 +2074,25 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             (128 + 128 + 2, 128),
         )
 
+    @unittest.skipUnless(torch.cuda.is_available(), "requires a CUDA GPU")
     @unittest.skipIf(
         torch.version.hip is not None,
         "online fused FP8 A projection is CUDA-only",
     )
     def test_mla_online_fp8_uses_models_py_quantizer(self):
-        attention = DeepSeekV32MlaAttention(
-            hidden_size=128,
-            num_heads=2,
-            q_lora_rank=128,
-            kv_lora_rank=128,
-            nope_head_dim=2,
-            rope_head_dim=2,
-            v_head_dim=2,
-            layer_idx=0,
-            quant_config=QuantizationConfig("fp8_block_online"),
-            params_dtype=torch.bfloat16,
-        )
+        with torch.device("cuda"):
+            attention = DeepSeekV32MlaAttention(
+                hidden_size=128,
+                num_heads=2,
+                q_lora_rank=128,
+                kv_lora_rank=128,
+                nope_head_dim=2,
+                rope_head_dim=2,
+                v_head_dim=2,
+                layer_idx=0,
+                quant_config=QuantizationConfig("fp8_block_online"),
+                params_dtype=torch.bfloat16,
+            )
         for parameter in attention.parameters():
             parameter.data.zero_()
         attention.process_weights_after_loading()
@@ -1807,6 +2103,54 @@ class DeepSeekNewloaderTest(unittest.TestCase):
             tuple(attention._fused_qkv_a_runtime.weight.shape),
             (128 + 128 + 2, 128),
         )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires a ROCm GPU")
+    @unittest.skipUnless(
+        torch.version.hip is not None,
+        "ROCm online-FP8 fallback is required",
+    )
+    def test_mla_online_fp8_rocm_keeps_exact_bf16_kv_b_views(self):
+        device = torch.device("cuda")
+        with torch.device(device):
+            attention = DeepSeekV32MlaAttention(
+                hidden_size=128,
+                num_heads=2,
+                q_lora_rank=128,
+                kv_lora_rank=128,
+                nope_head_dim=64,
+                rope_head_dim=128,
+                v_head_dim=64,
+                layer_idx=0,
+                quant_config=QuantizationConfig("fp8_block_online"),
+                params_dtype=torch.bfloat16,
+            )
+        with torch.no_grad():
+            for parameter in attention.parameters():
+                parameter.zero_()
+            checkpoint_weight = torch.arange(
+                attention.kv_b_proj.weight.numel(),
+                device=device,
+                dtype=torch.float32,
+            ).reshape_as(attention.kv_b_proj.weight)
+            checkpoint_weight = (checkpoint_weight.remainder(97) - 48).to(
+                torch.bfloat16
+            )
+            attention.kv_b_proj.weight.copy_(checkpoint_weight)
+        expected_kv_b = checkpoint_weight.t().contiguous()
+
+        NewModelLoader._validate_runtime_backends(attention, "cuda")
+        NewModelLoader._migrate_staged_modules(attention, "cuda")
+        attention.to(device)
+        NewModelLoader._run_post_load_hooks(attention)
+
+        self.assertIsNone(attention._fused_qkv_a_runtime)
+        self.assertEqual(attention._fused_qkv_a_w.dtype, torch.bfloat16)
+        self.assertIsNone(attention._kv_b_runtime_w)
+        self.assertIsNone(attention._kv_b_runtime_s)
+        self.assertTrue(torch.equal(attention._kv_b_w, expected_kv_b))
+        kernel_weights = attention._build_mla_kernel_weights()
+        self.assertTrue(torch.equal(kernel_weights[W.mla_kv_b_w], expected_kv_b))
+        self.assertNotIn(W.mla_kv_b_s, kernel_weights)
 
     @unittest.skipUnless(torch.cuda.is_available(), "requires a CUDA GPU")
     @unittest.skipIf(
@@ -1870,10 +2214,89 @@ class DeepSeekNewloaderTest(unittest.TestCase):
     @unittest.skipUnless(torch.cuda.is_available(), "requires a CUDA GPU")
     @unittest.skipIf(
         torch.version.hip is not None,
+        "CUDA online-FP8 kv_b runtime is required",
+    )
+    def test_mla_online_fp8_kc_vc_use_bf16_checkpoint_source(self):
+        from rtp_llm.models_py.modules.factory import LinearFactory
+
+        device = torch.device("cuda")
+        with torch.device(device):
+            attention = DeepSeekV32MlaAttention(
+                hidden_size=128,
+                num_heads=2,
+                q_lora_rank=128,
+                kv_lora_rank=128,
+                nope_head_dim=64,
+                rope_head_dim=128,
+                v_head_dim=64,
+                layer_idx=0,
+                quant_config=QuantizationConfig("fp8_block_online"),
+                params_dtype=torch.bfloat16,
+            )
+        generator = torch.Generator(device=device).manual_seed(20260730)
+        checkpoint_weight = torch.randn(
+            attention.kv_b_proj.weight.shape,
+            generator=generator,
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        attention.kv_b_proj.weight.data.copy_(checkpoint_weight)
+        expected = checkpoint_weight.transpose(0, 1).contiguous().view(128, 2, 128)
+
+        attention.process_weights_after_loading()
+
+        self.assertTrue(
+            torch.equal(
+                attention._kc_w,
+                expected[:, :, :64].permute(1, 2, 0).contiguous(),
+            )
+        )
+        self.assertTrue(
+            torch.equal(
+                attention._vc_w,
+                expected[:, :, 64:].transpose(0, 1).contiguous(),
+            )
+        )
+        self.assertIsNone(attention._kv_b_w)
+        self.assertIsNotNone(attention._kv_b_runtime_w)
+        self.assertIsNotNone(attention._kv_b_runtime_s)
+
+        kernel_weights = attention._build_mla_kernel_weights()
+        linear = LinearFactory.create_linear_from_weights(
+            kernel_weights,
+            W.mla_kv_b_w,
+            W.mla_kv_b_s,
+            None,
+            quant_config=types.SimpleNamespace(get_method=lambda: "FP8_PER_BLOCK"),
+        )
+        x = torch.randn(
+            (11, checkpoint_weight.shape[1]),
+            generator=generator,
+            device=device,
+            dtype=torch.bfloat16,
+        )
+        actual = linear(x)
+        reference = F.linear(x, checkpoint_weight)
+        difference = actual.float() - reference.float()
+        relative_rmse = (
+            difference.square().mean().sqrt() / reference.float().square().mean().sqrt()
+        )
+        cosine = F.cosine_similarity(
+            actual.float().flatten(),
+            reference.float().flatten(),
+            dim=0,
+        )
+        self.assertLess(float(relative_rmse), 0.05)
+        self.assertGreater(float(cosine), 0.998)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "requires a CUDA GPU")
+    @unittest.skipIf(
+        torch.version.hip is not None,
         "CUDA DeepGEMM pre-quantized FP8 projection is required",
     )
     def test_mla_prequantized_fp8_kernel_views_execute_numerically(self):
         from rtp_llm.models_py.kernels.cuda.fp8_quant import per_block_cast_to_fp8
+        from rtp_llm.models_py.modules.factory import LinearFactory
 
         device = torch.device("cuda")
         quant_config = QuantizationConfig("FP8_PER_BLOCK")

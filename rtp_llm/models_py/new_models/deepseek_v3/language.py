@@ -26,11 +26,12 @@ from rtp_llm.models_py.model_desc.module_base import GptModelBase
 from rtp_llm.models_py.modules import AttnImplFactory
 from rtp_llm.models_py.new_models.model_base import select_block_map_for_layer
 from rtp_llm.models_py.weight_mapper import WeightsMapper
+from rtp_llm.ops import MlaOpsType
 from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
 from rtp_llm.utils.model_weight import W
 
 from .model import DeepSeekV32DecoderLayer
-from .moe import _normalize_topk_method
+from .moe import normalize_topk_method
 from .rotary_embedding import DeepseekV3RotaryEmbedding, DeepseekV3YarnRotaryEmbedding
 
 logger = logging.getLogger(__name__)
@@ -77,6 +78,93 @@ def _build_mla_runtime_layout(
 #  RoPE helpers (mirrors DeepSeekV2._create_rope_w)
 # ------------------------------------------------------------------ #
 
+_YARN_REQUIRED_KEYS = (
+    "factor",
+    "original_max_position_embeddings",
+    "mscale",
+    "mscale_all_dim",
+)
+_YARN_TYPES = {"yarn", "deepseek_yarn"}
+
+
+def _rope_type(config: dict) -> Optional[str]:
+    rope_type = config.get("rope_type", config.get("type"))
+    if rope_type is None:
+        return None
+    if not isinstance(rope_type, str):
+        raise TypeError(f"DeepSeek rope_type must be a string, got {rope_type!r}")
+    return rope_type.strip().lower()
+
+
+def _resolve_yarn_parameters(config_json: dict) -> Optional[dict]:
+    """Resolve legacy rope_scaling and Transformers rope_parameters safely."""
+    rope_scaling = config_json.get("rope_scaling")
+    rope_parameters = config_json.get("rope_parameters", {})
+    if rope_scaling is not None and not isinstance(rope_scaling, dict):
+        raise TypeError("DeepSeek rope_scaling must be a dictionary")
+    if not isinstance(rope_parameters, dict):
+        raise TypeError("DeepSeek rope_parameters must be a dictionary")
+
+    parameter_type = _rope_type(rope_parameters)
+    parameter_has_scaling = parameter_type in _YARN_TYPES or any(
+        key in rope_parameters for key in _YARN_REQUIRED_KEYS
+    )
+    if (
+        parameter_has_scaling
+        and parameter_type is not None
+        and parameter_type not in _YARN_TYPES
+    ):
+        raise ValueError(
+            f"unsupported DeepSeek rope_parameters rope_type={parameter_type!r}"
+        )
+
+    if rope_scaling is None:
+        yarn = rope_parameters if parameter_has_scaling else None
+    else:
+        scaling_type = _rope_type(rope_scaling)
+        if scaling_type is not None and scaling_type not in _YARN_TYPES:
+            raise ValueError(
+                f"unsupported DeepSeek rope_scaling rope_type={scaling_type!r}"
+            )
+        yarn = rope_scaling
+        if parameter_has_scaling:
+            for key in _YARN_REQUIRED_KEYS:
+                if (
+                    key in rope_scaling
+                    and key in rope_parameters
+                    and rope_scaling[key] != rope_parameters[key]
+                ):
+                    raise ValueError(
+                        "conflicting DeepSeek RoPE scaling values for "
+                        f"{key}: rope_scaling={rope_scaling[key]!r}, "
+                        f"rope_parameters={rope_parameters[key]!r}"
+                    )
+
+    if yarn is None:
+        return None
+    missing = [key for key in _YARN_REQUIRED_KEYS if key not in yarn]
+    if missing:
+        raise ValueError(f"DeepSeek YaRN configuration is missing keys: {missing}")
+    factor = yarn["factor"]
+    original_max = yarn["original_max_position_embeddings"]
+    for name, value in (
+        ("factor", factor),
+        ("mscale", yarn["mscale"]),
+        ("mscale_all_dim", yarn["mscale_all_dim"]),
+    ):
+        if isinstance(value, bool) or not isinstance(value, (int, float)) or value <= 0:
+            raise ValueError(f"DeepSeek YaRN {name} must be positive, got {value!r}")
+    if (
+        isinstance(original_max, bool)
+        or not isinstance(original_max, int)
+        or original_max <= 0
+    ):
+        raise ValueError(
+            "DeepSeek YaRN original_max_position_embeddings must be a "
+            f"positive integer, got {original_max!r}"
+        )
+    return yarn
+
 
 def _build_rope_cache(
     config_json: dict,
@@ -87,11 +175,18 @@ def _build_rope_cache(
 
     Returns [cos|sin] concatenated, shape [max_seq_len, rope_head_dim], float32.
     """
-    rope_scaling = config_json.get("rope_scaling")
     rope_parameters = config_json.get("rope_parameters", {})
+    if not isinstance(rope_parameters, dict):
+        raise TypeError("DeepSeek rope_parameters must be a dictionary")
     rope_theta = rope_parameters.get(
         "rope_theta", config_json.get("rope_theta", 10000.0)
     )
+    if (
+        isinstance(rope_theta, bool)
+        or not isinstance(rope_theta, (int, float))
+        or rope_theta <= 0
+    ):
+        raise ValueError(f"DeepSeek rope_theta must be positive, got {rope_theta!r}")
     rope_head_dim = config_json.get(
         "qk_rope_head_dim", config_json.get("rope_head_dim")
     )
@@ -106,9 +201,9 @@ def _build_rope_cache(
             f"got {rope_head_dim!r}"
         )
 
-    has_yarn = rope_scaling is not None
+    yarn_parameters = _resolve_yarn_parameters(config_json)
 
-    if not has_yarn:
+    if yarn_parameters is None:
         rotary_emb = DeepseekV3RotaryEmbedding(
             dim=rope_head_dim,
             max_position_embeddings=max_seq_len,
@@ -122,14 +217,14 @@ def _build_rope_cache(
             rope_head_dim,
             max_seq_len,
             rope_theta,
-            scaling_factor=rope_scaling["factor"],
-            original_max_position_embeddings=rope_scaling[
+            scaling_factor=yarn_parameters["factor"],
+            original_max_position_embeddings=yarn_parameters[
                 "original_max_position_embeddings"
             ],
-            beta_fast=float(rope_scaling.get("beta_fast", 32)),
-            beta_slow=float(rope_scaling.get("beta_slow", 1)),
-            mscale=rope_scaling["mscale"],
-            mscale_all_dim=rope_scaling["mscale_all_dim"],
+            beta_fast=float(yarn_parameters.get("beta_fast", 32)),
+            beta_slow=float(yarn_parameters.get("beta_slow", 1)),
+            mscale=yarn_parameters["mscale"],
+            mscale_all_dim=yarn_parameters["mscale_all_dim"],
         )
 
     half_rope_dim = rope_head_dim // 2
@@ -253,6 +348,18 @@ def _extract_config_values(
         indexer_head_num = _get(model_config, "index_n_heads", 64)
         indexer_topk = _get(model_config, "index_topk", 2048)
 
+    if attn_config is not None:
+        use_mla = _bool_value(
+            _get(attn_config, "use_mla", False),
+            "attn_config.use_mla",
+        )
+        mla_ops_type = _get(model_config, "mla_ops_type", None)
+        if not use_mla or mla_ops_type == MlaOpsType.MHA:
+            raise ValueError(
+                "DeepSeek newloader requires an MLA attention backend; "
+                "the legacy expanded-MHA fallback is not supported"
+            )
+
     rms_norm_eps = _positive_float(
         _get(
             model_config,
@@ -362,7 +469,7 @@ def _extract_config_values(
             "routed_scaling_factor", routed_scaling_factor
         )
     topk_method = config_json.get("topk_method", "greedy") if config_json else "greedy"
-    topk_method = _normalize_topk_method(topk_method)
+    topk_method = normalize_topk_method(topk_method)
     # has_e_score_correction is not a ModelConfig field — the legacy loader
     # detects it from ckpt key presence on the weight class side. Derive it
     # here from config.json's topk_method ("noaux_tc" => correction bias).
