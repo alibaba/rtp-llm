@@ -93,7 +93,8 @@ MatchResult LinearKVCacheGroup::match(const CacheKeysType& cache_keys) {
     return {};
 }
 
-bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step) {
+bool LinearKVCacheGroup::malloc(
+    BlockIds& block_ids, int seq_len, bool enable_reuse_cache, int reserve_step, int* need_blocks) {
     const int step               = std::max(1, linear_step_);
     const int current_blocks_len = static_cast<int>(block_ids.blocksNum());
     const int seq_slots          = needBlocksNum(seq_len, 0, 0);
@@ -125,6 +126,9 @@ bool LinearKVCacheGroup::malloc(BlockIds& block_ids, int seq_len, bool enable_re
         if (should_materialize(i)) {
             need_alloc_blocks++;
         }
+    }
+    if (need_blocks != nullptr) {
+        *need_blocks = need_alloc_blocks;
     }
 
     if (need_alloc_blocks > 0) {

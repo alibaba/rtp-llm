@@ -590,14 +590,10 @@ class DeepSeekV4(DeepSeekV2):
 
         # ---- per-layer attention schedule ----
         compress_ratios = config_json["compress_ratios"]
-        # Drop the trailing MTP entry (always 0) so the schedule matches main layers.
-        # Length should be num_layers (MTP layers count separately).
-        if len(compress_ratios) == config.num_layers + config_json.get(
-            "num_nextn_predict_layers", 0
-        ):
-            main_ratios = compress_ratios[: config.num_layers]
-        else:
-            main_ratios = compress_ratios
+        # Some checkpoints append speculative-model entries to this list. They
+        # are added to the cache layout separately and must not be counted as
+        # target-model layers here.
+        main_ratios = compress_ratios[: config.num_layers]
         config.attn_config.layer_compress_ratios = list(main_ratios)
 
         # ---- output projection / SWA / sink ----

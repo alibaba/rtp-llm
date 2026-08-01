@@ -16,7 +16,11 @@ public:
 	                     const kmonitor::MetricsReporterPtr& metrics_reporter = nullptr):
 	        KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, shared_cache, metrics_reporter) {}
 
-    bool malloc(BlockIds& block_ids, int seq_len, bool enable_reuse_cache = false, int reserve_step = 0) override;
+    bool malloc(BlockIds& block_ids,
+                int       seq_len,
+                bool      enable_reuse_cache = false,
+                int       reserve_step       = 0,
+                int*      need_blocks        = nullptr) override;
     MatchResult match(const CacheKeysType& cache_keys) override;
     void        free(const BlockIndicesType& block_indices) override;
     void removeSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;
