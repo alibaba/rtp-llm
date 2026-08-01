@@ -34,6 +34,7 @@ _group_map: Dict[Union[Group, str], torch.distributed.ProcessGroup] = {}
 _parallelism_config: Optional[ParallelismConfig] = None
 _initialized: bool = False  # Track if we've initialized (to prevent double init)
 _cpu_tp_broadcaster_base_path: Optional[str] = None
+_cpu_world_reducer_base_path: Optional[str] = None
 _rocm_rccl = None
 _symm_mem = None
 
@@ -86,6 +87,30 @@ def _make_cpu_tp_broadcaster_base_path(
     return base_path
 
 
+def _make_cpu_world_reducer_base_path(
+    nccl_init_port: int,
+) -> str:
+    session_id = os.environ.get("RTP_LLM_CPU_TP_BROADCASTER_ID")
+    if not session_id:
+        session_id = f"ppid{os.getppid()}_port{nccl_init_port}"
+    session_id = re.sub(r"[^A-Za-z0-9._-]", "_", session_id)
+
+    base_dir = os.environ.get("RTP_LLM_CPU_TP_BROADCASTER_DIR")
+    if not base_dir:
+        base_dir = os.path.join(
+            os.environ.get("TMPDIR", "/tmp"), f"rtp_llm_{os.getuid()}"
+        )
+    os.makedirs(base_dir, mode=0o700, exist_ok=True)
+    base_path = os.path.join(base_dir, f"rtp_llm_world_{session_id}")
+    rank0_path = f"{base_path}_0.sock"
+    if len(os.fsencode(rank0_path)) >= _UDS_SUN_PATH_LIMIT:
+        raise ValueError(
+            f"CPU world reducer UDS path too long ({len(os.fsencode(rank0_path))} "
+            f"bytes, limit {_UDS_SUN_PATH_LIMIT - 1}): {rank0_path}"
+        )
+    return base_path
+
+
 def _normalize_parallelism_ranks(parallelism_config: ParallelismConfig) -> None:
     # Process-group construction below uses this world-rank layout. Keep the
     # explicit config fields in sync for callsites that only fill sizes/ranks.
@@ -131,7 +156,8 @@ def init_distributed_environment(
     Raises:
         RuntimeError: If already initialized and not destroyed
     """
-    global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path
+    global _group_map, _parallelism_config, _initialized
+    global _cpu_tp_broadcaster_base_path, _cpu_world_reducer_base_path
 
     # Check if already initialized (and not destroyed)
     if _initialized and torch.distributed.is_initialized():
@@ -144,6 +170,9 @@ def init_distributed_environment(
             _cpu_tp_broadcaster_base_path = _make_cpu_tp_broadcaster_base_path(
                 parallelism_config, nccl_init_port
             )
+            _cpu_world_reducer_base_path = _make_cpu_world_reducer_base_path(
+                nccl_init_port
+            )
             _create_process_groups(parallelism_config, backend, timedelta(days=36500))
             _register_process_groups_to_cpp()
         rocm_rccl = _get_rocm_rccl()
@@ -154,6 +183,9 @@ def init_distributed_environment(
     _normalize_parallelism_ranks(parallelism_config)
     _cpu_tp_broadcaster_base_path = _make_cpu_tp_broadcaster_base_path(
         parallelism_config, nccl_init_port
+    )
+    _cpu_world_reducer_base_path = _make_cpu_world_reducer_base_path(
+        nccl_init_port
     )
 
     assert backend in ["nccl"], "backend current only supports nccl"
@@ -508,6 +540,27 @@ def _register_process_groups_to_cpp():
             f"tp_size={_parallelism_config.tp_size}, base_path={base_path})"
         )
 
+    # A second, protocol-independent UDS star carries tiny host control flags
+    # across every rank when the whole process world is on this node. Cross-node
+    # deployments retain the NCCL correctness fallback in C++.
+    if (
+        _parallelism_config is not None
+        and _parallelism_config.world_size > 1
+        and _parallelism_config.world_size <= _parallelism_config.local_world_size
+        and hasattr(librtp_compute_ops, "init_cpu_world_reducer")
+    ):
+        base_path = _cpu_world_reducer_base_path
+        assert base_path is not None
+        librtp_compute_ops.init_cpu_world_reducer(
+            _parallelism_config.world_rank,
+            _parallelism_config.world_size,
+            base_path,
+        )
+        logging.info(
+            f"Initialized CPU world reducer (world_rank={_parallelism_config.world_rank}, "
+            f"world_size={_parallelism_config.world_size}, base_path={base_path})"
+        )
+
 
 def distributed_environment_initialized() -> bool:
     """Check if distributed environment is initialized.
@@ -548,7 +601,8 @@ def destroy_distributed_environment():
     After calling this function, init_distributed_environment() can be called again
     to reinitialize the distributed environment.
     """
-    global _group_map, _parallelism_config, _initialized, _cpu_tp_broadcaster_base_path
+    global _group_map, _parallelism_config, _initialized
+    global _cpu_tp_broadcaster_base_path, _cpu_world_reducer_base_path
 
     rank = torch.distributed.get_rank()
     logging.info(f"[rank: {rank}] Destroying distributed environment")
@@ -569,6 +623,8 @@ def destroy_distributed_environment():
             librtp_compute_ops.clear_comm_ops()
         if hasattr(librtp_compute_ops, "destroy_cpu_tp_broadcaster"):
             librtp_compute_ops.destroy_cpu_tp_broadcaster()
+        if hasattr(librtp_compute_ops, "destroy_cpu_world_reducer"):
+            librtp_compute_ops.destroy_cpu_world_reducer()
     except ImportError:
         pass
 
@@ -585,6 +641,7 @@ def destroy_distributed_environment():
     logging.info(f"[rank: {rank}] Distributed environment destroyed")
     _parallelism_config = None
     _cpu_tp_broadcaster_base_path = None
+    _cpu_world_reducer_base_path = None
     _initialized = False
     gc.collect()
 

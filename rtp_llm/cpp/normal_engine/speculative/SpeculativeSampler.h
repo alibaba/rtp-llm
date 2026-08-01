@@ -45,11 +45,17 @@ private:
 
 class SpeculativeSampler {
 public:
-    SpeculativeSampler(torch::Tensor d2t_map, size_t propose_step): d2t_map_(d2t_map), propose_step_(propose_step) {}
+    SpeculativeSampler(torch::Tensor d2t_map, size_t propose_step, bool use_fp64_gumbel = false):
+        d2t_map_(d2t_map), propose_step_(propose_step), use_fp64_gumbel_(use_fp64_gumbel) {}
 
     virtual SpeculativeSamplerOutput forward(const std::list<GenerateStreamPtr>& streams,
                                              SamplerOutput&                      draft_sampler_output,
                                              SamplerOutput&                      target_sampler_output);
+
+    SpeculativeSamplerOutput forwardCoupled(const std::list<GenerateStreamPtr>& streams,
+                                            SamplerOutput&                      draft_sampler_output,
+                                            SamplerOutput&                      target_sampler_output,
+                                            const torch::Tensor&                target_prefix_lengths);
 
 private:
     void batchSample(SpeculativeSamplerOutput&           sample_output,
@@ -62,9 +68,12 @@ private:
                       SamplerOutput&                      draft_sampler_output,
                       SamplerOutput&                      target_sampler_output) const;
 
+    void publishAcceptToHost(SpeculativeSamplerOutput& sample_output) const;
+
 protected:
     torch::Tensor        d2t_map_;
     size_t               propose_step_;
+    bool                 use_fp64_gumbel_{false};
     mutable TensorHolder buffer_holder_;
 
     // Reusable buffer for draft_probs vocab-padding when draft/target vocab sizes differ.

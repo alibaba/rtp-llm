@@ -1,3 +1,4 @@
+import pickle
 import unittest
 from unittest import TestCase
 from unittest.mock import patch
@@ -8,6 +9,7 @@ from rtp_llm.config.server_config_setup import (
     setup_and_configure_server,
 )
 from rtp_llm.server.server_args.server_args import setup_args
+from rtp_llm.ops import SpeculativeExecutionConfig
 
 
 class GenerateConfigTest(TestCase):
@@ -21,6 +23,16 @@ class GenerateConfigTest(TestCase):
         )
         cuda_available.start()
         self.addCleanup(cuda_available.stop)
+
+    def test_dspark_sampling_config_pickle_round_trip(self):
+        config = SpeculativeExecutionConfig()
+        config.draft_sample_method = "greedy"
+        config.use_fp64_gumbel = True
+
+        restored = pickle.loads(pickle.dumps(config))
+
+        self.assertEqual(restored.draft_sample_method, "greedy")
+        self.assertTrue(restored.use_fp64_gumbel)
 
     # EnvArgumentParser in setup_args() reads these env vars (START_PORT, TP_SIZE, etc.)
     # and binds them to py_env_configs; server_port = start_port + rank_id * worker_info_port_num (rank_id=0 here).

@@ -2,6 +2,7 @@ import json
 import os
 import unittest
 from types import SimpleNamespace
+from unittest import mock
 
 import torch
 import torch.nn.functional as F
@@ -54,7 +55,7 @@ class DeepSeekV4DSparkTest(unittest.TestCase):
         self.assertEqual(real.num_layers, 3)
         self.assertEqual(real.attn_config.layer_compress_ratios, [0, 0, 0])
 
-    def test_config_rejects_non_greedy_proposal(self):
+    def test_config_preserves_but_does_not_route_checkpoint_proposal_type(self):
         cfg = {
             "dspark_block_size": 5,
             "dspark_noise_token_id": 128799,
@@ -62,8 +63,8 @@ class DeepSeekV4DSparkTest(unittest.TestCase):
             "dspark_markov_rank": 256,
             "dspark_proposal_type": "gumbel",
         }
-        with self.assertRaisesRegex(ValueError, "supports only.*greedy"):
-            DeepSeekV4DSparkParams.from_ckpt_config(cfg)
+        params = DeepSeekV4DSparkParams.from_ckpt_config(cfg)
+        self.assertEqual(params.proposal_type, "gumbel")
 
     def test_model_factory_preserves_frozen_anchor_layout(self):
         params = DeepSeekV4DSparkParams(
@@ -181,6 +182,54 @@ class DeepSeekV4DSparkTest(unittest.TestCase):
         # FP32 input must not be mutated by the correction loop.
         self.assertFalse(torch.equal(base, corrected))
 
+    def test_gumbel_markov_chain_uses_explicit_binding_and_sampled_predecessor(self):
+        model = DeepSeekV4DSparkModel.__new__(DeepSeekV4DSparkModel)
+        nn.Module.__init__(model)
+        model.markov_head = DSparkMarkovHead(torch.zeros(5, 1), torch.zeros(5, 1))
+        base = torch.zeros(1, 3, 5)
+        anchor = torch.tensor([4])
+        seeds = torch.tensor([17])
+        positions = torch.tensor([[10, 11, 12]])
+        temperatures = torch.tensor([0.8])
+        sampled = iter((torch.tensor([1]), torch.tensor([3]), torch.tensor([2])))
+        predecessors = []
+
+        def fake_sample(
+            logits,
+            seed,
+            position,
+            temperature,
+            input_is_probs,
+            apply_temperature,
+            use_fp64,
+        ):
+            predecessors.append(position.item())
+            self.assertEqual(seed.item(), 17)
+            self.assertAlmostEqual(temperature.item(), 0.8)
+            self.assertFalse(input_is_probs)
+            self.assertTrue(apply_temperature)
+            self.assertFalse(use_fp64)
+            return next(sampled)
+
+        fake_ops = SimpleNamespace(gumbel_sample=fake_sample)
+        with mock.patch(
+            "rtp_llm.models_py.model_desc.deepseek_v4_dspark_model.rtp_llm_ops",
+            fake_ops,
+        ):
+            tokens, corrected = model.markov_correct(
+                base,
+                anchor,
+                seeds=seeds,
+                positions=positions,
+                temperatures=temperatures,
+                use_gumbel=True,
+                return_corrected=False,
+            )
+
+        self.assertTrue(torch.equal(tokens, torch.tensor([[1, 3, 2]])))
+        self.assertEqual(predecessors, [10, 11, 12])
+        self.assertEqual(corrected.numel(), 0)
+
     def test_draft_tail_anchor_accepts_native_and_verify_carriers(self):
         model = DeepSeekV4DSparkModel.__new__(DeepSeekV4DSparkModel)
         nn.Module.__init__(model)
@@ -209,19 +258,23 @@ class DeepSeekV4DSparkTest(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "B\\*k or B\\*\\(k\\+1\\)"):
             model._anchor_ids_from_block_inputs(torch.zeros(11), head_hidden)
 
-    def test_draft_tail_skips_softmax_when_probs_not_requested(self):
+    def test_draft_tail_never_materializes_probabilities(self):
         model = DeepSeekV4DSparkModel.__new__(DeepSeekV4DSparkModel)
         nn.Module.__init__(model)
         model.compute_base_logits = lambda hidden: torch.tensor(
             [[[0.0, 2.0, 1.0], [3.0, 0.0, 1.0]]]
         )
         model._anchor_ids_from_block_inputs = lambda input_ids, hidden: torch.tensor([0])
-        model.markov_correct = lambda logits, anchors: (logits.argmax(-1), logits)
+        model.markov_correct = lambda logits, anchors, **kwargs: (logits.argmax(-1), torch.empty(0))
 
         outputs = SimpleNamespace(
             hidden_states=torch.zeros(2, 4), draft_tokens=None, draft_probs=None
         )
-        inputs = SimpleNamespace(input_ids=torch.tensor([0, 1]), need_draft_probs=False)
+        inputs = SimpleNamespace(
+            input_ids=torch.tensor([0, 1]),
+            need_draft_probs=False,
+            dspark_use_gumbel=False,
+        )
         result = model.draft_tail(outputs, inputs)
         self.assertTrue(torch.equal(result.draft_tokens, torch.tensor([[1, 0]])))
         self.assertIsNone(result.draft_probs)
@@ -229,10 +282,7 @@ class DeepSeekV4DSparkTest(unittest.TestCase):
         outputs.draft_probs = None
         inputs.need_draft_probs = True
         result = model.draft_tail(outputs, inputs)
-        torch.testing.assert_close(
-            result.draft_probs,
-            torch.softmax(torch.tensor([[[0.0, 2.0, 1.0], [3.0, 0.0, 1.0]]]), -1),
-        )
+        self.assertIsNone(result.draft_probs)
 
     def test_target_aux_capture_mean_pools_mhc_lanes(self):
         v4 = SimpleNamespace()

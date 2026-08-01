@@ -33,7 +33,7 @@ from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
 )
 from rtp_llm.models_py.modules.dsv4.kv_cache_utils import build_block_tables_batched
 from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear_from_dict
-from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs
+from rtp_llm.ops.compute_ops import PyModelInputs, PyModelOutputs, rtp_llm_ops
 from rtp_llm.utils.model_weight import W
 
 
@@ -67,11 +67,9 @@ class DeepSeekV4DSparkParams:
             raise ValueError(f"invalid dspark_block_size={params.block_size}")
         if params.markov_rank < 1:
             raise ValueError(f"invalid dspark_markov_rank={params.markov_rank}")
-        if params.proposal_type != "greedy":
-            raise ValueError(
-                "DSV4 DSpark currently supports only dspark_proposal_type='greedy'; "
-                f"got {params.proposal_type!r}"
-            )
+        # vLLM reads this checkpoint field but routes the actual proposal
+        # policy through the engine's draft_sample_method. Preserve it for
+        # diagnostics; do not let a stale checkpoint value override serving.
         if not params.sample_from_anchor:
             raise ValueError("DSV4 checkpoint requires sample_from_anchor=true")
         return params
@@ -348,19 +346,46 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
         return draft_ids
 
     def markov_correct(
-        self, base_logits: torch.Tensor, anchor_ids: torch.Tensor
+        self,
+        base_logits: torch.Tensor,
+        anchor_ids: torch.Tensor,
+        seeds: Optional[torch.Tensor] = None,
+        positions: Optional[torch.Tensor] = None,
+        temperatures: Optional[torch.Tensor] = None,
+        use_gumbel: bool = False,
+        use_fp64_gumbel: bool = False,
+        return_corrected: bool = True,
     ) -> tuple[torch.Tensor, torch.Tensor]:
         assert self.markov_head is not None
-        corrected = base_logits.float()
-        if corrected is base_logits:
-            corrected = corrected.clone()
-        batch, width = corrected.shape[:2]
-        tokens = torch.empty((batch, width), dtype=torch.long, device=corrected.device)
+        batch, width = base_logits.shape[:2]
+        tokens = torch.empty((batch, width), dtype=torch.long, device=base_logits.device)
+        corrected_steps = []
         previous = anchor_ids.long()
         for step in range(width):
-            corrected[:, step] += self.markov_head.bias(previous)
-            previous = corrected[:, step].argmax(dim=-1)
+            logits_i = base_logits[:, step].float() + self.markov_head.bias(previous)
+            if use_gumbel:
+                if seeds is None or positions is None or temperatures is None:
+                    raise ValueError("DSpark Gumbel sampling requires seeds, positions, and temperatures")
+                previous = rtp_llm_ops.gumbel_sample(
+                    logits_i.contiguous(),
+                    seeds.contiguous(),
+                    positions[:, step].contiguous(),
+                    temperatures.contiguous(),
+                    False,
+                    True,
+                    use_fp64_gumbel,
+                )
+            else:
+                previous = logits_i.argmax(dim=-1)
+            previous = self.map_draft_to_target(previous)
             tokens[:, step] = previous
+            if return_corrected:
+                corrected_steps.append(logits_i)
+        corrected = (
+            torch.stack(corrected_steps, dim=1)
+            if return_corrected
+            else torch.empty(0, device=base_logits.device)
+        )
         return tokens, corrected
 
     def _anchor_ids_from_block_inputs(
@@ -416,10 +441,36 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
         anchors = self._anchor_ids_from_block_inputs(
             inputs.input_ids, outputs.hidden_states
         )
-        tokens, corrected = self.markov_correct(base_logits, anchors)
+        use_gumbel = bool(getattr(inputs, "dspark_use_gumbel", False))
+        use_fp64_gumbel = bool(getattr(inputs, "dspark_use_fp64_gumbel", False))
+        seeds = getattr(inputs, "dspark_sampling_seeds", None)
+        temperatures = getattr(inputs, "dspark_sampling_temperatures", None)
+        positions = None
+        if use_gumbel:
+            if seeds is None or seeds.numel() == 0 or temperatures is None:
+                raise RuntimeError("DSpark draft tail is missing Gumbel coupling metadata")
+            batch, width = base_logits.shape[:2]
+            prefix = inputs.attention_inputs.prefix_lengths[:batch].to(
+                device=base_logits.device, dtype=torch.long, non_blocking=True
+            )
+            # Query row j predicts absolute position prefix+j+1; vLLM keys
+            # that prediction with its predecessor Q-1 = prefix+j.
+            positions = prefix[:, None] + torch.arange(
+                width, device=base_logits.device, dtype=torch.long
+            )[None, :]
+        tokens, _ = self.markov_correct(
+            base_logits,
+            anchors,
+            seeds=seeds,
+            positions=positions,
+            temperatures=temperatures,
+            use_gumbel=use_gumbel,
+            use_fp64_gumbel=use_fp64_gumbel,
+            return_corrected=False,
+        )
         outputs.draft_tokens = tokens
-        if bool(getattr(inputs, "need_draft_probs", True)):
-            outputs.draft_probs = torch.softmax(corrected, dim=-1)
+        # Coupled verification consumes tokens only in both greedy and
+        # stochastic modes. Leave the fresh output's draft_probs undefined.
         return outputs
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:

@@ -843,6 +843,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("sp_dspark_propose_num", &SpeculativeExecutionConfig::sp_dspark_propose_num)
         .def_readwrite("sp_dspark_mask_token_id", &SpeculativeExecutionConfig::sp_dspark_mask_token_id)
         .def_readwrite("sp_dspark_sample_from_anchor", &SpeculativeExecutionConfig::sp_dspark_sample_from_anchor)
+        .def_readwrite("draft_sample_method", &SpeculativeExecutionConfig::draft_sample_method)
+        .def_readwrite("use_fp64_gumbel", &SpeculativeExecutionConfig::use_fp64_gumbel)
         .def("to_string", [](const SpeculativeExecutionConfig& self) { return self.to_string(); })
         .def(py::pickle(
             [](const SpeculativeExecutionConfig& self) {
@@ -858,10 +860,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.checkpoint_path,
                                       self.sp_dspark_propose_num,
                                       self.sp_dspark_mask_token_id,
-                                      self.sp_dspark_sample_from_anchor);
+                                      self.sp_dspark_sample_from_anchor,
+                                      self.draft_sample_method,
+                                      self.use_fp64_gumbel);
             },
             [](py::tuple t) {
-                if (t.size() != 12 && t.size() != 13)
+                if (t.size() != 12 && t.size() != 13 && t.size() != 14 && t.size() != 15)
                     throw std::runtime_error("Invalid state!");
                 SpeculativeExecutionConfig c;
                 try {
@@ -879,6 +883,13 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.sp_dspark_mask_token_id       = t[11].cast<int64_t>();
                     if (t.size() == 13) {
                         c.sp_dspark_sample_from_anchor = t[12].cast<bool>();
+                    }
+                    if (t.size() >= 14) {
+                        c.sp_dspark_sample_from_anchor = t[12].cast<bool>();
+                        c.draft_sample_method          = t[13].cast<std::string>();
+                    }
+                    if (t.size() == 15) {
+                        c.use_fp64_gumbel = t[14].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("SpeculativeExecutionConfig unpickle error: ") + e.what());

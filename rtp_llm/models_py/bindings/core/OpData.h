@@ -61,9 +61,14 @@ struct GptModelInputs {
     // default "ends at prefix length".  Used by the dense decode-tail path,
     // whose fixed k+1 window ends past the new committed prefix.
     torch::Tensor dspark_ctx_starts;
-    // Pinned-host planning metadata for DSpark attention. Undefined selects
-    // the device-planning path; P7 fills and consumes it.
-    torch::Tensor dspark_plan_kv_pages_host;
+    // Per-request coupling metadata for DSpark's sequential proposal tail.
+    // Seeds are int64 [batch], temperatures are float32 [batch] with 0 as
+    // the deterministic target sentinel. Absolute predecessor positions are
+    // derived on device from prefix_lengths, so no RNG state is carried.
+    torch::Tensor dspark_sampling_seeds;
+    torch::Tensor dspark_sampling_temperatures;
+    bool          dspark_use_gumbel = false;
+    bool          dspark_use_fp64_gumbel = false;
 
     torch::Tensor attention_mask;  // [batch_size, seq_len, seq_len]
 
@@ -104,10 +109,8 @@ struct GptModelInputs {
     // CP prefill exit must materialize the full [seq, hidden] all_hidden_states
     // (true) or may gather only the last-token rows lm_head needs (false).
     bool need_all_hidden_states = false;
-    // DSpark proposal tokens are always required, but its corrected softmax
-    // distribution is needed only by probabilistic rejection sampling.
-    // Greedy/top1 sets this false and uses a persistent executor-side dummy
-    // buffer for the legacy rejection-kernel ABI.
+    // Legacy non-DSpark speculative-sampling probability materialization.
+    // DSpark's §5.8 coupled verifier never consumes a draft distribution.
     bool need_draft_probs       = true;
     bool need_moe_gating        = false;
     bool warmup                 = false;
@@ -359,6 +362,26 @@ struct GreedyParams {
 
 struct GreedyOutput {
     torch::Tensor success;
+};
+
+struct GumbelSampleParams {
+    const torch::Tensor& values;        // float32 [rows, vocab]
+    const torch::Tensor& seeds;         // int64 [rows]
+    const torch::Tensor& positions;     // int64 [rows], predecessor key Q-1
+    const torch::Tensor& temperatures;  // float32 [rows], zero = argmax
+    bool input_is_probs    = false;
+    bool apply_temperature = true;
+    bool use_fp64           = false;
+};
+
+struct CoupledTokenVerifyParams {
+    const torch::Tensor& draft_tokens;
+    const torch::Tensor& target_tokens;
+};
+
+struct CoupledTokenVerifyOutput {
+    torch::Tensor accept_tokens;
+    torch::Tensor accept_len;
 };
 
 struct BeamSearchParams {

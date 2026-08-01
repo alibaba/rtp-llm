@@ -333,6 +333,13 @@ struct SpeculativeExecutionConfig {
     // speculators-format checkpoints use 1+k query rows. Derived from the
     // checkpoint; it is not a user-facing scheduling knob.
     bool sp_dspark_sample_from_anchor = false;
+    // DSpark proposal selection. "gumbel" uses the same (request seed,
+    // absolute predecessor position) coupling as target verification;
+    // "greedy" keeps the deterministic argmax proposal baseline.
+    std::string draft_sample_method = "gumbel";
+    // vLLM-compatible optional fp64 Gumbel noise/reduction. Disabled by
+    // default because fp64 is substantially slower on inference GPUs.
+    bool use_fp64_gumbel = false;
     std::string     to_string() const;
 
     // Helper functions for enum conversion

@@ -195,9 +195,7 @@ void PrefillRpcServer::getRpcConnection(PrefillGenerateContext& prefill_context)
         input->generate_config->gen_timeline = true;
     }
     input->generate_config->pd_separation = true;
-    if (engine_->isMTPEagle() || engine_->isDSpark()) {
-        input->generate_config->force_disable_sp_run = false;
-    } else {
+    if (!(engine_->isMTPEagle() || engine_->isDSpark())) {
         input->generate_config->force_disable_sp_run = true;
     }
     prefill_context.generate_input = input;
@@ -421,29 +419,31 @@ void PrefillRpcServer::remoteGenerate(PrefillGenerateContext& prefill_context) {
             {context_position_ids.data_ptr<int32_t>(),
              context_position_ids.data_ptr<int32_t>() + context_position_ids.numel()});
     }
-    if (engine_->isMTPEagle()) {
+    const bool target_only = stream->disableSpRun();
+    if (engine_->isMTPEagle() && !target_only) {
         RTP_LLM_CHECK_WITH_INFO(stream->getProposeToken().size() > 0,
                                 "mtp remote generate propose token should not be empty");
     }
-    if (engine_->isDSpark()) {
+    if (engine_->isDSpark() && !target_only) {
         // The dspark decode node verifies the wire proposal as-is, so the full
         // {target, p1..pk} row must have been assembled by the prefill step.
         RTP_LLM_CHECK_WITH_INFO(stream->getProposeToken().size() > 1,
                                 "dspark remote generate needs the full propose row, got %zu tokens",
                                 stream->getProposeToken().size());
     }
-    generate_request.mutable_propose_token_ids()->CopyFrom(
-        {stream->getProposeToken().begin(), stream->getProposeToken().end()});
+    if (!target_only) {
+        generate_request.mutable_propose_token_ids()->CopyFrom(
+            {stream->getProposeToken().begin(), stream->getProposeToken().end()});
+    }
 
     auto sp_output_buffer = stream->getSPOutputBuffer();
 
-    if (sp_output_buffer) {
+    if (sp_output_buffer && !target_only) {
         torch::Tensor all_probs_cpu;
-        if (engine_->isDSpark() && stream->generateConfig()->top1()) {
-            // Greedy verification never reads draft probs (the rejection
-            // kernel's same_token short-circuit), so skip the [1, k, vocab]
-            // fp32 payload (~4 MiB per request at a 150k vocab); the decode
-            // node substitutes a persistent zero dummy.
+        if (engine_->isDSpark()) {
+            // Coupled DSpark verification ships only {target, p1..pk}.  Greedy
+            // and Gumbel sampling both avoid the [1, k, vocab] draft payload;
+            // target re-sampling uses the request seed and absolute positions.
             all_probs_cpu = torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat32));
         } else {
             all_probs_cpu =

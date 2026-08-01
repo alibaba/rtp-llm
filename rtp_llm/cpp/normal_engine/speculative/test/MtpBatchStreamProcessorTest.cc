@@ -230,7 +230,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputReplicatesScoreTok
     }
 }
 
-TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens) {
+TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputDefersStatefulThinkBoundaryTokens) {
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -263,10 +263,13 @@ TEST_F(MtpBatchStreamProcessorTest, testSpecSamplerInputMasksThinkBoundaryTokens
     ASSERT_NE(sampler_inputs.logits_processor_states_ptr, nullptr);
     sampler_inputs.logits_processor_states_ptr->batchProcess(sampler_inputs);
 
-    float neg_inf = -std::numeric_limits<float>::max();
+    // ThinkModeLogitsProcessor is stateful.  MTP verify must consume its
+    // immutable SpecLogitsVerifyRunner mask instead of invoking process()
+    // here, which would advance the matcher twice.  With no runner result in
+    // this unit-level gather, the logits therefore remain untouched.
     for (int i = 0; i < 3; ++i) {
-        EXPECT_EQ(neg_inf, sampler_inputs.logits[i][7].item<float>());
-        EXPECT_EQ(neg_inf, sampler_inputs.logits[i][8].item<float>());
+        EXPECT_EQ(0, sampler_inputs.logits[i][7].item<float>());
+        EXPECT_EQ(0, sampler_inputs.logits[i][8].item<float>());
         EXPECT_EQ(0, sampler_inputs.logits[i][9].item<float>());
     }
 }
@@ -418,10 +421,14 @@ TEST_F(MtpBatchStreamProcessorTest, testDispatchDecodeStream) {
 
     checkOutput(stream1, {1, 2, 3, 1, 3, 2}, {2, 0}, {0.2, 0.1, 0.3, 0.5}, {0.6, 0.06});
     checkOutput(stream2, {2, 1, 2}, {2, 3}, {0.3, 0.1, 0.4, 0.2}, {1.3, 0.13});
-    EXPECT_EQ(stream1->getMtpAsyncDeviceState().last_real_seq_len, stream1->seqLength());
-    EXPECT_EQ(stream1->getMtpAsyncDeviceState().next_real_seq_len, stream1->seqLength());
-    EXPECT_EQ(stream2->getMtpAsyncDeviceState().last_real_seq_len, stream2->seqLength());
-    EXPECT_EQ(stream2->getMtpAsyncDeviceState().next_real_seq_len, stream2->seqLength());
+    // dispatchDecode owns only host stream bookkeeping.  MtpExecutor publishes
+    // the CUDA state before the sync/async handoff, where accept tensors and
+    // sequence-length ownership are available together; a direct processor
+    // call must not synthesize a partial device state.
+    EXPECT_EQ(stream1->getMtpAsyncDeviceState().last_real_seq_len, -1);
+    EXPECT_EQ(stream1->getMtpAsyncDeviceState().next_real_seq_len, -1);
+    EXPECT_EQ(stream2->getMtpAsyncDeviceState().last_real_seq_len, -1);
+    EXPECT_EQ(stream2->getMtpAsyncDeviceState().next_real_seq_len, -1);
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testGatherDecodeModelInput) {
@@ -1180,9 +1187,9 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPdPrefillProposeRow) {
     target_output.sampler_output.token_ids = torch::tensor({2, -1, 1, 1, 2, 3}, torch::kInt32).reshape({2, 3});
 
     MergedOutput draft_output;
-    // dspark block proposal: [B, k] tokens + [B, k, vocab] probs, no hidden chain
+    // Coupled dspark transports only the [B, k] proposal row.  It never
+    // materializes or stores a [B, k, vocab] draft probability tensor.
     draft_output.sampler_output.token_ids = torch::tensor({1L, 2L, 3L, 0L, 1L, 2L}, torch::kInt64).reshape({2, k});
-    draft_output.sampler_output.all_probs = torch::rand({2, k, 4}, torch::kFloat32);
 
     auto status = processor.dispatchPrefill(stream_groups, std::move(target_output), std::move(draft_output));
     EXPECT_TRUE(status.ok());
@@ -1192,12 +1199,54 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkPdPrefillProposeRow) {
     // stream2 (PDFUSION): legacy pair {target=3, last draft token=2}
     EXPECT_EQ((vector<int>{3, 2}), stream2->getProposeToken());
 
-    // [1, k, vocab] probs land per stream for the verify pass
-    auto probs1 = stream1->getSPOutputBuffer()->all_probs;
-    ASSERT_TRUE(probs1.defined());
-    EXPECT_EQ((std::vector<int64_t>{1, k, 4}), probs1.sizes().vec());
+    EXPECT_FALSE(stream1->getSPOutputBuffer()->all_probs.defined());
+    EXPECT_FALSE(stream2->getSPOutputBuffer()->all_probs.defined());
     // dspark keeps no cross-step hidden chain
     EXPECT_FALSE(stream1->getSPOutputBuffer()->hidden_states.defined());
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testDSparkDecodeAcceptsUndefinedDraftProbabilities) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+
+    model_config.max_seq_len          = 2048;
+    model_config.vocab_size           = 4;
+    model_config.num_layers           = 1;
+    sp_config.type                    = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle       = 3;
+    sp_config.sp_dspark_mask_token_id = 3;
+
+    ResourceContext resource_context;
+    resource_context.cache_manager =
+        std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                                        /*block_num=*/10,
+                                                                        /*tokens_per_block=*/2,
+                                                                        rtp_llm::TYPE_INT8,
+                                                                        /*local_head_num_kv=*/4,
+                                                                        /*size_per_head=*/32));
+    auto stream = createContextStream(model_config, runtime_config, resource_context, {1}, 1);
+    auto groups = StreamGroups({stream});
+
+    speculative::SpeculativeSamplerOutput verified;
+    verified.accept_len_cpu    = torch::tensor({2}, torch::kInt32);
+    verified.accept_tokens_cpu = torch::tensor({{2, 3, 0, 0}}, torch::kInt32);
+
+    MergedOutput proposal;
+    proposal.sampler_output.token_ids = torch::tensor({2L, 3L, 1L}, torch::kInt64).reshape({1, 3});
+    ASSERT_FALSE(proposal.sampler_output.all_probs.defined());
+
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+    auto status = processor.dispatchDecode(groups, verified, proposal);
+    ASSERT_TRUE(status.ok());
+
+    EXPECT_EQ((vector<int>{1, 2, 3}), stream->getCompleteTokenIds()->completeTokenIdsVec(0));
+    EXPECT_FALSE(stream->getSPOutputBuffer()->all_probs.defined());
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testDSparkAnchorAsFirstQueryLayout) {
@@ -1247,10 +1296,10 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkAnchorAsFirstQueryLayout) {
     EXPECT_EQ((vector<int>{0, 4}), toVec<int>(fill_processor.dsparkLmIndexes(2)));
 }
 
-TEST_F(MtpBatchStreamProcessorTest, testDSparkDraftSamplerOutputGreedyDummyProbs) {
-    // PD wire gate: greedy (top1) streams ship no draft probs.  The sampler
-    // input builder must substitute the persistent zero dummy (all-greedy and
-    // mixed batches) and hard-fail for a sampling stream without probs.
+TEST_F(MtpBatchStreamProcessorTest, testDSparkDraftSamplerOutputIsTokenOnly) {
+    // Gumbel-coupled DSpark verifies token equality in both greedy and
+    // stochastic modes.  Draft probabilities are neither required nor
+    // retained, including when an older sender still populates the field.
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -1284,48 +1333,49 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkDraftSamplerOutputGreedyDummyProbs
     TensorHolder holder;
 
     {
-        // All-greedy batch, no probs anywhere -> the shared zero dummy.
+        // All-greedy batch: tokens only, no dummy full-vocab allocation.
         std::list<GenerateStreamPtr> streams{make_stream(1, 1, torch::Tensor()), make_stream(2, 1, torch::Tensor())};
         StreamGroups                 groups(streams);
         SamplerOutput                out;
         torch::Tensor                probs_d;
         processor.updateDSparkDraftSamplerOutput(groups, out, probs_d, holder);
-        ASSERT_TRUE(out.all_probs.defined());
-        EXPECT_EQ((std::vector<int64_t>{2, k, vocab}), out.all_probs.sizes().vec());
-        EXPECT_TRUE(out.all_probs.eq(0).all().item<bool>());
+        EXPECT_FALSE(out.all_probs.defined());
+        EXPECT_FALSE(probs_d.defined());
         EXPECT_EQ((std::vector<int64_t>{2, k}), out.token_ids.sizes().vec());
     }
 
     {
-        // Mixed batch: the sampling stream keeps its real probs, the greedy
-        // stream gets a zero row.
+        // Mixed batch: discard a legacy probability carrier instead of
+        // letting it reintroduce [B,k,V] ownership.
         auto real_probs = torch::rand({1, k, vocab}, torch::TensorOptions().dtype(torch::kFloat32)).cuda();
         std::list<GenerateStreamPtr> streams{make_stream(3, 0, real_probs), make_stream(4, 1, torch::Tensor())};
         StreamGroups                 groups(streams);
         SamplerOutput                out;
         torch::Tensor                probs_d;
         processor.updateDSparkDraftSamplerOutput(groups, out, probs_d, holder);
-        ASSERT_TRUE(out.all_probs.defined());
-        EXPECT_EQ((std::vector<int64_t>{2, k, vocab}), out.all_probs.sizes().vec());
-        EXPECT_TRUE(out.all_probs[0].eq(real_probs[0]).all().item<bool>());
-        EXPECT_TRUE(out.all_probs[1].eq(0).all().item<bool>());
+        EXPECT_FALSE(out.all_probs.defined());
+        EXPECT_FALSE(probs_d.defined());
+        EXPECT_EQ((std::vector<int64_t>{2, k}), out.token_ids.sizes().vec());
     }
 
     {
-        // A sampling stream without probs is a broken sender, not a valid state.
+        // Sampling without draft probs is the native coupled contract.
         std::list<GenerateStreamPtr> streams{make_stream(5, 0, torch::Tensor())};
         StreamGroups                 groups(streams);
         SamplerOutput                out;
         torch::Tensor                probs_d;
-        EXPECT_ANY_THROW(processor.updateDSparkDraftSamplerOutput(groups, out, probs_d, holder));
+        EXPECT_NO_THROW(processor.updateDSparkDraftSamplerOutput(groups, out, probs_d, holder));
+        EXPECT_FALSE(out.all_probs.defined());
+        EXPECT_FALSE(probs_d.defined());
+        EXPECT_EQ((std::vector<int64_t>{1, k}), out.token_ids.sizes().vec());
     }
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testDSparkGreedySpecSamplerFastPath) {
     // Fast-path gate: only plain-greedy batches (no logit shaping, no
     // probs/logits returns) may skip the target sampler; the builder must
-    // reproduce the sampler's greedy picks bit-exactly and hand the rejection
-    // kernel a zero probs stand-in of the target shape.
+    // reproduce the sampler's greedy picks bit-exactly without allocating a
+    // target-probability tensor.
     ModelConfig                 model_config;
     RuntimeConfig               runtime_config;
     SpeculativeExecutionConfig  sp_config;
@@ -1360,6 +1410,14 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkGreedySpecSamplerFastPath) {
         std::list<GenerateStreamPtr> streams{make_stream(1), make_stream(2)};
         EXPECT_TRUE(processor.canUseGreedySpecSamplerFastPath(streams));
 
+        // API-level do_sample=false is greedy even when top_k keeps its
+        // unrestricted default (0); it must not be misrouted to a stochastic
+        // verifier that expects processed-logit sampling metadata.
+        auto explicit_greedy = make_stream(10);
+        explicit_greedy->generateConfig()->top_k     = 0;
+        explicit_greedy->generateConfig()->do_sample = false;
+        EXPECT_TRUE(processor.canUseGreedySpecSamplerFastPath({explicit_greedy}));
+
         // xgrammar is a stateful SpecLogitsProcessor.  Even for top1 it must
         // take the full verify-sampler path so its per-position bitmask can
         // constrain both accepted draft tokens and the replacement token.
@@ -1392,7 +1450,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkGreedySpecSamplerFastPath) {
     }
 
     {
-        // Builder: argmax ids in the kernel's stride-1 layout, zero probs.
+        // Builder: argmax ids in the kernel's stride-1 layout, no probs.
         const int64_t batch  = 2;
         const int64_t width  = k + 1;
         torch::Tensor logits = torch::randn({batch * width, vocab},
@@ -1401,8 +1459,7 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkGreedySpecSamplerFastPath) {
         EXPECT_EQ((std::vector<int64_t>{batch * width, 1}), out.token_ids.sizes().vec());
         EXPECT_EQ(torch::kInt32, out.token_ids.scalar_type());
         EXPECT_TRUE(out.token_ids.squeeze(-1).eq(logits.argmax(-1).to(torch::kInt32)).all().item<bool>());
-        EXPECT_EQ((std::vector<int64_t>{batch, width, vocab}), out.all_probs.sizes().vec());
-        EXPECT_TRUE(out.all_probs.eq(0).all().item<bool>());
+        EXPECT_FALSE(out.all_probs.defined());
 
         // Wrong row count is a contract violation, not a silent reshape.
         EXPECT_ANY_THROW(processor.buildGreedySpecSamplerOutput(logits, batch + 1));

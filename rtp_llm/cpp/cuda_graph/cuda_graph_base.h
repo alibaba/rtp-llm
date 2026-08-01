@@ -27,6 +27,10 @@ struct GraphParams {
     // static logical block table + dspark_ctx_starts and refreshes them per
     // replay (MTP/eagle drafts have no such in-forward cache-write stage).
     bool                 is_dspark                    = false;
+    // Service-level DSpark draft policy. Greedy target requests still use the
+    // same captured Gumbel kernel with per-row temperature 0.
+    bool                 dspark_use_gumbel            = false;
+    bool                 dspark_use_fp64_gumbel       = false;
     int                  max_seq_len                  = 0;
     int                  tokens_per_block             = 0;  // physical kv block size
     int                  kernel_tokens_per_block      = 0;  // must be explicitly configured

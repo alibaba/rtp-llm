@@ -503,6 +503,11 @@ public:
         return generator_;
     }
 
+    // Keep the public replay seed and the ordinary target Sampler generator
+    // under the stream owner. This also supports engine-issued seeds after
+    // stream construction (DSpark target-only fallback).
+    void setRandomSeed(int seed);
+
     torch::Tensor getProposeTokens() const {
         if (propose_stream_ && propose_stream_->sp_output_buffer_->tokens.defined()) {
             return propose_stream_->sp_output_buffer_->tokens;

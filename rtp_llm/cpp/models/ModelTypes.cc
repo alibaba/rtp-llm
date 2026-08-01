@@ -86,6 +86,12 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
         inputs.dspark_ctx_lengths.defined() ? inputs.dspark_ctx_lengths.numel() : 0;
     shape_hints[GptModelInputIndex::dsparkCtxStarts] =
         inputs.dspark_ctx_starts.defined() ? inputs.dspark_ctx_starts.numel() : 0;
+    shape_hints[GptModelInputIndex::dsparkSamplingSeeds] =
+        inputs.dspark_sampling_seeds.defined() ? inputs.dspark_sampling_seeds.numel() : 0;
+    shape_hints[GptModelInputIndex::dsparkSamplingTemperatures] =
+        inputs.dspark_sampling_temperatures.defined() ? inputs.dspark_sampling_temperatures.numel() : 0;
+    shape_hints[GptModelInputIndex::dsparkUseGumbel] = inputs.dspark_use_gumbel;
+    shape_hints[GptModelInputIndex::dsparkUseFp64Gumbel] = inputs.dspark_use_fp64_gumbel;
     const auto cache_store_sync_metadata = getCacheStoreTensorSyncMetadata(inputs);
     shape_hints[GptModelInputIndex::cacheStoreInputLengths] = cache_store_sync_metadata.input_lengths_count;
     shape_hints[GptModelInputIndex::cacheStorePrefixLengths] = cache_store_sync_metadata.prefix_lengths_count;
@@ -111,6 +117,12 @@ GptModelInputShapeHints getModelInputShapeHints(const GptModelInputs& inputs) {
     }
     if (inputs.dspark_ctx_starts.defined() && inputs.dspark_ctx_starts.is_cuda()) {
         device_bits |= GptModelInputDeviceBit::kDeviceBitDsparkCtxStarts;
+    }
+    if (inputs.dspark_sampling_seeds.defined() && inputs.dspark_sampling_seeds.is_cuda()) {
+        device_bits |= GptModelInputDeviceBit::kDeviceBitDsparkSamplingSeeds;
+    }
+    if (inputs.dspark_sampling_temperatures.defined() && inputs.dspark_sampling_temperatures.is_cuda()) {
+        device_bits |= GptModelInputDeviceBit::kDeviceBitDsparkSamplingTemperatures;
     }
     device_bits |= cache_store_sync_metadata.device_bits;
     shape_hints[GptModelInputIndex::tensorDeviceMap] = static_cast<int64_t>(device_bits);
@@ -172,6 +184,8 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     inputs.need_all_logits              = shape_hints_ptr[GptModelInputIndex::needAllLogits];
     inputs.need_all_hidden_states       = shape_hints_ptr[GptModelInputIndex::needAllHiddenStates];
     inputs.need_draft_probs             = shape_hints_ptr[GptModelInputIndex::needDraftProbs];
+    inputs.dspark_use_gumbel             = shape_hints_ptr[GptModelInputIndex::dsparkUseGumbel];
+    inputs.dspark_use_fp64_gumbel        = shape_hints_ptr[GptModelInputIndex::dsparkUseFp64Gumbel];
     inputs.skip_run                     = shape_hints_ptr[GptModelInputIndex::skipRun];
     inputs.is_fake_stream               = shape_hints_ptr[GptModelInputIndex::isFakeStream];
     if (inputs.skip_run) {
@@ -328,6 +342,19 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                          {checkedHint(GptModelInputIndex::dsparkCtxStarts, "dsparkCtxStarts")},
                          pickAlloc(GptModelInputDeviceBit::kDeviceBitDsparkCtxStarts));
         }
+        if (shape_hints_ptr[GptModelInputIndex::dsparkSamplingSeeds]) {
+            inputs.dspark_sampling_seeds =
+                allocBuf(rtp_llm::DataType::TYPE_INT64,
+                         {checkedHint(GptModelInputIndex::dsparkSamplingSeeds, "dsparkSamplingSeeds")},
+                         pickAlloc(GptModelInputDeviceBit::kDeviceBitDsparkSamplingSeeds));
+        }
+        if (shape_hints_ptr[GptModelInputIndex::dsparkSamplingTemperatures]) {
+            inputs.dspark_sampling_temperatures =
+                allocBuf(rtp_llm::DataType::TYPE_FP32,
+                         {checkedHint(GptModelInputIndex::dsparkSamplingTemperatures,
+                                      "dsparkSamplingTemperatures")},
+                         pickAlloc(GptModelInputDeviceBit::kDeviceBitDsparkSamplingTemperatures));
+        }
         if (shape_hints_ptr[GptModelInputIndex::cacheStoreInputLengths]) {
             inputs.cache_store_input_lengths =
                 allocBuf(rtp_llm::DataType::TYPE_INT32,
@@ -413,6 +440,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     }
     if (shape_hints_ptr[GptModelInputIndex::dsparkCtxStarts]) {
         collect(inputs.dspark_ctx_starts);
+    }
+    if (shape_hints_ptr[GptModelInputIndex::dsparkSamplingSeeds]) {
+        collect(inputs.dspark_sampling_seeds);
+    }
+    if (shape_hints_ptr[GptModelInputIndex::dsparkSamplingTemperatures]) {
+        collect(inputs.dspark_sampling_temperatures);
     }
     if (shape_hints_ptr[GptModelInputIndex::cacheStoreInputLengths]) {
         collect(inputs.cache_store_input_lengths);
@@ -554,4 +587,3 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
 }
 
 }  // namespace rtp_llm
-

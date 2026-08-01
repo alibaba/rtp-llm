@@ -109,13 +109,20 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
         });
 
     if (generateConfig()->random_seed.has_value()) {
+        setRandomSeed(generateConfig()->random_seed.value());
+    }
+}
+
+void GenerateStream::setRandomSeed(int seed) {
+    generateConfig()->random_seed = seed;
+    if (!generator_.defined()) {
 #if defined(USING_CUDA) || defined(USING_ROCM)
         generator_ = torch::make_generator<torch::CUDAGeneratorImpl>();
 #else
         generator_ = torch::make_generator<torch::CPUGeneratorImpl>();
 #endif
-        generator_.set_current_seed(generateConfig()->random_seed.value());
     }
+    generator_.set_current_seed(static_cast<uint64_t>(seed));
 }
 
 void GenerateStream::resetBeginTime(int64_t begin_time_us) {

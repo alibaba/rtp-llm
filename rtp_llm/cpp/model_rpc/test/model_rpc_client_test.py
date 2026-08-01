@@ -53,6 +53,7 @@ class FakeStub:
         aux_info = output_pb1.aux_info.add()
         aux_info.iter_count = 1
         aux_info.output_len = 1
+        aux_info.random_seed = 20260731
         output_pb1.logits.data_type = TensorPB.DataType.FP32
         output_pb1.logits.shape.extend([1, 1, 2])
         output_pb1.logits.fp32_data = struct.pack("<ff", 0.0, 0.0)
@@ -68,6 +69,7 @@ class FakeStub:
         aux_info2 = output_pb2.aux_info.add()
         aux_info2.iter_count = 2
         aux_info2.output_len = 2
+        aux_info2.random_seed = 20260731
         output_pb2.logits.data_type = TensorPB.DataType.FP32
         output_pb2.logits.shape.extend([1, 1, 2])
         output_pb2.logits.fp32_data = struct.pack("<ff", 0.1, 0.2)
@@ -165,6 +167,7 @@ class ModelRpcClientTest(TestCase):
         logits_0 = res[0].logits.tolist()
         self.assertAlmostEqual(logits_0[0][0], 0.0, places=6)
         self.assertAlmostEqual(logits_0[0][1], 0.0, places=6)
+        self.assertEqual(res[0].aux_info.random_seed, 20260731)
 
         # res[1] 是第二个token
         self.assertTrue(hasattr(res[1], "logits"))
@@ -172,6 +175,7 @@ class ModelRpcClientTest(TestCase):
         logits_1 = res[1].logits.tolist()
         self.assertAlmostEqual(logits_1[0][0], 0.1, places=6)
         self.assertAlmostEqual(logits_1[0][1], 0.2, places=6)
+        self.assertEqual(res[1].aux_info.random_seed, 20260731)
 
         # res[2] 是完成标记，包含指定位置token的logits
         self.assertTrue(res[2].finished)

@@ -97,6 +97,7 @@ public:
         }
         json.Jsonize("local_reuse_len", local_reuse_len, local_reuse_len);
         json.Jsonize("remote_reuse_len", remote_reuse_len, remote_reuse_len);
+        json.Jsonize("random_seed", random_seed, random_seed);
     }
     AuxInfoAdapter() {
         AuxInfo();
@@ -113,6 +114,7 @@ public:
         cum_log_probs    = base.cum_log_probs;
         local_reuse_len  = base.local_reuse_len;
         remote_reuse_len = base.remote_reuse_len;
+        random_seed      = base.random_seed;
 
         cost_time_ms = cost_time_us / 1000.0;
     }

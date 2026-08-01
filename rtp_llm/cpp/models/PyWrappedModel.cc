@@ -223,7 +223,6 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.dtype            = dataTypeToTorchType(description_.data_type);
     py_attn_inputs.is_prefill       = !decode_batch_size;
     py_attn_inputs.is_target_verify = inputs.is_target_verify;
-    py_attn_inputs.dspark_plan_kv_pages_host = inputs.dspark_plan_kv_pages_host;
     RTP_LLM_CHECK_WITH_INFO(
         context_batch_size + decode_batch_size == batch_size,
         "batch size check failed context_batch_size[%ld] decode_batch_size[%ld] total_batch_size[%ld]",
@@ -742,6 +741,10 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         auto py_model_inputs = PyModelInputs({token_ids, input_hiddens, attention_inputs_, bert_embedding_inputs});
         py_model_inputs.dspark_ctx_lengths = inputs.dspark_ctx_lengths;
         py_model_inputs.dspark_ctx_starts = inputs.dspark_ctx_starts;
+        py_model_inputs.dspark_sampling_seeds = inputs.dspark_sampling_seeds;
+        py_model_inputs.dspark_sampling_temperatures = inputs.dspark_sampling_temperatures;
+        py_model_inputs.dspark_use_gumbel = inputs.dspark_use_gumbel;
+        py_model_inputs.dspark_use_fp64_gumbel = inputs.dspark_use_fp64_gumbel;
         py_model_inputs.need_draft_probs = inputs.need_draft_probs;
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
@@ -758,22 +761,9 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_inputs.attention_inputs.is_s_padded = true;
             py_model_outputs                             = graph_runner_->forward(py_model_inputs, graph_state_);
             RTP_LLM_LOG_DEBUG("[PyWrappedModel] CUDA graph forward completed");
-            // DSpark draft: the graph captured the backbone only (head_hidden);
-            // run the eager lm_head + Markov tail here, reading the
-            // static head_hidden buffer BEFORE it is cloned below.  draft_tail
-            // always fills draft_tokens and conditionally fills draft_probs as
-            // fresh (non-static) tensors, so a requested [B, k, V]
-            // distribution never persists as a graph output.
-            if (is_dspark_ && !use_spec_decoding_) {
-                py::gil_scoped_acquire gil;
-                auto tail_obj = py_model_.attr("draft_tail")(py_model_outputs, py_model_inputs);
-                py_model_outputs = tail_obj.cast<PyModelOutputs>();
-            }
             hidden_states = py_model_outputs.hidden_states.clone();
             // Graph output buffers are reused across replays; detach copies of
-            // the optional dspark outputs. The defined dspark tensors are
-            // fresh eager outputs (clone is a harmless defensive copy);
-            // aux_hidden_states may still alias a static buffer.
+            // optional DSpark outputs before the next replay overwrites them.
             for (torch::Tensor* t :
                  {&py_model_outputs.aux_hidden_states, &py_model_outputs.draft_tokens, &py_model_outputs.draft_probs}) {
                 if (t->defined()) {

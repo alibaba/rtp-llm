@@ -215,6 +215,40 @@ SamplerOutput Sampler::forward(const SamplerInputs& inputs) {
                           std::move(all_success)});
 }
 
+torch::Tensor Sampler::prepareDSparkCoupledLogits(const SamplerInputs& inputs) {
+    RTP_LLM_PROFILE_SCOPE("sampler.prepareDSparkCoupledLogits");
+    preprocessLogits(inputs);
+    RTP_LLM_CHECK_WITH_INFO(inputs.batch_size == inputs.batch_size_out,
+                            "DSpark coupled sampler does not support beam expansion");
+    RTP_LLM_CHECK_WITH_INFO(inputs.logits.scalar_type() == torch::kFloat32,
+                            "DSpark coupled target logits must be float32");
+    // vLLM's Gumbel contract treats T=0 as deterministic argmax. The generic
+    // RTP temperature penalty divides by every value !=1, so replace only
+    // exact zeros for preprocessing; the later Gumbel metadata still carries
+    // zero and therefore adds no noise.
+    auto safe_temperature = inputs.temperature.clone();
+    safe_temperature.masked_fill_(safe_temperature == 0.0F, 1.0F);
+    return execPrepareGumbelTargetLogits(
+        {inputs.logits,
+         inputs.input_lengths,
+         inputs.sequence_lengths,
+         inputs.token_ids,
+         inputs.step,
+         inputs.top_k,
+         inputs.top_p,
+         safe_temperature,
+         inputs.repetition_penalty.defined() ? std::optional<torch::Tensor>(inputs.repetition_penalty) : std::nullopt,
+         inputs.no_repeat_ngram_size.defined() ? std::optional<torch::Tensor>(inputs.no_repeat_ngram_size) : std::nullopt,
+         std::nullopt,
+         std::nullopt,
+         std::nullopt,
+         inputs.presence_penalty.defined() ? std::optional<torch::Tensor>(inputs.presence_penalty) : std::nullopt,
+         inputs.frequency_penalty.defined() ? std::optional<torch::Tensor>(inputs.frequency_penalty) : std::nullopt,
+         inputs.do_sample.defined() ? std::optional<torch::Tensor>(inputs.do_sample) : std::nullopt,
+         {},
+         &buffer_holder_});
+}
+
 void Sampler::preprocessLogits(const SamplerInputs& inputs) {
     if (inputs.logits_processor_states_ptr != nullptr) {
         inputs.logits_processor_states_ptr->batchProcess(inputs);

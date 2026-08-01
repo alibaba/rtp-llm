@@ -81,6 +81,9 @@ void fusedStridedCopy(const FusedStridedCopyParams& params);
 // ===================================================================
 
 GreedyOutput     execSampleGreedy(const GreedyParams& params);
+torch::Tensor    execGumbelSample(const GumbelSampleParams& params);
+CoupledTokenVerifyOutput execCoupledTokenVerify(const CoupledTokenVerifyParams& params);
+torch::Tensor    execPrepareGumbelTargetLogits(const GreedyParams& params);
 BeamSearchOutput execSampleBeamSearch(const BeamSearchParams& params);
 void             execChainSpeculativeSampling(const SpeculativeSamplingParams& params);
 void             execRejectionSampling(const RejectionSamplingParams& params);
@@ -96,6 +99,9 @@ void execBroadcast(const BroadcastParams& params);
 // All ranks must call with identical tensor counts and byte sizes.
 void            execBroadcastCpu(const BroadcastParams& params);
 bool            isCpuTpBroadcasterInitialized();
+// Returns false when the local-world UDS reducer was not initialized (for
+// example cross-node execution); callers then use their correctness fallback.
+bool            tryExecAllReduceCpuMax(torch::Tensor buffer);
 AllReduceOutput execAllReduce(const AllReduceParams& params);
 void            execAllGather(const AllGatherParams& params);
 void            execSyncCommunication(bool timeout = true);

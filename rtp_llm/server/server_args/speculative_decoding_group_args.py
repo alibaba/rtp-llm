@@ -86,6 +86,25 @@ def init_speculative_decoding_group_args(parser, sp_config):
     )
 
     speculative_decoding_group.add_argument(
+        "--draft_sample_method",
+        env_name="DRAFT_SAMPLE_METHOD",
+        bind_to=(sp_config, "draft_sample_method"),
+        type=str,
+        choices=["greedy", "gumbel"],
+        default="gumbel",
+        help="DSpark draft proposal method; gumbel shares the target's seeded position key.",
+    )
+
+    speculative_decoding_group.add_argument(
+        "--use_fp64_gumbel",
+        env_name="USE_FP64_GUMBEL",
+        bind_to=(sp_config, "use_fp64_gumbel"),
+        type=str2bool,
+        default=False,
+        help="Use vLLM-compatible fp64 Gumbel noise/reduction for DSpark (slower; default fp32).",
+    )
+
+    speculative_decoding_group.add_argument(
         "--gen_num_per_cycle",
         env_name="GEN_NUM_PER_CIRCLE",
         bind_to=(sp_config, "gen_num_per_cycle"),

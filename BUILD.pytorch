@@ -25,6 +25,10 @@ cc_library(
         ] + glob([
             "torch/lib/libcudart*.so*",
             "torch/lib/libnvToolsExt*.so*",
+            # torch 2.11 splits c10d's NVSHMEM extension out of
+            # libtorch_python.  Export it from the common Torch target so
+            # every CUDA C++ binary gets a complete link closure.
+            "torch/lib/libtorch_nvshmem.so*",
         ]),
         "@//:using_rocm": [
             # "torch/lib/librocfft.so",

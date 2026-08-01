@@ -234,10 +234,11 @@ void DecodeRpcServer::localGenerate(DecodeGenerateContext& decode_context) {
                                         .clone();
         generate_stream->setContextPositionIds(context_position_ids);
     }
-    if (!propose_maga_init_params_) {
+    const bool target_only = generate_stream->disableSpRun();
+    if (!propose_maga_init_params_ || target_only) {
         generate_stream->markGrpcNormalDeviceStatePending();
     }
-    if (propose_maga_init_params_) {
+    if (propose_maga_init_params_ && !target_only) {
         const size_t propose_step = propose_maga_init_params_->gen_num_per_circle;
         RTP_LLM_CHECK_WITH_INFO(propose_step > 0, "decode rpc propose_step should be positive");
         if (maga_init_params_.sp_config.gen_num_per_cycle > 0) {

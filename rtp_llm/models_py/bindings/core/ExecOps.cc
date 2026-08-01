@@ -40,6 +40,9 @@ BeamSearchOutput sampleBeamSearch(const BeamSearchParams& params);
 void             chainSpeculativeSampling(const SpeculativeSamplingParams& params);
 void             rejectionSampling(const RejectionSamplingParams& params);
 void             mappingDraft2Target(const MappingDraft2TargetParams& params);
+torch::Tensor    gumbelSampling(const GumbelSampleParams& params);
+CoupledTokenVerifyOutput coupledTokenVerification(const CoupledTokenVerifyParams& params);
+torch::Tensor    prepareGumbelTargetLogits(const GreedyParams& params);
 void             multiMergeCopy(const MultiMergeCopyParams& params);
 }  // namespace rtp_llm
 
@@ -534,6 +537,18 @@ GreedyOutput execSampleGreedy(const GreedyParams& params) {
     return sampleGreedy(params);
 }
 
+torch::Tensor execGumbelSample(const GumbelSampleParams& params) {
+    return gumbelSampling(params);
+}
+
+CoupledTokenVerifyOutput execCoupledTokenVerify(const CoupledTokenVerifyParams& params) {
+    return coupledTokenVerification(params);
+}
+
+torch::Tensor execPrepareGumbelTargetLogits(const GreedyParams& params) {
+    return prepareGumbelTargetLogits(params);
+}
+
 BeamSearchOutput execSampleBeamSearch(const BeamSearchParams& params) {
     return sampleBeamSearch(params);
 }
@@ -638,6 +653,19 @@ void execBroadcastCpu(const BroadcastParams& params) {
 
 bool isCpuTpBroadcasterInitialized() {
     return CpuTpBroadcaster::instance().isInitialized();
+}
+
+bool tryExecAllReduceCpuMax(torch::Tensor buffer) {
+    auto& reducer = CpuTpBroadcaster::worldInstance();
+    if (!reducer.isInitialized()) {
+        return false;
+    }
+    RTP_LLM_CHECK_WITH_INFO(buffer.is_cpu() && buffer.scalar_type() == torch::kInt32 && buffer.is_contiguous(),
+                            "tryExecAllReduceCpuMax requires contiguous CPU int32, got device=%s dtype=%s",
+                            buffer.device().str().c_str(),
+                            c10::toString(buffer.scalar_type()));
+    reducer.allReduceMaxInt32(buffer.data_ptr<int32_t>(), static_cast<std::size_t>(buffer.numel()));
+    return true;
 }
 
 AllReduceOutput execAllReduce(const AllReduceParams& params) {
@@ -822,6 +850,25 @@ void registerExecCtxOps(pybind11::module& m) {
             CpuTpBroadcaster::instance().reset();
         },
         "Tear down the UDS-backed intra-node TP broadcaster and clear its singleton state.");
+
+    m.def(
+        "init_cpu_world_reducer",
+        [](int world_rank, int world_size, const std::string& base_path) {
+            py::gil_scoped_release release;
+            CpuTpBroadcaster::worldInstance().initialize(world_rank, world_size, base_path);
+        },
+        py::arg("world_rank"),
+        py::arg("world_size"),
+        py::arg("base_path"),
+        "Bootstrap the UDS-backed local-world CPU max reducer used by host control flags.");
+
+    m.def(
+        "destroy_cpu_world_reducer",
+        []() {
+            py::gil_scoped_release release;
+            CpuTpBroadcaster::worldInstance().reset();
+        },
+        "Tear down the UDS-backed local-world CPU reducer.");
 }
 
 }  // namespace rtp_llm

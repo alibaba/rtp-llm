@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/normal_engine/NormalExecutor.h"
+#include "rtp_llm/cpp/normal_engine/NormalDeviceState.h"
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
@@ -527,7 +528,11 @@ bool NormalExecutor::gatherCanUseDeviceState(const StreamGroups& stream_groups) 
 }
 
 void NormalExecutor::prepareGrpcNormalDeviceState(const StreamGroups& stream_groups) {
-    if (role_type_ != RoleType::DECODE || stream_groups.totalContextBatchSize() != 0
+    normal_device_state::prepareGrpc(role_type_, stream_groups);
+}
+
+void normal_device_state::prepareGrpc(RoleType role_type, const StreamGroups& stream_groups) {
+    if (role_type != RoleType::DECODE || stream_groups.totalContextBatchSize() != 0
         || stream_groups.totalDecodeBatchSize() == 0) {
         return;
     }
@@ -573,6 +578,10 @@ void NormalExecutor::prepareGrpcNormalDeviceState(const StreamGroups& stream_gro
 }
 
 void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups, const SamplerOutput& sampler_output) {
+    normal_device_state::publish(stream_groups, sampler_output);
+}
+
+void normal_device_state::publish(const StreamGroups& stream_groups, const SamplerOutput& sampler_output) {
     RTP_LLM_PROFILE_SCOPE("executor.publish_normal_device_state");
 
     auto all_streams = stream_groups.allStreams();

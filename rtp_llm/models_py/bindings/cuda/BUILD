@@ -257,6 +257,7 @@ cc_library(
         "//rtp_llm/models_py/bindings:register_ops_hdr",
         "//rtp_llm/models_py/bindings/cuda/kernels:mla_quant_kernel",
         "//rtp_llm/models_py/bindings/cuda/kernels:dsv4_top_k_per_row_prefill",
+        "//rtp_llm/models_py/bindings/cuda/kernels:kernels_speculative_sampling",
         ":cuda_bindings",
     ],
     visibility = ["//visibility:public"],

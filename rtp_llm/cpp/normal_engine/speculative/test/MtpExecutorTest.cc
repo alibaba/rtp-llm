@@ -11,6 +11,7 @@
 
 #define private public
 #include "rtp_llm/cpp/normal_engine/speculative/MtpBatchStreamProcessor.h"
+#include "rtp_llm/cpp/normal_engine/NormalDeviceState.h"
 #include "rtp_llm/cpp/normal_engine/NormalGenerateStream.h"
 #include "rtp_llm/cpp/normal_engine/speculative/MtpExecutor.h"
 #include "rtp_llm/cpp/models/SampleInfos.h"
@@ -1277,9 +1278,8 @@ TEST_F(MtpExecutorTest, testDispatchStatePrepareBenchmark) {
     RTP_LLM_LOG_INFO("[dispatch-bench] speedup: %.1fx", speedup);
 }
 
-TEST_F(MtpExecutorTest, testDSparkGrpcSideChannelSeeding) {
-    const int64_t k     = 3;
-    const int64_t vocab = 4;
+TEST_F(MtpExecutorTest, testDSparkGrpcSideChannelSeedingIsTokenOnly) {
+    const int64_t k = 3;
 
     MtpExecutorTestConfig test_config;
     test_config.gen_num_per_cycle    = k;
@@ -1292,7 +1292,7 @@ TEST_F(MtpExecutorTest, testDSparkGrpcSideChannelSeeding) {
     auto sp_buffer                         = std::make_shared<SpeculativeExecutorStreamOutput>();
     sp_buffer->propose_step                = k;
     sp_buffer->tokens                      = torch::tensor({2, 1, 2, 3}, torch::kInt32).reshape({1, k + 1});
-    sp_buffer->side_channel.propose_probs  = torch::rand({1, k, vocab}, torch::kFloat32);
+    sp_buffer->side_channel.propose_probs  = torch::empty({0}, torch::kFloat32);
     sp_buffer->side_channel.propose_hidden = torch::empty({0}, torch::kFloat16);
     stream->setSPOutputBuffer(sp_buffer);
 
@@ -1307,17 +1307,14 @@ TEST_F(MtpExecutorTest, testDSparkGrpcSideChannelSeeding) {
     ASSERT_TRUE(stream->getAcceptTokensGpu().defined());
     EXPECT_EQ(2, toVec<int>(stream->getAcceptTokensGpu())[0]);
     EXPECT_EQ((vector<int>{1}), toVec<int>(stream->getAcceptLenGpu()));
-    ASSERT_TRUE(stream->getDraftAllProbsGpu().defined());
-    EXPECT_EQ((std::vector<int64_t>{1, k, vocab}), stream->getDraftAllProbsGpu().sizes().vec());
+    EXPECT_FALSE(stream->getDraftAllProbsGpu().defined());
     EXPECT_FALSE(sp_buffer->side_channel.any());
 }
 
-TEST_F(MtpExecutorTest, testDSparkGrpcGreedyProbsSkipped) {
-    // PD wire gate: a greedy (top1) stream ships an EMPTY propose_probs
-    // tensor.  prepareGrpcMtpDeviceState must accept it, seed the full
-    // propose row as usual, and leave the device-state probs undefined (the
-    // batch processor substitutes the zero dummy).  A sampling stream with
-    // empty probs must still hard-fail.
+TEST_F(MtpExecutorTest, testDSparkGrpcProbabilitiesSkippedForGreedyAndSampling) {
+    // PD wire gate: both greedy and Gumbel-coupled sampling ship an EMPTY
+    // propose_probs tensor.  The full proposal row seeds device state; draft
+    // probabilities remain undefined in both modes.
     const int64_t k = 3;
 
     MtpExecutorTestConfig test_config;
@@ -1333,7 +1330,7 @@ TEST_F(MtpExecutorTest, testDSparkGrpcGreedyProbsSkipped) {
         auto sp_buffer                         = std::make_shared<SpeculativeExecutorStreamOutput>();
         sp_buffer->propose_step                = k;
         sp_buffer->tokens                      = torch::tensor({2, 1, 2, 3}, torch::kInt32).reshape({1, k + 1});
-        sp_buffer->side_channel.propose_probs  = torch::empty({0}, torch::kFloat32);  // greedy wire skip
+        sp_buffer->side_channel.propose_probs  = torch::empty({0}, torch::kFloat32);  // token-only wire
         sp_buffer->side_channel.propose_hidden = torch::empty({0}, torch::kFloat16);
         stream->setSPOutputBuffer(sp_buffer);
         return stream;
@@ -1354,14 +1351,17 @@ TEST_F(MtpExecutorTest, testDSparkGrpcGreedyProbsSkipped) {
     }
 
     {
-        auto                         stream = make_wire_stream(/*top_k=*/0);  // sampling stream
+        auto                         stream = make_wire_stream(/*top_k=*/0);  // Gumbel sampling
         std::list<GenerateStreamPtr> streams{stream};
         TensorHolder                 holder;
-        EXPECT_ANY_THROW(components.executor->prepareGrpcMtpDeviceState(streams, holder));
+        EXPECT_NO_THROW(components.executor->prepareGrpcMtpDeviceState(streams, holder));
+        EXPECT_EQ((vector<int>{1, 2, 3}), toVec<int>(stream->getProposeTokensGpu()));
+        EXPECT_FALSE(stream->getDraftAllProbsGpu().defined());
+        EXPECT_FALSE(stream->getSPOutputBuffer()->all_probs.defined());
     }
 }
 
-TEST_F(MtpExecutorTest, testDSparkRejectsNonGreedyBeforeProcessMutation) {
+TEST_F(MtpExecutorTest, testDSparkAcceptsSamplingAndIssuesReplaySeedBeforeMutation) {
     MtpExecutorTestConfig test_config;
     test_config.sp_type              = SP_TYPE_DSPARK;
     test_config.dspark_mask_token_id = 3;
@@ -1376,12 +1376,187 @@ TEST_F(MtpExecutorTest, testDSparkRejectsNonGreedyBeforeProcessMutation) {
 
     stream->generateConfig()->top_k = 0;
     const auto status = components.executor->validateDSparkGenerateConfigs(streams);
-    EXPECT_EQ(status.code(), absl::StatusCode::kInvalidArgument);
-    EXPECT_NE(std::string(status.message()).find("only greedy/top1"), std::string::npos);
+    EXPECT_TRUE(status.ok());
+    ASSERT_TRUE(stream->generateConfig()->random_seed.has_value());
+    EXPECT_GE(stream->generateConfig()->random_seed.value(), 0);
+    ASSERT_TRUE(stream->getGenerator().defined());
+    EXPECT_EQ(stream->getGenerator().current_seed(),
+              static_cast<uint64_t>(stream->generateConfig()->random_seed.value()));
     EXPECT_EQ(stream->getSPOutputBuffer(), nullptr);
 }
 
-TEST_F(MtpExecutorTest, testDSparkGreedyDraftOutputUsesPersistentDummyProbs) {
+TEST_F(MtpExecutorTest, testDSparkCoupledTargetPreprocessingReturnsProcessedLogitsWithoutSampling) {
+    Sampler sampler(SamplerInitParams{});
+    SamplerInputs inputs;
+    inputs.logits = torch::tensor({{0.0F, 1.0F, 2.0F, 3.0F},
+                                   {0.0F, 1.0F, 2.0F, 3.0F},
+                                   {0.0F, 1.0F, 2.0F, 3.0F}},
+                                  torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+    inputs.token_ids       = torch::zeros({3, 2}, torch::kInt32);
+    inputs.input_lengths   = torch::tensor({1, 1, 1}, torch::kInt32);
+    inputs.sequence_lengths = torch::empty({0}, torch::kInt32);
+    inputs.batch_size      = 3;
+    inputs.batch_size_out  = 3;
+    inputs.step            = 1;
+    inputs.top_k           = torch::tensor({0, 2, 0}, torch::kInt32);
+    inputs.top_p           = torch::tensor({1.0F, 1.0F, 1.0F}, torch::kFloat32);
+    inputs.temperature     = torch::tensor({1.0F, 0.5F, 0.0F}, torch::kFloat32);
+    inputs.do_sample       = torch::tensor({true, true, true}, torch::kBool);
+
+    const void* storage = inputs.logits.storage().data();
+    auto processed = sampler.prepareDSparkCoupledLogits(inputs);
+
+    EXPECT_EQ(storage, processed.storage().data());
+    auto result = processed.cpu();
+    EXPECT_TRUE(torch::allclose(result[0], torch::tensor({0.0F, 1.0F, 2.0F, 3.0F})));
+    EXPECT_TRUE(torch::isneginf(result[1][0]).item<bool>());
+    EXPECT_TRUE(torch::isneginf(result[1][1]).item<bool>());
+    // Coupled sampling uses vLLM's exact temperature division rather than the
+    // legacy RTP penalty's epsilon-adjusted reciprocal.
+    EXPECT_FLOAT_EQ(result[1][2].item<float>(), 4.0F);
+    EXPECT_FLOAT_EQ(result[1][3].item<float>(), 6.0F);
+    EXPECT_TRUE(torch::allclose(result[2], torch::tensor({0.0F, 1.0F, 2.0F, 3.0F})));
+    EXPECT_FALSE(inputs.all_probs.defined());
+}
+
+TEST_F(MtpExecutorTest, testDSparkTargetOnlyRoutingForHistoryDependentAndBeamConfigs) {
+    MtpExecutorTestConfig test_config;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.dspark_mask_token_id = 3;
+    auto components                  = createMtpExecutorComponents(test_config);
+
+    auto make_stream = [&]() {
+        return createContextStream(
+            components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    };
+    auto plain = make_stream();
+    EXPECT_FALSE(components.executor->requiresDSparkTargetOnly(plain));
+
+    auto repetition = make_stream();
+    repetition->generateConfig()->repetition_penalty = 1.2f;
+    EXPECT_TRUE(components.executor->requiresDSparkTargetOnly(repetition));
+
+    auto presence = make_stream();
+    presence->generateConfig()->presence_penalty = 0.5f;
+    EXPECT_TRUE(components.executor->requiresDSparkTargetOnly(presence));
+
+    auto frequency = make_stream();
+    frequency->generateConfig()->frequency_penalty = 0.5f;
+    EXPECT_TRUE(components.executor->requiresDSparkTargetOnly(frequency));
+
+    auto ngram = make_stream();
+    ngram->generateConfig()->no_repeat_ngram_size = 3;
+    EXPECT_TRUE(components.executor->requiresDSparkTargetOnly(ngram));
+
+    auto beam = make_stream();
+    beam->generateConfig()->num_beams = 2;
+    EXPECT_TRUE(components.executor->requiresDSparkTargetOnly(beam));
+
+    auto cum_log_probs = make_stream();
+    cum_log_probs->generateConfig()->return_cum_log_probs = true;
+    EXPECT_TRUE(components.executor->requiresDSparkTargetOnly(cum_log_probs));
+
+    auto softmax_probs = make_stream();
+    softmax_probs->generateConfig()->return_softmax_probs = true;
+    EXPECT_TRUE(components.executor->requiresDSparkTargetOnly(softmax_probs));
+
+    auto logits = make_stream();
+    logits->generateConfig()->return_logits = true;
+    EXPECT_TRUE(components.executor->requiresDSparkTargetOnly(logits));
+
+    auto hidden = make_stream();
+    hidden->generateConfig()->return_hidden_states = true;
+    EXPECT_TRUE(components.executor->requiresDSparkTargetOnly(hidden));
+
+    auto all_hidden = make_stream();
+    all_hidden->generateConfig()->return_all_hidden_states = true;
+    EXPECT_TRUE(components.executor->requiresDSparkTargetOnly(all_hidden));
+}
+
+TEST_F(MtpExecutorTest, testDSparkPenaltyExecutesOneSharedTargetOnlyStep) {
+    MtpExecutorTestConfig test_config;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.dspark_mask_token_id = 3;
+    auto components                  = createMtpExecutorComponents(test_config);
+
+    auto stream = createContextStream(
+        components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    stream->generateConfig()->repetition_penalty = 1.2f;
+
+    GptModelInputs target_input;
+    target_input.combo_tokens      = torch::tensor({0, 1}, torch::kInt32);
+    target_input.input_lengths     = torch::tensor({2}, torch::kInt32);
+    target_input.prefix_lengths    = torch::tensor({0}, torch::kInt32);
+    target_input.lm_output_indexes = torch::tensor({1}, torch::kInt32);
+    GptModelOutputs target_output;
+    target_output.logits = torch::tensor({0.1f, 0.2f, 0.3f, 0.4f}).reshape({1, 4});
+    components.fake_target_model->setInputs({target_input});
+    components.fake_target_model->setOutputs({target_output});
+
+    SamplerInputs sampler_input{target_output.logits};
+    SamplerOutput sampler_output{torch::tensor({3}, torch::kInt32).reshape({1, 1})};
+    components.fake_sampler->setInputs({sampler_input});
+    components.fake_sampler->setOutputs({sampler_output});
+
+    setupFakeModels(components.executor.get(),
+                    std::move(components.fake_target_model),
+                    std::move(components.fake_draft_model),
+                    std::move(components.fake_fast_topk_sampler),
+                    std::move(components.fake_speculative_sampler),
+                    std::move(components.fake_sampler));
+
+    auto status = components.executor->process({stream});
+    ASSERT_TRUE(status.ok()) << status.ToString();
+    EXPECT_EQ((vector<int>{0, 1, 3}), stream->getCompleteTokenIds()->completeTokenIdsVec(0));
+    EXPECT_EQ(nullptr, stream->getSPOutputBuffer());
+    EXPECT_TRUE(stream->disableSpRun());
+    ASSERT_TRUE(stream->generateConfig()->random_seed.has_value());
+    EXPECT_GE(stream->generateConfig()->random_seed.value(), 0);
+}
+
+TEST_F(MtpExecutorTest, testDSparkTargetOnlyRestoresAndPublishesPdNormalDeviceState) {
+    ModelConfig model_config;
+    model_config.max_seq_len = 128;
+    model_config.vocab_size  = 4;
+    RuntimeConfig   runtime_config;
+    ResourceContext resource_context;
+    auto stream = createContextStream(model_config, runtime_config, resource_context, {0, 1});
+    StreamUpdateInfo update_info{torch::tensor({3}, torch::kInt32).reshape({1, 1}),
+                                 1,
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 torch::Tensor(),
+                                 false};
+    stream->update(update_info);
+    stream->setIsContextStream(false);
+    stream->markGrpcNormalDeviceStatePending();
+
+    StreamGroups groups({stream});
+    normal_device_state::prepareGrpc(RoleType::DECODE, groups);
+    const auto& restored = stream->getNormalAsyncDeviceState();
+    ASSERT_TRUE(restored.last_sample_token_gpu.defined());
+    ASSERT_TRUE(restored.next_seq_len_gpu.defined());
+    EXPECT_EQ(restored.last_sample_token_gpu.item<int32_t>(), 3);
+    EXPECT_EQ(restored.next_seq_len_gpu.item<int32_t>(), stream->seqLength());
+
+    SamplerOutput sampled;
+    sampled.token_ids = torch::tensor({2}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA))
+                            .reshape({1, 1});
+    const int before = stream->seqLength();
+    normal_device_state::publish(groups, sampled);
+    const auto& published = stream->getNormalAsyncDeviceState();
+    EXPECT_EQ(published.last_sample_token_gpu.item<int32_t>(), 2);
+    EXPECT_EQ(published.next_seq_len_gpu.item<int32_t>(), before + 1);
+    EXPECT_EQ(published.last_real_seq_len, before);
+    EXPECT_EQ(published.next_real_seq_len, before + 1);
+}
+
+TEST_F(MtpExecutorTest, testDSparkDraftOutputNeverMaterializesProbs) {
     MtpExecutorTestConfig test_config;
     test_config.gen_num_per_cycle    = 3;
     test_config.sp_type              = SP_TYPE_DSPARK;
@@ -1391,13 +1566,10 @@ TEST_F(MtpExecutorTest, testDSparkGreedyDraftOutputUsesPersistentDummyProbs) {
     GptModelOutputs output;
     output.draft_tokens = torch::tensor({{1, 2, 3}}, torch::kInt64).to(torch::kCUDA);
     auto first = components.executor->batch_stream_processor_->buildDSparkDraftSamplerOutput(output);
-    ASSERT_TRUE(first.all_probs.defined());
-    EXPECT_EQ((std::vector<int64_t>{1, 3, static_cast<int64_t>(components.model_config.vocab_size)}),
-              first.all_probs.sizes().vec());
-    EXPECT_EQ(first.all_probs.count_nonzero().item<int64_t>(), 0);
+    EXPECT_FALSE(first.all_probs.defined());
 
     auto second = components.executor->batch_stream_processor_->buildDSparkDraftSamplerOutput(output);
-    EXPECT_EQ(first.all_probs.data_ptr(), second.all_probs.data_ptr());
+    EXPECT_FALSE(second.all_probs.defined());
 }
 
 TEST_F(MtpExecutorTest, testDSparkFakeDecodeStreamCarriesFullProposalRow) {

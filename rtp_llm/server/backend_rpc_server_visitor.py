@@ -396,19 +396,35 @@ class BackendRPCServerVisitor:
         if input.generate_config.force_disable_sp_run:
             return
 
-        if self.sp_config.type == SpeculativeType.DSPARK:
-            top_k = input.generate_config.top_k
-            is_top1 = (
-                bool(top_k) and all(value == 1 for value in top_k)
-                if isinstance(top_k, list)
-                else top_k == 1
+        is_dspark = self.sp_config.type == SpeculativeType.DSPARK
+        config = input.generate_config
+        if is_dspark:
+            # Gumbel coupling assumes sampling is a pure function of
+            # (seed, absolute position). History-dependent sampling and beam
+            # geometry therefore run on the ordinary target executor.  Keep
+            # this as an explicit wire flag so PD decode also avoids creating
+            # speculative side-channel state.
+            variable_beams = getattr(config, "variable_num_beams", []) or []
+            needs_target_only = (
+                getattr(config, "num_return_sequences", 1) > 1
+                or getattr(config, "num_beams", 1) > 1
+                or bool(variable_beams)
+                or getattr(config, "repetition_penalty", 1.0) != 1.0
+                or getattr(config, "presence_penalty", 0.0) != 0.0
+                or getattr(config, "frequency_penalty", 0.0) != 0.0
+                or (getattr(config, "no_repeat_ngram_size", 0) or 0) > 0
+                or bool(getattr(config, "return_all_probs", False))
+                or bool(getattr(config, "return_cum_log_probs", False))
+                or bool(getattr(config, "return_softmax_probs", False))
+                or bool(getattr(config, "return_logits", False))
+                or bool(getattr(config, "return_hidden_states", False))
+                or bool(getattr(config, "return_all_hidden_states", False))
+                or (getattr(config, "calculate_loss", 0) or 0) != 0
+                or (len(input.token_ids.shape) == 2 and input.token_ids.size(0) != 1)
             )
-            if not is_top1:
-                raise FtRuntimeException(
-                    ExceptionType.UNSUPPORTED_OPERATION,
-                    "DSpark phase-1 supports only greedy/top1 generation; "
-                    "probabilistic sampling is not implemented",
-                )
+            if needs_target_only:
+                config.force_disable_sp_run = True
+                return
 
         # speculative decoding does not support batched input
         if len(input.token_ids.shape) == 2 and input.token_ids.size(0) != 1:
@@ -417,10 +433,7 @@ class BackendRPCServerVisitor:
                 "speculative decoding does not support batched input",
             )
         # speculative decoding does not support num_return_sequences > 1 or num_beams > 1
-        if (
-            input.generate_config.num_return_sequences > 1
-            or input.generate_config.num_beams > 1
-        ):
+        if config.num_return_sequences > 1 or config.num_beams > 1:
             raise FtRuntimeException(
                 ExceptionType.UNSUPPORTED_OPERATION,
                 "speculative decoding does not support num_return_sequences > 1 or num_beams > 1",

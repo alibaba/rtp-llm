@@ -142,9 +142,6 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<PyAttentionInputs>(m, "PyAttentionInputs")
         .def(pybind11::init<>())
         .def_readwrite("is_prefill", &PyAttentionInputs::is_prefill)
-        .def_readwrite("dspark_plan_kv_pages_host",
-                       &PyAttentionInputs::dspark_plan_kv_pages_host,
-                       "pinned host int32 DSpark attention planning metadata")
         .def_readwrite("is_cuda_graph", &PyAttentionInputs::is_cuda_graph)
         .def_readwrite("is_target_verify", &PyAttentionInputs::is_target_verify)
         .def_readwrite("prefix_lengths", &PyAttentionInputs::prefix_lengths)
@@ -212,9 +209,21 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("dspark_ctx_starts",
                        &PyModelInputs::dspark_ctx_starts,
                        "Optional int32 [batch] dspark feature-injection window start positions")
+        .def_readwrite("dspark_sampling_seeds",
+                       &PyModelInputs::dspark_sampling_seeds,
+                       "Optional int64 [batch] DSpark request seeds")
+        .def_readwrite("dspark_sampling_temperatures",
+                       &PyModelInputs::dspark_sampling_temperatures,
+                       "Optional float32 [batch] DSpark sampling temperatures; zero is greedy")
+        .def_readwrite("dspark_use_gumbel",
+                       &PyModelInputs::dspark_use_gumbel,
+                       "Whether the DSpark proposal tail uses coupled Gumbel sampling")
+        .def_readwrite("dspark_use_fp64_gumbel",
+                       &PyModelInputs::dspark_use_fp64_gumbel,
+                       "Whether DSpark Gumbel noise/reduction uses vLLM's fp64 mode")
         .def_readwrite("need_draft_probs",
                        &PyModelInputs::need_draft_probs,
-                       "Whether DSpark must materialize corrected proposal probabilities");
+                       "Legacy proposal-probability request; DSpark always leaves probabilities undefined");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")

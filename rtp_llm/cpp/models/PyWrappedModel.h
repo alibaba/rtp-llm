@@ -281,7 +281,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         // Correctness fallback backed by the P5 target-only probe: DSV4's
         // existing target CUDA graph is not eager-equivalent under TP2 (it
         // changes greedy tokens even without a speculative executor). Keep
-        // the DSpark draft-backbone graph enabled, but execute target verify
+        // the DSpark draft full-tail graph enabled, but execute target verify
         // eagerly until the independent target graph gate is fixed.
         RTP_LLM_LOG_WARNING(
             "Disable target CUDA graph for DSpark: target-only TP2 graph/eager equivalence gate is not satisfied; "
@@ -370,6 +370,9 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
                                              && !is_prefill_cuda_graph_mode;
         graph_params.is_target_verify = use_spec_decoding || is_target_verify_decode;
         graph_params.is_dspark = is_dspark;
+        graph_params.dspark_use_gumbel =
+            is_dspark && params.sp_config.draft_sample_method == "gumbel";
+        graph_params.dspark_use_fp64_gumbel = is_dspark && params.sp_config.use_fp64_gumbel;
         if (params.sp_config.type != SP_TYPE_NONE) {
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
         }

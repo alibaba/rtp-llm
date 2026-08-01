@@ -94,6 +94,10 @@ enum GptModelInputIndex : size_t {
     mtpHiddenStatesRows,
     dsparkCtxLengths,  // numel of dspark_ctx_lengths ([batch] int32)
     dsparkCtxStarts,   // numel of dspark_ctx_starts ([batch] int32)
+    dsparkSamplingSeeds,
+    dsparkSamplingTemperatures,
+    dsparkUseGumbel,
+    dsparkUseFp64Gumbel,
     cacheStoreInputLengths,
     cacheStorePrefixLengths,
     // Per-tensor device hint bitmap from root so non-root ranks allocate
@@ -116,6 +120,8 @@ enum GptModelInputDeviceBit : uint32_t {
     kDeviceBitDsparkCtxStarts  = 1u << 6,
     kDeviceBitCacheStoreInputLengths  = 1u << 7,
     kDeviceBitCacheStorePrefixLengths = 1u << 8,
+    kDeviceBitDsparkSamplingSeeds = 1u << 9,
+    kDeviceBitDsparkSamplingTemperatures = 1u << 10,
 };
 
 struct CacheStoreTensorSyncMetadata {

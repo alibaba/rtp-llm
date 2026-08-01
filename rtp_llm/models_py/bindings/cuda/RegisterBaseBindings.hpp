@@ -24,12 +24,24 @@
 #include "rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_persistent_topk.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_top_k_per_row_prefill.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/speculative_sampling/gumbel_sampling.h"
 
 using namespace rtp_llm;
 
 namespace torch_ext {
 
 void registerBasicCudaOps(py::module& rtp_ops_m) {
+    rtp_ops_m.def("gumbel_sample",
+                  &rtp_llm::gumbelSample,
+                  "Stateless vLLM-compatible Gumbel-max sampling",
+                  py::arg("values"),
+                  py::arg("seeds"),
+                  py::arg("positions"),
+                  py::arg("temperatures"),
+                  py::arg("input_is_probs") = false,
+                  py::arg("apply_temperature") = true,
+                  py::arg("use_fp64") = false);
+
     rtp_ops_m.def("debug_kernel",
                   &debugKernel,
                   "Debug kernel to print 2D data blocks from GPU tensor",

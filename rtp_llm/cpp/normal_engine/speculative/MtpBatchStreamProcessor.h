@@ -20,7 +20,11 @@ public:
         is_dspark_(sp_config.type == SP_TYPE_DSPARK),
         dspark_mask_token_id_(static_cast<int32_t>(sp_config.sp_dspark_mask_token_id)),
         dspark_sample_from_anchor_(sp_config.sp_dspark_sample_from_anchor),
-        dspark_vocab_size_(model_config.vocab_size) {}
+        dspark_use_gumbel_(sp_config.draft_sample_method == "gumbel"),
+        dspark_use_fp64_gumbel_(sp_config.use_fp64_gumbel) {}
+
+    absl::StatusOr<GptModelInputs> gatherModelInput(const StreamGroups& stream_groups,
+                                                    TensorHolder&       host_holder) const override;
 
     absl::Status dispatchPrefill(const StreamGroups& stream_groups,
                                  const MergedOutput& prefill_output,
@@ -86,8 +90,8 @@ public:
                                        GptModelInputs&     model_input,
                                        TensorHolder&       host_holder);
 
-    // Draft sampler output for rejection sampling, from the per-stream state
-    // stored last round: token_ids [B, k] int32, all_probs [B, k, vocab].
+    // Token-only draft output for coupled verification, from the per-stream
+    // state stored last round: token_ids [B, k] int32; no draft probabilities.
     void updateDSparkDraftSamplerOutput(const StreamGroups& stream_groups,
                                         SamplerOutput&      draft_sampler_output,
                                         torch::Tensor&      draft_token_probs_d_t,
@@ -145,6 +149,9 @@ protected:
                                      std::vector<StreamSpecUpdateInfo>&           spec_update_infos) const;
 
     void gatherHiddenStates(const StreamGroups& stream_groups, GptModelInputs& model_input) const;
+    void prepareDSparkSamplingMetadata(const StreamGroups& stream_groups,
+                                       GptModelInputs&     model_input,
+                                       TensorHolder&       host_holder) const;
 
 protected:
     // Grow-only caches for the dspark per-round constants: their contents
@@ -155,27 +162,18 @@ protected:
     torch::Tensor dsparkQueryLengths(int64_t batch_size);
     torch::Tensor dsparkDenseCtxLengths(int64_t batch_size);
     torch::Tensor dsparkLmIndexes(int64_t batch_size);
-    // Zero-filled stand-in consumed by the rejection kernel when a greedy-only
-    // stream's draft probs were dropped on the PD wire: the kernel still
-    // dereferences the [B, k, V] buffer, but a greedy row's accept decision
-    // never depends on its contents (same_token short-circuit).
-    torch::Tensor dsparkDummyProbs(int64_t batch_size);
-    // Target-side [cap, k+1, V] zero stand-in for the greedy sampler fast
-    // path below (same kernel contract as dsparkDummyProbs).
-    torch::Tensor dsparkTargetDummyProbs(int64_t batch_size);
 
 public:
     // Greedy spec-sampler fast path (dspark decode).  When every stream is
     // plain greedy with no logit shaping (penalties, ngram bans, logits
     // processors, beams/tiling) and no probs/logits/loss returns, the
-    // rejection kernel's accept decision reads only the target argmax ids:
-    // greedy rows short-circuit on same_token and never reach the
-    // residual-resample section, so neither probs buffer's contents matter.
+    // coupled verifier's accept decision reads only proposal and target argmax
+    // IDs, so no probability buffer exists on either side.
     // The whole sampler-input gather (host loops + O(seq_len) token-history
     // copy) and Sampler::forward (penalty kernels + [B*(k+1), V] softmax)
-    // then collapse to one argmax over the verify logits plus cached zero
-    // probs stand-ins.
+    // then collapse to one argmax over the verify logits.
     bool          canUseGreedySpecSamplerFastPath(const std::list<GenerateStreamPtr>& streams) const;
+    bool          needsDSparkCoupledTargetProbs(const std::list<GenerateStreamPtr>& streams) const;
     SamplerOutput buildGreedySpecSamplerOutput(const torch::Tensor& logits, int64_t batch_size);
     SamplerOutput buildDSparkDraftSamplerOutput(const GptModelOutputs& model_output);
 
@@ -186,14 +184,12 @@ protected:
     bool    is_dspark_            = false;
     int32_t dspark_mask_token_id_ = -1;
     bool    dspark_sample_from_anchor_ = false;
-
-    int64_t dspark_vocab_size_ = 0;
+    bool    dspark_use_gumbel_          = false;
+    bool    dspark_use_fp64_gumbel_     = false;
 
     torch::Tensor dspark_combo_cache_;              // [cap, query_width] int32
     torch::Tensor dspark_query_lengths_cache_;       // [cap] = query_width
     torch::Tensor dspark_dense_ctx_lengths_cache_;   // [cap] = target width k+1
     torch::Tensor dspark_lm_indexes_cache_;           // [cap], query row bases
-    torch::Tensor dspark_dummy_probs_;                // [cap, k, vocab] fp32 zeros
-    torch::Tensor dspark_target_dummy_probs_;  // [cap, k+1, vocab] fp32 zeros
 };
 }  // namespace rtp_llm

@@ -34,6 +34,10 @@ public:
         decoder_layer_aux_hidden_states_ = aux_hidden_states;
     };
 
+    void setDraftTokens(at::Tensor draft_tokens) {
+        draft_tokens_ = draft_tokens;
+    };
+
     CaptureMemoryHold() {}
 
     CaptureMemoryHold(at::Tensor hidden_states, torch_ext::PyModelInputs& inputs, bool is_embedding):
@@ -54,6 +58,10 @@ public:
         // DSpark: static window-base buffer bound into the captured forward
         // (undefined for non-dspark graphs). Refreshed per replay.
         py_model_inputs_.dspark_ctx_starts                        = inputs.dspark_ctx_starts;
+        py_model_inputs_.dspark_sampling_seeds                    = inputs.dspark_sampling_seeds;
+        py_model_inputs_.dspark_sampling_temperatures             = inputs.dspark_sampling_temperatures;
+        py_model_inputs_.dspark_use_gumbel                        = inputs.dspark_use_gumbel;
+        py_model_inputs_.dspark_use_fp64_gumbel                   = inputs.dspark_use_fp64_gumbel;
 
         // for spec
         py_model_inputs_.input_hiddens                            = inputs.input_hiddens;
@@ -81,6 +89,8 @@ public:
     // outputs.aux_hidden_states [tokens, n_aux, H] (the draft's fc input).
     // Undefined for every other graph flavor.
     at::Tensor               decoder_layer_aux_hidden_states_;
+    // DSpark full-tail graph output [batch, k] int64.
+    at::Tensor               draft_tokens_;
     torch_ext::PyModelInputs py_model_inputs_;
 };
 

@@ -309,7 +309,9 @@ std::string SpeculativeExecutionConfig::to_string() const {
         << "checkpoint_path: " << checkpoint_path << "\n"
         << "sp_dspark_propose_num: " << sp_dspark_propose_num << "\n"
         << "sp_dspark_mask_token_id: " << sp_dspark_mask_token_id << "\n"
-        << "sp_dspark_sample_from_anchor: " << sp_dspark_sample_from_anchor;
+        << "sp_dspark_sample_from_anchor: " << sp_dspark_sample_from_anchor << "\n"
+        << "draft_sample_method: " << draft_sample_method << "\n"
+        << "use_fp64_gumbel: " << use_fp64_gumbel;
     return oss.str();
 }
 

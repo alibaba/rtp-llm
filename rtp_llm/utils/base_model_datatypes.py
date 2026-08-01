@@ -93,6 +93,7 @@ class AuxInfo:
     decode_local_reuse_len: int = 0
     decode_remote_reuse_len: int = 0
     decode_memory_reuse_len: int = 0
+    random_seed: int = 0
 
     role_addrs: List[RoleAddr] = field(default_factory=list)
     aux_string: str = ""

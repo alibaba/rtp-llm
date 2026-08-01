@@ -5,6 +5,7 @@
 #include <array>
 #include <chrono>
 #include <cstdio>
+#include <cstdint>
 #include <cstdlib>
 #include <cstring>
 #include <functional>
@@ -271,12 +272,62 @@ void runHappyPath(int tp_size) {
     cleanupTempBase(base, tp_size);
 }
 
+int allReduceMaxChild(int rank, int world_size, const std::string& base) {
+    auto& reducer = CpuTpBroadcaster::worldInstance();
+    reducer.reset();
+    reducer.initialize(rank, world_size, base);
+
+    // Repeat enough rounds to pin the message framing/order contract used by
+    // the per-decode control path, not just first-call bootstrap behavior.
+    for (int iteration = 0; iteration < 128; ++iteration) {
+        std::array<int32_t, 3> values{
+            static_cast<int32_t>(iteration + rank),
+            static_cast<int32_t>(iteration + world_size - rank),
+            static_cast<int32_t>(rank == 2 ? iteration + 17 : -rank),
+        };
+        reducer.allReduceMaxInt32(values.data(), values.size());
+        const std::array<int32_t, 3> expected{
+            static_cast<int32_t>(iteration + world_size - 1),
+            static_cast<int32_t>(iteration + world_size),
+            static_cast<int32_t>(world_size > 2 ? iteration + 17 : 0),
+        };
+        if (values != expected) {
+            std::fprintf(stderr,
+                         "rank %d iteration %d got reduced values {%d,%d,%d}\n",
+                         rank,
+                         iteration,
+                         values[0],
+                         values[1],
+                         values[2]);
+            return 1;
+        }
+    }
+    reducer.reset();
+    return 0;
+}
+
+void runAllReduceMax(int world_size) {
+    const std::string  base = makeTempBase();
+    std::vector<pid_t> pids;
+    pids.push_back(spawnChild([=] { return allReduceMaxChild(0, world_size, base); }));
+    std::this_thread::sleep_for(std::chrono::milliseconds(20));
+    for (int rank = 1; rank < world_size; ++rank) {
+        pids.push_back(spawnChild([=] { return allReduceMaxChild(rank, world_size, base); }));
+    }
+    expectChildrenOk(pids);
+    cleanupTempBase(base, world_size);
+}
+
 TEST(CpuTpBroadcasterTest, BroadcastHappyPathTp2) {
     runHappyPath(2);
 }
 
 TEST(CpuTpBroadcasterTest, BroadcastHappyPathTp4) {
     runHappyPath(4);
+}
+
+TEST(CpuTpBroadcasterTest, AllReduceMaxHappyPathWorld4) {
+    runAllReduceMax(4);
 }
 
 TEST(CpuTpBroadcasterTest, Rank0RejectsBadPeerRank) {

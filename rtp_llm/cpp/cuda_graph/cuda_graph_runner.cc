@@ -221,6 +221,29 @@ void CudaGraphRunner::prepareInputData(const PyModelInputs& inputs, CudaGraphSta
                            py_model_inputs_.dspark_ctx_starts,
                            inputs.dspark_ctx_starts.numel() * sizeof(int));
     }
+
+    if (is_dspark_ && !is_target_verify_) {
+        RTP_LLM_CHECK_WITH_INFO(inputs.dspark_use_gumbel == py_model_inputs_.dspark_use_gumbel,
+                                "DSpark draft sampling policy changed after graph capture");
+        RTP_LLM_CHECK_WITH_INFO(inputs.dspark_use_fp64_gumbel == py_model_inputs_.dspark_use_fp64_gumbel,
+                                "DSpark Gumbel precision changed after graph capture");
+        RTP_LLM_CHECK_WITH_INFO(inputs.dspark_sampling_seeds.defined()
+                                    && inputs.dspark_sampling_temperatures.defined()
+                                    && py_model_inputs_.dspark_sampling_seeds.defined()
+                                    && py_model_inputs_.dspark_sampling_temperatures.defined(),
+                                "DSpark full-tail graph requires seed/temperature inputs");
+        RTP_LLM_CHECK_WITH_INFO(
+            inputs.dspark_sampling_seeds.numel() <= py_model_inputs_.dspark_sampling_seeds.numel()
+                && inputs.dspark_sampling_temperatures.numel()
+                       <= py_model_inputs_.dspark_sampling_temperatures.numel(),
+            "DSpark sampling metadata exceeds captured batch capacity");
+        optimizedCopyAsync(inputs.dspark_sampling_seeds,
+                           py_model_inputs_.dspark_sampling_seeds,
+                           inputs.dspark_sampling_seeds.numel() * sizeof(int64_t));
+        optimizedCopyAsync(inputs.dspark_sampling_temperatures,
+                           py_model_inputs_.dspark_sampling_temperatures,
+                           inputs.dspark_sampling_temperatures.numel() * sizeof(float));
+    }
 }
 
 void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
@@ -536,6 +559,11 @@ PyModelOutputs CudaGraphRunner::forward(const PyModelInputs& inputs, CudaGraphSt
         if (aux_hold.defined()) {
             outputs.aux_hidden_states = aux_hold.slice(0, 0, state.seq_len_sum);
         }
+        const auto& draft_tokens =
+            graph_instances_[state.current_real_graph_bs].mem_hold_.draft_tokens_;
+        if (draft_tokens.defined()) {
+            outputs.draft_tokens = draft_tokens.slice(0, 0, state.current_batch_size);
+        }
     }
     // record forward done event
     forward_event_.record(cuda_graph::graphGetCurrentStream());
@@ -692,7 +720,8 @@ bool CudaGraphRunner::aliasesGraphStaticStorage(const torch::Tensor& t, const Cu
     const auto& hold = it->second.mem_hold_;
     const void* p    = t.storage().data();
     for (const at::Tensor* static_tensor : {&hold.decoder_layer_hidden_states_,
-                                            &hold.decoder_layer_aux_hidden_states_}) {
+                                            &hold.decoder_layer_aux_hidden_states_,
+                                            &hold.draft_tokens_}) {
         if (static_tensor->defined() && static_tensor->storage().data() == p) {
             return true;
         }
@@ -899,6 +928,12 @@ void CudaGraphRunner::initCapture() {
         // not, so exclude it.
         if (is_dspark_ && !is_target_verify_) {
             inputs.dspark_ctx_starts = torch::zeros({int(max_bs_)}, options_cuda_int32_);
+            inputs.dspark_sampling_seeds = torch::zeros(
+                {int(max_bs_)}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
+            inputs.dspark_sampling_temperatures =
+                torch::zeros({int(max_bs_)}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+            inputs.dspark_use_gumbel = dspark_use_gumbel_;
+            inputs.dspark_use_fp64_gumbel = dspark_use_fp64_gumbel_;
         }
         // Setup attention inputs using the extracted function
         initCaptureAttentionInputs(inputs, max_bs_, num_tokens_per_bs_);
@@ -938,6 +973,18 @@ void CudaGraphRunner::initCapture() {
             aux_sizes[0]   = max_num_token_;
             capture_mem_hold_.setAuxHiddenStates(
                 torch::zeros(aux_sizes, probe_outputs.aux_hidden_states.options()));
+        }
+        if (is_dspark_ && !is_target_verify_) {
+            py::gil_scoped_acquire gil;
+            auto                   probe_outputs = probe_outputs_obj.cast<PyModelOutputs>();
+            RTP_LLM_CHECK_WITH_INFO(probe_outputs.draft_tokens.defined(),
+                                    "DSpark full-tail graph probe did not produce draft_tokens");
+            auto draft_sizes = probe_outputs.draft_tokens.sizes().vec();
+            RTP_LLM_CHECK_WITH_INFO(draft_sizes.size() == 2,
+                                    "DSpark full-tail graph draft_tokens must be [batch,k]");
+            draft_sizes[0] = static_cast<int64_t>(max_bs_);
+            capture_mem_hold_.setDraftTokens(
+                torch::zeros(draft_sizes, probe_outputs.draft_tokens.options()));
         }
         initCaptureAttentionInputsPost();
         logCudaGraphPoolMemory("before_capture");
@@ -1046,6 +1093,11 @@ void CudaGraphRunner::captureOneGraphInstance(int key, const char* key_type) {
                                         "dspark target verify capture: forward did not export aux_hidden_states");
                 graph_instances_[key].mem_hold_.decoder_layer_aux_hidden_states_.copy_(outputs.aux_hidden_states);
             }
+            if (graph_instances_[key].mem_hold_.draft_tokens_.defined()) {
+                RTP_LLM_CHECK_WITH_INFO(outputs.draft_tokens.defined(),
+                                        "dspark full-tail capture: forward did not produce draft_tokens");
+                graph_instances_[key].mem_hold_.draft_tokens_.copy_(outputs.draft_tokens);
+            }
             graph.capture_end();
         }
 
@@ -1101,6 +1153,14 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     if (is_dspark_ && capture_mem_hold_.py_model_inputs_.dspark_ctx_starts.defined()) {
         inputs.dspark_ctx_starts =
             capture_mem_hold_.py_model_inputs_.dspark_ctx_starts.slice(0, 0, batch_size);
+    }
+    if (is_dspark_ && !is_target_verify_) {
+        inputs.dspark_sampling_seeds =
+            capture_mem_hold_.py_model_inputs_.dspark_sampling_seeds.slice(0, 0, batch_size);
+        inputs.dspark_sampling_temperatures =
+            capture_mem_hold_.py_model_inputs_.dspark_sampling_temperatures.slice(0, 0, batch_size);
+        inputs.dspark_use_gumbel = capture_mem_hold_.py_model_inputs_.dspark_use_gumbel;
+        inputs.dspark_use_fp64_gumbel = capture_mem_hold_.py_model_inputs_.dspark_use_fp64_gumbel;
     }
     inputs.attention_inputs.input_lengths =
         capture_mem_hold_.py_model_inputs_.attention_inputs.input_lengths.slice(0, 0, batch_size);
@@ -1165,6 +1225,10 @@ CaptureMemoryHold CudaGraphRunner::createCaptureMemoryHold(PyModelInputs& inputs
                                   is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1);
     if (capture_mem_hold_.decoder_layer_aux_hidden_states_.defined()) {
         hold.setAuxHiddenStates(capture_mem_hold_.decoder_layer_aux_hidden_states_.slice(0, 0, tokens_count));
+    }
+    if (capture_mem_hold_.draft_tokens_.defined()) {
+        const int64_t batch_size = tokens_count / std::max(1, num_tokens_per_bs_);
+        hold.setDraftTokens(capture_mem_hold_.draft_tokens_.slice(0, 0, batch_size));
     }
     return hold;
 }

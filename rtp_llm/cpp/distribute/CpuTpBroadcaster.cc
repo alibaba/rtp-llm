@@ -4,6 +4,8 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 
 #include <chrono>
+#include <algorithm>
+#include <cstdint>
 #include <cstring>
 #include <thread>
 
@@ -215,6 +217,11 @@ CpuTpBroadcaster& CpuTpBroadcaster::instance() {
     return i;
 }
 
+CpuTpBroadcaster& CpuTpBroadcaster::worldInstance() {
+    static CpuTpBroadcaster i;
+    return i;
+}
+
 CpuTpBroadcaster::~CpuTpBroadcaster() {
     reset();
 }
@@ -420,6 +427,48 @@ void CpuTpBroadcaster::broadcast(void* buf, std::size_t nbytes, int root) {
         ssize_t n = readAll(peer_fds_[0], buf, nbytes);
         RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(nbytes),
                                 "CpuTpBroadcaster read from rank 0 (%zu bytes) failed: %s",
+                                nbytes,
+                                std::strerror(errno));
+    }
+}
+
+void CpuTpBroadcaster::allReduceMaxInt32(int32_t* values, std::size_t count) {
+    RTP_LLM_CHECK_WITH_INFO(initialized_.load(std::memory_order_acquire),
+                            "CpuTpBroadcaster::allReduceMaxInt32 called before initialize");
+    if (tp_size_ <= 1 || count == 0) {
+        return;
+    }
+    const std::size_t nbytes = count * sizeof(int32_t);
+    if (tp_rank_ == 0) {
+        std::vector<int32_t> peer_values(count);
+        for (int peer_rank = 1; peer_rank < tp_size_; ++peer_rank) {
+            ssize_t n = readAll(peer_fds_[peer_rank], peer_values.data(), nbytes);
+            RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(nbytes),
+                                    "CpuTpBroadcaster all-reduce read from rank %d (%zu bytes) failed: %s",
+                                    peer_rank,
+                                    nbytes,
+                                    std::strerror(errno));
+            for (std::size_t i = 0; i < count; ++i) {
+                values[i] = std::max(values[i], peer_values[i]);
+            }
+        }
+        for (int peer_rank = 1; peer_rank < tp_size_; ++peer_rank) {
+            ssize_t n = writeAll(peer_fds_[peer_rank], values, nbytes);
+            RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(nbytes),
+                                    "CpuTpBroadcaster all-reduce write to rank %d (%zu bytes) failed: %s",
+                                    peer_rank,
+                                    nbytes,
+                                    std::strerror(errno));
+        }
+    } else {
+        ssize_t n = writeAll(peer_fds_[0], values, nbytes);
+        RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(nbytes),
+                                "CpuTpBroadcaster all-reduce write to rank 0 (%zu bytes) failed: %s",
+                                nbytes,
+                                std::strerror(errno));
+        n = readAll(peer_fds_[0], values, nbytes);
+        RTP_LLM_CHECK_WITH_INFO(n == static_cast<ssize_t>(nbytes),
+                                "CpuTpBroadcaster all-reduce read from rank 0 (%zu bytes) failed: %s",
                                 nbytes,
                                 std::strerror(errno));
     }

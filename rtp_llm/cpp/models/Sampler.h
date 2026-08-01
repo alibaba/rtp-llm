@@ -16,6 +16,11 @@ public:
 
     virtual SamplerOutput forward(const SamplerInputs& inputs);
 
+    // Apply the ordinary target logits processors and temperature/top-k/top-p
+    // transforms, but do not run generator-backed sampling. The returned
+    // tensor aliases inputs.logits and is consumed once by stateless Gumbel.
+    virtual torch::Tensor prepareDSparkCoupledLogits(const SamplerInputs& inputs);
+
 private:
     void preprocessLogits(const SamplerInputs& inputs);
 

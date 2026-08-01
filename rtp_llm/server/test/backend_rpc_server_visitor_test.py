@@ -78,34 +78,69 @@ class BackendRPCServerVisitorDSparkConfigTest(unittest.TestCase):
         return visitor
 
     @staticmethod
-    def _input(top_k, force_disable_sp_run=False):
+    def _input(top_k, force_disable_sp_run=False, token_ids=None, **overrides):
+        config = dict(
+            top_k=top_k,
+            force_disable_sp_run=force_disable_sp_run,
+            num_return_sequences=1,
+            num_beams=1,
+            variable_num_beams=[],
+            repetition_penalty=1.0,
+            presence_penalty=0.0,
+            frequency_penalty=0.0,
+            no_repeat_ngram_size=0,
+            return_all_probs=False,
+            return_cum_log_probs=False,
+            return_softmax_probs=False,
+            return_logits=False,
+            return_hidden_states=False,
+            return_all_hidden_states=False,
+            calculate_loss=0,
+        )
+        config.update(overrides)
         return SimpleNamespace(
-            token_ids=SimpleNamespace(shape=(3,)),
-            generate_config=SimpleNamespace(
-                top_k=top_k,
-                force_disable_sp_run=force_disable_sp_run,
-                num_return_sequences=1,
-                num_beams=1,
-                return_all_probs=False,
-            ),
+            token_ids=token_ids or SimpleNamespace(shape=(3,)),
+            generate_config=SimpleNamespace(**config),
         )
 
-    def test_dspark_accepts_only_top1(self):
+    def test_dspark_accepts_greedy_and_probabilistic_sampling(self):
         visitor = self._visitor()
-        visitor.check_sp_supported(self._input(1))
-        visitor.check_sp_supported(self._input([1, 1]))
-
-        for top_k in (0, 2, [1, 2], []):
+        for top_k in (0, 1, 2, [1, 1], [1, 2], []):
             with self.subTest(top_k=top_k):
-                with self.assertRaisesRegex(
-                    FtRuntimeException, "only greedy/top1 generation"
-                ):
-                    visitor.check_sp_supported(self._input(top_k))
+                visitor.check_sp_supported(self._input(top_k))
 
     def test_force_disable_sp_keeps_target_sampling_available(self):
         self._visitor().check_sp_supported(
             self._input(2, force_disable_sp_run=True)
         )
+
+    def test_history_dependent_and_beam_requests_select_target_only(self):
+        for overrides in (
+            {"repetition_penalty": 1.2},
+            {"presence_penalty": 0.5},
+            {"frequency_penalty": 0.5},
+            {"no_repeat_ngram_size": 3},
+            {"num_beams": 2},
+            {"variable_num_beams": [1, 2]},
+            {"num_return_sequences": 2},
+            {"return_all_probs": True},
+            {"return_cum_log_probs": True},
+            {"return_softmax_probs": True},
+            {"return_logits": True},
+            {"return_hidden_states": True},
+            {"return_all_hidden_states": True},
+            {"calculate_loss": 1},
+        ):
+            with self.subTest(overrides=overrides):
+                request = self._input(2, **overrides)
+                self._visitor().check_sp_supported(request)
+                self.assertTrue(request.generate_config.force_disable_sp_run)
+
+    def test_batched_request_selects_target_only(self):
+        token_ids = SimpleNamespace(shape=(2, 3), size=lambda dim: (2, 3)[dim])
+        request = self._input(2, token_ids=token_ids)
+        self._visitor().check_sp_supported(request)
+        self.assertTrue(request.generate_config.force_disable_sp_run)
 
 
 class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):

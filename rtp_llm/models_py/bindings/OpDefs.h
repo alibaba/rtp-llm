@@ -291,7 +291,6 @@ struct PyContextParallelParams {
 struct PyAttentionInputs {
     bool          is_prefill{false};
     bool          is_target_verify{false};
-    torch::Tensor dspark_plan_kv_pages_host;
     torch::Tensor prefix_lengths;
     torch::Tensor sequence_lengths;
     torch::Tensor input_lengths;
@@ -360,8 +359,11 @@ struct PyModelInputs {
     // window is [starts[i], starts[i] + lengths[i]) and the model takes the
     // device fast path (fixed shapes, no host sync) in inject_context_kv.
     torch::Tensor dspark_ctx_starts;
-    // Whether the caller needs the corrected [B, k, V] DSpark probability
-    // tensor. Proposal tokens are emitted independently of this flag.
+    torch::Tensor dspark_sampling_seeds;
+    torch::Tensor dspark_sampling_temperatures;
+    bool          dspark_use_gumbel{false};
+    bool          dspark_use_fp64_gumbel{false};
+    // Legacy probability flag. DSpark always leaves draft_probs undefined.
     bool need_draft_probs{true};
 };
 
@@ -374,10 +376,9 @@ struct PyModelOutputs {
     // was configured to capture aux hidden states (G1, dspark-phase1 design).
     torch::Tensor aux_hidden_states;
     // Optional dspark/dflash draft proposal (G3: sampling lives in the model):
-    // draft_tokens [batch, k] int64; optional draft_probs [batch, k, vocab]
-    // fp32 (Markov-corrected softmax q for probabilistic rejection sampling).
-    // draft_probs is deliberately undefined for greedy DSpark and both are
-    // undefined for every non-dspark model.
+    // draft_tokens [batch, k] int64. Gumbel-coupled DSpark verification is
+    // token-only, so draft_probs stays undefined in greedy and sampling modes;
+    // the field remains for legacy non-DSpark proposal implementations.
     torch::Tensor draft_tokens;
     torch::Tensor draft_probs;
 

@@ -14,6 +14,10 @@ namespace rtp_llm {
 class CpuTpBroadcaster {
 public:
     static CpuTpBroadcaster& instance();
+    // Independent star used by host control-plane collectives spanning every
+    // local world rank. It deliberately owns separate sockets from TP input
+    // broadcast so the two protocols cannot interleave.
+    static CpuTpBroadcaster& worldInstance();
 
     // Bootstrap UDS endpoints. Call once per process. Subsequent calls with
     // matching (tp_rank, tp_size, base_path) are no-ops; mismatched re-init
@@ -24,6 +28,11 @@ public:
     // root rank writes to all peer sockets; non-root reads from its peer-0 fd.
     // Throws on transport error.
     void broadcast(void* buf, std::size_t nbytes, int root);
+
+    // In-place elementwise max over int32 control words. Every initialized
+    // rank must call in the same order. This is CPU/UDS only and introduces no
+    // CUDA work or device-host synchronization.
+    void allReduceMaxInt32(int32_t* values, std::size_t count);
 
     // Close all sockets and return the singleton to its initial state so a
     // later distributed init can bootstrap a fresh base_path.

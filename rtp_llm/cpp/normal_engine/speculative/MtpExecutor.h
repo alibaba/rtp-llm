@@ -80,6 +80,14 @@ public:
                                                        bool                   is_dspark = false);
 
 protected:
+    // DSpark requests whose sampling semantics depend on evolving history
+    // (penalties/ngram/beam) bypass speculation and execute one ordinary
+    // target-model step.  This shares model/KV ownership with MtpExecutor;
+    // no second target model is loaded.
+    bool         requiresDSparkTargetOnly(const GenerateStreamPtr& stream) const;
+    absl::Status targetOnlyProcess(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us);
+    absl::Status processSpeculative(const std::list<GenerateStreamPtr>& streams, int64_t schedule_time_us);
+
     struct AcceptLenMetricsSnapshot {
         int64_t total_accept_len        = 0;
         int64_t total_stream_num        = 0;
@@ -143,10 +151,10 @@ protected:
                         std::list<GenerateStreamPtr>&       prefill_streams,
                         std::list<GenerateStreamPtr>&       decode_streams);
 
-    // Phase-1 DSpark proposals are deterministic argmax blocks.  Accepting a
-    // sampling request here would silently use the wrong proposal
-    // distribution in rejection sampling, so reject it before any stream
-    // state is mutated.
+    // Validate request combinations that cannot use the coupled DSpark path.
+    // History-dependent and beam modes are partitioned into the shared-target
+    // fallback before this validation; ordinary temperature/top-k/top-p
+    // sampling is supported by the vLLM-compatible Gumbel coupling.
     absl::Status validateDSparkGenerateConfigs(const std::list<GenerateStreamPtr>& streams) const;
 
     // Spec-decode hand-off: when the source model exposes a pre-output-projection
@@ -209,11 +217,21 @@ private:
     // proposes propose_step_ tokens (no MTP multi-step decode chain, sampling
     // lives in the draft model).  Set from propose_params->sp_type.
     bool                                             is_dspark_ = false;
+    bool                                             dspark_use_fp64_gumbel_ = false;
     size_t                                           draft_vocab_size_;
     std::shared_ptr<ModelBase>                       draft_model_;
     std::shared_ptr<ModelBase>                       sp_prefill_draft_model_;
     std::unique_ptr<speculative::SpeculativeSampler> speculative_sampler_;
     std::unique_ptr<speculative::FastTopKSampler>    fast_topk_sampler_;
+
+    // Request-level target-only/speculative routing must be identical on TP,
+    // DP and EP participants. The host buffer uses the intra-node UDS world
+    // reducer; CUDA buffers are lazy cross-node correctness fallback only.
+    ModelConfig   model_config_;
+    RuntimeConfig runtime_config_;
+    torch::Tensor dspark_route_flags_host_;
+    torch::Tensor dspark_route_flags_gpu_;
+    torch::Tensor dspark_route_flags_reduced_gpu_;
 
     // Keeps async copy source tensors alive across release points.
     TensorHolder buffer_holder_;
