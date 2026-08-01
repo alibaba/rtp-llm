@@ -490,11 +490,18 @@ void PyWrappedModel::finishCacheStoreForward() {
     RTP_LLM_CHECK_WITH_INFO(cache_store_cycle_active_,
                             "finishCacheStoreForward called without an active cycle");
     if (track_cache_store_completion_) {
-        // The Python forward has synchronously submitted all writer work, but
-        // those CPU tasks and the CacheStore publication they register remain
-        // asynchronous.  MtpExecutor drains both only at the final prefill
-        // dispatch boundary, preserving their overlap with the DSpARK draft
-        // head kernels and C++ post-processing.
+        if (!is_dspark_draft_) {
+            // Preserve the target model's original forward boundary: all CPU
+            // writer tasks have submitted their CacheStore work before target
+            // sampling starts. Only the actual publication callbacks remain
+            // asynchronous and overlap the entire draft forward.
+            cache_store_async_writer_->finishSubmissions();
+            cache_store_cycle_active_        = false;
+            cache_store_publication_pending_ = true;
+        }
+        // The DSpARK draft keeps both submission and publication asynchronous
+        // through its head kernels and C++ post-processing. MtpExecutor drains
+        // the remaining work for both models at the dispatch boundary.
         return;
     } else {
         try {
