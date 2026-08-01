@@ -379,8 +379,8 @@ if { [[ "${role}" == "PREFILL" ]] \
             operator_wheels=()
             if [[ "${kda_backend}" == "cula" ]]; then
                 operator_wheels+=(
-                    "${operator_bundle}/flash_linear_attention-0.5.0+rtp.3a9ce1c.2-py3-none-any.whl"
-                    "${operator_bundle}/cuda_linear_attention-0.1.2+rtp.1854323.1-cp310-cp310-linux_x86_64.whl"
+                    "${operator_bundle}/flash_linear_attention-0.5.0+rtp.3a9ce1c.3-py3-none-any.whl"
+                    "${operator_bundle}/cuda_linear_attention-0.1.2+rtp.4db9fb9.1-cp310-cp310-linux_x86_64.whl"
                 )
             elif [[ "${kda_backend}" == "flash_kda" ]]; then
                 operator_wheels+=(

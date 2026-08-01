@@ -85,10 +85,10 @@ fi
 rm -rf "${ops_overlay}"
 "${python_bin}" -m pip install \
   --no-deps --target "${ops_overlay}" \
-  "${script_dir}/wheels/cuda_linear_attention-0.1.2+rtp.1854323.1-cp310-cp310-linux_x86_64.whl" \
+  "${script_dir}/wheels/cuda_linear_attention-0.1.2+rtp.4db9fb9.1-cp310-cp310-linux_x86_64.whl" \
   "${script_dir}/wheels/deep_gemm-2.6.1-cp310-cp310-linux_x86_64.whl" \
   "${script_dir}/wheels/flash_kda-0.0.1-cp310-cp310-linux_x86_64.whl" \
-  "${script_dir}/wheels/flash_linear_attention-0.5.0+rtp.3a9ce1c.2-py3-none-any.whl"
+  "${script_dir}/wheels/flash_linear_attention-0.5.0+rtp.3a9ce1c.3-py3-none-any.whl"
 
 KDA_BACKEND="${kda_backend}" PYTHONPATH="${ops_overlay}" "${python_bin}" - <<'PY'
 import inspect
@@ -111,9 +111,9 @@ if torch.cuda.get_device_capability(0) != (10, 3):
         f"operator wheels target sm_103a, got "
         f"{torch.cuda.get_device_capability(0)}"
     )
-if version("flash-linear-attention") != "0.5.0+rtp.3a9ce1c.2":
+if version("flash-linear-attention") != "0.5.0+rtp.3a9ce1c.3":
     raise RuntimeError("unexpected flash-linear-attention version")
-if version("cuda-linear-attention") != "0.1.2+rtp.1854323.1":
+if version("cuda-linear-attention") != "0.1.2+rtp.4db9fb9.1":
     raise RuntimeError("unexpected cuda-linear-attention version")
 overlay = Path(os.environ["PYTHONPATH"].split(os.pathsep, 1)[0])
 if not (overlay / "cula" / "kda" / "chunk.py").is_file():

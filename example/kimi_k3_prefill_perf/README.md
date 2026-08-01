@@ -4,14 +4,15 @@ This directory is the self-contained launcher for the K3 performance-only path:
 
 - TP8 / EP8, batch 1, 65,536 input tokens, one generated token.
 - `KDA -> KDA -> KDA -> MLA`, with three MoE layers.
-- cuLA `18543238473028425b81482e9e569161453bf2d6` is the default KDA
+- cuLA `4db9fb97b791ace6b8c7709b9ead8016b9c0c72a` is the default KDA
   backend. Its SM100 kernel publishes exact FP32 recurrent-state checkpoints
   every 4K tokens without splitting the 64K recurrence. This revision also
-  supports packed varlen checkpoints and accepts non-contiguous beta logits;
-  the current K3 optimized path uses its fixed-length checkpoint API.
+  supports packed varlen checkpoints, accepts non-contiguous beta logits and
+  uses 64-bit flattened offsets beyond the H64 256K-token boundary; the
+  current K3 optimized path uses its fixed-length checkpoint API.
 - FlashKDA `fa7eb894824a` remains selectable for same-branch A/B profiling.
 - cuLA uses FLA `3a9ce1c83a13994d824dbb3421e2989d330bb38b` plus the pinned
-  Python 3.10 / Triton 3.6 compatibility patch.
+  Python 3.10 / Triton 3.6 compatibility and varlen 64-bit-offset patches.
 - DeepGEMM `f5a76426fa084087169693fd0cd815223576d6e9` with K3 SiTU
   and the CUDA13 float-NTTP fix for MegaMoE.
 - RTP native MLA.
@@ -82,12 +83,18 @@ To rebuild from source:
 ```
 
 This clones the pinned FlashKDA, internal cuLA and DeepGEMM revisions,
-initializes their submodules, builds the patched FLA runtime, reuses cuLA's
-validated SM103 binary through its guarded prebuilt-wheel script, applies
+initializes their submodules, builds the patched FLA runtime, performs a fresh
+SM103-only cuLA native build, applies
 `patches/deepgemm_cuda13_float_nttp.patch` and the cuLA dynamic checkpoint
-pointer fix, and builds all operator wheels.  The cuLA patch preserves the
-kernel math while making FP32 page-boundary state publication valid for
-CUTLASS DSL dynamic indices.
+pointer fix, and builds all operator wheels. Rebuilding the native cuLA
+extension is required because the latest long-sequence fix changes C++ W/U
+address calculation; overlaying Python on an older `.so` is not valid. The
+cuLA pointer patch preserves the kernel math while making FP32 page-boundary
+state publication valid for CUTLASS DSL dynamic indices. The builder checks
+the pinned Python/PyTorch/CUDA environment and publishes only the four exact
+wheel filenames after all builds complete successfully. Set
+`K3_PERF_OPS_BUILD_ROOT` to a scratch parent directory when needed; the
+builder creates and removes only its own unique child directory.
 
 ## Scope
 
