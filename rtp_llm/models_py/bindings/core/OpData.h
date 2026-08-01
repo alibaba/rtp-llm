@@ -82,7 +82,7 @@ struct GptModelInputs {
     torch::Tensor request_pd_separation;  // bool, [context_batch_size]
     torch::Tensor cache_keys;             // [context_batch_size]
     // Optional PD cache-store range overrides. DSpARK attends from the full
-    // prompt but transfers the computed suffix plus its draft query block.
+    // prompt while transfer remains bounded to committed prefix/suffix KV.
     torch::Tensor cache_store_input_lengths;
     torch::Tensor cache_store_prefix_lengths;
     size_t        kv_block_stride_bytes;

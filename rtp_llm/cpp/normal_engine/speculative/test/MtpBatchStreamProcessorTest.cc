@@ -823,12 +823,63 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkRuntimeGammaThreePrefillInputShape
     EXPECT_EQ((std::vector<int32_t>{3, 2}), toVec<int32_t>(model_input.dspark_ctx_lengths));
     EXPECT_EQ((std::vector<int32_t>{0, 3}), toVec<int32_t>(model_input.dspark_ctx_starts));
     EXPECT_EQ((std::vector<int32_t>{7, 4}), toVec<int32_t>(model_input.cache_store_prefix_lengths));
-    EXPECT_EQ((std::vector<int32_t>{6, 5}), toVec<int32_t>(model_input.cache_store_input_lengths));
+    EXPECT_EQ((std::vector<int32_t>{3, 2}), toVec<int32_t>(model_input.cache_store_input_lengths));
     EXPECT_EQ((std::vector<int32_t>{10, 6}), toVec<int32_t>(model_input.prefix_lengths));
     EXPECT_EQ((std::vector<int32_t>{gamma, gamma}), toVec<int32_t>(model_input.input_lengths));
     EXPECT_EQ((std::vector<int32_t>{0, gamma}), toVec<int32_t>(model_input.lm_output_indexes));
     EXPECT_EQ(5, model_input.last_hidden_states.size(0));
     EXPECT_EQ(12, model_input.last_hidden_states.size(1));
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testDSparkPrefillCacheStoreUsesCommittedPromptLength) {
+    constexpr int32_t gamma          = 3;
+    constexpr int32_t mask_id        = 12345;
+    constexpr int32_t tokens_per_blk = 256;
+
+    ModelConfig                 model_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    SpeculativeExecutionConfig  sp_config;
+    cache_config.group_types          = {CacheGroupType::FULL};
+    sp_config.type                    = SP_TYPE_DSPARK;
+    sp_config.gen_num_per_cycle       = gamma;
+    sp_config.sp_dspark_mask_token_id = mask_id;
+
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    const std::vector<int32_t> prompt_lengths = {4349, 4350, 4351, 4352, 4353, 43775, 68095};
+    const std::vector<bool>    speculative_rows_cross_block = {false, true, true, true, false, true, true};
+    GptModelInputs             model_input;
+    model_input.input_lengths  = torch::tensor(prompt_lengths, torch::kInt32);
+    model_input.prefix_lengths = torch::zeros({static_cast<int64_t>(prompt_lengths.size())}, torch::kInt32);
+
+    GptModelOutputs model_output;
+    model_output.aux_hidden_states = torch::zeros(
+        {static_cast<int64_t>(prompt_lengths.size()), 1},
+        torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+
+    SamplerOutput sampler_output;
+    sampler_output.token_ids = torch::zeros(
+        {static_cast<int64_t>(prompt_lengths.size()), 2},
+        torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+
+    TensorHolder host_holder;
+    processor.updatePrefillPostDSparkDraftModelInput(model_input, model_output, sampler_output, host_holder);
+
+    const auto store_lengths = toVec<int32_t>(model_input.cache_store_input_lengths);
+    EXPECT_EQ(prompt_lengths, store_lengths);
+    for (size_t i = 0; i < prompt_lengths.size(); ++i) {
+        const auto prompt_blocks = (prompt_lengths[i] + tokens_per_blk - 1) / tokens_per_blk;
+        const auto store_blocks  = (store_lengths[i] + tokens_per_blk - 1) / tokens_per_blk;
+        EXPECT_EQ(prompt_blocks, store_blocks) << "prompt_length=" << prompt_lengths[i];
+
+        const auto speculative_blocks =
+            (prompt_lengths[i] + gamma + tokens_per_blk - 1) / tokens_per_blk;
+        EXPECT_EQ(speculative_rows_cross_block[i], speculative_blocks > prompt_blocks)
+            << "prompt_length=" << prompt_lengths[i];
+    }
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testUpdatePrefillPostDraftModelInput) {

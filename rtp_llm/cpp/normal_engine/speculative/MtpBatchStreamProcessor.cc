@@ -767,8 +767,14 @@ void MtpBatchStreamProcessor::updatePrefillPostDSparkDraftModelInput(GptModelInp
     model_input.last_hidden_states = aux.reshape({aux.size(0), -1});
     model_input.dspark_ctx_lengths = suffix_lengths;
     model_input.dspark_ctx_starts  = suffix_lengths.cumsum(0, torch::kInt32) - suffix_lengths;
+    // CacheStore keys are derived from the committed prompt received by both
+    // PD peers. The gamma rows written by this draft seeding forward are
+    // speculative state outside that prompt's hash namespace. Counting them
+    // here shifts the SWA tail window onto a padded key whenever the rows cross
+    // a cache-block boundary, so prefill and decode derive different block
+    // plans for the draft layers.
     model_input.cache_store_prefix_lengths = reuse_lengths;
-    model_input.cache_store_input_lengths  = suffix_lengths + static_cast<int32_t>(propose_step_);
+    model_input.cache_store_input_lengths  = suffix_lengths;
     model_input.prefix_lengths     = reuse_lengths + suffix_lengths;
     model_input.input_lengths      = dsparkDraftInputLengths(batch_size);
     model_input.sequence_lengths   = emptyInt32OnCuda({0});

@@ -666,9 +666,10 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
 
             # The custom non-causal attention path bypasses the ordinary V4
             # prefill loop, so it must explicitly publish each completed
-            # draft-layer cache in PD-separated prefill.  The C++ input
-            # overrides describe the newly injected context plus this fixed
-            # query block; decode receives exactly those SWA cache entries.
+            # draft-layer cache in PD-separated prefill. The forward computes
+            # the fixed query rows locally, while the C++ CacheStore overrides
+            # expose only committed prefix/suffix KV. Decode rebuilds the
+            # speculative rows after loading that committed state.
             if write_cache_store_impl is not None:
                 write_cache_store_impl(self.kv_cache.get_layer_caches(layer_idx))
 
