@@ -196,11 +196,9 @@ bool PrefillGenerateContext::isPriorityPreempted() const {
 
 bool PrefillGenerateContext::tryMarkOtherTerminal() {
     std::lock_guard<std::mutex> lock(terminal_transition_mu_);
-    auto expected = PrefillTerminalCause::ACTIVE;
-    if (terminal_cause_.compare_exchange_strong(expected,
-                                                PrefillTerminalCause::OTHER,
-                                                std::memory_order_acq_rel,
-                                                std::memory_order_acquire)) {
+    auto                        expected = PrefillTerminalCause::ACTIVE;
+    if (terminal_cause_.compare_exchange_strong(
+            expected, PrefillTerminalCause::OTHER, std::memory_order_acq_rel, std::memory_order_acquire)) {
         return true;
     }
     return expected == PrefillTerminalCause::OTHER;
@@ -243,16 +241,16 @@ bool PrefillGenerateContext::finalizePriorityPreemption() {
     details.set_error_message(error_info.ToString());
     std::string serialized_details;
     details.SerializeToString(&serialized_details);
-    error_status = grpc::Status(transErrorCodeToGrpc(ErrorCode::PRIORITY_PREEMPTED),
-                                error_info.ToString(),
-                                serialized_details);
+    error_status =
+        grpc::Status(transErrorCodeToGrpc(ErrorCode::PRIORITY_PREEMPTED), error_info.ToString(), serialized_details);
 
     // TryCancel is only the stop trigger. Finish joins the existing P->D RPC
     // execution; Decode's cancellation finalizer runs before Finish returns.
     tryCancelDownstream();
     (void)closeGrpcStream();
 
-    if (stream_) {
+    const auto finalized_stream = stream_;
+    if (finalized_stream) {
         stream_->reportError(ErrorCode::PRIORITY_PREEMPTED, "preempted by a higher-priority request");
         // A Prefill stream is scheduler-owned once published. Retry on the
         // managed finalizer executor until the scheduler has completed its
@@ -269,7 +267,8 @@ bool PrefillGenerateContext::finalizePriorityPreemption() {
     if (meta) {
         meta->markPriorityPreemptionCanceled(request_id,
                                              static_cast<int64_t>(ErrorCode::PRIORITY_PREEMPTED),
-                                             "preempted by a higher-priority request");
+                                             "preempted by a higher-priority request",
+                                             finalized_stream);
     }
     priority_finalized_ = true;
     return true;
