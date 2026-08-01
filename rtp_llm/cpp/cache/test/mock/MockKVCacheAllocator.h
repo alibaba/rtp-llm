@@ -30,7 +30,7 @@ public:
     MOCK_METHOD(BlockPoolPtr, blockPool, (std::string_view tag), (const, override));
     MOCK_METHOD(std::shared_ptr<KVCacheResource>,
                 incrKVCacheRef,
-                (const KVCacheResource& kvcache_resource, const CacheKeysType& cache_keys, bool is_connector),
+                (const KVCacheResource& kvcache_resource, const CacheKeysByGroup& cache_keys, bool is_connector),
                 (override));
     MOCK_METHOD(void, decrKVCacheRef, (const KVCacheResource& kvcache_resource, bool is_connector), (override));
     MOCK_METHOD(GroupedCacheLayerLayout, allLayerCacheBase, (), (const, override));

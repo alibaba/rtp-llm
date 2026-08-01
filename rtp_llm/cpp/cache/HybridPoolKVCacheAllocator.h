@@ -37,7 +37,7 @@ public:
     size_t                  totalTokensNum() const override;
     size_t                  totalBlocksNum() const override;
     size_t                  maxAvailableTokensNum() const override;
-    KVCacheTokenCapacity    tokenCapacity(size_t default_seq_size_per_block) const override;
+    KVCacheTokenCapacity    tokenCapacity() const override;
     std::vector<KVCachePoolMetricsSnapshot> poolMetricsSnapshots() const override;
     void    regUserMr(size_t model_id, std::shared_ptr<CacheStore> cache_store = nullptr) override;
     int64_t getMrCostTimeMs() const override;
@@ -60,7 +60,8 @@ private:
     void freeBlocksInGroup(std::string_view tag, const BlockIndicesType& blocks, bool is_connector = false) override;
     bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const override;
 
-    size_t minTokenCapacity(bool use_available_blocks, bool full_groups_only) const;
+    size_t minTokenCapacity(bool use_available_blocks) const;
+    size_t logicalCoverageUnitTokens() const;
     size_t totalReservableAvailableBlocks() const;
     size_t
     reserveBlocksForPool(std::string_view tag, size_t reserve_blocks, size_t total_reservable_available_blocks) const;

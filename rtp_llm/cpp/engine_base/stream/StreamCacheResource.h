@@ -2,6 +2,7 @@
 
 #include <atomic>
 #include <memory>
+#include <numeric>
 #include "absl/status/status.h"
 #include "absl/status/statusor.h"
 #include "rtp_llm/cpp/engine_base/stream/ResourceContext.h"
@@ -93,17 +94,29 @@ public:
     }
 
     int seqSizePerBlock() const {
-        return resource_context_.cache_manager->cacheConfig().seq_size_per_block;
+        uint64_t boundary = 1;
+        for (const auto& group : resource_context_.cache_manager->cacheConfig().topology().groups()) {
+            if (group.policy.enable_prefix_reuse) {
+                boundary = std::lcm(boundary, static_cast<uint64_t>(group.seq_size_per_block));
+            }
+        }
+        return static_cast<int>(boundary);
     }
 
     // KVCacheResource reuse counters follow the canonical cache-key namespace.
     // Under CP sharding one canonical block spans cp_size physical blocks.
     int reuseBlockTokens() const {
-        const auto& mapper = resource_context_.cache_manager->cpSlotMapper();
-        if (mapper && mapper->isSharded()) {
-            return mapper->virtualBlockSize();
+        uint64_t boundary = 1;
+        for (const auto& group : resource_context_.cache_manager->cacheConfig().topology().groups()) {
+            if (!group.policy.enable_prefix_reuse) {
+                continue;
+            }
+            const auto     mapper = resource_context_.cache_manager->cpSlotMapper(group.tag);
+            const uint64_t span   = mapper && mapper->isSharded() ? static_cast<uint64_t>(mapper->virtualBlockSize()) :
+                                                                    static_cast<uint64_t>(group.seq_size_per_block);
+            boundary              = std::lcm(boundary, span);
         }
-        return seqSizePerBlock();
+        return static_cast<int>(boundary);
     }
 
     void setNeedReleaseResource(bool need_release_resource) {

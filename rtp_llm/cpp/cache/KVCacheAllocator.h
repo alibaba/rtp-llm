@@ -6,6 +6,7 @@
 #include <memory>
 #include <string>
 #include <string_view>
+#include <unordered_map>
 #include <vector>
 
 #include "kmonitor/client/MetricsReporter.h"
@@ -54,9 +55,18 @@ public:
     virtual std::vector<BlockInfo> convertIndexToBuffer(int layer_id, const std::string& tag, int block_id) const = 0;
     virtual std::vector<BlockInfo> convertIndexToBuffer(
         int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const = 0;
-    virtual std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
+    virtual std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource&  kvcache_resource,
+                                                            const CacheKeysByGroup& cache_keys_by_group,
+                                                            bool                    is_connector = false)                   = 0;
+    std::shared_ptr<KVCacheResource>         incrKVCacheRef(const KVCacheResource& kvcache_resource,
                                                             const CacheKeysType&   cache_keys,
-                                                            bool                   is_connector = false)                   = 0;
+                                                            bool                   is_connector = false) {
+        RTP_LLM_CHECK_WITH_INFO(kvcache_resource.groupResources().size() == 1,
+                                "legacy cache-key adapter requires exactly one tagged group, got %zu",
+                                kvcache_resource.groupResources().size());
+        CacheKeysByGroup cache_keys_by_group{{kvcache_resource.groupResources().front().tag, cache_keys}};
+        return incrKVCacheRef(kvcache_resource, cache_keys_by_group, is_connector);
+    }
 
     virtual GroupedCacheLayerLayout allLayerCacheBase() const                                          = 0;
     virtual bool                    updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
@@ -93,12 +103,13 @@ public:
         use_cuda_malloc_block_pool_ = use_cuda_malloc_block_pool;
     }
 
-    void setCPSlotMapper(std::shared_ptr<CPSlotMapper> cp_slot_mapper) {
-        cp_slot_mapper_ = std::move(cp_slot_mapper);
+    void setCPSlotMappers(std::unordered_map<std::string, std::shared_ptr<CPSlotMapper>> cp_slot_mappers) {
+        cp_slot_mappers_ = std::move(cp_slot_mappers);
     }
 
-    std::shared_ptr<CPSlotMapper> cpSlotMapper() const {
-        return cp_slot_mapper_;
+    std::shared_ptr<CPSlotMapper> cpSlotMapper(std::string_view tag) const {
+        const auto it = cp_slot_mappers_.find(std::string(tag));
+        return it == cp_slot_mappers_.end() ? nullptr : it->second;
     }
 
     // Reserve some blocks for already-running streams' future allocations.
@@ -124,7 +135,7 @@ public:
     virtual size_t                  totalTokensNum() const;
     virtual size_t                  totalBlocksNum() const;
     virtual size_t                  maxAvailableTokensNum() const;
-    virtual KVCacheTokenCapacity    tokenCapacity(size_t default_seq_size_per_block) const;
+    virtual KVCacheTokenCapacity    tokenCapacity() const;
     virtual std::vector<KVCachePoolMetricsSnapshot> poolMetricsSnapshots() const;
     virtual std::vector<std::string>                independentEvictionTags() const;
     /// Returns global layer id; std::numeric_limits<uint32_t>::max() indicates invalid (caller must check).
@@ -138,30 +149,28 @@ protected:
     virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info) = 0;
     virtual int          getNeedBlocks(const MallocInfo& malloc_info) const    = 0;
     // Estimate peak additional blocks for one sequence resource.
-    virtual int  estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
-                                        int                    seq_len,
-                                        int                    remaining_tokens,
-                                        int                    reserve_step,
-                                        bool                   enable_reuse_cache) const           = 0;
-    virtual int  estimateInitialBatchPeakNeedBlocks(int  seq_len,
-                                                    int  common_seq_len,
-                                                    int  remaining_tokens,
-                                                    int  reserve_step,
-                                                    bool enable_reuse_cache,
-                                                    int  target_batch_size) const = 0;
-    virtual void checkCPShardedMallocResult(const MallocInfo&) const {}
-    virtual void decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) = 0;
-    bool         cpShardThisGroupForCapacity(std::string_view tag) const;
-    size_t       logicalSeqSizePerBlockForCapacity(std::string_view tag) const;
-    int          cpEffectiveSeqLenForAlloc(std::string_view tag, int seq_len) const;
-    int          deviceCacheMetricTokensPerBlock() const;
-
-    CacheConfig                        config_;
-    AllocationType                     allocation_type_;
-    SharedBlockCachePtr                shared_block_cache_;
-    std::shared_ptr<CPSlotMapper>      cp_slot_mapper_;
-    const kmonitor::MetricsReporterPtr metrics_reporter_           = nullptr;
-    bool                               use_cuda_malloc_block_pool_ = false;
+    virtual int         estimatePeakNeedBlocks(const KVCacheResource& kv_cache_resource,
+                                               int                    seq_len,
+                                               int                    remaining_tokens,
+                                               int                    reserve_step,
+                                               bool                   enable_reuse_cache) const           = 0;
+    virtual int         estimateInitialBatchPeakNeedBlocks(int  seq_len,
+                                                           int  common_seq_len,
+                                                           int  remaining_tokens,
+                                                           int  reserve_step,
+                                                           bool enable_reuse_cache,
+                                                           int  target_batch_size) const = 0;
+    virtual void        checkCPShardedMallocResult(const MallocInfo&) const {}
+    virtual void        decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) = 0;
+    bool                cpShardThisGroupForCapacity(std::string_view tag) const;
+    size_t              logicalSeqSizePerBlockForCapacity(std::string_view tag) const;
+    int                 cpEffectiveSeqLenForAlloc(std::string_view tag, int seq_len) const;
+    CacheConfig         config_;
+    AllocationType      allocation_type_;
+    SharedBlockCachePtr shared_block_cache_;
+    std::unordered_map<std::string, std::shared_ptr<CPSlotMapper>> cp_slot_mappers_;
+    const kmonitor::MetricsReporterPtr                             metrics_reporter_           = nullptr;
+    bool                                                           use_cuda_malloc_block_pool_ = false;
 
     size_t  reserve_block_num_{0};
     int64_t reserve_block_ratio_{0};

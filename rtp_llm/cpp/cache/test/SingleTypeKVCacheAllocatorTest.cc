@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <memory>
+#include <numeric>
 #include <vector>
 #include <set>
 #include <optional>
@@ -106,7 +107,8 @@ createBatchKVCacheResource(int batch_size, const CacheConfig& config, int block_
     resource->initGroups(config.topologyPtr());
     for (int i = 0; i < batch_size; ++i) {
         resource->setBatchBlocks(i, "default", std::vector<int>(block_num_per_batch));
-        resource->setBatchCacheKeys(i, CacheKeysType(block_num_per_batch, static_cast<CacheKeyType>(i * 100)));
+        resource->setBatchCacheKeys(
+            i, "default", CacheKeysType(block_num_per_batch, static_cast<CacheKeyType>(i * 100)));
     }
     return resource;
 }
@@ -148,8 +150,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ConstructorAndInit) {
     bool init_result = allocator_->init();
     EXPECT_TRUE(init_result);
 
-    EXPECT_EQ(allocator_->totalBlocksNum(), config.block_num - 1);
-    EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);  // reserve 1 block
+    EXPECT_EQ(allocator_->totalBlocksNum(), config.blockNumForGroup("default") - 1);
+    EXPECT_EQ(allocator_->freeBlocksNum(), config.blockNumForGroup("default") - 1);  // reserve 1 block
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, InitSupportsSingleLinearGroup) {
@@ -203,7 +205,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, MallocSingleBatch) {
 
     EXPECT_TRUE(result.success);
     EXPECT_EQ(batch_resource->blocksNum(0, "default"), 2);
-    EXPECT_LT(allocator_->freeBlocksNum(), config.block_num);
+    EXPECT_LT(allocator_->freeBlocksNum(), config.blockNumForGroup("default"));
 
     seq_length         = 160;
     complete_token_ids = createCompleteTokenIds(1, seq_length);
@@ -263,7 +265,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseRefere
     // set system property with 4 blocks: cache keys {100, 101, 102, 103}.
     {
         auto seed_resource = createBatchKVCacheResource(/*batch_size=*/1, config);
-        seed_resource->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});
+        seed_resource->setBatchCacheKeys(0, "default", CacheKeysType{100, 101, 102, 103});
         auto seed_token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/16, /*seq_size_per_block=*/4);
 
         MallocInfo seed_malloc_info{seed_resource, seed_token_ids};
@@ -278,18 +280,18 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseRefere
     // reuse 4 block, allocate 1 new block
     {
         auto batch_resource = createBatchKVCacheResource(/*batch_size=*/1, config);
-        batch_resource->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103, 200});  // match_keys -> {100}
+        batch_resource->setBatchCacheKeys(0, "default", CacheKeysType{100, 101, 102, 103, 200});  // match_keys -> {100}
 
-        auto       token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/20, /*seq_size_per_block=*/4);
+        auto token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/20, /*seq_size_per_block=*/4);
+        batch_resource->cacheResource(0).requestPrefix().rebuild(token_ids->data(0), token_ids->seqLength());
         MallocInfo malloc_info{batch_resource, token_ids};
         malloc_info.enable_device_cache = true;
 
         auto result = allocator_->malloc(malloc_info);
         EXPECT_TRUE(result.success);
-        const size_t reuse_blocks = batch_resource->cacheResource(0).reuseBlockNum();
-        EXPECT_EQ(reuse_blocks * static_cast<size_t>(config.seq_size_per_block), static_cast<size_t>(result.reuse_len));
+        EXPECT_EQ(batch_resource->cacheResource(0).reuseTokenNum(), static_cast<size_t>(result.reuse_tokens));
         EXPECT_EQ(batch_resource->curBlocksNum(), 5);
-        EXPECT_EQ(allocator_->availableBlocksNum(), 4);
+        EXPECT_EQ(allocator_->availableBlocksNum(), 3);
         FreeInfo free_info{batch_resource, token_ids};
         allocator_->free(free_info);
         EXPECT_EQ(allocator_->availableBlocksNum(), 5);
@@ -298,7 +300,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseRefere
     // reuse 4 blocks but allocate 5 new blocks, exceed reserved blocks
     {
         auto batch_resource = createBatchKVCacheResource(/*batch_size=*/1, config);
-        batch_resource->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103, 300, 301, 302, 303});
+        batch_resource->setBatchCacheKeys(0, "default", CacheKeysType{100, 101, 102, 103, 300, 301, 302, 303});
 
         auto       token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/32, /*seq_size_per_block=*/4);
         MallocInfo malloc_info{batch_resource, token_ids};
@@ -330,7 +332,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, MallocMultipleBatches) {
     for (int i = 0; i < batch_size; ++i) {
         EXPECT_EQ(batch_resource->blocksNum(i, "default"), 3);
     }
-    EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 6);  // 2 shared + 3 batches * 1 blocks + 1 reserved
+    EXPECT_EQ(allocator_->freeBlocksNum(),
+              config.blockNumForGroup("default") - 6);  // 2 shared + 3 batches * 1 blocks + 1 reserved
 }
 
 // TEST_F(HybridPoolKVCacheAllocatorTest, MallocWithInsufficientBlocks) {
@@ -384,7 +387,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, FreeMultipleBatches) {
 
     FreeInfo free_info{batch_resource, complete_token_ids};
     allocator_->free(free_info);
-    EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);  // reserve 1 block
+    EXPECT_EQ(allocator_->freeBlocksNum(), config.blockNumForGroup("default") - 1);  // reserve 1 block
 }
 
 // Test malloc free cycle
@@ -405,7 +408,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, MallocFreeCycle) {
         FreeInfo free_info{batch_resource, complete_token_ids};
         allocator_->free(free_info);
 
-        EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);  // reserve 1 block
+        EXPECT_EQ(allocator_->freeBlocksNum(), config.blockNumForGroup("default") - 1);  // reserve 1 block
     }
 }
 
@@ -466,18 +469,18 @@ TEST_F(HybridPoolKVCacheAllocatorTest, PrefixReuseDisabledSkipsMatchAndInsert) {
     ASSERT_FALSE(shared_cache->empty());
 
     auto hit_resource = createBatchKVCacheResource(/*batch_size=*/1, config);
-    hit_resource->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103, 200});
+    hit_resource->setBatchCacheKeys(0, "default", CacheKeysType{100, 101, 102, 103, 200});
     auto hit_tokens = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/20, /*seq_size_per_block=*/4);
 
     MallocInfo hit_malloc_info{hit_resource, hit_tokens};
     hit_malloc_info.enable_device_cache = true;
     auto hit_result                     = allocator_->malloc(hit_malloc_info);
     ASSERT_TRUE(hit_result.success);
-    EXPECT_EQ(hit_result.reuse_len, 0);
-    EXPECT_EQ(hit_resource->cacheResource(0).reuseBlockNum(), 0u);
+    EXPECT_EQ(hit_result.reuse_tokens, 0);
+    EXPECT_EQ(hit_resource->cacheResource(0).reuseTokenNum(), 0u);
 
     auto insert_resource = createBatchKVCacheResource(/*batch_size=*/1, config);
-    insert_resource->setBatchCacheKeys(0, CacheKeysType{300, 301});
+    insert_resource->setBatchCacheKeys(0, "default", CacheKeysType{300, 301});
     auto insert_tokens = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/8, /*seq_size_per_block=*/4);
 
     MallocInfo insert_malloc_info{insert_resource, insert_tokens};
@@ -862,19 +865,19 @@ TEST_F(HybridPoolKVCacheAllocatorTest, BlockBatchCopyCopiesCompleteSparseIndexer
                                                           parallelism_config,
                                                           /*is_mtp=*/false,
                                                           /*gen_num_per_cycle=*/0);
-    config.finalizeBlockNums(/*global_block_num=*/4, RuntimeConfig{});
+    applyUniformTestBlockCount(config, 4);
 
     ASSERT_TRUE(config.is_sparse);
-    ASSERT_GT(config.kv_scale_stride_bytes, 0u);
-    ASSERT_EQ(config.kv_scale_stride_bytes, config.kvScaleStrideBytesForGroup("default"));
+    ASSERT_GT(config.kvScaleStrideBytesForGroup("default"), 0u);
 
     allocator_ = std::make_shared<HybridPoolKVCacheAllocator>(config, AllocationType::HOST);
     ASSERT_TRUE(allocator_->init());
 
-    const auto stride   = config.kv_scale_stride_bytes;
-    auto       snapshot = [&]() {
-        std::vector<std::vector<uint8_t>> blocks(config.block_num, std::vector<uint8_t>(stride));
-        for (uint32_t block = 0; block < config.block_num; ++block) {
+    const auto block_num = config.blockNumForGroup("default");
+    const auto stride    = config.kvScaleStrideBytesForGroup("default");
+    auto       snapshot  = [&]() {
+        std::vector<std::vector<uint8_t>> blocks(block_num, std::vector<uint8_t>(stride));
+        for (uint32_t block = 0; block < block_num; ++block) {
             auto addr = allocator_->convertIndexToAddr(/*layer_id=*/0, "default", static_cast<int>(block));
             EXPECT_NE(addr.kv_scale_addr, nullptr);
             memcpy(blocks[block].data(), addr.kv_scale_addr, stride);
@@ -882,14 +885,14 @@ TEST_F(HybridPoolKVCacheAllocatorTest, BlockBatchCopyCopiesCompleteSparseIndexer
         return blocks;
     };
     auto verify = [&](const std::vector<std::vector<uint8_t>>& expected) {
-        for (uint32_t block = 0; block < config.block_num; ++block) {
+        for (uint32_t block = 0; block < block_num; ++block) {
             auto addr = allocator_->convertIndexToAddr(/*layer_id=*/0, "default", static_cast<int>(block));
             EXPECT_EQ(memcmp(addr.kv_scale_addr, expected[block].data(), stride), 0)
                 << "sparse indexer mismatch at block " << block;
         }
     };
 
-    for (uint32_t block = 0; block < config.block_num; ++block) {
+    for (uint32_t block = 0; block < block_num; ++block) {
         auto  addr = allocator_->convertIndexToAddr(/*layer_id=*/0, "default", static_cast<int>(block));
         auto* data = static_cast<uint8_t*>(addr.kv_scale_addr);
         ASSERT_NE(data, nullptr);
@@ -907,7 +910,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, BlockBatchCopyCopiesCompleteSparseIndexer
     after_single[1]   = initial[0];
     verify(after_single);
 
-    const int last_block = static_cast<int>(config.block_num - 1);
+    const int last_block = static_cast<int>(block_num - 1);
     EXPECT_NO_THROW(allocator_->blockBatchCopy({GroupBlockIdPair{"default", 1, last_block}}));
     auto after_last        = after_single;
     after_last[last_block] = after_single[1];
@@ -1020,7 +1023,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, FreeBlocksNums) {
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     allocator_->init();
 
-    EXPECT_EQ(allocator_->freeBlocksNum(), config.block_num - 1);  // reserve 1 block
+    EXPECT_EQ(allocator_->freeBlocksNum(), config.blockNumForGroup("default") - 1);  // reserve 1 block
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, AvailableBlocksNums) {
@@ -1028,7 +1031,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, AvailableBlocksNums) {
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     allocator_->init();
 
-    EXPECT_EQ(allocator_->availableBlocksNum(), config.block_num - 1);  // reserve 1 block
+    EXPECT_EQ(allocator_->availableBlocksNum(), config.blockNumForGroup("default") - 1);  // reserve 1 block
 }
 
 TEST_F(HybridPoolKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly) {
@@ -1047,15 +1050,17 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IncrKVCacheRefReferencesMatchedBlocksOnly
     KVCacheResource resource;
     resource.initGroups(config.topologyPtr());
 
-    resource.cacheKeys() = CacheKeysType{100, 101, 102, 103};
+    resource.cacheKeys("default") = CacheKeysType{100, 101, 102, 103};
     resource.mutableBlockIds("default").assign(BlockIndicesType{blocks[0], blocks[1], 0, blocks[2]});
-    resource.setDeviceReuseBlockNum(3);
+    std::vector<int32_t> prefix_tokens(33, 1);
+    resource.requestPrefix().rebuild(prefix_tokens.data(), prefix_tokens.size());
+    resource.setDeviceReuseTokenNum(24);
 
     // Reference keys: 101(pos1)->blocks[1], 102(pos2)->0(ignored), 103(pos3)->blocks[2]
-    auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysType{101, 999, 102, 103});
+    auto ref_resource =
+        allocator_->incrKVCacheRef(resource, CacheKeysByGroup{{"default", CacheKeysType{101, 999, 102, 103}}});
     ASSERT_NE(ref_resource, nullptr);
-    // Validate: incrKVCacheRef propagates reuseBlockNum to returned resource.
-    EXPECT_EQ(ref_resource->reuseBlockNum(), resource.reuseBlockNum());
+    EXPECT_EQ(ref_resource->reuseTokenNum(), resource.reuseTokenNum());
 
     block_pool->requestFree(blocks);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);  // blocks[1] & blocks[2] are still referenced
@@ -1079,16 +1084,26 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IncrKVCacheRefPreservesConnectorDummyTail
 
     KVCacheResource resource;
     resource.initGroups(config.topologyPtr());
-    resource.cacheKeys() = CacheKeysType{101, 103, 999};
-    resource.rebuildLinearBlockDependencies();
-    resource.setLastBlockAligned(false);
+    resource.cacheKeys("default") = CacheKeysType{101, 103, 999};
+    resource.rebuildLinearBlockDependencies("default");
+    resource.setLastBlockAligned("default", false);
     resource.mutableBlockIds("default").assign(BlockIndicesType{blocks[0], blocks[1]});
+    std::vector<int32_t> tokens(24);
+    std::iota(tokens.begin(), tokens.end(), 1);
+    resource.requestPrefix().rebuild(tokens.data(), tokens.size());
+    resource.setDeviceReuseTokenNum(8);
+    resource.setMemoryReuseTokenNum(8);
 
-    auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysType{101, 103, 999}, /*is_connector=*/true);
+    auto ref_resource = allocator_->incrKVCacheRef(
+        resource, CacheKeysByGroup{{"default", CacheKeysType{101, 103, 999}}}, /*is_connector=*/true);
     ASSERT_NE(ref_resource, nullptr);
-    EXPECT_FALSE(ref_resource->lastBlockAligned());
-    EXPECT_EQ(ref_resource->cacheKeys(), (CacheKeysType{101, 103, 999}));
+    EXPECT_FALSE(ref_resource->lastBlockAligned("default"));
+    EXPECT_EQ(ref_resource->cacheKeys("default"), (CacheKeysType{101, 103, 999}));
     EXPECT_EQ(ref_resource->blocks("default"), (BlockIndicesType{blocks[0], blocks[1], NULL_BLOCK_IDX}));
+    EXPECT_EQ(ref_resource->requestPrefix().keys(), resource.requestPrefix().keys());
+    EXPECT_EQ(ref_resource->requestPrefix().tokenExtent(), resource.requestPrefix().tokenExtent());
+    EXPECT_EQ(ref_resource->requestPrefix().deviceReuseTokens(), 8u);
+    EXPECT_EQ(ref_resource->requestPrefix().memoryReuseTokens(), 8u);
 
     block_pool->requestFree(blocks);
     EXPECT_EQ(allocator_->freeBlocksNum(), total_free_before - 2);
@@ -1112,10 +1127,10 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IncrKVCacheRefEmptyInputNoEffect) {
 
     KVCacheResource resource;
     resource.initGroups(config.topologyPtr());
-    resource.cacheKeys() = CacheKeysType{100, 101};
+    resource.cacheKeys("default") = CacheKeysType{100, 101};
     resource.mutableBlockIds("default").assign(BlockIndicesType{blocks[0], blocks[1]});
 
-    auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysType{});
+    auto ref_resource = allocator_->incrKVCacheRef(resource, CacheKeysByGroup{});
     ASSERT_EQ(ref_resource, nullptr);
 
     block_pool->requestFree(blocks);
@@ -1143,7 +1158,8 @@ TEST_F(HybridPoolKVCacheAllocatorTest, CapacityAndNeedBlocksUseCPVirtualBlockSiz
     allocator_  = std::make_shared<HybridPoolKVCacheAllocator>(config);
     ASSERT_TRUE(allocator_->init());
 
-    allocator_->setCPSlotMapper(std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/8));
+    allocator_->setCPSlotMappers(
+        {{"default", std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/8)}});
 
     EXPECT_EQ(allocator_->maxAvailableTokensNum(), (10u - 1u) * 16u);
     EXPECT_EQ(allocator_->availableTokensNum(), (10u - 1u) * 16u);
@@ -1187,7 +1203,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackWhenInitMallocForCommon
     ASSERT_TRUE(allocator_->init());
 
     auto seed_resource = createBatchKVCacheResource(/*batch_size=*/1, config);
-    seed_resource->setBatchCacheKeys(0, CacheKeysType{100, 101, 102, 103});  // 4 keys for 4 blocks
+    seed_resource->setBatchCacheKeys(0, "default", CacheKeysType{100, 101, 102, 103});  // 4 keys for 4 blocks
     auto seed_token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/16, /*seq_size_per_block=*/4);
 
     const size_t free_before_seed      = allocator_->freeBlocksNum();
@@ -1207,18 +1223,19 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackWhenInitMallocForCommon
     allocator_->free(seed_free_info);
 
     // After free, blocks remain held by resident cache, thus not truly free; but they are "available" to requests.
-    ASSERT_EQ(allocator_->freeBlocksNum(), 1u);
+    ASSERT_EQ(allocator_->freeBlocksNum(), 2u);
     ASSERT_EQ(allocator_->availableBlocksNum(), 5u);
 
     auto batch_resource = createBatchKVCacheResource(/*batch_size=*/2, config);
-    batch_resource->setBatchCacheKeys(0, CacheKeysType{100, 101});  // match_keys -> {100}
-    batch_resource->setBatchCacheKeys(1, CacheKeysType{200, 201});
+    batch_resource->setBatchCacheKeys(0, "default", CacheKeysType{100, 101});  // match_keys -> {100}
+    batch_resource->setBatchCacheKeys(1, "default", CacheKeysType{200, 201});
 
     auto token_ids = createCompleteTokenIds(/*batch_size=*/2, /*seq_length=*/13, /*seq_size_per_block=*/4);
+    batch_resource->cacheResource(0).requestPrefix().rebuild(token_ids->data(0), token_ids->seqLength());
 
     const size_t free_before_fail      = allocator_->freeBlocksNum();
     const size_t available_before_fail = allocator_->availableBlocksNum();
-    ASSERT_EQ(free_before_fail, 1u);
+    ASSERT_EQ(free_before_fail, 2u);
     ASSERT_EQ(available_before_fail, 5u);
 
     MallocInfo malloc_info{batch_resource, token_ids};

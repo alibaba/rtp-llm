@@ -85,11 +85,8 @@ MatchResult FullKVCacheGroup::matchPrefix(const CacheKeysType& cache_keys) const
         if (isNullBlockIdx(block_idx)) {
             break;
         }
-        final_result.reuse_blocks++;
         final_result.block_indices.push_back(block_idx);
     }
-
-    final_result.reuse_length = final_result.reuse_blocks * seqSizePerBlock();
 
     return final_result;
 }

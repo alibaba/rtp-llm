@@ -43,8 +43,6 @@ struct GroupBlockIdPair {
 };
 
 struct MatchResult {
-    size_t           reuse_length = 0;
-    size_t           reuse_blocks = 0;
     BlockIndicesType block_indices;
 };
 
@@ -68,7 +66,7 @@ struct MallocInfo {
 
 struct MallocResult {
     bool success;
-    int  reuse_len;
+    int  reuse_tokens;
 
     int64_t match_cost_time_us = 0;
 };

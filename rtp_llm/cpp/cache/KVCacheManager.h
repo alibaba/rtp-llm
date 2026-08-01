@@ -5,7 +5,9 @@
 #include <functional>
 #include <mutex>
 #include <string>
+#include <string_view>
 #include <thread>
+#include <unordered_map>
 #include <vector>
 
 #include "rtp_llm/cpp/cache/Types.h"
@@ -126,14 +128,16 @@ public:
     }
 
     // Increment KV cache reference count for PD separation (connector refcount)
-    std::shared_ptr<KVCacheResource>
-    incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_connector = true);
+    std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource&  resource,
+                                                    const CacheKeysByGroup& cache_keys_by_group,
+                                                    bool                    is_connector = true);
 
     // CP page-level RR sharding context. Returns nullptr when sharding is not active
     // (single-rank or kv_cache_sharded=false).  Used by connector / cache_store to
     // remap cacheKeys -> last-rank-key namespace.
-    std::shared_ptr<CPSlotMapper> cpSlotMapper() const {
-        return cp_slot_mapper_;
+    std::shared_ptr<CPSlotMapper> cpSlotMapper(std::string_view tag) const {
+        const auto it = cp_slot_mappers_.find(std::string(tag));
+        return it == cp_slot_mappers_.end() ? nullptr : it->second;
     }
 
     // Write one KV block (optionally per-layer) from host/device tensors for test
@@ -180,7 +184,7 @@ private:
     const CacheStoreConfig             cache_store_config_;
     const bool                         use_cuda_malloc_block_pool_;
 
-    std::shared_ptr<CPSlotMapper> cp_slot_mapper_;
+    std::unordered_map<std::string, std::shared_ptr<CPSlotMapper>> cp_slot_mappers_;
 
     std::atomic<bool> stop_{false};
     std::thread       metrics_reporter_thread_;

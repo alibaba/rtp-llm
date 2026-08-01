@@ -54,16 +54,18 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
         if (metrics_reporter_ && malloc_info.enable_device_cache) {
             int64_t device_input_length = 0;
             if (malloc_info.batch_kv_cache_resource) {
-                const auto& cache_keys      = malloc_info.batch_kv_cache_resource->cacheKeys(0);
-                size_t      match_keys_size = cache_keys.size();
-                device_input_length         = static_cast<int64_t>(match_keys_size) * config_.seq_size_per_block;
+                for (const auto& group : config_.topology().groups()) {
+                    const auto key_count = malloc_info.batch_kv_cache_resource->cacheKeys(0, group.tag).size();
+                    device_input_length =
+                        std::max(device_input_length, static_cast<int64_t>(key_count * group.seq_size_per_block));
+                }
             }
 
             if (device_input_length > 0) {
                 RtpLLMDeviceCacheReuseMetricsCollector collector;
                 collector.match_cost_time_us    = init_result.match_cost_time_us;
                 collector.device_input_length   = device_input_length;
-                collector.device_reuse_length   = init_result.reuse_len;
+                collector.device_reuse_length   = init_result.reuse_tokens;
                 collector.device_cache_hit_rate = static_cast<float>(static_cast<int64_t>(collector.device_reuse_length)
                                                                      * 100 / collector.device_input_length);
                 kmonitor::MetricsTags tags;
@@ -119,10 +121,18 @@ int KVCacheAllocator::estimateBatchPeakNeedBlocks(const BatchKVCacheResourcePtr&
     const int per_sequence_growth = estimatePeakNeedBlocks(
         batch_kv_cache_resource->cacheResource(0), seq_len, remaining_tokens, reserve_step, enable_reuse_cache);
 
-    // Full blocks remain shared when the batch expands, but every additional sequence needs a physical copy of the
-    // current partial tail before it can diverge.
+    // updateKVBlock(copy_last_block=true) replaces the last block independently
+    // for every non-empty tagged group on each forked sequence.
     const int expanded_sequences = target_width - current_batch_size;
-    const int tail_copy_blocks   = expanded_sequences > 0 && seq_len % seqSizePerBlock() != 0 ? expanded_sequences : 0;
+    int       copied_group_count = 0;
+    if (expanded_sequences > 0 && seq_len % seqSizePerBlock() != 0) {
+        for (const auto& entry : batch_kv_cache_resource->cacheResource(0).groupResources()) {
+            if (!entry.block_ids->blocks().empty()) {
+                ++copied_group_count;
+            }
+        }
+    }
+    const int tail_copy_blocks = expanded_sequences * copied_group_count;
     return target_width * per_sequence_growth + tail_copy_blocks;
 }
 
@@ -241,41 +251,39 @@ BatchKVCacheResourcePtr KVCacheAllocator::popBlocksFromCache(size_t min_blocks_t
     auto batch_resource = std::make_shared<BatchKVCacheResource>();
     batch_resource->resetBatchSize(1);
     batch_resource->initGroups(config_.topologyPtr());
-    batch_resource->setLastBlockAligned(true);
+    for (const auto& group : config_.topology().groups()) {
+        batch_resource->setLastBlockAligned(group.tag, true);
+    }
 
     for (const auto& group : config_.topology().groups()) {
-        batch_resource->mutableBlockIds(0, group.tag).resize(evict_result.evicted_keys.size(), NULL_BLOCK_IDX);
-    }
-
-    CacheKeysType         evicted_keys;
-    BlockDependenciesType evicted_dependencies;
-    evicted_keys.reserve(evict_result.evicted_keys.size());
-    evicted_dependencies.reserve(evict_result.evicted_keys.size());
-    for (size_t evicted_idx = 0; evicted_idx < evict_result.evicted_keys.size(); ++evicted_idx) {
-        const auto  cache_key = evict_result.evicted_keys[evicted_idx];
-        const auto& blocks    = evict_result.evicted_blocks_by_group.at(cache_key);
-        evicted_keys.push_back(cache_key);
-        auto dep_it = evict_result.evicted_dependencies.find(cache_key);
-        if (dep_it != evict_result.evicted_dependencies.end()) {
-            evicted_dependencies.push_back(dep_it->second);
-        } else {
+        CacheKeysType         group_keys;
+        BlockDependenciesType group_dependencies;
+        auto&                 group_blocks = batch_resource->mutableBlockIds(0, group.tag);
+        for (const auto cache_key : evict_result.evicted_keys) {
+            const auto& evicted_group_blocks = evict_result.evicted_blocks_by_group.at(cache_key);
+            const auto  block_it =
+                std::find_if(evicted_group_blocks.begin(), evicted_group_blocks.end(), [&](const auto& block) {
+                    return block.tag == group.tag && !isNullBlockIdx(block.block_id);
+                });
+            if (block_it == evicted_group_blocks.end()) {
+                continue;
+            }
             BlockDependency dependency;
-            dependency.ordinal = static_cast<uint32_t>(evicted_idx);
-            if (evicted_idx > 0) {
+            dependency.ordinal = static_cast<uint32_t>(group_keys.size());
+            if (!group_keys.empty()) {
                 dependency.has_parent = true;
-                dependency.parent_key = evict_result.evicted_keys[evicted_idx - 1];
+                dependency.parent_key = group_keys.back();
             }
-            evicted_dependencies.push_back(dependency);
+            group_keys.push_back(cache_key);
+            group_dependencies.push_back(dependency);
+            const auto block_pos = group_blocks.blocksNum();
+            group_blocks.resize(block_pos + 1, NULL_BLOCK_IDX);
+            group_blocks.setAt(block_pos, block_it->block_id);
         }
-        for (const auto& block : blocks) {
-            if (!isNullBlockIdx(block.block_id)) {
-                batch_resource->mutableBlockIds(0, block.tag).setAt(evicted_idx, block.block_id);
-            }
-        }
+        batch_resource->cacheResource(0).setCacheKeys(group.tag, std::move(group_keys));
+        batch_resource->cacheResource(0).setBlockDependencies(group.tag, std::move(group_dependencies));
+        batch_resource->cacheResource(0).setCacheKeysAreCpCanonical(group.tag, true);
     }
-    batch_resource->cacheResource(0).setCacheKeys(std::move(evicted_keys));
-    batch_resource->cacheResource(0).setBlockDependencies(std::move(evicted_dependencies));
-    batch_resource->cacheResource(0).setCacheKeysAreCpCanonical(true);
     return batch_resource;
 }
 
@@ -337,6 +345,9 @@ size_t KVCacheAllocator::notInUseBlocksNum() const {
 size_t KVCacheAllocator::availableTokensNum() const {
     size_t min_tokens = std::numeric_limits<size_t>::max();
     for (const auto& group : config_.topology().groups()) {
+        if (group.policy.fixed_block_num > 0) {
+            continue;
+        }
         min_tokens = std::min(
             min_tokens, blockPool(group.tag)->availableBlocksNum() * logicalSeqSizePerBlockForCapacity(group.tag));
     }
@@ -346,6 +357,9 @@ size_t KVCacheAllocator::availableTokensNum() const {
 size_t KVCacheAllocator::totalTokensNum() const {
     size_t min_tokens = std::numeric_limits<size_t>::max();
     for (const auto& group : config_.topology().groups()) {
+        if (group.policy.fixed_block_num > 0) {
+            continue;
+        }
         min_tokens =
             std::min(min_tokens, blockPool(group.tag)->totalBlocksNum() * logicalSeqSizePerBlockForCapacity(group.tag));
     }
@@ -365,33 +379,25 @@ size_t KVCacheAllocator::maxAvailableTokensNum() const {
 }
 
 bool KVCacheAllocator::cpShardThisGroupForCapacity(std::string_view tag) const {
-    return cp_slot_mapper_ && cp_slot_mapper_->isSharded() && cp_slot_mapper_->blockRoundRobinGroup(config_, tag);
+    const auto mapper = cpSlotMapper(tag);
+    return mapper && mapper->isSharded() && mapper->blockRoundRobinGroup(config_, tag);
 }
 
 size_t KVCacheAllocator::logicalSeqSizePerBlockForCapacity(std::string_view tag) const {
-    if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
-        return cp_slot_mapper_->logicalSeqSizePerBlock(config_, tag);
+    const auto mapper = cpSlotMapper(tag);
+    if (mapper && mapper->isSharded()) {
+        return mapper->logicalSeqSizePerBlock(config_, tag);
     }
     return config_.seqSizePerBlockForGroup(tag);
 }
 
 int KVCacheAllocator::cpEffectiveSeqLenForAlloc(std::string_view tag, int seq_len) const {
-    return (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) ?
-               cp_slot_mapper_->effectiveSeqLenForAlloc(config_, tag, seq_len) :
-               seq_len;
+    const auto mapper = cpSlotMapper(tag);
+    return (mapper && mapper->isSharded()) ? mapper->effectiveSeqLenForAlloc(config_, tag, seq_len) : seq_len;
 }
 
-int KVCacheAllocator::deviceCacheMetricTokensPerBlock() const {
-    if (cp_slot_mapper_ && cp_slot_mapper_->isSharded()) {
-        return cp_slot_mapper_->virtualBlockSize();
-    }
-    return seqSizePerBlock();
-}
-
-KVCacheTokenCapacity KVCacheAllocator::tokenCapacity(size_t default_seq_size_per_block) const {
-    const size_t total_blocks     = totalBlocksNum();
-    const size_t available_blocks = availableBlocksNum();
-    return {total_blocks * default_seq_size_per_block, available_blocks * default_seq_size_per_block};
+KVCacheTokenCapacity KVCacheAllocator::tokenCapacity() const {
+    return {totalTokensNum(), availableTokensNum()};
 }
 
 std::vector<KVCachePoolMetricsSnapshot> KVCacheAllocator::poolMetricsSnapshots() const {

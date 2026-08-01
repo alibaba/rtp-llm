@@ -61,6 +61,19 @@ cc_test(
 )
 
 cc_test(
+    name = "request_prefix_control_plane_test",
+    srcs = ["RequestPrefixControlPlaneTest.cc"],
+    copts = test_copts,
+    deps = [
+        ":cache_config_test_utils",
+        "//rtp_llm/cpp/cache:request_prefix_resource",
+        "@com_google_googletest//:gtest",
+        "@com_google_googletest//:gtest_main",
+    ],
+    env = {},
+)
+
+cc_test(
     name = "cache_config_creator_test",
     srcs = ["CacheConfigCreatorTest.cc"],
     copts = test_copts,
@@ -102,6 +115,7 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = [
+        ":cache_config_test_utils",
         "//rtp_llm/cpp/cache:cp_slot_mapper",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
@@ -118,6 +132,7 @@ cc_test(
     copts = test_copts,
     deps = [
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
+        ":cache_config_test_utils",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",
     ],

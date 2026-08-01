@@ -66,7 +66,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, NoCPSharding_ReturnsNullMapper) {
     auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
 
-    EXPECT_EQ(mgr->cpSlotMapper(), nullptr);
+    EXPECT_EQ(mgr->cpSlotMapper("default"), nullptr);
 }
 
 // When tp_size == 1, cpSlotMapper() should return nullptr even if kv_cache_sharded is true.
@@ -83,7 +83,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, SingleRank_ReturnsNullMapper) {
     auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
 
-    EXPECT_EQ(mgr->cpSlotMapper(), nullptr);
+    EXPECT_EQ(mgr->cpSlotMapper("default"), nullptr);
 }
 
 // When kv_cache_sharded is true and tp_size > 1, cpSlotMapper() should return a valid mapper.
@@ -102,7 +102,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_ReturnsValidMapper) {
     auto mgr = std::make_shared<KVCacheManager>(config, /*warmup=*/true, nullptr, KVCacheConfig{}, par);
     ASSERT_TRUE(mgr->init());
 
-    auto mapper = mgr->cpSlotMapper();
+    auto mapper = mgr->cpSlotMapper("default");
     ASSERT_NE(mapper, nullptr);
     EXPECT_TRUE(mapper->isSharded());
     EXPECT_EQ(mapper->cpRank(), 1);
@@ -124,7 +124,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardingEnabled_CacheInfoReportsVirtual
     ASSERT_TRUE(mgr->init());
 
     auto info = mgr->getKVCacheInfo(/*latest_version=*/-1, /*need_cache_keys=*/false);
-    EXPECT_EQ(info.block_size, static_cast<size_t>(seq_size_per_block * par.tp_size));
+    EXPECT_EQ(info.block_size, static_cast<size_t>(seq_size_per_block));
 }
 
 // Partial tails may be allocated as live KV blocks before they become cacheable
@@ -143,9 +143,9 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardedMallocAllowsPartialTailWithoutCa
     auto token_ids = makeTokenIds(1, /*seq_len=*/1, seq_size_per_block);
 
     MallocInfo info{resource, token_ids};
-    auto       cp_mapper = std::make_shared<CPSlotMapper>(0, 2, seq_size_per_block);
-    mgr->cp_slot_mapper_ = cp_mapper;
-    mgr->allocator_->setCPSlotMapper(cp_mapper);
+    auto       cp_mapper  = std::make_shared<CPSlotMapper>(0, 2, seq_size_per_block);
+    mgr->cp_slot_mappers_ = {{"default", cp_mapper}};
+    mgr->allocator_->setCPSlotMappers(mgr->cp_slot_mappers_);
 
     auto result = mgr->malloc(info);
     ASSERT_TRUE(result.success);
@@ -155,7 +155,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, CPShardedMallocAllowsPartialTailWithoutCa
     result = mgr->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(resource->blocksNum(0, "default"), 1);
-    EXPECT_EQ(resource->cacheKeys(0).size(), 0);
+    EXPECT_EQ(resource->cacheKeys(0, "default").size(), 0);
 }
 
 // malloc() should use the manager-level cpSlotMapper.
@@ -248,8 +248,8 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_AllocatorMapperControlsMalloc) {
     // effectiveSeqLenForAlloc(64) = ceil(64/16)*4 = 16 tokens => ceil(16/4) = 4 blocks
 
     MallocInfo info{resource, token_ids};
-    mgr->cp_slot_mapper_ = explicit_mapper;
-    mgr->allocator_->setCPSlotMapper(explicit_mapper);
+    mgr->cp_slot_mappers_ = {{"default", explicit_mapper}};
+    mgr->allocator_->setCPSlotMappers(mgr->cp_slot_mappers_);
     auto result = mgr->malloc(info);
     ASSERT_TRUE(result.success);
 
@@ -302,7 +302,7 @@ TEST_F(KVCacheManagerCPSlotMapperTest, DISABLED_InsertAutoInjectsMapper) {
     // seq_len=16 produces 2 cache keys (each covering 8 tokens).
     // match drops the last key → 1 matched key → reuse_len = 1 * virtual_block_size = 8.
     // The sharded reuse_length adjustment ensures this is 1 * virtual_block_size = 8, not 1 * seq_size_per_block = 4.
-    EXPECT_EQ(result2.reuse_len, seq_size_per_block * par.tp_size);  // = 4 * 2 = 8
+    EXPECT_EQ(result2.reuse_tokens, seq_size_per_block * par.tp_size);  // = 4 * 2 = 8
 }
 
 }  // namespace test

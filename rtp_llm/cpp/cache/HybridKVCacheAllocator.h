@@ -23,9 +23,9 @@ public:
     void free(const FreeInfo& free_info) override;
     void insertIntoCache(const InsertInfo& insert_info) override;
 
-    std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource& kvcache_resource,
-                                                    const CacheKeysType&   cache_keys,
-                                                    bool                   is_connector = false) override;
+    std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource&  kvcache_resource,
+                                                    const CacheKeysByGroup& cache_keys_by_group,
+                                                    bool                    is_connector = false) override;
 
     bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                        const std::vector<int>&        block_src_batch,
@@ -56,9 +56,7 @@ protected:
     void         checkCPShardedMallocResult(const MallocInfo& malloc_info) const override;
     void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override;
 
-    int reuseCache(const CacheKeysType&                 cache_keys,
-                   BatchKVCacheResource&                kv_resource,
-                   const std::shared_ptr<CPSlotMapper>& cp_mapper);
+    int reuseTokens(BatchKVCacheResource& kv_resource, size_t max_reuse_tokens);
 
     virtual void
     referenceBlocksInGroup(std::string_view tag, const BlockIndicesType& blocks, bool is_connector = false) const   = 0;

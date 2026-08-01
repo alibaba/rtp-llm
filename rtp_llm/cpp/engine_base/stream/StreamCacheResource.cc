@@ -371,11 +371,11 @@ absl::Status StreamCacheResource::initKVBlock() {
         return absl::InternalError("malloc failed");
     }
 
-    if (result.reuse_len > 0) {
-        stream_->setReuseLength(result.reuse_len);
-        stream_->setMtpTokenIndex(result.reuse_len);
-        stream_->setInitialReuseLength(result.reuse_len);
-        stream_->setLocalReuseLength(result.reuse_len);
+    if (result.reuse_tokens > 0) {
+        stream_->setReuseLength(result.reuse_tokens);
+        stream_->setMtpTokenIndex(result.reuse_tokens);
+        stream_->setInitialReuseLength(result.reuse_tokens);
+        stream_->setLocalReuseLength(result.reuse_tokens);
     }
     return absl::OkStatus();
 }
@@ -402,11 +402,11 @@ absl::Status StreamCacheResource::incrKVBlock() {
         return absl::InternalError("malloc failed");
     }
 
-    if (result.reuse_len > 0) {
-        stream_->setReuseLength(result.reuse_len);
-        stream_->setMtpTokenIndex(result.reuse_len);
-        stream_->setInitialReuseLength(result.reuse_len);
-        stream_->setLocalReuseLength(result.reuse_len);
+    if (result.reuse_tokens > 0) {
+        stream_->setReuseLength(result.reuse_tokens);
+        stream_->setMtpTokenIndex(result.reuse_tokens);
+        stream_->setInitialReuseLength(result.reuse_tokens);
+        stream_->setLocalReuseLength(result.reuse_tokens);
     }
 
     return absl::OkStatus();
@@ -737,9 +737,12 @@ void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t 
 }
 
 void StreamCacheResource::holdKVCacheForPDSep() {
-    auto&       resource   = batch_kv_cache_resource_->cacheResource(0);
-    const auto& cache_keys = resource.cacheKeys();
-    auto        ref = resource_context_.cache_manager->incrKVCacheRef(resource, cache_keys, /*is_connector=*/true);
+    auto&            resource = batch_kv_cache_resource_->cacheResource(0);
+    CacheKeysByGroup cache_keys_by_group;
+    for (const auto& entry : resource.groupResources()) {
+        cache_keys_by_group.emplace(entry.tag, entry.cache_keys);
+    }
+    auto ref = resource_context_.cache_manager->incrKVCacheRef(resource, cache_keys_by_group, /*is_connector=*/true);
     if (ref) {
         pd_kvcache_ref_ = std::move(ref);
     }
