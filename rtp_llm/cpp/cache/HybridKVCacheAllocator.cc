@@ -249,6 +249,7 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
     }
 
     if (reserve_blocks > 0 && !hasAvailableBlocksForReserve(malloc_info, reserve_blocks)) {
+        logMallocFailure(malloc_info, "init_reserve", 0, -1, false, -1);
         rollbackInitMalloc(*kv_resource, referenced_blocks, {});
         return {false, 0};
     }
@@ -263,8 +264,10 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
                                        config_.group_types[static_cast<size_t>(gid)] :
                                        CacheGroupType::FULL;
         const int  group_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, group_type, common_seq_len);
+        int        need_blocks   = 0;
         if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
-                block_ids_0, group_seq_len, malloc_info.reuse_cache, 0)) {
+                block_ids_0, group_seq_len, malloc_info.reuse_cache, 0, &need_blocks)) {
+            logMallocFailure(malloc_info, "init_group_malloc", 0, gid, false, need_blocks);
             rollbackInitMalloc(*kv_resource, referenced_blocks, original_sizes);
             return {false, 0};
         }
@@ -294,9 +297,10 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
         }
     }
 
-    bool all_success  = true;
-    int  failed_batch = -1;
-    int  failed_group = -1;
+    bool all_success        = true;
+    int  failed_batch       = -1;
+    int  failed_group       = -1;
+    int  failed_need_blocks = -1;
     for (int b = 0; b < batch_size; ++b) {
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
             auto&      block_ids     = kv_resource->mutableBlockIds(b, gid);
@@ -304,11 +308,13 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
                                            config_.group_types[static_cast<size_t>(gid)] :
                                            CacheGroupType::FULL;
             const int  group_seq_len = cpEffectiveSeqLenForGroup(cp_mapper, group_type, raw_seq_len);
+            int        need_blocks   = 0;
             if (!kv_cache_groups_[static_cast<size_t>(gid)]->malloc(
-                    block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step)) {
-                all_success  = false;
-                failed_batch = b;
-                failed_group = gid;
+                    block_ids, group_seq_len, malloc_info.reuse_cache, reserve_step, &need_blocks)) {
+                all_success        = false;
+                failed_batch       = b;
+                failed_group       = gid;
+                failed_need_blocks = need_blocks;
                 break;
             }
         }
@@ -330,6 +336,8 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
         return {true, 0};
     }
 
+    logMallocFailure(
+        malloc_info, "incremental_group_malloc", failed_batch, failed_group, true, failed_need_blocks);
     for (int b = 0; b <= failed_batch && b < batch_size; ++b) {
         for (int gid = 0; gid < kv_resource->groupNums(); ++gid) {
             auto&       block_ids = kv_resource->mutableBlockIds(b, gid);
@@ -355,7 +363,6 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
             block_ids.assign(original);
         }
     }
-    RTP_LLM_LOG_WARNING("Hybrid incrMalloc failed at batch=%d group=%d", failed_batch, failed_group);
     return {false, 0};
 }
 
@@ -633,6 +640,28 @@ bool HybridKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& mall
                          reserve_blocks);
     }
     return accepted;
+}
+
+void HybridKVCacheAllocator::logMallocFailure(const MallocInfo& malloc_info,
+                                              const char*       phase,
+                                              int               failed_batch,
+                                              int               failed_group,
+                                              bool              incremental,
+                                              int               failed_need_blocks) const {
+    if (!malloc_info.verbose) {
+        return;
+    }
+    RTP_LLM_LOG_WARNING("Hybrid malloc failure: error_code=602 request_id=%ld phase=%s failed_batch=%d failed_group=%d "
+                        "incremental=%d failed_need_blocks=%d need_blocks=%d available_blocks=%zu reserve_blocks=%zu",
+                        malloc_info.request_id,
+                        phase,
+                        failed_batch,
+                        failed_group,
+                        incremental,
+                        failed_need_blocks,
+                        getNeedBlocks(malloc_info),
+                        availableBlocksNum(),
+                        reserveBlockNum());
 }
 
 void HybridKVCacheAllocator::rollbackBlockIdsToSize(int gid, BlockIds& block_ids, size_t original_size) {
