@@ -26,6 +26,9 @@ from rtp_llm.ops import SpecialTokens, TaskType
 from rtp_llm.server.misc import format_exception
 from rtp_llm.server.request_headers import extract_request_headers
 from rtp_llm.structure.request_constants import request_id_field_name
+from rtp_llm.telemetry import CURRENT_TRACE_STATE
+from rtp_llm.telemetry import attributes as trace_attrs
+from rtp_llm.telemetry import record_response_attributes, start_server_span
 from rtp_llm.utils.complete_response_async_generator import (
     CompleteResponseAsyncGenerator,
 )
@@ -37,6 +40,13 @@ from rtp_llm.utils.time_util import current_time_ms
 from rtp_llm.utils.util import check_with_info
 
 USAGE_HEADER = "USAGE"
+
+
+def _record_http_status(trace_state, status_code: int) -> None:
+    # Dual-write both semconv generations: platform views disagree on which key
+    # wins, and the HTTP-error counter only reads the legacy http.status_code.
+    trace_state.set_attribute(trace_attrs.HTTP_RESPONSE_STATUS_CODE, status_code)
+    trace_state.set_attribute(trace_attrs.HTTP_STATUS_CODE, status_code)
 
 
 class FrontendServer(object):
@@ -188,6 +198,10 @@ class FrontendServer(object):
         request: Dict[str, Any],
         response: CompleteResponseAsyncGenerator,
     ):
+        # HTTP SERVER span owner for streaming requests: the four exits below
+        # (success / cancel / error / finally) all funnel into the idempotent
+        # finish() (manual instrumentation, no ASGI middleware).
+        trace_state = CURRENT_TRACE_STATE.get()
         is_openai_response = request.get("stream", False)
         response_data_prefix = "data: " if is_openai_response else "data:"
         try:
@@ -200,6 +214,9 @@ class FrontendServer(object):
             await self._collect_complete_response_and_record_access_log(
                 request, response
             )
+            if trace_state is not None:
+                _record_http_status(trace_state, 200)
+                trace_state.finish()
         except asyncio.CancelledError as e:
             try:
                 await response.aclose()
@@ -208,6 +225,11 @@ class FrontendServer(object):
                     "close streaming response after cancellation failed: %s",
                     close_error,
                 )
+            if trace_state is not None:
+                # StreamingResponse headers were already committed as 200 even
+                # though body delivery was cancelled afterwards.
+                _record_http_status(trace_state, 200)
+                trace_state.finish(error=e, error_type="Cancelled")
             self._access_logger.log_exception_access(request, e)
             kmonitor.report(
                 AccMetrics.CANCEL_QPS_METRIC,
@@ -221,6 +243,11 @@ class FrontendServer(object):
             raise
         except BaseException as e:
             # 捕获非Cancel以外所有的异常,所以使用BaseException
+            if trace_state is not None:
+                # SSE headers already went out as 200; the error only reaches
+                # the client inside the stream body, so 200 is the true status.
+                _record_http_status(trace_state, 200)
+                trace_state.finish(error=e)
             format_e = format_exception(e)
             self._access_logger.log_exception_access(request, e, format_e)
             kmonitor.report(
@@ -237,6 +264,9 @@ class FrontendServer(object):
                 format_e, ensure_ascii=False
             ) + "\r\n\r\n"
         finally:
+            if trace_state is not None:
+                # safety net for exits not covered above; idempotent
+                trace_state.finish()
             self._global_controller.decrement()
 
     async def inference(self, req: Union[str, Dict[Any, Any]], raw_request: RawRequest):
@@ -285,6 +315,18 @@ class FrontendServer(object):
             rep = await self._infer_impl(req, raw_request, generate_call)
         except BaseException as e:
             rep = self._handle_exception(req, e)
+            # Finish the span here while the real exception is still in hand:
+            # the caller only sees the swallowed ORJSONResponse and would
+            # otherwise mark a 500 span as OK (OTel semconv: 5xx on SERVER
+            # spans must set status Error).
+            trace_state = CURRENT_TRACE_STATE.get()
+            if trace_state is not None:
+                _record_http_status(trace_state, getattr(rep, "status_code", 500))
+                if isinstance(e, asyncio.CancelledError):
+                    # keep error.type low-cardinality, mirroring stream_response
+                    trace_state.finish(error=e, error_type="Cancelled")
+                else:
+                    trace_state.finish(error=e)
         return rep
 
     async def chat_completion(
@@ -297,6 +339,38 @@ class FrontendServer(object):
             self.server_id,
             sequence,
         )
+
+        # Trace entry point: only chat completions get an HTTP SERVER span.
+        # Returns None when telemetry is disabled; all calls below are no-ops then.
+        loaded_model = (
+            self._openai_endpoint.model_name
+            if self._openai_endpoint is not None
+            else ""
+        ) or self.py_env_configs.model_args.model_type
+        request_model = request.model or loaded_model
+        initial_trace_attributes = {
+            trace_attrs.GEN_AI_SPAN_KIND: "LLM",
+            trace_attrs.GEN_AI_OPERATION_NAME: "chat",
+            trace_attrs.GEN_AI_SYSTEM: "rtp_llm",
+            trace_attrs.LINGJI_FLAG: True,
+            trace_attrs.ACS_ARMS_TENANT_SPAN_POLICY: "mask",
+        }
+        if request_model:
+            initial_trace_attributes[trace_attrs.GEN_AI_REQUEST_MODEL] = str(
+                request_model
+            )
+        trace_state = start_server_span(
+            "POST /v1/chat/completions",
+            raw_request.headers,
+            initial_attributes=initial_trace_attributes,
+        )
+        if trace_state is not None:
+            # `request_id` is the Bailian Unitrace index key: spans without it
+            # are accepted upstream but unsearchable (verified 2026-07-26)
+            trace_state.set_attribute("request_id", str(request_id))
+            trace_state.set_attribute("rtp_llm.request_id", request_id)
+            trace_state.set_attribute(trace_attrs.HTTP_REQUEST_METHOD, "POST")
+            trace_state.set_attribute(trace_attrs.HTTP_METHOD, "POST")
 
         def generate_call():
             assert self._openai_endpoint != None
@@ -319,10 +393,22 @@ class FrontendServer(object):
             request_dict[request_id_field_name] = request_id
             rep = await self._infer_wrap(request_dict, raw_request, generate_call)
         except BaseException as e:
+            if trace_state is not None:
+                # re-raise ends in FastAPI's generic exception handler -> 500
+                _record_http_status(trace_state, 500)
+                trace_state.finish(error=e)
             self._global_controller.decrement()
             raise e
 
         if not isinstance(rep, StreamingResponse):
+            # non-streaming lifecycle ends here; streaming spans are finished
+            # by stream_response's four exits
+            if trace_state is not None:
+                # Swallowed-error spans were already finished (status ERROR)
+                # inside _infer_wrap; these calls are dropped/no-op for them
+                # and only take effect on the success path.
+                _record_http_status(trace_state, getattr(rep, "status_code", 200))
+                trace_state.finish()
             self._global_controller.decrement()
 
         return rep
@@ -417,16 +503,29 @@ class FrontendServer(object):
         return rep
 
     async def _call_generate_with_report(
-        self, generate_call: Callable[[], CompleteResponseAsyncGenerator]
+        self,
+        generate_call: Callable[[], CompleteResponseAsyncGenerator],
+        is_streaming: bool,
     ):
+        # Captured here (request handler context) instead of inside the
+        # generator: StreamingResponse may iterate it from another task whose
+        # contextvars snapshot no longer holds CURRENT_TRACE_STATE.
+        trace_state = CURRENT_TRACE_STATE.get()
+
         async def __gen_response_with_report(start_time: float, response_generator):
             last_iterate_time = current_time_ms()
-            first_token = True
+            first_response = True
             iter_count = 0
             async for response in response_generator:
                 end_time = current_time_ms()
-                if first_token:
-                    first_token = False
+                if first_response:
+                    first_response = False
+                    if trace_state is not None and is_streaming:
+                        # This marks frontend delivery availability. It is not
+                        # the engine TTFT boundary and is intentionally absent
+                        # from non-streaming requests, whose first response is
+                        # already the complete body.
+                        trace_state.add_event(trace_attrs.EVENT_FIRST_RESPONSE_CHUNK)
                     kmonitor.report(
                         GaugeMetrics.RESPONSE_FIRST_TOKEN_RT_METRIC,
                         end_time - last_iterate_time,
@@ -489,6 +588,11 @@ class FrontendServer(object):
             if isinstance(complete_response, BaseModel)
             else complete_response
         )
+        # Single point covering streaming + non-streaming: write request-level
+        # gen_ai.* business attributes onto the HTTP SERVER span from the fully
+        # aggregated response (usage / finish_reason / AuxInfo). No-op when
+        # telemetry is off.
+        record_response_attributes(complete_response)
         self._access_logger.log_success_access(req, complete_response)
 
         return complete_response
@@ -513,7 +617,7 @@ class FrontendServer(object):
         is_streaming = self._frontend_worker.is_streaming(req)
         if await raw_request.is_disconnected():
             raise asyncio.CancelledError("client disconnects")
-        res = await self._call_generate_with_report(generate_call)
+        res = await self._call_generate_with_report(generate_call, is_streaming)
 
         if is_streaming:
             return StreamingResponse(

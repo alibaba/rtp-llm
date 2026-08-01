@@ -681,6 +681,7 @@ class RequestTraceState:
         self._server_context = server_context
         self._finished = False
         self._settled_ok: Optional[bool] = None
+        self._renderer_completed = False
         self._lock = threading.Lock()
 
     @property
@@ -700,6 +701,17 @@ class RequestTraceState:
         """
         with self._lock:
             return self._settled_ok
+
+    @property
+    def renderer_completed(self) -> bool:
+        """Whether the renderer deliberately completed the response stream."""
+        with self._lock:
+            return self._renderer_completed
+
+    def mark_renderer_completed(self) -> None:
+        """Publishes a normal renderer stop before its backend stream teardown."""
+        with self._lock:
+            self._renderer_completed = True
 
     def set_attribute(self, key: str, value: Any) -> None:
         try:

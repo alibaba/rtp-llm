@@ -1,3 +1,4 @@
+import asyncio
 import functools
 import json
 import logging
@@ -26,6 +27,9 @@ from rtp_llm.server.request_headers import (
     extract_correlation_request_id,
     extract_trace_id,
 )
+from rtp_llm.telemetry import CURRENT_TRACE_STATE
+from rtp_llm.telemetry import attributes as trace_attrs
+from rtp_llm.telemetry import start_client_span
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateConfig,
@@ -44,6 +48,118 @@ from rtp_llm.utils.grpc_util import (
 
 MAX_GRPC_TIMEOUT_SECONDS = 3600
 JsonableOption = Optional[Union[str, Dict[str, Any], bool]]
+
+
+def _selected_pd_separation(
+    selected_role: Optional[RoleType], generate_config: GenerateConfig
+) -> Optional[bool]:
+    if selected_role == RoleType.PDFUSION:
+        return False
+    if selected_role != RoleType.PREFILL:
+        return None
+    # Keep this aligned with PrefillRpcServer::GenerateStreamCall. These are
+    # the request fields actually sent to the selected Prefill endpoint, so
+    # the result describes its real PD-vs-local branch rather than process role.
+    return (
+        generate_config.max_new_tokens > 1
+        and generate_config.num_beams <= 1
+        and not generate_config.variable_num_beams
+        and generate_config.num_return_sequences <= 1
+        and generate_config.can_use_pd_separation
+    )
+
+
+def _engine_reported_finished(outputs: Optional[GenerateOutputs]) -> bool:
+    """True when the engine flagged every sub-output of this response as done.
+
+    `finished` comes straight from the engine protobuf (see trans_output), so it
+    is the authoritative "generation is over" signal, unlike the renderer-side
+    finish_reason which can also fire on renderer-side stop-word truncation
+    while the engine keeps generating.
+    """
+    if outputs is None or not outputs.generate_outputs:
+        return False
+    return all(bool(out.finished) for out in outputs.generate_outputs)
+
+
+def _request_completed_normally(trace_state: Any) -> bool:
+    """True when renderer or root state proves normal request completion.
+
+    Used to classify a teardown-time GeneratorExit/CancelledError. The renderer
+    stops iterating as soon as every sequence has a finish_reason, which fires
+    on stop-word truncation too. Context-dependent tokenization can make the
+    renderer match a string stop word that the engine's token-level
+    stop_words_list misses. The renderer publishes that deliberate completion
+    before closing the backend generator. ``settled_ok`` remains a fail-open
+    fallback for non-renderer consumers that close only after the root settles.
+    """
+    if trace_state is None:
+        return False
+    try:
+        return trace_state.renderer_completed is True or trace_state.settled_ok is True
+    except Exception:  # noqa: BLE001 - fail-open
+        return False
+
+
+async def _wait_for_rpc_termination(response_iterator: Any) -> Any:
+    """Waits until grpc.aio has observed the server-side stream termination."""
+    try:
+        code = getattr(response_iterator, "code", None)
+        if code is not None:
+            return await code()
+    except Exception:  # noqa: BLE001 - span cleanup must stay fail-open
+        pass
+    return None
+
+
+def _record_client_rpc_status(client_span: Any, status: Any) -> None:
+    if client_span is None or status is None:
+        return
+    try:
+        value = getattr(status, "name", None)
+        if value:
+            client_span.set_attribute(trace_attrs.RPC_RESPONSE_STATUS_CODE, str(value))
+    except Exception:  # noqa: BLE001 - fail-open
+        pass
+
+
+def _record_client_span_usage(
+    client_span: Any, outputs: Optional[GenerateOutputs]
+) -> None:
+    """Writes the per-hop token attributes on the gRPC CLIENT span.
+
+    The platform top-bar Total tokens only aggregates caller-side spans (it
+    needs a plain client span carrying gen_ai.span.kind=LLM plus total_tokens),
+    so the pair is duplicated here for direct deployments without the gateway.
+    Full five-key set (semconv + legacy aliases, mirroring
+    telemetry::setUsageTokenAttributes): the tokens tooltip reads
+    prompt_tokens/completion_tokens, not total. Fail-open; a span already
+    finished drops these writes.
+    """
+    if client_span is None:
+        return
+    try:
+        generate_outputs = outputs.generate_outputs if outputs is not None else []
+        if not generate_outputs:
+            return
+        aux_infos = [out.aux_info for out in generate_outputs]
+        input_len = aux_infos[0].input_len
+        if (
+            input_len <= 0
+            or any(aux.input_len != input_len for aux in aux_infos)
+            or any(aux.output_len <= 0 for aux in aux_infos)
+        ):
+            return
+        output_len = sum(aux.output_len for aux in aux_infos)
+        client_span.set_attribute("gen_ai.span.kind", "LLM")
+        client_span.set_attribute("gen_ai.usage.input_tokens", input_len)
+        client_span.set_attribute("gen_ai.usage.output_tokens", output_len)
+        client_span.set_attribute("gen_ai.usage.prompt_tokens", input_len)
+        client_span.set_attribute("gen_ai.usage.completion_tokens", output_len)
+        client_span.set_attribute("gen_ai.usage.total_tokens", input_len + output_len)
+    except Exception:  # noqa: BLE001 - fail-open
+        pass
+
 
 class StreamState:
     def __init__(self):
@@ -625,8 +741,10 @@ class ModelRpcClient(object):
             input_py.generate_config.timeout_ms = int(effective_ms)
         input_pb = trans_input(input_py)
         response_iterator = None
+        rpc_status = None
         stream_state = StreamState()
         use_fetch_response = bool(getattr(input_py, "enqueued_by_master", False))
+        selected_role = None
 
         if use_fetch_response:
             address_list = [
@@ -634,6 +752,11 @@ class ModelRpcClient(object):
                 for role_addr in input_py.generate_config.role_addrs
                 if role_addr.role == RoleType.PREFILL and role_addr.ip
             ]
+            if address_list:
+                # FetchResponse targets the Prefill endpoint the master enqueued
+                # on, so the PD attribute follows the same Prefill semantics as
+                # the streaming channel below.
+                selected_role = RoleType.PREFILL
         else:
             address_list = self._addresses
             for role_addr in input_py.generate_config.role_addrs:
@@ -646,6 +769,7 @@ class ModelRpcClient(object):
                 ):
                     if role_addr.ip != "":
                         address_list = [role_addr.ip + ":" + str(role_addr.grpc_port)]
+                        selected_role = role_addr.role
                         break
 
         if not address_list:
@@ -660,12 +784,37 @@ class ModelRpcClient(object):
         stub = None
         stream_done = False
         terminal_seen = False
+
+        trace_state = CURRENT_TRACE_STATE.get()
+        pd_separation = _selected_pd_separation(selected_role, input_py.generate_config)
+        if pd_separation is not None and trace_state is not None:
+            trace_state.set_attribute(trace_attrs.RTP_LLM_PD_SEP, pd_separation)
+
+        # gRPC CLIENT span: child of the HTTP SERVER span
+        # published via CURRENT_TRACE_STATE; W3C traceparent goes into gRPC
+        # metadata. Both are no-ops when telemetry is disabled.
+        client_span, trace_metadata = start_client_span(
+            "rtp_llm.generate_stream_call", target_address
+        )
+        if client_span is not None:
+            # Bailian Unitrace index key (see rtp_llm/telemetry/attributes.py)
+            client_span.set_attribute("request_id", str(input_py.request_id))
+            client_span.set_attribute("rtp_llm.request_id", input_py.request_id)
+        last_output = None
+
         try:
+            logging.debug(f"target_address: {target_address}")
             # Get channel from pool
             channel = await self._channel_pool.get(target_address)
             stub = RpcServiceStub(channel)
 
-            grpc_kwargs = {"timeout": effective_ms / 1000.0} if effective_ms > 0 else {}
+            grpc_kwargs = {}
+            if effective_ms > 0:
+                grpc_kwargs["timeout"] = effective_ms / 1000.0
+            if trace_metadata:
+                # One injection point covers both channels: W3C traceparent
+                # rides gRPC metadata for FetchResponse and GenerateStreamCall.
+                grpc_kwargs["metadata"] = trace_metadata
             if use_fetch_response:
                 response_iterator = stub.FetchResponse(
                     FetchRequestPB(request_id=input_pb.request_id), **grpc_kwargs
@@ -674,21 +823,100 @@ class ModelRpcClient(object):
                 response_iterator = stub.GenerateStreamCall(input_pb, **grpc_kwargs)
             # 调用服务器方法并接收流式响应
             async for response in response_iterator.__aiter__():
-                output = trans_output(input_py, response, stream_state)
+                output_py = trans_output(input_py, response, stream_state)
+                last_output = output_py
                 if use_fetch_response and _is_finished_response(response):
                     terminal_seen = True
-                yield output
+                if _engine_reported_finished(output_py):
+                    # The finished application frame is not the gRPC EOF. If it
+                    # escapes first, an upstream renderer can close this generator
+                    # while the server is still settling the RPC, converting a
+                    # naturally completed call into CANCELLED. grpc.aio receives
+                    # the terminal status independently of the message iterator,
+                    # so wait for that physical boundary before publishing the
+                    # final frame.
+                    rpc_status = await _wait_for_rpc_termination(response_iterator)
+                    # Settle the CLIENT span here, not in ``finally``: consumers
+                    # habitually abandon this generator right after the finished
+                    # frame (the wrapper's async-for exits without aclosing the
+                    # inner generator), so ``finally`` only runs at GC-finalizer
+                    # time -- or never -- and the span would leak unexported.
+                    # ``finish()`` is idempotent with every later settle path.
+                    if client_span is not None:
+                        _record_client_rpc_status(client_span, rpc_status)
+                        _record_client_span_usage(client_span, output_py)
+                        client_span.finish()
+                yield output_py
             stream_done = True
         except grpc.RpcError as e:
+            rpc_status = e.code()
+            if client_span is not None:
+                _record_client_rpc_status(client_span, rpc_status)
+                _record_client_span_usage(client_span, last_output)
+                client_span.finish(error=e, error_type="RpcError")
             if response_iterator:
                 response_iterator.cancel()
-            self._handle_grpc_error(e, f"request: [{input_pb.request_id}]", target_address)
+            self._handle_grpc_error(
+                e, f"request: [{input_pb.request_id}]", target_address
+            )
+        except (asyncio.CancelledError, GeneratorExit) as e:
+            # Client disconnect / stream teardown: these are BaseException
+            # subclasses the `except Exception` below never sees, and the
+            # finally fallback would end the CLIENT span as OK — yielding
+            # contradictory SERVER=Cancelled / CLIENT=OK traces. Cancel the
+            # RPC first, settle the span, then re-raise so the cancellation
+            # keeps propagating.
+            # Which status is truthful cannot be decided from the exception
+            # type: both a real disconnect and the renderer deliberately
+            # closing a completed response arrive here as GeneratorExit. The
+            # renderer milestone distinguishes those paths before root span
+            # settlement; a root already settled OK remains a fallback.
+            engine_finished = _engine_reported_finished(last_output)
+            if response_iterator:
+                if not engine_finished:
+                    response_iterator.cancel()
+                # A CLIENT span covers grpc.aio's terminal RPC state. Engine-finished
+                # streams already waited before exposing their final frame; after
+                # local cancellation, remote handler cleanup can still be asynchronous.
+                if rpc_status is None:
+                    rpc_status = await _wait_for_rpc_termination(response_iterator)
+                _record_client_rpc_status(client_span, rpc_status)
+            if client_span is not None:
+                # Keep usage for both successful cleanup and a genuinely
+                # cancelled stream. The last delivered response is confirmed
+                # work; writing it after finish() would be dropped.
+                _record_client_span_usage(client_span, last_output)
+                if engine_finished or _request_completed_normally(trace_state):
+                    client_span.finish()
+                else:
+                    client_span.finish(error=e, error_type="Cancelled")
+            raise
         except Exception as e:
+            if response_iterator:
+                response_iterator.cancel()
+                if rpc_status is None:
+                    rpc_status = await _wait_for_rpc_termination(response_iterator)
+                _record_client_rpc_status(client_span, rpc_status)
+            if client_span is not None:
+                _record_client_span_usage(client_span, last_output)
+                client_span.finish(error=e)
             logging.error(
                 f"request: [{input_pb.request_id}] rpc to [{target_address}] unknown error: {str(e)}"
             )
             raise e
         finally:
+            if client_span is not None:
+                # Fallback for streams that ended without a finished flag (the
+                # branch above already settled the normal case): non-streaming
+                # merges, engines that close the stream without flagging, and
+                # error paths where the span is already settled and these calls
+                # are dropped.
+                if response_iterator and rpc_status is None:
+                    rpc_status = await _wait_for_rpc_termination(response_iterator)
+                _record_client_rpc_status(client_span, rpc_status)
+                _record_client_span_usage(client_span, last_output)
+                # success/cancel fallback; idempotent with the error paths above
+                client_span.finish()
             should_cancel = not stream_done and not (
                 use_fetch_response and terminal_seen
             )

@@ -2,12 +2,15 @@
 Unit tests for MasterService: VIP discovery and heartbeat probes are mocked.
 """
 
+import asyncio
 import unittest
+from types import SimpleNamespace
 from typing import Dict
 from unittest.mock import MagicMock, patch
 
-from rtp_llm.server.host_service import FlexlbHeartbeatInfo
-from rtp_llm.server.host_service import MasterService
+from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
+from rtp_llm.server.host_service import FlexlbHeartbeatInfo, MasterService
+from rtp_llm.telemetry import attributes as trace_attrs
 from rtp_llm.vipserver.host import Host
 
 
@@ -260,6 +263,42 @@ class TestMasterService(unittest.TestCase):
 
         self.assertNotIn("10.0.0.1:8000", svc.get_host_health_status())
         self.assertIsNone(svc.get_master_addr())
+
+
+class TestBackendRouteTrace(unittest.TestCase):
+    def test_proactive_rejection_finishes_after_all_attributes(self):
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.master_config = SimpleNamespace(master_queue_reject_threshold=-1)
+        visitor.host_service = MagicMock()
+        visitor.host_service.get_queue_length.return_value = 0
+        route_span = MagicMock()
+        request = SimpleNamespace(request_id=123)
+
+        with patch(
+            "rtp_llm.server.backend_rpc_server_visitor.start_internal_span",
+            return_value=route_span,
+        ), patch("rtp_llm.server.backend_rpc_server_visitor.kmonitor.report"):
+            with self.assertRaisesRegex(
+                Exception, "queue length 0 exceeds threshold -1"
+            ):
+                asyncio.run(visitor.route_ips(request))
+
+        route_span.set_attribute.assert_any_call("request_id", "123")
+        route_span.set_attribute.assert_any_call("rtp_llm.request_id", 123)
+        route_span.set_attribute.assert_any_call(
+            trace_attrs.RTP_LLM_ROUTE_QUEUE_LENGTH, 0
+        )
+        route_span.set_attribute.assert_any_call(
+            trace_attrs.RTP_LLM_ROUTE_QUEUE_REJECT_THRESHOLD, -1
+        )
+        route_span.set_attribute.assert_any_call(
+            trace_attrs.RTP_LLM_ROUTE_SOURCE, "none"
+        )
+        route_span.finish.assert_called_once()
+        self.assertEqual(
+            route_span.finish.call_args.kwargs["error_type"], "TrafficLimit"
+        )
+        self.assertEqual(route_span.method_calls[-1][0], "finish")
 
 
 if __name__ == "__main__":
