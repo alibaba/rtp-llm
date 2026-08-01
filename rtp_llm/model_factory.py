@@ -25,6 +25,7 @@ from rtp_llm.config.py_config_modules import (
 from rtp_llm.model_factory_register import _model_factory, ensure_model_registered
 from rtp_llm.ops import ProfilingDebugLoggingConfig, SpeculativeType, VitSeparation
 from rtp_llm.utils.util import check_with_info
+from rtp_llm.utils.model_weight import W
 
 
 class ModelFactory:
@@ -102,6 +103,7 @@ class ModelFactory:
         model_config: ModelConfig,
         propose_model_config: Optional[ModelConfig],
         engine_config: EngineConfig,
+        target_model: Optional[Any] = None,
     ) -> Optional[Any]:
         """Get and create ProposeModel from engine_config and propose_model_config.
 
@@ -151,6 +153,20 @@ class ModelFactory:
             propose_model_config.max_seq_len = model_config.max_seq_len
             propose_model_config.gen_num_per_cycle = model_config.gen_num_per_cycle
 
+            alias_names = ()
+            if (
+                sp_type == SpeculativeType.DSPARK
+                and model_config.model_type == "deepseek_v4"
+                and propose_model_config.model_type == "deepseek_v4_dspark"
+            ):
+                if target_model is None or target_model.weight is None:
+                    raise RuntimeError("DSV4 DSpark shared-weight owner is not loaded")
+                if model_config.vocab_size != propose_model_config.vocab_size:
+                    raise ValueError("DSV4 DSpark cannot alias weights across different vocab sizes")
+                if model_config.hidden_size != propose_model_config.hidden_size:
+                    raise ValueError("DSV4 DSpark cannot alias weights across different hidden sizes")
+                alias_names = (W.embedding, W.lm_head)
+
             gpt_model = model_cls.from_config(
                 model_config=propose_model_config,
                 parallelism_config=engine_config.parallelism_config,
@@ -163,7 +179,16 @@ class ModelFactory:
                 device_resource_config=engine_config.device_resource_config,
                 vit_config=None,  # Propose model doesn't need vit_config
                 merge_lora=False,  # Propose model doesn't need merge_lora
+                weight_alias_owner=target_model if alias_names else None,
+                weight_alias_names=alias_names,
             )
+            for name in alias_names:
+                owner_tensor = target_model.weight.get_global_weight(name)
+                alias_tensor = gpt_model.weight.get_global_weight(name)
+                if alias_tensor is not owner_tensor or alias_tensor.data_ptr() != owner_tensor.data_ptr():
+                    raise RuntimeError(f"DSV4 DSpark global weight alias {name!r} did not preserve storage identity")
+            if alias_names:
+                logging.info("DSV4 DSpark aliases owner weights: %s", alias_names)
             logging.info(f"create propose model {engine_config.sp_config.type}")
             return ProposeModel(sp_type, gen_num_per_circle, gpt_model)
         elif sp_type == SpeculativeType.DETERMINISTIC:
@@ -228,6 +253,7 @@ class ModelFactory:
             model_config=model_config,
             propose_model_config=propose_model_config,
             engine_config=engine_config,
+            target_model=model,
         )
 
         # Create engine using create_engine function (replaces AsyncModel)

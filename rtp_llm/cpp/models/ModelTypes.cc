@@ -64,6 +64,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             0;
     shape_hints_ptr[GptModelInputIndex::needAllLogits]       = inputs.need_all_logits;
     shape_hints_ptr[GptModelInputIndex::needAllHiddenStates] = inputs.need_all_hidden_states;
+    shape_hints_ptr[GptModelInputIndex::needDraftProbs]      = inputs.need_draft_probs;
     shape_hints_ptr[GptModelInputIndex::mtpHiddenStates] =
         inputs.last_hidden_states.defined() ? inputs.last_hidden_states.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::mtpHiddenStatesDtype] =
@@ -117,6 +118,7 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     int32_t*      mm_features_shape_ptr = nullptr;
     inputs.need_all_logits              = shape_hints_ptr[GptModelInputIndex::needAllLogits];
     inputs.need_all_hidden_states       = shape_hints_ptr[GptModelInputIndex::needAllHiddenStates];
+    inputs.need_draft_probs             = shape_hints_ptr[GptModelInputIndex::needDraftProbs];
     inputs.skip_run                     = shape_hints_ptr[GptModelInputIndex::skipRun];
     inputs.is_fake_stream               = shape_hints_ptr[GptModelInputIndex::isFakeStream];
     if (inputs.skip_run) {

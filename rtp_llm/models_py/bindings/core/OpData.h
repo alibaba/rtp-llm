@@ -104,6 +104,11 @@ struct GptModelInputs {
     // CP prefill exit must materialize the full [seq, hidden] all_hidden_states
     // (true) or may gather only the last-token rows lm_head needs (false).
     bool need_all_hidden_states = false;
+    // DSpark proposal tokens are always required, but its corrected softmax
+    // distribution is needed only by probabilistic rejection sampling.
+    // Greedy/top1 sets this false and uses a persistent executor-side dummy
+    // buffer for the legacy rejection-kernel ABI.
+    bool need_draft_probs       = true;
     bool need_moe_gating        = false;
     bool warmup                 = false;
     bool skip_run               = false;

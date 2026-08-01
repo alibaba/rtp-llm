@@ -530,6 +530,31 @@ class DeepSeekV4Model(GptModelBase):
                 return indexer
         return None
 
+    @staticmethod
+    def _resolve_prefill_q_dim(layers, head_dim: int) -> int:
+        """Return the rank-local dense-Q width used by every attention layer.
+
+        ``AttentionFP8.n_heads`` is already TP-local.  The prefill workspace is
+        handed directly to the local ``wq_b`` projection, so sizing it from the
+        checkpoint's global ``V4Args.n_heads`` silently doubles the output
+        storage on TP=2 and makes the projection's local view invalid.
+        """
+        if not layers:
+            raise RuntimeError("cannot size prefill Q workspace without layers")
+        local_heads = {int(layer.attn.n_heads) for layer in layers}
+        if len(local_heads) != 1:
+            raise RuntimeError(
+                "all attention layers must have one rank-local Q-head width; "
+                f"got {sorted(local_heads)}"
+            )
+        local_head_count = local_heads.pop()
+        if local_head_count <= 0 or int(head_dim) <= 0:
+            raise RuntimeError(
+                "prefill Q workspace dimensions must be positive; "
+                f"got heads={local_head_count}, head_dim={head_dim}"
+            )
+        return local_head_count * int(head_dim)
+
     def _bind_runtime_buffers(self, device: torch.device) -> None:
         assert self.v4 is not None
         mtp_hidden = None
@@ -550,7 +575,9 @@ class DeepSeekV4Model(GptModelBase):
         # lifetime. CP gather/restore region is sized only when CP is active.
         cp_size = int(self._prefill_cp_size)
         q_rows = int(self._resolve_prefill_q_token_capacity())
-        q_dim = int(self._v4_args.n_heads) * int(self._v4_args.head_dim)
+        q_dim = self._resolve_prefill_q_dim(
+            self.v4.layers, int(self._v4_args.head_dim)
+        )
         if cp_size > 1:
             full_rows = q_rows * cp_size
             main_w, idx_w = self._resolve_prefill_ws_gather_widths()
@@ -768,7 +795,9 @@ class DeepSeekV4Model(GptModelBase):
 
             if os.environ.get("DSV4_PREWARM_FLASH_MLA_SWA", "1") != "0":
                 try:
-                    from flash_mla import flash_mla_sparse_fwd as _flash_mla_sparse_fwd
+                    from rtp_llm.models_py.modules.dsv4.fp8.attention import (
+                        _sparse_prefill_fwd,
+                    )
 
                     _swa_attn = self.v4.layers[0].attn
                     _H_swa = int(_swa_attn.n_heads)
@@ -801,7 +830,7 @@ class DeepSeekV4Model(GptModelBase):
                     _topk_len_swa = _torch.tensor(
                         [_first_topk_len_swa, 5], dtype=_torch.int32, device=device_str
                     )
-                    _flash_mla_sparse_fwd(
+                    _sparse_prefill_fwd(
                         q=_q_swa,
                         kv=_kv_swa,
                         indices=_idx_swa,

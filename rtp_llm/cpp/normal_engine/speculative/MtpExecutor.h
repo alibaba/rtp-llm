@@ -142,6 +142,12 @@ protected:
                         std::list<GenerateStreamPtr>&       prefill_streams,
                         std::list<GenerateStreamPtr>&       decode_streams);
 
+    // Phase-1 DSpark proposals are deterministic argmax blocks.  Accepting a
+    // sampling request here would silently use the wrong proposal
+    // distribution in rejection sampling, so reject it before any stream
+    // state is mutated.
+    absl::Status validateDSparkGenerateConfigs(const std::list<GenerateStreamPtr>& streams) const;
+
     // Spec-decode hand-off: when the source model exposes a pre-output-projection
     // residual buffer (DSv4 pre-hc [T, hc*D]), swap it into the C++ hidden-state
     // carrier. The source returns the full buffer; consumers slice as needed.

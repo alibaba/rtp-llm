@@ -72,6 +72,9 @@ from rtp_llm.models_py.modules.dsv4.fp8._swa_cp_byte_sliced import (
     build_cp_byte_sliced_slot_compaction,
 )
 from rtp_llm.models_py.modules.dsv4.fp8.compressor import CompressorFP8, CompressorMeta
+from rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_sparse_attn_decode_op import (
+    flash_mla_padded_heads,
+)
 from rtp_llm.models_py.modules.dsv4.fp8.indexer import IndexerFP8
 from rtp_llm.models_py.modules.dsv4.prefill_workspace import PrefillWorkspace
 from rtp_llm.models_py.modules.dsv4.rope import precompute_freqs_cis
@@ -206,6 +209,101 @@ def _get_cp_post_gather_stream(
 
 def _flat_1d(t: torch.Tensor) -> torch.Tensor:
     return t.reshape(-1).contiguous()
+
+
+_SPARSE_PREFILL_BACKEND = os.environ.get(
+    "DSV4_SPARSE_PREFILL_BACKEND", "flash_mla"
+).lower()
+if _SPARSE_PREFILL_BACKEND not in ("flash_mla", "tilelang"):
+    raise RuntimeError(
+        "DSV4_SPARSE_PREFILL_BACKEND must be flash_mla or tilelang, "
+        f"got {_SPARSE_PREFILL_BACKEND!r}"
+    )
+
+
+def _sparse_prefill_fwd(
+    *,
+    q: torch.Tensor,
+    kv: torch.Tensor,
+    indices: torch.Tensor,
+    sm_scale: float,
+    attn_sink: Optional[torch.Tensor],
+    topk_length: torch.Tensor,
+) -> Tuple[torch.Tensor, Optional[torch.Tensor], Optional[torch.Tensor]]:
+    """Run sparse prefill while preserving the TP-local head contract.
+
+    FlashMLA accepts 64 or 128 query heads.  As in vLLM's DeepSeek-V4
+    implementation, a smaller TP-local head count is padded to the next
+    supported width, the dummy sinks are set to ``-inf``, and the dummy output
+    heads are sliced away.  Query heads are independent, so the real-head
+    result is unchanged.  ``DSV4_SPARSE_PREFILL_BACKEND=tilelang`` remains an
+    explicit diagnostic fallback; it is not the production default.
+    """
+    local_heads = int(q.size(1))
+    if _SPARSE_PREFILL_BACKEND == "flash_mla":
+        padded_heads = flash_mla_padded_heads(local_heads)
+        q_padded = q
+        sink_padded = attn_sink
+        if local_heads != padded_heads:
+            q_padded = F.pad(q, (0, 0, 0, padded_heads - local_heads), value=0.0)
+            if attn_sink is not None:
+                sink_padded = F.pad(
+                    attn_sink,
+                    (0, padded_heads - local_heads),
+                    value=-float("inf"),
+                )
+
+        from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
+
+        output, softmax_lse, aux = flash_mla_sparse_fwd(
+            q=q_padded,
+            kv=kv,
+            indices=indices,
+            sm_scale=sm_scale,
+            attn_sink=sink_padded,
+            topk_length=topk_length,
+        )
+        output = output[:, :local_heads, :]
+        if local_heads != padded_heads:
+            # Slicing the real heads out of a padded FlashMLA result retains
+            # the padded head stride.  The fused inverse-RoPE/output-projection
+            # kernel consumes a dense [T,H,D] tensor and deliberately rejects
+            # such strided views.  Materialize only on the TP layouts that
+            # actually needed padding; the native 64/128-head path stays a
+            # zero-copy hot path.
+            output = output.contiguous()
+        return output, softmax_lse, aux
+
+    if attn_sink is None:
+        raise RuntimeError(
+            "TileLang sparse prefill fallback requires attn_sink; "
+            f"unsupported flat partial-attention shape h_q={local_heads}"
+        )
+    if q.dim() != 3 or kv.dim() != 3 or kv.size(1) != 1:
+        raise RuntimeError(
+            "TileLang sparse prefill expects q=[T,H,D], kv=[N,1,D], got "
+            f"q={tuple(q.shape)}, kv={tuple(kv.shape)}"
+        )
+
+    from rtp_llm.models_py.modules.dsv4 import tilelang_kernels
+
+    flat_indices = indices.squeeze(1)
+    index_columns = torch.arange(
+        flat_indices.size(1), dtype=topk_length.dtype, device=flat_indices.device
+    )
+    flat_indices = torch.where(
+        index_columns.unsqueeze(0) < topk_length.reshape(-1, 1),
+        flat_indices,
+        -1,
+    )
+    output = tilelang_kernels.sparse_attn(
+        q.unsqueeze(0),
+        kv.squeeze(1).unsqueeze(0),
+        attn_sink,
+        flat_indices.unsqueeze(0),
+        sm_scale,
+    ).squeeze(0)
+    return output, None, None
 
 
 def _build_suffix_pool_slot_mapping(
@@ -3093,8 +3191,6 @@ class AttentionFP8(nn.Module):
         ``arange(N_max)`` per token) is used instead.
         """
         assert qkv.q is not None, "_attn_via_workspace: prefill Q not materialized"
-        from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
-
         from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, HCA_KV, SWA_KV
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as _swa_dq
         from rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton import (
@@ -3429,7 +3525,7 @@ class AttentionFP8(nn.Module):
                 with record_function_range(
                     "dsv4.fp8.attn.workspace.flash_mla_sparse_fwd"
                 ):
-                    o_part, _, _ = flash_mla_sparse_fwd(
+                    o_part, _, _ = _sparse_prefill_fwd(
                         q=qkv.q,
                         kv=kv_view,
                         indices=indices_3d,
@@ -3450,7 +3546,7 @@ class AttentionFP8(nn.Module):
                     with record_function_range(
                         "dsv4.fp8.attn.workspace.flash_mla_sparse_fwd"
                     ):
-                        o_part, _, _ = flash_mla_sparse_fwd(
+                        o_part, _, _ = _sparse_prefill_fwd(
                             q=qkv.q[start:end],
                             kv=kv_view,
                             indices=indices_3d[start:end],
@@ -5281,8 +5377,6 @@ class AttentionFP8(nn.Module):
         assert (
             qkv.q is not None
         ), "_attn_fp8_swa_via_kv_full: prefill Q not materialized"
-        from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
-
         meta = common.swa_meta
         assert meta is not None and meta.topk_length_kv_full is not None, (
             "FP8 SWA prefill requires common.swa_meta.topk_length_kv_full; "
@@ -5311,7 +5405,7 @@ class AttentionFP8(nn.Module):
         indices = ti.unsqueeze(1).to(torch.int32)
 
         with record_function_range("dsv4.fp8.attn.swa.flash_mla_kv_full"):
-            o3, _, _ = flash_mla_sparse_fwd(
+            o3, _, _ = _sparse_prefill_fwd(
                 q=qkv.q,
                 kv=qkv.kv_full.unsqueeze(1),
                 indices=indices,
@@ -5345,8 +5439,6 @@ class AttentionFP8(nn.Module):
 
         """
         assert qkv.q is not None, "_attn_fp8_swa_via_concat: prefill Q not materialized"
-        from flash_mla import flash_mla_sparse_fwd  # type: ignore[import-not-found]
-
         from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
         from rtp_llm.models_py.modules.dsv4.fp8 import _swa_dequant_triton as _swa_dq
 
@@ -5427,7 +5519,7 @@ class AttentionFP8(nn.Module):
 
         # 3. flash_mla_sparse_fwd over the [B*M] flat KV view.
         with record_function_range("dsv4.fp8.attn.swa_concat.flash_mla"):
-            o3, _, _ = flash_mla_sparse_fwd(
+            o3, _, _ = _sparse_prefill_fwd(
                 q=qkv.q,
                 kv=workspace.view(B * meta.M, 1, D),
                 indices=meta.combined_indices.unsqueeze(1),

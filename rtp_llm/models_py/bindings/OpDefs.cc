@@ -211,7 +211,10 @@ void registerPyOpDefs(pybind11::module& m) {
                        "Optional int32 [batch] dspark feature-injection window lengths")
         .def_readwrite("dspark_ctx_starts",
                        &PyModelInputs::dspark_ctx_starts,
-                       "Optional int32 [batch] dspark feature-injection window start positions");
+                       "Optional int32 [batch] dspark feature-injection window start positions")
+        .def_readwrite("need_draft_probs",
+                       &PyModelInputs::need_draft_probs,
+                       "Whether DSpark must materialize corrected proposal probabilities");
 
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")

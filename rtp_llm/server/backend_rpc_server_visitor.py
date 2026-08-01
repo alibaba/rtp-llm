@@ -12,7 +12,12 @@ from rtp_llm.config.model_config import ModelConfig as PyModelConfig
 from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
-from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cache_keys
+from rtp_llm.ops import (
+    SpeculativeExecutionConfig,
+    SpeculativeType,
+    VitSeparation,
+    get_block_cache_keys,
+)
 from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
 from rtp_llm.server.host_service import HostService, HostServiceArgs
 from rtp_llm.server.master_client import FlexlbResponse, MasterClient
@@ -390,6 +395,20 @@ class BackendRPCServerVisitor:
             return
         if input.generate_config.force_disable_sp_run:
             return
+
+        if self.sp_config.type == SpeculativeType.DSPARK:
+            top_k = input.generate_config.top_k
+            is_top1 = (
+                bool(top_k) and all(value == 1 for value in top_k)
+                if isinstance(top_k, list)
+                else top_k == 1
+            )
+            if not is_top1:
+                raise FtRuntimeException(
+                    ExceptionType.UNSUPPORTED_OPERATION,
+                    "DSpark phase-1 supports only greedy/top1 generation; "
+                    "probabilistic sampling is not implemented",
+                )
 
         # speculative decoding does not support batched input
         if len(input.token_ids.shape) == 2 and input.token_ids.size(0) != 1:

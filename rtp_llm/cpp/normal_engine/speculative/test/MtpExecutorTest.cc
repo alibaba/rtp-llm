@@ -1361,4 +1361,43 @@ TEST_F(MtpExecutorTest, testDSparkGrpcGreedyProbsSkipped) {
     }
 }
 
+TEST_F(MtpExecutorTest, testDSparkRejectsNonGreedyBeforeProcessMutation) {
+    MtpExecutorTestConfig test_config;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.dspark_mask_token_id = 3;
+    auto components                  = createMtpExecutorComponents(test_config);
+
+    auto stream = createContextStream(
+        components.model_config, components.runtime_config, components.resource_context, {0, 1});
+    std::list<GenerateStreamPtr> streams{stream};
+
+    stream->generateConfig()->top_k = 1;
+    EXPECT_TRUE(components.executor->validateDSparkGenerateConfigs(streams).ok());
+
+    stream->generateConfig()->top_k = 0;
+    const auto status = components.executor->validateDSparkGenerateConfigs(streams);
+    EXPECT_EQ(status.code(), absl::StatusCode::kInvalidArgument);
+    EXPECT_NE(std::string(status.message()).find("only greedy/top1"), std::string::npos);
+    EXPECT_EQ(stream->getSPOutputBuffer(), nullptr);
+}
+
+TEST_F(MtpExecutorTest, testDSparkGreedyDraftOutputUsesPersistentDummyProbs) {
+    MtpExecutorTestConfig test_config;
+    test_config.gen_num_per_cycle    = 3;
+    test_config.sp_type              = SP_TYPE_DSPARK;
+    test_config.dspark_mask_token_id = 3;
+    auto components                  = createMtpExecutorComponents(test_config);
+
+    GptModelOutputs output;
+    output.draft_tokens = torch::tensor({{1, 2, 3}}, torch::kInt64).to(torch::kCUDA);
+    auto first = components.executor->batch_stream_processor_->buildDSparkDraftSamplerOutput(output);
+    ASSERT_TRUE(first.all_probs.defined());
+    EXPECT_EQ((std::vector<int64_t>{1, 3, static_cast<int64_t>(components.model_config.vocab_size)}),
+              first.all_probs.sizes().vec());
+    EXPECT_EQ(first.all_probs.count_nonzero().item<int64_t>(), 0);
+
+    auto second = components.executor->batch_stream_processor_->buildDSparkDraftSamplerOutput(output);
+    EXPECT_EQ(first.all_probs.data_ptr(), second.all_probs.data_ptr());
+}
+
 }  // namespace rtp_llm

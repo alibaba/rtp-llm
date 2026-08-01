@@ -80,6 +80,7 @@ enum GptModelInputIndex : size_t {
     mmFeaturesDtype,
     needAllLogits,
     needAllHiddenStates,
+    needDraftProbs,
     mtpHiddenStates,
     mtpHiddenStatesDtype,
     skipRun,

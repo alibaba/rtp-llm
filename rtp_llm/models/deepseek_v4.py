@@ -36,7 +36,11 @@ from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.ffn_weight import MoeAtomicWeight, MoeConfig, MoeWeight
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
-from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
+from rtp_llm.model_loader.weight_module import (
+    AtomicWeight,
+    MMAtomicWeight,
+    WeightModule,
+)
 from rtp_llm.models.deepseek_v2 import (
     DeepSeekV2,
     DeepSeekV2Weight,
@@ -48,6 +52,7 @@ from rtp_llm.utils.model_weight import (
     W,
     concat_0,
     identity,
+    sp_id,
     stack_,
     stack_moe_w1,
     yarn_get_mscale,
@@ -428,10 +433,18 @@ class DeepSeekV4Weight(DeepSeekV2Weight):
             for layer_id in range(self._num_layers)
         ]
         weights: List[WeightModule] = [
-            AtomicWeight(
+            # V4's current TP contract keeps the mHC residual and every
+            # block input at the full hidden width; only attention heads and
+            # the vocabulary projection are sharded.  The framework default
+            # for W.embedding column-shards hidden_size, which would feed
+            # [*, hidden/tp] into the first mHC unit.  Replicate embeddings
+            # explicitly until/unless the whole residual stack gains
+            # sequence-parallel hidden sharding.
+            MMAtomicWeight(
                 W.embedding,
                 [CkptWeightInfo("embed.weight", identity)],
                 identity,
+                split_func=sp_id,
             ),
             AtomicWeight(
                 W.final_ln_gamma,
@@ -706,10 +719,11 @@ class DeepSeekV4MtpWeight(DeepSeekV4Weight, DeepSeekV3MtpWeight):
             for layer_id in range(self._num_layers)
         ]
         weights: List[WeightModule] = [
-            AtomicWeight(
+            MMAtomicWeight(
                 W.embedding,
                 [CkptWeightInfo("embed.weight", identity)],
                 identity,
+                split_func=sp_id,
             ),
             AtomicWeight(
                 W.final_ln_gamma,
@@ -834,10 +848,11 @@ class DeepSeekV4DSparkWeight(DeepSeekV4Weight):
             for layer_id in range(self._num_layers)
         ]
         weights: List[WeightModule] = [
-            AtomicWeight(
+            MMAtomicWeight(
                 W.embedding,
                 [CkptWeightInfo("embed.weight", identity)],
                 identity,
+                split_func=sp_id,
             ),
             AtomicWeight(
                 W.lm_head,

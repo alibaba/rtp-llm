@@ -50,10 +50,10 @@ public:
         py_attn_pyobj_method_ = py_instance_.attr("prepare_fmha_impl");
         // The DSpark draft splits its forward: the graph captures the backbone
         // (A+B+C -> head_hidden [., H]) only, and the engine runs the lm_head +
-        // Markov + softmax tail eagerly after replay (draft_tail).  This keeps
-        // the [B, k, V] draft distribution out of the static graph output
-        // buffers -- the vLLM boundary.  The target-verify graph (also is_dspark_)
-        // captures the whole forward as usual.
+        // Markov tail eagerly after replay (draft_tail). Probabilistic callers
+        // may additionally request corrected softmax; phase-1 greedy does not.
+        // This keeps the [B, k, V] draft distribution out of the static graph
+        // output buffers -- the vLLM boundary.
         const bool capture_backbone_only = is_dspark_ && !is_target_verify_;
         py_forward_method_ =
             py_instance_.attr(capture_backbone_only ? "forward_backbone" : "forward");

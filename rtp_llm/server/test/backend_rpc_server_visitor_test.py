@@ -1,10 +1,12 @@
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.cache_key_routing import route_cache_keys_for_page_rr
 from rtp_llm.server.master_client import FlexlbResponse
+from rtp_llm.ops import SpeculativeType
 
 
 class _FakeTokenIds:
@@ -65,6 +67,45 @@ class BackendRPCServerVisitorRouteCacheKeysTest(unittest.TestCase):
 
         visitor._page_rr_route_cache_keys = True
         self.assertEqual(visitor._cache_key_block_size(), 1024)
+
+
+class BackendRPCServerVisitorDSparkConfigTest(unittest.TestCase):
+    def _visitor(self) -> BackendRPCServerVisitor:
+        visitor = BackendRPCServerVisitor.__new__(BackendRPCServerVisitor)
+        visitor.sp_config = SimpleNamespace(
+            model_type="deepseek_v4_dspark", type=SpeculativeType.DSPARK
+        )
+        return visitor
+
+    @staticmethod
+    def _input(top_k, force_disable_sp_run=False):
+        return SimpleNamespace(
+            token_ids=SimpleNamespace(shape=(3,)),
+            generate_config=SimpleNamespace(
+                top_k=top_k,
+                force_disable_sp_run=force_disable_sp_run,
+                num_return_sequences=1,
+                num_beams=1,
+                return_all_probs=False,
+            ),
+        )
+
+    def test_dspark_accepts_only_top1(self):
+        visitor = self._visitor()
+        visitor.check_sp_supported(self._input(1))
+        visitor.check_sp_supported(self._input([1, 1]))
+
+        for top_k in (0, 2, [1, 2], []):
+            with self.subTest(top_k=top_k):
+                with self.assertRaisesRegex(
+                    FtRuntimeException, "only greedy/top1 generation"
+                ):
+                    visitor.check_sp_supported(self._input(top_k))
+
+    def test_force_disable_sp_keeps_target_sampling_available(self):
+        self._visitor().check_sp_supported(
+            self._input(2, force_disable_sp_run=True)
+        )
 
 
 class BackendRPCServerVisitorRouteIpsTest(unittest.IsolatedAsyncioTestCase):

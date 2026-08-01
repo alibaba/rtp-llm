@@ -10,6 +10,14 @@ py_test(
 )
 
 py_test(
+    name = "sparse_attn_tilelang_equivalence_test",
+    srcs = ["sparse_attn_tilelang_equivalence_test.py"],
+    deps = _DSV4_TEST_DEPS,
+    tags = ["H20"],
+    exec_properties = {"gpu": "H20"},
+)
+
+py_test(
     name = "test_cp_topk_idxs_align",
     srcs = ["test_cp_topk_idxs_align.py"],
     deps = _DSV4_TEST_DEPS,

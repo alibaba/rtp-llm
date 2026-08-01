@@ -67,6 +67,11 @@ class DeepSeekV4DSparkParams:
             raise ValueError(f"invalid dspark_block_size={params.block_size}")
         if params.markov_rank < 1:
             raise ValueError(f"invalid dspark_markov_rank={params.markov_rank}")
+        if params.proposal_type != "greedy":
+            raise ValueError(
+                "DSV4 DSpark currently supports only dspark_proposal_type='greedy'; "
+                f"got {params.proposal_type!r}"
+            )
         if not params.sample_from_anchor:
             raise ValueError("DSV4 checkpoint requires sample_from_anchor=true")
         return params
@@ -358,12 +363,42 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
             tokens[:, step] = previous
         return tokens, corrected
 
+    def _anchor_ids_from_block_inputs(
+        self, input_ids: torch.Tensor, head_hidden: torch.Tensor
+    ) -> torch.Tensor:
+        """Extract one anchor per draft block from a k or k+1 carrier.
+
+        The draft backbone always emits ``B*k`` rows.  Eager calls carry its
+        native ``B*k`` anchor layout, while the CUDA-graph tail may receive the
+        engine's surrounding target-verify ``B*(k+1)`` input object even though
+        replay itself consumed the graph's k-wide static token buffer.  The
+        tail needs only column zero, so derive ``B`` from the authoritative
+        backbone output and accept exactly those two documented carrier widths.
+        """
+        width = self.dspark_params.block_width
+        hidden_rows = int(head_hidden.size(0))
+        if hidden_rows % width:
+            raise RuntimeError(
+                f"DSV4 DSpark head rows {hidden_rows} are not divisible by k={width}"
+            )
+        batch = hidden_rows // width
+        carrier_rows = int(input_ids.numel())
+        valid_rows = (batch * width, batch * (width + 1))
+        if carrier_rows not in valid_rows:
+            raise RuntimeError(
+                "DSV4 DSpark anchor carrier must be B*k or B*(k+1); "
+                f"got {carrier_rows} rows for B={batch}, k={width}"
+            )
+        return input_ids.reshape(batch, carrier_rows // batch)[:, 0]
+
     def propose(
         self, inputs: PyModelInputs, fmha_impl: Any = None
     ) -> DeepSeekV4DSparkProposal:
         outputs = self._propose_backbone(inputs, fmha_impl)
         base_logits = self.compute_base_logits(outputs.hidden_states)
-        anchors = inputs.input_ids.view(-1, self.dspark_params.block_width)[:, 0]
+        anchors = self._anchor_ids_from_block_inputs(
+            inputs.input_ids, outputs.hidden_states
+        )
         tokens, corrected = self.markov_correct(base_logits, anchors)
         return DeepSeekV4DSparkProposal(
             tokens, corrected, base_logits, outputs.hidden_states
@@ -378,10 +413,13 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
 
     def draft_tail(self, outputs: PyModelOutputs, inputs: PyModelInputs) -> PyModelOutputs:
         base_logits = self.compute_base_logits(outputs.hidden_states)
-        anchors = inputs.input_ids.view(-1, self.dspark_params.block_width)[:, 0]
+        anchors = self._anchor_ids_from_block_inputs(
+            inputs.input_ids, outputs.hidden_states
+        )
         tokens, corrected = self.markov_correct(base_logits, anchors)
         outputs.draft_tokens = tokens
-        outputs.draft_probs = torch.softmax(corrected, dim=-1)
+        if bool(getattr(inputs, "need_draft_probs", True)):
+            outputs.draft_probs = torch.softmax(corrected, dim=-1)
         return outputs
 
     def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:

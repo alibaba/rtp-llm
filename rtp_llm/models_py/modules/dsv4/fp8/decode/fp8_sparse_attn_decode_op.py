@@ -24,6 +24,7 @@ import logging
 from typing import Any, Optional
 
 import torch
+import torch.nn.functional as F
 
 _FLASH_MLA_AVAILABLE = False
 try:
@@ -38,6 +39,17 @@ try:
             _FLASH_MLA_AVAILABLE = True
 except (ImportError, AttributeError, ValueError) as e:
     logging.warning("[dsv4-fp8] flash_mla wheel unavailable (%s)", e)
+
+
+def flash_mla_padded_heads(local_heads: int) -> int:
+    """Return FlashMLA's supported width for a TP-local Q head count."""
+    local_heads = int(local_heads)
+    if not 0 < local_heads <= 128:
+        raise RuntimeError(
+            "FlashMLA sparse attention supports TP-local h_q <= 128, "
+            f"got h_q={local_heads}"
+        )
+    return 64 if local_heads <= 64 else 128
 
 
 class SparseAttnV4DecodeFp8Op:
@@ -138,6 +150,16 @@ class SparseAttnV4DecodeFp8Op:
         from flash_mla import flash_mla_with_kvcache  # type: ignore[import-not-found]
 
         B, q_len, H, D = q.shape
+        padded_heads = flash_mla_padded_heads(H)
+        q_padded = q
+        sink_padded = attn_sink
+        if H != padded_heads:
+            q_padded = F.pad(q, (0, 0, 0, padded_heads - H), value=0.0)
+            sink_padded = F.pad(
+                attn_sink,
+                (0, padded_heads - H),
+                value=-float("inf"),
+            )
         # FlashMLA expects 4D q ``(batch_size, seq_len_q, num_heads_q, head_dim)``
         # and 3D indices ``(batch_size, seq_len_q, topk)`` per the installed
         # wheel's ``flash_mla_interface.flash_mla_with_kvcache`` docstring.
@@ -174,7 +196,7 @@ class SparseAttnV4DecodeFp8Op:
         # output *= exp(lse) / (exp(lse) + exp(attn_sink)). Mirrors vLLM
         # ``deepseek_v4_attention.py:860`` (both single- and dual-pool calls).
         attn_out, _ = flash_mla_with_kvcache(
-            q=q,
+            q=q_padded,
             k_cache=kv_4d,
             block_table=block_table,
             head_dim_v=self.head_dim,
@@ -185,10 +207,12 @@ class SparseAttnV4DecodeFp8Op:
             indices=topk_3d,
             softmax_scale=self.softmax_scale,
             topk_length=topk_length,
-            attn_sink=attn_sink,
+            attn_sink=sink_padded,
             extra_k_cache=extra_kv_4d,
             extra_indices_in_kvcache=extra_topk_3d,
             extra_topk_length=extra_topk_length,
         )
 
-        return attn_out.view(B, q_len, H, self.head_dim).contiguous()
+        return attn_out.view(B, q_len, padded_heads, self.head_dim)[
+            :, :, :H, :
+        ].contiguous()

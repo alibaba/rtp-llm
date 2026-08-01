@@ -260,10 +260,23 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         throw;
     }
     const auto py_model_class_name = py::str(py_instance.attr("__class__").attr("__name__")).cast<std::string>();
+    const bool is_dspark = params.sp_config.type == SP_TYPE_DSPARK;
+    is_dspark_           = is_dspark;
     if (enable_cuda_graph_ && py_model_class_name == "DeepSeekV4Model" && !params.kv_cache_layer_layout.has_value()) {
         RTP_LLM_LOG_WARNING(
             "Disable CUDA graph for DeepSeekV4 warmup without kv_cache_layer_layout; real executor can capture after "
             "CacheManager is initialized.");
+        enable_cuda_graph_ = false;
+    }
+    if (enable_cuda_graph_ && is_dspark && !params.model_id && py_model_class_name == "DeepSeekV4Model") {
+        // Correctness fallback backed by the P5 target-only probe: DSV4's
+        // existing target CUDA graph is not eager-equivalent under TP2 (it
+        // changes greedy tokens even without a speculative executor). Keep
+        // the DSpark draft-backbone graph enabled, but execute target verify
+        // eagerly until the independent target graph gate is fixed.
+        RTP_LLM_LOG_WARNING(
+            "Disable target CUDA graph for DSpark: target-only TP2 graph/eager equivalence gate is not satisfied; "
+            "the draft CUDA graph remains enabled");
         enable_cuda_graph_ = false;
     }
     if (enable_cuda_graph_) {
@@ -322,8 +335,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
         // eager and graph modes share exactly the same tensor contract.
         // clang-format on
 
-        const bool is_dspark = params.sp_config.type == SP_TYPE_DSPARK;
-        is_dspark_           = is_dspark;
         if (is_prefill_cuda_graph_mode && params.sp_config.type == SP_TYPE_NONE) {
             // for embedding model
             graph_params.num_tokens_per_bs = params.max_seq_len;

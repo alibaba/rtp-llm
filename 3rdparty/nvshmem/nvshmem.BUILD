@@ -24,6 +24,9 @@ cc_library(
         "usr/include/device_host_transport/nvshmem_constants.h",
         "usr/include/nvshmemx.h",
         "usr/include/nvshmem.h",
+        # NVSHMEM 3.4.5 splits the host declarations included by nvshmem.h
+        # into this top-level header.
+        "usr/include/nvshmem_host.h",
     ],
     strip_include_prefix = "usr/include",
     visibility = ["//visibility:public"],
@@ -49,6 +52,7 @@ cc_library(
         "usr/include/non_abi/device/threadgroup/nvshmemi_common_device_defines.cuh",
         "usr/include/nvshmemx.h",
         "usr/include/nvshmem.h",
+        "usr/include/nvshmem_host.h",
     ],
     strip_include_prefix = "usr/include",
     copts = cuda_copts(),

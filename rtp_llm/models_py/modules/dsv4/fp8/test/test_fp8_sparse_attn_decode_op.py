@@ -5,6 +5,7 @@ from __future__ import annotations
 import sys
 import types
 import unittest
+from types import SimpleNamespace
 
 import torch
 
@@ -14,6 +15,40 @@ from rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_sparse_attn_decode_op import 
 
 
 class TestSparseAttnV4DecodeFp8Op(unittest.TestCase):
+    def test_scheduler_uses_same_padded_head_width(self):
+        from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
+            get_or_build_sched_meta,
+        )
+
+        calls = []
+        fake_flash_mla = types.ModuleType("flash_mla")
+
+        def fake_get_mla_metadata(**kwargs):
+            calls.append(kwargs)
+            return object(), None
+
+        fake_flash_mla.get_mla_metadata = fake_get_mla_metadata
+        old_flash_mla = sys.modules.get("flash_mla")
+        sys.modules["flash_mla"] = fake_flash_mla
+        try:
+            metadata = SimpleNamespace(sched_meta_cache={})
+            get_or_build_sched_meta(
+                metadata,
+                batch_size=2,
+                q_len=3,
+                num_heads=32,
+                topk=128,
+            )
+        finally:
+            if old_flash_mla is None:
+                sys.modules.pop("flash_mla", None)
+            else:
+                sys.modules["flash_mla"] = old_flash_mla
+
+        self.assertEqual(len(calls), 1)
+        self.assertEqual(calls[0]["num_heads_q"], 64)
+        self.assertEqual(calls[0]["num_q_tokens_per_head_k"], 2 * 3 * 64)
+
     def test_sparse_indices_drop_dense_cache_metadata(self):
         calls = []
         fake_flash_mla = types.ModuleType("flash_mla")
@@ -72,6 +107,16 @@ class TestSparseAttnV4DecodeFp8Op(unittest.TestCase):
             self.assertIsNone(calls[0]["block_table"])
             self.assertIsNone(calls[0]["cache_seqlens"])
             self.assertTrue(torch.equal(calls[0]["indices"], topk))
+            self.assertEqual(tuple(calls[0]["q"].shape), (2, 3, 64, 512))
+            self.assertTrue(torch.equal(calls[0]["q"][:, :, :4], q))
+            self.assertTrue(
+                torch.equal(
+                    calls[0]["q"][:, :, 4:],
+                    torch.zeros_like(calls[0]["q"][:, :, 4:]),
+                )
+            )
+            self.assertTrue(torch.equal(calls[0]["attn_sink"][:4], attn_sink))
+            self.assertTrue(torch.isneginf(calls[0]["attn_sink"][4:]).all())
         finally:
             if old_flash_mla is None:
                 sys.modules.pop("flash_mla", None)

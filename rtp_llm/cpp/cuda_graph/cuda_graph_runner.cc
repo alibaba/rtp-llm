@@ -272,6 +272,15 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                     0);
             }
         }
+        // prepareInputData refreshes only real DSpark rows.  A larger graph
+        // bucket must not retain an earlier request's injection start in its
+        // padded rows, or replay can write features through stale block-table
+        // entries.
+        auto& ctx_starts_tail = py_model_inputs_.dspark_ctx_starts;
+        if (is_dspark_ && !is_target_verify_ && ctx_starts_tail.defined()) {
+            addCudaGraphPrepareFillRegion(
+                fill_params, ctx_starts_tail, state.current_batch_size, ctx_starts_tail.numel(), 0);
+        }
         if (is_prefill_cuda_graph_mode_) {
             if (state.current_batch_size < max_bs_) {
                 addCudaGraphPrepareFillRegion(fill_params,
@@ -390,9 +399,15 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         // and clear only the selected graph's padded read window.
         if (is_dspark_ && !is_target_verify_
             && py_model_inputs_.attention_inputs.kv_cache_block_id_host.defined()) {
-            copyStridedHost(inputs.attention_inputs.kv_cache_block_id_host,
-                            py_model_inputs_.attention_inputs.kv_cache_block_id_host);
-            zeroStridedHostTail(inputs.attention_inputs.kv_cache_block_id_host,
+            // The engine publishes [group, batch, blocks], while DSpark's
+            // phase-1 injection mirror is the 2-D single-FULL-group table.
+            // Select group 0 before enforcing the same-rank copy contract.
+            torch::Tensor logical_src = inputs.attention_inputs.kv_cache_block_id_host;
+            if (logical_src.defined() && logical_src.dim() == 3) {
+                logical_src = logical_src.select(0, 0);
+            }
+            copyStridedHost(logical_src, py_model_inputs_.attention_inputs.kv_cache_block_id_host);
+            zeroStridedHostTail(logical_src,
                                 py_model_inputs_.attention_inputs.kv_cache_block_id_host,
                                 state.current_real_graph_bs);
         }
@@ -598,7 +613,8 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
     }
 
     if (is_dspark_ && !is_prefill_cuda_graph_mode_) {
-        // The DSpark draft block forward is prefill-shaped (k+1 tokens per
+        // The DSpark draft block forward is prefill-shaped (checkpoint query
+        // width: k for sample-from-anchor, otherwise k+1 tokens per
         // request, prefix>0) yet runs in the decode graph -- like target verify,
         // it must bypass the is_prefill gate below. Only the dense decode-tail
         // (dspark_ctx_starts set) is capturable; prefill seeding uses a ragged
@@ -749,8 +765,9 @@ void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_
     // prefix_lengths [batch_size, int32] is only meaningful for prefill and target-verify.
     // Plain decode must leave it undefined.
     //
-    // The DSpark draft's block forward is prefill-shaped (num_tokens_per_bs = k+1
-    // query tokens over a committed prefix) yet runs in the decode graph, exactly
+    // The DSpark draft's block forward is prefill-shaped (num_tokens_per_bs is
+    // the checkpoint query width: k for sample-from-anchor, otherwise k+1)
+    // over a committed prefix, yet runs in the decode graph, exactly
     // like target verify. Its RoPE positions are prefix + [0, num_tokens_per_bs);
     // with prefix unset they run off sequence_lengths (~max_seq_len) and the
     // cos/sin-cache index goes out of bounds during capture. Seed the same
@@ -866,7 +883,15 @@ void CudaGraphRunner::initCapture() {
             py::gil_scoped_acquire gil;
             input_hidden_dim = py_instance_.attr("cuda_graph_input_hidden_dim")().cast<int>();
         }
-        inputs.input_hiddens = torch::zeros({max_num_token_, input_hidden_dim}, options_cuda_float_);
+        // DSpark's query and feature-injection widths are deliberately
+        // different for sample-from-anchor checkpoints: the draft queries k
+        // rows, while the target exports k+1 aux rows that must all be
+        // injected.  Keep input_ids/output at B*k, but give input_hiddens its
+        // independent B*(k+1) static capacity.  Eager mode already accepts
+        // this row-count mismatch; the graph input must preserve it too.
+        const int max_input_hidden_rows =
+            (is_dspark_ && !is_target_verify_) ? int(max_bs_) * (sp_steps_ + 1) : max_num_token_;
+        inputs.input_hiddens = torch::zeros({max_input_hidden_rows, input_hidden_dim}, options_cuda_float_);
         // DSpark dense decode-tail injection window base, one per request. The
         // model reads it inside the captured forward to place the k+1-wide
         // feature window; refreshed per replay in prepareInputData. Only the
@@ -1065,8 +1090,14 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
         is_prefill_cuda_graph_mode_ && num_tokens_per_bs_ != max_seq_len_;
     const int token_slice_len =
         draft_prefill_graph_mode ? max_bs_ * num_tokens_per_bs_ : seq_len_or_tokens;
-    inputs.input_ids     = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
-    inputs.input_hiddens = capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, token_slice_len);
+    inputs.input_ids = capture_mem_hold_.py_model_inputs_.input_ids.slice(0, 0, token_slice_len);
+    // A DSpark draft consumes B*(k+1) target aux rows even when its checkpoint
+    // query block is only B*k rows.  Do not trim the independent hidden input
+    // back to the token slice while constructing each graph instance.
+    const int input_hidden_slice_len =
+        (is_dspark_ && !is_target_verify_) ? batch_size * (sp_steps_ + 1) : token_slice_len;
+    inputs.input_hiddens =
+        capture_mem_hold_.py_model_inputs_.input_hiddens.slice(0, 0, input_hidden_slice_len);
     if (is_dspark_ && capture_mem_hold_.py_model_inputs_.dspark_ctx_starts.defined()) {
         inputs.dspark_ctx_starts =
             capture_mem_hold_.py_model_inputs_.dspark_ctx_starts.slice(0, 0, batch_size);

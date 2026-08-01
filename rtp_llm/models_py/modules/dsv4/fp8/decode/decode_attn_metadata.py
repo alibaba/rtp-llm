@@ -286,6 +286,11 @@ def get_or_build_sched_meta(
     replay. See ``opt_flash_mla/design/01_cuda_graph_sched_meta_freeze.md``.
     """
     from flash_mla import get_mla_metadata  # type: ignore[import-not-found]
+    from rtp_llm.models_py.modules.dsv4.fp8.decode.fp8_sparse_attn_decode_op import (
+        flash_mla_padded_heads,
+    )
+
+    num_heads = flash_mla_padded_heads(num_heads)
 
     capturing = False
     try:

@@ -816,6 +816,23 @@ SamplerOutput MtpBatchStreamProcessor::buildGreedySpecSamplerOutput(const torch:
     return sampler_output;
 }
 
+SamplerOutput MtpBatchStreamProcessor::buildDSparkDraftSamplerOutput(const GptModelOutputs& model_output) {
+    RTP_LLM_CHECK_WITH_INFO(model_output.draft_tokens.defined(),
+                            "dspark draft forward did not emit draft_tokens");
+    RTP_LLM_CHECK_WITH_INFO(model_output.draft_tokens.dim() == 2
+                                && model_output.draft_tokens.size(1) == static_cast<int64_t>(propose_step_),
+                            "dspark draft_tokens must be [B, k], got dim=%ld width=%ld (k=%d)",
+                            (long)model_output.draft_tokens.dim(),
+                            model_output.draft_tokens.dim() == 2 ? (long)model_output.draft_tokens.size(1) : -1L,
+                            propose_step_);
+    SamplerOutput output;
+    output.token_ids = model_output.draft_tokens;
+    output.all_probs = model_output.draft_probs.defined() ?
+                           model_output.draft_probs :
+                           dsparkDummyProbs(model_output.draft_tokens.size(0));
+    return output;
+}
+
 void MtpBatchStreamProcessor::updatePrefillPostDSparkDraftModelInput(GptModelInputs&        model_input,
                                                                      const GptModelOutputs& model_output,
                                                                      const SamplerOutput&   sampler_output,
@@ -851,9 +868,10 @@ void MtpBatchStreamProcessor::updatePrefillPostDSparkDraftModelInput(GptModelInp
     model_input.prefix_lengths   = reuse_lengths + suffix_lengths;  // = full prompt length
     model_input.input_lengths    = dsparkQueryLengths(batch_size);
     model_input.sequence_lengths = emptyInt32OnCuda({0});
-    // Draft logits are unused (the proposal comes back as draft_tokens/
-    // draft_probs), so point lm_head at the anchor rows only.
+    // Draft logits are unused (the proposal tokens, and optional probabilities,
+    // come back on the model output), so point lm_head at anchor rows only.
     model_input.lm_output_indexes = dsparkLmIndexes(batch_size);
+    model_input.need_draft_probs  = false;
 }
 
 void MtpBatchStreamProcessor::prepareDSparkVerifyModelInput(const StreamGroups& stream_groups,
@@ -1060,6 +1078,22 @@ void MtpBatchStreamProcessor::updateDecodePostDSparkDraftModelInput(
     // Empty sequence_lengths carries over from setVerifyPairInputs; draft
     // logits are unused, keep lm indexes at the query-block row bases.
     model_input.lm_output_indexes = dsparkLmIndexes((int64_t)batch_size);
+    model_input.need_draft_probs  = false;
+}
+
+void MtpBatchStreamProcessor::prepareDSparkDraftReceiverMetadata(GptModelInputs& model_input, int64_t batch_size) {
+    const int64_t width = dsparkQueryWidth();
+    if (!dspark_combo_cache_.defined() || dspark_combo_cache_.size(0) < batch_size) {
+        // Rank 0 overwrites the complete logical slice through NCCL below, so
+        // the receive-side contents are immaterial.  Reuse the same grow-only
+        // storage as the ordinary anchor+mask builder to keep this allocation
+        // out of the steady-state decode loop.
+        dspark_combo_cache_ = torch::empty({batch_size, width}, cudaInt32Options());
+    }
+    model_input.combo_tokens = dspark_combo_cache_.narrow(0, 0, batch_size).reshape({-1});
+    model_input.input_lengths = dsparkQueryLengths(batch_size);
+    model_input.lm_output_indexes = dsparkLmIndexes(batch_size);
+    model_input.need_draft_probs = false;
 }
 
 void MtpBatchStreamProcessor::updateDecodePostDraftModelInput(

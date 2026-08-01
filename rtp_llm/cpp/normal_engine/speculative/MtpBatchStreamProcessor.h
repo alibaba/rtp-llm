@@ -103,6 +103,11 @@ public:
                                                torch::Tensor&                               hidden_states_d_t,
                                                TensorHolder&                                host_holder);
 
+    // Non-root TP ranks do not run rejection sampling, but NCCL broadcast
+    // requires their destination tensors to already have the same logical
+    // shapes as rank 0's post-rejection draft input.
+    void prepareDSparkDraftReceiverMetadata(GptModelInputs& model_input, int64_t batch_size);
+
     void updateDecodePostDraftModelInput(GptModelInputs&                              model_input,
                                          const GptModelOutputs&                       model_output,
                                          const speculative::SpeculativeSamplerOutput& speculative_sampler_output,
@@ -172,6 +177,7 @@ public:
     // probs stand-ins.
     bool          canUseGreedySpecSamplerFastPath(const std::list<GenerateStreamPtr>& streams) const;
     SamplerOutput buildGreedySpecSamplerOutput(const torch::Tensor& logits, int64_t batch_size);
+    SamplerOutput buildDSparkDraftSamplerOutput(const GptModelOutputs& model_output);
 
 protected:
 

@@ -1225,6 +1225,16 @@ TEST_F(MtpBatchStreamProcessorTest, testDSparkAnchorAsFirstQueryLayout) {
     EXPECT_EQ((vector<int>{4, 4}), toVec<int>(anchor_processor.dsparkDenseCtxLengths(2)));
     EXPECT_EQ((vector<int>{0, 3}), toVec<int>(anchor_processor.dsparkLmIndexes(2)));
 
+    // A non-root rank starts this phase with the target verify rectangle
+    // [B,k+1].  Receiver preparation must establish the rank-0 draft shapes
+    // before NCCL broadcast; broadcast itself does not mutate tensor metadata.
+    GptModelInputs receiver_input;
+    receiver_input.combo_tokens = torch::empty({2 * (k + 1)}, torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA));
+    anchor_processor.prepareDSparkDraftReceiverMetadata(receiver_input, 2);
+    EXPECT_EQ((std::vector<int64_t>{2 * k}), receiver_input.combo_tokens.sizes().vec());
+    EXPECT_EQ((vector<int>{3, 3}), toVec<int>(receiver_input.input_lengths));
+    EXPECT_EQ((vector<int>{0, 3}), toVec<int>(receiver_input.lm_output_indexes));
+
     // The source #1249 DFlash/speculators layout remains 1+k when the
     // checkpoint does not opt into anchor-as-first.
     sp_config.sp_dspark_sample_from_anchor = false;
