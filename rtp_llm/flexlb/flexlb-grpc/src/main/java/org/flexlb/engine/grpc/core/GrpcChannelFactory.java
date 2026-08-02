@@ -4,9 +4,12 @@ import io.grpc.ManagedChannel;
 import io.grpc.internal.GrpcUtil;
 import io.grpc.netty.NettyChannelBuilder;
 import io.netty.buffer.PooledByteBufAllocator;
+import io.netty.channel.Channel;
 import io.netty.channel.ChannelOption;
 import io.netty.channel.EventLoopGroup;
 import io.netty.channel.WriteBufferWaterMark;
+import io.netty.channel.epoll.Epoll;
+import io.netty.channel.epoll.EpollSocketChannel;
 import io.netty.channel.socket.nio.NioSocketChannel;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
@@ -37,7 +40,7 @@ public class GrpcChannelFactory {
     public ManagedChannel create(GrpcTarget target) {
         log.info("Creating gRPC channel: {}", target);
         return NettyChannelBuilder.forAddress(target.host(), target.port())
-                .channelType(NioSocketChannel.class)
+                .channelType(channelType())
                 .withOption(ChannelOption.TCP_NODELAY, true)
                 .withOption(ChannelOption.SO_KEEPALIVE, true)
                 .withOption(ChannelOption.ALLOCATOR, PooledByteBufAllocator.DEFAULT)
@@ -65,5 +68,9 @@ public class GrpcChannelFactory {
                 .proxyDetector(GrpcUtil.NOOP_PROXY_DETECTOR)
                 .disableRetry()
                 .build();
+    }
+
+    private Class<? extends Channel> channelType() {
+        return Epoll.isAvailable() ? EpollSocketChannel.class : NioSocketChannel.class;
     }
 }

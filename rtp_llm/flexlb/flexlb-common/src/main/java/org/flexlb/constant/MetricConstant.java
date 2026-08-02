@@ -91,7 +91,7 @@ public class MetricConstant {
     public static final String ENGINE_BALANCING_THREAD_POOL_INFO = "app.engine.balancing.thread.pool.info";
 
     /**
-     * Load balancing service NioEventLoopGroup status
+     * Load balancing service EventLoopGroup status
      */
     public static final String ENGINE_BALANCING_EVENT_LOOP_GROUP_INFO = "app.engine.balancing.event.loop.group.info";
 
