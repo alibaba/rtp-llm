@@ -5,7 +5,7 @@ from typing_extensions import override
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import GenerateConfig
-from rtp_llm.openai.api_datatype import ChatCompletionRequest
+from rtp_llm.openai.api_datatype import ChatCompletionRequest, DeltaMessage
 from rtp_llm.openai.renderer_factory_register import register_renderer
 from rtp_llm.openai.renderers.custom_renderer import (
     CustomChatRenderer,
@@ -16,11 +16,12 @@ from rtp_llm.openai.renderers.custom_renderer import (
 
 
 class _KimiK3StreamStatus(StreamStatus):
-    """Per-choice state for filtering K3's terminal XTML envelope."""
+    """Per-choice state for parsing K3's generated XTML channels."""
 
     def __init__(self, request: ChatCompletionRequest):
         super().__init__(request)
         self.xtml_pending = ""
+        self.in_reasoning = not request.disable_thinking()
         self.response_closed = False
 
 
@@ -39,50 +40,72 @@ class KimiK3Renderer(CustomChatRenderer):
         self.add_extra_stop_words(["<|end_of_msg|>"])
 
     @staticmethod
-    def _filter_non_thinking_xtml_delta(status: _KimiK3StreamStatus, text: str) -> str:
-        """Remove only a verified terminal ``response`` channel envelope.
+    def _split_marker_prefix(text: str, marker: str) -> tuple[str, str]:
+        """Keep the longest suffix that may be a split XTML marker."""
 
-        K3 emits ``<|close|>response<|sep|><|end_of_msg|>`` after the visible
-        answer.  The EOS token is already removed by the generic stop-word
-        path, but the preceding XTML envelope consists of ordinary output
-        tokens and would otherwise leak into OpenAI ``content``.
+        max_prefix = min(len(text), len(marker) - 1)
+        for length in range(max_prefix, 0, -1):
+            if text.endswith(marker[:length]):
+                return text[:-length], text[-length:]
+        return text, ""
 
-        Buffer from ``<|close|>`` through ``<|sep|>`` so a wrong channel label
-        (for example ``think``) is returned verbatim instead of being hidden.
-        This keeps numerical/protocol failures observable while suppressing
-        only the valid response closure.
+    @classmethod
+    def _parse_xtml_delta(
+        cls, status: _KimiK3StreamStatus, text: str, flush: bool = False
+    ) -> DeltaMessage:
+        """Split K3 reasoning/content channels and remove their XTML envelope.
+
+        In thinking mode the generation prompt has already opened the
+        ``think`` channel. The model then emits this transition before the
+        visible answer::
+
+            <|close|>think<|sep|><|open|>response<|sep|>
+
+        Both thinking and non-thinking modes finish the visible channel with
+        ``<|close|>response<|sep|>``. ``<|end_of_msg|>`` is removed by the
+        generic stop path, but the other XTML tokens are ordinary generated
+        tokens. Parse the exact channel boundaries here so they never leak
+        into OpenAI ``content`` and the reasoning text is exposed through
+        ``reasoning_content``. Partial markers are buffered across streaming
+        chunks.
         """
 
         if status.response_closed:
-            return ""
+            return DeltaMessage(reasoning_content="", content="")
 
-        close = "<|close|>"
-        sep = "<|sep|>"
-        response_closure = f"{close}response{sep}"
+        think_to_response = "<|close|>think<|sep|><|open|>response<|sep|>"
+        response_closure = "<|close|>response<|sep|>"
         combined = status.xtml_pending + text
         status.xtml_pending = ""
-        visible: List[str] = []
-        cursor = 0
+        reasoning = ""
+        content = ""
 
-        while cursor < len(combined):
-            close_at = combined.find(close, cursor)
-            if close_at < 0:
-                visible.append(combined[cursor:])
-                break
-            visible.append(combined[cursor:close_at])
-            sep_at = combined.find(sep, close_at + len(close))
-            if sep_at < 0:
-                status.xtml_pending = combined[close_at:]
-                break
-            segment_end = sep_at + len(sep)
-            segment = combined[close_at:segment_end]
-            if segment == response_closure:
-                status.response_closed = True
-                break
-            visible.append(segment)
-            cursor = segment_end
+        if status.in_reasoning:
+            transition_at = combined.find(think_to_response)
+            if transition_at < 0:
+                if flush:
+                    reasoning = combined
+                else:
+                    reasoning, status.xtml_pending = cls._split_marker_prefix(
+                        combined, think_to_response
+                    )
+                return DeltaMessage(reasoning_content=reasoning, content="")
+            reasoning = combined[:transition_at]
+            combined = combined[transition_at + len(think_to_response) :]
+            status.in_reasoning = False
 
-        return "".join(visible)
+        closure_at = combined.find(response_closure)
+        if closure_at >= 0:
+            content = combined[:closure_at]
+            status.response_closed = True
+        elif flush:
+            content = combined
+        else:
+            content, status.xtml_pending = cls._split_marker_prefix(
+                combined, response_closure
+            )
+
+        return DeltaMessage(reasoning_content=reasoning, content=content)
 
     @override
     async def _create_status_list(
@@ -108,15 +131,26 @@ class KimiK3Renderer(CustomChatRenderer):
             stop_word_slice_list,
             is_streaming,
         )
-        if (
-            isinstance(status, _KimiK3StreamStatus)
-            and status.request.disable_thinking()
-            and isinstance(delta.output_str, str)
+        if isinstance(status, _KimiK3StreamStatus) and isinstance(
+            delta.output_str, str
         ):
-            delta.output_str = self._filter_non_thinking_xtml_delta(
-                status, delta.output_str
+            delta.output_str = self._parse_xtml_delta(
+                status,
+                delta.output_str,
+                flush=status.finish_reason is not None,
             )
         return delta
+
+    @override
+    def in_think_mode(self, request: ChatCompletionRequest) -> bool:
+        return not request.disable_thinking()
+
+    @override
+    def should_process_think(self, request: ChatCompletionRequest) -> bool:
+        del request
+        # _parse_xtml_delta returns DeltaMessage with the channels already
+        # separated; the generic <think> tag parser must not process it again.
+        return False
 
     @staticmethod
     def _request_dict(request: ChatCompletionRequest) -> Dict[str, Any]:
