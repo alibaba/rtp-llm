@@ -23,6 +23,7 @@ class CacheStore;
 
 class BlockPool {
 public:
+    void debugString() const;
     BlockPool(const BlockPoolConfig& config,
               AllocationType         allocation_type         = AllocationType::DEVICE,
               bool                   use_pinned_cpu_backing  = false,

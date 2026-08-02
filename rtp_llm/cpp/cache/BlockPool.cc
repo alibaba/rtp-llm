@@ -702,6 +702,53 @@ size_t BlockPool::notInUseBlocksNum() const {
     return req_cache_ref_counter_.freeBlockNum();
 }
 
+void BlockPool::debugString() const {
+    std::scoped_lock lock(ref_mu_, free_mu_);
+    size_t           total_blocks        = totalBlocksNum();
+    size_t           free_blocks         = free_block_ids_.size();
+    size_t           available_blocks    = request_ref_counter_.freeBlockNum();
+    size_t           busy_blocks         = req_con_ref_counter_.busyBlockNum();
+    size_t           request_busy_blocks = request_ref_counter_.busyBlockNum();
+
+    RTP_LLM_LOG_INFO("BlockPool state: total_blocks = %zu, free_blocks = %zu, available_blocks = %zu, "
+                     "busy_blocks = %zu, request_busy_blocks = %zu, used_blocks = %zu",
+                     total_blocks,
+                     free_blocks,
+                     available_blocks,
+                     busy_blocks,
+                     request_busy_blocks,
+                     total_blocks - available_blocks);
+
+    // Print reference count for each block
+    // Block 0 is reserved, so we start from block 1
+    size_t       printed_count   = 0;
+    const size_t max_print_count = 100;  // Limit output to avoid log flooding
+
+    for (BlockIdxType block_id = 1; block_id < static_cast<BlockIdxType>(config_.block_num); ++block_id) {
+        int  all_ref_count     = req_con_ref_counter_.getRefCounter(block_id);
+        int  request_ref_count = request_ref_counter_.getRefCounter(block_id);
+        bool is_free           = free_block_ids_.find(block_id) != free_block_ids_.end();
+
+        // Print all blocks or only non-zero reference count blocks (to reduce log size)
+        // Uncomment the condition below to print only blocks with non-zero reference count
+        // if (all_ref_count > 0 || request_ref_count > 0) {
+        if (printed_count < max_print_count) {
+            RTP_LLM_LOG_INFO("BlockPool block[%d]: all_ref_count = %d, request_ref_count = %d, is_free = %s",
+                             block_id,
+                             all_ref_count,
+                             request_ref_count,
+                             is_free ? "true" : "false");
+            printed_count++;
+        } else if (printed_count == max_print_count) {
+            RTP_LLM_LOG_INFO(
+                "BlockPool: ... (showing first %zu blocks, total %zu blocks)", max_print_count, total_blocks);
+            printed_count++;
+            break;
+        }
+        // }
+    }
+}
+
 // MTP support: Map global_layer_id to (model_index, local_layer_id).
 // Returns {layout_index, local_layer_id}. layout_index is the index in BlockPoolConfig.memory_layouts.
 std::pair<int, int> BlockPool::mapGlobalLayerIdToLocal(int global_layer_id) const {
