@@ -12,6 +12,22 @@ start_port="${START_PORT:-27188}"
 cuda_devices="${CUDA_VISIBLE_DEVICES:-0,1,2,3,4,5,6,7}"
 python_bin="${PYTHON_BIN:-/opt/conda310/bin/python3}"
 kda_comm_backend="${KIMI_K3_KDA_COMM_BACKEND:-rs_ag}"
+enable_cuda_graph="${ENABLE_CUDA_GRAPH:-0}"
+enable_cuda_graph_debug_mode="${ENABLE_CUDA_GRAPH_DEBUG_MODE:-0}"
+decode_capture_config="${DECODE_CAPTURE_CONFIG:-}"
+prefill_capture_config="${PREFILL_CAPTURE_CONFIG:-}"
+
+for flag_name in enable_cuda_graph enable_cuda_graph_debug_mode; do
+  flag_value="${!flag_name}"
+  if [[ "${flag_value}" != "0" && "${flag_value}" != "1" ]]; then
+    echo "${flag_name} must resolve to 0 or 1, got ${flag_value}" >&2
+    exit 2
+  fi
+done
+if [[ "${enable_cuda_graph_debug_mode}" == "1" && "${enable_cuda_graph}" != "1" ]]; then
+  echo "ENABLE_CUDA_GRAPH_DEBUG_MODE=1 requires ENABLE_CUDA_GRAPH=1" >&2
+  exit 2
+fi
 server_runfiles="${repo_root}/bazel-bin/example/kimi_k3_prefill_perf/kimi_k3_prefill_server.runfiles"
 server_binary="${repo_root}/bazel-bin/example/kimi_k3_prefill_perf/kimi_k3_prefill_server"
 flashinfer_site_packages="${server_runfiles}/pip_gpu_cuda13_torch_flashinfer_python/site-packages"
@@ -113,11 +129,11 @@ mkdir -p \
 echo \
   "[K3_PERF_CONFIG] kda_comm=${KIMI_K3_KDA_COMM_BACKEND} " \
   "kda=${KIMI_K3_KDA_BACKEND} moe=${KIMI_K3_MOE_BACKEND} " \
-  "mla=${KIMI_K3_MLA_BACKEND}" \
+  "mla=${KIMI_K3_MLA_BACKEND} graph=${enable_cuda_graph}" \
   >&2
 cd "${RUN_ROOT}/work"
 
-exec "${server_binary}" \
+server_args=(
   --role_type PDFUSION \
   --tp_size 8 \
   --dp_size 1 \
@@ -140,7 +156,17 @@ exec "${server_binary}" \
   --use_deepep_low_latency 0 \
   --deep_ep_num_sm 24 \
   --use_all_gather 0 \
-  --enable_cuda_graph 0 \
+  --enable_cuda_graph "${enable_cuda_graph}" \
+  --enable_cuda_graph_debug_mode "${enable_cuda_graph_debug_mode}" \
   --load_method fastsafetensors \
   --ft_core_dump_on_exception 0 \
   --shutdown_timeout 5
+)
+if [[ -n "${decode_capture_config}" ]]; then
+  server_args+=(--decode_capture_config "${decode_capture_config}")
+fi
+if [[ -n "${prefill_capture_config}" ]]; then
+  server_args+=(--prefill_capture_config "${prefill_capture_config}")
+fi
+
+exec "${server_binary}" "${server_args[@]}"

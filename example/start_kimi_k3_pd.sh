@@ -55,6 +55,10 @@ Optional environment variables:
   KIMI_K3_FLASHINFER_WORKSPACE_BASE     defaults below KIMI_K3_RUN_ROOT;
                                          isolates JIT artifacts from stale
                                          Bazel output-base absolute paths
+  KIMI_K3_FLASHINFER_CUDA_ARCH_LIST     defaults to 10.3a for the validated
+                                         B300/SM103a K3 deployment; required
+                                         because the virtual GPU product can
+                                         otherwise inject or detect SM89
   KIMI_K3_BAZEL_OUTPUT_BASE             optional existing Bazel output base;
                                          useful on inode-constrained hosts
   KIMI_K3_SERVER_BINARY                 optional prebuilt Bazel launcher path
@@ -69,6 +73,11 @@ Optional environment variables:
   KIMI_K3_SERVICE_ID                    defaults to kimi-k3-pd
   KIMI_K3_MAX_SEQ_LEN                   defaults to 16384
   KIMI_K3_KV_CACHE_MEM_MB               defaults to 8192
+  SEQ_SIZE_PER_BLOCK                    defaults to 4096
+  KERNEL_SEQ_SIZE_PER_BLOCK             defaults to 128
+  CONCURRENCY_LIMIT                     defaults to 2; set this to the GPQA
+                                         GENERATION_WORKERS value
+  MAX_CONTEXT_BATCH_SIZE                defaults to 1
   KIMI_K3_DECODE_CPU_OFFLOAD_START      defaults to auto; integer or none
   KIMI_K3_DECODE_TOPOLOGY               defaults to tp8_ep8; one of:
                                          tp8_ep8, dp8_ep8
@@ -106,6 +115,13 @@ Optional environment variables:
   KIMI_K3_ACCURACY_CANONICAL_MLA        optional 0/1 diagnostic override
   KIMI_K3_ACCURACY_RETAIN_FULL_TP_WEIGHTS
                                          defaults to 0 in this service launcher
+  ENABLE_CUDA_GRAPH                     defaults to 0; set Decode to 1 for
+                                         CUDA Graph capture/replay validation
+  ENABLE_CUDA_GRAPH_DEBUG_MODE          defaults to 0; emits CUDA Graph DOT
+                                         diagnostics when graph is enabled
+  DECODE_CAPTURE_CONFIG                 optional Decode batch sizes, for
+                                         example 1,2
+  PREFILL_CAPTURE_CONFIG                optional Prefill sequence lengths
   KIMI_K3_DRY_RUN=1                     print configuration and exit
 EOF
 }
@@ -216,6 +232,12 @@ export TMPDIR="${runtime_tmpdir}"
 # validated location.
 flashinfer_workspace_base="${KIMI_K3_FLASHINFER_WORKSPACE_BASE:-${run_root}/flashinfer-workspace}"
 export FLASHINFER_WORKSPACE_BASE="${flashinfer_workspace_base}"
+# A virtualized environment can report a generic architecture even though K3
+# runs on the B300/SM103a device, and its base environment can already export
+# the wrong value. FlashInfer uses this value to choose the JIT directory and
+# compile flags. Force the K3-specific default instead of preserving an
+# inherited value; only the namespaced override may change it.
+export FLASHINFER_CUDA_ARCH_LIST="${KIMI_K3_FLASHINFER_CUDA_ARCH_LIST:-10.3a}"
 mkdir -p "${FLASHINFER_WORKSPACE_BASE}"
 
 # Optimized TP8/EP8 uses DeepGEMM MegaMoE, whose dispatch/combine is fused
@@ -282,6 +304,10 @@ if [[ -n "${runtime_pythonpath}" ]]; then
 fi
 
 max_seq_len="${KIMI_K3_MAX_SEQ_LEN:-16384}"
+seq_size_per_block="${SEQ_SIZE_PER_BLOCK:-4096}"
+kernel_seq_size_per_block="${KERNEL_SEQ_SIZE_PER_BLOCK:-128}"
+concurrency_limit="${CONCURRENCY_LIMIT:-2}"
+max_context_batch_size="${MAX_CONTEXT_BATCH_SIZE:-1}"
 default_batched_kda_decode=0
 case "${execution_mode}" in
     optimized)
@@ -362,6 +388,10 @@ perf_mode="${KIMI_K3_PERF_MODE:-0}"
 accuracy_mode="${KIMI_K3_ACCURACY_MODE:-${default_accuracy_mode}}"
 kv_cache_mem_mb="${KIMI_K3_KV_CACHE_MEM_MB:-${default_kv_cache_mem_mb}}"
 kda_fla37_precompiled_dir="${KIMI_K3_KDA_FLA37_PRECOMPILED_DIR:-${repo_root}/example/kimi_k3_pd/fla37-sm103}"
+enable_cuda_graph="${ENABLE_CUDA_GRAPH:-0}"
+enable_cuda_graph_debug_mode="${ENABLE_CUDA_GRAPH_DEBUG_MODE:-0}"
+decode_capture_config="${DECODE_CAPTURE_CONFIG:-}"
+prefill_capture_config="${PREFILL_CAPTURE_CONFIG:-}"
 
 if { [[ "${role}" == "PREFILL" ]] \
         && { [[ "${kda_backend}" == "cula" ]] \
@@ -410,10 +440,37 @@ if { [[ "${role}" == "PREFILL" ]] \
     fi
 fi
 
-for flag_name in use_host_metadata sp_moe perf_fusions batched_kda_decode perf_mode; do
+for flag_name in \
+    use_host_metadata \
+    sp_moe \
+    perf_fusions \
+    batched_kda_decode \
+    perf_mode \
+    enable_cuda_graph \
+    enable_cuda_graph_debug_mode; do
     flag_value="${!flag_name}"
     [[ "${flag_value}" == "0" || "${flag_value}" == "1" ]] \
         || die "${flag_name} must resolve to 0 or 1, got ${flag_value}"
+done
+if [[ "${enable_cuda_graph_debug_mode}" == "1" && "${enable_cuda_graph}" != "1" ]]; then
+    die "ENABLE_CUDA_GRAPH_DEBUG_MODE=1 requires ENABLE_CUDA_GRAPH=1"
+fi
+if [[ "${role}" == "PREFILL" && -n "${decode_capture_config}" ]]; then
+    die "DECODE_CAPTURE_CONFIG is only valid for the Decode role"
+fi
+if [[ "${role}" == "DECODE" && -n "${prefill_capture_config}" ]]; then
+    die "PREFILL_CAPTURE_CONFIG is only valid for the Prefill role"
+fi
+for integer_name in \
+    max_seq_len \
+    kv_cache_mem_mb \
+    seq_size_per_block \
+    kernel_seq_size_per_block \
+    concurrency_limit \
+    max_context_batch_size; do
+    integer_value="${!integer_name}"
+    [[ "${integer_value}" =~ ^[1-9][0-9]*$ ]] \
+        || die "${integer_name} must resolve to a positive integer, got ${integer_value}"
 done
 
 case "${kda_backend}" in
@@ -690,8 +747,17 @@ echo "  DeepGEMM JIT:    ${deepgemm_jit_compiler}"
 echo "  perf fusions:    ${perf_fusions}"
 echo "  batched KDA:     ${batched_kda_decode}"
 echo "  perf validation: ${perf_mode}"
+echo "  concurrency:     generate=${concurrency_limit}, context=${max_context_batch_size}"
+echo "  cache blocks:    seq=${seq_size_per_block}, kernel=${kernel_seq_size_per_block}"
+echo "  CUDA Graph:      enabled=${enable_cuda_graph}, debug=${enable_cuda_graph_debug_mode}"
+if [[ -n "${decode_capture_config}" ]]; then
+    echo "  Decode captures: ${decode_capture_config}"
+fi
+if [[ -n "${prefill_capture_config}" ]]; then
+    echo "  Prefill captures:${prefill_capture_config}"
+fi
 echo "  fastsafetensors: streaming=${KIMI_K3_FASTSAFETENSORS_STREAMING}, files_per_batch=${KIMI_K3_FASTSAFETENSORS_FILES_PER_BATCH}"
-echo "  FlashInfer JIT:  ${FLASHINFER_WORKSPACE_BASE}"
+echo "  FlashInfer JIT:  ${FLASHINFER_WORKSPACE_BASE} (arch=${FLASHINFER_CUDA_ARCH_LIST})"
 echo "  runtime tmp:     ${TMPDIR}"
 echo "  logs:            ${LOG_PATH}"
 
@@ -704,26 +770,35 @@ server_args=(
     --local_world_size 8
     --remote_server_port "${remote_port}"
     --max_seq_len "${max_seq_len}"
-    --seq_size_per_block 4096
-    --kernel_seq_size_per_block 128
+    --max_context_batch_size "${max_context_batch_size}"
+    --seq_size_per_block "${seq_size_per_block}"
+    --kernel_seq_size_per_block "${kernel_seq_size_per_block}"
     --kv_cache_mem_mb "${kv_cache_mem_mb}"
     --ssm_state_dtype fp32
     --warm_up 0
     --reuse_cache 0
     --enable_device_cache 1
-    --concurrency_limit 2
+    --concurrency_limit "${concurrency_limit}"
     --use_deepep_moe "${use_deepep_moe}"
     --use_deepep_internode 0
     --use_deepep_low_latency 0
     --deep_ep_num_sm 24
     --use_all_gather 0
-    --enable_cuda_graph 0
+    --enable_cuda_graph "${enable_cuda_graph}"
+    --enable_cuda_graph_debug_mode "${enable_cuda_graph_debug_mode}"
     --cache_store_rdma_mode 0
     --load_cache_timeout_ms 7200000
     --load_method "${LOAD_METHOD}"
     --ft_core_dump_on_exception 0
     --shutdown_timeout 5
 )
+
+if [[ -n "${decode_capture_config}" ]]; then
+    server_args+=(--decode_capture_config "${decode_capture_config}")
+fi
+if [[ -n "${prefill_capture_config}" ]]; then
+    server_args+=(--prefill_capture_config "${prefill_capture_config}")
+fi
 
 if [[ "${KIMI_K3_DRY_RUN:-0}" == "1" ]]; then
     printf 'command:'
