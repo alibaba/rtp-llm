@@ -30,6 +30,19 @@ py_test(
 )
 
 py_test(
+    name = "test_rocm_mla_prefill",
+    srcs = ["test_rocm_mla_prefill.py"],
+    deps = [
+        "//rtp_llm/models_py:models",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+    ],
+    timeout = "eternal",
+    tags = ["rocm"],
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+)
+
+py_test(
     name = "test_fused_qkv_transpose_v3",
     srcs = ["test_fused_qkv_transpose_v3.py"],
     deps = [
