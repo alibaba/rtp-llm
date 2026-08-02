@@ -33,12 +33,14 @@ from deep_gemm.utils.layout import (  # noqa: E402
 )
 
 from rtp_llm.config.quant_config import Fp8BlockWiseQuantConfig
+from rtp_llm.models_py.modules.dsv4 import _nan_diag_triton as _nan_diag
 from rtp_llm.models_py.modules.dsv4._fused_inv_rope_fp8_quant_triton import (
     fused_inv_rope_fp8_quant,
 )
 from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_fp8_quant_triton import (
     rmsnorm_fp8_quant_ue8m0,
 )
+
 # Audit §7.4 P0 (row 1) + §7.3.4: fused RMSNorm + partial RoPE, single
 # Triton launch.  Covers every Q/KV decode + prefill site.  Standalone
 # (no-RoPE) RMSNorm sites (``_rmsnorm_weighted``) use the framework C++
@@ -3831,6 +3833,16 @@ class AttentionFP8(nn.Module):
         ):
             gathered_lse = all_gather(local_lse.contiguous(), group=Group.TP).view(
                 cp_ctx.cp_size, int(q_full.shape[0]), self.n_heads
+            )
+        if _nan_diag.ENABLED:
+            # -Inf is the valid empty-shard sentinel. NaN and +Inf are not, and
+            # would otherwise be converted to zero by merge/sink handling before
+            # the next MoE boundary can observe them.
+            _nan_diag.report_nonfinite(
+                gathered_lse,
+                source_id=_nan_diag.SOURCE_CP_ATTENTION_LSE,
+                layer_id=self.layer_id,
+                include_neg_inf=False,
             )
         merged_o, merged_lse = merge_lse_output(gathered_o, gathered_lse, dim=0)
         merged_o = self._raw_q_merge_apply_sink(merged_o, merged_lse)

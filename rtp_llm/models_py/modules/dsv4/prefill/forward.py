@@ -100,6 +100,7 @@ from typing import TYPE_CHECKING, Any, Callable, Dict, Optional, Tuple
 import torch
 
 from rtp_llm.models_py.modules.dsv4 import _forward_tensor_debug as _fwd_dbg
+from rtp_llm.models_py.modules.dsv4 import _nan_diag_triton as _nan_diag
 from rtp_llm.models_py.modules.dsv4 import _profiler
 from rtp_llm.models_py.modules.dsv4 import _record_tensor as _rt
 from rtp_llm.models_py.modules.dsv4.cp import (
@@ -582,6 +583,12 @@ def forward_layers(
         if _rt_on:
             _rt.record("prefill_hc_reduced", h)
         h = v4.norm(h)  # [T, dim]
+    if _nan_diag.ENABLED:
+        _nan_diag.report_nonfinite(
+            h,
+            source_id=_nan_diag.SOURCE_FINAL_HIDDEN,
+            layer_id=0,
+        )
     if _rt_on:
         _rt.record("prefill_final_norm", h)
         if cp_ctx is None:
