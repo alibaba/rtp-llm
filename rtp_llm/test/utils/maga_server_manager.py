@@ -254,7 +254,16 @@ class MagaServerManager(object):
 
     def visit(self, query: Dict[str, Any], retry_times: int, endpoint: str = "/"):
         logging.info(f"retry times: {retry_times}")
-        port_offset = 5 if int(self._env_args.get("HTTP_API_TEST", 0)) else 0
+        # HTTP_API_TEST normally targets the C++ backend (+5), while batch
+        # inference is exposed by the Python frontend on the base port.
+        is_frontend_endpoint = endpoint == "/batch_infer" or endpoint.startswith(
+            "/v1/batch/"
+        )
+        port_offset = (
+            0
+            if is_frontend_endpoint
+            else (5 if int(self._env_args.get("HTTP_API_TEST", 0)) else 0)
+        )
         # for dp test, random select dp for visit
         if int(self._env_args.get("DP_SIZE", 1)) > 1:
             port_offset = (

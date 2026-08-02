@@ -141,6 +141,16 @@ class NormalComparer(BaseComparer):
                 res = json.loads(res[-2].decode("utf-8")[5:])  # data:
         else:
             res = json.loads(res)
+        # The C++ HTTP API serializes aux_info as a one-element list, while
+        # smoke goldens use the scalar AuxInfo shape. Normalize both the
+        # single-response and response_batch wire formats.
+        responses = res.get("response_batch", [res])
+        for response in responses:
+            if (
+                isinstance(response.get("aux_info"), list)
+                and len(response["aux_info"]) == 1
+            ):
+                response["aux_info"] = response["aux_info"][0]
         return res
 
     # override
