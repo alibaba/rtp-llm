@@ -192,6 +192,28 @@ class KimiDetector(BaseReasoningFormatDetector):
         )
 
 
+class MiniMaxM3ReasoningDetector(BaseReasoningFormatDetector):
+    """
+    Detector for MiniMax-M3 models.
+    Assumes reasoning format:
+      (<mm:think>)*(.*)</mm:think>
+
+    M3 always closes with `</mm:think>`, even when it skips thinking: its system
+    prompt instructs it to "begin your response directly after the </mm:think>
+    prefix". Reasoning is therefore forced, as for DeepSeek-R1 — otherwise a
+    non-thinking reply, which opens with a bare `</mm:think>`, leaks that tag
+    into the content.
+    """
+
+    def __init__(self, stream_reasoning: bool = True, force_reasoning: bool = True):
+        super().__init__(
+            "<mm:think>",
+            "</mm:think>",
+            force_reasoning=True,
+            stream_reasoning=stream_reasoning,
+        )
+
+
 class ReasoningParser:
     """
     Parser that handles both streaming and non-streaming scenarios for extracting
@@ -209,6 +231,7 @@ class ReasoningParser:
         "glm45": Qwen3Detector,
         "kimi": KimiDetector,
         "kimi_k2": Qwen3Detector,
+        "minimax_m3": MiniMaxM3ReasoningDetector,
         "qwen3": Qwen3Detector,
         "qwen3-thinking": Qwen3Detector,
         "step3": DeepSeekR1Detector,
