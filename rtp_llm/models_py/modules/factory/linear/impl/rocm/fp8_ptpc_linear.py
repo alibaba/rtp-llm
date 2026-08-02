@@ -1,5 +1,6 @@
 """ROCm FP8 PTPC (Per-Token Per-Channel) quantized Linear implementation."""
 
+import importlib
 import importlib.metadata as importlib_metadata
 import json
 import logging
@@ -7,14 +8,18 @@ from functools import lru_cache
 from pathlib import Path
 from typing import Optional, Tuple
 
-import aiter
 import torch
 import torch.nn.functional as F
-from aiter.ops.gemm_op_a8w8 import gemm_a8w8_bpreshuffle_cktile
 
 from rtp_llm.models_py.kernels.rocm.fp8_kernel import rocm_per_token_quant_fp8
 from rtp_llm.models_py.modules.factory.linear import LinearBase
 from rtp_llm.ops import HWKernelConfig
+from rtp_llm.utils.aiter_jit_patch import load_aiter
+
+aiter = load_aiter()
+_gemm_ops = importlib.import_module("aiter.ops.gemm_op_a8w8")
+_gradlib_ops = importlib.import_module("aiter.ops.gradlib")
+gemm_a8w8_bpreshuffle_cktile = _gemm_ops.gemm_a8w8_bpreshuffle_cktile
 
 logger = logging.getLogger(__name__)
 
@@ -69,7 +74,7 @@ class RocmFp8PTPCLinearBase(LinearBase):
     @staticmethod
     @lru_cache(maxsize=1)
     def init_hipblas() -> None:
-        aiter.hipb_create_extension()
+        _gradlib_ops.hipb_create_extension()
 
     @staticmethod
     def _as_hipb_weight_view(weight: torch.Tensor) -> torch.Tensor:
@@ -123,7 +128,21 @@ class RocmFp8PTPCLinearNoSwizzle(RocmFp8PTPCLinearBase):
     ) -> bool:
         if not cls._can_handle_fp8_ptpc(quant_config, weight, weight_scales):
             return False
-        return hw_kernel_config is None or not hw_kernel_config.use_swizzleA
+        # gfx942 uses E4M3FNUZ after the device-side dtype rewrite.  Keep this
+        # representation on the CK path even when the loader returns a view;
+        # it is not a valid hipBLASLt swizzleA operand.
+        if weight.dtype == torch.float8_e4m3fnuz:
+            return True
+        # The hipBLASLt swizzleA implementation consumes the non-contiguous
+        # column-major view produced by the optimized loader.  TSE weights are
+        # materialized as contiguous CK-preswizzled tensors by the generic
+        # loader, so keep them on the original CK path even when swizzleA is
+        # enabled globally.
+        return (
+            hw_kernel_config is None
+            or not hw_kernel_config.use_swizzleA
+            or weight.is_contiguous()
+        )
 
     def __init__(
         self,
@@ -164,7 +183,7 @@ class RocmFp8PTPCLinearNoSwizzle(RocmFp8PTPCLinearBase):
                 input_fp8, self.weight, input_scales, self.weight_scales, output
             )
         else:
-            output = aiter.gemm_a8w8_bpreshuffle(
+            output = _gemm_ops.gemm_a8w8_bpreshuffle(
                 input_fp8,
                 self.weight,
                 input_scales,
@@ -193,7 +212,12 @@ class RocmFp8PTPCLinearWithSwizzle(RocmFp8PTPCLinearBase):
     ) -> bool:
         if not cls._can_handle_fp8_ptpc(quant_config, weight, weight_scales):
             return False
-        return hw_kernel_config is not None and hw_kernel_config.use_swizzleA
+        return (
+            weight.dtype == torch.float8_e4m3fn
+            and hw_kernel_config is not None
+            and hw_kernel_config.use_swizzleA
+            and not weight.is_contiguous()
+        )
 
     def __init__(
         self,
@@ -316,7 +340,7 @@ class RocmFp8PTPCLinearWithSwizzle(RocmFp8PTPCLinearBase):
         )
         if use_gelu:
             kwargs["use_gelu"] = True
-        output = aiter.hipb_mm(input_fp8, self.weight, solution_index, **kwargs)
+        output = _gradlib_ops.hipb_mm(input_fp8, self.weight, solution_index, **kwargs)
         return self._restore_dtype(output, original_dtype)
 
     def forward(self, input: torch.Tensor) -> torch.Tensor:

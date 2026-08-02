@@ -1,9 +1,14 @@
 """ROCm-specific activation function implementations."""
 
-import aiter
+import importlib
+
 import torch
 
 from rtp_llm.models_py.modules.base.common.activation import SiluAndMulBase
+from rtp_llm.utils.aiter_jit_patch import load_aiter
+
+load_aiter()
+silu_and_mul = importlib.import_module("aiter.ops.activation").silu_and_mul
 
 
 class FusedSiluAndMul(SiluAndMulBase):
@@ -20,5 +25,5 @@ class FusedSiluAndMul(SiluAndMulBase):
         d = gate_up.shape[-1] // 2
         output_shape = gate_up.shape[:-1] + (d,)
         output = torch.empty(output_shape, dtype=gate_up.dtype, device=gate_up.device)
-        aiter.silu_and_mul(output, gate_up)
+        silu_and_mul(output, gate_up)
         return output

@@ -319,7 +319,9 @@ class RocmFp8PTPCLinearWithSwizzleTest(unittest.TestCase):
             linear = LinearFactory.create_linear(
                 weight_with_swizzle, self.bias, scale_b, quant_config, hw_config
             )
-            self.assertIsInstance(linear, RocmFp8PTPCLinearWithSwizzle)
+            # MI308X rewrites FP8 weights to E4M3FNUZ, which stays on the CK
+            # path even when swizzleA is enabled globally.
+            self.assertIsInstance(linear, RocmFp8PTPCLinearNoSwizzle)
 
             hw_config = HWKernelConfig()
             hw_config.use_swizzleA = False

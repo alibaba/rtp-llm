@@ -1013,7 +1013,7 @@ class TestCompactGatherReshape(unittest.TestCase):
 
         prefill_func = (
             "rtp_llm.models_py.modules.factory.attention.rocm_impl.aiter."
-            "aiter.mha_batch_prefill_func"
+            "_mha_ops.mha_batch_prefill_func"
         )
 
         with patch.object(

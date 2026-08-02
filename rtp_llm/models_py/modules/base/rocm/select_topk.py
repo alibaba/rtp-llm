@@ -1,8 +1,13 @@
-import aiter
+import importlib
+
 import torch
 from torch import nn
 
 from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.utils.aiter_jit_patch import load_aiter
+
+load_aiter()
+topk_softmax = importlib.import_module("aiter.ops.moe_op").topk_softmax
 
 
 class SelectTopk(nn.Module):
@@ -21,7 +26,7 @@ class SelectTopk(nn.Module):
             topk_ids.shape[0], self.top_k, dtype=torch.int32, device=topk_ids.device
         )
         topk_ids = topk_ids.int()
-        aiter.topk_softmax(
+        topk_softmax(
             topk_weights,
             topk_ids,
             token_expert_indicies,

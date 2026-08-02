@@ -1,18 +1,22 @@
 import functools
+import importlib
 import json
 import logging
 import os
 from functools import lru_cache
 from typing import Any, Dict, List, Optional, Tuple
 
-import aiter.utility.dtypes as dtypes
 import torch
 import triton
-from aiter.ops.quant import (
-    dynamic_per_tensor_quant,
-    dynamic_per_token_scaled_quant,
-    static_per_tensor_quant,
-)
+
+from rtp_llm.utils.aiter_jit_patch import load_aiter
+
+load_aiter()
+dtypes = importlib.import_module("aiter.utility.dtypes")
+_quant_ops = importlib.import_module("aiter.ops.quant")
+dynamic_per_tensor_quant = _quant_ops.dynamic_per_tensor_quant
+dynamic_per_token_scaled_quant = _quant_ops.dynamic_per_token_scaled_quant
+static_per_tensor_quant = _quant_ops.static_per_tensor_quant
 
 logger = logging.getLogger(__name__)
 

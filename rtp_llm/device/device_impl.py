@@ -917,6 +917,7 @@ class RocmImpl(GpuImpl):
                     "Quark MXFP4 MoE scale shuffle requires gfx950 (MI355)."
                 )
             from aiter.utility.fp4_utils import e8m0_shuffle
+
             if x_.dim() == 3:
                 s0, s1, _ = x_.shape
                 x_ = e8m0_shuffle(x_.contiguous().view(s0 * s1, -1)).view(s0, s1, -1)
@@ -954,13 +955,19 @@ class RocmImpl(GpuImpl):
             W.linear_attn_ba_w,
             W.linear_attn_out_w,
         ]:
-            if self.py_env_configs.py_hw_kernel_config.use_swizzleA:
-                if weight.dtype != torch.float8_e4m3fn:
-                    weight = swizzle_tensor(weight.t(), False).t()
+            if weight.dtype in (torch.float8_e4m3fn, torch.float8_e4m3fnuz):
+                if self.py_env_configs.py_hw_kernel_config.use_swizzleA:
+                    # Keep the hipBLASLt swizzle only for native E4M3FN.
+                    # gfx942 rewrites checkpoint FP8 weights to E4M3FNUZ;
+                    # those weights are handled by the CK bpreshuffle path.
+                    if weight.dtype == torch.float8_e4m3fn:
+                        weight = swizzle_tensor(weight, False)
+                    else:
+                        weight = self.shuffle_gemm_weight(weight)
                 else:
-                    weight = swizzle_tensor(weight, weight.dtype != torch.float8_e4m3fn)
-            elif weight.dtype == torch.float8_e4m3fn:
-                weight = self.shuffle_gemm_weight(weight)
+                    weight = self.shuffle_gemm_weight(weight)
+            # Non-FP8 (FP16/BF16) weights are never swizzled: hipBLASLt has no
+            # bpreshuffle heuristic for these on gfx942 (HIPBLAS_STATUS_INTERNAL_ERROR).
 
         return weight
 

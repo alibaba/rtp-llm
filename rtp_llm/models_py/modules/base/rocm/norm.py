@@ -1,11 +1,8 @@
+import importlib
 from typing import Tuple
 
 import torch
 import torch.nn.functional as F
-from aiter import layernorm2d_fwd as layernorm2d_fwd
-from aiter import layernorm2d_fwd_with_add as layernorm2d_fwd_with_add
-from aiter import rms_norm
-from aiter import rmsnorm2d_fwd_with_add as fused_add_rmsnorm
 from torch import nn
 
 from rtp_llm.models_py.modules.base.common.norm import (
@@ -15,6 +12,15 @@ from rtp_llm.models_py.modules.base.common.norm import (
     BaseResNorm,
 )
 from rtp_llm.ops.compute_ops import rtp_llm_ops
+from rtp_llm.utils.aiter_jit_patch import load_aiter
+
+load_aiter()
+_norm_ops = importlib.import_module("aiter.ops.norm")
+_rmsnorm_ops = importlib.import_module("aiter.ops.rmsnorm")
+layernorm2d_fwd = _norm_ops.layernorm2d_fwd
+layernorm2d_fwd_with_add = _norm_ops.layernorm2d_fwd_with_add
+rms_norm = _rmsnorm_ops.rms_norm
+fused_add_rmsnorm = _rmsnorm_ops.rmsnorm2d_fwd_with_add
 
 # Fast-path guard for VisionBert-style AddBiasResLayerNorm. The aiter
 # fused-add 2D kernel was validated for request-sized batches with hidden <=

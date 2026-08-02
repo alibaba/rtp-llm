@@ -22,7 +22,6 @@ from rtp_llm.models_py.modules.factory.linear.impl.rocm.f16_linear import (
 )
 from rtp_llm.ops import ActivationType, HWKernelConfig
 from rtp_llm.utils.model_weight import W
-from rtp_llm.utils.swizzle_utils import swizzle_tensor
 
 
 class LinearTorch(nn.Module):
@@ -120,10 +119,10 @@ class LinearTest(TestCase):
         torch_output = linear_torch(x)
         hw_kernel_config = HWKernelConfig()
         if has_swizzle:
-            # Follow aiter's approach: transpose to (n, k), shuffle, then transpose back to (k, n)
-            # This matches the format expected by hipb_mm with bpreshuffle=True
-            w_swizzled = swizzle_tensor(w.t(), False, MiM=16).t()  # (n, k) swizzled
-            w_dict = {"weight": w_swizzled, "bias": bias}
+            # FP16/BF16 swizzleA is disabled on gfx942. Keep the global flag
+            # enabled here to verify that unquantized weights still select the
+            # safe no-swizzle implementation.
+            w_dict = {"weight": w, "bias": bias}
             hw_kernel_config.use_swizzleA = True
         else:
             w_dict = {"weight": w, "bias": bias}
@@ -136,7 +135,7 @@ class LinearTest(TestCase):
 
     @staticmethod
     def _swizzle_weight(weight: torch.Tensor) -> torch.Tensor:
-        return swizzle_tensor(weight.t(), False, MiM=16).t()
+        return weight
 
     def _assert_swizzled_linear_matches_reference(
         self,
@@ -146,7 +145,7 @@ class LinearTest(TestCase):
         atol: float = 1e-2,
         rtol: float = 1e-2,
     ) -> None:
-        self.assertIsInstance(linear, RocmF16LinearWithSwizzle)
+        self.assertIsInstance(linear, RocmF16LinearNoSwizzle)
         actual = linear(input)
         expected = input @ weight
         self.assertTrue(torch.allclose(actual, expected, atol=atol, rtol=rtol))
@@ -179,12 +178,9 @@ class LinearTest(TestCase):
         num_tokens = 7
 
         moe_gate_weight = torch.randn(hidden_size, num_experts, dtype=dtype)
-        swizzled_moe_gate_weight = swizzle_tensor(
-            moe_gate_weight.t(), False, MiM=16
-        ).t()
         shared_expert_gate_weight = torch.randn(hidden_size, 1, dtype=dtype)
         weights = {
-            W.moe_gate: swizzled_moe_gate_weight,
+            W.moe_gate: moe_gate_weight,
             W.moe_w1: torch.empty(num_experts, 1, 1, dtype=dtype),
             W.moe_w2: torch.empty(num_experts, 1, 1, dtype=dtype),
             W.shared_expert_gate: shared_expert_gate_weight,
@@ -235,7 +231,7 @@ class LinearTest(TestCase):
                 hw_kernel_config=hw_kernel_config,
             )
 
-        self.assertIsInstance(layer.gate, RocmF16LinearWithSwizzle)
+        self.assertIsInstance(layer.gate, RocmF16LinearNoSwizzle)
         self.assertIsInstance(layer.shared_expert_gate, RocmF16LinearNoSwizzle)
 
         layer.sigmoid_gate_scale_add = FakeSigmoidGateScaleAdd()
@@ -250,7 +246,7 @@ class LinearTest(TestCase):
         expected = torch.sigmoid(expected_gate) * (hidden_states * 2)
         self.assertTrue(torch.allclose(actual, expected, atol=atol, rtol=rtol))
 
-    def test_shared_expert_gate_falls_back_to_no_swizzle(self):
+    def test_shared_expert_gate_uses_no_swizzle(self):
         dtype_tolerances = (
             (torch.float16, 1e-2, 1e-2),
             (torch.bfloat16, 2e-2, 2e-2),
