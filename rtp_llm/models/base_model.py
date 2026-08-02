@@ -20,11 +20,11 @@ from rtp_llm.model_loader.weight_manager import WeightManager
 from rtp_llm.models.downstream_modules.custom_module import CustomModule
 from rtp_llm.models.downstream_modules.utils import create_custom_module
 from rtp_llm.ops import (
-    KVCacheSpecType,
     DeviceResourceConfig,
     FMHAConfig,
     HWKernelConfig,
     KVCacheSpecDesc,
+    KVCacheSpecType,
     MlaOpsType,
     MoeConfig,
     ParallelismConfig,
@@ -170,6 +170,15 @@ class BaseModel(object):
         self.weight: ModelWeights = self.model_weights_loader.load_weights(
             device=device
         )
+        for name, tensor in self.weight.global_weights.items():
+            logging.info(
+                f"global weight {name} shape: {tensor.shape}, dtype: {tensor.dtype}"
+            )
+        for layer_id in range(len(self.weight.weights)):
+            for name, tensor in self.weight.weights[layer_id].items():
+                logging.info(
+                    f"layer {layer_id} weight {name} shape: {tensor.shape}, dtype: {tensor.dtype}"
+                )
         self._load_custom_module()
 
         # 清理checkpoint加载过程中使用的临时资源，释放host内存

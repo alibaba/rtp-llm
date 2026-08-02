@@ -63,10 +63,14 @@ class Pipeline(object):
         vit_separation: Optional[VitSeparation] = None,  # Optional VitSeparation
         server_config=None,
         master_config=None,
+        extra_input_processor: Optional[
+            Any
+        ] = None,  # callable(input_ids) -> (processed_ids, extra_ids, loc)
     ):
         self.pd_sep_config = pd_sep_config
         self.tokenizer = tokenizer
         self._special_tokens: SpecialTokens = special_tokens
+        self._extra_input_processor = extra_input_processor
         self._mm_token: str = ""
         if mm_related_params:
             self._mm_token = mm_related_params.special_tokens.get(
@@ -250,7 +254,15 @@ class Pipeline(object):
                     f"prompt_logits_end ({end}) > prompt_len ({prompt_len}), clamped to {prompt_len}"
                 )
                 generate_config.prompt_logits_end = prompt_len
-
+        extra_input_ids = None
+        extra_input_ids_loc = -1
+        if self._extra_input_processor is not None:
+            try:
+                token_ids, extra_input_ids, extra_input_ids_loc = (
+                    self._extra_input_processor(token_ids)
+                )
+            except Exception as e:
+                logging.warning(f"Failed to process extra input: {e}")
         if generate_config.sp_advice_prompt != "":
             generate_config.sp_advice_prompt_token_ids = self.tokenizer.encode(
                 generate_config.sp_advice_prompt
@@ -267,6 +279,8 @@ class Pipeline(object):
             mm_inputs,
             generate_config,
             headers=request_headers,
+            extra_input_ids=extra_input_ids,
+            extra_input_ids_loc=extra_input_ids_loc,
             **kwargs,
         )
 
@@ -510,6 +524,8 @@ class Pipeline(object):
         token_ids: List[int],
         mm_inputs: List[MultimodalInput],
         generate_config: GenerateConfig,
+        extra_input_ids: Optional[List[int]] = None,
+        extra_input_ids_loc: int = -1,
         **kwargs: Any,
     ) -> AsyncGenerator[GenerateResponse, None]:
         token_type_ids = []
@@ -524,6 +540,8 @@ class Pipeline(object):
             generate_config=generate_config,
             tokenizer=self.tokenizer,
             token_type_ids=token_type_ids,
+            extra_input_ids=extra_input_ids,
+            extra_input_ids_loc=extra_input_ids_loc,
             batch_group_size=kwargs.get("batch_group_size", 1),
             batch_group_id=kwargs.get("batch_group_id", -1),
             headers=request_headers,
@@ -648,6 +666,15 @@ class Pipeline(object):
                     "prompt should have at least one token!",
                 )
             token_ids = self.tokenizer.encode(prompt)
+            extra_input_ids = None
+            extra_input_ids_loc = -1
+            if self._extra_input_processor is not None:
+                try:
+                    token_ids, extra_input_ids, extra_input_ids_loc = (
+                        self._extra_input_processor(token_ids)
+                    )
+                except Exception as e:
+                    logging.warning(f"Failed to process extra input: {e}")
 
             if generate_config.return_prompt_logits:
                 prompt_len = len(token_ids)
@@ -677,6 +704,8 @@ class Pipeline(object):
                 mm_inputs=[],
                 generate_config=copy.copy(generate_config),
                 tokenizer=self.tokenizer,
+                extra_input_ids=extra_input_ids,
+                extra_input_ids_loc=extra_input_ids_loc,
             )
             inputs.append(gen_input)
 

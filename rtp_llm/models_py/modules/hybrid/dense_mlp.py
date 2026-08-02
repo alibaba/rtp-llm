@@ -103,4 +103,5 @@ class DenseMLP(nn.Module):
         output = self.down_proj(activated)
         if not skip_allreduce and ffn_tp_size > 1:
             output = all_reduce(output, group=Group.TP)
+
         return output

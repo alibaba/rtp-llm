@@ -55,7 +55,8 @@ private:
     GptModelOutputs                 callForwardPostLayers(torch::Tensor         hidden_states,
                                                           const GptModelInputs& inputs,
                                                           bool                  skip_final_layernorm,
-                                                          size_t                num_valid_tokens = -1);
+                                                          size_t                num_valid_tokens  = -1,
+                                                          torch::Tensor         lm_output_indexes = torch::Tensor());
     torch::Tensor                   tensorHoldHostAndToCuda(const torch::Tensor& tensor);
 
     // Methods absorbed from GptModel
@@ -148,7 +149,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
 
     py::gil_scoped_acquire          gil;
     torch_ext::PyModelInitResources init_resources;
-
     if (params.kv_cache_layer_layout.has_value()) {
         init_resources.kv_cache.emplace(params.kv_cache_layer_layout.value());
     }

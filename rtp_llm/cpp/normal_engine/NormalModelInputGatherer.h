@@ -47,6 +47,7 @@ private:
     void           initializeKvCacheMetadata(GptModelInputs& model_input) const;
     absl::Status   processDecodeStreams(GptModelInputs& model_input, const StreamGroups& stream_groups) const;
     absl::Status   processContextStreams(GptModelInputs& model_input, const StreamGroups& stream_groups) const;
+    void           gatherExtraInputIds(GptModelInputs& model_input, const StreamGroups& stream_groups) const;
 
     NormalModelInputGathererConfig config_;
 };

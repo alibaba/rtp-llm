@@ -424,6 +424,57 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
     return absl::OkStatus();
 }
 
+void NormalModelInputGatherer::gatherExtraInputIds(GptModelInputs&     model_input,
+                                                   const StreamGroups& stream_groups) const {
+    const size_t total_context_batch_size = stream_groups.totalContextBatchSize();
+    if (total_context_batch_size == 0) {
+        return;
+    }
+
+    size_t total_extra_input_ids_size = 0;
+    for (const auto& stream : stream_groups.contextStreams()) {
+        auto current_batch_size = stream->currentBatchSize();
+        for (auto i = 0; i < current_batch_size; ++i) {
+            auto generate_input = stream->generateInput();
+            if (generate_input && generate_input->extra_input_ids.has_value()) {
+                total_extra_input_ids_size += generate_input->extra_input_ids.value().numel();
+            }
+        }
+    }
+    if (total_extra_input_ids_size == 0) {
+        return;
+    }
+
+    static const auto pinned_i32        = torch::TensorOptions(torch::kInt32).pinned_memory(true);
+    model_input.combo_extra_input_ids   = torch::empty({(int64_t)total_extra_input_ids_size}, pinned_i32);
+    model_input.extra_input_ids_lengths = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
+    model_input.extra_input_ids_locs    = torch::empty({(int64_t)total_context_batch_size}, pinned_i32);
+
+    int* combo_ptr   = model_input.combo_extra_input_ids.data_ptr<int32_t>();
+    int* lengths_ptr = model_input.extra_input_ids_lengths.data_ptr<int32_t>();
+    int* locs_ptr    = model_input.extra_input_ids_locs.data_ptr<int32_t>();
+
+    int context_batch_idx = 0;
+    int offset            = 0;
+    for (const auto& stream : stream_groups.contextStreams()) {
+        auto current_batch_size = stream->currentBatchSize();
+        for (auto i = 0; i < current_batch_size; ++i) {
+            auto generate_input = stream->generateInput();
+            if (generate_input && generate_input->extra_input_ids.has_value()) {
+                auto   buffer = generate_input->extra_input_ids.value().contiguous();
+                size_t len    = buffer.numel();
+                std::memcpy(combo_ptr + offset, buffer.data_ptr<int32_t>(), len * sizeof(int32_t));
+                lengths_ptr[context_batch_idx] = static_cast<int>(len);
+                locs_ptr[context_batch_idx]    = generate_input->extra_input_ids_loc;
+                offset += len;
+            } else {
+                lengths_ptr[context_batch_idx] = 0;
+                locs_ptr[context_batch_idx]    = -1;
+            }
+            context_batch_idx++;
+        }
+    }
+}
 absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGroups& stream_groups) const {
     RTP_LLM_LOG_DEBUG(__PRETTY_FUNCTION__);
     RTP_LLM_LOG_DEBUG("context_streams size = %d, decode_streams size = %d",
@@ -433,6 +484,7 @@ absl::StatusOr<GptModelInputs> NormalModelInputGatherer::gather(const StreamGrou
     initializeKvCacheMetadata(model_input);
     RETURN_IF_STATUS_ERROR(processDecodeStreams(model_input, stream_groups));
     RETURN_IF_STATUS_ERROR(processContextStreams(model_input, stream_groups));
+    gatherExtraInputIds(model_input, stream_groups);
     return model_input;
 }
 

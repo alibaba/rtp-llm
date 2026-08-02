@@ -55,8 +55,6 @@ class ModelWeightInfo:
     ) -> None:
         self.weights = weights
         self.layer_weights = layer_weights
-        if len(self.layer_weights) == 0:
-            return
 
     def set_weight_dtype(self, dtype: torch.dtype):
         if self.layer_weights:

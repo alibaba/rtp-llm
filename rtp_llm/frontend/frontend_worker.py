@@ -24,6 +24,7 @@ from rtp_llm.distribute.distributed_server import (
     get_world_info,
 )
 from rtp_llm.frontend.tokenizer_factory.tokenizer_factory import TokenizerFactory
+from rtp_llm.model_factory import ModelFactory
 from rtp_llm.ops import ParallelismConfig, SpecialTokens, VitSeparation
 from rtp_llm.pipeline.pipeline import Pipeline
 from rtp_llm.structure.request_extractor import Request, RequestExtractor
@@ -96,6 +97,17 @@ class FrontendWorker:
         if py_env_configs.vit_config:
             vit_separation = py_env_configs.vit_config.vit_separation
 
+        extra_input_processor = None
+        try:
+            model_cls = ModelFactory.get_model_cls(model_config.model_type)
+            if hasattr(model_cls, "get_extra_input_processor"):
+                extra_input_processor = model_cls.get_extra_input_processor(
+                    model_config.ckpt_path
+                )
+                logging.info(f"Loaded extra_input_processor from {model_cls.__name__}")
+        except Exception as e:
+            logging.warning(f"Failed to get extra_input_processor: {e}")
+
         self.pipeline = Pipeline(
             special_tokens=special_tokens,
             pd_sep_config=engine_config.pd_sep_config,
@@ -109,6 +121,7 @@ class FrontendWorker:
             vit_separation=vit_separation,
             server_config=py_env_configs.server_config,
             master_config=py_env_configs.master_config,
+            extra_input_processor=extra_input_processor,
         )
         self.backend_rpc_server_visitor = self.pipeline.backend_rpc_server_visitor
         self.generate_env_config = py_env_configs.generate_env_config

@@ -195,6 +195,13 @@ void registerPyOpDefs(pybind11::module& m) {
             "mm_extra_input", &PyMultimodalInputs::mm_extra_input, "Multimodal model-specific extra input tensor")
         .def("__repr__", [](const PyMultimodalInputs& self) { return "PyMultimodalInputs"; });
 
+    pybind11::class_<PyExtraInputIds>(m, "PyExtraInputIds")
+        .def(pybind11::init<>())
+        .def_readwrite("combo_extra_input_ids", &PyExtraInputIds::combo_extra_input_ids)
+        .def_readwrite("extra_input_ids_lengths", &PyExtraInputIds::extra_input_ids_lengths)
+        .def_readwrite("extra_input_ids_locs", &PyExtraInputIds::extra_input_ids_locs)
+        .def("__repr__", [](const PyExtraInputIds& self) { return "PyExtraInputIds"; });
+
     pybind11::class_<PyModelInputs>(m, "PyModelInputs")
         .def(pybind11::init<>())
         .def(pybind11::init([](torch::Tensor       input_ids,
@@ -233,6 +240,7 @@ void registerPyOpDefs(pybind11::module& m) {
         .def_readwrite("combo_position_ids", &PyModelInputs::combo_position_ids, "Combo position IDs tensor")
         .def_readwrite("embedding_inputs", &PyModelInputs::embedding_inputs, "Embedding inputs structure")
         .def_readwrite("multimodal_inputs", &PyModelInputs::multimodal_inputs, "Multimodal inputs structure")
+        .def_readwrite("extra_input_ids", &PyModelInputs::extra_input_ids, "TSE extra input ids structure")
         .def_property(
             "attention_inputs",
             [](PyModelInputs& self) -> pybind11::object {
@@ -265,7 +273,8 @@ void registerPyOpDefs(pybind11::module& m) {
     pybind11::class_<PyModelOutputs>(m, "PyModelOutputs")
         .def(pybind11::init<>(), "Default constructor")
         .def(pybind11::init<torch::Tensor>(), pybind11::arg("hidden_states"), "Initialize with hidden states tensor")
-        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor");
+        .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
+        .def_readwrite("lm_output_indexes", &PyModelOutputs::lm_output_indexes, "LM output indexes tensor");
 }
 
 }  // namespace torch_ext

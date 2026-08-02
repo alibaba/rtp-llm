@@ -39,6 +39,7 @@ public:
         addr_(address),
         params_(params),
         token_processor_(new TokenProcessor(token_processor)),
+        py_model_(params.py_model),
         metrics_reporter_(params.metrics_reporter) {
         is_embedding_ = false;
         active_request_count_.reset(new autil::AtomicCounter());
@@ -98,6 +99,7 @@ private:
     const EngineInitParams&                params_;
     std::shared_ptr<ConcurrencyController> controller_;
     std::shared_ptr<TokenProcessor>        token_processor_;
+    py::object                             py_model_;
 
     std::shared_ptr<EmbeddingEndpoint> embedding_endpoint_;
     std::shared_ptr<Tokenizer>         tokenizer_;

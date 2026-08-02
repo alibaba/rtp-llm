@@ -56,6 +56,7 @@ class Embedding(nn.Module):
                 .contiguous()
                 .reshape(m, -1)
             )
+
         return output
 
 

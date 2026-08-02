@@ -1,7 +1,10 @@
 #include "rtp_llm/cpp/api_server/InferenceService.h"
 
 #include <algorithm>
+#include <cstdio>
+#include <cstdlib>
 #include <iterator>
+#include <openssl/sha.h>
 #include <torch/python.h>
 
 #include "rtp_llm/cpp/pybind/PyUtils.h"
@@ -111,14 +114,20 @@ InferenceService::InferenceService(const std::shared_ptr<EngineBase>&           
                                    const std::shared_ptr<TokenProcessor>&          token_processor,
                                    const std::shared_ptr<ConcurrencyController>&   controller,
                                    const ModelConfig&                              model_config,
-                                   const std::shared_ptr<ApiServerMetricReporter>& metric_reporter):
+                                   const std::shared_ptr<ApiServerMetricReporter>& metric_reporter,
+                                   py::object                                      py_model):
     engine_(engine),
     mm_processor_(mm_processor),
     token_processor_(token_processor),
     request_counter_(request_counter),
     controller_(controller),
     model_config_(model_config),
-    metric_reporter_(metric_reporter) {}
+    metric_reporter_(metric_reporter),
+    py_model_(std::move(py_model)) {
+    if (!py_model_.is_none()) {
+        loadExtraInputConfig();
+    }
+}
 
 void checkMasterWorker(bool isInternal) {
     if (isInternal) {
@@ -237,12 +246,116 @@ InferenceService::fillGenerateInput(int64_t                                reque
     }
     autil::ScopedTime2 timer;
     auto               vec = token_processor_->encode(text);
+
+    // Process extra input if model supports it
+    auto result = processExtraInput(vec);
+    vec         = result.processed_input_ids;
+
+    // Store extra_input_ids and location if present
+    if (result.extra_input_ids.has_value()) {
+        input->extra_input_ids = torch::from_blob(result.extra_input_ids->data(),
+                                                  {static_cast<int64_t>(result.extra_input_ids->size())},
+                                                  torch::kInt32)
+                                     .clone();
+        // Store location information (relative to single sequence; later converted to global index)
+        input->extra_input_ids_loc = result.extra_input_ids_loc;
+    }
     if (metric_reporter_) {
         metric_reporter_->reportFTPreTokenProcessorRtMetric(timer.done_ms());
     }
     input->input_ids = torch::from_blob(const_cast<int*>(vec.data()), {(int64_t)vec.size()}, torch::kInt32).clone();
 
     return input;
+}
+
+InferenceService::ProcessExtraInputResult InferenceService::processExtraInput(const std::vector<int>& input_ids) {
+    if (py_model_.is_none()) {
+        return {input_ids, std::nullopt, -1};
+    }
+
+    // Try C++ implementation first (no GIL needed)
+    return processExtraInputCpp(input_ids);
+}
+
+void InferenceService::loadExtraInputConfig() {
+    if (extra_input_config_loaded_)
+        return;
+    extra_input_config_loaded_ = true;
+
+    // Read config from Python model's tse_config (single GIL acquisition, only once)
+    try {
+        py::gil_scoped_acquire acquire;
+        if (py::hasattr(py_model_, "tse_config")) {
+            auto tse_config = py_model_.attr("tse_config");
+            if (py::hasattr(tse_config, "mask_token_id")) {
+                mask_token_id_ = py::cast<int>(tse_config.attr("mask_token_id"));
+            }
+            if (py::hasattr(tse_config, "num_last_tokens")) {
+                num_last_tokens_ = py::cast<int>(tse_config.attr("num_last_tokens"));
+            }
+        }
+        RTP_LLM_LOG_INFO(
+            "loadExtraInputConfig: mask_token_id=%d, num_last_tokens=%d", mask_token_id_, num_last_tokens_);
+    } catch (const std::exception& e) {
+        RTP_LLM_LOG_WARNING(
+            "Failed to load extra input config from Python model: %s, using defaults (mask_token_id=%d, num_last_tokens=%d)",
+            e.what(),
+            mask_token_id_,
+            num_last_tokens_);
+    }
+}
+
+InferenceService::ProcessExtraInputResult InferenceService::processExtraInputCpp(const std::vector<int>& input_ids) {
+    // Config already loaded in constructor
+
+    // Find mask token positions
+    std::vector<int> mask_indices;
+    for (int i = 0; i < (int)input_ids.size(); i++) {
+        if (input_ids[i] == mask_token_id_) {
+            mask_indices.push_back(i);
+        }
+    }
+
+    if (mask_indices.size() < 2) {
+        return {input_ids, std::nullopt, -1};
+    }
+
+    int first_mask_idx  = mask_indices[0];
+    int second_mask_idx = mask_indices[1];
+
+    // Extract item_input (between two masks)
+    std::vector<int> item_input(input_ids.begin() + first_mask_idx + 1, input_ids.begin() + second_mask_idx);
+
+    // Build decoder_input_ids: before_item + [mask_token_id] * num_last_tokens + after_item
+    std::vector<int> decoder_input_ids;
+    decoder_input_ids.reserve(first_mask_idx + num_last_tokens_ + (int)input_ids.size() - second_mask_idx - 1);
+    decoder_input_ids.insert(decoder_input_ids.end(), input_ids.begin(), input_ids.begin() + first_mask_idx);
+    int placeholder_start = (int)decoder_input_ids.size();
+
+    // Compute item_hash_token_id: SHA256 hash matching Python's hashlib.sha256(json.dumps(item_input, sort_keys=True))
+    std::string item_json = "[";
+    for (size_t i = 0; i < item_input.size(); i++) {
+        if (i > 0)
+            item_json += ", ";
+        item_json += std::to_string(item_input[i]);
+    }
+    item_json += "]";
+
+    unsigned char sha256_hash[SHA256_DIGEST_LENGTH];
+    SHA256(reinterpret_cast<const unsigned char*>(item_json.data()), item_json.size(), sha256_hash);
+    // Take first 8 hex chars (4 bytes) matching Python's int(hexdigest[:8], 16)
+    char hex_buf[9];
+    snprintf(
+        hex_buf, sizeof(hex_buf), "%02x%02x%02x%02x", sha256_hash[0], sha256_hash[1], sha256_hash[2], sha256_hash[3]);
+    unsigned long item_hash          = strtoul(hex_buf, nullptr, 16);
+    int           item_hash_token_id = 100000 + (int)(item_hash % 900000);
+
+    for (int i = 0; i < num_last_tokens_; i++) {
+        decoder_input_ids.push_back(item_hash_token_id);
+    }
+    decoder_input_ids.insert(decoder_input_ids.end(), input_ids.begin() + second_mask_idx + 1, input_ids.end());
+
+    return {decoder_input_ids, item_input, placeholder_start};
 }
 
 std::pair<int, std::vector<std::string>>

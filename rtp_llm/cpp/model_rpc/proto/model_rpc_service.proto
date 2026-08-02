@@ -187,6 +187,8 @@ message GenerateInputPB {
     int32 batch_group_size = 7;
     google.protobuf.Int64Value batch_group_id = 8;
     RequestInfoPB request_info = 9;
+    repeated int32 extra_input_ids = 10;
+    int32 extra_input_ids_loc = 11;  // -1 means not present
 }
 
 message AuxInfoPB {

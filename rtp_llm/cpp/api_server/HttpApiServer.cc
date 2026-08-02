@@ -259,7 +259,8 @@ bool HttpApiServer::registerInferenceService() {
                                                   token_processor_,
                                                   controller_,
                                                   params_.model_config_,
-                                                  metric_reporter_));
+                                                  metric_reporter_,
+                                                  py_model_));
     auto inference_internal_callback =
         [active_request_count = active_request_count_, inference_service = inference_service_](
             std::unique_ptr<http_server::HttpResponseWriter> writer, const http_server::HttpRequest& request) -> void {

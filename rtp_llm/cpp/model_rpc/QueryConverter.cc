@@ -126,8 +126,8 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     TRANS_OPTIONAL(force_batch);
 
     // 生成式推荐：组合 token 约束
-    generate_config->combo_token_size = config_proto->combo_token_size();
-    generate_config->enable_cross_sequence_ban = config_proto->enable_cross_sequence_ban();
+    generate_config->combo_token_size              = config_proto->combo_token_size();
+    generate_config->enable_cross_sequence_ban     = config_proto->enable_cross_sequence_ban();
     generate_config->cross_seq_diverge_start_combo = config_proto->cross_seq_diverge_start_combo();
     for (const auto& combo_proto : config_proto->banned_combo_token_ids().rows()) {
         std::vector<int> combo;
@@ -180,7 +180,7 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
         generate_input->batch_group_id = input->batch_group_id().value();
     }
     if (input->has_request_info()) {
-        const auto& info_pb                  = input->request_info();
+        const auto& info_pb                      = input->request_info();
         generate_input->request_info.frontend_ip = info_pb.frontend_ip();
         generate_input->request_info.dash_ip     = info_pb.dash_ip();
         generate_input->request_info.trace_id    = info_pb.trace_id();
@@ -195,6 +195,14 @@ std::shared_ptr<GenerateInput> QueryConverter::transQuery(const GenerateInputPB*
     }
     if (generate_input->generate_config && generate_input->generate_config->trace_id.empty()) {
         generate_input->generate_config->trace_id = generate_input->request_info.trace_id;
+    }
+
+    if (input->extra_input_ids_size() > 0) {
+        generate_input->extra_input_ids = torch::from_blob(const_cast<int*>(input->extra_input_ids().data()),
+                                                           {(int64_t)input->extra_input_ids_size()},
+                                                           torch::kInt32)
+                                              .clone();
+        generate_input->extra_input_ids_loc = input->extra_input_ids_loc();
     }
 
     return generate_input;

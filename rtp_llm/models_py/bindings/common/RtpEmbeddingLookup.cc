@@ -22,7 +22,13 @@ void embedding(at::Tensor&               output,
     auto device = input.device();
     CHECK_EQ(weight.device(), device);
     CHECK_DIM(1, input);   // input: (tokens)
-    CHECK_DIM(2, weight);  // weight: (hidden_size, hidden_size)
+    CHECK_DIM(2, weight);  // weight: (vocab_size, hidden_size)
+
+    // Check input dtype - must be int32 or int64
+    TORCH_CHECK(input.scalar_type() == at::ScalarType::Int || input.scalar_type() == at::ScalarType::Long,
+                "input must be int32 or int64, got ",
+                input.scalar_type());
+
     const int tokens      = input.size(0);
     const int hidden_size = weight.size(1);
     CHECK_EQ(output.size(0), tokens);
@@ -37,6 +43,18 @@ void embedding(at::Tensor&               output,
     auto* mask_ptr = tensor_data_or_null(text_tokens_mask);
 
     DISPATCH_PYTORCH_DTYPE_TO_CTYPE_FP16(weight.scalar_type(), c_type, [&] {
+        // Convert input to int32 if it's int64
+        at::Tensor input_int32;
+        const int* input_ptr;
+        if (input.scalar_type() == at::ScalarType::Long) {
+            // Convert int64 to int32
+            input_int32 = input.to(at::ScalarType::Int);
+            input_ptr   = static_cast<const int*>(input_int32.data_ptr());
+        } else {
+            // Already int32
+            input_ptr = static_cast<const int*>(input.data_ptr());
+        }
+
         const int vecSize = sizeof(float4) / sizeof(c_type);
         if (hidden_size % vecSize == 0 && !pos_ptr && !type_ptr && !mask_ptr) {  // this kernel does not support mask
             invokeEmbeddingLookupVec(static_cast<c_type*>(output.data_ptr()),
@@ -44,7 +62,7 @@ void embedding(at::Tensor&               output,
                                      1.0,
                                      static_cast<const c_type*>(nullptr),  // postition_table
                                      static_cast<const c_type*>(nullptr),  // token_type_table
-                                     static_cast<const int*>(input.data_ptr()),
+                                     input_ptr,
                                      static_cast<const int*>(nullptr),  // position_ids
                                      static_cast<const int*>(nullptr),  // token_types
                                      static_cast<const int*>(nullptr),  // mask
@@ -57,7 +75,7 @@ void embedding(at::Tensor&               output,
                                   1.0,
                                   static_cast<const c_type*>(nullptr),  // postition_table
                                   static_cast<const c_type*>(nullptr),  // token_type_table
-                                  static_cast<const int*>(input.data_ptr()),
+                                  input_ptr,
                                   static_cast<const int*>(pos_ptr),   // position_ids
                                   static_cast<const int*>(type_ptr),  // token_types
                                   static_cast<const int*>(mask_ptr),  // mask

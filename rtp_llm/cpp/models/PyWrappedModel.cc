@@ -262,13 +262,15 @@ torch_ext::BertEmbeddingInputs PyWrappedModel::buildBertEmbeddingInputs(const Gp
 GptModelOutputs PyWrappedModel::callForwardPostLayers(torch::Tensor         hidden_states,
                                                       const GptModelInputs& inputs,
                                                       bool                  skip_final_layernorm,
-                                                      size_t                num_valid_tokens) {
+                                                      size_t                num_valid_tokens,
+                                                      torch::Tensor         lm_output_indexes) {
     RTP_LLM_PROFILE_SCOPE("py_model.callForwardPostLayers");
-    size_t num_input_tokens = num_valid_tokens != -1 ? num_valid_tokens : inputs.combo_tokens.size(0);
+    size_t      num_input_tokens        = num_valid_tokens != -1 ? num_valid_tokens : inputs.combo_tokens.size(0);
+    const auto& final_lm_output_indexes = lm_output_indexes.defined() ? lm_output_indexes : inputs.lm_output_indexes;
     return forwardPostLayers(hidden_states,
                              inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0),
                              inputs.need_all_logits,
-                             inputs.lm_output_indexes,
+                             final_lm_output_indexes,
                              false,
                              num_input_tokens,
                              inputs,
@@ -395,14 +397,28 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         torch::Tensor token_ids = micro_inputs.combo_tokens.clone().cuda();
         torch::Tensor input_hiddens =
             inputs.last_hidden_states.defined() ? inputs.last_hidden_states : torch::empty({0});
-        input_list.emplace_back(PyModelInputs{token_ids,
-                                              input_hiddens,
-                                              combo_position_ids,
-                                              embedding_inputs,
-                                              multimodal_inputs,
-                                              py_attn_inputs,
-                                              attention_inputs_by_tag,
-                                              bert_embedding_inputs});
+        PyModelInputs py_model_input{token_ids,
+                                     input_hiddens,
+                                     combo_position_ids,
+                                     embedding_inputs,
+                                     multimodal_inputs,
+                                     py_attn_inputs,
+                                     attention_inputs_by_tag,
+                                     bert_embedding_inputs};
+        if (inputs.combo_extra_input_ids.defined() && inputs.combo_extra_input_ids.numel() > 0) {
+            py_model_input.extra_input_ids.combo_extra_input_ids =
+                tensorHoldHostAndToCuda(inputs.combo_extra_input_ids);
+            py_model_input.extra_input_ids.extra_input_ids_lengths =
+                tensorHoldHostAndToCuda(inputs.extra_input_ids_lengths);
+            py_model_input.extra_input_ids.extra_input_ids_locs =
+                inputs.extra_input_ids_locs.defined() ? tensorHoldHostAndToCuda(inputs.extra_input_ids_locs) :
+                                                        torch::empty({0}, torch::kInt32);
+        } else {
+            py_model_input.extra_input_ids.combo_extra_input_ids   = torch::empty({0}, torch::kInt32);
+            py_model_input.extra_input_ids.extra_input_ids_lengths = torch::empty({0}, torch::kInt32);
+            py_model_input.extra_input_ids.extra_input_ids_locs    = torch::empty({0}, torch::kInt32);
+        }
+        input_list.emplace_back(std::move(py_model_input));
     }
 
     if (!inputs.warmup && inputs.pd_separation) {
@@ -461,7 +477,15 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
 
     RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
 
-    return callForwardPostLayers(hidden_states, inputs, false);
+    // TSE may return output indexes based on the encoder/decoder layout.
+    torch::Tensor lm_output_indexes = inputs.lm_output_indexes;
+    if (py_model_outputs.size() > 0 && py_model_outputs[0].lm_output_indexes.defined()
+        && py_model_outputs[0].lm_output_indexes.numel() > 0) {
+        buffer_holder_.hold_host(py_model_outputs[0].lm_output_indexes);
+        lm_output_indexes = py_model_outputs[0].lm_output_indexes;
+    }
+
+    return callForwardPostLayers(hidden_states, inputs, false, -1, lm_output_indexes);
 }
 
 torch_ext::PyEmbeddingInputs PyWrappedModel::buildPyEmbeddingInputs(const GptModelInputs& inputs) {
@@ -544,17 +568,30 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         attention_inputs.padding_offset = tensorHoldHostAndToCuda(attention_inputs.padding_offset);
         auto attention_inputs_by_tag    = setupKVCacheForAttentionInputs(attention_inputs, inputs);
 
-        // launch fused copy
+        auto py_model_inputs = PyModelInputs({token_ids,
+                                              input_hiddens,
+                                              combo_position_ids,
+                                              embedding_inputs,
+                                              multimodal_inputs,
+                                              attention_inputs,
+                                              attention_inputs_by_tag,
+                                              bert_embedding_inputs});
+        if (inputs.combo_extra_input_ids.defined() && inputs.combo_extra_input_ids.numel() > 0) {
+            py_model_inputs.extra_input_ids.combo_extra_input_ids =
+                tensorHoldHostAndToCuda(inputs.combo_extra_input_ids);
+            py_model_inputs.extra_input_ids.extra_input_ids_lengths =
+                tensorHoldHostAndToCuda(inputs.extra_input_ids_lengths);
+            py_model_inputs.extra_input_ids.extra_input_ids_locs =
+                inputs.extra_input_ids_locs.defined() ? tensorHoldHostAndToCuda(inputs.extra_input_ids_locs) :
+                                                        torch::empty({0}, torch::kInt32);
+        } else {
+            py_model_inputs.extra_input_ids.combo_extra_input_ids   = torch::empty({0}, torch::kInt32);
+            py_model_inputs.extra_input_ids.extra_input_ids_lengths = torch::empty({0}, torch::kInt32);
+            py_model_inputs.extra_input_ids.extra_input_ids_locs    = torch::empty({0}, torch::kInt32);
+        }
+        // Flush all H2D copies, including extra_input_ids registered above,
+        // before passing tensors to the Python model.
         fusedCopy(d2d_copies_);
-
-        auto           py_model_inputs = PyModelInputs({token_ids,
-                                                        input_hiddens,
-                                                        combo_position_ids,
-                                                        embedding_inputs,
-                                                        multimodal_inputs,
-                                                        attention_inputs,
-                                                        attention_inputs_by_tag,
-                                                        bert_embedding_inputs});
         PyModelOutputs py_model_outputs;
         torch::Tensor  hidden_states;
 
@@ -592,12 +629,18 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         }
 
         RTP_LLM_LOG_DEBUG("Python object instance forward method called successfully.");
+        // An empty Python lm_output_indexes tensor is a placeholder. Keep the C++
+        // indexes computed from the request in that case (e.g. tbstars_tse).
+        torch::Tensor lm_output_indexes = inputs.lm_output_indexes;
+        if (py_model_outputs.lm_output_indexes.defined() && py_model_outputs.lm_output_indexes.numel() > 0) {
+            lm_output_indexes = py_model_outputs.lm_output_indexes;
+        }
         const bool has_context_request = inputs.input_lengths.size(0) != inputs.sequence_lengths.size(0);
         if (device_props_.enable_prefill_cp && has_context_request) {
             size_t num_valid_tokens = context_parallel_processor_->handleOutputs(hidden_states, inputs, cp_params);
-            return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens);
+            return callForwardPostLayers(hidden_states, inputs, true, num_valid_tokens, lm_output_indexes);
         }
-        return callForwardPostLayers(hidden_states, inputs, true);
+        return callForwardPostLayers(hidden_states, inputs, true, -1, lm_output_indexes);
 
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());

@@ -374,6 +374,12 @@ struct PyMultimodalInputs {
     std::vector<torch::Tensor> mm_extra_input;
 };
 
+struct PyExtraInputIds {
+    torch::Tensor combo_extra_input_ids;
+    torch::Tensor extra_input_ids_lengths;
+    torch::Tensor extra_input_ids_locs;
+};
+
 using AttentionInputsByTag = std::map<std::string, PyAttentionInputs>;
 
 struct PyModelInputs {
@@ -387,6 +393,7 @@ struct PyModelInputs {
     PyAttentionInputs    attention_inputs;
     AttentionInputsByTag attention_inputs_by_tag;
     BertEmbeddingInputs  bert_embedding_inputs;
+    PyExtraInputIds      extra_input_ids;
 
     bool hasAttentionInputsByTag() const {
         return !attention_inputs_by_tag.empty();
@@ -395,10 +402,12 @@ struct PyModelInputs {
 
 struct PyModelOutputs {
     torch::Tensor hidden_states;
+    torch::Tensor lm_output_indexes;
 
     PyModelOutputs() = default;
 
-    PyModelOutputs(torch::Tensor hidden_states): hidden_states(std::move(hidden_states)) {}
+    PyModelOutputs(torch::Tensor hidden_states):
+        hidden_states(std::move(hidden_states)), lm_output_indexes(torch::empty(0)) {}
 };
 
 void registerPyOpDefs(pybind11::module& m);
