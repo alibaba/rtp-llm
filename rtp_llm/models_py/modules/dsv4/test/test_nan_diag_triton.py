@@ -120,6 +120,37 @@ class NanDiagTritonTest(unittest.TestCase):
             torch.cuda.synchronize()
             self.assertEqual(int(report_count[state_index].item()), before_count + 2)
 
+    def test_unmapped_batch_zero_is_silent(self) -> None:
+        x = torch.full((4, 1024), float("nan"), dtype=torch.float32, device="cuda")
+        batch_id = torch.zeros((1,), dtype=torch.int64, device="cuda")
+        source_id = 9  # Test-only source slot.
+        layer_id = 996
+
+        with patch.object(nan_diag, "ENABLED", True):
+            nan_diag.set_batch_context(batch_id)
+            state_index = nan_diag._report_state_index(source_id, layer_id)
+            _, report_count = nan_diag._ensure_report_state(x.device)
+            before_count = int(report_count[state_index].item())
+
+            nan_diag.report_nonfinite(
+                x,
+                source_id=source_id,
+                layer_id=layer_id,
+            )
+            torch.cuda.synchronize()
+            self.assertEqual(int(report_count[state_index].item()), before_count)
+
+            # The first traceable batch must still report after an arbitrary
+            # amount of graph capture or startup work using batch zero.
+            batch_id.fill_(996001)
+            nan_diag.report_nonfinite(
+                x,
+                source_id=source_id,
+                layer_id=layer_id,
+            )
+            torch.cuda.synchronize()
+            self.assertEqual(int(report_count[state_index].item()), before_count + 1)
+
     def test_attention_lse_ignores_negative_inf_but_reports_nan(self) -> None:
         lse = torch.zeros((2, 3, 7), dtype=torch.float32, device="cuda")
         lse[0, 0, 0] = -float("inf")

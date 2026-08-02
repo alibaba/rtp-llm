@@ -3,7 +3,9 @@
 Set ``DSV4_NAN_DIAG=1`` before starting the server to add read-only detector
 kernels to important DSV4 numerical boundaries. A detector prints at most one
 structured event per ``(batch, source, layer)`` even when an entire tensor is
-non-finite. Triton includes the winning ``pid (row, tile, 0)`` in the line.
+non-finite. Unmapped startup and CUDA-graph-capture batches use batch id zero
+and are intentionally silent. Triton includes the winning ``pid (row, tile,
+0)`` in the line.
 The first printed integer is the model batch id, which joins to the host-side
 ``[DSV4_NAN_TRACE]`` line containing trace ids. The second integer is this
 13-digit event payload for the first reported 256-element tile:
@@ -178,26 +180,31 @@ if triton is not None:
         )
         if (n_nan + n_inf > 0) & (thread_idx == 0):
             batch_id = tl.load(batch_id_ptr).to(tl.int64)
-            previous_batch = tl.atomic_xchg(
-                last_reported_batch_ptr + state_index,
-                batch_id,
-            )
-            if previous_batch != batch_id:
-                tl.atomic_add(report_count_ptr + state_index, 1)
-                first_offset = first_col - col_start
-                event = (
-                    source_id.to(tl.int64) * 1_000_000_000_000
-                    + layer_id.to(tl.int64) * 1_000_000_000
-                    + first_offset * 1_000_000
-                    + tl.minimum(n_nan, 999).to(tl.int64) * 1_000
-                    + tl.minimum(n_inf, 999).to(tl.int64)
-                )
-                tl.device_print(
-                    "[DSV4_NAN] batch,event=source(1d)layer(3d)"
-                    "first_offset(3d)n_nan(3d)n_inf(3d):",
+            # Batch zero has no host-side trace mapping. CUDA graph capture
+            # and other untracked startup work use it deliberately so a
+            # persistent failure cannot flood stderr before the service is
+            # ready or consume the event for the first real request.
+            if batch_id != 0:
+                previous_batch = tl.atomic_xchg(
+                    last_reported_batch_ptr + state_index,
                     batch_id,
-                    event,
                 )
+                if previous_batch != batch_id:
+                    tl.atomic_add(report_count_ptr + state_index, 1)
+                    first_offset = first_col - col_start
+                    event = (
+                        source_id.to(tl.int64) * 1_000_000_000_000
+                        + layer_id.to(tl.int64) * 1_000_000_000
+                        + first_offset * 1_000_000
+                        + tl.minimum(n_nan, 999).to(tl.int64) * 1_000
+                        + tl.minimum(n_inf, 999).to(tl.int64)
+                    )
+                    tl.device_print(
+                        "[DSV4_NAN] batch,event=source(1d)layer(3d)"
+                        "first_offset(3d)n_nan(3d)n_inf(3d):",
+                        batch_id,
+                        event,
+                    )
 
     @triton.jit
     def _device_printf_canary_kernel():

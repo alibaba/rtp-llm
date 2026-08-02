@@ -243,20 +243,28 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.input_lengths    = input_lengths;
 
     if (dsv4NanDiagEnabled()) {
-        // Batch sequences are process-local. Prefix them with the process id so
-        // merged logs from DP/EP ranks still have an unambiguous correlation id.
-        const int64_t batch_seq = dsv4_nan_diag_batch_seq.fetch_add(1, std::memory_order_relaxed);
-        const int64_t batch_id  = (static_cast<int64_t>(::getpid()) << 32) | (batch_seq & 0xffffffffLL);
-        auto          batch_id_host =
+        const bool has_trace_id = std::any_of(
+            inputs.trace_ids.begin(), inputs.trace_ids.end(), [](const std::string& id) { return !id.empty(); });
+        const bool traceable_batch = !inputs.warmup && has_trace_id;
+
+        // Batch zero is intentionally reserved for untracked startup work and
+        // CUDA graph capture. The detector ignores it, preventing a persistent
+        // NaN from flooding stderr before an event can be joined to a trace.
+        // Traceable batch sequences are process-local; prefix them with the pid
+        // so merged logs from DP/EP ranks remain unambiguous.
+        int64_t batch_id = 0;
+        if (traceable_batch) {
+            const int64_t batch_seq = dsv4_nan_diag_batch_seq.fetch_add(1, std::memory_order_relaxed);
+            batch_id                = (static_cast<int64_t>(::getpid()) << 32) | (batch_seq & 0xffffffffLL);
+        }
+        auto batch_id_host =
             torch::empty({1}, torch::TensorOptions(torch::kInt64).device(torch::kCPU).pinned_memory(true));
         batch_id_host.data_ptr<int64_t>()[0] = batch_id;
         buffer_holder_.hold_host(batch_id_host);
         py_attn_inputs.nan_diag_batch_id =
             batch_id_host.to(torch::TensorOptions(torch::kInt64).device(torch::kCUDA), /*non_blocking=*/true);
 
-        const bool has_trace_id = std::any_of(
-            inputs.trace_ids.begin(), inputs.trace_ids.end(), [](const std::string& id) { return !id.empty(); });
-        if (!inputs.warmup && has_trace_id) {
+        if (traceable_batch) {
             const char*        phase = inputs.sequence_lengths.numel() > 0 ? "decode" : "prefill";
             std::ostringstream trace_map;
             trace_map << "[DSV4_NAN_TRACE] batch=" << batch_id << " phase=" << phase << " trace_ids=[";
