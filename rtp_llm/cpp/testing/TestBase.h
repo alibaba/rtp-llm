@@ -191,9 +191,15 @@ protected:
             }
         }
 
+        RTP_LLM_CHECK_WITH_INFO(cache_config.groupNums() == 1,
+                                "DeviceTestBase::allocateKVBlocks requires exactly one cache group, got %d",
+                                cache_config.groupNums());
+        const auto& cache_group    = cache_config.topology().groups().front();
+        const auto& cache_tag      = cache_group.tag;
+        const auto  tokensPerBlock = cache_group.seq_size_per_block;
+
         auto max_seq_len                    = *std::max_element(input_lengths.begin(), input_lengths.end());
         max_seq_len                         = (max_seq_len == 0) ? 1 : max_seq_len;
-        const auto tokensPerBlock           = cache_config.seq_size_per_block;
         const auto batch_layer_kv_block_num = need_padding ? ((max_seq_len + tokensPerBlock - 1) / tokensPerBlock) + 1 :
                                                              ((max_seq_len + tokensPerBlock - 1) / tokensPerBlock);
         const auto batch_size               = input_lengths.size();
@@ -222,15 +228,8 @@ protected:
         rtp_llm::MallocInfo malloc_info{batch_kv_cache, complete_token_ids};
         auto                malloc_result = cache_manager_->malloc(malloc_info);
         EXPECT_TRUE(malloc_result.success);
-        RTP_LLM_CHECK_WITH_INFO(cache_config.groupNums() == 1,
-                                "DeviceTestBase::allocateKVBlocks requires exactly one cache group, got %d",
-                                cache_config.groupNums());
         const auto groups = cache_config.topology().groupsForLayer(0);
         RTP_LLM_CHECK_WITH_INFO(groups.size() == 1, "TestBase requires exactly one cache group for layer 0");
-        std::string cache_tag;
-        for (const auto& group : groups) {
-            cache_tag = group.get().tag;
-        }
 
         for (size_t i = 0; i < batch_size; i++) {
             const auto& indices = batch_kv_cache->blocks(static_cast<int>(i), cache_tag);
@@ -240,22 +239,22 @@ protected:
                 // [layernum, batch, 2, max_pad_seq, dim]
                 auto       max_pad_seq    = kvCache.sizes()[3];
                 auto       k_indexs       = indices;
-                const auto max_k_blocks   = max_pad_seq / cache_config.seq_size_per_block;
+                const auto max_k_blocks   = max_pad_seq / tokensPerBlock;
                 const auto blocks_to_fill = std::min<size_t>(max_k_blocks, k_indexs.size());
                 const auto spec           = cache_config.specForGroup(cache_tag);
                 const auto local_kv_heads = cache_config.localKvHeadNumForGroup(cache_tag);
                 RTP_LLM_CHECK_WITH_INFO(local_kv_heads > 0, "local_head_num_kv must be positive");
                 const auto elems_per_kv_block   = spec->k_block_size();
-                const auto elems_per_head_block = static_cast<size_t>(local_kv_heads) * cache_config.seq_size_per_block;
+                const auto elems_per_head_block = static_cast<size_t>(local_kv_heads) * tokensPerBlock;
                 RTP_LLM_CHECK_WITH_INFO(elems_per_head_block > 0 && elems_per_kv_block % elems_per_head_block == 0,
                                         "invalid KV block layout: k_block_elems=%zu local_head_num_kv=%u seq=%zu",
                                         elems_per_kv_block,
                                         local_kv_heads,
-                                        static_cast<size_t>(cache_config.seq_size_per_block));
+                                        static_cast<size_t>(tokensPerBlock));
                 const auto size_per_head = elems_per_kv_block / elems_per_head_block;
                 for (size_t k = 0; k < blocks_to_fill; ++k) {
-                    auto          block_start = k * cache_config.seq_size_per_block;
-                    auto          block_end   = block_start + cache_config.seq_size_per_block;
+                    auto          block_start = k * tokensPerBlock;
+                    auto          block_end   = block_start + tokensPerBlock;
                     torch::Tensor kblock, vblock;
                     if (need_padding) {
                         kblock = kvCache
@@ -273,32 +272,30 @@ protected:
                                              torch::indexing::Slice()})
                                      .contiguous();
                     } else {
-                        kblock =
-                            kvCache
-                                .index({torch::indexing::Slice(),
-                                        static_cast<int64_t>(i),
-                                        torch::indexing::Slice(),
-                                        torch::indexing::Slice(block_start, block_end),
-                                        torch::indexing::Slice()})
-                                .reshape(std::vector<int64_t>{2,
-                                                              static_cast<int64_t>(cache_config.seq_size_per_block),
-                                                              static_cast<int64_t>(local_kv_heads),
-                                                              static_cast<int64_t>(size_per_head)})
-                                .transpose(2, 1)
-                                .contiguous();
+                        kblock = kvCache
+                                     .index({torch::indexing::Slice(),
+                                             static_cast<int64_t>(i),
+                                             torch::indexing::Slice(),
+                                             torch::indexing::Slice(block_start, block_end),
+                                             torch::indexing::Slice()})
+                                     .reshape(std::vector<int64_t>{2,
+                                                                   static_cast<int64_t>(tokensPerBlock),
+                                                                   static_cast<int64_t>(local_kv_heads),
+                                                                   static_cast<int64_t>(size_per_head)})
+                                     .transpose(2, 1)
+                                     .contiguous();
                         // vblock is written with the same helper as kblock.
-                        vblock =
-                            kvCache
-                                .index({torch::indexing::Slice(),
-                                        static_cast<int64_t>(i),
-                                        1,
-                                        torch::indexing::Slice(block_start, block_end),
-                                        torch::indexing::Slice()})
-                                .reshape(std::vector<int64_t>{static_cast<int64_t>(cache_config.seq_size_per_block),
-                                                              static_cast<int64_t>(local_kv_heads),
-                                                              static_cast<int64_t>(size_per_head)})
-                                .transpose(1, 0)
-                                .contiguous();
+                        vblock = kvCache
+                                     .index({torch::indexing::Slice(),
+                                             static_cast<int64_t>(i),
+                                             1,
+                                             torch::indexing::Slice(block_start, block_end),
+                                             torch::indexing::Slice()})
+                                     .reshape(std::vector<int64_t>{static_cast<int64_t>(tokensPerBlock),
+                                                                   static_cast<int64_t>(local_kv_heads),
+                                                                   static_cast<int64_t>(size_per_head)})
+                                     .transpose(1, 0)
+                                     .contiguous();
                     }
                     // std::cout << "index: " << k << " start: " << block_start << " end: " << block_end << std::endl;
                     // std::cout << "block index: " << k_indexs[k] << std::endl;

@@ -118,11 +118,8 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     auto layer_num = model_config.num_layers;
 
     CacheConfig config;
-    config.layer_num                 = static_cast<uint32_t>(layer_num);
-    config.layer_all_num             = static_cast<uint32_t>(layer_num);
-    config.block_num                 = 0;
-    config.seq_size_per_block        = tokens_per_block;
-    config.kernel_seq_size_per_block = kernel_seq_size_per_block;
+    config.layer_num     = static_cast<uint32_t>(layer_num);
+    config.layer_all_num = static_cast<uint32_t>(layer_num);
 
     config.use_mla   = model_config.attn_config.use_mla;
     config.dtype     = dtype;
@@ -131,20 +128,16 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     auto spec = getDefaultSpecFromRuntimeSpecs(model_config, runtime_specs);
 
     // Complete the physical layout before publishing the immutable topology.
-    config.kv_block_stride_bytes = spec->block_size_bytes();
-    config.kv_block_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_block_stride_bytes;
+    size_t kv_block_stride_bytes = spec->block_size_bytes();
 
     // scale_block_size_bytes() returns 0 when scales are not used.
-    config.kv_scale_stride_bytes = spec->scale_block_size_bytes();
-    config.kv_scale_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
+    size_t kv_scale_stride_bytes = spec->scale_block_size_bytes();
 
     if (config.is_sparse) {
-        auto indexer_dim             = model_config.attn_config.indexer_head_dim;
-        config.kv_scale_stride_bytes = (indexer_dim + indexer_dim / 128 * 4) * spec->seq_size_per_block;
-        config.kv_scale_size_bytes   = static_cast<size_t>(config.layer_num) * config.kv_scale_stride_bytes;
+        const size_t indexer_dim = static_cast<size_t>(model_config.attn_config.indexer_head_dim);
+        kv_scale_stride_bytes    = (indexer_dim + indexer_dim / 128 * 4) * spec->seq_size_per_block;
     }
 
-    config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
     std::vector<int> layer_ids(static_cast<size_t>(layer_num));
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
     GroupBase group;
@@ -156,11 +149,9 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     group.layer_ids                 = layer_ids;
     group.local_kv_head_num         = localKvHeadNumForSpec(spec->type, model_config, parallelism_config);
     group.seq_size_per_block        = spec->seq_size_per_block;
-    group.kernel_seq_size_per_block = group_type == CacheGroupType::FULL ?
-                                          std::min<size_t>(kernel_seq_size_per_block, group.seq_size_per_block) :
-                                          group.seq_size_per_block;
-    group.kv_block_stride_bytes     = config.kv_block_stride_bytes;
-    group.kv_scale_stride_bytes     = config.kv_scale_stride_bytes;
+    group.kernel_seq_size_per_block = std::min<size_t>(kernel_seq_size_per_block, group.seq_size_per_block);
+    group.kv_block_stride_bytes     = kv_block_stride_bytes;
+    group.kv_scale_stride_bytes     = kv_scale_stride_bytes;
 
     std::vector<LayerBase> layers(static_cast<size_t>(layer_num));
     for (int64_t layer_id = 0; layer_id < layer_num; ++layer_id) {

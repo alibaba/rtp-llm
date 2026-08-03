@@ -50,7 +50,7 @@ public:
 
         auto& resource       = batch_resource[0];
         int   max_blocks_num = 0;
-        for (const auto& group : resource.groupBlocks()) {
+        for (const auto& group : resource.groupResources()) {
             max_blocks_num = std::max(max_blocks_num, static_cast<int>(group.block_ids->blocksNum()));
         }
         return max_blocks_num;
@@ -80,9 +80,13 @@ public:
         return cacheResource(batch_id).mutableBlockIdsForLayer(layer_id, tag);
     }
 
-    const std::vector<TaggedBlockIds>& groupBlocks(int batch_id = 0) const {
+    const std::vector<KVCacheGroupResource>& groupResources(int batch_id = 0) const {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        return batch_resource[batch_id].groupBlocks();
+        return batch_resource[batch_id].groupResources();
+    }
+
+    const std::vector<KVCacheGroupResource>& groupBlocks(int batch_id = 0) const {
+        return groupResources(batch_id);
     }
 
     const KVCacheResource& cacheResource(int batch_id = 0) const {
@@ -99,16 +103,36 @@ public:
         resizeBlocks(0, 0);
     }
 
-    const CacheKeysType& cacheKeys(int batch_id = 0) const {
+    const CacheKeysType& cacheKeys(int batch_id, std::string_view tag) const {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        return batch_resource[batch_id].cacheKeys();
+        return batch_resource[batch_id].cacheKeys(tag);
     }
 
-    void popBackCacheKey(int batch_id = 0) {
+    const CacheKeysType& cacheKeys(int batch_id) const {
+        return cacheResource(batch_id).cacheKeys();
+    }
+
+    void popBackCacheKey(int batch_id, std::string_view tag) {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        auto& keys = batch_resource[batch_id].cacheKeys();
+        auto& keys = batch_resource[batch_id].cacheKeys(tag);
         if (!keys.empty()) {
             keys.pop_back();
+        }
+    }
+
+    void popBackCacheKey(int batch_id) {
+        auto& keys = cacheResource(batch_id).cacheKeys();
+        if (!keys.empty()) {
+            keys.pop_back();
+        }
+    }
+
+    void popBackAllBatchCacheKeys(std::string_view tag) {
+        for (auto& resource : batch_resource) {
+            auto& keys = resource.cacheKeys(tag);
+            if (!keys.empty()) {
+                keys.pop_back();
+            }
         }
     }
 
@@ -121,16 +145,24 @@ public:
         }
     }
 
-    void clearCacheKeys(int batch_id = 0) {
+    void clearCacheKeys(int batch_id, std::string_view tag) {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        batch_resource[batch_id].cacheKeys().clear();
+        batch_resource[batch_id].cacheKeys(tag).clear();
+    }
+
+    void clearCacheKeys(int batch_id) {
+        cacheResource(batch_id).cacheKeys().clear();
+    }
+
+    void pushBackCacheKey(int batch_id, std::string_view tag, CacheKeyType key) {
+        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
+        auto& resource = batch_resource[batch_id];
+        auto& keys     = resource.cacheKeys(tag);
+        keys.push_back(key);
     }
 
     void pushBackCacheKey(int batch_id, CacheKeyType key) {
-        RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        auto& resource = batch_resource[batch_id];
-        auto& keys     = resource.cacheKeys();
-        keys.push_back(key);
+        cacheResource(batch_id).cacheKeys().push_back(key);
     }
 
     void setBatchBlocks(int batch_id, std::string_view tag, const BlockIndicesType& blocks) {
@@ -138,14 +170,18 @@ public:
         batch_resource[batch_id].mutableBlockIds(tag).assign(blocks);
     }
 
-    void setBatchCacheKeys(int batch_id, const CacheKeysType& keys) {
+    void setBatchCacheKeys(int batch_id, std::string_view tag, const CacheKeysType& keys) {
         RTP_LLM_CHECK(batch_id >= 0 && static_cast<size_t>(batch_id) < batch_resource.size());
-        batch_resource[batch_id].cacheKeys() = keys;
+        batch_resource[batch_id].cacheKeys(tag) = keys;
+    }
+
+    void setBatchCacheKeys(int batch_id, const CacheKeysType& keys) {
+        cacheResource(batch_id).setCacheKeys(keys);
     }
 
     void check() const {
         RTP_LLM_CHECK(!batch_resource.empty());
-        const auto groups = batch_resource[0].groupBlocks();
+        const auto groups = batch_resource[0].groupResources();
         for (const auto& resource : batch_resource) {
             for (const auto& group : groups) {
                 RTP_LLM_CHECK(resource.blocksNum(group.tag) == static_cast<int>(group.block_ids->blocksNum()));
@@ -184,6 +220,18 @@ public:
         return all_blocks;
     }
 
+    bool hasCacheKeys(std::string_view tag) const {
+        if (batch_resource.empty()) {
+            return false;
+        }
+        for (const auto& resource : batch_resource) {
+            if (!resource.cacheKeys(tag).empty()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool hasCacheKeys() const {
         if (batch_resource.empty()) {
             return false;
@@ -196,6 +244,26 @@ public:
         return false;
     }
 
+    bool hasAnyCacheKeys() const {
+        for (const auto& resource : batch_resource) {
+            for (const auto& group : resource.groupResources()) {
+                if (!group.cache_keys.empty()) {
+                    return true;
+                }
+            }
+        }
+        return false;
+    }
+
+    bool lastBlockAligned(std::string_view tag) const {
+        for (const auto& resource : batch_resource) {
+            if (!resource.lastBlockAligned(tag)) {
+                return false;
+            }
+        }
+        return true;
+    }
+
     bool lastBlockAligned() const {
         for (const auto& resource : batch_resource) {
             if (!resource.lastBlockAligned()) {
@@ -203,6 +271,12 @@ public:
             }
         }
         return true;
+    }
+
+    void setLastBlockAligned(std::string_view tag, bool last_block_aligned) {
+        for (auto& resource : batch_resource) {
+            resource.setLastBlockAligned(tag, last_block_aligned);
+        }
     }
 
     void setLastBlockAligned(bool last_block_aligned) {

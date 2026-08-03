@@ -94,6 +94,18 @@ cc_library(
 )
 
 cc_library(
+    name = "request_prefix_resource",
+    hdrs = ["RequestPrefixResource.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":cache_config",
+        "//rtp_llm/cpp/utils:core_utils",
+        "//rtp_llm/cpp/utils:hash_util",
+    ],
+)
+
+cc_library(
     name = "cache_layout",
     hdrs = ["BufferTypes.h"],
     copts = copts(),
@@ -261,6 +273,7 @@ cc_library(
     deps = [
         ":cache_config",
         ":cache_group_type",
+        ":request_prefix_resource",
         "//rtp_llm/cpp/utils:core_utils",
     ],
 )

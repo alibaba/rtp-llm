@@ -24,6 +24,18 @@
 
 namespace rtp_llm {
 
+static void applyCacheMetadataToModelInput(GptModelInputs& model_input, const CacheConfig& cache_config) {
+    for (auto& [tag, table] : model_input.block_tables_by_group) {
+        RTP_LLM_CHECK_WITH_INFO(
+            cache_config.topology().contains(tag), "MTP model input has unknown cache tag=%s", tag.c_str());
+        const auto& group               = cache_config.group(tag);
+        table.seq_size_per_block        = group.seq_size_per_block;
+        table.kernel_seq_size_per_block = group.kernel_seq_size_per_block;
+        table.kv_block_stride_bytes     = group.kv_block_stride_bytes;
+        table.kv_scale_stride_bytes     = group.kv_scale_stride_bytes;
+    }
+}
+
 GptModelOutputs MtpExecutor::forwardModel(ModelBase* model, const GptModelInputs& inputs, ModelInputsModelRole role) {
     RTP_LLM_CHECK_WITH_INFO(model != nullptr, "model is null before forward");
     if (model_inputs_logger_) {
@@ -53,11 +65,6 @@ void MtpExecutor::maybePrintModelInput(const GptModelInputs& model_input, const 
     }
 }
 
-static void applyCacheStrideToModelInput(GptModelInputs& model_input, const CacheConfig& cache_config) {
-    model_input.kv_block_stride_bytes = cache_config.kv_block_stride_bytes;
-    model_input.kv_scale_stride_bytes = cache_config.kv_scale_stride_bytes;
-}
-
 static std::shared_ptr<NormalGenerateStream> makeFakeStream(int                    max_new_tokens,
                                                             size_t                 reserved_blocks,
                                                             const ModelConfig&     model_config,
@@ -75,7 +82,7 @@ static std::shared_ptr<NormalGenerateStream> makeFakeStream(int                 
         fake_input, model_config, runtime_config, resource_context, nullptr, max_new_tokens);
     fake_stream->setIsFakeStream(true);
     fake_stream->setMetricsReporter(nullptr);
-    fake_stream->fakeInitKVBlock(reserved_blocks);
+    fake_stream->fakeInitKVBlockForTokens(reserved_blocks);
 
     return fake_stream;
 }
@@ -400,7 +407,7 @@ absl::Status MtpExecutor::prefillStep(const std::list<GenerateStreamPtr>& stream
         tpSyncModelInputs(model_input, parallelism_config_);
         maybePrintModelInput(model_input, "prefill post draft model");
         const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
-        applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
+        applyCacheMetadataToModelInput(model_input, mtp_cache_cfg);
         draft_model_output = std::move(forwardModel(draft_model_.get(), model_input, ModelInputsModelRole::DRAFT));
     }
 
@@ -676,7 +683,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
         RTP_LLM_PROFILE_SCOPE("executor.mtp.decode_step(prepare_draft_prefill_input)");
         maybePrintModelInput(model_input, "decode post draft model");
         const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
-        applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
+        applyCacheMetadataToModelInput(model_input, mtp_cache_cfg);
     }
 
     {
@@ -833,7 +840,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
     buffer_holder_.release();
 
     const auto& mtp_cache_cfg = cache_manager_->getMTPModuleCacheConfig(0);
-    applyCacheStrideToModelInput(model_input, mtp_cache_cfg);
+    applyCacheMetadataToModelInput(model_input, mtp_cache_cfg);
 
     GptModelOutputs            draft_decode_model_output;
     std::vector<torch::Tensor> draft_token_ids_list;
@@ -928,7 +935,7 @@ void MtpExecutor::draftModelDecode(GptModelInputs&             model_input,
             execBroadcast({broadcast_tensors, 0});
         }
 
-        applyCacheStrideToModelInput(model_input, cache_manager_->cacheConfig());
+        applyCacheMetadataToModelInput(model_input, cache_manager_->cacheConfig());
     }
 }
 

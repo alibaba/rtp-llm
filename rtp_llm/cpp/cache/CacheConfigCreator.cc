@@ -32,108 +32,154 @@ void validatePublishedCacheConfig(const CacheConfig& config) {
                             static_cast<size_t>(full_attention_group_num));
 }
 
-bool blockNumFitsBudget(uint32_t block_num, size_t total_budget_bytes, const KVCacheBlockBudget& budget, int step) {
-    if (budget.explicit_pool_reserve_bytes > total_budget_bytes) {
-        return false;
-    }
-
-    size_t remaining = total_budget_bytes - budget.explicit_pool_reserve_bytes;
-    if (budget.paged_block_bytes > 0) {
-        if (static_cast<size_t>(block_num) > remaining / budget.paged_block_bytes) {
-            return false;
-        }
-        remaining -= static_cast<size_t>(block_num) * budget.paged_block_bytes;
-    }
-
-    const auto safe_step  = static_cast<uint32_t>(std::max(1, step));
-    const auto swa_blocks = block_num / safe_step + (block_num % safe_step != 0 ? 1u : 0u);
-    return budget.swa_block_bytes == 0 || static_cast<size_t>(swa_blocks) <= remaining / budget.swa_block_bytes;
+size_t checkedAdd(size_t lhs, size_t rhs, const char* what) {
+    RTP_LLM_CHECK_WITH_INFO(
+        rhs <= std::numeric_limits<size_t>::max() - lhs, "kv cache %s overflow: %zu + %zu", what, lhs, rhs);
+    return lhs + rhs;
 }
 
-KVCacheBlockBudget blockBudgetForConfig(const CacheConfig& config) {
-    KVCacheBlockBudget budget;
-    budget.explicit_pool_reserve_bytes = config.explicitly_sized_pool_reserve_bytes;
-    for (const auto& group : config.topology().groups()) {
-        if (config.usesExplicitIndependentBlocks(group.tag)) {
-            continue;
-        }
-        const auto group_bytes = config.blockSizeBytesForGroup(group.tag);
-        switch (config.typeForGroup(group.tag)) {
-            case CacheGroupType::FULL:
-            case CacheGroupType::LINEAR:
-                budget.paged_block_bytes += group_bytes;
-                break;
-            case CacheGroupType::SWA:
-                budget.swa_block_bytes += group_bytes;
-                break;
-        }
-    }
-    return budget;
+size_t checkedMul(size_t lhs, size_t rhs, const char* what) {
+    RTP_LLM_CHECK_WITH_INFO(
+        lhs == 0 || rhs <= std::numeric_limits<size_t>::max() / lhs, "kv cache %s overflow: %zu * %zu", what, lhs, rhs);
+    return lhs * rhs;
 }
 
-void addBlockBudget(KVCacheBlockBudget& total, const KVCacheBlockBudget& addition, size_t multiplier = 1) {
-    const auto add = [multiplier](size_t& dst, size_t value, const char* name) {
-        RTP_LLM_CHECK_WITH_INFO(multiplier == 0 || value <= (std::numeric_limits<size_t>::max() - dst) / multiplier,
-                                "kv cache %s budget overflow: current=%zu addition=%zu multiplier=%zu",
-                                name,
-                                dst,
-                                value,
-                                multiplier);
-        dst += value * multiplier;
-    };
-    add(total.explicit_pool_reserve_bytes, addition.explicit_pool_reserve_bytes, "explicit reserve");
-    add(total.paged_block_bytes, addition.paged_block_bytes, "paged block bytes");
-    add(total.swa_block_bytes, addition.swa_block_bytes, "SWA block bytes");
+uint64_t checkedLcm(uint64_t lhs, uint64_t rhs) {
+    RTP_LLM_CHECK_WITH_INFO(lhs > 0 && rhs > 0, "kv cache capacity LCM requires positive spans");
+    const uint64_t gcd = std::gcd(lhs, rhs);
+    RTP_LLM_CHECK_WITH_INFO(lhs / gcd <= std::numeric_limits<uint64_t>::max() / rhs,
+                            "kv cache physical span LCM overflow: %lu and %lu",
+                            lhs,
+                            rhs);
+    return lhs / gcd * rhs;
 }
 
-uint32_t computeBlockNum(CacheConfig&                                     config,
-                         const ModelConfig&                               model_config,
-                         const RuntimeConfig&                             runtime_config,
-                         const KVCacheConfig&                             kv_cache_config,
-                         const ParallelismConfig&                         parallelism_config,
-                         const std::optional<WarmUpResult>&               warm_up_result,
-                         const std::optional<SpeculativeExecutionConfig>& sp_config) {
+uint64_t explicitTestCapacity(const ModelConfig& model_config, const KVCacheConfig& kv_cache_config) {
+    const auto blocks = static_cast<uint64_t>(kv_cache_config.test_block_num);
+    const auto span   = static_cast<uint64_t>(model_config.attn_config.tokens_per_block);
+    RTP_LLM_CHECK_WITH_INFO(span > 0 && blocks <= std::numeric_limits<uint64_t>::max() / span,
+                            "test block capacity overflow: blocks=%lu span=%lu",
+                            blocks,
+                            span);
+    return blocks * span;
+}
+
+uint64_t computeTokenCapacity(const CacheConfig&                               config,
+                              const ModelConfig&                               model_config,
+                              const RuntimeConfig&                             runtime_config,
+                              const KVCacheConfig&                             kv_cache_config,
+                              const ParallelismConfig&                         parallelism_config,
+                              const std::optional<WarmUpResult>&               warm_up_result,
+                              const std::optional<SpeculativeExecutionConfig>& sp_config) {
     if (kv_cache_config.test_block_num > 0) {
         RTP_LLM_LOG_INFO("KVCacheConfig explicitly specified kv cache block num %d", kv_cache_config.test_block_num);
-        config.finalizeBlockNums(kv_cache_config.test_block_num, runtime_config);
-        return static_cast<uint32_t>(kv_cache_config.test_block_num);
+        return explicitTestCapacity(model_config, kv_cache_config);
     }
 
     const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
         runtime_config, kv_cache_config, model_config, parallelism_config, warm_up_result, sp_config);
-    config.finalizeBlockNums(0, runtime_config);
-
-    const auto block_budget = blockBudgetForConfig(config);
-    if (block_budget.explicit_pool_reserve_bytes > 0) {
-        RTP_LLM_CHECK_WITH_INFO(kv_cache_mem_size > block_budget.explicit_pool_reserve_bytes,
-                                "kv cache budget %zu MiB is smaller than explicitly-sized pool reservation %zu MiB "
-                                "(reduce explicitly sized pool blocks if needed)",
-                                kv_cache_mem_size / 1024 / 1024,
-                                block_budget.explicit_pool_reserve_bytes / 1024 / 1024);
-        RTP_LLM_LOG_INFO("kv cache: total budget %zu MiB, explicitly-sized pool reserve %zu MiB",
-                         kv_cache_mem_size / 1024 / 1024,
-                         block_budget.explicit_pool_reserve_bytes / 1024 / 1024);
-    }
-    return maxKVCacheBlockNumForBudget(kv_cache_mem_size, block_budget, config.linear_step);
+    return maxKVCacheTokenCapacityForBudget(kv_cache_mem_size, config);
 }
 
 }  // namespace
 
-uint32_t maxKVCacheBlockNumForBudget(size_t total_budget_bytes, const KVCacheBlockBudget& budget, int linear_step) {
-    RTP_LLM_CHECK_WITH_INFO(budget.paged_block_bytes > 0 || budget.swa_block_bytes > 0,
-                            "kv cache block budget has zero marginal block bytes");
+uint64_t maxKVCacheTokenCapacityForBudget(size_t total_budget_bytes, const CacheConfig& config) {
+    struct LogicalGroup {
+        uint64_t span;
+        size_t   block_bytes;
+    };
+    std::vector<LogicalGroup> logical_groups;
+    uint64_t                  period             = 1;
+    size_t                    fixed_budget_bytes = 0;
 
-    uint32_t low  = 0;
-    uint32_t high = std::numeric_limits<uint32_t>::max();
-    while (low < high) {
-        const uint32_t mid = low + static_cast<uint32_t>((static_cast<uint64_t>(high) - low + 1) / 2);
-        if (blockNumFitsBudget(mid, total_budget_bytes, budget, linear_step)) {
-            low = mid;
-        } else {
-            high = mid - 1;
+    for (const auto& group : config.topology().groups()) {
+        RTP_LLM_CHECK_WITH_INFO(
+            group.seq_size_per_block > 0, "kv cache tag=%s has zero physical seq_size_per_block", group.tag.c_str());
+        const size_t block_bytes = config.blockSizeBytesForGroup(group.tag);
+        if (group.policy.fixed_block_num > 0) {
+            if (group.policy.charge_to_paged_budget) {
+                fixed_budget_bytes =
+                    checkedAdd(fixed_budget_bytes,
+                               checkedMul(group.policy.fixed_block_num, block_bytes, "fixed group bytes"),
+                               "fixed group budget");
+            }
+            continue;
+        }
+        RTP_LLM_CHECK_WITH_INFO(
+            block_bytes > 0, "kv cache logical tag=%s has zero marginal block bytes", group.tag.c_str());
+        logical_groups.push_back({group.seq_size_per_block, block_bytes});
+        period = checkedLcm(period, group.seq_size_per_block);
+    }
+    RTP_LLM_CHECK_WITH_INFO(!logical_groups.empty(), "kv cache has no LOGICAL capacity group");
+    RTP_LLM_CHECK_WITH_INFO(fixed_budget_bytes <= total_budget_bytes,
+                            "kv cache budget %zu is smaller than fixed pool reservation %zu",
+                            total_budget_bytes,
+                            fixed_budget_bytes);
+
+    size_t period_bytes = 0;
+    for (const auto& group : logical_groups) {
+        RTP_LLM_CHECK_WITH_INFO(period % group.span == 0, "invalid kv cache capacity period");
+        period_bytes =
+            checkedAdd(period_bytes,
+                       checkedMul(static_cast<size_t>(period / group.span), group.block_bytes, "period group bytes"),
+                       "period bytes");
+    }
+    RTP_LLM_CHECK_WITH_INFO(period_bytes > 0, "kv cache capacity period has zero marginal bytes");
+
+    const size_t   available_budget = total_budget_bytes - fixed_budget_bytes;
+    const uint64_t budget_periods   = available_budget / period_bytes;
+    const uint64_t full_periods     = budget_periods;
+    RTP_LLM_CHECK_WITH_INFO(full_periods <= std::numeric_limits<uint64_t>::max() / period,
+                            "kv cache token capacity overflow");
+    const uint64_t base_tokens      = full_periods * period;
+    const size_t   base_bytes       = checkedMul(static_cast<size_t>(full_periods), period_bytes, "base period bytes");
+    const size_t   remainder_budget = available_budget - base_bytes;
+
+    constexpr size_t kMaxCapacityBoundaries = 1 << 20;
+    size_t           boundary_count         = 1;
+    for (const auto& group : logical_groups) {
+        const uint64_t group_boundary_count = period / group.span;
+        RTP_LLM_CHECK_WITH_INFO(group_boundary_count <= kMaxCapacityBoundaries - boundary_count,
+                                "kv cache capacity period has too many boundaries: period=%lu span=%lu limit=%zu",
+                                period,
+                                group.span,
+                                kMaxCapacityBoundaries);
+        boundary_count += static_cast<size_t>(group_boundary_count);
+    }
+    std::vector<uint64_t> boundaries;
+    boundaries.reserve(boundary_count + 1);
+    boundaries.push_back(0);
+    for (const auto& group : logical_groups) {
+        for (uint64_t boundary = group.span;; boundary += group.span) {
+            boundaries.push_back(boundary);
+            if (boundary == period) {
+                break;
+            }
+            RTP_LLM_CHECK_WITH_INFO(boundary < period && group.span <= period - boundary,
+                                    "kv cache capacity boundary increment overflow");
         }
     }
-    return low;
+    std::sort(boundaries.begin(), boundaries.end());
+    boundaries.erase(std::unique(boundaries.begin(), boundaries.end()), boundaries.end());
+    uint64_t best = base_tokens;
+    for (const uint64_t offset : boundaries) {
+        RTP_LLM_CHECK_WITH_INFO(offset <= std::numeric_limits<uint64_t>::max() - base_tokens,
+                                "kv cache boundary token overflow");
+        const uint64_t candidate    = base_tokens + offset;
+        size_t         offset_bytes = 0;
+        for (const auto& group : logical_groups) {
+            const uint64_t blocks = offset / group.span + (offset % group.span != 0 ? 1 : 0);
+            offset_bytes =
+                checkedAdd(offset_bytes,
+                           checkedMul(static_cast<size_t>(blocks), group.block_bytes, "boundary group bytes"),
+                           "boundary bytes");
+        }
+        if (offset_bytes <= remainder_budget) {
+            best = candidate;
+        }
+    }
+    RTP_LLM_CHECK_WITH_INFO(best > 0, "kv cache budget %zu cannot provide capacity for one token", total_budget_bytes);
+    return best;
 }
 
 LayerKVCacheSpecs CacheConfigCreator::buildLayerSpecsFromDescs(const LayerKVCacheSpecDescs& layer_descs,
@@ -191,22 +237,15 @@ CacheConfig CacheConfigCreator::createConfig(const ModelConfig&                 
 
     config.linear_step = kv_cache_config.linear_step;
 
-    uint32_t block_num = computeBlockNum(
+    const uint64_t capacity_tokens = computeTokenCapacity(
         config, model_config, runtime_config, kv_cache_config, parallelism_config, warm_up_result, sp_config);
-    RTP_LLM_CHECK_WITH_INFO(block_num > 0,
-                            "kv cache needs at least 1 block but %ld, each block needs %ld MiB memory",
-                            block_num,
-                            static_cast<long>(config.block_size_bytes / 1024 / 1024));
-
-    const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
-    config.block_num            = static_cast<int>(block_num);
-    config.finalizeBlockNums(block_num, runtime_config);
-    RTP_LLM_LOG_INFO("kv cache block nums is %u, allows storing %ld tokens", block_num, kv_cache_seq_len);
-    if (kv_cache_seq_len < model_config.max_seq_len) {
-        RTP_LLM_LOG_WARNING("kv cache block nums %u can only store %ld tokens, less than max_seq_len %ld, "
+    RTP_LLM_CHECK_WITH_INFO(capacity_tokens > 0, "kv cache needs capacity for at least 1 token");
+    config.applyTokenCapacity(capacity_tokens);
+    RTP_LLM_LOG_INFO("kv cache joint capacity is %lu tokens", capacity_tokens);
+    if (capacity_tokens < static_cast<uint64_t>(model_config.max_seq_len)) {
+        RTP_LLM_LOG_WARNING("kv cache can only store %lu tokens, less than max_seq_len %ld, "
                             "this is dangerous, consider decrease max_seq_len",
-                            block_num,
-                            kv_cache_seq_len,
+                            capacity_tokens,
                             model_config.max_seq_len);
     }
     return config;
@@ -226,9 +265,8 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
     CacheConfig propose_config =
         createBasicConfig(propose_model_config, parallelism_config, is_mtp, sp_config.gen_num_per_cycle);
 
-    const int joint_step       = std::max(1, kv_cache_config.linear_step);
-    score_config.linear_step   = joint_step;
-    propose_config.linear_step = joint_step;
+    score_config.linear_step   = kv_cache_config.linear_step;
+    propose_config.linear_step = kv_cache_config.linear_step;
 
     int num_mtp_modules = 1;
     if (is_mtp) {
@@ -238,56 +276,13 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
         }
     }
 
-    score_config.finalizeBlockNums(0, runtime_config);
-    propose_config.finalizeBlockNums(0, runtime_config);
-
     uint32_t total_layer_num = score_config.layer_num;
     for (int i = 0; i < num_mtp_modules; ++i) {
         total_layer_num += propose_config.layer_num;
     }
 
-    size_t total_block_size_bytes = score_config.block_size_bytes;
-    for (int i = 0; i < num_mtp_modules; ++i) {
-        total_block_size_bytes += propose_config.block_size_bytes;
-    }
-
-    KVCacheBlockBudget joint_budget = blockBudgetForConfig(score_config);
-    addBlockBudget(joint_budget, blockBudgetForConfig(propose_config), static_cast<size_t>(num_mtp_modules));
-    const size_t explicit_pool_reserve = joint_budget.explicit_pool_reserve_bytes;
-
-    size_t block_num = 0;
-    if (kv_cache_config.test_block_num > 0) {
-        block_num = kv_cache_config.test_block_num;
-    } else {
-        const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
-            runtime_config, kv_cache_config, score_model_config, parallelism_config, warm_up_result, sp_config);
-
-        if (explicit_pool_reserve > 0) {
-            RTP_LLM_CHECK_WITH_INFO(
-                kv_cache_mem_size > explicit_pool_reserve,
-                "sp kv cache budget %zu MiB is smaller than explicitly-sized pool reservation %zu MiB "
-                "(reduce explicitly sized pool blocks if needed)",
-                kv_cache_mem_size / 1024 / 1024,
-                explicit_pool_reserve / 1024 / 1024);
-            RTP_LLM_LOG_INFO(
-                "sp kv cache: total budget %zu MiB, explicitly-sized pool reserve %zu MiB (score=%zu MiB + propose=%zu MiB x %d)",
-                kv_cache_mem_size / 1024 / 1024,
-                explicit_pool_reserve / 1024 / 1024,
-                score_config.explicitly_sized_pool_reserve_bytes / 1024 / 1024,
-                propose_config.explicitly_sized_pool_reserve_bytes / 1024 / 1024,
-                num_mtp_modules);
-        }
-        block_num = maxKVCacheBlockNumForBudget(kv_cache_mem_size, joint_budget, joint_step);
-    }
-
-    RTP_LLM_CHECK_WITH_INFO(block_num > 0, "kv cache needs at least 1 block but %zu", block_num);
-
-    CacheConfig config                         = score_config;
-    config.linear_step                         = joint_step;
-    config.layer_all_num                       = score_config.layer_num;
-    config.block_size_bytes                    = total_block_size_bytes;
-    config.block_num                           = block_num;
-    config.explicitly_sized_pool_reserve_bytes = explicit_pool_reserve;
+    CacheConfig config   = score_config;
+    config.layer_all_num = score_config.layer_num;
 
     const uint32_t main_layer_num = score_config.layer_num;
 
@@ -296,25 +291,26 @@ CacheConfig CacheConfigCreator::createSpConfig(const ModelConfig&               
 
     for (int m = 0; m < num_mtp_modules; ++m) {
         auto sub_cfg = config.mergeMTPModule(propose_config, m, main_layer_num);
-        sub_cfg->finalizeBlockNums(static_cast<uint32_t>(block_num), runtime_config);
         config.mtp_sub_configs.push_back(sub_cfg);
     }
 
-    config.finalizeBlockNums(static_cast<uint32_t>(block_num), runtime_config);
-    config.explicitly_sized_pool_reserve_bytes = explicit_pool_reserve;
+    uint64_t capacity_tokens = 0;
+    if (kv_cache_config.test_block_num > 0) {
+        capacity_tokens = explicitTestCapacity(score_model_config, kv_cache_config);
+    } else {
+        const auto kv_cache_mem_size = MemoryEvaluationHelper::getKVCacheMemorySize(
+            runtime_config, kv_cache_config, score_model_config, parallelism_config, warm_up_result, sp_config);
+        capacity_tokens = maxKVCacheTokenCapacityForBudget(kv_cache_mem_size, config);
+    }
+    RTP_LLM_CHECK_WITH_INFO(capacity_tokens > 0, "SP kv cache needs capacity for at least 1 token");
+    config.applyTokenCapacity(capacity_tokens);
 
-    const auto kv_cache_seq_len = static_cast<size_t>(block_num) * config.seq_size_per_block;
-    RTP_LLM_LOG_INFO("CacheConfig created: is_mtp=%d, total_layers=%u, num_mtp_modules=%d, block_num=%zu, "
-                     "allows storing %zu tokens, total_block_size=%zu bytes (main=%zu + %d*propose=%zu)",
+    RTP_LLM_LOG_INFO("CacheConfig created: is_mtp=%d, total_layers=%u, num_mtp_modules=%d, "
+                     "allows storing %lu tokens",
                      is_mtp,
                      total_layer_num,
                      num_mtp_modules,
-                     block_num,
-                     kv_cache_seq_len,
-                     total_block_size_bytes,
-                     score_config.block_size_bytes,
-                     num_mtp_modules,
-                     propose_config.block_size_bytes);
+                     capacity_tokens);
 
     RTP_LLM_LOG_INFO("CacheConfig debugString(main_score_model):\n%s", score_config.debugString().c_str());
     for (size_t i = 0; i < config.mtp_sub_configs.size(); ++i) {

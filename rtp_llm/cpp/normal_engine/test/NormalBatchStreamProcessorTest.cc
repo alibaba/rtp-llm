@@ -34,9 +34,8 @@ static void initFullCacheConfig(CacheConfig& cache_config, int layer_num) {
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
     cache_config.layer_num     = static_cast<uint32_t>(layer_num);
     cache_config.layer_all_num = static_cast<uint32_t>(layer_num);
-    test::setTestTopology(
-        cache_config,
-        {test::makeTestGroupForConfig(cache_config, spec, std::move(layer_ids), CacheGroupType::FULL, "default")});
+    test::setTestTopology(cache_config,
+                          {test::makeTestGroupForConfig(spec, std::move(layer_ids), CacheGroupType::FULL, "default")});
 }
 
 static void initFullCacheConfig(CacheConfig& cache_config, int layer_num, const std::vector<std::string>& tags) {
@@ -46,7 +45,7 @@ static void initFullCacheConfig(CacheConfig& cache_config, int layer_num, const 
     for (const auto& tag : tags) {
         auto spec = std::make_shared<MHAKVCacheSpec>();
         spec->tag = tag;
-        groups.push_back(test::makeTestGroupForConfig(cache_config, spec, layer_ids, CacheGroupType::FULL, tag));
+        groups.push_back(test::makeTestGroupForConfig(spec, layer_ids, CacheGroupType::FULL, tag));
     }
     cache_config.layer_num     = static_cast<uint32_t>(layer_num);
     cache_config.layer_all_num = static_cast<uint32_t>(layer_num);
@@ -135,8 +134,12 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
     PDSepConfig pd_sep_config;
     pd_sep_config.role_type = RoleType::PREFILL;
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
-    CacheConfig                 cache_config;
-    initFullCacheConfig(cache_config, model_config.num_layers);
+    CacheConfig                 cache_config = test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
+                                                              /*block_num=*/8,
+                                                              /*tokens_per_block=*/2,
+                                                              DataType::TYPE_FP16);
+    resource_context.cache_manager           = std::make_shared<KVCacheManager>(cache_config, /*warmup=*/true);
+    ASSERT_TRUE(resource_context.cache_manager->init());
     RuntimeConfig runtime_config;
 
     auto query                                   = make_shared<GenerateInput>();
@@ -149,11 +152,18 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
     BatchKVCacheResource resource;
     resource.resetBatchSize(2);
     resource.initGroups(cache_config.topologyPtr());
-    resource.setBatchBlocks(0, "default", {1, 2});
-    resource.setBatchBlocks(1, "default", {3, 4});
-    resource.setBatchCacheKeys(0, CacheKeysType{101, 102, 103});
-    resource.setBatchCacheKeys(1, CacheKeysType{201, 202, 203, 204, 205});
+    resource.setBatchBlocks(0, "default", {0, 0});
+    resource.setBatchBlocks(1, "default", {0, 0});
+    resource.setBatchCacheKeys(0, "default", CacheKeysType{101, 102, 103});
+    resource.setBatchCacheKeys(1, "default", CacheKeysType{201, 202, 203, 204, 205});
+    std::vector<int32_t> request_tokens_0{1, 2, 3, 4, 5};
+    std::vector<int32_t> request_tokens_1{11, 12, 13, 14, 15, 16, 17, 18, 19};
+    resource.cacheResource(0).requestPrefix().rebuild(request_tokens_0.data(), request_tokens_0.size());
+    resource.cacheResource(1).requestPrefix().rebuild(request_tokens_1.data(), request_tokens_1.size());
+    const auto expected_keys_0 = resource.cacheResource(0).requestPrefix().keys();
+    const auto expected_keys_1 = resource.cacheResource(1).requestPrefix().keys();
     stream->setKVCache(resource);
+    stream->streamCacheResource().setNeedReleaseResource(false);
     stream->generate_status_->status = StreamState::RUNNING;
 
     StreamGroups stream_groups({stream});
@@ -169,7 +179,10 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
     ASSERT_TRUE(cache_keys.defined());
     EXPECT_EQ(cache_keys.size(0), 2);
     EXPECT_EQ(cache_keys.size(1), 5);
-    EXPECT_EQ(toVec<int64_t>(cache_keys), (std::vector<int64_t>{101, 102, 103, 0, 0, 201, 202, 203, 204, 205}));
+    std::vector<int64_t> expected(expected_keys_0.begin(), expected_keys_0.end());
+    expected.resize(5, 0);
+    expected.insert(expected.end(), expected_keys_1.begin(), expected_keys_1.end());
+    EXPECT_EQ(toVec<int64_t>(cache_keys), expected);
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testResourceMayContainConfiguredTagSubset) {
@@ -230,8 +243,10 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     ProfilingDebugLoggingConfig profiling_debug_logging_config;
     CacheConfig                 cache_config;
     initFullCacheConfig(cache_config, model_config.num_layers);
-    cache_config.kv_block_stride_bytes = 4096;
-    cache_config.kv_scale_stride_bytes = 256;
+    auto groups                     = cache_config.topology().groups();
+    groups[0].kv_block_stride_bytes = 4096;
+    groups[0].kv_scale_stride_bytes = 256;
+    test::setTestTopology(cache_config, std::move(groups));
 
     RuntimeConfig              runtime_config;
     NormalBatchStreamProcessor processor(
@@ -316,8 +331,8 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_EQ(kv_cache_block_id, toVec<int>(default_table.block_ids));
         EXPECT_EQ(default_table.tag, "default");
         EXPECT_EQ(default_table.type, CacheGroupType::FULL);
-        EXPECT_EQ(model_input.kv_block_stride_bytes, cache_config.kv_block_stride_bytes);
-        EXPECT_EQ(model_input.kv_scale_stride_bytes, cache_config.kv_scale_stride_bytes);
+        EXPECT_EQ(default_table.kv_block_stride_bytes, cache_config.kvBlockStrideBytesForGroup("default"));
+        EXPECT_EQ(default_table.kv_scale_stride_bytes, cache_config.kvScaleStrideBytesForGroup("default"));
     }
     {
         MMModelConfig mm_model_config;

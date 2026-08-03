@@ -45,7 +45,7 @@ struct CacheGroupPolicy {
     bool               enable_prefix_reuse    = true;
     CacheEvictPolicy   evict_policy           = CacheEvictPolicy::CHAIN;
     bool               reservable             = true;
-    uint32_t           explicit_block_num     = 0;
+    uint32_t           fixed_block_num        = 0;  // 0: logical capacity; > 0: fixed pool blocks.
     bool               charge_to_paged_budget = false;
     uint32_t           active_tail_blocks     = 0;
     bool               validate_tail_blocks   = true;

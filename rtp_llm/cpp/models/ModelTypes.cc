@@ -1,6 +1,7 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
 #include <algorithm>
 #include <cstring>
+#include <limits>
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
@@ -13,7 +14,9 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     constexpr size_t kMaxCacheGroups  = 64;
     constexpr size_t kMaxCacheTagSize = 128;
     constexpr size_t kTagWords        = kMaxCacheTagSize / sizeof(int32_t);
-    constexpr size_t kGroupHintWords  = 4 + kTagWords;  // tag length, type, physical width, kernel width, tag bytes
+    // tag length, type, physical width, kernel width, physical span, kernel span,
+    // KV stride, scale stride, followed by tag bytes.
+    constexpr size_t kGroupHintWords  = 8 + kTagWords;
     const size_t     shape_hints_size = GptModelInputIndex::gptModelInputLength + kMaxCacheGroups * kGroupHintWords;
     auto             shape_hints_t    = torch::empty({(int64_t)shape_hints_size}, torch::kInt32).pin_memory();
     auto             shape_hints_ptr  = shape_hints_t.data_ptr<int32_t>();
@@ -42,8 +45,19 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         shape_hints_ptr[group_hint_offset + 1] = static_cast<int32_t>(table.type);
         shape_hints_ptr[group_hint_offset + 2] = static_cast<int32_t>(table.block_ids.size(1));
         shape_hints_ptr[group_hint_offset + 3] = static_cast<int32_t>(table.kernel_block_ids.size(1));
-        std::memset(shape_hints_ptr + group_hint_offset + 4, 0, kMaxCacheTagSize);
-        std::memcpy(shape_hints_ptr + group_hint_offset + 4, tag.data(), tag.size());
+        RTP_LLM_CHECK_WITH_INFO(
+            table.seq_size_per_block <= static_cast<size_t>(std::numeric_limits<int32_t>::max())
+                && table.kernel_seq_size_per_block <= static_cast<size_t>(std::numeric_limits<int32_t>::max())
+                && table.kv_block_stride_bytes <= static_cast<size_t>(std::numeric_limits<int32_t>::max())
+                && table.kv_scale_stride_bytes <= static_cast<size_t>(std::numeric_limits<int32_t>::max()),
+            "tagged KV cache metadata exceeds TP wire range for tag=%s",
+            tag.c_str());
+        shape_hints_ptr[group_hint_offset + 4] = static_cast<int32_t>(table.seq_size_per_block);
+        shape_hints_ptr[group_hint_offset + 5] = static_cast<int32_t>(table.kernel_seq_size_per_block);
+        shape_hints_ptr[group_hint_offset + 6] = static_cast<int32_t>(table.kv_block_stride_bytes);
+        shape_hints_ptr[group_hint_offset + 7] = static_cast<int32_t>(table.kv_scale_stride_bytes);
+        std::memset(shape_hints_ptr + group_hint_offset + 8, 0, kMaxCacheTagSize);
+        std::memcpy(shape_hints_ptr + group_hint_offset + 8, tag.data(), tag.size());
         max_blocks_hint        = std::max(max_blocks_hint, shape_hints_ptr[group_hint_offset + 2]);
         max_kernel_blocks_hint = std::max(max_kernel_blocks_hint, shape_hints_ptr[group_hint_offset + 3]);
         group_hint_offset += kGroupHintWords;
@@ -149,6 +163,10 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         CacheGroupType type;
         size_t         width;
         size_t         kernel_width;
+        size_t         seq_size_per_block;
+        size_t         kernel_seq_size_per_block;
+        size_t         kv_block_stride_bytes;
+        size_t         kv_scale_stride_bytes;
     };
     std::vector<GroupDescriptor> group_descriptors;
     group_descriptors.reserve(kv_cache_group_num);
@@ -156,11 +174,15 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     for (size_t i = 0; i < kv_cache_group_num; ++i) {
         const auto tag_size = static_cast<size_t>(shape_hints_ptr[group_hint_offset]);
         RTP_LLM_CHECK_WITH_INFO(tag_size <= kMaxCacheTagSize, "invalid broadcast KV cache tag length=%zu", tag_size);
-        const char* tag_data = reinterpret_cast<const char*>(shape_hints_ptr + group_hint_offset + 4);
+        const char* tag_data = reinterpret_cast<const char*>(shape_hints_ptr + group_hint_offset + 8);
         group_descriptors.push_back(GroupDescriptor{std::string(tag_data, tag_size),
                                                     static_cast<CacheGroupType>(shape_hints_ptr[group_hint_offset + 1]),
                                                     static_cast<size_t>(shape_hints_ptr[group_hint_offset + 2]),
-                                                    static_cast<size_t>(shape_hints_ptr[group_hint_offset + 3])});
+                                                    static_cast<size_t>(shape_hints_ptr[group_hint_offset + 3]),
+                                                    static_cast<size_t>(shape_hints_ptr[group_hint_offset + 4]),
+                                                    static_cast<size_t>(shape_hints_ptr[group_hint_offset + 5]),
+                                                    static_cast<size_t>(shape_hints_ptr[group_hint_offset + 6]),
+                                                    static_cast<size_t>(shape_hints_ptr[group_hint_offset + 7])});
         group_hint_offset += kGroupHintWords;
     }
 
@@ -207,8 +229,12 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
             inputs.block_tables_by_group.clear();
             for (const auto& descriptor : group_descriptors) {
                 GroupBlockTable table;
-                table.tag       = descriptor.tag;
-                table.type      = descriptor.type;
+                table.tag                       = descriptor.tag;
+                table.type                      = descriptor.type;
+                table.seq_size_per_block        = descriptor.seq_size_per_block;
+                table.kernel_seq_size_per_block = descriptor.kernel_seq_size_per_block;
+                table.kv_block_stride_bytes     = descriptor.kv_block_stride_bytes;
+                table.kv_scale_stride_bytes     = descriptor.kv_scale_stride_bytes;
                 table.block_ids = physical_backing.narrow(0, physical_offset, batch_size * descriptor.width)
                                       .view({static_cast<int64_t>(batch_size), static_cast<int64_t>(descriptor.width)});
                 table.kernel_block_ids =

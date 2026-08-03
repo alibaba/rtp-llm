@@ -86,6 +86,10 @@ public:
 
     KVCacheResource projectConnectorResource(const KVCacheResource& source,
                                              const CacheConfig&     config,
+                                             std::string_view       tag,
+                                             const CacheKeysType&   selected_keys) const;
+    KVCacheResource projectConnectorResource(const KVCacheResource& source,
+                                             const CacheConfig&     config,
                                              const CacheKeysType&   selected_keys) const;
 
 private:

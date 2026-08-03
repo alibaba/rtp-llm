@@ -29,7 +29,10 @@ struct GroupBase {
     size_t   kv_scale_stride_bytes     = 0;
 };
 
-// Order is deterministic but carries no business meaning.
+// Order is deterministic but carries no business meaning. group_tags may be
+// empty for an explicit non-cache/placeholder layer (for example an MTP layout
+// slot); consumers that require cache storage must reject that case at their
+// own boundary.
 struct LayerBase {
     int                      layer_id = -1;
     std::vector<std::string> group_tags;

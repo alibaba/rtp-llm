@@ -10,18 +10,19 @@ namespace rtp_llm {
 namespace {
 
 bool isCompactFullBlockList(const KVCacheResource&  source,
+                            std::string_view        tag,
                             const BlockIndicesType& src_blocks,
                             const CacheKeysType&    selected_keys) {
-    return src_blocks.size() <= selected_keys.size() || src_blocks.size() < source.cacheKeys().size();
+    return src_blocks.size() <= selected_keys.size() || src_blocks.size() < source.cacheKeys(tag).size();
 }
 
-bool selectedLastRankKeysAreAligned(const KVCacheResource& source, int cp_size) {
-    if (source.lastBlockAligned()) {
+bool selectedLastRankKeysAreAligned(const KVCacheResource& source, std::string_view tag, int cp_size) {
+    if (source.lastBlockAligned(tag)) {
         return true;
     }
-    const auto& keys = source.cacheKeys();
+    const auto& keys = source.cacheKeys(tag);
     if (keys.empty() || cp_size <= 1) {
-        return source.lastBlockAligned();
+        return source.lastBlockAligned(tag);
     }
     const int partial_key_pos = static_cast<int>(keys.size() - 1);
     const int last_rank       = cp_size - 1;
@@ -189,25 +190,54 @@ std::vector<BlockInfo> CPSlotMapper::sliceBlockForPeer(const CacheConfig&     co
 
 KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& source,
                                                        const CacheConfig&     config,
+                                                       std::string_view       tag,
                                                        const CacheKeysType&   selected_keys) const {
     KVCacheResource selected = source;
     selected.initGroups(config.topologyPtr());
-    selected.setCacheKeys(selected_keys);
-    const bool selected_aligned = selectedLastRankKeysAreAligned(source, cp_size_);
-    selected.setLastBlockAligned(selected_aligned);
+    selected.setCacheKeys(tag, selected_keys);
+    BlockDependenciesType selected_dependencies;
+    selected_dependencies.reserve(selected_keys.size());
+    const auto& source_keys         = source.cacheKeys(tag);
+    const auto& source_dependencies = source.blockDependencies(tag);
+    for (const auto key : selected_keys) {
+        const auto key_it = std::find(source_keys.begin(), source_keys.end(), key);
+        if (key_it == source_keys.end()) {
+            selected_dependencies.push_back(
+                BlockDependency{false, 0, static_cast<uint32_t>(selected_dependencies.size())});
+            continue;
+        }
+        const size_t pos = static_cast<size_t>(std::distance(source_keys.begin(), key_it));
+        selected_dependencies.push_back(
+            pos < source_dependencies.size() ?
+                source_dependencies[pos] :
+                BlockDependency{false, 0, static_cast<uint32_t>(selected_dependencies.size())});
+    }
+    selected.setBlockDependencies(tag, std::move(selected_dependencies));
+    selected.setCacheKeysAreCpCanonical(tag, true);
+    const bool selected_aligned = selectedLastRankKeysAreAligned(source, tag, cp_size_);
+    selected.setLastBlockAligned(tag, selected_aligned);
 
     // Memory connector intentionally drops the last key to avoid matching a
     // partial tail.  After CP Page-RR remap, a source partial can belong to a
     // non-last rank, making the selected last-rank key complete.  Append the
     // original partial key as a connector-only dummy tail so the drop-last
     // contract discards the dummy, not the usable selected key.
-    if (!source.lastBlockAligned() && selected_aligned && !source.cacheKeys().empty()) {
-        selected.cacheKeys().push_back(source.cacheKeys().back());
-        selected.rebuildLinearBlockDependencies();
-        selected.setLastBlockAligned(false);
+    if (!source.lastBlockAligned(tag) && selected_aligned && !source.cacheKeys(tag).empty()) {
+        selected.cacheKeys(tag).push_back(source.cacheKeys(tag).back());
+        const auto& source_dependencies = source.blockDependencies(tag);
+        if (!source_dependencies.empty()) {
+            selected.blockDependencies(tag).push_back(source_dependencies.back());
+        } else {
+            selected.blockDependencies(tag).push_back(
+                BlockDependency{false, 0, static_cast<uint32_t>(source.cacheKeys(tag).size() - 1)});
+        }
+        selected.setLastBlockAligned(tag, false);
     }
 
-    for (const auto& group : source.groupBlocks()) {
+    for (const auto& group : source.groupResources()) {
+        if (group.tag != tag) {
+            continue;
+        }
         const auto&      src_blocks = group.block_ids->blocks();
         BlockIndicesType dst_blocks;
         dst_blocks.reserve(selected_keys.size());
@@ -218,7 +248,7 @@ KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& so
                 dst_blocks.push_back(i < src_blocks.size() ? src_blocks[i] : NULL_BLOCK_IDX);
             }
         } else if (layout.mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN) {
-            if (isCompactFullBlockList(source, src_blocks, selected_keys)) {
+            if (isCompactFullBlockList(source, tag, src_blocks, selected_keys)) {
                 for (size_t i = 0; i < selected_keys.size(); ++i) {
                     dst_blocks.push_back(i < src_blocks.size() ? src_blocks[i] : NULL_BLOCK_IDX);
                 }
@@ -239,6 +269,15 @@ KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& so
     }
 
     return selected;
+}
+
+KVCacheResource CPSlotMapper::projectConnectorResource(const KVCacheResource& source,
+                                                       const CacheConfig&     config,
+                                                       const CacheKeysType&   selected_keys) const {
+    RTP_LLM_CHECK_WITH_INFO(source.groupResources().size() == 1,
+                            "legacy connector projection requires exactly one tagged group, got %zu",
+                            source.groupResources().size());
+    return projectConnectorResource(source, config, source.groupResources().front().tag, selected_keys);
 }
 
 }  // namespace rtp_llm

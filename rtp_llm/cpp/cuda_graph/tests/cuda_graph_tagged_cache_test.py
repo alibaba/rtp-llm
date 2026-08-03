@@ -49,14 +49,34 @@ class TaggedSequenceLengthModel:
         return PyModelOutputs(inputs.input_hiddens + signature)
 
 
+class FlatBlockTableModel:
+    def prepare_fmha_impl(self, inputs: PyModelInputs, is_cuda_graph: bool = False):
+        return None
+
+    def forward(self, inputs: PyModelInputs, fmha_impl=None) -> PyModelOutputs:
+        signature = inputs.attention_inputs.kv_cache_kernel_block_id_device[0, 0]
+        return PyModelOutputs(inputs.input_hiddens + signature)
+
+
 def _tag_attention_inputs(
-    common: PyAttentionInputs, tags: list[str], values: dict[str, int]
+    common: PyAttentionInputs,
+    tags: list[str],
+    values: dict[str, int],
+    widths: dict[str, int] | None = None,
 ) -> dict[str, PyAttentionInputs]:
     tagged = {}
     for tag in tags:
         tag_inputs = copy.copy(common)
-        host_blocks = torch.full_like(
-            common.kv_cache_kernel_block_id, values[tag], device="cpu"
+        width = (
+            widths[tag]
+            if widths is not None
+            else common.kv_cache_kernel_block_id.size(1)
+        )
+        host_blocks = torch.full(
+            (common.kv_cache_kernel_block_id.size(0), width),
+            values[tag],
+            dtype=common.kv_cache_kernel_block_id.dtype,
+            device="cpu",
         ).pin_memory()
         device_blocks = host_blocks.cuda()
         tag_inputs.kv_cache_kernel_block_id = host_blocks
@@ -74,6 +94,7 @@ def _build_common_inputs(
     batch_size: int,
     token_count: int,
     block_count: int,
+    widths: dict[str, int] | None = None,
 ) -> PyModelInputs:
     inputs = PyModelInputs()
     inputs.input_ids = torch.arange(token_count, dtype=torch.int32, device="cuda")
@@ -96,7 +117,11 @@ def _build_common_inputs(
     attention_inputs.kv_cache_block_id_device = (
         attention_inputs.kv_cache_kernel_block_id_device
     )
-    inputs.attention_inputs = _tag_attention_inputs(attention_inputs, tags, values)
+    inputs.attention_inputs = attention_inputs
+    if tags:
+        inputs.attention_inputs = _tag_attention_inputs(
+            attention_inputs, tags, values, widths
+        )
     return inputs
 
 
@@ -104,13 +129,12 @@ def _build_decode_inputs(
     tags: list[str],
     values: dict[str, int],
     batch_size: int = 2,
+    widths: dict[str, int] | None = None,
 ) -> PyModelInputs:
     attention_inputs = PyAttentionInputs()
     attention_inputs.is_prefill = False
     attention_inputs.is_target_verify = False
-    attention_inputs.prefix_lengths = torch.empty(
-        0, dtype=torch.int32
-    ).pin_memory()
+    attention_inputs.prefix_lengths = torch.empty(0, dtype=torch.int32).pin_memory()
     attention_inputs.input_lengths = torch.ones(
         batch_size, dtype=torch.int32
     ).pin_memory()
@@ -138,11 +162,15 @@ def _build_decode_inputs(
         batch_size=batch_size,
         token_count=batch_size,
         block_count=1,
+        widths=widths,
     )
 
 
 def _build_prefill_inputs(
-    tags: list[str], values: dict[str, int], seq_len: int = 4
+    tags: list[str],
+    values: dict[str, int],
+    seq_len: int = 4,
+    widths: dict[str, int] | None = None,
 ) -> PyModelInputs:
     attention_inputs = PyAttentionInputs()
     attention_inputs.is_prefill = True
@@ -164,6 +192,7 @@ def _build_prefill_inputs(
         batch_size=1,
         token_count=seq_len,
         block_count=1,
+        widths=widths,
     )
 
 
@@ -174,6 +203,7 @@ def _build_target_verify_inputs(
     query_len: int = 5,
     prefix_len: int = 11,
     is_prefill: bool = True,
+    widths: dict[str, int] | None = None,
 ) -> PyModelInputs:
     token_count = batch_size * query_len
 
@@ -186,16 +216,12 @@ def _build_target_verify_inputs(
     attention_inputs.prefix_lengths = torch.full(
         (batch_size,), prefix_len, dtype=torch.int32
     ).pin_memory()
-    attention_inputs.sequence_lengths = torch.empty(
-        0, dtype=torch.int32
-    ).pin_memory()
+    attention_inputs.sequence_lengths = torch.empty(0, dtype=torch.int32).pin_memory()
     attention_inputs.sequence_lengths_plus_1_device = (
         attention_inputs.prefix_lengths.cuda() + 1
     )
 
-    cu_q = torch.arange(
-        0, token_count + 1, query_len, dtype=torch.int32
-    ).pin_memory()
+    cu_q = torch.arange(0, token_count + 1, query_len, dtype=torch.int32).pin_memory()
     attention_inputs.cu_seqlens = cu_q
     attention_inputs.cu_seqlens_device = cu_q.cuda()
     attention_inputs.cu_kv_seqlens_device = torch.arange(
@@ -212,13 +238,9 @@ def _build_target_verify_inputs(
         attention_inputs.decode_cu_seqlens.cuda()
     )
 
-    attention_inputs.context_total_kv_length = batch_size * (
-        query_len + prefix_len
-    )
+    attention_inputs.context_total_kv_length = batch_size * (query_len + prefix_len)
 
-    block_count = (
-        prefix_len + query_len + TOKENS_PER_BLOCK - 1
-    ) // TOKENS_PER_BLOCK
+    block_count = (prefix_len + query_len + TOKENS_PER_BLOCK - 1) // TOKENS_PER_BLOCK
     return _build_common_inputs(
         attention_inputs,
         tags,
@@ -226,6 +248,7 @@ def _build_target_verify_inputs(
         batch_size=batch_size,
         token_count=token_count,
         block_count=block_count,
+        widths=widths,
     )
 
 
@@ -299,6 +322,98 @@ class TestCudaGraphTaggedCache(unittest.TestCase):
             runner,
             _build_prefill_inputs(GROUP_TAGS, {"full": 4, "aux": 3}),
             52,
+        )
+
+    def test_prefill_heterogeneous_group_widths_are_captured_per_tag(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_prefill(
+            TaggedBlockTableModel(),
+            2,
+            16,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [4],
+            HIDDEN_SIZE,
+            GROUP_TAGS,
+            {"full": (16, 1), "aux": (4, 4)},
+        )
+        self._assert_replay_signature(
+            runner,
+            _build_prefill_inputs(
+                GROUP_TAGS,
+                {"full": 3, "aux": 2},
+                widths={"full": 8, "aux": 1},
+            ),
+            35,
+        )
+
+    def test_invalid_group_shape_is_rejected(self) -> None:
+        runner = CudaGraphRunner()
+        with self.assertRaisesRegex(RuntimeError, "invalid CUDA graph cache shape"):
+            runner.init_decode(
+                TaggedBlockTableModel(),
+                HIDDEN_SIZE,
+                16,
+                TOKENS_PER_BLOCK,
+                TOKENS_PER_BLOCK,
+                [2],
+                GROUP_TAGS,
+                False,
+                1,
+                {"full": (10, 4), "aux": (4, 4)},
+            )
+
+    def test_flat_block_table_too_wide_falls_back(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            FlatBlockTableModel(),
+            HIDDEN_SIZE,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [2],
+        )
+        inputs = _build_decode_inputs([], {}, batch_size=2)
+        inputs.attention_inputs.kv_cache_kernel_block_id = torch.zeros(
+            (2, 8), dtype=torch.int32
+        ).pin_memory()
+        inputs.attention_inputs.kv_cache_kernel_block_id_device = (
+            inputs.attention_inputs.kv_cache_kernel_block_id.cuda()
+        )
+        self.assertFalse(runner.canRun(inputs))
+
+    def test_decode_heterogeneous_group_widths_are_captured_per_tag(self) -> None:
+        runner = CudaGraphRunner()
+        runner.init_decode(
+            TaggedBlockTableModel(),
+            HIDDEN_SIZE,
+            16,
+            TOKENS_PER_BLOCK,
+            TOKENS_PER_BLOCK,
+            [2],
+            GROUP_TAGS,
+            False,
+            1,
+            {"full": (16, 1), "aux": (4, 4)},
+        )
+
+        self._assert_replay_signature(
+            runner,
+            _build_decode_inputs(
+                GROUP_TAGS,
+                {"full": 3, "aux": 2},
+                widths={"full": 8, "aux": 2},
+            ),
+            35,
+        )
+        self.assertFalse(
+            runner.canRun(
+                _build_decode_inputs(
+                    GROUP_TAGS,
+                    {"full": 3, "aux": 2},
+                    widths={"full": 17, "aux": 2},
+                )
+            )
         )
 
     def test_duplicate_capture_tag_is_rejected(self) -> None:

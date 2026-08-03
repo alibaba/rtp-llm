@@ -18,16 +18,17 @@ NormalBatchStreamProcessor::NormalBatchStreamProcessor(
     model_input_gatherer_config_.position_id_len_factor    = model_config.attn_config.rope_config.index_factor;
     model_input_gatherer_config_.role_type                 = pd_sep_config.role_type;
     model_input_gatherer_config_.decode_entrance           = pd_sep_config.decode_entrance;
-    model_input_gatherer_config_.block_stride_bytes        = cache_config.kv_block_stride_bytes;
-    model_input_gatherer_config_.scale_stride_bytes        = cache_config.kv_scale_stride_bytes;
-    model_input_gatherer_config_.seq_size_per_block        = cache_config.seq_size_per_block;
-    model_input_gatherer_config_.kernel_seq_size_per_block = cache_config.kernel_seq_size_per_block;
     model_input_gatherer_config_.use_opaque_kv_cache_store = cache_config.use_opaque_kv_cache_store;
     if (cache_config.groupNums() > 0) {
         for (const auto& group : cache_config.topology().groups()) {
             model_input_gatherer_config_.kv_cache_groups.emplace(
                 group.tag,
-                ModelInputCacheGroup{group.policy.group_type, cache_config.kernelBlocksPerKvBlockForGroup(group.tag)});
+                ModelInputCacheGroup{group.policy.group_type,
+                                     group.seq_size_per_block,
+                                     group.kernel_seq_size_per_block,
+                                     cache_config.kernelBlocksPerKvBlockForGroup(group.tag),
+                                     group.kv_block_stride_bytes,
+                                     group.kv_scale_stride_bytes});
         }
     }
     model_input_gatherer_config_.warm_up           = warm_up;
