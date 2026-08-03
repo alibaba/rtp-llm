@@ -423,15 +423,15 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         class _AccessAgg:
             backend_error_code = None
 
-        exception_types = (
-            ExceptionType.MM_LONG_PROMPT_ERROR,
-            ExceptionType.MM_WRONG_FORMAT_ERROR,
-            ExceptionType.MM_PROCESS_ERROR,
-            ExceptionType.MM_EMPTY_ENGINE_ERROR,
-            ExceptionType.MM_NOT_SUPPORTED_ERROR,
-            ExceptionType.MM_DOWNLOAD_FAILED,
+        cases = (
+            (ExceptionType.MM_LONG_PROMPT_ERROR, DASH_ERROR_TOO_LONG),
+            (ExceptionType.MM_WRONG_FORMAT_ERROR, DASH_ERROR_BAD_REQUEST),
+            (ExceptionType.MM_PROCESS_ERROR, DASH_ERROR_INTERNAL),
+            (ExceptionType.MM_EMPTY_ENGINE_ERROR, DASH_ERROR_INTERNAL),
+            (ExceptionType.MM_NOT_SUPPORTED_ERROR, DASH_ERROR_UNSUPPORTED),
+            (ExceptionType.MM_DOWNLOAD_FAILED, DASH_ERROR_INTERNAL),
         )
-        for exception_type in exception_types:
+        for exception_type, error_spec in cases:
             with self.subTest(exception_type=exception_type):
                 access_agg = _AccessAgg()
                 chunks = await _drain(
@@ -447,9 +447,13 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 )
 
                 self.assertEqual(len(chunks), 1)
-                _assert_parameter_error_response(
-                    self, chunks[0], "multimodal input failed"
-                )
+                error_no, payload = _dash_error_payload(chunks[0])
+                self.assertEqual(error_no, error_spec.error_no)
+                self.assertEqual(payload["status_code"], error_spec.status_code)
+                self.assertEqual(payload["status_name"], error_spec.status_name)
+                self.assertIn("multimodal input failed", payload["status_message"])
+                self.assertEqual(_finish_reason(chunks[0]), error_spec.finish_reason)
+                self.assertEqual(_gen_ids(chunks[0]), [])
                 self.assertEqual(
                     access_agg.backend_error_code,
                     f"{int(exception_type)}_{exception_type.name}",
