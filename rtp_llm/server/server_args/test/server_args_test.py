@@ -1,5 +1,6 @@
 import importlib
 import os
+import pickle
 import sys
 from unittest import TestCase, main
 
@@ -37,6 +38,7 @@ class ServerArgsSetTest(TestCase):
         os.environ["WARM_UP_JIT_AND_WRITE_REMOTE"] = "dfs://bucket/jit/writer"
         os.environ["MM_IMAGE_MIN_DIMENSION"] = "12"
         os.environ["MM_IMAGE_MAX_ASPECT_RATIO"] = "150.5"
+        os.environ["SP_DETERMINISTIC_DRAFT_EXACT_MATCH"] = "1"
 
         sys.argv = ["prog"]
 
@@ -83,6 +85,9 @@ class ServerArgsSetTest(TestCase):
         )
         self.assertEqual(py_env_configs.vit_config.mm_image_min_dimension, 12)
         self.assertEqual(py_env_configs.vit_config.mm_image_max_aspect_ratio, 150.5)
+        self.assertTrue(py_env_configs.sp_config.deterministic_draft_exact_match)
+        restored_sp_config = pickle.loads(pickle.dumps(py_env_configs.sp_config))
+        self.assertTrue(restored_sp_config.deterministic_draft_exact_match)
 
     def test_cmd_args_set_to_py_env_configs(self):
         """Test that command line arguments are correctly set to py_env_configs."""
@@ -114,6 +119,8 @@ class ServerArgsSetTest(TestCase):
             "4",
             "--cache_store_rdma_worker_thread_count",
             "2",
+            "--sp_deterministic_draft_exact_match",
+            "true",
             # Note: max_seq_len is in ModelConfig, not ModelArgs
             # It will be set when ModelConfig is created from model_args
         ]
@@ -161,6 +168,7 @@ class ServerArgsSetTest(TestCase):
         # Verify cache_store_config
         self.assertEqual(py_env_configs.cache_store_config.rdma_io_thread_count, 4)
         self.assertEqual(py_env_configs.cache_store_config.rdma_worker_thread_count, 2)
+        self.assertTrue(py_env_configs.sp_config.deterministic_draft_exact_match)
 
     def test_cmd_args_override_env_vars(self):
         """Test that command line arguments override environment variables."""
@@ -202,6 +210,7 @@ class ServerArgsSetTest(TestCase):
         self.assertEqual(
             py_env_configs.concurrency_config.concurrency_limit, 64
         )  # Overridden
+        self.assertFalse(py_env_configs.sp_config.deterministic_draft_exact_match)
 
     def test_mixed_env_and_cmd_args(self):
         """Test mixed environment variables and command line arguments."""

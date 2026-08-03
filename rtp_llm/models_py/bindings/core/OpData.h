@@ -416,6 +416,7 @@ struct RejectionSamplingParams {
     torch::Tensor output_token_ids_d;
     torch::Tensor output_accepted_token_num_d;
     torch::Tensor do_sample_d;
+    bool          deterministic_draft = false;
 };
 
 struct MappingDraft2TargetParams {

@@ -33,7 +33,7 @@ protected:
 // invokeRejectionSampling tests
 // ─────────────────────────────────────────────────────────────────────────────
 
-TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_AllAccept) {
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_GreedyAllAccept) {
     const int batch_size    = 2;
     const int num_spec      = 3;
     const int vocab_size    = 16;
@@ -54,7 +54,7 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_AllAccept) {
     auto uniform_samples     = torch::zeros({batch_size, num_spec + 1}, floatCuda());
     auto output_token_ids    = torch::full({batch_size, num_spec + 1}, -1, intCuda());
     auto output_accepted_num = torch::zeros({batch_size}, intCuda());
-    auto do_sample           = torch::ones({batch_size}, boolCuda());
+    auto do_sample           = torch::zeros({batch_size}, boolCuda());
 
     auto status = rtp_llm::invokeRejectionSampling<float, int>(draft_probs.data_ptr<float>(),
                                                                draft_token_ids.data_ptr<int>(),
@@ -65,6 +65,7 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_AllAccept) {
                                                                output_token_ids.data_ptr<int>(),
                                                                output_accepted_num.data_ptr<int>(),
                                                                do_sample.data_ptr<bool>(),
+                                                               false,
                                                                batch_size,
                                                                num_spec,
                                                                vocab_size,
@@ -87,7 +88,97 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_AllAccept) {
     }
 }
 
-TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_ImmediateReject) {
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_SampledPointMassMatchesTargetDistribution) {
+    const int batch_size    = 1000;
+    const int num_spec      = 1;
+    const int vocab_size    = 16;
+    const int target_stride = 1;
+
+    auto draft_probs  = torch::zeros({batch_size, num_spec, vocab_size}, floatCuda());
+    auto target_probs = torch::zeros({batch_size, num_spec + 1, vocab_size}, floatCuda());
+    draft_probs.index_put_({torch::indexing::Slice(), 0, 5}, 1.0f);
+    target_probs.index_put_({torch::indexing::Slice(), 0, 5}, 0.25f);
+    target_probs.index_put_({torch::indexing::Slice(), 0, 7}, 0.75f);
+    target_probs.index_put_({torch::indexing::Slice(), 1, 7}, 1.0f);
+
+    auto draft_token_ids  = torch::full({batch_size, num_spec}, 5, intCuda());
+    auto target_token_ids = torch::full({batch_size, num_spec + 1, target_stride}, 7, intCuda());
+    auto uniform_samples  = torch::zeros({batch_size, num_spec + 1}, floatCuda());
+    uniform_samples.index_put_({torch::indexing::Slice(), 0},
+                               (torch::arange(batch_size, floatCuda()) + 0.5f) / static_cast<float>(batch_size));
+    auto output_token_ids    = torch::full({batch_size, num_spec + 1}, -1, intCuda());
+    auto output_accepted_num = torch::zeros({batch_size}, intCuda());
+    auto do_sample           = torch::ones({batch_size}, boolCuda());
+
+    auto status = rtp_llm::invokeRejectionSampling<float, int>(draft_probs.data_ptr<float>(),
+                                                               draft_token_ids.data_ptr<int>(),
+                                                               uniform_samples.data_ptr<float>(),
+                                                               target_probs.data_ptr<float>(),
+                                                               target_token_ids.data_ptr<int>(),
+                                                               target_stride,
+                                                               output_token_ids.data_ptr<int>(),
+                                                               output_accepted_num.data_ptr<int>(),
+                                                               do_sample.data_ptr<bool>(),
+                                                               false,
+                                                               batch_size,
+                                                               num_spec,
+                                                               vocab_size,
+                                                               stream_);
+    ASSERT_EQ(status, cudaSuccess);
+    cudaStreamSynchronize(stream_);
+
+    auto first_tokens = output_token_ids.index({torch::indexing::Slice(), 0}).to(torch::kCPU);
+    auto accepted_num = output_accepted_num.to(torch::kCPU);
+    EXPECT_EQ(first_tokens.eq(5).sum().item<int64_t>(), 250);
+    EXPECT_EQ(first_tokens.eq(7).sum().item<int64_t>(), 750);
+    EXPECT_EQ(accepted_num.eq(2).sum().item<int64_t>(), 250);
+    EXPECT_EQ(accepted_num.eq(1).sum().item<int64_t>(), 750);
+    auto second_tokens = output_token_ids.index({torch::indexing::Slice(), 1}).to(torch::kCPU);
+    EXPECT_EQ(second_tokens.eq(7).sum().item<int64_t>(), 250);
+    EXPECT_EQ(second_tokens.eq(-1).sum().item<int64_t>(), 750);
+}
+
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_ExactMatchIgnoresRequestDoSampleAndUniform) {
+    const int batch_size    = 2;
+    const int num_spec      = 2;
+    const int vocab_size    = 16;
+    const int target_stride = 1;
+
+    auto draft_probs         = torch::zeros({batch_size, num_spec, vocab_size}, floatCuda());
+    auto target_probs        = torch::zeros({batch_size, num_spec + 1, vocab_size}, floatCuda());
+    auto draft_token_ids     = torch::tensor({{5, 3}, {5, 3}}, intCuda());
+    auto target_token_ids    = torch::tensor({{{5}, {7}, {9}}, {{5}, {7}, {9}}}, intCuda());
+    auto uniform_samples     = torch::tensor({{0.0f, 0.0f, 0.0f}, {0.99f, 0.99f, 0.99f}}, floatCuda());
+    auto output_token_ids    = torch::full({batch_size, num_spec + 1}, -1, intCuda());
+    auto output_accepted_num = torch::zeros({batch_size}, intCuda());
+    auto do_sample           = torch::tensor({false, true}, boolCuda());
+
+    auto status = rtp_llm::invokeRejectionSampling<float, int>(draft_probs.data_ptr<float>(),
+                                                               draft_token_ids.data_ptr<int>(),
+                                                               uniform_samples.data_ptr<float>(),
+                                                               target_probs.data_ptr<float>(),
+                                                               target_token_ids.data_ptr<int>(),
+                                                               target_stride,
+                                                               output_token_ids.data_ptr<int>(),
+                                                               output_accepted_num.data_ptr<int>(),
+                                                               do_sample.data_ptr<bool>(),
+                                                               true,
+                                                               batch_size,
+                                                               num_spec,
+                                                               vocab_size,
+                                                               stream_);
+    ASSERT_EQ(status, cudaSuccess);
+    cudaStreamSynchronize(stream_);
+
+    EXPECT_TRUE(output_token_ids[0].eq(output_token_ids[1]).all().item<bool>());
+    EXPECT_TRUE(output_accepted_num[0].eq(output_accepted_num[1]).item<bool>());
+    EXPECT_EQ(output_accepted_num[0].item<int>(), 2);
+    EXPECT_EQ(output_token_ids[0][0].item<int>(), 5);
+    EXPECT_EQ(output_token_ids[0][1].item<int>(), 7);
+    EXPECT_EQ(output_token_ids[0][2].item<int>(), -1);
+}
+
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_LegacyImmediateReject) {
     const int batch_size    = 1;
     const int num_spec      = 3;
     const int vocab_size    = 16;
@@ -119,6 +210,7 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_ImmediateReject) {
                                                                output_token_ids.data_ptr<int>(),
                                                                output_accepted_num.data_ptr<int>(),
                                                                do_sample.data_ptr<bool>(),
+                                                               false,
                                                                batch_size,
                                                                num_spec,
                                                                vocab_size,
@@ -131,8 +223,8 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_ImmediateReject) {
 
     // Rejected at position 0, so accepted count = 0 + 1 = 1 (the resampled token)
     EXPECT_EQ(acc_num_h[0].item<int>(), 1);
-    // The resampled token at pos 0 should come from relu(q-p); target_probs is all on token 7,
-    // so the resampled token should be 7
+    // Legacy rejection resamples from relu(target_probs - draft_probs), whose
+    // only non-zero residual mass is on token 7.
     EXPECT_EQ(out_ids_h[0][0].item<int>(), 7);
     // Remaining positions padded with -1
     EXPECT_EQ(out_ids_h[0][1].item<int>(), -1);
@@ -173,6 +265,7 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_GreedyRejectUsesTargetTo
                                                                output_token_ids.data_ptr<int>(),
                                                                output_accepted_num.data_ptr<int>(),
                                                                do_sample.data_ptr<bool>(),
+                                                               true,
                                                                batch_size,
                                                                num_spec,
                                                                vocab_size,
@@ -190,7 +283,7 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_GreedyRejectUsesTargetTo
     EXPECT_EQ(out_ids_h[0][3].item<int>(), -1);
 }
 
-TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_PartialAccept) {
+TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_LegacyPartialAccept) {
     const int batch_size    = 1;
     const int num_spec      = 3;
     const int vocab_size    = 16;
@@ -231,6 +324,7 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_PartialAccept) {
                                                                output_token_ids.data_ptr<int>(),
                                                                output_accepted_num.data_ptr<int>(),
                                                                do_sample.data_ptr<bool>(),
+                                                               false,
                                                                batch_size,
                                                                num_spec,
                                                                vocab_size,
@@ -245,14 +339,15 @@ TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_PartialAccept) {
     EXPECT_EQ(acc_num_h[0].item<int>(), 3);
     EXPECT_EQ(out_ids_h[0][0].item<int>(), 5);
     EXPECT_EQ(out_ids_h[0][1].item<int>(), 5);
-    // Resampled from relu(q-p) at position 2; target has all prob on token 7
+    // Legacy rejection resamples from relu(target_probs - draft_probs), whose
+    // only non-zero residual mass at position 2 is on token 7.
     EXPECT_EQ(out_ids_h[0][2].item<int>(), 7);
     EXPECT_EQ(out_ids_h[0][3].item<int>(), -1);
 }
 
 TEST_F(SpeculativeSamplingKernelTest, RejectionSampling_BatchSizeZero) {
     auto status = rtp_llm::invokeRejectionSampling<float, int>(
-        nullptr, nullptr, nullptr, nullptr, nullptr, 1, nullptr, nullptr, nullptr, 0, 3, 16, stream_);
+        nullptr, nullptr, nullptr, nullptr, nullptr, 1, nullptr, nullptr, nullptr, false, 0, 3, 16, stream_);
     ASSERT_EQ(status, cudaSuccess);
 }
 

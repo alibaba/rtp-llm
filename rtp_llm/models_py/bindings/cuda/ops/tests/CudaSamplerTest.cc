@@ -689,6 +689,62 @@ TEST_F(CudaSamplerTest, testFlashinferKernelTopP) {
     assertTokenIn(output_token_ids_host, 23, {7, 8, 5, 0, 4, 3, 9, 1});
 }
 
+TEST_F(CudaSamplerTest, testSeededTopPIsInvariantToBatchPosition) {
+    constexpr int64_t vocab_size = 100;
+    constexpr int64_t step       = 1;
+
+    auto run = [&](int64_t batch_size) {
+        auto cuda_float = torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA);
+        auto cuda_int   = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+        auto pinned_int = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+        auto pinned_f32 = torch::TensorOptions().dtype(torch::kFloat32).pinned_memory(true);
+
+        auto x           = torch::arange(vocab_size, cuda_float);
+        auto logits_row  = torch::sin(x * 0.017) + torch::cos(x * 0.003);
+        auto logits      = logits_row.repeat({batch_size, 1});
+        auto token_ids   = torch::zeros({batch_size, step + 1}, cuda_int);
+        auto lengths     = torch::full({batch_size}, step, cuda_int);
+        auto top_k       = torch::zeros({batch_size}, pinned_int);
+        auto top_p       = torch::full({batch_size}, 0.9, pinned_f32);
+        auto temperature = torch::ones({batch_size}, pinned_f32);
+
+        std::vector<at::Generator> generators;
+        generators.reserve(batch_size);
+        for (int64_t i = 0; i < batch_size; ++i) {
+            auto generator = torch::make_generator<at::CUDAGeneratorImpl>();
+            generator.set_current_seed(314159);
+            generators.push_back(generator);
+        }
+
+        GreedyParams params({logits,
+                             lengths,
+                             lengths,
+                             token_ids,
+                             step,
+                             top_k,
+                             top_p,
+                             temperature,
+                             nullopt,
+                             nullopt,
+                             nullopt,
+                             nullopt,
+                             false,
+                             nullopt,
+                             nullopt,
+                             nullopt,
+                             nullopt,
+                             generators});
+        execSampleGreedy(params);
+        check_cuda_error();
+        return token_ids.select(1, step).cpu();
+    };
+
+    auto single  = run(1);
+    auto batched = run(8);
+    ASSERT_TRUE(batched.eq(single.item<int32_t>()).all().item<bool>())
+        << "per-request seeded sampling changed with dynamic batch row";
+}
+
 TEST_F(CudaSamplerTest, testFlashinferKernelTopKTopP) {
     size_t batch_size = 4;
     auto   logits_t   = cudaTensor(

@@ -102,6 +102,15 @@ def init_speculative_decoding_group_args(parser, sp_config):
     )
 
     speculative_decoding_group.add_argument(
+        "--sp_deterministic_draft_exact_match",
+        env_name="SP_DETERMINISTIC_DRAFT_EXACT_MATCH",
+        bind_to=(sp_config, "deterministic_draft_exact_match"),
+        type=str2bool,
+        default=False,
+        help="确认草稿 token 由确定性 argmax 产生，并启用 exact-match 验证。",
+    )
+
+    speculative_decoding_group.add_argument(
         "--force_score_context_attention",
         env_name="FORCE_SCORE_CONTEXT_ATTENTION",
         bind_to=(sp_config, "force_score_context_attention"),

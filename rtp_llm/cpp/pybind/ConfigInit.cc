@@ -922,6 +922,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("tree_decode_config", &SpeculativeExecutionConfig::tree_decode_config)
         .def_readwrite("gen_num_per_cycle", &SpeculativeExecutionConfig::gen_num_per_cycle)
         .def_readwrite("force_stream_sample", &SpeculativeExecutionConfig::force_stream_sample)
+        .def_readwrite("deterministic_draft_exact_match", &SpeculativeExecutionConfig::deterministic_draft_exact_match)
         .def_readwrite("force_score_context_attention", &SpeculativeExecutionConfig::force_score_context_attention)
         .def_readwrite("fp8_kv_cache", &SpeculativeExecutionConfig::fp8_kv_cache)
         .def_readwrite("quantization", &SpeculativeExecutionConfig::quantization)
@@ -939,10 +940,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.force_score_context_attention,
                                       self.fp8_kv_cache,
                                       self.quantization,
-                                      self.checkpoint_path);
+                                      self.checkpoint_path,
+                                      self.deterministic_draft_exact_match);
             },
             [](py::tuple t) {
-                if (t.size() != 10 && t.size() != 11)
+                if (t.size() != 10 && t.size() != 11 && t.size() != 12)
                     throw std::runtime_error("Invalid state!");
                 SpeculativeExecutionConfig c;
                 try {
@@ -954,13 +956,16 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.gen_num_per_cycle             = t[5].cast<int64_t>();
                     c.force_stream_sample           = t[6].cast<bool>();
                     c.force_score_context_attention = t[7].cast<bool>();
-                    const bool has_fp8_kv_cache     = t.size() == 11;
+                    const bool has_fp8_kv_cache     = t.size() >= 11;
                     size_t     next_field           = 8;
                     if (has_fp8_kv_cache) {
                         c.fp8_kv_cache = t[next_field++].cast<int>();
                     }
                     c.quantization    = t[next_field++].cast<std::string>();
-                    c.checkpoint_path = t[next_field].cast<std::string>();
+                    c.checkpoint_path = t[next_field++].cast<std::string>();
+                    if (t.size() == 12) {
+                        c.deterministic_draft_exact_match = t[next_field].cast<bool>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("SpeculativeExecutionConfig unpickle error: ") + e.what());
                 }
