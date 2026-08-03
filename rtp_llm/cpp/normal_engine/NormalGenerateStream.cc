@@ -247,13 +247,11 @@ void NormalGenerateStream::updateOutput(const StreamUpdateInfo& update_info) {
         }
     }
 
-    if (!update_info.skip_finish_check) {
-        bool need_finish_result = finished_ || needFinish();
-        finished_               = need_finish_result;
-        if (finished_) {
-            reportEventWithoutLock(StreamEvents::GenerateDone);
-            fillSubGenerateStatus(StreamState::FINISHED);
-        }
+    bool need_finish_result = finished_ || needFinish();
+    finished_               = need_finish_result;
+    if (finished_) {
+        reportEventWithoutLock(StreamEvents::GenerateDone);
+        fillSubGenerateStatus(StreamState::FINISHED);
     }
     if (update_info.cum_log_probs.defined()) {
         cum_log_probs_ = update_info.cum_log_probs.cpu();

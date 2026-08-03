@@ -145,6 +145,7 @@ private:
     bool                          fake_inited_           = false;
     bool                          resource_released_     = false;
     std::shared_ptr<AsyncContext> allocator_load_context_;
+    std::shared_ptr<AsyncContext> p2p_load_context_;
 
     // Connector reference counting for PD separation (RAII auto-release)
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;

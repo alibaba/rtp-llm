@@ -7,13 +7,9 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
-#include "rtp_llm/cpp/cache/connector/memory/KVCacheMemoryConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverterImpl.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
-#ifdef USE_REMOTE_KV_CACHE
-#include "rtp_llm/cpp/cache/connector/remote_connector/RemoteConnector.h"
-#endif
 
 namespace rtp_llm {
 
@@ -44,7 +40,6 @@ KVCacheConnectorCoordinator::~KVCacheConnectorCoordinator() {
         update_thread_.reset();
     }
     // Now safe to release connectors — no concurrent reader
-    memory_connector_.reset();
     connectors_.clear();
     // Wait for any in-flight async contexts to drain
     autil::ScopedTime2 timer;
@@ -78,56 +73,21 @@ bool KVCacheConnectorCoordinator::hasP2PConnector() const {
 KVCacheResource KVCacheConnectorCoordinator::normalizeResourceForConnector(const KVCacheResource& resource,
                                                                            int                    layer_id) const {
     KVCacheResource normalized;
-    normalized.initGroups(cache_config_.groupNums(),
-                          static_cast<int>(cache_config_.layer_all_num),
-                          cache_config_.layer_to_group_id,
-                          cache_config_.kernelBlocksPerKvBlock(),
-                          cache_config_.group_types);
+    normalized.initGroups(cache_config_.topologyPtr());
     normalized.cacheKeys() = resource.cacheKeys();
+    normalized.setBlockDependencies(resource.blockDependencies());
+    normalized.setCacheKeysAreCpCanonical(resource.cacheKeysAreCpCanonical());
     normalized.setDeviceReuseBlockNum(resource.deviceReuseBlockNum());
     normalized.setMemoryReuseBlockNum(resource.memoryReuseBlockNum());
     normalized.setRemoteReuseBlockNum(resource.remoteReuseBlockNum());
     normalized.setLastBlockAligned(resource.lastBlockAligned());
 
-    bool        copied_blocks       = false;
-    const auto& source_layer_blocks = resource.layerBlocks();
-    if (layer_id >= 0 && static_cast<size_t>(layer_id) < source_layer_blocks.size()
-        && static_cast<size_t>(layer_id) < cache_config_.layer_to_group_id.size()) {
-        const auto& source_blocks = source_layer_blocks[static_cast<size_t>(layer_id)]->blocks();
-        if (!source_blocks.empty()) {
-            const int canonical_gid = cache_config_.layer_to_group_id[static_cast<size_t>(layer_id)];
-            normalized.mutableBlockIds(canonical_gid).assign(source_blocks);
-            copied_blocks = true;
+    for (const auto& group : cache_config_.topology().groups()) {
+        if (layer_id >= 0
+            && std::find(group.layer_ids.begin(), group.layer_ids.end(), layer_id) == group.layer_ids.end()) {
+            continue;
         }
-    } else {
-        const auto max_layer_num = std::min(source_layer_blocks.size(), cache_config_.layer_to_group_id.size());
-        for (size_t current_layer_id = 0; current_layer_id < max_layer_num; ++current_layer_id) {
-            const auto& source_blocks = source_layer_blocks[current_layer_id]->blocks();
-            if (source_blocks.empty()) {
-                continue;
-            }
-            const int canonical_gid = cache_config_.layer_to_group_id[current_layer_id];
-            auto&     dst_block_ids = normalized.mutableBlockIds(canonical_gid);
-            if (dst_block_ids.blocks().empty()) {
-                dst_block_ids.assign(source_blocks);
-                copied_blocks = true;
-                continue;
-            }
-            RTP_LLM_CHECK_WITH_INFO(dst_block_ids.blocks() == source_blocks,
-                                    "conflicting connector block ids for canonical gid %d",
-                                    canonical_gid);
-        }
-    }
-
-    if (!copied_blocks) {
-        const auto& source_groups  = resource.groupBlocks();
-        const int   copy_group_num = std::min<int>(resource.groupNums(), normalized.groupNums());
-        for (int gid = 0; gid < copy_group_num; ++gid) {
-            const auto& source_blocks = source_groups[static_cast<size_t>(gid)]->blocks();
-            if (!source_blocks.empty()) {
-                normalized.mutableBlockIds(gid).assign(source_blocks);
-            }
-        }
+        normalized.mutableBlockIds(group.tag).assign(resource.blocks(group.tag));
     }
     return normalized;
 }
@@ -137,16 +97,6 @@ bool KVCacheConnectorCoordinator::init() {
                      cache_config_.debugString().c_str(),
                      kv_cache_config_.to_string().c_str(),
                      runtime_config_.to_string().c_str());
-    if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_memory_cache) {
-        memory_connector_ = initMemoryConnector();
-        connectors_.emplace_back(memory_connector_);
-    }
-#ifdef USE_REMOTE_KV_CACHE
-    if (kv_cache_config_.reuse_cache && kv_cache_config_.enable_remote_cache) {
-        remote_connector_ = initRemoteConnector();
-        connectors_.emplace_back(remote_connector_);
-    }
-#endif
     if (!initP2PConnectorInternal()) {
         RTP_LLM_LOG_ERROR("init P2P connector failed");
         return false;
@@ -272,34 +222,6 @@ KVCacheConnectorCoordinator::holdKVCacheResourceForConnector(const KVCacheResour
     return held_resource;
 }
 
-std::shared_ptr<KVCacheMemoryConnector> KVCacheConnectorCoordinator::initMemoryConnector() {
-    auto memory_connector = std::make_shared<KVCacheMemoryConnector>(
-        cache_config_, kv_cache_config_, allocator_, runtime_config_.worker_grpc_addrs, metrics_reporter_);
-    RTP_LLM_CHECK_WITH_INFO(memory_connector->init(), "memory connector init failed");
-    return memory_connector;
-}
-
-std::shared_ptr<RemoteConnector> KVCacheConnectorCoordinator::initRemoteConnector() {
-#ifdef USE_REMOTE_KV_CACHE
-    // TODO : get lora info map
-    auto remote_connector_ = std::make_shared<RemoteConnector>(cache_config_,
-                                                               kv_cache_config_,
-                                                               runtime_config_,
-                                                               parallelism_config_,
-                                                               sp_config_,
-                                                               allocator_->getBlockPool()->getBaseAddress(),
-                                                               allocator_->getBlockPool()->getTotalSizeBytes(),
-                                                               allocator_,
-                                                               metrics_reporter_);
-
-    RTP_LLM_CHECK_WITH_INFO(remote_connector_->init(), "remote connector init failed");
-    return remote_connector_;
-#else
-    RTP_LLM_LOG_ERROR("not RemoteConnector");
-    return nullptr;
-#endif
-}
-
 void KVCacheConnectorCoordinator::updateOnce() {
     RTP_LLM_PROFILE_FUNCTION();
     processReadContexts();
@@ -386,6 +308,9 @@ void KVCacheConnectorCoordinator::asyncReadAfterMatch(
     std::shared_ptr<FusedAsyncReadContext>                fused_read_context,
     const std::vector<std::shared_ptr<KVCacheConnector>>& connectors_snapshot) {
     RTP_LLM_PROFILE_FUNCTION();
+    if (fused_read_context->cancelled()) {
+        return;
+    }
     auto async_read_start_us = currentTimeUs();
     auto match_contexts      = fused_read_context->fusedMatchContext()->contexts();
     RTP_LLM_CHECK_WITH_INFO(
@@ -394,7 +319,7 @@ void KVCacheConnectorCoordinator::asyncReadAfterMatch(
         match_contexts.size(),
         connectors_snapshot.size());
 
-    int                                        already_reuse_num = fused_read_context->resource()->reuseBlockNum();
+    int already_reuse_num = static_cast<int>(fused_read_context->resource()->deviceReuseBlockNum());
     std::vector<std::shared_ptr<AsyncContext>> connector_read_contexts;
     for (int i = 0; i < match_contexts.size(); i++) {
         auto match_context = std::dynamic_pointer_cast<AsyncMatchContext>(match_contexts.at(i));
@@ -423,6 +348,12 @@ void KVCacheConnectorCoordinator::asyncReadAfterMatch(
                                 connector_async_read_cost_us);
         }
         if (connector_read_context) {
+            if (fused_read_context->cancelled()) {
+                if (p2p_connector_) {
+                    p2p_connector_->cancelRead(connector_read_context);
+                }
+                break;
+            }
             connector_read_contexts.emplace_back(connector_read_context);
             already_reuse_num = matched_num;
         }
@@ -459,18 +390,23 @@ void KVCacheConnectorCoordinator::notifySideChannelReady(const std::string&     
         p2p_connector_->streamStore()->notifySideChannelReady(unique_key, deadline_ms, data);
     }
 }
+
+void KVCacheConnectorCoordinator::cancelRead(const std::shared_ptr<AsyncContext>& context) {
+    auto fused = std::dynamic_pointer_cast<FusedAsyncReadContext>(context);
+    if (!fused || !p2p_connector_) {
+        return;
+    }
+    fused->cancel();
+    auto read_context = fused->fusedReadContext();
+    if (!read_context) {
+        return;
+    }
+    for (const auto& child : read_context->contexts()) {
+        p2p_connector_->cancelRead(child);
+    }
+}
 bool KVCacheConnectorCoordinator::executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response) {
-    if (request.has_mem_request()) {
-        RTP_LLM_CHECK(memory_connector_ != nullptr);
-        return memory_connector_->copyCache(request.mem_request(), *(response.mutable_mem_response()));
-    } else if (request.has_remote_request()) {
-#ifdef USE_REMOTE_KV_CACHE
-        RTP_LLM_CHECK(remote_connector_ != nullptr);
-        return remote_connector_->copyCache(request.remote_request(), *(response.mutable_remote_response()));
-#endif
-        RTP_LLM_CHECK(false);
-        return false;
-    } else if (request.has_p2p_request()) {
+    if (request.has_p2p_request()) {
         if (!p2p_connector_) {
             RTP_LLM_LOG_WARNING("executeFunction: p2p_request received but P2P connector not initialized");
             return false;
@@ -507,7 +443,14 @@ bool KVCacheConnectorCoordinator::initP2PConnectorInternal() {
 
     auto p2p_config = P2PConnectorConfig::create(
         runtime_config_, cache_store_config_, parallelism_config_, pd_sep_config_, layer_all_num, is_mla);
-    p2p_config.scheduler_config.layer_attn_types = cache_config_.layer_attn_types;
+    p2p_config.scheduler_config.topology = cache_config_.topologyPtr();
+    p2p_config.worker_config.topology    = cache_config_.topologyPtr();
+    const int cp_size = parallelism_config_.prefill_cp_config.kv_cache_sharded ?
+                            static_cast<int>(parallelism_config_.tp_size) :
+                            1;
+    p2p_config.scheduler_config.cp_size = cp_size;
+    p2p_config.scheduler_config.cp_rank = static_cast<int>(parallelism_config_.tp_rank) % cp_size;
+    p2p_config.worker_config.cp_size    = cp_size;
     auto p2p = std::make_shared<P2PConnector>(std::move(p2p_config), layer_block_converter, metrics_reporter_);
     if (!p2p->init()) {
         RTP_LLM_LOG_ERROR("P2PConnector init failed");
@@ -522,13 +465,6 @@ bool KVCacheConnectorCoordinator::initP2PConnectorInternal() {
     }
     RTP_LLM_LOG_INFO("P2PConnector initialized successfully, total connectors: %zu", connectors_.size());
     return true;
-}
-
-std::vector<CacheKeyType> KVCacheConnectorCoordinator::memoryCacheKeys() const {
-    if (!memory_connector_) {
-        return {};
-    }
-    return memory_connector_->cacheKeys();
 }
 
 void KVCacheConnectorCoordinator::reportP2PCacheWriteFailure() {

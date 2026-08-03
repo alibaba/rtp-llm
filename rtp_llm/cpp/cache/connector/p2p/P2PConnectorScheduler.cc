@@ -39,8 +39,15 @@ bool P2PConnectorScheduler::init(const std::string& process_id) {
 
 P2PConnectorScheduler::AsyncReadResult P2PConnectorScheduler::asyncRead(const KVCacheResourcePtr&    resource,
                                                                         const std::shared_ptr<Meta>& meta,
-                                                                        const std::pair<int, int>&   block_range) {
-    return decode_->asyncRead(resource, meta, block_range);
+                                                                        const std::pair<int, int>&   block_range,
+                                                                        bool                         no_transfer) {
+    return decode_->asyncRead(resource, meta, block_range, no_transfer);
+}
+
+void P2PConnectorScheduler::cancel(const std::shared_ptr<P2PConnectorAsyncReadContext>& context) {
+    if (decode_) {
+        decode_->cancel(context);
+    }
 }
 
 ErrorInfo
@@ -49,9 +56,17 @@ P2PConnectorScheduler::sendKVCache(const KVCacheResourcePtr&                    
                                    int64_t                                              request_id,
                                    const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
                                    int64_t                                              deadline_ms,
-                                   std::function<bool()>                                is_cancelled) {
-    return prefill_->sendKVCache(
-        resource, unique_key, request_id, decode_transfer_servers, deadline_ms, std::move(is_cancelled));
+                                   std::function<bool()>                                is_cancelled,
+                                   bool                                                 no_transfer,
+                                   int64_t                                              request_deadline_ms) {
+    return prefill_->sendKVCache(resource,
+                                 unique_key,
+                                 request_id,
+                                 decode_transfer_servers,
+                                 deadline_ms,
+                                 std::move(is_cancelled),
+                                 no_transfer,
+                                 request_deadline_ms);
 }
 
 }  // namespace rtp_llm

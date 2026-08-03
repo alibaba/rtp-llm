@@ -31,14 +31,18 @@ public:
 public:
     AsyncReadResult asyncRead(const KVCacheResourcePtr&       resource,
                               const std::shared_ptr<Meta>&    meta,
-                              const std::pair<int, int>&      block_range);
+                              const std::pair<int, int>&      block_range,
+                              bool                           no_transfer = false);
+    void cancel(const std::shared_ptr<P2PConnectorAsyncReadContext>& context);
 
     ErrorInfo sendKVCache(const KVCacheResourcePtr&                            resource,
                           const std::string&                                   unique_key,
                           int64_t                                              request_id,
                           const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
                           int64_t                                              deadline_ms,
-                          std::function<bool()>                                is_cancelled = nullptr);
+                          std::function<bool()>                                is_cancelled = nullptr,
+                          bool                                                 no_transfer = false,
+                          int64_t                                              request_deadline_ms = 0);
 
 private:
     P2PConnectorSchedulerConfig         config_;

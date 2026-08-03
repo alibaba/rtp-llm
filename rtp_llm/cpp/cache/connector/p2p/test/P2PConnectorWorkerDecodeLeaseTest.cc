@@ -133,6 +133,10 @@ public:
     }
 
     transfer::IKVCacheRecvTaskPtr recv(const transfer::RecvRequest& request) override {
+        const int call_index = recv_call_count_.fetch_add(1) + 1;
+        if (fail_recv_call_index_ > 0 && call_index == fail_recv_call_index_) {
+            return nullptr;
+        }
         auto task = std::make_shared<InflightMockRecvTask>();
         if (start_in_transferring_) {
             task->startTransfer();
@@ -193,6 +197,10 @@ public:
         start_in_transferring_ = v;
     }
 
+    void setFailRecvCallIndex(int call_index) {
+        fail_recv_call_index_ = call_index;
+    }
+
     int stealCount() const {
         return steal_count_.load();
     }
@@ -204,6 +212,8 @@ private:
     std::vector<std::string>                                               task_creation_order_;
     std::atomic<int>                                                       steal_count_{0};
     bool                                                                   start_in_transferring_{true};
+    std::atomic<int>                                                       recv_call_count_{0};
+    int                                                                    fail_recv_call_index_{0};
 };
 
 // =============================================================================
@@ -242,7 +252,7 @@ protected:
     }
 
     std::shared_ptr<LayerCacheBuffer> makeBuffer(int layer_id, int num_blocks = 2) {
-        auto buf = std::make_shared<LayerCacheBuffer>(layer_id);
+        auto buf = std::make_shared<LayerCacheBuffer>(layer_id, "full");
         for (int i = 0; i < num_blocks; ++i) {
             buf->addBlockId(layer_id * 1000 + i, i);
         }
@@ -288,6 +298,29 @@ protected:
 // even when TRANSFERRING tasks haven't finished. queryLeaseStatus then returns
 // "not found" → treats as stopped → blocks freed prematurely.
 // =============================================================================
+
+TEST_F(DecodeLeaseRaceTest, PartialRecvRegistrationFailureKeepsLeaseUntilStartedTaskStops) {
+    const std::string key = "partial_registration_failure";
+    inflight_receiver_->setFailRecvCallIndex(2);
+
+    auto error = decode_->read(1, key, currentTimeMs() + 5000, makeBuffers(2));
+    ASSERT_TRUE(error.hasError());
+    EXPECT_EQ(error.code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE);
+
+    bool sealed = false;
+    int  started = 0;
+    int  finished = 0;
+    bool stopped = true;
+    EXPECT_TRUE(decode_->queryLeaseStatus(key, sealed, started, finished, stopped));
+    EXPECT_TRUE(sealed);
+    EXPECT_FALSE(stopped);
+
+    auto tasks = inflight_receiver_->getAllTasks();
+    ASSERT_EQ(tasks.size(), 1u);
+    tasks.front()->notifyDone(false);
+    EXPECT_TRUE(decode_->queryLeaseStatus(key, sealed, started, finished, stopped));
+    EXPECT_TRUE(stopped);
+}
 
 // A1: After cancel with in-flight transfers, queryLeaseStatus must still report
 //     the lease as NOT stopped until all tasks complete.

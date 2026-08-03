@@ -5,16 +5,188 @@
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/connector/KVCacheConnectorReadWriteContext.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorAsyncContext.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
+#include "rtp_llm/cpp/model_rpc/TensorPbConvert.h"
+#include <algorithm>
+#include <cstring>
 #include <thread>
+#include <torch/extension.h>
 
 using namespace std;
 
 namespace rtp_llm {
 
+class StreamConnectorContext: public KVCacheConnectorReadWriteContext {
+public:
+    StreamConnectorContext(std::shared_ptr<BatchKVCacheResource> resource, std::shared_ptr<Meta> meta):
+        resource_(std::move(resource)), meta_(std::move(meta)) {}
+
+    const KVCacheResource& kvCacheResource() const override {
+        return resource_->cacheResource(0);
+    }
+    const std::shared_ptr<Meta>& meta() const override {
+        return meta_;
+    }
+
+private:
+    std::shared_ptr<BatchKVCacheResource> resource_;
+    std::shared_ptr<Meta>                 meta_;
+};
+
+class MetaImpl: public Meta {
+public:
+    MetaImpl(bool enable_memory_cache, bool enable_remote_cache, std::string trace_id):
+        enable_memory_cache_(enable_memory_cache),
+        enable_remote_cache_(enable_remote_cache),
+        trace_id_(std::move(trace_id)) {}
+    ~MetaImpl() override = default;
+
+    bool enableMemoryCache() const override {
+        return enable_memory_cache_;
+    }
+    bool enableRemoteCache() const override {
+        return enable_remote_cache_;
+    }
+    const std::string& trace_id() const override {
+        return trace_id_;
+    }
+    const std::string& unique_id() const override {
+        return unique_id_;
+    }
+    const std::vector<int64_t>& tokens() const override {
+        return tokens_;
+    }
+    GenerateStream* generateStream() const override {
+        return generate_stream_;
+    }
+    void reportError(ErrorCode code, const std::string& message) override {
+        if (generate_stream_) {
+            generate_stream_->reportError(code, message);
+        }
+    }
+    std::optional<P2PRoutingContext> p2pRouting() const override {
+        return routing_ctx_;
+    }
+    void fillRoutingContext(GenerateStream* stream) {
+        if (stream && !routing_ctx_.has_value()) {
+            auto& routing           = routing_ctx_.emplace();
+            routing.request_id      = stream->streamId();
+            routing.unique_key      = stream->uniqueKey();
+            routing.deadline_ms     = stream->deadlineMs();
+            routing.prefill_addr    = stream->prefillAddr();
+            routing.prefill_tp_size = stream->getPrefillTpSize();
+        }
+    }
+
+    GenerateStream*                  generate_stream_ = nullptr;
+    std::optional<P2PRoutingContext> routing_ctx_;
+
+private:
+    bool                 enable_memory_cache_{false};
+    bool                 enable_remote_cache_{false};
+    std::string          trace_id_;
+    std::string          unique_id_;
+    std::vector<int64_t> tokens_;
+};
+
 namespace {
+
+torch::Tensor buildFirstTokenUpdateTokens(GenerateStream* stream, int32_t first_token_id) {
+    const auto next_batch_size = static_cast<int64_t>(stream->nextBatchSize());
+    if (!stream->hasNumBeams()) {
+        auto tokens = torch::empty({next_batch_size, 1}, torch::kInt32);
+        std::fill(tokens.data_ptr<int32_t>(), tokens.data_ptr<int32_t>() + next_batch_size, first_token_id);
+        return tokens;
+    }
+    const auto seq_len         = static_cast<int64_t>(stream->seqLength());
+    auto       tokens          = torch::zeros({next_batch_size, seq_len + 1}, torch::kInt32);
+    const auto current_batches = std::max<int64_t>(1, static_cast<int64_t>(stream->currentBatchSize()));
+    for (int64_t batch = 0; batch < next_batch_size; ++batch) {
+        const auto source = static_cast<int>(std::min(batch, current_batches - 1));
+        const auto prefix = stream->completeTokenIdsVec(source);
+        auto*      row    = tokens.data_ptr<int32_t>() + batch * tokens.size(1);
+        std::copy(prefix.begin(), prefix.end(), row);
+        row[seq_len] = first_token_id;
+    }
+    return tokens;
+}
+
+const P2PSideChannelPayload* p2pSideChannel(const std::shared_ptr<AsyncContext>& context) {
+    auto p2p = std::dynamic_pointer_cast<P2PConnectorAsyncReadContext>(context);
+    return p2p ? p2p->sideChannelPayload() : nullptr;
+}
+
+void applyP2PSideChannel(const P2PSideChannelPayload& payload, GenerateStream* stream) {
+    if (payload.has_first_token) {
+        stream->setIsContextStream(false);
+        stream->step();
+        stream->updateWithoutLock({.new_tokens =
+                                       buildFirstTokenUpdateTokens(stream, static_cast<int32_t>(payload.first_token_id)),
+                                   .num_new_tokens = 1,
+                                   .hidden_states = {},
+                                   .logits = {},
+                                   .softmax_probs = {},
+                                   .cum_log_probs = {},
+                                   .all_probs = {},
+                                   .loss = {},
+                                   .src_batch_indices = {},
+                                   .all_hidden_states = {},
+                                   .update_remote_generate = false,
+                                   .force_update_info = false});
+    }
+
+    if (payload.total_reuse_len > 0) {
+        stream->setPrefillReuseLength(
+            payload.total_reuse_len, payload.local_reuse_len, payload.remote_reuse_len, payload.memory_reuse_len);
+    }
+
+    const bool has_probs = payload.propose_probs.shape_size() > 0 || !payload.propose_probs.fp16_data().empty()
+                           || !payload.propose_probs.bf16_data().empty()
+                           || !payload.propose_probs.fp32_data().empty();
+    const bool has_hidden = payload.propose_hidden.shape_size() > 0 || !payload.propose_hidden.fp16_data().empty()
+                            || !payload.propose_hidden.bf16_data().empty()
+                            || !payload.propose_hidden.fp32_data().empty();
+    if (!payload.propose_tokens.empty() || has_probs || has_hidden) {
+        if (payload.propose_tokens.size() < 2) {
+            stream->setContainProposeToken(false);
+            stream->setProposeToken({});
+            stream->setSPOutputBuffer(nullptr);
+            if (!stream->disableSpRun()) {
+                stream->reportErrorWithoutLock(ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED,
+                                                "P2P side channel has invalid speculative tokens");
+            }
+        } else {
+            auto probs = has_probs ? TensorPbConvert::pbToTorch(payload.propose_probs) :
+                                     torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat32));
+            auto hidden = has_hidden ? TensorPbConvert::pbToTorch(payload.propose_hidden) :
+                                       torch::empty({0}, torch::TensorOptions().dtype(torch::kFloat16));
+            stream->setReuseLength(stream->seqLength() - 1);
+            stream->setSpEditRun(false);
+            stream->setMtpTokenIndex(stream->seqLength() - 1);
+            stream->setContainProposeToken(true);
+            stream->setProposeToken(payload.propose_tokens);
+            auto output    = std::make_shared<SpeculativeExecutorStreamOutput>();
+            output->tokens = torch::zeros({1, static_cast<int64_t>(payload.propose_tokens.size())}, torch::kInt32);
+            memcpy(output->tokens.data_ptr<int>(),
+                   payload.propose_tokens.data(),
+                   payload.propose_tokens.size() * sizeof(int));
+            output->all_probs     = probs;
+            output->hidden_states = hidden;
+            output->tensors_holder.emplace_back(std::move(probs));
+            output->tensors_holder.emplace_back(std::move(hidden));
+            stream->setSPOutputBuffer(output);
+        }
+    }
+
+    if (!payload.position_ids.empty()) {
+        stream->setContextPositionIds(
+            torch::tensor(payload.position_ids, torch::dtype(torch::kInt32).device(torch::kCPU)));
+    }
+}
 
 std::shared_ptr<const CacheTopology> warmupCacheTopology() {
     static const auto topology = []() {
@@ -76,6 +248,10 @@ void StreamCacheResource::releaseResource() {
     if (allocator_load_context_) {
         resource_context_.cache_manager->cancelLoad(allocator_load_context_);
         allocator_load_context_.reset();
+    }
+    if (p2p_load_context_) {
+        resource_context_.cache_manager->cancelP2PLoad(p2p_load_context_);
+        p2p_load_context_.reset();
     }
     // do not reuse cache from stopped beam search streams, whose states are likely corrupted
     if (!need_release_resource_ && (!stream_->hasNumBeams() || !stream_->hasError())) {
@@ -256,7 +432,15 @@ absl::Status StreamCacheResource::incrKVBlock() {
 
 bool StreamCacheResource::asyncLoadCache() {
     RTP_LLM_PROFILE_FUNCTION();
-    return allocator_load_context_ != nullptr;
+    if (!p2p_load_context_ && resource_context_.cache_manager && resource_context_.cache_manager->hasP2PConnector()) {
+        auto meta = std::make_shared<MetaImpl>(
+            reuseCache() && enableMemoryCache(), reuseCache() && enableRemoteCache(), stream_->traceId());
+        meta->generate_stream_ = stream_;
+        meta->fillRoutingContext(stream_);
+        auto context = std::make_shared<StreamConnectorContext>(batch_kv_cache_resource_, std::move(meta));
+        p2p_load_context_ = resource_context_.cache_manager->asyncLoadCache(context);
+    }
+    return allocator_load_context_ != nullptr || p2p_load_context_ != nullptr;
 }
 
 bool StreamCacheResource::loadCacheDone() {
@@ -274,6 +458,29 @@ bool StreamCacheResource::loadCacheDone() {
             return true;
         }
         allocator_load_context_.reset();
+    }
+
+    if (p2p_load_context_) {
+        if (!p2p_load_context_->done()) {
+            return false;
+        }
+        if (p2p_load_context_->success()) {
+            if (const auto* payload = p2pSideChannel(p2p_load_context_)) {
+                applyP2PSideChannel(*payload, stream_);
+            }
+            p2p_load_context_.reset();
+        } else {
+            // P2P always represents a mandatory request lifecycle once a
+            // context exists. This includes Tree-full-hit/no-transfer, where
+            // StartLoad still returns side-channel state and releases Prefill
+            // resources, and Prefill registration itself. None of these
+            // failures is a benign cache miss.
+            const auto error = p2p_load_context_->errorInfo();
+            p2p_load_context_.reset();
+            RTP_LLM_LOG_WARNING(
+                "P2P cache load failed, stream=%ld error=%s", stream_->streamId(), error.ToString().c_str());
+            stream_->reportEventWithoutLock(StreamEvents::Error, error.code(), error.ToString());
+        }
     }
     return true;
 }

@@ -19,7 +19,7 @@ protected:
     }
 
     std::shared_ptr<LayerCacheBuffer> createLayerCacheBuffer(int layer_id) {
-        return std::make_shared<LayerCacheBuffer>(layer_id);
+        return std::make_shared<LayerCacheBuffer>(layer_id, "full");
     }
 
     int64_t getDeadlineMs(int64_t offset_ms = 1000) {
@@ -69,6 +69,23 @@ TEST_F(StoreWaitContextTest, CheckerCheckOnce_Timeout) {
     // Buffer should NOT be added (timeout, not success)
     auto computed_buffer = computed_buffers_->getBuffer(request_id);
     EXPECT_EQ(computed_buffer, nullptr);
+}
+
+TEST_F(StoreWaitContextTest, CheckerUsesActivatedTransferHorizon) {
+    StoreWaitContextChecker checker(nullptr, computed_buffers_);
+
+    const int64_t request_id       = 3005;
+    const int64_t expired_horizon  = currentTimeMs() - 1;
+    const int64_t transfer_horizon = currentTimeMs() + 1000;
+    auto          collector        = std::make_shared<PrefillWorkerStoreMetricsCollector>();
+
+    ASSERT_TRUE(computed_buffers_->registerRequestHorizon(request_id, expired_horizon).has_value());
+    ASSERT_TRUE(computed_buffers_->activateRequestHorizon(request_id, transfer_horizon).has_value());
+    checker.addContext(StoreWaitContext(request_id, nullptr, createLayerCacheBuffer(0), expired_horizon, collector));
+
+    checker.checkOnce();
+    EXPECT_EQ(checker.getContextCount(), 0);
+    EXPECT_NE(computed_buffers_->getBuffer(request_id), nullptr);
 }
 
 }  // namespace rtp_llm

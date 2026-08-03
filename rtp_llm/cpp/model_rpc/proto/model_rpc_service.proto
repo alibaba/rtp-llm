@@ -556,6 +556,7 @@ enum P2PConnectorBroadcastType {
     CANCEL_READ = 2;
     CANCEL_HANDLE_READ = 3;
     QUERY_LEASE_STATUS = 4;
+    HANDLE_READ_NO_TRANSFER = 5;
 }
 
 message P2PConnectorBroadcastTpRequestPB {
@@ -567,6 +568,9 @@ message P2PConnectorBroadcastTpRequestPB {
     P2PConnectorBroadcastType type = 6;
     // TP size of the remote side (prefill_tp_size for decode, decode_tp_size for prefill)
     int32 remote_tp_size = 8;
+    // Original user-request deadline. deadline_ms remains the physical
+    // transfer deadline used by this broadcast and its worker operation.
+    int64 request_deadline_ms = 9;
 }
 
 // GetPeerInfo: Decode calls this on Prefill to exchange TP size before recv registration
@@ -599,6 +603,13 @@ message P2PConnectorStartLoadRequestPB {
     string unique_key = 1;
     repeated TPWorkerInfoPB workers = 2;
     int64 deadline_ms = 3;
+    // Decode already has all matched KV blocks locally. Prefill should still
+    // complete the StartLoad lifecycle and return side-channel data, but must
+    // not dispatch a data transfer.
+    bool no_transfer = 4;
+    // Original user-request deadline. deadline_ms remains the absolute
+    // deadline of this physical P2P transfer.
+    int64 request_deadline_ms = 5;
 }
 
 // Side-channel tensor blob: carries named tensor data between prefill and decode

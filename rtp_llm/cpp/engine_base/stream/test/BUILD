@@ -17,6 +17,7 @@ test_deps = [
     "//rtp_llm/cpp/cache/test:cache_config_test_utils",
     "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
     "//rtp_llm/cpp/cache/test:mock_async_context",
+    "//rtp_llm/cpp/cache/connector/p2p:connector",
 ] + torch_deps()
 
 cc_test(

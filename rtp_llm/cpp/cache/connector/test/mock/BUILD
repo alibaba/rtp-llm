@@ -13,6 +13,7 @@ cc_library(
         "MockKVCacheConnectorReadWriteContext.h",
     ],
     deps = [
+        "//rtp_llm/cpp/cache:cache_async_context",
         "//rtp_llm/cpp/cache/connector:connector",
     ],
     copts = test_copts,

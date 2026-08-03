@@ -21,8 +21,8 @@ protected:
     }
 
     // 创建测试用的 LayerCacheBuffer
-    std::shared_ptr<LayerCacheBuffer> createLayerCacheBuffer(int layer_id) {
-        return std::make_shared<LayerCacheBuffer>(layer_id);
+    std::shared_ptr<LayerCacheBuffer> createLayerCacheBuffer(int layer_id, const std::string& tag = "full") {
+        return std::make_shared<LayerCacheBuffer>(layer_id, tag);
     }
 
     // 获取当前时间（毫秒）+ 偏移量
@@ -49,7 +49,7 @@ TEST_F(ComputedLayerCacheBufferTest, nullBufferFirst) {
     computed_buffer.addBuffer(buffer, deadline_ms1);
     ASSERT_EQ(deadline_ms1, computed_buffer.deadlineMs());
 
-    auto [layer_count, buffers] = computed_buffer.getBuffers({0, 1});
+    auto [layer_count, buffers] = computed_buffer.getBuffers({"0:full", "1:full"});
     EXPECT_EQ(layer_count, 1);
     EXPECT_EQ(buffers.size(), 1);
     EXPECT_EQ(buffer, buffers.at(0));
@@ -68,7 +68,7 @@ TEST_F(ComputedLayerCacheBufferTest, fullBufferFirst) {
     computed_buffer.addBuffer(nullptr, deadline_ms1);
     ASSERT_EQ(deadline_ms1, computed_buffer.deadlineMs());
 
-    auto [layer_count, buffers] = computed_buffer.getBuffers({0, 1});
+    auto [layer_count, buffers] = computed_buffer.getBuffers({"0:full", "1:full"});
     EXPECT_EQ(layer_count, 1);
     EXPECT_EQ(buffers.size(), 1);
     EXPECT_EQ(buffer, buffers.at(0));
@@ -93,7 +93,7 @@ TEST_F(ComputedLayerCacheBufferTest, ComputedLayerCacheBuffer_WaitChange) {
 
     producer.join();
 
-    std::set<int> layer_ids     = {0, 1};
+    std::set<std::string> layer_ids = {"0:full", "1:full"};
     auto [layer_count, buffers] = computed_buffer->getBuffers(layer_ids);
     EXPECT_EQ(layer_count, 2);
     EXPECT_EQ(buffers.size(), 2);
@@ -129,7 +129,7 @@ TEST_F(ComputedLayerCacheBufferTest, GetBuffersReturnsStoredLayerCountForWaitCha
     int64_t deadline_ms = getDeadlineMs();
 
     auto computed_buffer = std::make_shared<ComputedLayerCacheBuffer>(request_id, buffer0, deadline_ms);
-    auto [stored_layer_count, ready_buffers] = computed_buffer->getBuffers({1});
+    auto [stored_layer_count, ready_buffers] = computed_buffer->getBuffers({"1:full"});
     EXPECT_EQ(stored_layer_count, 1);
     EXPECT_TRUE(ready_buffers.empty());
 
@@ -146,7 +146,7 @@ TEST_F(ComputedLayerCacheBufferTest, GetBuffersReturnsStoredLayerCountForWaitCha
     producer.join();
 
     EXPECT_GE(elapsed, 30);
-    auto [final_layer_count, final_buffers] = computed_buffer->getBuffers({0, 1});
+    auto [final_layer_count, final_buffers] = computed_buffer->getBuffers({"0:full", "1:full"});
     EXPECT_EQ(final_layer_count, 2);
     EXPECT_EQ(final_buffers.size(), 2);
 }
@@ -178,7 +178,7 @@ TEST_F(ComputedLayerCacheBufferTest, AddAndGetBuffer) {
     auto computed_buffer2 = store_->addBuffer(request_id, buffer1, deadline_ms);
     ASSERT_EQ(computed_buffer2, computed_buffer);
 
-    auto [layer_count, buffers] = retrieved->getBuffers({0, 2});
+    auto [layer_count, buffers] = retrieved->getBuffers({"0:full", "2:full"});
     EXPECT_EQ(layer_count, 2);
     ASSERT_EQ(buffers.size(), 1);
     EXPECT_EQ(buffers[0]->getLayerId(), 0);
@@ -233,7 +233,7 @@ TEST_F(ComputedLayerCacheBufferTest, LayerCacheBuffer_HoldsKVCacheResourceLifeti
             deleter_called = true;
             delete p;
         });
-    auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(0, owned_resource);
+    auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(0, "full", owned_resource);
 
     owned_resource.reset();
     EXPECT_FALSE(deleter_called);
@@ -262,6 +262,67 @@ TEST_F(ComputedLayerCacheBufferTest, AddBufferRejectedAfterRemove) {
     EXPECT_EQ(result2, nullptr);
     EXPECT_EQ(store_->getBuffer(request_id), nullptr);
     EXPECT_EQ(store_->getBuffersCount(), 0);
+}
+
+TEST_F(ComputedLayerCacheBufferTest, RequestHorizonDoesNotRollWithLaterLayers) {
+    const int64_t request_id       = 4005;
+    const int64_t initial_horizon  = currentTimeMs() + 1000;
+    const int64_t later_candidate  = initial_horizon + 5000;
+
+    auto first = store_->registerRequestHorizon(request_id, initial_horizon);
+    auto later = store_->registerRequestHorizon(request_id, later_candidate);
+
+    ASSERT_TRUE(first.has_value());
+    ASSERT_TRUE(later.has_value());
+    EXPECT_EQ(*first, initial_horizon);
+    EXPECT_EQ(*later, initial_horizon);
+
+    store_->removeBuffer(request_id);
+    EXPECT_FALSE(store_->registerRequestHorizon(request_id, later_candidate).has_value());
+}
+
+TEST_F(ComputedLayerCacheBufferTest, StartLoadPromotesFixedRequestHorizon) {
+    const int64_t request_id       = 4007;
+    const int64_t initial_horizon  = currentTimeMs() - 1;
+    const int64_t transfer_horizon = currentTimeMs() + 5000;
+
+    ASSERT_EQ(store_->registerRequestHorizon(request_id, initial_horizon), initial_horizon);
+    ASSERT_NE(store_->addBuffer(request_id, createLayerCacheBuffer(0), initial_horizon), nullptr);
+    ASSERT_EQ(store_->activateRequestHorizon(request_id, transfer_horizon), transfer_horizon);
+    store_->checkTimeout();
+    EXPECT_NE(store_->getBuffer(request_id), nullptr);
+    EXPECT_EQ(store_->requestHorizon(request_id), transfer_horizon);
+    EXPECT_EQ(store_->registerRequestHorizon(request_id, transfer_horizon + 5000), transfer_horizon);
+}
+
+TEST_F(ComputedLayerCacheBufferTest, TerminalTombstoneOutlivesLayerHorizon) {
+    const int64_t request_id          = 4006;
+    const int64_t expired_horizon_ms  = currentTimeMs() - 1;
+    const int64_t request_deadline_ms = currentTimeMs() + 5000;
+
+    ASSERT_TRUE(store_->registerRequestHorizon(request_id, expired_horizon_ms, request_deadline_ms).has_value());
+    store_->removeBuffer(request_id);
+    store_->checkTimeout();
+
+    EXPECT_FALSE(
+        store_->registerRequestHorizon(request_id, currentTimeMs() + 1000, request_deadline_ms).has_value());
+    EXPECT_EQ(store_->addBuffer(request_id, createLayerCacheBuffer(0), currentTimeMs() + 1000), nullptr);
+}
+
+TEST_F(ComputedLayerCacheBufferTest, SameLayerDifferentTagsDoNotCollide) {
+    const int64_t request_id  = 4002;
+    const int64_t deadline_ms = getDeadlineMs();
+    auto          full_buffer = createLayerCacheBuffer(0, "full");
+    auto          swa_buffer  = createLayerCacheBuffer(0, "swa");
+
+    ComputedLayerCacheBuffer computed_buffer(request_id, full_buffer, deadline_ms);
+    computed_buffer.addBuffer(swa_buffer, deadline_ms);
+
+    auto [buffer_count, buffers] = computed_buffer.getBuffers({"0:full", "0:swa"});
+    EXPECT_EQ(buffer_count, 2);
+    ASSERT_EQ(buffers.size(), 2);
+    EXPECT_EQ(buffers[0], full_buffer);
+    EXPECT_EQ(buffers[1], swa_buffer);
 }
 
 }  // namespace rtp_llm

@@ -23,11 +23,20 @@ public:
         grpc::Status                         status;
         std::string                          server_addr;
         int                                  timeout_ms;
+        bool                                 call_started{false};
     };
 
 public:
     explicit BroadcastResult(const std::vector<std::shared_ptr<WorkerRpcContext>>& worker_rpc_contexts):
-        worker_contexts_(worker_rpc_contexts), finished_(worker_rpc_contexts.size(), false) {}
+        worker_contexts_(worker_rpc_contexts), finished_(worker_rpc_contexts.size(), false) {
+        for (size_t rank = 0; rank < worker_contexts_.size(); ++rank) {
+            if (!worker_contexts_[rank] || !worker_contexts_[rank]->call_started) {
+                finished_[rank] = true;
+                ++finished_count_;
+                grpc_status_failure_seen_ = true;
+            }
+        }
+    }
     ~BroadcastResult() {
         std::unique_lock<std::mutex> lock(wait_done_mutex_);
         for (size_t rank = 0; rank < worker_contexts_.size(); ++rank) {
@@ -182,26 +191,13 @@ private:
             return;
         }
         std::thread([contexts = std::move(worker_contexts)]() mutable {
-            constexpr int64_t kAsyncDrainBudgetMs = 60000;
-            const auto        deadline =
-                std::chrono::system_clock::now() + std::chrono::milliseconds(kAsyncDrainBudgetMs);
             for (const auto& worker_rpc_context : contexts) {
                 if (!worker_rpc_context) {
                     continue;
                 }
                 void* got_tag = nullptr;
                 bool  ok      = false;
-                while (true) {
-                    auto next_status = worker_rpc_context->completion_queue.AsyncNext(&got_tag, &ok, deadline);
-                    if (next_status == grpc::CompletionQueue::NextStatus::SHUTDOWN) {
-                        break;
-                    }
-                    if (next_status == grpc::CompletionQueue::NextStatus::TIMEOUT) {
-                        RTP_LLM_LOG_ERROR(
-                            "[PD-DIAG] BroadcastResult async drain timed out, worker_count=%zu",
-                            contexts.size());
-                        return;
-                    }
+                while (worker_rpc_context->completion_queue.Next(&got_tag, &ok)) {
                 }
             }
         }).detach();
@@ -286,9 +282,13 @@ public:
             auto  reader = rpc_call(ctx->stub, ctx->client_context, ctx->request, &ctx->completion_queue);
             if (!reader) {
                 RTP_LLM_LOG_WARNING("broadcast: create async reader failed rank=%d addr=%s", rank, ctx->server_addr.c_str());
-                return nullptr;
+                // Calls for preceding ranks may already be in flight. Return a
+                // failed result that still owns and drains those calls instead
+                // of making the caller assume that nothing was dispatched.
+                return std::make_shared<BroadcastResult<RequestPB, ResponsePB>>(std::move(contexts));
             }
             reader->Finish(&ctx->response, &ctx->status, reinterpret_cast<void*>(static_cast<intptr_t>(rank)));
+            ctx->call_started = true;
         }
 
         return std::make_shared<BroadcastResult<RequestPB, ResponsePB>>(std::move(contexts));

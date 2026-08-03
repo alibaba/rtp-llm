@@ -82,6 +82,8 @@ public:
     ErrorInfo errorInfo() const override;
     void      waitDone() override;
     void      notifyDone();
+    void      cancel();
+    bool      cancelled() const;
     // NOTE: `setFusedReadContext()` must be called eventually to avoid blocking waitDone() on the read stage.
     void setFusedReadContext(const std::shared_ptr<FusedAsyncContext>& fused_read_context);
     const std::shared_ptr<FusedAsyncContext>  fusedReadContext() const;
@@ -96,6 +98,7 @@ private:
     std::shared_ptr<Meta>              meta_;
 
     std::atomic<bool>  read_ctx_set_{false};
+    std::atomic<bool>  cancelled_{false};
     mutable std::mutex read_ctx_mutex_;
 
     std::mutex              done_mutex_;

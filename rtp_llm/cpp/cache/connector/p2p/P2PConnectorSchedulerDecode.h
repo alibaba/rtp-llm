@@ -13,9 +13,11 @@
 #include <string>
 #include <vector>
 
-namespace rtp_llm {
+namespace autil {
+class LockFreeThreadPool;
+}
 
-class GenerateStream;
+namespace rtp_llm {
 
 class P2PConnectorSchedulerDecode {
 public:
@@ -40,7 +42,9 @@ public:
     // asyncRead from Meta (extracts routing from Meta::p2pRouting())
     AsyncReadResult asyncRead(const KVCacheResourcePtr&       resource,
                               const std::shared_ptr<Meta>&    meta,
-                              const std::pair<int, int>&      block_range);
+                              const std::pair<int, int>&      block_range,
+                              bool                           no_transfer = false);
+    void cancel(const std::shared_ptr<P2PConnectorAsyncReadContext>& context);
 
 private:
     struct AsyncReadCallResults {
@@ -53,12 +57,13 @@ private:
                         const std::string&                                    prefill_ip,
                         uint32_t                                              prefill_port,
                         const std::string&                                    unique_key,
-                        int64_t                                               deadline_ms,
+                        int64_t                                               request_deadline_ms,
+                        int64_t                                               transfer_deadline_ms,
                         const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
-                        GenerateStream*                                       generate_stream,
                         const std::shared_ptr<DecodeSchedulerMetricsCollector>& collector,
                         ErrorInfo&                                            out_error,
-                        int                                                   prefill_tp_size = 0);
+                        int                                                   prefill_tp_size = 0,
+                        bool                                                  no_transfer = false);
 
 private:
     const P2PConnectorSchedulerConfig                    config_;
@@ -66,6 +71,7 @@ private:
     std::shared_ptr<P2PBroadcastClient>                  tp_broadcast_client_;
     std::shared_ptr<PrefillLoadCaller>                   server_caller_;
     std::shared_ptr<P2PConnectorAsyncReadContextChecker> checker_;
+    std::shared_ptr<autil::LockFreeThreadPool>           async_read_pool_;
 };
 
 }  // namespace rtp_llm

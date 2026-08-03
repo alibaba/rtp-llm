@@ -190,7 +190,7 @@ struct PrefillLoadCallerResultDrainTraits {
 
     static void markDrained(const std::shared_ptr<PrefillLoadCaller::Result>& result) {
         if (result) {
-            result->completion_queue_shutdown_drained_ = true;
+            result->markCompletionQueueDrained();
         }
     }
 };
@@ -252,8 +252,9 @@ std::shared_ptr<PrefillLoadCaller::Result> PrefillLoadCaller::load(int64_t      
                                                                    const std::string& prefill_ip,
                                                                    uint32_t           prefill_port,
                                                                    const std::string& unique_key,
-                                                                   int64_t            deadline_ms,
-                                                                   GenerateStream*    /*generate_stream*/) {
+                                                                   int64_t            request_deadline_ms,
+                                                                   int64_t            transfer_deadline_ms,
+                                                                   bool               no_transfer) {
     if (!rpc_pool_) {
         RTP_LLM_LOG_WARNING("PrefillLoadCaller load failed: rpc_pool is null");
         return nullptr;
@@ -294,10 +295,13 @@ std::shared_ptr<PrefillLoadCaller::Result> PrefillLoadCaller::load(int64_t      
         return nullptr;
     }
 
-    result->request_id = request_id;
+    result->request_id    = request_id;
+    result->unique_key    = unique_key;
+    result->start_time_us = currentTimeUs();
 
     const int64_t build_rpc_start_us = currentTimeUs();
-    if (!buildAndStartAsyncRpc(result, unique_key, deadline_ms, request_id)) {
+    if (!buildAndStartAsyncRpc(
+            result, unique_key, request_deadline_ms, transfer_deadline_ms, request_id, no_transfer)) {
         return nullptr;
     }
     const int64_t build_rpc_cost_us = currentTimeUs() - build_rpc_start_us;
@@ -309,20 +313,26 @@ std::shared_ptr<PrefillLoadCaller::Result> PrefillLoadCaller::load(int64_t      
             unique_key.c_str());
     }
 
-    RTP_LLM_LOG_DEBUG("PrefillLoadCaller load started, unique_key: %s, addr: %s, deadline_ms: %lld, timeout ms: %d",
+    RTP_LLM_LOG_DEBUG("PrefillLoadCaller load started, unique_key: %s, addr: %s, request_deadline_ms: %lld, "
+                      "transfer_deadline_ms: %lld, timeout ms: %d",
                       unique_key.c_str(),
                       result->server_addr.c_str(),
-                      deadline_ms,
+                      request_deadline_ms,
+                      transfer_deadline_ms,
                       result->timeout_ms);
     return result;
 }
 
 bool PrefillLoadCaller::buildAndStartAsyncRpc(const std::shared_ptr<Result>& result,
                                               const std::string&             unique_key,
-                                              int64_t                        deadline_ms,
-                                              int64_t                        request_id) {
+                                              int64_t                        request_deadline_ms,
+                                              int64_t                        transfer_deadline_ms,
+                                              int64_t                        request_id,
+                                              bool                           no_transfer) {
     result->request.set_unique_key(unique_key);
-    result->request.set_deadline_ms(deadline_ms);
+    result->request.set_deadline_ms(transfer_deadline_ms);
+    result->request.set_request_deadline_ms(request_deadline_ms);
+    result->request.set_no_transfer(no_transfer);
 
     for (const auto& tp_worker : tp_worker_infos_) {
         auto tp_worker_info = result->request.add_workers();
@@ -334,7 +344,7 @@ bool PrefillLoadCaller::buildAndStartAsyncRpc(const std::shared_ptr<Result>& res
     result->completion_queue = std::make_shared<grpc::CompletionQueue>();
 
     const int64_t now_ms       = currentTimeMs();
-    int64_t       remaining_ms = deadline_ms > 0 ? (deadline_ms - now_ms) : 30000;
+    int64_t       remaining_ms = transfer_deadline_ms > 0 ? (transfer_deadline_ms - now_ms) : 30000;
     if (remaining_ms < 0) {
         remaining_ms = 0;
     }
@@ -407,6 +417,7 @@ void PrefillLoadCaller::Result::shutdownAndDrainCompletionQueue() {
 }
 
 void PrefillLoadCaller::Result::cancel() {
+    std::lock_guard<std::mutex> lock(state_mutex_);
     if (done_) {
         return;
     }
@@ -419,6 +430,11 @@ void PrefillLoadCaller::Result::cancel() {
     done_              = true;
     success_           = false;
     total_cost_time_us = currentTimeUs() - start_time_us;
+}
+
+void PrefillLoadCaller::Result::markCompletionQueueDrained() {
+    std::lock_guard<std::mutex> lock(state_mutex_);
+    completion_queue_shutdown_drained_ = true;
 }
 
 bool PrefillLoadCaller::Result::pollCompletionQueue() {
@@ -519,6 +535,7 @@ void PrefillLoadCaller::Result::updateStreamFromResponse() {
 }
 
 void PrefillLoadCaller::Result::checkDone() {
+    std::lock_guard<std::mutex> lock(state_mutex_);
     if (done_) {
         return;
     }
@@ -531,6 +548,12 @@ void PrefillLoadCaller::Result::checkDone() {
     }
 
     updateStreamFromResponse();
+    if (!side_channel_payload.has_first_token) {
+        success_       = false;
+        error_code     = ErrorCode::P2P_CONNECTOR_LOAD_FROM_PREFILL_FAILED;
+        error_message  = "StartLoad response is missing the required first token";
+        return;
+    }
     success_           = true;
     done_              = true;
     total_cost_time_us = currentTimeUs() - start_time_us;

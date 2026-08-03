@@ -4,11 +4,18 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "autil/LockFreeThreadPool.h"
 #include <algorithm>
 #include <memory>
 #include <optional>
 
 namespace rtp_llm {
+namespace {
+// Keep kickoff bounded: connection acquisition/reconnection may block, while
+// completion polling remains isolated on P2PConnectorAsyncReadContextChecker.
+constexpr size_t kAsyncReadThreadCount = 4;
+constexpr size_t kAsyncReadQueueSize   = 1024;
+}  // namespace
 
 P2PConnectorSchedulerDecode::P2PConnectorSchedulerDecode(
     P2PConnectorSchedulerConfig                config,
@@ -17,6 +24,11 @@ P2PConnectorSchedulerDecode::P2PConnectorSchedulerDecode(
     config_(std::move(config)), metrics_reporter_(metrics_reporter), tp_broadcast_client_(tp_broadcast_client) {}
 
 P2PConnectorSchedulerDecode::~P2PConnectorSchedulerDecode() {
+    if (async_read_pool_) {
+        async_read_pool_->stop(autil::ThreadPool::STOP_AFTER_QUEUE_EMPTY);
+        async_read_pool_->join();
+        async_read_pool_.reset();
+    }
     if (checker_) {
         checker_->stop();
     }
@@ -25,9 +37,19 @@ P2PConnectorSchedulerDecode::~P2PConnectorSchedulerDecode() {
 bool P2PConnectorSchedulerDecode::init(const std::string& process_id) {
     server_caller_ = std::make_shared<PrefillLoadCaller>(config_.worker_addrs);
 
+    auto async_read_pool = std::make_shared<autil::LockFreeThreadPool>(
+        kAsyncReadThreadCount, kAsyncReadQueueSize, nullptr, "P2PAsyncReadKickoff");
+    if (!async_read_pool->start()) {
+        RTP_LLM_LOG_ERROR("P2PConnectorSchedulerDecode init failed: async read pool start failed");
+        return false;
+    }
+    async_read_pool_ = std::move(async_read_pool);
+
     checker_ = std::make_shared<P2PConnectorAsyncReadContextChecker>();
     if (!checker_->init(metrics_reporter_, tp_broadcast_client_)) {
         RTP_LLM_LOG_ERROR("P2PConnectorSchedulerDecode init failed: checker init failed");
+        async_read_pool_->stop();
+        async_read_pool_.reset();
         return false;
     }
 
@@ -40,8 +62,17 @@ void P2PConnectorSchedulerDecode::stopChecker() {
     }
 }
 
+void P2PConnectorSchedulerDecode::cancel(const std::shared_ptr<P2PConnectorAsyncReadContext>& context) {
+    if (context) {
+        context->cancel(tp_broadcast_client_);
+    }
+}
+
 P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncRead(
-    const KVCacheResourcePtr& resource, const std::shared_ptr<Meta>& meta, const std::pair<int, int>& block_range) {
+    const KVCacheResourcePtr& resource,
+    const std::shared_ptr<Meta>& meta,
+    const std::pair<int, int>& block_range,
+    bool no_transfer) {
     if (!meta || !resource) {
         RTP_LLM_LOG_WARNING("asyncRead: meta or resource is null");
         return {nullptr, ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "meta or resource is null")};
@@ -56,17 +87,21 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
             ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "meta->p2pRouting() returned nullopt")};
     }
 
-    const int64_t     request_id      = routing->request_id;
-    const std::string unique_key      = routing->unique_key;
-    // Clamp the per-transfer deadline to p2p_max_transfer_deadline_ms. The
-    // routing deadline is the request's business deadline (often ~1h via
-    // generate_config->timeout_ms), which is too long for a single P2P read:
-    // a single hung RDMA transfer would block waitForBroadcastCompletion /
-    // waitSendCallbacksWithTimeout for the full hour. See 5/26 incident.
-    const int64_t     now_ms          = currentTimeMs();
-    const int64_t     deadline_ms     = std::min(routing->deadline_ms, now_ms + config_.p2p_max_transfer_deadline_ms);
-    const auto&       prefill_addr    = routing->prefill_addr;
-    const int         prefill_tp_size = routing->prefill_tp_size;
+    const int64_t     request_id          = routing->request_id;
+    const std::string unique_key          = routing->unique_key;
+    const int64_t     request_deadline_ms = routing->deadline_ms;
+    const int64_t     now_ms              = currentTimeMs();
+    if (request_deadline_ms <= 0 || now_ms >= request_deadline_ms) {
+        RTP_LLM_LOG_WARNING("asyncRead: request deadline expired, unique_key: %s", unique_key.c_str());
+        return {nullptr, ErrorInfo(ErrorCode::GENERATE_TIMEOUT, "P2P request deadline expired")};
+    }
+    // StartLoad carries both deadlines: deadline_ms bounds this physical
+    // transfer, while request_deadline_ms only bounds request-level terminal
+    // state such as Prefill resource tombstones.
+    const int64_t     transfer_deadline_ms =
+        std::min(request_deadline_ms, now_ms + config_.p2p_max_transfer_deadline_ms);
+    const auto& prefill_addr    = routing->prefill_addr;
+    const int   prefill_tp_size = routing->prefill_tp_size;
 
     if (unique_key.empty()) {
         RTP_LLM_LOG_WARNING("asyncRead: unique_key is empty");
@@ -81,41 +116,80 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
     }
 
     auto collector = std::make_shared<DecodeSchedulerMetricsCollector>(metrics_reporter_);
-    auto layer_cache_buffers =
-        LayerCacheBufferUtil::convert(*resource, 0, config_.layer_attn_types, block_range.first, block_range.second);
-    if (layer_cache_buffers.empty()) {
+    if (!no_transfer && !config_.topology) {
+        collector->success = false;
+        return {nullptr,
+                ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "cache topology is null")};
+    }
+    std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
+    if (!no_transfer) {
+        layer_cache_buffers = LayerCacheBufferUtil::convert(
+            *resource, *config_.topology, block_range.first, block_range.second, config_.cp_rank, config_.cp_size);
+    }
+    if (!no_transfer && layer_cache_buffers.empty()) {
         RTP_LLM_LOG_WARNING("asyncRead: layer_cache_buffers is empty");
         collector->success = false;
         return {nullptr,
                 ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "layer_cache_buffers is empty")};
     }
 
-    auto      generate_stream = meta->generateStream();
-    ErrorInfo start_error;
-    auto      async_calls = startAsyncReadCalls(request_id,
-                                           prefill_addr.first,
-                                           prefill_addr.second,
-                                           unique_key,
-                                           deadline_ms,
-                                           layer_cache_buffers,
-                                           generate_stream,
-                                           collector,
-                                           start_error,
-                                           prefill_tp_size);
-    if (!async_calls) {
-        return {nullptr, start_error};
+    auto async_context = std::make_shared<P2PConnectorAsyncReadContext>(resource,
+                                                                        unique_key,
+                                                                        collector,
+                                                                        config_.p2p_transfer_not_done_resource_hold_ms,
+                                                                        no_transfer,
+                                                                        request_deadline_ms);
+
+    auto submit_result = async_read_pool_->pushTask(
+        [this,
+         request_id,
+         prefill_ip = prefill_addr.first,
+         prefill_port = prefill_addr.second,
+         unique_key,
+         request_deadline_ms,
+         transfer_deadline_ms,
+         layer_cache_buffers = std::move(layer_cache_buffers),
+         collector,
+         async_context,
+         prefill_tp_size,
+         no_transfer]() mutable {
+            if (!async_context->beginKickoff()) {
+                return;
+            }
+
+            ErrorInfo start_error;
+            auto      async_calls = startAsyncReadCalls(request_id,
+                                                        prefill_ip,
+                                                        prefill_port,
+                                                        unique_key,
+                                                        request_deadline_ms,
+                                                        transfer_deadline_ms,
+                                                        layer_cache_buffers,
+                                                        collector,
+                                                        start_error,
+                                                        prefill_tp_size,
+                                                        no_transfer);
+            if (!async_calls) {
+                async_context->markStartFailed(start_error);
+                return;
+            }
+
+            const bool cancel_requested =
+                async_context->setCallResults(async_calls->tp_sync_result, async_calls->server_call_result);
+            if (cancel_requested) {
+                async_context->cancel(tp_broadcast_client_);
+            }
+        },
+        false);
+    if (submit_result != autil::ThreadPoolBase::ERROR_NONE) {
+        collector->success = false;
+        return {nullptr,
+                ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED,
+                          "failed to submit P2P async read kickoff task")};
     }
 
-    auto async_context = std::make_shared<P2PConnectorAsyncReadContext>(resource,
-                                                                        async_calls->tp_sync_result,
-                                                                        async_calls->server_call_result,
-                                                                        collector,
-                                                                        config_.p2p_transfer_not_done_resource_hold_ms);
-
-    // [PD-DIAG] addContext takes async_contexts_mutex_; if the checker thread is busy
-    // (or — before the P0-2 fix — blocked in a slow cancel()), this can serialize the
-    // whole scheduler. We bracket it separately so that any residual asyncReadAfterMatch
-    // slowness can be attributed to startAsyncReadCalls vs addContext without ambiguity.
+    // addContext only publishes the pending context. The potentially slow RPC
+    // kickoff runs in async_read_pool_ and never holds async_contexts_mutex_.
     const int64_t add_context_start_us = currentTimeUs();
     checker_->addContext(async_context);
     const int64_t add_context_cost_us = currentTimeUs() - add_context_start_us;
@@ -134,12 +208,13 @@ std::optional<P2PConnectorSchedulerDecode::AsyncReadCallResults> P2PConnectorSch
     const std::string&                                      prefill_ip,
     uint32_t                                                prefill_port,
     const std::string&                                      unique_key,
-    int64_t                                                 deadline_ms,
+    int64_t                                                 request_deadline_ms,
+    int64_t                                                 transfer_deadline_ms,
     const std::vector<std::shared_ptr<LayerCacheBuffer>>&   layer_cache_buffers,
-    GenerateStream*                                         generate_stream,
     const std::shared_ptr<DecodeSchedulerMetricsCollector>& collector,
     ErrorInfo&                                              out_error,
-    int                                                     prefill_tp_size) {
+    int                                                     prefill_tp_size,
+    bool                                                    no_transfer) {
 
     const int64_t entry_us = currentTimeUs();
     RTP_LLM_LOG_DEBUG("[PD-DIAG] startAsyncReadCalls entry, unique_key=%s, prefill=%s:%u, timestamp_us=%ld",
@@ -154,8 +229,13 @@ std::optional<P2PConnectorSchedulerDecode::AsyncReadCallResults> P2PConnectorSch
     // per-worker gRPC AsyncExecuteFunction. Either can be the source of
     // 18-22s asyncReadAfterMatch stalls observed in production.
     const int64_t server_load_start_us = currentTimeUs();
-    auto          server_call_result =
-        server_caller_->load(request_id, prefill_ip, prefill_port, unique_key, deadline_ms, generate_stream);
+    auto server_call_result = server_caller_->load(request_id,
+                                                   prefill_ip,
+                                                   prefill_port,
+                                                   unique_key,
+                                                   request_deadline_ms,
+                                                   transfer_deadline_ms,
+                                                   no_transfer);
     const int64_t server_load_cost_us = currentTimeUs() - server_load_start_us;
     if (server_load_cost_us >= 100000) {
         RTP_LLM_LOG_WARNING("[PD-DIAG] startAsyncReadCalls slow server_caller->load, "
@@ -174,8 +254,19 @@ std::optional<P2PConnectorSchedulerDecode::AsyncReadCallResults> P2PConnectorSch
     }
 
     const int64_t broadcast_start_us = currentTimeUs();
-    auto          tp_sync_result     = tp_broadcast_client_->broadcast(
-        request_id, layer_cache_buffers, {}, unique_key, deadline_ms, P2PConnectorBroadcastType::READ, prefill_tp_size);
+    std::shared_ptr<P2PBroadcastClient::Result> tp_sync_result;
+    if (no_transfer) {
+        tp_sync_result = std::make_shared<P2PBroadcastClient::Result>(unique_key);
+    } else {
+        tp_sync_result = tp_broadcast_client_->broadcast(request_id,
+                                                         layer_cache_buffers,
+                                                         {},
+                                                         unique_key,
+                                                         transfer_deadline_ms,
+                                                         P2PConnectorBroadcastType::READ,
+                                                         prefill_tp_size,
+                                                         request_deadline_ms);
+    }
     const int64_t broadcast_cost_us = currentTimeUs() - broadcast_start_us;
     if (broadcast_cost_us >= 100000) {
         RTP_LLM_LOG_WARNING(

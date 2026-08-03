@@ -23,6 +23,9 @@ public:
     void init();
     void submit(std::function<void()> task);
     void waitAllDone();
+    // Drain submitted work and restore IDLE without surfacing background
+    // exceptions. Used while another exception is already unwinding forward().
+    void drainOnError() noexcept;
 
 private:
     class PendingTaskGuard {

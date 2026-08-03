@@ -1,61 +1,99 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
 
 #include "rtp_llm/cpp/utils/Logger.h"
+#include <algorithm>
+#include <optional>
 
 namespace rtp_llm {
 
-std::vector<std::shared_ptr<LayerCacheBuffer>>
-LayerCacheBufferUtil::convert(KVCacheResource& resource, int batch_id, int start_block_idx, int block_count) {
-    std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
+namespace {
 
-    const auto& layer_block_ids = resource.layerBlocks();
-    for (size_t i = 0; i < layer_block_ids.size(); ++i) {
-        auto layer_cache_buffer = convertLayer(resource, batch_id, i, start_block_idx, block_count);
-        if (layer_cache_buffer) {
-            layer_cache_buffers.push_back(layer_cache_buffer);
+std::optional<size_t> physicalBlockPosition(const CacheGroupPolicy& policy,
+                                            size_t                  logical_position,
+                                            size_t                  logical_count,
+                                            int                     cp_rank,
+                                            int                     cp_size) {
+    const size_t cp_scale = static_cast<size_t>(std::max(1, cp_size));
+    if (policy.cp_mapping == CpBlockMappingMode::BLOCK_ROUND_ROBIN && cp_scale > 1) {
+        if (logical_position % cp_scale != static_cast<size_t>(cp_rank)) {
+            return std::nullopt;
         }
+        return logical_position / cp_scale;
     }
-    return layer_cache_buffers;
+    if (policy.cp_mapping == CpBlockMappingMode::COMPACT_LAST_RANK && cp_scale > 1) {
+        const bool is_segment_tail = logical_position % cp_scale == cp_scale - 1;
+        const bool is_final_key    = logical_position + 1 == logical_count;
+        if (!is_segment_tail && !is_final_key) {
+            return std::nullopt;
+        }
+        return logical_position / cp_scale;
+    }
+    return std::make_optional(logical_position);
 }
 
-std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(
-    KVCacheResource& resource, int batch_id, int layer_id, int start_block_idx, int block_count) {
-    const auto& layer_block_ids = resource.layerBlocks();
-    const auto& cache_keys      = resource.cacheKeys();
+}  // namespace
 
-    if (layer_id < 0 || static_cast<size_t>(layer_id) >= layer_block_ids.size()) {
-        RTP_LLM_LOG_WARNING("invalid layer_id %d, total layers: %zu", layer_id, layer_block_ids.size());
+std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(KVCacheResource&     resource,
+                                                                             const CacheTopology& topology,
+                                                                             int                  start_block_idx,
+                                                                             int                  block_count,
+                                                                             int                  cp_rank,
+                                                                             int                  cp_size) {
+    std::vector<std::shared_ptr<LayerCacheBuffer>> result;
+    for (const auto& layer : topology.layers()) {
+        auto layer_buffers =
+            convertLayer(resource, topology, layer.layer_id, start_block_idx, block_count, cp_rank, cp_size);
+        result.insert(result.end(), layer_buffers.begin(), layer_buffers.end());
+    }
+    return result;
+}
+
+std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convertLayer(
+    KVCacheResource& resource,
+    const CacheTopology& topology,
+    int layer_id,
+    int start_block_idx,
+    int block_count,
+    int cp_rank,
+    int cp_size) {
+    std::vector<std::shared_ptr<LayerCacheBuffer>> result;
+    for (const auto& group_ref : topology.groupsForLayer(layer_id)) {
+        auto buffer =
+            convertLayerTag(resource, group_ref.get(), layer_id, start_block_idx, block_count, cp_rank, cp_size);
+        if (buffer) {
+            result.push_back(std::move(buffer));
+        }
+    }
+    return result;
+}
+
+std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayerTag(KVCacheResource& resource,
+                                                                        const GroupBase&  group,
+                                                                        int               layer_id,
+                                                                        int               start_block_idx,
+                                                                        int               block_count,
+                                                                        int               cp_rank,
+                                                                        int               cp_size) {
+    const auto& cache_keys = resource.cacheKeys();
+    if (start_block_idx < 0 || block_count == 0 || block_count < -1
+        || static_cast<size_t>(start_block_idx) >= cache_keys.size()) {
         return nullptr;
     }
 
-    // block_count == 0 is never valid; block_count < -1 is an undefined sentinel
-    if (start_block_idx < 0 || block_count == 0 || block_count < -1) {
-        RTP_LLM_LOG_WARNING("invalid start_block_idx %d, block_count %d", start_block_idx, block_count);
-        return nullptr;
+    const size_t logical_begin = static_cast<size_t>(start_block_idx);
+    const size_t logical_end = block_count > 0 ?
+                                   std::min(cache_keys.size(), logical_begin + static_cast<size_t>(block_count)) :
+                                   cache_keys.size();
+    const auto& block_ids = resource.blocksForLayer(layer_id, group.tag);
+    auto buffer = std::make_shared<LayerCacheBuffer>(layer_id, group.tag);
+    for (size_t logical_pos = logical_begin; logical_pos < logical_end; ++logical_pos) {
+        const auto physical_pos = physicalBlockPosition(group.policy, logical_pos, cache_keys.size(), cp_rank, cp_size);
+        if (!physical_pos || *physical_pos >= block_ids.size() || isNullBlockIdx(block_ids[*physical_pos])) {
+            continue;
+        }
+        buffer->addBlockId(cache_keys[logical_pos], block_ids[*physical_pos]);
     }
-
-    const auto& block_ids = layer_block_ids[layer_id]->blocks();
-    // Use signed arithmetic throughout to avoid unsigned underflow when start_block_idx >= actual_block_count
-    int actual_block_count = static_cast<int>(std::min(block_ids.size(), cache_keys.size()));
-    if (start_block_idx >= actual_block_count) {
-        RTP_LLM_LOG_WARNING("start_block_idx %d >= actual_block_count %d", start_block_idx, actual_block_count);
-        return nullptr;
-    }
-    int block_ids_size = (block_count > 0) ? std::min(block_count, actual_block_count - start_block_idx) :
-                                             (actual_block_count - start_block_idx);
-    if (block_ids_size <= 0) {
-        RTP_LLM_LOG_WARNING("block_ids_size %d", block_ids_size);
-        return nullptr;
-    }
-
-    auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id);
-    for (size_t i = 0; i < block_ids_size; ++i) {
-        int     block_id = block_ids[start_block_idx + i];
-        int64_t key      = cache_keys[start_block_idx + i];
-        layer_cache_buffer->addBlockId(key, block_id);
-    }
-
-    return layer_cache_buffer;
+    return buffer->blockIdMap().empty() ? nullptr : buffer;
 }
 
 transfer::KeyBlockInfoMap
@@ -67,7 +105,8 @@ LayerCacheBufferUtil::buildKeyBlockInfos(const std::shared_ptr<LayerBlockConvert
     int                       layer_id = layer_cache_buffer->getLayerId();
 
     for (const auto& [cache_key, block_id] : layer_cache_buffer->blockIdMap()) {
-        auto block_infos = converter->convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
+        auto block_infos = converter->convertIndexToBuffer(
+            layer_id, layer_cache_buffer->cacheTag(), block_id, partition_count, partition_id);
 
         transfer::KeyBlockInfo kbi;
         kbi.cache_key              = cache_key;
@@ -75,94 +114,6 @@ LayerCacheBufferUtil::buildKeyBlockInfos(const std::shared_ptr<LayerBlockConvert
         key_block_infos[cache_key] = std::make_shared<const transfer::KeyBlockInfo>(std::move(kbi));
     }
     return key_block_infos;
-}
-
-// --- Group-type-aware overloads ---
-
-std::vector<std::shared_ptr<LayerCacheBuffer>>
-LayerCacheBufferUtil::convert(KVCacheResource&                   resource,
-                              int                                batch_id,
-                              const std::vector<CacheGroupType>& layer_attn_types,
-                              int                                start_block_idx,
-                              int                                block_count) {
-    std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
-
-    const auto& layer_block_ids = resource.layerBlocks();
-    for (size_t i = 0; i < layer_block_ids.size(); ++i) {
-        CacheGroupType group_type = (i < layer_attn_types.size()) ? layer_attn_types[i] : CacheGroupType::FULL;
-        auto layer_cache_buffer   = convertLayer(resource, batch_id, i, start_block_idx, block_count, group_type);
-        if (layer_cache_buffer) {
-            layer_cache_buffers.push_back(layer_cache_buffer);
-        }
-    }
-    return layer_cache_buffers;
-}
-
-std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(KVCacheResource& resource,
-                                                                     int              batch_id,
-                                                                     int              layer_id,
-                                                                     int              start_block_idx,
-                                                                     int              block_count,
-                                                                     CacheGroupType   group_type) {
-    const auto& layer_block_ids = resource.layerBlocks();
-    const auto& cache_keys      = resource.cacheKeys();
-
-    if (layer_id < 0 || static_cast<size_t>(layer_id) >= layer_block_ids.size()) {
-        RTP_LLM_LOG_WARNING("invalid layer_id %d, total layers: %zu", layer_id, layer_block_ids.size());
-        return nullptr;
-    }
-
-    if (start_block_idx < 0 || block_count == 0 || block_count < -1) {
-        RTP_LLM_LOG_WARNING("invalid start_block_idx %d, block_count %d", start_block_idx, block_count);
-        return nullptr;
-    }
-
-    const auto& block_ids          = layer_block_ids[layer_id]->blocks();
-    int         actual_block_count = static_cast<int>(std::min(block_ids.size(), cache_keys.size()));
-    if (start_block_idx >= actual_block_count) {
-        RTP_LLM_LOG_WARNING("start_block_idx %d >= actual_block_count %d", start_block_idx, actual_block_count);
-        return nullptr;
-    }
-    int block_ids_size = (block_count > 0) ? std::min(block_count, actual_block_count - start_block_idx) :
-                                             (actual_block_count - start_block_idx);
-    if (block_ids_size <= 0) {
-        RTP_LLM_LOG_WARNING("block_ids_size %d", block_ids_size);
-        return nullptr;
-    }
-
-    auto layer_cache_buffer = std::make_shared<LayerCacheBuffer>(layer_id);
-
-    switch (group_type) {
-        case CacheGroupType::FULL:
-            for (int i = 0; i < block_ids_size; ++i) {
-                int block_id = block_ids[start_block_idx + i];
-                if (isNullBlockIdx(block_id)) {
-                    RTP_LLM_LOG_WARNING("FULL group layer %d has NULL_BLOCK_IDX at position %d, skipping", layer_id, i);
-                    continue;
-                }
-                layer_cache_buffer->addBlockId(cache_keys[start_block_idx + i], block_id);
-            }
-            break;
-
-        case CacheGroupType::LINEAR:
-            for (int i = block_ids_size - 1; i >= 0; --i) {
-                int block_id = block_ids[start_block_idx + i];
-                if (!isNullBlockIdx(block_id)) {
-                    layer_cache_buffer->addBlockId(cache_keys[start_block_idx + i], block_id);
-                    break;
-                }
-            }
-            break;
-
-            // Future: case CacheGroupType::SLIDING_WINDOW:
-            //   Select last N blocks based on window config.
-            //   break;
-    }
-
-    if (layer_cache_buffer->blockIdMap().empty()) {
-        return nullptr;
-    }
-    return layer_cache_buffer;
 }
 
 }  // namespace rtp_llm

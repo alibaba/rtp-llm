@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <algorithm>
+#include <exception>
 #include <functional>
 
 namespace rtp_llm {
@@ -30,13 +31,22 @@ void StoreWaitContextChecker::checkOnce() {
     while (iter != contexts_.end()) {
         auto& context = *iter;
 
+        // StartLoad may begin after this event was queued. Once it consumes
+        // the request resource, use the activated transfer horizon instead of
+        // expiring the layer at the earlier pre-transfer hold deadline.
+        if (computed_buffers_) {
+            if (auto active_horizon = computed_buffers_->requestHorizon(context.request_id)) {
+                context.deadline_ms = *active_horizon;
+            }
+        }
+
         // check timeout
         if (currentTimeMs() >= context.deadline_ms) {
             RTP_LLM_LOG_WARNING("StoreWaitContextChecker: wait timeout, request_id: %ld, deadline_ms: %ld",
                                 context.request_id,
                                 context.deadline_ms);
             if (computed_buffers_) {
-                computed_buffers_->removeBuffer(context.request_id);
+                computed_buffers_->removeBuffer(context.request_id, context.request_deadline_ms);
             }
             if (context.collector) {
                 context.collector->success                 = false;
@@ -50,8 +60,40 @@ void StoreWaitContextChecker::checkOnce() {
             continue;
         }
 
+        bool event_ready = !context.event;
+        if (context.event) {
+            try {
+                event_ready = context.event->query();
+            } catch (const std::exception& e) {
+                RTP_LLM_LOG_ERROR("StoreWaitContextChecker: event query failed, request_id=%ld, error=%s",
+                                  context.request_id,
+                                  e.what());
+                if (computed_buffers_) {
+                    computed_buffers_->removeBuffer(context.request_id, context.request_deadline_ms);
+                }
+                if (context.collector) {
+                    context.collector->success                 = false;
+                    context.collector->store_wait_done_time_us = currentTimeUs() - context.collector->start_time_us;
+                }
+                iter = contexts_.erase(iter);
+                continue;
+            } catch (...) {
+                RTP_LLM_LOG_ERROR("StoreWaitContextChecker: event query failed, request_id=%ld, unknown error",
+                                  context.request_id);
+                if (computed_buffers_) {
+                    computed_buffers_->removeBuffer(context.request_id, context.request_deadline_ms);
+                }
+                if (context.collector) {
+                    context.collector->success                 = false;
+                    context.collector->store_wait_done_time_us = currentTimeUs() - context.collector->start_time_us;
+                }
+                iter = contexts_.erase(iter);
+                continue;
+            }
+        }
+
         // check event readiness
-        if (!context.event || context.event->query()) {
+        if (event_ready) {
             if (computed_buffers_) {
                 computed_buffers_->addBuffer(context.request_id, context.layer_cache_buffer, context.deadline_ms);
             }

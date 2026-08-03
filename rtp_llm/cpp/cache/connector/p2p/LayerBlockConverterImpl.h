@@ -12,23 +12,13 @@ class LayerBlockConverterImpl: public LayerBlockConverter {
 public:
     explicit LayerBlockConverterImpl(const std::shared_ptr<KVCacheAllocator>& allocator): allocator_(allocator) {}
 
-    std::vector<BlockInfo>
-    convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override {
-        auto block_infos = allocator_->convertIndexToBuffer(layer_id, block_id, partition_count, partition_id);
-        std::vector<BlockInfo> result;
-        result.reserve(block_infos.size());
-        for (const auto& info : block_infos) {
-            if (info.addr != nullptr && info.size_bytes > 0) {
-                result.push_back(info);
-            }
-        }
-        return result;
-    }
-
-    std::vector<BlockInfo> convertIndexToBuffer(
-        int layer_id, KVCacheRegionName region_name, int block_id, int partition_count, int partition_id) const override {
+    std::vector<BlockInfo> convertIndexToBuffer(int                layer_id,
+                                                const std::string& cache_tag,
+                                                int                block_id,
+                                                int                partition_count,
+                                                int                partition_id) const override {
         auto block_infos =
-            allocator_->convertIndexToBuffer(layer_id, region_name, block_id, partition_count, partition_id);
+            allocator_->convertIndexToBufferByTag(layer_id, cache_tag, block_id, partition_count, partition_id);
         std::vector<BlockInfo> result;
         result.reserve(block_infos.size());
         for (const auto& info : block_infos) {
@@ -55,11 +45,12 @@ public:
             const size_t aligned = static_cast<size_t>(t.nbytes());
             result.push_back({info, aligned});
         };
-        for (const auto& t : layout.layers_to_kv_buffer_ptrs) {
-            append_tensor(t);
-        }
-        for (const auto& t : layout.layers_to_scale_buffer_ptrs) {
-            append_tensor(t);
+        for (const auto& [tag, group_layout] : layout.groups()) {
+            (void)tag;
+            for (const auto& layer : group_layout.layers()) {
+                append_tensor(layer.kv_addr);
+                append_tensor(layer.kv_scale_addr);
+            }
         }
         return result;
     }

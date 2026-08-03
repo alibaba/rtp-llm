@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/cache/connector/AsyncContext.h"
+#include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorLayerContext.h"
 
 namespace rtp_llm {

@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/CacheTopology.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferBackendConfig.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include <cstdint>
@@ -19,6 +20,8 @@ struct P2PConnectorSchedulerConfig {
     std::vector<std::string> worker_grpc_addrs;
     std::vector<std::string> worker_addrs;
     std::vector<std::string> p2p_worker_addrs;
+    // Hard upper bound for Decode target retention after a transfer-not-done/cancelled outcome.
+    // A confirmed physical RDMA completion releases the resource earlier.
     int64_t                  p2p_transfer_not_done_resource_hold_ms       = 10 * 1000;
     int                      p2p_resource_store_timeout_check_interval_ms = 100;
     int64_t                  p2p_cancel_broadcast_timeout_ms              = 1000;
@@ -27,10 +30,9 @@ struct P2PConnectorSchedulerConfig {
     // CacheStoreConfig::p2p_max_transfer_deadline_ms for rationale.
     int64_t                     p2p_max_transfer_deadline_ms = 300 * 1000;
     int64_t                     p2p_cancelled_keys_ttl_ms    = 3600 * 1000;
-    std::vector<CacheGroupType> layer_attn_types;
-
-    std::vector<std::vector<int>> layer_region_to_group_id;
-    std::vector<CacheGroupType>   group_types;
+    std::shared_ptr<const CacheTopology> topology;
+    int                                  cp_rank = 0;
+    int                                  cp_size = 1;
 
     static P2PConnectorSchedulerConfig create(const RuntimeConfig&    runtime_config,
                                               const CacheStoreConfig& cache_store_config,
@@ -57,14 +59,15 @@ struct P2PConnectorWorkerConfig {
     int64_t p2p_read_return_before_deadline_ms      = 100;
     int64_t p2p_layer_cache_buffer_store_timeout_ms = 100 * 1000;
     int64_t p2p_prefill_resource_hold_ms            = 300 * 1000;
+    int64_t p2p_cancelled_keys_ttl_ms                = 3600 * 1000;
 
     int64_t  tp_size       = 1;
     int64_t  tp_rank       = 0;
     uint32_t layer_all_num = 0;
     bool     is_mla        = false;
 
-    std::vector<std::vector<int>> layer_region_to_group_id;
-    std::vector<CacheGroupType>   group_types;
+    std::shared_ptr<const CacheTopology> topology;
+    int                                  cp_size = 1;
 
     static P2PConnectorWorkerConfig create(const CacheStoreConfig&  cache_store_config,
                                            const PDSepConfig&       pd_sep_config,
@@ -94,6 +97,7 @@ struct P2PConnectorWorkerConfig {
         config.p2p_read_steal_before_deadline_ms       = cache_store_config.p2p_read_steal_before_deadline_ms;
         config.p2p_read_return_before_deadline_ms      = cache_store_config.p2p_read_return_before_deadline_ms;
         config.p2p_prefill_resource_hold_ms            = cache_store_config.p2p_prefill_resource_hold_ms;
+        config.p2p_cancelled_keys_ttl_ms                = cache_store_config.p2p_cancelled_keys_ttl_ms;
         config.tp_size                                 = parallelism_config.tp_size;
         config.tp_rank                                 = parallelism_config.tp_rank;
         config.layer_all_num                           = layer_all_num;

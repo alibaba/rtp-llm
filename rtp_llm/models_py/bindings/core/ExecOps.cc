@@ -1,5 +1,6 @@
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/models_py/bindings/core/CommonDefines.h"
+#include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/CacheStore.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
@@ -8,15 +9,18 @@
 #include "rtp_llm/cpp/utils/DevicePin.h"
 #include "rtp_llm/cpp/utils/StackTrace.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/ErrorCodeUtil.h"
+#include "autil/StringUtil.h"
 #include "autil/StackTracer.h"
 #include "autil/EnvUtil.h"
 #include <unistd.h>
 #include <sstream>
 #include <iomanip>
+#include <limits>
 #include <cstdlib>
 #include <cstdio>
 #include <mutex>
 #include <atomic>
+#include <stdexcept>
 #if USING_CUDA
 #include <c10/cuda/CUDAGuard.h>
 #elif USING_ROCM
@@ -133,6 +137,170 @@ std::shared_ptr<torch::Event> runtimeCreateEvent() {
 // ============================================================
 // CacheStore (cache_store passed explicitly from KVCacheManager)
 // ============================================================
+
+namespace {
+
+void writeCacheToP2P(const CacheStoreInputs& param, const P2PLayerWriteCallback& p2p_layer_write) {
+    if (!p2p_layer_write || param.warmup || !param.decode_entrance || !param.pd_separation
+        || param.context_batch_size == 0) {
+        return;
+    }
+    if (param.pre_created_event) {
+        param.pre_created_event->synchronize();
+    }
+
+    RTP_LLM_CHECK_WITH_INFO(param.host_kv_cache_offset.defined(), "P2P layer write requires host block offsets");
+    RTP_LLM_CHECK_WITH_INFO(param.host_kv_cache_offset.dim() == 2,
+                            "P2P layer block table for tag=%s must be [batch, blocks], got dim=%ld",
+                            param.tag.c_str(),
+                            param.host_kv_cache_offset.dim());
+    RTP_LLM_CHECK_WITH_INFO(param.context_batch_size == static_cast<size_t>(param.request_pd_separation.numel()),
+                            "P2P request_pd_separation size mismatch");
+    RTP_LLM_CHECK_WITH_INFO(param.context_batch_size == static_cast<size_t>(param.request_id.numel()),
+                            "P2P request_id size mismatch");
+    RTP_LLM_CHECK_WITH_INFO(
+        param.host_kv_cache_offset.size(0)
+            >= static_cast<int64_t>(param.decoder_batch_size + param.context_batch_size),
+        "P2P layer block table has insufficient rows: rows=%ld required=%zu",
+        param.host_kv_cache_offset.size(0),
+        param.decoder_batch_size + param.context_batch_size);
+    RTP_LLM_CHECK_WITH_INFO(param.cache_keys.size() % param.context_batch_size == 0,
+                            "P2P cache key count=%zu is not divisible by context batch size=%zu",
+                            param.cache_keys.size(),
+                            param.context_batch_size);
+    RTP_LLM_CHECK_WITH_INFO(param.prefix_lengths_host.defined() && param.input_lengths_host.defined(),
+                            "P2P layer write requires prefix and input lengths");
+    RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(param.prefix_lengths_host.numel()) >= param.context_batch_size,
+                            "P2P prefix length count is smaller than context batch size");
+    RTP_LLM_CHECK_WITH_INFO(
+        static_cast<size_t>(param.input_lengths_host.numel())
+            >= param.decoder_batch_size + param.context_batch_size,
+        "P2P input length count is smaller than total batch size");
+
+    const auto policy_it = param.kv_cache_group_policies.find(param.tag);
+    RTP_LLM_CHECK_WITH_INFO(policy_it != param.kv_cache_group_policies.end(),
+                            "P2P layer write has no group policy for tag=%s",
+                            param.tag.c_str());
+    const auto& group_policy = policy_it->second;
+    const auto  seq_it       = param.tokens_per_block_by_tag.find(param.tag);
+    const size_t seq_size_per_block =
+        seq_it != param.tokens_per_block_by_tag.end() ? seq_it->second : param.tokens_per_block;
+    RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0, "P2P tag=%s has zero tokens_per_block", param.tag.c_str());
+
+    const size_t max_blocks_per_batch = param.host_kv_cache_offset.size(1);
+    const auto*  offset_addr          = param.host_kv_cache_offset.data_ptr<int32_t>();
+    const size_t cache_keys_per_batch =
+        param.context_batch_size > 0 ? param.cache_keys.size() / param.context_batch_size : 0;
+    const bool use_group_cache_transfer_policy = param.kv_cache_group_policies.size() > 1;
+    const bool uses_cp_canonical_keys = param.cp_size > 1 && group_policy.cp_mapping != CpBlockMappingMode::NONE
+                                        && seq_size_per_block % param.cp_size == 0;
+    const size_t canonical_seq_size_per_block =
+        uses_cp_canonical_keys ? seq_size_per_block / static_cast<size_t>(param.cp_size) : seq_size_per_block;
+
+    for (size_t batch_id = 0; batch_id < param.context_batch_size; ++batch_id) {
+        if (!param.request_pd_separation.data_ptr<bool>()[batch_id]) {
+            continue;
+        }
+        const int prefix_length = param.prefix_lengths_host.data_ptr<int>()[batch_id];
+        RTP_LLM_CHECK_WITH_INFO(prefix_length % static_cast<int>(canonical_seq_size_per_block) == 0,
+                                "P2P tag=%s prefix_length=%d is not aligned to tokens_per_block=%zu",
+                                param.tag.c_str(),
+                                prefix_length,
+                                canonical_seq_size_per_block);
+        const int input_length = param.input_lengths_host.data_ptr<int>()[param.decoder_batch_size + batch_id];
+        const int canonical_reuse_blocks = prefix_length / canonical_seq_size_per_block;
+        const int canonical_input_blocks =
+            (input_length + static_cast<int>(canonical_seq_size_per_block) - 1)
+            / static_cast<int>(canonical_seq_size_per_block);
+        const int canonical_total_blocks = canonical_reuse_blocks + canonical_input_blocks;
+        if (canonical_total_blocks <= 0) {
+            continue;
+        }
+        RTP_LLM_CHECK_WITH_INFO(cache_keys_per_batch > 0,
+                                "P2P layer write has no cache keys, request_id=%ld layer_id=%d tag=%s",
+                                param.request_id.data_ptr<int64_t>()[batch_id],
+                                param.layer_id,
+                                param.tag.c_str());
+
+        const auto block_plan = buildCacheStorePlan(
+            group_policy,
+            static_cast<size_t>(std::min<int>(canonical_total_blocks, static_cast<int>(cache_keys_per_batch))),
+            0,
+            use_group_cache_transfer_policy,
+            param.cp_rank,
+            param.cp_size);
+        std::vector<int64_t> cache_keys;
+        std::vector<int32_t> block_ids;
+        cache_keys.reserve(block_plan.size());
+        block_ids.reserve(block_plan.size());
+        for (const auto& pair : block_plan) {
+            RTP_LLM_CHECK_WITH_INFO(pair.key_index >= 0
+                                        && pair.key_index < static_cast<int>(cache_keys_per_batch),
+                                    "P2P key index=%d out of range=%zu",
+                                    pair.key_index,
+                                    cache_keys_per_batch);
+            RTP_LLM_CHECK_WITH_INFO(pair.offset_index >= 0
+                                        && pair.offset_index < static_cast<int>(max_blocks_per_batch),
+                                    "P2P block offset=%d out of range=%zu",
+                                    pair.offset_index,
+                                    max_blocks_per_batch);
+            const int32_t block_id =
+                offset_addr[(param.decoder_batch_size + batch_id) * max_blocks_per_batch + pair.offset_index];
+            if (isNullBlockIdx(block_id)) {
+                continue;
+            }
+            int64_t cache_key = 0;
+            const auto& raw_key = param.cache_keys[batch_id * cache_keys_per_batch + pair.key_index];
+            if (!autil::StringUtil::strToInt64(raw_key.c_str(), cache_key)) {
+                throw std::runtime_error(rtp_llm::fmtstr(
+                    "P2P layer write rejected non-integer cache key=%s request_id=%ld layer_id=%d tag=%s",
+                    raw_key.c_str(),
+                    param.request_id.data_ptr<int64_t>()[batch_id],
+                    param.layer_id,
+                    param.tag.c_str()));
+            }
+            cache_keys.push_back(cache_key);
+            block_ids.push_back(block_id);
+        }
+        if (cache_keys.empty()) {
+            // A CP rank may legitimately own no local block for this tag; that
+            // path is handled by the existing CP follow-up. In the ordinary
+            // path, silently skipping a non-empty plan leaves Prefill waiting
+            // for this topology key until the transfer deadline.
+            RTP_LLM_CHECK_WITH_INFO(param.cp_size > 1 || block_plan.empty(),
+                                    "P2P layer write has no valid blocks, request_id=%ld layer_id=%d tag=%s",
+                                    param.request_id.data_ptr<int64_t>()[batch_id],
+                                    param.layer_id,
+                                    param.tag.c_str());
+            continue;
+        }
+
+        const int64_t request_id = param.request_id.data_ptr<int64_t>()[batch_id];
+        const int64_t deadline_ms =
+            param.request_deadline_ms.defined()
+                && static_cast<size_t>(param.request_deadline_ms.numel()) > batch_id ?
+                param.request_deadline_ms.data_ptr<int64_t>()[batch_id] :
+                std::numeric_limits<int64_t>::max();
+        const bool dispatched = p2p_layer_write(param.model_id,
+                                                param.layer_id,
+                                                param.tag,
+                                                cache_keys,
+                                                block_ids,
+                                                request_id,
+                                                param.pre_created_event,
+                                                deadline_ms);
+        if (!dispatched) {
+            throw std::runtime_error(rtp_llm::fmtstr(
+                "P2P layer write dispatch failed, request_id=%ld model_id=%zu layer_id=%d tag=%s",
+                request_id,
+                param.model_id,
+                param.layer_id,
+                param.tag.c_str()));
+        }
+    }
+}
+
+}  // namespace
 
 void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
                             const KvCacheInfo&          kv_cache,
@@ -653,8 +821,10 @@ void execSyncCommunication(ParallelMode mode, bool timeout) {
 void execWriteCacheStore(const CacheStoreInputs&     inputs,
                          const KvCacheInfo&          kv_cache,
                          bool                        mla_kvcache,
-                         std::shared_ptr<CacheStore> cache_store) {
+                         std::shared_ptr<CacheStore> cache_store,
+                         const P2PLayerWriteCallback& p2p_layer_write) {
     runtimeWriteCacheStore(inputs, kv_cache, mla_kvcache, std::move(cache_store));
+    writeCacheToP2P(inputs, p2p_layer_write);
 }
 
 // ============================================================

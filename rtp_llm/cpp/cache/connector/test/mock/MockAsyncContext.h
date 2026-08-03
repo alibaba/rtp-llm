@@ -2,7 +2,7 @@
 
 #include <gmock/gmock.h>
 
-#include "rtp_llm/cpp/cache/connector/AsyncContext.h"
+#include "rtp_llm/cpp/cache/AsyncContext.h"
 
 namespace rtp_llm {
 

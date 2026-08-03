@@ -6,6 +6,7 @@ cc_library(
     name = "p2p_connector_config",
     hdrs = ["P2PConnectorConfig.h"],
     deps = [
+        "//rtp_llm/cpp/cache:cache_config",
         "//rtp_llm/cpp/cache/connector/p2p/transfer:transfer_backend_config",
         "//rtp_llm/cpp/config:config_modules",
     ],
@@ -24,6 +25,7 @@ cc_library(
     ],
     deps = [
         ":layer_block_converter",
+        "//rtp_llm/cpp/cache:cache_config",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:time_util",
         "//rtp_llm/cpp/cache:batch_kv_cache_resource",
@@ -83,7 +85,7 @@ cc_library(
     deps = [
         ":layer_cache_buffer",
         ":metrics",
-        "//rtp_llm/cpp/cache/connector:connector_header",
+        "//rtp_llm/cpp/cache/connector:connector_base",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/model_rpc:broadcast_manager",
         "//rtp_llm/cpp/model_rpc:model_rpc_pool",
@@ -129,7 +131,8 @@ cc_library(
         ":layer_cache_buffer",
         ":metrics",
         ":p2p_connector_config",
-        "//rtp_llm/cpp/cache/connector:connector_header",
+        "//rtp_llm/cpp/cache:cache_async_context",
+        "//rtp_llm/cpp/cache/connector:connector_base",
         "//rtp_llm/cpp/model_rpc:rpc_error_code",
         "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/cpp/utils:time_util",

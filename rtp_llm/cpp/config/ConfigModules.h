@@ -330,7 +330,7 @@ struct CacheStoreConfig {
     int64_t p2p_read_return_before_deadline_ms = 100;  // Decode read 与 Prefill send：transfer 层 deadline / worker
                                                        // 须在 D 前该毫秒数完成（与对端 recv/send 对齐）
     int64_t p2p_transfer_not_done_resource_hold_ms =
-        10 * 1000;  // Scheduler：TRANSFER_NOT_DONE 后延迟 done 以保留显存安全窗口
+        10 * 1000;  // Decode 异常返回后目标资源的最大保留时间；物理传输可提前结束该保留
 
     int     p2p_resource_store_timeout_check_interval_ms = 100;
     int64_t p2p_layer_cache_buffer_store_timeout_ms      = 100 * 1000;

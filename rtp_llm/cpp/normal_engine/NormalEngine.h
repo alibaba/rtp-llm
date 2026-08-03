@@ -80,6 +80,7 @@ private:
     FfnDisAggregateConfig                         ffn_disaggregate_config;
     ModelSpecificConfig                           model_specific_config;
     SpeculativeExecutionConfig                    sp_config;
+    CacheStoreConfig                              cache_store_config;
     kmonitor::MetricsReporterPtr                  metrics_reporter_;
     std::unique_ptr<ProposeModelEngineInitParams> propose_params_;
     StepWindowProfiler                            step_profiler_;

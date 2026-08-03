@@ -190,7 +190,7 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsSuccess) {
     }
 }
 
-TEST_F(BroadcastManagerTest, Broadcast_ReturnNull_WhenAsyncReaderCreationFails) {
+TEST_F(BroadcastManagerTest, Broadcast_ReturnFailedResult_WhenAsyncReaderCreationFails) {
     std::vector<FunctionRequestPB> requests(manager_->workerNum());
     auto                           rpc_call = [](const std::shared_ptr<RpcService::Stub>&,
                        const std::shared_ptr<grpc::ClientContext>&,
@@ -200,7 +200,31 @@ TEST_F(BroadcastManagerTest, Broadcast_ReturnNull_WhenAsyncReaderCreationFails) 
     };
 
     auto result = manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, /*timeout_ms=*/100, rpc_call);
-    EXPECT_EQ(result, nullptr);
+    ASSERT_NE(result, nullptr);
+    result->waitDone();
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
+}
+
+TEST_F(BroadcastManagerTest, Broadcast_PreservesEarlierCalls_WhenLaterAsyncReaderCreationFails) {
+    std::vector<FunctionRequestPB> requests(manager_->workerNum());
+    std::atomic<int>               call_count{0};
+    auto rpc_call = [&call_count](const std::shared_ptr<RpcService::Stub>&    stub,
+                                  const std::shared_ptr<grpc::ClientContext>& ctx,
+                                  const FunctionRequestPB&                    req,
+                                  grpc::CompletionQueue* cq)
+        -> std::unique_ptr<grpc::ClientAsyncResponseReader<FunctionResponsePB>> {
+        if (call_count.fetch_add(1) == 0) {
+            return stub->AsyncExecuteFunction(ctx.get(), req, cq);
+        }
+        return nullptr;
+    };
+
+    auto result = manager_->broadcast<FunctionRequestPB, FunctionResponsePB>(requests, /*timeout_ms=*/100, rpc_call);
+    ASSERT_NE(result, nullptr);
+    result->waitDone();
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
 }
 
 TEST_F(BroadcastManagerTest, Broadcast_ReturnNotNull_AllRequestsTimeout) {

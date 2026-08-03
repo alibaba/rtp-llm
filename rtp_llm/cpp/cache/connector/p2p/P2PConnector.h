@@ -58,16 +58,25 @@ public:
     std::shared_ptr<AsyncContext>
     asyncWriteByLayer(int layer_id, const std::shared_ptr<KVCacheConnectorLayerContext>& layer_context) override;
 
+    bool writeByLayerTag(int                                   layer_id,
+                         const std::string&                    tag,
+                         const KVCacheResourcePtr&             resource,
+                         int64_t                               request_id,
+                         const std::shared_ptr<torch::Event>& event,
+                         int64_t                               deadline_ms);
+
 public:
     void handleRead(const P2PConnectorStartLoadRequestPB& request,
                     P2PConnectorStartLoadResponsePB&      response,
                     std::function<bool()>                 is_cancelled = nullptr);
 
     bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
+    void cancelRead(const std::shared_ptr<AsyncContext>& context);
 
 private:
     grpc::Status waitForResourceEntry(const std::string&                          unique_key,
-                                      int64_t                                     deadline_ms,
+                                      int64_t                                     request_deadline_ms,
+                                      int64_t                                     transfer_deadline_ms,
                                       std::function<bool()>                       is_cancelled,
                                       std::shared_ptr<P2PConnectorResourceEntry>& resource_entry);
 
@@ -90,7 +99,7 @@ private:
                      const P2PConnectorBroadcastTpRequestPB& p2p_request,
                      FunctionResponsePB&                     response);
 
-    bool executeCancelRead(const std::string& unique_key, FunctionResponsePB& response);
+    bool executeCancelRead(const std::string& unique_key, int64_t request_deadline_ms, FunctionResponsePB& response);
 
     bool executeCancelHandleRead(const std::string& unique_key, FunctionResponsePB& response);
 

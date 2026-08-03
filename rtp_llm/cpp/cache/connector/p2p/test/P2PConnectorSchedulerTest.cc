@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorScheduler.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include "rtp_llm/cpp/utils/Exception.h"
@@ -117,8 +118,16 @@ protected:
         P2PConnectorSchedulerConfig cfg;
         cfg.worker_grpc_addrs = tp_broadcast_addrs_;
         cfg.worker_addrs.push_back("127.0.0.1:12345:" + std::to_string(prefill_server_->listenPort()));
-        cfg.layer_attn_types = layer_attn_types;
-        scheduler_           = std::make_unique<P2PConnectorScheduler>(std::move(cfg), nullptr);
+        std::vector<std::vector<int>> layer_group_ids;
+        for (size_t i = 0; i < layer_attn_types.size(); ++i) {
+            layer_group_ids.push_back({static_cast<int>(i)});
+        }
+        cfg.topology = makeTestCacheTopology(static_cast<int>(layer_attn_types.size()),
+                                             static_cast<int>(layer_attn_types.size()),
+                                             layer_group_ids,
+                                             /*kernel_blocks_per_kv_block=*/1,
+                                             layer_attn_types);
+        scheduler_ = std::make_unique<P2PConnectorScheduler>(std::move(cfg), nullptr);
         ASSERT_TRUE(scheduler_->init());
     }
 
@@ -371,17 +380,65 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_HoldsCancelledOutcomeUntilLeaseWindo
 
     context->checkDone();
 
-    EXPECT_FALSE(context->done());
+    EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
     EXPECT_FALSE(context->needCancel());
+    EXPECT_TRUE(context->resourceHoldPending());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED);
 
     std::this_thread::sleep_for(std::chrono::milliseconds(120));
-    context->checkDone();
+    context->pollLeaseIfNeeded(nullptr);
 
     EXPECT_TRUE(context->done());
     EXPECT_FALSE(context->success());
+    EXPECT_FALSE(context->resourceHoldPending());
     EXPECT_EQ(context->errorInfo().code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED);
+}
+
+TEST_F(P2PConnectorSchedulerTest, AsyncReadPendingContextWaitsForKickoff) {
+    auto resource  = createValidKVCacheResource(1, 1);
+    auto collector = std::make_shared<DecodeSchedulerMetricsCollector>(nullptr);
+    auto context   = std::make_shared<P2PConnectorAsyncReadContext>(
+        resource, "pending-kickoff", collector, /*transfer_not_done_hold_ms=*/0);
+
+    context->checkDone();
+
+    EXPECT_FALSE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_FALSE(context->needCancel());
+    EXPECT_EQ(context->uniqueKey(), "pending-kickoff");
+}
+
+TEST_F(P2PConnectorSchedulerTest, AsyncReadPendingContextCanBeCancelledBeforeKickoff) {
+    auto resource  = createValidKVCacheResource(1, 1);
+    auto collector = std::make_shared<DecodeSchedulerMetricsCollector>(nullptr);
+    auto context   = std::make_shared<P2PConnectorAsyncReadContext>(
+        resource, "cancel-before-kickoff", collector, /*transfer_not_done_hold_ms=*/0);
+
+    context->cancel(nullptr);
+    context->waitDone();
+
+    EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
+    EXPECT_TRUE(context->cancelRequested());
+    EXPECT_EQ(context->errorInfo().code(), ErrorCode::CANCELLED);
+}
+
+TEST_F(P2PConnectorSchedulerTest, AsyncReadStartingContextIsNotCompletedByCancelBeforeCallsReady) {
+    auto resource  = createValidKVCacheResource(1, 1);
+    auto collector = std::make_shared<DecodeSchedulerMetricsCollector>(nullptr);
+    auto context   = std::make_shared<P2PConnectorAsyncReadContext>(
+        resource, "cancel-during-kickoff", collector, /*transfer_not_done_hold_ms=*/0);
+
+    ASSERT_TRUE(context->beginKickoff());
+    context->cancel(nullptr);
+
+    EXPECT_TRUE(context->cancelRequested());
+    EXPECT_FALSE(context->done());
+
+    context->markStartFailed(ErrorInfo(ErrorCode::CANCELLED, "kickoff cancelled before calls were created"));
+    EXPECT_TRUE(context->done());
+    EXPECT_FALSE(context->success());
 }
 
 // ==================== asyncRead 测试 (Decode 端功能) ====================
@@ -405,6 +462,25 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnNotNull_AllSuccess) {
         EXPECT_EQ(tp_broadcast_servers_[i]->service()->getBroadcastTpCallCount(), 1);
     }
     EXPECT_EQ(prefill_server_->service()->getStartLoadCallCount(), 1);
+}
+
+TEST_F(P2PConnectorSchedulerTest, AsyncRead_NoTransferCompletesWithoutDecodeBuffers) {
+    auto resource = createValidKVCacheResource(2, 2);
+    auto meta     = createMockMeta(2011, "test_async_read_no_transfer", currentTimeMs() + 5000);
+
+    auto result = scheduler_->asyncRead(resource, meta, {2, 0}, /*no_transfer=*/true);
+    ASSERT_TRUE(result.ok());
+    ASSERT_NE(result.context, nullptr);
+
+    waitAsyncContextDone(result.context);
+
+    EXPECT_TRUE(result.context->done());
+    EXPECT_TRUE(result.context->success());
+    ASSERT_EQ(prefill_server_->service()->getStartLoadCallCount(), 1);
+    EXPECT_TRUE(prefill_server_->service()->getLastStartLoadRequest().no_transfer());
+    for (const auto& server : tp_broadcast_servers_) {
+        EXPECT_EQ(server->service()->getBroadcastTpCallCount(), 0);
+    }
 }
 
 // 验证 P2PConnectorAsyncReadContext::waitDone() 在 checkDone() 置 done 后由 condition_variable 唤醒
@@ -533,6 +609,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_BothFailed) {
 
     EXPECT_TRUE(async_context->done());
     EXPECT_FALSE(async_context->success());
+    EXPECT_TRUE(async_context->resourceHoldPending());
 }
 
 // 测试: prefill server 超时, 返回失败
@@ -575,6 +652,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_ReturnFalse_BroadcastTimeout) {
 
     EXPECT_TRUE(async_context->done());
     EXPECT_FALSE(async_context->success());
+    EXPECT_TRUE(async_context->resourceHoldPending());
 }
 
 // 测试: asyncread prefill 失败, 取消broadcast
@@ -668,9 +746,9 @@ TEST_F(P2PConnectorSchedulerTest, SendKVCache_ReturnError_WhenBroadcastExceedsDe
     EXPECT_EQ(error_info.code(), ErrorCode::P2P_CONNECTOR_WORKER_HANDLE_READ_TIMEOUT);
 }
 
-// StartLoad 返回 TRANSFER_NOT_DONE 且 hold_ms>0：checkDone 进入保留窗口，done 仍为 false 且 needCancel 为 false；hold
-// 结束后 done
-TEST_F(P2PConnectorSchedulerTest, AsyncRead_TransferNotDone_HoldDelaysDoneAndSuppressesNeedCancel) {
+// StartLoad 返回 TRANSFER_NOT_DONE：请求立即失败完成，
+// 但 checker 继续持有 Decode 目标资源并轮询 lease。
+TEST_F(P2PConnectorSchedulerTest, AsyncRead_TransferNotDone_CompletesRequestAndRetainsResource) {
     rebuildSchedulerWithResourceHoldMs(120);
 
     prefill_server_->service()->setStartLoadApplicationError(ErrorCodePB::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE,
@@ -690,37 +768,24 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_TransferNotDone_HoldDelaysDoneAndSup
     auto async_context = result.context;
     ASSERT_NE(async_context, nullptr);
 
-    bool saw_hold = false;
-    for (int i = 0; i < 3000 && !saw_hold; ++i) {
+    for (int i = 0; i < 3000 && !async_context->done(); ++i) {
         async_context->checkDone();
-        if (!async_context->done()
-            && async_context->errorInfo().code() == ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE
-            && !async_context->needCancel()) {
-            saw_hold = true;
-            break;
-        }
-        if (async_context->done()) {
-            break;
-        }
         std::this_thread::sleep_for(std::chrono::milliseconds(1));
     }
-    ASSERT_TRUE(saw_hold) << "expected hold phase: not done, TRANSFER_NOT_DONE, needCancel false";
-
-    ASSERT_FALSE(async_context->done());
-    std::this_thread::sleep_for(std::chrono::milliseconds(200));
-    async_context->checkDone();
 
     EXPECT_TRUE(async_context->done());
     EXPECT_FALSE(async_context->success());
     EXPECT_EQ(async_context->errorInfo().code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE);
+    EXPECT_TRUE(async_context->resourceHoldPending());
+    EXPECT_FALSE(async_context->needCancel());
 
     for (size_t i = 0; i < tp_broadcast_servers_.size(); ++i) {
         EXPECT_EQ(tp_broadcast_servers_[i]->service()->getBroadcastTpCancelCallCount(), 0);
     }
 }
 
-// hold_ms==0 时不进入保留窗口，应立即 done 且失败
-TEST_F(P2PConnectorSchedulerTest, AsyncRead_TransferNotDone_ZeroHold_CompletesImmediately) {
+// hold_ms==0 disables the exceptional-path retention window.
+TEST_F(P2PConnectorSchedulerTest, AsyncRead_TransferNotDone_ZeroHoldDoesNotRetainResource) {
     rebuildSchedulerWithResourceHoldMs(0);
 
     prefill_server_->service()->setStartLoadApplicationError(ErrorCodePB::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE,
@@ -748,6 +813,7 @@ TEST_F(P2PConnectorSchedulerTest, AsyncRead_TransferNotDone_ZeroHold_CompletesIm
     ASSERT_TRUE(async_context->done());
     EXPECT_FALSE(async_context->success());
     EXPECT_EQ(async_context->errorInfo().code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE);
+    EXPECT_FALSE(async_context->resourceHoldPending());
 }
 
 }  // namespace rtp_llm

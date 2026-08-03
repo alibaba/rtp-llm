@@ -1,6 +1,6 @@
 #pragma once
 
-#include "rtp_llm/cpp/cache/connector/AsyncContext.h"
+#include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorMetrics.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PBroadcastClient.h"
@@ -13,6 +13,8 @@
 #include <chrono>
 #include <condition_variable>
 #include <mutex>
+#include <string>
+#include <utility>
 #include <vector>
 
 namespace rtp_llm {
@@ -36,18 +38,40 @@ private:
 class P2PConnectorAsyncReadContext: public AsyncContext {
 public:
     P2PConnectorAsyncReadContext(const KVCacheResourcePtr&                               resource,
+                                 std::string                                             unique_key,
+                                 const std::shared_ptr<DecodeSchedulerMetricsCollector>& collector,
+                                 int64_t                                                 transfer_not_done_hold_ms,
+                                 bool                                                    no_transfer = false,
+                                 int64_t                                                 request_deadline_ms = 0):
+        resource_(resource),
+        unique_key_(std::move(unique_key)),
+        collector_(collector),
+        transfer_not_done_hold_ms_(transfer_not_done_hold_ms),
+        no_transfer_(no_transfer),
+        request_deadline_ms_(request_deadline_ms),
+        done_(false),
+        success_(false),
+        error_code_(ErrorCode::NONE_ERROR) {}
+
+    P2PConnectorAsyncReadContext(const KVCacheResourcePtr&                               resource,
                                  const std::shared_ptr<P2PBroadcastClient::Result>&      tp_sync_result,
                                  const std::shared_ptr<PrefillLoadCaller::Result>&       server_call_result,
                                  const std::shared_ptr<DecodeSchedulerMetricsCollector>& collector,
-                                 int64_t                                                 transfer_not_done_hold_ms):
+                                 int64_t                                                 transfer_not_done_hold_ms,
+                                 bool                                                    no_transfer = false,
+                                 int64_t                                                 request_deadline_ms = 0):
         resource_(resource),
         tp_sync_result_(tp_sync_result),
         server_call_result_(server_call_result),
         collector_(collector),
         transfer_not_done_hold_ms_(transfer_not_done_hold_ms),
+        no_transfer_(no_transfer),
+        request_deadline_ms_(request_deadline_ms),
         done_(false),
         success_(false),
-        error_code_(ErrorCode::NONE_ERROR) {}
+        error_code_(ErrorCode::NONE_ERROR),
+        calls_ready_(true),
+        kickoff_state_(KickoffState::CALLS_READY) {}
     virtual ~P2PConnectorAsyncReadContext() = default;
 
 public:
@@ -59,25 +83,56 @@ public:
     bool needCancel() const;
     void cancel(const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client);
 
-    // Called periodically by the checker when transfer_not_done hold is active.
-    // Broadcasts QUERY_LEASE_STATUS to all TP workers and sets lease_all_ranks_stopped_
-    // once all ranks confirm their transfers have finished.
+    /// Atomically claim the queued kickoff. If cancellation won while the task
+    /// was still queued, returns false and no RPC may be created.
+    bool beginKickoff();
+
+    /// Bind the RPC results produced by the asynchronous kickoff task.
+    /// Returns true when cancellation was requested before/during kickoff and
+    /// the newly-created calls should be cancelled immediately.
+    bool setCallResults(const std::shared_ptr<P2PBroadcastClient::Result>& tp_sync_result,
+                        const std::shared_ptr<PrefillLoadCaller::Result>&  server_call_result);
+    void markStartFailed(const ErrorInfo& error_info);
+    bool cancelRequested() const {
+        return cancel_requested_.load(std::memory_order_acquire);
+    }
+
+    // Called periodically while Decode target resources are retained after the
+    // request has already completed with TRANSFER_NOT_DONE/CANCELLED.
+    // Broadcasts QUERY_LEASE_STATUS to all TP workers. The hold ends when all
+    // ranks stop or when the configured resource-hold deadline is reached.
     void pollLeaseIfNeeded(const std::shared_ptr<P2PBroadcastClient>& tp_broadcast_client);
 
+    // Release an expired resource hold without issuing an RPC. The checker
+    // calls this for every context before selecting one lease to poll.
+    bool expireLeaseHoldIfNeeded();
+
     bool needLeasePoll() const {
-        return lease_hold_pending_.load(std::memory_order_acquire)
-            && !done()
-            && !lease_all_ranks_stopped_.load(std::memory_order_acquire)
-            && currentTimeMs() >= lease_poll_next_ms_.load(std::memory_order_relaxed);
+        if (!lease_hold_pending_.load(std::memory_order_acquire)) {
+            return false;
+        }
+        const int64_t now_ms        = currentTimeMs();
+        const int64_t hold_until_ms = lease_hold_until_ms_.load(std::memory_order_relaxed);
+        return (hold_until_ms > 0 && now_ms >= hold_until_ms)
+            || (!lease_all_ranks_stopped_.load(std::memory_order_acquire)
+                && now_ms >= lease_poll_next_ms_.load(std::memory_order_relaxed));
+    }
+
+    bool resourceHoldPending() const {
+        return lease_hold_pending_.load(std::memory_order_acquire);
     }
 
     std::string uniqueKey() const {
+        if (!unique_key_.empty()) {
+            return unique_key_;
+        }
         return tp_sync_result_ ? tp_sync_result_->uniqueKey() : "";
     }
 
     // Access side-channel payload parsed from Prefill response (for downstream apply in waitLoadCacheDone)
     const P2PSideChannelPayload* sideChannelPayload() const {
-        if (!server_call_result_ || !server_call_result_->side_channel_payload.has_data) {
+        if (!calls_ready_.load(std::memory_order_acquire) || !server_call_result_
+            || !server_call_result_->side_channel_payload.has_data) {
             return nullptr;
         }
         return &server_call_result_->side_channel_payload;
@@ -85,24 +140,35 @@ public:
 
     ErrorInfo errorInfo() const override;
 
+    size_t matchedBlockCount() const {
+        return resource_ ? resource_->cacheKeys().size() : 0;
+    }
+
 private:
+    enum class KickoffState {
+        QUEUED,
+        STARTING,
+        CALLS_READY,
+    };
+
     struct MergedReadOutcome {
         bool        success{false};
         ErrorCode   error_code{ErrorCode::NONE_ERROR};
         std::string error_message;
     };
 
-    bool              tryFinishExpiredLeaseHold();
     MergedReadOutcome mergeReadResultsWhenBothDone() const;
-    /// @param allow_lease_hold 为 false 时不再进入 lease 等待窗口（用于 hold 到期后的终态）
-    void applyMergedReadOutcome(const MergedReadOutcome& outcome, bool allow_transfer_not_done_hold = true);
+    void              applyMergedReadOutcome(const MergedReadOutcome& outcome);
 
     const KVCacheResourcePtr                               resource_;
-    const std::shared_ptr<P2PBroadcastClient::Result>      tp_sync_result_;
-    const std::shared_ptr<PrefillLoadCaller::Result>       server_call_result_;
+    const std::string                                      unique_key_;
+    std::shared_ptr<P2PBroadcastClient::Result>            tp_sync_result_;
+    std::shared_ptr<PrefillLoadCaller::Result>             server_call_result_;
     const std::shared_ptr<DecodeSchedulerMetricsCollector> collector_;
 
     const int64_t transfer_not_done_hold_ms_;
+    const bool    no_transfer_;
+    const int64_t request_deadline_ms_;
 
     mutable std::mutex      state_mutex_;
     std::condition_variable done_cv_;
@@ -114,11 +180,14 @@ private:
     std::atomic<int64_t>    lease_hold_until_ms_{0};
     std::atomic<bool>       tp_cancel_broadcast_triggered_{false};
 
-    // Lease polling state (active when transfer_not_done_hold_pending_ is true).
+    // Lease polling state (active while lease_hold_pending_ is true).
     std::atomic<bool>    lease_all_ranks_stopped_{false};  // set when poll confirms all ranks stopped
     std::atomic<int64_t> lease_poll_next_ms_{0};           // rate limit: earliest time for next poll
     std::atomic<int64_t> lease_poll_interval_ms_{10};      // backoff interval, starts 10ms, max 100ms
     std::atomic<int>     lease_poll_retry_count_{0};
+    std::atomic<bool>    calls_ready_{false};
+    std::atomic<bool>    cancel_requested_{false};
+    KickoffState         kickoff_state_{KickoffState::QUEUED};  // guarded by state_mutex_
 };
 
 /// @brief P2P 按层写入的异步上下文。
@@ -162,6 +231,7 @@ private:
     mutable std::mutex                                         async_contexts_mutex_;
     std::vector<std::shared_ptr<P2PConnectorAsyncReadContext>> async_contexts_;
     autil::LoopThreadPtr                                       check_done_thread_;
+    size_t                                                     lease_poll_cursor_{0};
 };
 
 }  // namespace rtp_llm
