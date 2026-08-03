@@ -1215,7 +1215,7 @@ TEST_F(KVCacheAllocatorTest, UpdateKVBlockForksSharedBlocksAcrossGroups) {
     std::vector<GroupBlockIdPair> update_mapping;
     ASSERT_TRUE(allocator->updateKVBlock(batch_res,
                                          /*block_src_batch=*/std::vector<int>{0, 0},
-                                         /*copy_last_block=*/false,
+                                         /*cached_sequence_length=*/4,
                                          update_mapping));
 
     EXPECT_TRUE(update_mapping.empty());
@@ -1263,7 +1263,7 @@ TEST_F(KVCacheAllocatorTest, UpdateKVBlockCopyLastBlockAcrossGroups) {
     std::vector<GroupBlockIdPair> update_mapping{{"stale", 1, 2}};
     ASSERT_TRUE(allocator->updateKVBlock(batch_res,
                                          /*block_src_batch=*/std::vector<int>{0, 0},
-                                         /*copy_last_block=*/true,
+                                         /*cached_sequence_length=*/1,
                                          update_mapping));
 
     ASSERT_EQ(update_mapping.size(), 2u);
@@ -1292,6 +1292,47 @@ TEST_F(KVCacheAllocatorTest, UpdateKVBlockCopyLastBlockAcrossGroups) {
 
     allocator->free(FreeInfo{batch_res, nullptr});
     EXPECT_EQ(allocator->freeBlocksNum(), free_before);
+}
+
+TEST_F(KVCacheAllocatorTest, UpdateKVBlockUsesEachGroupPhysicalSpan) {
+    auto run = [](int cached_sequence_length, size_t expected_copies) {
+        auto config = makeTinyHybridConfig();
+        auto groups = config.topology().groups();
+        for (auto& group : groups) {
+            group.seq_size_per_block        = group.tag == kFullTag ? 4 : 2;
+            group.kernel_seq_size_per_block = group.seq_size_per_block;
+        }
+        config.setTopology(std::move(groups), config.topology().layers());
+
+        auto allocator = std::make_shared<KVCacheAllocator>(config, AllocationType::HOST);
+        ASSERT_TRUE(allocator->init());
+        auto resource = makeBatchResource(/*batch_size=*/1, config, {});
+        for (const auto& group : config.topology().groups()) {
+            const int block_count = (cached_sequence_length + static_cast<int>(group.seq_size_per_block) - 1)
+                                    / static_cast<int>(group.seq_size_per_block);
+            auto blocks = poolFor(allocator, group.tag)->malloc(block_count);
+            ASSERT_EQ(blocks.size(), static_cast<size_t>(block_count));
+            resource->mutableBlockIds(0, group.tag).assign(blocks);
+        }
+
+        const int                     estimated = allocator->estimateBatchPeakNeedBlocks(resource,
+                                                                     cached_sequence_length,
+                                                                     /*common_seq_len=*/0,
+                                                                     /*remaining_tokens=*/0,
+                                                                     /*reserve_step=*/0,
+                                                                     /*enable_reuse_cache=*/false,
+                                                                     /*target_batch_size=*/2);
+        std::vector<GroupBlockIdPair> update_mapping;
+        ASSERT_TRUE(allocator->updateKVBlock(
+            resource, /*block_src_batch=*/std::vector<int>{0, 0}, cached_sequence_length, update_mapping));
+        EXPECT_EQ(update_mapping.size(), expected_copies);
+        EXPECT_EQ(estimated, static_cast<int>(update_mapping.size()));
+        allocator->free(FreeInfo{resource, nullptr});
+    };
+
+    run(/*cached_sequence_length=*/2, /*expected_copies=*/1);  // FULL only
+    run(/*cached_sequence_length=*/3, /*expected_copies=*/2);  // FULL and LINEAR
+    run(/*cached_sequence_length=*/4, /*expected_copies=*/0);  // both aligned
 }
 
 TEST_F(KVCacheAllocatorTest, UpdateKVBlockReservationFailureLeavesResourceUnchanged) {
@@ -1324,7 +1365,7 @@ TEST_F(KVCacheAllocatorTest, UpdateKVBlockReservationFailureLeavesResourceUnchan
     std::vector<GroupBlockIdPair> update_mapping{{"stale", 1, 2}};
     EXPECT_FALSE(allocator->updateKVBlock(batch_res,
                                           /*block_src_batch=*/std::vector<int>{0, 0},
-                                          /*copy_last_block=*/true,
+                                          /*cached_sequence_length=*/1,
                                           update_mapping));
 
     EXPECT_TRUE(update_mapping.empty());
@@ -1366,7 +1407,7 @@ TEST_F(KVCacheAllocatorTest, UpdateKVBlockReusesDroppedBatchCapacityTransactiona
     std::vector<GroupBlockIdPair> update_mapping;
     ASSERT_TRUE(allocator->updateKVBlock(batch_res,
                                          /*block_src_batch=*/std::vector<int>{1, 1},
-                                         /*copy_last_block=*/true,
+                                         /*cached_sequence_length=*/1,
                                          update_mapping));
 
     ASSERT_EQ(update_mapping.size(), 2u);

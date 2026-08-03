@@ -76,6 +76,12 @@ public:
         return groups_;
     }
 
+    const std::string& wireKeyTag() const {
+        RTP_LLM_CHECK_WITH_INFO(!full_group_tags_.empty() || !other_group_tags_.empty(),
+                                "remote group policy has no wire key tag");
+        return !full_group_tags_.empty() ? *full_group_tags_.begin() : *other_group_tags_.begin();
+    }
+
     // Aggregate group masks that getNeedWriteGroups() can actually emit.
     // Singleton specs are registered independently by RemoteConnector.
     virtual std::vector<uint64_t> reachableAggregateMasks() const {

@@ -66,6 +66,7 @@ cc_test(
     copts = test_copts,
     deps = [
         ":cache_config_test_utils",
+        "//rtp_llm/cpp/cache:kv_cache_transfer_planner",
         "//rtp_llm/cpp/cache:request_prefix_resource",
         "@com_google_googletest//:gtest",
         "@com_google_googletest//:gtest_main",

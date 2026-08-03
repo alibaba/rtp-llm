@@ -19,17 +19,17 @@ namespace rtp_llm {
 /// @brief PD 分离场景下的匹配上下文，始终全量匹配
 class P2PConnectorAsyncMatchContext: public AsyncMatchContext {
 public:
-    P2PConnectorAsyncMatchContext(const KVCacheResourcePtr& resource): resource_(resource) {}
+    explicit P2PConnectorAsyncMatchContext(size_t matched_token_count): matched_token_count_(matched_token_count) {}
     virtual ~P2PConnectorAsyncMatchContext() {}
 
 public:
-    size_t matchedBlockCount() const override;
+    size_t matchedTokenCount() const override;
     bool   done() const override;
     bool   success() const override;
     void   waitDone() override {}
 
 private:
-    const KVCacheResourcePtr resource_;
+    size_t matched_token_count_{0};
 };
 
 class P2PConnectorAsyncReadContext: public AsyncContext {

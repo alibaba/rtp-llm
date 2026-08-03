@@ -3,6 +3,7 @@
 #include "grpc++/grpc++.h"
 #include "rtp_llm/cpp/model_rpc/RemoteRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/DecodeGenerateContext.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 #include <map>
@@ -86,7 +87,9 @@ private:
     BroadcastLoadRequestPB constructRemoteLoadRequestForMla(const LoadKVCacheContext&       load_context,
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;
-    static BlockIdsByGroup decodeGroupBlockIds(const BroadcastLoadRequestPB& request, const CacheTopology& topology);
+    static ErrorInfo       decodeGroupBlockIds(const BroadcastLoadRequestPB& request,
+                                               const CacheTopology&          topology,
+                                               BlockIdsByGroup&              block_ids_by_group);
     static std::string     makeGroupRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
     static std::string
     makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);

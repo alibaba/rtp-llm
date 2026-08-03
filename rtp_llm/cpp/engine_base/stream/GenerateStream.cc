@@ -14,7 +14,6 @@
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/models/logits_processor/LogitsProcessorFactory.h"
-#include "rtp_llm/cpp/utils/LinearBlocksUtil.h"
 
 using namespace std;
 
@@ -103,12 +102,8 @@ void GenerateStream::resetBeginTime(int64_t begin_time_us) {
     begin_time_us_ = begin_time_us;
 }
 
-bool GenerateStream::hasCacheKeys() const {
-    return stream_cache_resource_->hasCacheKeys();
-}
-
-const CacheKeysType& GenerateStream::cacheKeys(int32_t batch_id) const {
-    return stream_cache_resource_->cacheKeys(batch_id);
+const RequestPrefixResource& GenerateStream::requestPrefix(int32_t batch_id) const {
+    return stream_cache_resource_->requestPrefix(batch_id);
 }
 
 absl::Status GenerateStream::initKVBlock() {
@@ -124,6 +119,11 @@ absl::Status GenerateStream::initKVBlock() {
 void GenerateStream::fakeInitKVBlock(size_t reserved_blocks) {
     std::lock_guard<std::mutex> lock(*mutex_);
     stream_cache_resource_->fakeInitKVBlock(reserved_blocks);
+}
+
+void GenerateStream::fakeInitKVBlockForTokens(size_t token_capacity, size_t reserve_blocks) {
+    std::lock_guard<std::mutex> lock(*mutex_);
+    stream_cache_resource_->fakeInitKVBlockForTokens(token_capacity, reserve_blocks);
 }
 
 absl::Status GenerateStream::incrKVBlock() {
@@ -771,26 +771,9 @@ void GenerateStream::specUpdate(const StreamSpecUpdateInfo& update_info) {
     int nxt_cached_len   = seqLength() - 1;
     int accept_token_num = nxt_cached_len - cur_cached_len;
     if (accept_token_num > 1 && stream_cache_resource_) {
-        int seq_size_per_block = seqSizePerBlock();
-
-        // 1. swap cache blocks of accept tokens to corresponding blocks
-        auto [cached_src_block_idx, cached_des_block_idx] =
-            getCachedTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
-        stream_cache_resource_->swapLinearBlocks(0, cached_src_block_idx, cached_des_block_idx);
-
-        // 2. swap final block of accept tokens to the next sequence block
-        auto [src_block_idx, des_block_idx] =
-            getFinalTokenBlockSwapIdx(cur_cached_len, nxt_cached_len, seq_size_per_block);
-        stream_cache_resource_->swapLinearBlocks(0, src_block_idx, des_block_idx);
-
-        RTP_LLM_LOG_DEBUG("[stream %d (%d -> %d)] swap cache blocks: %d -> %d, %d -> %d",
-                          streamId(),
-                          cur_cached_len + 1,
-                          nxt_cached_len + 1,
-                          cached_src_block_idx,
-                          cached_des_block_idx,
-                          src_block_idx,
-                          des_block_idx);
+        stream_cache_resource_->adjustLinearBlocksForAcceptedTokens(0, cur_cached_len, nxt_cached_len);
+        RTP_LLM_LOG_DEBUG(
+            "[stream %d (%d -> %d)] adjusted LINEAR cache blocks", streamId(), cur_cached_len + 1, nxt_cached_len + 1);
     } else {
         RTP_LLM_LOG_DEBUG(
             "[stream %d (%d -> %d)] no swap cache blocks", streamId(), cur_cached_len + 1, nxt_cached_len + 1);
@@ -876,11 +859,9 @@ bool GenerateStream::updateKvCacheBlocks(const torch::Tensor& src_batch_indices)
     std::vector<int> block_src_batch(data, data + src_batch_indices.numel());
     RTP_LLM_CHECK(block_src_batch.size() == currentBatchSize());
 
-    // NOTE: `1` is used here as updateKvCacheBlocks is called after updateOutput,
-    // in which the seqLength has already increased
-    bool is_seq_len_misaligned = seqLength() % seqSizePerBlock() != 1;
-
-    return stream_cache_resource_->updateKVBlock(block_src_batch, is_seq_len_misaligned);
+    // updateKvCacheBlocks runs after updateOutput, so the cached prefix before
+    // this step is one token shorter than the current sequence.
+    return stream_cache_resource_->updateKVBlock(block_src_batch, seqLength() - 1);
 }
 
 void GenerateStream::updateLogitProcessorMultiSeqStatus(const torch::Tensor& src_batch_indices) {

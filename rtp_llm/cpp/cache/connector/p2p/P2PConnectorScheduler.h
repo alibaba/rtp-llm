@@ -1,6 +1,7 @@
 #pragma once
 
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorConfig.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorSchedulerPrefill.h"
@@ -31,7 +32,7 @@ public:
 public:
     AsyncReadResult asyncRead(const KVCacheResourcePtr&       resource,
                               const std::shared_ptr<Meta>&    meta,
-                              const std::pair<int, int>&      block_range);
+                              const NativeTransferSelections& selections);
 
     ErrorInfo sendKVCache(const KVCacheResourcePtr&                            resource,
                           const std::string&                                   unique_key,

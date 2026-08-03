@@ -9,9 +9,10 @@ cc_library(
     hdrs = glob([
         "*.h",
     ]),
-    copts = copts() + select({
+    copts = copts(),
+    defines = select({
         "//conditions:default": [],
-        "//:using_remote_kv_cache": ["-DUSE_REMOTE_KV_CACHE=1"],
+        "//:using_remote_kv_cache": ["USE_REMOTE_KV_CACHE=1"],
     }),
     visibility = ["//visibility:public"],
     deps = [

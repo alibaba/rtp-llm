@@ -63,9 +63,11 @@ public:
     virtual GroupedCacheLayerLayout allLayerCacheBase() const;
     virtual bool                    updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                                   const std::vector<int>&        block_src_batch,
-                                                  bool                           copy_last_block,
+                                                  int                            cached_sequence_length,
                                                   std::vector<GroupBlockIdPair>& block_update_mapping);
-    virtual int                     seqSizePerBlock() const;
+    // Request-level LCM used for common-prefix alignment and request block counts.
+    // Tag-local allocation and mutation must use each group's physical span.
+    virtual int seqSizePerBlock() const;
     virtual int
     singleBatchNeedBlocks(const BatchKVCacheResourcePtr& batch_kv_cache_resource, int seq_len, int reserve_step) const;
     // Common-prefix growth is charged once; non-common growth is charged once per target sequence.

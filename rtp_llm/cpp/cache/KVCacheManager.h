@@ -68,7 +68,7 @@ public:
 
     bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                        const std::vector<int>&        block_src_batch,
-                       bool                           copy_last_block,
+                       int                            cached_sequence_length,
                        std::vector<GroupBlockIdPair>& block_update_mapping);
 
     // 地址转换和缓冲区访问

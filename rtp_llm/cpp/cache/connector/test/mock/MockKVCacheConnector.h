@@ -4,6 +4,7 @@
 
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/cache/connector/Meta.h"
+#include "rtp_llm/cpp/cache/RequestPrefixResource.h"
 
 namespace rtp_llm {
 
@@ -15,15 +16,15 @@ public:
 public:
     MOCK_METHOD(std::shared_ptr<AsyncMatchContext>,
                 asyncMatch,
-                (const std::shared_ptr<KVCacheResource>& resource, const std::shared_ptr<Meta>& meta),
+                (const RequestPrefixMatchView& view, const std::shared_ptr<Meta>& meta),
                 (override));
     MOCK_METHOD(std::shared_ptr<AsyncContext>,
                 asyncRead,
                 (const std::shared_ptr<KVCacheResource>&   resource,
                  const std::shared_ptr<Meta>&              meta,
                  const std::shared_ptr<AsyncMatchContext>& match_context,
-                 int                                       start_read_block_index,
-                 int                                       read_block_num),
+                 size_t                                    start_token,
+                 size_t                                    token_count),
                 (override));
     MOCK_METHOD(std::shared_ptr<AsyncContext>,
                 asyncWrite,
@@ -44,7 +45,7 @@ public:
     MOCK_METHOD(void, waitDone, (), (override));
     MOCK_METHOD(bool, done, (), (const, override));
     MOCK_METHOD(bool, success, (), (const, override));
-    MOCK_METHOD(size_t, matchedBlockCount, (), (const, override));
+    MOCK_METHOD(size_t, matchedTokenCount, (), (const, override));
 };
 
 }  // namespace rtp_llm

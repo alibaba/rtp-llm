@@ -153,13 +153,7 @@ public:
     int                          estimateInitialNeedBlocks() const;
     int                          estimatePeakNeedBlocks(int remaining_tokens) const;
     void                         setNeedReleaseResource(bool need_release_resource);
-    bool                         hasCacheKeys() const;
-    const std::string&           singleCacheKeyTag() const;
-    const CacheKeysType&         cacheKeys(int32_t batch_id, std::string_view tag) const;
-    const CacheKeysType&         cacheKeys(int32_t batch_id) const;
-    const RequestPrefixResource& requestPrefix(int32_t batch_id) const {
-        return kvCache().cacheResource(batch_id).requestPrefix();
-    }
+    const RequestPrefixResource& requestPrefix(int32_t batch_id) const;
 
     std::shared_ptr<GenerateInput>   generateInput() const;
     std::shared_ptr<GenerateConfig>& generateConfig() const;

@@ -32,7 +32,7 @@ public:
     ~AsyncMatchContext() override = default;
 
 public:
-    virtual size_t matchedBlockCount() const = 0;
+    virtual size_t matchedTokenCount() const = 0;
 };
 
 class FusedAsyncContext: public AsyncContext {

@@ -120,42 +120,20 @@ public:
     }
 
     const std::vector<KVCacheGroupResource>& groupResources() const;
-    const std::vector<KVCacheGroupResource>& groupBlocks() const {
-        return groupResources();
-    }
 
     CacheKeysType&       cacheKeys(std::string_view tag);
     const CacheKeysType& cacheKeys(std::string_view tag) const;
-    CacheKeysType&       cacheKeys();
-    const CacheKeysType& cacheKeys() const;
     void                 setCacheKeys(std::string_view tag, const CacheKeysType& keys);
     void                 setCacheKeys(std::string_view tag, CacheKeysType&& keys);
-    void                 setCacheKeys(const CacheKeysType& keys);
-    void                 setCacheKeys(CacheKeysType&& keys);
     bool                 cacheKeysAreCpCanonical(std::string_view tag) const;
-    bool                 cacheKeysAreCpCanonical() const {
-        return cacheKeysAreCpCanonical(strictSingleGroupTag());
-    }
-    void setCacheKeysAreCpCanonical(std::string_view tag, bool cache_keys_are_cp_canonical);
-    void setCacheKeysAreCpCanonical(bool value) {
-        setCacheKeysAreCpCanonical(strictSingleGroupTag(), value);
-    }
+    void                 setCacheKeysAreCpCanonical(std::string_view tag, bool cache_keys_are_cp_canonical);
 
     BlockDependenciesType&       blockDependencies(std::string_view tag);
     const BlockDependenciesType& blockDependencies(std::string_view tag) const;
-    BlockDependenciesType&       blockDependencies();
-    const BlockDependenciesType& blockDependencies() const;
     void                         setBlockDependencies(std::string_view tag, const BlockDependenciesType& dependencies);
     void                         setBlockDependencies(std::string_view tag, BlockDependenciesType&& dependencies);
-    void                         setBlockDependencies(BlockDependenciesType&& dependencies) {
-        setBlockDependencies(strictSingleGroupTag(), std::move(dependencies));
-    }
-    void rebuildLinearBlockDependencies(std::string_view tag);
-    void rebuildLinearBlockDependencies();
-    void ensureLinearBlockDependencies(std::string_view tag);
-    void ensureLinearBlockDependencies() {
-        ensureLinearBlockDependencies(strictSingleGroupTag());
-    }
+    void                         rebuildLinearBlockDependencies(std::string_view tag);
+    void                         ensureLinearBlockDependencies(std::string_view tag);
 
     // Return rank-local cache keys: every cp_size-th key starting from cp_rank.
     // localCacheKeys(tag, r, s)[i] == cacheKeys(tag)[i * s + r]
@@ -178,23 +156,12 @@ public:
     size_t memoryReuseTokenNum() const;
     size_t remoteReuseTokenNum() const;
 
-    size_t reuseBlockNum() const;
-    size_t deviceReuseBlockNum() const;
-    size_t memoryReuseBlockNum() const;
-    size_t remoteReuseBlockNum() const;
-
     void setDeviceReuseTokenNum(size_t tokens);
     void setMemoryReuseTokenNum(size_t tokens);
     void setRemoteReuseTokenNum(size_t tokens);
 
-    void setDeviceReuseBlockNum(size_t blocks);
-    void setMemoryReuseBlockNum(size_t blocks);
-    void setRemoteReuseBlockNum(size_t blocks);
-
     bool lastBlockAligned(std::string_view tag) const;
     void setLastBlockAligned(std::string_view tag, bool last_block_aligned);
-    bool lastBlockAligned() const;
-    void setLastBlockAligned(bool last_block_aligned);
 
     void swapBlocks(std::string_view tag, size_t rhs, size_t lhs);
 
@@ -207,7 +174,6 @@ private:
     std::shared_ptr<const CacheTopology> topology_;
     KVCacheGroupResource&                groupResource(std::string_view tag);
     const KVCacheGroupResource&          groupResource(std::string_view tag) const;
-    const std::string&                   strictSingleGroupTag() const;
 
     std::vector<KVCacheGroupResource>       group_resources_;
     std::unordered_map<std::string, size_t> group_offset_by_tag_;

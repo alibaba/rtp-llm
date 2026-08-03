@@ -118,7 +118,7 @@ public:
     void TearDown() override {}
 
 protected:
-    constexpr static int tp_size_ = 1;
+    int tp_size_ = 1;
 
     std::string genLocationSpecName(int tp_rank, const std::string& group_name) const {
         static std::string location_spec_name("tp");

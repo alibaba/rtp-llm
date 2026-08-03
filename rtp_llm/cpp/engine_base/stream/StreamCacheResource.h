@@ -28,20 +28,21 @@ public:
 
     ~StreamCacheResource() = default;
 
-    void                 init(int batch_size);
-    bool                 hasCacheKeys() const;
-    const CacheKeysType& cacheKeys(int32_t batch_id) const;
-    absl::Status         initKVBlock();
-    absl::Status         incrKVBlock();
-    void                 fakeInitKVBlock(size_t reserved_blocks = 0);
-    int                  tryReleaseKVBlock(size_t nums);
-    void                 freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
-    void                 releaseResource();
-    bool                 asyncLoadCache();
-    bool                 loadCacheDone();
+    void                         init(int batch_size);
+    const RequestPrefixResource& requestPrefix(int32_t batch_id) const;
+    absl::Status                 initKVBlock();
+    absl::Status                 incrKVBlock();
+    void                         fakeInitKVBlock(size_t reserved_blocks = 0);
+    void                         fakeInitKVBlockForTokens(size_t token_capacity, size_t reserve_blocks = 0);
+    int                          tryReleaseKVBlock(size_t nums);
+    void                         freeBatchBlocks(size_t batch_id, std::vector<int>& blocks);
+    void                         releaseResource();
+    bool                         asyncLoadCache();
+    bool                         loadCacheDone();
 
-    // swap all linear groups rhs and lhs
-    void swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs);
+    // Adjust speculative cache placement for every LINEAR group. Swap indices
+    // are derived from the token range with each group's physical span.
+    void adjustLinearBlocksForAcceptedTokens(int32_t batch_id, int cur_cached_len, int nxt_cached_len);
 
     // TODO, remove this after remove fallback
     int singleBatchNeedBlocks(int seq_len, int reserve_step) const;
@@ -61,7 +62,8 @@ public:
     //
     // @params block_src_batch: [new_batch_size] int, indicating the blocks of batch i should be
     //                           forked from old batch block_src_batch[i],
-    // @params copy_last_block: bool, if ture, copy the last block from the old batch for each batch
+    // @params cached_sequence_length: cached tokens before the beam fork. Each
+    // group decides tail copying from its own physical span.
     //
     // Note: This method may allocate and free KV cache blocks, but the caller must
     // execute the block copy maunually (e.g., via `getKVBlockUpdateMapping` and
@@ -77,7 +79,7 @@ public:
     //
     // @returns true if success, false otherwise
     //
-    bool updateKVBlock(const std::vector<int>& block_src_batch, bool copy_last_block);
+    bool updateKVBlock(const std::vector<int>& block_src_batch, int cached_sequence_length);
 
     // clear block copy mapping
     void clearKVBlockUpdateMapping() {
@@ -94,6 +96,8 @@ public:
     }
 
     int seqSizePerBlock() const {
+        // Request-level LCM for common-prefix alignment and request block counts.
+        // Tag-local block mutation must use the group's physical span instead.
         uint64_t boundary = 1;
         for (const auto& group : resource_context_.cache_manager->cacheConfig().topology().groups()) {
             if (group.policy.enable_prefix_reuse) {

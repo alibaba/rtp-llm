@@ -112,28 +112,32 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
         RTP_LLM_LOG_WARNING("async read failed, connector context is null");
         return nullptr;
     }
-    const auto& kvcache_resource = connector_context->kvCacheResource();
-    // empty cache keys will not handled by coordinator.
-    if (kvcache_resource.cacheKeys().empty()) {
+    const auto&      kvcache_resource = connector_context->kvCacheResource();
+    const int        cp_size          = cpSize();
+    CacheKeysByGroup ref_keys_by_group;
+    for (const auto& group : cache_config_.topology().groups()) {
+        const auto& keys = kvcache_resource.cacheKeys(group.tag);
+        if (keys.empty()) {
+            continue;
+        }
+        if (cp_size > 1 && !kvcache_resource.cacheKeysAreCpCanonical(group.tag)) {
+            CPSlotMapper mapper(cp_size - 1, cp_size, static_cast<int>(group.seq_size_per_block));
+            if (mapper.usesCpCanonicalKeys(cache_config_, group.tag)) {
+                auto canonical = mapper.canonicalCacheKeys(keys);
+                if (!canonical.empty()) {
+                    ref_keys_by_group.emplace(group.tag, std::move(canonical));
+                }
+            } else {
+                ref_keys_by_group.emplace(group.tag, keys);
+            }
+        } else {
+            ref_keys_by_group.emplace(group.tag, keys);
+        }
+    }
+    if (ref_keys_by_group.empty()) {
         return nullptr;
     }
-
-    const int       cp_size      = cpSize();
-    CacheKeysType   ref_keys     = kvcache_resource.cacheKeys();
-    KVCacheResource ref_resource = kvcache_resource;
-    if (cp_size > 1 && !kvcache_resource.cacheKeysAreCpCanonical()) {
-        CPSlotMapper mapper(cp_size - 1, cp_size, static_cast<int>(cache_config_.seq_size_per_block));
-        ref_keys = mapper.canonicalCacheKeys(kvcache_resource.cacheKeys());
-        // Short requests (< cp_size logical blocks) have no complete virtual
-        // block, so the canonical last-rank-key namespace is empty by design.
-        // Skip silently — connector activity for these is a no-op anyway.
-        if (ref_keys.empty()) {
-            return nullptr;
-        }
-        ref_resource = mapper.projectConnectorResource(kvcache_resource, cache_config_, ref_keys);
-        ref_keys     = ref_resource.cacheKeys();
-    }
-    auto resource = allocator_->incrKVCacheRef(ref_resource, ref_keys, true);
+    auto resource = allocator_->incrKVCacheRef(kvcache_resource, ref_keys_by_group, true);
     if (!resource) {
         RTP_LLM_LOG_WARNING("async read failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());
@@ -142,7 +146,11 @@ KVCacheConnectorCoordinator::asyncRead(const std::shared_ptr<KVCacheConnectorRea
 
     std::vector<std::shared_ptr<AsyncContext>> match_contexts(connectors_.size());
     for (int i = 0; i < connectors_.size(); i++) {
-        match_contexts.at(i) = connectors_.at(i)->asyncMatch(resource, connector_context->meta());
+        if (!connectors_.at(i)->bindRequestResource(resource, connector_context->meta())) {
+            continue;
+        }
+        match_contexts.at(i) =
+            connectors_.at(i)->asyncMatch(resource->requestPrefix().matchView(), connector_context->meta());
     }
 
     auto fused_match_context = std::make_shared<FusedAsyncContext>(std::move(match_contexts));
@@ -164,26 +172,34 @@ KVCacheConnectorCoordinator::asyncWrite(const std::shared_ptr<KVCacheConnectorRe
         RTP_LLM_LOG_WARNING("async write failed, connector context is null");
         return nullptr;
     }
-    const auto& kvcache_resource = connector_context->kvCacheResource();
-    if (kvcache_resource.cacheKeys().empty()) {
+    const auto&      kvcache_resource = connector_context->kvCacheResource();
+    CacheKeysByGroup ref_keys_by_group;
+    const int        cp_size = cpSize();
+    for (const auto& group : cache_config_.topology().groups()) {
+        const auto& keys = kvcache_resource.cacheKeys(group.tag);
+        if (keys.empty()) {
+            continue;
+        }
+        if (cp_size > 1 && !kvcache_resource.cacheKeysAreCpCanonical(group.tag)) {
+            CPSlotMapper mapper(cp_size - 1, cp_size, static_cast<int>(group.seq_size_per_block));
+            if (mapper.usesCpCanonicalKeys(cache_config_, group.tag)) {
+                auto canonical = mapper.canonicalCacheKeys(keys);
+                if (!canonical.empty()) {
+                    ref_keys_by_group.emplace(group.tag, std::move(canonical));
+                }
+            } else {
+                ref_keys_by_group.emplace(group.tag, keys);
+            }
+        } else {
+            ref_keys_by_group.emplace(group.tag, keys);
+        }
+    }
+    if (ref_keys_by_group.empty()) {
         RTP_LLM_LOG_DEBUG("async write failed, kvcache resource cache keys is empty, resource: [%s]",
                           kvcache_resource.debugString().c_str());
         return nullptr;
     }
-
-    const int       cp_size      = cpSize();
-    CacheKeysType   ref_keys     = kvcache_resource.cacheKeys();
-    KVCacheResource ref_resource = kvcache_resource;
-    if (cp_size > 1 && !kvcache_resource.cacheKeysAreCpCanonical()) {
-        CPSlotMapper mapper(cp_size - 1, cp_size, static_cast<int>(cache_config_.seq_size_per_block));
-        ref_keys = mapper.canonicalCacheKeys(kvcache_resource.cacheKeys());
-        if (ref_keys.empty()) {
-            return nullptr;  // request shorter than one virtual block — nothing to write
-        }
-        ref_resource = mapper.projectConnectorResource(kvcache_resource, cache_config_, ref_keys);
-        ref_keys     = ref_resource.cacheKeys();
-    }
-    auto resource = allocator_->incrKVCacheRef(ref_resource, ref_keys, true);
+    auto resource = allocator_->incrKVCacheRef(kvcache_resource, ref_keys_by_group, true);
     if (!resource) {
         RTP_LLM_LOG_WARNING("async write failed, incr kvcache ref failed, resource: [%s]",
                             kvcache_resource.debugString().c_str());
@@ -329,25 +345,32 @@ void KVCacheConnectorCoordinator::asyncReadAfterMatch(std::shared_ptr<FusedAsync
         match_contexts.size(),
         connectors_.size());
 
-    int                                        already_reuse_num = fused_read_context->resource()->reuseBlockNum();
+    size_t       already_reuse_tokens = fused_read_context->resource()->reuseTokenNum();
+    const size_t request_extent       = fused_read_context->resource()->requestPrefix().tokenExtent();
     std::vector<std::shared_ptr<AsyncContext>> connector_read_contexts;
     for (int i = 0; i < match_contexts.size(); i++) {
         auto match_context = std::dynamic_pointer_cast<AsyncMatchContext>(match_contexts.at(i));
         if (!match_context) {
             continue;
         }
-        const auto matched_num = match_context->matchedBlockCount();
-        if (matched_num <= already_reuse_num) {
+        const auto matched_tokens = match_context->matchedTokenCount();
+        if (matched_tokens <= already_reuse_tokens) {
+            continue;
+        }
+        if (matched_tokens > request_extent) {
+            RTP_LLM_LOG_WARNING("connector match endpoint exceeds request extent, matched=%zu extent=%zu",
+                                matched_tokens,
+                                request_extent);
             continue;
         }
         auto connector_read_context = connectors_.at(i)->asyncRead(fused_read_context->resource(),
                                                                    fused_read_context->meta(),
                                                                    match_context,
-                                                                   already_reuse_num,
-                                                                   matched_num - already_reuse_num);
+                                                                   already_reuse_tokens,
+                                                                   matched_tokens - already_reuse_tokens);
         if (connector_read_context) {
             connector_read_contexts.emplace_back(connector_read_context);
-            already_reuse_num = matched_num;
+            already_reuse_tokens = matched_tokens;
         }
     }
     fused_read_context->setFusedReadContext(std::make_shared<FusedAsyncContext>(connector_read_contexts));

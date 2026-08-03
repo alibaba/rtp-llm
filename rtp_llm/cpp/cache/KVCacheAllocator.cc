@@ -130,13 +130,14 @@ int KVCacheAllocator::estimateBatchPeakNeedBlocks(const BatchKVCacheResourcePtr&
     const int per_sequence_growth = estimatePeakNeedBlocks(
         batch_kv_cache_resource->cacheResource(0), seq_len, remaining_tokens, reserve_step, enable_reuse_cache);
 
-    // updateKVBlock(copy_last_block=true) replaces the last block independently
-    // for every non-empty tagged group on each forked sequence.
+    // updateKVBlock replaces the last block independently for each non-empty
+    // tag whose physical span does not align with the cached sequence length.
     const int expanded_sequences = target_width - current_batch_size;
     int       copied_group_count = 0;
-    if (expanded_sequences > 0 && seq_len % seqSizePerBlock() != 0) {
+    if (expanded_sequences > 0) {
         for (const auto& entry : batch_kv_cache_resource->cacheResource(0).groupResources()) {
-            if (!entry.block_ids->blocks().empty()) {
+            const int physical_span = kv_cache_groups_.at(entry.tag)->seqSizePerBlock();
+            if (!entry.block_ids->blocks().empty() && seq_len % physical_span != 0) {
                 ++copied_group_count;
             }
         }
@@ -716,7 +717,7 @@ void KVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_resource, b
 
 bool KVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                      const std::vector<int>&        block_src_batch,
-                                     bool                           copy_last_block,
+                                     int                            cached_sequence_length,
                                      std::vector<GroupBlockIdPair>& block_update_mapping) {
     block_update_mapping.clear();
     if (block_src_batch.empty()) {
@@ -737,9 +738,11 @@ bool KVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cac
     std::unordered_map<std::string, int> new_blocks_num;
     for (int old_batch_idx = 0; old_batch_idx < old_batch_size; ++old_batch_idx) {
         const int fork_count = batch_fork_count[old_batch_idx];
-        if (fork_count > 1 && copy_last_block) {
+        if (fork_count > 1) {
             for (const auto& entry : batch_kv_cache_resource->groupResources(old_batch_idx)) {
-                if (!entry.block_ids->blocks().empty()) {
+                const int  physical_span   = kv_cache_groups_.at(entry.tag)->seqSizePerBlock();
+                const bool copy_last_block = cached_sequence_length > 0 && cached_sequence_length % physical_span != 0;
+                if (copy_last_block && !entry.block_ids->blocks().empty()) {
                     new_blocks_num[entry.tag] += fork_count - 1;
                 }
             }
@@ -874,6 +877,8 @@ bool KVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cac
                 auto& block_ids = batch_kv_cache_resource->mutableBlockIds(new_batch_idx, tag);
                 kv_cache_groups_.at(tag)->reference(block_ids, entry.block_ids->blocks());
 
+                const int  physical_span   = kv_cache_groups_.at(tag)->seqSizePerBlock();
+                const bool copy_last_block = cached_sequence_length > 0 && cached_sequence_length % physical_span != 0;
                 if (copy_last_block && !block_ids.blocks().empty()) {
                     const int  old_block       = block_ids.popBack();
                     const bool old_block_valid = !isNullBlockIdx(old_block) && old_block > 0;

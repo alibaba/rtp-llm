@@ -16,31 +16,26 @@ namespace rtp_llm {
 // 用于 memory connector match
 class MemoryAsyncMatchContext: public AsyncMatchContext {
 public:
-    explicit MemoryAsyncMatchContext(size_t                matched_block_count,
-                                     int                   start_read_block_index = -1,
-                                     int                   read_block_num         = 0,
-                                     std::shared_ptr<void> read_copy_plan         = nullptr):
-        matched_block_count_(matched_block_count),
-        start_read_block_index_(start_read_block_index),
-        read_block_num_(read_block_num),
-        read_copy_plan_(std::move(read_copy_plan)) {}
+    explicit MemoryAsyncMatchContext(size_t matched_token_count,
+                                     size_t planned_start_token = 0,
+                                     size_t planned_token_count = 0):
+        matched_token_count_(matched_token_count),
+        planned_start_token_(planned_start_token),
+        planned_token_count_(planned_token_count) {}
     ~MemoryAsyncMatchContext() override = default;
 
 public:
-    void                  waitDone() override;
-    bool                  done() const override;
-    bool                  success() const override;
-    size_t                matchedBlockCount() const override;
-    int                   startReadBlockIndex() const;
-    int                   readBlockNum() const;
-    std::shared_ptr<void> readCopyPlan() const;
-    void                  clearReadCopyPlan();
+    void   waitDone() override;
+    bool   done() const override;
+    bool   success() const override;
+    size_t matchedTokenCount() const override;
+    size_t plannedStartToken() const;
+    size_t plannedTokenCount() const;
 
 private:
-    size_t                matched_block_count_{0};
-    int                   start_read_block_index_{-1};
-    int                   read_block_num_{0};
-    std::shared_ptr<void> read_copy_plan_;
+    size_t matched_token_count_{0};
+    size_t planned_start_token_{0};
+    size_t planned_token_count_{0};
 };
 
 // 用于 memory connector read/write

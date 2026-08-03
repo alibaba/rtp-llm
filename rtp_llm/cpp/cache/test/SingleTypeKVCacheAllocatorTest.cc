@@ -1486,7 +1486,7 @@ TEST_F(KVCacheAllocatorTest, EstimateBatchPeakCoversPartialTailCopiesAtExactCapa
 
     std::vector<GroupBlockIdPair> block_update_mapping;
     ASSERT_TRUE(allocator_->updateKVBlock(
-        resource, /*block_src_batch=*/{0, 0, 0, 0}, /*copy_last_block=*/true, block_update_mapping));
+        resource, /*block_src_batch=*/{0, 0, 0, 0}, /*cached_sequence_length=*/5, block_update_mapping));
     EXPECT_EQ(resource->batchSize(), 4);
     EXPECT_EQ(block_update_mapping.size(), 3);
     EXPECT_EQ(allocator_->freeBlocksNum(), 0);

@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/model_rpc/RpcErrorCode.h"
 #include "rtp_llm/cpp/model_rpc/LocalRpcServer.h"
 #include "rtp_llm/cpp/model_rpc/RemoteServerResource.h"
+#include "rtp_llm/cpp/cache/CacheConfig.h"
 
 namespace rtp_llm {
 
@@ -24,6 +25,13 @@ private:
     void initCacheStore(const EngineInitParams& params, rtp_llm::ProposeModelEngineInitParams* propose_params);
 
 protected:
+    virtual grpc::Status validateBeforeCacheStoreInit() const;
+    static grpc::Status  validateNormalCacheStoreWireSpan(const CacheConfig& config,
+                                                          size_t             expected_span,
+                                                          size_t             cp_size,
+                                                          const std::string& topology_name);
+    static grpc::Status  validateNormalCacheStoreTopologies(const CacheConfig& config, size_t cp_size = 1);
+
     std::string                 process_id_;
     RemoteServerResource        resource_;
     std::atomic<size_t>         loading_cache_requests_{0};

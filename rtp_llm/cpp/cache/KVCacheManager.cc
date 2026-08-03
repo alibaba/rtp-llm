@@ -319,10 +319,11 @@ void KVCacheManager::blockBatchCopy(const std::vector<GroupBlockIdPair>& copy_ma
 
 bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
                                    const std::vector<int>&        block_src_batch,
-                                   bool                           copy_last_block,
+                                   int                            cached_sequence_length,
                                    std::vector<GroupBlockIdPair>& block_update_mapping) {
     RTP_LLM_PROFILE_FUNCTION();
-    return allocator_->updateKVBlock(batch_kv_cache_resource, block_src_batch, copy_last_block, block_update_mapping);
+    return allocator_->updateKVBlock(
+        batch_kv_cache_resource, block_src_batch, cached_sequence_length, block_update_mapping);
 }
 
 // 地址转换和缓冲区访问

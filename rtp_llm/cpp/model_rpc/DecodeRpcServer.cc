@@ -45,11 +45,7 @@ namespace rtp_llm {
 grpc::Status DecodeRpcServer::init(const EngineInitParams&                                maga_init_params,
                                    std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                                    py::object                                             mm_process_engine) {
-    auto ret = RemoteRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
-    if (!ret.ok()) {
-        return ret;
-    }
-    return grpc::Status::OK;
+    return RemoteRpcServer::init(maga_init_params, std::move(propose_params), mm_process_engine);
 }
 
 std::string
@@ -388,9 +384,9 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
 ErrorInfo DecodeRpcServer::loadCacheForAllRank(DecodeGenerateContext& decode_context) {
     RTP_LLM_PROFILE_FUNCTION();
     auto*           generate_stream = decode_context.getStream().get();
-    auto&           cache_keys      = generate_stream->cacheKeys(0);
+    const auto&     cache_keys      = generate_stream->requestPrefix(0).keys();
     BlockIdsByGroup block_ids_by_group;
-    for (const auto& group : generate_stream->kvCachePtr()->groupBlocks(0)) {
+    for (const auto& group : generate_stream->kvCachePtr()->groupResources(0)) {
         block_ids_by_group.emplace(group.tag, group.block_ids);
     }
 
@@ -695,11 +691,8 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
     };
     const bool is_page_level_rr = load_context.prefill_cp_size > 1
                                   && static_cast<int>(load_context.peer_addrs.size()) == load_context.prefill_cp_size;
-    auto layerGroupTags = [](const CacheConfig& cfg, size_t layer_id) {
-        std::vector<std::string> tags;
-        for (const auto& group : cfg.groupsForLayer(static_cast<int>(layer_id))) {
-            tags.push_back(group.get().tag);
-        }
+    auto layerGroupTags = [](const CacheConfig& cfg, size_t layer_id) -> const std::vector<std::string>& {
+        const auto& tags = cfg.topology().layer(static_cast<int>(layer_id)).group_tags;
         RTP_LLM_CHECK_WITH_INFO(!tags.empty(), "cache layer %zu has no tagged groups", layer_id);
         return tags;
     };
@@ -746,9 +739,16 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
         if (!is_page_level_rr || !groupUsesCpSlice(cfg, tag) || load_context.prefill_cp_size <= 1) {
             return false;
         }
-        const auto group_tokens = cfg.seqSizePerBlockForGroup(tag);
-        return group_tokens > 0
-               && group_tokens == cfg.seq_size_per_block * static_cast<size_t>(load_context.prefill_cp_size);
+        const auto group_tokens      = cfg.seqSizePerBlockForGroup(tag);
+        size_t     full_group_tokens = 0;
+        for (const auto& group : cfg.topology().groups()) {
+            if (group.policy.group_type == CacheGroupType::FULL) {
+                full_group_tokens = group.seq_size_per_block;
+                break;
+            }
+        }
+        return group_tokens > 0 && full_group_tokens > 0
+               && group_tokens == full_group_tokens * static_cast<size_t>(load_context.prefill_cp_size);
     };
     auto blockPositionsForLoad = [&](size_t             block_num,
                                      const CacheConfig& cfg,
@@ -1121,9 +1121,16 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     }
 
     std::vector<CacheKeyType> cache_keys(request->cache_keys().begin(), request->cache_keys().end());
-    const auto&               cache_config       = engine_->resourceContext().cache_manager->cacheConfig();
-    const auto&               topology           = cache_config.topology();
-    BlockIdsByGroup           block_ids_by_group = decodeGroupBlockIds(*request, topology);
+    const auto&               cache_config = engine_->resourceContext().cache_manager->cacheConfig();
+    const auto&               topology     = cache_config.topology();
+    BlockIdsByGroup           block_ids_by_group;
+    auto                      decode_error = decodeGroupBlockIds(*request, topology, block_ids_by_group);
+    if (decode_error.hasError()) {
+        response->mutable_error_info()->set_error_code(transErrorCodeToRPC(decode_error.code()));
+        response->mutable_error_info()->set_error_message(decode_error.ToString());
+        response->set_done_time_us(currentTimeUs());
+        return grpc::Status::OK;
+    }
 
     std::vector<std::string> peer_addrs(request->peer_addrs().begin(), request->peer_addrs().end());
 
@@ -1146,24 +1153,30 @@ grpc::Status DecodeRpcServer::RemoteLoad(grpc::ServerContext*          server_co
     return grpc::Status::OK;
 }
 
-DecodeRpcServer::BlockIdsByGroup DecodeRpcServer::decodeGroupBlockIds(const BroadcastLoadRequestPB& request,
-                                                                      const CacheTopology&          topology) {
-    BlockIdsByGroup block_ids_by_group;
+ErrorInfo DecodeRpcServer::decodeGroupBlockIds(const BroadcastLoadRequestPB& request,
+                                               const CacheTopology&          topology,
+                                               BlockIdsByGroup&              block_ids_by_group) {
+    block_ids_by_group.clear();
     for (const auto& tagged_row : request.tagged_group_block_ids()) {
-        (void)topology.group(tagged_row.tag());
-        RTP_LLM_CHECK_WITH_INFO(
-            block_ids_by_group.count(tagged_row.tag()) == 0, "duplicate RPC cache tag=%s", tagged_row.tag().c_str());
+        if (!topology.contains(tagged_row.tag())) {
+            return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "unknown RPC cache tag=" + tagged_row.tag());
+        }
+        if (block_ids_by_group.count(tagged_row.tag()) != 0) {
+            return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED, "duplicate RPC cache tag=" + tagged_row.tag());
+        }
         auto holder = std::make_shared<BlockIds>();
         holder->assign(BlockIndicesType(tagged_row.block_ids().begin(), tagged_row.block_ids().end()));
         block_ids_by_group.emplace(tagged_row.tag(), std::move(holder));
     }
-    RTP_LLM_CHECK_WITH_INFO(block_ids_by_group.size() == topology.groups().size(),
-                            "RPC cache tag set does not match local topology");
     for (const auto& group : topology.groups()) {
-        RTP_LLM_CHECK_WITH_INFO(
-            block_ids_by_group.count(group.tag) != 0, "RPC cache is missing local tag=%s", group.tag.c_str());
+        if (block_ids_by_group.count(group.tag) == 0) {
+            return ErrorInfo(ErrorCode::LOAD_KV_CACHE_FAILED,
+                             "RPC cache is missing local tag=" + group.tag
+                                 + " (request=" + std::to_string(block_ids_by_group.size())
+                                 + " local=" + std::to_string(topology.groups().size()) + ")");
+        }
     }
-    return block_ids_by_group;
+    return ErrorInfo::OkStatus();
 }
 
 grpc::Status DecodeRpcServer::allocateResourceFunc(DecodeGenerateContext& decode_context) {

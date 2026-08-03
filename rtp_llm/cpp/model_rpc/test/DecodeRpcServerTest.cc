@@ -26,10 +26,10 @@ DecodeRpcServer::LoadKVCacheContext makeLoadContext(const std::string&          
             prefill_cp_size};
 }
 
-GroupBase makeRpcGroup(std::string tag, std::vector<int> layer_ids) {
+GroupBase makeRpcGroup(std::string tag, std::vector<int> layer_ids, size_t physical_span = 8) {
     auto spec                = std::make_shared<MHAKVCacheSpec>();
     spec->tag                = tag;
-    spec->seq_size_per_block = 8;
+    spec->seq_size_per_block = physical_span;
 
     GroupBase group;
     group.tag                       = std::move(tag);
@@ -37,8 +37,8 @@ GroupBase makeRpcGroup(std::string tag, std::vector<int> layer_ids) {
     group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
     group.layer_ids                 = std::move(layer_ids);
     group.block_num                 = 8;
-    group.seq_size_per_block        = 8;
-    group.kernel_seq_size_per_block = 8;
+    group.seq_size_per_block        = physical_span;
+    group.kernel_seq_size_per_block = physical_span;
     return group;
 }
 
@@ -122,13 +122,15 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsResolveByLocalTagOrder) {
     linear->set_tag("linear");
     linear->add_block_ids(20);
 
-    const auto blocks = DecodeRpcServer::decodeGroupBlockIds(request, *topology);
+    DecodeRpcServer::BlockIdsByGroup blocks;
+    EXPECT_TRUE(DecodeRpcServer::decodeGroupBlockIds(request, *topology, blocks).ok());
     EXPECT_EQ(blocks.at("full")->blocks(), (BlockIndicesType{10}));
     EXPECT_EQ(blocks.at("linear")->blocks(), (BlockIndicesType{20}));
 
-    auto       reordered        = CacheTopology::create({makeRpcGroup("full", {1}), makeRpcGroup("linear", {0})},
-                                                        {{0, {"linear"}}, {1, {"full"}}});
-    const auto reordered_blocks = DecodeRpcServer::decodeGroupBlockIds(request, *reordered);
+    auto reordered = CacheTopology::create({makeRpcGroup("full", {1}), makeRpcGroup("linear", {0})},
+                                           {{0, {"linear"}}, {1, {"full"}}});
+    DecodeRpcServer::BlockIdsByGroup reordered_blocks;
+    EXPECT_TRUE(DecodeRpcServer::decodeGroupBlockIds(request, *reordered, reordered_blocks).ok());
     EXPECT_EQ(reordered_blocks.at("full")->blocks(), blocks.at("full")->blocks());
     EXPECT_EQ(reordered_blocks.at("linear")->blocks(), blocks.at("linear")->blocks());
     EXPECT_EQ(DecodeRpcServer::makeGroupRequestKey(42, 1, topology->group("full").tag),
@@ -136,9 +138,12 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsResolveByLocalTagOrder) {
 }
 
 TEST(DecodeRpcServerTest, EmptyTaggedBlockRowsAreRejected) {
-    auto                   topology = CacheTopology::create({makeRpcGroup("full", {0})}, {{0, {"full"}}});
-    BroadcastLoadRequestPB request;
-    EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockIds(request, *topology));
+    auto                             topology = CacheTopology::create({makeRpcGroup("full", {0})}, {{0, {"full"}}});
+    BroadcastLoadRequestPB           request;
+    DecodeRpcServer::BlockIdsByGroup blocks;
+    const auto                       error = DecodeRpcServer::decodeGroupBlockIds(request, *topology, blocks);
+    EXPECT_EQ(error.code(), ErrorCode::LOAD_KV_CACHE_FAILED);
+    EXPECT_NE(error.ToString().find("missing local tag=full"), std::string::npos);
 }
 
 TEST(DecodeRpcServerTest, TaggedBlockRowsRejectTopologyMismatch) {
@@ -149,7 +154,88 @@ TEST(DecodeRpcServerTest, TaggedBlockRowsRejectTopologyMismatch) {
     row->set_tag("full");
     row->add_block_ids(1);
 
-    EXPECT_ANY_THROW(DecodeRpcServer::decodeGroupBlockIds(missing_tag, *topology));
+    DecodeRpcServer::BlockIdsByGroup blocks;
+    const auto                       error = DecodeRpcServer::decodeGroupBlockIds(missing_tag, *topology, blocks);
+    EXPECT_EQ(error.code(), ErrorCode::LOAD_KV_CACHE_FAILED);
+    EXPECT_NE(error.ToString().find("missing local tag=linear"), std::string::npos);
+}
+
+TEST(DecodeRpcServerTest, NormalCacheStoreRejectsHeterogeneousReusableSpans) {
+    CacheConfig config;
+    config.layer_num     = 2;
+    config.layer_all_num = 2;
+    config.setTopology({makeRpcGroup("main", {0}, 8), makeRpcGroup("mtp", {1}, 16)}, {{0, {"main"}}, {1, {"mtp"}}});
+
+    const auto status = DecodeRpcServer::validateNormalCacheStoreWireSpan(config, 8, 1, "main");
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_NE(status.error_message().find("mtp"), std::string::npos);
+}
+
+TEST(DecodeRpcServerTest, NormalCacheStoreAcceptsCpSlicedPhysicalSpan) {
+    CacheConfig config;
+    config.layer_num       = 2;
+    config.layer_all_num   = 2;
+    auto main              = makeRpcGroup("main", {0}, 8);
+    auto sliced            = makeRpcGroup("state", {1}, 16);
+    sliced.policy.cp_slice = CpBlockSliceMode::EQUAL_BYTES;
+    config.setTopology({main, sliced}, {{0, {"main"}}, {1, {"state"}}});
+
+    const auto status = DecodeRpcServer::validateNormalCacheStoreTopologies(config, /*cp_size=*/2);
+    EXPECT_TRUE(status.ok()) << status.error_message();
+}
+
+TEST(DecodeRpcServerTest, NormalCacheStoreRejectsTopologyWithoutReusableGroup) {
+    CacheConfig config;
+    config.layer_num                 = 1;
+    config.layer_all_num             = 1;
+    auto group                       = makeRpcGroup("state", {0}, 8);
+    group.policy.enable_prefix_reuse = false;
+    config.setTopology({group}, {{0, {"state"}}});
+
+    const auto status = DecodeRpcServer::validateNormalCacheStoreTopologies(config);
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_NE(status.error_message().find("reusable cache group"), std::string::npos);
+}
+
+TEST(DecodeRpcServerTest, NormalCacheStoreRejectsHeterogeneousParticipatingGroup) {
+    CacheConfig config;
+    config.layer_num                        = 2;
+    config.layer_all_num                    = 2;
+    auto reusable                           = makeRpcGroup("main", {0}, 8);
+    auto non_reusable                       = makeRpcGroup("state", {1}, 16);
+    non_reusable.policy.enable_prefix_reuse = false;
+    config.setTopology({reusable, non_reusable}, {{0, {"main"}}, {1, {"state"}}});
+
+    const auto status = DecodeRpcServer::validateNormalCacheStoreTopologies(config);
+    EXPECT_FALSE(status.ok());
+    EXPECT_EQ(status.error_code(), grpc::StatusCode::INVALID_ARGUMENT);
+    EXPECT_NE(status.error_message().find("state"), std::string::npos);
+}
+
+TEST(DecodeRpcServerTest, NormalCacheStoreValidatesEveryMtpSubConfig) {
+    CacheConfig config;
+    config.layer_num     = 1;
+    config.layer_all_num = 1;
+    config.setTopology({makeRpcGroup("main", {0}, 8)}, {{0, {"main"}}});
+
+    auto mtp0           = std::make_shared<CacheConfig>();
+    mtp0->layer_num     = 1;
+    mtp0->layer_all_num = 1;
+    mtp0->setTopology({makeRpcGroup("mtp0", {0}, 8)}, {{0, {"mtp0"}}});
+    auto mtp1           = std::make_shared<CacheConfig>();
+    mtp1->layer_num     = 1;
+    mtp1->layer_all_num = 1;
+    mtp1->setTopology({makeRpcGroup("mtp1", {0}, 16)}, {{0, {"mtp1"}}});
+    config.mtp_sub_configs = {mtp0, mtp1};
+
+    auto status = DecodeRpcServer::validateNormalCacheStoreTopologies(config);
+    EXPECT_FALSE(status.ok());
+    EXPECT_NE(status.error_message().find("MTP module 1"), std::string::npos);
+
+    mtp1->setTopology({makeRpcGroup("mtp1", {0}, 8)}, {{0, {"mtp1"}}});
+    status = DecodeRpcServer::validateNormalCacheStoreTopologies(config);
+    EXPECT_TRUE(status.ok()) << status.error_message();
 }
 
 TEST(DecodeRpcServerTest, MtpCacheKeyUsesSharedBaseModelIdForEverySlot) {

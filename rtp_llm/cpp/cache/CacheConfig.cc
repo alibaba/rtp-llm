@@ -445,20 +445,6 @@ uint64_t CacheConfig::tokenCapacity() const {
     return capacity != std::numeric_limits<uint64_t>::max() ? capacity : 0;
 }
 
-const std::string& CacheConfig::singleReusableGroupTag() const {
-    const GroupBase* reusable_group = nullptr;
-    for (const auto& group : topology().groups()) {
-        if (!group.policy.enable_prefix_reuse) {
-            continue;
-        }
-        RTP_LLM_CHECK_WITH_INFO(reusable_group == nullptr,
-                                "single-key cache protocol does not support multiple reusable groups");
-        reusable_group = &group;
-    }
-    RTP_LLM_CHECK_WITH_INFO(reusable_group != nullptr, "CacheConfig has no reusable cache group");
-    return reusable_group->tag;
-}
-
 std::string CacheConfig::debugString(size_t indent) const {
     const std::string indent_str = std::string(indent, ' ');
     const std::string indent1    = indent_str + "  ";

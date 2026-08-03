@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBuffer.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
+#include "rtp_llm/cpp/cache/KVCacheTransferPlanner.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/Types.h"
 #include <vector>
 #include <memory>
@@ -26,6 +27,15 @@ public:
                                                                   int              block_count     = -1,
                                                                   int              cp_rank         = 0,
                                                                   int              cp_size         = 1);
+
+    /// Convert planner selections whose owned_global_positions are dependency
+    /// ordinals. Both cache keys and block IDs are resolved through the
+    /// resource's dependency ordinals; local_positions describe the
+    /// planner's CP projection and are retained for consistency validation only.
+    /// Malformed selections reject the complete conversion. NULL block IDs are
+    /// expected padding and are skipped.
+    static std::vector<std::shared_ptr<LayerCacheBuffer>>
+    convertBySelections(KVCacheResource& resource, const NativeTransferSelections& selections);
 
     static std::shared_ptr<LayerCacheBuffer> convertLayer(KVCacheResource&   resource,
                                                           int                batch_id,

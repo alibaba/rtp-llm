@@ -102,7 +102,7 @@ public:
         return tokens_;
     }
 
-private:
+protected:
     bool                 enable_memory_cache_{false};
     bool                 enable_remote_cache_{false};
     std::string          trace_id_;
@@ -177,6 +177,63 @@ private:
         cache_config_.setTopology(std::move(groups), cache_config_.topology().layers());
     }
 };
+
+class RemoteConnectorMockOnlyFullCPTest: public RemoteConnectorMockOnlyFullTest {
+public:
+    void SetUp() override {
+        tp_size_                                               = 2;
+        parallelism_config_.tp_size                            = 2;
+        parallelism_config_.tp_rank                            = 0;
+        parallelism_config_.prefill_cp_config.kv_cache_sharded = true;
+        RemoteConnectorMockTestBase::SetUp();
+        initConnector();
+    }
+};
+
+TEST_F(RemoteConnectorMockOnlyFullCPTest, CanonicalMatchReadAndWriteUseLogicalSpan) {
+    auto resource = std::make_shared<KVCacheResource>();
+    resource->initGroups(cache_config_.topologyPtr());
+    resource->mutableBlockIds("default").assign({1, 2, 3});
+    std::vector<int32_t> tokens(/*six complete physical keys plus a partial tail=*/7 * 8, 1);
+    resource->requestPrefix().rebuild(tokens.data(), tokens.size());
+    const auto view = resource->requestPrefix().matchView();
+    ASSERT_EQ(view.matchSpanTokens(), 8u);
+    ASSERT_EQ(view.matchLimitTokens(), 48u);
+    const CacheKeysType canonical_keys{view.keys()[1], view.keys()[3], view.keys()[5]};
+    resource->setCacheKeys("default", canonical_keys);
+    resource->setCacheKeysAreCpCanonical("default", true);
+    resource->setLastBlockAligned("default", true);
+
+    auto      meta               = std::make_shared<MetaImpl>(false, true, "cp_trace");
+    Locations expected_locations = genFullotherLocations(canonical_keys);
+    EXPECT_CALL(*meta_clients_[0],
+                MatchLocation(Eq("match_cp_trace"), _, canonical_keys, _, Eq(BlockMask(static_cast<size_t>(0))), _, _))
+        .WillOnce(Return(MatchLocationReturnType({ClientErrorCode::ER_OK, expected_locations})));
+
+    auto match_context = remote_connectors_[0]->asyncMatch(view, meta);
+    waitAsyncContextDone(match_context);
+    ASSERT_TRUE(match_context->success());
+    EXPECT_EQ(match_context->matchedTokenCount(), 48u);
+
+    EXPECT_EQ(remote_connectors_[0]->asyncRead(resource, meta, match_context, /*start_token=*/8, /*token_count=*/16),
+              nullptr);
+
+    EXPECT_CALL(*transfer_client_, LoadKvCaches(_, _, _)).Times(2).WillRepeatedly(Return(ClientErrorCode::ER_OK));
+    auto read_context =
+        remote_connectors_[0]->asyncRead(resource, meta, match_context, /*start_token=*/0, /*token_count=*/48);
+    waitAsyncContextDone(read_context);
+    ASSERT_TRUE(read_context->success());
+    EXPECT_EQ(resource->remoteReuseTokenNum(), 48u);
+
+    const std::string write_session_id = "cp_write_session";
+    WriteLocation     empty_write_location({write_session_id, static_cast<size_t>(3), {}});
+    EXPECT_CALL(*meta_clients_[0], StartWrite(Eq("start_write_cp_trace"), canonical_keys, _, _, _))
+        .WillOnce(Return(StartWriteReturnType({ClientErrorCode::ER_OK, empty_write_location})));
+    EXPECT_CALL(*transfer_client_, SaveKvCaches(_, _, _)).Times(0);
+    auto write_context = remote_connectors_[0]->asyncWrite(resource, meta);
+    waitAsyncContextDone(write_context);
+    EXPECT_TRUE(write_context->success());
+}
 
 TEST_F(RemoteConnectorMockOnlyFullTest, rejectsMultiGroupTopologyAtConstruction) {
     CacheConfig multi_group = cache_config_;
