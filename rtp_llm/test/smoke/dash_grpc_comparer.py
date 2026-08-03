@@ -51,10 +51,12 @@ class DashQueryInfo(BaseModel):
     model_name: str = "default"
     return_input_ids: bool = False
     enable_thinking: Optional[bool] = None
+    cancel_after_response_count: Optional[int] = None
 
 
 class DashSmokeResponse(BaseModel):
     response: str
+    cancelled: bool = False
     finish_reason: Optional[int] = None
     generated_ids: List[int] = []
     prompt_token_ids: List[int] = []
@@ -239,6 +241,13 @@ class DashGrpcComparer(BaseComparer):
                 ) from e
             return
 
+        if expect.cancelled:
+            if not actual.cancelled:
+                raise SmokeException(
+                    QueryStatus.COMPARE_FAILED,
+                    "dash stream did not reach the expected CANCELLED status",
+                )
+            return
         if expect.response != actual.response:
             raise SmokeException(
                 QueryStatus.COMPARE_FAILED,
@@ -309,6 +318,14 @@ class DashGrpcComparer(BaseComparer):
             )
 
         sampling = _build_sampling_params(query_info.generate_config)
+        if (
+            query_info.cancel_after_response_count is not None
+            and query_info.cancel_after_response_count <= 0
+        ):
+            raise SmokeException(
+                QueryStatus.VALID_FAILED,
+                "cancel_after_response_count must be greater than 0",
+            )
         request = build_model_infer_request(
             request_id=query_info.request_id or f"smoke_dash_{id(self)}",
             model_name=query_info.model_name,
@@ -330,9 +347,13 @@ class DashGrpcComparer(BaseComparer):
             prompt_token_num: Optional[int] = None
             prompt_cached_token_num: Optional[int] = None
             prompt_token_ids: Optional[List[int]] = None
-            for resp in stub.ModelStreamInfer(
+            cancelled = False
+            response_count = 0
+            call = stub.ModelStreamInfer(
                 iter([request]), timeout=DASH_GRPC_TIMEOUT_SECONDS
-            ):
+            )
+            for resp in call:
+                response_count += 1
                 if resp.error_message:
                     raise SmokeException(
                         QueryStatus.VISIT_FAILED,
@@ -373,6 +394,21 @@ class DashGrpcComparer(BaseComparer):
                     ):
                         values = _int32_values(out, raw)
                         prompt_cached_token_num = values[0] if values else None
+                if (
+                    query_info.cancel_after_response_count is not None
+                    and response_count >= query_info.cancel_after_response_count
+                ):
+                    # cancel() returns False when the RPC already reached a
+                    # terminal state, which is a timing artifact, not a failure.
+                    # The terminal code is the real assertion.
+                    call.cancel()
+                    if call.code() != grpc.StatusCode.CANCELLED:
+                        raise SmokeException(
+                            QueryStatus.VISIT_FAILED,
+                            "dash stream cancellation did not settle as CANCELLED",
+                        )
+                    cancelled = True
+                    break
         finally:
             channel.close()
 
@@ -382,6 +418,7 @@ class DashGrpcComparer(BaseComparer):
             response_text = ""
         actual = DashSmokeResponse(
             response=response_text,
+            cancelled=cancelled,
             finish_reason=last_finish,
             generated_ids=generated_ids,
             prompt_token_ids=prompt_token_ids or [],

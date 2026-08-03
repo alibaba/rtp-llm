@@ -10,7 +10,7 @@ import threading
 import time
 from types import SimpleNamespace
 from unittest import TestCase, main
-from unittest.mock import Mock, patch
+from unittest.mock import MagicMock, Mock, patch
 
 import grpc
 
@@ -186,6 +186,63 @@ class CreateProxyServicerOnLoopTest(TestCase):
         loop, servicer = asyncio.run(run())
         self.assertIs(servicer, sentinel)
         self.assertEqual(created_loops, [loop])
+
+
+class TraceTelemetryLifecycleTest(TestCase):
+    def test_start_initializes_dash_role_and_shutdowns(self) -> None:
+        app = bg_app.DashScApp.__new__(bg_app.DashScApp)
+        app.server_config = SimpleNamespace(
+            rank_id=3,
+            dash_sc_grpc_server_port=18096,
+            ip="127.0.0.1",
+            frontend_server_id="42",
+        )
+        app.py_env_configs = MagicMock()
+        app.py_env_configs.generate_env_config.think_terminate_token_id = -1
+        app.py_env_configs.profiling_debug_logging_config.log_file_backup_count = 1
+        app._grpc_server = MagicMock()
+        app._shutdown_manager = MagicMock()
+        app._shutdown_event = MagicMock()
+        app._install_signal_handlers = MagicMock()
+        app._start_enqueue_loop = MagicMock(return_value=MagicMock())
+        app.stop = MagicMock()
+
+        with patch.object(
+            bg_app, "_is_proxy_mode_enabled", return_value=False
+        ), patch.object(
+            bg_app.ModelFactory, "create_model_config", return_value=MagicMock()
+        ), patch.object(
+            bg_app, "create_backend_rpc_server_visitor", return_value=MagicMock()
+        ), patch.object(
+            bg_app.TokenizerFactory, "create", return_value=MagicMock()
+        ), patch.object(
+            bg_app, "_derive_echo_prefix_ids", return_value=[]
+        ), patch.object(
+            bg_app, "_derive_stop_word_ids_list", return_value=[]
+        ), patch.object(
+            bg_app, "_build_repetition_monitor_config", return_value=MagicMock()
+        ), patch.object(
+            bg_app, "build_think_runtime", return_value=MagicMock()
+        ), patch.object(
+            bg_app, "DashScInferenceServicer", return_value=MagicMock()
+        ), patch.object(
+            bg_app.kmonitor, "init"
+        ), patch.object(
+            bg_app, "_init_trace_telemetry"
+        ) as init_trace, patch.object(
+            bg_app, "_shutdown_trace_telemetry"
+        ) as shutdown_trace:
+            app.start()
+
+        init_trace.assert_called_once_with()
+        shutdown_trace.assert_called_once_with()
+        app.stop.assert_called_once_with()
+
+    def test_init_failure_is_fail_open(self) -> None:
+        with patch.object(
+            bg_app, "init_telemetry", side_effect=RuntimeError("otel init failed")
+        ):
+            bg_app._init_trace_telemetry()
 
 
 class ProxyModeEnvTest(TestCase):

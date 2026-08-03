@@ -50,6 +50,7 @@ from rtp_llm.dash_sc.inference.servicer import (
     _dash_error_mapping_for_ft_exception,
     _dash_error_spec_for_ft_exception,
     _derive_max_token_id,
+    _finish_server_trace,
     _request_qos_level,
     build_think_runtime,
     iter_real_model_stream_infer,
@@ -58,6 +59,7 @@ from rtp_llm.dash_sc.proto import predict_v2_pb2
 from rtp_llm.metrics import AccMetrics
 from rtp_llm.ops import RoleType
 from rtp_llm.server.master_client import MasterClient
+from rtp_llm.telemetry import tracing
 from rtp_llm.utils.base_model_datatypes import (
     AuxInfo,
     GenerateInput,
@@ -1046,7 +1048,9 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         for metadata_qos in ("invalid", "0", "-1", "101"):
             with self.subTest(metadata_qos=metadata_qos):
                 qos_level = _request_qos_level(
-                    DashScRequestControls(request_headers={"x-dashscope-inner-qos-level": "50"}),
+                    DashScRequestControls(
+                        request_headers={"x-dashscope-inner-qos-level": "50"}
+                    ),
                     (("x-dashscope-inner-qos-level", metadata_qos),),
                 )
                 self.assertEqual(50, qos_level)
@@ -1057,7 +1061,9 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         for qos in ("invalid", "0", "-1", "101"):
             with self.subTest(qos=qos):
                 qos_level = _request_qos_level(
-                    DashScRequestControls(request_headers={"x-dashscope-inner-qos-level": qos}),
+                    DashScRequestControls(
+                        request_headers={"x-dashscope-inner-qos-level": qos}
+                    ),
                     (("x-dashscope-inner-qos-level", qos),),
                 )
                 self.assertIsNone(qos_level)
@@ -1078,7 +1084,9 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
                 req,
                 [1, 2],
                 SamplingParams(),
-                DashScRequestControls(request_headers={"x-dashscope-inner-qos-level": "49"}),
+                DashScRequestControls(
+                    request_headers={"x-dashscope-inner-qos-level": "49"}
+                ),
                 _RejectedVisitor(),
                 rtp_llm_request_id=1,
                 invocation_metadata=(("x-dashscope-inner-qos-level", "50"),),
@@ -1765,6 +1773,53 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
 
         self.assertEqual(visitor.enqueue_called, 2)
         self.assertTrue(phase1_stream.aclose_called)
+
+    async def test_consumer_close_closes_phase2_stream_immediately(self) -> None:
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 1], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([128822, 271, 20], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase1_stream = _FakeAsyncStream([phase1])
+        phase2_stream = _FakeAsyncStream([phase2])
+        visitor = _MultiStreamVisitor([phase1_stream, phase2_stream])
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        response_iter = iter_real_model_stream_infer(
+            req,
+            [7, 8, 128821],
+            SamplingParams(),
+            DashScRequestControls(enable_thinking=True),
+            visitor,
+            rtp_llm_request_id=100,
+            echo_prefix_ids=[128821, 198],
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+            phase2_request_id_factory=lambda: 200,
+        )
+
+        while visitor.enqueue_called < 2:
+            await response_iter.__anext__()
+        self.assertFalse(phase2_stream.aclose_called)
+        await response_iter.aclose()
+
+        self.assertTrue(phase1_stream.aclose_called)
+        self.assertTrue(phase2_stream.aclose_called)
 
     async def test_request_disable_thinking_prevents_token1_phase2(self) -> None:
         req = self._minimal_request()
@@ -3701,6 +3756,305 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["aux_info"]["reuse_len"], 7)
         self.assertEqual(payload["aux_info"]["local_reuse_len"], 3)
         self.assertEqual(payload["aux_info"]["memory_reuse_len"], 4)
+
+
+@unittest.skipUnless(tracing.OTEL_AVAILABLE, "opentelemetry not installed")
+class DashScInferenceTracingTest(unittest.IsolatedAsyncioTestCase):
+    async def asyncSetUp(self) -> None:
+        from opentelemetry.sdk.trace.export.in_memory_span_exporter import (
+            InMemorySpanExporter,
+        )
+
+        tracing.shutdown_telemetry()
+        with tracing._state_lock:
+            tracing._state = tracing.TelemetryState.UNINITIALIZED
+            tracing._provider = None
+        tracing.CURRENT_TRACE_STATE.set(None)
+        self.exporter = InMemorySpanExporter()
+        self.assertTrue(
+            tracing.init_telemetry_for_test(self.exporter, role="dash_sc", tp_rank=0)
+        )
+
+    async def asyncTearDown(self) -> None:
+        tracing.shutdown_telemetry()
+        with tracing._state_lock:
+            tracing._state = tracing.TelemetryState.UNINITIALIZED
+            tracing._provider = None
+        tracing.CURRENT_TRACE_STATE.set(None)
+
+    def _finished_spans(self):
+        self.assertTrue(tracing._provider.force_flush())
+        return self.exporter.get_finished_spans()
+
+    @staticmethod
+    def _request(request_id: str) -> predict_v2_pb2.ModelInferRequest:
+        request = predict_v2_pb2.ModelInferRequest()
+        request.id = request_id
+        request.model_name = "default"
+        _add_input_tensor(request, "input_ids", "INT32", [1], struct.pack("<i", 42))
+        return request
+
+    @staticmethod
+    def _terminal_stream():
+        output = GenerateOutput(
+            output_ids=torch.tensor([9], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(
+                input_len=1,
+                output_len=4,
+                reuse_len=0,
+                cost_time=42.5,
+                first_token_cost_time=12.5,
+            ),
+        )
+        return _FakeAsyncStream([GenerateOutputs(generate_outputs=[output])])
+
+    class _ClientSpanVisitor:
+        def __init__(self, stream_factory):
+            self._stream_factory = stream_factory
+            self.metadata = []
+
+        async def enqueue(self, _generate_input):
+            handle, metadata = tracing.start_client_span(
+                "rtp_llm.generate_stream_call", "127.0.0.1:1234"
+            )
+            self.metadata.append(metadata)
+            await asyncio.sleep(0)
+            if handle is not None:
+                handle.finish()
+            return self._stream_factory()
+
+    async def test_upstream_parent_server_client_and_attributes(self) -> None:
+        trace_id_hex = "11111111111111111111111111111111"
+        parent_span_hex = "2222222222222222"
+        metadata = (
+            ("traceparent", f"00-{trace_id_hex}-{parent_span_hex}-01"),
+            ("tracestate", "dash=test"),
+        )
+        visitor = self._ClientSpanVisitor(self._terminal_stream)
+        servicer = DashScInferenceServicer(
+            backend_visitor=visitor, ip="127.0.0.1", port=18096, server_id="7"
+        )
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(
+                _areq_iter([self._request("upstream")]),
+                _FakeGrpcContext(metadata),
+            )
+        )
+
+        self.assertEqual(len(responses), 1)
+        spans = {span.name: span for span in self._finished_spans()}
+        server = spans["dash_sc.ModelStreamInfer"]
+        client = spans["rtp_llm.generate_stream_call"]
+        self.assertEqual(server.context.trace_id, int(trace_id_hex, 16))
+        self.assertEqual(server.parent.span_id, int(parent_span_hex, 16))
+        self.assertEqual(client.parent.span_id, server.context.span_id)
+        self.assertEqual(server.attributes["gen_ai.span.kind"], "LLM")
+        self.assertEqual(server.attributes["gen_ai.operation.name"], "chat")
+        self.assertEqual(server.attributes["gen_ai.system"], "rtp_llm")
+        self.assertEqual(server.attributes["gen_ai.response.time_to_first_token"], 12.5)
+        self.assertEqual(
+            server.attributes["rtp_llm.engine.time_per_output_token_ms"], 10.0
+        )
+        self.assertEqual(server.attributes["rpc.system"], "grpc")
+        self.assertEqual(
+            server.attributes["rpc.method"],
+            "GRPCInferenceService/ModelStreamInfer",
+        )
+        self.assertEqual(
+            server.attributes["request_id"],
+            str(server.attributes["rtp_llm.request_id"]),
+        )
+        self.assertIn("traceparent", dict(visitor.metadata[0]))
+        self.assertEqual(server.status.status_code.name, "OK")
+        self.assertEqual(client.status.status_code.name, "OK")
+
+    async def test_two_phase_engine_tpot_combines_both_streams(self) -> None:
+        record = GrpcAccessRecord(
+            method="ModelStreamInfer",
+            stream_type="bidi_stream",
+            peer="test-peer",
+            start_ts=10.0,
+        )
+        record.record_engine_token_latency(
+            phase="phase1",
+            cost_time_ms=42.5,
+            first_token_cost_time_ms=12.5,
+            output_len=4,
+        )
+        record.record_engine_token_latency(
+            phase="phase2",
+            cost_time_ms=20.0,
+            first_token_cost_time_ms=5.0,
+            output_len=2,
+        )
+
+        self.assertEqual(record.engine_ttft_ms, 12.5)
+        self.assertEqual(record.engine_tpot_ms, 10.0)
+
+    async def test_unavailable_engine_token_latencies_are_omitted(self) -> None:
+        state = tracing.start_server_span("dash_sc.ModelStreamInfer", {})
+        self.assertIsNotNone(state)
+        record = GrpcAccessRecord(
+            method="ModelStreamInfer",
+            stream_type="bidi_stream",
+            peer="test-peer",
+            start_ts=10.0,
+        )
+
+        _finish_server_trace(state, record, None)
+
+        span = self._finished_spans()[-1]
+        self.assertNotIn("gen_ai.response.time_to_first_token", span.attributes)
+        self.assertNotIn("rtp_llm.engine.time_per_output_token_ms", span.attributes)
+
+    async def test_no_parent_bad_request_and_no_frame_statuses(self) -> None:
+        servicer = DashScInferenceServicer(
+            backend_visitor=self._ClientSpanVisitor(self._terminal_stream)
+        )
+        await _drain(
+            servicer.ModelStreamInfer(
+                _areq_iter([self._request("local-root")]), _FakeGrpcContext()
+            )
+        )
+        local_root = self._finished_spans()[-1]
+        self.assertEqual(local_root.name, "dash_sc.ModelStreamInfer")
+        self.assertIsNone(local_root.parent)
+        self.assertEqual(local_root.status.status_code.name, "OK")
+
+        bad = predict_v2_pb2.ModelInferRequest(id="bad", model_name="default")
+        await _drain(servicer.ModelStreamInfer(_areq_iter([bad]), _FakeGrpcContext()))
+        bad_span = self._finished_spans()[-1]
+        self.assertEqual(bad_span.status.status_code.name, "ERROR")
+        self.assertEqual(bad_span.attributes["error.type"], "DASH_ERROR_8")
+
+        await _drain(servicer.ModelStreamInfer(_areq_iter([]), _FakeGrpcContext()))
+        no_frame = self._finished_spans()[-1]
+        self.assertEqual(no_frame.status.status_code.name, "OK")
+        self.assertNotIn("request_id", no_frame.attributes)
+
+    async def test_cancelled_stream_sets_cancelled_status(self) -> None:
+        class _CancelVisitor:
+            async def enqueue(self, _generate_input):
+                async def stream():
+                    raise asyncio.CancelledError()
+                    yield  # pragma: no cover
+
+                return stream()
+
+        servicer = DashScInferenceServicer(backend_visitor=_CancelVisitor())
+        with self.assertRaises(asyncio.CancelledError):
+            await _drain(
+                servicer.ModelStreamInfer(
+                    _areq_iter([self._request("cancel")]), _FakeGrpcContext()
+                )
+            )
+
+        span = self._finished_spans()[-1]
+        self.assertEqual(span.status.status_code.name, "ERROR")
+        self.assertEqual(span.attributes["error.type"], "Cancelled")
+
+    async def test_consumer_close_closes_backend_stream_immediately(self) -> None:
+        chunk = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([42], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=2, reuse_len=0),
+                )
+            ]
+        )
+        backend_stream = _FakeAsyncStream([chunk])
+        servicer = DashScInferenceServicer(backend_visitor=_FakeVisitor(backend_stream))
+        response_iter = servicer.ModelStreamInfer(
+            _areq_iter([self._request("consumer-close")]), _FakeGrpcContext()
+        )
+
+        await response_iter.__anext__()
+        self.assertFalse(backend_stream.aclose_called)
+        await response_iter.aclose()
+
+        self.assertTrue(backend_stream.aclose_called)
+
+    async def test_concurrent_stream_contexts_do_not_cross(self) -> None:
+        visitor = self._ClientSpanVisitor(self._terminal_stream)
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+        trace_ids = (
+            "33333333333333333333333333333333",
+            "44444444444444444444444444444444",
+        )
+
+        async def run(index: int) -> None:
+            metadata = (
+                (
+                    "traceparent",
+                    f"00-{trace_ids[index]}-{index + 1:016x}-01",
+                ),
+            )
+            await _drain(
+                servicer.ModelStreamInfer(
+                    _areq_iter([self._request(f"concurrent-{index}")]),
+                    _FakeGrpcContext(metadata),
+                )
+            )
+
+        await asyncio.gather(run(0), run(1))
+
+        spans_by_trace = {}
+        for span in self._finished_spans():
+            spans_by_trace.setdefault(span.context.trace_id, []).append(span)
+        for trace_id_hex in trace_ids:
+            spans = spans_by_trace[int(trace_id_hex, 16)]
+            self.assertEqual(len(spans), 2)
+            server = next(s for s in spans if s.name == "dash_sc.ModelStreamInfer")
+            client = next(s for s in spans if s.name == "rtp_llm.generate_stream_call")
+            self.assertEqual(client.parent.span_id, server.context.span_id)
+
+    async def test_backend_error_frame_sets_span_error_type(self) -> None:
+        class _BoomVisitor:
+            async def enqueue(self, _generate_input):
+                raise RuntimeError("backend down")
+
+        servicer = DashScInferenceServicer(backend_visitor=_BoomVisitor())
+        await _drain(
+            servicer.ModelStreamInfer(
+                _areq_iter([self._request("backend-error")]), _FakeGrpcContext()
+            )
+        )
+
+        span = self._finished_spans()[-1]
+        self.assertEqual(span.name, "dash_sc.ModelStreamInfer")
+        self.assertEqual(span.status.status_code.name, "ERROR")
+        self.assertEqual(span.attributes["error.type"], "DASH_ERROR_19")
+
+    async def test_prologue_reporting_failure_still_ends_server_span(self) -> None:
+        """A throwing prologue reporting call must not leak the SERVER span.
+
+        ``emit_query_log`` runs inside the handler ``try`` with no exception
+        guard of its own: the ``finally`` still ends the span and clears
+        CURRENT_TRACE_STATE.
+        """
+        servicer = DashScInferenceServicer(
+            backend_visitor=self._ClientSpanVisitor(self._terminal_stream)
+        )
+        with patch(
+            "rtp_llm.dash_sc.inference.servicer.emit_query_log",
+            side_effect=RuntimeError("kmonitor down"),
+        ):
+            with self.assertRaises(RuntimeError):
+                await _drain(
+                    servicer.ModelStreamInfer(
+                        _areq_iter([self._request("prologue-boom")]),
+                        _FakeGrpcContext(),
+                    )
+                )
+
+        span = self._finished_spans()[-1]
+        self.assertEqual(span.name, "dash_sc.ModelStreamInfer")
+        self.assertTrue(span.end_time)
+        self.assertEqual(span.status.status_code.name, "ERROR")
+        self.assertIsNone(tracing.CURRENT_TRACE_STATE.get())
 
 
 if __name__ == "__main__":

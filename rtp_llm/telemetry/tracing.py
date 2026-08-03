@@ -578,6 +578,33 @@ def extract_context_from_headers(headers: Any) -> Optional[Any]:
         return None
 
 
+def metadata_to_headers(metadata: Any) -> Dict[str, Any]:
+    """Converts gRPC metadata to a lowercase, mapping-like carrier.
+
+    Duplicate keys use the last value, matching ``dict(metadata)``. Malformed
+    entries and undecodable byte keys are ignored so tracing cannot fail an RPC.
+    Values are preserved because ``-bin`` metadata may legitimately be bytes.
+    """
+    headers: Dict[str, Any] = {}
+    try:
+        entries = metadata or ()
+        for entry in entries:
+            try:
+                key, value = entry
+                if key is None or value is None:
+                    continue
+                if isinstance(key, bytes):
+                    key = key.decode("ascii")
+                else:
+                    key = str(key)
+                headers[key.lower()] = value
+            except Exception:  # noqa: BLE001 - malformed metadata is ignored
+                continue
+    except Exception:  # noqa: BLE001 - fail-open
+        return {}
+    return headers
+
+
 # Bailian convention: consume `traffic.llm_sdk.*` baggage entries at the HTTP
 # entry and write them (prefix stripped) onto the
 # root SERVER span. This is entry-side CONSUMPTION only, and does not conflict

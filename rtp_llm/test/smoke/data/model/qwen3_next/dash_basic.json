@@ -68,6 +68,23 @@
                 "prompt_token_num": 10,
                 "prompt_cached_token_num": 0
             }
+        },
+        {
+            "endpoint": "dash://ModelStreamInfer",
+            "query": {
+                "prompt": "Continue generating until the client disconnects.",
+                "generate_config": {
+                    "max_new_tokens": 128,
+                    "top_k": 1,
+                    "temperature": 1.0
+                },
+                "cancel_after_response_count": 1,
+                "request_id": "smoke_dash_cancel_after_first_response"
+            },
+            "result": {
+                "response": "",
+                "cancelled": true
+            }
         }
     ]
 }

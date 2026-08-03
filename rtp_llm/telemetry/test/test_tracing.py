@@ -70,6 +70,32 @@ class TestDependencyContract(unittest.TestCase):
             f"opentelemetry runtime unavailable: {tracing._OTEL_IMPORT_ERROR!r}",
         )
 
+    def test_otlp_http_trace_exporter_is_available(self):
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+            OTLPSpanExporter,
+        )
+
+        self.assertIsNotNone(OTLPSpanExporter)
+
+    def test_metadata_to_headers_is_lowercase_last_value_wins(self):
+        metadata = (
+            ("TraceParent", "first"),
+            ("traceparent", "second"),
+            (b"X-Request-ID", "request"),
+            ("binary-bin", b"\x00\x01"),
+            ("malformed",),
+            (None, "ignored"),
+        )
+
+        self.assertEqual(
+            tracing.metadata_to_headers(metadata),
+            {
+                "traceparent": "second",
+                "x-request-id": "request",
+                "binary-bin": b"\x00\x01",
+            },
+        )
+
 
 @unittest.skipUnless(OTEL_AVAILABLE, "opentelemetry not installed")
 class TracingTestCase(unittest.TestCase):
