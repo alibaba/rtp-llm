@@ -361,7 +361,11 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                                         ctx.batch_idx);
                 }
                 normal_combo_tokens_gpu.push_back(state.last_sample_token_gpu.reshape({1}));
-                normal_sequence_lengths_gpu.push_back((state.next_seq_len_gpu - 1).to(torch::kInt32).reshape({1}));
+                // Preserve the device state as the source of truth, but defer
+                // the arithmetic until the whole decode batch is assembled.
+                // Doing `state.next_seq_len_gpu - 1` here launches one CUDA
+                // kernel per request (128 launches at BS128).
+                normal_sequence_lengths_gpu.push_back(state.next_seq_len_gpu.reshape({1}));
                 normal_sequence_lengths_host.data_ptr<int32_t>()[ctx.batch_idx] = state.next_real_seq_len - 1;
                 ctx.input_lengths[ctx.batch_idx]                                = stream->inputLength();
             } else {
@@ -389,8 +393,13 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
     }
 
     if (use_normal_device_state) {
-        model_input.combo_tokens                  = torch::cat(normal_combo_tokens_gpu, 0).to(torch::kInt32);
-        model_input.sequence_lengths              = torch::cat(normal_sequence_lengths_gpu, 0).to(torch::kInt32);
+        auto combo_tokens_gpu          = normal_combo_tokens_gpu.size() == 1 ? normal_combo_tokens_gpu.front() :
+                                                                               torch::cat(normal_combo_tokens_gpu, 0);
+        auto next_sequence_lengths_gpu = normal_sequence_lengths_gpu.size() == 1 ?
+                                             normal_sequence_lengths_gpu.front() :
+                                             torch::cat(normal_sequence_lengths_gpu, 0);
+        model_input.combo_tokens       = combo_tokens_gpu.to(torch::kInt32);
+        model_input.sequence_lengths   = (next_sequence_lengths_gpu - 1).to(torch::kInt32);
         model_input.sequence_lengths_host_for_log = normal_sequence_lengths_host;
     }
     return absl::OkStatus();
