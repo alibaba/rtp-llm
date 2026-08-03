@@ -15,6 +15,11 @@ class LocalRpcServiceImpl: public RpcService::Service {
 public:
     LocalRpcServiceImpl() {}
     virtual ~LocalRpcServiceImpl() {}
+    void prepareLocalServer() {
+        if (!local_server_) {
+            local_server_ = std::make_shared<LocalRpcServer>();
+        }
+    }
     virtual grpc::Status init(const EngineInitParams&                                maga_init_params,
                               std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                               py::object                                             mm_process_engine) {
