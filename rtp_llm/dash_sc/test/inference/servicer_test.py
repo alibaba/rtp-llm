@@ -31,8 +31,9 @@ from rtp_llm.dash_sc.codec import (
     DASH_ERROR_TOO_LONG,
     DASH_ERROR_UNSUPPORTED,
     DashScParameterError,
-    LLMFinishReason,
     DashScRequestControls,
+    LLMFinishReason,
+    ParsedInputIds,
     SamplingParams,
 )
 from rtp_llm.dash_sc.inference.servicer import (
@@ -63,6 +64,13 @@ def _add_input_tensor(
 
 def _unpack_int32_le(raw: bytes) -> list[int]:
     return list(struct.unpack("<%di" % (len(raw) // 4), raw))
+
+
+def _parsed_input_ids(values: list[int]) -> ParsedInputIds:
+    return ParsedInputIds(
+        values=values,
+        tensor=torch.tensor(values, dtype=torch.int32),
+    )
 
 
 class _FakeAsyncStream:
@@ -300,7 +308,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         chunks = await _drain(
             iter_real_model_stream_infer(
                 req,
-                [1, 2],
+                _parsed_input_ids([1, 2]),
                 SamplingParams(),
                 DashScRequestControls(),
                 visitor,
@@ -319,6 +327,31 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(infer.parameters["prompt_token_num"].int64_param, 2)
         self.assertEqual(infer.parameters["prompt_cached_token_num"].int64_param, 0)
 
+    async def test_reuses_parsed_input_tensor_without_copy(self) -> None:
+        req = self._minimal_request()
+        input_ids = _parsed_input_ids([1, 2])
+        out = GenerateOutput(
+            output_ids=torch.tensor([3], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(input_len=2, reuse_len=0),
+        )
+        visitor = _FakeVisitor(
+            _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+
+        await _drain(
+            iter_real_model_stream_infer(
+                req,
+                input_ids,
+                SamplingParams(),
+                DashScRequestControls(),
+                visitor,
+                rtp_llm_request_id=1,
+            )
+        )
+
+        self.assertIs(visitor.last_generate_input.token_ids, input_ids.tensor)
+
     async def test_reasoning_effort_override_reaches_generate_config(self) -> None:
         req = self._minimal_request()
         out = GenerateOutput(
@@ -333,7 +366,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         chunks = await _drain(
             iter_real_model_stream_infer(
                 req,
-                [1, 2],
+                _parsed_input_ids([1, 2]),
                 SamplingParams(),
                 DashScRequestControls(reasoning_effort="xhigh"),
                 visitor,
@@ -361,7 +394,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         chunks = await _drain(
             iter_real_model_stream_infer(
                 req,
-                [1, 2],
+                _parsed_input_ids([1, 2]),
                 SamplingParams(max_new_tokens=3),
                 DashScRequestControls(),
                 visitor,
@@ -380,7 +413,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         chunks = await _drain(
             iter_real_model_stream_infer(
                 req,
-                [1, 2],
+                _parsed_input_ids([1, 2]),
                 SamplingParams(),
                 DashScRequestControls(),
                 visitor,
@@ -405,7 +438,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         chunks = await _drain(
             iter_real_model_stream_infer(
                 req,
-                [1, 2],
+                _parsed_input_ids([1, 2]),
                 SamplingParams(),
                 DashScRequestControls(),
                 _BoomVisitor(),
@@ -440,7 +473,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         chunks = await _drain(
             iter_real_model_stream_infer(
                 req,
-                [1, 2],
+                _parsed_input_ids([1, 2]),
                 SamplingParams(),
                 DashScRequestControls(),
                 _BoomVisitor(),
@@ -456,9 +489,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["status_code"], 503)
         self.assertIn("route failed", payload["status_message"])
         self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.TASK_LIST_FULL)
-        self.assertEqual(
-            access_agg.backend_error_code, "8500_ROUTE_ERROR"
-        )
+        self.assertEqual(access_agg.backend_error_code, "8500_ROUTE_ERROR")
 
     async def test_stream_exception_yields_error_message(self) -> None:
         req = self._minimal_request()
@@ -467,7 +498,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         chunks = await _drain(
             iter_real_model_stream_infer(
                 req,
-                [1, 2],
+                _parsed_input_ids([1, 2]),
                 SamplingParams(),
                 DashScRequestControls(),
                 visitor,
@@ -580,7 +611,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             await _drain(
                 iter_real_model_stream_infer(
                     req,
-                    [1, 2],
+                    _parsed_input_ids([1, 2]),
                     SamplingParams(max_new_think_tokens=0),
                     DashScRequestControls(),
                     visitor,
@@ -624,7 +655,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         chunks = await _drain(
             iter_real_model_stream_infer(
                 req,
-                [1, 2],
+                _parsed_input_ids([1, 2]),
                 SamplingParams(),
                 DashScRequestControls(),
                 visitor,
@@ -697,7 +728,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         chunks = await _drain(
             iter_real_model_stream_infer(
                 req,
-                [7, 8, 128821],
+                _parsed_input_ids([7, 8, 128821]),
                 SamplingParams(
                     response_format=json.dumps({"type": "json_object"}),
                 ),
@@ -782,7 +813,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         chunks = await _drain(
             iter_real_model_stream_infer(
                 req,
-                [7, 8, 128821],
+                _parsed_input_ids([7, 8, 128821]),
                 SamplingParams(
                     max_new_tokens=2,
                     max_new_tokens_from_completion_alias=True,
@@ -838,7 +869,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         chunks = await _drain(
             iter_real_model_stream_infer(
                 req,
-                [1, 2],
+                _parsed_input_ids([1, 2]),
                 SamplingParams(
                     max_new_tokens=100,
                     max_new_tokens_from_completion_alias=True,
@@ -881,7 +912,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         chunks = await _drain(
             iter_real_model_stream_infer(
                 req,
-                [1, 2],
+                _parsed_input_ids([1, 2]),
                 SamplingParams(
                     max_new_tokens=3,
                     max_new_tokens_from_completion_alias=True,
@@ -932,7 +963,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         await _drain(
             iter_real_model_stream_infer(
                 req,
-                [7, 8, 128821],
+                _parsed_input_ids([7, 8, 128821]),
                 SamplingParams(),
                 DashScRequestControls(enable_thinking=True),
                 visitor,
@@ -973,7 +1004,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         chunks = await _drain(
             iter_real_model_stream_infer(
                 req,
-                [7, 8, 128821],
+                _parsed_input_ids([7, 8, 128821]),
                 SamplingParams(),
                 DashScRequestControls(enable_thinking=False, max_new_think_tokens=0),
                 visitor,
@@ -1035,7 +1066,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         chunks = await _drain(
             iter_real_model_stream_infer(
                 req,
-                [7, 8, 128821],
+                _parsed_input_ids([7, 8, 128821]),
                 SamplingParams(),
                 DashScRequestControls(enable_thinking=True),
                 visitor,
@@ -1084,7 +1115,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         chunks = await _drain(
             iter_real_model_stream_infer(
                 req,
-                [1, 2],
+                _parsed_input_ids([1, 2]),
                 SamplingParams(),
                 DashScRequestControls(),
                 visitor,
@@ -1138,7 +1169,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         chunks = await _drain(
             iter_real_model_stream_infer(
                 req,
-                [7, 8, 128821],
+                _parsed_input_ids([7, 8, 128821]),
                 SamplingParams(),
                 DashScRequestControls(enable_thinking=True),
                 visitor,
@@ -1190,7 +1221,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         chunks = await _drain(
             iter_real_model_stream_infer(
                 req,
-                [7, 8, 128821],
+                _parsed_input_ids([7, 8, 128821]),
                 SamplingParams(),
                 DashScRequestControls(enable_thinking=True),
                 visitor,
@@ -1243,7 +1274,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         chunks = await _drain(
             iter_real_model_stream_infer(
                 req,
-                [7, 8, 128821],
+                _parsed_input_ids([7, 8, 128821]),
                 SamplingParams(),
                 DashScRequestControls(enable_thinking=True),
                 visitor,
@@ -1302,7 +1333,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             await _drain(
                 iter_real_model_stream_infer(
                     req,
-                    [7, 8, 128821],
+                    _parsed_input_ids([7, 8, 128821]),
                     SamplingParams(),
                     DashScRequestControls(enable_thinking=True),
                     visitor,
@@ -1328,10 +1359,70 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(value, 1)
         self.assertEqual(tags["protocol"], "dash_sc_grpc")
 
-    async def test_phase2_strips_leading_thinking_then_close(self) -> None:
-        """Phase-2 model occasionally emits accidental thinking followed by
-        ``</think>`` before the real answer. The leading reasoning + close
-        sequence must be stripped so only post-close tokens reach the client."""
+    async def test_phase2_grammar_streams_each_backend_chunk_immediately(self) -> None:
+        req = self._minimal_request()
+        phase1 = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([10, 1], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2_first = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([20, 21], dtype=torch.int32),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2_final = GenerateOutputs(
+            generate_outputs=[
+                GenerateOutput(
+                    output_ids=torch.tensor([22], dtype=torch.int32),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=4, reuse_len=0),
+                )
+            ]
+        )
+        phase2_stream = _FakeAsyncStream([phase2_first, phase2_final])
+        visitor = _MultiStreamVisitor([_FakeAsyncStream([phase1]), phase2_stream])
+        tok = _dsv4_tokenizer()
+        env_cfg = _GenerateEnvCfg()
+        responses = iter_real_model_stream_infer(
+            req,
+            _parsed_input_ids([7, 8, 128821]),
+            SamplingParams(
+                response_format=json.dumps({"type": "json_object"}),
+            ),
+            DashScRequestControls(enable_thinking=True),
+            visitor,
+            rtp_llm_request_id=100,
+            echo_prefix_ids=[128821, 198],
+            tokenizer=tok,
+            generate_env_config=env_cfg,
+            think_runtime=build_think_runtime(tok, env_cfg, "deepseek_v4"),
+            phase2_request_id_factory=lambda: 200,
+        )
+
+        first_phase2 = None
+        async for response in responses:
+            if response.infer_response.id.endswith("-2"):
+                first_phase2 = response
+                break
+
+        self.assertIsNotNone(first_phase2)
+        self.assertEqual(_gen_ids(first_phase2), [20, 21])
+        self.assertEqual(phase2_stream._emitted, 1)
+
+        remaining = await _drain(responses)
+        self.assertEqual([_gen_ids(chunk) for chunk in remaining], [[22]])
+
+    async def test_phase2_preserves_leading_thinking_then_close(self) -> None:
+        """Phase-2 output is streamed unchanged, matching DashLLM ownership."""
         req = self._minimal_request()
         phase1 = GenerateOutputs(
             generate_outputs=[
@@ -1379,7 +1470,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         chunks = await _drain(
             iter_real_model_stream_infer(
                 req,
-                [7, 8, 128821],
+                _parsed_input_ids([7, 8, 128821]),
                 SamplingParams(),
                 DashScRequestControls(enable_thinking=True),
                 visitor,
@@ -1392,18 +1483,16 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
             )
         )
 
-        # Phase-1 emits two chunks (truncated content then synthesised eos).
-        # Phase-2 sees [55, 56] (accidental thinking, buffered then dropped),
-        # then [128822, 271, 20, 21] (close + tail content). Client only sees
-        # [20, 21] from phase-2.
+        # Phase-2 servicer output is a transparent chunk-for-chunk pass-through.
         phase2_chunks = [c for c in chunks if c.infer_response.id.endswith("-2")]
-        self.assertEqual(len(phase2_chunks), 1)
-        self.assertEqual(_gen_ids(phase2_chunks[0]), [20, 21])
+        self.assertEqual(len(phase2_chunks), 2)
+        self.assertEqual(
+            [_gen_ids(chunk) for chunk in phase2_chunks],
+            [[55, 56], [128822, 271, 20, 21]],
+        )
 
-    async def test_phase2_strips_trailing_eos_artifact(self) -> None:
-        """Phase-2 ends with a structural ``</think>\\n\\n`` closing-tag
-        artifact mirroring the empty-think prompt body. That trailing
-        sequence must not leak into ``content``."""
+    async def test_phase2_preserves_trailing_think_close(self) -> None:
+        """Phase-2 trailing close tokens remain backend-owned output."""
         req = self._minimal_request()
         phase1 = GenerateOutputs(
             generate_outputs=[
@@ -1441,7 +1530,7 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         chunks = await _drain(
             iter_real_model_stream_infer(
                 req,
-                [7, 8, 128821],
+                _parsed_input_ids([7, 8, 128821]),
                 SamplingParams(),
                 DashScRequestControls(enable_thinking=True),
                 visitor,
@@ -1456,8 +1545,10 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
 
         phase2_chunks = [c for c in chunks if c.infer_response.id.endswith("-2")]
         self.assertEqual(len(phase2_chunks), 1)
-        # Trailing [128822, 271] is stripped; only the real answer ids survive.
-        self.assertEqual(_gen_ids(phase2_chunks[0]), [30, 31, 32])
+        self.assertEqual(
+            _gen_ids(phase2_chunks[0]),
+            [30, 31, 32, 128822, 271],
+        )
 
 
 class IterRealModelStreamInferEchoTest(unittest.IsolatedAsyncioTestCase):
@@ -1483,7 +1574,7 @@ class IterRealModelStreamInferEchoTest(unittest.IsolatedAsyncioTestCase):
         return await _drain(
             iter_real_model_stream_infer(
                 self._req(),
-                input_ids,
+                _parsed_input_ids(input_ids),
                 SamplingParams(),
                 DashScRequestControls(),
                 visitor,
@@ -1563,7 +1654,7 @@ class IterRealModelStreamInferStopWordsTest(unittest.IsolatedAsyncioTestCase):
         await _drain(
             iter_real_model_stream_infer(
                 self._req(),
-                [42],
+                _parsed_input_ids([42]),
                 SamplingParams(),
                 DashScRequestControls(),
                 _CaptureVisitor(),
@@ -1599,7 +1690,7 @@ class IterRealModelStreamInferStopWordsTest(unittest.IsolatedAsyncioTestCase):
         await _drain(
             iter_real_model_stream_infer(
                 self._req(),
-                [42],
+                _parsed_input_ids([42]),
                 SamplingParams(stop_words_list=((154827,),)),
                 DashScRequestControls(),
                 _CaptureVisitor(),
@@ -1659,6 +1750,26 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         )
         return _FakeVisitor(
             _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
+        )
+
+    async def test_int64_input_overflow_is_rejected_at_parse_boundary(
+        self,
+    ) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        req.id = "overflow"
+        req.model_name = "default"
+        _add_input_tensor(req, "input_ids", "INT64", [1], struct.pack("<q", 2**40))
+        visitor = _FakeVisitor(_FakeAsyncStream([]))
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+
+        responses = await _drain(
+            servicer.ModelStreamInfer(_areq_iter([req]), _FakeGrpcContext())
+        )
+
+        self.assertEqual(visitor.enqueue_called, 0)
+        self.assertEqual(len(responses), 1)
+        self.assertEqual(
+            _finish_reason(responses[0]), DASH_ERROR_INTERNAL.finish_reason
         )
 
     async def test_access_log_records_input_and_generated_ids(self) -> None:

@@ -147,6 +147,6 @@ bazel test //rtp_llm/dash_sc/test:proxy_servicer_test
 bazel test //rtp_llm/dash_sc/test:access_log_test
 ```
 
-`codec_test` 覆盖请求解析、`SamplingParams` / `DashScRequestControls` 以及 `build_stream_response_from_generate_outputs`；
+`codec_test` 覆盖请求解析、`SamplingParams` / `DashScRequestControls`、`ParsedInputIds` 以及 `StreamResponseBuilder`；
 `inference_servicer_test` 覆盖 `iter_real_model_stream_infer`（mock `run_enqueue_sync`）、`DashScInferenceServicer.ModelStreamInfer` 与缺 `input_ids` 错误路径；
 `proxy_servicer_test` 覆盖 gRPC proxy 转发、下游异常和流关闭路径。
