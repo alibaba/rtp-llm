@@ -4,15 +4,18 @@ This directory is the self-contained launcher for the K3 performance-only path:
 
 - TP8 / EP8, batch 1, 65,536 input tokens, one generated token.
 - `KDA -> KDA -> KDA -> MLA`, with three MoE layers.
-- cuLA `4db9fb97b791ace6b8c7709b9ead8016b9c0c72a` is the default KDA
-  backend. Its SM100 kernel publishes exact FP32 recurrent-state checkpoints
-  every 4K tokens without splitting the 64K recurrence. This revision also
-  supports packed varlen checkpoints, accepts non-contiguous beta logits and
-  uses 64-bit flattened offsets beyond the H64 256K-token boundary; the
-  current K3 optimized path uses its fixed-length checkpoint API.
+- cuLA `ed777e01f2c1158fd748e2d58f3e00ac96ce53ea`, published as
+  `0.1.dev1+ed777e01.cu132`, is the default KDA backend. Its SM100 kernel
+  publishes exact FP32 recurrent-state checkpoints every 4K tokens without
+  splitting the 64K recurrence. This revision also supports packed varlen
+  checkpoints, accepts non-contiguous beta logits and uses 64-bit flattened
+  offsets beyond the H64 256K-token boundary. It supports checkpoint writes
+  with CUTLASS DSL 4.4.2 and keeps checkpoint-state base offsets in 64 bits;
+  the current K3 optimized path uses its fixed-length checkpoint API.
 - FlashKDA `fa7eb894824a` remains selectable for same-branch A/B profiling.
-- cuLA uses FLA `3a9ce1c83a13994d824dbb3421e2989d330bb38b` plus the pinned
-  Python 3.10 / Triton 3.6 compatibility and varlen 64-bit-offset patches.
+- cuLA uses the matching FLA `0.5.0+rtp.3a9ce1c.3` artifact, based on
+  `3a9ce1c83a13994d824dbb3421e2989d330bb38b` plus the pinned Python 3.10 /
+  Triton 3.6 compatibility and varlen 64-bit-offset patches.
 - DeepGEMM `f5a76426fa084087169693fd0cd815223576d6e9` with K3 SiTU
   and the CUDA13 float-NTTP fix for MegaMoE.
 - RTP native MLA.
@@ -21,11 +24,17 @@ This directory is the self-contained launcher for the K3 performance-only path:
 - Accuracy/reference/trace-comparison paths are rejected by
   `KIMI_K3_PERF_MODE=1`.
 
-The checked-in operator wheels are intentionally limited to the reference
-environment: CPython 3.10, PyTorch 2.11.0+cu130, CUDA 13.0 and L20D/B300
+The checked-in operator bundle is validated for the reference environment:
+CPython 3.10, PyTorch 2.11.0+cu130, CUDA 13.0 and L20D/B300 `sm_103a`. The
+cuLA wheel's `.cu132` local-version suffix records its CUDA 13.2 build
+toolchain; it is not a platform tag and does not require PyTorch cu132. Its
+native extension contains both `sm_100a` and `sm_103a` cubins and is validated
+on the pinned cu130 runtime; the other native artifacts in this bundle target
 `sm_103a`. All four artifacts are verified through `wheels/SHA256SUMS` and
 installed into an isolated runtime overlay; they do not change RTP's shared
-Bazel/Python dependency set.
+Bazel/Python dependency set. Because installation uses `--no-deps`, the
+runtime must provide the wheels' declared dependencies; in particular, cuLA
+requires `nvidia-cutlass-dsl>=4.4.2` and `apache-tvm-ffi>=0.1.9`.
 
 ## One command per KDA communication backend
 
@@ -72,27 +81,25 @@ leave that service running. Override `RUN_ROOT`, `START_PORT` or
 output base so the incremental build reuses its external repositories.
 Set `KIMI_K3_KDA_BACKEND=flash_kda` for an A/B run; the default is `cula`.
 
-## Rebuild the operators
+## Refresh or rebuild the operators
 
 The pinned wheels make the timeline reproducible without network access or
 rebuilding operators.
-To rebuild from source:
+To fetch the canonical cuLA/FLA artifacts and rebuild the two native auxiliary
+operators:
 
 ```bash
 ./example/kimi_k3_prefill_perf/build_operator_wheels.sh
 ```
 
-This clones the pinned FlashKDA, internal cuLA and DeepGEMM revisions,
-initializes their submodules, builds the patched FLA runtime, performs a fresh
-SM103-only cuLA native build, applies
-`patches/deepgemm_cuda13_float_nttp.patch` and the cuLA dynamic checkpoint
-pointer fix, and builds all operator wheels. Rebuilding the native cuLA
-extension is required because the latest long-sequence fix changes C++ W/U
-address calculation; overlaying Python on an older `.so` is not valid. The
-cuLA pointer patch preserves the kernel math while making FP32 page-boundary
-state publication valid for CUTLASS DSL dynamic indices. The builder checks
-the pinned Python/PyTorch/CUDA environment and publishes only the four exact
-wheel filenames after all builds complete successfully. Set
+This downloads the ArtLab-published cuLA and matching FLA wheels, verifies
+their pinned SHA-256 digests, then clones and builds the pinned FlashKDA and
+DeepGEMM revisions. Only DeepGEMM still needs
+`patches/deepgemm_cuda13_float_nttp.patch`; cuLA's checkpoint-pointer and
+64-bit checkpoint-offset fixes are already part of `ed777e01`, so RTP applies
+no cuLA source patch. The builder checks the pinned Python/PyTorch/CUDA
+environment and publishes only the four exact wheel filenames after all
+downloads and builds complete successfully. Set
 `K3_PERF_OPS_BUILD_ROOT` to a scratch parent directory when needed; the
 builder creates and removes only its own unique child directory.
 
