@@ -76,7 +76,12 @@ class BenchmarkResult:
 class WorkItem:
     """Minimal MMWorkItem interface consumed by MMScheduler."""
 
-    def __init__(self, preprocess_result: Any, mm_type: Any):
+    def __init__(
+        self,
+        preprocess_result: Any,
+        mm_type: Any,
+        work_estimate: Any,
+    ):
         self.preprocess_result = preprocess_result
         self.mm_type = mm_type
         self.mm_inputs = [None]
@@ -84,6 +89,7 @@ class WorkItem:
         self.need_check_cache = False
         self.cache_key = ""
         self.embedding_result = None
+        self.work_estimate = work_estimate
 
 
 class GpuMonitor(threading.Thread):
@@ -173,6 +179,11 @@ def parse_args() -> argparse.Namespace:
     parser.add_argument("--max-repeat-attempts", type=int, default=20)
     parser.add_argument(
         "--load-checkpoint-weights",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument(
+        "--validate-mixed-batch",
         action=argparse.BooleanOptionalAction,
         default=True,
     )
@@ -298,6 +309,106 @@ def make_image_data(mm: Any, case: ImageCase) -> Tuple[Any, Dict[str, int]]:
     }
 
 
+def validate_mixed_batch(
+    mm: Any,
+    image_cases: Sequence[ImageCase],
+    mm_type: Any,
+) -> None:
+    """Compare one scheduler-packed mixed batch with per-image references."""
+    if len(image_cases) < 2:
+        return
+
+    from rtp_llm.multimodal.mm_scheduler import MMScheduler
+
+    work_items = []
+    references = []
+    for index, image_case in enumerate(image_cases):
+        data, image_info = make_image_data(mm, image_case)
+        # Distinct pixel values make an accidental result reorder observable,
+        # including when two source sizes resize to the same target grid.
+        data[0].fill_((index + 1) * 37)
+        estimate = mm.estimate_work(data, mm_type)
+        if (
+            estimate.input_patches != image_info["input_patches"]
+            or estimate.output_tokens != image_info["output_tokens"]
+        ):
+            raise RuntimeError(
+                "M3VL work estimate disagrees with mixed-batch metadata: "
+                f"estimate={estimate}, image_info={image_info}"
+            )
+        work_items.append(WorkItem(data, mm_type, estimate))
+        references.append(mm.embedding(data, mm_type=mm_type))
+    torch.cuda.synchronize()
+
+    batch_sizes: List[int] = []
+    batch_lock = threading.Lock()
+    original_batched_embedding = mm.batched_embedding
+
+    def recorded_batched_embedding(
+        data_list: List[Any], mm_types: List[Any], **kwargs: Any
+    ) -> Any:
+        with batch_lock:
+            batch_sizes.append(len(data_list))
+        return original_batched_embedding(data_list, mm_types, **kwargs)
+
+    scheduler = MMScheduler(
+        mm,
+        batch_wait_ms=300,
+        max_batch_size=len(work_items),
+        max_batch_images=len(work_items),
+    )
+    mm.batched_embedding = recorded_batched_embedding
+    barrier = threading.Barrier(len(work_items))
+    errors: List[BaseException] = []
+
+    def submit(work_item: WorkItem) -> None:
+        try:
+            barrier.wait()
+            scheduler.submit_and_wait([work_item])
+        except BaseException as error:
+            errors.append(error)
+
+    threads = [
+        threading.Thread(target=submit, args=(work_item,)) for work_item in work_items
+    ]
+    try:
+        for thread in threads:
+            thread.start()
+        for thread in threads:
+            thread.join()
+        torch.cuda.synchronize()
+    finally:
+        scheduler.close()
+        mm.batched_embedding = original_batched_embedding
+
+    if errors:
+        raise errors[0]
+    if batch_sizes != [len(work_items)]:
+        raise RuntimeError(
+            "mixed-batch validation did not produce exactly one packed "
+            f"forward: batch_sizes={batch_sizes}"
+        )
+
+    for image_case, work_item, reference in zip(image_cases, work_items, references):
+        actual = work_item.embedding_result
+        if actual is None:
+            raise RuntimeError(f"missing mixed-batch output for {image_case.name}")
+        torch.testing.assert_close(
+            actual[0],
+            reference[0],
+            rtol=2e-2,
+            atol=2e-2,
+        )
+        torch.testing.assert_close(actual[1], reference[1], rtol=0, atol=0)
+
+    print(
+        "mixed-batch correctness: "
+        f"{','.join(case.name for case in image_cases)} "
+        f"packed={batch_sizes[0]} order=ok embeddings=close",
+        flush=True,
+    )
+
+
 def wait_for_gpus_idle(
     physical_device: int,
     allow_busy: bool,
@@ -380,6 +491,15 @@ def run_point(
         max_batch_size=args.max_batch_size,
         max_batch_images=args.max_batch_images,
     )
+    work_estimate = mm.estimate_work(data, mm_type)
+    if (
+        work_estimate.input_patches != image_info["input_patches"]
+        or work_estimate.output_tokens != image_info["output_tokens"]
+    ):
+        raise RuntimeError(
+            "M3VL work estimate disagrees with benchmark image metadata: "
+            f"estimate={work_estimate}, image_info={image_info}"
+        )
 
     for _ in range(args.warmup_runs):
         warmup_outputs = mm.batched_embedding(
@@ -417,7 +537,7 @@ def run_point(
             start_event.wait()
             iteration = 0
             while iteration < iterations or time.perf_counter() < deadline[0]:
-                work_item = WorkItem(data, mm_type)
+                work_item = WorkItem(data, mm_type, work_estimate)
                 start = time.perf_counter()
                 scheduler.submit_and_wait([work_item])
                 # Scheduler completion means kernels were submitted. Synchronize
@@ -695,8 +815,12 @@ def main() -> None:
         "idle_seconds": args.idle_seconds,
         "max_repeat_attempts": args.max_repeat_attempts,
         "allow_busy_gpu": args.allow_busy_gpu,
+        "validate_mixed_batch": args.validate_mixed_batch,
         "image_cases": [asdict(case) for case in image_cases],
     }
+
+    if args.validate_mixed_batch:
+        validate_mixed_batch(mm, image_cases, MMUrlType.IMAGE)
 
     results = []
     repetitions = []
