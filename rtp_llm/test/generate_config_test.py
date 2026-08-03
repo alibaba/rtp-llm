@@ -1,3 +1,4 @@
+import copy
 import os
 from typing import Any, List, Optional
 from unittest import TestCase, main
@@ -20,6 +21,10 @@ from rtp_llm.openai.api_datatype import ChatCompletionRequest, GenerateConfig
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.ops import SpecialTokens
 from rtp_llm.pipeline.pipeline import Pipeline
+from rtp_llm.structure.request_extractor import (
+    RequestExtractor,
+    request_id_field_name,
+)
 
 
 class GenerateConfigTest(TestCase):
@@ -242,13 +247,9 @@ class GenerateConfigTest(TestCase):
         )
 
         def snapshot(c):
-            return (
-                list(c.select_tokens_id),
-                [list(x) for x in c.stop_words_list],
-                list(c.stop_words_str),
-                list(c.end_think_token_ids),
-                c.in_think_mode,
-            )
+            # 全量 dump 而不是列举字段:prepare 链未来 mutate 任何新字段都会被这里
+            # 捕获,不需要同步维护一张白名单。
+            return copy.deepcopy(c.model_dump())
 
         first = None
         for _ in range(3):
@@ -263,6 +264,59 @@ class GenerateConfigTest(TestCase):
             if first is None:
                 first = snap
             self.assertEqual(snap, first)
+
+    def test_batch_adapter_name_shallow_copy_no_accumulation(self):
+        # 累积缺陷有两条触发路径,这条覆盖第二条:_get_adapter 在带 adapter_name 时
+        # 对每条 query 做 copy.copy(request_extractor.py),浅拷贝让各副本与原对象
+        # 共享 select_tokens_id / stop_words_* 的 list 引用,重复 append 依然互相
+        # 可见。(第一条是不带 adapter_name 时的 [config] * N,见
+        # test_batch_shared_config_no_accumulation。)
+        special_tokens = SpecialTokens()
+        special_tokens.stop_words_id_list = [[1233, 19912]]
+        special_tokens.stop_words_str_list = ["gg"]
+        tokenizer = QWenTokenizer(
+            f"{self.test_data_path}/model_test/fake_test/testdata/qwen_7b/tokenizer/qwen.tiktoken"
+        )
+
+        request, _ = RequestExtractor(GenerateConfig()).extract_request(
+            {
+                "prompt_batch": ["q1", "q2", "q3"],
+                "generate_config": {
+                    "select_tokens_str": ["1", "2", "3", "4"],
+                    "adapter_name": ["lora_a", "lora_b", "lora_c"],
+                },
+                request_id_field_name: 1,
+            }
+        )
+        configs = request.generate_configs
+        self.assertEqual(len(configs), 3)
+        self.assertEqual(
+            [c.adapter_name for c in configs], ["lora_a", "lora_b", "lora_c"]
+        )
+        # 浅拷贝分支:各副本是不同对象,但 list 字段仍共享同一引用——这正是重复
+        # append 会串扰的原因。
+        self.assertIsNot(configs[0], configs[1])
+        self.assertIs(configs[0].select_tokens_id, configs[1].select_tokens_id)
+
+        expected_ids = []
+        for token_str in ["1", "2", "3", "4"]:
+            for token_id in tokenizer.encode(token_str):
+                if token_id not in expected_ids:
+                    expected_ids.append(token_id)
+
+        for config in configs:
+            Pipeline.create_generate_config(
+                generate_config=config,
+                vocab_size=200000,
+                special_tokens=special_tokens,
+                tokenizer=tokenizer,
+                generate_env_config=GenerateEnvConfig(),
+            )
+
+        for config in configs:
+            self.assertEqual(config.select_tokens_id, expected_ids)
+            self.assertEqual(config.stop_words_str.count("gg"), 1)
+            self.assertEqual(config.stop_words_list.count([1233, 19912]), 1)
 
     def test_same(self):
         special_tokens = SpecialTokens()

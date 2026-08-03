@@ -502,6 +502,10 @@ class GenerateConfig(BaseModel):
         # 去重合并 select_tokens_str 派生的 id(而非 +=):保留与 select_tokens_id
         # 的并集语义(str 不会被丢弃),同时保证幂等——batch 共享同一 config 对象
         # 重复调用时不累积。
+        # 契约:select_tokens_id 是「去重并集、显式 id 在前、str 派生 id 按序 append
+        # 在后」,消费端(NormalGenerateStream 的 index_select)按此顺序逐列取 logits。
+        # C++ 前端 Tokenizer::convertSelectTokens 是「不去重 + insert 到列表头」,
+        # 顺序与本实现相反——该差异在本次修改之前就已存在,未在此处对齐。
         for token_str in self.select_tokens_str:
             for token_id in tokenizer.encode(token_str):
                 if token_id not in self.select_tokens_id:
