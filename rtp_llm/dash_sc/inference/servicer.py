@@ -39,6 +39,7 @@ from rtp_llm.config.response_format_builder import (
     ReasoningFormat,
     ResponseFormatBuilder,
 )
+from rtp_llm.config.think_tag import normalize_think_tag
 from rtp_llm.dash_sc.access_log import emit_access_log, emit_query_log
 from rtp_llm.dash_sc.access_record import GrpcAccessRecord, to_optional_int
 from rtp_llm.dash_sc.codec import (
@@ -232,12 +233,12 @@ class _BackendVisitor(Protocol):
 
 
 def _decode_env_tag(value: str) -> str:
-    """Unescape literal ``\\n`` etc. from a configured think tag.
+    """Normalize literal newlines from a configured think tag.
 
     No literal default here — ``GenerateEnvConfig`` is the single source of truth
     for tag defaults. Empty value returns "".
     """
-    return (value or "").encode("utf-8").decode("unicode_escape")
+    return normalize_think_tag(value or "")
 
 
 def _encode_tag(tokenizer: BaseTokenizer | None, text: str) -> list[int]:

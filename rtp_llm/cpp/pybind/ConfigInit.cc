@@ -343,9 +343,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error("Invalid DashScGrpcConfig state!");
                 DashScGrpcConfig c;
                 try {
-                    py::dict client_dict = t[0].cast<py::dict>();
-                    py::dict server_dict = t[1].cast<py::dict>();
-                    int      mw          = (t.size() == 3) ? t[2].cast<int>() : 4;
+                    py::dict           client_dict = t[0].cast<py::dict>();
+                    py::dict           server_dict = t[1].cast<py::dict>();
+                    int                mw          = (t.size() == 3) ? t[2].cast<int>() : 4;
                     std::ostringstream oss;
                     oss << "{\"client_config\": {";
                     bool first = true;
@@ -1344,20 +1344,23 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.compiler_cache_bytes);
             },
             [](py::tuple t) {
-                if (t.size() != 3 && t.size() != 4 && t.size() != 5)
+                if (t.size() != 5)
                     throw std::runtime_error("Invalid state!");
                 GrammarConfig c;
                 try {
-                    if (t.size() == 3) {
-                        c.constrained_json_disable_any_whitespace = t[0].cast<bool>();
-                        c.num_workers                             = t[1].cast<int>();
-                        c.compiler_cache_bytes                    = t[2].cast<int64_t>();
-                    } else if (t.size() == 4) {
-                        c.constrained_json_disable_any_whitespace = t[0].cast<bool>();
-                        c.num_workers                             = t[1].cast<int>();
-                        c.override_stop_tokens                    = t[2].cast<std::vector<int32_t>>();
-                        c.compiler_cache_bytes                    = t[3].cast<int64_t>();
+                    if (py::isinstance<py::str>(t[0])) {
+                        // Legacy layout:
+                        // (grammar_backend, disable_any_whitespace, num_workers, tokenizer_info_json,
+                        //  override_stop_tokens). grammar_backend was removed; validate and discard it.
+                        static_cast<void>(t[0].cast<std::string>());
+                        c.constrained_json_disable_any_whitespace = t[1].cast<bool>();
+                        c.num_workers                             = t[2].cast<int>();
+                        c.tokenizer_info_json                     = t[3].cast<std::string>();
+                        c.override_stop_tokens                    = t[4].cast<std::vector<int32_t>>();
                     } else {
+                        // Current layout:
+                        // (disable_any_whitespace, num_workers, tokenizer_info_json, override_stop_tokens,
+                        //  compiler_cache_bytes).
                         c.constrained_json_disable_any_whitespace = t[0].cast<bool>();
                         c.num_workers                             = t[1].cast<int>();
                         c.tokenizer_info_json                     = t[2].cast<std::string>();

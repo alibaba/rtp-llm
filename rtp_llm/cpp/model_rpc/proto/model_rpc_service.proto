@@ -136,7 +136,10 @@ message GenerateConfigPB {
     google.protobuf.StringValue regex = 70;
     google.protobuf.StringValue ebnf = 71;
     google.protobuf.StringValue structural_tag = 72;
-    google.protobuf.StringValue response_format = 73;
+    // Deprecated high-level envelope. Request entrypoints project it onto
+    // fields 69-72 before RPC serialization. Retain field 73 for wire
+    // compatibility, but new clients and the C++ engine must not use it.
+    google.protobuf.StringValue response_format = 73 [deprecated = true];
     bool grammar_terminate_without_stop_token = 74;
 }
 

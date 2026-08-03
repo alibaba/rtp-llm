@@ -60,6 +60,16 @@ class DeriveEchoPrefixIdsTest(TestCase):
         # Must encode without special tokens so only the tag bytes become ids.
         self.assertEqual(tok.encode_calls, [("<think>\n", False)])
 
+    def test_normalizes_literal_newline_before_encoding(self) -> None:
+        tok = _FakeTokenizer(ids=[154841])
+
+        ids = _derive_echo_prefix_ids(
+            _EnvCfg(think_start_tag="<think>\\n"), _BaseTok(tok)
+        )
+
+        self.assertEqual(ids, [154841])
+        self.assertEqual(tok.encode_calls, [("<think>\n", False)])
+
     def test_disabled_when_think_mode_off(self) -> None:
         tok = _FakeTokenizer(ids=[154841])
         ids = _derive_echo_prefix_ids(_EnvCfg(think_mode=0), _BaseTok(tok))

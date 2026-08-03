@@ -16,6 +16,7 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
+from rtp_llm.config.think_tag import normalize_think_tag
 from rtp_llm.frontend.recommendation_parser import parse_and_fill_banned_combo
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.openai.api_datatype import (
@@ -182,9 +183,7 @@ class OpenaiEndpoint(object):
         if end_token_id != -1:
             config.end_think_token_ids = [end_token_id]
             return
-        think_end_tag = self.generate_env_config.think_end_tag.encode("utf-8").decode(
-            "unicode_escape"
-        )
+        think_end_tag = normalize_think_tag(self.generate_env_config.think_end_tag)
         config.end_think_token_ids = self.tokenizer.encode(
             think_end_tag, add_special_tokens=False
         )

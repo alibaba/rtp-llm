@@ -91,9 +91,9 @@ class FakeModelRpcClient(ModelRpcClient):
     def __init__(self):
         # Call parent __init__ with minimal required parameters
         super().__init__(
-            [],     # addresses: empty list for fake client
-            {},     # client_config: empty dict for fake client
-            0,      # max_rpc_timeout_ms
+            [],  # addresses: empty list for fake client
+            {},  # client_config: empty dict for fake client
+            0,  # max_rpc_timeout_ms
             False,  # decode_entrance
         )
         self.stub = FakeStub()
@@ -199,6 +199,7 @@ class ModelRpcClientTest(TestCase):
                 self.assertEqual(config.model_dump(), config_before_rpc)
                 self.assertTrue(input_pb.generate_config.HasField(field))
                 self.assertEqual(field_value(input_pb.generate_config).value, expected)
+                self.assertFalse(input_pb.generate_config.HasField("response_format"))
                 for other_field in grammar_fields:
                     if other_field != field:
                         self.assertFalse(input_pb.generate_config.HasField(other_field))

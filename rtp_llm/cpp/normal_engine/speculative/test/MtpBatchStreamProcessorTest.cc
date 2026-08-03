@@ -270,6 +270,7 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputAppliesGrammarMask
     auto sampler_inputs =
         processor.gatherSpecSamplerInput(stream_groups, model_input, model_output, spec_logits_result);
     ASSERT_TRUE(sampler_inputs.ok());
+    EXPECT_EQ(sampler_inputs.value().logits.data_ptr(), model_output.logits.data_ptr());
 
     const auto& finished_mask = sampler_inputs.value().finished_mask;
     ASSERT_EQ(finished_mask.numel(), 3);
@@ -283,6 +284,35 @@ TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputAppliesGrammarMask
     EXPECT_LT(logits.data_ptr<float>()[4], -1e20f);
     EXPECT_FLOAT_EQ(logits.data_ptr<float>()[5], 1.2f);
     EXPECT_LT(logits.data_ptr<float>()[11], -1e20f);
+}
+
+TEST_F(MtpBatchStreamProcessorTest, testGatherSpecSamplerInputReusesLogitsWithoutGrammar) {
+    ModelConfig                 model_config;
+    RuntimeConfig               runtime_config;
+    SpeculativeExecutionConfig  sp_config;
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config = makeProcessorCacheConfig();
+
+    model_config.max_seq_len    = 2048;
+    model_config.vocab_size     = 4;
+    model_config.num_layers     = 1;
+    sp_config.gen_num_per_cycle = 2;
+
+    ResourceContext   resource_context;
+    GenerateStreamPtr stream        = createContextStream(model_config, runtime_config, resource_context, {1, 2}, 1);
+    auto              stream_groups = StreamGroups({stream});
+
+    MtpBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, sp_config, false);
+
+    GptModelInputs  model_input;
+    GptModelOutputs model_output;
+    model_output.logits = torch::zeros({3, 4}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+
+    auto sampler_inputs = processor.gatherSpecSamplerInput(stream_groups, model_input, model_output, {});
+    ASSERT_TRUE(sampler_inputs.ok());
+    EXPECT_EQ(sampler_inputs.value().logits.data_ptr(), model_output.logits.data_ptr());
 }
 
 TEST_F(MtpBatchStreamProcessorTest, testPrepareOneStepSpecDecodeModelInput) {

@@ -34,13 +34,14 @@ using namespace std;
 namespace spec = speculative;
 
 struct MtpExecutorTestConfig {
-    size_t  max_seq_len            = 2048;
-    size_t  vocab_size             = 4;
-    size_t  num_layers             = 1;
-    size_t  gen_num_per_cycle      = 4;
-    size_t  vocab_size_override    = 0;  // 0 means use vocab_size
-    int64_t mm_position_ids_style  = 0;
-    int     position_id_len_factor = 1;
+    size_t      max_seq_len            = 2048;
+    size_t      vocab_size             = 4;
+    size_t      num_layers             = 1;
+    size_t      gen_num_per_cycle      = 4;
+    size_t      vocab_size_override    = 0;  // 0 means use vocab_size
+    int64_t     mm_position_ids_style  = 0;
+    int         position_id_len_factor = 1;
+    std::string tree_decode_config;
 };
 
 template<typename T>
@@ -399,6 +400,7 @@ public:
         model_config.mm_model_config.mm_position_ids_style = test_config.mm_position_ids_style;
         model_config.attn_config.rope_config.index_factor  = test_config.position_id_len_factor;
         sp_config.gen_num_per_cycle                        = test_config.gen_num_per_cycle;
+        sp_config.tree_decode_config                       = test_config.tree_decode_config;
 
         resource_context.cache_manager =
             std::make_shared<KVCacheManager>(test::makeSimpleMhaCacheConfig(/*layer_num=*/1,
@@ -739,6 +741,21 @@ TEST_F(MtpExecutorTest, testPrepareStreamsRejectsNormalDecodeOnlyProcessor) {
     EXPECT_EQ(error.code(), ErrorCode::INVALID_PARAMS);
     EXPECT_NE(error.ToString().find("processor_index=0"), std::string::npos);
     EXPECT_NE(error.ToString().find("processor supports normal decoding only"), std::string::npos);
+}
+
+TEST_F(MtpExecutorTest, testConstructorRejectsTreeDecodeConfig) {
+    MtpExecutorTestConfig test_config;
+    test_config.tree_decode_config = "tree_decode.json";
+
+    try {
+        (void)createMtpExecutorComponents(test_config);
+        FAIL() << "MTP executor construction should reject tree_decode_config";
+    } catch (const std::runtime_error& e) {
+        const std::string message = e.what();
+        EXPECT_NE(message.find("MTP startup rejected"), std::string::npos);
+        EXPECT_NE(message.find("tree_decode_config is not supported with MTP"), std::string::npos);
+        EXPECT_NE(message.find("unset TREE_DECODE_CONFIG or disable MTP"), std::string::npos);
+    }
 }
 
 TEST_F(MtpExecutorTest, testSingleBatchPrefill) {

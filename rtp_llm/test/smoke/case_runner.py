@@ -25,8 +25,8 @@ from typing import Any, Dict, List, Optional, Tuple, Type, Union
 
 from smoke.cache_status_comparer import CacheStatusComparer
 from smoke.classifier_comparer import ClassifierComparer
-from smoke.dash_grpc_comparer import DASH_ENDPOINT, DashGrpcComparer
 from smoke.common_def import QueryStatus, SmokeException, Tracer
+from smoke.dash_grpc_comparer import DASH_ENDPOINT, DashGrpcComparer
 from smoke.embedding_comparer import EmbeddingComparer
 from smoke.gpu_diagnostics import (
     ExceptionType,
@@ -151,7 +151,6 @@ class CaseRunner(object):
                 return task_states
             assert server_manager is not None, "server manager should not be None"
             server_manager.stop_server()
-            self._print_sp_accept_summary(server_manager)
             if enable_remote_cache and self.remote_kvcm_server is not None:
                 self.remote_kvcm_server.stop_server()
                 self.remote_kvcm_server.copy_logs()
@@ -160,58 +159,6 @@ class CaseRunner(object):
             summarize_and_cleanup_coredumps(
                 os.environ.get("TEST_UNDECLARED_OUTPUTS_DIR", "")
             )
-
-    def _print_sp_accept_summary(self, server_manager: MagaServerManager) -> None:
-        # Advisory only. Gated by RTP_SP_ACCEPT_TRACE + a substring grep so non-grammar
-        # smokes don't pay the regex walk on multi-GB engine logs.
-        if os.environ.get("RTP_SP_ACCEPT_TRACE", "1") in ("0", "false", "False"):
-            return
-        log_path = server_manager.log_file_path
-        if not log_path or not os.path.exists(log_path):
-            return
-        try:
-            with open(log_path, "rb") as f:
-                has_marker = False
-                for chunk in iter(lambda: f.read(1 << 20), b""):
-                    if b"[sp_accept_trace]" in chunk:
-                        has_marker = True
-                        break
-            if not has_marker:
-                return
-        except OSError as e:
-            logging.warning(f"[sp_accept_check] preflight read failed: {e}")
-            return
-        try:
-            from smoke.spec_accept_analyzer import _verdict, parse_lines, summarize
-        except ImportError as e:
-            logging.warning(f"[sp_accept_check] analyzer import failed: {e}")
-            return
-        try:
-            by_grammar, _by_stream, _steps, total = parse_lines([log_path])
-        except Exception as e:
-            logging.warning(f"[sp_accept_check] parse failed: {e}")
-            return
-        if total == 0:
-            return
-        baseline_mean = summarize(by_grammar.get("none", [])).get("mean", 0)
-        for kind in sorted(by_grammar.keys()):
-            s = summarize(by_grammar[kind])
-            if kind == "none":
-                logging.info(
-                    f"[sp_accept_check] grammar={kind:<14} mean={s['mean']} (baseline)"
-                )
-                continue
-            if baseline_mean and baseline_mean > 0:
-                ratio = s["mean"] / baseline_mean
-                logging.info(
-                    f"[sp_accept_check] grammar={kind:<14} mean={s['mean']} "
-                    f"ratio={ratio:.3f} -> {_verdict(ratio)}"
-                )
-            else:
-                logging.info(
-                    f"[sp_accept_check] grammar={kind:<14} mean={s['mean']} "
-                    f"(no baseline=none stream in this run)"
-                )
 
     def _start_remote_kvcm_server(self) -> Optional[RemoteKVCMServer]:
         server_path = os.path.join(

@@ -148,7 +148,9 @@ MtpBatchStreamProcessor::gatherSpecSamplerInput(const StreamGroups&             
         }
     }
 
-    sampler_inputs.logits = model_output.logits.clone();
+    // Sampling mutates logits in place, but MTP decode does not consume target logits afterwards.
+    // Reuse the model output storage to avoid copying the full [B * (P + 1), vocab] tensor every step.
+    sampler_inputs.logits = model_output.logits;
     if (spec_logits_result.has_active_processor) {
         SpecLogitsVerifyRunner::applyMaskToLogits(sampler_inputs.logits, spec_logits_result, sampler_inputs.vocab_size);
     }

@@ -1807,7 +1807,6 @@ class DeepEPTest(TestCase):
             dash_sc_grpc_config=py_env.dash_sc_grpc_config,
             grammar_config=py_env.grammar_config,
             load_config=py_env.load_config,
-            grammar_config=py_env.grammar_config,
         )
 
         return nccl_comm_config, master_port, engine_config, model_config

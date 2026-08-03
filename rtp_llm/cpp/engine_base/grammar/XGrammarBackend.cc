@@ -42,11 +42,11 @@ void logCompileResult(const GrammarKeyCpp&                                      
                       const absl::StatusOr<std::shared_ptr<xgrammar::CompiledGrammar>>& result,
                       int64_t                                                           elapsed_ms) {
     if (result.ok()) {
-        RTP_LLM_LOG_INFO("XGrammarBackend compile OK: type=%s, len=%zu, elapsed_ms=%lld, bytes=%zu",
-                         key.key_type.c_str(),
-                         key.key_string.size(),
-                         static_cast<long long>(elapsed_ms),
-                         result.value()->MemorySizeBytes());
+        RTP_LLM_LOG_DEBUG("XGrammarBackend compile OK: type=%s, len=%zu, elapsed_ms=%lld, bytes=%zu",
+                          key.key_type.c_str(),
+                          key.key_string.size(),
+                          static_cast<long long>(elapsed_ms),
+                          result.value()->MemorySizeBytes());
         return;
     }
 
@@ -108,7 +108,8 @@ XGrammarBackend::Options XGrammarBackend::optionsFromConfig(const GrammarConfig&
     return opts;
 }
 
-XGrammarBackend::XGrammarBackend(const xgrammar::TokenizerInfo& tokenizer_info, const XGrammarBackend::Options& options):
+XGrammarBackend::XGrammarBackend(const xgrammar::TokenizerInfo&  tokenizer_info,
+                                 const XGrammarBackend::Options& options):
     options_(options),
     tokenizer_info_(tokenizer_info),
     compiler_(tokenizer_info_,

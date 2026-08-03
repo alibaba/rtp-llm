@@ -19,6 +19,7 @@ from typing import TYPE_CHECKING, List, Optional
 
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.py_config_modules import PyEnvConfigs
+from rtp_llm.config.think_tag import normalize_think_tag
 from rtp_llm.dash_sc.inference.servicer import (
     DashScInferenceServicer,
     build_think_runtime,
@@ -212,7 +213,7 @@ def _derive_echo_prefix_ids(
     """
     if not bool(generate_env_config.think_mode):
         return []
-    tag = generate_env_config.think_start_tag or ""
+    tag = normalize_think_tag(generate_env_config.think_start_tag or "")
     if not tag:
         return []
     try:

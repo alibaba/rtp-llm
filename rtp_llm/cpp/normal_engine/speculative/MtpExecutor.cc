@@ -228,6 +228,10 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
     fast_topk_sampler_(new speculative::FastTopKSampler()),
     warm_up_(warm_up),
     role_type_(params.pd_sep_config.role_type) {
+    RTP_LLM_CHECK_WITH_INFO(params.sp_config.tree_decode_config.empty(),
+                            "MTP startup rejected: tree_decode_config is not supported with MTP; "
+                            "unset TREE_DECODE_CONFIG or disable MTP");
+
     data_type_          = params.model_config_.data_type;
     hidden_size_        = params.model_config_.hidden_size;
     propose_step_       = propose_params->gen_num_per_circle;

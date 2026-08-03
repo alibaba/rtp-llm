@@ -53,11 +53,10 @@ struct ProcessorBundle {
     }
 };
 
-ProcessorBundle
-makeProcessorFromKey(const std::shared_ptr<XGrammarBackend>& backend,
-                     const GrammarKeyCpp&                    key,
-                     bool                                    terminate_without_stop_token = true,
-                     int64_t                                 eos_token_id = 0) {
+ProcessorBundle makeProcessorFromKey(const std::shared_ptr<XGrammarBackend>& backend,
+                                     const GrammarKeyCpp&                    key,
+                                     bool                                    terminate_without_stop_token = true,
+                                     int64_t                                 eos_token_id                 = 0) {
     EXPECT_TRUE(backend);
     if (!backend) {
         return {};
@@ -150,7 +149,7 @@ int expectCapOk(ErrorResult<int>&& result) {
 TEST(GrammarLogitsProcessorTest, ProcessMasksInitialDecodeState) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    auto            proc = makeProcessor(backend, "ab");
+    auto proc = makeProcessor(backend, "ab");
 
     auto logits = torch::zeros({1, 128}, torch::kFloat32);
     auto inputs = makeSamplerInputs(logits);
@@ -166,7 +165,7 @@ TEST(GrammarLogitsProcessorTest, ProcessMasksInitialDecodeState) {
 TEST(GrammarLogitsProcessorTest, ProcessRejectsGrammarVocabExceedingModelVocab) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    auto            proc = makeProcessor(backend, "ab");
+    auto proc = makeProcessor(backend, "ab");
 
     auto logits = torch::zeros({1, 127}, torch::kFloat32);
     auto error  = proc->process(makeSamplerInputs(logits), 0, 1);
@@ -195,7 +194,7 @@ TEST(GrammarLogitsProcessorTest, ProcessAppliesPackedMaskOnGpuAcrossLogitDtypes)
 TEST(GrammarLogitsProcessorTest, ProcessKeepsReasoningFreeUntilBudgetThenAppliesFinalGrammarOnGpu) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    auto            proc = makeProcessorFromKey(backend, {"structural_tag", makeReasoningStructuralTag(/*budget=*/1)});
+    auto proc = makeProcessorFromKey(backend, {"structural_tag", makeReasoningStructuralTag(/*budget=*/1)});
 
     auto reasoning_logits = torch::zeros({1, 128}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
     ASSERT_FALSE(proc->process(makeSamplerInputs(reasoning_logits), 0, 1).has_value());
@@ -220,7 +219,7 @@ TEST(GrammarLogitsProcessorTest, ProcessKeepsReasoningFreeUntilBudgetThenApplies
 TEST(GrammarLogitsProcessorTest, AllTrueXGrammarMaskIsANoopRatherThanFailure) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    auto            proc = makeProcessorFromKey(backend,
+    auto proc = makeProcessorFromKey(backend,
                                      {"structural_tag", makeUnboundedAnyTextStructuralTag()},
                                      /*terminate_without_stop_token=*/false);
 
@@ -243,18 +242,17 @@ TEST(GrammarLogitsProcessorTest, AllTrueXGrammarMaskIsANoopRatherThanFailure) {
 TEST(GrammarLogitsProcessorTest, InstanceDeclaresMtpAndCommittedStateContract) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    auto            incremental = makeProcessor(backend, "ab");
+    auto incremental = makeProcessor(backend, "ab");
 
     EXPECT_EQ(incremental->mtpCapability().mode, MtpProcessorMode::SPEC_VERIFY);
     ASSERT_TRUE(incremental->committedOutputLen().has_value());
     EXPECT_EQ(incremental->committedOutputLen().value(), 0);
-
 }
 
 TEST(GrammarLogitsProcessorTest, UpdateStatusAdvancesDecodeMaskState) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    auto            proc = makeProcessor(backend, "ab");
+    auto proc = makeProcessor(backend, "ab");
 
     auto token_a      = torch::tensor({kA}, torch::kInt32).reshape({1, 1});
     auto update_error = proc->updateStatus(token_a, 1);
@@ -275,7 +273,7 @@ TEST(GrammarLogitsProcessorTest, UpdateStatusAdvancesDecodeMaskState) {
 TEST(GrammarLogitsProcessorTest, ProcessForcesEosAfterGrammarTerminates) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    auto            proc = makeProcessor(backend, "ab");
+    auto proc = makeProcessor(backend, "ab");
 
     ASSERT_FALSE(proc->updateStatus(torch::tensor({kA}, torch::kInt32).reshape({1, 1}), 1).has_value());
     ASSERT_FALSE(proc->updateStatus(torch::tensor({kB}, torch::kInt32).reshape({1, 1}), 1).has_value());
@@ -311,8 +309,8 @@ TEST(GrammarLogitsProcessorTest, ProcessForcesEosAfterGrammarTerminates) {
 TEST(GrammarLogitsProcessorTest, ProcessRejectsOutOfVocabEosAfterGrammarTerminates) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    auto proc = makeProcessorFromKey(
-        backend, {"regex", "ab"}, /*terminate_without_stop_token=*/true, /*eos_token_id=*/128);
+    auto proc =
+        makeProcessorFromKey(backend, {"regex", "ab"}, /*terminate_without_stop_token=*/true, /*eos_token_id=*/128);
 
     ASSERT_FALSE(proc->updateStatus(torch::tensor({kA, kB}, torch::kInt32).reshape({1, 2}), 2).has_value());
     ASSERT_TRUE(matcherTerminated(*proc.matcher));
@@ -329,7 +327,7 @@ TEST(GrammarLogitsProcessorTest, ProcessRejectsOutOfVocabEosAfterGrammarTerminat
 TEST(GrammarLogitsProcessorTest, UpdateStatusReportsInvalidCommittedToken) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    auto            proc = makeProcessor(backend, "ab");
+    auto proc = makeProcessor(backend, "ab");
 
     auto error = proc->updateStatus(torch::tensor({kX}, torch::kInt32).reshape({1, 1}), 1);
 
@@ -341,7 +339,7 @@ TEST(GrammarLogitsProcessorTest, UpdateStatusReportsInvalidCommittedToken) {
 TEST(GrammarLogitsProcessorTest, UpdateStatusRollsBackEntireRejectedBatch) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    auto            proc = makeProcessor(backend, "ab");
+    auto proc = makeProcessor(backend, "ab");
 
     auto initial_logits = torch::zeros({1, 128}, torch::kFloat32);
     ASSERT_FALSE(proc->process(makeSamplerInputs(initial_logits), 0, 1).has_value());
@@ -370,7 +368,7 @@ TEST(GrammarLogitsProcessorTest, UpdateStatusRollsBackEntireRejectedBatch) {
 TEST(GrammarLogitsProcessorTest, AcceptsLegalDraftChain) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    auto            proc = makeProcessor(backend, "ab");
+    auto proc = makeProcessor(backend, "ab");
 
     const int            propose_step = 2;
     const size_t         words        = SpecLogitsProcessorRequest::bitmaskWordCount(128);
@@ -394,7 +392,7 @@ TEST(GrammarLogitsProcessorTest, AcceptsLegalDraftChain) {
 TEST(GrammarLogitsProcessorTest, SpecVerifyKeepsAllTrueXGrammarRowsUnconstrained) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    auto            proc = makeProcessorFromKey(backend,
+    auto proc = makeProcessorFromKey(backend,
                                      {"structural_tag", makeUnboundedAnyTextStructuralTag()},
                                      /*terminate_without_stop_token=*/false);
 
@@ -421,7 +419,7 @@ TEST(GrammarLogitsProcessorTest, SpecVerifyKeepsAllTrueXGrammarRowsUnconstrained
 TEST(GrammarLogitsProcessorTest, CapsAtFirstIllegalDraftToken) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    auto            proc = makeProcessor(backend, "ab");
+    auto proc = makeProcessor(backend, "ab");
 
     const int            propose_step = 2;
     const size_t         words        = SpecLogitsProcessorRequest::bitmaskWordCount(128);
@@ -445,7 +443,7 @@ TEST(GrammarLogitsProcessorTest, CapsAtFirstIllegalDraftToken) {
 TEST(GrammarLogitsProcessorTest, TerminatedMatcherLeavesAllowAllWithoutCrash) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    auto            proc = makeProcessor(backend, "ab");
+    auto proc = makeProcessor(backend, "ab");
 
     const int            propose_step = 3;  // one past the grammar's natural end
     const size_t         words        = SpecLogitsProcessorRequest::bitmaskWordCount(128);
@@ -475,7 +473,7 @@ TEST(GrammarLogitsProcessorTest, TerminatedMatcherLeavesAllowAllWithoutCrash) {
 TEST(GrammarLogitsProcessorTest, VerifyCapStopsWhenDraftContinuesWithEos) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    auto            proc = makeProcessor(backend, "ab");
+    auto proc = makeProcessor(backend, "ab");
 
     const int            propose_step = 3;
     const size_t         words        = SpecLogitsProcessorRequest::bitmaskWordCount(128);
@@ -497,7 +495,7 @@ TEST(GrammarLogitsProcessorTest, VerifyCapStopsWhenDraftContinuesWithEos) {
 TEST(GrammarLogitsProcessorTest, VerifyCapZeroWhenGrammarAlreadyComplete) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    auto            proc = makeProcessor(backend, "ab");
+    auto proc = makeProcessor(backend, "ab");
 
     ASSERT_TRUE(acceptMatcherToken(*proc.matcher, kA));
     ASSERT_TRUE(acceptMatcherToken(*proc.matcher, kB));
@@ -522,7 +520,7 @@ TEST(GrammarLogitsProcessorTest, VerifyCapZeroWhenGrammarAlreadyComplete) {
 TEST(GrammarLogitsProcessorTest, SpecVerifyCountsEosCommittedAcrossTerminatedRounds) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    auto            proc = makeProcessor(backend, "ab");
+    auto proc = makeProcessor(backend, "ab");
 
     ASSERT_FALSE(proc->updateStatus(torch::tensor({kA, kB}, torch::kInt32).reshape({1, 2}), 2).has_value());
     ASSERT_TRUE(matcherTerminated(*proc.matcher));
@@ -558,7 +556,7 @@ TEST(GrammarLogitsProcessorTest, SpecVerifyCountsEosCommittedAcrossTerminatedRou
 TEST(GrammarLogitsProcessorTest, RollsBackProvisionalAccepts) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    auto            proc = makeProcessor(backend, "ab");
+    auto proc = makeProcessor(backend, "ab");
 
     const int            propose_step = 2;
     const size_t         words        = SpecLogitsProcessorRequest::bitmaskWordCount(128);
@@ -572,15 +570,19 @@ TEST(GrammarLogitsProcessorTest, RollsBackProvisionalAccepts) {
     req.bitmask_size_int32 = words;
     req.vocab_size         = 128;
 
-    const int r1 = expectCapOk(proc->prepareSpeculative(req));
+    const int64_t committed_matcher_len = proc.matcher->numAcceptedTokens();
+    const int     r1                    = expectCapOk(proc->prepareSpeculative(req));
+    EXPECT_EQ(proc.matcher->numAcceptedTokens(), committed_matcher_len);
     const int r2 = expectCapOk(proc->prepareSpeculative(req));
     EXPECT_EQ(r1, r2) << "state must be unchanged across calls (rollback)";
+    EXPECT_EQ(proc.matcher->numAcceptedTokens(), committed_matcher_len);
+    EXPECT_EQ(proc->committedOutputLen().value(), 0);
 }
 
 TEST(GrammarLogitsProcessorTest, VerifyCapIsDraftRejectIndex) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    auto            proc = makeProcessor(backend, "ab");
+    auto proc = makeProcessor(backend, "ab");
 
     const int            propose_step = 2;
     const size_t         words        = SpecLogitsProcessorRequest::bitmaskWordCount(128);
@@ -601,7 +603,7 @@ TEST(GrammarLogitsProcessorTest, VerifyCapIsDraftRejectIndex) {
 TEST(GrammarLogitsProcessorTest, RejectsUndersizedBitmaskBuffer) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    auto            proc = makeProcessor(backend, "ab");
+    auto proc = makeProcessor(backend, "ab");
 
     const int propose_step = 1;
     // Allocate a deliberately too-small buffer for vocab=128 (needs 4 words).
@@ -624,7 +626,7 @@ TEST(GrammarLogitsProcessorTest, RejectsUndersizedBitmaskBuffer) {
 TEST(GrammarLogitsProcessorTest, SpecVerifyRejectsGrammarVocabExceedingModelVocabInSameBitmaskWord) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    auto            proc = makeProcessor(backend, "ab");
+    auto proc = makeProcessor(backend, "ab");
 
     const int            propose_step = 1;
     const size_t         words        = SpecLogitsProcessorRequest::bitmaskWordCount(127);
@@ -662,7 +664,7 @@ TEST(GrammarLogitsProcessorTest, ClearBitmaskTokenRangeClearsFullWordsAndEdges) 
 TEST(GrammarLogitsProcessorTest, StructuralTagReasoningBudgetForcesEndAndFinalGrammar) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    auto            proc = makeProcessorFromKey(backend, {"structural_tag", makeReasoningStructuralTag(/*budget=*/1)});
+    auto proc = makeProcessorFromKey(backend, {"structural_tag", makeReasoningStructuralTag(/*budget=*/1)});
 
     const int            propose_step = 3;
     const size_t         words        = SpecLogitsProcessorRequest::bitmaskWordCount(128);
@@ -699,7 +701,7 @@ TEST(GrammarLogitsProcessorTest, StructuralTagReasoningBudgetForcesEndAndFinalGr
 TEST(GrammarLogitsProcessorTest, StructuralTagReasoningBudgetForcesTokenEndAndFinalGrammar) {
     auto backend = makeBackend();
     ASSERT_TRUE(backend);
-    auto            proc =
+    auto proc =
         makeProcessorFromKey(backend, {"structural_tag", makeReasoningStructuralTagWithTokenEnd(/*budget=*/1, kZ)});
 
     const int            propose_step = 3;

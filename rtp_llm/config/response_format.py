@@ -1,15 +1,29 @@
 import json
 from typing import Any, Dict, Literal, Optional, TypeAlias, Union
 
-from pydantic import BaseModel, ConfigDict, model_validator
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    SerializerFunctionWrapHandler,
+    model_serializer,
+    model_validator,
+)
 
 
 class ResponseFormatJSONSchema(BaseModel):
-    # OpenAI wire field is literally "schema"; silence pydantic v2 protected_namespaces warning.
-    model_config = ConfigDict(protected_namespaces=())
+    model_config = ConfigDict(populate_by_name=True)
 
     name: Optional[str] = None
-    schema: Optional[Dict[str, Any]] = None
+    schema_: Optional[Dict[str, Any]] = Field(default=None, alias="schema")
+
+    @model_serializer(mode="wrap")
+    def _serialize(self, handler: SerializerFunctionWrapHandler) -> Dict[str, Any]:
+        """Keep the OpenAI wire field named ``schema`` in nested dumps."""
+        data = handler(self)
+        if "schema_" in data:
+            data["schema"] = data.pop("schema_")
+        return data
 
 
 class ResponseFormat(BaseModel):
@@ -24,7 +38,7 @@ class ResponseFormat(BaseModel):
     @model_validator(mode="after")
     def _check_payload(self) -> "ResponseFormat":
         if self.type == "json_schema":
-            if self.json_schema is None or self.json_schema.schema is None:
+            if self.json_schema is None or self.json_schema.schema_ is None:
                 raise ValueError(
                     "response_format.type=json_schema requires json_schema.schema"
                 )
@@ -59,6 +73,8 @@ def parse_response_format(value: Any) -> Optional[ResponseFormat]:
         stripped = value.strip()
         if not stripped:
             return None
+        if stripped == "text":
+            return ResponseFormat(type="text")
         value = json.loads(stripped)
     if isinstance(value, dict):
         if not value:

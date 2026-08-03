@@ -50,8 +50,8 @@ ErrorInfo validateGrammarVocabFitsModel(RtpGrammarMatcher& matcher, size_t model
     if (grammar_vocab_size <= 0) {
         matcher.markFinished();
         return ErrorInfo(ErrorCode::INVALID_PARAMS,
-                         std::string("grammar ") + path
-                             + ": invalid grammar vocab size " + std::to_string(grammar_vocab_size));
+                         std::string("grammar ") + path + ": invalid grammar vocab size "
+                             + std::to_string(grammar_vocab_size));
     }
     if (static_cast<size_t>(grammar_vocab_size) > model_vocab_size) {
         matcher.markFinished();
@@ -138,9 +138,9 @@ bool specVerifyDraftTokenAllowed(const int32_t* row, size_t W, size_t vocab_size
     return token >= 0 && static_cast<size_t>(token) < vocab_size && bitmaskAllowsToken(row, W, token);
 }
 
-class ProvisionalSpecAcceptGuard {
+class ProvisionalSpecAcceptTracker {
 public:
-    explicit ProvisionalSpecAcceptGuard(RtpGrammarMatcher& matcher): matcher_(matcher) {}
+    explicit ProvisionalSpecAcceptTracker(RtpGrammarMatcher& matcher): matcher_(matcher) {}
 
     void recordAccepted() {
         ++accepted_prefix_;
@@ -158,8 +158,9 @@ public:
 
 private:
     ErrorInfo rollback() {
-        if (accepted_prefix_ > 0) {
-            return matcher_.rollback(accepted_prefix_);
+        const int accepted_prefix = std::exchange(accepted_prefix_, 0);
+        if (accepted_prefix > 0) {
+            return matcher_.rollback(accepted_prefix);
         }
         return ErrorInfo::OkStatus();
     }
@@ -171,7 +172,7 @@ private:
 [[nodiscard]] ErrorResult<int> verifyDraftPrefixAndFillBitmask(RtpGrammarMatcher&                matcher,
                                                                int64_t                           eos_token_id,
                                                                const SpecLogitsProcessorRequest& request,
-                                                               ProvisionalSpecAcceptGuard&       provisional) {
+                                                               ProvisionalSpecAcceptTracker&     provisional) {
     const int  P = request.propose_step;
     const auto W = request.bitmask_size_int32;
 
@@ -219,18 +220,25 @@ ErrorResult<int> verifySpecDraftAndFillBitmask(RtpGrammarMatcher&               
         return err;
     }
 
-    ProvisionalSpecAcceptGuard provisional(matcher);
+    ProvisionalSpecAcceptTracker provisional(matcher);
 
     auto cap = verifyDraftPrefixAndFillBitmask(matcher, eos_token_id, request, provisional);
+    // prepareSpeculative only inspects draft tokens. Restore the committed
+    // matcher state before returning, including when verification fails.
+    auto rollback_err = provisional.rollbackAndReport(request.bitmask_cpu_out, W, eos_token_id);
+    if (rollback_err.hasError()) {
+        if (!cap.ok()) {
+            return ErrorInfo(rollback_err.code(),
+                             "grammar MTP verify rollback failed after error: " + cap.status().ToString()
+                                 + "; rollback_error=" + rollback_err.ToString());
+        }
+        return rollback_err;
+    }
+
     if (!cap.ok()) {
         matcher.markFinished();
         forceTokenInBitmask(request.bitmask_cpu_out, W, eos_token_id);
         return cap.status();
-    }
-
-    auto rollback_err = provisional.rollbackAndReport(request.bitmask_cpu_out, W, eos_token_id);
-    if (rollback_err.hasError()) {
-        return rollback_err;
     }
     return int(cap.value());
 }
@@ -408,7 +416,7 @@ private:
                 break;
         }
 
-        const size_t mask_vocab_size   = std::min(logits_vocab_size, static_cast<size_t>(state.grammar_vocab_size));
+        const size_t mask_vocab_size = std::min(logits_vocab_size, static_cast<size_t>(state.grammar_vocab_size));
         if (state.mask_required && mask_vocab_size > 0) {
             if (!state.packed_allow_mask_cpu.defined()) {
                 return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "grammar packed mask state is missing its CPU source");
@@ -505,8 +513,7 @@ GrammarLogitsProcessor::process(const SamplerInputs& inputs, size_t start_idx, s
     std::lock_guard<std::mutex> lock(state_mutex_);
     const auto                  logits_row = inputs.logits[start_idx];
     if (!logits_row.defined() || logits_row.dim() != 1 || logits_row.stride(0) != 1) {
-        return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION,
-                         "grammar logits processor requires contiguous 1D logits rows");
+        return ErrorInfo(ErrorCode::EXECUTION_EXCEPTION, "grammar logits processor requires contiguous 1D logits rows");
     }
     if (auto error = validateGrammarVocabFitsModel(*matcher_, static_cast<size_t>(logits_row.size(0)), "decode");
         error.hasError()) {

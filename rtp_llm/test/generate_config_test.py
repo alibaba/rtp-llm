@@ -1,6 +1,6 @@
 import json
 import os
-from typing import Any, List, Optional
+from typing import Any, Dict, List, Optional, Union
 from unittest import TestCase, main
 from unittest.mock import patch
 
@@ -14,6 +14,7 @@ from rtp_llm.config.py_config_modules import (
     RenderConfig,
     VitConfig,
 )
+from rtp_llm.config.response_format import parse_response_format
 from rtp_llm.config.response_format_builder import (
     ReasoningFormat,
     ResponseFormatBuilder,
@@ -22,11 +23,8 @@ from rtp_llm.frontend.tokenizer_factory.tokenizers.base_tokenizer import BaseTok
 from rtp_llm.frontend.tokenizer_factory.tokenizers.tokenization_qwen import (
     QWenTokenizer,
 )
-from rtp_llm.openai.api_datatype import (
-    ChatCompletionRequest,
-    GenerateConfig,
-    ResponseFormat as OpenAIResponseFormat,
-)
+from rtp_llm.openai.api_datatype import ChatCompletionRequest, GenerateConfig
+from rtp_llm.openai.api_datatype import ResponseFormat as OpenAIResponseFormat
 from rtp_llm.openai.openai_endpoint import OpenaiEndpoint
 from rtp_llm.ops import SpecialTokens
 from rtp_llm.pipeline.pipeline import Pipeline
@@ -232,7 +230,7 @@ class GenerateConfigTest(TestCase):
         generate_env_config = GenerateEnvConfig()
         generate_env_config.think_mode = 1
         generate_env_config.think_end_token_id = -1
-        generate_env_config.think_end_tag = "</think>\n\n"
+        generate_env_config.think_end_tag = "</think>\\n\\n"
         special_tokens = SpecialTokens()
         tokenizer_path = f"{self.test_data_path}/model_test/fake_test/testdata/deepseek_r1_qwen_14b_tokenizer"
         tokenizer = BaseTokenizer(tokenizer_path)
@@ -271,7 +269,7 @@ class OpenaiGenerateConfigTest(TestCase):
         req_stop: Optional[List[str]] = None,
         req_config_stop_word_str: Optional[List[str]] = None,
         req_config_stop_word_list: Optional[List[List[int]]] = None,
-        response_format: Optional[dict] = None,
+        response_format: Optional[Union[str, Dict[str, Any]]] = None,
         json_format: Optional[bool] = None,
     ):
         special_tokens = SpecialTokens()
@@ -326,6 +324,15 @@ class OpenaiGenerateConfigTest(TestCase):
         )
         self.assertIsNone(config.response_format)
         self.assertEqual(config.json_schema, '{"type":"object"}')
+
+    def test_bare_text_response_format_remains_compatible(self):
+        config = self._generate_config_with_stop_word(response_format="text")
+
+        self.assertIsNone(config.response_format)
+        self.assertIsNone(config.json_schema)
+        self.assertIsNone(config.regex)
+        self.assertIsNone(config.ebnf)
+        self.assertIsNone(config.structural_tag)
 
     def test_json_format_is_finalized_before_generation(self):
         config = self._generate_config_with_stop_word(json_format=True)
@@ -533,7 +540,7 @@ class OpenaiGenerateConfigTest(TestCase):
 
 
 class GrammarMultiSequenceConfigTest(TestCase):
-    """A grammar request rejects its own multi-sequence/beam configuration."""
+    """Grammar and thinking requests reject multi-sequence/beam configuration."""
 
     def _apply(self, **fields):
         cfg = GenerateConfig(**fields)
@@ -567,6 +574,30 @@ class GrammarMultiSequenceConfigTest(TestCase):
                     **fields,
                 )
 
+    def test_thinking_plus_multi_sequence_is_rejected_before_engine(self):
+        generate_env_config = GenerateEnvConfig()
+        generate_env_config.think_mode = 1
+        cases = [
+            {"num_beams": 4},
+            {"variable_num_beams": [1, 3]},
+            {"num_return_sequences": 2},
+        ]
+
+        for fields in cases:
+            with self.subTest(fields=fields):
+                config = GenerateConfig(**fields)
+                with self.assertRaises(FtRuntimeException) as ctx:
+                    config.add_thinking_params(None, generate_env_config)
+                self.assertEqual(
+                    ctx.exception.exception_type,
+                    ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                )
+                self.assertIn(
+                    "thinking mode does not support beam search or "
+                    "num_return_sequences > 1",
+                    ctx.exception.message,
+                )
+
     def test_grammar_or_beam_alone_allowed(self):
         for fields in [
             {"json_schema": '{"type": "object"}'},
@@ -582,6 +613,18 @@ class GrammarMultiSequenceConfigTest(TestCase):
 
 class ResponseFormatProjectionTest(TestCase):
     """rf projected to typed fields and cleared by ResponseFormatBuilder."""
+
+    def test_json_schema_wire_alias_round_trip(self):
+        payload = {
+            "type": "json_schema",
+            "json_schema": {"name": "item", "schema": {"type": "object"}},
+        }
+
+        response_format = parse_response_format(payload)
+
+        self.assertIsNotNone(response_format)
+        self.assertEqual(response_format.model_dump(exclude_none=True), payload)
+        self.assertEqual(response_format.json_schema.schema_, {"type": "object"})
 
     def _terminate_without_stop_token(self, cfg: GenerateConfig) -> bool:
         return ResponseFormatBuilder.grammar_terminate_without_stop_token(cfg)
@@ -726,6 +769,21 @@ class ResponseFormatProjectionTest(TestCase):
         self._validate(cfg)
         self.assertFalse(cfg.json_format)
         self.assertEqual(cfg.json_schema, '{"type":"object"}')
+
+    def test_empty_response_format_falls_back_to_legacy_json_format(self):
+        for response_format in ("", "  ", {}, "{}"):
+            with self.subTest(response_format=response_format):
+                cfg = GenerateConfig(
+                    json_format=True,
+                    response_format=response_format,
+                )
+
+                self._validate(cfg)
+
+                self.assertFalse(cfg.json_format)
+                self.assertIsNone(cfg.response_format)
+                self.assertEqual(cfg.json_schema, '{"type":"object"}')
+                ResponseFormatBuilder.validate_finalized(cfg)
 
     def test_reasoning_json_schema_wrapped_as_structural_tag(self):
         cfg = GenerateConfig(

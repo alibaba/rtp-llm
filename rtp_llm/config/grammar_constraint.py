@@ -36,7 +36,7 @@ def load_json_field(name: str, value: Any) -> Any:
         raise FtRuntimeException(
             ExceptionType.ERROR_INPUT_FORMAT_ERROR,
             f"{name} must be valid JSON: {str(e)}",
-        )
+        ) from e
 
 
 def normalize_grammar_value(name: GrammarFieldName, value: Any) -> Any:
@@ -78,7 +78,7 @@ class GrammarConstraint:
         if response_format is None or response_format.type == "text":
             return None
         if response_format.type == "json_schema":
-            return cls("json_schema", response_format.json_schema.schema)
+            return cls("json_schema", response_format.json_schema.schema_)
         if response_format.type == "json_object":
             return cls("json_schema", {"type": "object"})
         if response_format.type == "regex":

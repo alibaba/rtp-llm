@@ -12,6 +12,7 @@ from rtp_llm.config.grammar_constraint import (
     normalize_grammar_value,
 )
 from rtp_llm.config.response_format import parse_response_format
+from rtp_llm.config.think_tag import normalize_think_tag
 
 
 @dataclass(frozen=True)
@@ -37,7 +38,7 @@ class ReasoningFormat:
                 ExceptionType.ERROR_INPUT_FORMAT_ERROR,
                 "think_end_tag is required when think_end_token_id is not set",
             )
-        tag = str(raw_tag).encode("utf-8").decode("unicode_escape")
+        tag = normalize_think_tag(str(raw_tag))
         return cls(tag_begin="", tag_end=tag)
 
     def prefix_format(self, max_thinking_tokens: int) -> Dict[str, Any]:
@@ -76,9 +77,17 @@ class ResponseFormatBuilder:
             self.restore_final_constraint(self.config, saved_constraint)
             return saved_constraint
 
+        if self.config.in_think_mode and (
+            self.config.has_num_beams() or self.config.num_return_sequences > 1
+        ):
+            raise FtRuntimeException(
+                ExceptionType.ERROR_INPUT_FORMAT_ERROR,
+                "thinking mode does not support beam search or "
+                "num_return_sequences > 1 because it uses grammar-constrained decoding",
+            )
+
         self.config._reasoning_grammar_terminate_without_stop_token = False
         self.config._reasoning_final_constraint = None
-        self._project_legacy_json_format()
         constraint = self._resolve_grammar_constraint()
 
         if not self.config.in_think_mode:
@@ -232,6 +241,7 @@ class ResponseFormatBuilder:
 
     def _resolve_grammar_constraint(self) -> Optional[GrammarConstraint]:
         self._project_response_format_to_grammar_fields()
+        self._project_legacy_json_format()
         if self.config.json_schema is not None:
             self.config.json_schema = normalize_grammar_value(
                 "json_schema", self.config.json_schema
@@ -249,10 +259,7 @@ class ResponseFormatBuilder:
                 and "type" not in structural_tag
                 and (
                     "format" in structural_tag
-                    or (
-                        "structures" in structural_tag
-                        and "triggers" in structural_tag
-                    )
+                    or ("structures" in structural_tag and "triggers" in structural_tag)
                 )
             ):
                 structural_tag = {"type": "structural_tag", **structural_tag}

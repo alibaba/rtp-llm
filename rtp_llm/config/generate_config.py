@@ -17,6 +17,7 @@ from transformers.tokenization_utils_base import PreTrainedTokenizerBase
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.response_format import ResponseFormat, ResponseFormatInput
+from rtp_llm.config.think_tag import normalize_think_tag
 from rtp_llm.ops import RoleType
 from rtp_llm.utils.check_util import *
 from rtp_llm.utils.util import check_with_info
@@ -114,9 +115,7 @@ class GenerateConfig(BaseModel):
     # --- private attrs（不参与序列化/schema，生命周期与实例绑定） ---
     _diverge_depth_warned: bool = PrivateAttr(default=False)
     _ban_auto_downgraded: bool = PrivateAttr(default=False)
-    _reasoning_grammar_terminate_without_stop_token: bool = PrivateAttr(
-        default=False
-    )
+    _reasoning_grammar_terminate_without_stop_token: bool = PrivateAttr(default=False)
     _reasoning_envelope_applied: bool = PrivateAttr(default=False)
     _reasoning_final_constraint: Any = PrivateAttr(default=None)
 
@@ -446,21 +445,18 @@ class GenerateConfig(BaseModel):
     def is_same(self, config: "GenerateConfig") -> bool:
         return self.md5_value == config.md5_value
 
-    def update(self, new: Dict[str, Any]):
-        """批量更新字段。
-
-        降级/重启用语义：
-          - 当条件不满足时，enable_cross_sequence_ban 会被自动降级为 False。
-          - 若后续 update 补齐了条件，且开关是因自动降级而关闭的（而非用户从未开启），
-            则会自动重新启用。这确保 request_extractor 两阶段合并不会导致误降级。
-          - 若用户在同一次 update 中显式传入 enable_cross_sequence_ban，视为用户重新表态，
-            自动重启用启发式不会覆盖其显式意图。
-        """
+    def _apply_updates(self, new: Dict[str, Any]) -> set[str]:
+        """更新已声明的 Pydantic 字段，并返回被消费的字段名。"""
         model_fields = type(self).model_fields
-        field_updates = {k: v for k, v in new.items() if k in model_fields}
-        self.__dict__.update(field_updates)
-        self.model_fields_set.update(field_updates)
-        # 直接更新字段不会触发 field_validator / model_validator，手动补偿：
+        updated_fields = set()
+        for key, value in new.items():
+            if key in model_fields:
+                setattr(self, key, value)
+                updated_fields.add(key)
+        return updated_fields
+
+    def _post_update(self, new: Dict[str, Any]) -> None:
+        """补偿赋值时不会自动触发的字段及模型校验。"""
         # 1) cross_seq_diverge_start_combo 的 clamp/类型兜底
         if "cross_seq_diverge_start_combo" in new:
             self.cross_seq_diverge_start_combo = self._sanitize_diverge_start_combo(
@@ -475,23 +471,24 @@ class GenerateConfig(BaseModel):
         # 4) 跨序列去重兼容性
         self._check_cross_seq_ban_compatibility()
 
+    def update(self, new: Dict[str, Any]):
+        """批量更新字段。
+
+        降级/重启用语义：
+          - 当条件不满足时，enable_cross_sequence_ban 会被自动降级为 False。
+          - 若后续 update 补齐了条件，且开关是因自动降级而关闭的（而非用户从未开启），
+            则会自动重新启用。这确保 request_extractor 两阶段合并不会导致误降级。
+          - 若用户在同一次 update 中显式传入 enable_cross_sequence_ban，视为用户重新表态，
+            自动重启用启发式不会覆盖其显式意图。
+        """
+        self._apply_updates(new)
+        self._post_update(new)
+
     def update_and_pop(self, new: Dict[str, Any]):
         """批量更新字段并返回未被消费的 key。校验策略同 update()。"""
-        model_fields = type(self).model_fields
-        field_updates = {k: v for k, v in new.items() if k in model_fields}
-        self.__dict__.update(field_updates)
-        self.model_fields_set.update(field_updates)
-        # 直接更新字段不会触发 field_validator / model_validator，手动补偿：
-        if "cross_seq_diverge_start_combo" in new:
-            self.cross_seq_diverge_start_combo = self._sanitize_diverge_start_combo(
-                self.cross_seq_diverge_start_combo
-            )
-        if "num_return_sequences" in new:
-            self._diverge_depth_warned = False
-        if "enable_cross_sequence_ban" in new:
-            self._ban_auto_downgraded = False
-        self._check_cross_seq_ban_compatibility()
-        return {k: v for k, v in new.items() if k not in field_updates}
+        updated_fields = self._apply_updates(new)
+        self._post_update(new)
+        return {k: v for k, v in new.items() if k not in updated_fields}
 
     @staticmethod
     def create_generate_config(
@@ -544,9 +541,7 @@ class GenerateConfig(BaseModel):
             [end_think_token_id] if end_think_token_id != -1 else []
         )
         if in_think_mode and tokenizer and end_think_token_id == -1:
-            think_end_tag: str = generate_env_config.think_end_tag.encode(
-                "utf-8"
-            ).decode("unicode_escape")
+            think_end_tag = normalize_think_tag(generate_env_config.think_end_tag)
             tokenized_result: List[int] = tokenizer.encode(
                 think_end_tag, add_special_tokens=False
             )
@@ -563,9 +558,7 @@ class GenerateConfig(BaseModel):
             reasoning_format = ReasoningFormat.from_generate_env_config(
                 generate_env_config
             )
-        return ResponseFormatBuilder(
-            self, reasoning_format=reasoning_format
-        ).apply()
+        return ResponseFormatBuilder(self, reasoning_format=reasoning_format).apply()
 
     def grammar_terminate_without_stop_token(self) -> bool:
         from rtp_llm.config.response_format_builder import ResponseFormatBuilder
