@@ -20,6 +20,9 @@ py_library(
     ]
 )
 
+# Selected by the SM100_ARM tag in ut-gb200/ut-gb200-cu13. The root .bazelrc
+# injects gpu=SM100_ARM for --config=cuda12_9_arm and gpu=SM100_ARM_CU13 for
+# --config=cuda13_arm.
 py_test (
     name = "trtllm_gen_test",
     srcs = ["trtllm_gen_test.py"],
@@ -30,8 +33,8 @@ py_test (
         "//rtp_llm:testlib",
     ],
     env = {"GPU_COUNT": "1"},
-    tags = ["open_skip", "SM100_ARM"],
-    exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'}
+    tags = ["SM100_ARM"],
+    exec_properties = {'gpu_count':'1'}
 )
 
 # Test for PyFlashinferDecodeAttnOp decode attention implementation
@@ -43,7 +46,7 @@ py_test(
         "base_attention_test.py"
     ],
     deps = py_test_deps + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:using_cuda12_9_plus_x86": flashinfer_deps,
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
@@ -81,7 +84,7 @@ py_test(
     deps = py_test_deps + [
         "//rtp_llm/test/utils:test_util",
     ] + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:using_cuda12_9_plus_x86": flashinfer_deps,
         "//conditions:default": []
     }),
     tags = ["H20", "cuda12_9"],
@@ -103,7 +106,7 @@ py_test(
     deps = py_test_deps + [
         "//rtp_llm/test/utils:test_util",
     ] + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:using_cuda12_9_plus_x86": flashinfer_deps,
         "//conditions:default": []
     }),
     tags = ["RTX_5000_PRO"],
@@ -125,7 +128,7 @@ py_test(
     deps = py_test_deps + [
         "//rtp_llm/test/utils:test_util",
     ] + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:using_cuda12_9_plus_x86": flashinfer_deps,
         "//conditions:default": []
     }),
     tags = ["H20", "cuda12_9"],
@@ -147,7 +150,7 @@ py_test(
     deps = py_test_deps + [
         "//rtp_llm/test/utils:test_util",
     ] + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:using_cuda12_9_plus_x86": flashinfer_deps,
         "//conditions:default": []
     }),
     tags = ["RTX_5000_PRO"],
@@ -181,7 +184,7 @@ py_test(
         "base_attention_test.py"
     ],
     deps = py_test_deps + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:using_cuda12_9_plus_x86": flashinfer_deps,
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
@@ -199,7 +202,7 @@ py_test(
         "base_attention_test.py"
     ],
     deps = py_test_deps + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:using_cuda12_9_plus_x86": flashinfer_deps,
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
@@ -218,7 +221,7 @@ py_test(
         "base_attention_test.py"
     ],
     deps = py_test_deps + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:using_cuda12_9_plus_x86": flashinfer_deps,
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
@@ -236,7 +239,7 @@ py_test(
         "base_attention_test.py"
     ],
     deps = py_test_deps + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:using_cuda12_9_plus_x86": flashinfer_deps,
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),

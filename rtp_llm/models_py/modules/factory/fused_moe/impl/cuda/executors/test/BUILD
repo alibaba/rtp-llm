@@ -21,6 +21,13 @@ py_test (
     exec_properties = {'gpu':'H20', 'gpu_count':'1'},
 )
 
+# Selected by the SM100_ARM tag in ut-gb200/ut-gb200-cu13. The root .bazelrc
+# injects gpu=SM100_ARM for --config=cuda12_9_arm and gpu=SM100_ARM_CU13 for
+# --config=cuda13_arm; this repository-level config is intentionally the single
+# source for the versioned GPU pool, while gpu_count remains target-specific.
+# The ARM-only tag is also deliberate: CUDA 13 x86 numerical coverage waits for
+# an x86 SM100 CI pool and qualified wheel revisions. Do not duplicate the ARM
+# pool value or reuse its tag at target level.
 py_test (
     name = "deepgemm_masked_executor_sm100_test",
     srcs = ["deepgemm_masked_executor_test.py",
@@ -34,8 +41,8 @@ py_test (
     env = {
         "GPU_COUNT": "1",
     },
-    tags = ["open_skip", "SM100_ARM"],
-    exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'},
+    tags = ["SM100_ARM"],
+    exec_properties = {'gpu_count':'1'},
 )
 
 py_test (
@@ -65,8 +72,8 @@ py_test (
     env = {
         "GPU_COUNT": "1",
     },
-    tags = ["open_skip", "SM100_ARM"],
-    exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'},
+    tags = ["SM100_ARM"],
+    exec_properties = {'gpu_count':'1'},
 )
 
 py_test (
@@ -82,14 +89,15 @@ py_test (
     env = {
         "GPU_COUNT": "1",
     },
-    tags = ["open_skip", "SM100_ARM"],
-    exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'},
+    tags = ["SM100_ARM"],
+    exec_properties = {'gpu_count':'1'},
 )
 
 py_test (
     name = "cutedsl_fp4_executor_test",
     srcs = ["cutedsl_fp4_executor_test.py"],
     deps = [
+        "//rtp_llm/models_py:kernels",
         "//rtp_llm/models_py:modules",
         "//rtp_llm:config",
         "//rtp_llm:testlib",
@@ -99,6 +107,6 @@ py_test (
         "GPU_COUNT": "1",
         "FLASHINFER_DISABLE_VERSION_CHECK": "1",
     },
-    tags = ["open_skip", "SM100_ARM"],
-    exec_properties = {'gpu':'SM100_ARM', 'gpu_count':'1'},
+    tags = ["SM100_ARM"],
+    exec_properties = {'gpu_count':'1'},
 )

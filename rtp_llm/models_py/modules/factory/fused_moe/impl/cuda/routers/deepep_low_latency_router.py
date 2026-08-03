@@ -23,6 +23,9 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.quant_config import (
     FusedMoEQuantConfig,
 )
 from rtp_llm.models_py.modules.factory.fused_moe.defs.type import RouterType
+from rtp_llm.models_py.modules.factory.fused_moe.impl.cuda.routers.deepep_dispatch_args import (
+    get_low_latency_dispatch_quant_args,
+)
 from rtp_llm.models_py.utils.arch import get_sm
 
 # DeepEP kernels quantize dispatch inputs in 128 element chunks.
@@ -224,11 +227,19 @@ class DeepEpLowLatencyRouter(FusedMoeDataRouter):
             "async_finish": self._async_finish,
             "return_recv_hook": self._return_recv_hook,
         }
-        # Set quantization config for DeepEP low latency dispatch
-        if self.quant_config.is_block_quantized and is_deep_gemm_e8m0_used():
-            dispatch_args.update({"round_scale": True, "use_ue8m0": True})
-        elif self.quant_config.is_per_act_token:
-            dispatch_args.update({"pertoken_quant": True})
+        use_e8m0 = (
+            self._use_fp8_dispatch
+            and self.quant_config.is_block_quantized
+            and is_deep_gemm_e8m0_used()
+        )
+        dispatch_args.update(
+            get_low_latency_dispatch_quant_args(
+                use_fp8=self._use_fp8_dispatch,
+                is_block_quantized=self.quant_config.is_block_quantized,
+                is_per_act_token=self.quant_config.is_per_act_token,
+                use_e8m0=use_e8m0,
+            )
+        )
 
         # Normal prepare
         expert_payload = self._normal_prepare(dispatch_args, tp_topk_weights)

@@ -10,13 +10,17 @@ flashinfer_deps = [
     "//rtp_llm:flashinfer-python",
 ]
 
+# The wider dependency select intentionally provides CUDA 13 analysis readiness,
+# while execution remains cuda12_9-only. Add a CUDA 13 tag only after its GPU
+# pool and runtime wheel combination are qualified; analysis support alone must
+# not silently opt this test into a new lane.
 py_test(
     name = "test_py_headwise",
     srcs = [
         "test_py_headwise.py",
     ],
     deps = py_test_deps + flashinfer_deps + select({
-        "@//:using_cuda12_9_x86": ["@pip_gpu_cuda12_9_torch//rtp_kernel:pkg"],
+        "@//:using_cuda12_9_plus_x86": ["//rtp_llm:rtp-kernel"],
         "//conditions:default": [],
     }),
     tags = ["H20", "cuda12_9"],

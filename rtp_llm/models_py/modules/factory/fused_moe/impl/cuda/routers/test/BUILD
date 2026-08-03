@@ -1,4 +1,10 @@
 py_test(
+    name = "deepep_dispatch_args_test",
+    srcs = ["deepep_dispatch_args_test.py"],
+    deps = ["//rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/routers:deepep_dispatch_args"],
+)
+
+py_test(
     name = "deepep_normal_router_test",
     srcs = ["deepep_normal_router_test.py"],
     deps = [

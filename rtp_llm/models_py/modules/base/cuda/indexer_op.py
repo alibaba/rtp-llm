@@ -42,6 +42,23 @@ def _unpack_ue8m0_scale(sf_packed: torch.Tensor) -> torch.Tensor:
     return sf_fp32
 
 
+def _require_fast_hadamard_transform():
+    # Construction-time failure is intentional: builds without this optional
+    # wheel must reject DSA/indexer models before their first forward. Keep a
+    # missing top-level package distinct from transitive import errors.
+    try:
+        from fast_hadamard_transform import hadamard_transform
+    except ModuleNotFoundError as exc:
+        if exc.name != "fast_hadamard_transform":
+            raise
+        raise RuntimeError(
+            "DeepSeek-V3.2 DSA requires fast-hadamard-transform, but this "
+            "build does not include a compatible wheel. CUDA 13 builds "
+            "currently defer this dependency."
+        ) from exc
+    return hadamard_transform
+
+
 def _rotate_activation(x: torch.Tensor) -> torch.Tensor:
     """
     Hadamard transform for activation rotation.
@@ -53,7 +70,7 @@ def _rotate_activation(x: torch.Tensor) -> torch.Tensor:
         Rotated activation tensor
     """
     assert x.dtype == torch.bfloat16
-    from fast_hadamard_transform import hadamard_transform
+    hadamard_transform = _require_fast_hadamard_transform()
 
     hidden_size = x.size(-1)
     assert (
@@ -95,6 +112,7 @@ class IndexerOp(nn.Module):
             scale_fmt: FP8 quantization format (default: "ue8m0")
         """
         super().__init__()
+        _require_fast_hadamard_transform()
         self.index_n_heads = index_n_heads
         self.index_head_dim = index_head_dim
         self.index_topk = index_topk

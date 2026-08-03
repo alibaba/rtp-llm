@@ -1,3 +1,7 @@
+# Keep shared targets synchronized with flashinfer_cu13.BUILD. In particular,
+# generate_dispatch intentionally duplicates its interpreter path and command;
+# change both rules together. CUDA 13 uses a reduced source set and separate
+# compatibility patches, so source lists intentionally differ.
 load("@//:def.bzl", "copts", "cuda_copts")
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch", "if_cuda")
 load("@arch_config//:arch_select.bzl", "torch_deps")

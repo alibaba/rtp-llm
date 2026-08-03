@@ -1,7 +1,9 @@
 #pragma once
+#include "3rdparty/trt_beam_search/beamSearch.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/models_py/bindings/core/ops/BeamSearchOp.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include <limits>
 #include <torch/torch.h>
 
 using namespace rtp_llm;
@@ -127,6 +129,49 @@ public:
 
         // assertTensorClose(result.token_ids, ref.token_ids);
         // assertTensorClose(result.beam_indices, ref.beam_indices);
+    }
+
+    void paddedVocabCase(int batch_size, int beam_width_in, int beam_width_out, bool expected_v2) {
+        constexpr int vocab_size  = 4093;
+        constexpr int max_seq_len = 8;
+        auto config
+            = tensorrt_llm::configureBeamSearch<float>(batch_size, beam_width_in, beam_width_out, vocab_size);
+        ASSERT_EQ(config.mV2, expected_v2);
+        ASSERT_EQ(config.mVBWS, beam_width_in != beam_width_out);
+
+        auto logits = torch::full(
+            {batch_size, beam_width_in, vocab_size}, -std::numeric_limits<float>::infinity(), float_options);
+        for (int batch = 0; batch < batch_size; ++batch) {
+            for (int beam = 0; beam < beam_width_in; ++beam) {
+                logits.index_put_({batch, beam, 17 + batch * beam_width_in + beam}, 10.0f);
+            }
+        }
+        auto cum_log_probs = torch::arange(batch_size * beam_width_in, float_options)
+                                 .mul(-0.25f)
+                                 .reshape({batch_size, beam_width_in});
+
+        TestBeamSearchInput input({logits,
+                                   torch::zeros({batch_size, beam_width_in, max_seq_len}, int_options),
+                                   torch::ones({batch_size, beam_width_in}, int_options),
+                                   torch::ones({batch_size, beam_width_in}, int_options),
+                                   cum_log_probs,
+                                   beam_width_out});
+
+        auto result = opRun(input);
+        auto ref    = torchRef(input);
+        assertTensorClose(result.token_ids, ref.token_ids);
+        assertTensorClose(result.beam_indices, ref.beam_indices);
+        assertTensorClose(result.cum_log_probs, ref.cum_log_probs);
+        assertTensorClose(result.sequence_lengths, ref.sequence_lengths);
+        assertTensorClose(result.input_lengths, ref.input_lengths);
+    }
+
+    void paddedVocabTest() {
+        // Cover V1, equal-width V2, and variable-width V2. The non-power-of-two
+        // vocabulary and -inf fill exercise masked padding in every case.
+        paddedVocabCase(1, 2, 2, false);
+        paddedVocabCase(1, 16, 16, true);
+        paddedVocabCase(2, 16, 4, true);
     }
 
     void runSimpleTests() {

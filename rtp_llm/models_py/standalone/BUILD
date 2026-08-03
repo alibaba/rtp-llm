@@ -30,9 +30,9 @@ flashinfer_with_cache = [
 ]
 
 flashmla = [
-    "//rtp_llm:fast-hadamard-transform",
     "//rtp_llm:flash-mla",
-    "//rtp_llm:tilelang"
+    "//rtp_llm:tilelang",
+    "//rtp_llm:fast-hadamard-transform",
 ]
 
 rtp_kernel = [
@@ -84,16 +84,15 @@ py_library(
     }) + select({
         "@//:using_cuda12_9_x86": flashinfer_with_cache + flashmla,
         "@//:using_cuda12_arm": flashinfer_with_cache,
+        "@//:using_cuda13": flashinfer + flashmla,
         "@//:cuda_pre_12_9": flashinfer,
         "//conditions:default": []
     }) + select({
-        "@//:using_cuda12_9_x86": rtp_kernel,
-        "@//:using_cuda12_arm": rtp_kernel,
+        "@//:using_cuda12_9_plus": rtp_kernel,
         "@//:cuda_pre_12_9": [],
         "//conditions:default": []
     }) + select({
-        "@//:using_cuda12_9_x86": flashattn,
-        "@//:using_cuda12_arm": flashattn,
+        "@//:using_cuda12_9": flashattn,
         "@//:cuda_pre_12_9": [],
         "//conditions:default": []
     }) + internal_deps(),

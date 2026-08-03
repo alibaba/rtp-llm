@@ -3,6 +3,21 @@ py_test_deps = [
     "//rtp_llm/models_py/standalone:py_standalone_testlib",
 ]
 
+py_test(
+    name = "cuda13_fallback_unit_test",
+    srcs = ["cuda13_fallback_unit_test.py"],
+    deps = [
+        "//rtp_llm/models_py:kernels",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:torch",
+    ],
+    tags = ["cpu"],
+    target_compatible_with = select({
+        "@//:using_cpu": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
+)
+
 py_test (
     name = "norm_test",
     srcs = ["norm_test.py"],

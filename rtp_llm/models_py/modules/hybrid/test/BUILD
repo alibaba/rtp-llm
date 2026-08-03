@@ -20,7 +20,7 @@ py_test (
     deps = py_test_deps + [
         "//rtp_llm:testlib",
     ] + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:using_cuda12_9_plus_x86": flashinfer_deps,
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),
@@ -34,7 +34,7 @@ py_test (
     deps = py_test_deps + [
         "//rtp_llm:testlib",
     ] + select({
-        "@//:using_cuda12_9_x86": flashinfer_deps,
+        "@//:using_cuda12_9_plus_x86": flashinfer_deps,
         "@//:cuda_pre_12_9": flashinfer_deps,
         "//conditions:default": []
     }),

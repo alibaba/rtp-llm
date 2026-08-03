@@ -144,6 +144,15 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
         extra_deps = []
         data = data + ["//rtp_llm/test/smoke:smoke_framework_srcs"]
 
+    # The root .bazelrc owns the SM100 ARM pool contract through
+    # --remote_default_exec_properties: cuda12_9_arm -> SM100_ARM and
+    # cuda13_arm -> SM100_ARM_CU13.
+    exec_properties = {
+        'gpu_count': str(gpu_count),
+    }
+    if gpu_type[0] != "SM100_ARM":
+        exec_properties['gpu'] = gpu_type[0]
+
     native.py_test(
         name = name,
         main = entry_main,
@@ -186,10 +195,7 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
             "--kill_remote", str(kill_remote),
             "--concurrency_test", str(concurrency_test),
         ],
-        exec_properties = {
-            'gpu':gpu_type[0],
-            'gpu_count': str(gpu_count),
-        },
+        exec_properties = exec_properties,
         env = {
             "GPU_COUNT": str(gpu_count),
         },

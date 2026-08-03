@@ -1,0 +1,48 @@
+-r requirements_base.txt
+
+# CUDA 13 / aarch64 (GB200 / GB300) dep set. Keep the TVM FFI and Cutlass DSL
+# pins synchronized with CUDA13_EXPECTED_DEPENDENCY_VERSIONS in
+# bazel/cuda13_packages.bzl.
+# Keep direct wheel URLs synchronized with whl_deps() in
+# arch_config/arch_select.bzl.
+# Matches the x86 cuda13 pattern: only self-built wheels against torch 2.11+cu130.
+# Packages that link libcudart.so.12 (flash_attn, flashinfer-cubin,
+# flashinfer-jit-cache, fast_hadamard) are deferred. flashinfer-python remains
+# available for JIT-backed APIs. Keep these architecture-specific pins until
+# ARM and x86 are qualified on the same Cutlass DSL and TVM FFI releases.
+flashinfer-python==0.6.9
+nvidia-cutlass-dsl==4.5.0
+apache-tvm-ffi==0.1.7
+# Triton 3.6 supports CUDA 13 ptxas natively; do not inject the legacy
+# TRITON_PTXAS_PATH version-spoofing wrapper used by older Triton releases.
+triton==3.6.0
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/arm_pkg/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl
+https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/rtp_llm/arm_pkg/torchvision-0.26.0%2Bcu130-cp310-cp310-manylinux_2_28_aarch64.whl
+mysql-connector-python==9.4.0
+
+# Self-built wheels against torch 2.11+cu130; SHAs are encoded in filenames.
+# The ARM FlashMLA wheel is from a separately validated platform build and may
+# differ from x86 until both architectures are rebuilt from one revision.
+# These byte-identical mirrors live under the team-managed CUDA 13 bucket.
+https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/cuda13/wheels/aarch64/deep-gemm/deep_gemm-2.5.0%2B8a4dfba-cp310-cp310-linux_aarch64.whl
+https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/cuda13/wheels/aarch64/deep-ep/deep_ep-1.2.1.12%2B37fda1c.base-cp310-cp310-linux_aarch64.whl
+https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/cuda13/wheels/aarch64/flash-mla/flash_mla-1.0.0%2B92fd68b-cp310-cp310-linux_aarch64.whl
+
+# rtp_kernel built from gitlab cuda_extension 49c379b for CUDA 13 ARM
+https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/cuda13/wheels/aarch64/rtp-kernel/rtp_kernel-0.1.0-49c379b-cp310-cp310-linux_aarch64.whl
+
+# fastsafetensors / fast_safetensors rebuilt against torch 2.11+cu130
+https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/cuda13/wheels/aarch64/fastsafetensors/fastsafetensors-0.1.20%2Bali-cp310-cp310-linux_aarch64.whl
+https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/cuda13/wheels/aarch64/fast-safetensors/fast_safetensors-0.7.3%2Btorch2.11.cu130-cp310-cp310-linux_aarch64.whl
+
+# DSV4 mHC uses TileLang by default.
+https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/cuda13/wheels/aarch64/tilelang/tilelang-0.1.9%2Bcuda.git441c3b06-cp38-abi3-linux_aarch64.whl
+https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/cuda13/wheels/aarch64/z3-solver/z3_solver-4.13.0.0%2Blocal.ali-py2.py3-none-manylinux2014_aarch64.whl
+https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/cuda13/wheels/aarch64/tile-kernels/tile_kernels-0.1.dev0%2Bali.git36d9e45-py3-none-any.whl
+
+safetensors==0.6.2
+tabulate==0.9.0
+
+# Direct cu129 flash_attn / flash_attn_3 / flashinfer cache / fast_hadamard
+# wheels are deferred because they link libcudart.so.12. nvidia-cutlass-dsl is
+# pinned above to the upstream CUDA 13 versions validated by this ARM lock.

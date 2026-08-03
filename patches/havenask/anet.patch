@@ -8,7 +8,7 @@ index 3774514c..78d172c5 100644
      deps=['//aios/alog:alog', '//aios/autil:env_util'],
 -    copts=['-Wformat-truncation=0'],
 +    copts=['-Wformat-truncation=0'] + select({
-+        "//:using_cuda12_arm": ['-march=armv8-a+crc'],
++        "//:using_cuda_arm": ['-march=armv8-a+crc'],
 +        "//conditions:default": ['-mcpu=native'],
 +    }),
 +    linkopts=['-ldl'],
