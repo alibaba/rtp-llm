@@ -10,7 +10,7 @@ import java.util.concurrent.TimeUnit;
 
 /**
  * Fixed-window batching algorithm with batch-full early dispatch, optional
- * predictor-based early dispatch, queue deadline drop, and token-cap filtering.
+ * predictor-based early dispatch, queue deadline drop, and resource-shape filtering.
  *
  * <h3>Algorithm</h3>
  * <ol>
@@ -33,10 +33,11 @@ import java.util.concurrent.TimeUnit;
  *   <li>Otherwise park briefly and retry.</li>
  * </ol>
  *
- * <h3>Token-cap filtering</h3>
- * When picking items for a batch, requests whose cumulative seqLen would
- * exceed {@code flexlbBatchMaxCapacity} are skipped (not included in the
- * current batch) but remain in the queue for subsequent batches.
+ * <h3>Resource-shape filtering</h3>
+ * When picking items for a batch, requests whose padded compute shape would
+ * exceed {@code flexlbBatchMaxCapacity}, or whose combined sequence length
+ * would exceed the latest worker-reported KV budget, remain in the queue for
+ * a later batch.
  * <p>
  * However, a request whose own seqLen already exceeds
  * {@code flexlbBatchMaxCapacity} can never be picked by any batch. Such
@@ -130,10 +131,10 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         long predictThresholdMs = ctx.cfg().getFlexlbBatchPredictThresholdMs();
         long batchMaxTokens = ctx.batchTokenCapacity();
 
-        // The Engine admits a group only when total context tokens are strictly
+        // The Engine admits a group only when padded context tokens are strictly
         // below max_batch_tokens_size. Reject an impossible head explicitly so
         // it cannot block the FIFO queue or cause an entire group to fast-fail.
-        if (!BatcherContext.fitsBatchTokenCapacity(0, head.seqLen(), batchMaxTokens)) {
+        if (!BatchShape.empty().add(head).fitsCompute(batchMaxTokens)) {
             ctx.rejectForBatchTokenCapacity(head, batchMaxTokens);
             return;
         }
@@ -162,7 +163,8 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
 
         // 2. Queue size >= batchMaxCount → dispatch immediately (batch full)
         if (ctx.size() >= batchMaxCount) {
-            List<BatchItem> picked = pickWithinCapacity(ctx, batchMaxCount, batchMaxTokens);
+            List<BatchItem> picked = pickWithinCapacity(
+                    ctx, batchMaxCount, batchMaxTokens, ctx.batchKvCapacity());
             if (!picked.isEmpty()) {
                 dispatch(ctx, picked, "batch_full");
             }
@@ -171,7 +173,8 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
 
         // 3. Queue size < batchMaxCount → check window timeout
         if (elapsedMs >= fixedWaitMs) {
-            List<BatchItem> picked = pickWithinCapacity(ctx, batchMaxCount, batchMaxTokens);
+            List<BatchItem> picked = pickWithinCapacity(
+                    ctx, batchMaxCount, batchMaxTokens, ctx.batchKvCapacity());
             if (!picked.isEmpty()) {
                 dispatch(ctx, picked, "fixed_window_timeout");
             }
@@ -181,7 +184,8 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         // 4. Predictor-based early dispatch
         if (predictThresholdMs > 0) {
             PrefillTimePredictor predictor = ctx.prefillEp().getPredictor();
-            List<BatchItem> candidates = pickWithinCapacity(ctx, batchMaxCount, batchMaxTokens);
+            List<BatchItem> candidates = pickWithinCapacity(
+                    ctx, batchMaxCount, batchMaxTokens, ctx.batchKvCapacity());
             if (!candidates.isEmpty() && predictor.predictBatchMs(candidates) >= predictThresholdMs) {
                 dispatch(ctx, candidates, "predict_threshold");
                 return;
@@ -196,20 +200,31 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
 
     /**
      * Greedily pick up to {@code maxCount} items in FIFO order while keeping
-     * the aggregate request sequence length strictly below the Engine limit.
+     * the batch inside the Engine's compute and KV resource shape.
+     *
+     * <p>The FIFO head is never rejected on dynamic KV availability: temporary
+     * KV pressure only prevents adding more members to this batch. The Engine
+     * remains the final admission authority for the singleton request.
      */
-    private static List<BatchItem> pickWithinCapacity(BatcherContext ctx, int maxCount, long batchMaxTokens) {
+    private static List<BatchItem> pickWithinCapacity(BatcherContext ctx,
+                                                       int maxCount,
+                                                       long batchMaxTokens,
+                                                       long batchKvTokens) {
         List<BatchItem> picked = new ArrayList<>();
-        long totalTokens = 0;
+        BatchShape shape = BatchShape.empty();
         for (BatchItem item : ctx.sortedItems()) {
             if (picked.size() >= maxCount) {
                 break;
             }
-            if (!BatcherContext.fitsBatchTokenCapacity(totalTokens, item.seqLen(), batchMaxTokens)) {
+            BatchShape candidate = shape.add(item);
+            if (!candidate.fitsCompute(batchMaxTokens)) {
+                continue;
+            }
+            if (!picked.isEmpty() && !candidate.fitsKv(batchKvTokens)) {
                 continue;
             }
             picked.add(item);
-            totalTokens += item.seqLen();
+            shape = candidate;
         }
         return picked;
     }

@@ -137,6 +137,31 @@ class PrefillEndpointTest {
     }
 
     @Test
+    void calibrateKeepsUnfinishedMembersAfterPartialSuccess() {
+        BatchItem item1 = createBatchItem(1L, 500, 200);
+        BatchItem item2 = createBatchItem(2L, 300, 100);
+        endpoint.commitBatch(1L, 100, List.of(item1, item2));
+
+        TaskInfo firstSuccess = new TaskInfo();
+        firstSuccess.setRequestId(1L);
+        firstSuccess.setBatchId(1L);
+        firstSuccess.setErrorCode(0);
+        calibrate(Map.of("1", firstSuccess), Map.of());
+
+        assertEquals(1, endpoint.getInflightBatchCount());
+        assertEquals(1, endpoint.realPendingCount());
+
+        TaskInfo secondSuccess = new TaskInfo();
+        secondSuccess.setRequestId(2L);
+        secondSuccess.setBatchId(1L);
+        secondSuccess.setErrorCode(0);
+        calibrate(Map.of("2", secondSuccess), Map.of());
+
+        assertEquals(0, endpoint.getInflightBatchCount());
+        assertEquals(0, endpoint.realPendingCount());
+    }
+
+    @Test
     void calibrateRepacksOnPartialFailure() {
         BatchItem item1 = createBatchItem(1L, 500, 200);
         BatchItem item2 = createBatchItem(2L, 300, 100);

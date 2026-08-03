@@ -106,7 +106,7 @@ class FixedWindowBatcherAlgorithmTest {
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
         BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
         BatchItem[] items = new BatchItem[32];
-        long now = System.currentTimeMillis();
+        long now = System.currentTimeMillis() - 1_000;
         for (int index = 0; index < items.length; index++) {
             items[index] = enqueuedItem(index + 1, now);
         }
@@ -124,7 +124,7 @@ class FixedWindowBatcherAlgorithmTest {
     }
 
     @Test
-    void fixedWindowBatchDoesNotExceedEngineBatchTokenLimit() throws InterruptedException {
+    void fixedWindowBatchUsesEnginePaddedTokenCost() throws InterruptedException {
         FlexlbConfig config = sloCaseConfig();
         config.setFlexlbBatchFixedWaitMs(0);
         config.setFlexlbBatchMaxCapacity(1_000);
@@ -138,21 +138,88 @@ class FixedWindowBatcherAlgorithmTest {
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
 
         BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        long now = System.currentTimeMillis() - 1_000;
         BatcherContext context = context(
                 "test", endpoint, config, handler,
-                queueWith(enqueuedItem(1, 1, 60),
-                        enqueuedItem(2, 2, 50),
-                        enqueuedItem(3, 3, 30)),
+                queueWith(enqueuedItem(1, now, 60),
+                        enqueuedItem(2, now + 1, 50),
+                        enqueuedItem(3, now + 2, 30)),
                 mock(BatchSchedulerReporter.class));
 
         new FixedWindowBatcherAlgorithm().processQueue(context);
 
         ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
         verify(handler).onBatchReady(dispatched.capture(), org.mockito.ArgumentMatchers.any());
-        assertEquals(List.of(1L, 3L), dispatched.getValue().stream().map(BatchItem::requestId).toList());
-        assertEquals(90L, dispatched.getValue().stream().mapToLong(BatchItem::seqLen).sum());
-        assertEquals(1, context.size());
+        assertEquals(List.of(1L), dispatched.getValue().stream().map(BatchItem::requestId).toList());
+        assertEquals(60L, dispatched.getValue().stream().mapToLong(BatchItem::seqLen).sum());
+        assertEquals(2, context.size());
         assertEquals(2L, context.peek().requestId());
+    }
+
+    @Test
+    void largeMrcrRequestIsDispatchedAloneWhenPaddedBatchWouldOverflow() throws InterruptedException {
+        final int engineBatchTokenLimit = 1_048_576;
+
+        FlexlbConfig config = sloCaseConfig();
+        config.setFlexlbBatchFixedWaitMs(0);
+        config.setFlexlbBatchSizeMax(13);
+        config.setFlexlbBatchMaxCapacity(engineBatchTokenLimit);
+
+        WorkerStatus status = new WorkerStatus();
+        status.setMaxSeqLen(engineBatchTokenLimit);
+        status.setMaxBatchTokensSize(engineBatchTokenLimit);
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.getStatus()).thenReturn(status);
+        when(endpoint.getIp()).thenReturn("127.0.0.1");
+        when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
+
+        BatchItem[] items = new BatchItem[13];
+        long now = System.currentTimeMillis() - 1_000;
+        items[0] = enqueuedItem(1L, now, 929_760L);
+        for (int index = 1; index < items.length; index++) {
+            items[index] = enqueuedItem(index + 1L, now + index, 9_192L);
+        }
+
+        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        BatcherContext context = context(
+                "test", endpoint, config, handler, queueWith(items),
+                mock(BatchSchedulerReporter.class));
+
+        new FixedWindowBatcherAlgorithm().processQueue(context);
+
+        ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
+        verify(handler).onBatchReady(dispatched.capture(), org.mockito.ArgumentMatchers.any());
+        assertEquals(List.of(1L), dispatched.getValue().stream().map(BatchItem::requestId).toList());
+        assertEquals(12, context.size());
+    }
+
+    @Test
+    void dynamicKvBudgetLimitsOnlyAdditionalBatchMembers() throws InterruptedException {
+        FlexlbConfig config = sloCaseConfig();
+        config.setFlexlbBatchFixedWaitMs(0);
+
+        WorkerStatus status = new WorkerStatus();
+        status.setMaxBatchTokensSize(1_000);
+        status.getTotalKvCacheTokens().set(100);
+        status.getAvailableKvCacheTokens().set(70);
+        PrefillEndpoint endpoint = mock(PrefillEndpoint.class);
+        when(endpoint.getStatus()).thenReturn(status);
+        when(endpoint.getIp()).thenReturn("127.0.0.1");
+        when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
+
+        long now = System.currentTimeMillis() - 1_000;
+        BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        BatcherContext context = context(
+                "test", endpoint, config, handler,
+                queueWith(enqueuedItem(1, now, 60), enqueuedItem(2, now + 1, 20)),
+                mock(BatchSchedulerReporter.class));
+
+        new FixedWindowBatcherAlgorithm().processQueue(context);
+
+        ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
+        verify(handler).onBatchReady(dispatched.capture(), org.mockito.ArgumentMatchers.any());
+        assertEquals(List.of(1L), dispatched.getValue().stream().map(BatchItem::requestId).toList());
+        assertEquals(1, context.size());
     }
 
     @Test
@@ -164,6 +231,7 @@ class FixedWindowBatcherAlgorithmTest {
         FlexlbConfig config = sloCaseConfig();
         config.setFlexlbBatchSizeMax(requestCount);
         config.setFlexlbBatchMaxCapacity(engineBatchTokenLimit);
+        config.setFlexlbBatchFixedWaitMs(0);
 
         WorkerStatus status = new WorkerStatus();
         status.setMaxSeqLen(131_072L);
@@ -174,8 +242,9 @@ class FixedWindowBatcherAlgorithmTest {
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
 
         BatchItem[] items = new BatchItem[requestCount];
+        long now = System.currentTimeMillis() - 1_000;
         for (int index = 0; index < requestCount; index++) {
-            items[index] = enqueuedItem(index + 1L, index + 1L, seqLen);
+            items[index] = enqueuedItem(index + 1L, now + index, seqLen);
         }
         BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
         BatcherContext context = context(
@@ -215,9 +284,10 @@ class FixedWindowBatcherAlgorithmTest {
         when(endpoint.ipPort()).thenReturn("127.0.0.1:61000");
 
         BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
+        long now = System.currentTimeMillis();
         BatcherContext context = context(
                 "test", endpoint, config, handler,
-                queueWith(enqueuedItem(1, 1, 60), enqueuedItem(2, 2, 40)),
+                queueWith(enqueuedItem(1, now, 60), enqueuedItem(2, now + 1, 40)),
                 mock(BatchSchedulerReporter.class));
 
         new FixedWindowBatcherAlgorithm().processQueue(context);

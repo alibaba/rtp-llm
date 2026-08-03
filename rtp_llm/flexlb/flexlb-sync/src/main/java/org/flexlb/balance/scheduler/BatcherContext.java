@@ -113,10 +113,11 @@ public class BatcherContext {
     }
 
     /**
-     * Effective strict token limit for one FlexLB batch.
+     * Effective strict padded-token limit for one FlexLB batch.
      *
-     * <p>The Engine's FIFO scheduler rejects a group when the aggregate context
-     * length is greater than or equal to {@code max_batch_tokens_size}. Prefer
+     * <p>The Engine's FIFO scheduler rejects a group when its padded context
+     * shape ({@code maxSeqLen * batchSize}) is greater than or equal to
+     * {@code max_batch_tokens_size}. Prefer
      * that exact worker-reported limit; {@code max_seq_len} is a conservative
      * fallback for workers that have not populated the newer field yet. The
      * FlexLB setting remains an operator-controlled upper bound.
@@ -135,19 +136,25 @@ public class BatcherContext {
         return Math.min(capacity, positiveOrUnlimited(engineCapacity));
     }
 
-    /** Engine admission uses a strict {@code total < capacity} comparison. */
-    static boolean fitsBatchTokenCapacity(long currentTokens, long itemTokens, long capacity) {
-        if (currentTokens < 0 || itemTokens < 0 || capacity <= 0 || currentTokens >= capacity) {
-            return false;
+    /**
+     * Latest worker-reported KV budget. A zero total means the worker has not
+     * published KV capacity yet, so batching remains compute-bound only.
+     */
+    long batchKvCapacity() {
+        WorkerStatus status = prefillEp != null ? prefillEp.getStatus() : null;
+        long total = status == null ? 0 : status.getTotalKvCacheTokens().get();
+        if (total <= 0) {
+            return Long.MAX_VALUE;
         }
-        return itemTokens < capacity - currentTokens;
+        long available = Math.max(0, status.getAvailableKvCacheTokens().get());
+        return Math.min(total, available);
     }
 
     void rejectForBatchTokenCapacity(BatchItem item, long capacity) {
         if (remove(item)) {
             handler.onOfferFailure(item, new IllegalArgumentException(
                     "request seq_len=" + item.seqLen()
-                            + " cannot fit strict batch token capacity=" + capacity));
+                            + " cannot fit strict padded batch token capacity=" + capacity));
         }
     }
 
