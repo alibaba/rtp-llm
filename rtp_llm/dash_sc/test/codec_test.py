@@ -11,12 +11,14 @@ import torch
 from rtp_llm.dash_sc.client import build_model_infer_request
 from rtp_llm.dash_sc.codec import (
     DashErrorSpec,
+    DashScInputIdsError,
     DashScParameterError,
     LLMFinishReason,
     OtherParams,
+    ParsedInputIds,
     SamplingParams,
+    StreamResponseBuilder,
     build_dash_error_response,
-    build_stream_response_from_generate_outputs,
     parse_dash_sc_grpc_request,
     parse_input_ids_from_request,
     parse_other_params,
@@ -729,7 +731,9 @@ class DashScGrpcRequestTest(TestCase):
 
         ids, sp, op = parse_dash_sc_grpc_request(req)
 
-        self.assertEqual(ids, [1, 2])
+        self.assertIsInstance(ids, ParsedInputIds)
+        assert ids is not None
+        self.assertEqual(ids.values, [1, 2])
         self.assertIsNotNone(sp)
         self.assertIsNotNone(op)
         self.assertEqual(sp.max_new_think_tokens, 7)
@@ -830,7 +834,10 @@ class DashScGrpcRequestTest(TestCase):
         _add_tensor(req, "top_k", "INT32", [1], struct.pack("<i", 10))
         _add_tensor(req, "return_input_ids", "BOOL", [1], b"\x01")
         ids, sp, op = parse_dash_sc_grpc_request(req)
-        self.assertEqual(ids, [1, 2])
+        self.assertIsInstance(ids, ParsedInputIds)
+        assert ids is not None
+        self.assertEqual(ids.values, [1, 2])
+        self.assertEqual(ids.tensor.tolist(), [1, 2])
         self.assertIsNotNone(sp)
         self.assertIsNotNone(op)
         assert sp is not None and op is not None
@@ -843,6 +850,63 @@ class DashScGrpcRequestTest(TestCase):
         self.assertIsNone(ids)
         self.assertIsNone(sp)
         self.assertIsNone(op)
+
+    def test_inference_input_ids_from_int32_wire_buffer(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_tensor(req, "input_ids", "INT32", [3], struct.pack("<3i", 7, 8, 9))
+
+        parsed, _, _ = parse_dash_sc_grpc_request(req)
+
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.tensor.dtype, torch.int32)
+        self.assertEqual(parsed.tensor.tolist(), [7, 8, 9])
+        parsed.tensor[0] = 99
+        self.assertEqual(parsed.values, [7, 8, 9])
+        self.assertEqual(parse_input_ids_from_request(req), [7, 8, 9])
+
+    def test_inference_input_ids_from_int64_converts_to_engine_dtype(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_tensor(req, "input_ids", "INT64", [2], struct.pack("<2q", 10, 11))
+
+        parsed, _, _ = parse_dash_sc_grpc_request(req)
+
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.tensor.dtype, torch.int32)
+        self.assertEqual(parsed.tensor.tolist(), [10, 11])
+
+    def test_inference_input_ids_from_int64_accepts_int32_boundaries(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_tensor(
+            req,
+            "input_ids",
+            "INT64",
+            [2],
+            struct.pack("<2q", -(2**31), 2**31 - 1),
+        )
+
+        parsed, _, _ = parse_dash_sc_grpc_request(req)
+
+        self.assertIsNotNone(parsed)
+        assert parsed is not None
+        self.assertEqual(parsed.tensor.tolist(), [-(2**31), 2**31 - 1])
+
+    def test_inference_input_ids_from_int64_rejects_int32_overflow(self) -> None:
+        for value in (-(2**40), 2**40):
+            with self.subTest(value=value):
+                req = predict_v2_pb2.ModelInferRequest()
+                _add_tensor(req, "input_ids", "INT64", [1], struct.pack("<q", value))
+                with self.assertRaisesRegex(
+                    DashScInputIdsError, "outside the INT32 range"
+                ):
+                    parse_dash_sc_grpc_request(req)
+
+    def test_inference_input_ids_rejects_misaligned_wire_buffer(self) -> None:
+        req = predict_v2_pb2.ModelInferRequest()
+        _add_tensor(req, "input_ids", "INT32", [1], b"\x01\x02\x03")
+        parsed, _, _ = parse_dash_sc_grpc_request(req)
+        self.assertIsNone(parsed)
 
     def test_sampling_to_generate_config(self) -> None:
         sp = SamplingParams(
@@ -859,16 +923,16 @@ class DashScGrpcRequestTest(TestCase):
         self.assertTrue(gc.return_input_ids)
 
 
-class BuildStreamResponseFromGenerateOutputsTest(TestCase):
+class StreamResponseBuilderTest(TestCase):
     def test_empty_generate_outputs_raises(self) -> None:
         go = GenerateOutputs(generate_outputs=[])
+        builder = StreamResponseBuilder(
+            dash_sc_request_id="r1",
+            model_name="m",
+            request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r1"),
+        )
         with self.assertRaises(ValueError) as ctx:
-            build_stream_response_from_generate_outputs(
-                dash_sc_request_id="r1",
-                model_name="m",
-                go=go,
-                request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r1"),
-            )
+            builder.build(go)
         self.assertIn("non-empty", str(ctx.exception))
 
     def test_basic_generated_ids_finish_aux(self) -> None:
@@ -878,13 +942,12 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             aux_info=AuxInfo(input_len=10, reuse_len=4),
         )
         go = GenerateOutputs(generate_outputs=[out])
-        resp = build_stream_response_from_generate_outputs(
+        resp = StreamResponseBuilder(
             dash_sc_request_id="req-a",
             model_name="mdl",
-            go=go,
             request_log_tag=stream_log_tag(request_id_numeric=99, trace_id="req-a"),
             return_input_ids=False,
-        )
+        ).build(go)
         self.assertFalse(resp.error_message)
         infer = resp.infer_response
         self.assertEqual(infer.id, "req-a")
@@ -974,20 +1037,19 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         ``finished=True`` always maps to 0 (stop), so dashscope-serving
         collapses every cutoff into ``finish_reason='stop'``.
 
-        Expected fix: codec exposes ``LLMFinishReason.LENGTH = 1`` and
-        ``build_stream_response_from_generate_outputs`` takes a
-        ``finish_reason_override`` argument the caller can set when the
-        cumulative output reaches the per-request budget."""
+        The response builder accepts a ``finish_reason_override`` the caller can
+        set when cumulative output reaches the per-request budget."""
         out = GenerateOutput(
             output_ids=torch.tensor([1, 2, 3], dtype=torch.int32),
             finished=True,
             aux_info=AuxInfo(input_len=4, reuse_len=0, output_len=3),
         )
-        resp = build_stream_response_from_generate_outputs(
+        resp = StreamResponseBuilder(
             dash_sc_request_id="r",
             model_name="m",
-            go=GenerateOutputs(generate_outputs=[out]),
             request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
+        ).build(
+            GenerateOutputs(generate_outputs=[out]),
             finish_reason_override=LLMFinishReason.LENGTH,
         )
         infer = resp.infer_response
@@ -1007,12 +1069,11 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             aux_info=None,
         )
         go = GenerateOutputs(generate_outputs=[out])
-        resp = build_stream_response_from_generate_outputs(
+        resp = StreamResponseBuilder(
             dash_sc_request_id="r",
             model_name="m",
-            go=go,
             request_log_tag=stream_log_tag(request_id_numeric=0, trace_id="r"),
-        )
+        ).build(go)
         infer = resp.infer_response
         by_name = {
             infer.outputs[i].name: infer.raw_output_contents[i]
@@ -1034,13 +1095,12 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             aux_info=None,
         )
         go = GenerateOutputs(generate_outputs=[out])
-        resp = build_stream_response_from_generate_outputs(
+        resp = StreamResponseBuilder(
             dash_sc_request_id="r",
             model_name="m",
-            go=go,
             request_log_tag=stream_log_tag(request_id_numeric=0, trace_id="r"),
             request_input_ids=[10, 11, 12],
-        )
+        ).build(go)
         infer = resp.infer_response
         by_name = {
             infer.outputs[i].name: infer.raw_output_contents[i]
@@ -1057,12 +1117,11 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             finished=True,
         )
         go = GenerateOutputs(generate_outputs=[out])
-        resp = build_stream_response_from_generate_outputs(
+        resp = StreamResponseBuilder(
             dash_sc_request_id="r",
             model_name="m",
-            go=go,
             request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
-        )
+        ).build(go)
         infer = resp.infer_response
         by_name = {
             infer.outputs[i].name: infer.raw_output_contents[i]
@@ -1076,14 +1135,13 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
             finished=True,
         )
         go = GenerateOutputs(generate_outputs=[out])
-        resp = build_stream_response_from_generate_outputs(
+        resp = StreamResponseBuilder(
             dash_sc_request_id="r",
             model_name="m",
-            go=go,
             request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
             request_input_ids=[1, 2, 3],
             return_input_ids=True,
-        )
+        ).build(go)
         infer = resp.infer_response
         names = [infer.outputs[i].name for i in range(len(infer.outputs))]
         self.assertEqual(
@@ -1107,12 +1165,11 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
     def test_missing_output_ids_empty_generated(self) -> None:
         out = GenerateOutput(output_ids=None, finished=False, aux_info=AuxInfo())
         go = GenerateOutputs(generate_outputs=[out])
-        resp = build_stream_response_from_generate_outputs(
+        resp = StreamResponseBuilder(
             dash_sc_request_id="r",
             model_name="m",
-            go=go,
             request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
-        )
+        ).build(go)
         infer = resp.infer_response
         by_name = {
             infer.outputs[i].name: infer.raw_output_contents[i]
@@ -1120,6 +1177,137 @@ class BuildStreamResponseFromGenerateOutputsTest(TestCase):
         }
         self.assertEqual(by_name["generated_ids"], struct.pack("<i", 0))
         self.assertEqual(list(infer.outputs[0].shape), [1, 0])
+
+    def test_updates_dynamic_fields_without_mutating_prior_frames(self) -> None:
+        generate_config = SamplingParams(
+            max_new_tokens=64, max_new_think_tokens=32
+        ).to_generate_config()
+        static = {
+            "dash_sc_request_id": "req-cached",
+            "model_name": "mdl",
+            "request_log_tag": stream_log_tag(
+                request_id_numeric=99, trace_id="req-cached"
+            ),
+            "request_input_ids": [10, 11, 12],
+            "return_input_ids": True,
+            "is_streaming": True,
+            "generate_config": generate_config,
+            "eos_token_id": 151643,
+            "max_token_id": 151936,
+        }
+        builder = StreamResponseBuilder(**static)
+        cases = (
+            (
+                GenerateOutput(
+                    output_ids=torch.tensor([1, 2]),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=3, reuse_len=1),
+                ),
+                None,
+                None,
+                LLMFinishReason.STREAMING,
+            ),
+            (
+                GenerateOutput(
+                    output_ids=torch.tensor([3, 4, 5]),
+                    finished=False,
+                    aux_info=AuxInfo(input_len=4, reuse_len=2),
+                ),
+                7,
+                None,
+                LLMFinishReason.STREAMING,
+            ),
+            (
+                GenerateOutput(
+                    output_ids=torch.tensor([6]),
+                    finished=True,
+                    aux_info=AuxInfo(input_len=5, reuse_len=3),
+                ),
+                None,
+                LLMFinishReason.LENGTH,
+                LLMFinishReason.LENGTH,
+            ),
+        )
+
+        frames = []
+        for output, think_len, finish_override, expected_finish_reason in cases:
+            go = GenerateOutputs(generate_outputs=[output])
+            token_ids = output.output_ids.tolist()
+            frame = builder.build(
+                go,
+                token_ids=token_ids,
+                generate_think_token_num=think_len,
+                finish_reason_override=finish_override,
+            )
+            frames.append(frame)
+            infer = frame.infer_response
+            by_name = {
+                infer.outputs[i].name: infer.raw_output_contents[i]
+                for i in range(len(infer.outputs))
+            }
+            self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), token_ids)
+            self.assertEqual(
+                _unpack_int64_le(by_name["finish_reason"]),
+                [expected_finish_reason],
+            )
+            self.assertEqual(
+                by_name["finished"], b"\x01" if output.finished else b"\x00"
+            )
+            self.assertEqual(
+                _unpack_int32_le(by_name["prompt_token_num"]),
+                [output.aux_info.input_len],
+            )
+            self.assertEqual(
+                _unpack_int32_le(by_name["prompt_cached_token_num"]),
+                [output.aux_info.reuse_len],
+            )
+            self.assertEqual(
+                infer.parameters["prompt_token_num"].int64_param,
+                output.aux_info.input_len,
+            )
+            self.assertEqual(
+                infer.parameters["prompt_cached_token_num"].int64_param,
+                output.aux_info.reuse_len,
+            )
+            if think_len is None:
+                self.assertNotIn("generate_think_token_num", infer.parameters)
+            else:
+                self.assertEqual(
+                    infer.parameters["generate_think_token_num"].int64_param,
+                    think_len,
+                )
+
+        first_by_name = {
+            frames[0]
+            .infer_response.outputs[i]
+            .name: (frames[0].infer_response.raw_output_contents[i])
+            for i in range(len(frames[0].infer_response.outputs))
+        }
+        self.assertEqual(_unpack_int32_le(first_by_name["generated_ids"]), [1, 2])
+
+    def test_stream_response_builder_removes_template_dynamic_parameter(self) -> None:
+        output = GenerateOutput(
+            output_ids=torch.tensor([1]),
+            finished=False,
+            aux_info=AuxInfo(input_len=1, reuse_len=0),
+        )
+        go = GenerateOutputs(generate_outputs=[output])
+        static = {
+            "dash_sc_request_id": "r",
+            "model_name": "m",
+            "request_log_tag": stream_log_tag(request_id_numeric=1, trace_id="r"),
+        }
+        builder = StreamResponseBuilder(**static)
+        builder.build(go, token_ids=[1], generate_think_token_num=4)
+
+        actual = builder.build(go, token_ids=[2], generate_think_token_num=None)
+        infer = actual.infer_response
+        self.assertNotIn("generate_think_token_num", infer.parameters)
+        by_name = {
+            infer.outputs[i].name: infer.raw_output_contents[i]
+            for i in range(len(infer.outputs))
+        }
+        self.assertEqual(_unpack_int32_le(by_name["generated_ids"]), [2])
 
 
 class PrependToGeneratedIdsTensorTest(TestCase):
@@ -1130,12 +1318,11 @@ class PrependToGeneratedIdsTensorTest(TestCase):
             aux_info=AuxInfo(input_len=0, reuse_len=0),
         )
         go = GenerateOutputs(generate_outputs=[out])
-        resp = build_stream_response_from_generate_outputs(
+        resp = StreamResponseBuilder(
             dash_sc_request_id="r",
             model_name="m",
-            go=go,
             request_log_tag=stream_log_tag(request_id_numeric=1, trace_id="r"),
-        )
+        ).build(go)
         return resp.infer_response
 
     def test_prepend_list_success(self) -> None:

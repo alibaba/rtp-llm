@@ -39,13 +39,15 @@ from rtp_llm.dash_sc.codec import (
     DASH_ERROR_TOO_LONG,
     DASH_ERROR_UNSUPPORTED,
     DashErrorSpec,
+    DashScInputIdsError,
     DashScParameterError,
     LLMFinishReason,
     OtherParams,
+    ParsedInputIds,
     SamplingParams,
+    StreamResponseBuilder,
     _token_ids_list_from_generate_output,
     build_dash_error_response,
-    build_stream_response_from_generate_outputs,
     iter_fake_model_stream_infer,
     parse_dash_sc_grpc_request,
     prepend_to_generated_ids_tensor,
@@ -324,7 +326,7 @@ def _phase2_input_ids_for_deepseek_v4(
 def _make_generate_input(
     *,
     request_id: int,
-    input_ids_list: list[int],
+    input_ids_tensor: torch.Tensor,
     generate_config: Any,
     invocation_metadata: Optional[Any],
     request_headers: Optional[dict[str, str]] = None,
@@ -336,7 +338,7 @@ def _make_generate_input(
     )
     return GenerateInput(
         request_id=request_id,
-        token_ids=torch.tensor(input_ids_list, dtype=torch.int),
+        token_ids=input_ids_tensor,
         mm_inputs=[],
         generate_config=generate_config,
         headers=headers,
@@ -444,7 +446,7 @@ def _apply_request_overrides(
 
 async def iter_real_model_stream_infer(
     request,
-    input_ids_list: list[int],
+    input_ids: ParsedInputIds,
     sampling: SamplingParams,
     other: OtherParams,
     backend_visitor: Any,
@@ -467,7 +469,7 @@ async def iter_real_model_stream_infer(
     the HTTP path). ``request.id`` (string) is preserved as the trace id.
 
     ``echo_prefix_ids`` is the auto-derived "thinking prefill" token id sequence. When
-    non-empty and ``input_ids_list`` ends with it, the first non-empty ``generated_ids``
+    non-empty and ``input_ids.values`` ends with it, the first non-empty ``generated_ids``
     chunk gets ``echo_prefix_ids`` prepended so downstream consumers that rely on the
     prefill-echo contract (dashllm-style) see the expected first token.
 
@@ -488,6 +490,7 @@ async def iter_real_model_stream_infer(
     + tuple hashing entirely. The slow branch only fires when a caller explicitly
     sets ``stop_words_list`` on the request.
     """
+    input_ids_list = input_ids.values
     trace_str = str(request.id)
     tag = stream_log_tag(request_id_numeric=rtp_llm_request_id, trace_id=trace_str)
     runtime = think_runtime if think_runtime is not None else _ThinkRuntime()
@@ -560,18 +563,28 @@ async def iter_real_model_stream_infer(
         phase2_enabled = runtime.phase2_enabled and bool(
             getattr(generate_config, "in_think_mode", False)
         )
-        cumulative_sent_ids: list[int] = []
+        cumulative_sent_len = 0
         generate_think_token_num: Optional[int] = None
         generate_input = _make_generate_input(
             request_id=rtp_llm_request_id,
-            input_ids_list=input_ids_list,
+            input_ids_tensor=input_ids.tensor,
             generate_config=generate_config,
             invocation_metadata=invocation_metadata,
             request_headers=other.request_headers,
         )
         is_streaming = bool(getattr(generate_config, "is_streaming", True))
         logging.debug("[DashScGrpc] [%s] generate_input: %s", tag, generate_input)
-        request_shape = list(request.inputs[0].shape) if request.inputs else None
+        response_builder = StreamResponseBuilder(
+            dash_sc_request_id=request.id,
+            model_name=request.model_name,
+            request_log_tag=tag,
+            request_input_ids=input_ids_list,
+            return_input_ids=other.return_input_ids,
+            is_streaming=is_streaming,
+            generate_config=generate_config,
+            eos_token_id=eos_id,
+            max_token_id=max_id,
+        )
         chunk_idx = 0
         phase2_needed = False
         # One-shot guard: ``phase2_triggered`` flips True the instant we
@@ -601,19 +614,7 @@ async def iter_real_model_stream_infer(
                 # model_rpc_client copies the final submitted role_addrs here.
                 access_agg.record_role_addrs(aux_info.role_addrs, phase="phase1")
             if not generated_ids and not out_py.finished:
-                response = build_stream_response_from_generate_outputs(
-                    dash_sc_request_id=request.id,
-                    model_name=request.model_name,
-                    go=go,
-                    request_log_tag=tag,
-                    request_input_ids=input_ids_list,
-                    return_input_ids=other.return_input_ids,
-                    is_streaming=is_streaming,
-                    generate_config=generate_config,
-                    eos_token_id=eos_id,
-                    max_token_id=max_id,
-                    _request_shape=request_shape,
-                )
+                response = response_builder.build(go, token_ids=generated_ids)
                 stats = (
                     0,
                     False,
@@ -648,9 +649,7 @@ async def iter_real_model_stream_infer(
                 if close_offset is not None and (
                     term_offset is None or close_offset < term_offset
                 ):
-                    generate_think_token_num = (
-                        len(cumulative_sent_ids) + close_offset + 1
-                    )
+                    generate_think_token_num = cumulative_sent_len + close_offset + 1
                     # Natural ``</think>`` close keeps the stream single-phase
                     # (DashLLM-aligned). Phase-2 is exclusively triggered by
                     # the terminate-token-id (DSV4 token 1) path below — see
@@ -667,9 +666,7 @@ async def iter_real_model_stream_infer(
                 ids_for_accounting = generated_ids
                 if should_echo and not echoed and generated_ids:
                     ids_for_accounting = matched_echo_ids + generated_ids
-                generate_think_token_num = len(cumulative_sent_ids) + len(
-                    ids_for_accounting
-                )
+                generate_think_token_num = cumulative_sent_len + len(ids_for_accounting)
                 will_do_phase2 = True
                 if sampling.max_new_tokens_from_completion_alias:
                     will_do_phase2 = (
@@ -678,22 +675,12 @@ async def iter_real_model_stream_infer(
                         )
                         > 0
                     )
-                cumulative_sent_ids.extend(ids_for_accounting)
+                cumulative_sent_len += len(ids_for_accounting)
                 # Yield thinking content (always intermediate)
                 if generated_ids:
-                    response = build_stream_response_from_generate_outputs(
-                        dash_sc_request_id=request.id,
-                        model_name=request.model_name,
-                        go=go,
-                        request_log_tag=tag,
-                        request_input_ids=input_ids_list,
-                        return_input_ids=other.return_input_ids,
-                        is_streaming=is_streaming,
-                        generate_config=generate_config,
-                        eos_token_id=eos_id,
-                        max_token_id=max_id,
+                    response = response_builder.build(
+                        go,
                         generate_think_token_num=generate_think_token_num,
-                        _request_shape=request_shape,
                         stream_finished=False,
                         token_ids=generated_ids,
                     )
@@ -713,22 +700,12 @@ async def iter_real_model_stream_infer(
                     yield (response, stats) if yield_access_stats else response
                 # Yield </think> close tokens
                 if runtime.eos_tokens:
-                    eos_response = build_stream_response_from_generate_outputs(
-                        dash_sc_request_id=request.id,
-                        model_name=request.model_name,
-                        go=go,
-                        request_log_tag=tag,
-                        request_input_ids=input_ids_list,
-                        return_input_ids=other.return_input_ids,
-                        is_streaming=is_streaming,
-                        generate_config=generate_config,
-                        eos_token_id=eos_id,
-                        max_token_id=max_id,
+                    eos_response = response_builder.build(
+                        go,
                         generate_think_token_num=generate_think_token_num,
                         finish_reason_override=(
                             LLMFinishReason.LENGTH if not will_do_phase2 else None
                         ),
-                        _request_shape=request_shape,
                         stream_finished=not will_do_phase2,
                         token_ids=list(runtime.eos_tokens),
                     )
@@ -751,28 +728,19 @@ async def iter_real_model_stream_infer(
                     )
                 phase2_needed = will_do_phase2
                 break
-            cumulative_sent_ids.extend(ids_for_accounting)
+            cumulative_sent_len += len(ids_for_accounting)
             finish_reason_override = None
             if (
                 out_py.finished
                 and max_new_tokens > 0
-                and len(cumulative_sent_ids) >= max_new_tokens
+                and cumulative_sent_len >= max_new_tokens
             ):
                 finish_reason_override = LLMFinishReason.LENGTH
-            response = build_stream_response_from_generate_outputs(
-                dash_sc_request_id=request.id,
-                model_name=request.model_name,
-                go=go,
-                request_log_tag=tag,
-                request_input_ids=input_ids_list,
-                return_input_ids=other.return_input_ids,
-                is_streaming=is_streaming,
-                generate_config=generate_config,
-                eos_token_id=eos_id,
-                max_token_id=max_id,
+            response = response_builder.build(
+                go,
                 generate_think_token_num=generate_think_token_num,
                 finish_reason_override=finish_reason_override,
-                _request_shape=request_shape,
+                token_ids=generated_ids,
             )
             if should_echo and not echoed and generated_ids:
                 if prepend_to_generated_ids_tensor(
@@ -877,7 +845,7 @@ async def iter_real_model_stream_infer(
             )
             phase2_generate_input = _make_generate_input(
                 request_id=phase2_request_id,
-                input_ids_list=phase2_input_ids,
+                input_ids_tensor=torch.tensor(phase2_input_ids, dtype=torch.int),
                 generate_config=phase2_config,
                 invocation_metadata=invocation_metadata,
                 request_headers=other.request_headers,
@@ -887,15 +855,26 @@ async def iter_real_model_stream_infer(
                 phase2_tag,
                 phase2_generate_input,
             )
+            phase2_response_builder = StreamResponseBuilder(
+                dash_sc_request_id=f"{request.id}{_PHASE2_SUFFIX}",
+                model_name=request.model_name,
+                request_log_tag=phase2_tag,
+                request_input_ids=phase2_input_ids,
+                return_input_ids=other.return_input_ids,
+                is_streaming=is_streaming,
+                generate_config=phase2_config,
+                eos_token_id=eos_id,
+                max_token_id=max_id,
+            )
             phase2_stream = await backend_visitor.enqueue(phase2_generate_input)
-            phase2_cumulative_sent_ids: list[int] = []
+            phase2_sent_len = 0
 
             def _build_phase2_response(
-                resp_go: Any,
+                resp_go: Any, resp_ids: list[int]
             ) -> predict_v2_pb2.ModelStreamInferResponse:
+                nonlocal phase2_sent_len
                 resp_out = resp_go.generate_outputs[0]
-                resp_ids = _token_ids_list_from_generate_output(resp_out)
-                phase2_cumulative_sent_ids.extend(resp_ids)
+                phase2_sent_len += len(resp_ids)
                 phase2_max_new_tokens = int(
                     getattr(phase2_config, "max_new_tokens", 0) or 0
                 )
@@ -903,7 +882,7 @@ async def iter_real_model_stream_infer(
                 if (
                     resp_out.finished
                     and phase2_max_new_tokens > 0
-                    and len(phase2_cumulative_sent_ids) >= phase2_max_new_tokens
+                    and phase2_sent_len >= phase2_max_new_tokens
                 ):
                     finish_reason_override = LLMFinishReason.LENGTH
                 response_finished = bool(resp_out.finished)
@@ -932,20 +911,11 @@ async def iter_real_model_stream_infer(
                 ):
                     # model_rpc_client copies the final submitted role_addrs here.
                     access_agg.record_role_addrs(aux_info.role_addrs, phase="phase2")
-                response = build_stream_response_from_generate_outputs(
-                    dash_sc_request_id=f"{request.id}{_PHASE2_SUFFIX}",
-                    model_name=request.model_name,
-                    go=resp_go,
-                    request_log_tag=phase2_tag,
-                    request_input_ids=phase2_input_ids,
-                    return_input_ids=other.return_input_ids,
-                    is_streaming=is_streaming,
-                    generate_config=phase2_config,
-                    eos_token_id=eos_id,
-                    max_token_id=max_id,
+                response = phase2_response_builder.build(
+                    resp_go,
                     generate_think_token_num=generate_think_token_num,
                     finish_reason_override=finish_reason_override,
-                    _request_shape=request_shape,
+                    token_ids=resp_ids,
                 )
                 stats = (
                     len(resp_ids),
@@ -964,7 +934,7 @@ async def iter_real_model_stream_infer(
                 generated_ids = _token_ids_list_from_generate_output(out_py)
                 if not generated_ids and not out_py.finished:
                     continue
-                resp, stats = _build_phase2_response(go)
+                resp, stats = _build_phase2_response(go, generated_ids)
                 yield (resp, stats) if yield_access_stats else resp
     except FtRuntimeException as e:
         _set_access_backend_error_code(access_agg, e)
@@ -1154,15 +1124,17 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     request.model_name,
                 )
                 try:
-                    input_ids_list, sampling, other = parse_dash_sc_grpc_request(
-                        request
-                    )
-                except DashScParameterError as e:
+                    input_ids, sampling, other = parse_dash_sc_grpc_request(request)
+                except (DashScParameterError, DashScInputIdsError) as e:
                     if first_request:
                         record.record_request_frame(request)
                         record.mark_request_done("eof")
                         first_request = False
-                    error_spec = DASH_ERROR_BAD_REQUEST
+                    error_spec = (
+                        DASH_ERROR_BAD_REQUEST
+                        if isinstance(e, DashScParameterError)
+                        else DASH_ERROR_INTERNAL
+                    )
                     resp = build_dash_error_response(
                         str(request.id),
                         request.model_name,
@@ -1178,7 +1150,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     )
                     yield resp
                     return
-                if input_ids_list is None:
+                if input_ids is None:
                     if first_request:
                         record.record_request_frame(request)
                         record.mark_request_done("eof")
@@ -1199,10 +1171,10 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                     )
                     yield resp
                     return
+                input_ids_list = input_ids.values
                 if first_request:
                     # Hand the record the payload we just parsed so it does not
-                    # decode the same request proto again (the input_ids tensor
-                    # is large for long context).
+                    # decode the same request proto again.
                     record.capture_structured_request(
                         request,
                         input_ids=input_ids_list,
@@ -1262,7 +1234,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
                 else:
                     async for resp, stats in iter_real_model_stream_infer(
                         request,
-                        input_ids_list,
+                        input_ids,
                         sampling,
                         other,
                         self._backend_visitor,

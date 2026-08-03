@@ -193,7 +193,7 @@
     "rtp_reasoning_prefix": "fFNGmRqEmx**[Date: October 15, 2023]**\\n\\nDear Diary,\\n\\nToday has been one of those days consumed by deep thought. I woke u",
     "smoke_phase1_output_ids": [10, 1, 99],
     "smoke_phase2_output_ids": [30, 31, 32, 128822, 271],
-    "expected_phase2_ids": [30, 31, 32],
+    "expected_phase2_ids": [30, 31, 32, 128822, 271],
     "expected_generate_think_token_num": 2
   },
   {
