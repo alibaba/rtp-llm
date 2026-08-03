@@ -1052,10 +1052,15 @@ MtpExecutor::MtpExecutor(const EngineInitParams&                        params,
 
     const auto& draft_weights = propose_params->getEngineInitParams().gpt_weights;
     d2t_map_                  = draft_model_ ? draft_model_->weights_.d2t_map : draft_weights.d2t_map;
-    speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_));
-    fast_topk_sampler_.reset(new speculative::FastTopKSampler(d2t_map_));
+    const auto proposal_mode  = params.sp_config.deterministic_draft_exact_match ?
+                                    speculative::DraftProposalMode::DETERMINISTIC :
+                                    speculative::DraftProposalMode::LEGACY;
+    speculative_sampler_.reset(new speculative::SpeculativeSampler(d2t_map_, propose_step_, proposal_mode));
+    fast_topk_sampler_.reset(new speculative::FastTopKSampler(d2t_map_, proposal_mode));
 
-    RTP_LLM_LOG_INFO("[speculative decoding] d2t_map size: %ld", d2t_map_.defined() ? d2t_map_.numel() : 0);
+    RTP_LLM_LOG_INFO("[speculative decoding] d2t_map size: %ld, deterministic_draft_exact_match: %d",
+                     d2t_map_.defined() ? d2t_map_.numel() : 0,
+                     params.sp_config.deterministic_draft_exact_match);
 }
 
 /*

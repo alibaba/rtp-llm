@@ -12,6 +12,11 @@ namespace rtp_llm {
 
 namespace speculative {
 
+enum class DraftProposalMode {
+    LEGACY,
+    DETERMINISTIC,
+};
+
 struct SpeculativeSamplerOutput {
 public:
     torch::Tensor accept_tokens;
@@ -32,18 +37,23 @@ struct FastTopKSamplerOutput {
 
 class FastTopKSampler {
 public:
-    FastTopKSampler(torch::Tensor d2t_map): d2t_map_(d2t_map) {}
+    FastTopKSampler(torch::Tensor d2t_map, DraftProposalMode proposal_mode = DraftProposalMode::LEGACY):
+        d2t_map_(d2t_map), proposal_mode_(proposal_mode) {}
     virtual ~FastTopKSampler() {}
 
     virtual FastTopKSamplerOutput forward(const torch::Tensor& logits, int top_k = 1);
 
 private:
-    torch::Tensor d2t_map_;
+    torch::Tensor     d2t_map_;
+    DraftProposalMode proposal_mode_;
 };
 
 class SpeculativeSampler {
 public:
-    SpeculativeSampler(torch::Tensor d2t_map, size_t propose_step): d2t_map_(d2t_map), propose_step_(propose_step) {}
+    SpeculativeSampler(torch::Tensor     d2t_map,
+                       size_t            propose_step,
+                       DraftProposalMode proposal_mode = DraftProposalMode::LEGACY):
+        d2t_map_(d2t_map), propose_step_(propose_step), proposal_mode_(proposal_mode) {}
 
     virtual SpeculativeSamplerOutput forward(const std::list<GenerateStreamPtr>& streams,
                                              SamplerOutput&                      draft_sampler_output,
@@ -63,6 +73,7 @@ private:
 protected:
     torch::Tensor        d2t_map_;
     size_t               propose_step_;
+    DraftProposalMode    proposal_mode_;
     mutable TensorHolder buffer_holder_;
 
     // Reusable buffer for draft_probs vocab-padding when draft/target vocab sizes differ.

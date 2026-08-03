@@ -483,6 +483,30 @@ public:
     }
 };
 
+TEST_F(MtpExecutorTest, testDeterministicDraftSamplerReportsDraftPointMassAndMappedToken) {
+    auto d2t_map = torch::tensor({0, 1, 3, 2}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
+    spec::FastTopKSampler sampler(d2t_map, spec::DraftProposalMode::DETERMINISTIC);
+    auto                  logits =
+        torch::tensor({{0.0f, 1.0f, 4.0f, 2.0f}}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+
+    auto output = sampler.forward(logits);
+
+    EXPECT_EQ(output.token_ids.item<int64_t>(), 3);
+    checkTensorEqual(output.all_probs, torch::tensor({{0.0f, 0.0f, 1.0f, 0.0f}}).to(torch::kCUDA));
+}
+
+TEST_F(MtpExecutorTest, testLegacyDraftSamplerPreservesSoftmaxProposal) {
+    auto d2t_map = torch::tensor({0, 1, 3, 2}, torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA));
+    spec::FastTopKSampler sampler(d2t_map);
+    auto                  logits =
+        torch::tensor({{0.0f, 1.0f, 4.0f, 2.0f}}, torch::TensorOptions().dtype(torch::kFloat32).device(torch::kCUDA));
+
+    auto output = sampler.forward(logits);
+
+    EXPECT_EQ(output.token_ids.item<int64_t>(), 3);
+    checkTensorEqual(output.all_probs, torch::softmax(logits, -1));
+}
+
 TEST_F(MtpExecutorTest, testSingleBatchPrefill) {
     MtpExecutorTestConfig test_config;
     test_config.gen_num_per_cycle = 4;

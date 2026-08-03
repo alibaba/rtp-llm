@@ -302,6 +302,7 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
                                           IdType* output_token_ids,
                                           IdType* output_accepted_token_num,
                                           bool*   do_sample,
+                                          bool    deterministic_draft,
                                           int     batch_size,
                                           int     num_speculative_tokens,
                                           int     target_vocab_size) {
@@ -317,6 +318,35 @@ __global__ void rejection_sampling_kernel(DType*  draft_probs,
         return;
     }
 
+    if (deterministic_draft) {
+        if (tx == 0) {
+            int pos = num_speculative_tokens;
+            for (int i = 0; i < num_speculative_tokens; ++i) {
+                IdType draft_id  = draft_token_ids[row_idx * num_speculative_tokens + i];
+                IdType target_id = target_token_ids[(row_idx * (num_speculative_tokens + 1) + i) * target_token_stride
+                                                    + target_token_stride - 1];
+                if (target_id == draft_id) {
+                    output_token_ids[row_idx * (num_speculative_tokens + 1) + i] = draft_id;
+                } else {
+                    pos                                                          = i;
+                    output_token_ids[row_idx * (num_speculative_tokens + 1) + i] = target_id;
+                    for (int j = i + 1; j < num_speculative_tokens + 1; ++j) {
+                        output_token_ids[row_idx * (num_speculative_tokens + 1) + j] = -1;
+                    }
+                    break;
+                }
+            }
+            output_accepted_token_num[row_idx] = pos + 1;
+            if (pos == num_speculative_tokens) {
+                output_token_ids[row_idx * (num_speculative_tokens + 1) + pos] =
+                    target_token_ids[(row_idx * (num_speculative_tokens + 1) + pos) * target_token_stride
+                                     + target_token_stride - 1];
+            }
+        }
+        return;
+    }
+
+    // Legacy rejection sampling is deliberately kept unchanged when the switch is off.
     __shared__ int  s_pos;
     __shared__ bool s_all_same_token;
 
@@ -615,6 +645,7 @@ hipError_t invokeRejectionSampling(DType*      draft_probs,
                                    IdType*     output_token_ids,
                                    IdType*     output_accepted_token_num,
                                    bool*       do_sample,
+                                   bool        deterministic_draft,
                                    int         batch_size,
                                    int         num_speculative_tokens,
                                    int         target_vocab_size,
@@ -640,6 +671,7 @@ hipError_t invokeRejectionSampling(DType*      draft_probs,
                                                   output_token_ids,
                                                   output_accepted_token_num,
                                                   do_sample,
+                                                  deterministic_draft,
                                                   batch_size,
                                                   num_speculative_tokens,
                                                   target_vocab_size);
@@ -690,6 +722,7 @@ void chain_speculative_sampling(at::Tensor draft_probs,
                                                 IdType*     output_token_ids,                                          \
                                                 IdType*     output_accepted_token_num,                                 \
                                                 bool*       do_sample,                                                 \
+                                                bool        deterministic_draft,                                       \
                                                 int         batch_size,                                                \
                                                 int         num_speculative_tokens,                                    \
                                                 int         target_vocab_size,                                         \

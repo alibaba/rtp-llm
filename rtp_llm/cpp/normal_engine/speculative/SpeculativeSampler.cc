@@ -64,16 +64,20 @@ std::string debugTensorSummary(const torch::Tensor& tensor, int64_t limit = 24) 
 
 FastTopKSamplerOutput FastTopKSampler::forward(const torch::Tensor& logits, int top_k) {
     FastTopKSamplerOutput output;
-    output.all_probs = torch::softmax(logits, -1);
 
-    std::tuple<torch::Tensor, torch::Tensor> sample_res;
-    if (top_k == 1) {
-        sample_res = torch::max(output.all_probs, -1, true);
+    if (proposal_mode_ == DraftProposalMode::DETERMINISTIC) {
+        RTP_LLM_CHECK_WITH_INFO(top_k == 1, "deterministic draft requires top_k=1, got %d", top_k);
+        output.token_ids = std::get<1>(torch::max(logits, -1, true));
+        // The draft token is selected deterministically. Rejection sampling must
+        // therefore see the actual point-mass proposal distribution. Keep this
+        // tensor draft-vocabulary aligned; batchSample owns d2t probability
+        // remapping when draft and target vocabularies differ.
+        output.all_probs = torch::zeros_like(logits).scatter_(-1, output.token_ids, 1.0);
     } else {
-        sample_res = torch::topk(output.all_probs, top_k, -1);
+        output.all_probs = torch::softmax(logits, -1);
+        output.token_ids = top_k == 1 ? std::get<1>(torch::max(output.all_probs, -1, true)) :
+                                        std::get<1>(torch::topk(output.all_probs, top_k, -1));
     }
-
-    output.token_ids = std::get<1>(sample_res);
 
     int batch_size = output.token_ids.size(0);
     execMappingDraft2Target({output.token_ids, d2t_map_, batch_size, 0, 1});
@@ -121,19 +125,20 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
         torch::zeros({(long)batch_size}, torch::TensorOptions().dtype(torch::kBool).pinned_memory(true));
     int stream_idx = 0;
     for (const GenerateStreamPtr& stream : streams) {
-        do_sample[stream_idx] = !stream->generateConfig()->top1();
-        stream_idx++;
+        do_sample[stream_idx++] = !stream->generateConfig()->top1();
     }
     buffer_holder_.hold_host(do_sample);
     auto do_sample_d = do_sample.to(target_device, true);
 
-    auto          rand_options      = torch::TensorOptions().device(target_device).dtype(torch::kFloat);
-    torch::Tensor uniform_samples_d = torch::rand({(long)batch_size, (long)propose_step_ + 1}, rand_options);
-
-    // Override per-stream uniform samples with seeded generator when random_seed is set,
-    // ensuring deterministic acceptance for reproducible iter_count.
-    {
-        int idx = 0;
+    auto          rand_options = torch::TensorOptions().device(target_device).dtype(torch::kFloat);
+    torch::Tensor uniform_samples_d;
+    if (proposal_mode_ == DraftProposalMode::DETERMINISTIC) {
+        // Exact-match reuses target_sampler_output and must not advance the
+        // per-request generator a second time.
+        uniform_samples_d = torch::zeros({(long)batch_size, (long)propose_step_ + 1}, rand_options);
+    } else {
+        uniform_samples_d = torch::rand({(long)batch_size, (long)propose_step_ + 1}, rand_options);
+        int idx           = 0;
         for (const auto& stream : streams) {
             auto gen = stream->getGenerator();
             if (gen.defined()) {
@@ -191,6 +196,7 @@ void SpeculativeSampler::batchSample(SpeculativeSamplerOutput&           sample_
             output_token_ids_d,
             output_accepted_token_num_d,
             do_sample_d,
+            proposal_mode_ == DraftProposalMode::DETERMINISTIC,
         });
     }
 
