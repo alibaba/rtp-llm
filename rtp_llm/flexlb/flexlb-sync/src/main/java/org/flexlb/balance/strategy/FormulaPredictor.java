@@ -87,6 +87,18 @@ public class FormulaPredictor implements PrefillTimePredictor {
         return (double) formula.evaluate(vars.topLevelVars(), vars.itemVars());
     }
 
+    @Override
+    public double predictBatchMsByDp(List<List<BatchItem>> itemsByDp) {
+        double maxMs = 0;
+        for (var dpItems : itemsByDp) {
+            if (!dpItems.isEmpty()) {
+                double dpMs = predictBatchMsUncached(dpItems);
+                maxMs = Math.max(maxMs, dpMs);
+            }
+        }
+        return maxMs;
+    }
+
     /**
      * Compute a hash key from the batch items' token statistics.
      * Only {@code seqLen} and {@code hitCache} participate, because these are the

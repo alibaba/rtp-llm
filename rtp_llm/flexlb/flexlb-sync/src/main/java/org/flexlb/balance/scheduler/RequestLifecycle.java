@@ -6,7 +6,10 @@ import java.util.Map;
 /**
  * Serialized request lifecycle. All mutations are synchronized so dispatch,
  * timeout and worker-status callbacks observe one transition order.
+ *
+ * @deprecated v2 调度器重构：被 InflightItem/AbstractScheduler/InflightStore 替代。
  */
+@Deprecated
 final class RequestLifecycle {
 
     private static final Map<RequestLifecycleState, EnumSet<RequestLifecycleState>> ALLOWED = Map.of(

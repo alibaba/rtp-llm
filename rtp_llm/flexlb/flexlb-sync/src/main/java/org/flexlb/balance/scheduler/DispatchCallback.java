@@ -6,7 +6,10 @@ package org.flexlb.balance.scheduler;
  * Implemented by the scheduler to manage inflight state in response to
  * engine acknowledgements. The dispatcher guarantees exactly one terminal
  * callback per item.
+ *
+ * @deprecated v2 调度器重构：被 InflightItem/AbstractScheduler/InflightStore 替代。
  */
+@Deprecated
 public interface DispatchCallback {
 
     /**

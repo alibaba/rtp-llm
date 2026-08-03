@@ -47,6 +47,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
         inflightExpectedKvReservedTotal.addAndGet(expectedKvTokens);
     }
 
+    @Override
     public void release(long requestId) {
         RequestInflight removed = inflightRequests.remove(requestId);
         if (removed != null) {

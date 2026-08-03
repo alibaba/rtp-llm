@@ -1,8 +1,10 @@
 package org.flexlb.balance.endpoint;
 
+import org.flexlb.balance.scheduler.Batch;
 import org.flexlb.balance.scheduler.BatchDecisionHandler;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.balance.scheduler.InflightEvictor;
+import org.flexlb.balance.scheduler.InflightItem;
 import org.flexlb.balance.scheduler.WorkerBatcher;
 import org.flexlb.balance.strategy.FormulaPredictor;
 import org.flexlb.balance.strategy.LearningPredictor;
@@ -114,6 +116,21 @@ public class PrefillEndpoint extends WorkerEndpoint {
     }
 
     /**
+     * Unified release entry point for EP-level resource cleanup.
+     * <p>Non-batch path: {@code requestId} is used directly as the inflight
+     * key (engine reports these with {@code batch_id=-1}), so we delegate to
+     * {@link #releaseBatch(long)} which removes the entry and decrements
+     * counters.
+     * <p>Batch path: batch-level release is handled separately by the batch's
+     * own terminate/complete path calling {@link #releaseBatch(long)} with
+     * the batchId, so this method does not need to handle that case.
+     */
+    @Override
+    public void release(long requestId) {
+        releaseBatch(requestId);
+    }
+
+    /**
      * Handle partial batch failure: remove failed requests from a batch and recompute prediction.
      *
      */
@@ -133,6 +150,55 @@ public class PrefillEndpoint extends WorkerEndpoint {
             cachedWaitTimeExpireAtMs = 0;
             return repacked;
         });
+    }
+
+    /**
+     * EP-level batch submission — the dispatch function moves onto the EP.
+     * Replaces the role of {@link org.flexlb.balance.scheduler.DefaultBatchDispatcher}.
+     *
+     * <p>Phase 4 placeholder: performs DP-aware prediction and commit.
+     * Engine dispatch integration is deferred to a later phase.
+     *
+     * <p>{@link InflightItem} objects are converted to {@link BatchItem}
+     * for the predictor.  Because {@code InflightItem} does not carry raw
+     * {@link org.flexlb.dao.loadbalance.ServerStatus} references, the
+     * {@code hitCache} for converted items defaults to 0 (conservative
+     * estimate).  This is acceptable for the placeholder; later phases
+     * will carry the necessary metadata through the pipeline.
+     *
+     * @param batch the batch to submit (contains per-DP item groups)
+     */
+    public void submitBatch(Batch batch) {
+        // 1. Convert InflightItem groups to BatchItem groups for predictor
+        List<List<BatchItem>> itemsByDp = new ArrayList<>();
+        List<BatchItem> flatItems = new ArrayList<>();
+        for (List<InflightItem> dpItems : batch.itemsByDp()) {
+            List<BatchItem> dpBatchItems = new ArrayList<>();
+            for (InflightItem item : dpItems) {
+                BatchItem bi = new BatchItem(
+                        item.ctx(),
+                        item.future(),
+                        null, // routeResponse — not available on InflightItem
+                        null, // prefill ServerStatus — hitCache defaults to 0
+                        null, // decode ServerStatus
+                        item.prefillEp(),
+                        item.decodeEp(),
+                        System.currentTimeMillis());
+                dpBatchItems.add(bi);
+                flatItems.add(bi);
+            }
+            itemsByDp.add(dpBatchItems);
+        }
+
+        // 2. DP-aware prediction (bucket effect: max across DP ranks)
+        double predictedMs = predictor.predictBatchMsByDp(itemsByDp);
+
+        // 3. Commit batch into inflight tracking
+        commitBatch(batch.batchId(), (long) predictedMs, flatItems);
+
+        // 4. Dispatch to engine (deferred to later phase)
+        logger.info("submitBatch batchId={} dpGroups={} totalItems={} predictedMs={}",
+                batch.batchId(), itemsByDp.size(), flatItems.size(), predictedMs);
     }
 
     @Override

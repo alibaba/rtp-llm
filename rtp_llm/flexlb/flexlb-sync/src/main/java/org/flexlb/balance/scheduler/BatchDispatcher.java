@@ -20,7 +20,10 @@ import java.util.List;
  *       {@link DispatchCallback#onFailure} for each item.</li>
  *   <li>Exactly one callback method is invoked per item.</li>
  * </ul>
+ *
+ * @deprecated v2 调度器重构：被 InflightItem/AbstractScheduler/InflightStore 替代。
  */
+@Deprecated
 public interface BatchDispatcher {
 
     /**

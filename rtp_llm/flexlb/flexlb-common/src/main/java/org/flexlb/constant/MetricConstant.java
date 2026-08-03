@@ -495,4 +495,76 @@ public class MetricConstant {
      * Dispatch executor completed task count (counter — monotonically increasing)
      */
     public static final String DISPATCH_EXECUTOR_COMPLETED_TASKS = "dispatch.executor.completed.tasks";
+
+    /* ------------------------ Unified Cross-Path Metrics (Phase 5) -------------------------- */
+
+    /**
+     * Request success QPS — shared metric reported by all three scheduling paths
+     * (BATCH, QUEUE, DIRECT), tagged with {@link #TAG_PATH}.
+     */
+    public static final String REQUEST_SUCCESS_QPS = "flexlb.request.success.qps";
+
+    /**
+     * Request failure QPS — shared metric, tagged with {@link #TAG_PATH} and {@link #TAG_CODE}.
+     */
+    public static final String REQUEST_FAILURE_QPS = "flexlb.request.failure.qps";
+
+    /**
+     * Request timeout QPS — shared metric, tagged with {@link #TAG_PATH}.
+     */
+    public static final String REQUEST_TIMEOUT_QPS = "flexlb.request.timeout.qps";
+
+    /**
+     * Request cancel QPS — shared metric, tagged with {@link #TAG_PATH}.
+     */
+    public static final String REQUEST_CANCEL_QPS = "flexlb.request.cancel.qps";
+
+    /**
+     * Time to first token in milliseconds (TIMER) — shared metric, tagged with {@link #TAG_PATH}.
+     */
+    public static final String REQUEST_TTFT_MS = "flexlb.request.ttft.ms";
+
+    /**
+     * Inflight size gauge — shared metric, tagged with {@link #TAG_PATH}.
+     */
+    public static final String INFLIGHT_SIZE = "flexlb.inflight.size";
+
+    /* ------------------------ Unified Tag Constants -------------------------- */
+
+    /**
+     * Tag key for the scheduling path (BATCH / QUEUE / DIRECT).
+     */
+    public static final String TAG_PATH = "path";
+
+    /**
+     * Tag key for the engine role (PREFILL / DECODE / PDFUSION).
+     */
+    public static final String TAG_ROLE = "role";
+
+    /**
+     * Tag key for the engine IP address.
+     */
+    public static final String TAG_ENGINE_IP = "engineIp";
+
+    /**
+     * Tag key for the error code (used on failure metrics).
+     */
+    public static final String TAG_CODE = "code";
+
+    /* ------------------------ Path Value Constants -------------------------- */
+
+    /**
+     * Path value for the batch scheduling path.
+     */
+    public static final String PATH_BATCH = "BATCH";
+
+    /**
+     * Path value for the queue scheduling path.
+     */
+    public static final String PATH_QUEUE = "QUEUE";
+
+    /**
+     * Path value for the direct scheduling path.
+     */
+    public static final String PATH_DIRECT = "DIRECT";
 }

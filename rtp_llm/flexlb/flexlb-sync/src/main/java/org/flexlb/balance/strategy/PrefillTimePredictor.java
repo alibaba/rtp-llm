@@ -48,6 +48,23 @@ public interface PrefillTimePredictor {
     double predictBatchMsUncached(List<BatchItem> items);
 
     /**
+     * DP-aware batch prediction: predict each dpRank sub-group separately and
+     * return the maximum.  All DP ranks execute prefill in parallel, so the
+     * batch completion time is governed by the slowest rank (bucket effect).
+     *
+     * <p>Default implementation degrades to flat prediction for backward
+     * compatibility.  Concrete predictors that can benefit from per-DP
+     * isolation should override this method.
+     *
+     * @param itemsByDp list of per-DP item groups (may contain empty sub-lists)
+     * @return predicted time in milliseconds (0 if all groups are empty)
+     */
+    default double predictBatchMsByDp(List<List<BatchItem>> itemsByDp) {
+        List<BatchItem> flat = itemsByDp.stream().flatMap(List::stream).toList();
+        return predictBatchMs(flat);
+    }
+
+    /**
      * Learn from a completed batch's actual execution time.
      *
      * @param items       the batch requests (contains seqLen, hitCache, etc.)

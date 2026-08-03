@@ -1,6 +1,11 @@
 package org.flexlb.balance.scheduler;
 
-/** Scheduler-owned request states. Terminal states never transition again. */
+/**
+ * Scheduler-owned request states. Terminal states never transition again.
+ *
+ * @deprecated v2 调度器重构：被 InflightItem/AbstractScheduler/InflightStore 替代。
+ */
+@Deprecated
 public enum RequestLifecycleState {
     QUEUED,
     DISPATCHING,

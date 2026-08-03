@@ -11,7 +11,10 @@ import java.util.List;
  *   <li>{@link #onBatchReady} — a batch has been assembled and is ready for gRPC dispatch</li>
  *   <li>{@link #onOfferFailure} — a new item could not be enqueued (batcher stopped or queue full)</li>
  * </ul>
+ *
+ * @deprecated v2 调度器重构：被 InflightItem/AbstractScheduler/InflightStore 替代。
  */
+@Deprecated
 public interface BatchDecisionHandler {
 
     /**

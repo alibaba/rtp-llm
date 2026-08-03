@@ -87,6 +87,19 @@ public abstract class WorkerEndpoint {
         // No resources by default. Stateful endpoints override when needed.
     }
 
+    /**
+     * Release EP-level resources tracked for the given request.
+     * <p>Default implementation is a no-op. Subclasses with local inflight
+     * state ({@link PrefillEndpoint}, {@link DecodeEndpoint}) override to
+     * decrement counters and remove inflight entries.
+     *
+     * @param requestId the request identifier whose EP-level reservation
+     *                  should be released
+     */
+    public void release(long requestId) {
+        // No resources by default. Stateful endpoints override when needed.
+    }
+
     // ==================== monitoring (EP-authoritative) ====================
 
     /**

@@ -37,7 +37,10 @@ import java.util.concurrent.TimeUnit;
  * Owns its own thread pool for asynchronous gRPC dispatch.
  * Handles the full pipeline: build request → send → parse response → callback.
  * Does NOT manage inflight state — results are reported via {@link DispatchCallback}.
+ *
+ * @deprecated v2 调度器重构：被 InflightItem/AbstractScheduler/InflightStore 替代。
  */
+@Deprecated
 @Component
 public class DefaultBatchDispatcher implements BatchDispatcher {
 

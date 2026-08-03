@@ -102,6 +102,18 @@ public class LearningPredictor implements PrefillTimePredictor {
         return predictBatchMs(items);
     }
 
+    @Override
+    public double predictBatchMsByDp(List<List<BatchItem>> itemsByDp) {
+        double maxMs = 0;
+        for (var dpItems : itemsByDp) {
+            if (!dpItems.isEmpty()) {
+                double dpMs = predictBatchMsUncached(dpItems);
+                maxMs = Math.max(maxMs, dpMs);
+            }
+        }
+        return maxMs;
+    }
+
     private double calcLinear(double[] inputs, double[] weights) {
         double sum = 0.0;
         for (int i = 0; i < inputs.length; i++) {
