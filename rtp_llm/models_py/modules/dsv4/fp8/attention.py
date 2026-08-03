@@ -2066,6 +2066,17 @@ class AttentionFP8(nn.Module):
 
         self._ensure_freqs_cis_bound()
         qkv = decode_compute_qkv(self, x, position_ids)
+        if _nan_diag.ENABLED:
+            _nan_diag.report_nonfinite(
+                qkv.q,
+                source_id=_nan_diag.SOURCE_ATTENTION_QUERY,
+                layer_id=self.layer_id,
+            )
+            _nan_diag.report_nonfinite(
+                qkv.kv,
+                source_id=_nan_diag.SOURCE_KV_WRITE_INPUT,
+                layer_id=self.layer_id,
+            )
         with suppress(Exception):
             from rtp_llm.models_py.modules.dsv4.attn_type import (
                 CSA_KV,
@@ -2101,6 +2112,12 @@ class AttentionFP8(nn.Module):
         else:
             raise AssertionError(f"unknown compress_ratio={self.compress_ratio}")
 
+        if _nan_diag.ENABLED:
+            _nan_diag.report_nonfinite(
+                o,
+                source_id=_nan_diag.SOURCE_ATTENTION_OUTPUT,
+                layer_id=self.layer_id,
+            )
         return decode_output_proj(self, o, qkv.freqs_cis, bsz, q_len)
 
     # ------------------------------------------------------------------
@@ -2245,6 +2262,14 @@ class AttentionFP8(nn.Module):
             if attn_metadata.swa_topk_length is not None
             else None
         )
+        if _nan_diag.ENABLED:
+            _nan_diag.report_packed_fp8_kv_cache(
+                swa_pool_3d,
+                swa_topk_3d,
+                source_id=_nan_diag.SOURCE_SWA_KV_CACHE_READ,
+                layer_id=self.layer_id,
+                topk_length=swa_topk_length,
+            )
         return attn_fp8_swa_paged(
             q=q,
             swa_pool_3d=swa_pool_3d,
@@ -2468,6 +2493,21 @@ class AttentionFP8(nn.Module):
             int(self.compress_ratio)
         )
         extra_topk_length = cmp_len_buf[:bsz] if cmp_len_buf is not None else None
+        if _nan_diag.ENABLED:
+            _nan_diag.report_packed_fp8_kv_cache(
+                swa_pool_3d,
+                swa_topk_3d,
+                source_id=_nan_diag.SOURCE_SWA_KV_CACHE_READ,
+                layer_id=self.layer_id,
+                topk_length=swa_topk_length,
+            )
+            _nan_diag.report_packed_fp8_kv_cache(
+                cmp_pool_3d,
+                cmp_topk_3d,
+                source_id=_nan_diag.SOURCE_COMPRESSED_KV_CACHE_READ,
+                layer_id=self.layer_id,
+                topk_length=extra_topk_length,
+            )
         return attn_fp8_dual_paged(
             q=q,
             swa_pool_3d=swa_pool_3d,
@@ -2528,7 +2568,14 @@ class AttentionFP8(nn.Module):
                 with record_function_range(
                     f"dsv4.fp8.attn.L{self.layer_id:02d}.prefill"
                 ):
-                    return self._forward_prefill(x, positions)
+                    out = self._forward_prefill(x, positions)
+                    if _nan_diag.ENABLED:
+                        _nan_diag.report_nonfinite(
+                            out,
+                            source_id=_nan_diag.SOURCE_ATTENTION_OUTPUT,
+                            layer_id=self.layer_id,
+                        )
+                    return out
             finally:
                 with record_function_range("dsv4.fp8.attn.clear_pool_context"):
                     self._clear_compressor_pool_context()
@@ -2557,9 +2604,16 @@ class AttentionFP8(nn.Module):
                 with record_function_range(
                     f"dsv4.fp8.attn.L{self.layer_id:02d}.prefill"
                 ):
-                    return self._forward_prefill(
+                    out = self._forward_prefill(
                         x, positions, shared_input_quant=shared_input_quant
                     )
+                    if _nan_diag.ENABLED:
+                        _nan_diag.report_nonfinite(
+                            out,
+                            source_id=_nan_diag.SOURCE_ATTENTION_OUTPUT,
+                            layer_id=self.layer_id,
+                        )
+                    return out
             finally:
                 with record_function_range("dsv4.fp8.attn.clear_pool_context"):
                     self._clear_compressor_pool_context()
@@ -2671,6 +2725,19 @@ class AttentionFP8(nn.Module):
             qkv = self._prefill_compute_qkv(
                 x, common, shared_input_quant=shared_input_quant
             )
+        if _nan_diag.ENABLED:
+            if qkv.q is not None:
+                _nan_diag.report_nonfinite(
+                    qkv.q,
+                    source_id=_nan_diag.SOURCE_ATTENTION_QUERY,
+                    layer_id=self.layer_id,
+                )
+            if qkv.kv_full is not None:
+                _nan_diag.report_nonfinite(
+                    qkv.kv_full,
+                    source_id=_nan_diag.SOURCE_KV_WRITE_INPUT,
+                    layer_id=self.layer_id,
+                )
 
         # Phase-Z overlap dispatch: hoist the SWA write into the orchestrator
         # so it can run on the default stream while the compressor NCCL
@@ -5185,6 +5252,12 @@ class AttentionFP8(nn.Module):
             q_local = q_local_flat.view(1, seqlen, self.n_heads, self.head_dim)
             q_local = fused_rmsnorm_rope(
                 q_local, None, common.freqs_cis, common.rd, eps=self.eps, out=q_local
+            )
+        if _nan_diag.ENABLED:
+            _nan_diag.report_nonfinite(
+                q_local,
+                source_id=_nan_diag.SOURCE_ATTENTION_QUERY,
+                layer_id=self.layer_id,
             )
         return qkv._replace(q=q_local.squeeze(0))
 

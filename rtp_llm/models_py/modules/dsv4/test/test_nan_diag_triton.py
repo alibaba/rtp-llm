@@ -21,6 +21,15 @@ nan_diag = _load_nan_diag()
 
 @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
 class NanDiagTritonTest(unittest.TestCase):
+    @staticmethod
+    def _packed_slot_offsets(cache: torch.Tensor, slot: int) -> tuple[int, int, int]:
+        block_size = int(cache.shape[1])
+        block, pos = divmod(slot, block_size)
+        block_base = block * int(cache.stride(0))
+        token_data = block_base + pos * 576
+        scale_data = block_base + block_size * 576 + pos * 8
+        return token_data, token_data + 448, scale_data
+
     def test_detector_is_read_only(self) -> None:
         x = torch.randn((2, 513), dtype=torch.float32, device="cuda")
         x[0, 7] = float("nan")
@@ -182,6 +191,112 @@ class NanDiagTritonTest(unittest.TestCase):
             )
             torch.cuda.synchronize()
             self.assertEqual(int(report_count[state_index].item()), before_count + 1)
+
+    def test_packed_fp8_kv_cache_reports_all_nan_encodings(self) -> None:
+        cache = torch.zeros((2, 4, 584), dtype=torch.uint8, device="cuda")
+        indices = torch.tensor([[[0, 5, 7, -1]]], dtype=torch.int32, device="cuda")
+        topk_length = torch.tensor([2], dtype=torch.int32, device="cuda")
+        batch_id = torch.tensor([993001], dtype=torch.int64, device="cuda")
+        source_id = nan_diag.SOURCE_SWA_KV_CACHE_READ
+        layer_id = 44
+        token_data, rope_data, scale_data = self._packed_slot_offsets(cache, 5)
+
+        with patch.object(nan_diag, "ENABLED", True), patch.object(
+            nan_diag, "TEST_KV_CORRUPT", None
+        ):
+            nan_diag.set_batch_context(batch_id)
+            state_index = nan_diag._report_state_index(source_id, layer_id)
+            _, report_count = nan_diag._ensure_report_state(cache.device)
+            before_count = int(report_count[state_index].item())
+            raw = cache.view(-1)
+
+            corruptions = (
+                ((token_data, 0x7F),),
+                ((rope_data, 0xC1), (rope_data + 1, 0x7F)),
+                ((scale_data, 0xFF),),
+            )
+            for event_index, writes in enumerate(corruptions, start=1):
+                cache.zero_()
+                for offset, value in writes:
+                    raw[offset] = value
+                before = cache.clone()
+                nan_diag.report_packed_fp8_kv_cache(
+                    cache,
+                    indices,
+                    source_id=source_id,
+                    layer_id=layer_id,
+                    topk_length=topk_length,
+                )
+                torch.cuda.synchronize()
+                self.assertEqual(
+                    int(report_count[state_index].item()),
+                    before_count + event_index,
+                )
+                torch.testing.assert_close(cache, before)
+                batch_id.add_(1)
+
+            # Slot 7 is outside topk_length=2 and must not be inspected.
+            cache.zero_()
+            ignored_token_data, _, _ = self._packed_slot_offsets(cache, 7)
+            raw[ignored_token_data] = 0x7F
+            nan_diag.report_packed_fp8_kv_cache(
+                cache,
+                indices,
+                source_id=source_id,
+                layer_id=layer_id,
+                topk_length=topk_length,
+            )
+            torch.cuda.synchronize()
+            self.assertEqual(
+                int(report_count[state_index].item()),
+                before_count + len(corruptions),
+            )
+
+    def test_packed_fp8_kv_cache_runs_on_cuda_graph_replay(self) -> None:
+        cache = torch.zeros((1, 4, 584), dtype=torch.uint8, device="cuda")
+        indices = torch.tensor([[[0, 1]]], dtype=torch.int32, device="cuda")
+        topk_length = torch.tensor([2], dtype=torch.int32, device="cuda")
+        batch_id = torch.tensor([994001], dtype=torch.int64, device="cuda")
+        source_id = nan_diag.SOURCE_COMPRESSED_KV_CACHE_READ
+        layer_id = 45
+
+        with patch.object(nan_diag, "ENABLED", True), patch.object(
+            nan_diag, "TEST_KV_CORRUPT", None
+        ):
+            nan_diag.set_batch_context(batch_id)
+            # Compile the exact HAS_LENGTHS variant before capture.
+            nan_diag.report_packed_fp8_kv_cache(
+                cache,
+                indices,
+                source_id=source_id,
+                layer_id=layer_id,
+                topk_length=topk_length,
+            )
+            torch.cuda.synchronize()
+
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                nan_diag.report_packed_fp8_kv_cache(
+                    cache,
+                    indices,
+                    source_id=source_id,
+                    layer_id=layer_id,
+                    topk_length=topk_length,
+                )
+
+            state_index = nan_diag._report_state_index(source_id, layer_id)
+            report_count = nan_diag._REPORT_COUNT_BY_DEVICE[str(cache.device)]
+            before_count = int(report_count[state_index].item())
+            token_data, _, _ = self._packed_slot_offsets(cache, 1)
+            cache.view(-1)[token_data] = 0xFF
+            for current_batch in (994002, 994003):
+                batch_id.fill_(current_batch)
+                graph.replay()
+                torch.cuda.synchronize()
+            self.assertEqual(
+                int(report_count[state_index].item()),
+                before_count + 2,
+            )
 
 
 if __name__ == "__main__":
