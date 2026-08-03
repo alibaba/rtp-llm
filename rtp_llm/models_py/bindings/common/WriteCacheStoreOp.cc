@@ -64,6 +64,7 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
         inputs.decoder_batch_size                             = captured_cache_store.decoder_batch_size;
         inputs.request_id                                     = captured_cache_store.request_id;
         inputs.request_pd_separation                          = captured_cache_store.request_pd_separation;
+        inputs.request_deadline_ms                            = captured_cache_store.request_deadline_ms;
         inputs.cache_keys                                     = captured_cache_store.cache_keys;
         inputs.tokens_per_block                               = captured_cache_store.tokens_per_block;
         inputs.kv_block_stride_bytes                          = captured_cache_store.kv_block_stride_bytes;
@@ -90,7 +91,11 @@ void WriteCacheStoreOp(const torch::Tensor&                         input_length
             (captured_kv_cache.kv_scale_base.defined() && captured_kv_cache.kv_scale_base.numel() > 0) ?
                 captured_kv_cache.kv_scale_base :
                 torch::Tensor();
-        execWriteCacheStore(inputs, kv_cache_info, captured_cache_store.mla_kvcache, captured_cache_store.cache_store);
+        execWriteCacheStore(inputs,
+                            kv_cache_info,
+                            captured_cache_store.mla_kvcache,
+                            captured_cache_store.cache_store,
+                            captured_cache_store.p2p_layer_write);
     };
 
     auto* async_writer = cache_store_inputs.cache_store_async_writer;

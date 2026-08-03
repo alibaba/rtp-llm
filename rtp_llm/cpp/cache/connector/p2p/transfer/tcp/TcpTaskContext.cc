@@ -3,6 +3,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/TransferErrorCode.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "rtp_llm/cpp/utils/Logger.h"
+#include <unordered_map>
 
 namespace rtp_llm {
 namespace transfer {
@@ -63,13 +64,24 @@ bool TcpTaskContext::executeCopy(CudaCopyUtil& cuda_copy_util) {
     std::unordered_map<int64_t, const ::tcp_transfer::TcpCacheKeyBlockBufferInfo*> request_index;
     request_index.reserve(request_->blocks_size());
     for (const auto& cache_key_block : request_->blocks()) {
-        request_index[cache_key_block.key()] = &cache_key_block;
+        if (!cache_key_block.has_key()
+            || !request_index.emplace(cache_key_block.key(), &cache_key_block).second) {
+            RTP_LLM_LOG_WARNING("executeCopy: missing or duplicate request cache key, unique_key: %s",
+                                unique_key_.c_str());
+            return false;
+        }
     }
 
     // Iterate over task's expected blocks as the authoritative source of truth.
-    // Every non-empty BlockInfo in the task must be present in the request with a matching size.
+    // Every BlockInfo in the task must be present in the request with a matching size.
     std::vector<CopyTask> copy_tasks;
     for (const auto& [cache_key, kbi_ptr] : task_->getBlockInfos()) {
+        if (!kbi_ptr || kbi_ptr->blocks.empty()) {
+            RTP_LLM_LOG_WARNING("executeCopy: empty Decode block set for cache_key %lld, unique_key: %s",
+                                cache_key,
+                                unique_key_.c_str());
+            return false;
+        }
         auto req_it = request_index.find(cache_key);
         if (req_it == request_index.end()) {
             RTP_LLM_LOG_WARNING(
@@ -81,7 +93,11 @@ bool TcpTaskContext::executeCopy(CudaCopyUtil& cuda_copy_util) {
         for (int i = 0; i < static_cast<int>(kbi_ptr->blocks.size()); ++i) {
             const BlockInfo& bi = kbi_ptr->blocks[i];
             if (bi.addr == nullptr || bi.size_bytes == 0) {
-                continue;
+                RTP_LLM_LOG_WARNING("executeCopy: invalid Decode buffer cache_key %lld sub %d, unique_key: %s",
+                                    cache_key,
+                                    i,
+                                    unique_key_.c_str());
+                return false;
             }
             if (i >= req_block->blocks_size()) {
                 RTP_LLM_LOG_WARNING("executeCopy: cache_key %lld sub_block %d missing in request, unique_key: %s",
@@ -91,13 +107,16 @@ bool TcpTaskContext::executeCopy(CudaCopyUtil& cuda_copy_util) {
                 return false;
             }
             const auto& proto_block = req_block->blocks(i);
-            if (proto_block.len() != static_cast<uint32_t>(bi.size_bytes)) {
+            if (!proto_block.has_len() || proto_block.len() != static_cast<uint32_t>(bi.size_bytes)
+                || proto_block.content().size() != bi.size_bytes) {
                 RTP_LLM_LOG_WARNING(
-                    "executeCopy: size mismatch cache_key %lld sub %d: expected %zu got %u, unique_key: %s",
+                    "executeCopy: size mismatch cache_key %lld sub %d: expected %zu declared %u actual %zu, "
+                    "unique_key: %s",
                     cache_key,
                     i,
                     bi.size_bytes,
                     proto_block.len(),
+                    proto_block.content().size(),
                     unique_key_.c_str());
                 return false;
             }
@@ -143,13 +162,17 @@ void TcpTaskContext::run(bool success, TransferErrorCode error_code, const std::
     }
 
     collector_->total_cost_latency_us = currentTimeUs() - start_time_us_;
+    std::string final_error_message    = error_message;
 
     if (task_) {
         task_->notifyDone(success, success ? TransferErrorCode::OK : error_code, error_message);
         // notifyDone() may override the result (e.g. cancel_requested_ was set during transfer).
-        // Read back the authoritative error code so sender and receiver see the same outcome.
+        // Read back the authoritative result so sender and receiver see the same outcome.
         error_code = task_->errorCode();
         success    = (error_code == TransferErrorCode::OK);
+        if (!success) {
+            final_error_message = task_->errorMessage();
+        }
     }
 
     auto proto_error_code = toTcpProtoErrorCode(error_code);
@@ -160,7 +183,7 @@ void TcpTaskContext::run(bool success, TransferErrorCode error_code, const std::
     }
 
     response_->set_error_code(proto_error_code);
-    response_->set_error_message(error_message);
+    response_->set_error_message(final_error_message);
     done_->Run();
     done_ = nullptr;
 }

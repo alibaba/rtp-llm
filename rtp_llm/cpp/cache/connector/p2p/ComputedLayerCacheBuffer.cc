@@ -1,21 +1,17 @@
 #include "rtp_llm/cpp/cache/connector/p2p/ComputedLayerCacheBuffer.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
+#include <algorithm>
+#include <limits>
 
 namespace rtp_llm {
-
-namespace {
-
-constexpr int64_t kRemovedIdRetentionMs = 3600000;
-
-}  // namespace
 
 ComputedLayerCacheBuffer::ComputedLayerCacheBuffer(int64_t                                  request_id,
                                                    const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer,
                                                    int64_t                                  deadline_ms):
     request_id_(request_id), deadline_ms_(deadline_ms) {
     if (layer_cache_buffer) {
-        layer_cache_buffers_[layer_cache_buffer->virtualLayerId()] = layer_cache_buffer;
+        layer_cache_buffers_[layer_cache_buffer->bufferKey()] = layer_cache_buffer;
     }
 }
 
@@ -23,7 +19,7 @@ void ComputedLayerCacheBuffer::addBuffer(const std::shared_ptr<LayerCacheBuffer>
                                          int64_t                                  deadline_ms) {
     std::lock_guard<std::mutex> lock(mutex_);
     if (layer_cache_buffer) {
-        layer_cache_buffers_[layer_cache_buffer->virtualLayerId()] = layer_cache_buffer;
+        layer_cache_buffers_[layer_cache_buffer->bufferKey()] = layer_cache_buffer;
     }
     int64_t cur = deadline_ms_.load(std::memory_order_relaxed);
     if (deadline_ms > cur) {
@@ -33,15 +29,19 @@ void ComputedLayerCacheBuffer::addBuffer(const std::shared_ptr<LayerCacheBuffer>
 }
 
 std::pair<int, std::vector<std::shared_ptr<LayerCacheBuffer>>>
-ComputedLayerCacheBuffer::getBuffers(const std::set<int>& layer_ids) {
+ComputedLayerCacheBuffer::getBuffers(const std::set<std::string>& buffer_keys) {
     std::lock_guard<std::mutex>                    lock(mutex_);
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
-    for (auto layer_id : layer_ids) {
-        auto iter = layer_cache_buffers_.find(layer_id);
+    for (const auto& buffer_key : buffer_keys) {
+        auto iter = layer_cache_buffers_.find(buffer_key);
         if (iter != layer_cache_buffers_.end()) {
             layer_cache_buffers.push_back(iter->second);
         }
     }
+    // The count is the total number already stored, not only the number that
+    // matched this lookup. dispatchPendingLayerTransfers uses it as the
+    // waitChange baseline; returning only matches would make a request spin
+    // when an unrelated layer/tag is already present.
     return {static_cast<int>(layer_cache_buffers_.size()), layer_cache_buffers};
 }
 
@@ -89,10 +89,70 @@ std::shared_ptr<ComputedLayerCacheBuffer> ComputedLayerCacheBufferStore::getBuff
     return nullptr;
 }
 
-void ComputedLayerCacheBufferStore::removeBuffer(int64_t request_id) {
+std::optional<int64_t> ComputedLayerCacheBufferStore::registerRequestHorizon(int64_t request_id,
+                                                                             int64_t horizon_ms,
+                                                                             int64_t request_deadline_ms) {
     std::lock_guard<std::mutex> lock(computed_buffers_mutex_);
-    computed_buffers_.erase(request_id);
-    markRemovedLocked(request_id, currentTimeMs());
+    if (removed_request_ids_.count(request_id)) {
+        return std::nullopt;
+    }
+    if (request_deadline_ms <= 0 || request_deadline_ms == std::numeric_limits<int64_t>::max()) {
+        request_deadline_ms = horizon_ms;
+    }
+    auto result = request_horizons_.emplace(request_id, RequestHorizon{horizon_ms, request_deadline_ms});
+    return result.first->second.horizon_ms;
+}
+
+std::optional<int64_t> ComputedLayerCacheBufferStore::activateRequestHorizon(int64_t request_id,
+                                                                             int64_t horizon_ms,
+                                                                             int64_t request_deadline_ms) {
+    std::lock_guard<std::mutex> lock(computed_buffers_mutex_);
+    if (removed_request_ids_.count(request_id)) {
+        return std::nullopt;
+    }
+    if (request_deadline_ms <= 0 || request_deadline_ms == std::numeric_limits<int64_t>::max()) {
+        request_deadline_ms = horizon_ms;
+    }
+    auto [it, inserted] = request_horizons_.emplace(request_id, RequestHorizon{horizon_ms, request_deadline_ms});
+    if (!inserted) {
+        it->second.horizon_ms          = std::max(it->second.horizon_ms, horizon_ms);
+        it->second.request_deadline_ms = std::max(it->second.request_deadline_ms, request_deadline_ms);
+    }
+    auto buffer_it = computed_buffers_.find(request_id);
+    if (buffer_it != computed_buffers_.end()) {
+        // Update the stored buffer under the same store lock so checkTimeout
+        // cannot remove it between StartLoad activation and sendKVCache's
+        // subsequent lookup.
+        buffer_it->second->addBuffer(nullptr, it->second.horizon_ms);
+    }
+    return it->second.horizon_ms;
+}
+
+std::optional<int64_t> ComputedLayerCacheBufferStore::requestHorizon(int64_t request_id) const {
+    std::lock_guard<std::mutex> lock(computed_buffers_mutex_);
+    auto                        it = request_horizons_.find(request_id);
+    return it == request_horizons_.end() ? std::nullopt : std::make_optional(it->second.horizon_ms);
+}
+
+void ComputedLayerCacheBufferStore::removeBuffer(int64_t request_id, int64_t request_deadline_ms) {
+    std::lock_guard<std::mutex> lock(computed_buffers_mutex_);
+    const int64_t               now_ms = currentTimeMs();
+    int64_t                     expire_at_ms = std::max(now_ms, request_deadline_ms);
+    bool                        has_request_deadline = request_deadline_ms > 0;
+    auto                        horizon_it = request_horizons_.find(request_id);
+    if (horizon_it != request_horizons_.end()) {
+        expire_at_ms = std::max(expire_at_ms, horizon_it->second.request_deadline_ms);
+        has_request_deadline = true;
+        request_horizons_.erase(horizon_it);
+    }
+    auto buffer_it = computed_buffers_.find(request_id);
+    if (buffer_it != computed_buffers_.end()) {
+        if (!has_request_deadline) {
+            expire_at_ms = std::max(expire_at_ms, buffer_it->second->deadlineMs());
+        }
+        computed_buffers_.erase(buffer_it);
+    }
+    markRemovedLocked(request_id, expire_at_ms);
 }
 
 int64_t ComputedLayerCacheBufferStore::getBuffersCount() const {
@@ -103,31 +163,42 @@ int64_t ComputedLayerCacheBufferStore::getBuffersCount() const {
 void ComputedLayerCacheBufferStore::checkTimeout() {
     std::unique_lock<std::mutex> lock(computed_buffers_mutex_);
     int64_t                      current_time_ms = currentTimeMs();
-    for (auto iter = computed_buffers_.begin(); iter != computed_buffers_.end();) {
-        if (current_time_ms >= iter->second->deadlineMs()) {
-            markRemovedLocked(iter->first, current_time_ms);
-            iter                              = computed_buffers_.erase(iter);
-        } else {
-            ++iter;
-        }
-    }
+    // Clean tombstones created by earlier checks first. Entries created below
+    // remain visible for at least one checker cycle even when their horizon is
+    // exactly the current time.
     while (!removed_request_expiry_queue_.empty()) {
         const auto& expiry = removed_request_expiry_queue_.top();
         if (expiry.expire_at_ms > current_time_ms) {
             break;
         }
         auto it = removed_request_ids_.find(expiry.request_id);
-        if (it != removed_request_ids_.end() && it->second == expiry.removed_at_ms) {
+        if (it != removed_request_ids_.end() && it->second == expiry.expire_at_ms) {
             removed_request_ids_.erase(it);
         }
         removed_request_expiry_queue_.pop();
     }
+    for (auto iter = computed_buffers_.begin(); iter != computed_buffers_.end();) {
+        if (current_time_ms >= iter->second->deadlineMs()) {
+            int64_t expire_at_ms = iter->second->deadlineMs();
+            auto    horizon_it   = request_horizons_.find(iter->first);
+            if (horizon_it != request_horizons_.end()) {
+                expire_at_ms = std::max(current_time_ms, horizon_it->second.request_deadline_ms);
+                request_horizons_.erase(horizon_it);
+            }
+            markRemovedLocked(iter->first, expire_at_ms);
+            iter                              = computed_buffers_.erase(iter);
+        } else {
+            ++iter;
+        }
+    }
 }
 
-void ComputedLayerCacheBufferStore::markRemovedLocked(int64_t request_id, int64_t removed_at_ms) {
-    removed_request_ids_[request_id] = removed_at_ms;
-    removed_request_expiry_queue_.push(
-        RemovedRequestExpiry{removed_at_ms + kRemovedIdRetentionMs, request_id, removed_at_ms});
+void ComputedLayerCacheBufferStore::markRemovedLocked(int64_t request_id, int64_t expire_at_ms) {
+    auto [it, inserted] = removed_request_ids_.emplace(request_id, expire_at_ms);
+    if (!inserted && expire_at_ms > it->second) {
+        it->second = expire_at_ms;
+    }
+    removed_request_expiry_queue_.push(RemovedRequestExpiry{it->second, request_id});
 }
 
 }  // namespace rtp_llm

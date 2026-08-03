@@ -1,5 +1,6 @@
 #pragma once
 
+#include "rtp_llm/models_py/bindings/OpDefs.h"
 #include "rtp_llm/models_py/bindings/core/OpData.h"
 #include "rtp_llm/models_py/bindings/core/DeviceData.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -18,7 +19,6 @@
 namespace rtp_llm {
 
 class CacheStore;
-class IKVCacheConnectorCoordinator;
 
 // ===================================================================
 // Runtime lifecycle
@@ -121,7 +121,7 @@ void execWriteCacheStore(const CacheStoreInputs&       inputs,
                          const KvCacheInfo&            kv_cache,
                          bool                          mla_kvcache,
                          std::shared_ptr<CacheStore>   cache_store,
-                         IKVCacheConnectorCoordinator* connector_coordinator = nullptr);
+                         const P2PLayerWriteCallback& p2p_layer_write = {});
 
 // ===================================================================
 // Static ops (weight preprocessing)

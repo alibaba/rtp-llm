@@ -93,7 +93,12 @@ void GenerateStateMachine::handleWaiting() {
 
 void GenerateStateMachine::handleLoading() {
     if (stream_cache_resource_->loadCacheDone()) {
-        status.store(StreamState::WAITING, std::memory_order_release);
+        if (events_.has(StreamEvents::GenerateDone)) {
+            status.store(StreamState::FINISHED, std::memory_order_release);
+            releaseResource();
+        } else {
+            status.store(StreamState::WAITING, std::memory_order_release);
+        }
     }
 }
 

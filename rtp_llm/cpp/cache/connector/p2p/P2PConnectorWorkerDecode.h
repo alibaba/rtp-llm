@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/DecodeTargetWriteLease.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/IKVCacheReceiver.h"
 #include "rtp_llm/cpp/utils/ErrorCode.h"
+#include "autil/LoopThread.h"
 #include <atomic>
 #include <cstdint>
 #include <memory>
@@ -25,16 +26,20 @@ public:
                              const std::shared_ptr<LayerBlockConverter>& layer_block_converter,
                              const kmonitor::MetricsReporterPtr&         metrics_reporter,
                              const transfer::IKVCacheReceiverPtr&        receiver);
-    ~P2PConnectorWorkerDecode() = default;
+    ~P2PConnectorWorkerDecode();
 
 public:
+    bool initialized() const {
+        return lease_cleanup_thread_ != nullptr;
+    }
+
     ErrorInfo read(int64_t                                               request_id,
                    const std::string&                                    unique_key,
                    int64_t                                               deadline_ms,
                    const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
                    int                                                   remote_tp_size = 1);
 
-    bool cancelRead(const std::string& unique_key);
+    bool cancelRead(const std::string& unique_key, int64_t request_deadline_ms = 0);
 
     // Query the local lease state for a given unique_key (called by QUERY_LEASE_STATUS handler).
     // Returns false if no lease is found (lease already cleaned up = transfers done).
@@ -93,22 +98,28 @@ private:
     mutable std::mutex                                              read_tasks_mutex_;
     std::unordered_map<std::string, std::shared_ptr<ReadTaskGroup>> read_tasks_;
     std::unordered_set<std::string>                                 building_read_keys_;
-    std::unordered_set<std::string>                                 pending_cancel_keys_;
+    // Cancellation can overtake READ because they are independent RPCs.
+    // Keep a bounded terminal marker so a late READ cannot start transfers.
+    std::unordered_map<std::string, int64_t>                         pending_cancel_keys_;
 
-    // Leases kept alive after read() returns (for TRANSFER_NOT_DONE path) until all ops finish.
-    // Keyed by unique_key. Cleaned up lazily when polled via queryLeaseStatus.
+    // Leases kept after read() returns so QUERY_LEASE_STATUS can observe physical completion.
+    // Completed entries are removed by queries; all entries also have a periodic hard TTL.
     struct LeaseMapEntry {
         std::shared_ptr<ReadTaskGroup> task_group;
         int                            finish_counted{0};  // how many tasks have been counted as finished so far
         int64_t                        create_time_ms{0};
     };
 
+    // Hard metadata-retention bound. Active transport contexts hold their own
+    // task references, so this tracking entry has no value after its TTL.
     static constexpr int64_t kLeaseMapTtlMs = 600000;  // 10 min
 
     // Requires lease_map_mutex_ to be held by caller.
     void evictStaleLeases();
+    void cleanupStaleLeases();
     mutable std::mutex                             lease_map_mutex_;
     std::unordered_map<std::string, LeaseMapEntry> lease_map_;
+    autil::LoopThreadPtr                           lease_cleanup_thread_;
 };
 
 }  // namespace rtp_llm

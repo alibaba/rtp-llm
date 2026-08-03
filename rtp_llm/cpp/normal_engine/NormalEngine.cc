@@ -73,6 +73,7 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     ffn_disaggregate_config(params.ffn_disaggregate_config),
     model_specific_config(params.model_specific_config),
     sp_config(params.sp_config),
+    cache_store_config(params.cache_store_config),
     metrics_reporter_(params.metrics_reporter),
     propose_params_(std::move(propose_params)),
     step_profiler_(params.profiling_debug_logging_config.torch_cuda_profiler_dir,
@@ -380,7 +381,8 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       pd_sep_config,
                                                                       cache_store_config,
                                                                       use_cuda_malloc_block_pool);
-        resource_context_.role_type     = pd_sep_config.role_type;
+        resource_context_.role_type       = pd_sep_config.role_type;
+        resource_context_.decode_entrance = pd_sep_config.decode_entrance;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }
@@ -405,7 +407,8 @@ void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) 
                                                                       pd_sep_config,
                                                                       cache_store_config,
                                                                       use_cuda_malloc_block_pool);
-        resource_context_.role_type     = pd_sep_config.role_type;
+        resource_context_.role_type       = pd_sep_config.role_type;
+        resource_context_.decode_entrance = pd_sep_config.decode_entrance;
         if (!resource_context_.cache_manager->init()) {
             RTP_LLM_FAIL("init kv cache manager failed");
         }

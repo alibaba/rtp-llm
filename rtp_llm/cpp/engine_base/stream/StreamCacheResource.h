@@ -157,6 +157,7 @@ private:
     RtpLLMCacheReuseMetricsCollector cache_reuse_metrics_;
     int64_t                       malloc_begin_time_us_    = 0;
     int64_t                       load_wait_begin_time_us_ = 0;
+    std::shared_ptr<AsyncContext> p2p_load_context_;
 
     // Physical block pins held for PD separation.
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;

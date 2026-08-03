@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerPrefill.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorWorkerDecode.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/IKVCacheSender.h"
 #include "rtp_llm/cpp/cache/connector/p2p/transfer/IKVCacheReceiver.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerBlockConverter.h"
@@ -410,7 +411,7 @@ protected:
     }
 
     std::shared_ptr<LayerCacheBuffer> createLayerCacheBuffer(int layer_id, int num_blocks = 2) {
-        auto buffer = std::make_shared<LayerCacheBuffer>(layer_id);
+        auto buffer = std::make_shared<LayerCacheBuffer>(layer_id, "full");
         for (int i = 0; i < num_blocks; ++i) {
             int64_t cache_key = layer_id * 1000 + i;
             int     block_id  = i;
@@ -851,13 +852,13 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnTrue_EmptyBuffers) {
 // ==================== rdma_transfer_wait_timeout_ms 超时测试 ====================
 
 TEST_F(P2PConnectorWorkerTest, HandleRead_ReturnFalse_RdmaTransferWaitTimeout) {
-    // 设置很短的 rdma_transfer_wait_timeout_ms；return_deadline 须较近，否则 callback 等待会持续到 D-return_before
+    // rdma_transfer_wait_timeout_ms 必须独立限制 callback 总等待时间。
     setTransferWaitTimeout(50);  // 50ms
 
     int64_t     request_id = 4001;
     std::string unique_key = "test_rdma_transfer_wait_timeout_handleread";
-    // return_deadline = deadline_ms - return_before_ms(100) ≈ now + 50ms，与 rdma cap 同量级
-    int64_t deadline_ms = currentTimeMs() + 150;
+    // 刻意让 return_deadline 远晚于 rdma cap，防止把 cap 错实现为反复轮询分片。
+    int64_t deadline_ms = currentTimeMs() + 5000;
 
     std::vector<std::pair<std::string, uint32_t>> decode_transfer_servers;
     decode_transfer_servers.push_back({"127.0.0.1", 12345});
@@ -1034,14 +1035,18 @@ TEST_F(P2PConnectorWorkerTest, Read_ReturnFalse_BuildRecvTasksFailure_RollsBackR
     EXPECT_EQ(mock_receiver_->taskCount(), 0);
 }
 
-TEST_F(P2PConnectorWorkerTest, CancelRead_ReturnFalse_TaskNotFound) {
+TEST_F(P2PConnectorWorkerTest, CancelReadBeforeReadCancelsLateRead) {
     std::string unique_key = "test_cancel_not_found";
 
-    // 不创建任务，直接调用 cancelRead
-    bool cancel_result = decode_->cancelRead(unique_key);
+    EXPECT_TRUE(decode_->cancelRead(unique_key));
 
-    // 验证返回 false（任务不存在）
-    EXPECT_FALSE(cancel_result);
+    std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
+    layer_cache_buffers.push_back(createLayerCacheBuffer(0, 2));
+    auto result = decode_->read(3009, unique_key, currentTimeMs() + 5000, layer_cache_buffers);
+
+    EXPECT_TRUE(result.hasError());
+    EXPECT_EQ(result.code(), ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED);
+    EXPECT_EQ(mock_receiver_->taskCount(), 0);
 }
 
 TEST_F(P2PConnectorWorkerTest, CancelHandleRead_ReturnTrue_ContextNotFound) {
@@ -1679,6 +1684,24 @@ TEST_F(P2PConnectorWorkerTest, WriteByLayer_BufferDeadlineFollowsRequestDeadline
            "Old behavior (deadline = now + store_wait_timeout) would have wiped it out by now.";
 }
 
+TEST_F(P2PConnectorWorkerTest, WriteByLayer_RequestDeadlineBoundsStoreWaitFallback) {
+    prefill_.reset();
+    prefill_ =
+        std::make_unique<P2PConnectorWorkerPrefill>(worker_config_, mock_layer_block_converter_, nullptr, mock_sender_);
+    prefill_->init(5000);
+    computed_buffers_ = prefill_->getComputedBuffersStore();
+
+    const int64_t request_id          = 6006;
+    const int64_t request_deadline_ms = currentTimeMs() + 30;
+    auto          resource            = createKVCacheResource(0, 2);
+    ASSERT_TRUE(prefill_->writeByLayer(0, resource, request_id, nullptr, request_deadline_ms));
+
+    std::this_thread::sleep_for(std::chrono::milliseconds(100));
+    computed_buffers_->checkTimeout();
+    EXPECT_EQ(computed_buffers_->getBuffer(request_id), nullptr)
+        << "A short business deadline must not be extended to store_wait_timeout";
+}
+
 // ==================== LayerCacheBufferUtil 边界测试 ====================
 
 class LayerCacheBufferUtilTest: public ::testing::Test {
@@ -1689,7 +1712,12 @@ protected:
         for (int i = 0; i < num_layers; ++i) {
             layer_to_group[i] = i;
         }
-        resource->initGroups(num_layers, num_layers, layer_to_group);
+        std::vector<std::vector<int>> layer_group_ids;
+        for (int group_id : layer_to_group) {
+            layer_group_ids.push_back({group_id});
+        }
+        topology_ = makeTestCacheTopology(num_layers, num_layers, layer_group_ids);
+        resource->initGroups(topology_);
         for (int layer = 0; layer < num_layers; ++layer) {
             for (int i = 0; i < blocks_per_layer; ++i) {
                 resource->mutableBlockIds(layer).add({i});
@@ -1700,55 +1728,59 @@ protected:
         }
         return resource;
     }
+
+    std::shared_ptr<const CacheTopology> topology_;
 };
 
 TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnNull_StartIdxEqualActualCount) {
     auto resource = createResource(2, 3);
     // start_block_idx == actual_block_count (3) -> out of range
-    auto buf = LayerCacheBufferUtil::convertLayer(*resource, 0, 0, 3, -1);
-    EXPECT_EQ(buf, nullptr);
+    auto buffers = LayerCacheBufferUtil::convertLayer(*resource, *topology_, 0, 3, -1);
+    EXPECT_TRUE(buffers.empty());
 }
 
 TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnNull_StartIdxGreaterThanActualCount) {
     auto resource = createResource(2, 3);
     // start_block_idx > actual_block_count
-    auto buf = LayerCacheBufferUtil::convertLayer(*resource, 0, 0, 10, -1);
-    EXPECT_EQ(buf, nullptr);
+    auto buffers = LayerCacheBufferUtil::convertLayer(*resource, *topology_, 0, 10, -1);
+    EXPECT_TRUE(buffers.empty());
 }
 
 TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnNull_BlockCountLessThanNegativeOne) {
     auto resource = createResource(2, 3);
     // block_count < -1 is undefined/illegal
-    auto buf = LayerCacheBufferUtil::convertLayer(*resource, 0, 0, 0, -2);
-    EXPECT_EQ(buf, nullptr);
+    auto buffers = LayerCacheBufferUtil::convertLayer(*resource, *topology_, 0, 0, -2);
+    EXPECT_TRUE(buffers.empty());
 }
 
 TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnNull_BlockCountZero) {
     auto resource = createResource(2, 3);
-    auto buf      = LayerCacheBufferUtil::convertLayer(*resource, 0, 0, 0, 0);
-    EXPECT_EQ(buf, nullptr);
+    auto buffers = LayerCacheBufferUtil::convertLayer(*resource, *topology_, 0, 0, 0);
+    EXPECT_TRUE(buffers.empty());
 }
 
 TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnPartial_BlockCountLimitsResult) {
     auto resource = createResource(2, 4);
     // start=1, count=2 -> should return 2 blocks
-    auto buf = LayerCacheBufferUtil::convertLayer(*resource, 0, 0, 1, 2);
-    ASSERT_NE(buf, nullptr);
+    auto buffers = LayerCacheBufferUtil::convertLayer(*resource, *topology_, 0, 1, 2);
+    ASSERT_EQ(buffers.size(), 1u);
+    auto buf = buffers.front();
     EXPECT_EQ(static_cast<int>(buf->blockIdMap().size()), 2);
 }
 
 TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnAll_BlockCountNegativeOne) {
     auto resource = createResource(2, 3);
     // block_count=-1 means "all remaining"
-    auto buf = LayerCacheBufferUtil::convertLayer(*resource, 0, 0, 0, -1);
-    ASSERT_NE(buf, nullptr);
+    auto buffers = LayerCacheBufferUtil::convertLayer(*resource, *topology_, 0, 0, -1);
+    ASSERT_EQ(buffers.size(), 1u);
+    auto buf = buffers.front();
     EXPECT_EQ(static_cast<int>(buf->blockIdMap().size()), 3);
 }
 
 TEST_F(LayerCacheBufferUtilTest, ConvertLayer_ReturnNull_StartIdxNegative) {
     auto resource = createResource(2, 3);
-    auto buf      = LayerCacheBufferUtil::convertLayer(*resource, 0, 0, -1, -1);
-    EXPECT_EQ(buf, nullptr);
+    auto buffers = LayerCacheBufferUtil::convertLayer(*resource, *topology_, 0, -1, -1);
+    EXPECT_TRUE(buffers.empty());
 }
 
 }  // namespace test

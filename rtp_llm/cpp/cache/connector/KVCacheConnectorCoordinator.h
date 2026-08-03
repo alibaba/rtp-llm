@@ -8,7 +8,7 @@
 #include "autil/LoopThread.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
-#include "rtp_llm/cpp/cache/connector/AsyncContext.h"
+#include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/connector/IKVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnector.h"
 #include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
@@ -20,8 +20,6 @@
 namespace rtp_llm {
 
 class KVCacheAllocator;
-class KVCacheMemoryConnector;
-class RemoteConnector;
 class P2PConnector;
 class KVCacheConnectorReadWriteContext;
 
@@ -55,7 +53,6 @@ public:
                                                                              int layer_id = -1) override;
 
     virtual bool              executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
-    std::vector<CacheKeyType> memoryCacheKeys() const;
 
     uint32_t convertToGlobalLayerId(int model_id, int layer_id) const override {
         return allocator_->convertToGlobalLayerId(model_id, layer_id);
@@ -71,11 +68,10 @@ public:
     void notifySideChannelReady(const std::string&                                unique_key,
                                 int64_t                                           deadline_ms,
                                 const P2PConnectorResourceEntry::SideChannelData& data);
+    void cancelRead(const std::shared_ptr<AsyncContext>& context);
 
 private:
     KVCacheResource normalizeResourceForConnector(const KVCacheResource& resource, int layer_id) const;
-    std::shared_ptr<KVCacheMemoryConnector> initMemoryConnector();
-    std::shared_ptr<RemoteConnector>        initRemoteConnector();
     bool                                    initP2PConnectorInternal();
     void                                    initUpdateThread();
     void                                    updateOnce();
@@ -101,8 +97,6 @@ private:
     CacheStoreConfig                  cache_store_config_;
 
     std::vector<std::shared_ptr<KVCacheConnector>>    connectors_;
-    std::shared_ptr<KVCacheMemoryConnector>           memory_connector_;
-    std::shared_ptr<RemoteConnector>                  remote_connector_;
     std::shared_ptr<P2PConnector>                     p2p_connector_;
     mutable std::mutex                                update_mutex_;
     std::list<std::shared_ptr<FusedAsyncReadContext>> fused_async_read_context_list_;

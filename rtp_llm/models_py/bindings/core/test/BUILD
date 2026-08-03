@@ -13,6 +13,7 @@ exec_ops_test_deps = [
     "//rtp_llm/models_py/bindings/cuda/ops:cuda_impl",
     "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
     "//rtp_llm/cpp/testing:test_log_capture",
+    "//rtp_llm/models_py/bindings/core:cache_store_async_writer",
     "@com_google_googletest//:gtest_main",
 ] + torch_deps()
 

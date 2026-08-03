@@ -22,6 +22,7 @@ public:
                                       ::grpc::ServerWriter<::GenerateOutputsPB>* writer) override;
     void           setSleepMillis(int ms);
     void           setP2PResponseSuccess(bool success);
+    void           setOmitP2PResponse(bool omit);
     void           setStartLoadResponseSuccess(bool success);
     /// 若 code != NONE_ERROR，StartLoad 在 gRPC OK 下返回该业务 error_code（优先于 setStartLoadResponseSuccess）
     void setStartLoadApplicationError(ErrorCodePB code, const std::string& message = "");
@@ -35,12 +36,14 @@ public:
     int  getBroadcastTpCancelCallCount() const;
     P2PConnectorBroadcastTpRequestPB getLastBroadcastTpRequest() const;
     int  getStartLoadCallCount() const;
+    P2PConnectorStartLoadRequestPB getLastStartLoadRequest() const;
     int  getGenerateStreamCallCount() const;
     void resetCallCounts();
 
 private:
     int              sleep_millis_{0};
     bool             p2p_response_success_{true};
+    bool             omit_p2p_response_{false};
     bool             start_load_response_success_{true};
     bool             use_legacy_start_load_response_{false};
     ErrorCodePB      start_load_app_error_pb_{ErrorCodePB::NONE_ERROR};
@@ -52,6 +55,8 @@ private:
     std::atomic<int> broadcast_tp_cancel_call_count_{0};
     mutable std::mutex              last_broadcast_tp_request_mutex_;
     P2PConnectorBroadcastTpRequestPB last_broadcast_tp_request_;
+    mutable std::mutex              last_start_load_request_mutex_;
+    P2PConnectorStartLoadRequestPB  last_start_load_request_;
     std::atomic<int> start_load_call_count_{0};
     std::atomic<int> generate_stream_call_count_{0};
 };

@@ -203,6 +203,17 @@ TEST_F(CacheStoreAsyncWriterTest, ExceptionPropagation) {
     ASSERT_EQ(1, counter.load());
 }
 
+TEST_F(CacheStoreAsyncWriterTest, DrainOnErrorRestoresIdleAndSuppressesBackgroundException) {
+    CacheStoreAsyncWriter writer;
+    writer.init();
+    writer.submit([]() { throw std::runtime_error("background failure during forward unwind"); });
+
+    ASSERT_NO_THROW(writer.drainOnError());
+
+    writer.init();
+    writer.waitAllDone();
+}
+
 TEST_F(CacheStoreAsyncWriterTest, FirstExceptionKeptOnMultipleFailures) {
     CacheStoreAsyncWriter writer;
     writer.init();

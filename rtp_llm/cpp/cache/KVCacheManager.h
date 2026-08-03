@@ -14,6 +14,7 @@
 #include "rtp_llm/cpp/cache/AsyncContext.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCache.h"
+#include "rtp_llm/cpp/cache/connector/p2p/P2PConnectorResourceStore.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/model_rpc/proto/model_rpc_service.grpc.pb.h"
 #include "kmonitor/client/MetricsReporter.h"
@@ -24,6 +25,7 @@ class CPSlotMapper;
 class CacheStore;
 class KVCacheConnectorReadWriteContext;
 class BroadcastManager;
+class P2PConnector;
 
 class KVCacheManager {
 public:
@@ -49,6 +51,7 @@ public:
     MallocResult malloc(const MallocInfo& malloc_info);
     void         free(const FreeInfo& free_info);
     bool         abortPendingLoad(const std::shared_ptr<AsyncContext>& context);
+    void         cancelP2PLoad(const std::shared_ptr<AsyncContext>& context);
     void         insertIntoCache(const InsertInfo& insert_info);
 
     int
@@ -127,14 +130,24 @@ public:
     // succeeded; the transfer outcome is reported through mem_response.code.
     bool executeFunction(const FunctionRequestPB& request, FunctionResponsePB& response);
 
-    // handle read request from decode side (StartLoad RPC), delegate to coordinator
+    // Handle a decode-side StartLoad RPC directly through P2PConnector.
     void handleRead(const P2PConnectorStartLoadRequestPB& request,
                     P2PConnectorStartLoadResponsePB&      response,
                     std::function<bool()>                 is_cancelled = nullptr);
 
     bool hasActiveConnectors() const;
     bool hasP2PConnector() const;
-
+    void notifySideChannelReady(const std::string&                                unique_key,
+                                int64_t                                           deadline_ms,
+                                const P2PConnectorResourceEntry::SideChannelData& data);
+    bool writeP2PLayer(size_t                                model_id,
+                       int                                   local_layer_id,
+                       const std::string&                    tag,
+                       const std::vector<int64_t>&           cache_keys,
+                       const std::vector<int32_t>&           block_ids,
+                       int64_t                               request_id,
+                       const std::shared_ptr<torch::Event>& event,
+                       int64_t                               deadline_ms);
     BlockTreeCachePtr blockTreeCache() const {
         return block_tree_cache_;
     }
@@ -164,6 +177,7 @@ public:
     }
 
 private:
+    bool                              initP2PConnector();
     void                              allocateAndSync();
     void                              reportMetricsLoop();
     std::shared_ptr<BroadcastManager> createMultiRankBlockTransferManager() const;
@@ -187,6 +201,7 @@ private:
     std::thread       metrics_reporter_thread_;
 
     BlockTreeCachePtr block_tree_cache_;
+    std::shared_ptr<P2PConnector> p2p_connector_;
 
     mutable std::mutex          cache_store_mutex_;
     std::shared_ptr<CacheStore> cache_store_;

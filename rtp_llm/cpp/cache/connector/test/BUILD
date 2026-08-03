@@ -26,6 +26,7 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = test_deps + [
+        "//rtp_llm/cpp/cache:cache_async_context",
         "//rtp_llm/cpp/cache/connector:connector",
         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
         "//rtp_llm/cpp/cache/connector/memory/test/mock:mock_memory_connector_lib",
@@ -44,6 +45,7 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = test_deps + [
+        "//rtp_llm/cpp/cache:cache_async_context",
         "//rtp_llm/cpp/cache/connector:connector",
         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
     ],

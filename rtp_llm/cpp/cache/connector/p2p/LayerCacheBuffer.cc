@@ -6,8 +6,8 @@ namespace rtp_llm {
 
 // ==================== LayerCacheBuffer ====================
 
-LayerCacheBuffer::LayerCacheBuffer(int layer_id, KVCacheResourcePtr resource):
-    layer_id_(layer_id), resource_(std::move(resource)) {}
+LayerCacheBuffer::LayerCacheBuffer(int layer_id, std::string cache_tag, KVCacheResourcePtr resource):
+    layer_id_(layer_id), cache_tag_(std::move(cache_tag)), resource_(std::move(resource)) {}
 
 void LayerCacheBuffer::addBlockId(int64_t key, int block_id) {
     block_id_map_[key] = block_id;
@@ -28,18 +28,19 @@ LayerCacheBufferStore::LayerCacheBufferStore(uint64_t timeout_ms): timeout_ms_(t
 void LayerCacheBufferStore::addLayerCacheBuffer(const std::string&                       unique_key,
                                                 const std::shared_ptr<LayerCacheBuffer>& layer_cache_buffer) {
     std::lock_guard<std::mutex> lock(mutex_);
-    layer_cache_buffer_map_[unique_key][layer_cache_buffer->getLayerId()] = layer_cache_buffer;
+    layer_cache_buffer_map_[unique_key][layer_cache_buffer->bufferKey()] = layer_cache_buffer;
     expired_time_map_[unique_key]                                         = currentTimeMs() + timeout_ms_;
 }
 
 std::shared_ptr<LayerCacheBuffer> LayerCacheBufferStore::getLayerCacheBuffer(const std::string& unique_key,
-                                                                             int                layer_id) const {
+                                                                             int                layer_id,
+                                                                             const std::string& cache_tag) const {
     std::lock_guard<std::mutex> lock(mutex_);
     auto                        it = layer_cache_buffer_map_.find(unique_key);
     if (it == layer_cache_buffer_map_.end()) {
         return nullptr;
     }
-    auto it2 = it->second.find(layer_id);
+    auto it2 = it->second.find(std::to_string(layer_id) + ":" + cache_tag);
     if (it2 == it->second.end()) {
         return nullptr;
     }

@@ -41,10 +41,20 @@ public:
                       std::shared_ptr<torch::Event> event,
                       int64_t                       deadline_ms);
 
+    bool writeByLayerTag(int                                   layer_id,
+                         const std::string&                    tag,
+                         const KVCacheResourcePtr&             resource,
+                         int64_t                               request_id,
+                         const std::shared_ptr<torch::Event>& event,
+                         int64_t                               deadline_ms);
+
     ErrorInfo sendKVCache(int64_t                                              request_id,
                           const std::string&                                   unique_key,
                           int64_t                                              deadline_ms,
-                          const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers);
+                          const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
+                          int64_t                                              request_deadline_ms = 0);
+
+    void completeNoTransfer(int64_t request_id, int64_t deadline_ms, int64_t request_deadline_ms = 0);
 
     bool cancelSend(const std::string& unique_key);
 
@@ -56,6 +66,11 @@ public:
     }
 
 private:
+    bool scheduleLayerCacheBuffers(int                                                           layer_id,
+                                   int64_t                                                       request_id,
+                                   const std::shared_ptr<torch::Event>&                          event,
+                                   int64_t                                                       request_deadline_ms,
+                                   const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers);
     void loopCheckProc();
 
     struct SendTransferResult {
@@ -75,7 +90,8 @@ private:
                                       int64_t                                          return_deadline_ms,
                                       const std::shared_ptr<std::atomic<bool>>&        cancel_flag,
                                       const std::shared_ptr<SendTransferResult>&       transfer_result,
-                                      std::set<int>&                                   sent_layer_ids,
+                                      const std::set<std::string>&                     expected_buffer_keys,
+                                      std::set<std::string>&                           sent_buffer_keys,
                                       int                                              total_transfers);
 
     int sendLayerToPartitions(const std::shared_ptr<LayerCacheBuffer>&   layer_cache_buffer,

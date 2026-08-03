@@ -2,6 +2,7 @@
 
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/cache/connector/p2p/LayerCacheBufferUtil.h"
 
 namespace rtp_llm {
@@ -16,7 +17,12 @@ protected:
                                  const std::vector<int32_t>&        block_ids_g0,
                                  const std::vector<int64_t>&        cache_keys_input) {
         KVCacheResource resource;
-        resource.initGroups(group_num, layer_num, layer_to_group, 1, group_types);
+        std::vector<std::vector<int>> layer_group_ids;
+        for (int group_id : layer_to_group) {
+            layer_group_ids.push_back({group_id});
+        }
+        topology_ = makeTestCacheTopology(group_num, layer_num, layer_group_ids, 1, group_types);
+        resource.initGroups(topology_);
         auto& blocks = resource.mutableBlockIds(0);
         blocks.assign(block_ids_g0);
         resource.cacheKeys() = cache_keys_input;
@@ -31,19 +37,23 @@ protected:
         // 2 layers: layer 0 -> group 0, layer 1 -> group 1
         std::vector<int>            layer_to_group = {0, 1};
         std::vector<CacheGroupType> group_types    = {CacheGroupType::FULL, CacheGroupType::LINEAR};
-        resource.initGroups(2, 2, layer_to_group, 1, group_types);
+        topology_ = makeTestCacheTopology(2, 2, {{0}, {1}}, 1, group_types);
+        resource.initGroups(topology_);
         resource.mutableBlockIds(0).assign(full_block_ids);
         resource.mutableBlockIds(1).assign(linear_block_ids);
         resource.cacheKeys() = cache_keys_input;
         return resource;
     }
+
+    std::shared_ptr<const CacheTopology> topology_;
 };
 
 TEST_F(LayerCacheBufferUtilFilterTest, FullGroupAllValidBlocks) {
     auto resource = makeResource(1, 1, {0}, {CacheGroupType::FULL}, {10, 11, 12}, {100, 101, 102});
 
-    auto result = LayerCacheBufferUtil::convertLayer(resource, 0, 0, 0, -1, CacheGroupType::FULL);
-    ASSERT_NE(result, nullptr);
+    auto results = LayerCacheBufferUtil::convertLayer(resource, *topology_, 0, 0, -1);
+    ASSERT_EQ(results.size(), 1u);
+    auto result = results.front();
     EXPECT_EQ(result->blockIdMap().size(), 3u);
     EXPECT_EQ(result->getBlockId(100), 10);
     EXPECT_EQ(result->getBlockId(101), 11);
@@ -53,8 +63,9 @@ TEST_F(LayerCacheBufferUtilFilterTest, FullGroupAllValidBlocks) {
 TEST_F(LayerCacheBufferUtilFilterTest, FullGroupWithNullBlockSkipped) {
     auto resource = makeResource(1, 1, {0}, {CacheGroupType::FULL}, {10, -1, 12}, {100, 101, 102});
 
-    auto result = LayerCacheBufferUtil::convertLayer(resource, 0, 0, 0, -1, CacheGroupType::FULL);
-    ASSERT_NE(result, nullptr);
+    auto results = LayerCacheBufferUtil::convertLayer(resource, *topology_, 0, 0, -1);
+    ASSERT_EQ(results.size(), 1u);
+    auto result = results.front();
     EXPECT_EQ(result->blockIdMap().size(), 2u);
     EXPECT_EQ(result->getBlockId(100), 10);
     EXPECT_EQ(result->getBlockId(102), 12);
@@ -64,8 +75,9 @@ TEST_F(LayerCacheBufferUtilFilterTest, FullGroupWithNullBlockSkipped) {
 TEST_F(LayerCacheBufferUtilFilterTest, LinearGroupOnlyLastValidBlock) {
     auto resource = makeResource(1, 1, {0}, {CacheGroupType::LINEAR}, {-1, -1, 25}, {100, 101, 102});
 
-    auto result = LayerCacheBufferUtil::convertLayer(resource, 0, 0, 0, -1, CacheGroupType::LINEAR);
-    ASSERT_NE(result, nullptr);
+    auto results = LayerCacheBufferUtil::convertLayer(resource, *topology_, 0, 0, -1);
+    ASSERT_EQ(results.size(), 1u);
+    auto result = results.front();
     EXPECT_EQ(result->blockIdMap().size(), 1u);
     EXPECT_EQ(result->getBlockId(102), 25);
 }
@@ -73,8 +85,9 @@ TEST_F(LayerCacheBufferUtilFilterTest, LinearGroupOnlyLastValidBlock) {
 TEST_F(LayerCacheBufferUtilFilterTest, LinearGroupMixedValidOnlyTakesLast) {
     auto resource = makeResource(1, 1, {0}, {CacheGroupType::LINEAR}, {18, -1, 25}, {100, 101, 102});
 
-    auto result = LayerCacheBufferUtil::convertLayer(resource, 0, 0, 0, -1, CacheGroupType::LINEAR);
-    ASSERT_NE(result, nullptr);
+    auto results = LayerCacheBufferUtil::convertLayer(resource, *topology_, 0, 0, -1);
+    ASSERT_EQ(results.size(), 1u);
+    auto result = results.front();
     EXPECT_EQ(result->blockIdMap().size(), 1u);
     EXPECT_EQ(result->getBlockId(102), 25);
     EXPECT_EQ(result->getBlockId(100), -1);  // not included
@@ -83,8 +96,8 @@ TEST_F(LayerCacheBufferUtilFilterTest, LinearGroupMixedValidOnlyTakesLast) {
 TEST_F(LayerCacheBufferUtilFilterTest, AllNullBlocksReturnsNullptr) {
     auto resource = makeResource(1, 1, {0}, {CacheGroupType::LINEAR}, {-1, -1, -1}, {100, 101, 102});
 
-    auto result = LayerCacheBufferUtil::convertLayer(resource, 0, 0, 0, -1, CacheGroupType::LINEAR);
-    EXPECT_EQ(result, nullptr);
+    auto results = LayerCacheBufferUtil::convertLayer(resource, *topology_, 0, 0, -1);
+    EXPECT_TRUE(results.empty());
 }
 
 TEST_F(LayerCacheBufferUtilFilterTest, ConvertWithLayerAttnTypes) {
@@ -92,8 +105,7 @@ TEST_F(LayerCacheBufferUtilFilterTest, ConvertWithLayerAttnTypes) {
                                          {-1, -1, 25},  // LINEAR group blocks
                                          {100, 101, 102});
 
-    std::vector<CacheGroupType> layer_attn_types = {CacheGroupType::FULL, CacheGroupType::LINEAR};
-    auto                        results          = LayerCacheBufferUtil::convert(resource, 0, layer_attn_types, 0, -1);
+    auto results = LayerCacheBufferUtil::convert(resource, *topology_);
 
     ASSERT_EQ(results.size(), 2u);
 
@@ -112,8 +124,7 @@ TEST_F(LayerCacheBufferUtilFilterTest, ConvertLinearAllNullSkipsLayer) {
                                          {-1, -1, -1},  // all null
                                          {100, 101, 102});
 
-    std::vector<CacheGroupType> layer_attn_types = {CacheGroupType::FULL, CacheGroupType::LINEAR};
-    auto                        results          = LayerCacheBufferUtil::convert(resource, 0, layer_attn_types, 0, -1);
+    auto results = LayerCacheBufferUtil::convert(resource, *topology_);
 
     // Only FULL layer should appear (LINEAR layer returns nullptr and is skipped)
     ASSERT_EQ(results.size(), 1u);

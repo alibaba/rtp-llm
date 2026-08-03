@@ -1,6 +1,5 @@
 #include "rtp_llm/cpp/model_rpc/PrefillRpcServerNew2.h"
 #include "rtp_llm/cpp/model_rpc/DecodeRpcServerNew2.h"
-#include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/utils/GrpcAddressUtil.h"
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include "autil/NetUtil.h"
@@ -257,11 +256,6 @@ grpc::Status PrefillRpcServerNew2::init(const EngineInitParams&                 
     if (!kvcache_manager) {
         RTP_LLM_LOG_WARNING("prefill rpc server new2 init failed, kvcache manager is null");
         return grpc::Status(grpc::StatusCode::INTERNAL, "kvcache manager is null");
-    }
-    auto connector_coordinator = kvcache_manager->connectorCoordinator();
-    if (!connector_coordinator) {
-        RTP_LLM_LOG_WARNING("prefill rpc server new2 init failed, connector coordinator is null");
-        return grpc::Status(grpc::StatusCode::INTERNAL, "connector coordinator is null");
     }
     if (!kvcache_manager->hasP2PConnector()) {
         RTP_LLM_LOG_WARNING("prefill rpc server new2 init failed, decode_entrance requires P2P connector");

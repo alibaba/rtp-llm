@@ -28,6 +28,8 @@ public:
     struct Result {
         Result(const std::string& unique_key, const std::shared_ptr<TpBroadcastResult>& tp_broadcast_result):
             unique_key_(unique_key), tp_broadcast_result_(tp_broadcast_result), start_time_us_(currentTimeUs()) {}
+        explicit Result(const std::string& unique_key):
+            unique_key_(unique_key), start_time_us_(currentTimeUs()), locally_completed_(true) {}
         ~Result() {}
 
         std::string uniqueKey() const {
@@ -35,7 +37,7 @@ public:
         }
 
         bool done() const {
-            return tp_broadcast_result_->done();
+            return locally_completed_ || (tp_broadcast_result_ && tp_broadcast_result_->done());
         }
         bool success() const;
         void checkDone();
@@ -52,6 +54,7 @@ public:
         std::shared_ptr<TpBroadcastResult> tp_broadcast_result_;
         int64_t                            start_time_us_;
         int64_t                            total_cost_time_us_{0};
+        bool                               locally_completed_{false};
     };
 
     /// @brief 向所有 TP worker 广播 KV cache 传输请求
@@ -61,10 +64,12 @@ public:
                                       const std::string&                                    unique_key,
                                       int64_t                                               deadline_ms,
                                       P2PConnectorBroadcastType                             type,
-                                      int                                                   remote_tp_size = 0);
+                                      int                                                   remote_tp_size = 0,
+                                      int64_t                                               request_deadline_ms = 0);
 
     /// @brief 向所有 TP worker 广播 cancel 请求
-    std::shared_ptr<Result> cancel(const std::string& unique_key, P2PConnectorBroadcastType type);
+    std::shared_ptr<Result>
+    cancel(const std::string& unique_key, P2PConnectorBroadcastType type, int64_t request_deadline_ms = 0);
 
     struct LeaseStatusResult {
         bool success{false};
@@ -103,7 +108,8 @@ private:
                              const std::string&                                    unique_key,
                              int64_t                                               deadline_ms,
                              P2PConnectorBroadcastType                             type,
-                             int                                                   remote_tp_size);
+                             int                                                   remote_tp_size,
+                             int64_t                                               request_deadline_ms);
 
 private:
     std::vector<std::string>          worker_addrs_;
