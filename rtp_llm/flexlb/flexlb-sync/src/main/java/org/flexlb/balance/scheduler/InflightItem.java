@@ -204,14 +204,14 @@ public final class InflightItem implements InflightEntry {
      */
     public void complete(Response response) {
         if (!terminated.compareAndSet(false, true)) return;
-        this.terminalReason = TerminalReason.COMPLETED;
+        this.terminalReason = response.isSuccess() ? TerminalReason.COMPLETED : TerminalReason.FAILED;
         this.terminalTime = System.currentTimeMillis();
         if (prefillEp != null) prefillEp.release(ctx.getRequestId());
         if (decodeEp != null) decodeEp.release(ctx.getRequestId());
         if (batch != null) {
             batch.removeItem(this);
         }
-        reportTerminalMetric(TerminalReason.COMPLETED);
+        reportTerminalMetric(this.terminalReason);
         future.complete(response);
     }
 

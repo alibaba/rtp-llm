@@ -12,12 +12,17 @@ import org.flexlb.balance.scheduler.QueueScheduler;
 import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.config.ConfigService;
+import org.flexlb.constant.MetricConstant;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.enums.ScheduleModeEnum;
+import org.flexlb.metric.FlexMonitor;
+import org.flexlb.service.monitor.FlexlbMetricHelper;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
+
+import javax.annotation.PreDestroy;
 
 import java.util.concurrent.CompletableFuture;
 
@@ -41,7 +46,8 @@ public class RouteService {
                         DefaultRouter defaultScheduler,
                         QueueManager queueManager,
                         FlexlbBatchScheduler flexlbBatchScheduler,
-                        RecentCacheKeyTraceReporter recentCacheKeyTraceReporter) {
+                        RecentCacheKeyTraceReporter recentCacheKeyTraceReporter,
+                        FlexMonitor flexMonitor) {
         this.configService = configService;
         this.router = defaultScheduler;
         this.queueManager = queueManager;
@@ -49,8 +55,14 @@ public class RouteService {
         this.recentCacheKeyTraceReporter = recentCacheKeyTraceReporter;
 
         this.globalInflightStore = new InflightStore();
-        this.batchScheduler = new BatchScheduler(flexlbBatchScheduler, globalInflightStore);
-        this.queueScheduler = new QueueScheduler(queueManager, globalInflightStore);
+
+        FlexlbMetricHelper batchHelper = new FlexlbMetricHelper(flexMonitor, MetricConstant.PATH_BATCH);
+        batchHelper.register();
+        FlexlbMetricHelper queueHelper = new FlexlbMetricHelper(flexMonitor, MetricConstant.PATH_QUEUE);
+        queueHelper.register();
+
+        this.batchScheduler = new BatchScheduler(flexlbBatchScheduler, globalInflightStore, batchHelper);
+        this.queueScheduler = new QueueScheduler(queueManager, globalInflightStore, queueHelper);
         this.directScheduler = new DirectScheduler(defaultScheduler);
     }
 
@@ -120,5 +132,10 @@ public class RouteService {
                                                     long expectedBatchId) {
         return flexlbBatchScheduler == null ? null
                 : flexlbBatchScheduler.getRequestState(requestId, expectedBatchId);
+    }
+
+    @PreDestroy
+    public void shutdown() {
+        globalInflightStore.shutdown();
     }
 }

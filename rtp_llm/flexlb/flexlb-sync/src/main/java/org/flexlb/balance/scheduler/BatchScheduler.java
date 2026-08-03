@@ -1,6 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 import org.flexlb.dao.BalanceContext;
+import org.flexlb.service.monitor.FlexlbMetricHelper;
 import org.flexlb.dao.loadbalance.Response;
 
 import java.util.concurrent.CompletableFuture;
@@ -27,10 +28,13 @@ public class BatchScheduler extends AbstractScheduler {
 
     private final FlexlbBatchScheduler delegate;
     private final InflightStore globalStore;
+    private final FlexlbMetricHelper metricHelper;
 
-    public BatchScheduler(FlexlbBatchScheduler delegate, InflightStore globalStore) {
+    public BatchScheduler(FlexlbBatchScheduler delegate, InflightStore globalStore,
+                          FlexlbMetricHelper metricHelper) {
         this.delegate = delegate;
         this.globalStore = globalStore;
+        this.metricHelper = metricHelper;
     }
 
     @Override
@@ -39,6 +43,7 @@ public class BatchScheduler extends AbstractScheduler {
         ctx.setFuture(future);
 
         InflightItem item = new InflightItem(ctx, future, this);
+        item.setMetricHelper(metricHelper);
         globalStore.put(item.requestId(), item);
 
         future.whenComplete((response, throwable) -> {

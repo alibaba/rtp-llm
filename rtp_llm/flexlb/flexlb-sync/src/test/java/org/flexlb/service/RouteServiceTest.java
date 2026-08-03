@@ -6,6 +6,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.enums.ScheduleModeEnum;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
@@ -50,7 +51,8 @@ class RouteServiceTest {
     void setUp() {
         when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
         routeService = new RouteService(configService, defaultRouter, queueManager,
-                flexlbBatchScheduler, recentCacheKeyTraceReporter);
+                flexlbBatchScheduler, recentCacheKeyTraceReporter,
+                NoOpFlexMonitor.getInstance());
     }
 
     @Test

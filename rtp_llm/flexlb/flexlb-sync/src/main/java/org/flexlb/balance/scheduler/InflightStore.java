@@ -65,12 +65,19 @@ public class InflightStore {
      * requests that must be tracked until a response or timeout is delivered.
      */
     private void evict() {
-        long now = System.currentTimeMillis();
-        store.forEach((reqId, item) -> {
-            if (item.isTerminated() && (now - item.getTerminalTime()) > TTL_MS) {
-                store.remove(reqId);
-            }
-        });
+        try {
+            long now = System.currentTimeMillis();
+            store.forEach((reqId, item) -> {
+                if (item.isTerminated()
+                        && item.getTerminalTime() > 0
+                        && (now - item.getTerminalTime()) > TTL_MS) {
+                    store.remove(reqId);
+                }
+            });
+        } catch (Exception e) {
+            // Guard: prevent evict exceptions from silently cancelling subsequent scheduled runs
+            Thread.currentThread().getUncaughtExceptionHandler().uncaughtException(Thread.currentThread(), e);
+        }
     }
 
     public void shutdown() {

@@ -251,7 +251,10 @@ class FlexlbBatchSchedulerTest {
         status.setFinishedTaskInfo(Map.of("85", finished));
         scheduler.onWorkerStatusUpdate(status);
 
-        assertFalse(scheduleFuture.isDone());
+        // New behavior: worker completion notification immediately completes the
+        // schedule future via completeSuccess(entry.item), before the enqueue ACK
+        // arrives. The ACK path (onSuccess) becomes a no-op for this request.
+        assertTrue(scheduleFuture.isDone());
         ackFuture.complete(ackFor(sentBatches.getFirst()));
 
         Response response = scheduleFuture.get(2, TimeUnit.SECONDS);

@@ -22,6 +22,7 @@ import org.flexlb.balance.strategy.RandomStrategy;
 import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.consistency.LBStatusConsistencyService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
@@ -210,7 +211,8 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 (DefaultRouter) router,
                 mock(QueueManager.class, withSettings().stubOnly()),
                 scheduler,
-                mock(RecentCacheKeyTraceReporter.class, withSettings().stubOnly()));
+                mock(RecentCacheKeyTraceReporter.class, withSettings().stubOnly()),
+                NoOpFlexMonitor.getInstance());
 
         LBStatusConsistencyService consistencyService =
                 mock(LBStatusConsistencyService.class, withSettings().stubOnly());

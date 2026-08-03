@@ -1,7 +1,7 @@
 package org.flexlb.balance.scheduler;
 
 /**
- * Marker interface for entries tracked by inflight stores.
+ * v2 sealed interface for inflight tracking.
  *
  * <p>A sealed interface permitting only {@link InflightItem} (single-request
  * tracking) and {@link Batch} (multi-request batch tracking), so that
@@ -11,6 +11,10 @@ package org.flexlb.balance.scheduler;
  * because the Java Language Specification requires sealed-interface permits
  * to reside in the same package when the code is compiled in the unnamed
  * module (no {@code module-info.java}).
+ *
+ * <p>Note: {@code FlexlbBatchScheduler} has a private inner class with the same
+ * simple name. This is intentional — the inner class will be removed when the
+ * v2 migration completes.
  */
 public sealed interface InflightEntry permits InflightItem, Batch {
 }
