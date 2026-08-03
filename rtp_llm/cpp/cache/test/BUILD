@@ -236,6 +236,27 @@ cc_test(
 )
 
 cc_test(
+    name = "kv_cache_manager_with_tier_cache_test",
+    srcs = [
+        "KVCacheManagerWithTierCacheBasicTest.cc",
+        "KVCacheManagerWithTierCacheCapacityTest.cc",
+        "KVCacheManagerWithTierCacheComplexTopologyTest.cc",
+        "KVCacheManagerWithTierCacheLoadFailureTest.cc",
+        "KVCacheManagerWithTierCacheTestBase.cc",
+        "KVCacheManagerWithTierCacheTestBase.h",
+        "KVCacheManagerWithTierCacheWatermarkTest.cc",
+    ],
+    data = [],
+    copts = test_copts,
+    deps = test_deps + [
+        ":block_pool_test_helper",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
+    ],
+    env = {},
+    exec_properties = {'gpu':'H20'},
+)
+
+cc_test(
     name = "kv_cache_manager_cp_test",
     srcs = [
         "KVCacheManagerCPSlotMapperTest.cc",
