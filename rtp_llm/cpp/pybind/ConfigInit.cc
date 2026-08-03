@@ -135,11 +135,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .value("INDEPENDENT", CacheEvictPolicy::INDEPENDENT)
         .value("NONE", CacheEvictPolicy::NONE);
 
-    py::enum_<CacheMemoryPlacement>(m, "CacheMemoryPlacement")
-        .value("DEVICE", CacheMemoryPlacement::DEVICE)
-        .value("HOST", CacheMemoryPlacement::HOST)
-        .value("HOST_PINNED", CacheMemoryPlacement::HOST_PINNED);
-
     py::enum_<CpBlockMappingMode>(m, "CpBlockMappingMode")
         .value("NONE", CpBlockMappingMode::NONE)
         .value("BLOCK_ROUND_ROBIN", CpBlockMappingMode::BLOCK_ROUND_ROBIN)
@@ -343,9 +338,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error("Invalid DashScGrpcConfig state!");
                 DashScGrpcConfig c;
                 try {
-                    py::dict client_dict = t[0].cast<py::dict>();
-                    py::dict server_dict = t[1].cast<py::dict>();
-                    int      mw          = (t.size() == 3) ? t[2].cast<int>() : 4;
+                    py::dict           client_dict = t[0].cast<py::dict>();
+                    py::dict           server_dict = t[1].cast<py::dict>();
+                    int                mw          = (t.size() == 3) ? t[2].cast<int>() : 4;
                     std::ostringstream oss;
                     oss << "{\"client_config\": {";
                     bool first = true;
@@ -1681,18 +1676,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 return c;
             }));
 
-    py::class_<CacheMemoryPolicyDesc>(m, "CacheMemoryPolicyDesc")
-        .def(py::init<>())
-        .def_readwrite("placement", &CacheMemoryPolicyDesc::placement)
-        .def(py::pickle([](const CacheMemoryPolicyDesc& self) { return py::make_tuple(self.placement); },
-                        [](py::tuple t) {
-                            CacheMemoryPolicyDesc c;
-                            if (t.size() != 1)
-                                throw std::runtime_error("Invalid CacheMemoryPolicyDesc state!");
-                            c.placement = t[0].cast<std::optional<CacheMemoryPlacement>>();
-                            return c;
-                        }));
-
     py::class_<CacheTailPolicyDesc>(m, "CacheTailPolicyDesc")
         .def(py::init<>())
         .def_readwrite("active_tail_blocks", &CacheTailPolicyDesc::active_tail_blocks)
@@ -1753,7 +1736,6 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("group_type", &KVCacheSpecDesc::group_type)
         .def_readwrite("reuse", &KVCacheSpecDesc::reuse)
         .def_readwrite("capacity", &KVCacheSpecDesc::capacity)
-        .def_readwrite("memory", &KVCacheSpecDesc::memory)
         .def_readwrite("tail", &KVCacheSpecDesc::tail)
         .def_readwrite("cp", &KVCacheSpecDesc::cp)
         .def(py::pickle(
@@ -1775,13 +1757,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.group_type,
                                       self.reuse,
                                       self.capacity,
-                                      self.memory,
                                       self.tail,
                                       self.cp);
             },
             [](py::tuple t) {
                 KVCacheSpecDesc c;
-                if (t.size() != 20)
+                if (t.size() != 19)
                     throw std::runtime_error("Invalid KVCacheSpecDesc state!");
                 c.tag                                  = t[0].cast<std::string>();
                 c.cache_type                           = t[1].cast<KVCacheSpecType>();
@@ -1800,9 +1781,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.group_type                           = t[14].cast<std::optional<CacheGroupType>>();
                 c.reuse                                = t[15].cast<std::optional<CacheReusePolicyDesc>>();
                 c.capacity                             = t[16].cast<std::optional<CacheCapacityPolicyDesc>>();
-                c.memory                               = t[17].cast<std::optional<CacheMemoryPolicyDesc>>();
-                c.tail                                 = t[18].cast<std::optional<CacheTailPolicyDesc>>();
-                c.cp                                   = t[19].cast<std::optional<CacheCpPolicyDesc>>();
+                c.tail                                 = t[17].cast<std::optional<CacheTailPolicyDesc>>();
+                c.cp                                   = t[18].cast<std::optional<CacheCpPolicyDesc>>();
                 return c;
             }));
 

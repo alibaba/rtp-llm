@@ -65,9 +65,6 @@ CacheGroupPolicy SpecBuilder::groupPolicy(const KVCacheSpecDesc& desc) {
             policy.charge_to_paged_budget = *desc.capacity->charge_to_paged_budget;
         }
     }
-    if (desc.memory.has_value() && desc.memory->placement.has_value()) {
-        policy.memory_placement = *desc.memory->placement;
-    }
     if (desc.tail.has_value()) {
         if (desc.tail->active_tail_blocks.has_value()) {
             policy.active_tail_blocks = *desc.tail->active_tail_blocks;

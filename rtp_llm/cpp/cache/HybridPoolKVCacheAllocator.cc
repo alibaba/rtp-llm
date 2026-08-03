@@ -46,17 +46,6 @@ void appendPoolSummary(std::ostringstream&    os,
        << ", blocks=" << pool_config.block_num;
 }
 
-AllocationType allocationTypeForPlacement(CacheMemoryPlacement placement, AllocationType fallback) {
-    if (placement == CacheMemoryPlacement::HOST) {
-        return AllocationType::HOST;
-    }
-    return fallback;
-}
-
-bool pinnedCpuBackingForPlacement(CacheMemoryPlacement placement) {
-    return placement == CacheMemoryPlacement::HOST_PINNED;
-}
-
 }  // namespace
 
 HybridPoolKVCacheAllocator::HybridPoolKVCacheAllocator(const CacheConfig&                 config,
@@ -105,13 +94,9 @@ bool HybridPoolKVCacheAllocator::doInit() {
     for (int gid = 0; gid < group_nums; ++gid) {
         const auto& pool_config = group_pool_configs[static_cast<size_t>(gid)];
         const auto  group_type  = config_.typeForGroup(static_cast<size_t>(gid));
-        const auto  policy      = config_.policyForGroup(static_cast<size_t>(gid));
 
         auto group_pool =
-            std::make_shared<BlockPool>(pool_config,
-                                        allocationTypeForPlacement(policy.memory_placement, allocation_type_),
-                                        pinnedCpuBackingForPlacement(policy.memory_placement),
-                                        use_cuda_malloc_block_pool_);
+            std::make_shared<BlockPool>(pool_config, allocation_type_, false, use_cuda_malloc_block_pool_);
         RTP_LLM_CHECK_WITH_INFO(
             group_pool->init(), "Failed to initialize block pool %s(group %d)", pool_config.pool_name.c_str(), gid);
 
