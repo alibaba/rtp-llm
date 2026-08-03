@@ -2,6 +2,7 @@
 #include "rtp_llm/cpp/cache/KVCacheManager.h"
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
+#include <algorithm>
 #include <cstdlib>
 #include <memory>
 #include <string>
@@ -616,29 +617,58 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
         return;
     }
 
-    int64_t batch_idx_out = 0;
-    for (auto& stream : all_streams) {
-        torch::Tensor last_sample_token_gpu;
-        if (token_ids_gpu.dim() == 1) {
-            last_sample_token_gpu = token_ids_gpu.narrow(0, batch_idx_out, 1).to(torch::kInt32);
-        } else {
-            const int64_t last_col = token_ids_gpu.size(-1) - 1;
-            last_sample_token_gpu =
-                token_ids_gpu.narrow(0, batch_idx_out, 1).select(-1, last_col).reshape({1}).to(torch::kInt32);
-        }
+    // Build current sequence lengths in stream order, then increment the whole
+    // batch once. The old loop launched one tiny add kernel per request and,
+    // on first publish, one tiny fill kernel per request as well.
+    std::vector<int>           cur_real_seq_lens;
+    std::vector<torch::Tensor> cur_seq_len_slices_gpu;
+    cur_real_seq_lens.reserve(all_streams.size());
+    cur_seq_len_slices_gpu.reserve(all_streams.size());
 
-        // Mirror next_seq_len_gpu on host for the next iter's scheduler.
-        // Fall back to live seqLength only on first publish (no prior worker).
+    bool needs_fallback_seq_lens = false;
+    for (const auto& stream : all_streams) {
         const auto& prev_state = stream->getNormalAsyncDeviceState();
         const int   cur_real_seq_len =
             prev_state.next_real_seq_len > 0 ? prev_state.next_real_seq_len : stream->seqLength();
+        cur_real_seq_lens.push_back(cur_real_seq_len);
+        const auto& prev_next_seq_len = prev_state.next_seq_len_gpu;
+        needs_fallback_seq_lens =
+            needs_fallback_seq_lens || !prev_next_seq_len.defined() || !prev_next_seq_len.is_cuda();
+    }
 
-        torch::Tensor cur_seq_len_gpu;
-        const auto&   prev_next_seq_len = prev_state.next_seq_len_gpu;
+    torch::Tensor fallback_cur_seq_lens_gpu;
+    if (needs_fallback_seq_lens) {
+        const auto pinned_i32                 = torch::TensorOptions().dtype(torch::kInt32).pinned_memory(true);
+        auto       fallback_cur_seq_lens_host = torch::empty({static_cast<int64_t>(all_streams.size())}, pinned_i32);
+        std::copy(cur_real_seq_lens.begin(), cur_real_seq_lens.end(), fallback_cur_seq_lens_host.data_ptr<int32_t>());
+        buffer_holder_.hold_host(fallback_cur_seq_lens_host);
+        fallback_cur_seq_lens_gpu = fallback_cur_seq_lens_host.to(cuda_i32, /*non_blocking=*/true);
+    }
+
+    int64_t batch_idx_out = 0;
+    for (const auto& stream : all_streams) {
+        const auto& prev_state        = stream->getNormalAsyncDeviceState();
+        const auto& prev_next_seq_len = prev_state.next_seq_len_gpu;
         if (prev_next_seq_len.defined() && prev_next_seq_len.is_cuda()) {
-            cur_seq_len_gpu = prev_next_seq_len;
+            cur_seq_len_slices_gpu.push_back(prev_next_seq_len.reshape({1}));
         } else {
-            cur_seq_len_gpu = torch::full({1}, static_cast<int64_t>(cur_real_seq_len), cuda_i32);
+            cur_seq_len_slices_gpu.push_back(fallback_cur_seq_lens_gpu.narrow(0, batch_idx_out, 1));
+        }
+        batch_idx_out += 1;
+    }
+
+    auto cur_seq_lens_gpu =
+        cur_seq_len_slices_gpu.size() == 1 ? cur_seq_len_slices_gpu.front() : torch::cat(cur_seq_len_slices_gpu, 0);
+    auto next_seq_lens_gpu = (cur_seq_lens_gpu + 1).to(torch::kInt32);
+
+    batch_idx_out = 0;
+    for (auto& stream : all_streams) {
+        torch::Tensor last_sample_token_gpu;
+        if (token_ids_gpu.dim() == 1) {
+            last_sample_token_gpu = token_ids_gpu.narrow(0, batch_idx_out, 1);
+        } else {
+            const int64_t last_col = token_ids_gpu.size(-1) - 1;
+            last_sample_token_gpu  = token_ids_gpu.narrow(0, batch_idx_out, 1).select(-1, last_col).reshape({1});
         }
 
         for (const auto& processor : stream->getAllLogitsProcessorPtr()) {
@@ -649,9 +679,9 @@ void NormalExecutor::publishNormalDeviceState(const StreamGroups& stream_groups,
 
         GenerateStream::NormalAsyncDeviceState state;
         state.last_sample_token_gpu = std::move(last_sample_token_gpu);
-        state.next_seq_len_gpu      = (cur_seq_len_gpu + 1).to(torch::kInt32);
-        state.last_real_seq_len     = cur_real_seq_len;
-        state.next_real_seq_len     = cur_real_seq_len + 1;
+        state.next_seq_len_gpu      = next_seq_lens_gpu.narrow(0, batch_idx_out, 1);
+        state.last_real_seq_len     = cur_real_seq_lens[batch_idx_out];
+        state.next_real_seq_len     = cur_real_seq_lens[batch_idx_out] + 1;
         stream->setNormalAsyncDeviceState(std::move(state));
         batch_idx_out += 1;
     }
