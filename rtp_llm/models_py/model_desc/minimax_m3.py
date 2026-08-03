@@ -44,8 +44,9 @@ class MiniMaxM3DecoderLayer(GenericMoeDecoderLayer):
                 hw_kernel_config,
             )
 
-        # MiniMax-M3 attention weights are not tensor-parallel sharded.
-        attn_configs = config.getAttentionConfigs(1)
+        # get_attn_tp_size() collapses to 1 under CP, where attention weights are
+        # replicated and the TP dimension splits the sequence instead of the heads.
+        attn_configs = config.getAttentionConfigs(parallelism_config.get_attn_tp_size())
         msa_config = config.msa_sparse_config
         is_sparse_layer = (
             msa_config is not None
@@ -645,7 +646,9 @@ class _MiniMaxM3ModelMixin:
 
         target_verify_impl = _target_verify_impl_class()
         attn_inputs.is_cuda_graph = is_cuda_graph
-        attn_configs = self.config.getAttentionConfigs(1)
+        attn_configs = self.config.getAttentionConfigs(
+            self.parallelism_config.get_attn_tp_size()
+        )
         return target_verify_impl(attn_configs, attn_inputs, self.parallelism_config)
 
 

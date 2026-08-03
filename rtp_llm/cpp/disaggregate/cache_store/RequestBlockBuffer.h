@@ -18,13 +18,28 @@ public:
         const std::string& key_, const std::shared_ptr<void>& addr_, uint32_t len_, bool gpu_mem_, bool adopted_):
         key(key_), addr(addr_), len(len_), gpu_mem(gpu_mem_), adopted(adopted_) {}
     BlockBuffer(const BlockBuffer& rhs):
-        key(rhs.key), addr(rhs.addr), len(rhs.len), gpu_mem(rhs.gpu_mem), adopted(rhs.adopted) {}
+        key(rhs.key),
+        addr(rhs.addr),
+        len(rhs.len),
+        gpu_mem(rhs.gpu_mem),
+        adopted(rhs.adopted),
+        partition_count(rhs.partition_count),
+        partition_id(rhs.partition_id),
+        partition_kv_halves(rhs.partition_kv_halves) {}
 
     std::string           key;
     std::shared_ptr<void> addr;
     uint32_t              len{0};
     bool                  gpu_mem{true};
     bool                  adopted{true};
+
+    // How much of the *remote* block this one asks for; see
+    // BlockBufferInfo.partition_count in cache_store_service.proto. Only
+    // meaningful on the loading (decode) side; 0 inherits the request-level
+    // partition, which is what every symmetric-TP caller wants.
+    int32_t partition_count{0};
+    int32_t partition_id{0};
+    bool    partition_kv_halves{false};
 };
 
 //  request 关联的 block buffer

@@ -21,6 +21,13 @@ CacheLoadRequest* Messager::makeLoadRequest(const std::shared_ptr<LoadRequest>& 
         auto block_msg = load_request->add_blocks();
         block_msg->set_key(block->key);
         block_msg->set_len(block->len);
+        if (block->partition_count > 0) {
+            block_msg->set_partition_count(block->partition_count);
+            block_msg->set_partition_id(block->partition_id);
+        }
+        if (block->partition_kv_halves) {
+            block_msg->set_partition_kv_halves(true);
+        }
     }
     return load_request;
 }

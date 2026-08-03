@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBuffer.h"
 #include "rtp_llm/cpp/disaggregate/cache_store/RequestBlockBufferStore.h"
 #include <shared_mutex>
+#include <vector>
 
 namespace rtp_llm {
 
@@ -24,6 +25,20 @@ public:
     void runFailed(KvCacheStoreServiceErrorCode error_code);
 
 protected:
+    // A half-open [offset, offset + len) byte range inside a locally stored block.
+    struct SourceRange {
+        uint32_t offset;
+        uint32_t len;
+    };
+
+    // Byte ranges of the locally stored block that make up the slice the peer
+    // asked for, concatenated in order. Returns false (and logs) when the peer's
+    // declared length is not a consistent partition of the stored block, which is
+    // the mismatch that used to surface as a bare CACHE_STORE_LOAD_SEND_REQUEST_FAILED.
+    bool computeSourceRanges(const std::shared_ptr<BlockBuffer>&     block,
+                             const std::shared_ptr<BlockBufferInfo>& peer_block,
+                             std::vector<SourceRange>&               ranges) const;
+
     std::shared_ptr<BlockBufferInfo> getAndEraseUnLoadedBlock(const std::string& block_key);
     void                             stopTimer();
     void                             runSuccess(bool direct_write);

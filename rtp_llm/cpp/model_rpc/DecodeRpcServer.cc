@@ -517,8 +517,8 @@ BroadcastLoadRequestPB DecodeRpcServer::constructRemoteLoadRequest(const LoadKVC
             request.add_peer_addrs(addr);
         }
     } else if (maga_init_params_.parallelism_config.prefill_cp_config.is_prefill_enabled()) {
-        int part_cnt = resource_.workers.size();
-        int peer_cnt = peer_addrs.size();
+        const int part_cnt = static_cast<int>(maga_init_params_.parallelism_config.get_attn_tp_size());
+        const int peer_cnt = static_cast<int>(peer_addrs.size());
         request.set_partition_count(part_cnt);
         request.set_partition_id(index % part_cnt);
         request.add_peer_addrs(peer_addrs[index % peer_cnt]);
@@ -911,6 +911,15 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 peer_cnt);
     }
 
+    const int64_t decode_attn_tp_size = maga_init_params_.parallelism_config.get_attn_tp_size();
+    const int64_t decode_attn_tp_rank = maga_init_params_.parallelism_config.get_attn_tp_rank();
+    const bool    slice_opaque_kv_by_head =
+        use_opaque_kv_store && !use_mla && !use_hybrid && decode_attn_tp_size > 1;
+    const int32_t opaque_kv_partition_count =
+        slice_opaque_kv_by_head ? static_cast<int32_t>(decode_attn_tp_size) : 0;
+    const int32_t opaque_kv_partition_id =
+        slice_opaque_kv_by_head ? static_cast<int32_t>(decode_attn_tp_rank) : 0;
+
     auto cancel_check_func  = [&load_context]() -> bool { return load_context.server_context->IsCancelled(); };
     auto start_load_time_us = currentTimeUs();
     std::vector<std::shared_ptr<LoadContext>> load_contexts;
@@ -1173,21 +1182,40 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
 
                     parts = sliceFixedDestinationForPeer(std::move(parts), cache_config, region_name, gid, i);
 
-                    auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
+                    // partition_count == 0 keeps the request-level partition.
+                    auto addBufBlock = [&](const std::string& key,
+                                           const BlockInfo&   block,
+                                           bool               partition_kv_halves = false,
+                                           int32_t            partition_count     = 0,
+                                           int32_t            partition_id       = 0) {
                         RTP_LLM_CHECK_WITH_INFO(block.addr != nullptr, "null block addr for key=%s", key.c_str());
                         RTP_LLM_CHECK_WITH_INFO(block.size_bytes > 0, "zero block size for key=%s", key.c_str());
                         std::shared_ptr<void> addr(block.addr, [](void*) {});
-                        load_layer_cache->addBlock(
+                        auto                  buffer = std::make_shared<BlockBuffer>(
                             key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
+                        buffer->partition_kv_halves = partition_kv_halves;
+                        if (partition_count > 0) {
+                            buffer->partition_count = partition_count;
+                            buffer->partition_id    = partition_id;
+                        }
+                        load_layer_cache->addBlock(buffer);
                     };
 
                     if (use_mla || use_opaque_kv_store) {
                         RTP_LLM_CHECK_WITH_INFO(parts.size() == 1 || parts.size() == 2,
                                                 "unexpected mla convertIndexToBuffer parts size=%zu",
                                                 parts.size());
-                        addBufBlock("kv_" + cache_key, parts[0]);
+                        addBufBlock("kv_" + cache_key,
+                                    parts[0],
+                                    slice_opaque_kv_by_head,
+                                    opaque_kv_partition_count,
+                                    opaque_kv_partition_id);
                         if (parts.size() == 2) {
-                            addBufBlock("kv_scale_" + cache_key, parts[1]);
+                            addBufBlock("kv_scale_" + cache_key,
+                                        parts[1],
+                                        /*partition_kv_halves=*/false,
+                                        /*partition_count=*/slice_opaque_kv_by_head ? 1 : 0,
+                                        /*partition_id=*/0);
                         }
                     } else {
                         RTP_LLM_CHECK_WITH_INFO(parts.size() == 2 || parts.size() == 4,
@@ -1372,23 +1400,45 @@ ErrorInfo DecodeRpcServer::loadCache(const LoadKVCacheContext& load_context) {
                                 parts =
                                     sliceFixedDestinationForPeer(std::move(parts), mtp_cache_cfg, region_name, gid, i);
 
-                                auto addBufBlock = [&](const std::string& key, const BlockInfo& block) {
+                                // See slice_opaque_kv_by_head on the main path.
+                                const bool mtp_slice_opaque_kv_by_head = mtp_use_opaque_kv_store && !mtp_use_mla
+                                                                         && !mtp_use_hybrid && decode_attn_tp_size > 1;
+
+                                auto addBufBlock = [&](const std::string& key,
+                                                       const BlockInfo&   block,
+                                                       bool               partition_kv_halves = false,
+                                                       int32_t            partition_count     = 0,
+                                                       int32_t            partition_id       = 0) {
                                     RTP_LLM_CHECK_WITH_INFO(
                                         block.addr != nullptr, "null block addr for key=%s", key.c_str());
                                     RTP_LLM_CHECK_WITH_INFO(
                                         block.size_bytes > 0, "zero block size for key=%s", key.c_str());
                                     std::shared_ptr<void> addr(block.addr, [](void*) {});
-                                    load_layer_cache->addBlock(
+                                    auto                  buffer = std::make_shared<BlockBuffer>(
                                         key, addr, static_cast<uint32_t>(block.size_bytes), block.is_cuda, true);
+                                    buffer->partition_kv_halves = partition_kv_halves;
+                                    if (partition_count > 0) {
+                                        buffer->partition_count = partition_count;
+                                        buffer->partition_id    = partition_id;
+                                    }
+                                    load_layer_cache->addBlock(buffer);
                                 };
 
                                 if (mtp_use_mla || mtp_use_opaque_kv_store) {
                                     RTP_LLM_CHECK_WITH_INFO(parts.size() == 1 || parts.size() == 2,
                                                             "unexpected mtp mla convertIndexToBuffer parts size=%zu",
                                                             parts.size());
-                                    addBufBlock("kv_" + cache_key, parts[0]);
+                                    addBufBlock("kv_" + cache_key,
+                                                parts[0],
+                                                mtp_slice_opaque_kv_by_head,
+                                                opaque_kv_partition_count,
+                                                opaque_kv_partition_id);
                                     if (parts.size() == 2) {
-                                        addBufBlock("kv_scale_" + cache_key, parts[1]);
+                                        addBufBlock("kv_scale_" + cache_key,
+                                                    parts[1],
+                                                    /*partition_kv_halves=*/false,
+                                                    /*partition_count=*/mtp_slice_opaque_kv_by_head ? 1 : 0,
+                                                    /*partition_id=*/0);
                                     }
                                 } else {
                                     RTP_LLM_CHECK_WITH_INFO(parts.size() == 2 || parts.size() == 4,

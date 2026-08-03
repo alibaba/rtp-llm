@@ -69,6 +69,58 @@ CacheStoreServiceImplContext::CacheStoreServiceImplContext(
     }
 }
 
+bool CacheStoreServiceImplContext::computeSourceRanges(const std::shared_ptr<BlockBuffer>&     block,
+                                                       const std::shared_ptr<BlockBufferInfo>& peer_block,
+                                                       std::vector<SourceRange>&               ranges) const {
+    const int32_t count = peer_block->partition_count() > 0 ? peer_block->partition_count() : partition_count_;
+    const int32_t id    = peer_block->partition_count() > 0 ? peer_block->partition_id() : partition_id_;
+
+    auto reject = [&](const char* reason) {
+        RTP_LLM_LOG_WARNING("cache store service load block not match expect block len, key: %s, len %u vs stored %u "
+                            "(partition %d/%d, kv_halves=%d): %s, peer is %s",
+                            block->key.c_str(),
+                            peer_block->len(),
+                            block->len,
+                            id,
+                            count,
+                            static_cast<int>(peer_block->partition_kv_halves()),
+                            reason,
+                            peer_ip_.c_str());
+        return false;
+    };
+
+    if (count <= 0 || id < 0 || id >= count) {
+        return reject("partition id out of range");
+    }
+    if (block->len % static_cast<uint32_t>(count) != 0) {
+        return reject("stored len not divisible by partition count");
+    }
+    const uint32_t slice_len = block->len / static_cast<uint32_t>(count);
+    if (slice_len != peer_block->len()) {
+        return reject("peer len is not the requested partition of the stored block");
+    }
+
+    ranges.clear();
+    if (!peer_block->partition_kv_halves() || count == 1) {
+        ranges.push_back({slice_len * static_cast<uint32_t>(id), slice_len});
+        return true;
+    }
+
+    // [K region][V region]: the KV-head partition of the whole block is the same
+    // partition taken inside each region, so the slice is two disjoint ranges.
+    if (block->len % 2 != 0) {
+        return reject("kv_halves block has odd stored len");
+    }
+    const uint32_t half = block->len / 2;
+    if (half % static_cast<uint32_t>(count) != 0) {
+        return reject("kv_halves region not divisible by partition count");
+    }
+    const uint32_t sub = half / static_cast<uint32_t>(count);
+    ranges.push_back({sub * static_cast<uint32_t>(id), sub});
+    ranges.push_back({half + sub * static_cast<uint32_t>(id), sub});
+    return true;
+}
+
 std::shared_ptr<BlockBufferInfo> CacheStoreServiceImplContext::getAndEraseUnLoadedBlock(const std::string& block_key) {
     RTP_LLM_PROFILE_FUNCTION();
     std::unique_lock<std::shared_mutex> lock(unloaded_blocks_mutex_);

@@ -33,6 +33,21 @@ message BlockBufferInfo {
     optional RdmaBlockBufferAddrInfo rdma_info = 3; // use only rdma mode
     optional bytes content = 4[ctype = RAW_STRING]; // use only tcp mode
     optional int64 addr = 5; // 使用TCP做Read, 需要指定addr
+
+    // Per-block override of CacheLoadRequest.partition_count/partition_id.
+    // Unset (0) inherits the request-level values. This lets one request mix
+    // sharded blocks with replicated ones: under asymmetric prefill/decode KV
+    // head counts the main KV is split across decode ranks, but a block with no
+    // KV-head dimension (MiniMax-M3's idx_K, which lives in the scale slot) must
+    // be copied whole to every rank.
+    optional int32 partition_count = 6;
+    optional int32 partition_id = 7;
+
+    // Set when the remote block is a [K region][V region] pair, i.e. the HND
+    // layout [2, kv_head, tokens_per_block, size_per_head]. Splitting KV heads
+    // then means taking the same partition inside each region and concatenating
+    // them, so the requested slice is two disjoint source ranges rather than one.
+    optional bool partition_kv_halves = 8;
 }
 
 message CacheLoadRequest {
