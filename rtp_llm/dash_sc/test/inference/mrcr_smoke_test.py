@@ -30,7 +30,11 @@ from pathlib import Path
 
 import torch
 
-from rtp_llm.dash_sc.codec import DashScRequestControls, SamplingParams
+from rtp_llm.dash_sc.codec import (
+    DashScRequestControls,
+    ParsedInputIds,
+    SamplingParams,
+)
 from rtp_llm.dash_sc.inference.servicer import (
     build_think_runtime,
     iter_real_model_stream_infer,
@@ -60,6 +64,13 @@ def _add_input_ids(req: predict_v2_pb2.ModelInferRequest, input_ids: list[int]) 
     inp.datatype = "INT32"
     inp.shape[:] = [len(input_ids)]
     req.raw_input_contents.append(struct.pack("<%di" % len(input_ids), *input_ids))
+
+
+def _parsed_input_ids(values: list[int]) -> ParsedInputIds:
+    return ParsedInputIds(
+        values=values,
+        tensor=torch.tensor(values, dtype=torch.int32),
+    )
 
 
 async def _drain(aiter):
@@ -309,7 +320,7 @@ class DeepSeekV4MrcrSmokeTest(unittest.IsolatedAsyncioTestCase):
             await _drain(
                 iter_real_model_stream_infer(
                     req,
-                    case["input_ids_tail"],
+                    _parsed_input_ids(case["input_ids_tail"]),
                     SamplingParams(max_new_tokens=384000, top_p=1.0, temperature=1.0),
                     DashScRequestControls(enable_thinking=True),
                     visitor,
@@ -392,7 +403,7 @@ class DeepSeekV4MrcrSmokeTest(unittest.IsolatedAsyncioTestCase):
             chunks = await _drain(
                 iter_real_model_stream_infer(
                     req,
-                    input_ids,
+                    _parsed_input_ids(input_ids),
                     case["sampling"],
                     case["request_controls"],
                     visitor,
@@ -471,7 +482,7 @@ class DeepSeekV4MrcrSmokeTest(unittest.IsolatedAsyncioTestCase):
             chunks = await _drain(
                 iter_real_model_stream_infer(
                     req,
-                    input_ids,
+                    _parsed_input_ids(input_ids),
                     SamplingParams(max_new_tokens=384000, top_p=1.0, temperature=1.0),
                     DashScRequestControls(enable_thinking=True),
                     visitor,
