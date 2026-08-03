@@ -181,10 +181,12 @@ class MMProcessEngineTest(TestCase):
 
     def test_timeout(self):
         model = FakeModel(FakeMultiModalEmbeddingInterfaceSlow())
+        vit_config = VitConfig()
+        vit_config.mm_cache_item_num = 0
         engine = MMProcessEngine(
             model.mm_part,
             model.model_config,
-            VitConfig(),
+            vit_config,
             ProfilingDebugLoggingConfig(),
         )
         with self.assertRaises(TimeoutError):
@@ -200,10 +202,12 @@ class MMProcessEngineTest(TestCase):
 
     def test_preprocess(self):
         model = FakeModel(FakeMultiModalEmbeddingInterfacePreprocessException())
+        vit_config = VitConfig()
+        vit_config.mm_cache_item_num = 0
         mm_process_engine = MMProcessEngine(
             model.mm_part,
             model.model_config,
-            VitConfig(),
+            vit_config,
             ProfilingDebugLoggingConfig(),
         )
         try:
@@ -263,6 +267,27 @@ class MMProcessEngineTest(TestCase):
             MMWorkItem([mm_input], mm_timeout_ms=123000).mm_timeout_ms, 123000
         )
 
+    def test_multimodal_cache_key_ignores_timeout(self):
+        def make_input(width: int, timeout_ms: int) -> MultimodalInput:
+            preprocess_config = MMPreprocessConfig(
+                width, 480, 100, 1000, 2, 1, 64, [0.25, 0.75], timeout_ms
+            )
+            return MultimodalInput(
+                "https://example.com/image.jpg",
+                MMUrlType.IMAGE,
+                torch.empty(0),
+                preprocess_config,
+            )
+
+        self.assertEqual(
+            make_input(640, 30000).cache_key(),
+            make_input(640, 120000).cache_key(),
+        )
+        self.assertNotEqual(
+            make_input(640, 30000).cache_key(),
+            make_input(800, 30000).cache_key(),
+        )
+
     def test_embedding_timeout_default_path(self):
         """Default (non-gpu-batch) serial path enforces an embedding-level timeout.
 
@@ -315,10 +340,12 @@ class MMProcessEngineTest(TestCase):
     def test_worker_crash_recovery(self):
         """Pool rebuilds after worker process crash and subsequent requests succeed."""
         model = FakeModel(FakeMultiModalEmbeddingInterfaceProcessCrash())
+        vit_config = VitConfig()
+        vit_config.mm_cache_item_num = 0
         engine = MMProcessEngine(
             model.mm_part,
             model.model_config,
-            VitConfig(),
+            vit_config,
             ProfilingDebugLoggingConfig(),
         )
 
@@ -355,6 +382,7 @@ class MMProcessEngineTest(TestCase):
         model = FakeModel(FakeMultiModalEmbeddingInterfaceSlow())
         vit_config = VitConfig()
         vit_config.mm_preprocess_max_workers = 2
+        vit_config.mm_cache_item_num = 0
         engine = MMProcessEngine(
             model.mm_part,
             model.model_config,
