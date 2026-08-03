@@ -18,17 +18,20 @@ struct StoreWaitContext {
     std::shared_ptr<torch::Event>                       event;
     std::shared_ptr<LayerCacheBuffer>                   layer_cache_buffer;
     int64_t                                             deadline_ms;
+    int64_t                                             request_deadline_ms;
     std::shared_ptr<PrefillWorkerStoreMetricsCollector> collector;
 
     StoreWaitContext(int64_t                                             request_id,
                      std::shared_ptr<torch::Event>                       event,
                      std::shared_ptr<LayerCacheBuffer>                   layer_cache_buffer,
                      int64_t                                             deadline_ms,
-                     std::shared_ptr<PrefillWorkerStoreMetricsCollector> collector):
+                     std::shared_ptr<PrefillWorkerStoreMetricsCollector> collector,
+                     int64_t                                             request_deadline_ms = 0):
         request_id(request_id),
         event(std::move(event)),
         layer_cache_buffer(layer_cache_buffer),
         deadline_ms(deadline_ms),
+        request_deadline_ms(request_deadline_ms > 0 ? request_deadline_ms : deadline_ms),
         collector(collector) {}
 };
 

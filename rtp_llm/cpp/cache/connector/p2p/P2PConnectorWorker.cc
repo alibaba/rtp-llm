@@ -69,6 +69,12 @@ bool P2PConnectorWorker::init(int64_t store_wait_timeout_ms) {
             return false;
         }
         if (!receiver->regMem(block_info, size)) {
+            if (rdma_mode) {
+                RTP_LLM_LOG_ERROR("init failed: receiver regMem failed in RDMA mode, addr: %p, size: %ld",
+                                  block_info.addr,
+                                  size);
+                return false;
+            }
             RTP_LLM_LOG_WARNING(
                 "receiver regMem failed, addr: %p, size: %ld (non-fatal for TCP mode)", block_info.addr, size);
         }
@@ -81,6 +87,10 @@ bool P2PConnectorWorker::init(int64_t store_wait_timeout_ms) {
     }
 
     decode_ = std::make_unique<P2PConnectorWorkerDecode>(config_, layer_block_converter_, metrics_reporter_, receiver);
+    if (!decode_->initialized()) {
+        RTP_LLM_LOG_ERROR("init failed: decode lease cleanup thread init failed");
+        return false;
+    }
 
     RTP_LLM_LOG_INFO("init success");
     return true;
@@ -94,12 +104,29 @@ bool P2PConnectorWorker::writeByLayer(int                           layer_id,
     return prefill_->writeByLayer(layer_id, resource, request_id, std::move(event), deadline_ms);
 }
 
+bool P2PConnectorWorker::writeByLayerTag(int                                   layer_id,
+                                         const std::string&                    tag,
+                                         const KVCacheResourcePtr&             resource,
+                                         int64_t                               request_id,
+                                         const std::shared_ptr<torch::Event>& event,
+                                         int64_t                               deadline_ms) {
+    return prefill_->writeByLayerTag(layer_id, tag, resource, request_id, event, deadline_ms);
+}
+
 ErrorInfo
 P2PConnectorWorker::sendKVCache(int64_t                                              request_id,
                                 const std::string&                                   unique_key,
                                 int64_t                                              deadline_ms,
-                                const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers) {
-    return prefill_->sendKVCache(request_id, unique_key, deadline_ms, decode_transfer_servers);
+                                const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
+                                int64_t                                              request_deadline_ms) {
+    return prefill_->sendKVCache(
+        request_id, unique_key, deadline_ms, decode_transfer_servers, request_deadline_ms);
+}
+
+void P2PConnectorWorker::completeNoTransfer(int64_t request_id,
+                                            int64_t deadline_ms,
+                                            int64_t request_deadline_ms) {
+    prefill_->completeNoTransfer(request_id, deadline_ms, request_deadline_ms);
 }
 
 ErrorInfo P2PConnectorWorker::read(int64_t                                               request_id,
@@ -110,8 +137,8 @@ ErrorInfo P2PConnectorWorker::read(int64_t                                      
     return decode_->read(request_id, unique_key, deadline_ms, layer_cache_buffers, remote_tp_size);
 }
 
-bool P2PConnectorWorker::cancelRead(const std::string& unique_key) {
-    return decode_->cancelRead(unique_key);
+bool P2PConnectorWorker::cancelRead(const std::string& unique_key, int64_t request_deadline_ms) {
+    return decode_->cancelRead(unique_key, request_deadline_ms);
 }
 
 bool P2PConnectorWorker::cancelSend(const std::string& unique_key) {

@@ -420,18 +420,10 @@ grpc::Status DecodeRpcServerNew2::init(const EngineInitParams&                  
         return ret;
     }
 
-    // get memory connector from kvcache manager and set to connector coordinator
     auto kvcache_manager = engine_->getCacheManager();
     if (!kvcache_manager) {
         RTP_LLM_LOG_WARNING("decode rpc server new2 init failed, kvcache manager is null");
         return grpc::Status(grpc::StatusCode::INTERNAL, "kvcache manager is null");
-    }
-    // Validate P2P connector coordinator is initialized (required for PD separation cache transfer).
-    // The coordinator itself is accessed later via KVCacheManager during cache operations.
-    auto connector_coordinator = kvcache_manager->connectorCoordinator();
-    if (!connector_coordinator) {
-        RTP_LLM_LOG_WARNING("decode rpc server new2 init failed, connector coordinator is null");
-        return grpc::Status(grpc::StatusCode::INTERNAL, "connector coordinator is null");
     }
     if (!kvcache_manager->hasP2PConnector()) {
         RTP_LLM_LOG_WARNING("decode rpc server new2 init failed, decode_entrance requires P2P connector");

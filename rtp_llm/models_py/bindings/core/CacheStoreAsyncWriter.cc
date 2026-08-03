@@ -111,4 +111,26 @@ void CacheStoreAsyncWriter::waitAllDone() {
     }
 }
 
+void CacheStoreAsyncWriter::drainOnError() noexcept {
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        if (state_ == State::IDLE) {
+            return;
+        }
+    }
+
+    {
+        std::unique_lock<std::mutex> lock(wait_mutex_);
+        wait_cv_.wait(lock, [this]() { return pending_count_.load(std::memory_order_acquire) == 0; });
+    }
+    {
+        std::lock_guard<std::mutex> lock(state_mutex_);
+        state_ = State::IDLE;
+    }
+    {
+        std::lock_guard<std::mutex> lock(exception_mutex_);
+        stored_exception_ = nullptr;
+    }
+}
+
 }  // namespace rtp_llm

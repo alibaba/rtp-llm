@@ -9,6 +9,8 @@
 #include "rtp_llm/cpp/utils/TimeUtil.h"
 #include <algorithm>
 #include <chrono>
+#include <functional>
+#include <limits>
 #include <thread>
 
 namespace rtp_llm {
@@ -20,7 +22,19 @@ P2PConnectorWorkerDecode::P2PConnectorWorkerDecode(P2PConnectorWorkerConfig     
     config_(std::move(config)),
     layer_block_converter_(layer_block_converter),
     metrics_reporter_(metrics_reporter),
-    receiver_(receiver) {}
+    receiver_(receiver) {
+    lease_cleanup_thread_ = autil::LoopThread::createLoopThread(
+        std::bind(&P2PConnectorWorkerDecode::cleanupStaleLeases, this), 1000000, "P2PDecodeLeaseCleanup");
+    if (!lease_cleanup_thread_) {
+        RTP_LLM_LOG_ERROR("P2PConnectorWorkerDecode failed to start lease cleanup thread");
+    }
+}
+
+P2PConnectorWorkerDecode::~P2PConnectorWorkerDecode() {
+    if (lease_cleanup_thread_) {
+        lease_cleanup_thread_->stop();
+    }
+}
 
 ErrorInfo
 P2PConnectorWorkerDecode::buildRecvTasks(const std::vector<std::shared_ptr<LayerCacheBuffer>>& layer_cache_buffers,
@@ -44,7 +58,7 @@ P2PConnectorWorkerDecode::buildRecvTasks(const std::vector<std::shared_ptr<Layer
                 layer_block_converter_, layer_cache_buffer, recv_partition_count, partition_id);
 
             const std::string partition_layer_key =
-                P2PKeyUtil::makePartitionLayerKey(unique_key, layer_id, layer_cache_buffer->getRegionName(), partition_id);
+                P2PKeyUtil::makePartitionLayerKey(unique_key, layer_id, layer_cache_buffer->cacheTag(), partition_id);
 
             transfer::RecvRequest recv_req;
             recv_req.unique_key  = partition_layer_key;
@@ -84,9 +98,6 @@ void P2PConnectorWorkerDecode::cleanupRecvTaskStore(const std::shared_ptr<ReadTa
         const auto& task = task_group->tasks[i];
         if (cancel_pending_tasks && task) {
             task->cancel();
-            if (!task->done()) {
-                task->forceCancel();
-            }
         }
         receiver_->stealTask(task_group->partition_keys[i]);
     }
@@ -193,15 +204,35 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                                
     int total_block_count            = 0;
     {
         std::lock_guard<std::mutex> lock(read_tasks_mutex_);
+        auto                        pending_cancel = pending_cancel_keys_.find(unique_key);
+        if (pending_cancel != pending_cancel_keys_.end()) {
+            const bool still_valid = currentTimeMs() <= pending_cancel->second;
+            pending_cancel_keys_.erase(pending_cancel);
+            if (still_valid) {
+                return ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_READ_CANCELLED,
+                                 "read cancelled before recv registration");
+            }
+        }
         building_read_keys_.insert(unique_key);
     }
 
     ErrorInfo build_result = buildRecvTasks(
         layer_cache_buffers, recv_partition_count, unique_key, deadline_ms, task_group, total_block_count);
     if (build_result.hasError()) {
-        std::lock_guard<std::mutex> lock(read_tasks_mutex_);
-        building_read_keys_.erase(unique_key);
-        pending_cancel_keys_.erase(unique_key);
+        {
+            std::lock_guard<std::mutex> lock(read_tasks_mutex_);
+            building_read_keys_.erase(unique_key);
+            pending_cancel_keys_.erase(unique_key);
+        }
+        const bool has_inflight_task = std::any_of(
+            task_group->tasks.begin(), task_group->tasks.end(), [](const auto& task) { return task && !task->done(); });
+        if (has_inflight_task) {
+            task_group->lease->seal();
+            std::lock_guard<std::mutex> lock(lease_map_mutex_);
+            lease_map_[unique_key] = LeaseMapEntry{task_group, 0, currentTimeMs()};
+            return ErrorInfo(ErrorCode::P2P_CONNECTOR_WORKER_READ_TRANSFER_NOT_DONE,
+                             build_result.ToString() + "; registered recv task is still stopping");
+        }
         return build_result;
     }
 
@@ -228,11 +259,6 @@ ErrorInfo P2PConnectorWorkerDecode::read(int64_t                                
 
     const ReadWaitOutcome outcome =
         waitRecvTasksWithReadDeadlinePolicy(task_group, deadline_ms, request_id, unique_key);
-
-    {
-        int done_cnt = 0, total_cnt = static_cast<int>(task_group->tasks.size());
-        for (const auto& t : task_group->tasks) { if (t->done()) ++done_cnt; }
-    }
 
     {
         std::lock_guard<std::mutex> lock(read_tasks_mutex_);
@@ -329,21 +355,27 @@ int P2PConnectorWorkerDecode::calculateRecvPartitionCount(int remote_tp_size) co
     return std::max(1, remote_tp_size / static_cast<int>(config_.tp_size));
 }
 
-bool P2PConnectorWorkerDecode::cancelRead(const std::string& unique_key) {
+bool P2PConnectorWorkerDecode::cancelRead(const std::string& unique_key, int64_t request_deadline_ms) {
     RTP_LLM_LOG_DEBUG("cancelRead start, unique_key: %s", unique_key.c_str());
     std::shared_ptr<ReadTaskGroup> task_group;
     {
         std::lock_guard<std::mutex> lock(read_tasks_mutex_);
         auto                        it = read_tasks_.find(unique_key);
         if (it == read_tasks_.end()) {
-            if (building_read_keys_.count(unique_key) > 0) {
-                pending_cancel_keys_.insert(unique_key);
-                RTP_LLM_LOG_INFO("cancelRead: queued pending cancel during recv registration, unique_key: %s",
-                                 unique_key.c_str());
-                return true;
-            }
-            RTP_LLM_LOG_INFO("cancelRead: task not found, unique_key: %s", unique_key.c_str());
-            return false;
+            const int64_t now_ms = currentTimeMs();
+            const int64_t ttl_ms = std::max<int64_t>(1, config_.p2p_cancelled_keys_ttl_ms);
+            const int64_t fallback_deadline = now_ms > std::numeric_limits<int64_t>::max() - ttl_ms ?
+                                                  std::numeric_limits<int64_t>::max() :
+                                                  now_ms + ttl_ms;
+            const bool has_finite_request_deadline =
+                request_deadline_ms > 0 && request_deadline_ms != std::numeric_limits<int64_t>::max();
+            pending_cancel_keys_[unique_key] = has_finite_request_deadline ?
+                                                   std::max(request_deadline_ms, now_ms) :
+                                                   fallback_deadline;
+            RTP_LLM_LOG_INFO("cancelRead: queued pending cancel, unique_key: %s, during_registration: %d",
+                             unique_key.c_str(),
+                             building_read_keys_.count(unique_key) > 0);
+            return true;
         }
         task_group = it->second;
     }
@@ -367,6 +399,24 @@ void P2PConnectorWorkerDecode::evictStaleLeases() {
         } else {
             ++it;
         }
+    }
+}
+
+void P2PConnectorWorkerDecode::cleanupStaleLeases() {
+    const int64_t now_ms = currentTimeMs();
+    {
+        std::lock_guard<std::mutex> lock(read_tasks_mutex_);
+        for (auto it = pending_cancel_keys_.begin(); it != pending_cancel_keys_.end();) {
+            if (it->second < now_ms) {
+                it = pending_cancel_keys_.erase(it);
+            } else {
+                ++it;
+            }
+        }
+    }
+    {
+        std::lock_guard<std::mutex> lock(lease_map_mutex_);
+        evictStaleLeases();
     }
 }
 

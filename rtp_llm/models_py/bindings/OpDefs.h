@@ -5,6 +5,7 @@
 #include <pybind11/embed.h>
 #include <torch/extension.h>
 #include <algorithm>
+#include <functional>
 #include <map>
 #include <memory>
 #include <optional>
@@ -22,6 +23,16 @@
 namespace rtp_llm {
 class CacheStore;
 class CacheStoreAsyncWriter;
+
+using P2PLayerWriteCallback =
+    std::function<bool(size_t,
+                       int,
+                       const std::string&,
+                       const std::vector<int64_t>&,
+                       const std::vector<int32_t>&,
+                       int64_t,
+                       const std::shared_ptr<torch::Event>&,
+                       int64_t)>;
 }  // namespace rtp_llm
 
 namespace torch_ext {
@@ -270,6 +281,7 @@ struct PyCacheStoreInputs {
     size_t                                           decoder_batch_size = 0;
     torch::Tensor                                    request_id;
     torch::Tensor                                    request_pd_separation;
+    torch::Tensor                                    request_deadline_ms;
     std::map<std::string, rtp_llm::CacheGroupPolicy> kv_cache_group_policies;
     std::map<std::string, size_t>                    tokens_per_block_by_tag;
     // Physical address step and logical transfer length are different for a
@@ -294,6 +306,7 @@ struct PyCacheStoreInputs {
     // Cache store reference (C++ only; passes through Python without inspection)
     std::shared_ptr<rtp_llm::CacheStore> cache_store;
     rtp_llm::CacheStoreAsyncWriter*      cache_store_async_writer = nullptr;
+    rtp_llm::P2PLayerWriteCallback       p2p_layer_write;
 
     // CP-page-RR sharding context. (1, 0) = no sharding.
     int cp_size = 1;

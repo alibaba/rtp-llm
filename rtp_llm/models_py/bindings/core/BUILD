@@ -87,6 +87,7 @@ cc_library(
     deps = [
         ":op_data",
         ":device_data",
+        "//rtp_llm/models_py/bindings:op_defs",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/models:stats",
         "//rtp_llm/models_py/bindings/common/kernels:fuse_copy_util",
@@ -137,7 +138,6 @@ cc_library(
         "//rtp_llm/cpp/utils:device_pin",
         "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
-        "//rtp_llm/cpp/cache/connector:connector_header",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
         "@havenask//aios/autil:stack_tracer",
         "@havenask//aios/autil:string_helper",
@@ -221,7 +221,6 @@ cc_library(
         "//rtp_llm/cpp/utils:device_pin",
         "//rtp_llm/cpp/pybind:th_utils",
         "//rtp_llm/cpp/disaggregate/cache_store:cache_store_interface",
-        "//rtp_llm/cpp/cache/connector:connector_header",
         "//rtp_llm/models_py/bindings/common/kernels:kernels_sampling",
         "@havenask//aios/autil:stack_tracer",
         "@havenask//aios/autil:string_helper",

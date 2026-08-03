@@ -272,6 +272,42 @@ TEST_F(TcpTaskContextTest, ExecuteCopy_SizeMismatch_ReturnsFalse) {
     EXPECT_FALSE(ctx->executeCopy(copy_util));
 }
 
+TEST_F(TcpTaskContextTest, ExecuteCopy_DeclaredLengthExceedsContent_ReturnsFalse) {
+    constexpr int64_t key  = 1;
+    constexpr size_t  size = 64;
+
+    char dummy[size];
+    auto req = makeSimpleRequest("k1", currentTimeMs() + 5000, key, size, std::string(size - 1, 'C'));
+
+    ::tcp_transfer::TcpLayerBlockTransferResponse resp;
+    MockClosure                                   closure;
+    auto                                          ctx = makeContext(&req, &resp, &closure);
+    ctx->setTask(makeTask(key, dummy, size));
+
+    CudaCopyUtil copy_util;
+    EXPECT_FALSE(ctx->executeCopy(copy_util));
+}
+
+TEST_F(TcpTaskContextTest, ExecuteCopy_DuplicateRequestKey_ReturnsFalse) {
+    constexpr int64_t key  = 1;
+    constexpr size_t  size = 64;
+
+    ::tcp_transfer::TcpLayerBlockTransferRequest req;
+    req.set_unique_key("k1");
+    req.set_deadline_ms(currentTimeMs() + 5000);
+    addRequestBlock(req, key, {{size, std::string(size, 'A')}});
+    addRequestBlock(req, key, {{size, std::string(size, 'B')}});
+
+    ::tcp_transfer::TcpLayerBlockTransferResponse resp;
+    MockClosure                                   closure;
+    auto                                          ctx = makeContext(&req, &resp, &closure);
+    char                                          dummy[size];
+    ctx->setTask(makeTask(key, dummy, size));
+
+    CudaCopyUtil copy_util;
+    EXPECT_FALSE(ctx->executeCopy(copy_util));
+}
+
 TEST_F(TcpTaskContextTest, ExecuteCopy_AllBlocksEmpty_ReturnsFalse) {
     // All BlockInfo entries have addr==nullptr / size_bytes==0 → copy_tasks stays empty.
     constexpr int64_t key = 1;
@@ -316,19 +352,14 @@ TEST_F(TcpTaskContextTest, ExecuteCopy_ValidData_DataCopiedToDevice) {
     EXPECT_TRUE(verifyDeviceData(gpu_buf.data_ptr(), content, data_size));
 }
 
-TEST_F(TcpTaskContextTest, ExecuteCopy_MixedBlocks_SkipsNullAddrBlocks) {
-    if (!device_initialized_) {
-        GTEST_SKIP() << "No GPU device available";
-    }
-
+TEST_F(TcpTaskContextTest, ExecuteCopy_MixedBlocks_RejectsNullDecodeBlock) {
     constexpr int64_t key       = 1;
     constexpr size_t  data_size = 32;
     const std::string content(data_size, 'Y');
-
-    auto gpu_buf = allocDeviceBuffer(data_size);
+    char              destination[data_size];
 
     // Request: 2 sub_blocks for cache_key=1.
-    // Index 0: empty (len=0) — skipped by the task-side null check.
+    // Index 0 is invalid on the Decode side and must reject the whole key.
     // Index 1: real data.
     ::tcp_transfer::TcpLayerBlockTransferRequest req;
     req.set_unique_key("k1");
@@ -339,18 +370,17 @@ TEST_F(TcpTaskContextTest, ExecuteCopy_MixedBlocks_SkipsNullAddrBlocks) {
     MockClosure                                   closure;
     auto                                          ctx = makeContext(&req, &resp, &closure);
 
-    // Task: sub_block[0] has addr==nullptr (skipped), sub_block[1] is valid.
+    // Task: sub_block[0] has addr==nullptr, sub_block[1] is otherwise valid.
     auto kbi = std::make_shared<KeyBlockInfo>();
-    kbi->blocks.push_back(BlockInfo{false, 0, 0, nullptr, 0});  // skipped
-    kbi->blocks.push_back(BlockInfo{false, 0, 0, gpu_buf.data_ptr(), data_size});
+    kbi->blocks.push_back(BlockInfo{false, 0, 0, nullptr, 0});
+    kbi->blocks.push_back(BlockInfo{false, 0, 0, destination, data_size});
     KeyBlockInfoMap block_infos;
     block_infos[key] = kbi;
     auto task        = std::make_shared<TransferTask>(std::move(block_infos), currentTimeMs() + 5000);
     ctx->setTask(task);
 
     CudaCopyUtil copy_util;
-    ASSERT_TRUE(ctx->executeCopy(copy_util));
-    EXPECT_TRUE(verifyDeviceData(gpu_buf.data_ptr(), content, data_size));
+    EXPECT_FALSE(ctx->executeCopy(copy_util));
 }
 
 // ===========================================================================
@@ -446,6 +476,7 @@ TEST_F(TcpTaskContextTest, Run_WithTask_CancelInTransferring_OverridesSuccess) {
     ctx->run(true);
 
     EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_TASK_CANCELLED);
+    EXPECT_EQ(resp.error_message(), "TransferTask cancelled during transfer");
     EXPECT_EQ(closure.run_count(), 1);
 }
 
@@ -466,6 +497,7 @@ TEST_F(TcpTaskContextTest, Run_WithTask_ExpiredDeadline_OverridesSuccess) {
     ctx->run(true);
 
     EXPECT_EQ(resp.error_code(), ::tcp_transfer::TCP_TRANSFER_CONTEXT_TIMEOUT);
+    EXPECT_EQ(resp.error_message(), "TransferTask timed out");
 }
 
 // ===========================================================================

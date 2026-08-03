@@ -9,11 +9,12 @@ cc_library(
     hdrs = [
         "MockAsyncContext.h",
         "MockKVCacheConnector.h",
-        "MockKVCacheConnectorCoordinator.h",
         "MockKVCacheConnectorReadWriteContext.h",
     ],
     deps = [
-        "//rtp_llm/cpp/cache/connector:connector",
+        "//rtp_llm/cpp/cache:cache_async_context",
+        "//rtp_llm/cpp/cache/connector:connector_base",
+        "//rtp_llm/cpp/cache/connector:connector_context",
     ],
     copts = test_copts,
     visibility = ["//visibility:public"],

@@ -25,7 +25,9 @@ public:
                           int64_t                                              request_id,
                           const std::vector<std::pair<std::string, uint32_t>>& decode_transfer_servers,
                           int64_t                                              deadline_ms,
-                          std::function<bool()>                                is_cancelled = nullptr);
+                          std::function<bool()>                                is_cancelled = nullptr,
+                          bool                                                 no_transfer = false,
+                          int64_t                                              request_deadline_ms = 0);
 
 private:
     /// 轮询 result->done()；is_cancelled 或当前时间超过 deadline_ms 时发 CANCEL_HANDLE_READ。

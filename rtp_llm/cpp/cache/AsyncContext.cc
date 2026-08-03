@@ -86,7 +86,19 @@ void FusedAsyncReadContext::notifyDone() {
     done_cv_.notify_all();
 }
 
+void FusedAsyncReadContext::cancel() {
+    cancelled_.store(true, std::memory_order_release);
+    notifyDone();
+}
+
+bool FusedAsyncReadContext::cancelled() const {
+    return cancelled_.load(std::memory_order_acquire);
+}
+
 bool FusedAsyncReadContext::done() const {
+    if (cancelled()) {
+        return true;
+    }
     if (!fused_match_context_) {
         return true;
     }
@@ -104,6 +116,9 @@ bool FusedAsyncReadContext::done() const {
 }
 
 bool FusedAsyncReadContext::success() const {
+    if (cancelled()) {
+        return false;
+    }
     if (done() && (fused_match_context_ && fused_match_context_->success())) {
         std::lock_guard<std::mutex> lk(read_ctx_mutex_);
         return !fused_read_context_ || fused_read_context_->success();
@@ -112,6 +127,9 @@ bool FusedAsyncReadContext::success() const {
 }
 
 ErrorInfo FusedAsyncReadContext::errorInfo() const {
+    if (cancelled()) {
+        return ErrorInfo(ErrorCode::CANCELLED, "async read cancelled");
+    }
     if (fused_match_context_ && !fused_match_context_->success()) {
         return fused_match_context_->errorInfo();
     }

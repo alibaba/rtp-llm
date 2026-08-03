@@ -24,7 +24,8 @@ struct P2PConnectorResourceEntry {
     int64_t            request_id;         // 请求 ID
     std::string        unique_key;         // 路由唯一标识（从 Meta::P2PRoutingContext 填充）
     KVCacheResourcePtr kv_cache_resource;  // KV cache 资源引用，用于保持引用计数
-    int64_t            deadline_ms;        // 过期时间
+    int64_t            deadline_ms;        // Prefill 资源持有截止时间
+    int64_t            request_deadline_ms;  // 原始请求截止时间，用于终态 tombstone
     int64_t            add_time_us;        // 添加时间
 
     // Side-channel data (filled by prefill when first token / SP data is produced)
@@ -73,13 +74,17 @@ public:
     // Init-time hook used to release per-request side resources (for example
     // computed per-layer buffers) when the stream-store drops the request due
     // to timeout or cancellation before decode consumes it.
-    void setOnRequestReleased(std::function<void(int64_t)> on_request_released);
+    void setOnRequestReleased(std::function<void(int64_t, int64_t)> on_request_released);
 
     // Mark unique_key as cancelled: if the resource is already in the store, remove it
     // immediately; otherwise record the cancellation so that a future addResource() call
     // for the same key is rejected on arrival, preventing blocks from being pinned until
     // the next checkTimeout() cycle.
-    void markCancelled(const std::string& unique_key);
+    void markCancelled(const std::string& unique_key, int64_t request_deadline_ms = 0);
+
+    // Record a terminal request after its resource has been consumed. Late
+    // side-channel notifications and duplicate StartLoad calls are rejected.
+    void markTerminal(const std::string& unique_key, int64_t request_deadline_ms = 0);
 
     std::shared_ptr<P2PConnectorResourceEntry> waitAndStealResource(const std::string&    unique_key,
                                                                     int64_t               deadline_ms,
@@ -115,15 +120,19 @@ private:
     mutable std::mutex                                                resource_map_mutex_;
     std::condition_variable                                           resource_cv_;
     std::map<std::string, std::shared_ptr<P2PConnectorResourceEntry>> resource_map_;
-    // unique_key → cancel_time_ms: keys for which the decode-side gRPC was cancelled before the
-    // resource arrived. addResource() rejects these to avoid pinning KV blocks; entries are
-    // purged by checkTimeout() after kCancelledKeyTTLMs.
+    // unique_key → expire_at_ms: terminal keys whose resources were cancelled or expired.
+    // Keeping the terminal state until the original request deadline makes a late StartLoad
+    // fail immediately instead of waiting for a resource that can no longer arrive.
     std::map<std::string, int64_t> cancelled_keys_;
     // Side-channel data stored independently from resource entries.
     // This allows notifySideChannelReady to store data even after the entry has been stolen.
     std::mutex                                      side_channel_map_mutex_;
     std::condition_variable                         side_channel_cv_;
     std::map<std::string, P2PSideChannelStoreEntry> side_channel_data_map_;
+    // Active StartLoad transfer deadline for entries already stolen from
+    // resource_map_. It prevents a later side-channel notification from
+    // falling back to the much longer user-request deadline.
+    std::map<std::string, int64_t> active_side_channel_deadlines_;
 
     kmonitor::MetricsReporterPtr metrics_reporter_;
 
@@ -134,11 +143,10 @@ private:
     // pinning KV blocks for the full business deadline (commonly ~1h) when
     // decode never sends StartLoad. See P2PConnectorResourceStore.cc::addResource.
     int64_t prefill_resource_hold_ms_;
-    // Lifetime of cancelled_keys_ tombstones; should cover the longest expected
-    // skew between addResource and a late-arriving StartLoad so handleRead can
-    // distinguish "expired on prefill" from "never seen".
+    // Fallback lifetime used only when a legacy caller does not provide a
+    // valid original request deadline.
     int64_t cancelled_keys_ttl_ms_;
-    std::function<void(int64_t)> on_request_released_;
+    std::function<void(int64_t, int64_t)> on_request_released_;
 
 public:
     // Test hook: peek whether a unique_key is currently in cancelled_keys_.

@@ -337,6 +337,7 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
         cache_store_inputs.decoder_batch_size        = decoder_batch_size;
         cache_store_inputs.request_id                = inputs.request_id;
         cache_store_inputs.request_pd_separation     = inputs.request_pd_separation;
+        cache_store_inputs.request_deadline_ms       = inputs.request_deadline_ms;
         cache_store_inputs.cache_keys                = transVectorToString(cache_keys_vec);
         cache_store_inputs.tokens_per_block          = inputs.seq_size_per_block;
         cache_store_inputs.kv_block_stride_bytes     = inputs.kv_block_stride_bytes;
@@ -350,6 +351,26 @@ std::optional<PyCacheStoreInputs> PyWrappedModel::prepareWriteCacheParams(const 
             description_.attention_conf.use_mla && mla_ops_type_ != rtp_llm::MlaOpsType::MHA;
         cache_store_inputs.cache_store              = cache_manager_->getCacheStore();
         cache_store_inputs.cache_store_async_writer = cache_store_async_writer_.get();
+        if (cache_manager_->hasP2PConnector()) {
+            cache_store_inputs.p2p_layer_write =
+                [cache_manager = cache_manager_](size_t                                model_id,
+                                                 int                                   layer_id,
+                                                 const std::string&                    tag,
+                                                 const std::vector<int64_t>&           cache_keys,
+                                                 const std::vector<int32_t>&           block_ids,
+                                                 int64_t                               request_id,
+                                                 const std::shared_ptr<torch::Event>& event,
+                                                 int64_t                               deadline_ms) {
+                    return cache_manager->writeP2PLayer(model_id,
+                                                        layer_id,
+                                                        tag,
+                                                        cache_keys,
+                                                        block_ids,
+                                                        request_id,
+                                                        event,
+                                                        deadline_ms);
+                };
+        }
         cache_store_inputs.cp_size =
             device_props_.prefill_cp_kv_cache_sharded ? static_cast<int>(device_props_.tp_size) : 1;
         cache_store_inputs.cp_rank =
@@ -424,7 +445,7 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
         auto multimodal_inputs     = buildPyMultimodalInputs(micro_inputs);
         auto bert_embedding_inputs = buildBertEmbeddingInputs(micro_inputs);
         if (!inputs.warmup && inputs.pd_separation) {
-            py_attn_inputs.cache_store_inputs = prepareWriteCacheParams(inputs);
+            py_attn_inputs.cache_store_inputs = prepareWriteCacheParams(micro_inputs);
         }
         torch::Tensor combo_position_ids = micro_inputs.combo_position_ids.defined() ?
                                                tensorHoldHostAndToCuda(micro_inputs.combo_position_ids) :
@@ -645,12 +666,15 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
         return callForwardPostLayers(hidden_states, inputs, true);
 
     } catch (const py::error_already_set& e) {
+        cache_store_async_writer_->drainOnError();
         RTP_LLM_LOG_ERROR("Python error during forward call on Python instance: %s", e.what());
         throw std::runtime_error(std::string("pybind11 error during forward call on Python instance: ") + e.what());
     } catch (const std::exception& e) {
+        cache_store_async_writer_->drainOnError();
         RTP_LLM_LOG_ERROR("C++ error during forward call on Python instance: %s", e.what());
         throw std::runtime_error(std::string("C++ error during forward call on Python instance: ") + e.what());
     } catch (...) {
+        cache_store_async_writer_->drainOnError();
         RTP_LLM_LOG_ERROR("An unknown error occurred during forward call on Python instance.");
         throw std::runtime_error("An unknown error occurred during forward call on Python instance.");
     }
@@ -977,6 +1001,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 micro_model_inputs.cache_keys = inputs.cache_keys.defined() ?
                                                     inputs.cache_keys.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                                                     torch::Tensor();
+                micro_model_inputs.request_deadline_ms =
+                    inputs.request_deadline_ms.defined() ?
+                        inputs.request_deadline_ms.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                        torch::Tensor();
 
                 token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, (size_t)slice_token_num});
 
@@ -1013,6 +1041,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     torch::empty({0}, torch::TensorOptions(torch::kInt32).device(torch::kCPU));
                 micro_model_inputs.lm_output_indexes =
                     inputs.lm_output_indexes.narrow(0, sliced_batch_idx, d_micro_batch_size);
+                micro_model_inputs.request_id            = torch::Tensor();
+                micro_model_inputs.request_pd_separation = torch::Tensor();
+                micro_model_inputs.cache_keys            = torch::Tensor();
+                micro_model_inputs.request_deadline_ms   = torch::Tensor();
 
                 token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, d_micro_batch_size});
 
@@ -1065,6 +1097,10 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                 micro_model_inputs.cache_keys = inputs.cache_keys.defined() ?
                                                     inputs.cache_keys.narrow(0, prefill_batch_idx, p_micro_batch_size) :
                                                     torch::Tensor();
+                micro_model_inputs.request_deadline_ms =
+                    inputs.request_deadline_ms.defined() ?
+                        inputs.request_deadline_ms.narrow(0, prefill_batch_idx, p_micro_batch_size) :
+                        torch::Tensor();
 
                 token_slice_recipes.emplace_back(TokenSliceInfo{sliced_token_idx, (size_t)slice_token_num});
 
@@ -1119,6 +1155,7 @@ void PyWrappedModel::holdInputsHostBuffers(const GptModelInputs& inputs) {
 
     buffer_holder_.hold_host(inputs.request_id);
     buffer_holder_.hold_host(inputs.request_pd_separation);
+    buffer_holder_.hold_host(inputs.request_deadline_ms);
     buffer_holder_.hold_host(inputs.cache_keys);
 }
 

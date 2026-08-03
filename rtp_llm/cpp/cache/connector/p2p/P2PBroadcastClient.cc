@@ -32,7 +32,8 @@ P2PBroadcastClient::broadcast(int64_t                                           
                               const std::string&                                    unique_key,
                               int64_t                                               deadline_ms,
                               P2PConnectorBroadcastType                             type,
-                              int                                                   remote_tp_size) {
+                              int                                                   remote_tp_size,
+                              int64_t                                               request_deadline_ms) {
     // 构建 FunctionRequestPB
     std::vector<FunctionRequestPB> requests;
     size_t                         worker_num = tp_broadcast_manager_->workerNum();
@@ -47,7 +48,8 @@ P2PBroadcastClient::broadcast(int64_t                                           
                             unique_key,
                             deadline_ms,
                             type,
-                            remote_tp_size);
+                            remote_tp_size,
+                            request_deadline_ms);
         requests.push_back(std::move(request));
     }
 
@@ -87,14 +89,15 @@ void P2PBroadcastClient::genBroadcastRequest(
     const std::string&                                    unique_key,
     int64_t                                               deadline_ms,
     P2PConnectorBroadcastType                             type,
-    int                                                   remote_tp_size) {
+    int                                                   remote_tp_size,
+    int64_t                                               request_deadline_ms) {
     auto p2p_request = request.mutable_p2p_request();
 
     // 设置 layer_blocks
     for (const auto& layer_cache_buffer : layer_cache_buffers) {
         auto layer_block = p2p_request->add_layer_blocks();
         layer_block->set_layer_id(layer_cache_buffer->getLayerId());
-        layer_block->set_region(static_cast<uint32_t>(layer_cache_buffer->getRegionName()));
+        layer_block->set_cache_tag(layer_cache_buffer->cacheTag());
         for (const auto& [key, block_id] : layer_cache_buffer->blockIdMap()) {
             layer_block->add_cache_keys(key);
             layer_block->add_block_ids(block_id);
@@ -111,11 +114,15 @@ void P2PBroadcastClient::genBroadcastRequest(
     p2p_request->set_unique_key(unique_key);
     p2p_request->set_request_id(request_id);
     p2p_request->set_deadline_ms(deadline_ms);
+    p2p_request->set_request_deadline_ms(request_deadline_ms > 0 ? request_deadline_ms : deadline_ms);
     p2p_request->set_type(type);
     p2p_request->set_remote_tp_size(remote_tp_size);
 }
 
 bool P2PBroadcastClient::Result::success() const {
+    if (locally_completed_) {
+        return true;
+    }
     if (!tp_broadcast_result_ || !tp_broadcast_result_->success()) {
         RTP_LLM_LOG_WARNING("P2PBroadcastClient::Result success is false, tp_broadcast_result failed");
         return false;
@@ -137,6 +144,10 @@ bool P2PBroadcastClient::Result::success() const {
 }
 
 void P2PBroadcastClient::Result::checkDone() {
+    if (locally_completed_) {
+        total_cost_time_us_ = currentTimeUs() - start_time_us_;
+        return;
+    }
     tp_broadcast_result_->waitDone(1);  // wait 1ms
     if (tp_broadcast_result_->done()) {
         total_cost_time_us_ = currentTimeUs() - start_time_us_;
@@ -144,7 +155,8 @@ void P2PBroadcastClient::Result::checkDone() {
 }
 
 std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::cancel(const std::string&        unique_key,
-                                                                       P2PConnectorBroadcastType type) {
+                                                                       P2PConnectorBroadcastType type,
+                                                                       int64_t request_deadline_ms) {
     RTP_LLM_LOG_DEBUG("P2PBroadcastClient cancel: unique_key: %s", unique_key.c_str());
 
     // 构建 FunctionRequestPB
@@ -157,6 +169,7 @@ std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::cancel(const std
         auto              p2p_request = request.mutable_p2p_request();
         p2p_request->set_unique_key(unique_key);
         p2p_request->set_type(type);
+        p2p_request->set_request_deadline_ms(request_deadline_ms);
         requests.push_back(std::move(request));
     }
 
@@ -183,16 +196,20 @@ std::shared_ptr<P2PBroadcastClient::Result> P2PBroadcastClient::cancel(const std
 }
 
 ErrorCode P2PBroadcastClient::Result::errorCode() const {
+    if (locally_completed_) {
+        return ErrorCode::NONE_ERROR;
+    }
     if (!tp_broadcast_result_ || !tp_broadcast_result_->done()) {
         return ErrorCode::UNKNOWN_ERROR;
     }
     auto responses = tp_broadcast_result_->responses();
     for (const auto& response : responses) {
-        if (response.has_p2p_response()) {
-            ErrorCodePB pb_error_code = response.p2p_response().error_code();
-            if (pb_error_code != ErrorCodePB::NONE_ERROR) {
-                return transRPCErrorCode(pb_error_code);
-            }
+        if (!response.has_p2p_response()) {
+            return ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED;
+        }
+        ErrorCodePB pb_error_code = response.p2p_response().error_code();
+        if (pb_error_code != ErrorCodePB::NONE_ERROR) {
+            return transRPCErrorCode(pb_error_code);
         }
     }
     if (!tp_broadcast_result_->success()) {
@@ -202,17 +219,21 @@ ErrorCode P2PBroadcastClient::Result::errorCode() const {
 }
 
 std::string P2PBroadcastClient::Result::errorMessage() const {
+    if (locally_completed_) {
+        return "";
+    }
     if (!tp_broadcast_result_ || !tp_broadcast_result_->done()) {
         return "P2PBroadcastClient::Result not done yet";
     }
     auto responses = tp_broadcast_result_->responses();
     for (size_t rank = 0; rank < responses.size(); ++rank) {
         const auto& response = responses[rank];
-        if (response.has_p2p_response()) {
-            const auto& p2p_response = response.p2p_response();
-            if (p2p_response.error_code() != ErrorCodePB::NONE_ERROR && !p2p_response.error_message().empty()) {
-                return "RANK " + std::to_string(rank) + ": " + p2p_response.error_message();
-            }
+        if (!response.has_p2p_response()) {
+            return "RANK " + std::to_string(rank) + ": missing p2p_response";
+        }
+        const auto& p2p_response = response.p2p_response();
+        if (p2p_response.error_code() != ErrorCodePB::NONE_ERROR && !p2p_response.error_message().empty()) {
+            return "RANK " + std::to_string(rank) + ": " + p2p_response.error_message();
         }
     }
     if (!tp_broadcast_result_->success()) {

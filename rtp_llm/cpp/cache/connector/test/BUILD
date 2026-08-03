@@ -19,24 +19,6 @@ test_deps = [
 ] + torch_deps()
 
 cc_test(
-    name = "coordinator_test",
-    srcs = [
-        "KVCacheConnectorCoordinatorTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = test_deps + [
-        "//rtp_llm/cpp/cache/connector:connector",
-        "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
-        "//rtp_llm/cpp/cache/connector/memory/test/mock:mock_memory_connector_lib",
-        "//rtp_llm/cpp/cache/test/mock:mock_allocator_lib",
-        "//rtp_llm/models_py/bindings/core:exec_ops_test_lib",
-    ],
-    env = {},
-    exec_properties = {'gpu':'H20'},
-)
-
-cc_test(
     name = "async_context_test",
     srcs = [
         "AsyncContextTest.cc",
@@ -44,7 +26,8 @@ cc_test(
     data = [],
     copts = test_copts,
     deps = test_deps + [
-        "//rtp_llm/cpp/cache/connector:connector",
+        "//rtp_llm/cpp/cache:cache_async_context",
+        "//rtp_llm/cpp/cache/connector:connector_base",
         "//rtp_llm/cpp/cache/connector/test/mock:connector_mock_files_lib",
     ],
     env = {},

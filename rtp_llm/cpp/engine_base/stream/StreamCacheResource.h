@@ -142,6 +142,7 @@ private:
     void recordCacheReuseMallocResult(const MallocResult& result);
     void publishReuseLengths(int total_length, int host_length, int disk_length, int backend_length);
     absl::Status finalizeAllocatorLoad();
+    size_t treeCoveredBlockNum() const;
 
     GenerateStream*                stream_;
     BatchKVCacheResourcePtr        batch_kv_cache_resource_;
@@ -157,6 +158,9 @@ private:
     RtpLLMCacheReuseMetricsCollector cache_reuse_metrics_;
     int64_t                       malloc_begin_time_us_    = 0;
     int64_t                       load_wait_begin_time_us_ = 0;
+    std::shared_ptr<AsyncContext> p2p_load_context_;
+    bool                          allocator_load_failed_{false};
+    bool                          p2p_cancel_requested_{false};
 
     // Physical block pins held for PD separation.
     std::shared_ptr<KVCacheResource> pd_kvcache_ref_;

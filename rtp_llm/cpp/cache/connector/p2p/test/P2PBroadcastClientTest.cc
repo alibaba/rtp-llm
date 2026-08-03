@@ -50,7 +50,7 @@ protected:
 
     // 创建测试用的 LayerCacheBuffer
     std::shared_ptr<LayerCacheBuffer> createLayerCacheBuffer(int layer_id, int num_blocks = 2) {
-        auto buffer = std::make_shared<LayerCacheBuffer>(layer_id);
+        auto buffer = std::make_shared<LayerCacheBuffer>(layer_id, "full");
         for (int i = 0; i < num_blocks; ++i) {
             int64_t cache_key = layer_id * 1000 + i;
             int     block_id  = i;
@@ -66,6 +66,7 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_AllRequestsSuccess) {
     std::string unique_key  = "test_broadcast_1";
     int64_t     request_id  = 1001;
     int64_t     deadline_ms = currentTimeMs() + 5000;
+    int64_t     request_deadline_ms = deadline_ms + 5000;
 
     // 创建 LayerCacheBuffer
     std::vector<std::shared_ptr<LayerCacheBuffer>> layer_cache_buffers;
@@ -83,7 +84,9 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_AllRequestsSuccess) {
                                      decode_transfer_servers,
                                      unique_key,
                                      deadline_ms,
-                                     P2PConnectorBroadcastType::READ);
+                                     P2PConnectorBroadcastType::READ,
+                                     0,
+                                     request_deadline_ms);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result->uniqueKey(), unique_key);
 
@@ -96,6 +99,8 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_AllRequestsSuccess) {
     for (size_t i = 0; i < servers_.size(); ++i) {
         EXPECT_EQ(servers_[i]->service()->getBroadcastTpCallCount(), 1);
         EXPECT_EQ(servers_[i]->service()->getBroadcastTpCancelCallCount(), 0);
+        EXPECT_EQ(servers_[i]->service()->getLastBroadcastTpRequest().deadline_ms(), deadline_ms);
+        EXPECT_EQ(servers_[i]->service()->getLastBroadcastTpRequest().request_deadline_ms(), request_deadline_ms);
     }
 }
 
@@ -199,6 +204,25 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_AllResponseFailed) {
     }
 }
 
+TEST_F(P2PBroadcastClientTest, Broadcast_MissingP2PResponseHasNonSuccessError) {
+    servers_[0]->service()->setOmitP2PResponse(true);
+    const int64_t deadline_ms = currentTimeMs() + 5000;
+
+    auto result = client_->broadcast(1006,
+                                     {createLayerCacheBuffer(0, 1)},
+                                     {{"127.0.0.1", 12345}},
+                                     "test_broadcast_missing_response",
+                                     deadline_ms,
+                                     P2PConnectorBroadcastType::READ);
+    ASSERT_NE(result, nullptr);
+    waitDone(result);
+
+    EXPECT_TRUE(result->done());
+    EXPECT_FALSE(result->success());
+    EXPECT_EQ(result->errorCode(), ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED);
+    EXPECT_NE(result->errorMessage().find("missing p2p_response"), std::string::npos);
+}
+
 TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_RpcStatusFailed) {
     // 设置第一个服务器返回 RPC 错误
     servers_[0]->service()->setRpcResponseStatus(::grpc::Status(grpc::StatusCode::INTERNAL, "Internal error"));
@@ -227,10 +251,11 @@ TEST_F(P2PBroadcastClientTest, Broadcast_ReturnNotNull_RpcStatusFailed) {
 }
 
 TEST_F(P2PBroadcastClientTest, Cancel_ReturnNotNull_Success) {
-    std::string unique_key = "test_cancel_success";
+    std::string unique_key          = "test_cancel_success";
+    int64_t     request_deadline_ms = currentTimeMs() + 5000;
 
     // 执行 cancel
-    auto result = client_->cancel(unique_key, P2PConnectorBroadcastType::CANCEL_READ);
+    auto result = client_->cancel(unique_key, P2PConnectorBroadcastType::CANCEL_READ, request_deadline_ms);
     ASSERT_NE(result, nullptr);
     EXPECT_EQ(result->uniqueKey(), unique_key);
 
@@ -243,6 +268,7 @@ TEST_F(P2PBroadcastClientTest, Cancel_ReturnNotNull_Success) {
     for (size_t i = 0; i < servers_.size(); ++i) {
         EXPECT_EQ(servers_[i]->service()->getBroadcastTpCallCount(), 0);
         EXPECT_EQ(servers_[i]->service()->getBroadcastTpCancelCallCount(), 1);
+        EXPECT_EQ(servers_[i]->service()->getLastBroadcastTpRequest().request_deadline_ms(), request_deadline_ms);
     }
 }
 

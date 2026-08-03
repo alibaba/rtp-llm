@@ -10,13 +10,12 @@
 #include "rtp_llm/cpp/utils/ErrorCode.h"
 #include <grpc++/grpc++.h>
 #include <memory>
+#include <mutex>
 #include <string>
 #include <vector>
 #include <optional>
 
 namespace rtp_llm {
-
-class GenerateStream;
 
 // Side-channel payload for P2P bypass (carries first token, reuse, SP info, position_ids)
 struct P2PSideChannelPayload {
@@ -48,16 +47,20 @@ public:
         }
 
         bool success() const {
+            std::lock_guard<std::mutex> lock(state_mutex_);
             return success_;
         }
         bool done() const {
+            std::lock_guard<std::mutex> lock(state_mutex_);
             return done_;
         }
         void    checkDone();
         void    cancel();
         int64_t totalCostTimeUs() const {
+            std::lock_guard<std::mutex> lock(state_mutex_);
             return total_cost_time_us;
         }
+        void markCompletionQueueDrained();
 
     private:
         bool pollCompletionQueue();
@@ -85,10 +88,10 @@ public:
         grpc::Status                                                                      status;
         std::string                                                                       server_addr;
         std::string                                                                       unique_key;
-        int                                                                               timeout_ms;
-        int64_t                                                                           request_id;
-        int64_t                                                                           start_time_us;
-        int64_t                                                                           total_cost_time_us;
+        int                                                                               timeout_ms{0};
+        int64_t                                                                           request_id{0};
+        int64_t                                                                           start_time_us{0};
+        int64_t                                                                           total_cost_time_us{0};
         ErrorCode   error_code = ErrorCode::NONE_ERROR;
         std::string error_message;
 
@@ -96,6 +99,9 @@ public:
         P2PSideChannelPayload side_channel_payload;
 
         bool completion_queue_shutdown_drained_{false};
+
+    private:
+        mutable std::mutex state_mutex_;
     };
 
     /// @brief 向 Prefill server 发起异步 StartLoad RPC，通知其开始向 Decode 发送 KV cache
@@ -103,14 +109,17 @@ public:
                                  const std::string& prefill_ip,
                                  uint32_t           prefill_port,
                                  const std::string& unique_key,
-                                 int64_t            deadline_ms,
-                                 GenerateStream*    generate_stream);
+                                 int64_t            request_deadline_ms,
+                                 int64_t            transfer_deadline_ms,
+                                 bool               no_transfer = false);
 
 private:
     bool buildAndStartAsyncRpc(const std::shared_ptr<Result>& result,
                                const std::string&             unique_key,
-                               int64_t                        deadline_ms,
-                               int64_t                        request_id);
+                               int64_t                        request_deadline_ms,
+                               int64_t                        transfer_deadline_ms,
+                               int64_t                        request_id,
+                               bool                           no_transfer);
 
     std::vector<std::string>    worker_addrs_;
     std::shared_ptr<RPCPool>    rpc_pool_;
