@@ -29,6 +29,11 @@ from rtp_llm.models_py.modules.factory.fused_moe.defs.config_adapter import (
     MoEConfigAdapter,
 )
 from rtp_llm.models_py.modules.factory.linear.fixed_m_linear import fixed_m_linear
+from rtp_llm.models_py.modules.hybrid.glm52_cuda_dag import (
+    Glm52CudaDagAdapter,
+    resolve_glm52_cuda_dag_enabled,
+    should_enable_glm52_cudadag,
+)
 from rtp_llm.ops import HWKernelConfig, MoeConfig, ParallelismConfig
 from rtp_llm.ops.compute_ops import LayerKVCache, PyModelInputs, PyModelOutputs
 from rtp_llm.utils.dsa_indexing import dsa_layer_has_indexer, dsa_layer_skips_topk
@@ -274,6 +279,18 @@ class GenericMoeLayer(nn.Module):
         clone._use_mega_moe_fused_shared = self._use_mega_moe_fused_shared
         return clone
 
+    def forward_prepacked(
+        self,
+        hidden_states: torch.Tensor,
+        topk_ids: torch.Tensor,
+        topk_weights: torch.Tensor,
+    ) -> torch.Tensor:
+        """Consume router/quant buffers already written by cuda-dag-runtime."""
+        if self.fake_balance_expert is not None:
+            self.fake_balance_expert(topk_ids, topk_weights)
+        experts_output = self.fused_moe.forward_prepacked(hidden_states)
+        return experts_output + self.shared_expert(hidden_states)
+
     def forward(
         self,
         hidden_states: torch.Tensor,
@@ -466,6 +483,19 @@ class GenericMoeDecoderLayer(nn.Module):
         self.post_attention_layernorm = RMSResNorm(
             weights[W.post_ln_gamma], eps=config.layernorm_eps
         )
+        self._glm52_cuda_dag_adapter = (
+            Glm52CudaDagAdapter(
+                layer_idx=layer_idx,
+                config=config,
+                parallelism_config=parallelism_config,
+                self_attn=self.self_attn,
+                input_layernorm=self.input_layernorm,
+                mlp=self.mlp,
+                post_attention_layernorm=self.post_attention_layernorm,
+            )
+            if resolve_glm52_cuda_dag_enabled()
+            else None
+        )
 
         # Fuse input_layernorm + fp8_quant → pass fp8 directly to first linear,
         # AND emit a bf16 normed output so downstream consumers (e.g. Indexer)
@@ -510,7 +540,9 @@ class GenericMoeDecoderLayer(nn.Module):
             and self.mlp.shared_expert.accepts_fp8_input
         )
 
-    def clone_for_cuda_graph(self) -> "GenericMoeDecoderLayer":
+    def clone_for_cuda_graph(
+        self, *, draft_prefill: bool = False
+    ) -> "GenericMoeDecoderLayer":
         clone = object.__new__(type(self))
         nn.Module.__init__(clone)
         clone.layer_idx = self.layer_idx
@@ -525,6 +557,14 @@ class GenericMoeDecoderLayer(nn.Module):
         clone._fuse_input_scale_ue8m0 = self._fuse_input_scale_ue8m0
         clone._fuse_post_norm_quant = self._fuse_post_norm_quant
         clone._fuse_post_norm_quant_moe = self._fuse_post_norm_quant_moe
+        clone._glm52_cuda_dag_adapter = (
+            None
+            if self._glm52_cuda_dag_adapter is None
+            else self._glm52_cuda_dag_adapter.clone_for_cuda_graph(
+                mlp=clone.mlp,
+                draft_prefill=draft_prefill,
+            )
+        )
         return clone
 
     def forward(
@@ -534,7 +574,30 @@ class GenericMoeDecoderLayer(nn.Module):
         fmha_impl: FMHAImplBase,
         kv_cache: Optional[LayerKVCache] = None,
         prev_topk_indices: Optional[torch.Tensor] = None,
+        enable_cudadag: bool = False,
     ) -> DecodeLayerOutput:
+        if enable_cudadag:
+            adapter = self._glm52_cuda_dag_adapter
+            if adapter is None:
+                raise RuntimeError("CUDA-DAG execution was not initialized")
+            cuda_dag_output = adapter.forward(
+                hidden_states,
+                residual,
+                fmha_impl,
+                kv_cache,
+                prev_topk_indices,
+            )
+            hidden_states = self.mlp.forward_prepacked(
+                cuda_dag_output.moe_hidden_states,
+                cuda_dag_output.routed_indices,
+                cuda_dag_output.routed_weights,
+            )
+            return DecodeLayerOutput(
+                hidden_states,
+                cuda_dag_output.residual,
+                cuda_dag_output.topk_indices,
+            )
+
         topk_indices = None
         if self._fuse_input_norm_quant and hidden_states.dim() == 2:
             bf16_hs, fp8_hs, scale = fused_add_rmsnorm_fp8_quant_with_bf16_output(
@@ -686,6 +749,13 @@ class GenericMoeModel(GptModelBase):
 
         residual = torch.zeros_like(hidden_states)
         prev_topk_indices = None
+        enable_cudadag = should_enable_glm52_cudadag(
+            self.layers,
+            self.layer_num,
+            hidden_states,
+            fmha_impl,
+            self.kv_cache,
+        )
         for i, decoder_layer in enumerate(self.layers[: self.layer_num]):
             select_block_map_for_layer(inputs.attention_inputs, i)
             output = decoder_layer(
@@ -694,6 +764,7 @@ class GenericMoeModel(GptModelBase):
                 fmha_impl,
                 kv_cache=self.kv_cache.get_layer_cache(i) if self.kv_cache else None,
                 prev_topk_indices=prev_topk_indices,
+                enable_cudadag=enable_cudadag,
             )
             hidden_states = output.hidden_states
             residual = output.residual

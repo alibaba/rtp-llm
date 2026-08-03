@@ -658,6 +658,36 @@ class GLM5MegaMoE(nn.Module):
 
         Returns [T, D] BF16 combined routed-expert output.
         """
+        return self._forward_impl(x, weights, indices, inputs_prepacked=False)
+
+    def prepacked_input_views(
+        self, tokens: int
+    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor, torch.Tensor]:
+        """Return graph-stable MegaMoE input buffers for an upstream producer."""
+        tokens = int(tokens)
+        buf = self._mega_buf
+        if tokens <= 0 or tokens > buf.num_max_tokens_per_rank:
+            raise ValueError(
+                f"tokens must be in [1,{buf.num_max_tokens_per_rank}], got {tokens}"
+            )
+        return (
+            buf.x[:tokens],
+            buf.x_sf[:tokens],
+            buf.topk_idx[:tokens],
+            buf.topk_weights[:tokens],
+        )
+
+    def forward_prepacked(self, x: torch.Tensor) -> torch.Tensor:
+        return self._forward_impl(x, None, None, inputs_prepacked=True)
+
+    def _forward_impl(
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor | None,
+        indices: torch.Tensor | None,
+        *,
+        inputs_prepacked: bool,
+    ) -> torch.Tensor:
         import deep_gemm
 
         T = x.size(0)
@@ -674,8 +704,10 @@ class GLM5MegaMoE(nn.Module):
                 "MegaMoE buffer sizing."
             )
 
-        # Pack inputs into symmetric memory buffer
-        self._input_packer.pack(x, weights, indices, buf, T)
+        if not inputs_prepacked:
+            if weights is None or indices is None:
+                raise ValueError("weights and indices are required before packing")
+            self._input_packer.pack(x, weights, indices, buf, T)
         self._maybe_pre_kernel_barrier(T)
         _sync_cuda_graph_warmup_ranks(
             f"glm5.mega_moe.layer{self.cfg.layer_id}.before_deepgemm",
@@ -690,7 +722,7 @@ class GLM5MegaMoE(nn.Module):
             buf,
             recipe=(1, 1, FP4_BLOCK),
             activation="swiglu",
-            activation_clamp=None, #(self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None),
+            activation_clamp=None,  # (self.cfg.swiglu_limit if self.cfg.swiglu_limit > 0 else None),
             fast_math=False,
         )
         return y

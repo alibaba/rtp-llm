@@ -219,6 +219,19 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
         weights: torch.Tensor,
         indices: torch.Tensor,
     ) -> torch.Tensor:
+        return self._forward_impl(x, weights, indices, inputs_prepacked=False)
+
+    def forward_prepacked(self, x: torch.Tensor) -> torch.Tensor:
+        return self._forward_impl(x, None, None, inputs_prepacked=True)
+
+    def _forward_impl(
+        self,
+        x: torch.Tensor,
+        weights: torch.Tensor | None,
+        indices: torch.Tensor | None,
+        *,
+        inputs_prepacked: bool,
+    ) -> torch.Tensor:
         import deep_gemm
 
         T = x.size(0)
@@ -235,7 +248,10 @@ class GLM5MegaMoEFP8(GLM5MegaMoE):
                 f"smaller than input tokens={T}."
             )
 
-        self._input_packer.pack(x, weights, indices, buf, T)
+        if not inputs_prepacked:
+            if weights is None or indices is None:
+                raise ValueError("weights and indices are required before packing")
+            self._input_packer.pack(x, weights, indices, buf, T)
         self._maybe_pre_kernel_barrier(T)
         _sync_cuda_graph_warmup_ranks(
             f"glm5.mega_moe_fp8.layer{self.cfg.layer_id}.before_deepgemm",

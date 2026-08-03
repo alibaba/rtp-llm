@@ -479,6 +479,8 @@ class SparseMlaImpl(MlaImplBase):
         )
         self._cos_sin_cache = cos_sin_cache
         self._is_neox_style = attn_configs.rope_config.is_neox_style
+        self._glm_cuda_dag_metadata = {}
+        self._glm_cuda_dag_storage_plans = {}
 
         self.write_cache_store_impl = common.create_write_cache_store_impl(attn_inputs)
 
@@ -608,12 +610,11 @@ class SparseMlaImpl(MlaImplBase):
             )
             self._refresh_paged_mqa_schedule_metadata(attn_inputs, forbid_realloc=True)
             self.fmha_impl.plan(self.fmha_params, block_table, attn_inputs=attn_inputs)
-            return
         # Decode fast path (draft model): SparseMlaImpl handles decode for sparse
         # configs because MlaFlashInferDecodeImpl rejects when is_sparse=True.
         # fillParams' 3 toHostContiguousI32 D2H syncs go away by delegating to
         # the device-only fillDecodeCudaGraphParams kernel.
-        if (
+        elif (
             not getattr(attn_inputs, "is_prefill", True)
             and isinstance(self.fmha_impl, SparseMlaOp)
             and attn_inputs.sequence_lengths_plus_1_d is not None
@@ -629,8 +630,7 @@ class SparseMlaImpl(MlaImplBase):
             )
             self._refresh_paged_mqa_schedule_metadata(attn_inputs, forbid_realloc=True)
             self.fmha_impl.plan(self.fmha_params, block_table, attn_inputs=attn_inputs)
-            return
-        if (
+        elif (
             getattr(attn_inputs, "is_prefill", False)
             and not _is_multi_token_decode(attn_inputs)
             and isinstance(self.fmha_impl, SparseMlaFp8Op)
@@ -648,8 +648,24 @@ class SparseMlaImpl(MlaImplBase):
             )
             self._refresh_paged_mqa_schedule_metadata(attn_inputs, forbid_realloc=True)
             self.fmha_impl.plan(self.fmha_params, block_table, attn_inputs=attn_inputs)
+        else:
+            self.prepare(attn_inputs, forbid_realloc=True)
+
+        if self._glm_cuda_dag_metadata:
+            self._prepare_cudadag_metadata(attn_inputs)
+
+    def _prepare_cudadag_metadata(self, attn_inputs: PyAttentionInputs) -> None:
+        """Refresh the graph-stable E1 schedule after RTP attention params."""
+        block_table = attn_inputs.kv_cache_block_id_device
+        if not isinstance(block_table, torch.Tensor) or block_table.numel() == 0:
             return
-        self.prepare(attn_inputs, forbid_realloc=True)
+        key = (
+            int(self.fmha_params.expanded_seq_lens.numel()),
+            int(block_table.size(0)),
+        )
+        metadata = self._glm_cuda_dag_metadata.get(key)
+        if metadata is not None:
+            metadata.prepare()
 
     # -- BMMs ----------------------------------------------------------------
 
