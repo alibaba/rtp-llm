@@ -11,11 +11,14 @@ from typing import Any, List, Optional
 
 import torch
 
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
+from rtp_llm.config.py_config_modules import VitConfig
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import (
     MMPreprocessConfigPB,
     MultimodalInputsPB,
     MultimodalOutputPB,
 )
+from rtp_llm.multimodal.mm_error_messages import MMErr, raise_mm
 from rtp_llm.ops import MMPreprocessConfig, MultimodalInput
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 from rtp_llm.utils.grpc_util import trans_from_tensor, trans_tensor
@@ -211,12 +214,76 @@ def get_json_result_from_url(url: str, download_headers: str = ""):
     return res
 
 
-def get_bytes_io_from_url(url: str, download_headers: str = ""):
+def _validate_file_size(size_bytes: int, max_file_size_kb: Optional[int]) -> None:
+    if max_file_size_kb is None or max_file_size_kb <= 0:
+        return
+    if size_bytes > max_file_size_kb * 1024:
+        raise_mm(MMErr.FILE_TOO_LARGE)
+
+
+def _download_http_content(
+    url: str, headers: dict, max_file_size_kb: Optional[int]
+) -> BytesIO:
+    import requests
+
+    response = None
+    try:
+        response = request_get(url, headers)
+        if response.status_code != 200:
+            raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
+
+        if max_file_size_kb is not None and max_file_size_kb > 0:
+            content_length = response.headers.get("Content-Length")
+            if content_length is None:
+                raise_mm(MMErr.MISS_CONTENT_LEN)
+            try:
+                content_length_bytes = int(content_length)
+            except (TypeError, ValueError):
+                raise_mm(MMErr.MISS_CONTENT_LEN)
+            _validate_file_size(content_length_bytes, max_file_size_kb)
+
+        content = BytesIO()
+        downloaded_bytes = 0
+        for chunk in response.iter_content(chunk_size=1024 * 1024):
+            if not chunk:
+                continue
+            downloaded_bytes += len(chunk)
+            _validate_file_size(downloaded_bytes, max_file_size_kb)
+            content.write(chunk)
+        content.seek(0)
+        return content
+    except FtRuntimeException:
+        raise
+    except (requests.exceptions.Timeout, TimeoutError):
+        raise_mm(MMErr.DL_TIMEOUT, ExceptionType.MM_PROCESS_ERROR)
+    except (
+        requests.exceptions.ConnectionError,
+        requests.exceptions.InvalidURL,
+        requests.exceptions.MissingSchema,
+        requests.exceptions.InvalidSchema,
+        requests.exceptions.URLRequired,
+    ):
+        raise_mm(MMErr.URL_INVALID, ExceptionType.MM_PROCESS_ERROR)
+    except Exception:
+        logger.exception("failed to download multimodal content")
+        raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
+    finally:
+        if response is not None:
+            response.close()
+
+
+def get_bytes_io_from_url(
+    url: str,
+    download_headers: str = "",
+    max_file_size_kb: Optional[int] = VitConfig.DEFAULT_MM_IMAGE_MAX_FILE_SIZE_KB,
+):
     """Get BytesIO from URL.
 
     Args:
         url: URL to fetch from.
         download_headers: JSON string containing HTTP headers. If empty, uses default headers.
+        max_file_size_kb: Maximum file size in KB. HTTP URLs must provide a
+            Content-Length header so the limit can be checked before reading the body.
     """
 
     cached_res = url_data_cache_.check_cache(url)
@@ -224,13 +291,7 @@ def get_bytes_io_from_url(url: str, download_headers: str = ""):
         headers = _get_http_heads(download_headers)
         try:
             if url.startswith("http") or url.startswith("https"):
-                response = request_get(url, headers)
-                if response.status_code == 200:
-                    res = BytesIO(response.content)
-                else:
-                    raise Exception(
-                        f"download failed, error code: {response.status_code}"
-                    )
+                res = _download_http_content(url, headers, max_file_size_kb)
             elif url.startswith("oss"):
                 from rtp_llm.utils.oss_util import get_bytes_io_from_oss_path
 
@@ -242,12 +303,17 @@ def get_bytes_io_from_url(url: str, download_headers: str = ""):
                 with open(url, "rb") as fh:
                     buf = BytesIO(fh.read())
                 res = buf
-        except Exception as e:
-            raise Exception(f"download and load {url} error, exception {e}")
+            _validate_file_size(res.getbuffer().nbytes, max_file_size_kb)
+        except FtRuntimeException:
+            raise
+        except Exception:
+            logger.exception("failed to load multimodal content")
+            raise_mm(MMErr.DL_FAILED, ExceptionType.MM_DOWNLOAD_FAILED)
         url_data_cache_.insert_cache(url, res)
         return res
     else:
         cached_res.seek(0)
+        _validate_file_size(cached_res.getbuffer().nbytes, max_file_size_kb)
         return cached_res
 
 
