@@ -66,7 +66,7 @@ void CudaGraphRunner::captureDecode() {
         graph_instances_[bs].mem_hold_.attn_pyobj_ =
             py_attn_pyobj_method_(graph_instances_[bs].mem_hold_.py_model_inputs_, true);
         captureDecodeOneBatchSize(bs);
-        cuda_graph::finish_capture_session();
+        cuda_graph::finish_capture_session(graph_owner_lease_.context());
         replayAndSyncCheck(bs, "batch size");
         RTP_LLM_LOG_INFO("capture success for batch size: %d", bs);
     }

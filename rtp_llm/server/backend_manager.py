@@ -23,6 +23,24 @@ StreamObjectType = Union[Dict[str, Any], BaseModel]
 USAGE_HEADER = "USAGE"
 
 
+def _init_distributed_environment_for_backend(
+    engine_config: EngineConfig,
+    py_env_configs: PyEnvConfigs,
+    distributed_server: DistributedServer,
+) -> None:
+    if engine_config.parallelism_config.world_size <= 1:
+        return
+    graph_requested = bool(engine_config.hw_kernel_config.enable_cuda_graph)
+    init_distributed_environment(
+        engine_config.parallelism_config,
+        nccl_comm_config=distributed_server.get_nccl_comm_config(),
+        nccl_init_port=distributed_server.get_nccl_init_port(),
+        backend="nccl",
+        timeout=py_env_configs.distribute_config.dist_comm_timeout,
+        graph_required=graph_requested,
+    )
+
+
 class BackendManager(object):
     def __init__(self, py_env_configs: PyEnvConfigs):
         self.py_env_configs = py_env_configs
@@ -50,14 +68,12 @@ class BackendManager(object):
             nccl_comm_config=self._distributed_server.get_nccl_comm_config(),
         )
 
-        if engine_config.parallelism_config.world_size > 1:
-            init_distributed_environment(
-                engine_config.parallelism_config,
-                nccl_comm_config=self._distributed_server.get_nccl_comm_config(),
-                nccl_init_port=self._distributed_server.get_nccl_init_port(),
-                backend="nccl",
-                timeout=self.py_env_configs.distribute_config.dist_comm_timeout,
-            )
+        # This must remain before ModelFactory.from_model_configs: that call can
+        # construct the C++ graph runner, and ROCm TP capture requires its
+        # ProcessGroup-owned communicator to be ready before runner creation.
+        _init_distributed_environment_for_backend(
+            engine_config, self.py_env_configs, self._distributed_server
+        )
         world_info = get_world_info(
             self.py_env_configs.server_config,
             self.py_env_configs.distribute_config,

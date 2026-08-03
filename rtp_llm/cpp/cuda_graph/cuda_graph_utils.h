@@ -109,7 +109,7 @@ private:
 
 class CudaGraphCaptureGuard {
 public:
-    explicit CudaGraphCaptureGuard(rtp_llm::cuda_graph::GraphNcclCaptureContext* ctx = nullptr): ctx_(ctx) {
+    explicit CudaGraphCaptureGuard(const rtp_llm::cuda_graph::GraphLifecycleContext* ctx): ctx_(ctx) {
         rtp_llm::cuda_graph::enter_graph_capture(ctx_);
     }
 
@@ -129,5 +129,5 @@ public:
     CudaGraphCaptureGuard& operator=(CudaGraphCaptureGuard&&)      = delete;
 
 private:
-    rtp_llm::cuda_graph::GraphNcclCaptureContext* ctx_{nullptr};
+    const rtp_llm::cuda_graph::GraphLifecycleContext* ctx_{nullptr};
 };

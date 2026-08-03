@@ -1,4 +1,5 @@
 #include "rtp_llm/cpp/cuda_graph/cuda_graph_device_shims.h"
+#include <cinttypes>
 #if USING_ROCM
 #include <hip/hip_runtime.h>
 #else
@@ -30,101 +31,119 @@ py::module_& getGraphCaptureModule() {
 }
 #endif
 
-void register_graph_capture_nccl_comm(void* nccl_comm, int world_size, int rank) {
+GraphLifecycleContext acquire_graph_owner(uintptr_t owner_id) {
+    GraphLifecycleContext ctx;
 #if USING_ROCM
     py::gil_scoped_acquire gil;
-    if (world_size <= 1) {
-        try {
-            py::module_& graph_capture = getGraphCaptureModule();
-            graph_capture.attr("set_graph_capture_nccl_comm")(static_cast<uintptr_t>(0), 0, rank);
-        } catch (const py::error_already_set& e) {
-            RTP_LLM_LOG_WARNING("Failed to clear NCCL comm for graph capture: %s", e.what());
-        }
-        return;
-    }
-    if (nccl_comm == nullptr) {
-        RTP_LLM_LOG_INFO(
-            "Skip graph-capture NCCL comm registration for rank=%d: using pre-bootstrapped RCCL communicator", rank);
-        return;
-    }
     try {
-        py::module_& graph_capture = getGraphCaptureModule();
-        graph_capture.attr("set_graph_capture_nccl_comm")(reinterpret_cast<uintptr_t>(nccl_comm), world_size, rank);
-        RTP_LLM_LOG_INFO("Registered NCCL comm for graph capture (rank=%d, world_size=%d)", rank, world_size);
-    } catch (const py::error_already_set& e) {
-        RTP_LLM_LOG_WARNING(
-            "Failed to register NCCL comm for graph capture (rank=%d, world_size=%d): %s", rank, world_size, e.what());
-        throw std::runtime_error(std::string("Failed to register NCCL comm for graph capture: ") + e.what());
+        py::tuple result = getGraphCaptureModule().attr("acquire_graph_owner")(owner_id).cast<py::tuple>();
+        RTP_LLM_CHECK_WITH_INFO(py::len(result) == 2, "acquire_graph_owner must return a 2-tuple");
+        ctx.owner_token = result[0].cast<uint64_t>();
+        ctx.generation  = result[1].cast<uint64_t>();
+    } catch (...) {
+        std::exception_ptr original_error = std::current_exception();
+        try {
+            getGraphCaptureModule().attr("release_graph_owner_after_acquire_failure")(owner_id);
+        } catch (const std::exception& rollback_error) {
+            RTP_LLM_LOG_ERROR("Failed to rollback undecodable ROCm graph owner for owner_id=%" PRIuPTR ": %s",
+                              owner_id,
+                              rollback_error.what());
+        } catch (...) {
+            RTP_LLM_LOG_ERROR("Failed to rollback undecodable ROCm graph owner for owner_id=%" PRIuPTR, owner_id);
+        }
+        std::rethrow_exception(original_error);
+    }
+    if (ctx.owner_token == 0) {
+        RTP_LLM_LOG_INFO("ROCm graph owner lease is inactive for owner_id=%" PRIuPTR, owner_id);
+    } else {
+        RTP_LLM_LOG_INFO(
+            "Acquired ROCm graph owner lease token=%" PRIu64 " generation=%" PRIu64, ctx.owner_token, ctx.generation);
     }
 #else
-    (void)nccl_comm;
-    (void)world_size;
-    (void)rank;
+    (void)owner_id;
+#endif
+    return ctx;
+}
+
+void begin_capture_planning(const GraphLifecycleContext& ctx) {
+#if USING_ROCM
+    if (ctx.owner_token == 0) {
+        return;
+    }
+    py::gil_scoped_acquire gil;
+    getGraphCaptureModule().attr("begin_capture_planning")(ctx.owner_token, ctx.generation);
+#else
+    (void)ctx;
 #endif
 }
 
-void enter_graph_capture(GraphNcclCaptureContext* ctx) {
+void cancel_capture_planning(const GraphLifecycleContext& ctx) {
 #if USING_ROCM
-    // State ownership: C++ owns in_hip_graph_capture (atomic bool); Python owns
-    // _rccl_comm/_rccl_world_size.  On failure we roll back both sides:
-    //   1. setHipGraphCaptureEnabled(false)       -- resets C++ capture flag
-    //   2. set_graph_capture_nccl_comm(0, 0, rank) -- triggers Python _clear_hipgraph_capture_nccl_comm()
-    py::gil_scoped_acquire gil;
-    rocm::setHipGraphCaptureEnabled(true);
-    try {
-        py::module_& graph_capture = getGraphCaptureModule();
-        if (ctx && ctx->comm_handle != 0) {
-            graph_capture.attr("enter_graph_capture_mode")(ctx->comm_handle, ctx->world_size, ctx->rank);
-        } else {
-            graph_capture.attr("enter_graph_capture_mode")(0, 0, 0);
-        }
-    } catch (const py::error_already_set& e) {
-        rocm::setHipGraphCaptureEnabled(false);
-        const int rank = ctx ? ctx->rank : -1;
-        try {
-            py::module_& graph_capture = getGraphCaptureModule();
-            graph_capture.attr("set_graph_capture_nccl_comm")(static_cast<uintptr_t>(0), 0, rank);
-        } catch (const py::error_already_set& clear_e) {
-            RTP_LLM_LOG_WARNING("Failed to clear NCCL comm after enter_graph_capture failure: %s", clear_e.what());
-        }
-        RTP_LLM_LOG_WARNING("Failed to enter graph capture mode: %s", e.what());
-        throw;
+    if (ctx.owner_token == 0) {
+        return;
     }
+    py::gil_scoped_acquire gil;
+    getGraphCaptureModule().attr("cancel_capture_planning")(ctx.owner_token, ctx.generation);
+#else
+    (void)ctx;
+#endif
+}
+
+void prepare_capture_arena(const GraphLifecycleContext& ctx) {
+#if USING_ROCM
+    if (ctx.owner_token == 0) {
+        return;
+    }
+    py::gil_scoped_acquire gil;
+    getGraphCaptureModule().attr("prepare_capture_arena")(ctx.owner_token, ctx.generation);
+#else
+    (void)ctx;
+#endif
+}
+
+void release_graph_owner(const GraphLifecycleContext& ctx) {
+#if USING_ROCM
+    if (ctx.owner_token == 0) {
+        return;
+    }
+    py::gil_scoped_acquire gil;
+    getGraphCaptureModule().attr("release_graph_owner")(ctx.owner_token, ctx.generation);
+#else
+    (void)ctx;
+#endif
+}
+
+void enter_graph_capture(const GraphLifecycleContext* ctx) {
+#if USING_ROCM
+    RTP_LLM_CHECK_WITH_INFO(ctx != nullptr, "ROCm graph capture requires a lifecycle context");
+    if (ctx->owner_token == 0) {
+        // Degenerate TP has no graph communicator to borrow, but HIPGraph
+        // capture itself remains valid and collectives stay on their normal
+        // eager implementation.
+        rocm::setHipGraphCaptureEnabled(true);
+        return;
+    }
+    py::gil_scoped_acquire gil;
+    // Publish the capture flag only after the token/generation is validated.
+    getGraphCaptureModule().attr("enter_graph_capture_mode")(ctx->owner_token, ctx->generation);
+    rocm::setHipGraphCaptureEnabled(true);
 #else
     (void)ctx;
     CaptureCheck::in_cuda_graph_capture = true;
 #endif
 }
 
-void exit_graph_capture(GraphNcclCaptureContext* ctx) {
+void exit_graph_capture(const GraphLifecycleContext* ctx) {
 #if USING_ROCM
-    // exit_graph_capture_mode() is intentionally a no-op on Python side:
-    // _rccl_comm is preserved across capture sessions for reuse in replay.
-    // C++ unconditionally calls setHipGraphCaptureEnabled(false) after this
-    // function, regardless of success or failure.
-    py::gil_scoped_acquire gil;
-    try {
-        py::module_& graph_capture = getGraphCaptureModule();
-        graph_capture.attr("exit_graph_capture_mode")();
-    } catch (const py::error_already_set& e) {
-        const unsigned long long comm_handle = ctx ? static_cast<unsigned long long>(ctx->comm_handle) : 0ULL;
-        const int                rank        = ctx ? ctx->rank : -1;
-        const int                world_size  = ctx ? ctx->world_size : -1;
-        RTP_LLM_LOG_WARNING("Failed to exit graph capture mode (comm_handle=%llu, rank=%d, world_size=%d): %s",
-                            comm_handle,
-                            rank,
-                            world_size,
-                            e.what());
-        try {
-            py::module_& graph_capture = getGraphCaptureModule();
-            graph_capture.attr("set_graph_capture_nccl_comm")(static_cast<uintptr_t>(0), 0, rank);
-        } catch (const py::error_already_set& clear_e) {
-            RTP_LLM_LOG_WARNING("Failed to clear NCCL comm after exit_graph_capture failure: %s", clear_e.what());
-        }
-        rocm::setHipGraphCaptureEnabled(false);
-        throw;
-    }
+    // The device flag must never remain set after capture unwinds, even if
+    // the context or Python-side state validation reports an error.
     rocm::setHipGraphCaptureEnabled(false);
+    RTP_LLM_CHECK_WITH_INFO(ctx != nullptr, "ROCm graph capture requires a lifecycle context");
+    if (ctx->owner_token == 0) {
+        return;
+    }
+    py::gil_scoped_acquire gil;
+    getGraphCaptureModule().attr("exit_graph_capture_mode")(ctx->owner_token, ctx->generation);
 #else
     (void)ctx;
     CaptureCheck::in_cuda_graph_capture = false;
@@ -200,12 +219,15 @@ void graphCaptureBegin(at::cuda::CUDAGraph& graph, GraphPoolHandle pool) {
 #endif
 }
 
-void finish_capture_session() {
+void finish_capture_session(const GraphLifecycleContext& ctx) {
 #if USING_ROCM
+    if (ctx.owner_token == 0) {
+        return;
+    }
     py::gil_scoped_acquire gil;
     try {
         py::module_& graph_capture = getGraphCaptureModule();
-        graph_capture.attr("finish_hipgraph_capture_session")();
+        graph_capture.attr("finish_hipgraph_capture_session")(ctx.owner_token, ctx.generation);
     } catch (const py::error_already_set& e) {
         RTP_LLM_LOG_WARNING("Failed to finish capture session: %s", e.what());
         throw;

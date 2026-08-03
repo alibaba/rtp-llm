@@ -85,14 +85,14 @@ private:
     torch::Tensor                                   residual_scale_;
     ModelBufferHolder                               buffer_holder_;
 
-    GraphBase* graph_runner_{nullptr};
-    py::object py_model_;
-    py::object held_attn_pyobj_;
-    bool       enable_cuda_graph_{false};
-    bool       is_prefill_cuda_graph_mode_{false};
-    bool       use_spec_decoding_{false};
-    bool       enable_device_perf_{false};
-    bool       check_nan_{false};
+    std::unique_ptr<GraphBase> graph_runner_{nullptr};
+    py::object                 py_model_;
+    py::object                 held_attn_pyobj_;
+    bool                       enable_cuda_graph_{false};
+    bool                       is_prefill_cuda_graph_mode_{false};
+    bool                       use_spec_decoding_{false};
+    bool                       enable_device_perf_{false};
+    bool                       check_nan_{false};
 
     std::unique_ptr<IContextParallelProcessor> context_parallel_processor_{nullptr};
     std::unique_ptr<CacheStoreAsyncWriter>     cache_store_async_writer_;
@@ -229,14 +229,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
         }
 
-        graph_runner_ = new CudaGraphRunner(graph_params, py_instance);
-        RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be nullptr in PyWrapper");
-        {
-            void* nccl_comm = cuda_graph::getGraphCaptureTpNcclComm();
-            cuda_graph::register_graph_capture_nccl_comm(nccl_comm,
-                                                         static_cast<int>(params.parallelism_config.tp_size),
-                                                         static_cast<int>(params.parallelism_config.tp_rank));
-        }
+        graph_runner_ = std::make_unique<CudaGraphRunner>(graph_params, py_instance);
 #else
         RTP_LLM_CHECK_WITH_INFO(false, "CUDA/HIP Graph is only supported on CUDA/ROCm platform");
 #endif
@@ -247,7 +240,6 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
             graph_runner_->setTokenTypeEmbedding(weights_.token_type_embedding->kernel.cuda());
         }
         graph_runner_->setInputEmbeddingScalar(description_.input_embedding_scalar);
-        RTP_LLM_CHECK_WITH_INFO(graph_runner_ != nullptr, "graph_runner_ can't be null");
         auto py_initialize_method = py_instance.attr("initialize");
         py_init_result            = py_initialize_method(init_resources);
         graph_runner_->initCapture();

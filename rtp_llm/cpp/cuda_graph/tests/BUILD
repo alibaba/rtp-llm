@@ -13,6 +13,41 @@ cc_test(
     ] + torch_deps(),
 )
 
+cc_test(
+    name = "graph_owner_lease_test",
+    srcs = ["graph_owner_lease_test.cc"],
+    copts = copts(),
+    # Deliberately untagged: this target exercises pure host lifecycle state
+    # and does not include or link any GPU graph implementation.
+    deps = [
+        "//rtp_llm/cpp/config:static_config",
+        "//rtp_llm/cpp/cuda_graph:graph_capture_lifecycle",
+        "//rtp_llm/cpp/utils:core_utils",
+        "@com_google_googletest//:gtest_main",
+    ],
+)
+
+cc_test(
+    name = "hipgraph_capture_handshake_test",
+    srcs = ["hipgraph_capture_handshake_test.cc"],
+    copts = copts(),
+    tags = ["rocm"],
+    timeout = "moderate",
+    exec_properties = {"gpu": "MI308X-ROCM7"},
+    deps = [
+        "//rtp_llm/cpp/config:static_config",
+        "//rtp_llm/cpp/cuda_graph:cuda_graph_impl",
+        "@com_google_googletest//:gtest_main",
+        "@local_config_python//:python_headers",
+        "@local_config_python//:python_lib",
+    ] + select({
+        "@//:using_rocm": [
+            "//rtp_llm/models_py/bindings/rocm:rocm_host_utils",
+        ],
+        "//conditions:default": [],
+    }) + torch_deps(),
+)
+
 cc_library(
     name = "test_cuda_graph_runner_libs",
     srcs = [

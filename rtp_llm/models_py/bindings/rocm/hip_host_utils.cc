@@ -17,10 +17,6 @@ bool isHipGraphCaptureEnabled() {
     return in_hip_graph_capture.load(std::memory_order_relaxed);
 }
 
-void* getHipGraphTpNcclComm() {
-    return nullptr;
-}
-
 static const char* _hipGetErrorEnum(hipError_t error) {
     return hipGetErrorString(error);
 }

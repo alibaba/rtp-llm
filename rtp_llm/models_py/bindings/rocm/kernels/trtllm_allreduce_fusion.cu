@@ -2,7 +2,6 @@
 // Copyright (C) 2024-2025, Advanced Micro Devices, Inc. All rights reserved.
 // Adapted from atrex trtllm_all_reduce_fusion for rtp-llm ROCm backend.
 
-#include <iostream>
 #include <functional>
 #include <limits>
 #include <vector>
@@ -996,14 +995,8 @@ public:
         comm_ptrs_buf_len_ = comm_ptrs_buf_len;
         max_thread_blocks_ = max_thread_blocks;
 
-        auto check_malloc = [](hipError_t err, const char* name, size_t bytes) {
-            TORCH_CHECK(err == gpuSuccess,
-                        "hipMalloc failed for ",
-                        name,
-                        " (requested ",
-                        bytes,
-                        " bytes): ",
-                        hipGetErrorString(err));
+        auto check_hip = [](hipError_t err, const char* operation, size_t bytes) {
+            TORCH_CHECK(err == gpuSuccess, operation, " failed for ", bytes, " bytes: ", hipGetErrorString(err));
         };
 
         size_t sync_clock_bytes    = max_thread_blocks_ * sizeof(int);
@@ -1011,70 +1004,146 @@ public:
         size_t data_bytes          = static_cast<size_t>(size_in_bytes_) * 2;
         size_t comm_ptrs_bytes     = comm_ptrs_buf_len_ * sizeof(CommPtrs);
 
-        check_malloc(gpuMalloc(&sync_clock_, sync_clock_bytes), "sync_clock", sync_clock_bytes);
-        check_malloc(gpuMalloc(&barrier_flags_, barrier_flags_bytes), "barrier_flags", barrier_flags_bytes);
-        check_malloc(gpuMalloc(&data_, data_bytes), "data", data_bytes);
-        check_malloc(gpuMalloc(&comm_ptrs_, comm_ptrs_bytes), "comm_ptrs", comm_ptrs_bytes);
+        try {
+            check_hip(gpuMalloc(&sync_clock_, sync_clock_bytes), "hipMalloc(sync_clock)", sync_clock_bytes);
+            check_hip(gpuMalloc(&barrier_flags_, barrier_flags_bytes), "hipMalloc(barrier_flags)", barrier_flags_bytes);
+            check_hip(gpuMalloc(&data_, data_bytes), "hipMalloc(data)", data_bytes);
+            check_hip(gpuMalloc(&comm_ptrs_, comm_ptrs_bytes), "hipMalloc(comm_ptrs)", comm_ptrs_bytes);
 
-        gpuMemset(sync_clock_, 0, sync_clock_bytes);
-        gpuMemset(barrier_flags_, 0, barrier_flags_bytes);
-        used_comm_ptrs_ = 0;
-        round_robin_    = round_robin;
+            check_hip(gpuMemset(sync_clock_, 0, sync_clock_bytes), "hipMemset(sync_clock)", sync_clock_bytes);
+            check_hip(
+                gpuMemset(barrier_flags_, 0, barrier_flags_bytes), "hipMemset(barrier_flags)", barrier_flags_bytes);
+            used_comm_ptrs_ = 0;
+            round_robin_    = round_robin;
+        } catch (...) {
+            close_peer_mappings();
+            release_local_exports();
+            throw;
+        }
     }
 
     ~CommWorkspace() {
-        // Close IPC handles opened from other ranks
+        close_peer_mappings();
+        if (!released_) {
+            try {
+                TORCH_WARN("[TrtllmAllreduce] workspace destroyed without coordinated two-phase release; "
+                           "retaining local exports until process exit");
+            } catch (...) {}
+        }
+    }
+
+    // Phase one: close only mappings imported from peers. Local exports stay
+    // alive until every rank crosses the control-group barrier.
+    void close_peer_mappings() noexcept {
+        if (peer_mappings_closed_) {
+            return;
+        }
         for (size_t i = 0; i < ipc_barrier_flags_.size(); ++i) {
-            if (static_cast<int>(i) != rank_) {
-                hipIpcCloseMemHandle(ipc_barrier_flags_[i]);
+            if (static_cast<int>(i) != rank_ && ipc_barrier_flags_[i] != nullptr) {
+                logHipFailure(hipIpcCloseMemHandle(ipc_barrier_flags_[i]), "close barrier mapping", i);
             }
         }
+        ipc_barrier_flags_.clear();
         for (size_t i = 0; i < ipc_data_.size(); ++i) {
-            if (static_cast<int>(i) != rank_) {
-                hipIpcCloseMemHandle(ipc_data_[i]);
+            if (static_cast<int>(i) != rank_ && ipc_data_[i] != nullptr) {
+                logHipFailure(hipIpcCloseMemHandle(ipc_data_[i]), "close data mapping", i);
             }
         }
-        // Close IPC handles from CUDA Graph captured pointers
+        ipc_data_.clear();
         for (auto& handles : captured_ipc_handles_) {
             for (size_t i = 0; i < handles.size(); ++i) {
-                if (static_cast<int>(i) != rank_) {
-                    hipIpcCloseMemHandle(handles[i]);
+                if (static_cast<int>(i) != rank_ && handles[i] != nullptr) {
+                    logHipFailure(hipIpcCloseMemHandle(handles[i]), "close captured mapping", i);
                 }
             }
         }
-        gpuFree(sync_clock_);
-        gpuFree(barrier_flags_);
-        gpuFree(data_);
-        gpuFree(comm_ptrs_);
+        captured_ipc_handles_.clear();
+        unregistered_ptrs_.clear();
+        unregistered_base_ptrs_.clear();
+        ptr_to_comm_ptrs_.clear();
+        pending_capture_ptrs_.clear();
+        used_comm_ptrs_             = 0;
+        capture_snapshot_used_      = 0;
+        capture_snapshot_ipc_count_ = 0;
+        peer_mappings_closed_       = true;
+    }
+
+    // Phase two: release allocations exported by this rank. This method is
+    // noexcept/idempotent so it is also safe during partial construction.
+    void release_local_exports() noexcept {
+        if (released_) {
+            return;
+        }
+        if (!peer_mappings_closed_) {
+            try {
+                TORCH_WARN("[TrtllmAllreduce] release_local_exports called before close_peer_mappings; "
+                           "closing peer mappings first");
+            } catch (...) {}
+            close_peer_mappings();
+        }
+        if (sync_clock_ != nullptr) {
+            logHipFailure(gpuFree(sync_clock_), "free sync_clock");
+            sync_clock_ = nullptr;
+        }
+        if (barrier_flags_ != nullptr) {
+            logHipFailure(gpuFree(barrier_flags_), "free barrier_flags");
+            barrier_flags_ = nullptr;
+        }
+        if (data_ != nullptr) {
+            logHipFailure(gpuFree(data_), "free data");
+            data_ = nullptr;
+        }
+        if (comm_ptrs_ != nullptr) {
+            logHipFailure(gpuFree(comm_ptrs_), "free comm_ptrs");
+            comm_ptrs_ = nullptr;
+        }
+        released_ = true;
     }
 
     Tensor get_barrier_handle() {
+        assertWorkspaceUsable("get_barrier_handle");
         return ipc_details::get_handle(barrier_flags_);
     }
 
     Tensor get_data_handle() {
+        assertWorkspaceUsable("get_data_handle");
         return ipc_details::get_handle(data_);
     }
 
     void open_barrier_handles(std::vector<Tensor> handles) {
+        assertWorkspaceUsable("open_barrier_handles");
         ipc_details::open_handles(rank_, handles, barrier_flags_, ipc_barrier_flags_);
     }
 
     void open_data_handles(std::vector<Tensor> handles) {
+        assertWorkspaceUsable("open_data_handles");
         ipc_details::open_handles(rank_, handles, data_, ipc_data_);
-        CommPtrs* cptrs = new CommPtrs[comm_ptrs_buf_len_];
+        std::vector<CommPtrs> cptrs(comm_ptrs_buf_len_);
         for (int i = 0; i < comm_ptrs_buf_len_; ++i) {
             for (int j = 0; j < world_size_; ++j) {
                 int r                 = round_robin_ ? ((rank_ + j) % world_size_) : j;
                 cptrs[i].data_ptrs[j] = ipc_data_[r];
             }
         }
-        gpuMemcpy(comm_ptrs_, cptrs, comm_ptrs_buf_len_ * sizeof(CommPtrs), gpuMemcpyHostToDevice);
+        auto copy_error =
+            gpuMemcpy(comm_ptrs_, cptrs.data(), comm_ptrs_buf_len_ * sizeof(CommPtrs), gpuMemcpyHostToDevice);
+        TORCH_CHECK(copy_error == gpuSuccess,
+                    "hipMemcpy failed while publishing base communication pointers: ",
+                    hipGetErrorString(copy_error));
         used_comm_ptrs_ = 1;
-        delete[] cptrs;
     }
 
     std::tuple<CommMeta, CommPtrs*> get_comm_data(const Tensor& input, gpuStream_t stream) {
+        assertWorkspaceUsable("get_comm_data");
+        TORCH_CHECK(ipc_barrier_flags_.size() == static_cast<size_t>(world_size_)
+                        && ipc_data_.size() == static_cast<size_t>(world_size_),
+                    "[TrtllmAllreduce] IPC mappings are incomplete; discard the captured graph and re-capture.");
+        for (int rank = 0; rank < world_size_; ++rank) {
+            TORCH_CHECK(ipc_barrier_flags_[rank] != nullptr && ipc_data_[rank] != nullptr,
+                        "[TrtllmAllreduce] IPC mapping for rank ",
+                        rank,
+                        " is incomplete; discard the captured graph and re-capture.");
+        }
         int64_t size = input.numel() * input.element_size();
         void*   ptr  = (void*)input.data_ptr();
 
@@ -1088,22 +1157,19 @@ public:
 
         CommPtrs* cptrs;
         bool      cache_hit = false;
-        auto      it = ptr_to_comm_ptrs_.find(ptr);
+        auto      it        = ptr_to_comm_ptrs_.find(ptr);
         if (it != ptr_to_comm_ptrs_.end()) {
             // Validate that the allocation backing this data_ptr hasn't
             // changed (freed + reused by the caching allocator).  If the
             // range no longer matches, the cached IPC slot is stale.
-            auto& slot = it->second;
+            auto&  slot      = it->second;
             void*  cur_start = nullptr;
             size_t cur_size  = 0;
             hipPointerGetAttribute(
-                &cur_start, HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR,
-                reinterpret_cast<hipDeviceptr_t>(ptr));
-            hipPointerGetAttribute(
-                &cur_size, HIP_POINTER_ATTRIBUTE_RANGE_SIZE,
-                reinterpret_cast<hipDeviceptr_t>(ptr));
+                &cur_start, HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR, reinterpret_cast<hipDeviceptr_t>(ptr));
+            hipPointerGetAttribute(&cur_size, HIP_POINTER_ATTRIBUTE_RANGE_SIZE, reinterpret_cast<hipDeviceptr_t>(ptr));
             if (cur_start == slot.range_start && cur_size == slot.range_size) {
-                cptrs = slot.comm_ptrs;
+                cptrs     = slot.comm_ptrs;
                 cache_hit = true;
             } else {
                 // Stale entry — allocation was recycled.  Erase so we fall
@@ -1139,11 +1205,13 @@ public:
     }
 
     void capture_clear() {
+        assertWorkspaceUsable("capture_clear");
         unregistered_ptrs_.clear();
         unregistered_base_ptrs_.clear();
     }
 
     std::vector<Tensor> get_captured_handles() {
+        assertWorkspaceUsable("get_captured_handles");
         int                 num_datas = unregistered_ptrs_.size();
         std::vector<Tensor> ipc_handles;
         ipc_handles.reserve(num_datas);
@@ -1158,6 +1226,7 @@ public:
     }
 
     Tensor get_captured_offsets() {
+        assertWorkspaceUsable("get_captured_offsets");
         int                  num_datas = unregistered_ptrs_.size();
         std::vector<int64_t> offsets;
         offsets.reserve(num_datas);
@@ -1173,8 +1242,9 @@ public:
     }
 
     void open_captured_handles(std::vector<Tensor>& handles, std::vector<int64_t>& offsets, int64_t ptr_idx) {
-        void*              ptr      = unregistered_ptrs_[ptr_idx];
-        void*              base_ptr = unregistered_base_ptrs_[ptr_idx];
+        assertWorkspaceUsable("open_captured_handles");
+        void* ptr      = unregistered_ptrs_[ptr_idx];
+        void* base_ptr = unregistered_base_ptrs_[ptr_idx];
 
         // Defensive check: verify the cached pointer still belongs to a valid
         // device allocation.  The caching allocator may have freed and re-used
@@ -1190,55 +1260,80 @@ public:
         // HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR / HIP_POINTER_ATTRIBUTE_RANGE_SIZE
         // to query the allocation range on ROCm.
         hipPointerAttribute_t ptr_attrs = {};
-        hipError_t attr_err = hipPointerGetAttributes(&ptr_attrs, base_ptr);
+        hipError_t            attr_err  = hipPointerGetAttributes(&ptr_attrs, base_ptr);
         TORCH_CHECK(attr_err == hipSuccess,
-                    "[TrtllmAllreduce] cached base_ptr ", base_ptr,
-                    " (ptr_idx=", ptr_idx, ") failed hipPointerGetAttributes (err=",
-                    static_cast<int>(attr_err), "). The pointer is no longer valid — "
+                    "[TrtllmAllreduce] cached base_ptr ",
+                    base_ptr,
+                    " (ptr_idx=",
+                    ptr_idx,
+                    ") failed hipPointerGetAttributes (err=",
+                    static_cast<int>(attr_err),
+                    "). The pointer is no longer valid — "
                     "discard the captured graph and re-capture.");
         TORCH_CHECK(ptr_attrs.type == hipMemoryTypeDevice || ptr_attrs.type == hipMemoryTypeUnified,
-                    "[TrtllmAllreduce] cached base_ptr ", base_ptr,
-                    " (ptr_idx=", ptr_idx, ") is not device memory (type=",
-                    static_cast<int>(ptr_attrs.type), "). The underlying allocation "
+                    "[TrtllmAllreduce] cached base_ptr ",
+                    base_ptr,
+                    " (ptr_idx=",
+                    ptr_idx,
+                    ") is not device memory (type=",
+                    static_cast<int>(ptr_attrs.type),
+                    "). The underlying allocation "
                     "may have been freed. Discard the captured graph and re-capture.");
 
         // Query allocation base address and size via hipPointerGetAttribute.
-        void*  range_start = nullptr;
-        size_t range_size  = 0;
-        hipError_t start_err = hipPointerGetAttribute(
-            &range_start, HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR,
-            reinterpret_cast<hipDeviceptr_t>(base_ptr));
+        void*      range_start = nullptr;
+        size_t     range_size  = 0;
+        hipError_t start_err   = hipPointerGetAttribute(
+            &range_start, HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR, reinterpret_cast<hipDeviceptr_t>(base_ptr));
         hipError_t size_err = hipPointerGetAttribute(
-            &range_size, HIP_POINTER_ATTRIBUTE_RANGE_SIZE,
-            reinterpret_cast<hipDeviceptr_t>(base_ptr));
-        TORCH_CHECK(start_err == hipSuccess && size_err == hipSuccess
-                    && range_start != nullptr && range_size > 0,
+            &range_size, HIP_POINTER_ATTRIBUTE_RANGE_SIZE, reinterpret_cast<hipDeviceptr_t>(base_ptr));
+        TORCH_CHECK(start_err == hipSuccess && size_err == hipSuccess && range_start != nullptr && range_size > 0,
                     "[TrtllmAllreduce] failed to query allocation range for base_ptr ",
-                    base_ptr, " (ptr_idx=", ptr_idx, ", start_err=",
-                    static_cast<int>(start_err), ", size_err=",
-                    static_cast<int>(size_err), "). Discard the captured graph "
+                    base_ptr,
+                    " (ptr_idx=",
+                    ptr_idx,
+                    ", start_err=",
+                    static_cast<int>(start_err),
+                    ", size_err=",
+                    static_cast<int>(size_err),
+                    "). Discard the captured graph "
                     "and re-capture.");
         TORCH_CHECK(reinterpret_cast<char*>(base_ptr) >= reinterpret_cast<char*>(range_start)
-                    && reinterpret_cast<char*>(ptr) < reinterpret_cast<char*>(range_start) + range_size,
-                    "[TrtllmAllreduce] cached ptr ", ptr, " (base_ptr=", base_ptr,
-                    ", ptr_idx=", ptr_idx, ") falls outside the current allocation "
-                    "[", range_start, ", +", range_size,
+                        && reinterpret_cast<char*>(ptr) < reinterpret_cast<char*>(range_start) + range_size,
+                    "[TrtllmAllreduce] cached ptr ",
+                    ptr,
+                    " (base_ptr=",
+                    base_ptr,
+                    ", ptr_idx=",
+                    ptr_idx,
+                    ") falls outside the current allocation "
+                    "[",
+                    range_start,
+                    ", +",
+                    range_size,
                     "). The allocation was likely freed and re-used. "
                     "Discard the captured graph and re-capture.");
 
-        std::vector<void*> ipc_data;
+        // Register the owner slot before opening peers. If opening rank N
+        // throws, the already-opened mappings remain reachable by rollback.
+        captured_ipc_handles_.emplace_back();
+        auto& ipc_data = captured_ipc_handles_.back();
         ipc_details::open_handles(rank_, handles, base_ptr, ipc_data);
-        // Store opened IPC handles so they can be closed in the destructor.
-        captured_ipc_handles_.push_back(ipc_data);
-        CommPtrs cptrs;
+        // Keep the registered base mappings unchanged for hipIpcCloseMemHandle;
+        // offsets are applied only to the pointers published to the kernel.
+        std::vector<void*> adjusted_ipc_data = ipc_data;
+        CommPtrs           cptrs;
         for (size_t i = 0; i < offsets.size(); ++i) {
-            ipc_data[i] = (void*)((char*)ipc_data[i] + offsets[i]);
+            adjusted_ipc_data[i] = (void*)((char*)adjusted_ipc_data[i] + offsets[i]);
         }
         for (size_t i = 0; i < offsets.size(); ++i) {
             int r              = round_robin_ ? ((rank_ + i) % world_size_) : i;
-            cptrs.data_ptrs[i] = ipc_data[r];
+            cptrs.data_ptrs[i] = adjusted_ipc_data[r];
         }
-        gpuMemcpy(comm_ptrs_ + used_comm_ptrs_, &cptrs, sizeof(CommPtrs), gpuMemcpyHostToDevice);
+        auto copy_error = gpuMemcpy(comm_ptrs_ + used_comm_ptrs_, &cptrs, sizeof(CommPtrs), gpuMemcpyHostToDevice);
+        TORCH_CHECK(copy_error == gpuSuccess,
+                    "hipMemcpy failed while publishing captured communication pointers: ",
+                    hipGetErrorString(copy_error));
 
         // Record allocation range at registration time so that cache hits
         // can detect freed-and-reused data_ptrs (same address, different
@@ -1246,13 +1341,9 @@ public:
         void*  reg_start = nullptr;
         size_t reg_size  = 0;
         hipPointerGetAttribute(
-            &reg_start, HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR,
-            reinterpret_cast<hipDeviceptr_t>(ptr));
-        hipPointerGetAttribute(
-            &reg_size, HIP_POINTER_ATTRIBUTE_RANGE_SIZE,
-            reinterpret_cast<hipDeviceptr_t>(ptr));
-        ptr_to_comm_ptrs_[ptr] = CachedSlot{
-            comm_ptrs_ + used_comm_ptrs_, reg_start, reg_size};
+            &reg_start, HIP_POINTER_ATTRIBUTE_RANGE_START_ADDR, reinterpret_cast<hipDeviceptr_t>(ptr));
+        hipPointerGetAttribute(&reg_size, HIP_POINTER_ATTRIBUTE_RANGE_SIZE, reinterpret_cast<hipDeviceptr_t>(ptr));
+        ptr_to_comm_ptrs_[ptr] = CachedSlot{comm_ptrs_ + used_comm_ptrs_, reg_start, reg_size};
 
         // Track every ptr registered in this session (vector, NOT set) so
         // that duplicate data_ptrs are counted correctly for rollback.
@@ -1264,16 +1355,18 @@ public:
     // to committed state.  After this call, invalidate_capture() will NOT
     // touch these slots — only future (failed) capture sessions are rolled back.
     void commit_capture() {
+        assertWorkspaceUsable("commit_capture");
         pending_capture_ptrs_.clear();
         // Reset snapshot — nothing to roll back.
-        capture_snapshot_used_       = used_comm_ptrs_;
-        capture_snapshot_ipc_count_  = static_cast<int>(captured_ipc_handles_.size());
+        capture_snapshot_used_      = used_comm_ptrs_;
+        capture_snapshot_ipc_count_ = static_cast<int>(captured_ipc_handles_.size());
     }
 
     // Begin a new capture session: snapshot the current high-water marks so
     // that invalidate_capture() can rewind to exactly this point.
     // Called from Python before the per-handle open loop begins.
     void begin_capture_session() {
+        assertWorkspaceUsable("begin_capture_session");
         capture_snapshot_used_      = used_comm_ptrs_;
         capture_snapshot_ipc_count_ = static_cast<int>(captured_ipc_handles_.size());
         pending_capture_ptrs_.clear();
@@ -1286,6 +1379,7 @@ public:
     // This handles duplicate data_ptrs correctly: we roll back by the
     // watermark difference (slot count), not by set cardinality.
     void invalidate_capture() {
+        assertWorkspaceUsable("invalidate_capture");
         // 1. Rewind used_comm_ptrs_ to the snapshot watermark.
         used_comm_ptrs_ = capture_snapshot_used_;
 
@@ -1299,9 +1393,9 @@ public:
         // 3. Close and remove IPC handles opened during this session.
         while (static_cast<int>(captured_ipc_handles_.size()) > capture_snapshot_ipc_count_) {
             auto& last = captured_ipc_handles_.back();
-            for (void* ipc_ptr : last) {
-                if (ipc_ptr) {
-                    hipIpcCloseMemHandle(ipc_ptr);
+            for (size_t i = 0; i < last.size(); ++i) {
+                if (static_cast<int>(i) != rank_ && last[i] != nullptr) {
+                    logHipFailure(hipIpcCloseMemHandle(last[i]), "rollback captured mapping", i);
                 }
             }
             captured_ipc_handles_.pop_back();
@@ -1309,27 +1403,75 @@ public:
     }
 
 private:
-    int                                  device_id_;
-    int                                  rank_;
-    int                                  world_size_;
-    int64_t                              size_in_bytes_;
-    int                                  comm_ptrs_buf_len_;
-    int                                  max_thread_blocks_;
-    bool                                 round_robin_;
-    void*                                sync_clock_;
-    void*                                barrier_flags_;
-    void*                                data_;
-    std::vector<void*>                   ipc_barrier_flags_;
-    std::vector<void*>                   ipc_data_;
-    std::vector<void*>                   unregistered_ptrs_;
-    std::vector<void*>                   unregistered_base_ptrs_;
-    std::vector<std::vector<void*>>      captured_ipc_handles_;
-    CommPtrs*                            comm_ptrs_;
-    int                                  used_comm_ptrs_;
+    void assertWorkspaceUsable(const char* operation) const {
+        TORCH_CHECK(!peer_mappings_closed_ && !released_,
+                    "[TrtllmAllreduce] ",
+                    operation,
+                    " called after workspace teardown; discard the captured graph and re-capture.");
+    }
+
+    void logHipFailure(hipError_t  error,
+                       const char* operation,
+                       size_t      index = std::numeric_limits<size_t>::max()) const noexcept {
+        if (error == hipSuccess) {
+            return;
+        }
+        try {
+            if (index == std::numeric_limits<size_t>::max()) {
+                TORCH_WARN("[TrtllmAllreduce] rank=",
+                           rank_,
+                           " device=",
+                           device_id_,
+                           " operation=",
+                           operation,
+                           " error=",
+                           static_cast<int>(error),
+                           " (",
+                           hipGetErrorString(error),
+                           ")");
+            } else {
+                TORCH_WARN("[TrtllmAllreduce] rank=",
+                           rank_,
+                           " device=",
+                           device_id_,
+                           " operation=",
+                           operation,
+                           " index=",
+                           index,
+                           " error=",
+                           static_cast<int>(error),
+                           " (",
+                           hipGetErrorString(error),
+                           ")");
+            }
+        } catch (...) {
+            // Teardown diagnostics must never violate the noexcept contract.
+        }
+    }
+
+    int                                   device_id_;
+    int                                   rank_;
+    int                                   world_size_;
+    int64_t                               size_in_bytes_;
+    int                                   comm_ptrs_buf_len_;
+    int                                   max_thread_blocks_;
+    bool                                  round_robin_{true};
+    void*                                 sync_clock_{nullptr};
+    void*                                 barrier_flags_{nullptr};
+    void*                                 data_{nullptr};
+    std::vector<void*>                    ipc_barrier_flags_;
+    std::vector<void*>                    ipc_data_;
+    std::vector<void*>                    unregistered_ptrs_;
+    std::vector<void*>                    unregistered_base_ptrs_;
+    std::vector<std::vector<void*>>       captured_ipc_handles_;
+    CommPtrs*                             comm_ptrs_{nullptr};
+    int                                   used_comm_ptrs_{0};
+    bool                                  peer_mappings_closed_{false};
+    bool                                  released_{false};
     std::unordered_map<void*, CachedSlot> ptr_to_comm_ptrs_;
-    std::vector<void*>                   pending_capture_ptrs_;      // ptrs registered in current session (allows duplicates)
-    int                                  capture_snapshot_used_ = 0;       // used_comm_ptrs_ at session start
-    int                                  capture_snapshot_ipc_count_ = 0;  // captured_ipc_handles_.size() at session start
+    std::vector<void*> pending_capture_ptrs_;            // ptrs registered in current session (allows duplicates)
+    int                capture_snapshot_used_      = 0;  // used_comm_ptrs_ at session start
+    int                capture_snapshot_ipc_count_ = 0;  // captured_ipc_handles_.size() at session start
 };
 
 // ============================================================================
@@ -1374,6 +1516,16 @@ void open_ar_fusion_barrier_handles(fptr_t fptr, std::vector<Tensor> handles) {
 void open_ar_fusion_data_handles(fptr_t fptr, std::vector<Tensor> handles) {
     auto ptr = reinterpret_cast<CommWorkspace*>(fptr);
     ptr->open_data_handles(handles);
+}
+
+void close_ar_fusion_peer_mappings(fptr_t fptr) {
+    auto ptr = reinterpret_cast<CommWorkspace*>(fptr);
+    ptr->close_peer_mappings();
+}
+
+void release_ar_fusion_local_exports(fptr_t fptr) {
+    auto ptr = reinterpret_cast<CommWorkspace*>(fptr);
+    ptr->release_local_exports();
 }
 
 void ar_fusion_capture_clear(fptr_t fptr) {

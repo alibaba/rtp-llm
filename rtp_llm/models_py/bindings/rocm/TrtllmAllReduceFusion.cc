@@ -44,6 +44,14 @@ void TrtllmArFusionHandle::open_data_handles(const std::vector<torch::Tensor>& h
     open_ar_fusion_data_handles(fptr_, handles_copy);
 }
 
+void TrtllmArFusionHandle::close_peer_mappings() {
+    close_ar_fusion_peer_mappings(fptr_);
+}
+
+void TrtllmArFusionHandle::release_local_exports() {
+    release_ar_fusion_local_exports(fptr_);
+}
+
 void TrtllmArFusionHandle::capture_clear() {
     ar_fusion_capture_clear(fptr_);
 }
@@ -109,6 +117,8 @@ void registerTrtllmArFusionHandle(py::module& module) {
         .def("get_data_handle", &TrtllmArFusionHandle::get_data_handle)
         .def("open_barrier_handles", &TrtllmArFusionHandle::open_barrier_handles, py::arg("handles"))
         .def("open_data_handles", &TrtllmArFusionHandle::open_data_handles, py::arg("handles"))
+        .def("close_peer_mappings", &TrtllmArFusionHandle::close_peer_mappings)
+        .def("release_local_exports", &TrtllmArFusionHandle::release_local_exports)
         // CUDA Graph capture support
         .def("capture_clear", &TrtllmArFusionHandle::capture_clear)
         .def("invalidate_capture", &TrtllmArFusionHandle::invalidate_capture)
