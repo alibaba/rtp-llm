@@ -89,9 +89,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     auto&       block_ids_0        = kv_resource->mutableBlockIds(0);
     int64_t     match_cost_time_us = 0;
 
-    const size_t reserve_blocks   = reserveBlockNum();
-    const int    estimated_blocks = (reserve_blocks > 0) ? getNeedBlocks(malloc_info) : 0;
-    int          reuse_blocks     = 0;
+    int reuse_blocks = 0;
 
     // drop the last cache key of the partial block to avoid reuse it for two reasons:
     // 1. if the last block is partial, it actually cannot be reused, because only full blocks will be inserted into the
@@ -124,24 +122,10 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         full_kv_cache_group_->reference(block_ids_0, match_result.block_indices);
     }
 
-    // Check if available blocks are enough for the request.
-    if (reserve_blocks > 0 && estimated_blocks > 0) {
-        const size_t available_blocks = availableBlocksNum();
-        const int    actual_blocks    = std::max(estimated_blocks - reuse_blocks, 0);
-        if (actual_blocks > 0 && available_blocks < static_cast<size_t>(actual_blocks) + reserve_blocks) {
-            if (malloc_info.verbose) {
-                RTP_LLM_LOG_INFO("SingleTypeKVCacheAllocator initMalloc rejected by reserve blocks: request_id=%ld "
-                                 "need_blocks=%d reuse_blocks=%d adjusted_need_blocks=%d available_blocks=%zu "
-                                 "reserve_blocks=%zu",
-                                 malloc_info.request_id,
-                                 estimated_blocks,
-                                 reuse_blocks,
-                                 actual_blocks,
-                                 available_blocks,
-                                 reserve_blocks);
-            }
-            return {false, 0};
-        }
+    const auto capacity_failure =
+        evaluateInitCapacity(malloc_info, reserveBlockNum(), InitCapacityScope::AVAILABLE);
+    if (capacity_failure != MallocFailureReason::NONE) {
+        return {false, 0, match_cost_time_us, capacity_failure};
     }
 
     if (!full_kv_cache_group_->malloc(block_ids_0, common_seq_len)) {

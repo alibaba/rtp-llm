@@ -395,20 +395,13 @@ void FIFOScheduler::moveGroupToAllocatingGroup(StreamGroup& group) {
     loading_cache_group_queue_.push_back(std::move(group));
 }
 
-void FIFOScheduler::dissolveGroup(StreamGroup& group) {
-    for (auto it = group.begin(); it != group.end();) {
-        const auto state = (*it)->getStatus();
-        if (state == StreamState::RUNNING) {
-            accountBatchMetrics(*it);
-            new_streams_.splice(new_streams_.end(), group, it++);
-        } else if (state == StreamState::LOADING_CACHE) {
-            loading_cache_streams_.splice(loading_cache_streams_.end(), group, it++);
-        } else if (state == StreamState::WAITING) {
-            waiting_streams_.splice(waiting_streams_.end(), group, it++);
-        } else {
-            RTP_LLM_CHECK_WITH_INFO(state == StreamState::FINISHED, "unexpected stream state while dissolving group");
-            it = group.erase(it);
-        }
+void FIFOScheduler::dispatchPreparedGroup(StreamGroup& group) {
+    const bool all_running = std::all_of(
+        group.begin(), group.end(), [](const auto& stream) { return stream->getStatus() == StreamState::RUNNING; });
+    if (all_running) {
+        moveGroupToNewStreams(group);
+    } else {
+        moveGroupToAllocatingGroup(group);
     }
 }
 
@@ -458,13 +451,11 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
         return;
     }
 
-    size_t      deferred_count = 0;
     StreamGroup admitted_streams;
     for (auto it = group.begin(); it != group.end();) {
-        auto& stream = *it;
+        auto current = it++;
+        auto& stream  = *current;
         if (!evaluateRunningBatch(admitted_streams, stream)) {
-            ++deferred_count;
-            ++it;
             continue;
         }
 
@@ -473,34 +464,38 @@ void FIFOScheduler::evaluateWaitingGroupQueue() {
         }
         const auto state = stream->moveToNext();
         if (state == StreamState::FINISHED) {
-            it = group.erase(it);
+            group.erase(current);
+            continue;
+        }
+        if (state == StreamState::WAITING) {
+            // Keep unresolved members in the residual group and continue the
+            // stable scan. This is normally a retryable KV shortage; a DECODE
+            // stream can also need one more state-machine transition after its
+            // first successful allocation.
             continue;
         }
         RTP_LLM_CHECK_WITH_INFO(state == StreamState::RUNNING || state == StreamState::LOADING_CACHE,
                                 "group stream must be RUNNING or LOADING_CACHE after scheduler admission");
-        admitted_streams.push_back(stream);
-        ++it;
+        admitted_streams.splice(admitted_streams.end(), group, current);
     }
 
-    if (deferred_count > 0) {
-        RTP_LLM_LOG_WARNING("group partially admitted and will be dissolved: original=%zu admitted=%zu deferred=%zu",
-                            original_size,
-                            admitted_streams.size(),
-                            deferred_count);
-        dissolveGroup(group);
-        pending_group_fallback_count_.fetch_add(1, std::memory_order_relaxed);
+    if (group.empty()) {
         waiting_group_queue_.pop_front();
+        if (admitted_streams.empty()) {
+            return;
+        }
+        dispatchPreparedGroup(admitted_streams);
         return;
     }
 
-    const bool all_running = std::all_of(
-        group.begin(), group.end(), [](const auto& stream) { return stream->getStatus() == StreamState::RUNNING; });
-    if (all_running) {
-        moveGroupToNewStreams(group);
-        waiting_group_queue_.pop_front();
-    } else {
-        moveGroupToAllocatingGroup(group);
-        waiting_group_queue_.pop_front();
+    if (!admitted_streams.empty()) {
+        RTP_LLM_LOG_WARNING("group partially admitted; keeping residual group at queue head: "
+                            "original=%zu admitted=%zu deferred=%zu",
+                            original_size,
+                            admitted_streams.size(),
+                            group.size());
+        dispatchPreparedGroup(admitted_streams);
+        pending_group_fallback_count_.fetch_add(1, std::memory_order_relaxed);
     }
 }
 

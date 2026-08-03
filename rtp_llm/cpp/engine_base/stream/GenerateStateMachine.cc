@@ -64,6 +64,9 @@ void GenerateStateMachine::handleWaiting() {
         }
         auto result = stream_cache_resource_->initKVBlock(reserve_step_);
         if (!result.ok()) {
+            if (absl::IsUnavailable(result)) {
+                return;
+            }
             error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
             status.store(StreamState::FINISHED, std::memory_order_release);
             releaseResource();

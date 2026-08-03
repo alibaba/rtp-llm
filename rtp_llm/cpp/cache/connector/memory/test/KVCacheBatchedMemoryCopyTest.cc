@@ -34,6 +34,11 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo&) {
     return {false, 0};
 }
 
+MallocFailureReason
+KVCacheAllocator::evaluateInitCapacity(const MallocInfo&, size_t, InitCapacityScope) const {
+    return MallocFailureReason::NONE;
+}
+
 BlockAddrInfo KVCacheAllocator::convertIndexToAddr(int layer_id, KVCacheRegionName, int block_id) const {
     return convertIndexToAddr(layer_id, block_id);
 }

@@ -394,6 +394,12 @@ absl::Status StreamCacheResource::initKVBlock(size_t reserve_step) {
     auto result = resource_context_.cache_manager->malloc(malloc_info);
     if (!result.success) {
         malloc_failed_times_++;
+        if (result.failure_reason == MallocFailureReason::RETRYABLE_RESOURCE_EXHAUSTED) {
+            return absl::UnavailableError("kv cache is temporarily unavailable");
+        }
+        if (result.failure_reason == MallocFailureReason::PERMANENT_RESOURCE_EXHAUSTED) {
+            return absl::ResourceExhaustedError("request exceeds usable kv cache capacity");
+        }
         return absl::InternalError("malloc failed");
     }
 

@@ -70,11 +70,18 @@ struct MallocInfo {
     int incrSeqLen() const;
 };
 
+enum class MallocFailureReason : uint8_t {
+    NONE = 0,
+    RETRYABLE_RESOURCE_EXHAUSTED,
+    PERMANENT_RESOURCE_EXHAUSTED,
+};
+
 struct MallocResult {
     bool success;
     int  reuse_len;
 
-    int64_t match_cost_time_us = 0;
+    int64_t             match_cost_time_us = 0;
+    MallocFailureReason failure_reason     = MallocFailureReason::NONE;
 };
 
 struct FreeInfo {

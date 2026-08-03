@@ -279,6 +279,54 @@ TEST_F(FIFOSchedulerTest, testInitKVCacheRejectedByReserveBlocks) {
     ASSERT_EQ(cache_manager->availableBlocksNum(), 10);
 }
 
+TEST_F(FIFOSchedulerTest, permanentlyOversizedGroupMemberDoesNotBlockLaterMembers) {
+    CacheConfig cache_config = makeMhaCacheConfig(/*layer_num=*/1,
+                                                  /*block_num=*/11,
+                                                  /*local_head_num_kv=*/1,
+                                                  /*size_per_head=*/4,
+                                                  /*tokens_per_block=*/1,
+                                                  rtp_llm::DataType::TYPE_FP16);
+    KVCacheConfig kv_cache_config;
+    kv_cache_config.reserve_block_ratio = 50;
+    auto cache_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
+    ASSERT_TRUE(cache_manager->init());
+
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+    resource_context.reuse_cache   = false;
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    auto make_stream = [&](std::vector<int> tokens) {
+        auto query             = std::make_shared<GenerateInput>();
+        query->input_ids       = torch::tensor(tokens, torch::kInt32);
+        query->generate_config = std::make_shared<GenerateConfig>();
+        return std::make_shared<NormalGenerateStream>(
+            query, model_config, runtime_config, resource_context, nullptr);
+    };
+    vector<GenerateStreamPtr> streams = {
+        make_stream({1, 2, 3, 4, 5, 6}),
+        make_stream({1, 2, 3, 4}),
+    };
+    ASSERT_EQ(scheduler.enqueueGroup(streams).first, std::vector<bool>({true, true}));
+
+    auto result = scheduler.schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.value().size(), 1);
+    EXPECT_TRUE(streams[0]->hasError());
+    EXPECT_EQ(streams[0]->getStatus(), StreamState::FINISHED);
+    EXPECT_EQ(streams[1]->getStatus(), StreamState::RUNNING);
+    EXPECT_FALSE(streams[1]->hasError());
+}
+
 TEST_F(FIFOSchedulerTest, testReserveBlocksOnlyAffectInitMallocNotIncrMalloc) {
     CacheConfig cache_config = makeMhaCacheConfig(/*layer_num=*/1,
                                                   /*block_num=*/11,
@@ -760,7 +808,7 @@ TEST_F(FIFOSchedulerTest, waitingStreamRunsBeforeGroupAtInitedLimit) {
     EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
 }
 
-TEST_F(FIFOSchedulerTest, groupTokenCapExceededDissolvesGroup) {
+TEST_F(FIFOSchedulerTest, groupTokenCapExceededKeepsResidualGroup) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 21, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
@@ -788,7 +836,7 @@ TEST_F(FIFOSchedulerTest, groupTokenCapExceededDissolvesGroup) {
 
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
-    // The first stream fits. The second one is deferred and the group is dissolved.
+    // The first stream fits. The second one remains in the residual group.
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
     ASSERT_EQ(streams[0]->getStatus(), StreamState::RUNNING);
@@ -798,7 +846,7 @@ TEST_F(FIFOSchedulerTest, groupTokenCapExceededDissolvesGroup) {
     }
 }
 
-TEST_F(FIFOSchedulerTest, groupCacheShortageDissolvesPreparedStreams) {
+TEST_F(FIFOSchedulerTest, groupCacheShortageDefersUnallocatedStreams) {
     CacheConfig cache_config  = makeMhaCacheConfig(1, 3, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
     auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
     ASSERT_TRUE(cache_manager->init());
@@ -826,15 +874,146 @@ TEST_F(FIFOSchedulerTest, groupCacheShortageDissolvesPreparedStreams) {
     auto result = scheduler.schedule();
     ASSERT_TRUE(result.ok());
     ASSERT_EQ(result.value().size(), 1);
-    ASSERT_EQ(scheduler.waitingStreamsSize(), 0);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
     ASSERT_EQ(scheduler.runningStreamsSize(), 1);
     EXPECT_EQ(streams[0]->getStatus(), StreamState::RUNNING);
     EXPECT_FALSE(streams[0]->hasError());
     EXPECT_GT(streams[0]->curBlocksNum(), 0);
-    EXPECT_EQ(streams[1]->getStatus(), StreamState::FINISHED);
-    EXPECT_TRUE(streams[1]->hasError());
-    EXPECT_EQ(streams[1]->statusInfo().code(), ErrorCode::MALLOC_FAILED);
+    EXPECT_EQ(streams[1]->getStatus(), StreamState::WAITING);
+    EXPECT_FALSE(streams[1]->hasError());
     EXPECT_EQ(streams[1]->curBlocksNum(), 0);
+}
+
+TEST_F(FIFOSchedulerTest, groupCacheShortageStillAdmitsLaterSmallerStreams) {
+    // Five usable blocks. The first request consumes four, the second request
+    // needs three and must be deferred, the one-block request still fits, and
+    // the final two-block request remains in the residual group.
+    CacheConfig cache_config  = makeMhaCacheConfig(1, 6, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
+    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ASSERT_EQ(cache_manager->freeBlocksNum(), 5);
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    vector<GenerateStreamPtr> streams = {
+        makeSingleStream(model_config, runtime_config, resource_context, {1, 2, 3, 4}),
+        makeSingleStream(model_config, runtime_config, resource_context, {1, 2, 3}),
+        makeSingleStream(model_config, runtime_config, resource_context, {1}),
+        makeSingleStream(model_config, runtime_config, resource_context, {1, 2}),
+    };
+    ASSERT_EQ(scheduler.enqueueGroup(streams).first, std::vector<bool>({true, true, true, true}));
+
+    auto first_result = scheduler.schedule();
+    ASSERT_TRUE(first_result.ok());
+    ASSERT_EQ(first_result.value().size(), 2);
+    EXPECT_EQ(streams[0]->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(streams[1]->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(streams[2]->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(streams[3]->getStatus(), StreamState::WAITING);
+    EXPECT_FALSE(streams[1]->hasError());
+    EXPECT_FALSE(streams[3]->hasError());
+    EXPECT_EQ(scheduler.runningStreamsSize(), 2);
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 2);
+
+    streams[0]->reportEvent(StreamEvents::GenerateDone);
+    streams[2]->reportEvent(StreamEvents::GenerateDone);
+    auto second_result = scheduler.schedule();
+    ASSERT_TRUE(second_result.ok());
+    ASSERT_EQ(second_result.value().size(), 2);
+    EXPECT_EQ(streams[1]->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(streams[3]->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(scheduler.waitingStreamsSize(), 0);
+}
+
+TEST_F(FIFOSchedulerTest, residualGroupPrecedesFollowingGroups) {
+    CacheConfig cache_config  = makeMhaCacheConfig(1, 6, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
+    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    vector<GenerateStreamPtr> first_group = {
+        makeSingleStream(model_config, runtime_config, resource_context, {1, 2, 3, 4}),
+        makeSingleStream(model_config, runtime_config, resource_context, {1, 2, 3}),
+        makeSingleStream(model_config, runtime_config, resource_context, {1}),
+        makeSingleStream(model_config, runtime_config, resource_context, {1, 2}),
+    };
+    vector<GenerateStreamPtr> second_group = {
+        makeSingleStream(model_config, runtime_config, resource_context, {1}),
+    };
+    scheduler.enqueueGroup(first_group);
+    scheduler.enqueueGroup(second_group);
+
+    auto first_result = scheduler.schedule();
+    ASSERT_TRUE(first_result.ok());
+    ASSERT_EQ(first_result.value().size(), 2);
+    ASSERT_EQ(first_group[1]->getStatus(), StreamState::WAITING);
+    ASSERT_EQ(first_group[3]->getStatus(), StreamState::WAITING);
+    ASSERT_EQ(second_group[0]->getStatus(), StreamState::WAITING);
+
+    first_group[0]->reportEvent(StreamEvents::GenerateDone);
+    first_group[2]->reportEvent(StreamEvents::GenerateDone);
+    auto second_result = scheduler.schedule();
+    ASSERT_TRUE(second_result.ok());
+    ASSERT_EQ(second_result.value().size(), 2);
+    EXPECT_EQ(first_group[1]->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(first_group[3]->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(second_group[0]->getStatus(), StreamState::WAITING);
+}
+
+TEST_F(FIFOSchedulerTest, groupTokenCapStillAdmitsLaterSmallerStreams) {
+    CacheConfig cache_config  = makeMhaCacheConfig(1, 100, 1, 4, 1, rtp_llm::DataType::TYPE_FP16);
+    auto        cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 8192;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 100;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    vector<GenerateStreamPtr> streams = {
+        makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(40, 1)),
+        makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(80, 1)),
+        makeSingleStream(model_config, runtime_config, resource_context, std::vector<int>(40, 1)),
+    };
+    scheduler.enqueueGroup(streams);
+
+    auto result = scheduler.schedule();
+    ASSERT_TRUE(result.ok());
+    ASSERT_EQ(result.value().size(), 2);
+    EXPECT_EQ(streams[0]->getStatus(), StreamState::RUNNING);
+    EXPECT_EQ(streams[1]->getStatus(), StreamState::WAITING);
+    EXPECT_EQ(streams[2]->getStatus(), StreamState::RUNNING);
 }
 
 TEST_F(FIFOSchedulerTest, groupIsolation_size3) {

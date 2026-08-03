@@ -217,7 +217,6 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
 
     const auto&                   cache_keys         = kv_resource->cacheKeys(0);
     int64_t                       match_cost_time_us = 0;
-    const size_t                  reserve_blocks     = reserveBlockNum();
     int                           reuse_blocks       = 0;
     std::vector<BlockIndicesType> referenced_blocks(static_cast<size_t>(kv_resource->groupNums()));
 
@@ -248,9 +247,11 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         kv_resource->cacheResource(0).setDeviceReuseBlockNum(reuse_blocks);
     }
 
-    if (reserve_blocks > 0 && !hasAvailableBlocksForReserve(malloc_info, reserve_blocks)) {
+    const auto capacity_failure =
+        evaluateInitCapacity(malloc_info, reserveBlockNum(), InitCapacityScope::AVAILABLE);
+    if (capacity_failure != MallocFailureReason::NONE) {
         rollbackInitMalloc(*kv_resource, referenced_blocks, {});
-        return {false, 0};
+        return {false, 0, match_cost_time_us, capacity_failure};
     }
 
     std::vector<size_t> original_sizes(static_cast<size_t>(kv_resource->groupNums()));
@@ -618,21 +619,8 @@ int HybridKVCacheAllocator::seqSizePerBlock() const {
 }
 
 bool HybridKVCacheAllocator::hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const {
-    const int need_blocks = getNeedBlocks(malloc_info);
-    if (need_blocks <= 0) {
-        return true;
-    }
-    const size_t available_blocks = availableBlocksNum();
-    const bool   accepted         = available_blocks >= static_cast<size_t>(need_blocks) + reserve_blocks;
-    if (!accepted && malloc_info.verbose) {
-        RTP_LLM_LOG_INFO("Hybrid initMalloc rejected by reserve blocks: request_id=%ld "
-                         "need_blocks=%d available_blocks=%zu reserve_blocks=%zu",
-                         malloc_info.request_id,
-                         need_blocks,
-                         available_blocks,
-                         reserve_blocks);
-    }
-    return accepted;
+    return evaluateInitCapacity(malloc_info, reserve_blocks, InitCapacityScope::AVAILABLE)
+           == MallocFailureReason::NONE;
 }
 
 void HybridKVCacheAllocator::rollbackBlockIdsToSize(int gid, BlockIds& block_ids, size_t original_size) {

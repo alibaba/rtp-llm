@@ -199,6 +199,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksOnlyAppliedToInitMalloc) {
         MallocInfo malloc_info{batch_resource, complete_token_ids};
         auto       result = allocator_->malloc(malloc_info);
         EXPECT_FALSE(result.success);
+        EXPECT_EQ(result.failure_reason, MallocFailureReason::PERMANENT_RESOURCE_EXHAUSTED);
         EXPECT_EQ(batch_resource->curBlocksNum(), 0);
         EXPECT_EQ(allocator_->availableBlocksNum(), available_before);
     }
@@ -219,7 +220,33 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksOnlyAppliedToInitMalloc) {
     EXPECT_EQ(batch_resource_ok->curBlocksNum(), 9);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseReferenceInInitMallocForCommonLen) {
+TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocDistinguishesRetryableCapacityShortage) {
+    auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/1);
+    allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
+    ASSERT_TRUE(allocator_->init());
+    allocator_->setReserveBlockNum(2);
+
+    auto holder_resource = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
+    auto holder_tokens   = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/1);
+    MallocInfo holder_info{holder_resource, holder_tokens};
+    ASSERT_TRUE(allocator_->malloc(holder_info).success);
+    ASSERT_EQ(allocator_->availableBlocksNum(), 5u);
+
+    auto deferred_resource = createBatchKVCacheResource(/*batch_size=*/1, config.layer_num);
+    auto deferred_tokens   = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/1);
+    MallocInfo deferred_info{deferred_resource, deferred_tokens};
+    auto       deferred_result = allocator_->malloc(deferred_info);
+    EXPECT_FALSE(deferred_result.success);
+    EXPECT_EQ(deferred_result.failure_reason, MallocFailureReason::RETRYABLE_RESOURCE_EXHAUSTED);
+    EXPECT_EQ(deferred_resource->curBlocksNum(), 0);
+
+    allocator_->free(FreeInfo{holder_resource, holder_tokens});
+    auto retry_result = allocator_->malloc(deferred_info);
+    EXPECT_TRUE(retry_result.success);
+    EXPECT_EQ(retry_result.failure_reason, MallocFailureReason::NONE);
+}
+
+TEST_F(SingleTypeKVCacheAllocatorTest, ReserveCapacityCheckRemainsCorrectWithDeviceCacheReuse) {
     auto config = createSingleTypeTestConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/4);
     allocator_  = std::make_shared<SingleTypeKVCacheAllocator>(config);
     allocator_->setSharedBlockCache(std::make_shared<SharedBlockCache>());

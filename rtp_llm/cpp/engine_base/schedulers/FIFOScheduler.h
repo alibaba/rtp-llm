@@ -62,7 +62,7 @@ private:
     void   advanceLoadingGroup(StreamGroup& group);
     void   moveGroupToNewStreams(StreamGroup& group);
     void   moveGroupToAllocatingGroup(StreamGroup& group);
-    void   dissolveGroup(StreamGroup& group);
+    void   dispatchPreparedGroup(StreamGroup& group);
     void   cancelStreams(std::list<GenerateStreamPtr>& streams);
     void   cancelGroups(StreamGroupQueue& group_queue);
 

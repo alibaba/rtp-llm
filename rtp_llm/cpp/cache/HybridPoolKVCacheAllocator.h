@@ -55,6 +55,10 @@ public:
 private:
     bool doInit() override;
 
+    MallocFailureReason evaluateInitCapacity(const MallocInfo& malloc_info,
+                                             size_t            reserve_blocks,
+                                             InitCapacityScope scope) const override;
+
     void referenceBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) const override;
     void freeBlocksInGroup(int gid, const BlockIndicesType& blocks, bool is_connector = false) override;
     bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const override;

@@ -33,10 +33,23 @@ bool KVCacheAllocator::init() {
 }
 
 MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
+    // Gross demand decides whether this request can ever fit. Current
+    // availability is checked after device-cache matching, when the allocator
+    // knows how many new physical blocks are actually required.
+    const auto capacity_failure =
+        evaluateInitCapacity(malloc_info, reserveBlockNum(), InitCapacityScope::TOTAL);
+    if (capacity_failure != MallocFailureReason::NONE) {
+        return {false, 0, 0, capacity_failure};
+    }
+
     auto init_result = initMallocForCommonLen(malloc_info);
     if (!init_result.success) {
         FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};
         free(free_info);
+        const auto failure = evaluateInitFailure(malloc_info, reserveBlockNum());
+        if (failure != MallocFailureReason::NONE) {
+            init_result.failure_reason = failure;
+        }
         return init_result;
     }
 
@@ -44,6 +57,10 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
     if (!incr_result.success) {
         FreeInfo free_info{malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids};
         free(free_info);
+        const auto failure = evaluateInitFailure(malloc_info, reserveBlockNum());
+        if (failure != MallocFailureReason::NONE) {
+            incr_result.failure_reason = failure;
+        }
         return incr_result;
     } else {
         if (metrics_reporter_ && malloc_info.enable_device_cache) {
@@ -69,6 +86,36 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
         }
         return init_result;
     }
+}
+
+MallocFailureReason KVCacheAllocator::evaluateInitCapacity(const MallocInfo& malloc_info,
+                                                           size_t            reserve_blocks,
+                                                           InitCapacityScope scope) const {
+    const int need_blocks = getNeedBlocks(malloc_info);
+    if (need_blocks <= 0) {
+        return MallocFailureReason::NONE;
+    }
+
+    const size_t required_blocks = static_cast<size_t>(need_blocks);
+    auto         fits = [required_blocks, reserve_blocks](size_t capacity) {
+        return required_blocks <= capacity && reserve_blocks <= capacity - required_blocks;
+    };
+
+    const size_t capacity = scope == InitCapacityScope::TOTAL ? totalBlocksNum() : availableBlocksNum();
+    if (!fits(capacity)) {
+        return scope == InitCapacityScope::TOTAL ? MallocFailureReason::PERMANENT_RESOURCE_EXHAUSTED :
+                                                  MallocFailureReason::RETRYABLE_RESOURCE_EXHAUSTED;
+    }
+    return MallocFailureReason::NONE;
+}
+
+MallocFailureReason KVCacheAllocator::evaluateInitFailure(const MallocInfo& malloc_info,
+                                                          size_t            reserve_blocks) const {
+    auto failure = evaluateInitCapacity(malloc_info, reserve_blocks, InitCapacityScope::TOTAL);
+    if (failure == MallocFailureReason::NONE) {
+        failure = evaluateInitCapacity(malloc_info, reserve_blocks, InitCapacityScope::AVAILABLE);
+    }
+    return failure;
 }
 
 MallocResult KVCacheAllocator::malloc(const MallocInfo& malloc_info) {
