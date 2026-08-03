@@ -1,43 +1,65 @@
 
-#include <functional>
 #include <algorithm>
+#include <cstring>
 #include <string>
-#include <string_view>
 #include <vector>
 #include <torch/python.h>
 #include "absl/status/statusor.h"
+#include "rtp_llm/cpp/multimodal_processor/FeatureHash.h"
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/multimodal_processor/MultimodalProcessor.h"
+
+#if USING_CUDA
+#include <c10/cuda/CUDAGuard.h>
+#include <c10/cuda/CUDAStream.h>
+#include "rtp_llm/cpp/multimodal_processor/FeatureHashKernel.h"
+#endif
 
 namespace py = pybind11;
 
 namespace rtp_llm {
 
 ErrorInfo MultimodalProcessor::getFeatureHash(int32_t* token_ids, const torch::Tensor& mm_emb) {
-    // Derive one cache-key hash per multimodal token from the content of its feature row.
-    // This makes the prefix cache key reflect the actual image/video embedding, so only
-    // identical content reuses cached blocks.
-    //
-    // NOTE on the GPU->CPU sync below: hashing must inspect every byte of the embedding,
-    // so we have to materialize it on the host. This is a deliberate blocking step on the
-    // prefill-prep path (NOT the decode hot path). Without it the cache key would either
-    // (a) require a GPU hash kernel — adds significant complexity for the marginal benefit
-    // of avoiding one extra prefill-time D2H, or (b) fall back to URL-based hashing, which
-    // would over-share cache blocks between requests whose URLs match but whose actual
-    // embedding bytes differ (e.g. dynamic image transforms). Keep this sync.
     if (mm_emb.dim() < 1 || mm_emb.size(0) <= 0) {
         return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "multimodal feature tensor is empty");
     }
-    auto          emb        = mm_emb.to(torch::kCPU).contiguous();
-    const int64_t num_tokens = emb.size(0);
-    const int64_t row_bytes  = emb.numel() / num_tokens * emb.element_size();
-    const char*   base       = static_cast<const char*>(emb.data_ptr());
 
-    std::hash<std::string_view> hasher;
+    const int64_t num_tokens = mm_emb.size(0);
+    const int64_t row_bytes  = mm_emb.numel() / num_tokens * mm_emb.element_size();
+    if (row_bytes <= 0) {
+        return ErrorInfo(ErrorCode::MM_WRONG_FORMAT_ERROR, "multimodal feature row is empty");
+    }
+
+#if USING_CUDA
+    if (mm_emb.is_cuda()) {
+        // Prefix-cache token IDs are int32, so fold the 64-bit row fingerprint
+        // on device and transfer only one compact token key per embedding row.
+        const c10::cuda::CUDAGuard device_guard(mm_emb.device());
+        auto                       emb      = mm_emb.contiguous();
+        auto                       hash_gpu = torch::empty({num_tokens}, emb.options().dtype(torch::kInt32));
+        const cudaStream_t         stream   = c10::cuda::getCurrentCUDAStream(emb.get_device());
+        cudaError_t                cuda_error =
+            invokeFeatureHash(emb.data_ptr(), num_tokens, row_bytes, hash_gpu.data_ptr<int32_t>(), stream);
+        if (cuda_error == cudaSuccess) {
+            cuda_error = cudaMemcpyAsync(
+                token_ids, hash_gpu.data_ptr<int32_t>(), num_tokens * sizeof(int32_t), cudaMemcpyDeviceToHost, stream);
+        }
+        if (cuda_error == cudaSuccess) {
+            cuda_error = cudaStreamSynchronize(stream);
+        }
+        if (cuda_error != cudaSuccess) {
+            return ErrorInfo(ErrorCode::MM_PROCESS_ERROR,
+                             std::string("failed to hash multimodal features on GPU: ")
+                                 + cudaGetErrorString(cuda_error));
+        }
+        return ErrorInfo::OkStatus();
+    }
+#endif
+
+    auto        emb  = mm_emb.to(torch::kCPU).contiguous();
+    const auto* base = static_cast<const uint8_t*>(emb.data_ptr());
     for (int64_t j = 0; j < num_tokens; ++j) {
-        std::string_view row(base + j * row_bytes, static_cast<size_t>(row_bytes));
-        int32_t          hash_res = static_cast<int32_t>(hasher(row));
-        memcpy(token_ids + j, &hash_res, sizeof(int32_t));
+        token_ids[j] = featureHashToTokenId(hashFeatureRowCpu(base + j * row_bytes, row_bytes));
     }
     return ErrorInfo::OkStatus();
 }

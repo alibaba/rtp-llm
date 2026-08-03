@@ -1,4 +1,4 @@
-load("//:def.bzl", "copts")
+load("//:def.bzl", "copts", "cuda_copts")
 load("//bazel:arch_select.bzl", "mm_rdma_deps")
 
 # Produces alias :mm_rdma_arch_select_impl -> internal RDMA impl (internal build, GPU)
@@ -57,6 +57,23 @@ cc_library(
 )
 
 cc_library(
+    name = "feature_hash_utils",
+    hdrs = ["FeatureHash.h"],
+)
+
+cc_library(
+    name = "feature_hash_kernel",
+    srcs = ["FeatureHashKernel.cu"],
+    hdrs = ["FeatureHashKernel.h"],
+    copts = cuda_copts(),
+    deps = [
+        ":feature_hash_utils",
+        "@local_config_cuda//cuda:cuda_headers",
+        "@local_config_cuda//cuda:cudart",
+    ],
+)
+
+cc_library(
     name = "multimodal_processor",
     hdrs = glob(
         ["*.h"],
@@ -64,6 +81,8 @@ cc_library(
             "MultimodalTypes.h",
             "MMRdmaTransport.h",
             "MMRdmaVitConfig.h",
+            "FeatureHash.h",
+            "FeatureHashKernel.h",
         ],
     ),
     srcs = glob(
@@ -71,6 +90,7 @@ cc_library(
         exclude = ["MMRdmaTransport.cc"],
     ),
     deps = [
+        ":feature_hash_utils",
         ":multimodal_types",
         ":mm_rdma_transport",
         ":mm_rdma_arch_select_impl",
@@ -78,6 +98,9 @@ cc_library(
         "//rtp_llm/cpp/embedding_engine:embedding_engine",
         "//rtp_llm/cpp/model_rpc/proto:model_rpc_service_cc_proto",
         "//rtp_llm/cpp/pybind:py_utils",
-    ],
+    ] + select({
+        "@//:using_cuda": [":feature_hash_kernel"],
+        "//conditions:default": [],
+    }),
     visibility = ["//visibility:public"],
 )

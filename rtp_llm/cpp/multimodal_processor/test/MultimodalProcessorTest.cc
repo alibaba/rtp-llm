@@ -121,4 +121,57 @@ TEST_F(MultimodalProcessorTest, testGetMMFeatures) {
     EXPECT_EQ(res.expanded_ids.numel(), 6);
 }
 
+TEST_F(MultimodalProcessorTest, testFeatureHashCpuGpuConsistency) {
+    FakeMultimodalProcessor processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 10);
+    auto cpu_embedding = torch::tensor({{1.0f, 2.0f, 3.0f, 4.0f}, {1.0f, 2.0f, 3.0f, 4.0f}, {1.0f, 2.0f, 3.0f, 5.0f}});
+    auto gpu_embedding = cpu_embedding.to(torch::kCUDA);
+
+    std::vector<int32_t> cpu_hashes(cpu_embedding.size(0));
+    std::vector<int32_t> gpu_hashes(gpu_embedding.size(0));
+    EXPECT_TRUE(processor.getFeatureHash(cpu_hashes.data(), cpu_embedding).ok());
+    EXPECT_TRUE(processor.getFeatureHash(gpu_hashes.data(), gpu_embedding).ok());
+
+    EXPECT_EQ(cpu_hashes, gpu_hashes);
+    EXPECT_EQ(cpu_hashes[0], cpu_hashes[1]);
+    EXPECT_NE(cpu_hashes[0], cpu_hashes[2]);
+}
+
+TEST_F(MultimodalProcessorTest, testFeatureHashNonContiguousTensor) {
+    FakeMultimodalProcessor processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 10);
+    auto                    cpu_embedding =
+        torch::arange(24, torch::TensorOptions().dtype(torch::kFloat32)).reshape({4, 6}).transpose(0, 1);
+    ASSERT_FALSE(cpu_embedding.is_contiguous());
+    auto gpu_embedding = cpu_embedding.to(torch::kCUDA);
+
+    std::vector<int32_t> cpu_hashes(cpu_embedding.size(0));
+    std::vector<int32_t> gpu_hashes(gpu_embedding.size(0));
+    EXPECT_TRUE(processor.getFeatureHash(cpu_hashes.data(), cpu_embedding).ok());
+    EXPECT_TRUE(processor.getFeatureHash(gpu_hashes.data(), gpu_embedding).ok());
+    EXPECT_EQ(cpu_hashes, gpu_hashes);
+}
+
+TEST_F(MultimodalProcessorTest, testFeatureHashTailBytes) {
+    FakeMultimodalProcessor processor = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 10);
+    auto cpu_embedding                = torch::arange(39, torch::TensorOptions().dtype(torch::kUInt8)).reshape({3, 13});
+    auto gpu_embedding                = cpu_embedding.to(torch::kCUDA);
+
+    std::vector<int32_t> cpu_hashes(cpu_embedding.size(0));
+    std::vector<int32_t> gpu_hashes(gpu_embedding.size(0));
+    EXPECT_TRUE(processor.getFeatureHash(cpu_hashes.data(), cpu_embedding).ok());
+    EXPECT_TRUE(processor.getFeatureHash(gpu_hashes.data(), gpu_embedding).ok());
+    EXPECT_EQ(cpu_hashes, gpu_hashes);
+}
+
+TEST_F(MultimodalProcessorTest, testFeatureHashRealisticShape) {
+    FakeMultimodalProcessor processor     = FakeMultimodalProcessor::createFakeMultimodalProcessor({{1}}, false, 10);
+    auto                    cpu_embedding = torch::randn({553, 4096}, torch::TensorOptions().dtype(torch::kBFloat16));
+    auto                    gpu_embedding = cpu_embedding.to(torch::kCUDA);
+
+    std::vector<int32_t> cpu_hashes(cpu_embedding.size(0));
+    std::vector<int32_t> gpu_hashes(gpu_embedding.size(0));
+    EXPECT_TRUE(processor.getFeatureHash(cpu_hashes.data(), cpu_embedding).ok());
+    EXPECT_TRUE(processor.getFeatureHash(gpu_hashes.data(), gpu_embedding).ok());
+    EXPECT_EQ(cpu_hashes, gpu_hashes);
+}
+
 }  // namespace rtp_llm
