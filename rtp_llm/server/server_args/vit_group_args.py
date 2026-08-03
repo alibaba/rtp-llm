@@ -361,6 +361,7 @@ def init_vit_group_args(parser, vit_config):
         bind_to=(vit_config, "gpu_max_batch_images"),
         type=int,
         default=32,
-        help="防止单次forward OOM。单个batch内的最大原始图片/媒体数；同时限制单个请求的最大图片数，"
-        "超过该值的请求将被拒绝（仅在 use_gpu_batch 时生效）",
+        help="防止单次forward OOM。单个batch内的最大原始图片/媒体数；支持成本估算的模型可将"
+        "多work-item请求拆成多个有界forward，其他模型仍会拒绝超过该值的请求"
+        "（仅在 use_gpu_batch 时生效）",
     )
