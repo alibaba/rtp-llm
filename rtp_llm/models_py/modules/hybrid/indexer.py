@@ -37,6 +37,7 @@ class Indexer(nn.Module):
         hw_kernel_config: Optional["HWKernelConfig"] = None,
         parallelism_config: Optional[ParallelismConfig] = None,
         scale_fmt: Optional[str] = "none",
+        use_glm5_indexer_topk: bool = False,
     ):
         super().__init__()
         self.layer_idx = layer_idx
@@ -76,6 +77,17 @@ class Indexer(nn.Module):
         self.indexer_size = self.index_head_dim / 2 + self.index_head_dim / 128 * 2
         self.is_neox_style = attn_config.rope_config.indexer_is_neox_style
         self.parallelism_config = parallelism_config
+        glm5_topk_backend = os.environ.get(
+            "GLM5_INDEXER_TOPK_BACKEND", "sglang"
+        ).strip().lower()
+        if glm5_topk_backend not in ("sglang", "vllm"):
+            raise ValueError(
+                "GLM5_INDEXER_TOPK_BACKEND must be 'sglang' or 'vllm', got "
+                f"{glm5_topk_backend!r}"
+            )
+        use_glm5_indexer_topk = (
+            use_glm5_indexer_topk and glm5_topk_backend == "sglang"
+        )
 
         self.wq_b = LinearFactory.create_linear_from_weights(
             weights,
@@ -135,6 +147,7 @@ class Indexer(nn.Module):
             block_size=self.block_size,
             scale_fmt=self.scale_fmt,
             is_neox_style=self.is_neox_style,
+            use_glm5_indexer_topk=use_glm5_indexer_topk,
         )
 
     def _prefill_cp_enabled(self) -> bool:

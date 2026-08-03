@@ -9,6 +9,18 @@ sm100_cuda_copts = copts() + cuda_default_copts_without_arch() + [
     '--cuda-include-ptx=sm_103a', '--cuda-gpu-arch=sm_103a',
 ]
 
+# The GLM5 TopK uses CTA clusters and requires SM90+.  CUDA Runtime reports
+# this host as SM103, so emit an exact SM103 cubin alongside production SM100.
+glm5_indexer_topk_cuda_copts = copts() + cuda_default_copts_without_arch() + [
+    '-O3',
+    # TopK is defined by exact FP32 ordering. The global CUDA defaults enable
+    # ftz=true, which collapses distinct subnormal scores to zero in compares.
+    '-nvcc_options=ftz=false',
+    '--cuda-include-ptx=sm_100', '--cuda-gpu-arch=sm_100',
+    '--cuda-include-ptx=sm_100a', '--cuda-gpu-arch=sm_100a',
+    '--cuda-include-ptx=sm_103', '--cuda-gpu-arch=sm_103',
+]
+
 cuda_deps = [
     "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
     ":cuda_utils_common",
@@ -172,6 +184,27 @@ cc_library(
         "//rtp_llm/cpp/utils:core_utils",
     ] + torch_deps(),
     copts = cuda_copts(),
+    visibility = ["//visibility:public"],
+)
+
+# Exact radix-select TopK for the GLM5 decode indexer.  This is kept separate
+# from the vLLM-derived dsv4_persistent_topk so real-inference A/B tests can
+# select either implementation without rebuilding.
+cc_library(
+    name = "topk_v3",
+    srcs = ["topk_v3.cu"],
+    hdrs = [
+        "topk_v3.h",
+        "topk_v3.cuh",
+        "topk_v3_compat.cuh",
+    ],
+    deps = [
+        "//rtp_llm/models_py/bindings/cuda:cuda_host_utils",
+        "//rtp_llm/models_py/bindings/cuda:launch_utils",
+        ":cuda_utils_common",
+        "//rtp_llm/cpp/utils:core_utils",
+    ] + torch_deps(),
+    copts = glm5_indexer_topk_cuda_copts,
     visibility = ["//visibility:public"],
 )
 
