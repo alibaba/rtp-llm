@@ -43,8 +43,6 @@ struct GroupBlockIdPair {
 };
 
 struct MatchResult {
-    size_t           reuse_length = 0;
-    size_t           reuse_blocks = 0;
     BlockIndicesType block_indices;
 };
 

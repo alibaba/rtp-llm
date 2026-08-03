@@ -182,48 +182,50 @@ TEST(PrefillCPConfigTest, ToStringIncludesShardingFields) {
 
 TEST(KVCacheResourceTest, CacheKeysMaintainLinearDependencies) {
     KVCacheResource resource;
-    resource.setCacheKeys(CacheKeysType{10, 20, 30});
+    resource.initGroups(makeTestCacheTopology(/*group_num=*/1, /*layer_num=*/1, {{0}}));
+    constexpr std::string_view tag = "group0";
+    resource.setCacheKeys(tag, CacheKeysType{10, 20, 30});
 
-    ASSERT_EQ(resource.blockDependencies().size(), 3u);
-    EXPECT_FALSE(resource.blockDependencies()[0].has_parent);
-    EXPECT_EQ(resource.blockDependencies()[0].ordinal, 0u);
-    EXPECT_TRUE(resource.blockDependencies()[1].has_parent);
-    EXPECT_EQ(resource.blockDependencies()[1].parent_key, 10);
-    EXPECT_EQ(resource.blockDependencies()[1].ordinal, 1u);
-    EXPECT_TRUE(resource.blockDependencies()[2].has_parent);
-    EXPECT_EQ(resource.blockDependencies()[2].parent_key, 20);
-    EXPECT_EQ(resource.blockDependencies()[2].ordinal, 2u);
+    ASSERT_EQ(resource.blockDependencies(tag).size(), 3u);
+    EXPECT_FALSE(resource.blockDependencies(tag)[0].has_parent);
+    EXPECT_EQ(resource.blockDependencies(tag)[0].ordinal, 0u);
+    EXPECT_TRUE(resource.blockDependencies(tag)[1].has_parent);
+    EXPECT_EQ(resource.blockDependencies(tag)[1].parent_key, 10);
+    EXPECT_EQ(resource.blockDependencies(tag)[1].ordinal, 1u);
+    EXPECT_TRUE(resource.blockDependencies(tag)[2].has_parent);
+    EXPECT_EQ(resource.blockDependencies(tag)[2].parent_key, 20);
+    EXPECT_EQ(resource.blockDependencies(tag)[2].ordinal, 2u);
 
     BlockDependenciesType custom = {
         BlockDependency{false, 0, 7},
         BlockDependency{true, 100, 8},
     };
-    resource.setCacheKeys(CacheKeysType{100, 200});
-    resource.setBlockDependencies(custom);
-    resource.ensureLinearBlockDependencies();
-    ASSERT_EQ(resource.blockDependencies().size(), 2u);
-    EXPECT_FALSE(resource.blockDependencies()[0].has_parent);
-    EXPECT_EQ(resource.blockDependencies()[0].ordinal, 0u);
-    EXPECT_TRUE(resource.blockDependencies()[1].has_parent);
-    EXPECT_EQ(resource.blockDependencies()[1].parent_key, 100);
-    EXPECT_EQ(resource.blockDependencies()[1].ordinal, 1u);
+    resource.setCacheKeys(tag, CacheKeysType{100, 200});
+    resource.setBlockDependencies(tag, custom);
+    resource.ensureLinearBlockDependencies(tag);
+    ASSERT_EQ(resource.blockDependencies(tag).size(), 2u);
+    EXPECT_FALSE(resource.blockDependencies(tag)[0].has_parent);
+    EXPECT_EQ(resource.blockDependencies(tag)[0].ordinal, 7u);
+    EXPECT_TRUE(resource.blockDependencies(tag)[1].has_parent);
+    EXPECT_EQ(resource.blockDependencies(tag)[1].parent_key, 100);
+    EXPECT_EQ(resource.blockDependencies(tag)[1].ordinal, 8u);
 
-    resource.cacheKeys().push_back(300);
-    resource.ensureLinearBlockDependencies();
-    ASSERT_EQ(resource.blockDependencies().size(), 3u);
-    EXPECT_EQ(resource.blockDependencies()[2].parent_key, 200);
-    EXPECT_EQ(resource.blockDependencies()[2].ordinal, 2u);
+    resource.cacheKeys(tag).push_back(300);
+    resource.ensureLinearBlockDependencies(tag);
+    ASSERT_EQ(resource.blockDependencies(tag).size(), 3u);
+    EXPECT_EQ(resource.blockDependencies(tag)[2].parent_key, 200);
+    EXPECT_EQ(resource.blockDependencies(tag)[2].ordinal, 2u);
 }
 
-TEST(CacheConfigTest, KernelBlocksPerKvBlockSafeByDefault) {
-    CacheConfig config;
-    config.seq_size_per_block        = 1;
-    config.kernel_seq_size_per_block = 0;
-    ASSERT_EQ(config.kernelBlocksPerKvBlock(), 1u);
+TEST(CacheConfigTest, KernelBlocksPerKvBlockIsTagLocal) {
+    auto config = makeSimpleMhaCacheConfig(1, 2, 8, DataType::TYPE_FP16);
+    ASSERT_EQ(config.kernelBlocksPerKvBlockForGroup("default"), 1u);
 
-    config.seq_size_per_block        = 8;
-    config.kernel_seq_size_per_block = 2;
-    ASSERT_EQ(config.kernelBlocksPerKvBlock(), 4u);
+    auto                   groups = config.topology().groups();
+    std::vector<GroupBase> updated_groups(groups.begin(), groups.end());
+    updated_groups.front().kernel_seq_size_per_block = 2;
+    config.setTopology(std::move(updated_groups), config.topology().layers());
+    ASSERT_EQ(config.kernelBlocksPerKvBlockForGroup("default"), 4u);
 }
 
 TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
@@ -250,19 +252,19 @@ TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {
     ASSERT_EQ(all_g0.size(), 2u);
     ASSERT_EQ(all_g0[0], (BlockIndicesType{1, 2}));
 
-    batch.pushBackCacheKey(0, 100);
-    batch.pushBackCacheKey(1, 200);
-    ASSERT_TRUE(batch.hasCacheKeys());
+    batch.pushBackCacheKey(0, "group0", 100);
+    batch.pushBackCacheKey(1, "group0", 200);
+    ASSERT_TRUE(batch.hasCacheKeys("group0"));
 
-    batch.popBackAllBatchCacheKeys();
-    ASSERT_EQ(batch.cacheKeys(0).size(), 0u);
-    ASSERT_EQ(batch.cacheKeys(1).size(), 0u);
-    ASSERT_FALSE(batch.hasCacheKeys());
+    batch.popBackAllBatchCacheKeys("group0");
+    ASSERT_EQ(batch.cacheKeys(0, "group0").size(), 0u);
+    ASSERT_EQ(batch.cacheKeys(1, "group0").size(), 0u);
+    ASSERT_FALSE(batch.hasCacheKeys("group0"));
 
-    batch.setLastBlockAligned(true);
-    ASSERT_TRUE(batch.lastBlockAligned());
-    batch.cacheResource(1).setLastBlockAligned(false);
-    ASSERT_FALSE(batch.lastBlockAligned());
+    batch.setLastBlockAligned("group0", true);
+    ASSERT_TRUE(batch.lastBlockAligned("group0"));
+    batch.cacheResource(1).setLastBlockAligned("group0", false);
+    ASSERT_FALSE(batch.lastBlockAligned("group0"));
 
     std::vector<KVCacheResource> old_resources;
     batch.resetAndReturnOldResources(/*new_batch_size=*/1, old_resources);

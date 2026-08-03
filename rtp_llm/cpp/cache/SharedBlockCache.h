@@ -44,9 +44,10 @@ public:
     struct UnifiedCacheItem {
         struct GroupBlock {
             std::string  tag;
-            BlockIdxType block_id        = NULL_BLOCK_IDX;
-            bool         matchable       = true;
-            int64_t      created_time_us = 0;
+            BlockIdxType block_id         = NULL_BLOCK_IDX;
+            bool         matchable        = true;
+            int64_t      created_time_us  = 0;
+            uint32_t     physical_ordinal = 0;
         };
 
         CacheKeyType                                cache_key;

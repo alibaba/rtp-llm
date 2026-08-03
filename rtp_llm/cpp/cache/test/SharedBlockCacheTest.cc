@@ -87,6 +87,24 @@ TEST(SharedBlockCacheTest, EmptyCacheKeepsLegacyVersion) {
     EXPECT_EQ(cache.version(), -1);
 }
 
+TEST(SharedBlockCacheTest, EvictionPreservesPhysicalOrdinal) {
+    TestSharedBlockCache cache;
+    GroupBlock           block{std::string(kFullTag),
+                     /*block_id=*/101,
+                     /*matchable=*/true,
+                     /*created_time_us=*/0,
+                     /*physical_ordinal=*/7};
+    BlockDependency      dependency{false, 0, 7};
+    cache.put(123, {block}, false, SharedBlockCache::kGpuLogicalNamespace, dependency);
+
+    const auto evicted = cache.selectAndEvict(/*min_blocks=*/1);
+    ASSERT_TRUE(evicted.evicted_blocks_by_group.count(123));
+    ASSERT_EQ(evicted.evicted_blocks_by_group.at(123).size(), 1u);
+    EXPECT_EQ(evicted.evicted_blocks_by_group.at(123).front().physical_ordinal, 7u);
+    ASSERT_TRUE(evicted.evicted_dependencies.count(123));
+    EXPECT_EQ(evicted.evicted_dependencies.at(123).ordinal, 7u);
+}
+
 TEST(SharedBlockCacheTest, PrefixTreeEvictsCollectedChainInParentFirstOrderWithDependencies) {
     TestSharedBlockCache cache;
     putOne(cache, 1, 101, rootDep(0));
