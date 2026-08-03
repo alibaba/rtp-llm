@@ -65,6 +65,83 @@ def get_base64_prefix(s):
     return match.end()
 
 
+FRAMES_PACK_URL_PREFIX = "frames-pack:base64,"
+
+
+def is_frames_pack_url(url: str) -> bool:
+    return isinstance(url, str) and url.startswith(FRAMES_PACK_URL_PREFIX)
+
+
+def encode_frames_pack_url(
+    frames_jpeg_bytes: list, sampled_fps: float = 0.0, extras: Optional[dict] = None
+) -> str:
+    """Pack a list of raw JPEG byte payloads into a ``frames-pack:base64,...`` URL.
+
+    The output URL stays inside ``MultimodalInput.url`` (a single string) so the
+    proto wire stays unchanged. Each frame is inlined as
+    ``data:image/jpeg;base64,...`` inside a JSON envelope so callers can also
+    parse the body opaquely if needed.
+
+    The packed format intentionally uses a custom URI scheme rather than
+    ``data:application/json;base64,...`` so the open-source ``load_video``
+    path (which feeds the URL to decord) never accidentally tries to decode
+    a JSON blob as MPEG.
+    """
+    frames_data_urls = [
+        "data:image/jpeg;base64," + base64.b64encode(b).decode("ascii")
+        for b in frames_jpeg_bytes
+    ]
+    envelope = {
+        "version": 1,
+        "sampled_fps": float(sampled_fps),
+        "frames": frames_data_urls,
+    }
+    if extras:
+        envelope.update(extras)
+    payload = json.dumps(envelope, ensure_ascii=False).encode("utf-8")
+    return FRAMES_PACK_URL_PREFIX + base64.b64encode(payload).decode("ascii")
+
+
+def parse_frames_pack_url(url: str):
+    """Decode a ``frames-pack:base64,...`` URL into a list of PIL Images + metadata.
+
+    Returns ``(images, envelope)`` where ``images`` is a ``List[PIL.Image.Image]``
+    and ``envelope`` is the JSON dict (so callers can read ``sampled_fps`` etc.).
+
+    Raises ``ValueError`` if the URL doesn't have the expected prefix or the
+    payload is malformed. This is a pure helper — does NOT touch network or
+    filesystem.
+    """
+    if not is_frames_pack_url(url):
+        raise ValueError(f"not a frames-pack url: {url[:64]!r}...")
+    body = url[len(FRAMES_PACK_URL_PREFIX) :]
+    try:
+        envelope_bytes = base64.b64decode(body)
+        envelope = json.loads(envelope_bytes.decode("utf-8"))
+    except Exception as e:
+        raise ValueError(f"frames-pack envelope decode failed: {e}") from e
+    frames = envelope.get("frames")
+    if not isinstance(frames, list) or not frames:
+        raise ValueError("frames-pack envelope missing non-empty 'frames' list")
+    from PIL import Image  # local import keeps top-level deps unchanged
+
+    images = []
+    for i, frame_url in enumerate(frames):
+        if not isinstance(frame_url, str):
+            raise ValueError(f"frames-pack frame[{i}] is not a string")
+        prefix_len = get_base64_prefix(frame_url)
+        if prefix_len == 0:
+            raise ValueError(
+                f"frames-pack frame[{i}] missing 'data:image/jpeg;base64,' prefix"
+            )
+        try:
+            raw = base64.b64decode(frame_url[prefix_len:])
+            images.append(Image.open(BytesIO(raw)).convert("RGB"))
+        except Exception as e:
+            raise ValueError(f"frames-pack frame[{i}] decode failed: {e}") from e
+    return images, envelope
+
+
 class IgraphItemKeyCountMismatchError(Exception):
 
     def __init__(self, requested_count: int, received_count: int, message: str = None):

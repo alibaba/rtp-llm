@@ -1,3 +1,4 @@
+import asyncio
 import concurrent.futures
 import gc
 import logging
@@ -6,18 +7,21 @@ import os
 import signal
 import threading
 import time
+from types import SimpleNamespace
 from typing import Any, Callable, List, Optional, Tuple
 
 import torch
 import torch.profiler
 
 from rtp_llm.access_logger.access_logger import MMAccessLogger
+from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.log_config import get_log_path
 from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.config.py_config_modules import ProfilingDebugLoggingConfig, VitConfig
 from rtp_llm.cpp.model_rpc.proto.model_rpc_service_pb2 import MultimodalInputsPB
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
+from rtp_llm.multimodal.greennet_hook import GreenNetVerdict, get_greennet_provider
 from rtp_llm.multimodal.mm_profiler import MMProfiler
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
     MultiModalEmbeddingInterface,
@@ -305,6 +309,94 @@ class MMEmbeddingRes:
         return f"MMEmbeddingRes(length={len(self.embeddings)}, embeddings_shape={[e.shape for e in self.embeddings]}, position_ids_shape={[p.shape for p in self.position_ids] if self.position_ids is not None else []}, extra_input_shape={[d.shape for d in self.extra_input] if self.extra_input is not None else []})"
 
 
+class MMEmbeddingCacheEntry:
+    """Three-state cache entry for async embedding computation.
+
+    States: PENDING (event not set) -> COMPLETE (result set) or ERROR (error set).
+    """
+
+    def __init__(self):
+        self._event = threading.Event()
+        self.result: Optional[Any] = None
+        self.error: Optional[Exception] = None
+        # GreenNet verdict is a SEPARATE signal from the embedding result so the
+        # ``WaitGreenNetVerdict`` RPC can unblock as soon as content inspection
+        # decides — independently of (and usually before) the ViT embedding
+        # completing. Set by _async_compute's inspect done-callback.
+        self._greennet_event = threading.Event()
+        self._greennet_verdict: Optional[GreenNetVerdict] = None
+
+    def wait(self, timeout: Optional[float] = None) -> Any:
+        if not self._event.wait(timeout=timeout):
+            raise TimeoutError("Waiting for embedding result timed out")
+        if self.error is not None:
+            raise self.error
+        return self.result
+
+    def complete(self, result: Any) -> None:
+        self.result = result
+        self._event.set()
+
+    def fail(self, error: Exception) -> None:
+        self.error = error
+        self._event.set()
+
+    @property
+    def is_done(self) -> bool:
+        return self._event.is_set()
+
+    def set_greennet_verdict(self, verdict: GreenNetVerdict) -> None:
+        self._greennet_verdict = verdict
+        self._greennet_event.set()
+
+    def wait_greennet(self, timeout: Optional[float] = None) -> GreenNetVerdict:
+        if not self._greennet_event.wait(timeout=timeout):
+            raise TimeoutError("Waiting for greennet verdict timed out")
+        return self._greennet_verdict
+
+    @property
+    def is_greennet_decided(self) -> bool:
+        return self._greennet_event.is_set()
+
+
+class MMEmbeddingAsyncCache:
+    """Cache with three states per key: miss, in_progress, complete."""
+
+    def __init__(self, max_size: int = 10):
+        self._lock = threading.Lock()
+        self._entries: dict = {}
+        self._max_size = max_size
+
+    def try_acquire(self, cache_key: str) -> Tuple[str, MMEmbeddingCacheEntry]:
+        with self._lock:
+            if cache_key in self._entries:
+                entry = self._entries[cache_key]
+                if entry.is_done:
+                    return ("complete", entry)
+                else:
+                    return ("in_progress", entry)
+            else:
+                entry = MMEmbeddingCacheEntry()
+                self._entries[cache_key] = entry
+                self._evict_if_needed()
+                return ("miss", entry)
+
+    def _evict_if_needed(self) -> None:
+        if len(self._entries) <= self._max_size:
+            return
+        done_keys = [k for k, v in self._entries.items() if v.is_done]
+        for k in done_keys[: len(self._entries) - self._max_size]:
+            del self._entries[k]
+
+    def remove(self, cache_key: str) -> None:
+        with self._lock:
+            self._entries.pop(cache_key, None)
+
+    def resize(self, max_size: int) -> None:
+        with self._lock:
+            self._max_size = max_size
+
+
 class MMWorkItem:
     """Represents a work item for processing multimodal inputs."""
 
@@ -413,6 +505,24 @@ class MMProcessEngine:
         vit_emb_cache_.resize_cache(self.vit_config.mm_cache_item_num)
         url_data_cache_.resize_cache(self.vit_config.url_cache_item_num)
 
+        self._async_cache = MMEmbeddingAsyncCache(
+            max_size=self.vit_config.mm_cache_item_num
+        )
+
+        # GreenNet (content safety) integration. The provider is a no-op when
+        # internal_source is absent or ENABLE_SAFETY_INSPECTION is off, so this
+        # is zero-cost for open-source / disabled deployments. The dedicated
+        # asyncio loop (lazily started on first real use) hosts the background
+        # inspect tasks, which must outlive any single preprocess_and_submit
+        # call — so we cannot use a transient asyncio.run() per worker thread.
+        self._greennet_provider = get_greennet_provider()
+        self._greennet_loop: Optional[asyncio.AbstractEventLoop] = None
+        self._greennet_loop_thread: Optional[threading.Thread] = None
+        self._greennet_loop_lock = threading.Lock()
+        self._greennet_timeout_s = (
+            float(getattr(self.vit_config, "mm_timeout_ms", 120000) or 120000) / 1000.0
+        )
+
     def inc_query_num(self) -> None:
         """Increment the query counter."""
         with self.query_num_lock:
@@ -439,10 +549,161 @@ class MMProcessEngine:
             return list(tensor)
         return [tensor]
 
+    # ------------------------------------------------------------------
+    # GreenNet (content safety) plumbing
+    # ------------------------------------------------------------------
+
+    def _greennet_enabled(self) -> bool:
+        # Effective enablement (internal source present AND runtime flag on).
+        # When off, every greennet path is skipped so behavior is identical to
+        # the pre-greennet engine — no asyncio loop, no rewrite, no inspect.
+        return self._greennet_provider.is_enabled()
+
+    def _ensure_greennet_loop(self) -> asyncio.AbstractEventLoop:
+        """Lazily start the dedicated asyncio loop that hosts greennet inspect
+        tasks. The loop runs in a daemon thread so background uploads / POSTs
+        survive across worker-thread calls."""
+        if self._greennet_loop is not None:
+            return self._greennet_loop
+        with self._greennet_loop_lock:
+            if self._greennet_loop is None:
+                loop = asyncio.new_event_loop()
+                thread = threading.Thread(
+                    target=loop.run_forever, daemon=True, name="greennet-loop"
+                )
+                thread.start()
+                self._greennet_loop = loop
+                self._greennet_loop_thread = thread
+        return self._greennet_loop
+
+    def _begin_greennet(
+        self,
+        mm_inputs: List[MultimodalInput],
+        entry: Optional[MMEmbeddingCacheEntry] = None,
+    ) -> Tuple[
+        List[MultimodalInput], Optional["concurrent.futures.Future"], Optional[Any]
+    ]:
+        """Run greennet preprocess (download + frame extraction + URL rewrite),
+        kick the async inspect task, and return:
+          (rewritten_inputs, verdict_future, handle)
+
+        Preprocess is the hard dependency for ViT (it rewrites mm_input.url to a
+        base64 / frames-pack form the mixin consumes). Inspect runs concurrently
+        on the greennet loop; ``verdict_future`` resolves to a GreenNetVerdict.
+
+        If ``entry`` is given, a done-callback stamps the verdict onto it the
+        moment inspection finishes — so ``WaitGreenNetVerdict`` unblocks without
+        waiting for ViT. Caller is responsible for cancelling ``handle``.
+
+        On a no-op provider, returns the inputs unchanged with no future/handle
+        (and stamps a passing verdict on ``entry`` if provided)."""
+        if not self._greennet_enabled():
+            if entry is not None:
+                entry.set_greennet_verdict(GreenNetVerdict(passed=True))
+            return mm_inputs, None, None
+
+        loop = self._ensure_greennet_loop()
+        # request_id is not threaded down to this layer; greennet uses it only for
+        # tracing headers, so best-effort empty is acceptable.
+        req = SimpleNamespace(
+            id="", model_name=getattr(self.vit_config, "model_name", "") or ""
+        )
+        handle = asyncio.run_coroutine_threadsafe(
+            self._greennet_provider.preprocess_and_submit(req, mm_inputs), loop
+        ).result(timeout=self._greennet_timeout_s)
+        rewritten = list(handle.rewritten_inputs)
+
+        verdict_future = asyncio.run_coroutine_threadsafe(handle.wait_result(), loop)
+        if entry is not None:
+
+            def _stamp(fut: "concurrent.futures.Future") -> None:
+                try:
+                    verdict = fut.result()
+                except Exception as e:  # noqa: BLE001 - convert to process error
+                    verdict = GreenNetVerdict(
+                        passed=False, code=11, message=f"greennet inspect failed: {e}"
+                    )
+                entry.set_greennet_verdict(verdict)
+
+            verdict_future.add_done_callback(_stamp)
+        return rewritten, verdict_future, handle
+
+    def _cancel_greennet(self, handle: Optional[Any]) -> None:
+        if handle is None or self._greennet_loop is None:
+            return
+        try:
+            self._greennet_loop.call_soon_threadsafe(handle.cancel)
+        except Exception as e:  # noqa: BLE001
+            logging.warning(f"greennet handle cancel failed: {e}")
+
+    def _shutdown_greennet_loop(self) -> None:
+        loop = self._greennet_loop
+        if loop is None:
+            return
+        try:
+            loop.call_soon_threadsafe(loop.stop)
+        except Exception as e:  # noqa: BLE001
+            logging.warning(f"greennet loop stop failed: {e}")
+        if self._greennet_loop_thread is not None:
+            self._greennet_loop_thread.join(timeout=2.0)
+        self._greennet_loop = None
+        self._greennet_loop_thread = None
+
+    def _embed_with_greennet_sync(
+        self, mm_inputs: List[MultimodalInput]
+    ) -> MMEmbeddingRes:
+        """Synchronous embedding path with greennet (used by the in-process /
+        cpp / rpc entrypoints). Preprocess + inspect run, ViT runs concurrently
+        with inspect, then the verdict gates the result. Raises
+        FtRuntimeException(UNSAFE_INPUT_CONTENT) on a non-passing verdict."""
+        rewritten, verdict_future, handle = self._begin_greennet(mm_inputs)
+        try:
+            result = self.mm_embedding_impl(rewritten)
+            if verdict_future is not None:
+                verdict = verdict_future.result(timeout=self._greennet_timeout_s)
+                if not verdict.passed:
+                    raise FtRuntimeException(
+                        ExceptionType.UNSAFE_INPUT_CONTENT,
+                        verdict.message or "data inspection failed",
+                    )
+            return result
+        finally:
+            self._cancel_greennet(handle)
+
+    def wait_greennet_verdict(
+        self, mm_inputs: List[MultimodalInput], timeout_ms: int = 60000
+    ) -> GreenNetVerdict:
+        """Block until every input's greennet verdict is decided; return the
+        first non-passing verdict (first-failure-wins), else a passing verdict.
+
+        Called by the VIT RPC's ``WaitGreenNetVerdict`` handler before prefill.
+        If an input was never async-submitted (cache miss), kick its compute
+        now so the verdict gets produced."""
+        if not self._greennet_enabled():
+            return GreenNetVerdict(passed=True)
+
+        for mm_input in mm_inputs:
+            if mm_input.url == "":
+                continue
+            cache_key = mm_input.cache_key()
+            state, entry = self._async_cache.try_acquire(cache_key)
+            if state == "miss":
+                single_input = [mm_input]
+                thread = threading.Thread(
+                    target=self._async_compute,
+                    args=(single_input, cache_key, entry),
+                    daemon=True,
+                )
+                thread.start()
+            verdict = entry.wait_greennet(timeout=timeout_ms / 1000.0)
+            if verdict is not None and not verdict.passed:
+                return verdict
+        return GreenNetVerdict(passed=True)
+
     def mm_embedding_rpc(self, mm_inputs: MultimodalInputsPB) -> MMEmbeddingRes:
         """Process multimodal inputs from RPC protocol buffer."""
         converted_inputs = trans_mm_input(mm_inputs)
-        return self.mm_embedding_impl(converted_inputs)
+        return self._embed_with_greennet_sync(converted_inputs)
 
     def mm_embedding_cpp(
         self,
@@ -460,7 +721,7 @@ class MMProcessEngine:
                 urls, types, tensors, mm_preprocess_configs
             )
         ]
-        res = self.mm_embedding_impl(mm_inputs)
+        res = self._embed_with_greennet_sync(mm_inputs)
         res.position_ids = [pos.cpu() for pos in res.position_ids]
         return res
 
@@ -581,6 +842,99 @@ class MMProcessEngine:
             tensor_res.extend(self._maybe_tensor_to_list(tensor, dim=1))
         return emb_res, pos_res, tensor_res
 
+    def async_submit(self, mm_inputs: List[MultimodalInput]) -> List[str]:
+        """Asynchronously submit multimodal URLs for embedding computation.
+
+        Each input is submitted independently, keyed by its own cache_key.
+        Returns the list of cache keys. Inputs already in-progress or complete
+        are not recomputed.
+        """
+        cache_keys = []
+        for mm_input in mm_inputs:
+            if mm_input.url == "":
+                raise ValueError("async_submit requires non-empty url for each input")
+
+            cache_key = mm_input.cache_key()
+            cache_keys.append(cache_key)
+
+            state, entry = self._async_cache.try_acquire(cache_key)
+            if state == "miss":
+                single_input = [mm_input]
+                thread = threading.Thread(
+                    target=self._async_compute,
+                    args=(single_input, cache_key, entry),
+                    daemon=True,
+                )
+                thread.start()
+
+        return cache_keys
+
+    def get_embedding_result(
+        self, mm_inputs: List[MultimodalInput], timeout_ms: int = 120000
+    ) -> List[MMEmbeddingRes]:
+        """Retrieve embedding results, blocking until ready if necessary.
+
+        Each input is looked up independently by its cache_key.
+        If a key was never submitted, computes synchronously.
+        If in-progress, blocks until the computing thread finishes.
+        If complete, returns immediately.
+        """
+        results = []
+        for mm_input in mm_inputs:
+            if mm_input.url == "":
+                raise ValueError(
+                    "get_embedding_result requires non-empty url for each input"
+                )
+
+            cache_key = mm_input.cache_key()
+            state, entry = self._async_cache.try_acquire(cache_key)
+
+            if state == "miss":
+                self._async_compute([mm_input], cache_key, entry)
+
+            results.append(entry.wait(timeout=timeout_ms / 1000.0))
+
+        return results
+
+    def _async_compute(
+        self,
+        mm_inputs: List[MultimodalInput],
+        cache_key: str,
+        entry: MMEmbeddingCacheEntry,
+    ) -> None:
+        handle = None
+        try:
+            # GreenNet preprocess (rewrites URL) + async inspect. The inspect
+            # done-callback stamps entry.greennet_verdict the moment inspection
+            # finishes, so WaitGreenNetVerdict unblocks independently of ViT.
+            rewritten, verdict_future, handle = self._begin_greennet(mm_inputs, entry)
+            # ViT embedding runs concurrently with inspection.
+            result = self.mm_embedding_impl(rewritten)
+            if verdict_future is not None:
+                verdict = verdict_future.result(timeout=self._greennet_timeout_s)
+                if not verdict.passed:
+                    entry.fail(
+                        FtRuntimeException(
+                            ExceptionType.UNSAFE_INPUT_CONTENT,
+                            verdict.message or "data inspection failed",
+                        )
+                    )
+                    self._async_cache.remove(cache_key)
+                    return
+            entry.complete(result)
+        except Exception as e:
+            # If greennet never decided (preprocess crash etc.), surface a
+            # process-error verdict so WaitGreenNetVerdict doesn't hang.
+            if not entry.is_greennet_decided:
+                entry.set_greennet_verdict(
+                    GreenNetVerdict(passed=False, code=11, message=str(e))
+                )
+            entry.fail(e)
+            self._async_cache.remove(cache_key)
+        finally:
+            self._cancel_greennet(handle)
+
     def stop(self) -> None:
         """Shutdown the preprocessing executor."""
         self.preprocess_executor.shutdown()
+        self._shutdown_greennet_loop()
