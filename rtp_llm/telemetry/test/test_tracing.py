@@ -16,6 +16,7 @@ import os
 import socket
 import sys
 import tempfile
+import time
 import unittest
 from unittest import mock
 
@@ -73,6 +74,32 @@ class TestDependencyContract(unittest.TestCase):
         self.assertTrue(
             tracing.OTEL_AVAILABLE,
             f"opentelemetry runtime unavailable: {tracing._OTEL_IMPORT_ERROR!r}",
+        )
+
+    def test_otlp_http_trace_exporter_is_available(self):
+        from opentelemetry.exporter.otlp.proto.http.trace_exporter import (
+            OTLPSpanExporter,
+        )
+
+        self.assertIsNotNone(OTLPSpanExporter)
+
+    def test_metadata_to_headers_is_lowercase_last_value_wins(self):
+        metadata = (
+            ("TraceParent", "first"),
+            ("traceparent", "second"),
+            (b"X-Request-ID", "request"),
+            ("binary-bin", b"\x00\x01"),
+            ("malformed",),
+            (None, "ignored"),
+        )
+
+        self.assertEqual(
+            tracing.metadata_to_headers(metadata),
+            {
+                "traceparent": "second",
+                "x-request-id": "request",
+                "binary-bin": b"\x00\x01",
+            },
         )
 
 
@@ -603,6 +630,18 @@ class TestActiveRuntime(TracingTestCase):
         )
         assert format(spans[0].parent.span_id, "016x") == "b7ad6b7169203331"
 
+    def test_server_span_accepts_explicit_start_time(self):
+        exporter = _start_in_memory_runtime()
+        start_time = time.time_ns() - 1_000_000
+        state = tracing.start_server_span("delayed", {}, start_time=start_time)
+        assert state is not None
+        state.finish()
+        tracing.shutdown_telemetry()
+
+        spans = exporter.get_finished_spans()
+        assert len(spans) == 1
+        assert spans[0].start_time == start_time
+
     def test_untrusted_unsampled_remote_parent_uses_local_sampler(self):
         exporter = _start_in_memory_runtime()
         headers = {
@@ -860,6 +899,23 @@ class TestClientSpan(TracingTestCase):
         # metadata traceparent must reference the CLIENT span (next hop parent)
         assert format(client.context.span_id, "016x") in carrier["traceparent"]
         assert format(client.context.trace_id, "032x") in carrier["traceparent"]
+
+    def test_zero_ratio_still_propagates_non_recording_client_context(self):
+        os.environ["RTP_LLM_OTEL_TRACE_SAMPLER_RATIO"] = "0"
+        exporter = _start_in_memory_runtime()
+        trace_id = "0af7651916cd43dd8448eb211c80319c"
+        state = tracing.start_server_span(
+            "server",
+            {"traceparent": f"00-{trace_id}-b7ad6b7169203331-01"},
+        )
+        handle, metadata = tracing.start_client_span("client")
+        assert handle is not None
+        carrier = dict(metadata)
+        assert carrier["traceparent"].split("-")[1] == trace_id
+        handle.finish()
+        state.finish()
+        tracing.shutdown_telemetry()
+        assert exporter.get_finished_spans() == ()
 
     def test_client_span_omits_rpc_system(self):
         # rpc.system on the frontend CLIENT span made the platform re-classify
