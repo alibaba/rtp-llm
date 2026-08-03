@@ -8,8 +8,7 @@
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 #include "rtp_llm/cpp/cache/CPSlotMapper.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
-#include "rtp_llm/cpp/cache/HybridPoolKVCacheAllocator.h"
-#include "rtp_llm/cpp/cache/SingleTypeKVCacheAllocator.h"
+#include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/SharedBlockCache.h"
 #include "rtp_llm/cpp/cache/connector/KVCacheConnectorCoordinator.h"
 #include "rtp_llm/cpp/cache/KVCacheHashUtil.h"
@@ -176,29 +175,29 @@ KVCacheManager::KVCacheManager(const CacheConfig&                 config,
     cache_store_config_(cache_store_config),
     use_cuda_malloc_block_pool_(use_cuda_malloc_block_pool) {
     if (warmup) {
-        config_.finalizeBlockNums(/*global_block_num=*/1, runtime_config_);
+        config_.applyTokenCapacity(/*capacity_tokens=*/1);
     } else {
         allocateAndSync();
     }
 
     const auto& cp_cfg = parallelism_config_.prefill_cp_config;
     if (cp_cfg.kv_cache_sharded && parallelism_config_.tp_size > 1) {
-        cp_slot_mapper_ = std::make_shared<CPSlotMapper>(static_cast<int>(parallelism_config_.tp_rank),
+        for (const auto& group : config_.topology().groups()) {
+            auto mapper = std::make_shared<CPSlotMapper>(static_cast<int>(parallelism_config_.tp_rank),
                                                          static_cast<int>(parallelism_config_.tp_size),
-                                                         static_cast<int>(config_.seq_size_per_block));
-        RTP_LLM_LOG_INFO("CP sharded KV cache enabled: cp_rank=%d, cp_size=%d, block_size=%zu, "
-                         "virtual_block_size=%d",
-                         (int)parallelism_config_.tp_rank,
-                         (int)parallelism_config_.tp_size,
-                         config_.seq_size_per_block,
-                         cp_slot_mapper_->virtualBlockSize());
+                                                         static_cast<int>(group.seq_size_per_block));
+            RTP_LLM_LOG_INFO("CP sharded KV cache tag=%s cp_rank=%d cp_size=%d physical_span=%zu "
+                             "virtual_block_size=%d",
+                             group.tag.c_str(),
+                             (int)parallelism_config_.tp_rank,
+                             (int)parallelism_config_.tp_size,
+                             group.seq_size_per_block,
+                             mapper->virtualBlockSize());
+            cp_slot_mappers_.emplace(group.tag, std::move(mapper));
+        }
     }
 
-    RTP_LLM_LOG_INFO("cache config: layer_num=%d, block_num=%d, block_size=%dB, seq_size_per_block=%zu",
-                     config_.layer_num,
-                     config_.block_num,
-                     config_.block_size_bytes,
-                     config_.seq_size_per_block);
+    RTP_LLM_LOG_INFO("cache config: layer_num=%d, token_capacity=%lu", config_.layer_num, config_.tokenCapacity());
 }
 
 KVCacheManager::~KVCacheManager() {
@@ -223,24 +222,18 @@ bool KVCacheManager::init() {
                                                    && kv_cache_config_.enable_prefix_tree_memory_cache
                                                    && kv_cache_config_.enable_independent_group_eviction;
 
-    const bool use_group_pools = config_.use_independent_block_pools || config_.groupNums() > 1;
-    if (use_group_pools) {
-        allocator_ = std::make_shared<rtp_llm::HybridPoolKVCacheAllocator>(config_,
-                                                                           AllocationType::DEVICE,
-                                                                           metrics_reporter_,
-                                                                           kv_cache_config_.reserve_block_ratio,
-                                                                           pd_sep_config_.role_type);
-    } else {
-        allocator_ = std::make_shared<rtp_llm::SingleTypeKVCacheAllocator>(
-            config_, AllocationType::DEVICE, metrics_reporter_, kv_cache_config_.reserve_block_ratio);
-    }
+    allocator_ = std::make_shared<rtp_llm::KVCacheAllocator>(config_,
+                                                             AllocationType::DEVICE,
+                                                             metrics_reporter_,
+                                                             kv_cache_config_.reserve_block_ratio,
+                                                             pd_sep_config_.role_type);
 
     if (use_cuda_malloc_block_pool_) {
         RTP_LLM_LOG_INFO("RDMA cache store enabled for PD role, use cudaMalloc KV cache block-pool backing");
         allocator_->setUseCudaMallocBlockPool(true);
     }
 
-    allocator_->setCPSlotMapper(cp_slot_mapper_);
+    allocator_->setCPSlotMappers(cp_slot_mappers_);
     allocator_->setSharedBlockCache(shared_cache);
     RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "KVCacheAllocator init failed");
     shared_cache->setIndependentGroupEviction(enable_independent_group_eviction, allocator_->independentEvictionTags());
@@ -274,11 +267,10 @@ MallocResult KVCacheManager::malloc(const MallocInfo& malloc_info) {
     RTP_LLM_PROFILE_FUNCTION();
     RTP_LLM_CHECK(malloc_info.batch_kv_cache_resource && malloc_info.complete_token_ids);
 
-    const int seq_size_per_block = config_.seq_size_per_block;
     if (!malloc_info.batch_kv_cache_resource->curBlocksNum()) {
-        initCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
+        initCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids);
     } else {
-        updateCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids, seq_size_per_block);
+        updateCacheKeys(malloc_info.batch_kv_cache_resource, malloc_info.complete_token_ids);
     }
 
     return allocator_->malloc(malloc_info);
@@ -452,11 +444,9 @@ KVCacheInfo KVCacheManager::getKVCacheInfo(int64_t latest_version, bool need_cac
         info.cached_keys.assign(all_keys.begin(), all_keys.end());
     }
 
-    const size_t block_size_tokens = cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?
-                                         cp_slot_mapper_->virtualBlockSize() :
-                                         config_.seq_size_per_block;
-
-    const auto capacity     = allocator_->tokenCapacity(block_size_tokens);
+    const size_t block_size_tokens =
+        config_.groupNums() == 1 ? config_.topology().groups().front().seq_size_per_block : 0;
+    const auto capacity     = allocator_->tokenCapacity();
     info.block_size         = block_size_tokens;
     info.total_kv_cache     = capacity.total_tokens;
     info.available_kv_cache = capacity.available_tokens;
@@ -485,9 +475,10 @@ bool KVCacheManager::hasActiveConnectors() const {
 }
 
 // PD separation: increment KV cache reference count
-std::shared_ptr<KVCacheResource>
-KVCacheManager::incrKVCacheRef(const KVCacheResource& resource, const CacheKeysType& cache_keys, bool is_connector) {
-    return allocator_->incrKVCacheRef(resource, cache_keys, is_connector);
+std::shared_ptr<KVCacheResource> KVCacheManager::incrKVCacheRef(const KVCacheResource&  resource,
+                                                                const CacheKeysByGroup& cache_keys_by_group,
+                                                                bool                    is_connector) {
+    return allocator_->incrKVCacheRef(resource, cache_keys_by_group, is_connector);
 }
 
 bool KVCacheManager::hasP2PConnector() const {
@@ -536,25 +527,28 @@ void KVCacheManager::initConnectorCoordinator() {
 }
 
 void KVCacheManager::allocateAndSync() {
-    RTP_LLM_LOG_INFO("allocateAndSync start, block_num=%d", config_.block_num);
+    uint64_t capacity_tokens = config_.tokenCapacity();
+    RTP_LLM_LOG_INFO("allocateAndSync start, capacity_tokens=%lu", capacity_tokens);
     size_t world_size = parallelism_config_.tp_size * parallelism_config_.dp_size;
     if (world_size > 1) {
-        size_t local_rank    = parallelism_config_.tp_size * parallelism_config_.dp_rank + parallelism_config_.tp_rank;
-        auto   block_num_t   = torch::empty({(int64_t)world_size}, torch::kInt32).pin_memory();
-        auto   block_num_ptr = block_num_t.data_ptr<int>();
-        block_num_ptr[local_rank] = config_.block_num;
-        execAllGather({{block_num_t}, ParallelMode::DP_AND_TP});
+        size_t local_rank   = parallelism_config_.tp_size * parallelism_config_.dp_rank + parallelism_config_.tp_rank;
+        auto   capacity_t   = torch::empty({(int64_t)world_size}, torch::kInt64).pin_memory();
+        auto   capacity_ptr = capacity_t.data_ptr<int64_t>();
+        RTP_LLM_CHECK_WITH_INFO(capacity_tokens <= static_cast<uint64_t>(std::numeric_limits<int64_t>::max()),
+                                "cache capacity exceeds collective int64 range");
+        capacity_ptr[local_rank] = static_cast<int64_t>(capacity_tokens);
+        execAllGather({{capacity_t}, ParallelMode::DP_AND_TP});
         execSyncCommunication(false);
         cudaSyncAndCheck();
 
         if (parallelism_config_.ffn_disaggregate_config.is_ffn_service()) {
-            config_.block_num = 1;
+            capacity_tokens = 1;
         } else {
-            config_.block_num = *std::min_element(block_num_ptr, block_num_ptr + world_size);
+            capacity_tokens = static_cast<uint64_t>(*std::min_element(capacity_ptr, capacity_ptr + world_size));
         }
     }
-    config_.finalizeBlockNums(static_cast<uint32_t>(config_.block_num), runtime_config_);
-    RTP_LLM_LOG_INFO("block_num is %d after tp sync", config_.block_num);
+    config_.applyTokenCapacity(capacity_tokens);
+    RTP_LLM_LOG_INFO("capacity_tokens is %lu after TP/DP sync", capacity_tokens);
 }
 
 void KVCacheManager::reportMetricsLoop() {
@@ -665,8 +659,10 @@ bool KVCacheManager::writeKVBlockForTest(int                  block_index,
                                          const std::string&   tag,
                                          const torch::Tensor& k_buffer,
                                          const torch::Tensor& v_buffer) {
-    if (block_index < 0 || block_index >= config_.block_num) {
-        RTP_LLM_LOG_WARNING("Invalid block_index: %d, valid range: [0, %d)", block_index, config_.block_num);
+    const auto block_num = config_.blockNumForGroup(tag);
+    if (block_index < 0 || static_cast<uint32_t>(block_index) >= block_num) {
+        RTP_LLM_LOG_WARNING(
+            "Invalid block_index: %d, valid range for tag=%s: [0, %u)", block_index, tag.c_str(), block_num);
         return false;
     }
 

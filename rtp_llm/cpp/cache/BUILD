@@ -191,6 +191,7 @@ cc_library(
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [
+        ":cache_config",
         ":cache_group_type",
     ],
 )
@@ -228,24 +229,15 @@ cc_library(
         ":block_pool",
         ":cache_types",
         ":cp_slot_mapper",
+        ":kv_cache_group",
         "//rtp_llm/cpp/metrics:metrics",
     ] + torch_deps(),
 )
 
 cc_library(
     name = "kv_cache_allocator",
-    srcs = [
-        "HybridKVCacheAllocator.cc",
-        "HybridPoolKVCacheAllocator.cc",
-        "KVCacheAllocator.cc",
-        "SingleTypeKVCacheAllocator.cc",
-    ],
-    hdrs = [
-        "HybridKVCacheAllocator.h",
-        "HybridPoolKVCacheAllocator.h",
-        "KVCacheAllocator.h",
-        "SingleTypeKVCacheAllocator.h",
-    ],
+    srcs = ["KVCacheAllocator.cc"],
+    hdrs = ["KVCacheAllocator.h"],
     copts = copts(),
     visibility = ["//visibility:public"],
     deps = [

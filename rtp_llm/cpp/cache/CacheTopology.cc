@@ -99,6 +99,10 @@ const GroupBase& CacheTopology::group(std::string_view tag) const {
     return groups_[it->second];
 }
 
+bool CacheTopology::contains(std::string_view tag) const {
+    return tag_to_group_idx_.find(std::string(tag)) != tag_to_group_idx_.end();
+}
+
 const LayerBase& CacheTopology::layer(int layer_id) const {
     RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layers_.size(),
                             "CacheTopology invalid layer_id=%d size=%zu",

@@ -266,15 +266,12 @@ void setupIndependentPoolSizes(CacheConfig&           config,
                                std::vector<GroupBase> groups,
                                std::vector<LayerBase> layers,
                                bool                   is_mtp) {
-    config.use_independent_block_pools = true;
 
-    size_t   max_kv_stride           = 0;
-    size_t   max_scale_stride        = 0;
-    size_t   total_kv_block_bytes    = 0;
-    size_t   total_scale_block_bytes = 0;
-    uint32_t max_group_layers        = 0;
+    size_t max_kv_stride           = 0;
+    size_t max_scale_stride        = 0;
+    size_t total_kv_block_bytes    = 0;
+    size_t total_scale_block_bytes = 0;
 
-    config.layer_to_block_stride_bytes.assign(config.layer_all_num, 0);
     for (auto& group : groups) {
         const auto& spec = group.spec;
         RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache spec tag=%s is null", group.tag.c_str());
@@ -295,15 +292,8 @@ void setupIndependentPoolSizes(CacheConfig&           config,
         }
         max_kv_stride    = std::max(max_kv_stride, kv_stride);
         max_scale_stride = std::max(max_scale_stride, scale_stride);
-        max_group_layers = std::max(max_group_layers, layer_count);
-
-        for (int layer_id : group.layer_ids) {
-            auto& layer_stride = config.layer_to_block_stride_bytes[static_cast<size_t>(layer_id)];
-            layer_stride       = std::max(layer_stride, static_cast<int>(kv_stride + scale_stride));
-        }
     }
 
-    config.group_layer_num         = static_cast<int>(std::max<uint32_t>(1, max_group_layers));
     config.kv_block_stride_bytes   = max_kv_stride;
     config.kv_scale_stride_bytes   = max_scale_stride;
     config.kv_block_size_bytes     = total_kv_block_bytes;
@@ -320,7 +310,6 @@ void setupIndependentPoolSizes(CacheConfig&           config,
     }
     config.explicitly_sized_pool_reserve_bytes = 0;
     config.setTopology(std::move(groups), std::move(layers));
-    config.group_block_layout_initialized = true;
 }
 
 CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_config,

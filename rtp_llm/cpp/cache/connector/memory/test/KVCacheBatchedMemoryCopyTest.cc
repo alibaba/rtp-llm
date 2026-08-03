@@ -85,16 +85,15 @@ TEST(KVCacheMemoryProtocolTest, TaglessBlocksAreAlwaysRejected) {
 
 CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     CacheConfig config;
-    config.dtype                       = rtp_llm::DataType::TYPE_UINT8;
-    config.layer_num                   = use_flash ? 43 : 61;
-    config.layer_all_num               = config.layer_num;
-    config.block_num                   = 512;
-    config.seq_size_per_block          = 256;
-    config.kernel_seq_size_per_block   = 256;
-    config.use_independent_block_pools = true;
-    config.use_typed_cache_regions     = true;
-    config.use_opaque_kv_cache_store   = true;
-    config.is_sparse                   = true;
+    config.dtype                     = rtp_llm::DataType::TYPE_UINT8;
+    config.layer_num                 = use_flash ? 43 : 61;
+    config.layer_all_num             = config.layer_num;
+    config.block_num                 = 512;
+    config.seq_size_per_block        = 256;
+    config.kernel_seq_size_per_block = 256;
+    config.use_typed_cache_regions   = true;
+    config.use_opaque_kv_cache_store = true;
+    config.is_sparse                 = true;
 
     constexpr size_t               kDsv4PoolNum = 7;
     const std::vector<std::string> group_tags   = {
@@ -124,9 +123,7 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     const std::vector<size_t>     group_kv_scale_stride_bytes(kDsv4PoolNum, 0);
     const std::vector<uint32_t>   group_block_nums(kDsv4PoolNum, config.block_num);
     std::vector<std::vector<int>> layers_by_group(kDsv4PoolNum);
-    config.layer_to_block_stride_bytes = std::vector<int>(config.layer_all_num, 0);
-
-    auto make_spec = [&](size_t gid) -> KVCacheSpecPtr {
+    auto                          make_spec = [&](size_t gid) -> KVCacheSpecPtr {
         return makeResolvedOpaqueSpec(group_types[gid] != CacheGroupType::FULL,
                                       group_tags[gid],
                                       config.dtype,
@@ -169,7 +166,6 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
         groups.push_back(std::move(group));
     }
     setTestTopology(config, std::move(groups));
-    config.group_block_layout_initialized = true;
     return config;
 }
 
@@ -185,7 +181,6 @@ void setGroupStridesForConfig(CacheConfig& config, size_t kv_block_stride_bytes,
         group.kv_scale_stride_bytes = kv_scale_stride_bytes;
     }
     config.setTopology(std::move(groups), config.topology().layers());
-    config.group_block_layout_initialized = true;
 }
 
 void setBlockBytes(const BlockInfo& b, size_t byte_offset, size_t byte_len, char c) {
@@ -301,6 +296,10 @@ public:
     std::vector<BlockInfo> convertIndexToBuffer(
         int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const override {
         return convertIndexToBuffer(layer_id, tag, block_id);
+    }
+
+    BlockPoolPtr blockPool(std::string_view) const override {
+        return nullptr;
     }
 
     std::shared_ptr<KVCacheResource> incrKVCacheRef(const KVCacheResource&, const CacheKeysType&, bool) override {

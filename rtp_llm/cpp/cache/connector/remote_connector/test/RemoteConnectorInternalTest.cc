@@ -108,6 +108,9 @@ public:
         int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const override {
         return convertIndexToBuffer(layer_id, tag, block_id);
     }
+    BlockPoolPtr blockPool(std::string_view) const override {
+        return nullptr;
+    }
     GroupedCacheLayerLayout allLayerCacheBase() const override {
         ++all_layer_cache_base_call_count_;
         const auto                            topology = config_.topologyPtr();
@@ -247,7 +250,6 @@ public:
             group.kv_scale_stride_bytes = 0;
         }
         cache_config_.setTopology(std::move(groups), cache_config_.topology().layers());
-        cache_config_.group_block_layout_initialized = true;
     }
 
     void TearDown() override {}
@@ -330,7 +332,6 @@ TEST_F(RemoteConnectorInternalTest, PublishesTagLocalHeterogeneousGroupBlockSize
         group.kv_scale_stride_bytes = 0;
     }
     heterogeneous_config.setTopology(std::move(groups), heterogeneous_config.topology().layers());
-    heterogeneous_config.group_block_layout_initialized = true;
 
     std::vector<std::string> full_group_tags({"0"});
     std::vector<std::string> linear_group_tags({"1", "2"});
@@ -385,7 +386,6 @@ TEST_F(RemoteConnectorInternalTest, test_genLocationSpecGroupsScalesLinearly) {
         group.kv_scale_stride_bytes = 0;
     }
     config.setTopology(std::move(groups), config.topology().layers());
-    config.group_block_layout_initialized = true;
 
     auto allocator =
         std::make_shared<FakeKVCacheAllocator>(config, full_group_tags, linear_group_tags, /*per_group_layer_num=*/1);

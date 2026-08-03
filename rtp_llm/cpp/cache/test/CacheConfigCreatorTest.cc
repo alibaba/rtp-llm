@@ -100,7 +100,6 @@ TEST(CacheConfigCreatorTest, HybridAppliesModelKernelShapeOnlyToFullGroup) {
     auto config = CacheConfigCreator::createConfig(model_config, parallelism_config, runtime_config, kv_cache_config);
 
     ASSERT_EQ(config.groupNums(), 2);
-    EXPECT_TRUE(config.use_independent_block_pools);
     EXPECT_EQ(config.kernel_seq_size_per_block, 4u);
     EXPECT_EQ(config.kernelSeqSizePerBlockForGroup("full"), 4u);
     EXPECT_EQ(config.kernelSeqSizePerBlockForGroup("linear"), config.seqSizePerBlockForGroup("linear"));

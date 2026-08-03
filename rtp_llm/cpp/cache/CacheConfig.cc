@@ -209,10 +209,6 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
     for (size_t layer_id = 0; layer_id < target_layers.size(); ++layer_id) {
         target_layers[layer_id].layer_id = static_cast<int>(layer_id);
     }
-    if (layer_to_block_stride_bytes.size() < total_layers) {
-        layer_to_block_stride_bytes.resize(total_layers, 0);
-    }
-
     const auto target_group_num  = target_groups.size();
     const auto default_alias_tag = resolveDefaultMTPGroupAlias(*this, propose_config);
 
@@ -250,18 +246,22 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
                     source_group.layer_ids[local_layer_id]);
             }
 
+            const auto   main_group_layers = static_cast<size_t>(std::count_if(
+                target_group.layer_ids.begin(), target_group.layer_ids.end(), [main_layer_num](int layer_id) {
+                    return layer_id >= 0 && static_cast<uint32_t>(layer_id) < main_layer_num;
+                }));
             const size_t expected_existing_layers =
-                static_cast<size_t>(group_layer_num) + static_cast<size_t>(module_index) * mtp_layer_num;
+                main_group_layers + static_cast<size_t>(module_index) * mtp_layer_num;
             RTP_LLM_CHECK_WITH_INFO(target_group.layer_ids.size() == expected_existing_layers,
                                     "CacheConfig::mergeMTPModule source_tag=%s target_tag=%s "
                                     "physical group alignment mismatch: "
-                                    "existing_layers=%zu expected=%zu module=%d group_layer_num=%d module_layers=%u",
+                                    "existing_layers=%zu expected=%zu module=%d main_group_layers=%zu module_layers=%u",
                                     source_group.tag.c_str(),
                                     tag.c_str(),
                                     target_group.layer_ids.size(),
                                     expected_existing_layers,
                                     module_index,
-                                    group_layer_num,
+                                    main_group_layers,
                                     mtp_layer_num);
         }
 
@@ -310,13 +310,6 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
 
             target_group.layer_ids.push_back(static_cast<int>(global_layer_id));
             target_layers[global_layer].group_tags.push_back(tag);
-
-            RTP_LLM_CHECK_WITH_INFO(static_cast<size_t>(local_layer_id) < sub_cfg->layer_to_block_stride_bytes.size(),
-                                    "CacheConfig::mergeMTPModule local layer stride missing layer=%d size=%zu",
-                                    local_layer_id,
-                                    sub_cfg->layer_to_block_stride_bytes.size());
-            layer_to_block_stride_bytes[global_layer] =
-                sub_cfg->layer_to_block_stride_bytes[static_cast<size_t>(local_layer_id)];
         }
 
         sub_groups.push_back(std::move(sub_group));
@@ -332,7 +325,6 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
                                 layer_id);
     }
 
-    sub_cfg->group_block_layout_initialized = group_block_layout_initialized;
     sub_cfg->setTopology(std::move(sub_groups), std::move(sub_layers));
     layer_all_num = static_cast<uint32_t>(total_layers);
     setTopology(std::move(target_groups), std::move(target_layers));
@@ -351,15 +343,8 @@ void CacheConfig::finalizeBlockNums(uint32_t global_block_num, const RuntimeConf
         }
     }
 
-    if (!use_independent_block_pools || !group_block_layout_initialized || groupNums() == 0) {
+    if (groupNums() == 0) {
         explicitly_sized_pool_reserve_bytes = 0;
-        if (groupNums() > 0) {
-            auto groups = copyGroups(topology());
-            for (auto& group : groups) {
-                group.block_num = global_block_num;
-            }
-            setTopology(std::move(groups), topology().layers());
-        }
         return;
     }
 
@@ -421,7 +406,6 @@ std::string CacheConfig::debugString(size_t indent) const {
 
     os << indent1 << "# Attention Configuration:\n";
     OUTPUT_FIELD(linear_step);
-    OUTPUT_FIELD(group_layer_num);
     OUTPUT_FIELD_EXPR("full_group_num",
                       std::count_if(topology_groups.begin(), topology_groups.end(), [](const GroupBase& group) {
                           return group.policy.group_type == CacheGroupType::FULL;

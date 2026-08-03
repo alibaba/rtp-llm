@@ -123,6 +123,10 @@ const GroupBase& KVCacheGroup::config() const {
     return cache_group_;
 }
 
+const BlockPoolPtr& KVCacheGroup::blockPool() const {
+    return block_pool_;
+}
+
 const CacheGroupPolicy& KVCacheGroup::policy() const {
     return cache_group_.policy;
 }

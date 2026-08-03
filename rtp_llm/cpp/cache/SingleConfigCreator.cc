@@ -145,12 +145,6 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     }
 
     config.block_size_bytes = config.kv_block_size_bytes + config.kv_scale_size_bytes;
-    config.group_layer_num  = layer_num;  // only 1 group for SingleConfig
-
-    const size_t per_layer_stride_bytes = config.kv_block_stride_bytes + config.kv_scale_stride_bytes;
-    config.layer_to_block_stride_bytes.assign(static_cast<size_t>(config.layer_all_num),
-                                              static_cast<int>(per_layer_stride_bytes));
-
     std::vector<int> layer_ids(static_cast<size_t>(layer_num));
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
     GroupBase group;

@@ -101,6 +101,9 @@ public:
         int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const override {
         return {};
     }
+    BlockPoolPtr blockPool(std::string_view) const override {
+        return nullptr;
+    }
     GroupedCacheLayerLayout allLayerCacheBase() const override {
         RTP_LLM_CHECK_WITH_INFO(topology_ != nullptr, "fake allocator has no cache topology");
         GroupedCacheLayerLayout::GroupLayouts groups;
