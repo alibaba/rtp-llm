@@ -5,6 +5,7 @@
 #include "rtp_llm/cpp/utils/utils.h"
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include <atomic>
+#include <cerrno>
 #include <cstdint>
 #include <stdexcept>
 #include <vector>
@@ -43,6 +44,25 @@ bool dsv4NanDiagEnabled() {
 
 std::atomic<int64_t> dsv4_nan_diag_batch_seq{1};
 
+// Every diagnostic record is kept below PIPE_BUF and emitted with one write(2)
+// call. This prevents bytes from different DP/EP rank processes sharing one
+// stderr pipe from being interleaved into an unsearchable line.
+void writeDsv4NanStderrLine(const std::string& line) {
+    std::string payload = line;
+    payload.push_back('\n');
+    ssize_t written = -1;
+    do {
+        written = ::write(STDERR_FILENO, payload.data(), payload.size());
+    } while (written < 0 && errno == EINTR);
+
+    if (written != static_cast<ssize_t>(payload.size())) {
+        // Preserve a visible failure signal even for an unusual stderr write
+        // error/short write. Normal deployment stderr is an inherited file or
+        // pipe, for which these sub-PIPE_BUF writes complete atomically.
+        std::cerr << "[DSV4_NAN_DIAG_FAILURE] atomic stderr write failed errno=" << errno << std::endl;
+    }
+}
+
 std::string sanitizeTraceIdForLog(const std::string& trace_id) {
     constexpr size_t kMaxTraceIdBytes = 256;
     std::string      result;
@@ -63,6 +83,102 @@ std::string sanitizeTraceIdForLog(const std::string& trace_id) {
         result += "...";
     }
     return result;
+}
+
+std::vector<std::string> traceIdsForNanLog(const GptModelInputs& inputs) {
+    std::vector<std::string> trace_ids;
+    trace_ids.reserve(std::max<size_t>(inputs.trace_ids.size(), 1));
+    for (size_t i = 0; i < inputs.trace_ids.size(); ++i) {
+        if (inputs.trace_ids[i].empty()) {
+            trace_ids.push_back("missing-trace-index-" + std::to_string(i));
+        } else {
+            trace_ids.push_back(sanitizeTraceIdForLog(inputs.trace_ids[i]));
+        }
+    }
+    if (trace_ids.empty()) {
+        trace_ids.push_back("startup-unmapped");
+    }
+    return trace_ids;
+}
+
+void drainDsv4NanDiagnostics(const torch_ext::PyModelOutputs& outputs, const GptModelInputs& inputs) {
+    if (!dsv4NanDiagEnabled()) {
+        return;
+    }
+    try {
+        const auto& counters = outputs.nan_diag_event_counters;
+        const auto& events   = outputs.nan_diag_events;
+        if (!counters.defined() || !events.defined()) {
+            for (const auto& trace_id : traceIdsForNanLog(inputs)) {
+                writeDsv4NanStderrLine("[DSV4_NAN_DIAG_FAILURE] reliable event buffers are missing; trace_id=\""
+                                       + trace_id + "\"");
+            }
+            return;
+        }
+        RTP_LLM_CHECK_WITH_INFO(counters.scalar_type() == torch::kInt64 && counters.numel() >= 3,
+                                "DSV4 NaN counters must be int64[>=3]");
+        RTP_LLM_CHECK_WITH_INFO(events.scalar_type() == torch::kInt64 && events.dim() == 2 && events.size(1) >= 8,
+                                "DSV4 NaN events must be int64[capacity,>=8]");
+
+        // Blocking D2H is deliberate in diagnostic mode: it orders the drain
+        // after CUDA-graph detector kernels and makes stderr persistence the
+        // source of truth instead of the best-effort device printf FIFO.
+        auto          counters_cpu = counters.to(torch::kCPU).contiguous();
+        const auto*   counter_data = counters_cpu.data_ptr<int64_t>();
+        const int64_t attempted    = std::max<int64_t>(counter_data[0], 0);
+        const int64_t dropped      = std::max<int64_t>(counter_data[1], 0);
+        const int64_t capacity     = events.size(0);
+        const int64_t count        = std::min(attempted, capacity);
+        if (count == 0 && dropped == 0) {
+            return;
+        }
+
+        const auto  trace_ids = traceIdsForNanLog(inputs);
+        const char* phase     = inputs.sequence_lengths.numel() > 0 ? "decode" : "prefill";
+        if (count > 0) {
+            auto          events_cpu = events.narrow(0, 0, count).to(torch::kCPU).contiguous();
+            const auto*   data       = events_cpu.data_ptr<int64_t>();
+            const int64_t stride     = events_cpu.size(1);
+            for (int64_t row = 0; row < count; ++row) {
+                const auto*        record   = data + row * stride;
+                const int64_t      batch_id = record[0];
+                const int64_t      source   = record[1];
+                std::ostringstream line;
+                line << "[DSV4_NAN_RELIABLE] batch=" << batch_id << " phase=" << phase << " source=" << source
+                     << " layer=" << record[2];
+                if (source == 8 || source == 9) {
+                    line << " first_byte=" << record[3] << " n_fp8=" << record[4] << " n_rope=" << record[5]
+                         << " n_scale=" << record[6] << " slot=" << record[7];
+                } else {
+                    line << " first_offset=" << record[3] << " n_nan=" << record[4] << " n_inf=" << record[5];
+                }
+                const std::string event_prefix = line.str();
+                for (size_t trace_index = 0; trace_index < trace_ids.size(); ++trace_index) {
+                    std::ostringstream trace_line;
+                    trace_line << event_prefix << " trace_status=" << (batch_id == 0 ? "unmapped" : "mapped")
+                               << " trace_scope=" << (trace_ids.size() == 1 ? "request" : "batch_candidate")
+                               << " trace_index=" << trace_index << " trace_id=\"" << trace_ids[trace_index] << "\"";
+                    writeDsv4NanStderrLine(trace_line.str());
+                }
+            }
+        }
+        if (dropped > 0 || attempted > capacity) {
+            for (size_t trace_index = 0; trace_index < trace_ids.size(); ++trace_index) {
+                std::ostringstream line;
+                line << "[DSV4_NAN_RELIABLE_OVERFLOW] attempted=" << attempted << " capacity=" << capacity
+                     << " dropped=" << std::max<int64_t>(dropped, attempted - capacity) << " phase=" << phase
+                     << " trace_index=" << trace_index << " trace_id=\"" << trace_ids[trace_index] << "\"";
+                writeDsv4NanStderrLine(line.str());
+            }
+        }
+    } catch (const std::exception& error) {
+        for (const auto& trace_id : traceIdsForNanLog(inputs)) {
+            std::ostringstream line;
+            line << "[DSV4_NAN_DIAG_FAILURE] reliable event drain failed: " << sanitizeTraceIdForLog(error.what())
+                 << " trace_id=\"" << trace_id << "\"";
+            writeDsv4NanStderrLine(line.str());
+        }
+    }
 }
 
 }  // namespace
@@ -243,13 +359,16 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.input_lengths    = input_lengths;
 
     if (dsv4NanDiagEnabled()) {
-        const bool has_trace_id = std::any_of(
-            inputs.trace_ids.begin(), inputs.trace_ids.end(), [](const std::string& id) { return !id.empty(); });
-        const bool traceable_batch = !inputs.warmup && has_trace_id;
+        const bool has_complete_trace_ids = !inputs.trace_ids.empty()
+                                            && std::all_of(inputs.trace_ids.begin(),
+                                                           inputs.trace_ids.end(),
+                                                           [](const std::string& id) { return !id.empty(); });
+        const bool real_request_batch = !inputs.warmup && !inputs.is_fake_stream;
+        const bool traceable_batch    = real_request_batch && has_complete_trace_ids;
 
         // Batch zero is intentionally reserved for untracked startup work and
-        // CUDA graph capture. The detector ignores it, preventing a persistent
-        // NaN from flooding stderr before an event can be joined to a trace.
+        // CUDA graph capture. Those events remain visible as unmapped, while
+        // every real request batch is assigned a nonzero trace-join key.
         // Traceable batch sequences are process-local; prefix them with the pid
         // so merged logs from DP/EP ranks remain unambiguous.
         int64_t batch_id = 0;
@@ -265,17 +384,16 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
             batch_id_host.to(torch::TensorOptions(torch::kInt64).device(torch::kCUDA), /*non_blocking=*/true);
 
         if (traceable_batch) {
-            const char*        phase = inputs.sequence_lengths.numel() > 0 ? "decode" : "prefill";
-            std::ostringstream trace_map;
-            trace_map << "[DSV4_NAN_TRACE] batch=" << batch_id << " phase=" << phase << " trace_ids=[";
+            const char* phase = inputs.sequence_lengths.numel() > 0 ? "decode" : "prefill";
             for (size_t i = 0; i < inputs.trace_ids.size(); ++i) {
-                if (i > 0) {
-                    trace_map << ",";
-                }
-                trace_map << "\"" << sanitizeTraceIdForLog(inputs.trace_ids[i]) << "\"";
+                std::ostringstream trace_map;
+                trace_map << "[DSV4_NAN_TRACE] batch=" << batch_id << " phase=" << phase << " trace_index=" << i
+                          << " trace_id=\"" << sanitizeTraceIdForLog(inputs.trace_ids[i]) << "\"";
+                writeDsv4NanStderrLine(trace_map.str());
             }
-            trace_map << "]";
-            std::cerr << trace_map.str() << std::endl;
+        } else if (real_request_batch) {
+            writeDsv4NanStderrLine(
+                "[DSV4_NAN_DIAG_FAILURE] real model batch has no complete trace-id mapping; batch=0");
         }
     }
 
@@ -614,6 +732,10 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                             py_model_outputs.size(),
                             input_list.size());
 
+    for (size_t i = 0; i < py_model_outputs.size(); ++i) {
+        drainDsv4NanDiagnostics(py_model_outputs[i], split_inputs[i]);
+    }
+
     if (!inputs.warmup && inputs.pd_separation) {
         cache_store_async_writer_->waitAllDone();
     }
@@ -836,6 +958,8 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             py_model_outputs      = outputs.cast<PyModelOutputs>();
             hidden_states         = py_model_outputs.hidden_states.clone();
         }
+
+        drainDsv4NanDiagnostics(py_model_outputs, inputs);
 
         if (!inputs.warmup && inputs.pd_separation) {
             cache_store_async_writer_->waitAllDone();

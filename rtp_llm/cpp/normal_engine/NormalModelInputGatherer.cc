@@ -4,6 +4,7 @@
 #include <cstring>
 #include <sstream>
 #include <string>
+#include <utility>
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
 #include "torch/all.h"
 #include "rtp_llm/cpp/cache/Types.h"
@@ -341,7 +342,15 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
         RTP_LLM_LOG_DEBUG("decode stream: %s", stream->debugString().c_str());
 
         for (auto i = 0; i < current_batch_size; ++i) {
-            model_input.trace_ids.push_back(stream->traceId());
+            // Diagnostics must always be joinable to a concrete request. The
+            // frontend-provided trace id is preferred, while streamId() is the
+            // server-generated, process-local request id used when the client
+            // supplied no trace header/body field.
+            auto trace_id = stream->traceId();
+            if (trace_id.empty()) {
+                trace_id = "rtp-request-" + std::to_string(stream->streamId());
+            }
+            model_input.trace_ids.push_back(std::move(trace_id));
             if (use_normal_device_state) {
                 const auto&             state = stream->getNormalAsyncDeviceState();
                 static std::atomic<int> debug_log_budget{200};
@@ -419,7 +428,11 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
 
         for (auto i = 0; i < current_batch_size; ++i) {
             const auto prefill_batch_idx = ctx.batch_idx - ctx.total_decode_batch_size;
-            model_input.trace_ids.push_back(stream->traceId());
+            auto       trace_id          = stream->traceId();
+            if (trace_id.empty()) {
+                trace_id = "rtp-request-" + std::to_string(stream->streamId());
+            }
+            model_input.trace_ids.push_back(std::move(trace_id));
             auto input_tokens = stream->currentExecuteTokens(i);
             auto input_masks  = stream->textTokensMask();
             memcpy(ctx.merged_tokens + ctx.token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));

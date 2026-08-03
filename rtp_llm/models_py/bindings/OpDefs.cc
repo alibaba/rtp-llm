@@ -227,6 +227,10 @@ void registerPyOpDefs(pybind11::module& m) {
              pybind11::arg("params_ptr"),
              "Initialize with hidden states tensor and params pointer")
         .def_readwrite("hidden_states", &PyModelOutputs::hidden_states, "Hidden states output tensor")
+        .def_readwrite("nan_diag_event_counters",
+                       &PyModelOutputs::nan_diag_event_counters,
+                       "DSV4 reliable NaN diagnostic counters")
+        .def_readwrite("nan_diag_events", &PyModelOutputs::nan_diag_events, "DSV4 reliable NaN diagnostic records")
         .def_readwrite("params_ptr", &PyModelOutputs::params_ptr, "Parameters pointer");
 }
 

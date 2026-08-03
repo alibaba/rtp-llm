@@ -4,8 +4,8 @@ Set ``DSV4_NAN_DIAG=1`` before starting the server to add read-only detector
 kernels to important DSV4 numerical boundaries. A detector prints at most one
 structured event per ``(batch, source, layer)`` even when an entire tensor is
 non-finite. Unmapped startup and CUDA-graph-capture batches use batch id zero
-and are intentionally silent. Triton includes the winning ``pid (row, tile,
-0)`` in the line.
+and are emitted with ``trace_status=unmapped`` by the host-side reliable drain.
+Triton includes the winning ``pid (row, tile, 0)`` in its auxiliary line.
 The first printed integer is the model batch id, which joins to the host-side
 ``[DSV4_NAN_TRACE]`` line containing trace ids. The second integer is this
 event payload for the first reported 256-element tile:
@@ -35,7 +35,9 @@ model data::
     DSV4_NAN_DIAG_TEST_INJECT_CONFIRM=I_UNDERSTAND_THIS_CHANGES_OUTPUT
 
 The injection tuple is ``layer,row,col`` and writes one NaN into that layer's
-MoE activation before the read-only detector runs.
+MoE activation before the read-only detector runs. Injection is skipped while
+the diagnostic batch id is 0, so startup/warmup forwards remain unchanged and
+a real request can carry the injected event's trace id.
 
 Packed FP8 KV-cache reads have a separate guarded corruption injector for
 end-to-end tests. ``layer,pool,kind`` accepts pool ``swa`` or ``compressed``
@@ -157,6 +159,8 @@ TEST_KV_CORRUPT = _parse_test_kv_corrupt_spec(_TEST_KV_CORRUPT_SPEC)
 
 _BLOCK_N = 256
 _DEFAULT_PRINTF_FIFO_MB = 64
+_DEFAULT_EVENT_CAPACITY = 4096
+_EVENT_FIELDS = 8
 _MAX_SOURCE_ID = 15
 _MAX_LAYER_ID = 999
 _STATE_LAYERS = _MAX_LAYER_ID + 2  # layer -1 (unscoped) plus layers 0..999
@@ -164,6 +168,8 @@ _PREWARMED_DEVICES: set[str] = set()
 _BATCH_ID_TENSORS: dict[str, torch.Tensor] = {}
 _LAST_REPORTED_BATCH_BY_DEVICE: dict[str, torch.Tensor] = {}
 _REPORT_COUNT_BY_DEVICE: dict[str, torch.Tensor] = {}
+_EVENT_COUNTERS_BY_DEVICE: dict[str, torch.Tensor] = {}
+_EVENT_RECORDS_BY_DEVICE: dict[str, torch.Tensor] = {}
 
 
 if triton is not None:
@@ -171,15 +177,17 @@ if triton is not None:
     @triton.jit(do_not_specialize=["row", "col", "stride_row", "stride_col"])
     def _inject_nan_kernel(
         tensor_ptr,
+        batch_id_ptr,
         row,
         col,
         stride_row,
         stride_col,
     ):
-        tl.store(
-            tensor_ptr + row * stride_row + col * stride_col,
-            float("nan"),
-        )
+        if tl.load(batch_id_ptr).to(tl.int64) != 0:
+            tl.store(
+                tensor_ptr + row * stride_row + col * stride_col,
+                float("nan"),
+            )
 
     @triton.jit(
         do_not_specialize=[
@@ -191,6 +199,7 @@ if triton is not None:
             "layer_id",
             "state_index",
             "include_neg_inf",
+            "event_capacity",
         ]
     )
     def _report_nonfinite_tiles_kernel(
@@ -198,6 +207,8 @@ if triton is not None:
         batch_id_ptr,
         last_reported_batch_ptr,
         report_count_ptr,
+        event_counters_ptr,
+        event_records_ptr,
         rows,
         cols,
         stride_row,
@@ -206,6 +217,7 @@ if triton is not None:
         layer_id,
         state_index,
         include_neg_inf,
+        event_capacity,
         BLOCK_N: tl.constexpr,
     ):
         row = tl.program_id(0).to(tl.int64)
@@ -243,31 +255,44 @@ if triton is not None:
         )
         if (n_nan + n_inf > 0) & (thread_idx == 0):
             batch_id = tl.load(batch_id_ptr).to(tl.int64)
-            # Batch zero has no host-side trace mapping. CUDA graph capture
-            # and other untracked startup work use it deliberately so a
-            # persistent failure cannot flood stderr before the service is
-            # ready or consume the event for the first real request.
-            if batch_id != 0:
-                previous_batch = tl.atomic_xchg(
-                    last_reported_batch_ptr + state_index,
-                    batch_id,
+            # Batch zero has no trace mapping. Give each forward/replay a
+            # negative device epoch for deduplication, but preserve batch=0 in
+            # the event so the host emits an explicit trace_status=unmapped log.
+            epoch = tl.load(event_counters_ptr + 2).to(tl.int64)
+            dedupe_id = tl.where(batch_id != 0, batch_id, -epoch)
+            previous_batch = tl.atomic_xchg(
+                last_reported_batch_ptr + state_index,
+                dedupe_id,
+            )
+            if previous_batch != dedupe_id:
+                tl.atomic_add(report_count_ptr + state_index, 1)
+                first_offset = first_col - col_start
+                event_index = tl.atomic_add(event_counters_ptr, 1)
+                if event_index < event_capacity:
+                    record = event_records_ptr + event_index * 8
+                    tl.store(record + 0, batch_id)
+                    tl.store(record + 1, source_id.to(tl.int64))
+                    tl.store(record + 2, layer_id.to(tl.int64))
+                    tl.store(record + 3, first_offset.to(tl.int64))
+                    tl.store(record + 4, n_nan.to(tl.int64))
+                    tl.store(record + 5, n_inf.to(tl.int64))
+                    tl.store(record + 6, -1)
+                    tl.store(record + 7, 0)
+                else:
+                    tl.atomic_add(event_counters_ptr + 1, 1)
+                event = (
+                    source_id.to(tl.int64) * 1_000_000_000_000
+                    + layer_id.to(tl.int64) * 1_000_000_000
+                    + first_offset * 1_000_000
+                    + tl.minimum(n_nan, 999).to(tl.int64) * 1_000
+                    + tl.minimum(n_inf, 999).to(tl.int64)
                 )
-                if previous_batch != batch_id:
-                    tl.atomic_add(report_count_ptr + state_index, 1)
-                    first_offset = first_col - col_start
-                    event = (
-                        source_id.to(tl.int64) * 1_000_000_000_000
-                        + layer_id.to(tl.int64) * 1_000_000_000
-                        + first_offset * 1_000_000
-                        + tl.minimum(n_nan, 999).to(tl.int64) * 1_000
-                        + tl.minimum(n_inf, 999).to(tl.int64)
-                    )
-                    tl.device_print(
-                        "[DSV4_NAN] batch,event=source(2d)layer(3d)"
-                        "first_offset(3d)n_nan(3d)n_inf(3d):",
-                        batch_id,
-                        event,
-                    )
+                tl.device_print(
+                    "[DSV4_NAN] batch,event=source(2d)layer(3d)"
+                    "first_offset(3d)n_nan(3d)n_inf(3d):",
+                    batch_id,
+                    event,
+                )
 
     @triton.jit(
         do_not_specialize=[
@@ -280,6 +305,7 @@ if triton is not None:
             "source_id",
             "layer_id",
             "state_index",
+            "event_capacity",
         ]
     )
     def _report_packed_fp8_kv_cache_kernel(
@@ -289,6 +315,8 @@ if triton is not None:
         batch_id_ptr,
         last_reported_batch_ptr,
         report_count_ptr,
+        event_counters_ptr,
+        event_records_ptr,
         rows,
         width,
         q_len,
@@ -298,6 +326,7 @@ if triton is not None:
         source_id,
         layer_id,
         state_index,
+        event_capacity,
         HAS_LENGTHS: tl.constexpr,
         LENGTHS_PER_ROW: tl.constexpr,
         CORRUPT_KIND: tl.constexpr,
@@ -409,42 +438,56 @@ if triton is not None:
         )
         if (n_bad > 0) & (thread_idx == 0):
             batch_id = tl.load(batch_id_ptr).to(tl.int64)
-            if batch_id != 0:
-                previous_batch = tl.atomic_xchg(
-                    last_reported_batch_ptr + state_index,
-                    batch_id,
+            epoch = tl.load(event_counters_ptr + 2).to(tl.int64)
+            dedupe_id = tl.where(batch_id != 0, batch_id, -epoch)
+            previous_batch = tl.atomic_xchg(
+                last_reported_batch_ptr + state_index,
+                dedupe_id,
+            )
+            if previous_batch != dedupe_id:
+                tl.atomic_add(report_count_ptr + state_index, 1)
+                event_index = tl.atomic_add(event_counters_ptr, 1)
+                if event_index < event_capacity:
+                    record = event_records_ptr + event_index * 8
+                    tl.store(record + 0, batch_id)
+                    tl.store(record + 1, source_id.to(tl.int64))
+                    tl.store(record + 2, layer_id.to(tl.int64))
+                    tl.store(record + 3, first_bad_byte.to(tl.int64))
+                    tl.store(record + 4, n_fp8.to(tl.int64))
+                    tl.store(record + 5, n_rope.to(tl.int64))
+                    tl.store(record + 6, n_scale.to(tl.int64))
+                    tl.store(record + 7, slot)
+                else:
+                    tl.atomic_add(event_counters_ptr + 1, 1)
+                event = (
+                    source_id.to(tl.int64) * 1_000_000_000_000
+                    + layer_id.to(tl.int64) * 1_000_000_000
+                    + tl.minimum(first_bad_byte, 999).to(tl.int64) * 1_000_000
+                    + tl.minimum(n_bad, 999).to(tl.int64) * 1_000
+                    + kind_bitmap
                 )
-                if previous_batch != batch_id:
-                    tl.atomic_add(report_count_ptr + state_index, 1)
-                    event = (
-                        source_id.to(tl.int64) * 1_000_000_000_000
-                        + layer_id.to(tl.int64) * 1_000_000_000
-                        + tl.minimum(first_bad_byte, 999).to(tl.int64) * 1_000_000
-                        + tl.minimum(n_bad, 999).to(tl.int64) * 1_000
-                        + kind_bitmap
-                    )
-                    tl.device_print(
-                        "[DSV4_NAN] batch,event=source(2d)layer(3d)"
-                        "first_byte(3d)n_bad(3d)kind_bitmap(3d):",
-                        batch_id,
-                        event,
-                    )
-                    tl.device_print(
-                        "[DSV4_KV_NAN] batch,slot:",
-                        batch_id,
-                        slot,
-                    )
-                    detail = (
-                        source_id.to(tl.int64) * 1_000_000_000
-                        + layer_id.to(tl.int64) * 1_000_000
-                        + tl.minimum(n_fp8, 999).to(tl.int64) * 1_000
-                        + tl.minimum(n_rope + n_scale, 999).to(tl.int64)
-                    )
-                    tl.device_print(
-                        "[DSV4_KV_NAN] source_layer,n_fp8_n_rope_scale:",
-                        detail,
-                        n_rope.to(tl.int64) * 1_000 + n_scale.to(tl.int64),
-                    )
+                tl.device_print(
+                    "[DSV4_NAN] batch,event=source(2d)layer(3d)"
+                    "first_byte(3d)n_bad(3d)kind_bitmap(3d):",
+                    batch_id,
+                    event,
+                )
+                tl.device_print(
+                    "[DSV4_KV_NAN] batch,slot:",
+                    batch_id,
+                    slot,
+                )
+                detail = (
+                    source_id.to(tl.int64) * 1_000_000_000
+                    + layer_id.to(tl.int64) * 1_000_000
+                    + tl.minimum(n_fp8, 999).to(tl.int64) * 1_000
+                    + tl.minimum(n_rope + n_scale, 999).to(tl.int64)
+                )
+                tl.device_print(
+                    "[DSV4_KV_NAN] source_layer,n_fp8_n_rope_scale:",
+                    detail,
+                    n_rope.to(tl.int64) * 1_000 + n_scale.to(tl.int64),
+                )
 
     @triton.jit
     def _device_printf_canary_kernel():
@@ -458,6 +501,23 @@ if triton is not None:
         )
         if thread_idx == 0:
             tl.device_print("[DSV4_NAN_DIAG_CANARY] device-printf-ready:", 1)
+
+    @triton.jit
+    def _reset_event_state_kernel(event_counters_ptr):
+        thread_idx = tl.inline_asm_elementwise(
+            asm="mov.u32 $0, %tid.x;",
+            constraints="=r",
+            args=[],
+            dtype=tl.int32,
+            is_pure=True,
+            pack=1,
+        )
+        if thread_idx == 0:
+            tl.store(event_counters_ptr + 0, 0)
+            tl.store(event_counters_ptr + 1, 0)
+            # A device-side epoch lets batch=0 forwards remain visible without
+            # conflating every unmapped request with one permanent batch.
+            tl.atomic_add(event_counters_ptr + 2, 1)
 
 
 def _normalized_device(device: str | torch.device) -> torch.device:
@@ -481,6 +541,47 @@ def _report_state_index(source_id: int, layer_id: int) -> int:
     return source_id * _STATE_LAYERS + layer_id + 1
 
 
+def _configured_event_capacity() -> int:
+    capacity = int(
+        os.environ.get(
+            "DSV4_NAN_DIAG_EVENT_CAPACITY",
+            str(_DEFAULT_EVENT_CAPACITY),
+        )
+    )
+    if capacity <= 0:
+        raise ValueError(
+            f"DSV4_NAN_DIAG_EVENT_CAPACITY must be positive, got {capacity}"
+        )
+    return capacity
+
+
+def _ensure_event_state(device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    device = _normalized_device(device)
+    device_key = str(device)
+    counters = _EVENT_COUNTERS_BY_DEVICE.get(device_key)
+    records = _EVENT_RECORDS_BY_DEVICE.get(device_key)
+    if counters is not None and records is not None:
+        return counters, records
+    if torch.cuda.is_current_stream_capturing():
+        raise RuntimeError(
+            "DSV4 NaN event state must be allocated before CUDA graph capture; "
+            "call prewarm(device) first"
+        )
+    capacity = _configured_event_capacity()
+    # counters = [events attempted, records dropped, batch-zero epoch].
+    counters = torch.zeros((3,), dtype=torch.int64, device=device)
+    records = torch.empty((capacity, _EVENT_FIELDS), dtype=torch.int64, device=device)
+    _EVENT_COUNTERS_BY_DEVICE[device_key] = counters
+    _EVENT_RECORDS_BY_DEVICE[device_key] = records
+    return counters, records
+
+
+def _reset_event_state(device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
+    counters, records = _ensure_event_state(device)
+    _reset_event_state_kernel[(1,)](counters, num_warps=1, num_stages=1)
+    return counters, records
+
+
 def _ensure_report_state(device: torch.device) -> tuple[torch.Tensor, torch.Tensor]:
     device = _normalized_device(device)
     device_key = str(device)
@@ -502,7 +603,7 @@ def _ensure_report_state(device: torch.device) -> tuple[torch.Tensor, torch.Tens
 
 
 def set_batch_context(batch_id: torch.Tensor | None) -> None:
-    """Set the graph-stable batch id tensor used by detector launches."""
+    """Set the graph-stable batch id and reset reliable events for this forward."""
     if not ENABLED or batch_id is None:
         return
     if not batch_id.is_cuda or batch_id.dtype != torch.int64 or batch_id.numel() < 1:
@@ -511,6 +612,22 @@ def set_batch_context(batch_id: torch.Tensor | None) -> None:
         )
     device_key = str(_normalized_device(batch_id.device))
     _BATCH_ID_TENSORS[device_key] = batch_id
+    # This launch is captured as the first diagnostics graph node, so every
+    # replay gets a fresh event buffer without a host-side reset or allocation.
+    _reset_event_state(batch_id.device)
+
+
+def attach_event_buffers(outputs):
+    """Attach graph-stable diagnostic buffers to ``PyModelOutputs`` for C++."""
+    if not ENABLED:
+        return outputs
+    hidden_states = getattr(outputs, "hidden_states", None)
+    if hidden_states is None or not hidden_states.is_cuda:
+        raise RuntimeError("DSV4 NaN diagnostics require CUDA model outputs")
+    counters, records = _ensure_event_state(hidden_states.device)
+    outputs.nan_diag_event_counters = counters
+    outputs.nan_diag_events = records
+    return outputs
 
 
 def report_nonfinite(
@@ -560,12 +677,15 @@ def report_nonfinite(
         batch_id_tensor = torch.zeros((1,), dtype=torch.int64, device=device)
         _BATCH_ID_TENSORS[device_key] = batch_id_tensor
     last_reported_batch, report_count = _ensure_report_state(device)
+    event_counters, event_records = _ensure_event_state(device)
     grid = (rows, triton.cdiv(cols, _BLOCK_N))
     _report_nonfinite_tiles_kernel[grid](
         tensor,
         batch_id_tensor,
         last_reported_batch,
         report_count,
+        event_counters,
+        event_records,
         rows,
         cols,
         stride_row,
@@ -574,6 +694,7 @@ def report_nonfinite(
         int(layer_id),
         state_index,
         int(include_neg_inf),
+        int(event_records.shape[0]),
         BLOCK_N=_BLOCK_N,
         num_warps=4,
         num_stages=1,
@@ -664,6 +785,7 @@ def report_packed_fp8_kv_cache(
         _BATCH_ID_TENSORS[device_key] = batch_id_tensor
     state_index = _report_state_index(int(source_id), int(layer_id))
     last_reported_batch, report_count = _ensure_report_state(device)
+    event_counters, event_records = _ensure_event_state(device)
     corrupt_kind = 0
     if TEST_KV_CORRUPT is not None:
         corrupt_layer, corrupt_source, requested_kind = TEST_KV_CORRUPT
@@ -677,6 +799,8 @@ def report_packed_fp8_kv_cache(
         batch_id_tensor,
         last_reported_batch,
         report_count,
+        event_counters,
+        event_records,
         rows,
         width,
         q_len,
@@ -686,6 +810,7 @@ def report_packed_fp8_kv_cache(
         int(source_id),
         int(layer_id),
         state_index,
+        int(event_records.shape[0]),
         HAS_LENGTHS=topk_length is not None,
         LENGTHS_PER_ROW=lengths_per_row,
         CORRUPT_KIND=corrupt_kind,
@@ -696,7 +821,7 @@ def report_packed_fp8_kv_cache(
 
 
 def maybe_inject_test_nan(tensor: torch.Tensor, *, layer_id: int) -> None:
-    """Inject one guarded test NaN; no-op unless TEST_INJECT targets this layer."""
+    """Inject one guarded test NaN into a mapped, non-warmup model batch."""
     if TEST_INJECT is None or TEST_INJECT[0] != layer_id:
         return
     if triton is None:
@@ -712,8 +837,20 @@ def maybe_inject_test_nan(tensor: torch.Tensor, *, layer_id: int) -> None:
             f"target=(layer={layer_id},row={row},col={col}) "
             f"shape={tuple(tensor.shape)}"
         )
+    device = _normalized_device(tensor.device)
+    device_key = str(device)
+    batch_id_tensor = _BATCH_ID_TENSORS.get(device_key)
+    if batch_id_tensor is None:
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "DSV4 NaN test injection requires batch context before CUDA "
+                "graph capture"
+            )
+        batch_id_tensor = torch.zeros((1,), dtype=torch.int64, device=device)
+        _BATCH_ID_TENSORS[device_key] = batch_id_tensor
     _inject_nan_kernel[(1,)](
         tensor,
+        batch_id_tensor,
         row,
         col,
         tensor.stride(0),
@@ -761,15 +898,19 @@ def prewarm(device: str | torch.device) -> None:
             error,
         )
 
+    event_capacity = _configured_event_capacity()
     logging.warning(
-        "[DSV4 NaN diag] enabled on %s with printf_fifo=%s; "
-        "events are rate-limited per batch/source/layer; device logs use "
-        "prefixes [DSV4_NAN] and [DSV4_NAN_DIAG_CANARY]. "
+        "[DSV4 NaN diag] enabled on %s with reliable_event_capacity=%d "
+        "and auxiliary_printf_fifo=%s; events are rate-limited per "
+        "batch/source/layer; reliable host logs use prefix "
+        "[DSV4_NAN_RELIABLE], while auxiliary device logs use prefixes "
+        "[DSV4_NAN] and [DSV4_NAN_DIAG_CANARY]. "
         "source_id: 1=moe_input, 2=router_scores, 3=router_bias, "
         "4=cp_attention_lse, 5=final_hidden, 6=attention_query, "
         "7=kv_write_input, 8=swa_kv_cache_read, "
         "9=compressed_kv_cache_read, 10=attention_output",
         device,
+        event_capacity,
         f"{fifo_mb} MiB" if fifo_configured else "runtime-default",
     )
     if TEST_INJECT is not None:
@@ -786,6 +927,7 @@ def prewarm(device: str | torch.device) -> None:
         )
     _BATCH_ID_TENSORS[device_key] = torch.zeros((1,), dtype=torch.int64, device=device)
     _ensure_report_state(device)
+    _reset_event_state(device)
     for dtype in (torch.bfloat16, torch.float32):
         probe = torch.zeros((1, _BLOCK_N), dtype=dtype, device=device)
         report_nonfinite(
@@ -813,6 +955,7 @@ def prewarm(device: str | torch.device) -> None:
         probe = torch.zeros((1, 1), dtype=torch.bfloat16, device=device)
         _inject_nan_kernel[(1,)](
             probe,
+            _BATCH_ID_TENSORS[device_key],
             0,
             0,
             probe.stride(0),

@@ -1222,8 +1222,15 @@ class DeepSeekV4Model(GptModelBase):
             )
             T = max(inputs.input_ids.numel(), 1)
             device = self.v4.embed.weight.device
-            return PyModelOutputs(
-                torch.zeros(T, self._v4_args.dim, dtype=torch.bfloat16, device=device)
+            return _nan_diag.attach_event_buffers(
+                PyModelOutputs(
+                    torch.zeros(
+                        T,
+                        self._v4_args.dim,
+                        dtype=torch.bfloat16,
+                        device=device,
+                    )
+                )
             )
         attn = inputs.attention_inputs
 
@@ -1251,7 +1258,7 @@ class DeepSeekV4Model(GptModelBase):
                 assert bool(
                     getattr(self.v4, "fp8_kv_cache", False)
                 ), "target verify requires fp8 kv cache"
-            return forward_decode(
+            outputs = forward_decode(
                 self.v4,
                 self.kv_cache,
                 self._v4_args,
@@ -1260,7 +1267,7 @@ class DeepSeekV4Model(GptModelBase):
                 prepare_hidden_fn=prep_decode,
             )
         elif attn.is_prefill:
-            return forward_prefill(
+            outputs = forward_prefill(
                 self.v4,
                 self.kv_cache,
                 self.parallelism_config,
@@ -1268,7 +1275,7 @@ class DeepSeekV4Model(GptModelBase):
                 prepare_hidden_fn=prep_prefill,
             )
         else:
-            return forward_decode(
+            outputs = forward_decode(
                 self.v4,
                 self.kv_cache,
                 self._v4_args,
@@ -1276,3 +1283,4 @@ class DeepSeekV4Model(GptModelBase):
                 fmha_impl,
                 prepare_hidden_fn=prep_decode,
             )
+        return _nan_diag.attach_event_buffers(outputs)

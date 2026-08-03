@@ -287,8 +287,8 @@ struct PyAttentionInputs {
     bool is_prefill{false};
     bool is_target_verify{false};
     // DSV4 NaN diagnostics only: a one-element CUDA int64 tensor refreshed
-    // before each launch. Device events print it to join with trace-id logs
-    // without synchronizing the CUDA stream.
+    // before each launch. Device detectors record it in the reliable event
+    // buffer so the host can emit a trace-correlated stderr line.
     torch::Tensor nan_diag_batch_id;
     torch::Tensor prefix_lengths;
     torch::Tensor sequence_lengths;
@@ -353,7 +353,11 @@ struct PyModelInputs {
 };
 
 struct PyModelOutputs {
-    torch::Tensor          hidden_states;
+    torch::Tensor hidden_states;
+    // DSV4 diagnostics only. Detectors append fixed-width CUDA records and
+    // C++ drains them synchronously to stderr after each diagnostic forward.
+    torch::Tensor          nan_diag_event_counters;
+    torch::Tensor          nan_diag_events;
     rtp_llm::ParamsBasePtr params_ptr{nullptr};
     py::object             py_attn_params{py::none()};
 

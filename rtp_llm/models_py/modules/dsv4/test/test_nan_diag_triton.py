@@ -1,6 +1,7 @@
 import importlib.util
 import os
 import unittest
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import torch
@@ -46,6 +47,23 @@ class NanDiagTritonTest(unittest.TestCase):
 
         torch.testing.assert_close(x, before, equal_nan=True)
 
+    def test_injector_skips_batch_zero_and_injects_mapped_batch(self) -> None:
+        x = torch.zeros((1, 8), dtype=torch.bfloat16, device="cuda")
+        batch_id = torch.zeros((1,), dtype=torch.int64, device="cuda")
+
+        with patch.object(nan_diag, "ENABLED", True), patch.object(
+            nan_diag, "TEST_INJECT", (2, 0, 3)
+        ):
+            nan_diag.set_batch_context(batch_id)
+            nan_diag.maybe_inject_test_nan(x, layer_id=2)
+            torch.cuda.synchronize()
+            self.assertEqual(float(x[0, 3].item()), 0.0)
+
+            batch_id.fill_(123456)
+            nan_diag.maybe_inject_test_nan(x, layer_id=2)
+            torch.cuda.synchronize()
+            self.assertTrue(torch.isnan(x[0, 3]).item())
+
     def test_detector_runs_on_every_cuda_graph_replay(self) -> None:
         probe = torch.zeros((1, 256), dtype=torch.bfloat16, device="cuda")
         x = torch.zeros((2, 513), dtype=torch.bfloat16, device="cuda")
@@ -64,6 +82,7 @@ class NanDiagTritonTest(unittest.TestCase):
 
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
+                nan_diag.set_batch_context(batch_id)
                 nan_diag.report_nonfinite(
                     x,
                     source_id=nan_diag.SOURCE_ROUTER_SCORES,
@@ -84,6 +103,14 @@ class NanDiagTritonTest(unittest.TestCase):
                 int(report_count[state_index].item()),
                 before_count + 2,
             )
+            event_counters, event_records = nan_diag._ensure_event_state(x.device)
+            self.assertEqual(int(event_counters[0].item()), 1)
+            self.assertEqual(event_records[0, 0].item(), 23003)
+            self.assertEqual(
+                event_records[0, 1].item(),
+                nan_diag.SOURCE_ROUTER_SCORES,
+            )
+            self.assertEqual(event_records[0, 2].item(), 23)
             torch.testing.assert_close(
                 x[1, 300],
                 torch.tensor(float("nan"), dtype=x.dtype, device=x.device),
@@ -129,7 +156,7 @@ class NanDiagTritonTest(unittest.TestCase):
             torch.cuda.synchronize()
             self.assertEqual(int(report_count[state_index].item()), before_count + 2)
 
-    def test_unmapped_batch_zero_is_silent(self) -> None:
+    def test_unmapped_batch_zero_is_recorded_reliably(self) -> None:
         x = torch.full((4, 1024), float("nan"), dtype=torch.float32, device="cuda")
         batch_id = torch.zeros((1,), dtype=torch.int64, device="cuda")
         source_id = 9  # Test-only source slot.
@@ -147,10 +174,14 @@ class NanDiagTritonTest(unittest.TestCase):
                 layer_id=layer_id,
             )
             torch.cuda.synchronize()
-            self.assertEqual(int(report_count[state_index].item()), before_count)
+            self.assertEqual(int(report_count[state_index].item()), before_count + 1)
+            event_counters, event_records = nan_diag._ensure_event_state(x.device)
+            self.assertEqual(int(event_counters[0].item()), 1)
+            record = event_records[0].cpu().tolist()
+            self.assertEqual(record[:3], [0, source_id, layer_id])
+            self.assertGreater(record[4], 0)
 
-            # The first traceable batch must still report after an arbitrary
-            # amount of graph capture or startup work using batch zero.
+            # The first traceable batch must still report after batch-zero work.
             batch_id.fill_(996001)
             nan_diag.report_nonfinite(
                 x,
@@ -158,7 +189,7 @@ class NanDiagTritonTest(unittest.TestCase):
                 layer_id=layer_id,
             )
             torch.cuda.synchronize()
-            self.assertEqual(int(report_count[state_index].item()), before_count + 1)
+            self.assertEqual(int(report_count[state_index].item()), before_count + 2)
 
     def test_attention_lse_ignores_negative_inf_but_reports_nan(self) -> None:
         lse = torch.zeros((2, 3, 7), dtype=torch.float32, device="cuda")
@@ -191,6 +222,49 @@ class NanDiagTritonTest(unittest.TestCase):
             )
             torch.cuda.synchronize()
             self.assertEqual(int(report_count[state_index].item()), before_count + 1)
+
+    def test_reliable_event_buffer_reports_overflow_instead_of_silent_loss(
+        self,
+    ) -> None:
+        device = torch.device("cuda", torch.cuda.current_device())
+        device_key = str(device)
+        old_counters = nan_diag._EVENT_COUNTERS_BY_DEVICE.get(device_key)
+        old_records = nan_diag._EVENT_RECORDS_BY_DEVICE.get(device_key)
+        counters = torch.zeros((3,), dtype=torch.int64, device=device)
+        records = torch.empty(
+            (1, nan_diag._EVENT_FIELDS), dtype=torch.int64, device=device
+        )
+        nan_diag._EVENT_COUNTERS_BY_DEVICE[device_key] = counters
+        nan_diag._EVENT_RECORDS_BY_DEVICE[device_key] = records
+        try:
+            batch_id = torch.tensor([992501], dtype=torch.int64, device=device)
+            x = torch.full((1, 8), float("nan"), dtype=torch.float32, device=device)
+            with patch.object(nan_diag, "ENABLED", True):
+                nan_diag.set_batch_context(batch_id)
+                for layer_id in (998, 999):
+                    nan_diag.report_nonfinite(
+                        x,
+                        source_id=nan_diag.SOURCE_FINAL_HIDDEN,
+                        layer_id=layer_id,
+                    )
+                torch.cuda.synchronize()
+            self.assertEqual(counters[:2].cpu().tolist(), [2, 1])
+            self.assertEqual(records[0, :3].cpu().tolist(), [992501, 5, 998])
+
+            outputs = SimpleNamespace(hidden_states=x)
+            with patch.object(nan_diag, "ENABLED", True):
+                self.assertIs(nan_diag.attach_event_buffers(outputs), outputs)
+            self.assertIs(outputs.nan_diag_event_counters, counters)
+            self.assertIs(outputs.nan_diag_events, records)
+        finally:
+            if old_counters is None:
+                nan_diag._EVENT_COUNTERS_BY_DEVICE.pop(device_key, None)
+            else:
+                nan_diag._EVENT_COUNTERS_BY_DEVICE[device_key] = old_counters
+            if old_records is None:
+                nan_diag._EVENT_RECORDS_BY_DEVICE.pop(device_key, None)
+            else:
+                nan_diag._EVENT_RECORDS_BY_DEVICE[device_key] = old_records
 
     def test_packed_fp8_kv_cache_reports_all_nan_encodings(self) -> None:
         cache = torch.zeros((2, 4, 584), dtype=torch.uint8, device="cuda")
@@ -276,6 +350,7 @@ class NanDiagTritonTest(unittest.TestCase):
 
             graph = torch.cuda.CUDAGraph()
             with torch.cuda.graph(graph):
+                nan_diag.set_batch_context(batch_id)
                 nan_diag.report_packed_fp8_kv_cache(
                     cache,
                     indices,
@@ -297,6 +372,11 @@ class NanDiagTritonTest(unittest.TestCase):
                 int(report_count[state_index].item()),
                 before_count + 2,
             )
+            event_counters, event_records = nan_diag._ensure_event_state(cache.device)
+            self.assertEqual(int(event_counters[0].item()), 1)
+            self.assertEqual(event_records[0, 0].item(), 994003)
+            self.assertEqual(event_records[0, 1].item(), source_id)
+            self.assertEqual(event_records[0, 7].item(), 1)
 
 
 if __name__ == "__main__":
