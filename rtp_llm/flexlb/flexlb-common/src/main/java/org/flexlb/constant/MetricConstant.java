@@ -378,6 +378,13 @@ public class MetricConstant {
     public static final String WORKER_PERMIT_CAPACITY = "app.worker.permit.capacity";
 
     /**
+     * Per-engine resource water level used by FlexLB capacity control, in the range 0-100.
+     * Tagged by engineIp and role. Prefill/PDFusion uses queue water level; Decode uses
+     * KV-cache water level.
+     */
+    public static final String WORKER_RESOURCE_WATER_LEVEL = "app.worker.resource.water.level";
+
+    /**
      * Request arrival delay at Netty (difference between client requestTimeSeconds and server startTime, in milliseconds)
      */
     public static final String REQUEST_ARRIVAL_DELAY_MS = "app.request.arrival.delay.ms";

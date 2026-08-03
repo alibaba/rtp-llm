@@ -55,7 +55,7 @@ public class PrefillResourceMeasure implements ResourceMeasure {
         int count = 0;
 
         for (WorkerStatus worker : workerStatusMap.values()) {
-            double waterLevel = calculateWaterLevel(worker);
+            double waterLevel = calculateWorkerWaterLevel(worker);
             totalWaterLevel += waterLevel;
             count++;
         }
@@ -63,7 +63,8 @@ public class PrefillResourceMeasure implements ResourceMeasure {
         return count > 0 ? totalWaterLevel / count : 0.0;
     }
 
-    private double calculateWaterLevel(WorkerStatus workerStatus) {
+    @Override
+    public double calculateWorkerWaterLevel(WorkerStatus workerStatus) {
         if (workerStatus == null) {
             return 0.0;
         }
