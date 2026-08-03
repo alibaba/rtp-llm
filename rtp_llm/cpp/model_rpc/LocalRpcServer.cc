@@ -39,8 +39,8 @@ std::string formatRequestLogTag(const std::string& request_key, const RequestInf
 }  // namespace
 
 grpc::Status LocalRpcServer::init(const EngineInitParams&                       maga_init_params,
-                                  py::object                                    mm_process_engine,
-                                  std::unique_ptr<ProposeModelEngineInitParams> propose_params) {
+                                  std::unique_ptr<ProposeModelEngineInitParams> propose_params,
+                                  py::object                                    mm_process_engine) {
     meta_.reset(new RpcServerRuntimeMeta());
     maga_init_params_ = maga_init_params;
     weight_manager_   = maga_init_params.weight_manager;
@@ -62,18 +62,14 @@ grpc::Status LocalRpcServer::init(const EngineInitParams&                       
                                 "running engine init with gil held may cause program hang, please check");
         engine_.reset(new NormalEngine(maga_init_params, std::move(propose_params)));
     }
-    if (!mm_process_engine.is_none()) {
-        auto vit_separation = maga_init_params.vit_config.vit_separation;
-        if (vit_separation == VitSeparation::VIT_SEPARATION_REMOTE) {
-            mm_processor_.reset(new RemoteMultimodalProcessor(mm_process_engine,
-                                                              maga_init_params.model_config_.mm_model_config,
+    if (maga_init_params.model_config_.mm_model_config.is_multimodal) {
+        if (mm_process_engine.is_none()) {
+            mm_processor_.reset(new RemoteMultimodalProcessor(maga_init_params.model_config_.mm_model_config,
                                                               maga_init_params.model_config_.max_seq_len));
-        } else if (vit_separation == VitSeparation::VIT_SEPARATION_LOCAL) {
+        } else {
             mm_processor_.reset(new LocalMultimodalProcessor(mm_process_engine,
                                                              maga_init_params.model_config_.mm_model_config,
                                                              maga_init_params.model_config_.max_seq_len));
-        } else {
-            return grpc::Status(grpc::StatusCode::INTERNAL, "invalid vit separation value in config");
         }
     }
 
@@ -84,10 +80,9 @@ grpc::Status LocalRpcServer::serializeErrorMsg(const string& request_key, ErrorI
     return serializeErrorMsg(request_key, RequestInfo(), error_info);
 }
 
-grpc::Status LocalRpcServer::serializeErrorMsg(const string&      request_key,
-                                               const RequestInfo& request_info,
-                                               ErrorInfo          error_info) {
-    const auto& error_msg = error_info.ToString();
+grpc::Status
+LocalRpcServer::serializeErrorMsg(const string& request_key, const RequestInfo& request_info, ErrorInfo error_info) {
+    const auto& error_msg       = error_info.ToString();
     const auto  request_log_tag = formatRequestLogTag(request_key, request_info);
     RTP_LLM_LOG_WARNING("%s, error code [%s], error message [%s]",
                         request_log_tag.c_str(),
@@ -158,7 +153,7 @@ grpc::Status LocalRpcServer::GenerateStreamCall(grpc::ServerContext*            
     RTP_LLM_LOG_DEBUG("receive request %ld", request_id);
     auto generate_context =
         GenerateContext(request_id, request->generate_config().timeout_ms(), context, metrics_reporter_, meta_);
-    auto input = QueryConverter::transQuery(request);
+    auto input                    = QueryConverter::transQuery(request);
     generate_context.request_info = input->request_info;
     if (applyTimelineGate(generate_context.request_key,
                           input->generate_config->gen_timeline,

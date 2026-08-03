@@ -15,7 +15,14 @@ from rtp_llm.frontend.tokenizer_factory.tokenizer_utils import (
 )
 from rtp_llm.frontend.tokenizer_factory.tokenizers import BaseTokenizer
 from rtp_llm.metrics import GaugeMetrics, kmonitor
-from rtp_llm.ops import SpecialTokens, SpeculativeExecutionConfig, VitSeparation
+from rtp_llm.multimodal.multimodal_util import MMUrlType
+from rtp_llm.ops import (
+    MMPreprocessConfig,
+    MultimodalInput,
+    SpecialTokens,
+    SpeculativeExecutionConfig,
+    VitSeparation,
+)
 from rtp_llm.server.backend_rpc_server_visitor import BackendRPCServerVisitor
 from rtp_llm.server.request_headers import normalize_request_headers
 from rtp_llm.utils.base_model_datatypes import (
@@ -24,7 +31,6 @@ from rtp_llm.utils.base_model_datatypes import (
     GenerateOutputs,
     GenerateResponse,
 )
-from rtp_llm.utils.multimodal_util import MultimodalInput
 from rtp_llm.utils.time_util import current_time_ms
 from rtp_llm.utils.util import AtomicCounter
 from rtp_llm.utils.word_util import (
@@ -100,7 +106,7 @@ class Pipeline(object):
         special_tokens: Any,
         tokenizer: BaseTokenizer,
         generate_env_config,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> GenerateConfig:
         if isinstance(generate_config, dict):
             config = GenerateConfig.create_generate_config(generate_config, **kwargs)
@@ -124,7 +130,7 @@ class Pipeline(object):
         prompt: str,
         request_id: int = None,
         urls: Optional[List[str]] = None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> Iterator[GenerateResponse]:
 
         q = queue.Queue()
@@ -170,7 +176,7 @@ class Pipeline(object):
         prompt: str,
         request_id: int = None,
         urls: Optional[List[str]] = None,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> AsyncGenerator[GenerateResponse, None]:
         begin_time = current_time_ms()
 
@@ -186,7 +192,19 @@ class Pipeline(object):
             self.tokenizer,
             **kwargs,
         )
-        mm_inputs = [MultimodalInput(url) for url in urls] if urls is not None else []
+        mm_inputs = (
+            [
+                MultimodalInput(
+                    url,
+                    MMUrlType.DEFAULT,
+                    torch.empty(0),
+                    MMPreprocessConfig(-1, -1, -1, -1, -1, -1, -1, [], 30000),
+                )
+                for url in urls
+            ]
+            if urls is not None
+            else []
+        )
 
         if len(prompt) == 0:
             raise FtRuntimeException(
@@ -243,7 +261,7 @@ class Pipeline(object):
         stop_word_str_list: List[str],
         stop_word_str_slices: List[str],
         token_buffer: str,
-        **kwargs: Any
+        **kwargs: Any,
     ):
         if generate_config.return_incremental:
             text = token_buffer + text
@@ -280,7 +298,7 @@ class Pipeline(object):
         stop_word_ids: List[int],
         stop_word_id_slices: List[int],
         ouput_tokens_list: List[torch.Tensor],
-        **kwargs: Any
+        **kwargs: Any,
     ) -> Tuple[List[str], List[int]]:
         tokens_lists_for_decode_input = []
         output_lens = []
@@ -372,7 +390,7 @@ class Pipeline(object):
         decoding_states: List[DecodingState],
         token_buffers: List[str],
         ouput_tokens_list: List[torch.Tensor],
-        **kwargs: Any
+        **kwargs: Any,
     ) -> Tuple[List[str], List[int]]:
         """处理增量解码的逻辑。"""
         num_outputs = len(generate_outputs.generate_outputs)
@@ -459,7 +477,7 @@ class Pipeline(object):
         token_ids: List[int],
         mm_inputs: List[MultimodalInput],
         generate_config: GenerateConfig,
-        **kwargs: Any
+        **kwargs: Any,
     ) -> AsyncGenerator[GenerateResponse, None]:
         token_type_ids = []
         request_headers = normalize_request_headers(kwargs.pop("headers", None))

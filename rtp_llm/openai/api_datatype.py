@@ -61,6 +61,8 @@ class MMPreprocessConfigPart(BaseModel):
     fps: Optional[int] = None
     min_frames: Optional[int] = None
     max_frames: Optional[int] = None
+    crop_positions: Optional[str] = None
+    mm_timeout_ms: int = 30000
 
 
 class IgraphInfo(BaseModel):
@@ -286,6 +288,8 @@ class CompletionTokensDetails(BaseModel):
 class PromptTokensDetails(BaseModel):
     audio_tokens: Optional[int] = None
     cached_tokens: Optional[int] = None
+    image_tokens: Optional[int] = None
+    video_tokens: Optional[int] = None
 
 
 class UsageInfo(BaseModel):

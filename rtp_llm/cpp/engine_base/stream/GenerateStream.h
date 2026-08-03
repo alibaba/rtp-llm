@@ -229,7 +229,15 @@ public:
     void step();
     void spStep();
 
+    // Raw multimodal accessors — return the full per-image vectors/tensor unfiltered.
+    // Stream is a pure data holder; the reuse-filtering rule ("an image is reused only
+    // when reuse_length covers its full token span") lives in NormalModelInputGatherer
+    // (see computeReusedMultimodalCount there). multimodalFeaturesLength() and
+    // hasMultimodalExtraInput() also return RAW counts; consumers that need post-reuse
+    // counts compute them on demand.
     std::vector<torch::Tensor> multimodalFeatures() const;
+    std::vector<torch::Tensor> multimodalExtraInput() const;
+    bool                       hasMultimodalExtraInput() const;
     int                        multimodalFeaturesLength() const;
     torch::Tensor              multimodalLocations() const;
 
@@ -255,8 +263,8 @@ public:
     ErrorInfo    statusInfo();
     std::string  stopReason();
 
-    void        setReserveStep(size_t reserve_step);
-    size_t      reserveStep() const {
+    void   setReserveStep(size_t reserve_step);
+    size_t reserveStep() const {
         return reserve_step_;
     }
     StreamState moveToNext();
@@ -704,15 +712,15 @@ protected:
     int64_t                               vocab_size_;
     std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
     int64_t                               begin_time_us_;
-    int64_t                               wait_time_us_ = 0;
-    bool                                  metrics_reported_ = false;
-    int64_t                               scheduler_enqueue_time_us_ = 0;
-    int64_t                               can_run_time_us_ = 0;
+    int64_t                               wait_time_us_                = 0;
+    bool                                  metrics_reported_            = false;
+    int64_t                               scheduler_enqueue_time_us_   = 0;
+    int64_t                               can_run_time_us_             = 0;
     int64_t                               loading_cache_start_time_us_ = 0;
-    int64_t                               loading_cache_done_time_us_ = 0;
-    int64_t                               first_running_time_us_ = 0;
-    int64_t                               loading_cache_latency_us_ = 0;
-    int64_t                               load_done_to_running_us_ = 0;
+    int64_t                               loading_cache_done_time_us_  = 0;
+    int64_t                               first_running_time_us_       = 0;
+    int64_t                               loading_cache_latency_us_    = 0;
+    int64_t                               load_done_to_running_us_     = 0;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
     std::shared_ptr<bool>                 is_context_stream_;
     size_t                                iter_count_           = 0;
@@ -724,7 +732,6 @@ protected:
     int                                   device_reuse_length_  = 0;
     int                                   remote_reuse_length_  = 0;
     int                                   memory_reuse_length_  = 0;
-    int                                   reuse_mm_length_      = 0;
     // prefill reuse info (PD-sep); read/write only under output_mutex_
     int64_t prefill_total_reuse_len_  = 0;
     int64_t prefill_local_reuse_len_  = 0;
@@ -795,10 +802,10 @@ protected:
     // Stream-async device-resident state for the next decode step's prepare.
     // These structs stay default-constructed (epoch=0, undefined tensors) until
     // their corresponding async/sync publisher installs a usable state.
-    MtpAsyncDeviceState    mtp_async_state_;
-    uint64_t               mtp_async_epoch_counter_ = 0;
-    NormalAsyncDeviceState normal_async_state_;
-    uint64_t               normal_async_epoch_counter_ = 0;
+    MtpAsyncDeviceState                mtp_async_state_;
+    uint64_t                           mtp_async_epoch_counter_ = 0;
+    NormalAsyncDeviceState             normal_async_state_;
+    uint64_t                           normal_async_epoch_counter_       = 0;
     std::shared_ptr<std::atomic<bool>> grpc_normal_device_state_pending_ = std::make_shared<std::atomic<bool>>(false);
 
     bool return_all_hidden_states_ = false;

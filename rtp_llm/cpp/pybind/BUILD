@@ -34,6 +34,7 @@ cc_library(
     ],
     deps = [
         ":py_utils",
+        "//rtp_llm/cpp/multimodal_processor:multimodal_input_class",
         "//rtp_llm/cpp/config:config_modules",
         "//rtp_llm/cpp/config:model_config",  # Add ModelConfig implementation
         "//rtp_llm/cpp/model_utils:model_utils",

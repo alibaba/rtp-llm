@@ -58,7 +58,7 @@ public:
             if (stream->hasCacheKeys()) {
                 max_cache_keys_num_ = std::max(max_cache_keys_num_, stream->cacheKeys().size());
             }
-            max_seq_len_    = std::max(max_seq_len_, (size_t)stream->seqLength());
+            max_seq_len_ = std::max(max_seq_len_, (size_t)stream->seqLength());
             total_score_batch_size_ += stream->scoreLen();
             adapter_names.push_back(stream->adapterName());
             gen_timeline_ |= stream->genTimeline();
@@ -138,6 +138,15 @@ public:
         return decode_streams_;
     }
 
+    bool hasMMExtraInput() const {
+        for (auto& stream : context_streams_) {
+            if (stream->hasMultimodalExtraInput()) {
+                return true;
+            }
+        }
+        return false;
+    }
+
     bool needReturnAllProbs() const {
         for (auto& stream : context_streams_) {
             if (stream->getReturnAllProbs()) {
@@ -206,13 +215,11 @@ public:
                      << ", total_sampler_batch_size_in: " << total_sampler_batch_size_in_
                      << ", total_sampler_batch_size_out: " << total_sampler_batch_size_out_
                      << ", total_block_update_copy_num: " << totalBlockUpdateCopyNum()
-                     << ", max_blocks_num_: " << max_blocks_num_
-                     << ", max_cache_keys_num_: " << max_cache_keys_num_
+                     << ", max_blocks_num_: " << max_blocks_num_ << ", max_cache_keys_num_: " << max_cache_keys_num_
                      << ", model_execute_token_size: " << model_execute_token_size_
                      << ", context_execute_token_size: " << context_execute_token_size_
                      << ", context_execute_token_size_with_cache: " << context_execute_token_size_with_cache_
-                     << ", max_seq_len: " << max_seq_len_
-                     << ", is_fake_stream: " << is_fake_stream_ << "}";
+                     << ", max_seq_len: " << max_seq_len_ << ", is_fake_stream: " << is_fake_stream_ << "}";
         return debug_string.str();
     }
 
@@ -231,26 +238,26 @@ public:
 private:
     std::list<GenerateStreamPtr> context_streams_;
     std::list<GenerateStreamPtr> decode_streams_;
-    size_t                       total_sampler_batch_size_in_   = 0;
-    size_t                       total_sampler_batch_size_out_  = 0;
-    size_t                       total_decode_batch_size_       = 0;
-    size_t                       total_context_batch_size_      = 0;
-    size_t                       decode_block_update_copy_num_  = 0;
-    size_t                       context_block_update_copy_num_ = 0;
-    size_t                       max_blocks_num_                = 0;
-    size_t                       max_cache_keys_num_            = 0;
-    size_t                       model_execute_token_size_      = 0;
-    size_t                       context_execute_token_size_    = 0;
+    size_t                       total_sampler_batch_size_in_           = 0;
+    size_t                       total_sampler_batch_size_out_          = 0;
+    size_t                       total_decode_batch_size_               = 0;
+    size_t                       total_context_batch_size_              = 0;
+    size_t                       decode_block_update_copy_num_          = 0;
+    size_t                       context_block_update_copy_num_         = 0;
+    size_t                       max_blocks_num_                        = 0;
+    size_t                       max_cache_keys_num_                    = 0;
+    size_t                       model_execute_token_size_              = 0;
+    size_t                       context_execute_token_size_            = 0;
     size_t                       context_execute_token_size_with_cache_ = 0;
-    size_t                       max_seq_len_                   = 0;
-    size_t                       max_context_seq_len_           = 0;
-    size_t                       max_reuse_length_              = 0;
-    size_t                       cum_context_seq_len_           = 0;
-    size_t                       multimodal_features_len_       = 0;
-    size_t                       total_score_batch_size_        = 0;
-    bool                         has_multimodal_input_          = false;
-    bool                         gen_timeline_                  = false;
-    bool                         is_fake_stream_                = false;
+    size_t                       max_seq_len_                           = 0;
+    size_t                       max_context_seq_len_                   = 0;
+    size_t                       max_reuse_length_                      = 0;
+    size_t                       cum_context_seq_len_                   = 0;
+    size_t                       multimodal_features_len_               = 0;
+    size_t                       total_score_batch_size_                = 0;
+    bool                         has_multimodal_input_                  = false;
+    bool                         gen_timeline_                          = false;
+    bool                         is_fake_stream_                        = false;
     std::list<std::string>       adapter_names;
 };
 

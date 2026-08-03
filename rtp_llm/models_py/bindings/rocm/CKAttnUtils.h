@@ -22,6 +22,7 @@ struct CKAttn {
     torch::Tensor kv_cache_kernel_block_id_device;
 
     torch::Tensor prefix_lengths;
+    torch::Tensor position_ids;
     torch::Tensor cu_seqlens;
     torch::Tensor cu_kv_seqlens;
     torch::Tensor input_lengths;

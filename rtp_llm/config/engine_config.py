@@ -252,15 +252,8 @@ class EngineConfig:
         grammar_config = py_env_configs.grammar_config
         load_config = py_env_configs.load_config
 
-        # Setup pd_sep_config role_type based on vit_separation
-        if (
-            py_env_configs.vit_config.vit_separation
-            == VitSeparation.VIT_SEPARATION_ROLE
-        ):
-            pd_sep_config.role_type = RoleType.VIT
-        else:
-            # role_config.role_type property automatically converts string to RoleType enum
-            pd_sep_config.role_type = py_env_configs.role_config.role_type
+        # role_config.role_type property automatically converts string to RoleType enum
+        pd_sep_config.role_type = py_env_configs.role_config.role_type
 
         # Mirror role into parallelism_config so model construction can read it
         # via parallelism_config.role_type instead of os.environ["ROLE_TYPE"].
