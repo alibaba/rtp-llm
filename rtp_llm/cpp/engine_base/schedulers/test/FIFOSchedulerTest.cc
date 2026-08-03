@@ -188,6 +188,49 @@ TEST_F(FIFOSchedulerTest, testRejectInputWithoutSpeculativeReserveSpace) {
     ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
 }
 
+TEST_F(FIFOSchedulerTest, testRejectDSpARKTailWithoutRopeReserveSpace) {
+    CacheConfig                     cache_config  = makeMhaCacheConfig(1, 128, 1, 4, 8, rtp_llm::DataType::TYPE_FP16);
+    std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);
+    ASSERT_TRUE(cache_manager->init());
+    ResourceContext resource_context;
+    resource_context.cache_manager = cache_manager;
+
+    ModelConfig model_config;
+    model_config.max_seq_len = 512;
+    RuntimeConfig runtime_config;
+    runtime_config.max_generate_batch_size                     = 100;
+    runtime_config.fifo_scheduler_config.max_batch_tokens_size = 8192;
+    PDSepConfig         pd_sep_config;
+    ParallelismConfig   parallelism_config;
+    ModelSpecificConfig model_specific_config;
+    FIFOScheduler       scheduler(
+        runtime_config, model_config, pd_sep_config, parallelism_config, model_specific_config, cache_manager);
+
+    const size_t gamma               = 3;
+    const size_t dspark_reserve_step = 3 * gamma;
+    auto         make_stream         = [&](size_t input_len) {
+        std::shared_ptr<GenerateInput> query = make_shared<GenerateInput>();
+        query->input_ids                     = torch::full({static_cast<int64_t>(input_len)}, 1, torch::kInt32);
+        query->generate_config               = make_shared<GenerateConfig>();
+        auto stream = make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+        stream->setReserveStep(dspark_reserve_step);
+        return stream;
+    };
+
+    auto valid_stream = make_stream(503);
+    ASSERT_TRUE(scheduler.enqueue(valid_stream).ok());
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
+
+    auto invalid_stream = make_stream(504);
+    ASSERT_FALSE(scheduler.enqueue(invalid_stream).ok());
+    ASSERT_TRUE(invalid_stream->hasError());
+    ASSERT_EQ(invalid_stream->statusInfo().code(), ErrorCode::LONG_PROMPT_ERROR);
+    ASSERT_NE(invalid_stream->stopReason().find("reserve_step 9"), std::string::npos);
+    ASSERT_NE(invalid_stream->stopReason().find("allowed max input len for speculative decoding is 503"),
+              std::string::npos);
+    ASSERT_EQ(scheduler.waitingStreamsSize(), 1);
+}
+
 TEST_F(FIFOSchedulerTest, testIncrKVCacheLackMem) {
     CacheConfig                     cache_config  = makeMhaCacheConfig(1, 3, 1, 4, 2, rtp_llm::DataType::TYPE_FP16);
     std::shared_ptr<KVCacheManager> cache_manager = std::make_shared<KVCacheManager>(cache_config);

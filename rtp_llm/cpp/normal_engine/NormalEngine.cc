@@ -96,11 +96,16 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                        + params.parallelism_config.tp_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
     if (propose_params_) {
-        reserve_step_ = propose_params_->gen_num_per_circle + 1;
+        const auto gamma = propose_params_->gen_num_per_circle;
+        reserve_step_ = gamma + 1;
         if (propose_params_->sp_type == SP_TYPE_DSPARK) {
-            // Target verify can append gamma+1 positions, then the same round
-            // seeds the next gamma-wide draft block beyond the accepted tail.
-            reserve_step_ = 2 * (propose_params_->gen_num_per_circle + 1);
+            // DSpARK decode can schedule the next step before the previous
+            // async specUpdate has committed the accepted tokens on host.
+            // The verifier may therefore see one extra max accept window
+            // (gamma + 1), then seed a gamma-wide draft block from that tail.
+            // Reserving 3 * gamma keeps the largest RoPE index below
+            // max_seq_len while still admitting the longest safe prompts.
+            reserve_step_ = 3 * gamma;
         }
     } else {
         reserve_step_ = 0;
