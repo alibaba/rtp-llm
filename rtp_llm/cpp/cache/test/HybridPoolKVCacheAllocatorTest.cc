@@ -802,10 +802,10 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveCheckIsBypassedWhenMallocInfoLacks
     EXPECT_TRUE(allocator->hasAvailableBlocksForReserve(info, /*reserve_blocks=*/9999));
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackFreesPartiallyAllocatedGroupBlocks) {
+TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocPerGroupPreflightLeavesPoolsUntouched) {
     // gid=0 has enough room for the LINEAR tail block; gid=1 cannot satisfy
-    // the 3 FULL blocks needed for seq_len=9. initMallocForCommonLen should
-    // roll gid=0 back after gid=1 fails.
+    // the 3 FULL blocks needed for seq_len=9. Per-group admission must reject
+    // before mutating either pool.
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/3, /*full_block_num=*/3);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());
@@ -822,6 +822,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackFreesPartiallyAllocated
 
     auto result = allocator->malloc(malloc_info);
     EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.failure_reason, MallocFailureReason::PERMANENT_RESOURCE_EXHAUSTED);
 
     EXPECT_EQ(batch_res->curBlocksNum(), 0u);
     EXPECT_EQ(batch_res->blocksNum(0, /*gid=*/0), 0u);
@@ -830,7 +831,41 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackFreesPartiallyAllocated
     expectPoolCountersEq(allocator, counters_before);
 }
 
-TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesDeviceReuseReferencesOnReserveReject) {
+TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocReportsRetryablePerGroupCapacityShortage) {
+    // Each pool has enough empty-engine capacity for seq_len=8. A live holder
+    // leaves the FULL pool one block short, so only the current admission is
+    // retryable; the request is not permanently oversized.
+    auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/4, /*full_block_num=*/3);
+    auto allocator = makeAllocator(config);
+    ASSERT_TRUE(allocator->init());
+
+    auto holder_resource = makeBatchResource(/*batch_size=*/1, config);
+    holder_resource->setBatchCacheKeys(0, CacheKeysType{100});
+    auto holder_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
+    MallocInfo holder_info{holder_resource, holder_tokens};
+    holder_info.enable_device_cache = false;
+    holder_info.reuse_cache         = false;
+    ASSERT_TRUE(allocator->malloc(holder_info).success);
+
+    auto deferred_resource = makeBatchResource(/*batch_size=*/1, config);
+    deferred_resource->setBatchCacheKeys(0, CacheKeysType{200, 201});
+    auto deferred_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/8, /*seq_size_per_block=*/4);
+    MallocInfo deferred_info{deferred_resource, deferred_tokens};
+    deferred_info.enable_device_cache = false;
+    deferred_info.reuse_cache         = false;
+    deferred_info.verbose             = false;
+
+    auto deferred_result = allocator->malloc(deferred_info);
+    EXPECT_FALSE(deferred_result.success);
+    EXPECT_EQ(deferred_result.failure_reason, MallocFailureReason::RETRYABLE_RESOURCE_EXHAUSTED);
+    EXPECT_EQ(deferred_resource->curBlocksNum(), 0u);
+
+    allocator->free(FreeInfo{holder_resource, holder_tokens});
+    auto retry_result = allocator->malloc(deferred_info);
+    EXPECT_TRUE(retry_result.success);
+}
+
+TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocPreflightDoesNotAcquireDeviceReuseReferencesOnReserveReject) {
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/4, /*full_block_num=*/4);
     auto allocator = makeAllocator(config);
     ASSERT_TRUE(allocator->init());

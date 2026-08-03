@@ -16,6 +16,8 @@ import io.netty.handler.codec.http.HttpVersion;
 import io.netty.handler.codec.http.LastHttpContent;
 import io.netty.handler.timeout.ReadTimeoutException;
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.netty.HttpNettyChannelContext;
 import org.flexlb.enums.StatusEnum;
 import org.flexlb.exception.FlexLBException;
@@ -32,7 +34,7 @@ import java.nio.charset.StandardCharsets;
 import java.util.ArrayList;
 import java.util.Objects;
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.SynchronousQueue;
+import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
 import java.util.concurrent.atomic.LongAdder;
@@ -46,15 +48,19 @@ public class GeneralHttpNettyService {
 
     private final HttpNettyClientHandler nettyClient;
     private final Scheduler httpRequestScheduler;
+    private final ThreadPoolExecutor httpRequestExecutor;
 
-    public static final ThreadPoolExecutor httpRequestExecutor = new ThreadPoolExecutor(10 * Runtime.getRuntime()
-            .availableProcessors(), 15 * Runtime.getRuntime()
-            .availableProcessors(), 60L, TimeUnit.SECONDS, new SynchronousQueue<>(), new NamedThreadFactory("req-thread"),
-            // Rejection policy: execute by submitting thread when queue is full (avoid task loss)
-            new ThreadPoolExecutor.CallerRunsPolicy());
-
-    public GeneralHttpNettyService(HttpNettyClientHandler nettyClient) {
+    public GeneralHttpNettyService(HttpNettyClientHandler nettyClient, ConfigService configService) {
         this.nettyClient = nettyClient;
+        FlexlbConfig config = configService.loadBalanceConfig();
+        httpRequestExecutor = new ThreadPoolExecutor(
+                config.getHttpRequestExecutorCoreSize(),
+                config.getHttpRequestExecutorMaxSize(),
+                60L, TimeUnit.SECONDS,
+                new LinkedBlockingQueue<>(config.getHttpRequestExecutorQueueSize()),
+                new NamedThreadFactory("req-thread"),
+                // Rejection policy: execute by submitting thread when queue is full (avoid task loss)
+                new ThreadPoolExecutor.CallerRunsPolicy());
         httpRequestScheduler = Schedulers.fromExecutor(httpRequestExecutor);
     }
 

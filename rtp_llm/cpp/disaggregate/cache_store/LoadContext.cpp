@@ -68,7 +68,8 @@ void SyncContext::updateResult(bool                                       succes
                           autil::TimeUtility::currentTimeInMilliSeconds() - start_time_ms_);
     }
 
-    if (++done_layer_cnt_ == expect_layer_cnt_) {
+    ++done_layer_cnt_;
+    if (done_layer_cnt_ == expect_layer_cnt_ || !success) {
         cond_.notify_all();
     }
 }
@@ -78,6 +79,14 @@ void SyncContext::waitDone() {
     auto                         once_time_ms = 30;
     while (true) {
         if (done_layer_cnt_ == expect_layer_cnt_) {
+            return;
+        }
+
+        if (error_info_.hasError()) {
+            RTP_LLM_LOG_INFO("load context wait done on early error: %s, done %d/%d layers",
+                             error_info_.ToString().c_str(),
+                             done_layer_cnt_.load(),
+                             expect_layer_cnt_);
             return;
         }
 
@@ -97,7 +106,7 @@ void SyncContext::waitDone() {
 
         // sync wait, safe to use this
         if (cond_.wait_for(lock, std::chrono::milliseconds(once_time_ms), [this] {
-                return done_layer_cnt_ == expect_layer_cnt_;
+                return done_layer_cnt_ == expect_layer_cnt_ || error_info_.hasError();
             })) {
             return;
         }

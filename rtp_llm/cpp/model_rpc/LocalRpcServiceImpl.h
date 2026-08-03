@@ -25,6 +25,7 @@ public:
                       py::object                                             mm_process_engine,
                       std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
                       py::object                                             weight_manager) {
+        (void)weight_manager;
         local_server_ = std::make_shared<LocalRpcServer>();
         return local_server_->init(maga_init_params, mm_process_engine, std::move(propose_params));
     }
@@ -33,6 +34,33 @@ public:
                                     const GenerateInputPB*                 request,
                                     grpc::ServerWriter<GenerateOutputsPB>* writer) override {
         return local_server_->GenerateStreamCall(context, request, writer);
+    }
+
+    grpc::Status EnqueueBatch(grpc::ServerContext*         context,
+                              const EnqueueBatchRequestPB* request,
+                              EnqueueBatchResponsePB*      response) override {
+        (void)context;
+        (void)request;
+        (void)response;
+        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "EnqueueBatch not implemented on this role");
+    }
+
+    grpc::Status EnqueueGroup(grpc::ServerContext*         context,
+                              const EnqueueGroupRequestPB* request,
+                              EnqueueBatchResponsePB*      response) override {
+        (void)context;
+        (void)request;
+        (void)response;
+        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "EnqueueGroup not implemented on this role");
+    }
+
+    grpc::Status FetchResponse(grpc::ServerContext*                   context,
+                               const FetchRequestPB*                  request,
+                               grpc::ServerWriter<GenerateOutputsPB>* writer) override {
+        (void)context;
+        (void)request;
+        (void)writer;
+        return grpc::Status(grpc::StatusCode::UNIMPLEMENTED, "FetchResponse not implemented on this role");
     }
 
     ::grpc::Status
@@ -114,6 +142,8 @@ public:
     virtual size_t onflightRequestNum() {
         return local_server_->onflightRequestNum();
     }
+
+    virtual void beginShutdown() {}
 
     virtual void stop() {
         if (local_server_) {

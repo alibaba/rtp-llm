@@ -50,8 +50,12 @@ public:
         return absl::OkStatus();
     }
 
-    std::vector<GenerateStreamPtr> batchEnqueue(const std::vector<GenerateStreamPtr>& streams) override {
-        return {};  // Not implemented for BatchDecodeScheduler
+    std::pair<std::vector<bool>, std::vector<GenerateStreamPtr>>
+    enqueueGroup(const std::vector<GenerateStreamPtr>& streams) override {
+        for (const auto& stream : streams) {
+            stream->reportError(ErrorCode::UNKNOWN_ERROR, "BatchDecodeScheduler::enqueueGroup is not implemented");
+        }
+        return {std::vector<bool>(streams.size(), false), streams};  // Not implemented for BatchDecodeScheduler
     }
 
     void updateSchedulerInfo(const std::string& scheduler_info) override {

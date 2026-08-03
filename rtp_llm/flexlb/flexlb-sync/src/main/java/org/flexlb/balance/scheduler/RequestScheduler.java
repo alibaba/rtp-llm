@@ -5,6 +5,7 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.RoutingQueueReporter;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
@@ -14,8 +15,6 @@ import javax.annotation.PreDestroy;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-
-import org.flexlb.dao.loadbalance.StrategyErrorType;
 
 /**
  * Request scheduler - manages worker thread pool, consumes request queue, and executes routing.
@@ -92,7 +91,7 @@ public class RequestScheduler {
 
                 try {
                     // Step 2: Take request from queue
-                    BalanceContext ctx = queueManager.takeRequest(true, 500);
+                    BalanceContext ctx = queueManager.takeRequest(500);
                     if (ctx == null) {
                         continue; // permit released in finally
                     }

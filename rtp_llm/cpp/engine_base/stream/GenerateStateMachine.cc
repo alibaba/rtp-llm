@@ -64,6 +64,9 @@ void GenerateStateMachine::handleWaiting() {
         }
         auto result = stream_cache_resource_->initKVBlock(reserve_step_);
         if (!result.ok()) {
+            if (absl::IsUnavailable(result)) {
+                return;
+            }
             error_info = ErrorInfo(ErrorCode::MALLOC_FAILED, "LACK MEM");
             status.store(StreamState::FINISHED, std::memory_order_release);
             releaseResource();
@@ -151,7 +154,7 @@ void GenerateStateMachine::handleRunning() {
         if (normal_override > 0) {
             seq_len_override = normal_override;
         } else {
-            const auto& mtp_state = stream->getMtpAsyncDeviceState();
+            const auto& mtp_state    = stream->getMtpAsyncDeviceState();
             const int   mtp_override = mtp_state.next_real_seq_len;
             if (mtp_override > 0) {
                 seq_len_override = mtp_override;

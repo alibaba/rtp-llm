@@ -257,8 +257,8 @@ public:
     ErrorInfo    statusInfo();
     std::string  stopReason();
 
-    void        setReserveStep(size_t reserve_step);
-    size_t      reserveStep() const {
+    void   setReserveStep(size_t reserve_step);
+    size_t reserveStep() const {
         return reserve_step_;
     }
     StreamState moveToNext();
@@ -442,19 +442,20 @@ public:
         return generate_input_->generate_config->trace_id;
     }
 
-    int batchGroupSize() const {
-        return generate_input_->batch_group_size;
+    int groupSize() const {
+        return generate_input_->group_size;
     }
 
-    int batchGroupTimeout() const {
-        return generate_input_->generate_config->batch_group_timeout.value_or(100);
+    int groupTimeout() const {
+        return generate_input_->generate_config->group_timeout.value_or(100);
     }
 
-    bool forceBatch() const {
-        return generate_input_->generate_config->force_batch;
+    bool isGroup() const {
+        return generate_input_->group_id != -1;
     }
-    int64_t batchGroupId() const {
-        return generate_input_->batch_group_id;
+
+    int64_t groupId() const {
+        return generate_input_->group_id;
     }
 
     int64_t enqueueTime() const {
@@ -706,15 +707,15 @@ protected:
     int64_t                               vocab_size_;
     std::shared_ptr<CompleteTokenIds>     complete_token_ids_;
     int64_t                               begin_time_us_;
-    int64_t                               wait_time_us_ = 0;
-    bool                                  metrics_reported_ = false;
-    int64_t                               scheduler_enqueue_time_us_ = 0;
-    int64_t                               can_run_time_us_ = 0;
+    int64_t                               wait_time_us_                = 0;
+    bool                                  metrics_reported_            = false;
+    int64_t                               scheduler_enqueue_time_us_   = 0;
+    int64_t                               can_run_time_us_             = 0;
     int64_t                               loading_cache_start_time_us_ = 0;
-    int64_t                               loading_cache_done_time_us_ = 0;
-    int64_t                               first_running_time_us_ = 0;
-    int64_t                               loading_cache_latency_us_ = 0;
-    int64_t                               load_done_to_running_us_ = 0;
+    int64_t                               loading_cache_done_time_us_  = 0;
+    int64_t                               first_running_time_us_       = 0;
+    int64_t                               loading_cache_latency_us_    = 0;
+    int64_t                               load_done_to_running_us_     = 0;
     std::shared_ptr<StreamCacheResource>  stream_cache_resource_;
     std::shared_ptr<bool>                 is_context_stream_;
     size_t                                iter_count_           = 0;
@@ -797,10 +798,10 @@ protected:
     // Stream-async device-resident state for the next decode step's prepare.
     // These structs stay default-constructed (epoch=0, undefined tensors) until
     // their corresponding async/sync publisher installs a usable state.
-    MtpAsyncDeviceState    mtp_async_state_;
-    uint64_t               mtp_async_epoch_counter_ = 0;
-    NormalAsyncDeviceState normal_async_state_;
-    uint64_t               normal_async_epoch_counter_ = 0;
+    MtpAsyncDeviceState                mtp_async_state_;
+    uint64_t                           mtp_async_epoch_counter_ = 0;
+    NormalAsyncDeviceState             normal_async_state_;
+    uint64_t                           normal_async_epoch_counter_       = 0;
     std::shared_ptr<std::atomic<bool>> grpc_normal_device_state_pending_ = std::make_shared<std::atomic<bool>>(false);
 
     bool return_all_hidden_states_ = false;

@@ -3,8 +3,6 @@ package org.flexlb.cache.core;
 import lombok.Getter;
 import lombok.extern.slf4j.Slf4j;
 import org.flexlb.config.ConfigService;
-import org.springframework.beans.factory.annotation.Autowired;
-import org.springframework.stereotype.Component;
 
 import java.util.List;
 import java.util.function.LongSupplier;
@@ -13,7 +11,6 @@ import java.util.function.LongSupplier;
  * Fixed-size recent cache-key pool for request-level cache hit metrics.
  */
 @Slf4j
-@Component
 public class RecentCacheKeyWindow {
 
     public static final long DEFAULT_TIME_WINDOW_MS = 30L * 60L * 1000L;
@@ -43,17 +40,6 @@ public class RecentCacheKeyWindow {
     private int keySize;
     private int uniqueSize;
 
-    @Autowired
-    public RecentCacheKeyWindow(ConfigService configService) {
-        this(resolveTimeWindowMs(configService),
-                resolveMaxCacheKeys(configService),
-                System::currentTimeMillis);
-    }
-
-    RecentCacheKeyWindow(long timeWindowMs, LongSupplier nowSupplier) {
-        this(timeWindowMs, DEFAULT_MAX_CACHE_KEYS, nowSupplier);
-    }
-
     RecentCacheKeyWindow(long timeWindowMs, long maxCacheKeys, LongSupplier nowSupplier) {
         this.timeWindowMs = normalizeTimeWindowMs(timeWindowMs);
         this.maxCacheKeys = normalizeCapacity(maxCacheKeys);
@@ -75,32 +61,28 @@ public class RecentCacheKeyWindow {
                 hashTableCapacity);
     }
 
-    public synchronized Snapshot record(List<Long> cacheKeys) {
+    public Snapshot record(List<Long> cacheKeys) {
         return record(cacheKeys, nowSupplier.getAsLong());
     }
 
-    synchronized Snapshot record(List<Long> cacheKeys, long nowMs) {
-        evictExpired(nowMs);
-        long requestOccurrences = countNonNull(cacheKeys);
-        long requestHitOccurrences = countHits(cacheKeys);
+    Snapshot record(List<Long> cacheKeys, long nowMs) {
+        long requestOccurrences;
+        long requestHitOccurrences;
+        synchronized (this) {
+            evictExpired(nowMs);
+            requestOccurrences = countNonNull(cacheKeys);
+            requestHitOccurrences = countHits(cacheKeys);
 
-        if (requestOccurrences > 0L) {
-            retainRequest(cacheKeys, requestOccurrences, nowMs);
+            if (requestOccurrences > 0L) {
+                retainRequest(cacheKeys, requestOccurrences, nowMs);
+            }
+
         }
 
-        logRequest(nowMs, requestOccurrences, requestHitOccurrences);
+        if (log.isInfoEnabled()) {
+            logRequest(nowMs, requestOccurrences, requestHitOccurrences);
+        }
         return new Snapshot(timeWindowMs, requestOccurrences, requestHitOccurrences);
-    }
-
-    public synchronized Snapshot clear() {
-        entryHead = 0;
-        entrySize = 0;
-        keyTail = 0;
-        keySize = 0;
-        uniqueSize = 0;
-        java.util.Arrays.fill(tableStates, EMPTY);
-        java.util.Arrays.fill(tableCounts, 0);
-        return new Snapshot(timeWindowMs, 0L, 0L);
     }
 
     private long countNonNull(List<Long> cacheKeys) {
@@ -108,7 +90,9 @@ public class RecentCacheKeyWindow {
             return 0L;
         }
         long count = 0L;
-        for (Long cacheKey : cacheKeys) {
+        int size = cacheKeys.size();
+        for (int i = 0; i < size; i++) {
+            Long cacheKey = cacheKeys.get(i);
             if (cacheKey != null) {
                 count++;
             }
@@ -121,7 +105,9 @@ public class RecentCacheKeyWindow {
             return 0L;
         }
         long hits = 0L;
-        for (Long cacheKey : cacheKeys) {
+        int size = cacheKeys.size();
+        for (int i = 0; i < size; i++) {
+            Long cacheKey = cacheKeys.get(i);
             if (cacheKey != null && getCount(cacheKey) > 0) {
                 hits++;
             }
@@ -147,7 +133,9 @@ public class RecentCacheKeyWindow {
 
         int start = keyTail;
         int retained = 0;
-        for (Long boxedKey : cacheKeys) {
+        int size = cacheKeys.size();
+        for (int i = 0; i < size; i++) {
+            Long boxedKey = cacheKeys.get(i);
             if (boxedKey == null) {
                 continue;
             }
@@ -277,14 +265,14 @@ public class RecentCacheKeyWindow {
                 timeWindowMs);
     }
 
-    private static long resolveTimeWindowMs(ConfigService configService) {
+    static long resolveTimeWindowMs(ConfigService configService) {
         if (configService == null || configService.loadBalanceConfig() == null) {
             return DEFAULT_TIME_WINDOW_MS;
         }
         return configService.loadBalanceConfig().getCacheHitTimeWindowMs();
     }
 
-    private static long resolveMaxCacheKeys(ConfigService configService) {
+    static long resolveMaxCacheKeys(ConfigService configService) {
         if (configService == null || configService.loadBalanceConfig() == null) {
             return DEFAULT_MAX_CACHE_KEYS;
         }
@@ -343,7 +331,7 @@ public class RecentCacheKeyWindow {
         private final long requestOccurrences;
         private final long requestHitOccurrences;
 
-        private Snapshot(long timeWindowMs, long requestOccurrences, long requestHitOccurrences) {
+        Snapshot(long timeWindowMs, long requestOccurrences, long requestHitOccurrences) {
             this.timeWindowMs = timeWindowMs;
             this.requestOccurrences = requestOccurrences;
             this.requestHitOccurrences = requestHitOccurrences;

@@ -1,15 +1,16 @@
+import asyncio
 import logging
 import os
 import time
-import asyncio
-from typing import TYPE_CHECKING, AsyncGenerator, List, Optional
+from dataclasses import replace
+from typing import TYPE_CHECKING, AsyncGenerator, Callable, List, Optional, Set
 
 import torch
 
 from rtp_llm.config.exceptions import ExceptionType, FtRuntimeException
 from rtp_llm.config.generate_config import RoleAddr, RoleType
 from rtp_llm.config.model_config import ModelConfig as PyModelConfig
-from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient
+from rtp_llm.cpp.model_rpc.model_rpc_client import ModelRpcClient, trans_input
 from rtp_llm.metrics import kmonitor
 from rtp_llm.metrics.kmonitor_metric_reporter import AccMetrics, GaugeMetrics
 from rtp_llm.ops import SpeculativeExecutionConfig, VitSeparation, get_block_cache_keys
@@ -33,6 +34,12 @@ if TYPE_CHECKING:
     from rtp_llm.config.py_config_modules import PyEnvConfigs
 
 route_logger = logging.getLogger("route_logger")
+
+
+def get_role_names(role_addrs: List[RoleAddr]) -> Set[str]:
+    """Return the set of human-readable role names from a list of RoleAddr."""
+    return {role_addr.role.name for role_addr in role_addrs}
+
 
 PD_ROUTE_RETRY_ON_UNAVAILABLE_ENV = "RTP_LLM_PD_ROUTE_RETRY_ON_UNAVAILABLE"
 DEFAULT_PD_ROUTE_RETRY_ON_UNAVAILABLE = 3
@@ -119,10 +126,14 @@ class BackendRPCServerVisitor:
         )
         self.recent_cache_key_window = RecentCacheKeyWindow()
         self.pd_route_retry_on_unavailable = self._pd_route_retry_on_unavailable()
+        self.request_id_factory: Optional[Callable[[], int]] = None
 
     async def close(self):
         await self.model_rpc_client.close()
         await self.master_client.close()
+
+    def set_request_id_factory(self, factory: Callable[[], int]) -> None:
+        self.request_id_factory = factory
 
     @staticmethod
     def _pd_route_retry_on_unavailable() -> int:
@@ -216,6 +227,7 @@ class BackendRPCServerVisitor:
         full_block_cache_keys = get_block_cache_keys(token_ids, self.seq_size_per_block)
         block_cache_keys = self._route_cache_keys(full_block_cache_keys)
         self._report_recent_cache_key_metrics(block_cache_keys)
+        input_pb = trans_input(input)
 
         try:
             route_result = await self.master_client.get_backend_role_addrs(
@@ -223,6 +235,7 @@ class BackendRPCServerVisitor:
                 cache_key_block_size=self._cache_key_block_size(),
                 input=input,
                 request_id=input.request_id,
+                input_pb=input_pb,
             )
         except BaseException as e:
             exception_json = format_exception(e)
@@ -235,6 +248,7 @@ class BackendRPCServerVisitor:
 
         if route_result.is_ok:
             input.generate_config.role_addrs = route_result.role_addrs
+            input.enqueued_by_master = route_result.enqueued_by_master
             route_logger.debug(
                 "master route success, request_id=%s, addrs=%s",
                 input.request_id,
@@ -496,20 +510,19 @@ class BackendRPCServerVisitor:
             set_aux_info(e)
             raise
 
-        async def route_and_enqueue(attempt: int):
-            if attempt > 0:
-                input.generate_config.role_addrs = []
+        async def route_and_enqueue(attempt_input: GenerateInput):
             if self.host_service.service_available:
-                await self.route_ips(input)
-            return self.model_rpc_client.enqueue(input)
+                await self.route_ips(attempt_input)
+            return self.model_rpc_client.enqueue(attempt_input)
 
         async def stream_with_aux_info():
             attempt = 0
+            attempt_input = input
             is_streaming = bool(getattr(input.generate_config, "is_streaming", False))
             while True:
                 yielded_output = False
                 try:
-                    stream = await route_and_enqueue(attempt)
+                    stream = await route_and_enqueue(attempt_input)
                     if is_streaming:
                         async for output in stream:
                             yielded_output = True
@@ -530,11 +543,22 @@ class BackendRPCServerVisitor:
                         or not self._is_retryable_route_rpc_error(e)
                     ):
                         raise
+                    request_id_factory = getattr(self, "request_id_factory", None)
+                    if request_id_factory is None:
+                        raise
                     attempt += 1
+                    attempt_input = replace(
+                        input,
+                        request_id=request_id_factory(),
+                        generate_config=input.generate_config.model_copy(
+                            update={"role_addrs": []}
+                        ),
+                        enqueued_by_master=False,
+                    )
                     route_logger.warning(
                         "retrying PD route after retryable RPC error, "
                         "request_id=%s, attempt=%s/%s, error=%s",
-                        input.request_id,
+                        attempt_input.request_id,
                         attempt,
                         self.pd_route_retry_on_unavailable,
                         e,

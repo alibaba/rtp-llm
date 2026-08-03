@@ -110,8 +110,17 @@ public:
     uint32_t convertToGlobalLayerId(size_t model_id, int local_layer_id) const;
 
 protected:
+    enum class InitCapacityScope {
+        TOTAL,
+        AVAILABLE,
+    };
+
     virtual bool         doInit() = 0;
     MallocResult         initMalloc(const MallocInfo& malloc_info);
+    virtual MallocFailureReason evaluateInitCapacity(const MallocInfo& malloc_info,
+                                                      size_t            reserve_blocks,
+                                                      InitCapacityScope scope) const;
+    MallocFailureReason evaluateInitFailure(const MallocInfo& malloc_info, size_t reserve_blocks) const;
     virtual MallocResult incrMalloc(const MallocInfo& malloc_info)                                          = 0;
     virtual MallocResult initMallocForCommonLen(const MallocInfo& malloc_info)                              = 0;
     virtual int          getNeedBlocks(const MallocInfo& malloc_info) const                                 = 0;

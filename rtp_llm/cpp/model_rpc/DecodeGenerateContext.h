@@ -70,6 +70,8 @@ public:
     DecodeStatInfo           stat_info;
     int64_t                  loading_cache_requests = 0;
     int32_t                  prefill_cp_size        = 1;  // CP size used by prefill; >1 means sharded KV cache
+    // Guards meta_->finishTask() early-failure reporting: at most once per request.
+    bool early_finish_reported = false;
 
     // for debug, will delete in future
     TimeInfo time_info;

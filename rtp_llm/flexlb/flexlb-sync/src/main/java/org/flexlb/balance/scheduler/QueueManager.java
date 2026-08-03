@@ -1,6 +1,5 @@
 package org.flexlb.balance.scheduler;
 
-import lombok.Getter;
 import org.flexlb.config.ConfigService;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.QueueSnapshot;
@@ -23,7 +22,6 @@ import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.BlockingDeque;
 import java.util.concurrent.BlockingQueue;
-import java.util.concurrent.CancellationException;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.ExecutionException;
 import java.util.concurrent.LinkedBlockingDeque;
@@ -37,7 +35,6 @@ import java.util.concurrent.atomic.AtomicLong;
  * @author saichen.sm
  * @since 2025/12/22
  */
-@Getter
 @Component
 public class QueueManager {
 
@@ -103,37 +100,35 @@ public class QueueManager {
         }
     }
 
+    public int queueSize() {
+        return queue.size();
+    }
+
     /**
-     * Take request from queue (blocking/non-blocking)
+     * Take request from the queue, waiting up to {@code blockTimeoutMs}.
      *
-     * @param isBlock          Whether to block and wait
-     * @param blockTimeoutMs   Block timeout in milliseconds
-     * @return Request context, null if queue is empty
+     * @return request context, or null when no request arrives before the timeout
      */
-    public BalanceContext takeRequest(boolean isBlock, long blockTimeoutMs) {
-        return takeValidRequest(queue, isBlock, blockTimeoutMs);
+    public BalanceContext takeRequest(long blockTimeoutMs) {
+        return takeValidRequest(queue, blockTimeoutMs);
     }
 
     /**
      * Take a single valid request from queue
      * <p>
-     * Checks for cancelled and timed-out requests, completes future for invalid requests
+     * Checks for timed-out requests and completes the future for invalid requests.
      *
      * @param sourceQueue Source queue
      * @return Request context, null if queue is empty
      */
-    private BalanceContext takeValidRequest(BlockingQueue<BalanceContext> sourceQueue, boolean isBlock, long blockTimeoutMs) {
+    private BalanceContext takeValidRequest(BlockingQueue<BalanceContext> sourceQueue, long blockTimeoutMs) {
         try {
             while (true) {
-                BalanceContext ctx = isBlock ? sourceQueue.poll(blockTimeoutMs, TimeUnit.MILLISECONDS) : sourceQueue.poll();
+                BalanceContext ctx = sourceQueue.poll(blockTimeoutMs, TimeUnit.MILLISECONDS);
                 if (ctx == null) {
                     return null;
                 }
                 ctx.setDequeueTime(System.currentTimeMillis());
-                if (ctx.isCancelled()) {
-                    ctx.getFuture().completeExceptionally(new CancellationException("Request cancelled by client"));
-                    continue;
-                }
                 long waitTimeMs = System.currentTimeMillis() - ctx.getEnqueueTime();
                 long maxQueueWaitTimeMs = ctx.getRequest().getGenerateTimeout();
                 if (waitTimeMs > maxQueueWaitTimeMs) {
@@ -158,14 +153,6 @@ public class QueueManager {
         Logger.warn("Request timeout in queue for id: {}, wait time: {}ms", ctx.getRequestId(), waitTimeMs);
     }
 
-    private void handleCanceled(BalanceContext ctx) {
-        remove(ctx);
-        metrics.reportCancelled();
-
-        long waitTimeMs = System.currentTimeMillis() - ctx.getEnqueueTime();
-        Logger.warn("Request canceled in queue for id: {}, wait time: {}ms", ctx.getRequestId(), waitTimeMs);
-    }
-
     private void handleInterruption(BalanceContext ctx) {
         remove(ctx);
         Thread.currentThread().interrupt();
@@ -185,9 +172,6 @@ public class QueueManager {
         if (cause instanceof TimeoutException) {
             handleTimeout(BalanceContext);
             return Mono.just(Response.error(StrategyErrorType.QUEUE_TIMEOUT));
-        } else if (cause instanceof CancellationException) {
-            handleCanceled(BalanceContext);
-            return Mono.just(Response.error(StrategyErrorType.REQUEST_CANCELLED));
         } else if (cause instanceof InterruptedException) {
             handleInterruption(BalanceContext);
             return Mono.just(Response.error(StrategyErrorType.QUEUE_TIMEOUT));
@@ -197,7 +181,7 @@ public class QueueManager {
         return Mono.just(Response.error(StrategyErrorType.NO_AVAILABLE_WORKER));
     }
 
-    @Scheduled(fixedRate = 1000)
+    @Scheduled(fixedRate = 2000L)
     public void reportQueueSize() {
         metrics.reportQueueSize(queue.size());
     }

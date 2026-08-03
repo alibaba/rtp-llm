@@ -68,20 +68,20 @@ protected:
         return cache_manager_->freeBlocksNum();
     }
 
-    // Helper function to schedule a stream through WAITING->LOADING_CACHE->WAITING->RUNNING
-    // Returns the result of the final schedule() call when stream is RUNNING
+    // Helper function to schedule a stream through to RUNNING state
+    // Returns the result of the schedule() call that transitions stream(s) to RUNNING
     absl::StatusOr<std::list<GenerateStreamPtr>> scheduleToRunning(std::shared_ptr<FIFOScheduler>& scheduler) {
-        // First schedule: WAITING -> LOADING_CACHE
+        // First schedule: stream should transition to RUNNING
         auto result1 = scheduler->schedule();
         if (!result1.ok() || result1.value().size() > 0) {
-            return result1;  // Unexpected: already RUNNING or error
+            return result1;
         }
-        // Second schedule: LOADING_CACHE -> WAITING (with CanRun event set)
+        // If not yet RUNNING, try again (e.g., loading cache)
         auto result2 = scheduler->schedule();
         if (!result2.ok() || result2.value().size() > 0) {
-            return result2;  // Unexpected: error or already done
+            return result2;
         }
-        // Third schedule: WAITING -> RUNNING
+        // Third attempt
         return scheduler->schedule();
     }
 
