@@ -110,6 +110,8 @@ class ExceptionType(IntEnum):
     MM_EMPTY_ENGINE_ERROR = 904
     MM_NOT_SUPPORTED_ERROR = 905, ExceptionCategory.UNSUPPORTED
     MM_DOWNLOAD_FAILED = 906
+    UNSAFE_INPUT_CONTENT = 907
+    UNSAFE_OUTPUT_CONTENT = 908
 
     @classmethod
     def from_value(cls, value):
