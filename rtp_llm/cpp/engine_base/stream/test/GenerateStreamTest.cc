@@ -72,10 +72,12 @@ public:
         return stream;
     }
 
-    GenerateStreamPtr createDecoderStream(std::vector<int> input_ids, std::vector<int> new_token_ids) {
+    GenerateStreamPtr
+    createDecoderStream(std::vector<int> input_ids, std::vector<int> new_token_ids, int num_return_sequences = 1) {
         std::shared_ptr<GenerateInput>  generate_input(new GenerateInput());
         std::shared_ptr<GenerateConfig> generate_config(new GenerateConfig());
-        ResourceContext                 resource_context;
+        generate_config->num_return_sequences = num_return_sequences;
+        ResourceContext resource_context;
         generate_input->generate_config = generate_config;
         generate_input->begin_time_us   = autil::TimeUtility::currentTimeInMicroSeconds();
         generate_input->input_ids =
@@ -90,6 +92,24 @@ public:
         stream_ptr->setSeqLength(stream_ptr->seqLength() + new_token_ids.size());
         return stream_ptr;
     };
+
+    std::shared_ptr<NormalGenerateStream> createBeamStream(std::vector<int> input_ids) {
+        auto cache_config  = init_config();
+        auto cache_manager = std::make_shared<KVCacheManager>(cache_config);
+        cache_manager->init();
+        ResourceContext resource_context;
+        resource_context.cache_manager = cache_manager;
+
+        auto generate_input                          = std::make_shared<GenerateInput>();
+        generate_input->generate_config              = std::make_shared<GenerateConfig>();
+        generate_input->generate_config->num_beams   = 2;
+        generate_input->generate_config->reuse_cache = false;
+        generate_input->begin_time_us                = autil::TimeUtility::currentTimeInMicroSeconds();
+        generate_input->input_ids =
+            torch::tensor(std::vector<int32_t>(input_ids.begin(), input_ids.end()), torch::kInt32);
+        return std::make_shared<NormalGenerateStream>(
+            generate_input, model_config_, runtime_config_, resource_context, nullptr);
+    }
 
 private:
     ModelConfig   model_config_;

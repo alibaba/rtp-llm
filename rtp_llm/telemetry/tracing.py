@@ -660,6 +660,65 @@ def extract_context_from_headers(headers: Any) -> Optional[Any]:
         return None
 
 
+def select_valid_server_trace_carrier(
+    body_headers: Any, metadata_headers: Any
+) -> Tuple[Dict[str, str], str]:
+    """Select one complete valid W3C carrier without mixing its sources."""
+    if not OTEL_AVAILABLE:
+        return {}, "none"
+    for source, headers in (("body", body_headers), ("metadata", metadata_headers)):
+        if not hasattr(headers, "get"):
+            continue
+        carrier = {
+            key: str(value)
+            for key in ("traceparent", "tracestate", "baggage")
+            if (value := headers.get(key))
+        }
+        if "traceparent" not in carrier:
+            continue
+        try:
+            context = TraceContextTextMapPropagator().extract(
+                {
+                    key: carrier[key]
+                    for key in ("traceparent", "tracestate")
+                    if key in carrier
+                },
+                context=otel_context.Context(),
+            )
+            if trace.get_current_span(context).get_span_context().is_valid:
+                return carrier, source
+        except Exception:  # noqa: BLE001 - malformed carriers are ignored
+            continue
+    return {}, "none"
+
+
+def metadata_to_headers(metadata: Any) -> Dict[str, Any]:
+    """Converts gRPC metadata to a lowercase, mapping-like carrier.
+
+    Duplicate keys use the last value, matching ``dict(metadata)``. Malformed
+    entries and undecodable byte keys are ignored so tracing cannot fail an RPC.
+    Values are preserved because ``-bin`` metadata may legitimately be bytes.
+    """
+    headers: Dict[str, Any] = {}
+    try:
+        entries = metadata or ()
+        for entry in entries:
+            try:
+                key, value = entry
+                if key is None or value is None:
+                    continue
+                if isinstance(key, bytes):
+                    key = key.decode("ascii")
+                else:
+                    key = str(key)
+                headers[key.lower()] = value
+            except Exception:  # noqa: BLE001 - malformed metadata is ignored
+                continue
+    except Exception:  # noqa: BLE001 - fail-open
+        return {}
+    return headers
+
+
 # Bailian convention: consume `traffic.llm_sdk.*` baggage entries at the HTTP
 # entry and write them (prefix stripped) onto the
 # root SERVER span. This is entry-side CONSUMPTION only, and does not conflict
@@ -1013,6 +1072,8 @@ def start_server_span(
     span_name: str,
     headers: Any,
     initial_attributes: Optional[Dict[str, Any]] = None,
+    start_time: Optional[int] = None,
+    request_start_ns: Optional[int] = None,
 ) -> Optional[RequestTraceState]:
     """Starts an HTTP SERVER span with remote parent extracted from headers.
 
@@ -1026,11 +1087,15 @@ def start_server_span(
         if tracer is None:
             return None
         remote_context = extract_context_from_headers(headers)
+        monotonic_start_ns = (
+            request_start_ns if request_start_ns is not None else time.monotonic_ns()
+        )
         span = tracer.start_span(
             span_name,
             context=remote_context,
             kind=trace.SpanKind.SERVER,
             attributes=dict(initial_attributes) if initial_attributes else None,
+            start_time=start_time,
         )
         for baggage_key, baggage_value in _extract_llm_sdk_baggage(headers).items():
             try:
@@ -1038,7 +1103,11 @@ def start_server_span(
             except Exception:  # noqa: BLE001 - fail-open
                 pass
         server_context = trace.set_span_in_context(span)
-        state = RequestTraceState(server_span=span, server_context=server_context)
+        state = RequestTraceState(
+            server_span=span,
+            server_context=server_context,
+            request_start_ns=monotonic_start_ns,
+        )
         CURRENT_TRACE_STATE.set(state)
         return state
     except Exception:  # noqa: BLE001 - fail-open

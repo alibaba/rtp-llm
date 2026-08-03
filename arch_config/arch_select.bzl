@@ -185,6 +185,13 @@ def triton_deps(names):
 def internal_deps():
     return []
 
+def telemetry_test_deps():
+    # The public pip lock has no opentelemetry, and tracing.py degrades to no-op
+    # when the import fails. The internal arch_config declares the runtime for the
+    # locks that carry it, so the telemetry test never depends on whatever the
+    # execution image's interpreter happens to have installed.
+    return []
+
 def jit_deps():
     return []
 

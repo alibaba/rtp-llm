@@ -8,6 +8,14 @@ filegroup(
     srcs = glob(["*.py"]),
 )
 
+py_test(
+    name = "dash_cancel_state_test",
+    srcs = [
+        "dash_cancel_state.py",
+        "dash_cancel_state_test.py",
+    ],
+)
+
 exports_files([
     "entry.py",
     "data/prompt_candidates.json",
