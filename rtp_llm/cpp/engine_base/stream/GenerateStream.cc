@@ -907,6 +907,7 @@ bool GenerateStream::needFinishBySPTokens() {
     });
 }
 
+
 void GenerateStream::matchEosToken() {
     for (int i = 0; i < currentBatchSize(); ++i) {
         matchEosToken(i);

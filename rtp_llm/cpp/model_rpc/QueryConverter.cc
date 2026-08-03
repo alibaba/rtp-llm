@@ -193,7 +193,6 @@ std::shared_ptr<GenerateConfig> QueryConverter::transGenerateConfig(const Genera
     for (const auto& token_id : config_proto->end_think_token_ids()) {
         generate_config->end_think_token_ids.push_back(token_id);
     }
-
     for (const auto& role_addr : config_proto->role_addrs()) {
         generate_config->role_addrs.emplace_back(
             transRoleAddrType(role_addr), role_addr.ip(), role_addr.http_port(), role_addr.grpc_port());
