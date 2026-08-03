@@ -25,7 +25,7 @@ namespace rtp_llm {
 // Mock LayerBlockConverter for testing
 class MockLayerBlockConverter: public LayerBlockConverter {
 public:
-    std::vector<BlockInfo> convertIndexToBufferByTag(int, const std::string&, int, int, int) const override {
+    std::vector<BlockInfo> convertIndexToBuffer(int, const std::string&, int, int, int) const override {
         return {};
     }
 
@@ -85,8 +85,9 @@ protected:
         resource->initGroups(test::makeTestCacheTopology(num_layers, num_layers, layer_to_group_ids));
 
         for (int layer_id = 0; layer_id < num_layers; ++layer_id) {
+            const std::string tag = "group" + std::to_string(layer_id);
             for (int i = 0; i < blocks_per_layer; ++i) {
-                resource->mutableBlockIds(layer_id).add({i});
+                resource->mutableBlockIds(tag).add({i});
             }
         }
 
@@ -206,8 +207,8 @@ TEST_F(P2PConnectorTest, AsyncMatchContext_MatchedBlockCountSupportsHybridGroups
     auto resource         = std::make_shared<KVCacheResource>();
     resource->cacheKeys() = {1000, 1001, 1002};
     resource->initGroups(test::makeTestCacheTopology(/*group_num=*/4, /*layer_num=*/2, {{1}, {3}}));
-    resource->mutableBlockIds(1).assign({10, 11, 12});
-    resource->mutableBlockIds(3).assign({30, 31, 32});
+    resource->mutableBlockIds("group1").assign({10, 11, 12});
+    resource->mutableBlockIds("group3").assign({30, 31, 32});
     ASSERT_GT(resource->groupNums(), 1);
 
     P2PConnectorAsyncMatchContext ctx(resource);

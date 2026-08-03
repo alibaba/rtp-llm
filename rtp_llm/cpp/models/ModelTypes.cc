@@ -1,4 +1,6 @@
 #include "rtp_llm/cpp/models/ModelTypes.h"
+#include <algorithm>
+#include <cstring>
 #include "rtp_llm/models_py/bindings/core/torch_utils/TypeConvert.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 
@@ -8,9 +10,13 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     if (parallelism_config.tp_size <= 1) {
         return;
     }
-    const size_t shape_hints_size = GptModelInputIndex::gptModelInputLength;
-    auto         shape_hints_t    = torch::empty({(int64_t)shape_hints_size}, torch::kInt32).pin_memory();
-    auto         shape_hints_ptr  = shape_hints_t.data_ptr<int32_t>();
+    constexpr size_t kMaxCacheGroups  = 64;
+    constexpr size_t kMaxCacheTagSize = 128;
+    constexpr size_t kTagWords        = kMaxCacheTagSize / sizeof(int32_t);
+    constexpr size_t kGroupHintWords  = 4 + kTagWords;  // tag length, type, physical width, kernel width, tag bytes
+    const size_t     shape_hints_size = GptModelInputIndex::gptModelInputLength + kMaxCacheGroups * kGroupHintWords;
+    auto             shape_hints_t    = torch::empty({(int64_t)shape_hints_size}, torch::kInt32).pin_memory();
+    auto             shape_hints_ptr  = shape_hints_t.data_ptr<int32_t>();
     shape_hints_ptr[GptModelInputIndex::comboTokens] = inputs.combo_tokens.defined() ? inputs.combo_tokens.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::inputLengths] =
         inputs.input_lengths.defined() ? inputs.input_lengths.numel() : 0;
@@ -18,22 +24,39 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.sequence_lengths.defined() ? inputs.sequence_lengths.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::prefixLengths] =
         inputs.prefix_lengths.defined() ? inputs.prefix_lengths.numel() : 0;
-    shape_hints_ptr[GptModelInputIndex::maxKernelBlocksPerBatch] =
-        inputs.kv_cache_kernel_block_id.defined() ? inputs.kv_cache_kernel_block_id.size(2) : 0;
-    shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch] =
-        inputs.kv_cache_block_id.defined() ? inputs.kv_cache_block_id.size(2) : 0;
+    int32_t max_kernel_blocks_hint = 0;
+    int32_t max_blocks_hint        = 0;
+    RTP_LLM_CHECK_WITH_INFO(inputs.block_tables_by_group.size() <= kMaxCacheGroups,
+                            "too many tagged KV cache groups: %zu > %zu",
+                            inputs.block_tables_by_group.size(),
+                            kMaxCacheGroups);
+    size_t group_hint_offset = GptModelInputIndex::gptModelInputLength;
+    for (const auto& [tag, table] : inputs.block_tables_by_group) {
+        RTP_LLM_CHECK_WITH_INFO(table.tag == tag, "block table key/tag mismatch for tag=%s", tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(
+            tag.size() <= kMaxCacheTagSize, "KV cache tag is too long: tag=%s length=%zu", tag.c_str(), tag.size());
+        RTP_LLM_CHECK_WITH_INFO(table.block_ids.dim() == 2 && table.kernel_block_ids.dim() == 2,
+                                "KV cache tables must be two-dimensional for tag=%s",
+                                tag.c_str());
+        shape_hints_ptr[group_hint_offset]     = static_cast<int32_t>(tag.size());
+        shape_hints_ptr[group_hint_offset + 1] = static_cast<int32_t>(table.type);
+        shape_hints_ptr[group_hint_offset + 2] = static_cast<int32_t>(table.block_ids.size(1));
+        shape_hints_ptr[group_hint_offset + 3] = static_cast<int32_t>(table.kernel_block_ids.size(1));
+        std::memset(shape_hints_ptr + group_hint_offset + 4, 0, kMaxCacheTagSize);
+        std::memcpy(shape_hints_ptr + group_hint_offset + 4, tag.data(), tag.size());
+        max_blocks_hint        = std::max(max_blocks_hint, shape_hints_ptr[group_hint_offset + 2]);
+        max_kernel_blocks_hint = std::max(max_kernel_blocks_hint, shape_hints_ptr[group_hint_offset + 3]);
+        group_hint_offset += kGroupHintWords;
+    }
+    shape_hints_ptr[GptModelInputIndex::maxKernelBlocksPerBatch] = max_kernel_blocks_hint;
+    shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch]       = max_blocks_hint;
     shape_hints_ptr[GptModelInputIndex::cacheKeysWidth] =
         inputs.cache_keys.defined() && inputs.cache_keys.dim() >= 2 ? inputs.cache_keys.size(1) : 0;
-    shape_hints_ptr[GptModelInputIndex::kvCacheGroupNum] =
-        inputs.kv_cache_kernel_block_id.defined() ?
-            inputs.kv_cache_kernel_block_id.size(0) :
-            (inputs.kv_cache_block_id.defined() ? inputs.kv_cache_block_id.size(0) : 1);
+    shape_hints_ptr[GptModelInputIndex::kvCacheGroupNum] = inputs.block_tables_by_group.size();
     // Kept as a reserved zero-valued slot for shape-hint wire compatibility.
     shape_hints_ptr[GptModelInputIndex::kvCacheLayerToGroupLen] = 0;
-    shape_hints_ptr[GptModelInputIndex::kvCacheGroupTypesLen] =
-        inputs.kv_cache_group_types.defined() ? inputs.kv_cache_group_types.numel() : 0;
-    shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum] =
-        inputs.kv_cache_update_mapping.defined() ? inputs.kv_cache_update_mapping.size(0) : 0;
+    shape_hints_ptr[GptModelInputIndex::kvCacheGroupTypesLen]   = 0;
+    shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum]   = inputs.kv_cache_update_mapping.size();
     shape_hints_ptr[GptModelInputIndex::lmOutputIndexes] =
         inputs.lm_output_indexes.defined() ? inputs.lm_output_indexes.numel() : 0;
     shape_hints_ptr[GptModelInputIndex::lmOutputLengthes] =
@@ -115,12 +138,31 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     auto   max_blocks              = (size_t)shape_hints_ptr[GptModelInputIndex::maxBlocksPerBatch];
     auto   cache_keys_width        = (size_t)shape_hints_ptr[GptModelInputIndex::cacheKeysWidth];
     auto   kv_cache_group_num      = (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheGroupNum];
-    auto   group_types_len         = (size_t)shape_hints_ptr[GptModelInputIndex::kvCacheGroupTypesLen];
     auto   combo_position_ids_size = shape_hints_ptr[GptModelInputIndex::comboPositionIds];
     auto   text_tokens_mask_size   = shape_hints_ptr[GptModelInputIndex::textTokensMask];
     auto   mm_features_locs_size   = shape_hints_ptr[GptModelInputIndex::mmFeaturesLocs];
     auto   hidden_states_size      = shape_hints_ptr[GptModelInputIndex::mtpHiddenStates];
     size_t request_length          = shape_hints_ptr[GptModelInputIndex::gptModelRequestLength];
+
+    struct GroupDescriptor {
+        std::string    tag;
+        CacheGroupType type;
+        size_t         width;
+        size_t         kernel_width;
+    };
+    std::vector<GroupDescriptor> group_descriptors;
+    group_descriptors.reserve(kv_cache_group_num);
+    group_hint_offset = GptModelInputIndex::gptModelInputLength;
+    for (size_t i = 0; i < kv_cache_group_num; ++i) {
+        const auto tag_size = static_cast<size_t>(shape_hints_ptr[group_hint_offset]);
+        RTP_LLM_CHECK_WITH_INFO(tag_size <= kMaxCacheTagSize, "invalid broadcast KV cache tag length=%zu", tag_size);
+        const char* tag_data = reinterpret_cast<const char*>(shape_hints_ptr + group_hint_offset + 4);
+        group_descriptors.push_back(GroupDescriptor{std::string(tag_data, tag_size),
+                                                    static_cast<CacheGroupType>(shape_hints_ptr[group_hint_offset + 1]),
+                                                    static_cast<size_t>(shape_hints_ptr[group_hint_offset + 2]),
+                                                    static_cast<size_t>(shape_hints_ptr[group_hint_offset + 3])});
+        group_hint_offset += kGroupHintWords;
+    }
 
     auto allocBuf = [&](rtp_llm::DataType       dtype,
                         std::vector<size_t>     dims,
@@ -150,24 +192,38 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         inputs.sequence_lengths =
             allocBuf(rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::sequenceLengths]});
         inputs.prefix_lengths = allocBuf(rtp_llm::DataType::TYPE_INT32, {context_batch_size});
-        if (max_kernel_blocks != 0) {
-            inputs.kv_cache_kernel_block_id = allocBuf(
-                rtp_llm::DataType::TYPE_INT32,
-                {kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_kernel_blocks});
-            inputs.kv_cache_update_mapping = allocBuf(
-                rtp_llm::DataType::TYPE_INT32, {(size_t)shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum], 3});
-        }
-        if (max_blocks != 0) {
-            inputs.kv_cache_block_id =
-                allocBuf(rtp_llm::DataType::TYPE_INT32,
-                         {kv_cache_group_num, (size_t)shape_hints_ptr[GptModelInputIndex::inputLengths], max_blocks});
+        if (max_kernel_blocks != 0 || max_blocks != 0) {
+            const size_t batch_size     = shape_hints_ptr[GptModelInputIndex::inputLengths];
+            size_t       physical_numel = 0;
+            size_t       kernel_numel   = 0;
+            for (const auto& descriptor : group_descriptors) {
+                physical_numel += batch_size * descriptor.width;
+                kernel_numel += batch_size * descriptor.kernel_width;
+            }
+            auto   physical_backing = allocBuf(rtp_llm::DataType::TYPE_INT32, {physical_numel});
+            auto   kernel_backing   = allocBuf(rtp_llm::DataType::TYPE_INT32, {kernel_numel});
+            size_t physical_offset  = 0;
+            size_t kernel_offset    = 0;
+            inputs.block_tables_by_group.clear();
+            for (const auto& descriptor : group_descriptors) {
+                GroupBlockTable table;
+                table.tag       = descriptor.tag;
+                table.type      = descriptor.type;
+                table.block_ids = physical_backing.narrow(0, physical_offset, batch_size * descriptor.width)
+                                      .view({static_cast<int64_t>(batch_size), static_cast<int64_t>(descriptor.width)});
+                table.kernel_block_ids =
+                    kernel_backing.narrow(0, kernel_offset, batch_size * descriptor.kernel_width)
+                        .view({static_cast<int64_t>(batch_size), static_cast<int64_t>(descriptor.kernel_width)});
+                physical_offset += batch_size * descriptor.width;
+                kernel_offset += batch_size * descriptor.kernel_width;
+                const auto [it, inserted] = inputs.block_tables_by_group.emplace(descriptor.tag, std::move(table));
+                (void)it;
+                RTP_LLM_CHECK_WITH_INFO(inserted, "duplicate broadcast KV cache tag=%s", descriptor.tag.c_str());
+            }
             if (inputs.pd_separation) {
                 inputs.cache_keys = allocBuf(rtp_llm::DataType::TYPE_INT64,
                                              {context_batch_size, cache_keys_width ? cache_keys_width : max_blocks});
             }
-        }
-        if (group_types_len) {
-            inputs.kv_cache_group_types = allocBuf(rtp_llm::DataType::TYPE_INT32, {group_types_len});
         }
         inputs.request_id            = allocBuf(rtp_llm::DataType::TYPE_INT64, {request_length});
         inputs.request_pd_separation = allocBuf(rtp_llm::DataType::TYPE_BOOL, {request_length});
@@ -217,6 +273,30 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
         }
     }
 
+    constexpr size_t kUpdateWireRecordSize = kMaxCacheTagSize + 2 * sizeof(int32_t);
+    const size_t     update_count = static_cast<size_t>(shape_hints_ptr[GptModelInputIndex::kvCacheUpdateCopyNum]);
+    torch::Tensor    update_wire;
+    if (update_count > 0) {
+        update_wire = torch::zeros({static_cast<int64_t>(update_count * kUpdateWireRecordSize)},
+                                   torch::TensorOptions(torch::kUInt8))
+                          .pin_memory();
+        if (!is_non_root) {
+            RTP_LLM_CHECK_WITH_INFO(inputs.kv_cache_update_mapping.size() == update_count,
+                                    "KV cache update mapping count changed during TP sync");
+            auto* wire = update_wire.data_ptr<uint8_t>();
+            for (size_t i = 0; i < update_count; ++i) {
+                const auto& mapping = inputs.kv_cache_update_mapping[i];
+                RTP_LLM_CHECK_WITH_INFO(mapping.tag.size() <= kMaxCacheTagSize,
+                                        "KV cache update tag is too long: tag=%s",
+                                        mapping.tag.c_str());
+                auto* record = wire + i * kUpdateWireRecordSize;
+                std::memcpy(record, mapping.tag.data(), mapping.tag.size());
+                std::memcpy(record + kMaxCacheTagSize, &mapping.src, sizeof(mapping.src));
+                std::memcpy(record + kMaxCacheTagSize + sizeof(mapping.src), &mapping.dst, sizeof(mapping.dst));
+            }
+        }
+    }
+
     // Collect all tensors that participate in broadcast.
     // The collect order must be deterministic and identical across all ranks.
     std::vector<torch::Tensor*> tensor_ptrs;
@@ -231,15 +311,17 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
     collect(inputs.sequence_lengths);
     collect(inputs.prefix_lengths);
     if (max_kernel_blocks || max_blocks) {
-        collect(inputs.kv_cache_kernel_block_id);
-        collect(inputs.kv_cache_block_id);
-        if (group_types_len) {
-            collect(inputs.kv_cache_group_types);
+        for (auto& [tag, table] : inputs.block_tables_by_group) {
+            (void)tag;
+            collect(table.kernel_block_ids);
+            collect(table.block_ids);
         }
         if (inputs.pd_separation) {
             collect(inputs.cache_keys);
         }
-        collect(inputs.kv_cache_update_mapping);
+    }
+    if (update_wire.defined()) {
+        collect(update_wire);
     }
     collect(inputs.request_id);
     collect(inputs.request_pd_separation);
@@ -349,6 +431,22 @@ void tpSyncModelInputs(GptModelInputs& inputs, const ParallelismConfig& parallel
                     e.tensor->data_ptr(), {e.nbytes}, torch::TensorOptions(torch::kUInt8).device(e.tensor->device()));
                 dst_bytes.copy_(gpu_packed.narrow(0, e.offset, e.nbytes));
             }
+        }
+    }
+
+    if (is_non_root) {
+        inputs.kv_cache_update_mapping.clear();
+        inputs.kv_cache_update_mapping.reserve(update_count);
+        const auto* wire = update_wire.defined() ? update_wire.data_ptr<uint8_t>() : nullptr;
+        for (size_t i = 0; i < update_count; ++i) {
+            const auto*      record   = wire + i * kUpdateWireRecordSize;
+            const auto*      end      = static_cast<const uint8_t*>(std::memchr(record, '\0', kMaxCacheTagSize));
+            const size_t     tag_size = end ? static_cast<size_t>(end - record) : kMaxCacheTagSize;
+            GroupBlockIdPair mapping;
+            mapping.tag.assign(reinterpret_cast<const char*>(record), tag_size);
+            std::memcpy(&mapping.src, record + kMaxCacheTagSize, sizeof(mapping.src));
+            std::memcpy(&mapping.dst, record + kMaxCacheTagSize + sizeof(mapping.src), sizeof(mapping.dst));
+            inputs.kv_cache_update_mapping.push_back(std::move(mapping));
         }
     }
 }

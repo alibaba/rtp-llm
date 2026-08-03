@@ -78,46 +78,32 @@ private:
     size_t           kernel_blocks_per_kv_block_ = 1;
 };
 
-using GroupBlockIds = std::vector<std::shared_ptr<BlockIds>>;
-// Legacy per-layer view. Valid only when each layer maps to exactly one group.
-using LayerBlockIds     = std::vector<std::shared_ptr<BlockIds>>;
-using LayerAttnBlockIds = std::vector<std::vector<std::shared_ptr<BlockIds>>>;
+struct TaggedBlockIds {
+    std::string               tag;
+    std::shared_ptr<BlockIds> block_ids;
+};
 
 class KVCacheResource {
 public:
     void initGroups(std::shared_ptr<const CacheTopology> topology);
     void resizeBlocks(int reserver_blocks, int value = 0);
 
-    int                     blocksNum(int group_id) const;
     int                     blocksNum(std::string_view tag) const;
-    const BlockIndicesType& blocks(int group_id) const;
     const BlockIndicesType& blocks(std::string_view tag) const;
-    const BlockIndicesType& blocks(int layer_id, int group_id) const;
     const BlockIndicesType& blocksForLayer(int layer_id, std::string_view tag) const;
-    const BlockIndicesType& kernelBlocks(int group_id) const;
     const BlockIndicesType& kernelBlocks(std::string_view tag) const;
-    const BlockIndicesType& kernelBlocks(int layer_id, int group_id) const;
     const BlockIndicesType& kernelBlocksForLayer(int layer_id, std::string_view tag) const;
-    BlockIds&               mutableBlockIds(int group_id) const;
     BlockIds&               mutableBlockIds(std::string_view tag) const;
-    BlockIds&               mutableBlockIds(int layer_id, int group_id) const;
     BlockIds&               mutableBlockIdsForLayer(int layer_id, std::string_view tag) const;
 
-    const BlockIds& blockIds(std::string_view tag) const;
-    const BlockIds& blockIdsForLayer(int layer_id, std::string_view tag) const;
-
+    const BlockIds&                 blockIds(std::string_view tag) const;
+    const BlockIds&                 blockIdsForLayer(int layer_id, std::string_view tag) const;
     const std::vector<std::string>& groupTagsForLayer(int layer_id) const;
-    const std::string&              soleGroupTagForLayer(int layer_id) const;
 
     int layerNum() const;
     int groupNums() const;
 
-    GroupBlockIds&       groupBlocks();
-    const GroupBlockIds& groupBlocks() const;
-
-    LayerBlockIds            layerBlocks() const;
-    const LayerAttnBlockIds& layerGroupBlocks() const;
-    int                      groupId(int layer_id, int group_id) const;
+    const std::vector<TaggedBlockIds>& groupBlocks() const;
 
     CacheKeysType&       cacheKeys();
     const CacheKeysType& cacheKeys() const;
@@ -165,24 +151,20 @@ public:
     size_t remoteReuseBlocksNum() const;
     void   setRemoteReuseBlocksNum(size_t remote_reuse_blocks_num);
 
-    void swapBlocks(size_t group_id, size_t rhs, size_t lhs);
+    void swapBlocks(std::string_view tag, size_t rhs, size_t lhs);
 
     std::string debugString() const;
 
 private:
-    int  groupIdForTag(std::string_view tag) const;
-    int  groupIdForLayerTag(int layer_id, std::string_view tag) const;
-    bool hasOneGroupPerLayer() const;
+    size_t groupOffset(std::string_view tag) const;
+    bool   layerContainsTag(int layer_id, std::string_view tag) const;
 
-    std::unordered_map<std::string, int>  tag_to_group_id_;
-    std::vector<std::vector<std::string>> layer_group_tags_;
-    // layer_id -> group_id -> block_indices
-    LayerAttnBlockIds layer_group_block_ids;
-    // group_id -> block_indices
-    GroupBlockIds         group_block_ids;
-    CacheKeysType         cache_keys;
-    BlockDependenciesType block_dependencies;
-    bool                  cache_keys_are_cp_canonical_{false};
+    std::shared_ptr<const CacheTopology>    topology_;
+    std::vector<TaggedBlockIds>             group_block_ids_;
+    std::unordered_map<std::string, size_t> group_offset_by_tag_;
+    CacheKeysType                           cache_keys;
+    BlockDependenciesType                   block_dependencies;
+    bool                                    cache_keys_are_cp_canonical_{false};
 
     size_t device_reuse_block_num_{0};
     size_t memory_reuse_block_num_{0};

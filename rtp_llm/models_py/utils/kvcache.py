@@ -43,10 +43,6 @@ class SingleGroupKVCacheAdapter:
         self._tag = str(tag)
 
     @property
-    def group_tags(self) -> list[str]:
-        return [self._tag]
-
-    @property
     def layer_count(self) -> int:
         return len(self._layer_tensors)
 
@@ -58,20 +54,19 @@ class SingleGroupKVCacheAdapter:
         if tag != self._tag:
             raise RuntimeError(f"KV cache tag {tag!r} is not available")
 
-    def get_layer_cache(self, layer_id: int, tag: str | None = None) -> LayerKVCache:
+    def get_layer_cache(self, layer_id: int, tag: str) -> LayerKVCache:
         self._validate_layer(layer_id)
-        self._validate_tag(self._tag if tag is None else str(tag))
+        self._validate_tag(str(tag))
         return LayerKVCache(
             self._layer_tensors[layer_id],
             self._seq_size_per_block,
             layer_id=layer_id,
-            group_id=0,
             tag=self._tag,
             kv_scale_base=self._layer_scale_tensors[layer_id],
         )
 
     def get_layer_cache_groups(self, layer_id: int) -> list[LayerKVCache]:
-        return [self.get_layer_cache(layer_id)]
+        return [self.get_layer_cache(layer_id, self._tag)]
 
     def get_seq_size_per_block(self, tag: str) -> int:
         self._validate_tag(str(tag))

@@ -2,7 +2,9 @@
 #include "rtp_llm/models_py/bindings/OpDefs.h"
 #include <cstddef>
 #include <cstdint>
+#include <map>
 #include <vector>
+#include "rtp_llm/cpp/cache/CacheGroupType.h"
 
 namespace rtp_llm {
 
@@ -32,10 +34,8 @@ struct GraphParams {
     c10::ScalarType  model_data_type        = c10::ScalarType::Float;
     std::vector<int> prefill_capture_seq_lens;
     std::vector<int> decode_capture_batch_sizes;
-    // Golden cache-group identity for CUDA graph capture/replay. A one-group
-    // topology keeps the direct AttentionInputs fast path; multiple groups
-    // require an exact tag -> AttentionInputs mapping at replay time.
-    std::vector<std::string> kv_cache_group_tags;
+    // Golden cache-group identity and metadata for CUDA graph capture/replay.
+    std::map<std::string, CacheGroupType> kv_cache_groups;
     // Per-token position-id factor for combo_position_ids capture buffer.
     // 0 = model does not use combo_position_ids (no buffer allocated, capture skips it).
     // >0 = factor (e.g. Mrope = rope_config.index_factor). Sourced from

@@ -105,13 +105,25 @@ cc_library(
 )
 
 cc_library(
+    name = "cache_types_hdr",
+    hdrs = ["Types.h"],
+    copts = copts(),
+    visibility = ["//visibility:public"],
+    deps = [
+        ":batch_kv_cache_resource",
+        ":block_info",
+        ":cache_group_type",
+        "//rtp_llm/models_py/bindings/core:types_hdr",
+    ],
+)
+
+cc_library(
     name = "cache_types",
     srcs = [
         "Types.cc",
     ],
     hdrs = [
         "CacheConfig.h",
-        "Types.h",
         "WarmUpResult.h",
     ],
     copts = copts(),
@@ -122,6 +134,7 @@ cc_library(
         ":cache_config",
         ":cache_group_type",
         ":cache_layout",
+        ":cache_types_hdr",
         ":kv_cache_specs",
         "//:rtp_compute_ops",
         "//rtp_llm/cpp/config:config_modules",
@@ -135,13 +148,11 @@ cc_library(
 cc_library(
     name = "block_pool",
     srcs = [
-        "BlockCache.cc",
         "BlockPool.cc",
         "MemoryLayoutStrategy.cc",
         "SharedBlockCache.cc",
     ],
     hdrs = [
-        "BlockCache.h",
         "BlockPool.h",
         "BlockPoolConfig.h",
         "BlockPoolConfigHelper.h",

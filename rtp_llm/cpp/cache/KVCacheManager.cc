@@ -99,7 +99,13 @@ void reportPoolCacheMetrics(const kmonitor::MetricsReporterPtr& metrics_reporter
 
 std::shared_ptr<const CacheTopology> projectTopology(const CacheTopology&       source,
                                                      const std::vector<size_t>& global_layer_ids) {
-    std::vector<GroupBase> groups = source.groups();
+    std::vector<GroupBase> groups;
+    groups.reserve(source.groups().size());
+    std::unordered_map<std::string, GroupBase*> groups_by_tag;
+    for (const auto& source_group : source.groups()) {
+        groups.push_back(source_group);
+        groups_by_tag.emplace(groups.back().tag, &groups.back());
+    }
     for (auto& group : groups) {
         group.layer_ids.clear();
     }
@@ -112,7 +118,7 @@ std::shared_ptr<const CacheTopology> projectTopology(const CacheTopology&       
         layer.layer_id   = static_cast<int>(local_layer_id);
         layer.group_tags = source_layer.group_tags;
         for (const auto& tag : layer.group_tags) {
-            groups[source.groupIdForTag(tag)].layer_ids.push_back(static_cast<int>(local_layer_id));
+            groups_by_tag.at(tag)->layer_ids.push_back(static_cast<int>(local_layer_id));
         }
         layers.push_back(std::move(layer));
     }
@@ -241,8 +247,7 @@ bool KVCacheManager::init() {
     allocator_->setCPSlotMapper(cp_slot_mapper_);
     allocator_->setSharedBlockCache(shared_cache);
     RTP_LLM_CHECK_WITH_INFO(allocator_->init(), "KVCacheAllocator init failed");
-    shared_cache->setIndependentGroupEviction(enable_independent_group_eviction,
-                                              allocator_->independentEvictionGroupIds());
+    shared_cache->setIndependentGroupEviction(enable_independent_group_eviction, allocator_->independentEvictionTags());
 
     if (metrics_reporter_) {
         stop_.store(false, std::memory_order_relaxed);
@@ -320,74 +325,32 @@ int KVCacheManager::estimatePeakNeedBlocks(const BatchKVCacheResourcePtr& batch_
 
 // 块操作相关
 
-void KVCacheManager::blockCopy(int src_block_index, int dest_block_index) {
-    return allocator_->blockCopy(src_block_index, dest_block_index);
-}
-
-void KVCacheManager::blockBatchCopy(const std::vector<BlockIdPair>& copy_mapping) {
+void KVCacheManager::blockBatchCopy(const std::vector<GroupBlockIdPair>& copy_mapping) {
     return allocator_->blockBatchCopy(copy_mapping);
 }
 
-void KVCacheManager::blockBatchCopy(const torch::Tensor& copy_mapping) {
-    return allocator_->blockBatchCopy(copy_mapping);
-}
-
-void KVCacheManager::blockBatchCopy(const BlockIdPair* copy_mapping_begin, const BlockIdPair* copy_mapping_end) {
-    return allocator_->blockBatchCopy(copy_mapping_begin, copy_mapping_end);
-}
-
-void KVCacheManager::blockBatchCopyByTag(const std::vector<TaggedBlockIdPair>& copy_mapping) {
-    return allocator_->blockBatchCopyByTag(copy_mapping);
-}
-
-bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
-                                   const std::vector<int>&         block_src_batch,
-                                   bool                            copy_last_block,
-                                   std::vector<TaggedBlockIdPair>& block_update_mapping) {
+bool KVCacheManager::updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                                   const std::vector<int>&        block_src_batch,
+                                   bool                           copy_last_block,
+                                   std::vector<GroupBlockIdPair>& block_update_mapping) {
     RTP_LLM_PROFILE_FUNCTION();
     return allocator_->updateKVBlock(batch_kv_cache_resource, block_src_batch, copy_last_block, block_update_mapping);
 }
 
 // 地址转换和缓冲区访问
 
-BlockAddrInfo KVCacheManager::convertIndexToAddr(int block_index, int layer_id) const {
-    return allocator_->convertIndexToAddr(layer_id, block_index);
-}
-
-std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(int block_index, int layer_id) const {
-    return allocator_->convertIndexToBuffer(layer_id, block_index);
+BlockAddrInfo KVCacheManager::convertIndexToAddr(int block_index, int layer_id, const std::string& tag) const {
+    return allocator_->convertIndexToAddr(layer_id, tag, block_index);
 }
 
 std::vector<BlockInfo>
-KVCacheManager::convertIndexToBuffer(int block_index, int layer_id, int partition_count, int partition_id) const {
-    return allocator_->convertIndexToBuffer(layer_id, block_index, partition_count, partition_id);
-}
-
-BlockAddrInfo KVCacheManager::convertIndexToAddr(int block_index, int layer_id, int group_id) const {
-    return allocator_->convertIndexToAddr(layer_id, group_id, block_index);
-}
-
-std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(int block_index, int layer_id, int group_id) const {
-    return allocator_->convertIndexToBuffer(layer_id, group_id, block_index);
+KVCacheManager::convertIndexToBuffer(int block_index, int layer_id, const std::string& tag) const {
+    return allocator_->convertIndexToBuffer(layer_id, tag, block_index);
 }
 
 std::vector<BlockInfo> KVCacheManager::convertIndexToBuffer(
-    int block_index, int layer_id, int group_id, int partition_count, int partition_id) const {
-    return allocator_->convertIndexToBuffer(layer_id, group_id, block_index, partition_count, partition_id);
-}
-
-BlockAddrInfo KVCacheManager::convertIndexToAddrByTag(int block_index, int layer_id, const std::string& tag) const {
-    return allocator_->convertIndexToAddrByTag(layer_id, tag, block_index);
-}
-
-std::vector<BlockInfo>
-KVCacheManager::convertIndexToBufferByTag(int block_index, int layer_id, const std::string& tag) const {
-    return allocator_->convertIndexToBufferByTag(layer_id, tag, block_index);
-}
-
-std::vector<BlockInfo> KVCacheManager::convertIndexToBufferByTag(
     int block_index, int layer_id, const std::string& tag, int partition_count, int partition_id) const {
-    return allocator_->convertIndexToBufferByTag(layer_id, tag, block_index, partition_count, partition_id);
+    return allocator_->convertIndexToBuffer(layer_id, tag, block_index, partition_count, partition_id);
 }
 
 GroupedCacheLayerLayout KVCacheManager::allLayerCacheBase() const {
@@ -400,10 +363,6 @@ GroupedCacheLayerLayout KVCacheManager::getMainModelGroupedCacheLayerLayout() co
     std::iota(global_layer_ids.begin(), global_layer_ids.end(), 0);
     auto main_topology = projectTopology(all_layout.topology(), global_layer_ids);
     return projectLayout(all_layout, std::move(main_topology), global_layer_ids);
-}
-
-GroupedCacheLayerLayout KVCacheManager::getMainModelCacheLayerLayout() const {
-    return getMainModelGroupedCacheLayerLayout();
 }
 
 GroupedCacheLayerLayout KVCacheManager::getMTPModuleGroupedCacheLayerLayout(int mtp_module_id) const {
@@ -429,10 +388,6 @@ GroupedCacheLayerLayout KVCacheManager::getMTPModuleGroupedCacheLayerLayout(int 
         global_layer_ids.push_back(global_layer_id);
     }
     return projectLayout(allocator_->allLayerCacheBase(), mtp_sub_config->topologyPtr(), global_layer_ids);
-}
-
-GroupedCacheLayerLayout KVCacheManager::getMTPModuleCacheLayerLayout(int mtp_module_id) const {
-    return getMTPModuleGroupedCacheLayerLayout(mtp_module_id);
 }
 
 // 资源统计和信息查询
@@ -645,14 +600,15 @@ void KVCacheManager::handleRead(const P2PConnectorStartLoadRequestPB& request,
 // Write one KV block (optionally per-layer) from host/device tensors for test
 bool KVCacheManager::writeKVBlockForTest(int                  block_index,
                                          int                  layer_id,
+                                         const std::string&   tag,
                                          const torch::Tensor& k_buffer,
                                          const torch::Tensor& v_buffer) {
     // Basic size/type validation to prevent out-of-bounds copy
-    auto&  spec             = config_.specForGroup(0);
-    size_t expected_k_bytes = spec->k_block_size_bytes();
-    size_t expected_v_bytes = spec->v_block_size_bytes();
-    size_t src_k_bytes      = k_buffer.nbytes();
-    size_t src_v_bytes      = v_buffer.nbytes();
+    const auto& spec             = config_.specForGroup(tag);
+    size_t      expected_k_bytes = spec->k_block_size_bytes();
+    size_t      expected_v_bytes = spec->v_block_size_bytes();
+    size_t      src_k_bytes      = k_buffer.nbytes();
+    size_t      src_v_bytes      = v_buffer.nbytes();
     if (src_k_bytes < expected_k_bytes || src_v_bytes < expected_v_bytes) {
         RTP_LLM_LOG_ERROR("writeKVBlockForTest src bytes too small: k[%zu]<[%zu] or v[%zu]<[%zu]",
                           src_k_bytes,
@@ -662,7 +618,7 @@ bool KVCacheManager::writeKVBlockForTest(int                  block_index,
         return false;
     }
 
-    auto dst = allocator_->convertIndexToBuffer(layer_id, block_index);
+    auto dst = allocator_->convertIndexToBuffer(layer_id, tag, block_index);
     RTP_LLM_CHECK_WITH_INFO(
         !dst.empty(), "convertIndexToBuffer returned empty for layer %d, block %d", layer_id, block_index);
     if (!dst[0].addr) {
@@ -710,6 +666,7 @@ bool KVCacheManager::writeKVBlockForTest(int                  block_index,
 }
 
 bool KVCacheManager::writeKVBlockForTest(int                  block_index,
+                                         const std::string&   tag,
                                          const torch::Tensor& k_buffer,
                                          const torch::Tensor& v_buffer) {
     if (block_index < 0 || block_index >= config_.block_num) {
@@ -718,8 +675,8 @@ bool KVCacheManager::writeKVBlockForTest(int                  block_index,
     }
 
     bool all_success = true;
-    for (int layer_id = 0; layer_id < config_.layer_num; ++layer_id) {
-        all_success = writeKVBlockForTest(block_index, layer_id, k_buffer, v_buffer) && all_success;
+    for (int layer_id : config_.layerIdsForGroup(tag)) {
+        all_success = writeKVBlockForTest(block_index, layer_id, tag, k_buffer, v_buffer) && all_success;
     }
     return all_success;
 }

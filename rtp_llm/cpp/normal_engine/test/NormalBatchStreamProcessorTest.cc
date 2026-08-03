@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/testing/TestBase.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/cache/MHAKVCacheSpec.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 
 using namespace std;
 
@@ -33,7 +34,23 @@ static void initFullCacheConfig(CacheConfig& cache_config, int layer_num) {
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
     cache_config.layer_num     = static_cast<uint32_t>(layer_num);
     cache_config.layer_all_num = static_cast<uint32_t>(layer_num);
-    cache_config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+    test::setTestTopology(
+        cache_config,
+        {test::makeTestGroupForConfig(cache_config, spec, std::move(layer_ids), CacheGroupType::FULL, "default")});
+}
+
+static void initFullCacheConfig(CacheConfig& cache_config, int layer_num, const std::vector<std::string>& tags) {
+    std::vector<GroupBase> groups;
+    std::vector<int>       layer_ids(static_cast<size_t>(layer_num));
+    std::iota(layer_ids.begin(), layer_ids.end(), 0);
+    for (const auto& tag : tags) {
+        auto spec = std::make_shared<MHAKVCacheSpec>();
+        spec->tag = tag;
+        groups.push_back(test::makeTestGroupForConfig(cache_config, spec, layer_ids, CacheGroupType::FULL, tag));
+    }
+    cache_config.layer_num     = static_cast<uint32_t>(layer_num);
+    cache_config.layer_all_num = static_cast<uint32_t>(layer_num);
+    test::setTestTopology(cache_config, std::move(groups));
 }
 
 class NormalBatchStreamProcessorTest: public DeviceTestBase {};
@@ -61,14 +78,51 @@ TEST_F(NormalBatchStreamProcessorTest, testWarmUpWithoutCacheManager) {
     NormalBatchStreamProcessor processor(
         model_config, pd_sep_config, profiling_debug_logging_config, cache_config, true);
 
-    EXPECT_EQ(processor.model_input_gatherer_config_.kv_cache_group_nums, 0);
-    EXPECT_TRUE(processor.model_input_gatherer_config_.kv_cache_group_types.empty());
+    EXPECT_TRUE(processor.model_input_gatherer_config_.kv_cache_groups.empty());
     ASSERT_EQ(stream->kvCache().groupNums(), 1);
-    EXPECT_EQ(stream->kvCache().cacheResource().soleGroupTagForLayer(0), "__warmup__");
+    EXPECT_EQ(stream->kvCache().cacheResource().groupTagsForLayer(0), std::vector<std::string>{"__warmup__"});
     auto model_input = processor.gatherModelInput(stream_groups);
     ASSERT_TRUE(model_input.ok());
-    EXPECT_FALSE(model_input->kv_cache_block_id.defined());
-    EXPECT_FALSE(model_input->kv_cache_kernel_block_id.defined());
+    EXPECT_TRUE(model_input->block_tables_by_group.empty());
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testWarmUpUsesConfiguredTagsWithSyntheticResource) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len      = 2048;
+    model_config.vocab_size       = 2048;
+    model_config.input_vocab_size = 2048;
+    model_config.num_layers       = 1;
+
+    CacheConfig cache_config;
+    initFullCacheConfig(cache_config, model_config.num_layers, {"full", "linear"});
+    RuntimeConfig runtime_config;
+
+    auto query             = make_shared<GenerateInput>();
+    query->input_ids       = hostIntBuffer({1, 2, 3});
+    query->generate_config = make_shared<GenerateConfig>();
+    GenerateStreamPtr stream =
+        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    stream->streamCacheResource().fakeInitKVBlock(1);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    StreamGroups                stream_groups({stream});
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    NormalBatchStreamProcessor  processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, true);
+
+    auto model_input_status = processor.gatherModelInput(stream_groups);
+    ASSERT_TRUE(model_input_status.ok());
+    const auto& tables = model_input_status->block_tables_by_group;
+    ASSERT_EQ(tables.size(), 2u);
+    for (const auto& [tag, table] : tables) {
+        EXPECT_TRUE(tag == "full" || tag == "linear");
+        EXPECT_EQ(table.block_ids.size(0), 1);
+        EXPECT_EQ(table.block_ids.size(1), 1);
+        EXPECT_EQ(toVec<int32_t>(table.block_ids), (std::vector<int32_t>{0}));
+        EXPECT_EQ(toVec<int32_t>(table.kernel_block_ids), (std::vector<int32_t>{0}));
+    }
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable) {
@@ -95,8 +149,8 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
     BatchKVCacheResource resource;
     resource.resetBatchSize(2);
     resource.initGroups(cache_config.topologyPtr());
-    resource.setBatchBlocks(0, 0, {1, 2});
-    resource.setBatchBlocks(1, 0, {3, 4});
+    resource.setBatchBlocks(0, "default", {1, 2});
+    resource.setBatchBlocks(1, "default", {3, 4});
     resource.setBatchCacheKeys(0, CacheKeysType{101, 102, 103});
     resource.setBatchCacheKeys(1, CacheKeysType{201, 202, 203, 204, 205});
     stream->setKVCache(resource);
@@ -116,6 +170,53 @@ TEST_F(NormalBatchStreamProcessorTest, testCacheKeyWidthIndependentOfBlockTable)
     EXPECT_EQ(cache_keys.size(0), 2);
     EXPECT_EQ(cache_keys.size(1), 5);
     EXPECT_EQ(toVec<int64_t>(cache_keys), (std::vector<int64_t>{101, 102, 103, 0, 0, 201, 202, 203, 204, 205}));
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testResourceMayContainConfiguredTagSubset) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len      = 2048;
+    model_config.vocab_size       = 2048;
+    model_config.input_vocab_size = 2048;
+    model_config.num_layers       = 1;
+
+    CacheConfig model_cache_config;
+    initFullCacheConfig(model_cache_config, model_config.num_layers, {"full", "linear"});
+    CacheConfig resource_cache_config;
+    initFullCacheConfig(resource_cache_config, model_config.num_layers, {"linear"});
+
+    auto query             = make_shared<GenerateInput>();
+    query->input_ids       = hostIntBuffer({1, 2, 3});
+    query->generate_config = make_shared<GenerateConfig>();
+    RuntimeConfig     runtime_config;
+    GenerateStreamPtr stream =
+        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+
+    BatchKVCacheResource resource;
+    resource.resetBatchSize(1);
+    resource.initGroups(resource_cache_config.topologyPtr());
+    resource.setBatchBlocks(0, "linear", {7, 8});
+    stream->setKVCache(resource);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    StreamGroups                stream_groups({stream});
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    NormalBatchStreamProcessor  processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, model_cache_config, false);
+
+    auto model_input_status = processor.gatherModelInput(stream_groups);
+    ASSERT_TRUE(model_input_status.ok());
+    const auto& tables = model_input_status->block_tables_by_group;
+    ASSERT_EQ(tables.size(), 2u);
+    EXPECT_EQ(tables.at("full").block_ids.size(0), 1);
+    EXPECT_EQ(tables.at("full").block_ids.size(1), 0);
+    EXPECT_EQ(tables.at("full").kernel_block_ids.size(0), 1);
+    EXPECT_EQ(tables.at("full").kernel_block_ids.size(1), 0);
+    EXPECT_EQ(tables.at("linear").block_ids.size(0), 1);
+    EXPECT_EQ(tables.at("linear").block_ids.size(1), 2);
+    EXPECT_EQ(toVec<int32_t>(tables.at("linear").block_ids), (std::vector<int32_t>{7, 8}));
+    EXPECT_EQ(toVec<int32_t>(tables.at("linear").kernel_block_ids), (std::vector<int32_t>{7, 8}));
 }
 
 TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
@@ -145,7 +246,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     BatchKVCacheResource addr1;
     addr1.resetBatchSize(1);
     addr1.initGroups(cache_config.topologyPtr());
-    addr1.setBatchBlocks(0, 0, {1, 2, 3, 4});
+    addr1.setBatchBlocks(0, "default", {1, 2, 3, 4});
     stream1->setKVCache(addr1);
     stream1->setIsContextStream(false);
 
@@ -158,7 +259,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     BatchKVCacheResource addr2;
     addr2.resetBatchSize(1);
     addr2.initGroups(cache_config.topologyPtr());
-    addr2.setBatchBlocks(0, 0, {5, 6, 7, 8});
+    addr2.setBatchBlocks(0, "default", {5, 6, 7, 8});
     stream2->setKVCache(addr2);
     stream2->setIsContextStream(false);
 
@@ -170,7 +271,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     BatchKVCacheResource addr3;
     addr3.resetBatchSize(1);
     addr3.initGroups(cache_config.topologyPtr());
-    addr3.setBatchBlocks(0, 0, {9, 10});
+    addr3.setBatchBlocks(0, "default", {9, 10});
     stream3->setKVCache(addr3);
 
     std::shared_ptr<GenerateInput> query4 = make_shared<GenerateInput>();
@@ -181,7 +282,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     BatchKVCacheResource addr4;
     addr4.resetBatchSize(1);
     addr4.initGroups(cache_config.topologyPtr());
-    addr4.setBatchBlocks(0, 0, {11, 12, 13, 14});
+    addr4.setBatchBlocks(0, "default", {11, 12, 13, 14});
     stream4->setKVCache(addr4);
     stream4->setReuseLength(1);
 
@@ -211,7 +312,10 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         EXPECT_EQ(input_lengths, toVec<int>(model_input.input_lengths));
         EXPECT_EQ(sequence_lengths, toVec<int>(model_input.sequence_lengths));
         EXPECT_EQ(prefix_lengths, toVec<int>(model_input.prefix_lengths));
-        EXPECT_EQ(kv_cache_block_id, toVec<int>(model_input.kv_cache_block_id));
+        const auto& default_table = model_input.block_tables_by_group.at("default");
+        EXPECT_EQ(kv_cache_block_id, toVec<int>(default_table.block_ids));
+        EXPECT_EQ(default_table.tag, "default");
+        EXPECT_EQ(default_table.type, CacheGroupType::FULL);
         EXPECT_EQ(model_input.kv_block_stride_bytes, cache_config.kv_block_stride_bytes);
         EXPECT_EQ(model_input.kv_scale_stride_bytes, cache_config.kv_scale_stride_bytes);
     }
@@ -250,7 +354,7 @@ TEST_F(NormalBatchStreamProcessorTest, testSoftmaxProbs) {
     BatchKVCacheResource addr1;
     addr1.resetBatchSize(1);
     addr1.initGroups(cache_config.topologyPtr());
-    addr1.setBatchBlocks(0, 0, {1});
+    addr1.setBatchBlocks(0, "default", {1});
     stream1->setKVCache(addr1);
 
     std::list<GenerateStreamPtr> streams;
@@ -303,7 +407,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     BatchKVCacheResource addr1;
     addr1.resetBatchSize(1);
     addr1.initGroups(cache_config.topologyPtr());
-    addr1.setBatchBlocks(0, 0, {1});
+    addr1.setBatchBlocks(0, "default", {1});
     stream1->setKVCache(addr1);
 
     std::shared_ptr<GenerateInput> query3   = make_shared<GenerateInput>();
@@ -315,7 +419,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     BatchKVCacheResource addr3;
     addr3.resetBatchSize(1);
     addr3.initGroups(cache_config.topologyPtr());
-    addr3.setBatchBlocks(0, 0, {9});
+    addr3.setBatchBlocks(0, "default", {9});
     stream3->setKVCache(addr3);
 
     std::shared_ptr<GenerateInput> query4   = make_shared<GenerateInput>();
@@ -327,7 +431,7 @@ TEST_F(NormalBatchStreamProcessorTest, testLoss) {
     BatchKVCacheResource addr4;
     addr4.resetBatchSize(1);
     addr4.initGroups(cache_config.topologyPtr());
-    addr4.setBatchBlocks(0, 0, {11, 12});
+    addr4.setBatchBlocks(0, "default", {11, 12});
     stream4->setKVCache(addr4);
 
     std::list<GenerateStreamPtr> streams;

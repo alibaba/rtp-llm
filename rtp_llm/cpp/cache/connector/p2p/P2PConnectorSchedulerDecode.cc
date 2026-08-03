@@ -45,6 +45,11 @@ P2PConnectorSchedulerDecode::AsyncReadResult P2PConnectorSchedulerDecode::asyncR
         RTP_LLM_LOG_WARNING("asyncRead: meta or resource is null");
         return {nullptr, ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_CALL_WORKER_FAILED, "meta or resource is null")};
     }
+    if (resource->groupNums() == 0) {
+        RTP_LLM_LOG_WARNING("asyncRead: resource has no cache groups");
+        return {nullptr,
+                ErrorInfo(ErrorCode::P2P_CONNECTOR_SCHEDULER_STREAM_RESOURCE_FAILED, "resource has no cache groups")};
+    }
 
     // Extract routing from Meta::p2pRouting()
     auto routing = meta->p2pRouting();

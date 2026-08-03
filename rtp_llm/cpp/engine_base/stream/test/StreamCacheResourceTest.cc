@@ -99,7 +99,7 @@ protected:
     void checkBlockFunc(BatchKVCacheResource& batch_resource, int outter_size, int inner_size) {
         ASSERT_EQ(batch_resource.batchSize(), outter_size);
         for (int i = 0; i < outter_size; ++i) {
-            ASSERT_EQ(batch_resource.blocks(i, 0).size(), inner_size);
+            ASSERT_EQ(batch_resource.blocks(i, "default").size(), inner_size);
         }
     };
 
@@ -129,7 +129,7 @@ TEST_F(StreamCacheResourceTest, testWarmUpFakeInitUsesTaggedTopology) {
 
     auto& resource = stream_->streamCacheResource();
     ASSERT_EQ(resource.kvCache().groupNums(), 1);
-    EXPECT_EQ(resource.kvCache().cacheResource().soleGroupTagForLayer(0), "__warmup__");
+    EXPECT_EQ(resource.kvCache().cacheResource().groupTagsForLayer(0), std::vector<std::string>{"__warmup__"});
     EXPECT_EQ(resource.curBlocksNum(), 0);
 
     stream_->fakeInitKVBlock(2);
@@ -391,7 +391,7 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
             EXPECT_FALSE(info.enable_device_cache);
             // Simulate a successful allocation so subsequent calls go through incrMalloc path.
             for (int b = 0; b < info.batch_kv_cache_resource->batchSize(); ++b) {
-                auto& block_ids = info.batch_kv_cache_resource->mutableBlockIds(b, /*group_id=*/0);
+                auto& block_ids = info.batch_kv_cache_resource->mutableBlockIds(b, "linear");
                 block_ids.assign(BlockIndicesType{/*block=*/1});
             }
             return {true, 0};

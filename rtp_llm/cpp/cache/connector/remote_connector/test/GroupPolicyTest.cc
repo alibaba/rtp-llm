@@ -2,11 +2,14 @@
 #include <gtest/gtest.h>
 
 #include <algorithm>
+#include <initializer_list>
+#include <string_view>
 
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/cache/KVCacheAllocator.h"
 #include "rtp_llm/cpp/cache/KVCacheSpecDesc.h"
 #include "rtp_llm/cpp/cache/connector/remote_connector/GroupPolicy.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 
 using namespace rtp_llm;
 using namespace rtp_llm::remote_connector;
@@ -22,7 +25,7 @@ bool operator==(const GroupPolicy::Group& lhs, const GroupPolicy::Group& rhs) {
 }
 
 bool operator==(const GroupPolicy::SpecInfo& lhs, const GroupPolicy::SpecInfo& rhs) {
-    return lhs.group_id == rhs.group_id && lhs.tp_rank == rhs.tp_rank && lhs.tag == rhs.tag;
+    return lhs.tp_rank == rhs.tp_rank && lhs.tag == rhs.tag;
 }
 
 namespace test {
@@ -52,39 +55,33 @@ KVCacheSpecPtr makeFakeSpec(const std::string& tag) {
 
 class FakeKVCacheAllocator: public KVCacheAllocator {
 public:
-    FakeKVCacheAllocator(const CacheConfig&          config,
-                         const std::vector<int32_t>& full_group_ids,
-                         const std::vector<int32_t>& other_group_ids,
-                         size_t                      per_group_layer_num):
+    FakeKVCacheAllocator(const CacheConfig&              config,
+                         const std::vector<std::string>& full_group_tags,
+                         const std::vector<std::string>& other_group_tags,
+                         size_t                          per_group_layer_num):
         KVCacheAllocator(config) {
-        std::vector<int> layer_group_ids;
-        for (int32_t full_group_id : full_group_ids) {
-            for (int i = 0; i < per_group_layer_num; i++) {
-                layer_group_ids.push_back(full_group_id);
-            }
-        }
-        for (int32_t other_group_id : other_group_ids) {
-            for (int i = 0; i < per_group_layer_num; i++) {
-                layer_group_ids.push_back(other_group_id);
-            }
-        }
-        if (!layer_group_ids.empty()) {
-            const auto  max_gid = *std::max_element(layer_group_ids.begin(), layer_group_ids.end());
+        const auto group_count = full_group_tags.size() + other_group_tags.size();
+        if (group_count > 0) {
             CacheConfig fake_config;
-            fake_config.layer_num     = static_cast<uint32_t>(layer_group_ids.size());
+            fake_config.layer_num     = static_cast<uint32_t>(group_count * per_group_layer_num);
             fake_config.layer_all_num = fake_config.layer_num;
-            std::vector<KVCacheSpecPtr>   specs;
-            std::vector<std::vector<int>> layers_by_group(static_cast<size_t>(max_gid + 1));
-            std::vector<CacheGroupType>   types(static_cast<size_t>(max_gid + 1), CacheGroupType::FULL);
-            std::vector<std::string>      tags;
-            for (int gid = 0; gid <= max_gid; ++gid) {
-                tags.push_back(std::to_string(gid));
-                specs.push_back(makeFakeSpec(tags.back()));
+            std::vector<GroupBase> groups;
+            int                    next_layer_id = 0;
+            const auto             append_group  = [&](const std::string& tag) {
+                std::vector<int> layer_ids;
+                for (size_t i = 0; i < per_group_layer_num; ++i) {
+                    layer_ids.push_back(next_layer_id++);
+                }
+                groups.push_back(rtp_llm::test::makeTestGroupForConfig(
+                    fake_config, makeFakeSpec(tag), std::move(layer_ids), CacheGroupType::FULL, tag));
+            };
+            for (const auto& tag : full_group_tags) {
+                append_group(tag);
             }
-            for (size_t layer_id = 0; layer_id < layer_group_ids.size(); ++layer_id) {
-                layers_by_group[static_cast<size_t>(layer_group_ids[layer_id])].push_back(static_cast<int>(layer_id));
+            for (const auto& tag : other_group_tags) {
+                append_group(tag);
             }
-            fake_config.fromGroupedSpecs(specs, layers_by_group, types, tags);
+            rtp_llm::test::setTestTopology(fake_config, std::move(groups));
             topology_ = fake_config.topologyPtr();
         }
     }
@@ -94,21 +91,25 @@ public:
     void insertIntoCache(const InsertInfo& insert_info) override {
         return;
     }
-    BlockAddrInfo convertIndexToAddr(int layer_id, int block_id) const override {
+    BlockAddrInfo convertIndexToAddr(int layer_id, const std::string& tag, int block_id) const override {
         return {};
     }
-    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, int block_id) const override {
+    std::vector<BlockInfo> convertIndexToBuffer(int layer_id, const std::string& tag, int block_id) const override {
         return {};
     }
-    std::vector<BlockInfo>
-    convertIndexToBuffer(int layer_id, int block_id, int partition_count, int partition_id) const override {
+    std::vector<BlockInfo> convertIndexToBuffer(
+        int layer_id, const std::string& tag, int block_id, int partition_count, int partition_id) const override {
         return {};
     }
     GroupedCacheLayerLayout allLayerCacheBase() const override {
         RTP_LLM_CHECK_WITH_INFO(topology_ != nullptr, "fake allocator has no cache topology");
         GroupedCacheLayerLayout::GroupLayouts groups;
         for (const auto& group : topology_->groups()) {
-            groups.emplace(group.tag, CacheLayerLayout(std::vector<BlockBufferPtrInfo>(topology_->layers().size())));
+            std::vector<BlockBufferPtrInfo> layers(topology_->layers().size());
+            for (const int layer_id : group.layer_ids) {
+                layers.at(static_cast<size_t>(layer_id)).kv_addr = torch::empty({1}, torch::kUInt8);
+            }
+            groups.emplace(group.tag, CacheLayerLayout(std::move(layers)));
         }
         return GroupedCacheLayerLayout(topology_, std::move(groups));
     }
@@ -144,14 +145,18 @@ public:
     void decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override {
         return;
     }
-    bool updateKVBlock(const BatchKVCacheResourcePtr&  batch_kv_cache_resource,
-                       const std::vector<int>&         block_src_batch,
-                       bool                            copy_last_block,
-                       std::vector<TaggedBlockIdPair>& block_update_mapping) override {
+    bool updateKVBlock(const BatchKVCacheResourcePtr& batch_kv_cache_resource,
+                       const std::vector<int>&        block_src_batch,
+                       bool                           copy_last_block,
+                       std::vector<GroupBlockIdPair>& block_update_mapping) override {
         return false;
     }
     int seqSizePerBlock() const override {
         return 0;
+    }
+
+    const std::shared_ptr<const CacheTopology>& topology() const {
+        return topology_;
     }
 
     void regUserMr(size_t model_id) {
@@ -241,30 +246,30 @@ public:
 
     void TearDown() override {}
 
-    void initGroupPolicy(size_t                      tp_size,
-                         RemoteConnectorGroupMode    group_mode,
-                         size_t                      per_group_layer_num,
-                         const std::vector<int32_t>& full_group_ids,
-                         const std::vector<int32_t>& other_group_ids                 = {},
-                         uint32_t                    linear_attention_write_interval = 0,
-                         size_t                      sink_size                       = 0,
-                         size_t                      sw_size                         = 0) {
+    void initGroupPolicy(size_t                          tp_size,
+                         RemoteConnectorGroupMode        group_mode,
+                         size_t                          per_group_layer_num,
+                         const std::vector<std::string>& full_group_tags,
+                         const std::vector<std::string>& other_group_tags                = {},
+                         uint32_t                        linear_attention_write_interval = 0,
+                         size_t                          sink_size                       = 0,
+                         size_t                          sw_size                         = 0) {
         allocator_ =
-            std::make_shared<FakeKVCacheAllocator>(config_, full_group_ids, other_group_ids, per_group_layer_num);
+            std::make_shared<FakeKVCacheAllocator>(config_, full_group_tags, other_group_tags, per_group_layer_num);
         switch (group_mode) {
             case RemoteConnectorGroupMode::RCGM_LAYER_DEFAULT: {
                 group_policy_ = std::make_shared<remote_connector::DefaultLayerGroupPolicy>(
-                    allocator_, full_group_ids, other_group_ids);
+                    allocator_, full_group_tags, other_group_tags);
                 break;
             }
             case RemoteConnectorGroupMode::RCGM_ONLY_FULL_LAYER: {
                 group_policy_ = std::make_shared<remote_connector::FullLayerGroupPolicy>(
-                    allocator_, full_group_ids, other_group_ids);
+                    allocator_, full_group_tags, other_group_tags);
                 break;
             }
             case RemoteConnectorGroupMode::RCGM_FULL_LINEAR_LAYER: {
                 group_policy_ = std::make_shared<remote_connector::FullLinearLayerGroupPolicy>(
-                    allocator_, full_group_ids, other_group_ids, linear_attention_write_interval);
+                    allocator_, full_group_tags, other_group_tags, linear_attention_write_interval);
                 break;
             }
         }
@@ -317,22 +322,26 @@ public:
     }
 
 private:
-    std::shared_ptr<BlockIds> makeGroupBlockIds(const BlockIndicesType& block_indices) {
-        auto result           = std::make_shared<BlockIds>();
-        result->block_indices = block_indices;
-        return result;
+    void setResourceBlocks(KVCacheResource&                                                     resource,
+                           std::initializer_list<std::pair<std::string_view, BlockIndicesType>> blocks_by_group) {
+        const auto allocator = std::dynamic_pointer_cast<FakeKVCacheAllocator>(allocator_);
+        ASSERT_NE(allocator, nullptr);
+        resource.initGroups(allocator->topology());
+        for (const auto& [tag, blocks] : blocks_by_group) {
+            resource.mutableBlockIds(tag).assign(blocks);
+        }
     }
 
-    kv_cache_manager::Locations genFullLinearLocations(size_t                      tp_size,
-                                                       const std::vector<int32_t>& full_group_ids,
-                                                       const std::vector<int32_t>& linear_group_ids,
-                                                       size_t                      cache_key_size,
-                                                       const std::vector<size_t>&  linear_pos_vec) const {
+    kv_cache_manager::Locations genFullLinearLocations(size_t                          tp_size,
+                                                       const std::vector<std::string>& full_group_tags,
+                                                       const std::vector<std::string>& linear_group_tags,
+                                                       size_t                          cache_key_size,
+                                                       const std::vector<size_t>&      linear_pos_vec) const {
         kv_cache_manager::Locations locations;
         locations.resize(cache_key_size, {});
         for (size_t i = 0; i < cache_key_size; i++) {
-            for (auto group_id : full_group_ids) {
-                std::string full_group_name = "F" + std::to_string(group_id);
+            for (const auto& tag : full_group_tags) {
+                std::string full_group_name = "F" + tag;
                 for (int r = 0; r < tp_size; r++) {
                     std::string uri = "uri_" + full_group_name + "_" + std::to_string(r) + "_" + std::to_string(i);
                     locations[i].push_back(
@@ -341,8 +350,8 @@ private:
             }
         }
         for (auto pos : linear_pos_vec) {
-            for (auto group_id : linear_group_ids) {
-                std::string linear_group_name = "L" + std::to_string(group_id);
+            for (const auto& tag : linear_group_tags) {
+                std::string linear_group_name = "L" + tag;
                 for (int r = 0; r < tp_size; r++) {
                     std::string uri = "uri_" + linear_group_name + "_" + std::to_string(r) + "_" + std::to_string(pos);
                     locations[pos].push_back(
@@ -358,63 +367,63 @@ private:
         return location_spec_name + std::to_string(tp_rank) + "_" + group_name;
     }
 
-    void test_FullLinearLayerGroupPolicy_filterNeedLoadLocations(size_t                      tp_size,
-                                                                 const std::vector<int32_t>& full_group_ids,
-                                                                 const std::vector<int32_t>& linear_group_ids) {
+    void test_FullLinearLayerGroupPolicy_filterNeedLoadLocations(size_t                          tp_size,
+                                                                 const std::vector<std::string>& full_group_tags,
+                                                                 const std::vector<std::string>& linear_group_tags) {
         {
-            Locations     locations = genFullLinearLocations(tp_size, full_group_ids, linear_group_ids, 4, {3});
+            Locations     locations = genFullLinearLocations(tp_size, full_group_tags, linear_group_tags, 4, {3});
             LocationsView locations_view;
             ASSERT_TRUE(group_policy_->filterNeedLoadLocations(locations, locations_view));
-            auto expect_locations = genFullLinearLocations(tp_size, full_group_ids, linear_group_ids, 4, {3});
+            auto expect_locations = genFullLinearLocations(tp_size, full_group_tags, linear_group_tags, 4, {3});
             ASSERT_THAT(expect_locations, LocationsEqLocationsView(locations_view));
         }
         {  // only load the last linear block
-            Locations     locations = genFullLinearLocations(tp_size, full_group_ids, linear_group_ids, 4, {1, 3});
+            Locations     locations = genFullLinearLocations(tp_size, full_group_tags, linear_group_tags, 4, {1, 3});
             LocationsView locations_view;
             ASSERT_TRUE(group_policy_->filterNeedLoadLocations(locations, locations_view));
-            auto expect_locations = genFullLinearLocations(tp_size, full_group_ids, linear_group_ids, 4, {3});
+            auto expect_locations = genFullLinearLocations(tp_size, full_group_tags, linear_group_tags, 4, {3});
             ASSERT_THAT(expect_locations, LocationsEqLocationsView(locations_view));
         }
         {  // only load the last full + linear block
-            Locations     locations = genFullLinearLocations(tp_size, full_group_ids, linear_group_ids, 4, {1, 2});
+            Locations     locations = genFullLinearLocations(tp_size, full_group_tags, linear_group_tags, 4, {1, 2});
             LocationsView locations_view;
             ASSERT_TRUE(group_policy_->filterNeedLoadLocations(locations, locations_view));
-            auto expect_locations = genFullLinearLocations(tp_size, full_group_ids, linear_group_ids, 3, {2});
+            auto expect_locations = genFullLinearLocations(tp_size, full_group_tags, linear_group_tags, 3, {2});
             ASSERT_THAT(expect_locations, LocationsEqLocationsView(locations_view));
         }
         {  // only load the last full + linear block
-            Locations     locations = genFullLinearLocations(tp_size, full_group_ids, linear_group_ids, 5, {1, 2});
+            Locations     locations = genFullLinearLocations(tp_size, full_group_tags, linear_group_tags, 5, {1, 2});
             LocationsView locations_view;
             ASSERT_TRUE(group_policy_->filterNeedLoadLocations(locations, locations_view));
-            auto expect_locations = genFullLinearLocations(tp_size, full_group_ids, linear_group_ids, 3, {2});
+            auto expect_locations = genFullLinearLocations(tp_size, full_group_tags, linear_group_tags, 3, {2});
             ASSERT_THAT(expect_locations, LocationsEqLocationsView(locations_view));
         }
         {  // empty linear block
-            Locations     locations = genFullLinearLocations(tp_size, full_group_ids, linear_group_ids, 4, {});
+            Locations     locations = genFullLinearLocations(tp_size, full_group_tags, linear_group_tags, 4, {});
             LocationsView locations_view;
             ASSERT_TRUE(group_policy_->filterNeedLoadLocations(locations, locations_view));
-            auto expect_locations = genFullLinearLocations(tp_size, full_group_ids, linear_group_ids, 0, {});
+            auto expect_locations = genFullLinearLocations(tp_size, full_group_tags, linear_group_tags, 0, {});
             ASSERT_THAT(expect_locations, LocationsEqLocationsView(locations_view));
         }
         {  // edge case : empty locations
-            Locations     locations = genFullLinearLocations(tp_size, full_group_ids, linear_group_ids, 0, {});
+            Locations     locations = genFullLinearLocations(tp_size, full_group_tags, linear_group_tags, 0, {});
             LocationsView locations_view;
             ASSERT_TRUE(group_policy_->filterNeedLoadLocations(locations, locations_view));
-            auto expect_locations = genFullLinearLocations(tp_size, full_group_ids, linear_group_ids, 0, {});
+            auto expect_locations = genFullLinearLocations(tp_size, full_group_tags, linear_group_tags, 0, {});
             ASSERT_THAT(expect_locations, LocationsEqLocationsView(locations_view));
         }
         {  // edge case : one full block + empty linear block
-            Locations     locations = genFullLinearLocations(tp_size, full_group_ids, linear_group_ids, 1, {});
+            Locations     locations = genFullLinearLocations(tp_size, full_group_tags, linear_group_tags, 1, {});
             LocationsView locations_view;
             ASSERT_TRUE(group_policy_->filterNeedLoadLocations(locations, locations_view));
-            auto expect_locations = genFullLinearLocations(tp_size, full_group_ids, linear_group_ids, 0, {});
+            auto expect_locations = genFullLinearLocations(tp_size, full_group_tags, linear_group_tags, 0, {});
             ASSERT_THAT(expect_locations, LocationsEqLocationsView(locations_view));
         }
         {  // edge case : one full block + one linear block
-            Locations     locations = genFullLinearLocations(tp_size, full_group_ids, linear_group_ids, 1, {0});
+            Locations     locations = genFullLinearLocations(tp_size, full_group_tags, linear_group_tags, 1, {0});
             LocationsView locations_view;
             ASSERT_TRUE(group_policy_->filterNeedLoadLocations(locations, locations_view));
-            auto expect_locations = genFullLinearLocations(tp_size, full_group_ids, linear_group_ids, 1, {0});
+            auto expect_locations = genFullLinearLocations(tp_size, full_group_tags, linear_group_tags, 1, {0});
             ASSERT_THAT(expect_locations, LocationsEqLocationsView(locations_view));
         }
     }
@@ -423,9 +432,7 @@ private:
         {
             auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3};
-            resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, 11}));
+            setResourceBlocks(*resource, {{"0", {0, 1, 2, 3}}, {"1", {4, 5, 6, 7}}, {"2", {8, 9, 10, 11}}});
             std::vector<std::string> real;
             resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
@@ -435,9 +442,7 @@ private:
         {
             auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3};
-            resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, 11}));
+            setResourceBlocks(*resource, {{"0", {0, 1, 2, 3}}, {"1", {4, 5, 6, 7}}, {"2", {8, 9, 10, 11}}});
             std::vector<std::string> real;
             resource->setLastBlockAligned(false);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
@@ -447,9 +452,7 @@ private:
         {
             auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3, 4};
-            resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3, 20}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7, 21}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, 11, 22}));
+            setResourceBlocks(*resource, {{"0", {0, 1, 2, 3, 20}}, {"1", {4, 5, 6, 7, 21}}, {"2", {8, 9, 10, 11, 22}}});
             std::vector<std::string> real;
             resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
@@ -459,9 +462,7 @@ private:
         {  // exist empty block
             auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3};
-            resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({-1, -1, -1, 7}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({-1, -1, -1, 11}));
+            setResourceBlocks(*resource, {{"0", {0, 1, 2, 3}}, {"1", {-1, -1, -1, 7}}, {"2", {-1, -1, -1, 11}}});
             std::vector<std::string> real;
             resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
@@ -471,9 +472,7 @@ private:
         {  // exist empty block
             auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3};
-            resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({4, -1, 6, 7}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({8, -1, 10, 11}));
+            setResourceBlocks(*resource, {{"0", {0, 1, 2, 3}}, {"1", {4, -1, 6, 7}}, {"2", {8, -1, 10, 11}}});
             std::vector<std::string> real;
             resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
@@ -483,9 +482,7 @@ private:
         {
             auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3};
-            resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, -1}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, -1}));
+            setResourceBlocks(*resource, {{"0", {0, 1, 2, 3}}, {"1", {4, 5, 6, -1}}, {"2", {8, 9, 10, -1}}});
             std::vector<std::string> real;
             resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
@@ -495,9 +492,8 @@ private:
         {  // exist empty block
             auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3, 4};
-            resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3, 20}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, -1, 7, 21}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, -1, 11, 22}));
+            setResourceBlocks(*resource,
+                              {{"0", {0, 1, 2, 3, 20}}, {"1", {4, 5, -1, 7, 21}}, {"2", {8, 9, -1, 11, 22}}});
             std::vector<std::string> real;
             resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
@@ -507,9 +503,8 @@ private:
         {  // exist empty block
             auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3, 4};
-            resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3, 20}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({4, -1, -1, 7, 21}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({8, -1, -1, 11, 22}));
+            setResourceBlocks(*resource,
+                              {{"0", {0, 1, 2, 3, 20}}, {"1", {4, -1, -1, 7, 21}}, {"2", {8, -1, -1, 11, 22}}});
             std::vector<std::string> real;
             resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
@@ -519,9 +514,7 @@ private:
         {  // exist empty block
             auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3};
-            resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({-1, 5, -1, 7}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({-1, 9, -1, 11}));
+            setResourceBlocks(*resource, {{"0", {0, 1, 2, 3}}, {"1", {-1, 5, -1, 7}}, {"2", {-1, 9, -1, 11}}});
             std::vector<std::string> real;
             resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
@@ -531,9 +524,7 @@ private:
         {  // edge case
             auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0};
-            resource->groupBlocks().push_back(makeGroupBlockIds({0}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({1}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({2}));
+            setResourceBlocks(*resource, {{"0", {0}}, {"1", {1}}, {"2", {2}}});
             std::vector<std::string> real;
             resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
@@ -543,9 +534,7 @@ private:
         {  // edge case
             auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0};
-            resource->groupBlocks().push_back(makeGroupBlockIds({0}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({-1}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({-1}));
+            setResourceBlocks(*resource, {{"0", {0}}, {"1", {-1}}, {"2", {-1}}});
             std::vector<std::string> real;
             resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
@@ -558,9 +547,7 @@ private:
         {
             auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3};
-            resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, 11}));
+            setResourceBlocks(*resource, {{"0", {0, 1, 2, 3}}, {"1", {4, 5, 6, 7}}, {"2", {8, 9, 10, 11}}});
             std::vector<std::string> real;
             resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
@@ -570,9 +557,8 @@ private:
         {
             auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3, 4};
-            resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3, 20}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, -1, 21}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, -1, 22}));
+            setResourceBlocks(*resource,
+                              {{"0", {0, 1, 2, 3, 20}}, {"1", {4, 5, 6, -1, 21}}, {"2", {8, 9, 10, -1, 22}}});
             std::vector<std::string> real;
             resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
@@ -582,9 +568,7 @@ private:
         {
             auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0};
-            resource->groupBlocks().push_back(makeGroupBlockIds({0}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({4}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({8}));
+            setResourceBlocks(*resource, {{"0", {0}}, {"1", {4}}, {"2", {8}}});
             std::vector<std::string> real;
             resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
@@ -597,9 +581,7 @@ private:
         {
             auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3};
-            resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, 11}));
+            setResourceBlocks(*resource, {{"0", {0, 1, 2, 3}}, {"1", {4, 5, 6, 7}}, {"2", {8, 9, 10, 11}}});
             std::vector<std::string> real;
             resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
@@ -609,9 +591,7 @@ private:
         {
             auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3, 4};
-            resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3, 20}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7, 21}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, 11, 22}));
+            setResourceBlocks(*resource, {{"0", {0, 1, 2, 3, 20}}, {"1", {4, 5, 6, 7, 21}}, {"2", {8, 9, 10, 11, 22}}});
             std::vector<std::string> real;
             resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
@@ -621,9 +601,7 @@ private:
         {
             auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0, 1, 2, 3};
-            resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, -1}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, -1}));
+            setResourceBlocks(*resource, {{"0", {0, 1, 2, 3}}, {"1", {4, 5, 6, -1}}, {"2", {8, 9, 10, -1}}});
             std::vector<std::string> real;
             resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
@@ -633,9 +611,7 @@ private:
         {  // edge case
             auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0};
-            resource->groupBlocks().push_back(makeGroupBlockIds({0}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({4}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({8}));
+            setResourceBlocks(*resource, {{"0", {0}}, {"1", {4}}, {"2", {8}}});
             std::vector<std::string> real;
             resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
@@ -645,9 +621,7 @@ private:
         {  // edge case
             auto resource        = std::make_shared<KVCacheResource>();
             resource->cache_keys = {0};
-            resource->groupBlocks().push_back(makeGroupBlockIds({0}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({-1}));
-            resource->groupBlocks().push_back(makeGroupBlockIds({-1}));
+            setResourceBlocks(*resource, {{"0", {0}}, {"1", {-1}}, {"2", {-1}}});
             std::vector<std::string> real;
             resource->setLastBlockAligned(true);
             ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
@@ -663,17 +637,20 @@ private:
 };
 
 TEST_F(GroupPolicyTest, test_init_FullLinearLayerGroupPolicy_success_single_tp) {
-    initGroupPolicy(1, RemoteConnectorGroupMode::RCGM_FULL_LINEAR_LAYER, 4, {0}, {1, 2}, 0);
+    initGroupPolicy(1, RemoteConnectorGroupMode::RCGM_FULL_LINEAR_LAYER, 4, {"0"}, {"1", "2"}, 0);
     auto cast_group_policy = std::dynamic_pointer_cast<FullLinearLayerGroupPolicy>(group_policy_);
-    ASSERT_EQ(GroupPolicy::GroupIdMap({{0, {true, 0b001, "F0"}}, {1, {false, 0b010, "L1"}}, {2, {false, 0b100, "L2"}}}),
-              cast_group_policy->groups_);
+    ASSERT_EQ(
+        GroupPolicy::GroupMap(
+            {{"0", {true, 0b001, "F0", "0"}}, {"1", {false, 0b010, "L1", "1"}}, {"2", {false, 0b100, "L2", "2"}}}),
+        cast_group_policy->groups_);
     ASSERT_EQ(
         (std::unordered_map<uint64_t, std::string>({{0b111, "F0L1L2"}, {0b001, "F0"}, {0b010, "L1"}, {0b100, "L2"}})),
         cast_group_policy->location_spec_group_map_);
     EXPECT_EQ(cast_group_policy->reachableAggregateMasks(), (std::vector<uint64_t>{0b001, 0b111}));
-    ASSERT_EQ(GroupPolicy::SpecInfoMap({{"tp0_F0", {0, 0, "0"}}, {"tp0_L1", {1, 0, "1"}}, {"tp0_L2", {2, 0, "2"}}}),
+    ASSERT_EQ(GroupPolicy::SpecInfoMap({{"tp0_F0", {0, "0"}}, {"tp0_L1", {0, "1"}}, {"tp0_L2", {0, "2"}}}),
               cast_group_policy->spec_name_to_info_);
-    ASSERT_EQ((std::map<int32_t, std::vector<int>>({{0, {0, 1, 2, 3}}, {1, {4, 5, 6, 7}}, {2, {8, 9, 10, 11}}})),
+    ASSERT_EQ((std::map<std::string, std::vector<int>, std::less<>>(
+                  {{"0", {0, 1, 2, 3}}, {"1", {4, 5, 6, 7}}, {"2", {8, 9, 10, 11}}})),
               cast_group_policy->group_to_layer_ids_);
     ASSERT_EQ(0b001, cast_group_policy->valid_full_bithash_);
     ASSERT_EQ(0b111, cast_group_policy->valid_full_other_bithash_);
@@ -683,21 +660,24 @@ TEST_F(GroupPolicyTest, test_init_FullLinearLayerGroupPolicy_success_single_tp) 
 }
 
 TEST_F(GroupPolicyTest, test_init_FullLinearLayerGroupPolicy_success_two_tp) {
-    initGroupPolicy(2, RemoteConnectorGroupMode::RCGM_FULL_LINEAR_LAYER, 4, {0}, {1, 2}, 0);
+    initGroupPolicy(2, RemoteConnectorGroupMode::RCGM_FULL_LINEAR_LAYER, 4, {"0"}, {"1", "2"}, 0);
     auto cast_group_policy = std::dynamic_pointer_cast<FullLinearLayerGroupPolicy>(group_policy_);
-    ASSERT_EQ(GroupPolicy::GroupIdMap({{0, {true, 0b001, "F0"}}, {1, {false, 0b010, "L1"}}, {2, {false, 0b100, "L2"}}}),
-              cast_group_policy->groups_);
+    ASSERT_EQ(
+        GroupPolicy::GroupMap(
+            {{"0", {true, 0b001, "F0", "0"}}, {"1", {false, 0b010, "L1", "1"}}, {"2", {false, 0b100, "L2", "2"}}}),
+        cast_group_policy->groups_);
     ASSERT_EQ(
         (std::unordered_map<uint64_t, std::string>({{0b111, "F0L1L2"}, {0b001, "F0"}, {0b010, "L1"}, {0b100, "L2"}})),
         cast_group_policy->location_spec_group_map_);
-    ASSERT_EQ(GroupPolicy::SpecInfoMap({{"tp0_F0", {0, 0, "0"}},
-                                        {"tp0_L1", {1, 0, "1"}},
-                                        {"tp0_L2", {2, 0, "2"}},
-                                        {"tp1_F0", {0, 1, "0"}},
-                                        {"tp1_L1", {1, 1, "1"}},
-                                        {"tp1_L2", {2, 1, "2"}}}),
+    ASSERT_EQ(GroupPolicy::SpecInfoMap({{"tp0_F0", {0, "0"}},
+                                        {"tp0_L1", {0, "1"}},
+                                        {"tp0_L2", {0, "2"}},
+                                        {"tp1_F0", {1, "0"}},
+                                        {"tp1_L1", {1, "1"}},
+                                        {"tp1_L2", {1, "2"}}}),
               cast_group_policy->spec_name_to_info_);
-    ASSERT_EQ((std::map<int32_t, std::vector<int>>({{0, {0, 1, 2, 3}}, {1, {4, 5, 6, 7}}, {2, {8, 9, 10, 11}}})),
+    ASSERT_EQ((std::map<std::string, std::vector<int>, std::less<>>(
+                  {{"0", {0, 1, 2, 3}}, {"1", {4, 5, 6, 7}}, {"2", {8, 9, 10, 11}}})),
               cast_group_policy->group_to_layer_ids_);
     ASSERT_EQ(0b001, cast_group_policy->valid_full_bithash_);
     ASSERT_EQ(0b111, cast_group_policy->valid_full_other_bithash_);
@@ -713,12 +693,12 @@ TEST_F(GroupPolicyTest, test_init_FullLinearLayerGroupPolicy_success_two_tp) {
 }
 
 TEST_F(GroupPolicyTest, test_init_FullLinearLayerGroupPolicy_success_two_full_groups) {
-    initGroupPolicy(2, RemoteConnectorGroupMode::RCGM_FULL_LINEAR_LAYER, 4, {0, 1}, {2, 3}, 0);
+    initGroupPolicy(2, RemoteConnectorGroupMode::RCGM_FULL_LINEAR_LAYER, 4, {"0", "1"}, {"2", "3"}, 0);
     auto cast_group_policy = std::dynamic_pointer_cast<FullLinearLayerGroupPolicy>(group_policy_);
-    ASSERT_EQ(GroupPolicy::GroupIdMap({{0, {true, 0b0001, "F0"}},
-                                       {1, {true, 0b0010, "F1"}},
-                                       {2, {false, 0b0100, "L2"}},
-                                       {3, {false, 0b1000, "L3"}}}),
+    ASSERT_EQ(GroupPolicy::GroupMap({{"0", {true, 0b0001, "F0", "0"}},
+                                     {"1", {true, 0b0010, "F1", "1"}},
+                                     {"2", {false, 0b0100, "L2", "2"}},
+                                     {"3", {false, 0b1000, "L3", "3"}}}),
               cast_group_policy->groups_);
     EXPECT_EQ(
         (std::unordered_map<uint64_t, std::string>(
@@ -726,18 +706,18 @@ TEST_F(GroupPolicyTest, test_init_FullLinearLayerGroupPolicy_success_two_full_gr
         cast_group_policy->location_spec_group_map_);
     EXPECT_EQ(cast_group_policy->reachableAggregateMasks(), (std::vector<uint64_t>{0b0011, 0b1111}));
     EXPECT_EQ(GroupPolicy::SpecInfoMap({
-                  {"tp0_F0", {0, 0, "0"}},
-                  {"tp0_F1", {1, 0, "1"}},
-                  {"tp0_L2", {2, 0, "2"}},
-                  {"tp0_L3", {3, 0, "3"}},
-                  {"tp1_F0", {0, 1, "0"}},
-                  {"tp1_F1", {1, 1, "1"}},
-                  {"tp1_L2", {2, 1, "2"}},
-                  {"tp1_L3", {3, 1, "3"}},
+                  {"tp0_F0", {0, "0"}},
+                  {"tp0_F1", {0, "1"}},
+                  {"tp0_L2", {0, "2"}},
+                  {"tp0_L3", {0, "3"}},
+                  {"tp1_F0", {1, "0"}},
+                  {"tp1_F1", {1, "1"}},
+                  {"tp1_L2", {1, "2"}},
+                  {"tp1_L3", {1, "3"}},
               }),
               cast_group_policy->spec_name_to_info_);
-    EXPECT_EQ((std::map<int32_t, std::vector<int>>(
-                  {{0, {0, 1, 2, 3}}, {1, {4, 5, 6, 7}}, {2, {8, 9, 10, 11}}, {3, {12, 13, 14, 15}}})),
+    EXPECT_EQ((std::map<std::string, std::vector<int>, std::less<>>(
+                  {{"0", {0, 1, 2, 3}}, {"1", {4, 5, 6, 7}}, {"2", {8, 9, 10, 11}}, {"3", {12, 13, 14, 15}}})),
               cast_group_policy->group_to_layer_ids_);
     EXPECT_EQ(0b0011, cast_group_policy->valid_full_bithash_);
     EXPECT_EQ(0b1111, cast_group_policy->valid_full_other_bithash_);
@@ -758,20 +738,17 @@ TEST_F(GroupPolicyTest, test_init_FullLinearLayerGroupPolicy_success_two_full_gr
 }
 
 TEST_F(GroupPolicyTest, test_init_DefaultLayerGroupPolicy_fail_for_duplicate_group) {
-    std::vector<int32_t> full_group_ids  = {0, 1};
-    std::vector<int32_t> other_group_ids = {0, 1};
-    allocator_ = std::make_shared<FakeKVCacheAllocator>(config_, full_group_ids, other_group_ids, 10);
-    group_policy_ =
-        std::make_shared<remote_connector::DefaultLayerGroupPolicy>(allocator_, full_group_ids, other_group_ids);
-    ASSERT_FALSE(group_policy_->init());
+    std::vector<std::string> full_group_tags  = {"0", "1"};
+    std::vector<std::string> other_group_tags = {"0", "1"};
+    EXPECT_ANY_THROW((void)std::make_shared<FakeKVCacheAllocator>(config_, full_group_tags, other_group_tags, 10));
 }
 
 TEST_F(GroupPolicyTest, test_init_FullLayerGroupPolicy_fail_for_empty_full_group) {
-    std::vector<int32_t> full_group_ids;
-    std::vector<int32_t> other_group_ids;
-    allocator_ = std::make_shared<FakeKVCacheAllocator>(config_, full_group_ids, other_group_ids, 10);
+    std::vector<std::string> full_group_tags;
+    std::vector<std::string> other_group_tags;
+    allocator_ = std::make_shared<FakeKVCacheAllocator>(config_, full_group_tags, other_group_tags, 10);
     group_policy_ =
-        std::make_shared<remote_connector::FullLayerGroupPolicy>(allocator_, full_group_ids, other_group_ids);
+        std::make_shared<remote_connector::FullLayerGroupPolicy>(allocator_, full_group_tags, other_group_tags);
     ASSERT_FALSE(group_policy_->init());
 }
 
@@ -779,7 +756,7 @@ TEST_F(GroupPolicyTest, test_init_FullLayerGroupPolicy_success_for_multiple_full
     initGroupPolicy(/*tp_size=*/1,
                     RemoteConnectorGroupMode::RCGM_ONLY_FULL_LAYER,
                     /*per_group_layer_num=*/1,
-                    /*full_group_ids=*/{0, 1});
+                    /*full_group_tags=*/{"0", "1"});
 
     EXPECT_EQ(group_policy_->reachableAggregateMasks(), (std::vector<uint64_t>{0b11}));
     EXPECT_EQ(group_policy_->location_spec_group_map_,
@@ -787,8 +764,7 @@ TEST_F(GroupPolicyTest, test_init_FullLayerGroupPolicy_success_for_multiple_full
 
     auto resource        = std::make_shared<KVCacheResource>();
     resource->cache_keys = {0, 1};
-    resource->groupBlocks().push_back(makeGroupBlockIds({10, 11}));
-    resource->groupBlocks().push_back(makeGroupBlockIds({20, NULL_BLOCK_IDX}));
+    setResourceBlocks(*resource, {{"0", {10, 11}}, {"1", {20, NULL_BLOCK_IDX}}});
     resource->setLastBlockAligned(true);
 
     std::vector<std::string> need_write_groups;
@@ -797,169 +773,169 @@ TEST_F(GroupPolicyTest, test_init_FullLayerGroupPolicy_success_for_multiple_full
 }
 
 TEST_F(GroupPolicyTest, test_init_FullLayerGroupPolicy_fail_for_not_empty_other_group) {
-    std::vector<int32_t> full_group_ids  = {0};
-    std::vector<int32_t> other_group_ids = {1};
-    allocator_ = std::make_shared<FakeKVCacheAllocator>(config_, full_group_ids, other_group_ids, 10);
+    std::vector<std::string> full_group_tags  = {"0"};
+    std::vector<std::string> other_group_tags = {"1"};
+    allocator_ = std::make_shared<FakeKVCacheAllocator>(config_, full_group_tags, other_group_tags, 10);
     group_policy_ =
-        std::make_shared<remote_connector::FullLayerGroupPolicy>(allocator_, full_group_ids, other_group_ids);
+        std::make_shared<remote_connector::FullLayerGroupPolicy>(allocator_, full_group_tags, other_group_tags);
     ASSERT_FALSE(group_policy_->init());
 }
 
 TEST_F(GroupPolicyTest, test_init_FullLinearLayerGroupPolicy_fail_for_not_empty_group) {
     {
-        std::vector<int32_t> full_group_ids;
-        std::vector<int32_t> other_group_ids = {1};
-        allocator_    = std::make_shared<FakeKVCacheAllocator>(config_, full_group_ids, other_group_ids, 10);
+        std::vector<std::string> full_group_tags;
+        std::vector<std::string> other_group_tags = {"1"};
+        allocator_    = std::make_shared<FakeKVCacheAllocator>(config_, full_group_tags, other_group_tags, 10);
         group_policy_ = std::make_shared<remote_connector::FullLinearLayerGroupPolicy>(
-            allocator_, full_group_ids, other_group_ids, 0);
+            allocator_, full_group_tags, other_group_tags, 0);
         ASSERT_FALSE(group_policy_->init());
     }
     {
-        std::vector<int32_t> full_group_ids = {0};
-        std::vector<int32_t> other_group_ids;
-        allocator_    = std::make_shared<FakeKVCacheAllocator>(config_, full_group_ids, other_group_ids, 10);
+        std::vector<std::string> full_group_tags = {"0"};
+        std::vector<std::string> other_group_tags;
+        allocator_    = std::make_shared<FakeKVCacheAllocator>(config_, full_group_tags, other_group_tags, 10);
         group_policy_ = std::make_shared<remote_connector::FullLinearLayerGroupPolicy>(
-            allocator_, full_group_ids, other_group_ids, 0);
+            allocator_, full_group_tags, other_group_tags, 0);
         ASSERT_FALSE(group_policy_->init());
     }
 }
 
 TEST_F(GroupPolicyTest, test_FullLinearLayerGroupPolicy_filterNeedLoadLocations_success_one_tp) {
-    size_t               tp_size                         = 1;
-    std::vector<int32_t> full_group_ids                  = {0};
-    std::vector<int32_t> linear_group_ids                = {1, 2};
-    uint32_t             linear_attention_write_interval = 0;
+    size_t                   tp_size                         = 1;
+    std::vector<std::string> full_group_tags                 = {"0"};
+    std::vector<std::string> linear_group_tags               = {"1", "2"};
+    uint32_t                 linear_attention_write_interval = 0;
     initGroupPolicy(tp_size,
                     RemoteConnectorGroupMode::RCGM_FULL_LINEAR_LAYER,
                     4,
-                    full_group_ids,
-                    linear_group_ids,
+                    full_group_tags,
+                    linear_group_tags,
                     linear_attention_write_interval);
-    test_FullLinearLayerGroupPolicy_filterNeedLoadLocations(tp_size, full_group_ids, linear_group_ids);
+    test_FullLinearLayerGroupPolicy_filterNeedLoadLocations(tp_size, full_group_tags, linear_group_tags);
 }
 
 TEST_F(GroupPolicyTest, test_FullLinearLayerGroupPolicy_filterNeedLoadLocations_success_two_tp) {
-    size_t               tp_size                         = 2;
-    std::vector<int32_t> full_group_ids                  = {0};
-    std::vector<int32_t> linear_group_ids                = {1, 2};
-    uint32_t             linear_attention_write_interval = 0;
+    size_t                   tp_size                         = 2;
+    std::vector<std::string> full_group_tags                 = {"0"};
+    std::vector<std::string> linear_group_tags               = {"1", "2"};
+    uint32_t                 linear_attention_write_interval = 0;
     initGroupPolicy(tp_size,
                     RemoteConnectorGroupMode::RCGM_FULL_LINEAR_LAYER,
                     4,
-                    full_group_ids,
-                    linear_group_ids,
+                    full_group_tags,
+                    linear_group_tags,
                     linear_attention_write_interval);
-    test_FullLinearLayerGroupPolicy_filterNeedLoadLocations(tp_size, full_group_ids, linear_group_ids);
+    test_FullLinearLayerGroupPolicy_filterNeedLoadLocations(tp_size, full_group_tags, linear_group_tags);
 }
 
 TEST_F(GroupPolicyTest, test_FullLinearLayerGroupPolicy_filterNeedLoadLocations_success_two_tp_two_full_group) {
-    size_t               tp_size                         = 2;
-    std::vector<int32_t> full_group_ids                  = {0, 1};
-    std::vector<int32_t> linear_group_ids                = {2, 3};
-    uint32_t             linear_attention_write_interval = 0;
+    size_t                   tp_size                         = 2;
+    std::vector<std::string> full_group_tags                 = {"0", "1"};
+    std::vector<std::string> linear_group_tags               = {"2", "3"};
+    uint32_t                 linear_attention_write_interval = 0;
     initGroupPolicy(tp_size,
                     RemoteConnectorGroupMode::RCGM_FULL_LINEAR_LAYER,
                     4,
-                    full_group_ids,
-                    linear_group_ids,
+                    full_group_tags,
+                    linear_group_tags,
                     linear_attention_write_interval);
-    test_FullLinearLayerGroupPolicy_filterNeedLoadLocations(tp_size, full_group_ids, linear_group_ids);
+    test_FullLinearLayerGroupPolicy_filterNeedLoadLocations(tp_size, full_group_tags, linear_group_tags);
 }
 
 TEST_F(GroupPolicyTest, test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_success_one_tp_interval_2) {
-    size_t               tp_size                         = 1;
-    std::vector<int32_t> full_group_ids                  = {0};
-    std::vector<int32_t> linear_group_ids                = {1, 2};
-    uint32_t             linear_attention_write_interval = 2;
+    size_t                   tp_size                         = 1;
+    std::vector<std::string> full_group_tags                 = {"0"};
+    std::vector<std::string> linear_group_tags               = {"1", "2"};
+    uint32_t                 linear_attention_write_interval = 2;
     initGroupPolicy(tp_size,
                     RemoteConnectorGroupMode::RCGM_FULL_LINEAR_LAYER,
                     4,
-                    full_group_ids,
-                    linear_group_ids,
+                    full_group_tags,
+                    linear_group_tags,
                     linear_attention_write_interval);
     test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_interval_2();
 }
 
 TEST_F(GroupPolicyTest, test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_success_two_tp_interval_2) {
-    size_t               tp_size                         = 2;
-    std::vector<int32_t> full_group_ids                  = {0};
-    std::vector<int32_t> linear_group_ids                = {1, 2};
-    uint32_t             linear_attention_write_interval = 2;
+    size_t                   tp_size                         = 2;
+    std::vector<std::string> full_group_tags                 = {"0"};
+    std::vector<std::string> linear_group_tags               = {"1", "2"};
+    uint32_t                 linear_attention_write_interval = 2;
     initGroupPolicy(tp_size,
                     RemoteConnectorGroupMode::RCGM_FULL_LINEAR_LAYER,
                     4,
-                    full_group_ids,
-                    linear_group_ids,
+                    full_group_tags,
+                    linear_group_tags,
                     linear_attention_write_interval);
     test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_interval_2();
 }
 
 TEST_F(GroupPolicyTest, test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_success_one_tp_interval_1) {
-    size_t               tp_size                         = 1;
-    std::vector<int32_t> full_group_ids                  = {0};
-    std::vector<int32_t> linear_group_ids                = {1, 2};
-    uint32_t             linear_attention_write_interval = 1;
+    size_t                   tp_size                         = 1;
+    std::vector<std::string> full_group_tags                 = {"0"};
+    std::vector<std::string> linear_group_tags               = {"1", "2"};
+    uint32_t                 linear_attention_write_interval = 1;
     initGroupPolicy(tp_size,
                     RemoteConnectorGroupMode::RCGM_FULL_LINEAR_LAYER,
                     4,
-                    full_group_ids,
-                    linear_group_ids,
+                    full_group_tags,
+                    linear_group_tags,
                     linear_attention_write_interval);
     test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_interval_1();
 }
 
 TEST_F(GroupPolicyTest, test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_success_two_tp_interval_1) {
-    size_t               tp_size                         = 2;
-    std::vector<int32_t> full_group_ids                  = {0};
-    std::vector<int32_t> linear_group_ids                = {1, 2};
-    uint32_t             linear_attention_write_interval = 1;
+    size_t                   tp_size                         = 2;
+    std::vector<std::string> full_group_tags                 = {"0"};
+    std::vector<std::string> linear_group_tags               = {"1", "2"};
+    uint32_t                 linear_attention_write_interval = 1;
     initGroupPolicy(tp_size,
                     RemoteConnectorGroupMode::RCGM_FULL_LINEAR_LAYER,
                     4,
-                    full_group_ids,
-                    linear_group_ids,
+                    full_group_tags,
+                    linear_group_tags,
                     linear_attention_write_interval);
     test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_interval_1();
 }
 
 TEST_F(GroupPolicyTest, test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_success_one_tp_interval_0) {
-    size_t               tp_size                         = 1;
-    std::vector<int32_t> full_group_ids                  = {0};
-    std::vector<int32_t> linear_group_ids                = {1, 2};
-    uint32_t             linear_attention_write_interval = 0;
+    size_t                   tp_size                         = 1;
+    std::vector<std::string> full_group_tags                 = {"0"};
+    std::vector<std::string> linear_group_tags               = {"1", "2"};
+    uint32_t                 linear_attention_write_interval = 0;
     initGroupPolicy(tp_size,
                     RemoteConnectorGroupMode::RCGM_FULL_LINEAR_LAYER,
                     4,
-                    full_group_ids,
-                    linear_group_ids,
+                    full_group_tags,
+                    linear_group_tags,
                     linear_attention_write_interval);
     test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_interval_0();
 }
 
 TEST_F(GroupPolicyTest, test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_success_two_tp_interval_0) {
-    size_t               tp_size                         = 2;
-    std::vector<int32_t> full_group_ids                  = {0};
-    std::vector<int32_t> linear_group_ids                = {1, 2};
-    uint32_t             linear_attention_write_interval = 0;
+    size_t                   tp_size                         = 2;
+    std::vector<std::string> full_group_tags                 = {"0"};
+    std::vector<std::string> linear_group_tags               = {"1", "2"};
+    uint32_t                 linear_attention_write_interval = 0;
     initGroupPolicy(tp_size,
                     RemoteConnectorGroupMode::RCGM_FULL_LINEAR_LAYER,
                     4,
-                    full_group_ids,
-                    linear_group_ids,
+                    full_group_tags,
+                    linear_group_tags,
                     linear_attention_write_interval);
     test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_interval_0();
 }
 
 TEST_F(GroupPolicyTest, test_FullLinearLayerGroupPolicy_filterNeedLoadLocations_fail) {
-    size_t               tp_size                         = 1;
-    std::vector<int32_t> full_group_ids                  = {0};
-    std::vector<int32_t> linear_group_ids                = {1, 2};
-    uint32_t             linear_attention_write_interval = 0;
+    size_t                   tp_size                         = 1;
+    std::vector<std::string> full_group_tags                 = {"0"};
+    std::vector<std::string> linear_group_tags               = {"1", "2"};
+    uint32_t                 linear_attention_write_interval = 0;
     initGroupPolicy(tp_size,
                     RemoteConnectorGroupMode::RCGM_FULL_LINEAR_LAYER,
                     4,
-                    full_group_ids,
-                    linear_group_ids,
+                    full_group_tags,
+                    linear_group_tags,
                     linear_attention_write_interval);
     {
         Locations     locations({{{"tp0_F0", "uri"}, {"tp0_L1", "uri"}, {"tp0_L2", "uri"}}});
@@ -984,15 +960,15 @@ TEST_F(GroupPolicyTest, test_FullLinearLayerGroupPolicy_filterNeedLoadLocations_
 }
 
 TEST_F(GroupPolicyTest, test_FullLinearLayerGroupPolicy_filterNeedLoadLocations_fail_two_full_group) {
-    size_t               tp_size                         = 1;
-    std::vector<int32_t> full_group_ids                  = {0, 1};
-    std::vector<int32_t> linear_group_ids                = {2, 3};
-    uint32_t             linear_attention_write_interval = 0;
+    size_t                   tp_size                         = 1;
+    std::vector<std::string> full_group_tags                 = {"0", "1"};
+    std::vector<std::string> linear_group_tags               = {"2", "3"};
+    uint32_t                 linear_attention_write_interval = 0;
     initGroupPolicy(tp_size,
                     RemoteConnectorGroupMode::RCGM_FULL_LINEAR_LAYER,
                     4,
-                    full_group_ids,
-                    linear_group_ids,
+                    full_group_tags,
+                    linear_group_tags,
                     linear_attention_write_interval);
     {
         Locations     locations({{{"tp0_F0", "uri"}, {"tp0_F1", "uri"}, {"tp0_L2", "uri"}, {"tp0_L3", "uri"}}});
@@ -1012,22 +988,20 @@ TEST_F(GroupPolicyTest, test_FullLinearLayerGroupPolicy_filterNeedLoadLocations_
 }
 
 TEST_F(GroupPolicyTest, test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_fail) {
-    size_t               tp_size                         = 1;
-    std::vector<int32_t> full_group_ids                  = {0};
-    std::vector<int32_t> linear_group_ids                = {1, 2};
-    uint32_t             linear_attention_write_interval = 2;
+    size_t                   tp_size                         = 1;
+    std::vector<std::string> full_group_tags                 = {"0"};
+    std::vector<std::string> linear_group_tags               = {"1", "2"};
+    uint32_t                 linear_attention_write_interval = 2;
     initGroupPolicy(tp_size,
                     RemoteConnectorGroupMode::RCGM_FULL_LINEAR_LAYER,
                     4,
-                    full_group_ids,
-                    linear_group_ids,
+                    full_group_tags,
+                    linear_group_tags,
                     linear_attention_write_interval);
     {  // incomplete block
         auto resource        = std::make_shared<KVCacheResource>();
         resource->cache_keys = {0, 1, 2, 3, 4};
-        resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3, 20}));
-        resource->groupBlocks().push_back(makeGroupBlockIds({4, -1, 6, 7, -1}));
-        resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, 11, -1}));
+        setResourceBlocks(*resource, {{"0", {0, 1, 2, 3, 20}}, {"1", {4, -1, 6, 7, -1}}, {"2", {8, 9, 10, 11, -1}}});
         std::vector<std::string> real;
         resource->setLastBlockAligned(true);
         ASSERT_FALSE(group_policy_->getNeedWriteGroups(resource, real));
@@ -1035,8 +1009,7 @@ TEST_F(GroupPolicyTest, test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_fa
     {  // invalid group size
         auto resource        = std::make_shared<KVCacheResource>();
         resource->cache_keys = {0, 1, 2, 3, 4};
-        resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3, 20}));
-        resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7, 21}));
+        setResourceBlocks(*resource, {{"0", {0, 1, 2, 3, 20}}, {"1", {4, 5, 6, 7, 21}}});
         std::vector<std::string> real;
         resource->setLastBlockAligned(true);
         ASSERT_FALSE(group_policy_->getNeedWriteGroups(resource, real));
@@ -1044,55 +1017,51 @@ TEST_F(GroupPolicyTest, test_FullLinearLayerGroupPolicy_filterNeedWriteGroups_fa
     {  // invalid group size
         auto resource        = std::make_shared<KVCacheResource>();
         resource->cache_keys = {0, 1, 2, 3, 4};
-        resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3, 20}));
-        resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7, 21}));
-        resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, 11, 22}));
-        resource->groupBlocks().push_back(makeGroupBlockIds({12, 13, 14, 15, 23}));
-        std::vector<std::string> real;
-        resource->setLastBlockAligned(true);
-        ASSERT_FALSE(group_policy_->getNeedWriteGroups(resource, real));
+        EXPECT_ANY_THROW(setResourceBlocks(*resource,
+                                           {{"0", {0, 1, 2, 3, 20}},
+                                            {"1", {4, 5, 6, 7, 21}},
+                                            {"2", {8, 9, 10, 11, 22}},
+                                            {"3", {12, 13, 14, 15, 23}}}));
     }
 }
 
 TEST_F(GroupPolicyTest, test_FullLayerGroupPolicy_filterNeedLoadLocations_success) {
-    size_t               tp_size                         = 2;
-    std::vector<int32_t> full_group_ids                  = {0};
-    std::vector<int32_t> other_group_ids                 = {};
-    uint32_t             linear_attention_write_interval = 0;
+    size_t                   tp_size                         = 2;
+    std::vector<std::string> full_group_tags                 = {"0"};
+    std::vector<std::string> other_group_tags                = {};
+    uint32_t                 linear_attention_write_interval = 0;
     initGroupPolicy(tp_size,
                     RemoteConnectorGroupMode::RCGM_ONLY_FULL_LAYER,
                     4,
-                    full_group_ids,
-                    other_group_ids,
+                    full_group_tags,
+                    other_group_tags,
                     linear_attention_write_interval);
     EXPECT_EQ(group_policy_->reachableAggregateMasks(), (std::vector<uint64_t>{0b1}));
     EXPECT_EQ(group_policy_->location_spec_group_map_.size(), 1u);
     {
-        Locations     locations = genFullLinearLocations(tp_size, full_group_ids, other_group_ids, 4, {});
+        Locations     locations = genFullLinearLocations(tp_size, full_group_tags, other_group_tags, 4, {});
         LocationsView locations_view;
         ASSERT_TRUE(group_policy_->filterNeedLoadLocations(locations, locations_view));
-        auto expect_locations = genFullLinearLocations(tp_size, full_group_ids, other_group_ids, 4, {});
+        auto expect_locations = genFullLinearLocations(tp_size, full_group_tags, other_group_tags, 4, {});
         ASSERT_THAT(expect_locations, LocationsEqLocationsView(locations_view));
     }
 }
 
 TEST_F(GroupPolicyTest, test_FullLayerGroupPolicy_filterNeedWriteGroups_success) {
-    size_t               tp_size                         = 2;
-    std::vector<int32_t> full_group_ids                  = {0};
-    std::vector<int32_t> other_group_ids                 = {};
-    uint32_t             linear_attention_write_interval = 0;
+    size_t                   tp_size                         = 2;
+    std::vector<std::string> full_group_tags                 = {"0"};
+    std::vector<std::string> other_group_tags                = {};
+    uint32_t                 linear_attention_write_interval = 0;
     initGroupPolicy(tp_size,
                     RemoteConnectorGroupMode::RCGM_ONLY_FULL_LAYER,
                     4,
-                    full_group_ids,
-                    other_group_ids,
+                    full_group_tags,
+                    other_group_tags,
                     linear_attention_write_interval);
     {
         auto resource        = std::make_shared<KVCacheResource>();
         resource->cache_keys = {0, 1, 2, 3};
-        resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3}));
-        resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7}));
-        resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, 11}));
+        setResourceBlocks(*resource, {{"0", {0, 1, 2, 3}}});
         std::vector<std::string> real;
         resource->setLastBlockAligned(true);
         ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
@@ -1102,22 +1071,20 @@ TEST_F(GroupPolicyTest, test_FullLayerGroupPolicy_filterNeedWriteGroups_success)
 }
 
 TEST_F(GroupPolicyTest, test_DefaultLayerGroupPolicy_filterNeedWriteGroups_success) {
-    size_t               tp_size                         = 2;
-    std::vector<int32_t> full_group_ids                  = {0};
-    std::vector<int32_t> other_group_ids                 = {1, 2};
-    uint32_t             linear_attention_write_interval = 0;
+    size_t                   tp_size                         = 2;
+    std::vector<std::string> full_group_tags                 = {"0"};
+    std::vector<std::string> other_group_tags                = {"1", "2"};
+    uint32_t                 linear_attention_write_interval = 0;
     initGroupPolicy(tp_size,
                     RemoteConnectorGroupMode::RCGM_LAYER_DEFAULT,
                     4,
-                    full_group_ids,
-                    other_group_ids,
+                    full_group_tags,
+                    other_group_tags,
                     linear_attention_write_interval);
     {
         auto resource        = std::make_shared<KVCacheResource>();
         resource->cache_keys = {0, 1, 2, 3};
-        resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3}));
-        resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7}));
-        resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, 11}));
+        setResourceBlocks(*resource, {{"0", {0, 1, 2, 3}}, {"1", {4, 5, 6, 7}}, {"2", {8, 9, 10, 11}}});
         std::vector<std::string> real;
         resource->setLastBlockAligned(true);
         ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
@@ -1127,9 +1094,7 @@ TEST_F(GroupPolicyTest, test_DefaultLayerGroupPolicy_filterNeedWriteGroups_succe
     {
         auto resource        = std::make_shared<KVCacheResource>();
         resource->cache_keys = {0, 1, 2, 3};
-        resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3}));
-        resource->groupBlocks().push_back(makeGroupBlockIds({4, 5, 6, 7}));
-        resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, 10, 11}));
+        setResourceBlocks(*resource, {{"0", {0, 1, 2, 3}}, {"1", {4, 5, 6, 7}}, {"2", {8, 9, 10, 11}}});
         std::vector<std::string> real;
         resource->setLastBlockAligned(false);
         ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));
@@ -1139,9 +1104,8 @@ TEST_F(GroupPolicyTest, test_DefaultLayerGroupPolicy_filterNeedWriteGroups_succe
     {
         auto resource        = std::make_shared<KVCacheResource>();
         resource->cache_keys = {0, 1, 2, 3, 4, 5};
-        resource->groupBlocks().push_back(makeGroupBlockIds({0, 1, 2, 3, 20, -1}));
-        resource->groupBlocks().push_back(makeGroupBlockIds({4, -1, 6, 7, -1, 21}));
-        resource->groupBlocks().push_back(makeGroupBlockIds({8, 9, -1, 11, -1, 22}));
+        setResourceBlocks(*resource,
+                          {{"0", {0, 1, 2, 3, 20, -1}}, {"1", {4, -1, 6, 7, -1, 21}}, {"2", {8, 9, -1, 11, -1, 22}}});
         std::vector<std::string> real;
         resource->setLastBlockAligned(true);
         ASSERT_TRUE(group_policy_->getNeedWriteGroups(resource, real));

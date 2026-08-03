@@ -182,21 +182,21 @@ void runtimeWriteCacheStore(const CacheStoreInputs&     cache_store_inputs,
     const CacheGroupPolicy group_policy                    = policy_it->second;
     const bool             use_group_cache_transfer_policy = param.kv_cache_group_policies.size() > 1;
 
-    const auto seq_it = param.tokens_per_block_by_tag.find(param.tag);
+    const auto seq_it = param.tokens_per_block_by_group.find(param.tag);
     const auto seq_size_per_block =
-        seq_it != param.tokens_per_block_by_tag.end() ? seq_it->second : param.tokens_per_block;
-    const auto kv_stride_it = param.kv_block_stride_bytes_by_tag.find(param.tag);
+        seq_it != param.tokens_per_block_by_group.end() ? seq_it->second : param.tokens_per_block;
+    const auto kv_stride_it = param.kv_block_stride_bytes_by_group.find(param.tag);
     const auto kv_block_stride_bytes =
-        kv_stride_it != param.kv_block_stride_bytes_by_tag.end() ? kv_stride_it->second : param.kv_block_stride_bytes;
-    const auto scale_stride_it       = param.kv_scale_stride_bytes_by_tag.find(param.tag);
-    const auto kv_scale_stride_bytes = scale_stride_it != param.kv_scale_stride_bytes_by_tag.end() ?
+        kv_stride_it != param.kv_block_stride_bytes_by_group.end() ? kv_stride_it->second : param.kv_block_stride_bytes;
+    const auto scale_stride_it       = param.kv_scale_stride_bytes_by_group.find(param.tag);
+    const auto kv_scale_stride_bytes = scale_stride_it != param.kv_scale_stride_bytes_by_group.end() ?
                                            scale_stride_it->second :
                                            param.kv_scale_stride_bytes;
-    const auto kv_transfer_it        = param.kv_block_transfer_bytes_by_tag.find(param.tag);
+    const auto kv_transfer_it        = param.kv_block_transfer_bytes_by_group.find(param.tag);
     const auto kv_block_transfer_bytes =
-        kv_transfer_it != param.kv_block_transfer_bytes_by_tag.end() ? kv_transfer_it->second : kv_block_stride_bytes;
-    const auto scale_transfer_it       = param.kv_scale_transfer_bytes_by_tag.find(param.tag);
-    const auto kv_scale_transfer_bytes = scale_transfer_it != param.kv_scale_transfer_bytes_by_tag.end() ?
+        kv_transfer_it != param.kv_block_transfer_bytes_by_group.end() ? kv_transfer_it->second : kv_block_stride_bytes;
+    const auto scale_transfer_it       = param.kv_scale_transfer_bytes_by_group.find(param.tag);
+    const auto kv_scale_transfer_bytes = scale_transfer_it != param.kv_scale_transfer_bytes_by_group.end() ?
                                              scale_transfer_it->second :
                                              kv_scale_stride_bytes;
     RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0, "cache-store tag=%s has zero tokens_per_block", param.tag.c_str());

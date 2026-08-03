@@ -73,23 +73,6 @@ std::vector<std::shared_ptr<LayerCacheBuffer>> LayerCacheBufferUtil::convert(
     return layer_cache_buffers;
 }
 
-std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(KVCacheResource& resource,
-                                                                     int              batch_id,
-                                                                     int              layer_id,
-                                                                     int              start_block_idx,
-                                                                     int              block_count,
-                                                                     int              cp_rank,
-                                                                     int              cp_size) {
-    return convertLayer(resource,
-                        batch_id,
-                        layer_id,
-                        resource.soleGroupTagForLayer(layer_id),
-                        start_block_idx,
-                        block_count,
-                        cp_rank,
-                        cp_size);
-}
-
 std::shared_ptr<LayerCacheBuffer> LayerCacheBufferUtil::convertLayer(KVCacheResource&   resource,
                                                                      int                batch_id,
                                                                      int                layer_id,
@@ -154,7 +137,7 @@ LayerCacheBufferUtil::buildKeyBlockInfos(const std::shared_ptr<LayerBlockConvert
     int                       layer_id = layer_cache_buffer->getLayerId();
 
     for (const auto& [cache_key, block_id] : layer_cache_buffer->blockIdMap()) {
-        auto block_infos = converter->convertIndexToBufferByTag(
+        auto block_infos = converter->convertIndexToBuffer(
             layer_id, layer_cache_buffer->cacheTag(), block_id, partition_count, partition_id);
 
         transfer::KeyBlockInfo kbi;

@@ -5,11 +5,13 @@
 #include "rtp_llm/cpp/model_rpc/DecodeGenerateContext.h"
 #include "rtp_llm/cpp/cache/Types.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
+#include <map>
 
 namespace rtp_llm {
 
 class DecodeRpcServer: public RemoteRpcServer {
 public:
+    using BlockIdsByGroup = std::map<std::string, std::shared_ptr<BlockIds>>;
     DecodeRpcServer() {}
     ~DecodeRpcServer();
     grpc::Status init(const EngineInitParams&                                maga_init_params,
@@ -28,7 +30,7 @@ public:
                            const std::string&               request_key,
                            const std::vector<std::string>&  peer_addrs,
                            const std::vector<CacheKeyType>& cache_keys,
-                           const GroupBlockIds&             block_ids_by_group,
+                           BlockIdsByGroup                  block_ids_by_group,
                            int64_t                          reuse_block_size,
                            int64_t                          timeout_ms,
                            int                              partition_count,
@@ -39,7 +41,7 @@ public:
             request_key(request_key),
             peer_addrs(peer_addrs),
             cache_keys(cache_keys),
-            block_ids_by_group(block_ids_by_group),
+            block_ids_by_group(std::move(block_ids_by_group)),
             reuse_block_size(reuse_block_size),
             timeout_ms(timeout_ms),
             partition_count(partition_count),
@@ -50,7 +52,7 @@ public:
         const std::string&               request_key;
         const std::vector<std::string>&  peer_addrs;
         const std::vector<CacheKeyType>& cache_keys;
-        const GroupBlockIds&             block_ids_by_group;
+        BlockIdsByGroup                  block_ids_by_group;
         int64_t                          reuse_block_size;
         int64_t                          timeout_ms;
         int                              partition_count;
@@ -84,8 +86,8 @@ private:
     BroadcastLoadRequestPB constructRemoteLoadRequestForMla(const LoadKVCacheContext&       load_context,
                                                             int                             index,
                                                             const std::vector<std::string>& peer_ips) const;
-    static GroupBlockIds   decodeGroupBlockIds(const BroadcastLoadRequestPB& request, const CacheTopology& topology);
-    static std::string     makeTaggedRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
+    static BlockIdsByGroup decodeGroupBlockIds(const BroadcastLoadRequestPB& request, const CacheTopology& topology);
+    static std::string     makeGroupRequestKey(int64_t request_id, size_t layer_id, const std::string& tag);
     static std::string
     makeMTPModuleCacheKey(size_t mtp_base_model_id, const std::string& token_id_str, size_t layer_id);
     static std::vector<MTPModuleLoadPlan> makeMTPModuleLoadPlan(const ProposeModelEngineInitParams* propose_params);

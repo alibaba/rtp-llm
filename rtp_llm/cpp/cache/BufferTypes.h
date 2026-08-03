@@ -1,5 +1,6 @@
 #pragma once
 
+#include <algorithm>
 #include <map>
 #include <memory>
 #include <string>
@@ -66,7 +67,7 @@ private:
 };
 
 // Canonical KV-cache buffer layout: semantic group tag -> dense all-layer
-// layout. CacheTopology is the sole owner of group metadata and numeric group ids.
+// layout. CacheTopology is the sole owner of group metadata.
 class GroupedCacheLayerLayout {
 public:
     using GroupLayouts = std::map<std::string, CacheLayerLayout>;
@@ -89,6 +90,17 @@ public:
                                     group_config.tag.c_str(),
                                     it->second.size(),
                                     topology_->layers().size());
+            for (size_t layer_id = 0; layer_id < topology_->layers().size(); ++layer_id) {
+                const auto& layer_tags = topology_->layer(static_cast<int>(layer_id)).group_tags;
+                const bool  owns_layer =
+                    std::find(layer_tags.begin(), layer_tags.end(), group_config.tag) != layer_tags.end();
+                RTP_LLM_CHECK_WITH_INFO(it->second.hasLayer(layer_id) == owns_layer,
+                                        "GroupedCacheLayerLayout tag=%s layer=%zu active=%d topology membership=%d",
+                                        group_config.tag.c_str(),
+                                        layer_id,
+                                        it->second.hasLayer(layer_id),
+                                        owns_layer);
+            }
         }
     }
 
@@ -99,35 +111,13 @@ public:
         return it->second;
     }
 
-    const CacheLayerLayout& group(size_t group_id) const {
-        return group(topology().groupById(group_id).tag);
-    }
-
     const BlockBufferPtrInfo& at(std::string_view tag, size_t layer_id) const {
+        topology().groupForLayer(static_cast<int>(layer_id), tag);
         return group(tag).at(layer_id);
     }
 
-    const BlockBufferPtrInfo& at(size_t group_id, size_t layer_id) const {
-        return group(group_id).at(layer_id);
-    }
-
-    // Layer-only access is valid only when exactly one group has data for the
-    // requested layer.
-    const BlockBufferPtrInfo& at(size_t layer_id) const {
-        const BlockBufferPtrInfo* result = nullptr;
-        size_t                    count  = 0;
-        for (const auto& [tag, layout] : groups_) {
-            (void)tag;
-            if (layout.hasLayer(layer_id)) {
-                result = &layout.at(layer_id);
-                ++count;
-            }
-        }
-        RTP_LLM_CHECK_WITH_INFO(count == 1,
-                                "GroupedCacheLayerLayout layer=%zu requires exactly one active group, got %zu",
-                                layer_id,
-                                count);
-        return *result;
+    const std::vector<std::string>& groupTagsForLayer(int layer_id) const {
+        return topology().layer(layer_id).group_tags;
     }
 
     const GroupLayouts& groups() const noexcept {
@@ -136,10 +126,6 @@ public:
 
     bool hasGroupData(std::string_view tag) const {
         return !group(tag).empty();
-    }
-
-    size_t groupId(std::string_view tag) const {
-        return topology().groupIdForTag(tag);
     }
 
     const CacheTopology& topology() const {

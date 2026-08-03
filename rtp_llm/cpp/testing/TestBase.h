@@ -225,7 +225,12 @@ protected:
         RTP_LLM_CHECK_WITH_INFO(cache_config.groupNums() == 1,
                                 "DeviceTestBase::allocateKVBlocks requires exactly one cache group, got %d",
                                 cache_config.groupNums());
-        const auto& cache_tag = cache_config.topology().soleGroupForLayer(0).tag;
+        const auto groups = cache_config.topology().groupsForLayer(0);
+        RTP_LLM_CHECK_WITH_INFO(groups.size() == 1, "TestBase requires exactly one cache group for layer 0");
+        std::string cache_tag;
+        for (const auto& group : groups) {
+            cache_tag = group.get().tag;
+        }
 
         for (size_t i = 0; i < batch_size; i++) {
             const auto& indices = batch_kv_cache->blocks(static_cast<int>(i), cache_tag);
@@ -237,8 +242,8 @@ protected:
                 auto       k_indexs       = indices;
                 const auto max_k_blocks   = max_pad_seq / cache_config.seq_size_per_block;
                 const auto blocks_to_fill = std::min<size_t>(max_k_blocks, k_indexs.size());
-                const auto spec           = cache_config.specForGroup(0);
-                const auto local_kv_heads = cache_config.localKvHeadNumForGroup(0);
+                const auto spec           = cache_config.specForGroup(cache_tag);
+                const auto local_kv_heads = cache_config.localKvHeadNumForGroup(cache_tag);
                 RTP_LLM_CHECK_WITH_INFO(local_kv_heads > 0, "local_head_num_kv must be positive");
                 const auto elems_per_kv_block   = spec->k_block_size();
                 const auto elems_per_head_block = static_cast<size_t>(local_kv_heads) * cache_config.seq_size_per_block;
@@ -297,7 +302,7 @@ protected:
                     }
                     // std::cout << "index: " << k << " start: " << block_start << " end: " << block_end << std::endl;
                     // std::cout << "block index: " << k_indexs[k] << std::endl;
-                    if (!cache_manager_->setKVBlockValue(k_indexs[k], kblock, vblock)) {
+                    if (!cache_manager_->setKVBlockValue(k_indexs[k], cache_tag, kblock, vblock)) {
                         std::cout << "setKVBlockValue failed for block index: " << k_indexs[k] << std::endl;
                         return torch::Tensor();
                     }

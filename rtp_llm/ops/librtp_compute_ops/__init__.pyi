@@ -127,7 +127,6 @@ class LayerKVCache:
         kv_cache_base: torch.Tensor,
         seq_size_per_block: int,
         layer_id: int = -1,
-        group_id: int = -1,
         tag: str = "default",
         kv_scale_base: torch.Tensor | None = None,
     ) -> None: ...
@@ -154,12 +153,6 @@ class LayerKVCache:
         """
 
     @property
-    def group_id(self) -> int:
-        """
-        Cache group id (-1 = default)
-        """
-
-    @property
     def tag(self) -> str:
         """
         Cache group tag
@@ -175,14 +168,7 @@ class KVCache:
     """Read-only whole-model KV cache created by the C++ runtime."""
 
     @property
-    def group_tags(self) -> list[str]: ...
-    @property
     def layer_count(self) -> int: ...
-    @typing.overload
-    def get_layer_cache(self, arg0: int) -> LayerKVCache:
-        """Return a per-layer LayerKVCache for the given global layer id."""
-        ...
-    @typing.overload
     def get_layer_cache(self, arg0: int, arg1: str) -> LayerKVCache:
         """Return a LayerKVCache for the given layer and tag."""
         ...

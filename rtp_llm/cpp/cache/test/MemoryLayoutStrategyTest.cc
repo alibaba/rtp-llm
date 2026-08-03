@@ -8,6 +8,7 @@
 #include "rtp_llm/cpp/cache/MemoryLayoutStrategy.h"
 #include "rtp_llm/cpp/cache/CacheConfig.h"
 #include "rtp_llm/cpp/cache/BlockPoolConfigHelper.h"
+#include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
 #include "rtp_llm/cpp/utils/Exception.h"
 #include "rtp_llm/models_py/bindings/core/ExecOps.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
@@ -167,7 +168,9 @@ protected:
     static void initializeSingleGroup(rtp_llm::CacheConfig& cache_config, const KVCacheSpecPtr& spec) {
         std::vector<int> layer_ids(cache_config.layer_num);
         std::iota(layer_ids.begin(), layer_ids.end(), 0);
-        cache_config.fromGroupedSpecs({spec}, {layer_ids}, {CacheGroupType::FULL}, {"default"});
+        setTestTopology(
+            cache_config,
+            {makeTestGroupForConfig(cache_config, spec, std::move(layer_ids), CacheGroupType::FULL, "default")});
         if (auto test_spec = std::dynamic_pointer_cast<TestKVCacheSpec>(spec)) {
             auto groups                 = cache_config.topology().groups();
             groups[0].local_kv_head_num = test_spec->local_kv_head_num;
