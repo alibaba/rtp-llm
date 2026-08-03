@@ -11,6 +11,7 @@ from rtp_llm.config.py_config_modules import GenerateEnvConfig, RenderConfig
 from rtp_llm.openai.api_datatype import ChatCompletionRequest
 from rtp_llm.openai.renderers.custom_renderer import RendererParams
 from rtp_llm.openai.renderers.minimax_m3_renderer import MiniMaxM3Renderer
+from rtp_llm.openai.renderers.minimax_m3_vl_renderer import MiniMaxM3VLRenderer
 from rtp_llm.openai.renderers.sglang_helpers.entrypoints.openai.protocol import (
     Function,
     Tool,
@@ -20,6 +21,7 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.minimax_m3_detector i
     MiniMaxM3Detector,
 )
 from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import ReasoningParser
+from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 MINIMAX_M3_PATH = Path(
     os.environ.get("MINIMAX_M3_PATH", "/data7/brucelee.ly/models/MiniMax-M3-MXFP8")
@@ -378,6 +380,11 @@ class FakeTokenizer:
     def convert_tokens_to_ids(self, token: str) -> int:
         return 7
 
+    def apply_chat_template(self, messages, **kwargs) -> str:
+        self.applied_messages = messages
+        self.applied_kwargs = kwargs
+        return "rendered multimodal prompt"
+
 
 def build_renderer(tokenizer, ckpt_path: str = "") -> MiniMaxM3Renderer:
     params = RendererParams(
@@ -388,6 +395,19 @@ def build_renderer(tokenizer, ckpt_path: str = "") -> MiniMaxM3Renderer:
         ckpt_path=ckpt_path,
     )
     return MiniMaxM3Renderer(
+        tokenizer, params, GenerateEnvConfig(), RenderConfig(), ckpt_path
+    )
+
+
+def build_vl_renderer(tokenizer, ckpt_path: str = "") -> MiniMaxM3VLRenderer:
+    params = RendererParams(
+        model_type="minimax_m3_vl",
+        max_seq_len=8192,
+        eos_token_id=tokenizer.eos_token_id,
+        stop_word_ids_list=[],
+        ckpt_path=ckpt_path,
+    )
+    return MiniMaxM3VLRenderer(
         tokenizer, params, GenerateEnvConfig(), RenderConfig(), ckpt_path
     )
 
@@ -468,6 +488,78 @@ class MiniMaxM3RendererTest(TestCase):
         self.assertIsNone(self.renderer._create_detector(without_tools))
 
 
+class MiniMaxM3VLRendererTest(TestCase):
+    def setUp(self):
+        self.tokenizer = FakeTokenizer()
+        self.renderer = build_vl_renderer(self.tokenizer)
+
+    def test_reuses_m3_reasoning_and_tool_detectors(self):
+        request = ChatCompletionRequest(
+            messages=[{"role": "user", "content": "plan my finals"}],
+            tools=[PLAN_TOOL_DEFINITION],
+        )
+
+        self.assertIsInstance(self.renderer, MiniMaxM3Renderer)
+        self.assertIsInstance(
+            self.renderer._create_detector(request), MiniMaxM3Detector
+        )
+        reasoning, content = self.renderer._create_reasoning_parser(
+            request
+        ).parse_non_stream("<mm:think>reasoning</mm:think>answer")
+        self.assertEqual(reasoning, "reasoning")
+        self.assertEqual(content, "answer")
+
+    def test_multimodal_render_keeps_inputs_and_preprocesses_tool_calls(self):
+        request = ChatCompletionRequest(
+            messages=[
+                {
+                    "role": "assistant",
+                    "content": "",
+                    "tool_calls": [
+                        {
+                            "id": "call_1",
+                            "type": "function",
+                            "function": {
+                                "name": "make_plan",
+                                "arguments": '{"start_date": "2025-11-10"}',
+                            },
+                        }
+                    ],
+                },
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.com/image.jpg"},
+                        },
+                        {"type": "text", "text": "plan my finals"},
+                    ],
+                },
+            ],
+            tools=[PLAN_TOOL_DEFINITION],
+        )
+
+        rendered = self.renderer.render_chat(request)
+
+        self.assertEqual(len(rendered.multimodal_inputs), 1)
+        self.assertEqual(
+            rendered.multimodal_inputs[0].url, "https://example.com/image.jpg"
+        )
+        self.assertEqual(rendered.multimodal_inputs[0].mm_type, MMUrlType.IMAGE)
+        self.assertEqual(
+            self.tokenizer.applied_messages[0]["tool_calls"][0]["function"][
+                "arguments"
+            ],
+            {"start_date": "2025-11-10"},
+        )
+        self.assertEqual(
+            self.tokenizer.applied_kwargs["tools"][0]["function"]["name"],
+            "make_plan",
+        )
+        self.assertEqual(self.tokenizer.applied_kwargs["thinking_mode"], "adaptive")
+
+
 @skipUnless(_HAS_MODEL, f"MiniMax-M3 tokenizer not found at {MINIMAX_M3_PATH}")
 class MiniMaxM3RealTokenizerTest(TestCase):
     @classmethod
@@ -478,6 +570,7 @@ class MiniMaxM3RealTokenizerTest(TestCase):
             str(MINIMAX_M3_PATH), trust_remote_code=True
         )
         cls.renderer = build_renderer(cls.tokenizer, str(MINIMAX_M3_PATH))
+        cls.vl_renderer = build_vl_renderer(cls.tokenizer, str(MINIMAX_M3_PATH))
         cls.tools = [PLAN_TOOL_DEFINITION]
         cls.messages = [{"role": "user", "content": "plan my finals"}]
 
@@ -511,8 +604,35 @@ class MiniMaxM3RealTokenizerTest(TestCase):
 
         rendered = self.renderer.render_chat(request)
 
+        self.assertEqual(len(rendered.input_ids), len(self.tokenizer.encode(reference)))
+
+    def test_vl_prompt_keeps_image_input_and_tools(self):
+        request = ChatCompletionRequest(
+            messages=[
+                {
+                    "role": "user",
+                    "content": [
+                        {
+                            "type": "image_url",
+                            "image_url": {"url": "https://example.com/image.jpg"},
+                        },
+                        {"type": "text", "text": "describe the image"},
+                    ],
+                }
+            ],
+            tools=self.tools,
+        )
+
+        rendered = self.vl_renderer.render_chat(request)
+
+        self.assertIn("]<]image[>[", rendered.rendered_prompt)
+        self.assertIn("make_plan", rendered.rendered_prompt)
+        self.assertEqual(len(rendered.multimodal_inputs), 1)
         self.assertEqual(
-            len(rendered.input_ids), len(self.tokenizer.encode(reference))
+            rendered.multimodal_inputs[0].url, "https://example.com/image.jpg"
+        )
+        self.assertIsInstance(
+            self.vl_renderer._create_detector(request), MiniMaxM3Detector
         )
 
     def test_rendered_tool_call_round_trips_through_detector(self):

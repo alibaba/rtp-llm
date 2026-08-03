@@ -11,13 +11,14 @@ from rtp_llm.openai.api_datatype import (
     ContentPartTypeEnum,
 )
 from rtp_llm.openai.renderer_factory_register import register_renderer
-from rtp_llm.openai.renderers.basic_renderer import BasicRenderer, PromptWithMMInput
+from rtp_llm.openai.renderers.basic_renderer import PromptWithMMInput
 from rtp_llm.openai.renderers.custom_renderer import RenderedInputs, RendererParams
 from rtp_llm.openai.renderers.llava_renderer import get_preprocess_config
+from rtp_llm.openai.renderers.minimax_m3_renderer import MiniMaxM3Renderer
 from rtp_llm.utils.base_model_datatypes import MMUrlType
 
 
-class MiniMaxM3VLRenderer(BasicRenderer):
+class MiniMaxM3VLRenderer(MiniMaxM3Renderer):
     """OpenAI chat renderer for MiniMax-M3 VL.
 
     The MiniMax-M3 Jinja `chat_template` (shipped with the HF tokenizer)
@@ -112,6 +113,8 @@ class MiniMaxM3VLRenderer(BasicRenderer):
                 msg_dict["tool_call_id"] = message.tool_call_id
 
             final_messages.append(msg_dict)
+
+        final_messages = self._preprocess_messages(final_messages)
 
         final_tools: List[Dict[str, Any]] = []
         if request.tools:
