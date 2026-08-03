@@ -164,7 +164,7 @@ public class SloBudgetBatcherAlgorithm implements BatcherAlgorithm {
 
             BatchShape candidate = shape.add(c);
             if (!candidate.fitsCompute(batchMaxTokens) || !candidate.fitsKv(batchKvTokens)) {
-                continue;
+                break;
             }
 
             List<BatchItem> trial = new ArrayList<>(picked.size() + 1);

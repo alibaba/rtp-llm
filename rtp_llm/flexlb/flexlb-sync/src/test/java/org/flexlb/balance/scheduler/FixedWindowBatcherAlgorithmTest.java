@@ -211,7 +211,9 @@ class FixedWindowBatcherAlgorithmTest {
         BatchDecisionHandler handler = mock(BatchDecisionHandler.class);
         BatcherContext context = context(
                 "test", endpoint, config, handler,
-                queueWith(enqueuedItem(1, now, 60), enqueuedItem(2, now + 1, 20)),
+                queueWith(enqueuedItem(1, now, 60),
+                        enqueuedItem(2, now + 1, 20),
+                        enqueuedItem(3, now + 2, 5)),
                 mock(BatchSchedulerReporter.class));
 
         new FixedWindowBatcherAlgorithm().processQueue(context);
@@ -219,7 +221,8 @@ class FixedWindowBatcherAlgorithmTest {
         ArgumentCaptor<List<BatchItem>> dispatched = ArgumentCaptor.forClass(List.class);
         verify(handler).onBatchReady(dispatched.capture(), org.mockito.ArgumentMatchers.any());
         assertEquals(List.of(1L), dispatched.getValue().stream().map(BatchItem::requestId).toList());
-        assertEquals(1, context.size());
+        assertEquals(2, context.size());
+        assertEquals(2L, context.peek().requestId());
     }
 
     @Test

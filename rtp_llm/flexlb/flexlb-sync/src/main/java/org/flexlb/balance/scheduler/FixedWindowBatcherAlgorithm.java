@@ -218,10 +218,10 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
             }
             BatchShape candidate = shape.add(item);
             if (!candidate.fitsCompute(batchMaxTokens)) {
-                continue;
+                break;
             }
             if (!picked.isEmpty() && !candidate.fitsKv(batchKvTokens)) {
-                continue;
+                break;
             }
             picked.add(item);
             shape = candidate;

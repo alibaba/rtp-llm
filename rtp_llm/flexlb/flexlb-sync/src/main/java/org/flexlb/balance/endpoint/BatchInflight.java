@@ -13,28 +13,26 @@ final class BatchInflight implements InflightEvictor.TtlTracked {
     private final long createdAtMs;
     private final AtomicLong progressBaseMs;
     private volatile boolean running;
-    private final boolean partiallyCompleted;
 
     BatchInflight(long predictTimeMs, List<BatchItem> requests) {
-        this(predictTimeMs, List.copyOf(requests), System.currentTimeMillis());
+        this(predictTimeMs, requests, System.currentTimeMillis());
     }
 
-    private BatchInflight(long predictTimeMs, List<BatchItem> requests, long nowMs) {
-        this(predictTimeMs, requests, nowMs, nowMs, false, false);
+    private BatchInflight(long predictTimeMs,
+                          List<BatchItem> requests, long nowMs) {
+        this(predictTimeMs, requests, nowMs, nowMs, false);
     }
 
     private BatchInflight(long predictTimeMs,
                           List<BatchItem> requests,
                           long createdAtMs,
                           long progressBaseMs,
-                          boolean running,
-                          boolean partiallyCompleted) {
+                          boolean running) {
         this.predictTimeMs = predictTimeMs;
-        this.requests = List.copyOf(requests);
+        this.requests = requests;
         this.createdAtMs = createdAtMs;
         this.progressBaseMs = new AtomicLong(progressBaseMs);
         this.running = running;
-        this.partiallyCompleted = partiallyCompleted;
     }
 
     long predictTimeMs() {
@@ -43,10 +41,6 @@ final class BatchInflight implements InflightEvictor.TtlTracked {
 
     List<BatchItem> requests() {
         return requests;
-    }
-
-    boolean partiallyCompleted() {
-        return partiallyCompleted;
     }
 
     @Override
@@ -73,6 +67,6 @@ final class BatchInflight implements InflightEvictor.TtlTracked {
 
     BatchInflight repack(long newPredictTimeMs, List<BatchItem> newRequests) {
         return new BatchInflight(newPredictTimeMs, newRequests,
-                createdAtMs, progressBaseMs(), running, true);
+                createdAtMs, progressBaseMs(), running);
     }
 }
