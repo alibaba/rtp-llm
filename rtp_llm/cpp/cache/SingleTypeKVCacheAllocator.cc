@@ -126,7 +126,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
             return rollback();
         }
         const size_t ready_blocks = match_result.matched_device_blocks;
-        reuse_blocks = load_context && !load_context->empty() ? load_context->logicalMatchedBlocks() : ready_blocks;
+        reuse_blocks = load_context && !load_context->empty() ? load_context->matchedBlocks() : ready_blocks;
         BlockIndicesType ready_group_blocks = block_tree_cache_->matchedBlocksForGroup(0, matched_resources);
         block_ids_0.assign(BlockIndicesType(reuse_blocks, NULL_BLOCK_IDX));
         for (size_t i = 0; i < ready_group_blocks.size(); ++i) {
@@ -249,8 +249,8 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     MallocResult result{true, reuse_len, match_cost_time_us, load_context};
     if (load_context != nullptr && reuse_blocks > 0) {
         const int reuse_unit_tokens = reuse_len / static_cast<int>(reuse_blocks);
-        result.memory_reuse_len = static_cast<int>(load_context->logicalMatchedBlocks(Tier::HOST)) * reuse_unit_tokens;
-        result.disk_reuse_len   = static_cast<int>(load_context->logicalMatchedBlocks(Tier::DISK)) * reuse_unit_tokens;
+        result.memory_reuse_len     = static_cast<int>(load_context->matchedBlocks(Tier::HOST)) * reuse_unit_tokens;
+        result.disk_reuse_len       = static_cast<int>(load_context->matchedBlocks(Tier::DISK)) * reuse_unit_tokens;
     }
     return result;
 }

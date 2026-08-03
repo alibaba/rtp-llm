@@ -94,23 +94,31 @@ protected:
     }
 
     std::shared_ptr<LoadAsyncContext> createRegisteredContext(std::vector<TransferDescriptor> load_descs,
-                                                              std::vector<bool>                  joined_load,
-                                                              size_t                             logical_matched_blocks,
-                                                              size_t pending_transfer_count) {
-        const std::shared_ptr<LoadAsyncContext> context = coordinator_->create(
-            std::move(load_descs), std::move(joined_load), logical_matched_blocks, pending_transfer_count);
+                                                              std::vector<bool>               joined_load,
+                                                              size_t                          matched_blocks) {
+        const std::shared_ptr<LoadAsyncContext> context =
+            coordinator_->create(std::move(load_descs), std::move(joined_load), matched_blocks);
         if (!coordinator_->registerContext(context)) {
             return nullptr;
         }
         return context;
     }
 
-    std::shared_ptr<LoadAsyncContext> makeContext(size_t pending_transfer_count) {
-        return createRegisteredContext({makePendingHostDescriptor()}, {false}, 1, pending_transfer_count);
+    std::shared_ptr<LoadAsyncContext> makeContext(size_t transfer_count) {
+        std::vector<TransferDescriptor> load_descs;
+        if (transfer_count == 0) {
+            TransferDescriptor desc;
+            desc.source_tier = Tier::DEVICE;
+            load_descs.push_back(std::move(desc));
+        } else {
+            load_descs.assign(transfer_count, makePendingHostDescriptor());
+        }
+        std::vector<bool> joined_load(load_descs.size(), false);
+        return createRegisteredContext(std::move(load_descs), std::move(joined_load), 1);
     }
 
-    std::shared_ptr<LoadAsyncContext> makeCommittedContext(size_t pending_transfer_count) {
-        const std::shared_ptr<LoadAsyncContext> context = makeContext(pending_transfer_count);
+    std::shared_ptr<LoadAsyncContext> makeCommittedContext(size_t transfer_count) {
+        const std::shared_ptr<LoadAsyncContext> context = makeContext(transfer_count);
         if (context == nullptr || !context->commit()) {
             return nullptr;
         }
@@ -122,7 +130,7 @@ protected:
     std::shared_ptr<LoadContextCoordinator> coordinator_;
 };
 
-TEST_F(LoadAsyncContextTest, KeepsJoinedMetadataOutsidePendingDescriptor) {
+TEST_F(LoadAsyncContextTest, InitializesJoinedTargetBlocks) {
     TransferDescriptor first;
     first.group_set_id  = 3;
     first.path_index    = 5;
@@ -134,11 +142,11 @@ TEST_F(LoadAsyncContextTest, KeepsJoinedMetadataOutsidePendingDescriptor) {
     joined.path_index           = 6;
     joined.source_tier          = Tier::DISK;
     joined.source_blocks        = {12};
-    joined.target_blocks = {21};
 
-    const std::shared_ptr<LoadAsyncContext> context = createRegisteredContext({first, joined}, {false, true}, 7, 2);
+    const std::shared_ptr<LoadAsyncContext> context = createRegisteredContext({first, joined}, {false, true}, 7);
     ASSERT_NE(context, nullptr);
 
+    context->initializeJoinedTargetBlocks(1, {21});
     EXPECT_EQ(context->load_descs_.size(), 2u);
     EXPECT_FALSE(context->joined_load_[0]);
     EXPECT_TRUE(context->joined_load_[1]);
@@ -165,14 +173,14 @@ TEST_F(LoadAsyncContextTest, CountsStrongestTierOncePerPath) {
     disk.source_tier                       = Tier::DISK;
 
     const std::shared_ptr<LoadAsyncContext> context =
-        createRegisteredContext({device, host, disk}, {false, false, false}, 9, 3);
+        createRegisteredContext({device, host, disk}, {false, false, false}, 9);
     ASSERT_NE(context, nullptr);
 
-    EXPECT_EQ(context->logicalMatchedBlocks(), 9u);
-    EXPECT_EQ(context->logicalMatchedBlocks(Tier::DEVICE), 0u);
-    EXPECT_EQ(context->logicalMatchedBlocks(Tier::HOST), 1u);
-    EXPECT_EQ(context->logicalMatchedBlocks(Tier::DISK), 1u);
-    EXPECT_EQ(context->logicalMatchedBlocks(Tier::NONE), 0u);
+    EXPECT_EQ(context->matchedBlocks(), 9u);
+    EXPECT_EQ(context->matchedBlocks(Tier::DEVICE), 0u);
+    EXPECT_EQ(context->matchedBlocks(Tier::HOST), 1u);
+    EXPECT_EQ(context->matchedBlocks(Tier::DISK), 1u);
+    EXPECT_EQ(context->matchedBlocks(Tier::NONE), 0u);
     context->abort();
 }
 
@@ -181,7 +189,7 @@ TEST_F(LoadAsyncContextTest, ResidentTargetMustPreserveSourceIdentity) {
     resident.source_tier   = Tier::DEVICE;
     resident.source_blocks = {31, 32};
 
-    const std::shared_ptr<LoadAsyncContext> context = createRegisteredContext({resident}, {false}, 1, 1);
+    const std::shared_ptr<LoadAsyncContext> context = createRegisteredContext({resident}, {false}, 1);
     ASSERT_NE(context, nullptr);
 
     EXPECT_FALSE(context->bindTargetDeviceBlocks(0, {41, 42}));

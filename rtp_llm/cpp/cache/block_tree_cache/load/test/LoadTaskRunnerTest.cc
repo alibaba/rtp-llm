@@ -35,7 +35,7 @@ TEST(LoadTaskRunnerTest, CreateTaskAllowsNoTransferDescriptors) {
     joined_desc.source_tier                                   = Tier::HOST;
     const std::shared_ptr<LoadContextCoordinator> coordinator = std::make_shared<LoadContextCoordinator>(
         LoadContextCoordinator::CommitCallback{}, LoadContextCoordinator::AbortCallback{});
-    const std::shared_ptr<LoadAsyncContext> context = coordinator->create({joined_desc}, {true}, 1, 1);
+    const std::shared_ptr<LoadAsyncContext> context = coordinator->create({joined_desc}, {true}, 1);
     LoadTaskRunner::TaskPtr                 task    = runner.createTask({joined_desc}, {true}, {group}, context);
     EXPECT_EQ(task, nullptr);
 }

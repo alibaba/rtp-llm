@@ -6,18 +6,6 @@
 
 namespace rtp_llm {
 
-bool LoadJoinRegistry::getTargetBlocks(TreeNode*                  node,
-                                       size_t                     group_set_id,
-                                       std::vector<BlockIdxType>& target_blocks) const {
-    target_blocks.clear();
-    const auto record_it = records_.find(Key{node, group_set_id});
-    if (record_it == records_.end()) {
-        return false;
-    }
-    target_blocks = record_it->second.target_blocks;
-    return true;
-}
-
 bool LoadJoinRegistry::start(TreeNode*                                node,
                              size_t                                   group_set_id,
                              const std::vector<BlockIdxType>&         target_blocks,
@@ -27,21 +15,28 @@ bool LoadJoinRegistry::start(TreeNode*                                node,
     return insert_result.second;
 }
 
-bool LoadJoinRegistry::join(TreeNode*                                node,
-                            size_t                                   group_set_id,
-                            const std::shared_ptr<LoadAsyncContext>& context,
-                            std::vector<BlockIdxType>&               target_blocks) {
-    target_blocks.clear();
-    const auto record_it = records_.find(Key{node, group_set_id});
-    if (record_it == records_.end()) {
-        return false;
+bool LoadJoinRegistry::join(const std::shared_ptr<LoadAsyncContext>& context) {
+    const std::vector<TransferDescriptor>& load_descs   = context->loadDescs();
+    const std::vector<bool>&               joined_loads = context->joinedLoads();
+    const uint64_t                         context_id   = context->contextId();
+    for (size_t desc_index = 0; desc_index < load_descs.size(); ++desc_index) {
+        if (!joined_loads[desc_index]) {
+            continue;
+        }
+        const TransferDescriptor& desc      = load_descs[desc_index];
+        const auto                record_it = records_.find(Key{desc.node, desc.group_set_id});
+        if (record_it == records_.end()) {
+            RTP_LLM_LOG_ERROR("failed to attach joined load context, group_set_id=%zu", desc.group_set_id);
+            return false;
+        }
+        if (record_it->second.contexts.find(context_id) == record_it->second.contexts.end()) {
+            record_it->second.contexts[context_id] = context;
+        }
+        context->initializeJoinedTargetBlocks(desc_index, record_it->second.target_blocks);
+        tree_->groupSets()[desc.group_set_id]->referenceBlocks(
+            MultiNodeResource{desc.group_set_id, Tier::DEVICE, {{desc.node, desc.target_blocks}}},
+            BlockRefType::REQUEST);
     }
-    const uint64_t                     context_id = context->contextId();
-    const Record::ContextMap::iterator context_it = record_it->second.contexts.find(context_id);
-    if (context_it == record_it->second.contexts.end()) {
-        record_it->second.contexts[context_id] = context;
-    }
-    target_blocks = record_it->second.target_blocks;
     return true;
 }
 

@@ -22,7 +22,7 @@ class BlockTreeTaskPool;
 struct BlockTreeMatchResult {
     size_t                         matched_device_blocks{0};
     std::vector<MultiNodeResource> matched_device_resources;
-    std::shared_ptr<AsyncContext>  async_context;
+    std::shared_ptr<LoadAsyncContext> async_context;
 };
 
 // Owns matching and the complete lower-tier-to-device load workflow.
@@ -55,18 +55,12 @@ public:
 private:
     bool validMatch(std::vector<TreeNode*>& path, std::vector<bool>& candidate_valid) const;
     BlockTreeMatchResult createMatchResult(std::vector<TreeNode*>& path);
-    std::shared_ptr<LoadAsyncContext> createLoadContext(std::vector<TransferDescriptor>& load_descs,
-                                                        const std::vector<bool>&         joined_load,
-                                                        size_t                           logical_matched_blocks);
-    bool prepareJoinedLoadDescriptor(TransferDescriptor& desc);
-    void reserveLoadDescriptors(const std::vector<TransferDescriptor>& load_descs,
-                                const std::vector<bool>&               joined_load);
     bool commitLoad(const std::shared_ptr<LoadAsyncContext>& context);
     void abortLoad(LoadAsyncContext& context);
-    void abortLoadLocked(const std::vector<TransferDescriptor>& load_descs,
-                         const std::vector<bool>&                  joined_load,
-                         size_t                                    prepared_desc_count,
-                         uint64_t                                  context_id);
+    void                 abortLoadLocked(const std::vector<TransferDescriptor>& load_descs,
+                                         const std::vector<bool>&               joined_loads,
+                                         size_t                                 prepared_desc_count,
+                                         uint64_t                               context_id);
     void runLoadTask(const LoadTaskRunner::TaskPtr& task);
     bool settleLoadLocked(LoadTaskRunner::Task& task, bool copy_success);
 

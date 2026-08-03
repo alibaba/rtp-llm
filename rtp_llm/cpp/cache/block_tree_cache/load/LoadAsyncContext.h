@@ -28,20 +28,20 @@ public:
         CANCELLED        = 4
     };
 
-    LoadAsyncContext(std::vector<TransferDescriptor> load_descs,
+    LoadAsyncContext(std::vector<TransferDescriptor>                load_descs,
                      std::vector<bool>                              joined_load,
-                     size_t                                         logical_matched_blocks,
-                     size_t                                         pending_transfer_count,
+                     size_t                                         matched_blocks,
                      uint64_t                                       context_id,
                      const std::shared_ptr<LoadContextCoordinator>& coordinator);
     ~LoadAsyncContext() override;
 
     bool     empty() const;
     uint64_t contextId() const;
-    size_t   logicalMatchedBlocks() const;
-    size_t   logicalMatchedBlocks(Tier tier) const;
+    size_t   matchedBlocks() const;
+    size_t   matchedBlocks(Tier tier) const;
 
     bool bindTargetDeviceBlocks(size_t desc_index, std::vector<BlockIdxType> target_device_blocks);
+    void initializeJoinedTargetBlocks(size_t desc_index, std::vector<BlockIdxType> target_blocks);
 
     const std::vector<TransferDescriptor>& loadDescs() const;
     const std::vector<bool>& joinedLoads() const;
@@ -59,7 +59,7 @@ public:
 
 private:
     void markAborted();
-    void rebuildLogicalMatchedBlocksByTier();
+    void rebuildMatchedBlocksByTier();
 
     // Keep the coordinator alive so a registered context can perform RAII abort.
     std::shared_ptr<LoadContextCoordinator> coordinator_;
@@ -67,8 +67,8 @@ private:
 
     std::vector<TransferDescriptor> load_descs_;
     std::vector<bool>     joined_load_;
-    const size_t          logical_matched_blocks_{0};
-    std::array<size_t, 3> logical_matched_blocks_by_tier_{};
+    const size_t                    matched_blocks_{0};
+    std::array<size_t, 3>           matched_blocks_by_tier_{};
 
     std::atomic<State>      state_{State::PENDING};
     mutable std::mutex      mutex_;
@@ -84,10 +84,8 @@ public:
 
     LoadContextCoordinator(CommitCallback commit_callback, AbortCallback abort_callback);
 
-    std::shared_ptr<LoadAsyncContext> create(std::vector<TransferDescriptor> load_descs,
-                                             std::vector<bool>                  joined_load,
-                                             size_t                             logical_matched_blocks,
-                                             size_t                             pending_transfer_count);
+    std::shared_ptr<LoadAsyncContext>
+    create(std::vector<TransferDescriptor> load_descs, std::vector<bool> joined_load, size_t matched_blocks);
     bool                              registerContext(const std::shared_ptr<LoadAsyncContext>& context);
     bool                              commit(uint64_t context_id);
     bool                              abort(uint64_t context_id, LoadAsyncContext& context) noexcept;

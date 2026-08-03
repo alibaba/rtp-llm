@@ -431,7 +431,7 @@ TEST_F(MultiRankBlockTransferEngineTest, LoadCompletionStateMismatchDoesNotInsta
     desc.target_blocks                                        = {device_block};
     const std::shared_ptr<LoadContextCoordinator> coordinator = std::make_shared<LoadContextCoordinator>(
         LoadContextCoordinator::CommitCallback{}, LoadContextCoordinator::AbortCallback{});
-    const std::shared_ptr<LoadAsyncContext> context = coordinator->create({desc}, {false}, 1, 1);
+    const std::shared_ptr<LoadAsyncContext> context = coordinator->create({desc}, {false}, 1);
     ASSERT_NE(context, nullptr);
     LoadTaskRunner::TaskPtr task = cache->loader_.load_task_runner_.createTask({desc}, {false}, {group}, context);
     ASSERT_NE(task, nullptr);

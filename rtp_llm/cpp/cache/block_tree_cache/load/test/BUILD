@@ -52,5 +52,5 @@ cc_test(
     name = "load_join_registry_test",
     srcs = ["LoadJoinRegistryTest.cc"],
     copts = test_copts,
-    deps = test_deps,
+    deps = test_deps + ["//rtp_llm/cpp/cache/block_tree_cache/transfer/test:block_transfer_engine_test_utils"],
 )

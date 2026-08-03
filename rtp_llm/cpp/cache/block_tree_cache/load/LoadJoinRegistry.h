@@ -5,22 +5,20 @@
 #include <unordered_map>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/block_tree_cache/BlockTree.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
-#include "rtp_llm/cpp/cache/block_tree_cache/TreeNode.h"
 
 namespace rtp_llm {
 
 class LoadJoinRegistry {
 public:
-    bool getTargetBlocks(TreeNode* node, size_t group_set_id, std::vector<BlockIdxType>& target_blocks) const;
+    explicit LoadJoinRegistry(BlockTree* tree): tree_(tree) {}
+
     bool start(TreeNode*                                node,
                size_t                                   group_set_id,
                const std::vector<BlockIdxType>&         target_blocks,
                const std::shared_ptr<LoadAsyncContext>& context);
-    bool join(TreeNode*                                node,
-              size_t                                   group_set_id,
-              const std::shared_ptr<LoadAsyncContext>& context,
-              std::vector<BlockIdxType>&               target_blocks);
+    bool join(const std::shared_ptr<LoadAsyncContext>& context);
     bool finish(TreeNode* node, size_t group_set_id, bool success);
     bool eraseForContext(TreeNode* node, size_t group_set_id, uint64_t context_id);
 
@@ -52,7 +50,8 @@ private:
 
     using RecordMap = std::unordered_map<Key, Record, KeyHash>;
 
-    RecordMap records_;
+    BlockTree* tree_;
+    RecordMap  records_;
 };
 
 }  // namespace rtp_llm

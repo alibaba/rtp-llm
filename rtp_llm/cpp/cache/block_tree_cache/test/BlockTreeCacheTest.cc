@@ -1368,7 +1368,7 @@ TEST_F(BlockTreeCacheTest, LoadOnlyReloadsSWAWindow) {
     EXPECT_TRUE(result.matched_device_resources.empty());
     std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
     ASSERT_NE(load_context, nullptr);
-    EXPECT_EQ(load_context->logicalMatchedBlocks(), 4u);
+    EXPECT_EQ(load_context->matchedBlocks(), 4u);
     const std::vector<TransferDescriptor>& load_descs = load_context->loadDescs();
     ASSERT_EQ(load_descs.size(), 6u);
     const std::function<size_t(size_t, Tier, size_t, BlockIdxType)> count_exact_desc =
@@ -1430,7 +1430,7 @@ TEST_F(BlockTreeCacheTest, LoadPlanningIgnoresBusySwaResourceOutsideTrailingWind
         EXPECT_TRUE(result.matched_device_resources.empty());
         std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
         ASSERT_NE(load_context, nullptr);
-        EXPECT_EQ(load_context->logicalMatchedBlocks(), 4u);
+        EXPECT_EQ(load_context->matchedBlocks(), 4u);
         const std::vector<TransferDescriptor>& load_descs = load_context->loadDescs();
         ASSERT_EQ(load_descs.size(), 6u);
 
@@ -1491,7 +1491,7 @@ TEST_F(BlockTreeCacheTest, LoadDetectsHostData) {
     EXPECT_TRUE(result.matched_device_resources.empty());
     std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
     ASSERT_NE(load_context, nullptr);
-    EXPECT_EQ(load_context->logicalMatchedBlocks(), 1u);
+    EXPECT_EQ(load_context->matchedBlocks(), 1u);
     ASSERT_EQ(load_context->loadDescs().size(), 1u);
     EXPECT_EQ(load_context->loadDescs()[0].group_set_id, 0u);
     EXPECT_EQ(load_context->loadDescs()[0].path_index, 0u);
@@ -1866,7 +1866,7 @@ TEST_F(BlockTreeCacheTest, LoadContextAbortSkipsLoad) {
     std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
     ASSERT_NE(load_context, nullptr);
     EXPECT_FALSE(load_context->empty());
-    EXPECT_EQ(load_context->logicalMatchedBlocks(), 1u);
+    EXPECT_EQ(load_context->matchedBlocks(), 1u);
     // Counters reflect the planned load; match() submits nothing asynchronously.
     EXPECT_EQ(result.matched_device_blocks, 0u);
     EXPECT_TRUE(result.matched_device_resources.empty());
@@ -1887,7 +1887,7 @@ TEST_F(BlockTreeCacheTest, LoadContextCommitTriggersLoad) {
     BlockTreeMatchResult              result       = cache->match({200});
     std::shared_ptr<LoadAsyncContext> load_context = takeLoadContext(result);
     ASSERT_NE(load_context, nullptr);
-    EXPECT_EQ(load_context->logicalMatchedBlocks(), 1u);
+    EXPECT_EQ(load_context->matchedBlocks(), 1u);
     EXPECT_EQ(result.matched_device_blocks, 0u);
     EXPECT_TRUE(result.matched_device_resources.empty());
 

@@ -1,7 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <algorithm>
+#include <chrono>
+#include <condition_variable>
 #include <limits>
 #include <memory>
+#include <mutex>
 #include <optional>
 #include <string>
 #include <vector>
@@ -13,6 +17,8 @@
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/BlockTreeCacheAllocatorTestHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
 #include "rtp_llm/cpp/engine_base/stream/CompleteTokenIds.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -21,6 +27,59 @@ namespace rtp_llm {
 namespace test {
 
 using TestHybridTypeKVCacheAllocator = BlockTreeCacheTestAllocator<HybridTypeKVCacheAllocator>;
+
+class PausableHybridPerRankBlockTransferEngine: public PerRankBlockTransferEngine {
+public:
+    explicit PausableHybridPerRankBlockTransferEngine(const std::vector<GroupSetPtr>& groups):
+        PerRankBlockTransferEngine(groups) {}
+
+    std::shared_ptr<AsyncContext> submit(const TransferDescriptor& descriptor) override {
+        {
+            std::unique_lock<std::mutex> lock(mutex_);
+            ++submit_count_;
+            entered_ = true;
+            cv_.notify_all();
+            cv_.wait(lock, [this] { return released_; });
+        }
+        return PerRankBlockTransferEngine::submit(descriptor);
+    }
+
+    bool waitUntilEnteredFor(std::chrono::milliseconds timeout) {
+        std::unique_lock<std::mutex> lock(mutex_);
+        return cv_.wait_for(lock, timeout, [this] { return entered_; });
+    }
+
+    void release() {
+        std::lock_guard<std::mutex> lock(mutex_);
+        released_ = true;
+        cv_.notify_all();
+    }
+
+    size_t submitCount() const {
+        std::lock_guard<std::mutex> lock(mutex_);
+        return submit_count_;
+    }
+
+private:
+    mutable std::mutex      mutex_;
+    std::condition_variable cv_;
+    bool                    entered_{false};
+    bool                    released_{false};
+    size_t                  submit_count_{0};
+};
+
+class ScopedHybridTransferRelease {
+public:
+    explicit ScopedHybridTransferRelease(std::shared_ptr<PausableHybridPerRankBlockTransferEngine> transfer_engine):
+        transfer_engine_(std::move(transfer_engine)) {}
+
+    ~ScopedHybridTransferRelease() {
+        transfer_engine_->release();
+    }
+
+private:
+    std::shared_ptr<PausableHybridPerRankBlockTransferEngine> transfer_engine_;
+};
 
 static CacheConfig makeTinyHybridConfig() {
     auto config                      = makeSimpleHybridMhaCacheConfig(/*layer_num=*/4,
@@ -572,6 +631,147 @@ TEST_F(HybridTypeKVCacheAllocatorTest, GetNeedBlocksUsesGroupGetNeedBlocksAndReu
         // extra_total  = 1 + 1 = 2
         // total = 5 + 2*2 = 9
         EXPECT_EQ(allocator->getNeedBlocks(info), 9);
+    }
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, TieredJoinedLoadMapsTargetsAcrossFullAndLinearGroups) {
+    auto config    = makeTinyHybridConfig();
+    auto allocator = std::make_shared<TestHybridTypeKVCacheAllocator>(config, AllocationType::DEVICE);
+
+    KVCacheConfig tiered_config;
+    tiered_config.enable_memory_cache        = true;
+    tiered_config.enable_tiered_memory_cache = true;
+    tiered_config.memory_cache_size_mb       = 1;
+    allocator->setBlockTreeCacheConfigForTest(std::move(tiered_config));
+    ASSERT_TRUE(allocator->init());
+
+    const auto& cache = allocator->blockTreeCacheOwner();
+    ASSERT_NE(cache, nullptr);
+    auto transfer_engine = std::make_shared<PausableHybridPerRankBlockTransferEngine>(cache->groupSets());
+    cache->transfer_dispatcher_->per_rank_engine_ = transfer_engine;
+    ScopedHybridTransferRelease transfer_release(transfer_engine);
+
+    const CacheKeysType                        cached_keys{100, 101};
+    std::vector<std::vector<GroupSetResource>> slots(cached_keys.size(),
+                                                     std::vector<GroupSetResource>(cache->groupSets().size()));
+    for (const GroupSetPtr& group_set : cache->groupSets()) {
+        ASSERT_NE(group_set->hostPool(), nullptr);
+        for (size_t path_index = 0; path_index < cached_keys.size(); ++path_index) {
+            const BlockIdxType source_block = group_set->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+            ASSERT_FALSE(isNullBlockIdx(source_block));
+            slots[path_index][group_set->groupSetId()].host_block = source_block;
+        }
+    }
+    cache->insert(cached_keys, slots);
+
+    const CacheKeysType request_keys{100, 101, 102};
+    auto                first_resource = makeBatchResource(/*batch_size=*/1, config, request_keys);
+    auto       first_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/9, /*seq_size_per_block=*/4);
+    MallocInfo first_info{first_resource, first_tokens};
+    first_info.enable_device_cache = true;
+    first_info.reuse_cache         = true;
+    MallocResult first_result      = allocator->malloc(first_info);
+    ASSERT_TRUE(first_result.success);
+    const auto first_context = std::dynamic_pointer_cast<LoadAsyncContext>(first_result.async_context);
+    ASSERT_NE(first_context, nullptr);
+    ASSERT_TRUE(transfer_engine->waitUntilEnteredFor(std::chrono::seconds(5)));
+
+    const size_t expected_submit_count =
+        std::count_if(first_context->loadDescs().begin(),
+                      first_context->loadDescs().end(),
+                      [](const TransferDescriptor& desc) { return desc.source_tier == Tier::HOST; });
+    ASSERT_GT(expected_submit_count, 0u);
+
+    auto       second_resource = makeBatchResource(/*batch_size=*/1, config, request_keys);
+    auto       second_tokens   = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/9, /*seq_size_per_block=*/4);
+    MallocInfo second_info{second_resource, second_tokens};
+    second_info.enable_device_cache = true;
+    second_info.reuse_cache         = true;
+    MallocResult second_result      = allocator->malloc(second_info);
+    ASSERT_TRUE(second_result.success);
+    const auto second_context = std::dynamic_pointer_cast<LoadAsyncContext>(second_result.async_context);
+    ASSERT_NE(second_context, nullptr);
+    ASSERT_EQ(second_context->loadDescs().size(), first_context->loadDescs().size());
+    ASSERT_TRUE(std::all_of(second_context->joinedLoads().begin(),
+                            second_context->joinedLoads().end(),
+                            [](bool joined) { return joined; }));
+    EXPECT_EQ(transfer_engine->submitCount(), 1u);
+
+    for (size_t desc_index = 0; desc_index < second_context->loadDescs().size(); ++desc_index) {
+        const TransferDescriptor& joined_desc = second_context->loadDescs()[desc_index];
+        const auto                first_desc  = std::find_if(first_context->loadDescs().begin(),
+                                             first_context->loadDescs().end(),
+                                             [&joined_desc](const TransferDescriptor& desc) {
+                                                 return desc.group_set_id == joined_desc.group_set_id
+                                                        && desc.path_index == joined_desc.path_index;
+                                             });
+        ASSERT_NE(first_desc, first_context->loadDescs().end());
+        EXPECT_EQ(joined_desc.target_blocks, first_desc->target_blocks);
+    }
+
+    const int linear_group_id = 0;
+    const int full_group_id   = 1;
+    ASSERT_EQ(config.typeForGroup(linear_group_id), CacheGroupType::LINEAR);
+    ASSERT_EQ(config.typeForGroup(full_group_id), CacheGroupType::FULL);
+    const auto targetFor = [&](const std::shared_ptr<LoadAsyncContext>& context, int group_id, size_t path_index) {
+        for (const TransferDescriptor& desc : context->loadDescs()) {
+            if (desc.path_index != path_index) {
+                continue;
+            }
+            const auto& group_ids = cache->groupSets()[desc.group_set_id]->groupIds();
+            const auto  group_it  = std::find(group_ids.begin(), group_ids.end(), static_cast<size_t>(group_id));
+            if (group_it != group_ids.end()) {
+                return desc.target_blocks[static_cast<size_t>(group_it - group_ids.begin())];
+            }
+        }
+        return NULL_BLOCK_IDX;
+    };
+
+    const BlockIdxType full_target_0   = targetFor(first_context, full_group_id, 0);
+    const BlockIdxType full_target_1   = targetFor(first_context, full_group_id, 1);
+    const BlockIdxType linear_target_1 = targetFor(first_context, linear_group_id, 1);
+    ASSERT_FALSE(isNullBlockIdx(full_target_0));
+    ASSERT_FALSE(isNullBlockIdx(full_target_1));
+    ASSERT_FALSE(isNullBlockIdx(linear_target_1));
+
+    ASSERT_EQ(first_resource->blocks(0, full_group_id).size(), 3u);
+    ASSERT_EQ(second_resource->blocks(0, full_group_id).size(), 3u);
+    EXPECT_EQ(first_resource->blocks(0, full_group_id)[0], full_target_0);
+    EXPECT_EQ(first_resource->blocks(0, full_group_id)[1], full_target_1);
+    EXPECT_EQ(second_resource->blocks(0, full_group_id)[0], full_target_0);
+    EXPECT_EQ(second_resource->blocks(0, full_group_id)[1], full_target_1);
+
+    ASSERT_EQ(first_resource->blocks(0, linear_group_id).size(), 3u);
+    ASSERT_EQ(second_resource->blocks(0, linear_group_id).size(), 3u);
+    EXPECT_TRUE(isNullBlockIdx(first_resource->blocks(0, linear_group_id)[0]));
+    EXPECT_TRUE(isNullBlockIdx(second_resource->blocks(0, linear_group_id)[0]));
+    EXPECT_EQ(first_resource->blocks(0, linear_group_id)[1], linear_target_1);
+    EXPECT_EQ(second_resource->blocks(0, linear_group_id)[1], linear_target_1);
+
+    transfer_engine->release();
+    first_context->waitDone();
+    second_context->waitDone();
+    ASSERT_TRUE(first_context->success());
+    ASSERT_TRUE(second_context->success());
+    EXPECT_EQ(transfer_engine->submitCount(), expected_submit_count);
+
+    for (const TransferDescriptor& desc : first_context->loadDescs()) {
+        const GroupSetPtr& group_set = cache->groupSets()[desc.group_set_id];
+        ASSERT_EQ(desc.source_blocks.size(), 1u);
+        EXPECT_FALSE(group_set->hostPool()->isAllocated(desc.source_blocks.front()));
+        ASSERT_EQ(desc.target_blocks.size(), group_set->devicePools().size());
+        for (size_t member_group_id = 0; member_group_id < desc.target_blocks.size(); ++member_group_id) {
+            EXPECT_EQ(group_set->devicePools()[member_group_id]->refCount(desc.target_blocks[member_group_id]), 3u);
+        }
+    }
+
+    allocator->free(FreeInfo{first_resource, first_tokens});
+    allocator->free(FreeInfo{second_resource, second_tokens});
+    for (const TransferDescriptor& desc : first_context->loadDescs()) {
+        const GroupSetPtr& group_set = cache->groupSets()[desc.group_set_id];
+        for (size_t member_group_id = 0; member_group_id < desc.target_blocks.size(); ++member_group_id) {
+            EXPECT_EQ(group_set->devicePools()[member_group_id]->refCount(desc.target_blocks[member_group_id]), 1u);
+        }
     }
 }
 

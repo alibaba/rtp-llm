@@ -1,5 +1,6 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadAsyncContext.h"
 
+#include <algorithm>
 #include <cassert>
 #include <unordered_map>
 #include <utility>
@@ -8,19 +9,20 @@
 
 namespace rtp_llm {
 
-LoadAsyncContext::LoadAsyncContext(std::vector<TransferDescriptor> load_descs,
+LoadAsyncContext::LoadAsyncContext(std::vector<TransferDescriptor>                load_descs,
                                    std::vector<bool>                              joined_load,
-                                   size_t                                         logical_matched_blocks,
-                                   size_t                                         pending_transfer_count,
+                                   size_t                                         matched_blocks,
                                    uint64_t                                       context_id,
                                    const std::shared_ptr<LoadContextCoordinator>& coordinator):
     coordinator_(coordinator),
     context_id_(context_id),
     load_descs_(std::move(load_descs)),
     joined_load_(std::move(joined_load)),
-    logical_matched_blocks_(logical_matched_blocks),
-    remaining_transfer_count_(pending_transfer_count) {
-    rebuildLogicalMatchedBlocksByTier();
+    matched_blocks_(matched_blocks),
+    remaining_transfer_count_(std::count_if(load_descs_.begin(), load_descs_.end(), [](const TransferDescriptor& desc) {
+        return desc.source_tier == Tier::HOST || desc.source_tier == Tier::DISK;
+    })) {
+    rebuildMatchedBlocksByTier();
     if (remaining_transfer_count_ == 0) {
         state_.store(State::SUCCEEDED);
     }
@@ -30,8 +32,8 @@ LoadAsyncContext::~LoadAsyncContext() {
     abort();
 }
 
-void LoadAsyncContext::rebuildLogicalMatchedBlocksByTier() {
-    logical_matched_blocks_by_tier_.fill(0);
+void LoadAsyncContext::rebuildMatchedBlocksByTier() {
+    matched_blocks_by_tier_.fill(0);
     std::unordered_map<size_t, Tier> reuse_tier_by_path;
     for (const TransferDescriptor& desc : load_descs_) {
         if (desc.source_tier < Tier::DEVICE || desc.source_tier > Tier::DISK) {
@@ -46,7 +48,7 @@ void LoadAsyncContext::rebuildLogicalMatchedBlocksByTier() {
         }
     }
     for (const std::pair<const size_t, Tier>& reuse_tier : reuse_tier_by_path) {
-        ++logical_matched_blocks_by_tier_[static_cast<size_t>(reuse_tier.second)];
+        ++matched_blocks_by_tier_[static_cast<size_t>(reuse_tier.second)];
     }
 }
 
@@ -58,15 +60,19 @@ uint64_t LoadAsyncContext::contextId() const {
     return context_id_;
 }
 
-size_t LoadAsyncContext::logicalMatchedBlocks() const {
-    return logical_matched_blocks_;
+size_t LoadAsyncContext::matchedBlocks() const {
+    return matched_blocks_;
 }
 
-size_t LoadAsyncContext::logicalMatchedBlocks(Tier tier) const {
+size_t LoadAsyncContext::matchedBlocks(Tier tier) const {
     if (tier < Tier::DEVICE || tier > Tier::DISK) {
         return 0;
     }
-    return logical_matched_blocks_by_tier_[static_cast<size_t>(tier)];
+    return matched_blocks_by_tier_[static_cast<size_t>(tier)];
+}
+
+void LoadAsyncContext::initializeJoinedTargetBlocks(size_t desc_index, std::vector<BlockIdxType> target_blocks) {
+    load_descs_[desc_index].target_blocks = std::move(target_blocks);
 }
 
 bool LoadAsyncContext::bindTargetDeviceBlocks(size_t desc_index, std::vector<BlockIdxType> target_device_blocks) {
@@ -197,9 +203,8 @@ LoadContextCoordinator::LoadContextCoordinator(CommitCallback commit_callback, A
     commit_callback_(std::move(commit_callback)), abort_callback_(std::move(abort_callback)) {}
 
 std::shared_ptr<LoadAsyncContext> LoadContextCoordinator::create(std::vector<TransferDescriptor> load_descs,
-                                                                 std::vector<bool>                  joined_load,
-                                                                 size_t logical_matched_blocks,
-                                                                 size_t pending_transfer_count) {
+                                                                 std::vector<bool>               joined_load,
+                                                                 size_t                          matched_blocks) {
     const std::shared_ptr<LoadContextCoordinator> coordinator = shared_from_this();
 
     uint64_t context_id = 0;
@@ -212,19 +217,11 @@ std::shared_ptr<LoadAsyncContext> LoadContextCoordinator::create(std::vector<Tra
         ++next_context_id_;
     }
 
-    return std::make_shared<LoadAsyncContext>(std::move(load_descs),
-                                              std::move(joined_load),
-                                              logical_matched_blocks,
-                                              pending_transfer_count,
-                                              context_id,
-                                              coordinator);
+    return std::make_shared<LoadAsyncContext>(
+        std::move(load_descs), std::move(joined_load), matched_blocks, context_id, coordinator);
 }
 
 bool LoadContextCoordinator::registerContext(const std::shared_ptr<LoadAsyncContext>& context) {
-    if (context == nullptr || context->contextId() == 0) {
-        return false;
-    }
-
     std::lock_guard<std::mutex> lock(mutex_);
     if (!accepting_) {
         return false;

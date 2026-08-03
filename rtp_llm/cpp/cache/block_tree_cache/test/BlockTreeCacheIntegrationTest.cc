@@ -1216,8 +1216,8 @@ TEST_P(BlockTreeCacheLowerTierTest, FullSWA_MatchLowerTierOnlyReturnsContextWith
     std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
     ASSERT_NE(context, nullptr);
     EXPECT_FALSE(context->empty());
-    EXPECT_EQ(context->logicalMatchedBlocks(), kPathLength);
-    EXPECT_EQ(context->logicalMatchedBlocks(GetParam()), kPathLength);
+    EXPECT_EQ(context->matchedBlocks(), kPathLength);
+    EXPECT_EQ(context->matchedBlocks(GetParam()), kPathLength);
     EXPECT_EQ(contextDescCountForGroupSet(context, 0), 4u);
     EXPECT_EQ(contextDescCountForGroupSet(context, 1), 2u);
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
@@ -1392,7 +1392,7 @@ TEST_P(BlockTreeCacheLowerTierTest, CancelPausedLoadStillInstallsTransferredTarg
     std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
     ASSERT_NE(context, nullptr);
     ASSERT_FALSE(context->empty());
-    EXPECT_EQ(context->logicalMatchedBlocks(), kPathLength);
+    EXPECT_EQ(context->matchedBlocks(), kPathLength);
     struct SourceRef {
         IBlockPool*  pool;
         BlockIdxType block;
@@ -1805,7 +1805,7 @@ TEST_F(BlockTreeCacheIntegrationTest, MixedHostDiskContextAbortRestoresSources) 
     expectUnpublishedResult(result);
     std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
     ASSERT_NE(context, nullptr);
-    EXPECT_EQ(context->logicalMatchedBlocks(), kPathLength);
+    EXPECT_EQ(context->matchedBlocks(), kPathLength);
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);
 
     bool                                             saw_host = false;
@@ -1880,7 +1880,7 @@ TEST_F(BlockTreeCacheIntegrationTest, FullSWA_MatchPublishesOnlyReadyBoundary) {
     expectAggregatedReadyResult(*environment->cache, result, /*full_blocks=*/2, /*swa_blocks=*/2);
     std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
     ASSERT_NE(context, nullptr);
-    EXPECT_EQ(context->logicalMatchedBlocks(), kPathLength);
+    EXPECT_EQ(context->matchedBlocks(), kPathLength);
     EXPECT_EQ(contextDescCountForGroupSet(context, 0), 2u);
     EXPECT_EQ(contextDescCountForGroupSet(context, 1), 2u);
     for (const TransferDescriptor& desc : context->loadDescs()) {
@@ -2085,7 +2085,7 @@ TEST_F(BlockTreeCacheIntegrationTest, SparseDisconnectedSWADoesNotPublishVacuous
     expectUnpublishedResult(result);
     std::shared_ptr<LoadAsyncContext> context = takeLoadContext(result);
     ASSERT_NE(context, nullptr);
-    EXPECT_EQ(context->logicalMatchedBlocks(), kPathLength);
+    EXPECT_EQ(context->matchedBlocks(), kPathLength);
     EXPECT_EQ(contextDescCountForGroupSet(context, 0), 4u);
     EXPECT_EQ(contextDescCountForGroupSet(context, 1), 2u);
     EXPECT_EQ(environment->scripted_per_rank_transfer_engine->submitCount(), 0u);

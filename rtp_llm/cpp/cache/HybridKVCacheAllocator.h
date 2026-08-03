@@ -57,15 +57,13 @@ protected:
     void         checkCPShardedMallocResult(const MallocInfo& malloc_info) const override;
     void         decrKVCacheRef(const KVCacheResource& kvcache_resource, bool is_connector = false) override;
 
-    int  reuseCache(const CacheKeysType&                 cache_keys,
-                    BatchKVCacheResource&                kv_resource,
-                    const std::shared_ptr<CPSlotMapper>& cp_mapper,
-                    std::shared_ptr<LoadAsyncContext>&   load_context,
-                    std::vector<BlockIndicesType>&       referenced_blocks);
-    bool preflightLoadMappings(const std::shared_ptr<LoadAsyncContext>& load_context) const;
+    int                        reuseCache(const CacheKeysType&                 cache_keys,
+                                          BatchKVCacheResource&                kv_resource,
+                                          const std::shared_ptr<CPSlotMapper>& cp_mapper,
+                                          std::shared_ptr<LoadAsyncContext>&   load_context,
+                                          std::vector<BlockIndicesType>&       referenced_blocks);
     const std::vector<size_t>* groupIdsForGroupSet(size_t group_set_id) const;
 
-    void referenceBlocksInGroup(int group_id, const BlockIndicesType& blocks, BlockRefType ref_type) const;
     std::vector<BlockRefTransition>
     freeBlocksInGroup(int group_id, const BlockIndicesType& blocks, BlockRefType ref_type);
     virtual bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const;
