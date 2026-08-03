@@ -155,7 +155,7 @@ def _validate_perf_environment() -> None:
         conflicting_flags.append("KIMI_K3_ACCURACY_TRACE_DIR")
     expected = {
         "KIMI_K3_MOE_BACKEND": "deep_gemm_mega",
-        "KIMI_K3_MLA_BACKEND": "kernel",
+        "KIMI_K3_MLA_BACKEND": "flashmla",
         "KIMI_K3_USE_HOST_METADATA": "1",
         "KIMI_K3_SP_MOE": "1",
         "KIMI_K3_PERF_FUSIONS": "1",
@@ -3225,9 +3225,10 @@ class KimiK3MLA(MlaAttention):
             )
         self.use_output_gate = runtime.mla_use_output_gate
         self._mla_backend = os.environ.get("KIMI_K3_MLA_BACKEND", "kernel").lower()
-        if self._mla_backend not in ("kernel", "reference"):
+        if self._mla_backend not in ("kernel", "flashmla", "reference"):
             raise ValueError(
-                f"KIMI_K3_MLA_BACKEND must be 'kernel' or 'reference', "
+                "KIMI_K3_MLA_BACKEND must be 'kernel', 'flashmla' or "
+                f"'reference', "
                 f"got {self._mla_backend!r}"
             )
 

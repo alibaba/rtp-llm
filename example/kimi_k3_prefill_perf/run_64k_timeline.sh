@@ -27,7 +27,8 @@ start_port="${START_PORT:-27188}"
 kda_comm_backend="${KIMI_K3_KDA_COMM_BACKEND:-rs_ag}"
 timestamp="$(date +%Y%m%d-%H%M%S)"
 kda_backend="${KIMI_K3_KDA_BACKEND:-cula}"
-run_root="${RUN_ROOT:-${HOME}/kimi_k3_perf_runs/${timestamp}-k3-${kda_comm_backend}-${kda_backend}-mega-64k}"
+mla_backend="${KIMI_K3_MLA_BACKEND:-flashmla}"
+run_root="${RUN_ROOT:-${HOME}/kimi_k3_perf_runs/${timestamp}-k3-${kda_comm_backend}-${kda_backend}-${mla_backend}-mega-64k}"
 ops_overlay="${run_root}/runtime/ops"
 server_log="${run_root}/launcher.log"
 server_target="//example/kimi_k3_prefill_perf:kimi_k3_prefill_server"
@@ -206,6 +207,7 @@ export START_PORT="${start_port}"
 export PYTHON_BIN="${python_bin}"
 export KIMI_K3_KDA_BACKEND="${kda_backend}"
 export KIMI_K3_KDA_COMM_BACKEND="${kda_comm_backend}"
+export KIMI_K3_MLA_BACKEND="${mla_backend}"
 
 setsid "${script_dir}/launch_prefill_server.sh" >"${server_log}" 2>&1 &
 server_pid=$!
@@ -232,13 +234,14 @@ echo "[service] healthy on port ${start_port}"
   --length 65536 \
   --backend "${kda_backend}" \
   --kda-comm-backend "${kda_comm_backend}" \
+  --mla-backend "${mla_backend}" \
   --output-dir "${run_root}/measurements" \
   --trace-dir "${run_root}/traces" \
   | tee "${run_root}/measurements/console.log"
 
 nvidia-smi -q >"${run_root}/snapshots/nvidia_smi_after.txt"
 echo "[done] run_root=${run_root}"
-echo "[done] rank0_trace=${run_root}/traces/k3_${kda_comm_backend}_${kda_backend}_mega_prefill_65536_steady_wr0_1.json"
+echo "[done] rank0_trace=${run_root}/traces/k3_${kda_comm_backend}_${kda_backend}_${mla_backend}_mega_prefill_65536_steady_wr0_1.json"
 
 if [[ "${KEEP_SERVER:-0}" == "1" ]]; then
   trap - EXIT INT TERM

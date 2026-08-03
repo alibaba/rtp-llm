@@ -93,6 +93,8 @@ Optional environment variables:
                                          fla37_precompiled
   KIMI_K3_MOE_BACKEND                   optimized TP8/EP8 defaults to
                                          deep_gemm_mega; otherwise deepep
+  KIMI_K3_MLA_BACKEND                   optimized Prefill defaults to
+                                         flashmla; Decode defaults to kernel
   KIMI_K3_PERF_FUSIONS                  optimized TP8/EP8 defaults to 1;
                                          all other modes/topologies default to 0
   KIMI_K3_BATCHED_KDA_DECODE            optimized TP8/EP8 Decode defaults to 1;
@@ -338,10 +340,14 @@ case "${execution_mode}" in
         else
             default_kda_backend=cula
             default_moe_backend=deep_gemm_mega
+            default_mla_backend=flashmla
             default_sp_moe=1
             default_perf_fusions=1
             default_kv_cache_mem_mb=8192
             default_decode_offload_start=auto
+        fi
+        if [[ "${role}" == "DECODE" ]]; then
+            default_mla_backend=kernel
         fi
         default_use_host_metadata=1
         ;;
@@ -369,6 +375,7 @@ case "${execution_mode}" in
             default_decode_offload_start=auto
         fi
         default_moe_backend=deepep
+        default_mla_backend=kernel
         default_perf_fusions=0
         # These are capacity choices only.  Keep the validated mathematical
         # path while retaining enough margin for eight concurrent
@@ -382,6 +389,7 @@ use_host_metadata="${KIMI_K3_USE_HOST_METADATA:-${default_use_host_metadata}}"
 sp_moe="${KIMI_K3_SP_MOE:-${default_sp_moe}}"
 kda_backend="${KIMI_K3_KDA_BACKEND:-${default_kda_backend}}"
 moe_backend="${KIMI_K3_MOE_BACKEND:-${default_moe_backend}}"
+mla_backend="${KIMI_K3_MLA_BACKEND:-${default_mla_backend}}"
 perf_fusions="${KIMI_K3_PERF_FUSIONS:-${default_perf_fusions}}"
 batched_kda_decode="${KIMI_K3_BATCHED_KDA_DECODE:-${default_batched_kda_decode}}"
 perf_mode="${KIMI_K3_PERF_MODE:-0}"
@@ -535,6 +543,15 @@ case "${moe_backend}" in
     *) die "unsupported KIMI_K3_MOE_BACKEND=${moe_backend}" ;;
 esac
 
+case "${mla_backend}" in
+    kernel | reference) ;;
+    flashmla)
+        [[ "${role}" == "PREFILL" ]] \
+            || die "KIMI_K3_MLA_BACKEND=flashmla is Prefill-only"
+        ;;
+    *) die "unsupported KIMI_K3_MLA_BACKEND=${mla_backend}" ;;
+esac
+
 case "${accuracy_mode}" in
     canonical)
         canonical_tp=1
@@ -618,7 +635,7 @@ export REMOTE_RPC_SERVER_IP="${remote_endpoint}"
 export MODEL_SERVICE_CONFIG="${model_service_config}"
 export KIMI_K3_KDA_BACKEND="${kda_backend}"
 export KIMI_K3_MOE_BACKEND="${moe_backend}"
-export KIMI_K3_MLA_BACKEND=kernel
+export KIMI_K3_MLA_BACKEND="${mla_backend}"
 export KIMI_K3_USE_HOST_METADATA="${use_host_metadata}"
 export KIMI_K3_SP_MOE="${sp_moe}"
 export KIMI_K3_PERF_FUSIONS="${perf_fusions}"
@@ -780,6 +797,7 @@ echo "  host metadata:   ${use_host_metadata}"
 echo "  SP MoE:          ${sp_moe}"
 echo "  KDA backend:     ${kda_backend}"
 echo "  MoE backend:     ${moe_backend}"
+echo "  MLA backend:     ${mla_backend}"
 echo "  DeepGEMM JIT:    ${deepgemm_jit_compiler}"
 echo "  perf fusions:    ${perf_fusions}"
 echo "  batched KDA:     ${batched_kda_decode}"

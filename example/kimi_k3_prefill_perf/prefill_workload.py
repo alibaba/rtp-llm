@@ -142,6 +142,7 @@ def main() -> None:
     )
     parser.add_argument("--timeout", type=int, default=14400)
     parser.add_argument("--backend", choices=("cula", "flash_kda"), default="cula")
+    parser.add_argument("--mla-backend", choices=("kernel", "flashmla"), default="flashmla")
     parser.add_argument("--min-warmups", type=int, default=10)
     parser.add_argument("--max-warmups", type=int, default=20)
     parser.add_argument("--stability-window", type=int, default=5)
@@ -177,6 +178,7 @@ def main() -> None:
         "reuse_cache": False,
         "kda_backend": args.backend,
         "kda_comm_backend": args.kda_comm_backend,
+        "mla_backend": args.mla_backend,
         "warmup_policy": {
             "materialization_runs": 1,
             "minimum_full_warmups": args.min_warmups,
@@ -221,7 +223,7 @@ def main() -> None:
     manifest["warmup_count"] = len(warmups)
 
     trace_name = (
-        f"k3_{args.kda_comm_backend}_{args.backend}_mega_prefill_"
+        f"k3_{args.kda_comm_backend}_{args.backend}_{args.mla_backend}_mega_prefill_"
         f"{args.length}_steady"
     )
     # Keep Kineto alive for one profiler warmup plus the measured request.

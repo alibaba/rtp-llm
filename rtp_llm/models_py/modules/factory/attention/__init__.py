@@ -90,9 +90,11 @@ else:
         from rtp_llm.models_py.modules.factory.attention.cuda_mla_impl.flashinfer_mla_wrapper import (
             MlaFlashInferDecodeImpl,
             MlaFlashInferPrefillImpl,
+            MlaFlashMLAPrefillImpl,
         )
 
         DECODE_MLA_IMPS.append(MlaFlashInferDecodeImpl)
+        PREFILL_MLA_IMPS.append(MlaFlashMLAPrefillImpl)
         PREFILL_MLA_IMPS.append(MlaFlashInferPrefillImpl)
 
         # SparseMlaImpl requires CUDA >= 12.9 for flash_mla support

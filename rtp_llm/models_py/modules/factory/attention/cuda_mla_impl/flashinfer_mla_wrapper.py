@@ -40,6 +40,7 @@ class MlaFlashInferImplBase(MlaImplBase):
         max_seq_len: int = 0,
         is_cuda_graph: bool = False,
         parallelism_config: Optional[ParallelismConfig] = None,
+        warmup_flashinfer: bool = True,
     ) -> None:
         super().__init__(
             attn_configs,
@@ -53,7 +54,8 @@ class MlaFlashInferImplBase(MlaImplBase):
             is_cuda_graph=is_cuda_graph,
             parallelism_config=parallelism_config,
         )
-        warmup_flashinfer_python()
+        if warmup_flashinfer:
+            warmup_flashinfer_python()
         self.seq_size_per_block = seq_size_per_block
         self.fmha_impl: Any = fmha_impl
         if (
@@ -342,7 +344,12 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
     def support(
         cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
     ) -> bool:
-        return attn_configs.use_mla and attn_inputs.is_prefill
+        return (
+            attn_configs.use_mla
+            and attn_inputs.is_prefill
+            and os.environ.get("KIMI_K3_MLA_BACKEND", "kernel").strip().lower()
+            != "flashmla"
+        )
 
     def _handle_long_sequence(
         self,
@@ -413,6 +420,74 @@ class MlaFlashInferPrefillImpl(MlaFlashInferImplBase):
         )
         assert self.fmha_impl is not None
         return self.compute_prefill_context(q, compressed_kv, k_pe, kv_cache, layer_id)
+
+
+class MlaFlashMLAPrefillImpl(MlaFlashInferPrefillImpl):
+    """Dense FlashMLA variant of RTP's shared MLA Prefill pipeline."""
+
+    def __init__(
+        self,
+        attn_configs: AttentionConfigs,
+        attn_inputs: PyAttentionInputs,
+        weights: List[Dict[str, torch.Tensor]],
+        cos_sin_cache: torch.Tensor,
+        fmha_config: Optional[FMHAConfig] = None,
+        use_trt_fmha: bool = False,
+        quant_config: Optional[object] = None,
+        max_seq_len: int = 0,
+        is_cuda_graph: bool = False,
+        parallelism_config: Optional[ParallelismConfig] = None,
+    ) -> None:
+        from .flashmla_dense_prefill import MlaFlashMLAPrefillOp
+
+        MlaFlashInferImplBase.__init__(
+            self,
+            MlaFlashMLAPrefillOp(
+                attn_configs.head_num,
+                attn_configs.kv_lora_rank,
+                attn_configs.rope_head_dim,
+                attn_configs.nope_head_dim,
+                attn_configs.v_head_dim,
+                attn_configs.kernel_tokens_per_block,
+                attn_configs.softmax_extra_scale,
+                attn_configs.use_mla,
+                weights,
+                quant_config,
+                attn_configs.kv_cache_dtype,
+            ),
+            NewMlaRotaryEmbeddingOp(
+                cos_sin_cache=cos_sin_cache,
+                is_neox_style=attn_configs.rope_config.is_neox_style,
+            ),
+            MlaKVCacheWriteOp(kv_cache_dtype=attn_configs.kv_cache_dtype),
+            attn_inputs,
+            attn_configs.kernel_tokens_per_block,
+            attn_configs,
+            weights,
+            cos_sin_cache,
+            fmha_config,
+            use_trt_fmha,
+            quant_config,
+            max_seq_len,
+            is_cuda_graph,
+            parallelism_config,
+            warmup_flashinfer=False,
+        )
+        self.has_reuse_cache = False
+        self.absorb_opt_len = 0
+        self.absorb_fmha = None
+
+    @classmethod
+    def support(
+        cls, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
+    ) -> bool:
+        return (
+            attn_configs.use_mla
+            and not attn_configs.is_sparse
+            and attn_inputs.is_prefill
+            and os.environ.get("KIMI_K3_MLA_BACKEND", "kernel").strip().lower()
+            == "flashmla"
+        )
 
 
 class MlaFlashInferDecodeImpl(MlaFlashInferImplBase):
