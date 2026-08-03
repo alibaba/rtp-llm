@@ -25,6 +25,7 @@ from rtp_llm.multimodal.greennet_hook import GreenNetVerdict, get_greennet_provi
 from rtp_llm.multimodal.mm_profiler import MMProfiler
 from rtp_llm.multimodal.mm_scheduler import MMScheduler
 from rtp_llm.multimodal.multimodal_mixins.multimodal_common import (
+    MMWorkEstimate,
     MultiModalEmbeddingInterface,
 )
 from rtp_llm.multimodal.multimodal_util import (
@@ -425,6 +426,7 @@ class MMWorkItem:
 
         self.preprocess_result: Optional[Any] = None
         self.embedding_result: Optional[Any] = None
+        self.work_estimate: Optional[MMWorkEstimate] = None
 
         self.need_check_cache = len(mm_inputs) == 1 and mm_inputs[0].url != ""
 
@@ -795,6 +797,16 @@ class MMProcessEngine:
         """Wait for all preprocessing tasks to complete."""
         for work_item in work_items:
             self.preprocess_executor.get_result(work_item)
+            if work_item.embedding_result is None:
+                estimate = self.mm_part.estimate_work(
+                    work_item.preprocess_result, work_item.mm_type
+                )
+                if estimate is not None and not isinstance(estimate, MMWorkEstimate):
+                    raise TypeError(
+                        "estimate_work must return MMWorkEstimate or None, got "
+                        f"{type(estimate).__name__}"
+                    )
+                work_item.work_estimate = estimate
 
     def _compute_embeddings(
         self, work_items: List[MMWorkItem]
