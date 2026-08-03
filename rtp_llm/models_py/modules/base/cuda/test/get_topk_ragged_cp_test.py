@@ -45,6 +45,34 @@ SKIP_REASON = "CUDA and deep_gemm required for IndexerOp._get_topk_ragged_cp"
 
 
 class GetTopkRaggedCPZeroLocalTest(TestCase):
+    @staticmethod
+    def _make_indexer_op():
+        return IndexerOp(
+            index_n_heads=32,
+            index_head_dim=128,
+            index_topk=512,
+            rope_head_dim=64,
+        )
+
+    def test_glm5_indexer_topk_backend_defaults_to_persistent(self):
+        with patch.dict("os.environ", {}, clear=True):
+            op = self._make_indexer_op()
+        self.assertIs(op._paged_topk_op, rtp_llm_ops.dsv4_persistent_topk)
+
+    def test_glm5_indexer_topk_backend_selects_topk_v3(self):
+        with patch.dict(
+            "os.environ", {"GLM5_INDEXER_TOPK_BACKEND": "topk_v3"}, clear=True
+        ):
+            op = self._make_indexer_op()
+        self.assertIs(op._paged_topk_op, rtp_llm_ops.topk_v3)
+
+    def test_glm5_indexer_topk_backend_rejects_invalid_value(self):
+        with patch.dict(
+            "os.environ", {"GLM5_INDEXER_TOPK_BACKEND": "unknown"}, clear=True
+        ):
+            with self.assertRaisesRegex(ValueError, "GLM5_INDEXER_TOPK_BACKEND"):
+                self._make_indexer_op()
+
     def test_prefill_topk_canonicalization_switch(self):
         with patch.dict(
             "os.environ", {"DSV4_INDEXER_TOPK_CANONICALIZE": "1"}

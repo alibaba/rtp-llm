@@ -23,6 +23,7 @@
 
 #include "rtp_llm/models_py/bindings/cuda/kernels/mla_quant_kernel.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_persistent_topk.h"
+#include "rtp_llm/models_py/bindings/cuda/kernels/topk_v3.h"
 #include "rtp_llm/models_py/bindings/cuda/kernels/dsv4_top_k_per_row_prefill.h"
 
 using namespace rtp_llm;
@@ -258,6 +259,16 @@ void registerBasicCudaOps(py::module& rtp_ops_m) {
     rtp_ops_m.def("dsv4_persistent_topk",
                   &dsv4_persistent_topk,
                   "DSv4 persistent radix-select TopK (K∈{512,1024,2048})",
+                  py::arg("logits"),
+                  py::arg("lengths"),
+                  py::arg("output"),
+                  py::arg("workspace"),
+                  py::arg("k"),
+                  py::arg("max_seq_len"));
+
+    rtp_ops_m.def("topk_v3",
+                  &topk_v3,
+                  "GLM5 decode indexer exact radix-select TopK",
                   py::arg("logits"),
                   py::arg("lengths"),
                   py::arg("output"),

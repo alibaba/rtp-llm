@@ -239,6 +239,20 @@ class IndexerOp(nn.Module):
         self.scale_fmt = scale_fmt
         self.is_neox_style = is_neox_style
 
+        glm5_topk_backend = os.environ.get(
+            "GLM5_INDEXER_TOPK_BACKEND", "dsv4_persistent"
+        ).strip().lower()
+        if glm5_topk_backend not in ("dsv4_persistent", "topk_v3"):
+            raise ValueError(
+                "GLM5_INDEXER_TOPK_BACKEND must be 'dsv4_persistent' or "
+                f"'topk_v3', got {glm5_topk_backend!r}"
+            )
+        self._paged_topk_op = (
+            rtp_llm_ops.topk_v3
+            if glm5_topk_backend == "topk_v3"
+            else rtp_llm_ops.dsv4_persistent_topk
+        )
+
     def _head_dim_with_sf(self) -> int:
         return self.index_head_dim + self.index_head_dim // self.block_size * 4
 
@@ -727,7 +741,7 @@ class IndexerOp(nn.Module):
         topk_result = logits.new_empty(
             (logits.shape[0], self.index_topk), dtype=torch.int32
         )
-        rtp_llm_ops.dsv4_persistent_topk(
+        self._paged_topk_op(
             logits,
             lengths,
             topk_result,
