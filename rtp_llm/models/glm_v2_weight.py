@@ -22,6 +22,16 @@ from rtp_llm.utils.model_weight import (
 
 
 class GlmV2WeightInfo(ModelDeployWeightInfo):
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        # Per-shard FFN intermediate size for w_half1_t/w_half2_t split.
+        # GLM v2/v3/v4 packs [w1; w3] into dense_h_to_4h.weight and we split at
+        # row = per-shard inter_size. The shared base no longer stores _inter_size
+        # (see model_weight_info.py: "inter_size is now accessed from model config
+        # when needed, not stored"); derive it here from model_config.inter_size
+        # divided by ffn_tp_size (FFN may have a different TP size than attention).
+        self._inter_size = self.model_config.inter_size // self.ffn_tp_size
+
     def _process_meta(self, meta_dicts, weight_keys):
         if "transformer.prefix_encoder.embedding.weight" in weight_keys:
             self._has_prefix_encoder = True

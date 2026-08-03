@@ -119,15 +119,15 @@ GenerateStream::GenerateStream(const shared_ptr<GenerateInput>& input,
 }
 
 void GenerateStream::resetBeginTime(int64_t begin_time_us) {
-    begin_time_us_ = begin_time_us;
-    wait_time_us_ = 0;
-    scheduler_enqueue_time_us_ = 0;
-    can_run_time_us_ = 0;
+    begin_time_us_               = begin_time_us;
+    wait_time_us_                = 0;
+    scheduler_enqueue_time_us_   = 0;
+    can_run_time_us_             = 0;
     loading_cache_start_time_us_ = 0;
-    loading_cache_done_time_us_ = 0;
-    first_running_time_us_ = 0;
-    loading_cache_latency_us_ = 0;
-    load_done_to_running_us_ = 0;
+    loading_cache_done_time_us_  = 0;
+    first_running_time_us_       = 0;
+    loading_cache_latency_us_    = 0;
+    load_done_to_running_us_     = 0;
 }
 
 bool GenerateStream::hasCacheKeys() const {
@@ -406,16 +406,6 @@ int GenerateStream::initialReuseLength() const {
 
 void GenerateStream::setReuseLength(int reuse_length) {
     reuse_length_ = reuse_length;
-    if (generate_input_->mm_locs) {
-        auto& locs      = generate_input_->mm_locs.value();
-        auto* locs_data = locs.data_ptr<int32_t>();
-        for (int i = locs.numel() - 1; i >= 0; --i) {
-            if (reuse_length_ > locs_data[i]) {
-                reuse_mm_length_ = i + 1;
-                break;
-            }
-        }
-    }
 }
 
 void GenerateStream::setLocalReuseLength(int length) {
@@ -512,23 +502,39 @@ int GenerateStream::currentExecuteTokenSize() {
 
 std::vector<torch::Tensor> GenerateStream::multimodalFeatures() const {
     if (generate_input_->multimodal_features) {
-        auto& features = generate_input_->multimodal_features.value();
-        return std::vector<torch::Tensor>(features.begin() + reuse_mm_length_, features.end());
+        return generate_input_->multimodal_features.value();
     } else {
         return std::vector<torch::Tensor>();
     }
 }
 
+std::vector<torch::Tensor> GenerateStream::multimodalExtraInput() const {
+    if (generate_input_->mm_extra_input) {
+        return generate_input_->mm_extra_input.value();
+    }
+    return std::vector<torch::Tensor>();
+}
+
+bool GenerateStream::hasMultimodalExtraInput() const {
+    if (generate_input_->mm_extra_input) {
+        return generate_input_->mm_extra_input.value().size() > 0;
+    }
+    return false;
+}
+
 int GenerateStream::multimodalFeaturesLength() const {
-    return multimodalFeatures().size() * currentBatchSize();
+    if (generate_input_->multimodal_features) {
+        return generate_input_->multimodal_features.value().size() * currentBatchSize();
+    } else {
+        return 0;
+    }
 }
 
 torch::Tensor GenerateStream::multimodalLocations() const {
     if (!generate_input_->mm_locs) {
         return torch::Tensor();
     }
-    auto& mm_locs = generate_input_->mm_locs.value();
-    return mm_locs.slice(0, reuse_mm_length_, mm_locs.numel());
+    return generate_input_->mm_locs.value();
 }
 
 vector<int> GenerateStream::textTokensMask() const {
@@ -1186,9 +1192,10 @@ void GenerateStream::reportStreamMetrics() {
         collector.is_streaming_qps  = generate_input_->generate_config->is_streaming;
         collector.not_streaming_qps = !generate_input_->generate_config->is_streaming;
         if (getStatus() == StreamState::FINISHED || cancelled || timeout) {
-            collector.reuse_length           = initial_reuse_length_;
-            collector.input_token_length     = inputLength();
-            collector.effective_context_length = std::max<int64_t>(0, collector.input_token_length - initial_reuse_length_);
+            collector.reuse_length       = initial_reuse_length_;
+            collector.input_token_length = inputLength();
+            collector.effective_context_length =
+                std::max<int64_t>(0, collector.input_token_length - initial_reuse_length_);
             collector.output_token_length    = outputTokenLen();
             collector.iterate_count          = iter_count_;
             collector.query_batch_size       = maxBatchSize();
@@ -1196,7 +1203,7 @@ void GenerateStream::reportStreamMetrics() {
             collector.first_token_latency_us = complete_token_ids_->firstTokenLatencyUs();
             RTP_LLM_LOG_DEBUG(
                 "stream [%s] report first latency us = %ld", streamLogTag().c_str(), collector.first_token_latency_us);
-            collector.wait_latency_us          = wait_time_us_;
+            collector.wait_latency_us = wait_time_us_;
             if (scheduler_enqueue_time_us_ > 0 && can_run_time_us_ > scheduler_enqueue_time_us_) {
                 collector.enqueue_to_canrun_us = can_run_time_us_ - scheduler_enqueue_time_us_;
             }

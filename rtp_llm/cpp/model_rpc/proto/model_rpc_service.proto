@@ -115,6 +115,8 @@ message MMPreprocessConfigPB {
     int32 fps = 5;
     int32 min_frames = 6;
     int32 max_frames = 7;
+    repeated float crop_positions = 8;
+    int32 mm_timeout_ms = 9;
 }
 
 message MultimodalInputPB {
@@ -131,10 +133,8 @@ message MultimodalInputsPB {
 message MultimodalOutputPB {
     TensorPB multimodal_embedding = 1;
     TensorPB multimodal_pos_id = 2;
-}
-
-message MultimodalOutputsPB {
-    repeated MultimodalOutputPB multimodal_outputs = 1;
+    repeated TensorPB multimodal_extra_input = 3;
+    repeated int32 split_size = 4;
 }
 
 message RequestInfoPB {
@@ -183,6 +183,7 @@ message AuxInfoPB {
     int32 memory_reuse_len = 24;
     int32 prefill_memory_reuse_len = 25;
     int32 decode_memory_reuse_len = 26;
+    map<int32, int32> multimodal_lengths = 27;
 }
 
 message FlattenOutputPB {
@@ -450,6 +451,7 @@ message EmbeddingInputPB {
     repeated int32 input_lengths = 3;
     int64 request_id = 4;
     repeated MultimodalInputPB multimodal_features = 5;
+    string vit_role_addr = 6;
 }
 
 message EmbeddingHealthRequestPB {
@@ -663,8 +665,10 @@ service RpcService {
     rpc GetPeerInfo(GetPeerInfoRequestPB) returns (GetPeerInfoResponsePB);
 }
 
+// Response type intentionally changed as part of multimodal refactoring — not a rolling-upgrade concern
+// because VIT proxy and LLM backend are always deployed together in this service.
 service MultimodalRpcService {
-    rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputsPB);
     rpc GetWorkerStatus(StatusVersionPB) returns (WorkerStatusPB);
     rpc GetCacheStatus(CacheVersionPB) returns (CacheStatusPB);
+    rpc RemoteMultimodalEmbedding(MultimodalInputsPB) returns (MultimodalOutputPB);
 }

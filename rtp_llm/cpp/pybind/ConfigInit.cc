@@ -1,4 +1,5 @@
 #define PYBIND11_DETAILED_ERROR_MESSAGES
+#include "rtp_llm/cpp/multimodal_processor/MultimodalInputClass.h"
 #include "rtp_llm/cpp/pybind/common/blockUtil.h"
 #include "rtp_llm/cpp/config/ConfigModules.h"
 #include "rtp_llm/cpp/config/RoleTypes.h"
@@ -18,9 +19,80 @@
 namespace py = pybind11;
 using namespace rtp_llm;
 
+void registerMultimodal(const py::module& m) {
+    pybind11::class_<MultimodalInput>(m, "MultimodalInput")
+        .def(pybind11::init<std::string, int32_t, torch::Tensor, MMPreprocessConfig>(),
+             py::arg("url"),
+             py::arg("mm_type"),
+             py::arg("tensor"),
+             py::arg("mm_preprocess_config"))
+        .def_readwrite("url", &MultimodalInput::url)
+        .def_readwrite("mm_type", &MultimodalInput::mm_type)
+        .def_readwrite("tensor", &MultimodalInput::tensor)
+        .def_readwrite("mm_preprocess_config", &MultimodalInput::mm_preprocess_config)
+        .def("to_string", &MultimodalInput::to_string)
+        .def("cache_key", &MultimodalInput::cache_key)
+        .def(pybind11::pickle(
+            [](const MultimodalInput& m) {  // __getstate__
+                return py::make_tuple(m.url, m.mm_type, m.tensor, m.mm_preprocess_config);
+            },
+            [](py::tuple t) {  // __setstate__
+                return MultimodalInput(t[0].cast<std::string>(),
+                                       t[1].cast<int32_t>(),
+                                       t[2].cast<torch::Tensor>(),
+                                       t[3].cast<MMPreprocessConfig>());
+            }));
+    pybind11::class_<MMPreprocessConfig>(m, "MMPreprocessConfig")
+        .def(pybind11::
+                 init<int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, int32_t, std::vector<float>, int32_t>(),
+             py::arg("width"),
+             py::arg("height"),
+             py::arg("min_pixels"),
+             py::arg("max_pixels"),
+             py::arg("fps"),
+             py::arg("min_frames"),
+             py::arg("max_frames"),
+             py::arg("crop_positions"),
+             py::arg("mm_timeout_ms"))
+        .def_readwrite("width", &MMPreprocessConfig::width)
+        .def_readwrite("height", &MMPreprocessConfig::height)
+        .def_readwrite("min_pixels", &MMPreprocessConfig::min_pixels)
+        .def_readwrite("max_pixels", &MMPreprocessConfig::max_pixels)
+        .def_readwrite("fps", &MMPreprocessConfig::fps)
+        .def_readwrite("min_frames", &MMPreprocessConfig::min_frames)
+        .def_readwrite("max_frames", &MMPreprocessConfig::max_frames)
+        .def_readwrite("crop_positions", &MMPreprocessConfig::crop_positions)
+        .def_readwrite("mm_timeout_ms", &MMPreprocessConfig::mm_timeout_ms)
+        .def("to_string", &MMPreprocessConfig::to_string)
+        .def(pybind11::pickle(
+            [](const MMPreprocessConfig& m) {  // __getstate__
+                return py::make_tuple(m.width,
+                                      m.height,
+                                      m.min_pixels,
+                                      m.max_pixels,
+                                      m.fps,
+                                      m.min_frames,
+                                      m.max_frames,
+                                      m.crop_positions,
+                                      m.mm_timeout_ms);
+            },
+            [](py::tuple t) {  // __setstate__
+                return MMPreprocessConfig(t[0].cast<int32_t>(),
+                                          t[1].cast<int32_t>(),
+                                          t[2].cast<int32_t>(),
+                                          t[3].cast<int32_t>(),
+                                          t[4].cast<int32_t>(),
+                                          t[5].cast<int32_t>(),
+                                          t[6].cast<int32_t>(),
+                                          t[7].cast<std::vector<float>>(),
+                                          t[8].cast<int32_t>());
+            }));
+}
+
 PYBIND11_MODULE(libth_transformer_config, m) {
     // Register get_block_cache_keys function
     registerCommon(m);
+    registerMultimodal(m);
 
     // Register enums
     py::enum_<RoleType>(m, "RoleType")
@@ -462,9 +534,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.enable_dsv4_state_block_independent_eviction);
             },
             [](py::tuple t) {
-                const bool has_disk_fields =
-                    t.size() >= 50 && py::isinstance<py::str>(t[9]);
-                const size_t min_size = has_disk_fields ? 50u : 45u;
+                const bool   has_disk_fields = t.size() >= 50 && py::isinstance<py::str>(t[9]);
+                const size_t min_size        = has_disk_fields ? 50u : 45u;
                 if (t.size() < min_size)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
@@ -486,43 +557,43 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                         c.memory_cache_disk_sync_timeout_ms = t[12].cast<int64_t>();
                         offset                              = 5;
                     }
-                    c.linear_step                          = t[8 + offset].cast<int>();
-                    c.int8_kv_cache                        = t[9 + offset].cast<int>();
-                    c.fp8_kv_cache                         = t[10 + offset].cast<int>();
-                    c.kv_cache_mem_mb                      = t[11 + offset].cast<int64_t>();
-                    c.seq_size_per_block                   = t[12 + offset].cast<int>();
-                    c.kernel_seq_size_per_block            = t[13 + offset].cast<int>();
-                    c.test_block_num                       = t[14 + offset].cast<int>();
-                    c.use_block_cache                      = t[15 + offset].cast<int>();
-                    c.enable_device_cache                  = t[16 + offset].cast<bool>();
-                    c.enable_memory_cache                  = t[17 + offset].cast<bool>();
-                    c.enable_memory_cache_sm_copy          = t[18 + offset].cast<bool>();
-                    c.enable_remote_cache                  = t[19 + offset].cast<bool>();
-                    c.write_cache_sync                     = t[20 + offset].cast<bool>();
-                    c.enable_tiered_memory_cache           = t[21 + offset].cast<bool>();
-                    c.device_cache_min_free_blocks         = t[22 + offset].cast<int64_t>();
-                    c.reco_enable_vipserver                = t[23 + offset].cast<bool>();
-                    c.reco_vipserver_domain                = t[24 + offset].cast<std::string>();
-                    c.reco_server_address                  = t[25 + offset].cast<std::string>();
-                    c.reco_instance_group                  = t[26 + offset].cast<std::string>();
-                    c.reco_meta_channel_retry_time         = t[27 + offset].cast<uint32_t>();
-                    c.reco_meta_channel_connection_timeout = t[28 + offset].cast<uint32_t>();
-                    c.reco_meta_channel_call_timeout       = t[29 + offset].cast<uint32_t>();
-                    c.reco_storage_thread_num              = t[30 + offset].cast<uint32_t>();
-                    c.reco_storage_queue_size              = t[31 + offset].cast<uint32_t>();
-                    c.reco_put_timeout_ms                  = t[32 + offset].cast<int>();
-                    c.reco_get_timeout_ms                  = t[33 + offset].cast<int>();
-                    c.reco_model_sdk_config                = t[34 + offset].cast<std::string>();
-                    c.reco_model_user_data                 = t[35 + offset].cast<std::string>();
-                    c.reco_model_extra_info                = t[36 + offset].cast<std::string>();
-                    c.reco_instance_id_salt                = t[37 + offset].cast<std::string>();
-                    c.reco_asyncwrapper_thread_num         = t[38 + offset].cast<size_t>();
-                    c.reco_asyncwrapper_queue_size         = t[39 + offset].cast<size_t>();
-                    c.reco_get_broadcast_timeout           = t[40 + offset].cast<int>();
-                    c.reco_put_broadcast_timeout           = t[41 + offset].cast<int>();
-                    c.reco_client_config                   = t[42 + offset].cast<std::string>();
-                    c.ssm_state_dtype                      = t[43 + offset].cast<std::string>();
-                    c.dsv4_fixed_pool_blocks               = t[44 + offset].cast<uint32_t>();
+                    c.linear_step                                = t[8 + offset].cast<int>();
+                    c.int8_kv_cache                              = t[9 + offset].cast<int>();
+                    c.fp8_kv_cache                               = t[10 + offset].cast<int>();
+                    c.kv_cache_mem_mb                            = t[11 + offset].cast<int64_t>();
+                    c.seq_size_per_block                         = t[12 + offset].cast<int>();
+                    c.kernel_seq_size_per_block                  = t[13 + offset].cast<int>();
+                    c.test_block_num                             = t[14 + offset].cast<int>();
+                    c.use_block_cache                            = t[15 + offset].cast<int>();
+                    c.enable_device_cache                        = t[16 + offset].cast<bool>();
+                    c.enable_memory_cache                        = t[17 + offset].cast<bool>();
+                    c.enable_memory_cache_sm_copy                = t[18 + offset].cast<bool>();
+                    c.enable_remote_cache                        = t[19 + offset].cast<bool>();
+                    c.write_cache_sync                           = t[20 + offset].cast<bool>();
+                    c.enable_tiered_memory_cache                 = t[21 + offset].cast<bool>();
+                    c.device_cache_min_free_blocks               = t[22 + offset].cast<int64_t>();
+                    c.reco_enable_vipserver                      = t[23 + offset].cast<bool>();
+                    c.reco_vipserver_domain                      = t[24 + offset].cast<std::string>();
+                    c.reco_server_address                        = t[25 + offset].cast<std::string>();
+                    c.reco_instance_group                        = t[26 + offset].cast<std::string>();
+                    c.reco_meta_channel_retry_time               = t[27 + offset].cast<uint32_t>();
+                    c.reco_meta_channel_connection_timeout       = t[28 + offset].cast<uint32_t>();
+                    c.reco_meta_channel_call_timeout             = t[29 + offset].cast<uint32_t>();
+                    c.reco_storage_thread_num                    = t[30 + offset].cast<uint32_t>();
+                    c.reco_storage_queue_size                    = t[31 + offset].cast<uint32_t>();
+                    c.reco_put_timeout_ms                        = t[32 + offset].cast<int>();
+                    c.reco_get_timeout_ms                        = t[33 + offset].cast<int>();
+                    c.reco_model_sdk_config                      = t[34 + offset].cast<std::string>();
+                    c.reco_model_user_data                       = t[35 + offset].cast<std::string>();
+                    c.reco_model_extra_info                      = t[36 + offset].cast<std::string>();
+                    c.reco_instance_id_salt                      = t[37 + offset].cast<std::string>();
+                    c.reco_asyncwrapper_thread_num               = t[38 + offset].cast<size_t>();
+                    c.reco_asyncwrapper_queue_size               = t[39 + offset].cast<size_t>();
+                    c.reco_get_broadcast_timeout                 = t[40 + offset].cast<int>();
+                    c.reco_put_broadcast_timeout                 = t[41 + offset].cast<int>();
+                    c.reco_client_config                         = t[42 + offset].cast<std::string>();
+                    c.ssm_state_dtype                            = t[43 + offset].cast<std::string>();
+                    c.dsv4_fixed_pool_blocks                     = t[44 + offset].cast<uint32_t>();
                     const size_t expected_with_fixed_pool_memory = (has_disk_fields ? 51u : 46u);
                     if (t.size() >= expected_with_fixed_pool_memory) {
                         c.dsv4_fixed_pool_use_memory = t[45 + offset].cast<bool>();
@@ -542,9 +613,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                             c.enable_prefix_tree_memory_cache         = t[extra_start + 2].cast<bool>();
                             c.enable_legacy_memory_connector_fallback = t[extra_start + 3].cast<bool>();
                             if (extra_count >= 6) {
-                                c.prefix_tree_memory_state_swa_pool_ratio = t[extra_start + 4].cast<int64_t>();
-                                c.enable_dsv4_state_block_independent_eviction =
-                                    t[extra_start + 5].cast<bool>();
+                                c.prefix_tree_memory_state_swa_pool_ratio      = t[extra_start + 4].cast<int64_t>();
+                                c.enable_dsv4_state_block_independent_eviction = t[extra_start + 5].cast<bool>();
                             }
                         }
                     }
@@ -1216,9 +1286,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     throw std::runtime_error("Invalid state!");
                 FIFOSchedulerConfig c;
                 try {
-                    c.max_context_batch_size       = t[0].cast<int64_t>();
-                    c.max_batch_tokens_size        = t[1].cast<int64_t>();
-                    c.cp_force_single_prefill      = t.size() >= 3 ? t[2].cast<bool>() : true;
+                    c.max_context_batch_size      = t[0].cast<int64_t>();
+                    c.max_batch_tokens_size       = t[1].cast<int64_t>();
+                    c.cp_force_single_prefill     = t.size() >= 3 ? t[2].cast<bool>() : true;
                     c.max_inited_kv_cache_streams = t.size() >= 4 ? t[3].cast<int64_t>() : 0;
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FIFOSchedulerConfig unpickle error: ") + e.what());

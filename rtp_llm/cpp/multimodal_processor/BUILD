@@ -1,12 +1,21 @@
 load("//:def.bzl", "copts")
 
 cc_library(
+    name = "multimodal_input_class",
+    hdrs = [
+        "MultimodalInputClass.h",
+    ],
+    visibility = ["//visibility:public"],
+)
+
+cc_library(
     name = "multimodal_types",
     hdrs = [
         "MultimodalTypes.h",
     ],
     deps = [
         "//:rtp_compute_ops",
+        ":multimodal_input_class",
     ],
     visibility = ["//visibility:public"],
 )

@@ -107,6 +107,9 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             generate_output.aux_info.local_reuse_len  = local_reuse_length_;
             generate_output.aux_info.remote_reuse_len = remote_reuse_length_;
             generate_output.aux_info.memory_reuse_len = memory_reuse_length_;
+
+            generate_output.aux_info.multimodal_lengths = generate_input_->multimodalLengths();
+
             if (generate_input_->generate_config->return_softmax_probs && softmax_probs_.defined()) {
                 generate_output.aux_info.softmax_probs =
                     softmax_probs_[i].narrow(0, last_output_pos_, output_len).clone();
@@ -114,7 +117,7 @@ GenerateOutputs NormalGenerateStream::prepareGenerateOutput(const StreamUpdateIn
             if (update_info.cum_log_probs.defined()) {
                 generate_output.aux_info.cum_log_probs = cum_log_probs_.narrow(0, i, 1).cpu().clone();
             }
-            if (generate_input_->generate_config->return_all_probs) {
+            if (generate_input_->generate_config->return_all_probs != ReturnAllProbsMode::NONE) {
                 if (!update_info.all_probs.defined()) {
                     throw std::runtime_error("all_probs is not while generate_config return_all_probs is true");
                 }

@@ -99,13 +99,12 @@ class MagaServerManager(object):
             return None
 
     def wait_sever_done(self, timeout: int = 1600):
-        # currently we can not check vit server health, assume it is ready, xieshui will fix it
-        if int(self._env_args.get("VIT_SEPARATION", "0")) == 1:
-            return True
-
         from rtp_llm.utils.util import wait_sever_done
 
-        # Health check uses START_PORT (self._port); when VIT_SEPARATION==1 we return True above
+        # Health check uses START_PORT (self._port). The VIT server (VIT_SEPARATION==1)
+        # exposes /health on its http port only after its preprocess engine and gRPC
+        # server finish initializing, so it goes through the same readiness probe as the
+        # LLM server instead of being assumed ready.
         result = wait_sever_done(self._server_process, int(self._port), timeout)
         if not result:
             rc = self._server_process.poll() if self._server_process else None
@@ -253,18 +252,14 @@ class MagaServerManager(object):
         if launcher:
             launcher = self._resolve_runfile(launcher)
             current_env["SMOKE_SERVER_LAUNCHER"] = launcher
-            for env_name in current_env.get(
-                "SMOKE_RESOLVE_RUNFILE_ENVS", ""
-            ).split(","):
+            for env_name in current_env.get("SMOKE_RESOLVE_RUNFILE_ENVS", "").split(
+                ","
+            ):
                 env_name = env_name.strip()
                 if env_name and current_env.get(env_name):
-                    current_env[env_name] = self._resolve_runfile(
-                        current_env[env_name]
-                    )
+                    current_env[env_name] = self._resolve_runfile(current_env[env_name])
             command = [launcher]
-            if str_to_bool(
-                current_env.get("SMOKE_SERVER_LAUNCHER_ROLE_ARG", "False")
-            ):
+            if str_to_bool(current_env.get("SMOKE_SERVER_LAUNCHER_ROLE_ARG", "False")):
                 command.append(self._role_name)
             command.extend(
                 shlex.split(current_env.get("SMOKE_SERVER_LAUNCHER_ARGS", ""))

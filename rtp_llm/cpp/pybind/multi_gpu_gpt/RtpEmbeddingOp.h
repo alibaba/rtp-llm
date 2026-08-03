@@ -11,6 +11,7 @@
 #include "rtp_llm/cpp/embedding_engine/arpc/ArpcServiceCreator.h"
 #include "rtp_llm/cpp/embedding_engine/arpc/ArpcServerWrapper.h"
 #include "rtp_llm/cpp/multimodal_processor/LocalMultimodalProcessor.h"
+#include "rtp_llm/cpp/multimodal_processor/RemoteMultimodalProcessor.h"
 #include "rtp_llm/cpp/api_server/HttpApiServer.h"
 #include "rtp_llm/cpp/model_rpc/EmbeddingRpcServer.h"
 namespace th = torch;
@@ -35,14 +36,13 @@ public:
                       std::vector<MultimodalInput> multimodal_inputs = {});
 
 private:
-
-    void startRpcServer(int64_t model_rpc_port,
-                        int64_t arpc_thread_num,
-                        int64_t arpc_queue_num,
-                        int64_t arpc_io_thread_num,
-                        py::object                                    py_render,
-                        py::object                                    py_tokenizer,
-                        kmonitor::MetricsReporterPtr                  reporter,
+    void startRpcServer(int64_t                              model_rpc_port,
+                        int64_t                              arpc_thread_num,
+                        int64_t                              arpc_queue_num,
+                        int64_t                              arpc_io_thread_num,
+                        py::object                           py_render,
+                        py::object                           py_tokenizer,
+                        kmonitor::MetricsReporterPtr         reporter,
                         std::shared_ptr<MultimodalProcessor> mm_processor);
 
     void startHttpServer(std::shared_ptr<EmbeddingEngine>     embedding_engine,

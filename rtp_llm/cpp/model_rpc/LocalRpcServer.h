@@ -30,8 +30,8 @@ public:
     LocalRpcServer() {}
     virtual ~LocalRpcServer() {}
     virtual grpc::Status init(const EngineInitParams&                                maga_init_params,
-                              py::object                                             mm_process_engine,
-                              std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params);
+                              std::unique_ptr<rtp_llm::ProposeModelEngineInitParams> propose_params,
+                              py::object                                             mm_process_engine);
 
     grpc::Status
     GetWorkerStatus(grpc::ServerContext* context, const ::StatusVersionPB* request, ::WorkerStatusPB* response);
@@ -99,13 +99,12 @@ public:
 
 protected:
     grpc::Status serializeErrorMsg(const std::string& request_key, ErrorInfo error_info);
-    grpc::Status serializeErrorMsg(const std::string& request_key,
-                                   const RequestInfo& request_info,
-                                   ErrorInfo          error_info);
-    bool         applyTimelineGate(const std::string& request_key,
-                                   bool               request_timeline,
-                                   int                profile_step,
-                                   const std::string& profile_trace_name = "");
+    grpc::Status
+         serializeErrorMsg(const std::string& request_key, const RequestInfo& request_info, ErrorInfo error_info);
+    bool applyTimelineGate(const std::string& request_key,
+                           bool               request_timeline,
+                           int                profile_step,
+                           const std::string& profile_trace_name = "");
     grpc::Status pollStreamOutput(grpc::ServerContext*             context,
                                   const std::string&               request_key,
                                   WriterInterface*                 writer,

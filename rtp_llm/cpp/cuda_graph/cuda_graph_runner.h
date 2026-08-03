@@ -37,7 +37,8 @@ public:
         decode_capture_batch_sizes_(graph_params.decode_capture_batch_sizes),
         model_data_type_(graph_params.model_data_type),
         kv_cache_layer_to_group_(graph_params.kv_cache_layer_to_group),
-        kv_cache_group_num_(graph_params.kv_cache_group_num) {
+        kv_cache_group_num_(graph_params.kv_cache_group_num),
+        position_id_len_factor_(graph_params.position_id_len_factor) {
         py::gil_scoped_acquire gil;
         if (!py_instance_ || py_instance_.is_none()) {
             throw std::runtime_error("CudaGraphRunner constructor: Python instance is null or none.");
@@ -136,11 +137,11 @@ private:
     // models). input_hiddens captures with hidden_size_ * hc_mult_ so the MTP
     // draft graph can take the target's pre-hc residual ([T, hc*dim]) as
     // input. The post-reduce output tensor still uses hidden_size_.
-    int                     hc_mult_{1};
-    int                     sp_steps_{0};
-    std::vector<int>        capture_range_;
-    std::vector<int>        prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
-    std::vector<int>        decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python
+    int              hc_mult_{1};
+    int              sp_steps_{0};
+    std::vector<int> capture_range_;
+    std::vector<int> prefill_capture_seq_lens_;    // Pre-configured sequence lengths from Python
+    std::vector<int> decode_capture_batch_sizes_;  // Pre-configured batch sizes from Python
     // capture seqLen -> GraphInstance (prefill)
     // batch_size -> GraphInstance (decode)
     std::unordered_map<int, GraphInstance> graph_instances_;
@@ -155,7 +156,8 @@ private:
     cuda_graph::GraphPoolHandle            shared_graph_pool_{};
 
     std::vector<int32_t> kv_cache_layer_to_group_;
-    int32_t              kv_cache_group_num_ = 0;
+    int32_t              kv_cache_group_num_     = 0;
+    int                  position_id_len_factor_ = 0;  // 0 = model has no combo_position_ids
 
     // event to record forward done
     torch::Event forward_event_ = cuda_graph::makeGraphEvent();

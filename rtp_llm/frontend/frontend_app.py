@@ -544,7 +544,6 @@ class FrontendApp(object):
                     status_code=400,
                     content={"error": f" HTTP health check failed"},
                 )
-            return "ok"
 
         @app.get("/")
         async def health(request: Request):
@@ -693,6 +692,8 @@ class FrontendApp(object):
             return self.frontend_server.tokenize(req)
 
         if self.frontend_server.is_embedding:
+            from rtp_llm.embedding.embedding_type import TYPE_STR, EmbeddingType
+
             # embedding
             @app.post("/v1/embeddings/similarity")
             @app.post("/v1/reranker")
