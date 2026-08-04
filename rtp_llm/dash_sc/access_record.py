@@ -486,9 +486,9 @@ class GrpcAccessRecord:
         if token_ids:
             self.generated_ids.extend(token_ids)
 
-    def record_aux_info(self, aux_info: Any) -> None:
+    def record_aux_info(self, aux_info: Any, *, overwrite: bool = True) -> None:
         """Keep the latest backend ``AuxInfo`` for the frontend access log."""
-        if aux_info is None:
+        if aux_info is None or (not overwrite and self.aux_info is not None):
             return
         self.aux_info = aux_info
 

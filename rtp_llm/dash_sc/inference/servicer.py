@@ -95,7 +95,7 @@ def _exception_metric_code(error_code: Any) -> str:
 def _capture_access_exception(access_agg: Any, e: BaseException) -> None:
     if access_agg is None:
         return
-    access_agg.record_aux_info(getattr(e, "aux_info", None))
+    access_agg.record_aux_info(getattr(e, "aux_info", None), overwrite=False)
     if not isinstance(e, FtRuntimeException):
         return
     access_agg.backend_error_code = _exception_metric_code(int(e.exception_type))
@@ -1276,7 +1276,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             if first_request:
                 record.mark_request_done("eof")
         except BaseException as e:
-            record.record_aux_info(getattr(e, "aux_info", None))
+            record.record_aux_info(getattr(e, "aux_info", None), overwrite=False)
             exc = e
             raise
         finally:

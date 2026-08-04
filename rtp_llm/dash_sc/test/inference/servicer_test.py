@@ -9,6 +9,7 @@ Covers:
 
 from __future__ import annotations
 
+import asyncio
 import json
 import logging
 import struct
@@ -1787,6 +1788,54 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["aux_info"]["local_reuse_len"], 1)
         self.assertEqual(payload["aux_info"]["remote_reuse_len"], 1)
         self.assertEqual(payload["aux_info"]["aux_string"], "backend-diagnostic")
+
+    async def test_late_cancel_does_not_overwrite_backend_aux_info(self) -> None:
+        out = GenerateOutput(
+            output_ids=torch.tensor([9], dtype=torch.int32),
+            finished=True,
+            aux_info=AuxInfo(
+                input_len=1,
+                output_len=1,
+                reuse_len=7,
+                local_reuse_len=3,
+                memory_reuse_len=4,
+            ),
+        )
+        cancel = asyncio.CancelledError()
+        cancel.aux_info = {
+            "input_len": 1,
+            "output_len": 0,
+            "step_output_len": 0,
+            "reuse_len": 0,
+        }
+
+        class _LateCancelStream(_FakeAsyncStream):
+            async def __anext__(self):
+                if self._emitted >= len(self._chunks):
+                    raise cancel
+                return await super().__anext__()
+
+        visitor = _FakeVisitor(
+            _LateCancelStream([GenerateOutputs(generate_outputs=[out])])
+        )
+        servicer = DashScInferenceServicer(backend_visitor=visitor)
+
+        with patch.object(
+            logging.getLogger(DASH_SC_GRPC_ACCESS_LOGGER_NAME), "info"
+        ) as info, self.assertRaises(asyncio.CancelledError):
+            await _drain(
+                servicer.ModelStreamInfer(
+                    _areq_iter([self._valid_infer_request()]), _FakeGrpcContext()
+                )
+            )
+
+        payload = json.loads(info.call_args.args[0])
+        self.assertEqual(payload["status"], "OK")
+        self.assertEqual(payload["exc_type"], "CancelledError")
+        self.assertEqual(payload["aux_info"]["output_len"], 1)
+        self.assertEqual(payload["aux_info"]["reuse_len"], 7)
+        self.assertEqual(payload["aux_info"]["local_reuse_len"], 3)
+        self.assertEqual(payload["aux_info"]["memory_reuse_len"], 4)
 
     async def test_access_log_records_generate_config_role_addrs(self) -> None:
         role_addrs = [
