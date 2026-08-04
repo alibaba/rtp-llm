@@ -141,6 +141,35 @@ void addD2DCopy(FusedD2DCopyParams& copies, const torch::Tensor& src, torch::Ten
     }
 }
 
+void addD2DScalarBroadcast(FusedStridedCopyParams& copies,
+                           torch::Tensor&          tensor,
+                           int64_t                 source_index,
+                           int64_t                 destination_begin,
+                           int64_t                 destination_end) {
+    if (!tensor.defined() || destination_end <= destination_begin) {
+        return;
+    }
+    RTP_LLM_CHECK_WITH_INFO(tensor.is_cuda() && tensor.scalar_type() == torch::kInt32,
+                            "D2D scalar broadcast expects an int32 CUDA tensor");
+    RTP_LLM_CHECK_WITH_INFO(tensor.is_contiguous(), "D2D scalar broadcast expects a contiguous tensor");
+    RTP_LLM_CHECK_WITH_INFO(source_index >= 0 && source_index < tensor.numel(),
+                            "D2D scalar broadcast source index %ld exceeds tensor numel %ld",
+                            source_index,
+                            tensor.numel());
+    RTP_LLM_CHECK_WITH_INFO(destination_begin >= 0 && destination_end <= tensor.numel(),
+                            "D2D scalar broadcast range [%ld, %ld) exceeds tensor numel %ld",
+                            destination_begin,
+                            destination_end,
+                            tensor.numel());
+    auto* base = tensor.data_ptr<int32_t>();
+    copies.add(base + source_index,
+               base + destination_begin,
+               destination_end - destination_begin,
+               sizeof(int32_t),
+               0,
+               sizeof(int32_t));
+}
+
 void addStridedD2DCopy(FusedStridedCopyParams& strided_copies,
                        FusedD2DCopyParams&     d2d_copies,
                        const torch::Tensor&    src,
@@ -285,6 +314,8 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
 
     const size_t hybrid_cache_group = hybridCacheGroup(inputs, py_model_inputs_);
     const bool   has_hybrid_cache   = hybrid_cache_group > 0;
+    const int    selected_graph_batch_size =
+        is_prefill_cuda_graph_mode_ ? static_cast<int>(max_bs_) : state.current_real_graph_bs;
 
     // Clear stale device ranges before strided D2D copies. All device-side fills
     // are fused into one kernel to avoid a train of tiny aten::fill_ launches.
@@ -317,17 +348,27 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                 addCudaGraphPrepareFillRegion(
                     fill_params, py_model_inputs_.attention_inputs.input_lengths, state.current_batch_size, max_bs_, 0);
             }
-            const int last_valid = state.current_seq_len;
+        }
+        if (!is_prefill_cuda_graph_mode_) {
+            const bool has_live_sequence_lengths = inputs.attention_inputs.sequence_lengths.defined()
+                                                   && inputs.attention_inputs.sequence_lengths.numel() > 0;
             addCudaGraphPrepareFillRegion(fill_params,
-                                          py_model_inputs_.attention_inputs.cu_seqlens,
-                                          state.current_batch_size + 1,
-                                          max_bs_ + 1,
-                                          last_valid);
+                                          py_model_inputs_.attention_inputs.sequence_lengths,
+                                          has_live_sequence_lengths ? state.current_batch_size : 0,
+                                          selected_graph_batch_size,
+                                          0);
+        }
+        if (is_target_verify_ && state.current_batch_size < selected_graph_batch_size) {
             addCudaGraphPrepareFillRegion(fill_params,
-                                          py_model_inputs_.attention_inputs.cu_kv_seqlens,
-                                          state.current_batch_size + 1,
-                                          max_bs_ + 1,
-                                          last_valid);
+                                          py_model_inputs_.attention_inputs.input_lengths,
+                                          state.current_batch_size,
+                                          selected_graph_batch_size,
+                                          0);
+            addCudaGraphPrepareFillRegion(fill_params,
+                                          py_model_inputs_.attention_inputs.prefix_lengths,
+                                          state.current_batch_size,
+                                          selected_graph_batch_size,
+                                          0);
         }
         if (is_dspark_draft_ && state.current_batch_size < state.current_real_graph_bs) {
             addCudaGraphPrepareFillRegion(fill_params,
@@ -370,6 +411,27 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
                inputs.attention_inputs.cu_kv_seqlens,
                py_model_inputs_.attention_inputs.cu_kv_seqlens,
                (state.current_batch_size + 1) * sizeof(int));
+    // launchFusedD2DCopies runs contiguous copies before strided copies, so the
+    // graph buffer's live terminal is current before it is broadcast to padding.
+    if ((is_prefill_cuda_graph_mode_ || is_target_verify_)
+        && state.current_batch_size < selected_graph_batch_size) {
+        RTP_LLM_CHECK_WITH_INFO(inputs.attention_inputs.cu_seqlens.defined()
+                                    && inputs.attention_inputs.cu_seqlens.numel() > state.current_batch_size,
+                                "cumulative Q lengths must contain the live batch terminal");
+        RTP_LLM_CHECK_WITH_INFO(inputs.attention_inputs.cu_kv_seqlens.defined()
+                                    && inputs.attention_inputs.cu_kv_seqlens.numel() > state.current_batch_size,
+                                "cumulative KV lengths must contain the live batch terminal");
+        addD2DScalarBroadcast(strided_d2d_copies,
+                              py_model_inputs_.attention_inputs.cu_seqlens,
+                              state.current_batch_size,
+                              state.current_batch_size + 1,
+                              selected_graph_batch_size + 1);
+        addD2DScalarBroadcast(strided_d2d_copies,
+                              py_model_inputs_.attention_inputs.cu_kv_seqlens,
+                              state.current_batch_size,
+                              state.current_batch_size + 1,
+                              selected_graph_batch_size + 1);
+    }
     addD2DCopy(d2d_copies,
                inputs.attention_inputs.input_lengths,
                py_model_inputs_.attention_inputs.input_lengths,
@@ -464,11 +526,11 @@ void CudaGraphRunner::prepareAttentionInputs(const PyModelInputs& inputs,
         // Reset unused host-side batch portions to prevent stale data (prefill only).
         // prefix_lengths/input_lengths are CUDA tensors and are reset by the fused
         // prepare-fill kernel above.
-        if (is_prefill_cuda_graph_mode_) {
-            int last_valid = state.current_seq_len;
+        if (is_prefill_cuda_graph_mode_ || is_target_verify_) {
+            const int last_valid = is_prefill_cuda_graph_mode_ ? state.current_seq_len : state.seq_len_sum;
             fillHostInt32(py_model_inputs_.attention_inputs.cu_seqlens_host,
                           state.current_batch_size + 1,
-                          max_bs_ + 1,
+                          selected_graph_batch_size + 1,
                           last_valid);
         }
     }
@@ -639,12 +701,16 @@ bool CudaGraphRunner::canRun(const PyModelInputs& inputs, CudaGraphState& state)
     // 2. all values in input_lengths are the same
     // this is for 2.2.1
     if (is_target_verify_) {
-        if (inputs.attention_inputs.is_target_verify) {
-            // Target-verify must also respect captured decode range.
-            // Otherwise we may replay an uncaptured graph key.
-            return tryGetRealGraphDecodeBatchSize(inputs, state);
+        if (!inputs.attention_inputs.is_target_verify) {
+            return false;
         }
-        return false;
+        if (!inputs.attention_inputs.is_prefill) {
+            RTP_LLM_LOG_WARNING("Target-verify CUDA graph requires prefill attention inputs, fallback to normal run.");
+            return false;
+        }
+        // Target-verify must also respect captured decode range.
+        // Otherwise we may replay an uncaptured graph key.
+        return tryGetRealGraphDecodeBatchSize(inputs, state);
     }
 
     if (is_dspark_draft_) {
