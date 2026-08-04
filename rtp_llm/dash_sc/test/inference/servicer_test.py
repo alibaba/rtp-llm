@@ -410,10 +410,17 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
 
         class _BoomVisitor:
             async def enqueue(self, _gi):
-                raise FtRuntimeException(
+                error = FtRuntimeException(
                     ExceptionType.ROUTE_ERROR,
                     "route failed",
                 )
+                error.aux_info = {
+                    "input_len": 2,
+                    "reuse_len": 1,
+                    "remote_reuse_len": 1,
+                    "aux_string": "route-diagnostic",
+                }
+                raise error
 
         access_agg = GrpcAccessRecord(
             method="ModelStreamInfer",
@@ -442,6 +449,15 @@ class IterRealModelStreamInferTest(unittest.IsolatedAsyncioTestCase):
         self.assertIn("route failed", payload["status_message"])
         self.assertEqual(_finish_reason(chunks[0]), LLMFinishReason.TASK_LIST_FULL)
         self.assertEqual(access_agg.backend_error_code, "8500_ROUTE_ERROR")
+        self.assertEqual(
+            access_agg.aux_info,
+            {
+                "input_len": 2,
+                "reuse_len": 1,
+                "remote_reuse_len": 1,
+                "aux_string": "route-diagnostic",
+            },
+        )
 
     async def test_stream_exception_yields_error_message(self) -> None:
         req = self._minimal_request()
@@ -1732,7 +1748,18 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         out = GenerateOutput(
             output_ids=torch.tensor([9], dtype=torch.int32),
             finished=True,
-            aux_info=AuxInfo(input_len=1, reuse_len=2),
+            aux_info=AuxInfo(
+                cost_time=12.5,
+                first_token_cost_time=3.5,
+                wait_time=1.25,
+                iter_count=4,
+                input_len=1,
+                output_len=1,
+                reuse_len=2,
+                local_reuse_len=1,
+                remote_reuse_len=1,
+                aux_string="backend-diagnostic",
+            ),
         )
         visitor = _FakeVisitor(
             _FakeAsyncStream([GenerateOutputs(generate_outputs=[out])])
@@ -1753,6 +1780,13 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(payload["backend_input_token_len"], 1)
         self.assertEqual(payload["output_token_len"], 1)
         self.assertEqual(payload["prompt_cached_token_num"], 2)
+        self.assertEqual(payload["aux_info"]["cost_time"], 12.5)
+        self.assertEqual(payload["aux_info"]["first_token_cost_time"], 3.5)
+        self.assertEqual(payload["aux_info"]["wait_time"], 1.25)
+        self.assertEqual(payload["aux_info"]["iter_count"], 4)
+        self.assertEqual(payload["aux_info"]["local_reuse_len"], 1)
+        self.assertEqual(payload["aux_info"]["remote_reuse_len"], 1)
+        self.assertEqual(payload["aux_info"]["aux_string"], "backend-diagnostic")
 
     async def test_access_log_records_generate_config_role_addrs(self) -> None:
         role_addrs = [
@@ -1793,6 +1827,7 @@ class DashScInferenceServicerTest(unittest.IsolatedAsyncioTestCase):
         self.assertEqual(phase1[0]["role"], "PREFILL")
         self.assertEqual(phase1[1]["role"], "DECODE")
         self.assertEqual(phase1[0]["grpc_port"], 8081)
+        self.assertEqual(payload["aux_info"]["role_addrs"], phase1)
 
     async def test_empty_request_stream_marks_request_done(self) -> None:
         servicer = DashScInferenceServicer(backend_visitor=None)

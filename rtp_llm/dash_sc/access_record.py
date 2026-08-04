@@ -5,8 +5,8 @@ Shared data model for both servicers (frontend ``inference`` + transparent
 the proxy is just one of its two consumers; ``access_log.py`` / ``grpc_metrics``
 also depend on it.
 
-This module intentionally has no logger or kmonitor dependencies. It owns the
-pure data path for dash-sc access logs:
+This module intentionally has no access-log handler or kmonitor dependencies.
+It owns the data path for dash-sc access logs:
 
 - record construction from a gRPC context (peer, upstream correlation id);
 - request-derived fields such as request id, model name, input length, and
@@ -30,11 +30,13 @@ from __future__ import annotations
 
 import dataclasses
 import json
+import logging
 import re
 import time
 from typing import Any, Optional
 
 import grpc
+from pydantic import TypeAdapter
 
 from rtp_llm.config.generate_config import GenerateConfig, RoleAddr
 from rtp_llm.dash_sc.codec import (
@@ -56,6 +58,7 @@ from rtp_llm.dash_sc.status import (
 )
 
 DASH_SC_GRPC_PROTOCOL = "grpc"
+_AUX_INFO_ADAPTER = TypeAdapter(Any)
 
 _MAX_CONTROL_STRING_LEN = 4096
 _MAX_CONTROL_DEPTH = 8
@@ -322,6 +325,21 @@ def _sampling_to_dict(sampling) -> dict[str, Any]:
     return d
 
 
+def dump_aux_info(aux_info: Any) -> dict[str, Any]:
+    """Return a detached, JSON-safe aux-info dict or ``{}`` on any failure."""
+    try:
+        value = _AUX_INFO_ADAPTER.dump_python(aux_info, mode="json")
+        return value if isinstance(value, dict) else {}
+    except Exception as e:
+        logging.warning(
+            "[DashScGrpc] aux_info dump failed, using empty object: %s: %s, aux_info=%r",
+            type(e).__name__,
+            e,
+            aux_info,
+        )
+        return {}
+
+
 _CONTEXT_ATTR = "_dash_sc_forward_access_record"
 
 
@@ -361,6 +379,7 @@ class GrpcAccessRecord:
     generated_ids: list[int] = dataclasses.field(default_factory=list)
     generate_config: Optional[dict[str, Any]] = None
     generate_config_role_addrs: Optional[dict[str, list[dict[str, Any]]]] = None
+    aux_info: Any = None
     output_len: int = 0
     first_token_frame_len: int = 0
     token_frame_count: int = 0
@@ -466,6 +485,12 @@ class GrpcAccessRecord:
         """
         if token_ids:
             self.generated_ids.extend(token_ids)
+
+    def record_aux_info(self, aux_info: Any) -> None:
+        """Keep the latest backend ``AuxInfo`` for the frontend access log."""
+        if aux_info is None:
+            return
+        self.aux_info = aux_info
 
     def check_repetition(self) -> None:
         self._repetition_monitor.check_generated_ids(self.generated_ids or ())
@@ -852,6 +877,7 @@ class GrpcAccessRecord:
                 "multi_token_frame_count": self.multi_token_frame_count,
                 "max_tokens_per_frame": self.max_tokens_per_frame,
                 "generate_config": self.generate_config,
+                "aux_info": dump_aux_info(self.aux_info),
                 "input_ids": self.input_ids,
                 "generated_ids": self.generated_ids or None,
             }

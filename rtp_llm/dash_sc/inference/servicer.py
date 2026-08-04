@@ -92,9 +92,10 @@ def _exception_metric_code(error_code: Any) -> str:
         return str(code)
 
 
-def _set_access_backend_error_code(access_agg: Any, e: BaseException) -> None:
+def _capture_access_exception(access_agg: Any, e: BaseException) -> None:
     if access_agg is None:
         return
+    access_agg.record_aux_info(getattr(e, "aux_info", None))
     if not isinstance(e, FtRuntimeException):
         return
     access_agg.backend_error_code = _exception_metric_code(int(e.exception_type))
@@ -610,9 +611,11 @@ async def iter_real_model_stream_infer(
             prompt_cached_token_num = (
                 int(aux_info.reuse_len) if aux_info is not None else 0
             )
-            if access_agg is not None and aux_info is not None and aux_info.role_addrs:
-                # model_rpc_client copies the final submitted role_addrs here.
-                access_agg.record_role_addrs(aux_info.role_addrs, phase="phase1")
+            if access_agg is not None and aux_info is not None:
+                access_agg.record_aux_info(aux_info)
+                if aux_info.role_addrs:
+                    # model_rpc_client copies the final submitted role_addrs here.
+                    access_agg.record_role_addrs(aux_info.role_addrs, phase="phase1")
             if not generated_ids and not out_py.finished:
                 response = response_builder.build(go, token_ids=generated_ids)
                 stats = (
@@ -904,13 +907,13 @@ async def iter_real_model_stream_infer(
                 prompt_cached_token_num = (
                     int(aux_info.reuse_len) if aux_info is not None else 0
                 )
-                if (
-                    access_agg is not None
-                    and aux_info is not None
-                    and aux_info.role_addrs
-                ):
-                    # model_rpc_client copies the final submitted role_addrs here.
-                    access_agg.record_role_addrs(aux_info.role_addrs, phase="phase2")
+                if access_agg is not None and aux_info is not None:
+                    access_agg.record_aux_info(aux_info)
+                    if aux_info.role_addrs:
+                        # model_rpc_client copies the final submitted role_addrs here.
+                        access_agg.record_role_addrs(
+                            aux_info.role_addrs, phase="phase2"
+                        )
                 response = phase2_response_builder.build(
                     resp_go,
                     generate_think_token_num=generate_think_token_num,
@@ -937,7 +940,7 @@ async def iter_real_model_stream_infer(
                 resp, stats = _build_phase2_response(go, generated_ids)
                 yield (resp, stats) if yield_access_stats else resp
     except FtRuntimeException as e:
-        _set_access_backend_error_code(access_agg, e)
+        _capture_access_exception(access_agg, e)
         error_spec = _dash_error_spec_for_ft_exception(e)
         status_message = str(e)
         if error_spec.status_code == 500:
@@ -955,6 +958,7 @@ async def iter_real_model_stream_infer(
         stats = (0, True, error_spec.finish_reason, len(input_ids_list), 0, ())
         yield (response, stats) if yield_access_stats else response
     except Exception as e:
+        _capture_access_exception(access_agg, e)
         logging.exception("[DashScGrpc] [%s] enqueue failed: %s", tag, e)
         error_spec = DASH_ERROR_INTERNAL
         response = build_dash_error_response(
@@ -1272,6 +1276,7 @@ class DashScInferenceServicer(predict_v2_pb2_grpc.GRPCInferenceServiceServicer):
             if first_request:
                 record.mark_request_done("eof")
         except BaseException as e:
+            record.record_aux_info(getattr(e, "aux_info", None))
             exc = e
             raise
         finally:
