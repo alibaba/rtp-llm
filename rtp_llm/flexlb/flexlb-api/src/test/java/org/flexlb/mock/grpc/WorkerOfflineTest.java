@@ -39,8 +39,8 @@ import static org.junit.jupiter.api.Assertions.assertTrue;
  *       it retries once with a new channel — which also fails.</li>
  *   <li>Regardless of retry, the exception propagates to
  *       {@link org.flexlb.balance.scheduler.DefaultBatchDispatcher}, which calls
- *       {@code failItems()} → {@code callback.onFailure()} →
- *       {@link org.flexlb.balance.scheduler.FlexlbBatchScheduler#failAck}</li>
+ *       {@code failItems()} → {@code callbacks.onFailure()} →
+ *       {@link org.flexlb.balance.scheduler.FlexlbBatchScheduler#onFailure}</li>
  * </ul>
  *
  * <p>Note: {@code MockWorker.stop()} already supports graceful gRPC server shutdown
@@ -53,7 +53,6 @@ class WorkerOfflineTest extends FlexLBMockTestBase {
     protected FlexlbConfig createConfig() {
         FlexlbConfig cfg = new FlexlbConfig();
         cfg.setFlexlbBatchSizeMax(1);        // single request triggers immediate dispatch
-        cfg.setFlexlbBatchWindowMs(300);
         cfg.setCostSloMs(50_000L);
         cfg.setCostSloRiskMarginMs(50L);
         cfg.setFlexlbBatchEnqueueDeadlineMs(5_000L);

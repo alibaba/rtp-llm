@@ -7,6 +7,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 /**
  * A single inference request queued for batch dispatch.
@@ -18,8 +19,8 @@ import java.util.concurrent.CompletableFuture;
  * so downstream operations (commit, rollback, ack) avoid repeated
  * {@code EndpointRegistry} lookups by ip+port.
  *
- * <p>{@link #sortKey} is mutable — the {@link BatcherAlgorithm} computes it
- * inside {@link WorkerBatcher#offer(BatchItem)} via {@link BatcherAlgorithm#computeSortKey}.
+ * <p>{@link #sortKey} is mutable — {@link FixedWindowBatcherAlgorithm} computes it
+ * inside {@link WorkerBatcher#offer(BatchItem)} via {@link FixedWindowBatcherAlgorithm#computeSortKey}.
  */
 public final class BatchItem {
 
@@ -34,6 +35,25 @@ public final class BatchItem {
 
     /** Mutable sort key set by the batcher algorithm at offer time. */
     private volatile long sortKey;
+
+    /**
+     * Batch ID assigned in {@code FlexlbBatchScheduler#flushItems} just before
+     * dispatch. Used for stale-ACK detection ({@code onSuccess} compares the
+     * incoming batch ID against this field). 0 = not yet dispatched.
+     */
+    private volatile long assignedBatchId;
+
+    /**
+     * Wall-clock timestamp (ms) set just before {@code dispatcher.dispatch}.
+     * Used for the dispatch-to-ACK latency metric. 0 = not yet dispatched.
+     */
+    private volatile long dispatchedAtMs;
+
+    /**
+     * CAS flag ensuring the decode reservation is rolled back at most once
+     * ({@code FlexlbBatchScheduler#rollbackOnce}).
+     */
+    final AtomicBoolean rolledBack = new AtomicBoolean(false);
 
     public BatchItem(BalanceContext ctx,
                      CompletableFuture<Response> future,
@@ -67,8 +87,20 @@ public final class BatchItem {
     /** Priority queue sort key. */
     public long sortKey() { return sortKey; }
 
-    /** Set by {@link WorkerBatcher#offer} after {@link BatcherAlgorithm#computeSortKey}. */
+    /** Set by {@link WorkerBatcher#offer} after {@link FixedWindowBatcherAlgorithm#computeSortKey}. */
     public void setSortKey(long sortKey) { this.sortKey = sortKey; }
+
+    /** Batch ID assigned at dispatch time; 0 = not yet dispatched. */
+    public long assignedBatchId() { return assignedBatchId; }
+
+    /** Set by {@code FlexlbBatchScheduler#flushItems} before dispatch. */
+    public void setAssignedBatchId(long assignedBatchId) { this.assignedBatchId = assignedBatchId; }
+
+    /** Wall-clock dispatch timestamp (ms); 0 = not yet dispatched. */
+    public long dispatchedAtMs() { return dispatchedAtMs; }
+
+    /** Set by {@code FlexlbBatchScheduler#flushItems} just before {@code dispatcher.dispatch}. */
+    public void setDispatchedAtMs(long dispatchedAtMs) { this.dispatchedAtMs = dispatchedAtMs; }
 
     // -- derived accessors --
 

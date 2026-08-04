@@ -19,6 +19,7 @@ import org.flexlb.sync.status.ModelWorkerStatus;
 import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.mockito.Mockito;
 
 import java.util.HashMap;
@@ -54,7 +55,7 @@ class CostBasedDecodeStrategyTest {
 
     /** Create an EndpointRegistry with DecodeEndpoints registered for each WorkerStatus entry. */
     private EndpointRegistry createDecodeRegistry(Map<String, WorkerStatus> workerMap) {
-        EndpointRegistry registry = new EndpointRegistry(configService, () -> null,
+        EndpointRegistry registry = new EndpointRegistry(configService, () -> Mockito.mock(FlexlbBatchScheduler.class),
                 Mockito.mock(BatchSchedulerReporter.class));
         for (Map.Entry<String, WorkerStatus> entry : workerMap.entrySet()) {
             WorkerStatus ws = entry.getValue();
@@ -69,7 +70,7 @@ class CostBasedDecodeStrategyTest {
 
     @Test
     void should_handle_empty_worker_map_when_no_workers_available() {
-        EndpointRegistry emptyRegistry = new EndpointRegistry(configService, () -> null,
+        EndpointRegistry emptyRegistry = new EndpointRegistry(configService, () -> Mockito.mock(FlexlbBatchScheduler.class),
                 Mockito.mock(BatchSchedulerReporter.class));
         EngineWorkerStatus engineWorkerStatus = new EngineWorkerStatus(emptyRegistry);
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);

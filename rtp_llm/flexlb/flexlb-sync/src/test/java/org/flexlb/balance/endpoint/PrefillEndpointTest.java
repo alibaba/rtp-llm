@@ -1,8 +1,6 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.BatchDecisionHandler;
 import org.flexlb.balance.scheduler.BatchItem;
-import org.flexlb.balance.scheduler.DispatchMeta;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.DebugInfo;
@@ -46,7 +44,9 @@ class PrefillEndpointTest {
         config.setFlexlbBatchFixedWaitMs(300);
         config.setCostFormula("10 + 0.1*sum(computeTokens) + 5*batchSize");
 
-        endpoint = new PrefillEndpoint(status, config, noopHandler(), mock(BatchSchedulerReporter.class));
+        endpoint = new PrefillEndpoint(status, config,
+                head -> { }, (items, meta) -> { }, (item, error) -> { },
+                mock(BatchSchedulerReporter.class));
     }
 
     @AfterEach
@@ -347,13 +347,5 @@ class PrefillEndpointTest {
         prefill.setDebugInfo(debugInfo);
 
         return new BatchItem(ctx, null, null, prefill, null, endpoint, null, System.currentTimeMillis());
-    }
-
-    private static BatchDecisionHandler noopHandler() {
-        return new BatchDecisionHandler() {
-            @Override public void onExpired(BatchItem head) {}
-            @Override public void onBatchReady(List<BatchItem> items, DispatchMeta meta) {}
-            @Override public void onOfferFailure(BatchItem item, Throwable error) {}
-        };
     }
 }

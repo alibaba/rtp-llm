@@ -181,7 +181,7 @@ public class DecodeEndpoint extends WorkerEndpoint {
 
     /**
      * Report per-worker decode inflight metrics via the given reporter.
-     * Called periodically by {@link org.flexlb.balance.scheduler.FlexlbBatchScheduler}.
+     * Called periodically by {@code RouteService#triggerSchedulerMetrics()}.
      */
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
         reporter.reportInflightRequestCount(RoleType.DECODE.name(), getIp(), getInflightCount());

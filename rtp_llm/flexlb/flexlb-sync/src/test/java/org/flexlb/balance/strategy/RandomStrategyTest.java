@@ -19,6 +19,7 @@ import org.flexlb.sync.status.EngineWorkerStatus;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.mockito.Mockito;
 
 import java.util.HashMap;
@@ -46,7 +47,7 @@ class RandomStrategyTest {
     void setUp() {
         ConfigService configService = Mockito.mock(ConfigService.class);
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
-        endpointRegistry = new EndpointRegistry(configService, () -> null,
+        endpointRegistry = new EndpointRegistry(configService, () -> Mockito.mock(FlexlbBatchScheduler.class),
                 Mockito.mock(BatchSchedulerReporter.class));
         resourceMeasure = Mockito.mock(ResourceMeasure.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());

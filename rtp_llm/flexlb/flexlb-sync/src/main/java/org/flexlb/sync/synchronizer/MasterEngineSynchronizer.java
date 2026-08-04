@@ -4,7 +4,7 @@ import com.fasterxml.jackson.core.type.TypeReference;
 import io.micrometer.core.instrument.util.NamedThreadFactory;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.balance.endpoint.EndpointRegistry;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.ModelMetaConfig;
@@ -38,7 +38,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
     private final List<String> modelNames = new ArrayList<>();
     private final EngineGrpcService engineGrpcService;
     private final CacheAwareService localKvCacheAwareManager;
-    private final FlexlbBatchScheduler batchScheduler;
+    private final InflightStore globalInflightStore;
     private final EndpointRegistry endpointRegistry;
     private final long syncRequestTimeoutMs;
     private final LongAdder syncCount = new LongAdder();
@@ -52,7 +52,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                     ModelMetaConfig modelMetaConfig,
                                     CacheAwareService localKvCacheAwareManager,
                                     @org.springframework.beans.factory.annotation.Autowired(required = false)
-                                    FlexlbBatchScheduler batchScheduler,
+                                    InflightStore globalInflightStore,
                                     EndpointRegistry endpointRegistry,
                                     ConfigService configService) {
 
@@ -60,7 +60,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
 
         this.engineGrpcService = engineGrpcService;
         this.localKvCacheAwareManager = localKvCacheAwareManager;
-        this.batchScheduler = batchScheduler;
+        this.globalInflightStore = globalInflightStore;
         this.endpointRegistry = endpointRegistry;
 
         this.syncEngineStatusInterval = System.getenv("SYNC_STATUS_INTERVAL") != null
@@ -87,7 +87,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
 
     public void syncEngineStatus() {
         syncCount.increment();
-        logger.info("====================sync engine prefill status start, times:{} =========================", syncCount.longValue());
+        logger.info("====================sync engine status start, times:{} =========================", syncCount.longValue());
         logger.info("modelNames:{}", modelNames);
         try {
             for (String modelName : modelNames) {
@@ -111,7 +111,7 @@ public class MasterEngineSynchronizer extends AbstractEngineStatusSynchronizer {
                                 workerAddressService, statusCheckExecutor, engineHealthReporter,
                                 engineGrpcService, roleType, localKvCacheAwareManager,
                                 syncRequestTimeoutMs, syncCount, syncEngineStatusInterval,
-                                batchScheduler, endpointRegistry
+                                globalInflightStore, endpointRegistry
                         ));
                     } else {
                         logger.error("roleEndpoints is null, by roleType : {}", roleType);

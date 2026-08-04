@@ -1,8 +1,8 @@
 package org.flexlb.balance.endpoint;
 
 import org.flexlb.balance.scheduler.Batch;
-import org.flexlb.balance.scheduler.BatchDecisionHandler;
 import org.flexlb.balance.scheduler.BatchItem;
+import org.flexlb.balance.scheduler.DispatchMeta;
 import org.flexlb.balance.scheduler.InflightEvictor;
 import org.flexlb.balance.scheduler.InflightItem;
 import org.flexlb.balance.scheduler.WorkerBatcher;
@@ -27,6 +27,8 @@ import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.function.BiConsumer;
+import java.util.function.Consumer;
 import java.util.stream.Collectors;
 
 public class PrefillEndpoint extends WorkerEndpoint {
@@ -52,12 +54,14 @@ public class PrefillEndpoint extends WorkerEndpoint {
     private volatile long cachedWaitTimeExpireAtMs = 0;
 
     public PrefillEndpoint(WorkerStatus status, FlexlbConfig config,
-                           BatchDecisionHandler handler,
+                           Consumer<BatchItem> onExpired,
+                           BiConsumer<List<BatchItem>, DispatchMeta> onBatchReady,
+                           BiConsumer<BatchItem, Throwable> onOfferFailure,
                            BatchSchedulerReporter reporter) {
         super(status);
         this.reporter = reporter;
         this.predictor = createPredictor(config);
-        this.batcher = createBatcher(config, handler, reporter);
+        this.batcher = createBatcher(config, onExpired, onBatchReady, onOfferFailure, reporter);
         this.batchEvictor = new InflightEvictor<>(inflightBatches, batch -> {
             inflightRequestCount.addAndGet(-batch.requests().size());
             cachedWaitTimeExpireAtMs = 0;
@@ -65,9 +69,13 @@ public class PrefillEndpoint extends WorkerEndpoint {
         this.batcher.start();
     }
 
-    private WorkerBatcher createBatcher(FlexlbConfig config, BatchDecisionHandler handler,
+    private WorkerBatcher createBatcher(FlexlbConfig config,
+                                        Consumer<BatchItem> onExpired,
+                                        BiConsumer<List<BatchItem>, DispatchMeta> onBatchReady,
+                                        BiConsumer<BatchItem, Throwable> onOfferFailure,
                                         BatchSchedulerReporter reporter) {
-        return new WorkerBatcher(status.getIpPort(), this, config, handler, reporter);
+        return new WorkerBatcher(status.getIpPort(), this, config,
+                onExpired, onBatchReady, onOfferFailure, reporter);
     }
 
     public WorkerBatcher getBatcher() {
@@ -415,7 +423,7 @@ public class PrefillEndpoint extends WorkerEndpoint {
 
     /**
      * Report per-worker batch metrics via the given reporter.
-     * Called periodically by {@link org.flexlb.balance.scheduler.FlexlbBatchScheduler}.
+     * Called periodically by {@code RouteService#triggerSchedulerMetrics()}.
      */
     public void reportBatchMetrics(BatchSchedulerReporter reporter) {
         int queueSize = batcher.queueSize();

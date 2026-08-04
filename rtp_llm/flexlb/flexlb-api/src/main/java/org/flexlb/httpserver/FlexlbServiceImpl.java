@@ -2,7 +2,6 @@ package org.flexlb.httpserver;
 
 import io.grpc.stub.StreamObserver;
 import org.flexlb.consistency.LBStatusConsistencyService;
-import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
@@ -114,29 +113,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     @Override
-    public void getRequestState(FlexlbScheduleProtocol.GetRequestStateRequestPB request,
-                                StreamObserver<FlexlbScheduleProtocol.GetRequestStateResponsePB> responseObserver) {
-        if (shouldForwardToMaster()) {
-            FlexlbScheduleProtocol.GetRequestStateResponsePB forwarded =
-                    grpcForwarder.forwardGetRequestStateToMaster(request);
-            if (forwarded != null && forwarded.getFound()) {
-                responseObserver.onNext(forwarded);
-                responseObserver.onCompleted();
-                return;
-            }
-        }
-        RequestLifecycleSnapshot snapshot = routeService.getRequestState(
-                request.getRequestId(), request.getBatchId());
-        FlexlbScheduleProtocol.GetRequestStateResponsePB.Builder response =
-                FlexlbScheduleProtocol.GetRequestStateResponsePB.newBuilder().setFound(snapshot != null);
-        if (snapshot != null) {
-            response.setLifecycle(toLifecycleProto(snapshot));
-        }
-        responseObserver.onNext(response.build());
-        responseObserver.onCompleted();
-    }
-
-    @Override
     public void cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB request,
                         StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> responseObserver) {
         if (shouldForwardToMaster()) {
@@ -153,13 +129,6 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
             boolean cancelled = routeService.cancel(String.valueOf(request.getRequestId()));
             response = FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder()
                     .setFound(cancelled);
-            if (cancelled) {
-                RequestLifecycleSnapshot snapshot = routeService.getRequestState(
-                        request.getRequestId(), request.getBatchId());
-                if (snapshot != null) {
-                    response.setLifecycle(toLifecycleProto(snapshot));
-                }
-            }
         } catch (Exception e) {
             Logger.error("FlexlbService.cancel error, request_id={}", request.getRequestId(), e);
             response = FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder()
@@ -170,15 +139,7 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     }
 
     private CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeLocally(BalanceContext ctx) {
-        return routeService.route(ctx).thenApply(response -> {
-            FlexlbScheduleProtocol.FlexlbScheduleResponsePB.Builder builder =
-                    toProtoResponse(response).toBuilder();
-            RequestLifecycleSnapshot lifecycle = routeService.getRequestState(ctx.getRequestId(), 0);
-            if (lifecycle != null) {
-                builder.setLifecycle(toLifecycleProto(lifecycle));
-            }
-            return builder.build();
-        });
+        return routeService.route(ctx).thenApply(this::toProtoResponse);
     }
 
     private void completeSchedule(BalanceContext ctx,
@@ -296,24 +257,5 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
     private boolean shouldForwardToMaster() {
         return lbStatusConsistencyService.isNeedConsistency()
                 && !lbStatusConsistencyService.isMaster();
-    }
-
-    private static FlexlbScheduleProtocol.RequestLifecyclePB toLifecycleProto(
-            RequestLifecycleSnapshot snapshot) {
-        FlexlbScheduleProtocol.RequestLifecyclePB.Builder lifecycle =
-                FlexlbScheduleProtocol.RequestLifecyclePB.newBuilder()
-                        .setRequestId(snapshot.requestId())
-                        .setState(switch (snapshot.state()) {
-                            case QUEUED -> FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_QUEUED;
-                            case DISPATCHING -> FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_DISPATCHING;
-                            case ACKNOWLEDGED -> FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_ACKNOWLEDGED;
-                            case TIMED_OUT -> FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_TIMED_OUT;
-                            case FAILED -> FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_FAILED;
-                            case COMPLETED -> FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_COMPLETED;
-                        });
-        if (snapshot.batchId() > 0) {
-            lifecycle.setBatchId(snapshot.batchId());
-        }
-        return lifecycle.build();
     }
 }

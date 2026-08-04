@@ -1,6 +1,5 @@
 package org.flexlb.mock.grpc;
 
-import org.flexlb.balance.scheduler.RequestLifecycleState;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
@@ -58,7 +57,6 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
     protected FlexlbConfig createConfig() {
         FlexlbConfig cfg = new FlexlbConfig();
         cfg.setFlexlbBatchSizeMax(1);        // single request triggers immediate dispatch
-        cfg.setFlexlbBatchWindowMs(300);
         cfg.setCostSloMs(50_000L);
         cfg.setCostSloRiskMarginMs(50L);
         cfg.setFlexlbBatchEnqueueDeadlineMs(500);  // 500ms deadline — will time out
@@ -77,8 +75,6 @@ class GrpcTimeoutTest extends FlexLBMockTestBase {
         assertFalse(response.isSuccess(), "Request should fail when EnqueueBatch times out");
         assertEquals(StrategyErrorType.BATCH_SLO_EXPIRED.getErrorCode(), response.getCode(),
                 "Request should have BATCH_SLO_EXPIRED error code");
-        assertEquals(RequestLifecycleState.TIMED_OUT,
-                scheduler.getRequestState(10001L, 0).state());
 
         // 3. Verify: mock prefill received the EnqueueBatch call (recorded before sleep)
         assertTrue(mockPrefillWorker.getEnqueueCount() >= 1,

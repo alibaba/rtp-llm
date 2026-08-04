@@ -191,14 +191,15 @@ public class EndpointRegistry {
         return true;
     }
 
-    private FlexlbBatchScheduler batchScheduler() {
-        return batchSchedulerFactory.getObject();
-    }
-
     private PrefillEndpoint createPrefillEndpoint(WorkerStatus status, RoleType roleType) {
         FlexlbConfig config = configService.loadBalanceConfig();
         prepareEndpointMetrics(roleType, status);
-        return new PrefillEndpoint(status, config, batchScheduler(), reporter);
+        // Lazily resolve the scheduler bean here (not in the constructor) to
+        // break the Spring circular dependency: scheduler -> registry -> endpoint.
+        FlexlbBatchScheduler scheduler = batchSchedulerFactory.getObject();
+        return new PrefillEndpoint(status, config,
+                scheduler::onExpired, scheduler::onBatchReady, scheduler::onOfferFailure,
+                reporter);
     }
 
     private DecodeEndpoint createDecodeEndpoint(WorkerStatus status) {

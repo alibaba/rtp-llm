@@ -68,7 +68,7 @@ class DefaultBatchDispatcherTest {
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
-        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test_reason", callback);
+        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test_reason", callback.callbacks);
 
         assertTrue(callback.successLatch.await(5, TimeUnit.SECONDS), "onSuccess should be called");
         assertEquals(1, callback.successCount.get());
@@ -83,7 +83,7 @@ class DefaultBatchDispatcherTest {
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenReturn(CompletableFuture.failedFuture(new RuntimeException("gRPC connection refused")));
 
-        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test_reason", callback);
+        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test_reason", callback.callbacks);
 
         assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS), "onFailure should be called");
         assertEquals(1, callback.failureCount.get());
@@ -98,7 +98,7 @@ class DefaultBatchDispatcherTest {
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenReturn(CompletableFuture.completedFuture(null));
 
-        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test_reason", callback);
+        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test_reason", callback.callbacks);
 
         assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS));
         assertEquals(1, callback.failureCount.get());
@@ -115,7 +115,7 @@ class DefaultBatchDispatcherTest {
                         .build()));
 
         dispatcher.dispatch(List.of(item), prefillEp, 88L,
-                100, "batch_id_mismatch", callback);
+                100, "batch_id_mismatch", callback.callbacks);
 
         assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS));
         assertEquals(0, callback.successCount.get());
@@ -129,7 +129,7 @@ class DefaultBatchDispatcherTest {
         PrefillEndpoint prefillEp = createPrefillEndpoint();
         BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
 
-        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test", callback);
+        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test", callback.callbacks);
 
         // Should fail synchronously when executor is shut down
         assertEquals(1, callback.failureCount.get());
@@ -154,7 +154,7 @@ class DefaultBatchDispatcherTest {
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
-        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test", callback);
+        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test", callback.callbacks);
 
         assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS));
         assertEquals(1, callback.failureCount.get());
@@ -172,7 +172,7 @@ class DefaultBatchDispatcherTest {
         when(grpcClient.batchEnqueueAsync(anyString(), anyInt(), any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
                 .thenReturn(CompletableFuture.completedFuture(response));
 
-        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test", callback);
+        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test", callback.callbacks);
 
         assertTrue(callback.failureLatch.await(5, TimeUnit.SECONDS));
         assertEquals(1, callback.failureCount.get());
@@ -191,7 +191,7 @@ class DefaultBatchDispatcherTest {
                 });
 
         BatchItem item = createBatchItem(1L, 500, 200, prefillEp);
-        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test", callback);
+        dispatcher.dispatch(List.of(item), prefillEp, 1L, 100, "test", callback.callbacks);
 
         // Wait for at least one task to start, then shutdown
         assertTrue(started.await(5, TimeUnit.SECONDS));
@@ -200,7 +200,7 @@ class DefaultBatchDispatcherTest {
         // Post-shutdown dispatch should be rejected immediately
         int failuresBefore = callback.failureCount.get();
         BatchItem extra = createBatchItem(99L, 500, 200, prefillEp);
-        dispatcher.dispatch(List.of(extra), prefillEp, 99L, 100, "test", callback);
+        dispatcher.dispatch(List.of(extra), prefillEp, 99L, 100, "test", callback.callbacks);
         assertEquals(failuresBefore + 1, callback.failureCount.get(), "Post-shutdown dispatch should add exactly 1 failure");
     }
 
@@ -255,22 +255,26 @@ class DefaultBatchDispatcherTest {
 
     // ---- Test callback ----
 
-    private static class TestCallback implements DispatchCallback {
+    private static class TestCallback {
         final AtomicInteger successCount = new AtomicInteger(0);
         final AtomicInteger failureCount = new AtomicInteger(0);
         final CountDownLatch successLatch = new CountDownLatch(1);
         final CountDownLatch failureLatch = new CountDownLatch(1);
 
-        @Override
-        public void onSuccess(BatchItem item, long batchId) {
-            successCount.incrementAndGet();
-            successLatch.countDown();
-        }
-
-        @Override
-        public void onFailure(BatchItem item, Throwable error) {
-            failureCount.incrementAndGet();
-            failureLatch.countDown();
-        }
+        final DefaultBatchDispatcher.DispatchCallbacks callbacks =
+                new DefaultBatchDispatcher.DispatchCallbacks(
+                        (item, batchId) -> {
+                            successCount.incrementAndGet();
+                            successLatch.countDown();
+                        },
+                        (item, error) -> {
+                            failureCount.incrementAndGet();
+                            failureLatch.countDown();
+                        },
+                        // timeout is counted as failure, matching the old default behavior
+                        (item, error) -> {
+                            failureCount.incrementAndGet();
+                            failureLatch.countDown();
+                        });
     }
 }

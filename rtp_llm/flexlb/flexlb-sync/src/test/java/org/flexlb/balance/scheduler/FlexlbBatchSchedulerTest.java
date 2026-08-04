@@ -8,9 +8,7 @@ import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
-import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
@@ -21,7 +19,6 @@ import org.junit.jupiter.api.Test;
 
 import java.util.HashSet;
 import java.util.List;
-import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.CopyOnWriteArrayList;
@@ -62,7 +59,6 @@ class FlexlbBatchSchedulerTest {
         config = new FlexlbConfig();
         config.setScheduleWorkerSize(1);
         config.setFlexlbBatchSizeMax(2);
-        config.setFlexlbBatchWindowMs(10_000);
         config.setCostSloMs(50000L);
         config.setCostSloRiskMarginMs(50L);
         when(configService.loadBalanceConfig()).thenReturn(config);
@@ -79,9 +75,9 @@ class FlexlbBatchSchedulerTest {
                     return CompletableFuture.completedFuture(ackFor(request));
                 });
         endpointRegistry = new EndpointRegistry(configService, () -> scheduler, reporter);
-        BatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
+        DefaultBatchDispatcher dispatcher = new DefaultBatchDispatcher(grpcClient, configService, null);
         scheduler = new FlexlbBatchScheduler(configService, router,
-                endpointRegistry, dispatcher, reporter, null);
+                endpointRegistry, dispatcher, reporter, new InflightStore(reporter), null);
 
         // Create endpoint and batcher for the worker that successRoute() returns
         String ipPort = "10.0.0.1:8080";
@@ -226,45 +222,6 @@ class FlexlbBatchSchedulerTest {
     }
 
     @Test
-    void worker_completion_before_enqueue_ack_still_completes_schedule_future() throws Exception {
-        config.setFlexlbBatchSizeMax(1);
-        CompletableFuture<EngineRpcService.EnqueueBatchResponsePB> ackFuture = new CompletableFuture<>();
-        CountDownLatch enqueueStarted = new CountDownLatch(1);
-        when(grpcClient.batchEnqueueAsync(anyString(), anyInt(),
-                any(EngineRpcService.EnqueueBatchRequestPB.class), anyLong()))
-                .thenAnswer(inv -> {
-                    EngineRpcService.EnqueueBatchRequestPB request = inv.getArgument(2);
-                    sentBatches.add(request);
-                    enqueueStarted.countDown();
-                    return ackFuture;
-                });
-
-        CompletableFuture<Response> scheduleFuture = scheduler.submit(context(85));
-        assertTrue(enqueueStarted.await(2, TimeUnit.SECONDS));
-        long batchId = sentBatches.getFirst().getBatchId();
-
-        TaskInfo finished = new TaskInfo();
-        finished.setRequestId(85L);
-        finished.setBatchId(batchId);
-        WorkerStatusResponse status = new WorkerStatusResponse();
-        status.setRole(RoleType.DECODE);
-        status.setFinishedTaskInfo(Map.of("85", finished));
-        scheduler.onWorkerStatusUpdate(status);
-
-        // New behavior: worker completion notification immediately completes the
-        // schedule future via completeSuccess(entry.item), before the enqueue ACK
-        // arrives. The ACK path (onSuccess) becomes a no-op for this request.
-        assertTrue(scheduleFuture.isDone());
-        ackFuture.complete(ackFor(sentBatches.getFirst()));
-
-        Response response = scheduleFuture.get(2, TimeUnit.SECONDS);
-        assertTrue(response.isSuccess());
-        assertTrue(response.isEnqueuedByMaster());
-        assertEquals(RequestLifecycleState.COMPLETED,
-                scheduler.getRequestState(85L, batchId).state());
-    }
-
-    @Test
     void route_failure_completes_without_batch_enqueue() throws Exception {
         Response failure = Response.error(StrategyErrorType.NO_PREFILL_WORKER);
         when(router.route(any(BalanceContext.class))).thenReturn(failure);
@@ -316,10 +273,10 @@ class FlexlbBatchSchedulerTest {
 
     @Test
     void processQueue_park_converges_to_urgent_dispatch() throws Exception {
-        // budget = sloMs(300) - predMs(128) = 172ms, margin = 100ms
-        // fillThreshold=2.0 → fillRatio can never reach it (max 1.0)
-        // batchSizeMax=1000 → single request can't trigger size condition
-        // So request parks, budget shrinks each 1ms iteration, after ~72ms budget < margin → urgent dispatch
+        // batchSizeMax=1000 → a single request can never trigger batch_full.
+        // The fixed_window batcher parks until the head request has waited
+        // flexlbBatchFixedWaitMs (default 300ms), then dispatches it alone
+        // via fixed_window_timeout.
         config.setCostSloMs(300L);
         config.setCostSloRiskMarginMs(100L);
         config.setFlexlbBatchSizeMax(1000);
@@ -333,9 +290,9 @@ class FlexlbBatchSchedulerTest {
 
     @Test
     void processQueue_fillRatio_triggers_dispatch() throws Exception {
-        // budget = sloMs(500) - predMs(128) = 372ms, margin = 50ms
-        // fillRatio = 128/322 ≈ 0.40 >= threshold(0.3) → dispatches immediately via fillRatio
-        // batchSizeMax=1000 ensures size condition is NOT the trigger
+        // batchSizeMax=1000 → a single request can never trigger batch_full.
+        // With fixed_window the request is dispatched alone once it has waited
+        // flexlbBatchFixedWaitMs (default 300ms) via fixed_window_timeout.
         config.setCostSloMs(500L);
         config.setCostSloRiskMarginMs(50L);
         config.setFlexlbBatchMaxCapacity(500);
@@ -350,11 +307,10 @@ class FlexlbBatchSchedulerTest {
 
     @Test
     void processQueue_dispatches_requests_within_budget() throws Exception {
-        // With slo_budget batcher (default), two 100-token requests each have
-        // budget ≈ 350ms (slo=500, margin=50, pred≈100). Both fit within the
-        // incremental budget and are dispatched together in a single batch.
-        // flexlbBatchScanAhead (default 64) determines how many candidates are
-        // scanned per iteration.
+        // With the fixed_window batcher, two 100-token requests fit well within
+        // batchSizeMax(100) and flexlbBatchMaxCapacity(100000). Both accumulate
+        // in the queue during the fixed window and are dispatched together in
+        // a single batch when the window expires.
         config.setCostSloMs(500L);
         config.setCostSloRiskMarginMs(50L);
         config.setFlexlbBatchMaxCapacity(100000);
@@ -366,9 +322,9 @@ class FlexlbBatchSchedulerTest {
         assertTrue(f1.get(2, TimeUnit.SECONDS).isSuccess());
         assertTrue(f2.get(2, TimeUnit.SECONDS).isSuccess());
 
-        // Both requests fit within the incremental budget → 1 combined batch
+        // Both requests fit within the batch limits → 1 combined batch
         assertEquals(1, sentBatches.size(),
-                "slo_budget dispatches both requests together when they fit within budget");
+                "fixed_window dispatches both requests together when they fit in one batch");
         assertEquals(2, batchInputs(sentBatches.get(0)).size());
     }
 
@@ -410,9 +366,10 @@ class FlexlbBatchSchedulerTest {
 
     @Test
     void dynamic_slo_prevents_drop_for_requests_exceeding_fixed_slo() throws Exception {
-        // With default costSloMs=500 and alpha1=1.0, a 600-token request has
-        // predMs=600 > sloMs=500 → budget=0 → immediate drop.
-        // With buckets "1000:5000,...", sloMs=5000 → budget=4400 → enough to batch.
+        // The fixed_window batcher never drops requests based on SLO budget;
+        // SLO buckets only affect routing-time filtering, not batching.
+        // With batchSizeMax=2, the second submit fills the batch and both
+        // 600-token requests are dispatched together via batch_full.
         config.setCostSloBuckets("1000:5000,100000:50000");
         config.setCostSloRiskMarginMs(50L);
         config.setFlexlbBatchSizeMax(2);

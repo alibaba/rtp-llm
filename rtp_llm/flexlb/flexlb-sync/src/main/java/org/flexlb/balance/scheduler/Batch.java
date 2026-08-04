@@ -3,7 +3,6 @@ package org.flexlb.balance.scheduler;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.dao.loadbalance.Response;
 
-import java.util.ArrayList;
 import java.util.List;
 import java.util.concurrent.CopyOnWriteArrayList;
 import java.util.concurrent.atomic.AtomicBoolean;
@@ -17,12 +16,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * list holds the items routed to that DP. All traversal (terminate, complete,
  * removeItem) respects this grouping.
  *
- * <p>Symmetric with {@link InflightItem}: both use a single
- * {@link AtomicBoolean} {@code terminated} for CAS-guarded idempotent
- * terminal transition. The {@link #dispatched} flag tracks whether the
- * batch has been submitted to the engine, determining whether
- * {@code item.terminate()} should {@link #removeItem(InflightItem)} (pre-dispatch)
- * or {@link #markItemFailed(InflightItem)} (post-dispatch).
+ * <p>Terminal transition: {@code Batch} uses a single {@link AtomicBoolean}
+ * {@code terminated} for CAS-guarded idempotent terminal transition, whereas
+ * {@link InflightItem} uses an {@code AtomicReference<InflightState>} that
+ * additionally distinguishes the terminal kind (COMPLETED/FAILED/TIMED_OUT).
  *
  * <p>Thread-safety: {@link CopyOnWriteArrayList} for read-heavy access
  * (status callbacks, metric reporting) with infrequent mutation
@@ -43,9 +40,6 @@ public final class Batch implements InflightEntry {
 
     /** CAS flag — {@code true} once the batch reaches a terminal state. */
     final AtomicBoolean terminated = new AtomicBoolean(false);
-
-    /** Whether this batch has been submitted to the engine. */
-    final AtomicBoolean dispatched = new AtomicBoolean(false);
 
     public Batch(long batchId, List<List<InflightItem>> itemsByDp) {
         this.batchId = batchId;
@@ -83,10 +77,6 @@ public final class Batch implements InflightEntry {
 
     public boolean isTerminated() {
         return terminated.get();
-    }
-
-    public boolean isDispatched() {
-        return dispatched.get();
     }
 
     // ---- error paths (CAS-guarded, double-layer traversal) ----
@@ -157,17 +147,6 @@ public final class Batch implements InflightEntry {
         cleanupBatchLevel();
     }
 
-    // ---- progress ----
-
-    /**
-     * Mark this batch as dispatched to the engine.
-     *
-     * @param batchId engine-assigned batch ID (may differ from local ID)
-     */
-    public void ack(long batchId) {
-        dispatched.set(true);
-    }
-
     // ---- item management ----
 
     /**
@@ -185,20 +164,6 @@ public final class Batch implements InflightEntry {
         for (List<InflightItem> dpItems : itemsByDp) {
             dpItems.remove(item);
         }
-    }
-
-    /**
-     * Mark an item as failed within an already-dispatched batch.
-     *
-     * <p>Called from {@link InflightItem#terminate(TerminalReason)} when the
-     * batch has already been dispatched — the item cannot be removed from a
-     * sent batch, so it is marked for separate handling when the batch
-     * response arrives.
-     *
-     * @param item the item that failed
-     */
-    void markItemFailed(InflightItem item) {
-        item.markFailedInBatch();
     }
 
     // ---- private helpers ----

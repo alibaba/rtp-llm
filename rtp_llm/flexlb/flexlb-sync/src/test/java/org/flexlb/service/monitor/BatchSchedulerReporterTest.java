@@ -14,7 +14,7 @@ import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_DISPATC
 import static org.flexlb.constant.MetricConstant.ENGINE_BALANCING_MASTER_SELECT_DETAIL;
 import static org.flexlb.constant.MetricConstant.DISPATCH_ACK_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTE_SUBMIT_TIME_MS;
-import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
+import static org.flexlb.constant.MetricConstant.BATCH_QUEUE_WAIT_TIME_MS;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
 import static org.mockito.ArgumentMatchers.eq;
@@ -69,7 +69,7 @@ class BatchSchedulerReporterTest {
                 "engineIp", "10.0.0.1");
         verify(monitor).prepare(DISPATCH_ACK_TIME_MS, endpointTags);
         verify(monitor).prepare(ROUTE_SUBMIT_TIME_MS, endpointTags);
-        verify(monitor).prepare(ROUTING_QUEUE_WAIT_TIME_MS, endpointTags);
+        verify(monitor).prepare(BATCH_QUEUE_WAIT_TIME_MS, endpointTags);
         for (String reason : new String[]{"batch_full", "fixed_window_timeout", "predict_threshold"}) {
             FlexMetricTags reasonTags = FlexMetricTags.of(
                     "role", "PREFILL",

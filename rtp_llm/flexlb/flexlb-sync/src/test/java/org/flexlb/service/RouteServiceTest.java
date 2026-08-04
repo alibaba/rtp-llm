@@ -1,6 +1,8 @@
 package org.flexlb.service;
 
+import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.scheduler.DefaultRouter;
+import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
@@ -8,6 +10,7 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.metric.NoOpFlexMonitor;
 import org.flexlb.enums.ScheduleModeEnum;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
@@ -43,6 +46,12 @@ class RouteServiceTest {
     private RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
 
     @Mock
+    private BatchSchedulerReporter batchSchedulerReporter;
+
+    @Mock
+    private EndpointRegistry endpointRegistry;
+
+    @Mock
     private BalanceContext balanceContext;
 
     private RouteService routeService;
@@ -52,7 +61,8 @@ class RouteServiceTest {
         when(configService.loadBalanceConfig()).thenReturn(flexlbConfig);
         routeService = new RouteService(configService, defaultRouter, queueManager,
                 flexlbBatchScheduler, recentCacheKeyTraceReporter,
-                NoOpFlexMonitor.getInstance());
+                NoOpFlexMonitor.getInstance(), new InflightStore(batchSchedulerReporter),
+                endpointRegistry, batchSchedulerReporter);
     }
 
     @Test

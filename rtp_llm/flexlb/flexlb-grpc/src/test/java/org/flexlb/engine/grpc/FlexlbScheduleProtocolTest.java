@@ -13,6 +13,9 @@ import static org.junit.jupiter.api.Assertions.assertNull;
 
 class FlexlbScheduleProtocolTest {
 
+    /**
+     * proto 保留 GetRequestState 用于线上兼容，Java 实现已删除（返回 UNIMPLEMENTED）。
+     */
     @Test
     void scheduleContractIsSeparatedButKeepsOriginalWireServiceName() {
         assertNull(EngineRpcService.getDescriptor().findMessageTypeByName("FlexlbScheduleRequestPB"));

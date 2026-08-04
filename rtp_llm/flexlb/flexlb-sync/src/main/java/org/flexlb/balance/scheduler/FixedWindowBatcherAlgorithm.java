@@ -44,26 +44,38 @@ import java.util.concurrent.TimeUnit;
  * oversized requests are rejected immediately when they reach the head of
  * the queue (see step 0.5 below), rather than waiting for the queue
  * deadline to expire.
- *
- * <h3>Key differences from {@link SloBudgetBatcherAlgorithm}</h3>
- * <ul>
- *   <li>No SLO deadline tracking — the sort key is only used for FIFO ordering.</li>
- *   <li>No EMA arrival rate estimation.</li>
- *   <li>Uses FIFO selection subject to the Engine-reported aggregate token
- *       capacity; it does not use SLO incremental-cost admission.</li>
- *   <li>Deadline is a simple max-wait threshold, not an SLO-deadline
- *       computed from predicted prefill time.</li>
- * </ul>
  */
-public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
+public class FixedWindowBatcherAlgorithm {
 
-    @Override
+    /**
+     * Compute the sort key used to order items in the per-worker
+     * priority queue. Called by {@link WorkerBatcher#offer} before the
+     * item is enqueued; the result is stored via
+     * {@link BatchItem#setSortKey(long)}.
+     */
     public long computeSortKey(BatcherContext ctx, BatchItem item) {
         // FIFO: arrival timestamp as sort key
         return item.enqueuedAtMs();
     }
 
-    @Override
+    /**
+     * Hook called by {@link WorkerBatcher#offer} after the sort key is
+     * computed and set. No arrival bookkeeping is needed for fixed-window
+     * batching.
+     */
+    public void onOffer(BatcherContext ctx, BatchItem item, long nowMs) {
+    }
+
+    /**
+     * Hook called by {@link WorkerBatcher#shutdown} before the queue is
+     * drained. No internal state to clean up for fixed-window batching.
+     */
+    public void onShutdown(BatcherContext ctx) {
+    }
+
+    /**
+     * Estimated time a new request would wait before its batch is dispatched.
+     */
     public long queueWaitMs(BatcherContext ctx) {
         long now = ctx.now();
         long fixedWaitMs = ctx.cfg().getFlexlbBatchFixedWaitMs();
@@ -114,7 +126,13 @@ public class FixedWindowBatcherAlgorithm implements BatcherAlgorithm {
         return fixedWaitMs;
     }
 
-    @Override
+    /**
+     * Core decision loop. Called by {@link WorkerBatcher#runLoop()} each
+     * iteration when the queue is non-empty. On each call it either
+     * dispatches items via {@link BatcherContext#dispatch}, drops the head
+     * item via {@link BatcherContext#dropHead}, or parks briefly and
+     * returns, letting the caller re-invoke.
+     */
     public void processQueue(BatcherContext ctx) throws InterruptedException {
         if (ctx.isEmpty()) {
             return;

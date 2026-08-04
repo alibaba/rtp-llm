@@ -6,6 +6,7 @@ import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.DefaultBatchDispatcher;
 import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.cache.core.EngineLocalView;
 import org.flexlb.cache.core.GlobalCacheIndex;
@@ -192,9 +193,9 @@ public abstract class FlexLBMockTestBase {
         // 11. Create real scheduler
         scheduler = new FlexlbBatchScheduler(
                 configService, router,
-                endpointRegistry, dispatcher, reporter, null);
+                endpointRegistry, dispatcher, reporter, new InflightStore(reporter), null);
 
-        // 12. Register prefill endpoint with the real scheduler as BatchDecisionHandler
+        // 12. Register prefill endpoint wired to the real scheduler's callback methods
         endpointRegistry.ensureEndpoint(RoleType.PREFILL, prefillIpPort, prefillWs);
 
         // 13. Register in EngineWorkerStatus static map for completeness
@@ -280,7 +281,6 @@ public abstract class FlexLBMockTestBase {
     protected FlexlbConfig createConfig() {
         FlexlbConfig cfg = new FlexlbConfig();
         cfg.setFlexlbBatchSizeMax(1);        // single request triggers dispatch
-        cfg.setFlexlbBatchWindowMs(300);
         cfg.setCostSloMs(50_000L);
         cfg.setCostSloRiskMarginMs(50L);
         cfg.setFlexlbBatchEnqueueDeadlineMs(5_000L);

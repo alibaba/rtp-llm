@@ -2,7 +2,7 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.cache.service.CacheAwareService;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
@@ -50,7 +50,7 @@ public class EngineSyncRunner implements Runnable {
 
     private final Long syncEngineStatusInterval;
 
-    private final FlexlbBatchScheduler batchScheduler;
+    private final InflightStore globalInflightStore;
 
     private final EndpointRegistry endpointRegistry;
 
@@ -65,7 +65,7 @@ public class EngineSyncRunner implements Runnable {
                             long syncRequestTimeoutMs,
                             LongAdder syncCount,
                             Long syncEngineStatusInterval,
-                            FlexlbBatchScheduler batchScheduler,
+                            InflightStore globalInflightStore,
                             EndpointRegistry endpointRegistry) {
 
         this.modelName = modelName;
@@ -79,7 +79,7 @@ public class EngineSyncRunner implements Runnable {
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
         this.syncCount = syncCount;
         this.syncEngineStatusInterval = syncEngineStatusInterval;
-        this.batchScheduler = batchScheduler;
+        this.globalInflightStore = globalInflightStore;
         this.endpointRegistry = endpointRegistry;
     }
 
@@ -144,7 +144,7 @@ public class EngineSyncRunner implements Runnable {
                         GrpcWorkerStatusRunner grpcWorkerStatusRunner
                                 = new GrpcWorkerStatusRunner(modelName, workerIpPort, site, roleType, host.getGroup(),
                                 workerStatus, cachedWorkerStatuses, engineHealthReporter, engineGrpcService,
-                                syncRequestTimeoutMs, batchScheduler, endpointRegistry, statusCheckExecutor);
+                                syncRequestTimeoutMs, globalInflightStore, endpointRegistry, statusCheckExecutor);
                         statusCheckExecutor.submit(grpcWorkerStatusRunner);
                     } catch (RejectedExecutionException e) {
                         workerStatus.getStatusCheckInProgress().set(false);

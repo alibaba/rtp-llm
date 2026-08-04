@@ -65,4 +65,13 @@ public class QueueScheduler extends AbstractScheduler {
         }
         return item.cancel();
     }
+
+    /**
+     * Report QUEUE-specific metrics: the current queue length (requests
+     * waiting in the routing queue for a worker to become available).
+     */
+    @Override
+    public void reportMetrics() {
+        metricHelper.reportInflightSize("PREFILL", "scheduler", delegate.queueSize());
+    }
 }

@@ -3,7 +3,6 @@ package org.flexlb.httpserver;
 import org.flexlb.balance.endpoint.DecodeEndpoint;
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.PrefillEndpoint;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.config.ConfigService;
 import org.flexlb.config.TrafficPolicyConfig;
@@ -18,6 +17,7 @@ import org.flexlb.domain.consistency.MasterChangeNotifyReq;
 import org.flexlb.domain.consistency.MasterChangeNotifyResp;
 import org.flexlb.domain.consistency.SyncLBStatusReq;
 import org.flexlb.domain.consistency.SyncLBStatusResp;
+import org.flexlb.service.RouteService;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
 import org.flexlb.sync.synchronizer.MasterEngineSynchronizer;
@@ -44,7 +44,7 @@ public class HttpLoadBalanceServer {
     private final LBStatusConsistencyService lbStatusConsistencyService;
     private final QueueManager queueManager;
     private final ConfigService configService;
-    private final FlexlbBatchScheduler batchScheduler;
+    private final RouteService routeService;
     private final EndpointRegistry endpointRegistry;
     private final MasterEngineSynchronizer masterEngineSynchronizer;
     private final ServerScheduleLatencyRecorder serverLatencyRecorder;
@@ -52,7 +52,7 @@ public class HttpLoadBalanceServer {
     public HttpLoadBalanceServer(LBStatusConsistencyService lbStatusConsistencyService,
                                  QueueManager queueManager,
                                  ConfigService configService,
-                                 FlexlbBatchScheduler batchScheduler,
+                                 RouteService routeService,
                                  EndpointRegistry endpointRegistry,
                                  @org.springframework.beans.factory.annotation.Autowired(required = false)
                                  MasterEngineSynchronizer masterEngineSynchronizer,
@@ -60,7 +60,7 @@ public class HttpLoadBalanceServer {
         this.lbStatusConsistencyService = lbStatusConsistencyService;
         this.queueManager = queueManager;
         this.configService = configService;
-        this.batchScheduler = batchScheduler;
+        this.routeService = routeService;
         this.endpointRegistry = endpointRegistry;
         this.masterEngineSynchronizer = masterEngineSynchronizer;
         this.serverLatencyRecorder = serverLatencyRecorder;
@@ -210,7 +210,9 @@ public class HttpLoadBalanceServer {
     public Mono<ServerResponse> inflightStatus(ServerRequest request) {
         try {
             Map<String, Object> result = new LinkedHashMap<>();
-            result.put("scheduler_inflight", batchScheduler.getInflightSize());
+            result.put("scheduler_inflight", routeService.globalInflightSize());
+            // Diagnostic view: total store entries including terminal tombstones within TTL
+            result.put("scheduler_inflight_total", routeService.globalInflightTotalSize());
 
             List<Map<String, Object>> prefillList = new ArrayList<>();
             for (Map.Entry<String, PrefillEndpoint> entry : endpointRegistry.getPrefillEndpoints().entrySet()) {

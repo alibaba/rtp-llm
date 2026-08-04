@@ -30,7 +30,9 @@ public enum StrategyErrorType {
     BATCH_BUILD_FAILED(8512, false),
     // worker (decode engine) execution failure — non-retryable to prevent retry storms
     // on persistent errors such as OOM or input-too-long.
-    WORKER_EXECUTION_FAILED(8513, false);
+    WORKER_EXECUTION_FAILED(8513, false),
+    // global inflight TTL expiry for non-batch (QUEUE/DIRECT) requests
+    INFLIGHT_TTL_EXPIRED(8514, false);
 
     private final int errorCode;
     private final String errorMsg;

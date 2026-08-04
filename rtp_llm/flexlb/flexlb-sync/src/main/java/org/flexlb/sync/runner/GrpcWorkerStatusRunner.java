@@ -2,7 +2,11 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.balance.endpoint.EndpointRegistry;
 import org.flexlb.balance.endpoint.WorkerEndpoint;
-import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
+import org.flexlb.balance.scheduler.InflightItem;
+import org.flexlb.balance.scheduler.InflightStore;
+import org.flexlb.balance.scheduler.TerminalReason;
+import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerStatusResponse;
 import org.flexlb.dao.route.RoleType;
@@ -35,7 +39,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
     private final Map<String, WorkerStatus> workerStatusMap;
     private final EngineHealthReporter engineHealthReporter;
     private final EngineGrpcService engineGrpcService;
-    private final FlexlbBatchScheduler batchScheduler;
+    private final InflightStore globalInflightStore;
     private final String ip;
     private final int grpcPort;
     private final long createTimeUs = System.nanoTime() / 1000;
@@ -51,7 +55,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
                                   EngineHealthReporter engineHealthReporter,
                                   EngineGrpcService engineGrpcService,
                                   long syncRequestTimeoutMs,
-                                  FlexlbBatchScheduler batchScheduler,
+                                  InflightStore globalInflightStore,
                                   EndpointRegistry endpointRegistry,
                                   Executor callbackExecutor) {
         this.ipPort = ipPort;
@@ -67,7 +71,7 @@ public class GrpcWorkerStatusRunner implements Runnable {
         this.engineHealthReporter = engineHealthReporter;
         this.engineGrpcService = engineGrpcService;
         this.syncRequestTimeoutMs = syncRequestTimeoutMs;
-        this.batchScheduler = batchScheduler;
+        this.globalInflightStore = globalInflightStore;
         this.endpointRegistry = endpointRegistry;
         this.callbackExecutor = callbackExecutor;
     }
@@ -162,9 +166,9 @@ public class GrpcWorkerStatusRunner implements Runnable {
                     ep.onWorkerStatusUpdate(workerStatus, newWorkerStatus);
                 }
 
-                // 3. Notify scheduler (cleanup finished requests)
-                if (batchScheduler != null) {
-                    batchScheduler.onWorkerStatusUpdate(newWorkerStatus);
+                // 3. Update inflight items (cleanup finished requests)
+                if (globalInflightStore != null) {
+                    handleFinishedTasks(newWorkerStatus);
                 }
 
                 Long latestFinishedVersion = newWorkerStatus.getLatestFinishedVersion();
@@ -199,6 +203,38 @@ public class GrpcWorkerStatusRunner implements Runnable {
             log("engine worker status check via gRPC exception, msg: " + e.getMessage());
             engineHealthReporter.reportStatusCheckerFail(
                     modelName, BalanceStatusEnum.UNKNOWN_ERROR, roleType);
+        }
+    }
+
+    /**
+     * Process finished tasks from worker status response by updating inflight items
+     * in the global store. Prefill completions with success are skipped (decode is
+     * still running). All other completions terminate the inflight item.
+     */
+    private void handleFinishedTasks(WorkerStatusResponse response) {
+        Map<String, TaskInfo> finishedTaskInfo = response.getFinishedTaskInfo();
+        if (finishedTaskInfo == null || finishedTaskInfo.isEmpty()) {
+            return;
+        }
+        boolean isPrefill = response.getRole() == RoleType.PREFILL;
+        for (TaskInfo task : finishedTaskInfo.values()) {
+            // Prefill success: decode is still running, keep inflight entry alive
+            if (isPrefill && task.getErrorCode() == 0) {
+                continue;
+            }
+            String requestId = String.valueOf(task.getRequestId());
+            InflightItem item = globalInflightStore.get(requestId);
+            if (item == null) {
+                continue;
+            }
+            if (task.getErrorCode() == 0) {
+                Response success = new Response();
+                success.setSuccess(true);
+                success.setCode(200);
+                item.complete(success);
+            } else {
+                item.terminate(TerminalReason.FAILED);
+            }
         }
     }
 

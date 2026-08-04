@@ -14,6 +14,7 @@ import org.flexlb.balance.resource.DecodeResourceMeasure;
 import org.flexlb.balance.resource.PrefillResourceMeasure;
 import org.flexlb.balance.resource.ResourceMeasureFactory;
 import org.flexlb.balance.scheduler.DefaultRouter;
+import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.balance.scheduler.Router;
 import org.flexlb.balance.strategy.CostBasedDecodeStrategy;
@@ -157,7 +158,6 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
     @Override
     protected FlexlbConfig createConfig() {
         FlexlbConfig cfg = super.createConfig();
-        cfg.setFlexlbBatchAlgorithm("fixed_window");
         cfg.setFlexlbBatchFixedWaitMs(10L);
         cfg.setFlexlbBatchPredictThresholdMs(0L);
         cfg.setFlexlbBatchSizeMax(16);
@@ -212,7 +212,10 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
                 mock(QueueManager.class, withSettings().stubOnly()),
                 scheduler,
                 mock(RecentCacheKeyTraceReporter.class, withSettings().stubOnly()),
-                NoOpFlexMonitor.getInstance());
+                NoOpFlexMonitor.getInstance(),
+                new InflightStore(reporter),
+                endpointRegistry,
+                reporter);
 
         LBStatusConsistencyService consistencyService =
                 mock(LBStatusConsistencyService.class, withSettings().stubOnly());
@@ -575,9 +578,6 @@ class MasterBatchEndToEndPerformanceTest extends FlexLBMockTestBase {
             assertTrue(response.getSuccess(),
                     () -> "schedule failed: code=" + response.getCode()
                             + ", error=" + response.getErrorMessage());
-            assertEquals(
-                    FlexlbScheduleProtocol.RequestStatePB.REQUEST_STATE_ACKNOWLEDGED,
-                    response.getLifecycle().getState());
             assertEquals(2, response.getServerStatusCount());
         }
     }

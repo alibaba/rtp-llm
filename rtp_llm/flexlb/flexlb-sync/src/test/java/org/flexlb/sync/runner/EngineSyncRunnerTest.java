@@ -15,6 +15,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
+import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.mockito.Mockito;
 import org.mockito.junit.jupiter.MockitoExtension;
 
@@ -146,7 +147,7 @@ class EngineSyncRunnerTest {
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         EndpointRegistry registry = new EndpointRegistry(
-                configService, () -> null, Mockito.mock(BatchSchedulerReporter.class));
+                configService, () -> Mockito.mock(FlexlbBatchScheduler.class), Mockito.mock(BatchSchedulerReporter.class));
         Map<String, WorkerStatus> statuses = new ConcurrentHashMap<>();
         String ipPort = "127.0.0.1:8080";
         WorkerStatus status = new WorkerStatus();

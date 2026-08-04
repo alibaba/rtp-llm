@@ -1,5 +1,8 @@
 package org.flexlb.service;
 
+import org.flexlb.balance.endpoint.DecodeEndpoint;
+import org.flexlb.balance.endpoint.EndpointRegistry;
+import org.flexlb.balance.endpoint.PrefillEndpoint;
 import org.flexlb.balance.scheduler.AbstractScheduler;
 import org.flexlb.balance.scheduler.BatchScheduler;
 import org.flexlb.balance.scheduler.DefaultRouter;
@@ -9,8 +12,6 @@ import org.flexlb.balance.scheduler.InflightItem;
 import org.flexlb.balance.scheduler.InflightStore;
 import org.flexlb.balance.scheduler.QueueManager;
 import org.flexlb.balance.scheduler.QueueScheduler;
-import org.flexlb.balance.scheduler.RequestLifecycleSnapshot;
-import org.flexlb.balance.scheduler.Router;
 import org.flexlb.config.ConfigService;
 import org.flexlb.constant.MetricConstant;
 import org.flexlb.config.FlexlbConfig;
@@ -18,8 +19,10 @@ import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.enums.ScheduleModeEnum;
 import org.flexlb.metric.FlexMonitor;
+import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.FlexlbMetricHelper;
 import org.flexlb.util.Logger;
+import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
 
 import javax.annotation.PreDestroy;
@@ -30,10 +33,10 @@ import java.util.concurrent.CompletableFuture;
 public class RouteService {
 
     private final ConfigService configService;
-    private final Router router;
-    private final QueueManager queueManager;
     private final FlexlbBatchScheduler flexlbBatchScheduler;
     private final RecentCacheKeyTraceReporter recentCacheKeyTraceReporter;
+    private final EndpointRegistry endpointRegistry;
+    private final BatchSchedulerReporter reporter;
 
     // --- Phase 3: thin-wrapper schedulers + global inflight store ---
 
@@ -47,14 +50,16 @@ public class RouteService {
                         QueueManager queueManager,
                         FlexlbBatchScheduler flexlbBatchScheduler,
                         RecentCacheKeyTraceReporter recentCacheKeyTraceReporter,
-                        FlexMonitor flexMonitor) {
+                        FlexMonitor flexMonitor,
+                        InflightStore globalInflightStore,
+                        EndpointRegistry endpointRegistry,
+                        BatchSchedulerReporter reporter) {
         this.configService = configService;
-        this.router = defaultScheduler;
-        this.queueManager = queueManager;
         this.flexlbBatchScheduler = flexlbBatchScheduler;
         this.recentCacheKeyTraceReporter = recentCacheKeyTraceReporter;
-
-        this.globalInflightStore = new InflightStore();
+        this.globalInflightStore = globalInflightStore;
+        this.endpointRegistry = endpointRegistry;
+        this.reporter = reporter;
 
         FlexlbMetricHelper batchHelper = new FlexlbMetricHelper(flexMonitor, MetricConstant.PATH_BATCH);
         batchHelper.register();
@@ -128,10 +133,50 @@ public class RouteService {
         return item.cancel();
     }
 
-    public RequestLifecycleSnapshot getRequestState(long requestId,
-                                                    long expectedBatchId) {
-        return flexlbBatchScheduler == null ? null
-                : flexlbBatchScheduler.getRequestState(requestId, expectedBatchId);
+    /**
+     * Return the number of active (non-terminal) inflight items in the
+     * global store. Tombstones within TTL are excluded — external monitors
+     * treat this as the live inflight count.
+     *
+     * @return active inflight count
+     */
+    public int globalInflightSize() {
+        return globalInflightStore.activeCount();
+    }
+
+    /**
+     * Return the total number of entries in the global store, including
+     * terminal tombstones within TTL. Diagnostic view only.
+     *
+     * @return inflight store size (active + tombstones)
+     */
+    public int globalInflightTotalSize() {
+        return globalInflightStore.size();
+    }
+
+    /**
+     * Periodically trigger scheduler-level and per-worker batch metrics
+     * reporting.
+     *
+     * <p>Runs every {@code report.interval.ms} (default 2000ms).
+     * <ul>
+     *   <li>Path-specific metrics via each scheduler's {@link AbstractScheduler#reportMetrics()}</li>
+     *   <li>Per-prefill-worker batch metrics (inflight batch count, queue depth, etc.)</li>
+     *   <li>Per-decode-worker batch metrics (inflight request count, KV reserved, etc.)</li>
+     * </ul>
+     */
+    @Scheduled(fixedRateString = "${report.interval.ms:2000}")
+    public void triggerSchedulerMetrics() {
+        batchScheduler.reportMetrics();
+        queueScheduler.reportMetrics();
+        directScheduler.reportMetrics();
+
+        for (PrefillEndpoint ep : endpointRegistry.getPrefillEndpoints().values()) {
+            ep.reportBatchMetrics(reporter);
+        }
+        for (DecodeEndpoint ep : endpointRegistry.getDecodeEndpoints().values()) {
+            ep.reportBatchMetrics(reporter);
+        }
     }
 
     @PreDestroy

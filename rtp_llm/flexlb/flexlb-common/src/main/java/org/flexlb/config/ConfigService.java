@@ -30,11 +30,9 @@ public class ConfigService {
      */
     private static final Set<String> CRITICAL_CONFIG_FIELDS = Set.of(
             "defaultScheduleMode",
-            "flexlbBatchAlgorithm",
             "flexlbBatchMaxCapacity",
             "flexlbBatchMaxInflight",
             "flexlbBatchFixedMaxInflightBatches",
-            "flexlbBatchSloMaxInflightBatches",
             "costFormula",
             "prefillPredictorType");
 
@@ -261,13 +259,11 @@ public class ConfigService {
      */
     private void dumpEffectiveConfig(FlexlbConfig config) {
         log.info("===== FlexLB Effective Configuration =====");
-        log.info("scheduleMode={}, batchAlgorithm={}",
-            config.getDefaultScheduleMode(), config.getFlexlbBatchAlgorithm());
+        log.info("scheduleMode={}", config.getDefaultScheduleMode());
         log.info("batchMaxCapacity={}, batchMaxInflight={}",
             config.getFlexlbBatchMaxCapacity(), config.getFlexlbBatchMaxInflight());
-        log.info("fixedMaxInflightBatches={}, sloMaxInflightBatches={}",
-            config.getFlexlbBatchFixedMaxInflightBatches(),
-            config.getFlexlbBatchSloMaxInflightBatches());
+        log.info("fixedMaxInflightBatches={}",
+            config.getFlexlbBatchFixedMaxInflightBatches());
         log.info("prefillPredictorType={}", config.getPrefillPredictorType());
         log.info("==========================================");
     }

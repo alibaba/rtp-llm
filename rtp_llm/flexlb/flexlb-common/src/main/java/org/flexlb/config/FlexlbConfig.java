@@ -296,52 +296,6 @@ public class FlexlbConfig {
     private int flexlbBatchSizeMax = 8;
 
     /**
-     * Remaining-budget window in milliseconds. Outside this window the batcher
-     * keeps collecting unless the batch reaches flexlbBatchSizeMax. Inside this
-     * window it can dispatch once the batch has enough requests and another
-     * arrival is unlikely before the latest safe dispatch point.
-     */
-    private long flexlbBatchWindowMs = 300;
-
-    /**
-     * Minimum useful batch size. This is not a hard immediate-dispatch trigger:
-     * the batcher may keep waiting if the remaining SLO slack can likely buy
-     * one more request.
-     */
-    private int flexlbBatchMinSize = 3;
-
-    /**
-     * Upper bound for deadline-protection dispatch. The effective guard is
-     * min(flexlbBatchEmergencyBudgetMs, incrementalBatchCost + flexlbBatchDispatchGuardMs).
-     */
-    private long flexlbBatchEmergencyBudgetMs = 150;
-
-    /**
-     * Safety guard left before the computed SLO deadline when dispatching a batch.
-     * Covers master loop jitter, gRPC enqueue overhead, and predictor error.
-     */
-    private long flexlbBatchDispatchGuardMs = 40;
-
-    /**
-     * EMA alpha used to estimate per-worker request inter-arrival time for batching.
-     */
-    private double flexlbBatchArrivalEmaAlpha = 0.2;
-
-    /**
-     * Extra slack that must remain after the next expected request arrival before
-     * the latest safe dispatch point. Larger values dispatch earlier and reduce
-     * deadline pressure; smaller values favor bigger batches.
-     */
-    private long flexlbBatchArrivalWaitGuardMs = 20;
-
-    /**
-     * Maximum in-flight prefill batches allowed per worker before the batcher
-     * stops dispatching new batches and keeps requests in the master-side queue.
-     * Values <= 0 disable this backpressure gate.
-     */
-    private int flexlbBatchSloMaxInflightBatches = 2;
-
-    /**
      * Maximum in-flight prefill batches per worker for the fixed_window batcher.
      * When the engine already has this many batches inflight, the batcher parks
      * instead of dispatching new batches.  Default 0 disables backpressure —
@@ -480,11 +434,9 @@ public class FlexlbConfig {
      */
     private String prefillPredictorType = "formula";
 
-    // ========== SLO-Budget Batcher Configuration ==========
+    // ========== Batcher Configuration ==========
 
     private int flexlbBatchMaxCapacity = 1048576;
-
-    private int flexlbBatchScanAhead = 64;
 
     /**
      * Maximum queue depth per WorkerBatcher. Requests beyond this limit are
@@ -498,26 +450,12 @@ public class FlexlbConfig {
      */
     private int flexlbBatchMaxInflight = 100000;
 
-    // ========== Batcher Algorithm Selection ==========
-
-    /**
-     * Batcher algorithm name. Supported values:
-     * <ul>
-     *   <li>{@code fixed_window} — Fixed time window batching with optional
-     *       predictor-based early dispatch. No SLO deadline tracking, no EMA,
-     *       no request dropping (default).</li>
-     *   <li>{@code slo_budget} — SLO-deadline-aware batching with EMA arrival
-     *       rate estimation, budget-based greedy fill, and deadline-gated dispatch.</li>
-     * </ul>
-     */
-    private String flexlbBatchAlgorithm = "fixed_window";
+    // ========== Fixed-Window Batcher Configuration ==========
 
     /**
      * Fixed wait time in milliseconds for the {@code fixed_window} batcher
      * algorithm. After a request has waited this long, the batcher dispatches
      * whatever has accumulated regardless of batch size.
-     *
-     * <p>Only used when {@link #flexlbBatchAlgorithm} is {@code fixed_window}.
      */
     private long flexlbBatchFixedWaitMs = 300;
 
@@ -528,7 +466,6 @@ public class FlexlbConfig {
      * dispatches immediately rather than waiting for {@link #flexlbBatchFixedWaitMs}.
      *
      * <p>Set to 0 to disable predictor-based early dispatch (default).
-     * Only used when {@link #flexlbBatchAlgorithm} is {@code fixed_window}.
      */
     private long flexlbBatchPredictThresholdMs = 0;
 

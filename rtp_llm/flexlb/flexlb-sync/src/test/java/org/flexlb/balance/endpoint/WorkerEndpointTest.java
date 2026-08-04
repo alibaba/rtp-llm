@@ -1,6 +1,5 @@
 package org.flexlb.balance.endpoint;
 
-import org.flexlb.balance.scheduler.BatchDecisionHandler;
 import org.flexlb.balance.scheduler.BatchItem;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
@@ -36,8 +35,9 @@ class WorkerEndpointTest {
         status.setGrpcPort(8081);
         FlexlbConfig config = new FlexlbConfig();
         config.setCostFormula("sum(computeTokens)");
-        BatchDecisionHandler handler = Mockito.mock(BatchDecisionHandler.class);
-        endpoint = new PrefillEndpoint(status, config, handler, Mockito.mock(BatchSchedulerReporter.class));
+        endpoint = new PrefillEndpoint(status, config,
+                head -> { }, (items, meta) -> { }, (item, error) -> { },
+                Mockito.mock(BatchSchedulerReporter.class));
     }
 
     @AfterEach

@@ -49,4 +49,15 @@ public abstract class AbstractScheduler {
     public void removeBatchInflight(String batchId) {
         // default: no batch inflight tracking
     }
+
+    /**
+     * Report path-specific metrics for this scheduler.
+     *
+     * <p>Default implementation is a no-op. Subclasses override this to
+     * report their own metrics (e.g. inflight size, queue length).
+     * Called periodically by {@code RouteService.triggerSchedulerMetrics()}.
+     */
+    public void reportMetrics() {
+        // default: no scheduler-specific metrics
+    }
 }

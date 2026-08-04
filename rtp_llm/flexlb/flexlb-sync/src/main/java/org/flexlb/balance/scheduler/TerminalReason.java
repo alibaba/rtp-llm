@@ -5,8 +5,7 @@ import java.util.concurrent.CancellationException;
 /**
  * Reason why an inflight item transitioned to a terminal state.
  *
- * <p>Used by {@link InflightItem} to record the terminal cause and by
- * {@link InflightStore} TTL eviction to distinguish tombstone age.
+ * <p>Used by {@link InflightItem} to record the terminal cause.
  */
 public enum TerminalReason {
     CANCELLED,

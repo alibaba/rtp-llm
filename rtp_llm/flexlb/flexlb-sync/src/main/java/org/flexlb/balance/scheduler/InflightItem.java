@@ -7,7 +7,7 @@ import org.flexlb.dao.loadbalance.Response;
 import org.flexlb.service.monitor.FlexlbMetricHelper;
 
 import java.util.concurrent.CompletableFuture;
-import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * A single inference request currently inflight (dispatched to an engine,
@@ -16,10 +16,10 @@ import java.util.concurrent.atomic.AtomicBoolean;
  * <p>Core v2 design: <b>binding-as-state</b> — the presence/absence of
  * {@link #prefillEp}, {@link #decodeEp}, and {@link #batch} references
  * implicitly expresses the progress phase, eliminating the need for a
- * separate state machine. A single {@link #terminated} AtomicBoolean
+ * separate state machine. A single {@link #state} AtomicReference
  * provides CAS-guarded idempotent terminal transition.
  *
- * <p>Thread-safety: the {@code terminated} AtomicBoolean ensures
+ * <p>Thread-safety: the {@code state} AtomicReference ensures
  * {@link #terminate(TerminalReason)} succeeds at most once. All binding
  * fields are {@code volatile} so that other threads (e.g. the cancel path
  * via {@link InflightStore}) observe the latest endpoint/batch references
@@ -32,6 +32,9 @@ public final class InflightItem implements InflightEntry {
     private final AbstractScheduler scheduler;
     private final String requestId;
 
+    /** Wall-clock timestamp (ms) when this item was created. Used for TTL expiry check. */
+    final long createdAtMs = System.currentTimeMillis();
+
     // ---- binding-as-state (volatile: set after construction) ----
 
     /** null = not routed, non-null = EP reserved. */
@@ -43,39 +46,36 @@ public final class InflightItem implements InflightEntry {
     /** null = not in a batch, non-null = in a batch awaiting dispatch. */
     volatile Batch batch;
 
-    // ---- single terminal flag ----
+    // ---- single atomic state ----
 
-    /** CAS flag — {@code true} once the item reaches a terminal state. */
-    final AtomicBoolean terminated = new AtomicBoolean(false);
-
-    /** The reason for the terminal transition. Set after CAS succeeds. */
-    volatile TerminalReason terminalReason;
+    /**
+     * CAS-guarded lifecycle state. Transitions from {@link InflightState#RUNNING}
+     * to a terminal state ({@link InflightState#COMPLETED},
+     * {@link InflightState#FAILED}, {@link InflightState#TIMED_OUT})
+     * exactly once — the first caller wins.
+     */
+    private final AtomicReference<InflightState> state = new AtomicReference<>(InflightState.RUNNING);
 
     /** Wall-clock timestamp (ms) when the terminal state was entered. */
     volatile long terminalTime;
-
-    // ---- dispatch tracking ----
-
-    /** Set by {@link #ack(long)} — engine-assigned batch ID for stale ACK detection. */
-    volatile long batchId;
-
-    /** Set by {@link #ack(long)} — wall-clock ms when ACK was received. */
-    volatile long dispatchedAtMs;
-
-    // ---- progress timestamps (metrics/debug only, not control flow) ----
-
-    volatile long enqueueTime;
-    volatile long dispatchTime;
-    volatile long ackTime;
-
-    /** Flag set by {@link Batch#markItemFailed(InflightItem)} when batch is already dispatched. */
-    volatile boolean failedInBatch;
 
     /**
      * Optional unified metric helper for terminal-state reporting.
      * Null-safe: if not set (null), no metrics are reported.
      */
     private volatile FlexlbMetricHelper metricHelper;
+
+    /**
+     * Optional callback invoked exactly once when this item enters a terminal
+     * state. Used by {@link InflightStore#putIfAbsent} to maintain the
+     * active-item counter.
+     *
+     * <p>Exactly-once guarantee: both the CAS-guarded {@link #transitionTo}
+     * and the registration-compensation path ({@link #takeOnTerminal})
+     * atomically claim the callback via {@code getAndSet(null)} — only one
+     * of the two paths can observe a non-null reference and run it.
+     */
+    private final AtomicReference<Runnable> onTerminal = new AtomicReference<>();
 
     // ---- constructor ----
 
@@ -119,16 +119,14 @@ public final class InflightItem implements InflightEntry {
         return requestId;
     }
 
-    public TerminalReason terminalReason() {
-        return terminalReason;
+    /** Returns the current lifecycle state (atomic read). */
+    public InflightState state() {
+        return state.get();
     }
 
-    public long batchId() {
-        return batchId;
-    }
-
-    public long dispatchedAtMs() {
-        return dispatchedAtMs;
+    /** Wall-clock timestamp (ms) when this item was created. */
+    public long createdAtMs() {
+        return createdAtMs;
     }
 
     // ---- binding setters (called by scheduler / queue logic after construction) ----
@@ -151,6 +149,31 @@ public final class InflightItem implements InflightEntry {
      */
     public void setMetricHelper(FlexlbMetricHelper helper) {
         this.metricHelper = helper;
+    }
+
+    /**
+     * Set the terminal-transition callback. Invoked exactly once when this
+     * item becomes terminal — either inside the CAS-guarded
+     * {@link #transitionTo}, or via the compensation path
+     * ({@link #takeOnTerminal}) if the item was already terminal when the
+     * callback got registered.
+     */
+    public void setOnTerminal(Runnable callback) {
+        this.onTerminal.set(callback);
+    }
+
+    /**
+     * Atomically claim the terminal callback (getAndSet(null)). Used by the
+     * {@link InflightStore#putIfAbsent} compensation path: if the item turned
+     * terminal between registration and callback wiring, the caller claims
+     * and runs the callback itself. Because both this path and
+     * {@link #transitionTo} claim via getAndSet(null), the callback runs
+     * exactly once.
+     *
+     * @return the callback if not yet claimed, or {@code null}
+     */
+    Runnable takeOnTerminal() {
+        return onTerminal.getAndSet(null);
     }
 
     // ---- terminal state management ----
@@ -177,17 +200,11 @@ public final class InflightItem implements InflightEntry {
      * @return {@code true} if this call won the CAS
      */
     public boolean terminate(TerminalReason reason, Throwable cause) {
-        if (!terminated.compareAndSet(false, true)) return false;
-        this.terminalReason = reason;
-        this.terminalTime = System.currentTimeMillis();
+        if (!transitionTo(toInflightState(reason))) return false;
         if (prefillEp != null) prefillEp.release(ctx.getRequestId());
         if (decodeEp != null) decodeEp.release(ctx.getRequestId());
         if (batch != null) {
-            if (batch.isDispatched()) {
-                batch.markItemFailed(this);
-            } else {
-                batch.removeItem(this);
-            }
+            batch.removeItem(this);
         }
         reportTerminalMetric(reason);
         future.completeExceptionally(cause != null ? cause : reason.toException());
@@ -197,22 +214,55 @@ public final class InflightItem implements InflightEntry {
     /**
      * Complete the request normally with the given response.
      *
-     * <p>Shares the same {@code terminated} CAS flag as {@link #terminate(TerminalReason)},
+     * <p>Shares the same {@code state} CAS as {@link #terminate(TerminalReason)},
      * so only one terminal transition (success or failure) can take effect.
      * On success, releases EP-level resources (Phase 2), removes the item from
      * its batch, and completes the future normally.
      */
     public void complete(Response response) {
-        if (!terminated.compareAndSet(false, true)) return;
-        this.terminalReason = response.isSuccess() ? TerminalReason.COMPLETED : TerminalReason.FAILED;
-        this.terminalTime = System.currentTimeMillis();
+        InflightState targetState = response.isSuccess() ? InflightState.COMPLETED : InflightState.FAILED;
+        if (!transitionTo(targetState)) return;
         if (prefillEp != null) prefillEp.release(ctx.getRequestId());
         if (decodeEp != null) decodeEp.release(ctx.getRequestId());
         if (batch != null) {
             batch.removeItem(this);
         }
-        reportTerminalMetric(this.terminalReason);
+        TerminalReason reason = response.isSuccess() ? TerminalReason.COMPLETED : TerminalReason.FAILED;
+        reportTerminalMetric(reason);
         future.complete(response);
+    }
+
+    /**
+     * Atomically transition from any non-terminal state to the target terminal state.
+     * Loop-CAS pattern: reads current state, returns {@code false} if already
+     * terminal, otherwise attempts CAS. Preserves "first caller wins" semantics.
+     */
+    private boolean transitionTo(InflightState targetState) {
+        while (true) {
+            InflightState current = state.get();
+            if (current.isTerminal()) {
+                return false;
+            }
+            if (state.compareAndSet(current, targetState)) {
+                this.terminalTime = System.currentTimeMillis();
+                // Atomically claim the callback so it runs exactly once even if
+                // the compensation path in InflightStore#putIfAbsent races here.
+                Runnable cb = onTerminal.getAndSet(null);
+                if (cb != null) {
+                    cb.run();
+                }
+                return true;
+            }
+        }
+    }
+
+    /** Map a {@link TerminalReason} to the corresponding {@link InflightState}. */
+    private static InflightState toInflightState(TerminalReason reason) {
+        return switch (reason) {
+            case COMPLETED -> InflightState.COMPLETED;
+            case TIMED_OUT -> InflightState.TIMED_OUT;
+            case FAILED, CANCELLED -> InflightState.FAILED;
+        };
     }
 
     /**
@@ -240,34 +290,6 @@ public final class InflightItem implements InflightEntry {
      */
     public boolean timeout() {
         return terminate(TerminalReason.TIMED_OUT);
-    }
-
-    // ---- ACK ----
-
-    /**
-     * Record the engine-assigned batch ID and ACK timestamp.
-     *
-     * @param batchId the engine-assigned batch ID (for stale ACK detection)
-     */
-    public void ack(long batchId) {
-        this.batchId = batchId;
-        this.dispatchedAtMs = System.currentTimeMillis();
-    }
-
-    // ---- batch-level failure marking ----
-
-    /**
-     * Called by {@link Batch#markItemFailed(InflightItem)} when the batch has
-     * already been dispatched and a single item fails. The item cannot be
-     * removed from a sent batch; instead it is marked so that when the batch
-     * response arrives, the item is handled as failed.
-     */
-    void markFailedInBatch() {
-        this.failedInBatch = true;
-    }
-
-    public boolean isFailedInBatch() {
-        return failedInBatch;
     }
 
     // ---- terminal metric reporting ----
@@ -318,7 +340,7 @@ public final class InflightItem implements InflightEntry {
     // ---- queries used by InflightStore TTL eviction ----
 
     public boolean isTerminated() {
-        return terminated.get();
+        return state.get().isTerminal();
     }
 
     public long getTerminalTime() {

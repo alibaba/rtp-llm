@@ -9,6 +9,7 @@ import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.junit.jupiter.api.AfterEach;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
+import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.mockito.Mockito;
 
 import java.util.Map;
@@ -28,7 +29,7 @@ class ExpirationCleanerTest {
         ConfigService configService = Mockito.mock(ConfigService.class);
         Mockito.when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         registry = new EndpointRegistry(
-                configService, () -> null, Mockito.mock(BatchSchedulerReporter.class));
+                configService, () -> Mockito.mock(FlexlbBatchScheduler.class), Mockito.mock(BatchSchedulerReporter.class));
     }
 
     @AfterEach

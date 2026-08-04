@@ -11,6 +11,7 @@ import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.BatchSchedulerReporter;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.Test;
+import org.flexlb.balance.scheduler.FlexlbBatchScheduler;
 import org.mockito.Mockito;
 
 import java.util.Map;
@@ -35,7 +36,7 @@ import static org.mockito.Mockito.when;
  * <ul>
  *   <li>Proto field {@code is_waiting} replaced by {@code TaskPhase phase}</li>
  *   <li>{@code WorkerStatus.runningTaskList} replaces old {@code waitingTaskList + localTaskMap}</li>
- *   <li>Constructor requires {@code FlexlbBatchScheduler + EndpointRegistry} (nullable)</li>
+ *   <li>Constructor requires {@code InflightStore + EndpointRegistry} (nullable)</li>
  *   <li>Task list refresh only occurs when status version advances (not on equal version)</li>
  * </ul>
  */
@@ -227,7 +228,7 @@ class GrpcWorkerStatusCheckRunnerTest {
         ConfigService configService = Mockito.mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(new FlexlbConfig());
         return new EndpointRegistry(
-                configService, () -> null, Mockito.mock(BatchSchedulerReporter.class));
+                configService, () -> Mockito.mock(FlexlbBatchScheduler.class), Mockito.mock(BatchSchedulerReporter.class));
     }
 
     private static WorkerStatus status(int port) {

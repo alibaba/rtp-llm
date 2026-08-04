@@ -30,19 +30,34 @@ import java.util.concurrent.LinkedBlockingQueue;
 import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.ThreadPoolExecutor;
 import java.util.concurrent.TimeUnit;
+import java.util.function.BiConsumer;
 
 /**
- * Default implementation of {@link BatchDispatcher}.
+ * Dispatches pre-assembled batches of items to the prefill engine via gRPC.
  * <p>
  * Owns its own thread pool for asynchronous gRPC dispatch.
  * Handles the full pipeline: build request → send → parse response → callback.
- * Does NOT manage inflight state — results are reported via {@link DispatchCallback}.
- *
- * @deprecated v2 调度器重构：被 InflightItem/AbstractScheduler/InflightStore 替代。
+ * Does NOT manage inflight state — per-item results are reported through the
+ * {@link DispatchCallbacks} supplied per dispatch; exactly one callback is
+ * invoked per item. On batch-level failure (build error, network error), the
+ * dispatcher releases the PrefillEndpoint batch before failing each item.
  */
-@Deprecated
 @Component
-public class DefaultBatchDispatcher implements BatchDispatcher {
+public class DefaultBatchDispatcher {
+
+    /**
+     * Per-dispatch result callbacks, passed with each {@link #dispatch} call
+     * to avoid interface coupling with the scheduler.
+     *
+     * @param onSuccess engine accepted the item {@code (item, batchId)}
+     * @param onFailure item failed to be enqueued (build/reject/missing-ack/network)
+     * @param onTimeout dispatch deadline elapsed before an acknowledgement
+     */
+    public record DispatchCallbacks(
+            BiConsumer<BatchItem, Long> onSuccess,
+            BiConsumer<BatchItem, Throwable> onFailure,
+            BiConsumer<BatchItem, Throwable> onTimeout) {
+    }
 
     private static final String METRIC_PREFIX = "flexlb.";
 
@@ -111,16 +126,15 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         Logger.info("FlexLB dispatch executor metrics registered with MeterRegistry");
     }
 
-    @Override
     public void dispatch(List<BatchItem> items, PrefillEndpoint prefillEp,
-                         long batchId, long predMs, String reason, DispatchCallback callback) {
+                         long batchId, long predMs, String reason, DispatchCallbacks callbacks) {
         try {
-            dispatchExecutor.execute(() -> doDispatch(items, prefillEp, batchId, predMs, reason, callback));
+            dispatchExecutor.execute(() -> doDispatch(items, prefillEp, batchId, predMs, reason, callbacks));
         } catch (RejectedExecutionException e) {
             Logger.warn("FlexLB batch dispatch rejected (executor shutdown), failing {} items", items.size());
             prefillEp.releaseBatch(batchId);
             for (BatchItem item : items) {
-                callback.onFailure(item, e);
+                callbacks.onFailure().accept(item, e);
             }
         }
     }
@@ -133,15 +147,15 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
     // ==================== Internal: dispatch pipeline (runs on executor thread) ====================
 
     private void doDispatch(List<BatchItem> items, PrefillEndpoint prefillEp,
-                            long batchId, long predMs, String reason, DispatchCallback callback) {
+                            long batchId, long predMs, String reason, DispatchCallbacks callbacks) {
         try {
-            doDispatchInternal(items, prefillEp, batchId, predMs, reason, callback);
+            doDispatchInternal(items, prefillEp, batchId, predMs, reason, callbacks);
         } catch (Throwable t) {
             // Safety net: ensure callbacks are always invoked even for unexpected errors
             Logger.error("Unexpected error in doDispatch batchId={}", batchId, t);
             for (BatchItem item : items) {
                 try {
-                    callback.onFailure(item, t);
+                    callbacks.onFailure().accept(item, t);
                 } catch (Throwable ignored) {
                     // best-effort
                 }
@@ -150,14 +164,14 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
     }
 
     private void doDispatchInternal(List<BatchItem> items, PrefillEndpoint prefillEp,
-                                    long batchId, long predMs, String reason, DispatchCallback callback) {
+                                    long batchId, long predMs, String reason, DispatchCallbacks callbacks) {
         // 1. Build gRPC request
         EngineRpcService.EnqueueBatchRequestPB request;
         try {
             request = buildBatchRequest(batchId, items);
         } catch (Exception e) {
             Logger.error("Failed to build FlexLB batch request batchId: {}", batchId, e);
-            failItems(items, prefillEp, batchId, "Batch request build failed: " + e.getMessage(), callback);
+            failItems(items, prefillEp, batchId, "Batch request build failed: " + e.getMessage(), callbacks);
             return;
         }
 
@@ -176,32 +190,32 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
                             if (Status.fromThrowable(cause).getCode() == Status.Code.DEADLINE_EXCEEDED) {
                                 prefillEp.releaseBatch(batchId);
                                 for (BatchItem item : items) {
-                                    callback.onTimeout(item, cause);
+                                    callbacks.onTimeout().accept(item, cause);
                                 }
                             } else {
                                 failItems(items, prefillEp, batchId,
-                                        "gRPC dispatch failed: " + cause.getMessage(), callback);
+                                        "gRPC dispatch failed: " + cause.getMessage(), callbacks);
                             }
                         } else if (response == null) {
-                            failItems(items, prefillEp, batchId, "EnqueueBatch returned null response", callback);
+                            failItems(items, prefillEp, batchId, "EnqueueBatch returned null response", callbacks);
                         } else {
-                            handleResponse(batchId, items, response, callback);
+                            handleResponse(batchId, items, response, callbacks);
                         }
                     } catch (Throwable t) {
                         // Safety net: ensure callbacks are always invoked even for unexpected errors
                         Logger.error("Unexpected error in EnqueueBatch callback batchId={}", batchId, t);
                         failItems(items, prefillEp, batchId,
-                                "Unexpected callback error: " + t.getMessage(), callback);
+                                "Unexpected callback error: " + t.getMessage(), callbacks);
                     }
                 }, dispatchExecutor);
     }
 
     private void failItems(List<BatchItem> items, PrefillEndpoint prefillEp,
-                           long batchId, String message, DispatchCallback callback) {
+                           long batchId, String message, DispatchCallbacks callbacks) {
         prefillEp.releaseBatch(batchId);
         RuntimeException error = new RuntimeException(message);
         for (BatchItem item : items) {
-            callback.onFailure(item, error);
+            callbacks.onFailure().accept(item, error);
         }
     }
 
@@ -209,13 +223,13 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
 
     private void handleResponse(long batchId, List<BatchItem> items,
                                 EngineRpcService.EnqueueBatchResponsePB response,
-                                DispatchCallback callback) {
+                                DispatchCallbacks callbacks) {
         if (response.getBatchId() != batchId) {
             RuntimeException mismatch = new RuntimeException(
                     "EnqueueBatch batch_id mismatch: expected " + batchId
                             + " but got " + response.getBatchId());
             for (BatchItem item : items) {
-                callback.onFailure(item, mismatch);
+                callbacks.onFailure().accept(item, mismatch);
             }
             return;
         }
@@ -230,16 +244,16 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
 
         for (BatchItem item : items) {
             if (successIds.contains(item.requestId())) {
-                callback.onSuccess(item, batchId);
+                callbacks.onSuccess().accept(item, batchId);
             } else if (errorByRequestId.containsKey(item.requestId())) {
                 EngineRpcService.EnqueueBatchErrorPB error = errorByRequestId.get(item.requestId());
                 String errorMessage = error.hasErrorInfo()
                         ? error.getErrorInfo().getErrorMessage()
                         : "missing error_info";
-                callback.onFailure(item, new RuntimeException(
+                callbacks.onFailure().accept(item, new RuntimeException(
                         "EnqueueBatch rejected request " + item.requestId() + ": " + errorMessage));
             } else {
-                callback.onFailure(item, new RuntimeException(
+                callbacks.onFailure().accept(item, new RuntimeException(
                         "EnqueueBatch missing ack for request " + item.requestId()));
             }
         }
@@ -335,13 +349,12 @@ public class DefaultBatchDispatcher implements BatchDispatcher {
         BatchItem head = items.get(0);
         long now = System.currentTimeMillis();
         long waitMs = now - head.enqueuedAtMs();
-        long budgetMs = head.sortKey() - now;
 
         Logger.info("flexlb_batch_dispatch batch_id={} batch_size={} total_tokens={} total_hit={} "
-                        + "pred_ms={} reason={} wait_ms={} budget_ms={} "
+                        + "pred_ms={} reason={} wait_ms={} "
                         + "prefill={}:{} items=[{}]",
                 batchId, items.size(), totalTokens, totalHit, predMs, reason,
-                waitMs, budgetMs,
+                waitMs,
                 prefillEp.getIp(), prefillEp.getHttpPort(),
                 itemDetail);
     }
