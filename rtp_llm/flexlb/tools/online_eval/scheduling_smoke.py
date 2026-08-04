@@ -100,9 +100,10 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
     async def test_load_balance(self) -> ScenarioResult:
         """Send N requests with unique block keys; verify all succeed.
 
-        In batch mode (COST_BASED_PREFILL), differentiate prefill
-        performance via ``_set_perf`` so routing is deterministic — all
-        requests should go to the fastest worker.  In other modes,
+        In batch mode (COST_BASED_PREFILL), inflate the slow worker's
+        reported queue depth via ``_set_queue_depth`` to trigger the
+        hotspot filter, ensuring deterministic routing — all requests
+        should go to the fast worker.  In other modes,
         hysteresis bias may concentrate requests; distribution is logged
         for diagnostics.
         """
@@ -111,16 +112,18 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
         is_batch = self._deploy_mode == "batch"
         perf_engine: str | None = None
         try:
-            # In batch mode, differentiate prefill performance to make
-            # COST_BASED_PREFILL routing deterministic (all to fastest).
+            # In batch mode, inflate slow worker's queue depth to trigger
+            # COST_BASED_PREFILL hotspot filter (all to fast worker).
             if is_batch:
                 snap0 = await self._snapshot_by_name()
                 prefill_names = sorted(
                     name for name, e in snap0.items() if e.get("role") == "prefill"
                 )
                 if len(prefill_names) >= 2:
-                    await self._set_perf(prefill_names[1], prefill_fixed_ms=200.0)
+                    await self._set_queue_depth(prefill_names[1], 500)
                     perf_engine = prefill_names[1]
+                    # Wait for master to sync the updated worker status
+                    await asyncio.sleep(1.0)
 
             addrs: list[str] = []
             for _ in range(n):
@@ -156,7 +159,7 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
             batch_detail = ""
             if is_batch and perf_engine:
                 # COST_BASED_PREFILL: all requests should route to the
-                # fastest worker (prefill-0), not the slowed one.
+                # fast worker (prefill-0), not the queue-loaded one.
                 slow_count = dist_names.get(perf_engine, 0)
                 passed = slow_count == 0
                 batch_detail = (
@@ -191,7 +194,8 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
         finally:
             if perf_engine:
                 try:
-                    await self._set_perf(perf_engine, prefill_fixed_ms=100.0)
+                    await self._set_queue_depth(perf_engine, 0)
+                    await asyncio.sleep(1.0)
                 except Exception:
                     pass
 
