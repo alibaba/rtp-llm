@@ -241,17 +241,16 @@ inline KVCacheSpecDesc makeDsv4Desc(const std::string& tag,
         desc.cp->prefill_slice_layout = CpPrefillSliceLayout::PAYLOAD;
         desc.cp->slice                = CpBlockSliceMode::PAYLOAD_BYTES;
     } else if (desc.tag == "hca_state") {
-        desc.compression_ratio                = 128;
-        desc.cp->align_payload                = true;
-        desc.cp->prefill_slice_layout         = CpPrefillSliceLayout::PAYLOAD;
-        desc.cp->slice                        = CpBlockSliceMode::PAYLOAD_BYTES;
-        desc.capacity                         = CacheCapacityPolicyDesc{};
-        desc.capacity->explicit_block_num     = 256;
-        desc.capacity->charge_to_paged_budget = true;
-        desc.reuse->enable_prefix_reuse       = false;
-        desc.tail                             = CacheTailPolicyDesc{};
-        desc.tail->active_tail_blocks         = 1;
-        desc.tail->validate_tail_blocks       = false;
+        desc.compression_ratio            = 128;
+        desc.cp->align_payload            = true;
+        desc.cp->prefill_slice_layout     = CpPrefillSliceLayout::PAYLOAD;
+        desc.cp->slice                    = CpBlockSliceMode::PAYLOAD_BYTES;
+        desc.capacity                     = CacheCapacityPolicyDesc{};
+        desc.capacity->explicit_block_num = 256;
+        desc.reuse->enable_prefix_reuse   = false;
+        desc.tail                         = CacheTailPolicyDesc{};
+        desc.tail->active_tail_blocks     = 1;
+        desc.tail->validate_tail_blocks   = false;
     } else if (desc.tag == "swa_kv") {
         desc.compression_ratio        = DSV4_SWA_WINDOW_ENTRIES;
         desc.cp->align_payload        = true;
@@ -374,8 +373,7 @@ inline void setDsv4ExplicitPoolBlocks(ModelConfig& model_config, const std::stri
                 if (!desc.capacity.has_value()) {
                     desc.capacity = CacheCapacityPolicyDesc{};
                 }
-                desc.capacity->explicit_block_num     = block_num;
-                desc.capacity->charge_to_paged_budget = block_num > 0;
+                desc.capacity->explicit_block_num = block_num;
             }
         }
     }

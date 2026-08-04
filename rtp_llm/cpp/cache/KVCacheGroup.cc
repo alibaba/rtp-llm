@@ -191,20 +191,12 @@ bool KVCacheGroup::hasSparseSlots() const {
     return policy().group_type != CacheGroupType::FULL;
 }
 
-bool KVCacheGroup::hasKernelBlockSubdiv() const {
-    return policy().group_type == CacheGroupType::FULL;
-}
-
 bool KVCacheGroup::transferTailBlocks() const {
     return activeTailBlocks() > 0;
 }
 
 bool KVCacheGroup::isReservable() const {
     return policy().reservable;
-}
-
-CacheMemoryPlacement KVCacheGroup::memoryPlacement() const {
-    return policy().memory_placement;
 }
 
 }  // namespace rtp_llm
