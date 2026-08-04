@@ -12,7 +12,7 @@ import java.util.Map;
 
 /**
  * Prefill role resource measure
- * Availability criteria: queue wait time below threshold
+ * Availability criteria: effective pending task count below threshold
  *
  * @author saichen.sm
  * @since 2025/12/23
@@ -36,7 +36,7 @@ public class PrefillResourceMeasure implements ResourceMeasure {
             return false;
         }
 
-        long queueSize = workerStatus.getWaitingTaskList() == null ? 0 : workerStatus.getWaitingTaskList().size();
+        long queueSize = effectiveQueueSize(workerStatus);
         return workerStatus.updateResourceAvailabilityWithHysteresis(queueSize, queueSizeThreshold, hysteresisBiasPercent);
     }
 
@@ -69,7 +69,7 @@ public class PrefillResourceMeasure implements ResourceMeasure {
             return 0.0;
         }
 
-        long queueSize = workerStatus.getWaitingTaskList() == null ? 0 : workerStatus.getWaitingTaskList().size();
+        long queueSize = effectiveQueueSize(workerStatus);
 
         if (queueSize <= 0) {
             return 0.0;
@@ -78,5 +78,16 @@ public class PrefillResourceMeasure implements ResourceMeasure {
         } else {
             return (queueSize * 100.0) / maxQueueSize;
         }
+    }
+
+    private long effectiveQueueSize(WorkerStatus workerStatus) {
+        long engineWaitingTaskCount = workerStatus.getWaitingTaskList() == null
+                ? 0 : workerStatus.getWaitingTaskList().size();
+        long localOutstandingTaskCount = workerStatus.getLocalTaskMap() == null
+                ? 0 : workerStatus.getLocalTaskMap().size();
+
+        // The two collections overlap, so use the larger count instead of double-counting tasks.
+        // Local tasks are recorded immediately and cover gaps between engine status snapshots.
+        return Math.max(engineWaitingTaskCount, localOutstandingTaskCount);
     }
 }

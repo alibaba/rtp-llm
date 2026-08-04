@@ -31,7 +31,9 @@ FlexLB 依据后端资源水位动态调整**路由并发许可数**，把请求
 
 ### PrefillResourceMeasure（指标 `WAIT_TIME`）
 
-实际度量是**等待队列长度**（`waitingTaskList.size()`，不是字面等待时间）：
+实际度量是**有效待处理任务数**：取引擎上报的 `waitingTaskList.size()` 与 FlexLB
+即时维护的 `localTaskMap.size()` 两者中的较大值。两份数据存在重叠，因此不相加；本地计数用于
+弥补引擎 step 执行期间 WorkerStatus 快照更新不及时的问题。
 
 - 单 worker 水位：`queueSize ≤ 0` → 0；`≥ maxPrefillQueueSize(20)` → 100；
   否则 `queueSize × 100 / maxPrefillQueueSize`。

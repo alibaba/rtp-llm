@@ -10,13 +10,14 @@ import java.util.Map;
 import java.util.concurrent.atomic.AtomicLong;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.when;
 
 class ResourceWaterLevelTest {
 
     @Test
-    void prefillWaterLevelUsesWorkerWaitingQueue() {
+    void prefillWaterLevelUsesEngineWaitingQueueWhenItIsLarger() {
         FlexlbConfig config = new FlexlbConfig();
         config.setMaxPrefillQueueSize(20);
         PrefillResourceMeasure measure = new PrefillResourceMeasure(configService(config));
@@ -29,6 +30,31 @@ class ResourceWaterLevelTest {
                 "request-5", new TaskInfo()));
 
         assertEquals(25.0, measure.calculateWorkerWaterLevel(workerStatus));
+    }
+
+    @Test
+    void prefillWaterLevelUsesLocalOutstandingTasksWhenEngineStatusLags() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setMaxPrefillQueueSize(20);
+        PrefillResourceMeasure measure = new PrefillResourceMeasure(configService(config));
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setWaitingTaskList(Map.of("request-1", new TaskInfo()));
+        addLocalTasks(workerStatus, 8);
+
+        assertEquals(40.0, measure.calculateWorkerWaterLevel(workerStatus));
+    }
+
+    @Test
+    void prefillResourceIsUnavailableWhenLocalOutstandingTasksReachThreshold() {
+        FlexlbConfig config = new FlexlbConfig();
+        config.setPrefillQueueSizeThreshold(3);
+        PrefillResourceMeasure measure = new PrefillResourceMeasure(configService(config));
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setAlive(true);
+        workerStatus.setWaitingTaskList(Map.of("request-1", new TaskInfo()));
+        addLocalTasks(workerStatus, 3);
+
+        assertFalse(measure.isResourceAvailable(workerStatus));
     }
 
     @Test
@@ -48,5 +74,11 @@ class ResourceWaterLevelTest {
         ConfigService configService = mock(ConfigService.class);
         when(configService.loadBalanceConfig()).thenReturn(config);
         return configService;
+    }
+
+    private static void addLocalTasks(WorkerStatus workerStatus, int count) {
+        for (int i = 0; i < count; i++) {
+            workerStatus.getLocalTaskMap().put("local-request-" + i, new TaskInfo());
+        }
     }
 }
