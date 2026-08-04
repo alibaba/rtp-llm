@@ -98,13 +98,22 @@ class DeviceResource:
         """Return PIDs of compute processes on a physical GPU via nvidia-smi."""
         try:
             result = subprocess.run(
-                ["nvidia-smi", "--query-compute-apps=pid",
-                 "--format=csv,noheader", f"--id={gpu_id}"],
-                capture_output=True, text=True, timeout=10,
+                [
+                    "nvidia-smi",
+                    "--query-compute-apps=pid",
+                    "--format=csv,noheader",
+                    f"--id={gpu_id}",
+                ],
+                capture_output=True,
+                text=True,
+                timeout=10,
             )
             if result.returncode == 0 and result.stdout.strip():
-                return [int(p.strip()) for p in result.stdout.strip().splitlines()
-                        if p.strip()]
+                return [
+                    int(p.strip())
+                    for p in result.stdout.strip().splitlines()
+                    if p.strip()
+                ]
         except Exception:
             pass
         return []
@@ -179,7 +188,9 @@ class DeviceResource:
                 return True
             time.sleep(1)
 
-        logging.warning(f"GPU cleanup timed out after {timeout}s for GPUs {self.gpu_ids}")
+        logging.warning(
+            f"GPU cleanup timed out after {timeout}s for GPUs {self.gpu_ids}"
+        )
         return False
 
     def _lock_gpus(self):
@@ -214,7 +225,9 @@ class DeviceResource:
                         if gpus_clean:
                             break
                         # Zombie contexts found — release these GPUs and retry
-                        logging.warning(f"GPUs {self.gpu_ids} have zombie contexts, retrying")
+                        logging.warning(
+                            f"GPUs {self.gpu_ids} have zombie contexts, retrying"
+                        )
                         self.gpu_ids = []
                         self.gpu_locks.close()
                 except Exception as e:
@@ -243,6 +256,21 @@ if __name__ == "__main__":
         from jit_sys_path_setup import setup_jit_cache
 
         setup_jit_cache()
+
+        # flashinfer JIT falls back to invoking bare `ninja`; pip's ninja package
+        # installs the binary under scripts/ which is not on PATH in bazel tests.
+        try:
+            import ninja
+
+            if getattr(ninja, "BIN_DIR", None):
+                os.environ["PATH"] = (
+                    ninja.BIN_DIR + os.pathsep + os.environ.get("PATH", "")
+                )
+                logging.info(
+                    "[Package Setup] Prepended ninja BIN_DIR to PATH: %s", ninja.BIN_DIR
+                )
+        except ImportError:
+            logging.info("[Package Setup] pip ninja package not found; PATH unchanged")
 
         device_name, _ = cuda_info
         require_count = int(

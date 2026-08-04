@@ -29,6 +29,10 @@ def get_package_info(package_name):
         meta_package_name = package_name
         if package_name == "tvm_ffi":
             meta_package_name = "apache-tvm-ffi"
+        elif package_name == "flashinfer":
+            meta_package_name = "flashinfer-python"
+        elif package_name == "flashinfer_jit_cache":
+            meta_package_name = "flashinfer-jit-cache"
 
         if runfiles_dir and os.path.exists(runfiles_dir):
             if runfiles_dir not in sys.path:
@@ -214,7 +218,16 @@ def setup_jit_cache(cache_dir=None, packages=None):
     if cache_dir is None:
         cache_dir = Path.home().as_posix() + "/.cache"
     if packages is None:
-        packages = ["flashinfer", "torch", "deep_gemm", "tvm_ffi"]
+        # flashinfer_jit_cache must be copied too: AOT .so live there. If only
+        # flashinfer is prepended via Package Copy and jit_cache is missing from
+        # the test PYTHONPATH, flashinfer falls back to JIT and needs ninja.
+        packages = [
+            "flashinfer",
+            "flashinfer_jit_cache",
+            "torch",
+            "deep_gemm",
+            "tvm_ffi",
+        ]
 
     runfiles_dir = os.environ.get("RUNFILES_DIR") or os.environ.get("TEST_SRCDIR")
 
