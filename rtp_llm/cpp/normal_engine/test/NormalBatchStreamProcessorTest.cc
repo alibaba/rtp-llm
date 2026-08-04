@@ -27,6 +27,17 @@ static torch::Tensor hostIntBuffer(std::vector<int32_t> data) {
     return torch::tensor(data, torch::kInt32);
 }
 
+static torch::Tensor normalStateTokenView(const GenerateStream::NormalAsyncDeviceState& state) {
+    return state.last_sample_token_gpu.defined() ?
+               state.last_sample_token_gpu :
+               state.batched_last_sample_tokens_gpu.narrow(0, state.device_batch_index, 1);
+}
+
+static torch::Tensor normalStateNextSeqLenView(const GenerateStream::NormalAsyncDeviceState& state) {
+    return state.next_seq_len_gpu.defined() ? state.next_seq_len_gpu :
+                                              state.batched_next_seq_lens_gpu.narrow(0, state.device_batch_index, 1);
+}
+
 static GenerateStreamPtr makeAsyncDecodeStream(const ModelConfig&   model_config,
                                                const RuntimeConfig& runtime_config,
                                                ResourceContext&     resource_context,
@@ -301,6 +312,99 @@ TEST_F(NormalBatchStreamProcessorTest, testDeviceStateGatherBatchesSequenceLengt
     EXPECT_EQ(expected_host_seq_lens, toVec<int32_t>(model_input.sequence_lengths_host_for_log));
 }
 
+TEST_F(NormalBatchStreamProcessorTest, testDeviceStateGatherReusesSharedBatchBacking) {
+    constexpr int batch_size = 128;
+
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 4096;
+    model_config.vocab_size  = 4096;
+    model_config.num_layers  = 1;
+    RuntimeConfig runtime_config;
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    const auto cuda_i32      = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto       tokens        = torch::arange(100, 100 + batch_size, cuda_i32);
+    auto       next_seq_lens = torch::arange(1000, 1000 + batch_size, cuda_i32);
+
+    std::list<GenerateStreamPtr> streams;
+    for (int i = 0; i < batch_size; ++i) {
+        auto stream = makeAsyncDecodeStream(model_config, runtime_config, resource_context, i + 1);
+        stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+            .batched_last_sample_tokens_gpu = tokens,
+            .batched_next_seq_lens_gpu      = next_seq_lens,
+            .device_batch_index             = i,
+            .last_real_seq_len              = 1999 + i,
+            .next_real_seq_len              = 2000 + i,
+        });
+        streams.push_back(stream);
+    }
+
+    StreamGroups stream_groups(streams);
+    TensorHolder holder;
+    auto         status = processor.gatherModelInput(stream_groups, holder);
+
+    ASSERT_TRUE(status.ok()) << status.status();
+    const auto& model_input = status.value();
+    // No per-stream views/cat are needed for tokens: the original backing
+    // Tensor is installed directly in GptModelInputs.
+    EXPECT_EQ(tokens.unsafeGetTensorImpl(), model_input.combo_tokens.unsafeGetTensorImpl());
+    EXPECT_EQ(toVec<int32_t>(tokens), toVec<int32_t>(model_input.combo_tokens));
+    auto expected_sequence_lengths = next_seq_lens - 1;
+    EXPECT_EQ(toVec<int32_t>(expected_sequence_lengths), toVec<int32_t>(model_input.sequence_lengths));
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testDeviceStateGatherFallsBackForReorderedBatchBacking) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 4096;
+    model_config.vocab_size  = 4096;
+    model_config.num_layers  = 1;
+    RuntimeConfig runtime_config;
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    cache_config.group_types = {CacheGroupType::FULL};
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+
+    const auto cuda_i32      = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    auto       tokens        = torch::tensor({10, 20}, cuda_i32);
+    auto       next_seq_lens = torch::tensor({100, 200}, cuda_i32);
+
+    std::list<GenerateStreamPtr> streams;
+    for (int i = 0; i < 2; ++i) {
+        auto      stream        = makeAsyncDecodeStream(model_config, runtime_config, resource_context, i + 1);
+        const int backing_index = 1 - i;
+        stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+            .batched_last_sample_tokens_gpu = tokens,
+            .batched_next_seq_lens_gpu      = next_seq_lens,
+            .device_batch_index             = backing_index,
+            .last_real_seq_len              = 299 + i,
+            .next_real_seq_len              = 300 + i,
+        });
+        streams.push_back(stream);
+    }
+
+    StreamGroups stream_groups(streams);
+    TensorHolder holder;
+    auto         status = processor.gatherModelInput(stream_groups, holder);
+
+    ASSERT_TRUE(status.ok()) << status.status();
+    const auto& model_input = status.value();
+    EXPECT_NE(tokens.unsafeGetTensorImpl(), model_input.combo_tokens.unsafeGetTensorImpl());
+    EXPECT_EQ(std::vector<int32_t>({20, 10}), toVec<int32_t>(model_input.combo_tokens));
+    EXPECT_EQ(std::vector<int32_t>({199, 99}), toVec<int32_t>(model_input.sequence_lengths));
+    EXPECT_EQ(std::vector<int32_t>({299, 300}), toVec<int32_t>(model_input.sequence_lengths_host_for_log));
+}
+
 TEST_F(NormalBatchStreamProcessorTest, testPublishNormalDeviceStateBatchesExistingDeviceState) {
     constexpr int batch_size = 128;
 
@@ -328,24 +432,45 @@ TEST_F(NormalBatchStreamProcessorTest, testPublishNormalDeviceStateBatchesExisti
     params.py_model      = py::none();
     NormalExecutor executor(params, nullptr, true);
 
-    auto token_ids = torch::arange(500, 500 + batch_size, cuda_i32).reshape({batch_size, 1});
+    // SamplerOutput is not guaranteed to be int32. The batched publish path
+    // must preserve the original per-stream contract and store int32 tokens.
+    const auto cuda_i64  = torch::TensorOptions().dtype(torch::kInt64).device(torch::kCUDA);
+    auto       token_ids = torch::arange(500, 500 + batch_size, cuda_i64).reshape({batch_size, 1});
     executor.publishNormalDeviceState(StreamGroups(streams), SamplerOutput{token_ids});
 
-    int32_t* first_token_ptr = nullptr;
-    int32_t* first_seq_ptr   = nullptr;
-    int      index           = 0;
+    at::TensorImpl* shared_token_impl = nullptr;
+    at::TensorImpl* shared_seq_impl   = nullptr;
+    int             index             = 0;
     for (const auto& stream : streams) {
         const auto& state = stream->getNormalAsyncDeviceState();
+        EXPECT_FALSE(state.last_sample_token_gpu.defined());
+        EXPECT_FALSE(state.next_seq_len_gpu.defined());
+        EXPECT_EQ(torch::kInt32, state.batched_last_sample_tokens_gpu.scalar_type());
+        EXPECT_EQ(index, state.device_batch_index);
         if (index == 0) {
-            first_token_ptr = state.last_sample_token_gpu.data_ptr<int32_t>();
-            first_seq_ptr   = state.next_seq_len_gpu.data_ptr<int32_t>();
+            shared_token_impl = state.batched_last_sample_tokens_gpu.unsafeGetTensorImpl();
+            shared_seq_impl   = state.batched_next_seq_lens_gpu.unsafeGetTensorImpl();
         }
-        EXPECT_EQ(first_token_ptr + index, state.last_sample_token_gpu.data_ptr<int32_t>());
-        EXPECT_EQ(first_seq_ptr + index, state.next_seq_len_gpu.data_ptr<int32_t>());
-        EXPECT_EQ(std::vector<int32_t>({500 + index}), toVec<int32_t>(state.last_sample_token_gpu));
-        EXPECT_EQ(std::vector<int32_t>({1001 + index}), toVec<int32_t>(state.next_seq_len_gpu));
+        EXPECT_EQ(shared_token_impl, state.batched_last_sample_tokens_gpu.unsafeGetTensorImpl());
+        EXPECT_EQ(shared_seq_impl, state.batched_next_seq_lens_gpu.unsafeGetTensorImpl());
+        EXPECT_EQ(std::vector<int32_t>({500 + index}), toVec<int32_t>(normalStateTokenView(state)));
+        EXPECT_EQ(std::vector<int32_t>({1001 + index}), toVec<int32_t>(normalStateNextSeqLenView(state)));
         EXPECT_EQ(2000 + index, state.last_real_seq_len);
         EXPECT_EQ(2001 + index, state.next_real_seq_len);
+        ++index;
+    }
+
+    // A second publish exercises the steady-state reuse path: the current
+    // sequence-length batch comes directly from the shared backing tensor.
+    auto next_token_ids = torch::arange(900, 900 + batch_size, cuda_i64);
+    executor.publishNormalDeviceState(StreamGroups(streams), SamplerOutput{next_token_ids});
+    index = 0;
+    for (const auto& stream : streams) {
+        const auto& state = stream->getNormalAsyncDeviceState();
+        EXPECT_EQ(std::vector<int32_t>({900 + index}), toVec<int32_t>(normalStateTokenView(state)));
+        EXPECT_EQ(std::vector<int32_t>({1002 + index}), toVec<int32_t>(normalStateNextSeqLenView(state)));
+        EXPECT_EQ(2001 + index, state.last_real_seq_len);
+        EXPECT_EQ(2002 + index, state.next_real_seq_len);
         ++index;
     }
 }
@@ -378,13 +503,112 @@ TEST_F(NormalBatchStreamProcessorTest, testPublishNormalDeviceStateBatchesHostFa
     auto       token_ids = torch::arange(700, 700 + batch_size, cuda_i32);
     executor.publishNormalDeviceState(StreamGroups(streams), SamplerOutput{token_ids});
 
+    at::TensorImpl* shared_token_impl = nullptr;
+    at::TensorImpl* shared_seq_impl   = nullptr;
+    int             index             = 0;
+    for (const auto& stream : streams) {
+        const auto& state = stream->getNormalAsyncDeviceState();
+        if (index == 0) {
+            shared_token_impl = state.batched_last_sample_tokens_gpu.unsafeGetTensorImpl();
+            shared_seq_impl   = state.batched_next_seq_lens_gpu.unsafeGetTensorImpl();
+        }
+        EXPECT_EQ(shared_token_impl, state.batched_last_sample_tokens_gpu.unsafeGetTensorImpl());
+        EXPECT_EQ(shared_seq_impl, state.batched_next_seq_lens_gpu.unsafeGetTensorImpl());
+        EXPECT_EQ(index, state.device_batch_index);
+        EXPECT_EQ(std::vector<int32_t>({700 + index}), toVec<int32_t>(normalStateTokenView(state)));
+        EXPECT_EQ(std::vector<int32_t>({2001 + index}), toVec<int32_t>(normalStateNextSeqLenView(state)));
+        EXPECT_EQ(2000 + index, state.last_real_seq_len);
+        EXPECT_EQ(2001 + index, state.next_real_seq_len);
+        ++index;
+    }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testPublishNormalDeviceStateBatchesMixedSequenceLengthSources) {
+    constexpr int batch_size = 4;
+
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 4096;
+    model_config.vocab_size  = 4096;
+    RuntimeConfig runtime_config;
+
+    const auto                   cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    std::list<GenerateStreamPtr> streams;
+    for (int i = 0; i < batch_size; ++i) {
+        auto stream = makeAsyncDecodeStream(model_config, runtime_config, resource_context, i + 1);
+        GenerateStream::NormalAsyncDeviceState state{
+            .last_real_seq_len = 1999 + i,
+            .next_real_seq_len = 2000 + i,
+        };
+        if (i % 2 == 0) {
+            state.next_seq_len_gpu = torch::full({1}, 1000 + i, cuda_i32);
+        }
+        stream->setNormalAsyncDeviceState(std::move(state));
+        streams.push_back(stream);
+    }
+
+    EngineInitParams params;
+    params.model_config_ = model_config;
+    params.py_model      = py::none();
+    NormalExecutor executor(params, nullptr, true);
+
+    auto token_ids = torch::arange(800, 800 + batch_size, cuda_i32);
+    executor.publishNormalDeviceState(StreamGroups(streams), SamplerOutput{token_ids});
+
+    const std::vector<int32_t> expected_next_seq_lens{1001, 2002, 1003, 2004};
+    int                        index = 0;
+    for (const auto& stream : streams) {
+        const auto& state = stream->getNormalAsyncDeviceState();
+        EXPECT_EQ(std::vector<int32_t>({800 + index}), toVec<int32_t>(normalStateTokenView(state)));
+        EXPECT_EQ(std::vector<int32_t>({expected_next_seq_lens[index]}),
+                  toVec<int32_t>(normalStateNextSeqLenView(state)));
+        EXPECT_EQ(2000 + index, state.last_real_seq_len);
+        EXPECT_EQ(2001 + index, state.next_real_seq_len);
+        ++index;
+    }
+}
+
+TEST_F(NormalBatchStreamProcessorTest, testPublishNormalDeviceStateSelectsLastTokenColumnOnceWithPadding) {
+    constexpr int batch_size  = 4;
+    constexpr int token_width = 3;
+    constexpr int padded_rows = 2;
+
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len = 4096;
+    model_config.vocab_size  = 4096;
+    RuntimeConfig runtime_config;
+
+    const auto                   cuda_i32 = torch::TensorOptions().dtype(torch::kInt32).device(torch::kCUDA);
+    std::list<GenerateStreamPtr> streams;
+    for (int i = 0; i < batch_size; ++i) {
+        auto stream = makeAsyncDecodeStream(model_config, runtime_config, resource_context, i + 1);
+        stream->setNormalAsyncDeviceState(GenerateStream::NormalAsyncDeviceState{
+            .last_sample_token_gpu = torch::full({1}, i, cuda_i32),
+            .next_seq_len_gpu      = torch::full({1}, 1000 + i, cuda_i32),
+            .last_real_seq_len     = 1999 + i,
+            .next_real_seq_len     = 2000 + i,
+        });
+        streams.push_back(stream);
+    }
+
+    EngineInitParams params;
+    params.model_config_ = model_config;
+    params.py_model      = py::none();
+    NormalExecutor executor(params, nullptr, true);
+
+    auto token_ids = torch::arange(0, (batch_size + padded_rows) * token_width, cuda_i32)
+                         .reshape({batch_size + padded_rows, token_width});
+    executor.publishNormalDeviceState(StreamGroups(streams), SamplerOutput{token_ids});
+
     int index = 0;
     for (const auto& stream : streams) {
         const auto& state = stream->getNormalAsyncDeviceState();
-        EXPECT_EQ(std::vector<int32_t>({700 + index}), toVec<int32_t>(state.last_sample_token_gpu));
-        EXPECT_EQ(std::vector<int32_t>({2001 + index}), toVec<int32_t>(state.next_seq_len_gpu));
-        EXPECT_EQ(2000 + index, state.last_real_seq_len);
-        EXPECT_EQ(2001 + index, state.next_real_seq_len);
+        EXPECT_EQ(std::vector<int32_t>({index * token_width + token_width - 1}),
+                  toVec<int32_t>(normalStateTokenView(state)));
+        EXPECT_TRUE(state.batched_last_sample_tokens_gpu.is_contiguous());
+        EXPECT_EQ(batch_size, state.batched_last_sample_tokens_gpu.size(0));
+        EXPECT_EQ(std::vector<int32_t>({1001 + index}), toVec<int32_t>(normalStateNextSeqLenView(state)));
         ++index;
     }
 }
