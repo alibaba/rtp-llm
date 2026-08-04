@@ -16,7 +16,10 @@ from rtp_llm.openai.renderers.sglang_helpers.function_call.base_format_detector 
 from rtp_llm.openai.renderers.sglang_helpers.function_call.minimax_m3_detector import (
     MiniMaxM3Detector,
 )
-from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import ReasoningParser
+from rtp_llm.openai.renderers.sglang_helpers.reasoning_parser import (
+    ReasoningParser,
+    normalize_mm_think_tags,
+)
 
 
 class MiniMaxM3Renderer(ReasoningToolBaseRenderer):
@@ -72,6 +75,7 @@ class MiniMaxM3Renderer(ReasoningToolBaseRenderer):
         # The template iterates `tool_call.arguments.items()`, but the OpenAI wire
         # format carries arguments as a JSON string.
         for message in messages:
+            self._normalize_think_markers(message)
             for tool_call in message.get("tool_calls") or []:
                 function = tool_call.get("function")
                 if not isinstance(function, dict):
@@ -89,6 +93,27 @@ class MiniMaxM3Renderer(ReasoningToolBaseRenderer):
                     decoded = {}
                 function["arguments"] = decoded if isinstance(decoded, dict) else {}
         return messages
+
+    @staticmethod
+    def _normalize_think_markers(message: dict) -> None:
+        """Fold zero-width-escaped think markers in a history message.
+
+        The template decides whether a past assistant turn contained reasoning by
+        looking for a literal `</mm:think>` in its content. An escaped marker fails
+        that check, so the template prepends a fresh marker while keeping the escaped
+        one, and the markers accumulate turn after turn until they crowd out the real
+        context.
+        """
+        content = message.get("content")
+        if isinstance(content, str):
+            message["content"] = normalize_mm_think_tags(content)
+        elif isinstance(content, list):
+            for part in content:
+                if isinstance(part, dict) and isinstance(part.get("text"), str):
+                    part["text"] = normalize_mm_think_tags(part["text"])
+        reasoning = message.get("reasoning_content")
+        if isinstance(reasoning, str):
+            message["reasoning_content"] = normalize_mm_think_tags(reasoning)
 
     @override
     def _create_detector(

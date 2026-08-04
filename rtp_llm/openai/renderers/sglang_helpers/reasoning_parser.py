@@ -1,4 +1,5 @@
 import logging
+import re
 from typing import Dict, Optional, Tuple, Type
 
 
@@ -64,14 +65,14 @@ class BaseReasoningFormatDetector:
         If stream_reasoning is True:
             Streams reasoning content as it arrives
         """
-        logging.info(
+        logging.debug(
             f"[REASONING_DEBUG] parse_streaming_increment: buffer={repr(self._buffer)}, new_text={repr(new_text)}"
         )
         self._buffer += new_text
         current_text = self._buffer
 
         # If the current text is a prefix of the think token, keep buffering
-        logging.info(
+        logging.debug(
             f"[REASONING_DEBUG] parse_streaming_increment: current_text={repr(current_text)}, in_reasoning={self._in_reasoning}"
         )
         if any(
@@ -192,6 +193,59 @@ class KimiDetector(BaseReasoningFormatDetector):
         )
 
 
+MM_THINK_START_TOKEN = "<mm:think>"
+MM_THINK_END_TOKEN = "</mm:think>"
+
+# Besides the `<mm:think>` / `</mm:think>` added tokens, M3 also emits the markers
+# as plain tokens with zero-width characters spliced in (`</\u200bmm:think>`). That
+# is a different token sequence, so a literal comparison never matches it and the
+# marker leaks into the content. Worse, the chat template keys the "did this turn
+# think?" check off the same literal, so a leaked marker fed back through the
+# history makes the template prepend yet another marker every turn. Folding the
+# escaped variants back to the literal form breaks that feedback loop.
+_ZERO_WIDTH_CHARS = "\u200b\u200c\u200d\ufeff"
+_ZW = f"[{_ZERO_WIDTH_CHARS}]*"
+_MM_THINK_TAG_RE = re.compile(
+    "<" + _ZW + "(/?)" + _ZW + _ZW.join("mm:think") + _ZW + ">"
+)
+_MM_THINK_TOKENS = (MM_THINK_START_TOKEN, MM_THINK_END_TOKEN)
+
+
+def normalize_mm_think_tags(text: str) -> str:
+    """Fold zero-width-escaped M3 think markers back to their literal form."""
+    if not text:
+        return text
+    normalized = _MM_THINK_TAG_RE.sub(lambda m: f"<{m.group(1)}mm:think>", text)
+    return _unescape_trailing_partial_tag(normalized)
+
+
+def _unescape_trailing_partial_tag(text: str) -> str:
+    """Drop zero-width chars from a partial think marker at the end of the text.
+
+    Streaming delivers the marker one token at a time, so the buffer routinely ends
+    mid-marker (`</`, `</\u200b`, `</\u200bmm`, ...). The base detector only keeps
+    buffering while the text is a literal prefix of a think token, so the zero-width
+    chars have to go before it can recognise the partial marker.
+    """
+    idx = text.rfind("<")
+    if idx == -1 or not any(c in text[idx:] for c in _ZERO_WIDTH_CHARS):
+        return text
+    head, tail = text[:idx], text[idx:]
+    stripped = "".join(c for c in tail if c not in _ZERO_WIDTH_CHARS)
+    if any(token.startswith(stripped) for token in _MM_THINK_TOKENS):
+        return head + stripped
+    return text
+
+
+def strip_mm_think_tags(text: str) -> str:
+    """Remove any complete think marker left in text destined for `content`."""
+    if not text:
+        return text
+    for token in _MM_THINK_TOKENS:
+        text = text.replace(token, "")
+    return text
+
+
 class MiniMaxM3ReasoningDetector(BaseReasoningFormatDetector):
     """
     Detector for MiniMax-M3 models.
@@ -203,15 +257,35 @@ class MiniMaxM3ReasoningDetector(BaseReasoningFormatDetector):
     prefix". Reasoning is therefore forced, as for DeepSeek-R1 — otherwise a
     non-thinking reply, which opens with a bare `</mm:think>`, leaks that tag
     into the content.
+
+    M3 also repeats the closing marker, so the base class's single-shot split is
+    not enough: once reasoning has ended every further marker would be treated as
+    ordinary text. Markers are control tokens and never belong in `content`, so
+    the leftovers are dropped instead.
     """
 
     def __init__(self, stream_reasoning: bool = True, force_reasoning: bool = True):
         super().__init__(
-            "<mm:think>",
-            "</mm:think>",
+            MM_THINK_START_TOKEN,
+            MM_THINK_END_TOKEN,
             force_reasoning=True,
             stream_reasoning=stream_reasoning,
         )
+
+    def detect_and_parse(self, text: str) -> StreamingParseResult:
+        result = super().detect_and_parse(normalize_mm_think_tags(text))
+        result.normal_text = strip_mm_think_tags(result.normal_text)
+        return result
+
+    def parse_streaming_increment(self, new_text: str) -> StreamingParseResult:
+        # Normalize the retained buffer together with the new chunk: a marker can be
+        # split across chunks, so the escape only becomes visible once the pieces are
+        # joined. Folding is idempotent, so re-running it on the buffer is safe.
+        combined = normalize_mm_think_tags(self._buffer + new_text)
+        self._buffer = ""
+        result = super().parse_streaming_increment(combined)
+        result.normal_text = strip_mm_think_tags(result.normal_text)
+        return result
 
 
 class ReasoningParser:
