@@ -192,6 +192,9 @@ class GenerateConfigTest(TestCase):
             # 每次调用后长度都应等于第一次,不随 batch 累积
             self.assertEqual(len(shared.select_tokens_id), first_select_len)
 
+        # 不只是「不累积」,值也不能丢:词表是仓内固定测试数据,直接钉字面量
+        self.assertEqual(shared.select_tokens_id, [16, 17, 18, 19])
+
         # special stop words 只合入一次,且用户已传入的 stop words 原样保留一份
         self.assertEqual(shared.stop_words_str, ["hello", "gg"])
         self.assertEqual(shared.stop_words_str.count("hello"), 1)
@@ -293,16 +296,16 @@ class GenerateConfigTest(TestCase):
         self.assertEqual(
             [c.adapter_name for c in configs], ["lora_a", "lora_b", "lora_c"]
         )
-        # 浅拷贝分支:各副本是不同对象,但 list 字段仍共享同一引用——这正是重复
-        # append 会串扰的原因。
+        # 各副本是不同对象。注:当前 _get_adapter 用 copy.copy,副本之间的 list 字段
+        # 仍共享同一引用,这正是原地 append 会串扰的原因;这里不对别名本身做断言——
+        # 将来若在 _get_adapter 层深拷贝消除别名,下面的值断言依旧成立。
         self.assertIsNot(configs[0], configs[1])
-        self.assertIs(configs[0].select_tokens_id, configs[1].select_tokens_id)
 
-        expected_ids = []
-        for token_str in ["1", "2", "3", "4"]:
-            for token_id in tokenizer.encode(token_str):
-                if token_id not in expected_ids:
-                    expected_ids.append(token_id)
+        # oracle 用词表固定的字面量,不镜像生产侧的去重算法
+        expected_ids = [16, 17, 18, 19]
+        self.assertEqual(
+            [tokenizer.encode(s)[0] for s in ["1", "2", "3", "4"]], expected_ids
+        )
 
         for config in configs:
             Pipeline.create_generate_config(
