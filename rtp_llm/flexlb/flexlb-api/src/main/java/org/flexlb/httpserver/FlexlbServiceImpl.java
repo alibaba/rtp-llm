@@ -136,6 +136,39 @@ public class FlexlbServiceImpl extends FlexlbServiceGrpc.FlexlbServiceImplBase {
         responseObserver.onCompleted();
     }
 
+    @Override
+    public void cancel(FlexlbScheduleProtocol.FlexlbCancelRequestPB request,
+                        StreamObserver<FlexlbScheduleProtocol.FlexlbCancelResponsePB> responseObserver) {
+        if (shouldForwardToMaster()) {
+            FlexlbScheduleProtocol.FlexlbCancelResponsePB forwarded =
+                    grpcForwarder.forwardCancelToMaster(request);
+            if (forwarded != null && forwarded.getFound()) {
+                responseObserver.onNext(forwarded);
+                responseObserver.onCompleted();
+                return;
+            }
+        }
+        FlexlbScheduleProtocol.FlexlbCancelResponsePB.Builder response;
+        try {
+            boolean cancelled = routeService.cancel(String.valueOf(request.getRequestId()));
+            response = FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder()
+                    .setFound(cancelled);
+            if (cancelled) {
+                RequestLifecycleSnapshot snapshot = routeService.getRequestState(
+                        request.getRequestId(), request.getBatchId());
+                if (snapshot != null) {
+                    response.setLifecycle(toLifecycleProto(snapshot));
+                }
+            }
+        } catch (Exception e) {
+            Logger.error("FlexlbService.cancel error, request_id={}", request.getRequestId(), e);
+            response = FlexlbScheduleProtocol.FlexlbCancelResponsePB.newBuilder()
+                    .setFound(false);
+        }
+        responseObserver.onNext(response.build());
+        responseObserver.onCompleted();
+    }
+
     private CompletableFuture<FlexlbScheduleProtocol.FlexlbScheduleResponsePB> routeLocally(BalanceContext ctx) {
         return routeService.route(ctx).thenApply(response -> {
             FlexlbScheduleProtocol.FlexlbScheduleResponsePB.Builder builder =
