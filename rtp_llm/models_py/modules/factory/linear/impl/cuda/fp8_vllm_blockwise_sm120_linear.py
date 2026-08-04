@@ -271,7 +271,6 @@ class CudaFp8VllmBlockwiseLinear(LinearBase):
             self.weight,
             input_scales,
             self.weight_scales,
+            self.bias,
         )
-        if self.bias is not None:
-            output.add_(self.bias)
         return output
