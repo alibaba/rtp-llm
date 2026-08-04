@@ -64,7 +64,9 @@ static rtp_llm::CacheConfig makeMtpCacheConfigByCreateSpConfig(uint32_t main_lay
     rtp_llm::RuntimeConfig runtime_config;
 
     rtp_llm::KVCacheConfig kv_cache_config;
-    kv_cache_config.test_block_num = static_cast<int>(block_num);
+    kv_cache_config.seq_size_per_block        = 4;
+    kv_cache_config.kernel_seq_size_per_block = 4;
+    kv_cache_config.test_block_num            = static_cast<int>(block_num);
 
     rtp_llm::SpeculativeExecutionConfig sp_config;
     sp_config.type              = SP_TYPE_MTP;
@@ -842,9 +844,10 @@ TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyEmpty) {
 }
 
 TEST_F(SingleTypeKVCacheAllocatorTest, BlockBatchCopyCopiesCompleteSparseIndexerStride) {
-    auto model_config                         = makeTestModelConfig(/*num_layers=*/1);
-    model_config.attn_config.is_sparse        = true;
-    model_config.attn_config.indexer_head_dim = 256;
+    auto model_config                                = makeTestModelConfig(/*num_layers=*/1);
+    model_config.attn_config.is_sparse               = true;
+    model_config.attn_config.indexer_head_dim        = 256;
+    model_config.attn_config.kernel_tokens_per_block = model_config.attn_config.tokens_per_block;
 
     ParallelismConfig parallelism_config;
     parallelism_config.tp_size = 1;

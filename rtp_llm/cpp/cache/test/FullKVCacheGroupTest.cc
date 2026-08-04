@@ -24,8 +24,7 @@ TEST_F(FullKVCacheGroupTest, NeedBlocksNumTest) {
     auto block_pool = createBlockPool();
     block_pool->init();
 
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block = 4;
+    auto spec = std::make_shared<MHAKVCacheSpec>(4, 4);
 
     FullKVCacheGroup group1({}, spec, block_pool, 0);
     ASSERT_EQ(2, group1.needBlocksNum(10, 1));
@@ -38,8 +37,7 @@ TEST_F(FullKVCacheGroupTest, GetNeedBlocksTest) {
     auto block_pool = createBlockPool();
     ASSERT_TRUE(block_pool->init());
 
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block = 4;
+    auto spec = std::make_shared<MHAKVCacheSpec>(4, 4);
 
     FullKVCacheGroup group({}, spec, block_pool, 0);
 
@@ -60,8 +58,7 @@ TEST_F(FullKVCacheGroupTest, RemoveSkippedBlocksTest) {
     auto block_pool = createBlockPool();
     block_pool->init();
 
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block = 4;
+    auto spec = std::make_shared<MHAKVCacheSpec>(4, 4);
 
     FullKVCacheGroup group1({}, spec, block_pool, 0);
 
@@ -81,8 +78,7 @@ TEST_F(FullKVCacheGroupTest, MatchTest) {
     std::vector<BlockPoolPtr> group_pools  = {block_pool};
     shared_cache->init(1, group_pools);
 
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block = 4;
+    auto spec = std::make_shared<MHAKVCacheSpec>(4, 4);
 
     FullKVCacheGroup group1({}, spec, block_pool, 0, shared_cache.get());
 
@@ -125,8 +121,7 @@ TEST_F(FullKVCacheGroupTest, MallocFreeTest) {
     ASSERT_EQ(block_pool->freeBlocksNum(), 9);
     ASSERT_EQ(block_pool->availableBlocksNum(), 9);
 
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block = 2;
+    auto spec = std::make_shared<MHAKVCacheSpec>(2, 2);
 
     FullKVCacheGroup group1({}, spec, block_pool, 0);
 

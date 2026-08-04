@@ -28,24 +28,26 @@ namespace {
 
 KVCacheSpecPtr makeTestMhaSpec(const std::string& tag, uint32_t seq_size_per_block) {
     AttentionConfigs attn_config;
-    attn_config.kv_head_num      = 8;
-    attn_config.size_per_head    = 128;
-    attn_config.tokens_per_block = seq_size_per_block;
+    attn_config.kv_head_num             = 8;
+    attn_config.size_per_head           = 128;
+    attn_config.tokens_per_block        = seq_size_per_block;
+    attn_config.kernel_tokens_per_block = seq_size_per_block;
 
     ParallelismConfig parallelism_config;
     parallelism_config.tp_size = 1;
 
     KVCacheSpecDesc desc;
-    desc.tag        = tag;
-    desc.cache_type = KVCacheSpecType::MultiHeadAttention;
-    desc.dtype      = rtp_llm::DataType::TYPE_FP16;
+    desc.tag                       = tag;
+    desc.cache_type                = KVCacheSpecType::MultiHeadAttention;
+    desc.dtype                     = rtp_llm::DataType::TYPE_FP16;
+    desc.kernel_seq_size_per_block = seq_size_per_block;
 
     SpecBuildContext ctx;
     ctx.dtype              = rtp_llm::DataType::TYPE_FP16;
     ctx.seq_size_per_block = seq_size_per_block;
     ctx.attn_config        = &attn_config;
     ctx.parallelism_config = &parallelism_config;
-    return SpecBuilder::build(desc, ctx);
+    return SpecBuilder::build(desc, ctx).first;
 }
 
 KVCacheSpecPtr makeTestLinearSpec(const std::string& tag, uint32_t seq_size_per_block) {
@@ -58,6 +60,9 @@ KVCacheSpecPtr makeTestLinearSpec(const std::string& tag, uint32_t seq_size_per_
 
     ParallelismConfig parallelism_config;
     parallelism_config.tp_size = 1;
+    AttentionConfigs attn_config;
+    attn_config.tokens_per_block        = seq_size_per_block;
+    attn_config.kernel_tokens_per_block = seq_size_per_block;
 
     KVCacheSpecDesc desc;
     desc.tag        = tag;
@@ -67,9 +72,10 @@ KVCacheSpecPtr makeTestLinearSpec(const std::string& tag, uint32_t seq_size_per_
     SpecBuildContext ctx;
     ctx.dtype                   = rtp_llm::DataType::TYPE_FP16;
     ctx.seq_size_per_block      = seq_size_per_block;
+    ctx.attn_config             = &attn_config;
     ctx.linear_attention_config = &linear_config;
     ctx.parallelism_config      = &parallelism_config;
-    return SpecBuilder::build(desc, ctx);
+    return SpecBuilder::build(desc, ctx).first;
 }
 
 }  // namespace

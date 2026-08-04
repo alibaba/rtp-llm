@@ -48,8 +48,14 @@ struct CustomConfig {
 };
 
 inline void setDefaultMhaKVCacheSpecDescs(rtp_llm::ModelConfig& model_config) {
-    model_config.kv_cache_spec_descs.assign(static_cast<size_t>(model_config.num_layers),
-                                            {KVCacheSpecDesc{"full", KVCacheSpecType::MultiHeadAttention}});
+    if (model_config.attn_config.kernel_tokens_per_block <= 0) {
+        model_config.attn_config.kernel_tokens_per_block = model_config.attn_config.tokens_per_block;
+    }
+    KVCacheSpecDesc desc{"full", KVCacheSpecType::MultiHeadAttention};
+    desc.kernel_seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.kernel_tokens_per_block > 0 ?
+                                                               model_config.attn_config.kernel_tokens_per_block :
+                                                               model_config.attn_config.tokens_per_block);
+    model_config.kv_cache_spec_descs.assign(static_cast<size_t>(model_config.num_layers), {desc});
 }
 
 rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
@@ -73,13 +79,13 @@ rtp_llm::EngineInitParams createEngineInitParams(const CustomConfig&     config,
     model_config.attn_config.kv_cache_dtype =
         config.kv_cache_data_type == DataType::TYPE_FP8_E4M3 ? KvCacheDataType::FP8 : KvCacheDataType::BASE;
     model_config.special_tokens.eos_token_id = -1;  // never eos
-    setDefaultMhaKVCacheSpecDescs(model_config);
-
-    const size_t inter_size = 512;
+    const size_t inter_size                  = 512;
     // inter_size is now calculated in ModelDeployWeightInfo, not in ModelConfig
-    model_config.attn_config.tokens_per_block = 2;
+    model_config.attn_config.tokens_per_block        = 2;
+    model_config.attn_config.kernel_tokens_per_block = 2;
+    setDefaultMhaKVCacheSpecDescs(model_config);
     kv_cache_config.seq_size_per_block        = model_config.attn_config.tokens_per_block;
-    kv_cache_config.kernel_seq_size_per_block = model_config.attn_config.tokens_per_block;
+    kv_cache_config.kernel_seq_size_per_block = model_config.attn_config.kernel_tokens_per_block;
     runtime_config.reserve_runtime_mem_mb     = 1024;
     const size_t hidden_units                 = 128;
 

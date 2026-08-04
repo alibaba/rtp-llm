@@ -7,7 +7,11 @@ from typing import Any, Dict, List, Optional
 import torch
 from transformers import AutoTokenizer
 
-from rtp_llm.config.model_config import ModelConfig, VitParameters
+from rtp_llm.config.model_config import (
+    ModelConfig,
+    VitParameters,
+    resolve_kv_cache_kernel_seq_size_per_block,
+)
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.attn_weight import AttnAtomicWeight, AttnConfig
 from rtp_llm.model_loader.ffn_weight import FfnAtomicWeight, FfnConfig, FfnWeight
@@ -495,6 +499,9 @@ class QwenV2MTP(QWenV2):
         desc = KVCacheSpecDesc()
         desc.cache_type = KVCacheSpecType.MHA
         desc.tag = "default"
+        desc.kernel_seq_size_per_block = resolve_kv_cache_kernel_seq_size_per_block(
+            model_config
+        )
         model_config.kv_cache_spec_descs = [
             [desc] for _ in range(model_config.num_layers)
         ]

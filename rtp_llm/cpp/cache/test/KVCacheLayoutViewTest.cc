@@ -16,11 +16,13 @@ namespace {
 
 class TestKVCacheSpec: public KVCacheSpec {
 public:
-    TestKVCacheSpec(std::string tag, KVCacheSpecType type, size_t seq_size, size_t k_elems, size_t v_elems):
-        k_elems_(k_elems), v_elems_(v_elems) {
-        this->tag                = std::move(tag);
-        this->type               = type;
-        this->seq_size_per_block = static_cast<uint32_t>(seq_size);
+    TestKVCacheSpec(
+        std::string tag, KVCacheSpecType type, size_t seq_size, size_t kernel_seq_size, size_t k_elems, size_t v_elems):
+        KVCacheSpec(static_cast<uint32_t>(seq_size), static_cast<uint32_t>(kernel_seq_size)),
+        k_elems_(k_elems),
+        v_elems_(v_elems) {
+        this->tag  = std::move(tag);
+        this->type = type;
     }
 
     size_t block_size() const override {
@@ -65,14 +67,13 @@ GroupBase makeGroup(const std::string& tag,
                     size_t             v_elems,
                     uint32_t           local_kv_heads = 1) {
     GroupBase group;
-    group.tag                = tag;
-    group.spec               = std::make_shared<TestKVCacheSpec>(tag, spec_type, physical_seq_size, k_elems, v_elems);
-    group.policy.group_type  = group_type;
-    group.layer_ids          = {0};
-    group.block_num          = 4;
-    group.local_kv_head_num  = local_kv_heads;
-    group.seq_size_per_block = physical_seq_size;
-    group.kernel_seq_size_per_block = kernel_seq_size;
+    auto spec = std::make_shared<TestKVCacheSpec>(tag, spec_type, physical_seq_size, kernel_seq_size, k_elems, v_elems);
+    group.tag = tag;
+    group.spec              = std::move(spec);
+    group.policy.group_type = group_type;
+    group.layer_ids         = {0};
+    group.block_num         = 4;
+    group.local_kv_head_num = local_kv_heads;
     return group;
 }
 
@@ -107,6 +108,11 @@ TEST(KVCacheLayoutViewTest, MhaUsesGroupHeadsAndSpecPayloadForKernelView) {
     EXPECT_EQ(layer.seq_size_per_block, 2);
     EXPECT_EQ(layer.kv_cache_base.sizes().vec(), (std::vector<int64_t>{12, 2, 1, 2, 4}));
     EXPECT_EQ(layer.kv_scale_base.sizes().vec(), (std::vector<int64_t>{12, 4}));
+    EXPECT_TRUE(torch::equal(layer.kv_cache_base[0][0].flatten(), torch::arange(0, 8, base.options())));
+    EXPECT_TRUE(torch::equal(layer.kv_cache_base[0][1].flatten(), torch::arange(8, 16, base.options())));
+    EXPECT_TRUE(torch::equal(layer.kv_cache_base[1][0].flatten(), torch::arange(16, 24, base.options())));
+    EXPECT_TRUE(torch::equal(layer.kv_scale_base[0], torch::arange(0, 4, scale.options())));
+    EXPECT_TRUE(torch::equal(layer.kv_scale_base[1], torch::arange(4, 8, scale.options())));
     EXPECT_EQ(layer.kv_cache_base.data_ptr(), base.data_ptr());
     EXPECT_EQ(by_tag.kv_cache_base.data_ptr(), layer.kv_cache_base.data_ptr());
     EXPECT_EQ(by_tag.group_id, 0);

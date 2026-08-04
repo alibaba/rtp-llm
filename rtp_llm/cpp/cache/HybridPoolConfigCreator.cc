@@ -16,7 +16,7 @@ namespace rtp_llm {
 
 namespace {
 
-void validateHybridPoolDescs(const ModelConfig& model_config, uint32_t kernel_tokens_per_block, int gen_num_per_cycle) {
+void validateHybridPoolDescs(const ModelConfig& model_config, int gen_num_per_cycle) {
     RTP_LLM_CHECK_WITH_INFO(
         model_config.kv_cache_spec_descs.size() == static_cast<size_t>(model_config.num_layers),
         "hybrid-pool desc config requires layer-wise kv_cache_spec_descs for every layer, got %zu/%ld",
@@ -36,15 +36,6 @@ void validateHybridPoolDescs(const ModelConfig& model_config, uint32_t kernel_to
                     "desc tag=%s derives entries from kernel block but has invalid compression_ratio=%u",
                     desc.tag.c_str(),
                     desc.compression_ratio);
-                RTP_LLM_CHECK_WITH_INFO(
-                    kernel_tokens_per_block > 0,
-                    "desc tag=%s derives entries from kernel block but kernel_tokens_per_block is 0",
-                    desc.tag.c_str());
-                RTP_LLM_CHECK_WITH_INFO(kernel_tokens_per_block % desc.compression_ratio == 0,
-                                        "desc tag=%s compression_ratio=%u must divide kernel block %u",
-                                        desc.tag.c_str(),
-                                        desc.compression_ratio,
-                                        kernel_tokens_per_block);
             }
             if (desc.entry_count_mode == OpaqueBlockEntryCountMode::STATE_RING) {
                 RTP_LLM_CHECK_WITH_INFO(desc.compression_ratio > 0,
@@ -55,56 +46,10 @@ void validateHybridPoolDescs(const ModelConfig& model_config, uint32_t kernel_to
     }
 }
 
-uint32_t mhaLocalKvHeadNum(const ModelConfig& model_config, const ParallelismConfig& parallelism_config) {
-    const auto     attn_tp = std::max<int64_t>(1, parallelism_config.get_attn_tp_size());
-    const uint32_t tp      = static_cast<uint32_t>(attn_tp);
-    const uint32_t kv      = static_cast<uint32_t>(model_config.attn_config.kv_head_num);
-    RTP_LLM_CHECK_WITH_INFO(kv > 0, "local kv head num requires positive kv_head_num");
-    return (kv % tp == 0) ? kv / tp : kv / std::gcd(kv, tp);
-}
-
-uint32_t linearLocalKvHeadNum(const ModelConfig& model_config, const ParallelismConfig& parallelism_config) {
-    const auto     attn_tp     = std::max<int64_t>(1, parallelism_config.get_attn_tp_size());
-    const uint32_t tp          = static_cast<uint32_t>(attn_tp);
-    const uint32_t value_heads = static_cast<uint32_t>(model_config.linear_attention_config.linear_num_value_heads);
-    RTP_LLM_CHECK_WITH_INFO(value_heads > 0, "local kv head num requires positive linear_num_value_heads");
-    RTP_LLM_CHECK_WITH_INFO(value_heads % tp == 0,
-                            "linear_num_value_heads must be divisible by attention TP, global=%u tp=%u",
-                            value_heads,
-                            tp);
-    const uint32_t local_value_heads = value_heads / tp;
-    RTP_LLM_CHECK_WITH_INFO(
-        local_value_heads > 0, "invalid local linear value heads: global=%u tp=%u", value_heads, tp);
-    return local_value_heads;
-}
-
-uint32_t localKvHeadNumForDesc(const KVCacheSpecDesc&   desc,
-                               const ModelConfig&       model_config,
-                               const ParallelismConfig& parallelism_config) {
-    switch (desc.cache_type) {
-        case KVCacheSpecType::MultiHeadAttention:
-            return mhaLocalKvHeadNum(model_config, parallelism_config);
-        case KVCacheSpecType::LinearAttention:
-            return linearLocalKvHeadNum(model_config, parallelism_config);
-        case KVCacheSpecType::MultiHeadLatentAttention:
-        case KVCacheSpecType::OpaqueKV:
-        case KVCacheSpecType::OpaqueState:
-            return 1;
-        default:
-            RTP_LLM_FAIL("unknown KVCacheSpecType=%d", static_cast<int>(desc.cache_type));
-    }
-    return 1;
-}
-
-void populateGroupsFromLayerSpecs(CacheConfig&                 config,
-                                  const LayerKVCacheSpecDescs& layer_descs,
-                                  const LayerKVCacheSpecs&     layer_specs,
-                                  const ModelConfig&           model_config,
-                                  const ParallelismConfig&     parallelism_config) {
-    RTP_LLM_CHECK_WITH_INFO(layer_descs.size() == static_cast<size_t>(config.layer_num),
-                            "hybrid-pool layer desc count %zu != layer_num %u",
-                            layer_descs.size(),
-                            config.layer_num);
+void populateGroupsFromLayerSpecs(CacheConfig&                        config,
+                                  const LayerKVCacheSpecBuildResults& layer_specs,
+                                  const ModelConfig&                  model_config,
+                                  const ParallelismConfig&            parallelism_config) {
     RTP_LLM_CHECK_WITH_INFO(layer_specs.size() == static_cast<size_t>(config.layer_num),
                             "hybrid-pool layer spec count %zu != layer_num %u",
                             layer_specs.size(),
@@ -113,7 +58,6 @@ void populateGroupsFromLayerSpecs(CacheConfig&                 config,
     struct GroupBuildState {
         KVCacheSpecPtr   spec;
         std::string      fingerprint;
-        CacheGroupType   type;
         CacheGroupPolicy policy;
         uint32_t         local_kv_head_num = 1;
         std::vector<int> layer_ids;
@@ -123,42 +67,30 @@ void populateGroupsFromLayerSpecs(CacheConfig&                 config,
     std::vector<std::string>               ordered_tags;
 
     for (uint32_t layer = 0; layer < config.layer_num; ++layer) {
-        const auto& descs = layer_descs[layer];
         const auto& specs = layer_specs[layer];
-        RTP_LLM_CHECK_WITH_INFO(!descs.empty(), "hybrid-pool layer %u has no descs", layer);
-        RTP_LLM_CHECK_WITH_INFO(descs.size() == specs.size(),
-                                "hybrid-pool layer %u desc count %zu != spec count %zu",
-                                layer,
-                                descs.size(),
-                                specs.size());
+        RTP_LLM_CHECK_WITH_INFO(!specs.empty(), "hybrid-pool layer %u has no specs", layer);
         std::set<std::string> layer_tags;
-        for (size_t idx = 0; idx < descs.size(); ++idx) {
-            const auto& desc = descs[idx];
-            const auto& spec = specs[idx];
+        for (const auto& [spec, policy] : specs) {
             RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "hybrid-pool layer %u has null spec", layer);
             RTP_LLM_CHECK_WITH_INFO(layer_tags.insert(spec->tag).second,
                                     "hybrid-pool layer %u has duplicate tag=%s",
                                     layer,
                                     spec->tag.c_str());
-            const auto policy            = SpecBuilder::groupPolicy(desc);
-            const auto type              = SpecBuilder::groupType(desc);
-            const auto local_kv_head_num = localKvHeadNumForDesc(desc, model_config, parallelism_config);
-            auto       group_it          = group_by_tag.find(spec->tag);
+            const auto local_kv_head_num = resolveLocalKVHeadNum(
+                spec->type, model_config.attn_config, model_config.linear_attention_config, parallelism_config);
+            auto group_it = group_by_tag.find(spec->tag);
             if (group_it == group_by_tag.end()) {
                 GroupBuildState state;
                 state.spec              = spec;
-                state.fingerprint       = spec->fingerprint();
-                state.type              = type;
+                state.fingerprint       = spec->layoutFingerprint();
                 state.policy            = policy;
                 state.local_kv_head_num = local_kv_head_num;
                 group_it                = group_by_tag.emplace(spec->tag, std::move(state)).first;
                 ordered_tags.push_back(spec->tag);
             } else {
-                RTP_LLM_CHECK_WITH_INFO(group_it->second.fingerprint == spec->fingerprint(),
+                RTP_LLM_CHECK_WITH_INFO(group_it->second.fingerprint == spec->layoutFingerprint(),
                                         "hybrid-pool tag=%s has multiple physical prototypes",
                                         spec->tag.c_str());
-                RTP_LLM_CHECK_WITH_INFO(
-                    group_it->second.type == type, "hybrid-pool tag=%s has inconsistent group type", spec->tag.c_str());
                 RTP_LLM_CHECK_WITH_INFO(CacheConfig::samePolicy(group_it->second.policy, policy),
                                         "hybrid-pool tag=%s has inconsistent policy",
                                         spec->tag.c_str());
@@ -211,11 +143,8 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
         const auto& spec = config.specForGroup(gid);
         RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "cache_specs[%zu] is null", gid);
         const auto   layer_count         = static_cast<uint32_t>(config.layerIdsForGroup(gid).size());
-        const size_t kernel_kv_stride    = spec->block_size_bytes();
-        const auto   kernel_scale        = spec->scale_block_size_bytes();
-        const size_t group_bpk           = config.kernelBlocksPerKvBlockForGroup(gid);
-        const size_t kv_stride           = kernel_kv_stride * group_bpk;
-        const size_t scale_stride        = kernel_scale * group_bpk;
+        const size_t kv_stride           = spec->block_size_bytes();
+        const size_t scale_stride        = spec->scale_block_size_bytes();
         group_kv_block_stride_bytes[gid] = kv_stride;
         group_kv_scale_stride_bytes[gid] = scale_stride;
         const auto type                  = config.typeForGroup(gid);
@@ -255,53 +184,34 @@ void setupIndependentPoolSizes(CacheConfig& config, bool is_mtp) {
 
 CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_config,
                                             const ParallelismConfig& parallelism_config,
-                                            const KVCacheConfig&     kv_cache_config,
                                             bool                     is_mtp,
                                             int                      gen_num_per_cycle) {
-    const auto    dtype                  = MemoryEvaluationHelper::getDataTypeForCache(model_config);
-    constexpr int kDefaultKvCacheSeqSize = 64;
-    const bool    has_seq_override =
-        kv_cache_config.seq_size_per_block > 0 && kv_cache_config.seq_size_per_block != kDefaultKvCacheSeqSize;
-    const auto physical_tokens_per_block = has_seq_override ?
-                                               static_cast<uint32_t>(kv_cache_config.seq_size_per_block) :
-                                               static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
-    const auto kernel_tokens_per_block   = kv_cache_config.kernel_seq_size_per_block > 0 ?
-                                               static_cast<uint32_t>(kv_cache_config.kernel_seq_size_per_block) :
-                                               physical_tokens_per_block;
+    const auto dtype                     = MemoryEvaluationHelper::getDataTypeForCache(model_config);
+    const auto physical_tokens_per_block = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
     RTP_LLM_CHECK_WITH_INFO(physical_tokens_per_block > 0, "hybrid-pool seq_size_per_block must be > 0");
-    RTP_LLM_CHECK_WITH_INFO(kernel_tokens_per_block > 0, "hybrid-pool kernel_seq_size_per_block must be > 0");
-    RTP_LLM_CHECK_WITH_INFO(
-        physical_tokens_per_block >= kernel_tokens_per_block
-            && physical_tokens_per_block % kernel_tokens_per_block == 0,
-        "hybrid-pool seq_size_per_block=%u must be >= kernel_seq_size_per_block=%u and divisible by it",
-        physical_tokens_per_block,
-        kernel_tokens_per_block);
 
     CacheConfig config;
-    config.layer_num                 = static_cast<uint32_t>(model_config.num_layers);
-    config.layer_all_num             = config.layer_num;
-    config.block_num                 = 0;
-    config.seq_size_per_block        = physical_tokens_per_block;
-    config.kernel_seq_size_per_block = kernel_tokens_per_block;
-    config.use_mla                   = model_config.attn_config.use_mla;
-    config.dtype                     = dtype;
-    config.linear_step               = 1;
-    config.is_sparse                 = model_config.attn_config.is_sparse;
+    config.layer_num          = static_cast<uint32_t>(model_config.num_layers);
+    config.layer_all_num      = config.layer_num;
+    config.block_num          = 0;
+    config.seq_size_per_block = physical_tokens_per_block;
+    config.use_mla            = model_config.attn_config.use_mla;
+    config.dtype              = dtype;
+    config.linear_step        = 1;
+    config.is_sparse          = model_config.attn_config.is_sparse;
 
     if (!model_config.kv_cache_spec_descs.empty()) {
-        validateHybridPoolDescs(model_config, kernel_tokens_per_block, gen_num_per_cycle);
+        validateHybridPoolDescs(model_config, gen_num_per_cycle);
         SpecBuildContext ctx;
         ctx.dtype                   = dtype;
         ctx.seq_size_per_block      = physical_tokens_per_block;
         ctx.attn_config             = &model_config.attn_config;
         ctx.linear_attention_config = &model_config.linear_attention_config;
         ctx.parallelism_config      = &parallelism_config;
-        ctx.kernel_tokens_per_block = kernel_tokens_per_block;
         ctx.gen_num_per_cycle       = static_cast<uint32_t>(gen_num_per_cycle);
         auto refreshed_specs        = CacheConfigCreator::buildLayerSpecsFromDescs(
             model_config.kv_cache_spec_descs, ctx, model_config.num_layers);
-        populateGroupsFromLayerSpecs(
-            config, model_config.kv_cache_spec_descs, refreshed_specs, model_config, parallelism_config);
+        populateGroupsFromLayerSpecs(config, refreshed_specs, model_config, parallelism_config);
         for (size_t gid = 0; gid < static_cast<size_t>(config.groupNums()); ++gid) {
             const auto& spec               = config.specForGroup(gid);
             config.use_typed_cache_regions = config.use_typed_cache_regions || spec->type == KVCacheSpecType::OpaqueKV
@@ -330,11 +240,9 @@ CacheConfig createHybridAttentionPoolConfig(const ModelConfig&       model_confi
 
 CacheConfig HybridPoolConfigCreator::createConfig(const ModelConfig&       model_config,
                                                   const ParallelismConfig& parallelism_config,
-                                                  const KVCacheConfig&     kv_cache_config,
                                                   bool                     is_mtp,
                                                   int                      gen_num_per_cycle) {
-    return createHybridAttentionPoolConfig(
-        model_config, parallelism_config, kv_cache_config, is_mtp, gen_num_per_cycle);
+    return createHybridAttentionPoolConfig(model_config, parallelism_config, is_mtp, gen_num_per_cycle);
 }
 
 }  // namespace rtp_llm

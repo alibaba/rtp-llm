@@ -88,7 +88,6 @@ CacheConfig makeCompactDsv4TypedMemoryCopyConfig(bool use_flash) {
     config.layer_all_num               = config.layer_num;
     config.block_num                   = 512;
     config.seq_size_per_block          = 256;
-    config.kernel_seq_size_per_block   = 256;
     config.use_independent_block_pools = true;
     config.use_typed_cache_regions     = true;
     config.use_opaque_kv_cache_store   = true;

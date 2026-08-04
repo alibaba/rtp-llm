@@ -57,14 +57,12 @@ protected:
     }
 
     SWAKVCacheGroup makeGroup(int seq_size_per_block) {
-        auto spec                = std::make_shared<MHAKVCacheSpec>();
-        spec->seq_size_per_block = seq_size_per_block;
+        auto spec = std::make_shared<MHAKVCacheSpec>(seq_size_per_block, seq_size_per_block);
         return SWAKVCacheGroup({}, spec, block_pool_, 0, 0, shared_cache_.get());
     }
 
     SWAKVCacheGroup makeGroupWithStep(int seq_size_per_block, int linear_step) {
-        auto spec                = std::make_shared<MHAKVCacheSpec>();
-        spec->seq_size_per_block = seq_size_per_block;
+        auto spec = std::make_shared<MHAKVCacheSpec>(seq_size_per_block, seq_size_per_block);
         return SWAKVCacheGroup({},
                                spec,
                                block_pool_,
@@ -82,8 +80,7 @@ protected:
 };
 
 TEST_F(SWAKVCacheGroupTest, DefaultPolicyDrivesBehaviorInterfaces) {
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block = 4;
+    auto            spec = std::make_shared<MHAKVCacheSpec>(4, 4);
     SWAKVCacheGroup group({}, spec, block_pool_, 0, 0, shared_cache_.get());
 
     EXPECT_FALSE(group.prefixReusable());
@@ -276,8 +273,7 @@ TEST_F(SWAKVCacheGroupTest, Malloc_NoOpWhenEnoughBlocks) {
 }
 
 TEST_F(SWAKVCacheGroupTest, Malloc_SkipsNullTailCheckWhenPolicyDisablesValidation) {
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block = 4;
+    auto     spec  = std::make_shared<MHAKVCacheSpec>(4, 4);
     auto     group = SWAKVCacheGroup({}, spec, block_pool_, 5, 0, shared_cache_.get(), nullptr, makePolicy(true));
     BlockIds block_ids(1);
     block_ids.assign(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
@@ -318,9 +314,8 @@ TEST_F(SWAKVCacheGroupTest, Malloc_CSAStateReuseEnabledKeepsSparseBlocks) {
 }
 
 TEST_F(SWAKVCacheGroupTest, Malloc_RejectsNullTailWhenValidationEnabled) {
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block = 4;
-    auto     group           = SWAKVCacheGroup({}, spec, block_pool_, 6, 0, shared_cache_.get(), nullptr, makePolicy());
+    auto     spec  = std::make_shared<MHAKVCacheSpec>(4, 4);
+    auto     group = SWAKVCacheGroup({}, spec, block_pool_, 6, 0, shared_cache_.get(), nullptr, makePolicy());
     BlockIds block_ids(1);
     block_ids.assign(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
 
@@ -328,9 +323,8 @@ TEST_F(SWAKVCacheGroupTest, Malloc_RejectsNullTailWhenValidationEnabled) {
 }
 
 TEST_F(SWAKVCacheGroupTest, Malloc_RejectsNullPenultimateBlockWhenTwoTailBlocksAreActive) {
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block = 4;
-    auto     group           = SWAKVCacheGroup({}, spec, block_pool_, 4, 0, shared_cache_.get(), nullptr, makePolicy());
+    auto     spec  = std::make_shared<MHAKVCacheSpec>(4, 4);
+    auto     group = SWAKVCacheGroup({}, spec, block_pool_, 4, 0, shared_cache_.get(), nullptr, makePolicy());
     BlockIds block_ids(1);
     block_ids.assign(BlockIndicesType{NULL_BLOCK_IDX, NULL_BLOCK_IDX, 1});
 
@@ -448,8 +442,7 @@ TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_WithStep_FreesNonStepBlocks) {
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block = 4;
+    auto            spec = std::make_shared<MHAKVCacheSpec>(4, 4);
     SWAKVCacheGroup group({}, spec, block_pool, 0, 2, nullptr, nullptr, makePolicy(/*skip_prefix_reuse=*/false));
 
     // Start with 6 allocated blocks (no NULLs).
@@ -509,8 +502,7 @@ TEST_F(SWAKVCacheGroupTest, RemoveSkippedBlocks_WithReserveStep) {
     ASSERT_TRUE(block_pool->init());
     ASSERT_EQ(block_pool->freeBlocksNum(), 9u);
 
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->seq_size_per_block = 4;
+    auto            spec = std::make_shared<MHAKVCacheSpec>(4, 4);
     SWAKVCacheGroup group({}, spec, block_pool, 0, 2, nullptr, nullptr, makePolicy(/*skip_prefix_reuse=*/false));
 
     auto allocated = block_pool->malloc(6);

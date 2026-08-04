@@ -11,18 +11,15 @@ namespace rtp_llm {
 namespace {
 
 GroupBase makeGroup(std::string tag, std::vector<int> layer_ids, CacheGroupType type = CacheGroupType::FULL) {
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->tag                = tag;
-    spec->seq_size_per_block = 8;
+    auto spec = std::make_shared<MHAKVCacheSpec>(8, type == CacheGroupType::FULL ? 2 : 8);
+    spec->tag = tag;
 
     GroupBase group;
-    group.tag                       = std::move(tag);
-    group.spec                      = std::move(spec);
-    group.policy                    = defaultCacheGroupPolicy(type);
-    group.layer_ids                 = std::move(layer_ids);
-    group.block_num                 = 16;
-    group.seq_size_per_block        = 8;
-    group.kernel_seq_size_per_block = type == CacheGroupType::FULL ? 2 : 8;
+    group.tag       = std::move(tag);
+    group.spec      = std::move(spec);
+    group.policy    = defaultCacheGroupPolicy(type);
+    group.layer_ids = std::move(layer_ids);
+    group.block_num = 16;
     return group;
 }
 
@@ -77,6 +74,10 @@ TEST(CacheTopologyTest, TagIdentityDoesNotDependOnNumericGroupOrder) {
 
 TEST(CacheTopologyTest, RejectsInconsistentReverseMembership) {
     EXPECT_ANY_THROW(CacheTopology::create({makeGroup("full", {0})}, {{0, {"full"}}, {1, {"full"}}}));
+}
+
+TEST(CacheTopologyTest, RejectsZeroKernelBlockSize) {
+    EXPECT_ANY_THROW(std::make_shared<MHAKVCacheSpec>(8, 0));
 }
 
 }  // namespace

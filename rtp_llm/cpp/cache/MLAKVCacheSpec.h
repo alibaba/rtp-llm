@@ -10,11 +10,19 @@
 namespace rtp_llm {
 
 struct MLAKVCacheSpec: public KVCacheSpec {
-    MLAKVCacheSpec() {
+    explicit MLAKVCacheSpec(uint32_t seq_size_per_block = 1): KVCacheSpec(seq_size_per_block) {
         type = KVCacheSpecType::MultiHeadLatentAttention;
     }
 
-    static KVCacheSpecPtr build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
+    MLAKVCacheSpec(uint32_t seq_size_per_block, uint32_t kernel_seq_size_per_block):
+        KVCacheSpec(seq_size_per_block, kernel_seq_size_per_block) {
+        type = KVCacheSpecType::MultiHeadLatentAttention;
+    }
+
+    static KVCacheSpecPtr build(const KVCacheSpecDesc&  desc,
+                                const SpecBuildContext& ctx,
+                                uint32_t                seq_size_per_block,
+                                uint32_t                kernel_seq_size_per_block) {
         RTP_LLM_CHECK_WITH_INFO(ctx.attn_config != nullptr,
                                 "KVCacheSpecDesc tag=%s cache_type=%d requires SpecBuildContext.attn_config",
                                 desc.tag.c_str(),
@@ -28,20 +36,19 @@ struct MLAKVCacheSpec: public KVCacheSpec {
                                 "MLA KVCacheSpecDesc tag=%s requires positive attn_config.rope_head_dim",
                                 desc.tag.c_str());
 
-        auto spec                = std::make_shared<MLAKVCacheSpec>();
-        spec->tag                = desc.tag;
-        spec->seq_size_per_block = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
-        spec->dtype_             = desc.dtype != DataType::TYPE_INVALID ? desc.dtype : ctx.dtype;
+        auto spec    = std::make_shared<MLAKVCacheSpec>(seq_size_per_block, kernel_seq_size_per_block);
+        spec->tag    = desc.tag;
+        spec->dtype_ = desc.dtype != DataType::TYPE_INVALID ? desc.dtype : ctx.dtype;
         RTP_LLM_CHECK_WITH_INFO(spec->dtype_ != DataType::TYPE_INVALID,
                                 "KVCacheSpecDesc tag=%s cache_type=%d requires valid dtype",
                                 desc.tag.c_str(),
                                 static_cast<int>(desc.cache_type));
 
-        const bool   is_fp8     = spec->dtype_ == DataType::TYPE_FP8_E4M3 || spec->dtype_ == DataType::TYPE_FP8_E8M0;
-        const size_t no_pe      = static_cast<size_t>(attn.kv_lora_rank);
-        const size_t rope       = static_cast<size_t>(attn.rope_head_dim);
-        spec->nope_per_token = no_pe;
-        spec->rope_per_token = rope;
+        const bool   is_fp8   = spec->dtype_ == DataType::TYPE_FP8_E4M3 || spec->dtype_ == DataType::TYPE_FP8_E8M0;
+        const size_t no_pe    = static_cast<size_t>(attn.kv_lora_rank);
+        const size_t rope     = static_cast<size_t>(attn.rope_head_dim);
+        spec->nope_per_token  = no_pe;
+        spec->rope_per_token  = rope;
         spec->elems_per_token = is_fp8 ? no_pe + no_pe / 128 * 4 + rope * 2 : no_pe + rope;
 
         return spec;

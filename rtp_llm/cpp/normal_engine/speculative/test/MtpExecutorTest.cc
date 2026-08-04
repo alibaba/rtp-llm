@@ -434,20 +434,19 @@ public:
         ModelConfig propose_cache_model_config = params.model_config_;
         score_cache_model_config.num_layers    = 1;
         propose_cache_model_config.num_layers  = 1;
-        setDefaultMhaKVCacheSpecDescs(score_cache_model_config);
-        setDefaultMhaKVCacheSpecDescs(propose_cache_model_config);
-
         KVCacheConfig test_kv_cache_config;
         test_kv_cache_config.test_block_num            = 10;
         test_kv_cache_config.seq_size_per_block        = 2;
         test_kv_cache_config.kernel_seq_size_per_block = 2;
 
         auto configure_cache_model = [](ModelConfig& cache_model_config) {
-            cache_model_config.data_type                    = rtp_llm::TYPE_INT8;
-            cache_model_config.attn_config.kv_head_num      = 128;
-            cache_model_config.attn_config.size_per_head    = 256;
-            cache_model_config.attn_config.tokens_per_block = 2;
-            cache_model_config.attn_config.kv_cache_dtype   = KvCacheDataType::BASE;
+            cache_model_config.data_type                           = rtp_llm::TYPE_INT8;
+            cache_model_config.attn_config.kv_head_num             = 128;
+            cache_model_config.attn_config.size_per_head           = 256;
+            cache_model_config.attn_config.tokens_per_block        = 2;
+            cache_model_config.attn_config.kernel_tokens_per_block = 2;
+            cache_model_config.attn_config.kv_cache_dtype          = KvCacheDataType::BASE;
+            setDefaultMhaKVCacheSpecDescs(cache_model_config);
         };
         configure_cache_model(score_cache_model_config);
         configure_cache_model(propose_cache_model_config);

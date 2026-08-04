@@ -23,13 +23,14 @@ struct GroupBase {
     CacheGroupPolicy                   policy;
     std::vector<int>                   layer_ids;
 
-    uint32_t block_num                 = 0;
-    uint32_t local_kv_head_num         = 1;
-    size_t   seq_size_per_block        = 0;
-    size_t   kernel_seq_size_per_block = 0;
-    size_t   kv_block_stride_bytes     = 0;
-    size_t   kv_scale_stride_bytes     = 0;
+    uint32_t block_num                        = 0;
+    uint32_t local_kv_head_num                = 1;
+    size_t   kv_block_stride_bytes            = 0;
+    size_t   kv_scale_stride_bytes            = 0;
+    bool     uses_sparse_indexer_scale_layout = false;
 };
+
+size_t storedKernelBlocksPerKvBlock(const GroupBase& group);
 
 // Order is deterministic but carries no business meaning.
 struct LayerBase {
