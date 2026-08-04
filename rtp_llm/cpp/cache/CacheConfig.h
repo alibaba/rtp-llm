@@ -39,43 +39,38 @@ public:
     bool              is_sparse     = false;
 
     // Block configuration
-    uint32_t block_num                 = 0;
-    size_t   seq_size_per_block        = 1;
-    size_t   kernel_seq_size_per_block = 0;
+    uint32_t block_num = 0;
+    // Global cache-key and cache-manager physical base granularity B. Raw
+    // cache keys and request-level block ordinals always use this value.
+    size_t seq_size_per_block = 1;
 
     size_t seqSizePerBlockForGroup(size_t gid) const {
-        return topology().groupById(gid).seq_size_per_block;
+        return specForGroup(gid)->seq_size_per_block;
     }
 
     size_t kernelSeqSizePerBlockForGroup(size_t gid) const {
-        return topology().groupById(gid).kernel_seq_size_per_block;
+        return specForGroup(gid)->kernel_seq_size_per_block;
     }
 
     size_t kernelBlocksPerKvBlockForGroup(size_t gid) const {
         const auto group_seq    = seqSizePerBlockForGroup(gid);
         const auto group_kernel = kernelSeqSizePerBlockForGroup(gid);
-        if (group_kernel == 0) {
-            return 1;
-        }
         RTP_LLM_CHECK_WITH_INFO(
-            group_seq % group_kernel == 0,
-            "group seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu), gid=%zu",
+            group_kernel > 0 && group_seq >= group_kernel && group_seq % group_kernel == 0,
+            "invalid block subdivision: physical seq_size_per_block(%zu), kernel_seq_size_per_block(%zu), gid=%zu",
             group_seq,
             group_kernel,
             gid);
-        return std::max<size_t>(1, group_seq / group_kernel);
+        return group_seq / group_kernel;
     }
 
-    // Legacy scalar view: how many kernel blocks fit inside one global physical block.
-    size_t kernelBlocksPerKvBlock() const {
-        if (kernel_seq_size_per_block == 0) {
-            return 1;
-        }
-        RTP_LLM_CHECK_WITH_INFO(seq_size_per_block % kernel_seq_size_per_block == 0,
-                                "seq_size_per_block(%zu) must be divisible by kernel_seq_size_per_block(%zu)",
-                                seq_size_per_block,
-                                kernel_seq_size_per_block);
-        return std::max<size_t>(1, seq_size_per_block / kernel_seq_size_per_block);
+    // Resolve the unique FULL group consumed through kernel-page block tables.
+    // All such groups must agree on K because model inputs expose one scalar K.
+    std::optional<size_t> kernelAddressedFullGroupId() const;
+
+    size_t kernelSeqSizePerBlockForModel() const {
+        const auto gid = kernelAddressedFullGroupId();
+        return gid.has_value() ? kernelSeqSizePerBlockForGroup(*gid) : seq_size_per_block;
     }
 
     // Block sizing information

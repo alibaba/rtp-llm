@@ -824,6 +824,22 @@ def apply_layer_num_override(model_config: ModelConfig, num_layers: int) -> None
     model_config.num_layers = num_layers
 
 
+def resolve_kv_cache_kernel_seq_size_per_block(
+    model_config: ModelConfig,
+) -> Optional[int]:
+    """Return the explicit FULL descriptor K only when it differs from B."""
+    tokens_per_block = model_config.attn_config.tokens_per_block
+    kernel_tokens_per_block = model_config.attn_config.kernel_tokens_per_block
+    effective_kernel_tokens_per_block = (
+        kernel_tokens_per_block if kernel_tokens_per_block > 0 else tokens_per_block
+    )
+    return (
+        effective_kernel_tokens_per_block
+        if effective_kernel_tokens_per_block != tokens_per_block
+        else None
+    )
+
+
 def build_model_config(
     model_config: ModelConfig,  # ModelConfig instance to build
     model_args: Any,  # ModelArgs from py_env_configs
@@ -884,10 +900,15 @@ def build_model_config(
         kv_cache_config=kv_cache_config, act_type=model_args.act_type
     )
     model_config.attn_config.tokens_per_block = kv_cache_config.seq_size_per_block
+    model_kernel_tokens_per_block = model_config.attn_config.kernel_tokens_per_block
     model_config.attn_config.kernel_tokens_per_block = (
         kv_cache_config.kernel_seq_size_per_block
         if kv_cache_config.kernel_seq_size_per_block > 0
-        else kv_cache_config.seq_size_per_block
+        else (
+            model_kernel_tokens_per_block
+            if model_kernel_tokens_per_block > 0
+            else kv_cache_config.seq_size_per_block
+        )
     )
     model_config.linear_attention_config.ssm_state_dtype = (
         ssm_state_dtype_str_to_data_type(kv_cache_config.ssm_state_dtype)

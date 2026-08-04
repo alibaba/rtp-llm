@@ -20,6 +20,7 @@ class WeightsConvertLayerOverrideTest(unittest.TestCase):
         model_config.attn_config.kv_head_num = 2
         model_config.attn_config.size_per_head = 16
         model_config.attn_config.tokens_per_block = 4
+        model_config.attn_config.kernel_tokens_per_block = 4
         model_config.hybrid_attention_config.enable_hybrid_attention = True
         model_config.hybrid_attention_config.hybrid_attention_types = [
             HybridAttentionType.LINEAR,

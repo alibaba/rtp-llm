@@ -5,14 +5,14 @@
 #include "rtp_llm/cpp/cache/MemoryEvaluationHelper.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 
-#include <algorithm>
 #include <numeric>
 
 namespace rtp_llm {
 
 namespace {
 
-KVCacheSpecPtr getDefaultSpecFromRuntimeSpecs(const ModelConfig& model_config, const LayerKVCacheSpecs& runtime_specs) {
+KVCacheSpecBuildResult getDefaultSpecFromRuntimeSpecs(const ModelConfig&                  model_config,
+                                                      const LayerKVCacheSpecBuildResults& runtime_specs) {
     RTP_LLM_CHECK_WITH_INFO(runtime_specs.size() == static_cast<size_t>(model_config.num_layers),
                             "single cache config requires layer-wise runtime specs for every layer, got %zu/%ld",
                             runtime_specs.size(),
@@ -21,17 +21,17 @@ KVCacheSpecPtr getDefaultSpecFromRuntimeSpecs(const ModelConfig& model_config, c
     RTP_LLM_CHECK_WITH_INFO(runtime_specs[0].size() == 1,
                             "single cache config requires exactly one spec for layer 0, got %zu",
                             runtime_specs[0].size());
-    auto spec = runtime_specs[0][0];
+    const auto& [spec, policy] = runtime_specs[0][0];
     RTP_LLM_CHECK_WITH_INFO(spec != nullptr, "single cache config got null runtime spec for layer 0");
     const auto& expected_tag = spec->tag;
-    const auto  fingerprint  = spec->fingerprint();
+    const auto  fingerprint  = spec->layoutFingerprint();
     for (int64_t layer_id = 1; layer_id < model_config.num_layers; ++layer_id) {
         const auto layer = static_cast<size_t>(layer_id);
         RTP_LLM_CHECK_WITH_INFO(runtime_specs[layer].size() == 1,
                                 "single cache config requires exactly one spec for layer %ld, got %zu",
                                 layer_id,
                                 runtime_specs[layer].size());
-        const auto& layer_spec = runtime_specs[layer][0];
+        const auto& [layer_spec, layer_policy] = runtime_specs[layer][0];
         RTP_LLM_CHECK_WITH_INFO(
             layer_spec != nullptr, "single cache config got null runtime spec for layer %ld", layer_id);
         RTP_LLM_CHECK_WITH_INFO(
@@ -41,48 +41,11 @@ KVCacheSpecPtr getDefaultSpecFromRuntimeSpecs(const ModelConfig& model_config, c
             layer_spec->tag.c_str(),
             expected_tag.c_str());
         RTP_LLM_CHECK_WITH_INFO(
-            layer_spec->fingerprint() == fingerprint, "single cache config spec differs at layer %ld", layer_id);
+            layer_spec->layoutFingerprint() == fingerprint, "single cache config spec differs at layer %ld", layer_id);
+        RTP_LLM_CHECK_WITH_INFO(
+            CacheConfig::samePolicy(layer_policy, policy), "single cache config policy differs at layer %ld", layer_id);
     }
-    return spec->clone();
-}
-
-uint32_t mhaLocalKvHeadNum(const ModelConfig& model_config, const ParallelismConfig& parallelism_config) {
-    const auto     attn_tp = std::max<int64_t>(1, parallelism_config.get_attn_tp_size());
-    const uint32_t tp      = static_cast<uint32_t>(attn_tp);
-    const uint32_t kv      = static_cast<uint32_t>(model_config.attn_config.kv_head_num);
-    RTP_LLM_CHECK_WITH_INFO(kv > 0, "local kv head num requires positive kv_head_num");
-    return (kv % tp == 0) ? kv / tp : kv / std::gcd(kv, tp);
-}
-
-uint32_t linearLocalKvHeadNum(const ModelConfig& model_config, const ParallelismConfig& parallelism_config) {
-    const auto     attn_tp     = std::max<int64_t>(1, parallelism_config.get_attn_tp_size());
-    const uint32_t tp          = static_cast<uint32_t>(attn_tp);
-    const uint32_t value_heads = static_cast<uint32_t>(model_config.linear_attention_config.linear_num_value_heads);
-    RTP_LLM_CHECK_WITH_INFO(value_heads > 0, "local kv head num requires positive linear_num_value_heads");
-    RTP_LLM_CHECK_WITH_INFO(value_heads % tp == 0,
-                            "linear_num_value_heads must be divisible by attention TP, global=%u tp=%u",
-                            value_heads,
-                            tp);
-    const uint32_t local_value_heads = value_heads / tp;
-    RTP_LLM_CHECK_WITH_INFO(
-        local_value_heads > 0, "invalid local linear value heads: global=%u tp=%u", value_heads, tp);
-    return local_value_heads;
-}
-
-uint32_t localKvHeadNumForSpec(KVCacheSpecType          type,
-                               const ModelConfig&       model_config,
-                               const ParallelismConfig& parallelism_config) {
-    switch (type) {
-        case KVCacheSpecType::MultiHeadAttention:
-            return mhaLocalKvHeadNum(model_config, parallelism_config);
-        case KVCacheSpecType::LinearAttention:
-            return linearLocalKvHeadNum(model_config, parallelism_config);
-        case KVCacheSpecType::MultiHeadLatentAttention:
-            return 1;
-        default:
-            RTP_LLM_FAIL("unknown KVCacheSpecType=%d", static_cast<int>(type));
-    }
-    return 1;
+    return {spec->clone(), policy};
 }
 
 }  // namespace
@@ -119,18 +82,18 @@ CacheConfig SingleConfigCreator::createSingleConfig(const ModelConfig&       mod
     config.dtype     = dtype;
     config.is_sparse = model_config.attn_config.is_sparse;
 
-    auto spec = getDefaultSpecFromRuntimeSpecs(model_config, runtime_specs);
+    auto [spec, policy] = getDefaultSpecFromRuntimeSpecs(model_config, runtime_specs);
 
     std::vector<int> layer_ids(static_cast<size_t>(layer_num));
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
     GroupBase group;
-    group.tag  = spec->tag;
-    group.spec = spec;
-    const auto group_type =
-        spec->type == KVCacheSpecType::LinearAttention ? CacheGroupType::LINEAR : CacheGroupType::FULL;
-    group.policy            = defaultCacheGroupPolicy(group_type);
+    group.tag               = spec->tag;
+    group.spec              = spec;
+    group.policy            = policy;
     group.layer_ids         = layer_ids;
-    group.local_kv_head_num = localKvHeadNumForSpec(spec->type, model_config, parallelism_config);
+    group.local_kv_head_num = resolveLocalKVHeadNum(
+        spec->type, model_config.attn_config, model_config.linear_attention_config, parallelism_config);
+    group.uses_sparse_indexer_scale_layout = config.is_sparse && spec->type == KVCacheSpecType::MultiHeadAttention;
 
     std::vector<LayerBase> layers(static_cast<size_t>(layer_num));
     for (int64_t layer_id = 0; layer_id < layer_num; ++layer_id) {

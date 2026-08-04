@@ -6,6 +6,7 @@ cc_library(
         "cuda_graph_base.h",
     ],
     deps = [
+        "//rtp_llm/cpp/utils:core_utils",
         "//rtp_llm/models_py/bindings:op_defs",
     ],
     visibility = ["//visibility:public"],

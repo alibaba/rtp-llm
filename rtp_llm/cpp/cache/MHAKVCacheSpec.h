@@ -12,11 +12,19 @@
 namespace rtp_llm {
 
 struct MHAKVCacheSpec: public KVCacheSpec {
-    MHAKVCacheSpec() {
+    explicit MHAKVCacheSpec(uint32_t seq_size_per_block = 1): KVCacheSpec(seq_size_per_block) {
         type = KVCacheSpecType::MultiHeadAttention;
     }
 
-    static KVCacheSpecPtr build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx) {
+    MHAKVCacheSpec(uint32_t seq_size_per_block, uint32_t kernel_seq_size_per_block):
+        KVCacheSpec(seq_size_per_block, kernel_seq_size_per_block) {
+        type = KVCacheSpecType::MultiHeadAttention;
+    }
+
+    static KVCacheSpecPtr build(const KVCacheSpecDesc&  desc,
+                                const SpecBuildContext& ctx,
+                                uint32_t                seq_size_per_block,
+                                uint32_t                kernel_seq_size_per_block) {
         RTP_LLM_CHECK_WITH_INFO(ctx.attn_config != nullptr,
                                 "KVCacheSpecDesc tag=%s cache_type=%d requires SpecBuildContext.attn_config",
                                 desc.tag.c_str(),
@@ -34,21 +42,17 @@ struct MHAKVCacheSpec: public KVCacheSpec {
                                 "MHA KVCacheSpecDesc tag=%s requires positive attn_config.size_per_head",
                                 desc.tag.c_str());
 
-        auto spec                = std::make_shared<MHAKVCacheSpec>();
-        spec->tag                = desc.tag;
-        spec->seq_size_per_block = ctx.seq_size_per_block == 0 ? 1 : ctx.seq_size_per_block;
-        spec->dtype_             = desc.dtype != DataType::TYPE_INVALID ? desc.dtype : ctx.dtype;
+        auto spec    = std::make_shared<MHAKVCacheSpec>(seq_size_per_block, kernel_seq_size_per_block);
+        spec->tag    = desc.tag;
+        spec->dtype_ = desc.dtype != DataType::TYPE_INVALID ? desc.dtype : ctx.dtype;
         RTP_LLM_CHECK_WITH_INFO(spec->dtype_ != DataType::TYPE_INVALID,
                                 "KVCacheSpecDesc tag=%s cache_type=%d requires valid dtype",
                                 desc.tag.c_str(),
                                 static_cast<int>(desc.cache_type));
 
-        const auto     attn_tp        = std::max<int64_t>(1, ctx.parallelism_config->get_attn_tp_size());
-        const uint32_t tp             = static_cast<uint32_t>(attn_tp);
-        const uint32_t kv             = static_cast<uint32_t>(attn.kv_head_num);
-        const uint32_t local_kv_heads = (kv % tp == 0) ? kv / tp : kv / std::gcd(kv, tp);
+        const uint32_t local_kv_heads = resolveMhaLocalKVHeadNum(attn, *ctx.parallelism_config);
 
-        spec->per_token_k_elems       = static_cast<size_t>(local_kv_heads) * attn.size_per_head;
+        spec->per_token_k_elems = static_cast<size_t>(local_kv_heads) * attn.size_per_head;
         if (spec->dtype_ == DataType::TYPE_INT8 || spec->dtype_ == DataType::TYPE_FP8_E4M3) {
             spec->per_token_k_scale_bytes = static_cast<size_t>(local_kv_heads) * sizeof(float);
         }

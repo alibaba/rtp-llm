@@ -99,11 +99,11 @@ public:
     }
 
     int getSeqSizePerBlock(const std::string& tag) const {
-        return static_cast<int>(grouped_layout_.topology().group(tag).seq_size_per_block);
+        return static_cast<int>(physicalSeqSize(grouped_layout_.topology().group(tag)));
     }
 
     int getKernelSeqSizePerBlock(const std::string& tag) const {
-        return static_cast<int>(grouped_layout_.topology().group(tag).kernel_seq_size_per_block);
+        return static_cast<int>(grouped_layout_.topology().group(tag).spec->kernel_seq_size_per_block);
     }
 
 private:
@@ -113,14 +113,20 @@ private:
         }
     }
 
-    static int64_t kernelBlocksPerPhysicalBlock(const rtp_llm::GroupBase& group) {
-        RTP_LLM_CHECK_WITH_INFO(group.kernel_seq_size_per_block > 0
-                                    && group.seq_size_per_block % group.kernel_seq_size_per_block == 0,
+    size_t physicalSeqSize(const rtp_llm::GroupBase& group) const {
+        return group.spec->seq_size_per_block;
+    }
+
+    int64_t kernelBlocksPerPhysicalBlock(const rtp_llm::GroupBase& group) const {
+        const auto physical_seq_size = physicalSeqSize(group);
+        const auto kernel_seq_size   = group.spec->kernel_seq_size_per_block;
+        RTP_LLM_CHECK_WITH_INFO(kernel_seq_size > 0 && physical_seq_size >= kernel_seq_size
+                                    && physical_seq_size % kernel_seq_size == 0,
                                 "invalid block subdivision for tag=%s physical=%zu kernel=%zu",
                                 group.tag.c_str(),
-                                group.seq_size_per_block,
-                                group.kernel_seq_size_per_block);
-        return static_cast<int64_t>(group.seq_size_per_block / group.kernel_seq_size_per_block);
+                                physical_seq_size,
+                                kernel_seq_size);
+        return static_cast<int64_t>(physical_seq_size / kernel_seq_size);
     }
 
     static torch::Tensor reshapeMlaTensor(const torch::Tensor& tensor,
@@ -158,7 +164,7 @@ private:
 
         const int    group_id = static_cast<int>(grouped_layout_.topology().groupIdForTag(group.tag));
         LayerKVCache result(buffers.kv_addr,
-                            static_cast<int>(group.seq_size_per_block),
+                            static_cast<int>(physicalSeqSize(group)),
                             layer_id,
                             group_id,
                             group.tag,
@@ -174,13 +180,13 @@ private:
         const int64_t physical_block_num  = buffers.kv_addr.size(0);
         const int64_t blocks_per_physical = kernelBlocksPerPhysicalBlock(group);
         const int64_t kernel_block_num    = physical_block_num * blocks_per_physical;
-        const int64_t kernel_seq_size     = static_cast<int64_t>(group.kernel_seq_size_per_block);
+        const int64_t kernel_seq_size     = static_cast<int64_t>(group.spec->kernel_seq_size_per_block);
         result.seq_size_per_block         = static_cast<int>(kernel_seq_size);
 
         if (spec_type == rtp_llm::KVCacheSpecType::MultiHeadAttention) {
             const int64_t local_kv_heads = static_cast<int64_t>(group.local_kv_head_num);
             RTP_LLM_CHECK_WITH_INFO(local_kv_heads > 0, "MHA tag=%s has no local KV heads", group.tag.c_str());
-            const int64_t physical_seq_size = static_cast<int64_t>(group.seq_size_per_block);
+            const int64_t physical_seq_size = static_cast<int64_t>(physicalSeqSize(group));
             const int64_t k_block_elems     = static_cast<int64_t>(group.spec->k_block_size());
             RTP_LLM_CHECK_WITH_INFO(k_block_elems > 0 && k_block_elems % (local_kv_heads * physical_seq_size) == 0,
                                     "MHA tag=%s cannot derive head dimension from k_block_size=%ld heads=%ld seq=%ld",

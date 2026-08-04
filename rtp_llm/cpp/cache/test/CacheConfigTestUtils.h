@@ -33,30 +33,32 @@ inline std::shared_ptr<MHAKVCacheSpec> makeResolvedMhaSpec(rtp_llm::DataType  dt
                                                            uint32_t           local_head_num_kv,
                                                            uint32_t           size_per_head,
                                                            uint32_t           seq_size_per_block,
-                                                           const std::string& tag = "") {
+                                                           const std::string& tag                       = "",
+                                                           uint32_t           kernel_seq_size_per_block = 0) {
     RTP_LLM_CHECK_WITH_INFO(local_head_num_kv > 0, "local_head_num_kv must be > 0");
     RTP_LLM_CHECK_WITH_INFO(size_per_head > 0, "size_per_head must be > 0");
     RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0, "seq_size_per_block must be > 0");
 
     AttentionConfigs attn{};
-    attn.kv_head_num      = static_cast<int>(local_head_num_kv);
-    attn.size_per_head    = static_cast<int>(size_per_head);
-    attn.tokens_per_block = seq_size_per_block;
+    attn.kv_head_num             = static_cast<int>(local_head_num_kv);
+    attn.size_per_head           = static_cast<int>(size_per_head);
+    attn.tokens_per_block        = seq_size_per_block;
+    attn.kernel_tokens_per_block = kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block : seq_size_per_block;
     ParallelismConfig parallelism;
     parallelism.tp_size = 1;
 
     KVCacheSpecDesc desc;
-    desc.tag        = tag.empty() ? "default" : tag;
-    desc.cache_type = KVCacheSpecType::MultiHeadAttention;
-    desc.dtype      = dtype;
+    desc.tag                       = tag.empty() ? "default" : tag;
+    desc.cache_type                = KVCacheSpecType::MultiHeadAttention;
+    desc.dtype                     = dtype;
+    desc.kernel_seq_size_per_block = kernel_seq_size_per_block > 0 ? kernel_seq_size_per_block : seq_size_per_block;
 
     SpecBuildContext ctx;
-    ctx.dtype                   = dtype;
-    ctx.seq_size_per_block      = seq_size_per_block;
-    ctx.attn_config             = &attn;
-    ctx.parallelism_config      = &parallelism;
-    ctx.kernel_tokens_per_block = seq_size_per_block;
-    return std::dynamic_pointer_cast<MHAKVCacheSpec>(SpecBuilder::build(desc, ctx));
+    ctx.dtype              = dtype;
+    ctx.seq_size_per_block = seq_size_per_block;
+    ctx.attn_config        = &attn;
+    ctx.parallelism_config = &parallelism;
+    return std::dynamic_pointer_cast<MHAKVCacheSpec>(SpecBuilder::build(desc, ctx).first);
 }
 
 inline std::shared_ptr<const CacheTopology> makeTestCacheTopology(int                                  group_num,
@@ -96,18 +98,18 @@ inline std::shared_ptr<const CacheTopology> makeTestCacheTopology(int           
     std::vector<GroupBase> groups;
     groups.reserve(static_cast<size_t>(group_num));
     for (int group_id = 0; group_id < group_num; ++group_id) {
-        const auto tag  = "group" + std::to_string(group_id);
-        auto       spec = makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, blocks_per_kv_block, tag);
+        const auto tag        = "group" + std::to_string(group_id);
+        const auto group_type = group_types.empty() ? CacheGroupType::FULL : group_types[static_cast<size_t>(group_id)];
+        const auto kernel_seq_size =
+            group_type == CacheGroupType::FULL ? 1 : static_cast<uint32_t>(blocks_per_kv_block);
+        auto spec = makeResolvedMhaSpec(DataType::TYPE_FP16, 1, 1, blocks_per_kv_block, tag, kernel_seq_size);
 
         GroupBase group;
-        group.tag                       = tag;
-        group.spec                      = std::move(spec);
-        group.policy                    = defaultCacheGroupPolicy(group_types.empty() ? CacheGroupType::FULL :
-                                                                     group_types[static_cast<size_t>(group_id)]);
-        group.layer_ids                 = std::move(group_layer_ids[static_cast<size_t>(group_id)]);
-        group.block_num                 = 16;
-        group.seq_size_per_block        = blocks_per_kv_block;
-        group.kernel_seq_size_per_block = 1;
+        group.tag       = tag;
+        group.spec      = std::move(spec);
+        group.policy    = defaultCacheGroupPolicy(group_type);
+        group.layer_ids = std::move(group_layer_ids[static_cast<size_t>(group_id)]);
+        group.block_num = 16;
         groups.push_back(std::move(group));
     }
     return CacheTopology::create(std::move(groups), std::move(layers));
@@ -123,19 +125,22 @@ inline std::shared_ptr<MLAKVCacheSpec> makeResolvedMlaSpec(rtp_llm::DataType  dt
     RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0, "seq_size_per_block must be > 0");
 
     AttentionConfigs attn{};
-    attn.kv_lora_rank  = static_cast<int>(kv_lora_rank);
-    attn.rope_head_dim = static_cast<int>(rope_head_dim);
+    attn.kv_lora_rank            = static_cast<int>(kv_lora_rank);
+    attn.rope_head_dim           = static_cast<int>(rope_head_dim);
+    attn.tokens_per_block        = seq_size_per_block;
+    attn.kernel_tokens_per_block = seq_size_per_block;
 
     KVCacheSpecDesc desc;
-    desc.tag        = tag.empty() ? "mla" : tag;
-    desc.cache_type = KVCacheSpecType::MultiHeadLatentAttention;
-    desc.dtype      = dtype;
+    desc.tag                       = tag.empty() ? "mla" : tag;
+    desc.cache_type                = KVCacheSpecType::MultiHeadLatentAttention;
+    desc.dtype                     = dtype;
+    desc.kernel_seq_size_per_block = seq_size_per_block;
 
     SpecBuildContext ctx;
     ctx.dtype              = dtype;
     ctx.seq_size_per_block = seq_size_per_block;
     ctx.attn_config        = &attn;
-    return std::dynamic_pointer_cast<MLAKVCacheSpec>(SpecBuilder::build(desc, ctx));
+    return std::dynamic_pointer_cast<MLAKVCacheSpec>(SpecBuilder::build(desc, ctx).first);
 }
 
 inline std::shared_ptr<LinearKVCacheSpec>
@@ -163,6 +168,9 @@ makeResolvedLinearSpec(rtp_llm::DataType  dtype,
     linear.conv_state_dtype       = conv_state_dtype == rtp_llm::DataType::TYPE_INVALID ? dtype : conv_state_dtype;
     ParallelismConfig parallelism;
     parallelism.tp_size = 1;
+    AttentionConfigs attn{};
+    attn.tokens_per_block        = seq_size_per_block;
+    attn.kernel_tokens_per_block = seq_size_per_block;
 
     KVCacheSpecDesc desc;
     desc.tag        = tag.empty() ? "linear" : tag;
@@ -172,10 +180,10 @@ makeResolvedLinearSpec(rtp_llm::DataType  dtype,
     SpecBuildContext ctx;
     ctx.dtype                   = dtype;
     ctx.seq_size_per_block      = seq_size_per_block;
+    ctx.attn_config             = &attn;
     ctx.linear_attention_config = &linear;
     ctx.parallelism_config      = &parallelism;
-    ctx.kernel_tokens_per_block = seq_size_per_block;
-    return std::dynamic_pointer_cast<LinearKVCacheSpec>(SpecBuilder::build(desc, ctx));
+    return std::dynamic_pointer_cast<LinearKVCacheSpec>(SpecBuilder::build(desc, ctx).first);
 }
 
 inline KVCacheSpecPtr makeResolvedOpaqueSpec(bool               state_cache,
@@ -200,11 +208,20 @@ inline KVCacheSpecPtr makeResolvedOpaqueSpec(bool               state_cache,
     desc.explicit_entry_count        = block_elems;
     desc.block_stride_bytes_override = block_bytes;
     desc.is_state_cache              = state_cache;
+    if (!state_cache) {
+        desc.kernel_seq_size_per_block = seq_size_per_block;
+    }
 
+    AttentionConfigs  attn{};
+    ParallelismConfig parallelism;
+    attn.tokens_per_block        = seq_size_per_block;
+    attn.kernel_tokens_per_block = seq_size_per_block;
     SpecBuildContext ctx;
     ctx.dtype              = dtype;
     ctx.seq_size_per_block = seq_size_per_block;
-    return SpecBuilder::build(desc, ctx);
+    ctx.attn_config        = &attn;
+    ctx.parallelism_config = &parallelism;
+    return SpecBuilder::build(desc, ctx).first;
 }
 
 inline KVCacheSpecDesc makeDsv4Desc(const std::string& tag,
@@ -261,12 +278,15 @@ inline KVCacheSpecDesc makeDsv4Desc(const std::string& tag,
         }
     }
     desc.state_ring_include_gen_num_per_cycle = true;
-    desc.cp->scale_seq_size                   = true;
+    desc.cp->mapping                          = CpBlockMappingMode::COMPACT_LAST_RANK;
     desc.block_stride_alignment_min_entries   = DSV4_SWA_WINDOW_ENTRIES;
     return desc;
 }
 
 inline void setDefaultKvCacheSpec(ModelConfig& model_config) {
+    if (model_config.attn_config.kernel_tokens_per_block <= 0) {
+        model_config.attn_config.kernel_tokens_per_block = model_config.attn_config.tokens_per_block;
+    }
     KVCacheSpecDesc desc;
     desc.tag = "default";
     if (model_config.attn_config.use_mla && model_config.mla_ops_type != rtp_llm::MlaOpsType::MHA) {
@@ -274,10 +294,16 @@ inline void setDefaultKvCacheSpec(ModelConfig& model_config) {
     } else {
         desc.cache_type = KVCacheSpecType::MultiHeadAttention;
     }
+    desc.kernel_seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.kernel_tokens_per_block > 0 ?
+                                                               model_config.attn_config.kernel_tokens_per_block :
+                                                               model_config.attn_config.tokens_per_block);
     model_config.kv_cache_spec_descs.assign(static_cast<size_t>(model_config.num_layers), {desc});
 }
 
 inline void setHybridAttentionKvCacheSpecs(ModelConfig& model_config) {
+    if (model_config.attn_config.kernel_tokens_per_block <= 0) {
+        model_config.attn_config.kernel_tokens_per_block = model_config.attn_config.tokens_per_block;
+    }
     std::vector<int> full_layers;
     std::vector<int> swa_layers;
     std::vector<int> linear_layers;
@@ -302,13 +328,17 @@ inline void setHybridAttentionKvCacheSpecs(ModelConfig& model_config) {
     }
 
     KVCacheSpecDesc full_desc;
-    full_desc.tag        = "full";
-    full_desc.cache_type = KVCacheSpecType::MultiHeadAttention;
+    full_desc.tag                       = "full";
+    full_desc.cache_type                = KVCacheSpecType::MultiHeadAttention;
+    full_desc.kernel_seq_size_per_block = static_cast<uint32_t>(model_config.attn_config.kernel_tokens_per_block > 0 ?
+                                                                    model_config.attn_config.kernel_tokens_per_block :
+                                                                    model_config.attn_config.tokens_per_block);
 
     KVCacheSpecDesc swa_desc = full_desc;
     swa_desc.tag             = "swa";
     swa_desc.cache_type      = KVCacheSpecType::OpaqueState;
-    swa_desc.entry_elems     = static_cast<uint32_t>(model_config.attn_config.size_per_head)
+    swa_desc.kernel_seq_size_per_block.reset();
+    swa_desc.entry_elems = static_cast<uint32_t>(model_config.attn_config.size_per_head)
                            * static_cast<uint32_t>(model_config.attn_config.kv_head_num) * 2;
     swa_desc.explicit_entry_count = static_cast<uint32_t>(model_config.attn_config.tokens_per_block);
     swa_desc.entry_dtype          = DataType::TYPE_FP16;
@@ -330,6 +360,9 @@ inline void setHybridAttentionKvCacheSpecs(ModelConfig& model_config) {
 }
 
 inline void setDsv4KvCacheSpecs(ModelConfig& model_config, const std::vector<int>& layer_compress_ratios) {
+    if (model_config.attn_config.kernel_tokens_per_block <= 0) {
+        model_config.attn_config.kernel_tokens_per_block = model_config.attn_config.tokens_per_block;
+    }
     const int layer_num = static_cast<int>(model_config.num_layers);
     model_config.hybrid_attention_config.hybrid_attention_types.assign(static_cast<size_t>(layer_num),
                                                                        HybridAttentionType::NONE);
@@ -342,13 +375,19 @@ inline void setDsv4KvCacheSpecs(ModelConfig& model_config, const std::vector<int
     const uint32_t head_dim         = static_cast<uint32_t>(model_config.attn_config.size_per_head);
     const uint32_t indexer_head_dim = static_cast<uint32_t>(model_config.attn_config.indexer_head_dim);
 
-    auto csa_kv        = makeDsv4Desc("csa_kv", "compressed_kv", kv_entry_elems, DataType::TYPE_UINT8, 4);
-    auto hca_kv        = makeDsv4Desc("hca_kv", "compressed_kv", kv_entry_elems, DataType::TYPE_UINT8, 128);
-    auto indexer_kv    = makeDsv4Desc("indexer_kv", "compressed_kv", indexer_entry_elems, DataType::TYPE_UINT8, 4);
-    auto indexer_state = makeDsv4Desc("indexer_state", "fixed_state", 4 * indexer_head_dim, DataType::TYPE_FP32);
-    auto csa_state     = makeDsv4Desc("csa_state", "fixed_state", 4 * head_dim, DataType::TYPE_FP32);
-    auto hca_state     = makeDsv4Desc("hca_state", "fixed_state", 2 * head_dim, DataType::TYPE_FP32);
-    auto swa_kv        = makeDsv4Desc("swa_kv", "sliding_window_kv", kv_entry_elems, DataType::TYPE_UINT8);
+    auto       csa_kv     = makeDsv4Desc("csa_kv", "compressed_kv", kv_entry_elems, DataType::TYPE_UINT8, 4);
+    auto       hca_kv     = makeDsv4Desc("hca_kv", "compressed_kv", kv_entry_elems, DataType::TYPE_UINT8, 128);
+    auto       indexer_kv = makeDsv4Desc("indexer_kv", "compressed_kv", indexer_entry_elems, DataType::TYPE_UINT8, 4);
+    auto       indexer_state = makeDsv4Desc("indexer_state", "fixed_state", 4 * indexer_head_dim, DataType::TYPE_FP32);
+    auto       csa_state     = makeDsv4Desc("csa_state", "fixed_state", 4 * head_dim, DataType::TYPE_FP32);
+    auto       hca_state     = makeDsv4Desc("hca_state", "fixed_state", 2 * head_dim, DataType::TYPE_FP32);
+    auto       swa_kv        = makeDsv4Desc("swa_kv", "sliding_window_kv", kv_entry_elems, DataType::TYPE_UINT8);
+    const auto kernel_seq_size           = static_cast<uint32_t>(model_config.attn_config.kernel_tokens_per_block > 0 ?
+                                                           model_config.attn_config.kernel_tokens_per_block :
+                                                           model_config.attn_config.tokens_per_block);
+    csa_kv.kernel_seq_size_per_block     = kernel_seq_size;
+    hca_kv.kernel_seq_size_per_block     = kernel_seq_size;
+    indexer_kv.kernel_seq_size_per_block = kernel_seq_size;
 
     model_config.kv_cache_spec_descs.clear();
     model_config.kv_cache_spec_descs.resize(static_cast<size_t>(layer_num));
@@ -385,24 +424,26 @@ inline KVCacheSpecPtr makeMhaSpec(const std::string& tag,
                                   uint32_t           local_head_num_kv,
                                   uint32_t           size_per_head) {
     AttentionConfigs attn_config;
-    attn_config.kv_head_num      = local_head_num_kv;
-    attn_config.size_per_head    = size_per_head;
-    attn_config.tokens_per_block = static_cast<uint32_t>(tokens_per_block);
+    attn_config.kv_head_num             = local_head_num_kv;
+    attn_config.size_per_head           = size_per_head;
+    attn_config.tokens_per_block        = static_cast<uint32_t>(tokens_per_block);
+    attn_config.kernel_tokens_per_block = static_cast<uint32_t>(tokens_per_block);
 
     ParallelismConfig parallelism_config;
     parallelism_config.tp_size = 1;
 
     KVCacheSpecDesc desc;
-    desc.tag        = tag;
-    desc.cache_type = KVCacheSpecType::MultiHeadAttention;
-    desc.dtype      = dtype;
+    desc.tag                       = tag;
+    desc.cache_type                = KVCacheSpecType::MultiHeadAttention;
+    desc.dtype                     = dtype;
+    desc.kernel_seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
 
     SpecBuildContext ctx;
     ctx.dtype              = dtype;
     ctx.seq_size_per_block = static_cast<uint32_t>(tokens_per_block);
     ctx.attn_config        = &attn_config;
     ctx.parallelism_config = &parallelism_config;
-    return SpecBuilder::build(desc, ctx);
+    return SpecBuilder::build(desc, ctx).first;
 }
 
 inline KVCacheSpecPtr makeLinearSpec(const std::string& tag,
@@ -419,6 +460,9 @@ inline KVCacheSpecPtr makeLinearSpec(const std::string& tag,
 
     ParallelismConfig parallelism_config;
     parallelism_config.tp_size = 1;
+    AttentionConfigs attn_config;
+    attn_config.tokens_per_block        = static_cast<uint32_t>(tokens_per_block);
+    attn_config.kernel_tokens_per_block = static_cast<uint32_t>(tokens_per_block);
 
     KVCacheSpecDesc desc;
     desc.tag        = tag;
@@ -428,20 +472,20 @@ inline KVCacheSpecPtr makeLinearSpec(const std::string& tag,
     SpecBuildContext ctx;
     ctx.dtype                   = dtype;
     ctx.seq_size_per_block      = static_cast<uint32_t>(tokens_per_block);
+    ctx.attn_config             = &attn_config;
     ctx.linear_attention_config = &linear_config;
     ctx.parallelism_config      = &parallelism_config;
-    return SpecBuilder::build(desc, ctx);
+    return SpecBuilder::build(desc, ctx).first;
 }
 
 inline CacheConfig
 makeSingleGroupCacheConfig(KVCacheSpecPtr spec, CacheGroupType group_type, int layer_num, int block_num) {
     CacheConfig config;
-    config.dtype                     = spec->memoryLayoutDType();
-    config.layer_num                 = static_cast<uint32_t>(layer_num);
-    config.layer_all_num             = static_cast<uint32_t>(layer_num);
-    config.block_num                 = static_cast<uint32_t>(block_num);
-    config.seq_size_per_block        = spec->seq_size_per_block;
-    config.kernel_seq_size_per_block = spec->seq_size_per_block;
+    config.dtype              = spec->memoryLayoutDType();
+    config.layer_num          = static_cast<uint32_t>(layer_num);
+    config.layer_all_num      = static_cast<uint32_t>(layer_num);
+    config.block_num          = static_cast<uint32_t>(block_num);
+    config.seq_size_per_block = spec->seq_size_per_block;
 
     std::vector<int> layer_ids(static_cast<size_t>(layer_num));
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
@@ -493,14 +537,13 @@ inline CacheConfig makeSimpleHybridMhaCacheConfig(int               layer_num,
                                                   uint32_t          local_head_num_kv = 1,
                                                   uint32_t          size_per_head     = 1) {
     CacheConfig config;
-    config.dtype                     = dtype;
-    config.layer_num                 = static_cast<uint32_t>(layer_num);
-    config.layer_all_num             = static_cast<uint32_t>(layer_num);
-    config.block_num                 = static_cast<uint32_t>(block_num);
-    config.seq_size_per_block        = tokens_per_block;
-    config.kernel_seq_size_per_block = tokens_per_block;
-    config.group_layer_num           = std::max(group_layer_num, 1);
-    config.linear_step               = 2;
+    config.dtype              = dtype;
+    config.layer_num          = static_cast<uint32_t>(layer_num);
+    config.layer_all_num      = static_cast<uint32_t>(layer_num);
+    config.block_num          = static_cast<uint32_t>(block_num);
+    config.seq_size_per_block = tokens_per_block;
+    config.group_layer_num    = std::max(group_layer_num, 1);
+    config.linear_step        = 2;
 
     if (layer_num <= 0 || (layer_num % config.group_layer_num) != 0 || (layer_num / config.group_layer_num) < 2) {
         return makeSimpleMhaCacheConfig(

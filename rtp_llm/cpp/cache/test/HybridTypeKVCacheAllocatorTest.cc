@@ -21,33 +21,35 @@ namespace rtp_llm {
 namespace test {
 
 static CacheConfig makeTinyHybridConfig() {
-    auto config                      = makeSimpleHybridMhaCacheConfig(/*layer_num=*/4,
+    auto config = makeSimpleHybridMhaCacheConfig(/*layer_num=*/4,
                                                  /*block_num=*/10,
                                                  /*tokens_per_block=*/4,
                                                  rtp_llm::DataType::TYPE_FP16,
                                                  /*group_layer_num=*/2,
                                                  /*local_head_num_kv=*/1,
                                                  /*size_per_head=*/1);
-    config.kernel_seq_size_per_block = 2;
     return config;
 }
 
 static ModelConfig makeTinyModelConfig(uint32_t num_layers) {
     ModelConfig cfg;
-    cfg.num_layers                   = static_cast<int64_t>(num_layers);
-    cfg.max_seq_len                  = 128;
-    cfg.hidden_size                  = 64;
-    cfg.vocab_size                   = 1024;
-    cfg.data_type                    = rtp_llm::DataType::TYPE_FP16;
-    cfg.attn_config.head_num         = 2;
-    cfg.attn_config.kv_head_num      = 2;
-    cfg.attn_config.size_per_head    = 16;
-    cfg.attn_config.tokens_per_block = 4;
-    cfg.attn_config.use_mla          = false;
-    cfg.attn_config.kv_cache_dtype   = KvCacheDataType::BASE;
+    cfg.num_layers                          = static_cast<int64_t>(num_layers);
+    cfg.max_seq_len                         = 128;
+    cfg.hidden_size                         = 64;
+    cfg.vocab_size                          = 1024;
+    cfg.data_type                           = rtp_llm::DataType::TYPE_FP16;
+    cfg.attn_config.head_num                = 2;
+    cfg.attn_config.kv_head_num             = 2;
+    cfg.attn_config.size_per_head           = 16;
+    cfg.attn_config.tokens_per_block        = 4;
+    cfg.attn_config.kernel_tokens_per_block = 4;
+    cfg.attn_config.use_mla                 = false;
+    cfg.attn_config.kv_cache_dtype          = KvCacheDataType::BASE;
     cfg.kv_cache_spec_descs.resize(num_layers);
     for (uint32_t i = 0; i < num_layers; ++i) {
-        cfg.kv_cache_spec_descs[i].push_back(KVCacheSpecDesc{"full", KVCacheSpecType::MultiHeadAttention});
+        KVCacheSpecDesc desc{"full", KVCacheSpecType::MultiHeadAttention};
+        desc.kernel_seq_size_per_block = static_cast<uint32_t>(cfg.attn_config.kernel_tokens_per_block);
+        cfg.kv_cache_spec_descs[i].push_back(desc);
     }
     return cfg;
 }
@@ -62,6 +64,9 @@ static KVCacheSpecPtr makeLinearSpecWithGlobalHeads(uint32_t key_heads, uint32_t
 
     ParallelismConfig parallelism_config;
     parallelism_config.tp_size = tp;
+    AttentionConfigs attn_config;
+    attn_config.tokens_per_block        = 1;
+    attn_config.kernel_tokens_per_block = 1;
 
     KVCacheSpecDesc desc;
     desc.tag        = "linear_test";
@@ -71,9 +76,10 @@ static KVCacheSpecPtr makeLinearSpecWithGlobalHeads(uint32_t key_heads, uint32_t
     SpecBuildContext ctx;
     ctx.dtype                   = DataType::TYPE_FP16;
     ctx.seq_size_per_block      = 1;
+    ctx.attn_config             = &attn_config;
     ctx.linear_attention_config = &linear_config;
     ctx.parallelism_config      = &parallelism_config;
-    return SpecBuilder::build(desc, ctx);
+    return SpecBuilder::build(desc, ctx).first;
 }
 
 static void setHybridLayerDescs(ModelConfig& cfg, const std::vector<HybridAttentionType>& types) {
@@ -84,7 +90,9 @@ static void setHybridLayerDescs(ModelConfig& cfg, const std::vector<HybridAttent
         if (types[i] == HybridAttentionType::LINEAR) {
             cfg.kv_cache_spec_descs[i].push_back(KVCacheSpecDesc{"linear", KVCacheSpecType::LinearAttention});
         } else {
-            cfg.kv_cache_spec_descs[i].push_back(KVCacheSpecDesc{"full", KVCacheSpecType::MultiHeadAttention});
+            KVCacheSpecDesc desc{"full", KVCacheSpecType::MultiHeadAttention};
+            desc.kernel_seq_size_per_block = static_cast<uint32_t>(cfg.attn_config.kernel_tokens_per_block);
+            cfg.kv_cache_spec_descs[i].push_back(desc);
         }
     }
 }
@@ -96,9 +104,13 @@ static void setHybridLayerDescsWithTags(ModelConfig&                            
     cfg.hybrid_attention_config.hybrid_attention_types  = types;
     cfg.kv_cache_spec_descs.assign(static_cast<size_t>(cfg.num_layers), {});
     for (size_t i = 0; i < types.size(); ++i) {
-        const auto cache_type = types[i] == HybridAttentionType::LINEAR ? KVCacheSpecType::LinearAttention :
-                                                                          KVCacheSpecType::MultiHeadAttention;
-        cfg.kv_cache_spec_descs[i].push_back(KVCacheSpecDesc{tags[i], cache_type});
+        const auto      cache_type = types[i] == HybridAttentionType::LINEAR ? KVCacheSpecType::LinearAttention :
+                                                                               KVCacheSpecType::MultiHeadAttention;
+        KVCacheSpecDesc desc{tags[i], cache_type};
+        if (cache_type == KVCacheSpecType::MultiHeadAttention) {
+            desc.kernel_seq_size_per_block = static_cast<uint32_t>(cfg.attn_config.kernel_tokens_per_block);
+        }
+        cfg.kv_cache_spec_descs[i].push_back(desc);
     }
 }
 
@@ -125,7 +137,9 @@ static CacheConfig makeTinyHybridMtpConfigByCreateSpConfig(SpeculativeType    sp
 
     RuntimeConfig runtime_cfg;
     KVCacheConfig kv_cache_cfg;
-    kv_cache_cfg.test_block_num = 8;
+    kv_cache_cfg.seq_size_per_block        = 4;
+    kv_cache_cfg.kernel_seq_size_per_block = 4;
+    kv_cache_cfg.test_block_num            = 8;
 
     SpeculativeExecutionConfig sp_cfg;
     sp_cfg.type              = sp_type;
@@ -275,7 +289,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, CreateHybridConfigKeepsModelTokensPerBloc
         CacheConfigCreator::createBasicConfig(cfg, parallelism_cfg, /*is_mtp=*/false, /*gen_num_per_cycle=*/0);
     EXPECT_EQ(cache_config.seq_size_per_block, 4);
     ASSERT_EQ(cache_config.groupNums(), 1);
-    EXPECT_EQ(cache_config.specForGroup(0)->seq_size_per_block, 4);
+    EXPECT_EQ(cache_config.kernelSeqSizePerBlockForGroup(0), 4);
 }
 
 TEST(HybridCacheConfigTest, LinearSpecRejectsHeadsNotDivisibleByAttentionTp) {
@@ -562,9 +576,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpAliasesCompatibleDefaultMlaGroup)
 
 TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsAmbiguousDefaultFullGroupAlias) {
     CacheConfig main_config;
-    main_config.layer_num       = 2;
-    main_config.layer_all_num   = 2;
-    main_config.group_layer_num = 1;
+    main_config.seq_size_per_block = 4;
+    main_config.layer_num          = 2;
+    main_config.layer_all_num      = 2;
+    main_config.group_layer_num    = 1;
     main_config.fromGroupedSpecs(
         {makeMhaSpec("full0", 4, DataType::TYPE_FP16, 1, 1), makeMhaSpec("full1", 4, DataType::TYPE_FP16, 1, 1)},
         {{0}, {1}},
@@ -580,6 +595,49 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsAmbiguousDefaultFullGroupA
         FAIL() << "expected an ambiguous default FULL group mapping to be rejected";
     } catch (const std::runtime_error& e) {
         EXPECT_NE(std::string(e.what()).find("ambiguous default FULL group mapping"), std::string::npos);
+    }
+}
+
+TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpDefaultAliasMatchesSparseIndexerLayoutContract) {
+    CacheConfig main_config;
+    main_config.seq_size_per_block = 4;
+    main_config.layer_num          = 2;
+    main_config.layer_all_num      = 2;
+    main_config.group_layer_num    = 1;
+    main_config.is_sparse          = true;
+    main_config.fromGroupedSpecs(
+        {makeMhaSpec("full0", 4, DataType::TYPE_FP16, 1, 1), makeMhaSpec("full1", 4, DataType::TYPE_FP16, 1, 1)},
+        {{0}, {1}},
+        {CacheGroupType::FULL, CacheGroupType::FULL},
+        {"full0", "full1"});
+    auto main_groups                                = main_config.topology().groups();
+    main_groups[0].uses_sparse_indexer_scale_layout = true;
+    main_config.setTopology(std::move(main_groups), main_config.topology().layers());
+    main_config.layer_to_block_stride_bytes.assign(3, 1);
+
+    auto propose_config = makeSimpleMhaCacheConfig(
+        /*layer_num=*/1, /*block_num=*/4, /*tokens_per_block=*/4, rtp_llm::DataType::TYPE_FP16);
+    propose_config.is_sparse                           = true;
+    auto propose_groups                                = propose_config.topology().groups();
+    propose_groups[0].uses_sparse_indexer_scale_layout = true;
+    propose_config.setTopology(std::move(propose_groups), propose_config.topology().layers());
+
+    const auto sub_config = main_config.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/2);
+    ASSERT_NE(sub_config, nullptr);
+    EXPECT_EQ(sub_config->layerIdsForGroup(0), std::vector<int>({0}));
+    EXPECT_TRUE(sub_config->layerIdsForGroup(1).empty());
+    EXPECT_EQ(main_config.layerIdsForGroup(0), std::vector<int>({0, 2}));
+    EXPECT_EQ(main_config.layerIdsForGroup(1), std::vector<int>({1}));
+
+    auto incompatible_target =
+        makeSingleLayerCacheConfig(makeMhaSpec("full", 4, DataType::TYPE_FP16, 1, 1), CacheGroupType::FULL);
+    incompatible_target.is_sparse = true;
+    try {
+        incompatible_target.mergeMTPModule(propose_config, /*module_index=*/0, /*main_layer_num=*/1);
+        FAIL() << "expected sparse-indexer layout mismatch to reject the default alias";
+    } catch (const std::runtime_error& e) {
+        EXPECT_NE(std::string(e.what()).find("no compatible target group for sole propose tag=default"),
+                  std::string::npos);
     }
 }
 
@@ -620,14 +678,6 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsIncompatibleDefaultFullGro
                                                                      /*local_head_num_kv=*/1,
                                                                      /*size_per_head=*/1),
                                                          CacheGroupType::FULL);
-    auto different_tokens   = makeSingleLayerCacheConfig(makeMhaSpec("default",
-                                                                   /*tokens_per_block=*/8,
-                                                                   DataType::TYPE_FP16,
-                                                                   /*local_head_num_kv=*/1,
-                                                                   /*size_per_head=*/1),
-                                                       CacheGroupType::FULL);
-    expect_no_compatible_alias(target, different_tokens);
-
     auto different_geometry = makeSingleLayerCacheConfig(makeMhaSpec("default",
                                                                      /*tokens_per_block=*/4,
                                                                      DataType::TYPE_FP16,
@@ -644,11 +694,17 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsIncompatibleDefaultFullGro
                                                  CacheGroupType::FULL);
     expect_no_compatible_alias(mla_target, compatible_propose);
 
-    auto different_group_stride = compatible_propose;
+    auto compatible_mla_propose = makeSingleLayerCacheConfig(makeResolvedMlaSpec(DataType::TYPE_FP16,
+                                                                                 /*kv_lora_rank=*/1,
+                                                                                 /*rope_head_dim=*/1,
+                                                                                 /*seq_size_per_block=*/4,
+                                                                                 "default"),
+                                                             CacheGroupType::FULL);
+    auto different_group_stride = compatible_mla_propose;
     different_group_stride.setGroupBlockLayout({different_group_stride.blockNumForGroup(0)},
                                                {different_group_stride.kvBlockStrideBytesForGroup(0) + 1},
                                                {different_group_stride.kvScaleStrideBytesForGroup(0)});
-    expect_no_compatible_alias(target, different_group_stride);
+    expect_no_compatible_alias(mla_target, different_group_stride);
 
     auto target_with_different_policy    = target;
     auto target_policy                   = target_with_different_policy.topology().groupById(0).policy;
@@ -659,9 +715,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpRejectsIncompatibleDefaultFullGro
 
 TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpPrefersExactDefaultGroupMatch) {
     CacheConfig main_config;
-    main_config.layer_num       = 2;
-    main_config.layer_all_num   = 2;
-    main_config.group_layer_num = 1;
+    main_config.seq_size_per_block = 4;
+    main_config.layer_num          = 2;
+    main_config.layer_all_num      = 2;
+    main_config.group_layer_num    = 1;
     main_config.fromGroupedSpecs(
         {makeMhaSpec("default", 4, DataType::TYPE_FP16, 1, 1), makeMhaSpec("aux", 4, DataType::TYPE_FP16, 1, 1)},
         {{0}, {1}},
@@ -734,9 +791,10 @@ TEST_F(HybridTypeKVCacheAllocatorTest, MergeMtpDoesNotAliasMultiGroupProposeConf
         CacheGroupType::FULL);
 
     CacheConfig propose_config;
-    propose_config.layer_num       = 1;
-    propose_config.layer_all_num   = 1;
-    propose_config.group_layer_num = 1;
+    propose_config.seq_size_per_block = 4;
+    propose_config.layer_num          = 1;
+    propose_config.layer_all_num      = 1;
+    propose_config.group_layer_num    = 1;
     propose_config.fromGroupedSpecs(
         {makeMhaSpec("default", 4, DataType::TYPE_FP16, 1, 1), makeMhaSpec("aux", 4, DataType::TYPE_FP16, 1, 1)},
         {{0}, {0}},

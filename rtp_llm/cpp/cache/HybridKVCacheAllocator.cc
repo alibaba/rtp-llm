@@ -850,9 +850,9 @@ void HybridKVCacheAllocator::copyBlockMappingForGroup(int                       
 
     const auto   memory_type         = memoryTypeForGroup(gid);
     const auto   copy_type           = BatchCopyParams::get_copy_type(memory_type, memory_type);
-    const auto&  spec                = config_.specForGroup(static_cast<size_t>(gid));
-    const size_t kv_block_size_bytes = spec->block_size_bytes();
-    const size_t scale_block_bytes   = spec->scale_block_size_bytes();
+    const auto   group_id            = static_cast<size_t>(gid);
+    const size_t kv_block_size_bytes = config_.kvBlockStrideBytesForGroup(group_id);
+    const size_t scale_block_bytes   = config_.kvScaleStrideBytesForGroup(group_id);
     const size_t buffers_per_layer   = scale_block_bytes > 0 ? 2 : 1;
 
     BatchCopyParams copy_params;

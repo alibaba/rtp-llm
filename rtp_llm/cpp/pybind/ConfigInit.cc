@@ -1749,23 +1749,20 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def(py::init<>())
         .def_readwrite("mapping", &CacheCpPolicyDesc::mapping)
         .def_readwrite("slice", &CacheCpPolicyDesc::slice)
-        .def_readwrite("scale_seq_size", &CacheCpPolicyDesc::scale_seq_size)
         .def_readwrite("align_payload", &CacheCpPolicyDesc::align_payload)
         .def_readwrite("prefill_slice_layout", &CacheCpPolicyDesc::prefill_slice_layout)
         .def(py::pickle(
             [](const CacheCpPolicyDesc& self) {
-                return py::make_tuple(
-                    self.mapping, self.slice, self.scale_seq_size, self.align_payload, self.prefill_slice_layout);
+                return py::make_tuple(self.mapping, self.slice, self.align_payload, self.prefill_slice_layout);
             },
             [](py::tuple t) {
                 CacheCpPolicyDesc c;
-                if (t.size() != 5)
+                if (t.size() != 4)
                     throw std::runtime_error("Invalid CacheCpPolicyDesc state!");
                 c.mapping              = t[0].cast<std::optional<CpBlockMappingMode>>();
                 c.slice                = t[1].cast<std::optional<CpBlockSliceMode>>();
-                c.scale_seq_size       = t[2].cast<std::optional<bool>>();
-                c.align_payload        = t[3].cast<std::optional<bool>>();
-                c.prefill_slice_layout = t[4].cast<std::optional<CpPrefillSliceLayout>>();
+                c.align_payload        = t[2].cast<std::optional<bool>>();
+                c.prefill_slice_layout = t[3].cast<std::optional<CpPrefillSliceLayout>>();
                 return c;
             }));
 
@@ -1775,6 +1772,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("cache_type", &KVCacheSpecDesc::cache_type)
         .def_readwrite("dtype", &KVCacheSpecDesc::dtype)
         .def_readwrite("is_state_cache", &KVCacheSpecDesc::is_state_cache)
+        .def_readwrite("kernel_seq_size_per_block", &KVCacheSpecDesc::kernel_seq_size_per_block)
         .def_readwrite("entry_elems", &KVCacheSpecDesc::entry_elems)
         .def_readwrite("entry_dtype", &KVCacheSpecDesc::entry_dtype)
         .def_readwrite("entry_count_mode", &KVCacheSpecDesc::entry_count_mode)
@@ -1810,11 +1808,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.reuse,
                                       self.capacity,
                                       self.tail,
-                                      self.cp);
+                                      self.cp,
+                                      self.kernel_seq_size_per_block);
             },
             [](py::tuple t) {
                 KVCacheSpecDesc c;
-                if (t.size() != 19)
+                if (t.size() != 20)
                     throw std::runtime_error("Invalid KVCacheSpecDesc state!");
                 c.tag                                  = t[0].cast<std::string>();
                 c.cache_type                           = t[1].cast<KVCacheSpecType>();
@@ -1835,6 +1834,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                 c.capacity                             = t[16].cast<std::optional<CacheCapacityPolicyDesc>>();
                 c.tail                                 = t[17].cast<std::optional<CacheTailPolicyDesc>>();
                 c.cp                                   = t[18].cast<std::optional<CacheCpPolicyDesc>>();
+                c.kernel_seq_size_per_block            = t[19].cast<std::optional<uint32_t>>();
                 return c;
             }));
 

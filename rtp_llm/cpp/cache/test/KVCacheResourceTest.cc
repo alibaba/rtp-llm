@@ -14,18 +14,15 @@ namespace test {
 namespace {
 
 GroupBase makeResourceGroup(std::string tag, CacheGroupType type) {
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->tag                = tag;
-    spec->seq_size_per_block = 8;
+    auto spec = std::make_shared<MHAKVCacheSpec>(8, type == CacheGroupType::FULL ? 2 : 8);
+    spec->tag = tag;
 
     GroupBase group;
-    group.tag                       = std::move(tag);
-    group.spec                      = std::move(spec);
-    group.policy                    = defaultCacheGroupPolicy(type);
-    group.layer_ids                 = {0};
-    group.block_num                 = 16;
-    group.seq_size_per_block        = 8;
-    group.kernel_seq_size_per_block = type == CacheGroupType::FULL ? 2 : 8;
+    group.tag       = std::move(tag);
+    group.spec      = std::move(spec);
+    group.policy    = defaultCacheGroupPolicy(type);
+    group.layer_ids = {0};
+    group.block_num = 16;
     return group;
 }
 
@@ -125,6 +122,14 @@ TEST(KVCacheResourceTest, InitGroups_RespectsGroupTypesAndBlocksPerKvBlock) {
     ASSERT_EQ(resource.kernelBlocks(1), (BlockIndicesType{1}));
 }
 
+TEST(CacheTopologyTest, StoredKernelBlocksPerKvBlockUsesGroupPolicy) {
+    const auto full   = makeResourceGroup("full", CacheGroupType::FULL);
+    const auto linear = makeResourceGroup("linear", CacheGroupType::LINEAR);
+
+    EXPECT_EQ(storedKernelBlocksPerKvBlock(full), 4u);
+    EXPECT_EQ(storedKernelBlocksPerKvBlock(linear), 1u);
+}
+
 TEST(KVCacheResourceTest, LayerBlocksRejectsMultipleGroupsForOneLayer) {
     KVCacheResource resource;
     resource.initGroups(makeTestCacheTopology(/*group_num=*/2,
@@ -215,13 +220,23 @@ TEST(KVCacheResourceTest, CacheKeysMaintainLinearDependencies) {
 
 TEST(CacheConfigTest, KernelBlocksPerKvBlockSafeByDefault) {
     CacheConfig config;
-    config.seq_size_per_block        = 1;
-    config.kernel_seq_size_per_block = 0;
-    ASSERT_EQ(config.kernelBlocksPerKvBlock(), 1u);
+    config.seq_size_per_block = 8;
+    config.layer_num          = 1;
+    auto group                = makeResourceGroup("full", CacheGroupType::FULL);
+    config.setTopology({std::move(group)}, {{0, {"full"}}});
+    ASSERT_EQ(config.kernelBlocksPerKvBlockForGroup(0), 4u);
+}
 
-    config.seq_size_per_block        = 8;
-    config.kernel_seq_size_per_block = 2;
-    ASSERT_EQ(config.kernelBlocksPerKvBlock(), 4u);
+TEST(CacheConfigTest, RejectsInvalidDerivedBlockSubdivision) {
+    CacheConfig non_divisible;
+    non_divisible.seq_size_per_block = 7;
+    EXPECT_THROW(non_divisible.setTopology({makeResourceGroup("full", CacheGroupType::FULL)}, {{0, {"full"}}}),
+                 std::exception);
+
+    CacheConfig zero_physical;
+    zero_physical.seq_size_per_block = 0;
+    EXPECT_THROW(zero_physical.setTopology({makeResourceGroup("full", CacheGroupType::FULL)}, {{0, {"full"}}}),
+                 std::exception);
 }
 
 TEST(BatchKVCacheResourceTest, BasicBatchOperations_WorkAsExpected) {

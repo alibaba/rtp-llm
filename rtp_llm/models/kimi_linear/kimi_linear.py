@@ -2,7 +2,10 @@ import json
 import os
 from typing import List
 
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.model_config import (
+    ModelConfig,
+    resolve_kv_cache_kernel_seq_size_per_block,
+)
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.hybrid_kv_cache import build_hybrid_kv_cache_spec_descs
@@ -173,7 +176,10 @@ class KimiLinear(BaseModel):
         if model_config.kv_cache_spec_descs:
             return
 
-        if model_config.attn_config.use_mla and model_config.mla_ops_type != MlaOpsType.MHA:
+        if (
+            model_config.attn_config.use_mla
+            and model_config.mla_ops_type != MlaOpsType.MHA
+        ):
             full_cache_type = KVCacheSpecType.MLA
         else:
             full_cache_type = KVCacheSpecType.MHA
@@ -181,6 +187,9 @@ class KimiLinear(BaseModel):
         model_config.kv_cache_spec_descs = build_hybrid_kv_cache_spec_descs(
             model_config.hybrid_attention_config.hybrid_attention_types,
             full_cache_type,
+            kernel_seq_size_per_block=resolve_kv_cache_kernel_seq_size_per_block(
+                model_config
+            ),
         )
 
     def support_cuda_graph(self) -> bool:

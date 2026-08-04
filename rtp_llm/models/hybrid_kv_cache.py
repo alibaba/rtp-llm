@@ -1,5 +1,5 @@
 from math import gcd
-from typing import Sequence
+from typing import Optional, Sequence
 
 from rtp_llm.ops import HybridAttentionType, KVCacheSpecDesc, KVCacheSpecType
 
@@ -18,6 +18,8 @@ def build_hybrid_kv_cache_spec_descs(
     hybrid_attention_types: Sequence[HybridAttentionType],
     full_cache_type: KVCacheSpecType,
     linear_cache_type: KVCacheSpecType = KVCacheSpecType.LINEAR,
+    *,
+    kernel_seq_size_per_block: Optional[int],
 ) -> list[list[KVCacheSpecDesc]]:
     linear_count = sum(
         attn_type == HybridAttentionType.LINEAR for attn_type in hybrid_attention_types
@@ -28,6 +30,7 @@ def build_hybrid_kv_cache_spec_descs(
     full_desc = KVCacheSpecDesc()
     full_desc.tag = "full"
     full_desc.cache_type = full_cache_type
+    full_desc.kernel_seq_size_per_block = kernel_seq_size_per_block
 
     linear_descs: dict[int, KVCacheSpecDesc] = {}
 

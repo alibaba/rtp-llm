@@ -43,7 +43,6 @@ struct CacheTailPolicyDesc {
 struct CacheCpPolicyDesc {
     std::optional<CpBlockMappingMode>   mapping;
     std::optional<CpBlockSliceMode>     slice;
-    std::optional<bool>                 scale_seq_size;
     std::optional<bool>                 align_payload;
     std::optional<CpPrefillSliceLayout> prefill_slice_layout;
 };
@@ -53,6 +52,9 @@ struct KVCacheSpecDesc {
     KVCacheSpecType cache_type     = KVCacheSpecType::MultiHeadAttention;
     DataType        dtype          = DataType::TYPE_INVALID;
     bool            is_state_cache = false;
+    // Defined only for FULL groups. Non-FULL specs use their final physical
+    // row span as the kernel span and do not consume this field.
+    std::optional<uint32_t> kernel_seq_size_per_block;
 
     uint32_t entry_elems = 0;
     DataType entry_dtype = DataType::TYPE_INVALID;
@@ -75,9 +77,9 @@ struct KVCacheSpecDesc {
 };
 
 struct SpecBuildContext {
-    DataType                     dtype                   = DataType::TYPE_INVALID;
+    DataType dtype = DataType::TYPE_INVALID;
+    // Global cache-key block size.
     uint32_t                     seq_size_per_block      = 0;
-    uint32_t                     kernel_tokens_per_block = 0;
     const AttentionConfigs*      attn_config             = nullptr;
     const LinearAttentionConfig* linear_attention_config = nullptr;
     const ParallelismConfig*     parallelism_config      = nullptr;
@@ -86,9 +88,15 @@ struct SpecBuildContext {
 
 class SpecBuilder {
 public:
-    static KVCacheSpecPtr   build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx);
+    static KVCacheSpecBuildResult build(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx);
+
+private:
+    static KVCacheSpecPtr   buildSpec(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx);
+    static CacheGroupPolicy buildPolicy(const KVCacheSpecDesc& desc);
     static CacheGroupType   groupType(const KVCacheSpecDesc& desc);
-    static CacheGroupPolicy groupPolicy(const KVCacheSpecDesc& desc);
+
+    static uint32_t seqSizePerBlock(const KVCacheSpecDesc& desc, const SpecBuildContext& ctx);
+    static uint32_t kernelSeqSizePerBlock(const KVCacheSpecDesc& desc, uint32_t seq_size_per_block);
 };
 
 }  // namespace rtp_llm
