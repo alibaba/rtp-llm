@@ -61,6 +61,11 @@ public class MetricConstant {
     public static final String ENGINE_LOCAL_TASK_MAP_SIZE = "app.engine.health.check.local.task.map.size";
 
     /**
+     * Engine tasks sent by FlexLB but not yet confirmed by the worker.
+     */
+    public static final String ENGINE_IN_TRANSIT_TASK_SIZE = "app.engine.health.check.in.transit.task.size";
+
+    /**
      * Engine finished task list size
      */
     public static final String ENGINE_FINISHED_TASK_LIST_SIZE = "app.engine.health.check.finished.task.list.size";

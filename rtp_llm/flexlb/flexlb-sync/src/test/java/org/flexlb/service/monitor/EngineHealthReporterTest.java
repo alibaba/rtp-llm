@@ -5,7 +5,9 @@ import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.master.CacheStatus;
+import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.WorkerStatus;
+import org.flexlb.enums.TaskStateEnum;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
@@ -49,6 +51,8 @@ class EngineHealthReporterTest {
     void shouldRegisterCacheHitComparisonMetrics() {
         reporter.init();
 
+        verify(monitor).register("app.engine.health.check.in.transit.task.size",
+                FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.predicted.tokens", FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.actual.tokens", FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.delta.tokens", FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
@@ -104,6 +108,10 @@ class EngineHealthReporterTest {
         WorkerStatus workerStatus = new WorkerStatus();
         workerStatus.setIp("10.0.0.1");
         workerStatus.setRole("PREFILL");
+        workerStatus.putLocalTask("in-transit", new TaskInfo());
+        TaskInfo confirmedTask = new TaskInfo();
+        workerStatus.putLocalTask("confirmed", confirmedTask);
+        confirmedTask.updateTaskState(TaskStateEnum.CONFIRMED);
 
         reporter.reportStatusCheckerSuccess("test-model", workerStatus, 2, 3, 4);
 
@@ -113,6 +121,13 @@ class EngineHealthReporterTest {
         verify(monitor).report("app.engine.health.check.waiting.task.info.size", expectedTags, 2.0);
         verify(monitor).report("app.engine.health.check.running.task.info.size", expectedTags, 3.0);
         verify(monitor).report("app.engine.health.check.finished.task.list.size", expectedTags, 4.0);
+
+        FlexMetricTags expectedLocalTaskTags = FlexMetricTags.of(
+                "model", "test-model",
+                "code", "0",
+                "engineIp", "10.0.0.1",
+                "role", "PREFILL");
+        verify(monitor).report("app.engine.health.check.in.transit.task.size", expectedLocalTaskTags, 1.0);
     }
 
     @Test

@@ -92,6 +92,12 @@ public class WorkerStatus {
         }
     }
 
+    public long getInTransitTaskCount() {
+        return localTaskMap.values().stream()
+                .filter(taskInfo -> taskInfo.getTaskState() == TaskStateEnum.IN_TRANSIT)
+                .count();
+    }
+
     /**
      * Add estimated execution time to running queue
      * @param len Estimated execution time to add
