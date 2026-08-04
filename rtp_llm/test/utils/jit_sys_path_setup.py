@@ -12,54 +12,284 @@ import importlib.metadata
 import logging
 import os
 import shutil
-import subprocess
 import sys
+import tempfile
+import zipfile
 from pathlib import Path
 
 from filelock import FileLock
 
+# importlib.metadata / dist name for each importable package name
+_META_PACKAGE_NAMES = {
+    "tvm_ffi": "apache-tvm-ffi",
+    "flashinfer": "flashinfer-python",
+    "flashinfer_jit_cache": "flashinfer-jit-cache",
+    "flashinfer_cubin": "flashinfer-cubin",
+}
+
+# substrings used to locate matching wheels under runfiles / pip cache
+_WHEEL_NAME_HINTS = {
+    "flashinfer": "flashinfer_python-",
+    "flashinfer_jit_cache": "flashinfer_jit_cache-",
+    "flashinfer_cubin": "flashinfer_cubin-",
+    "tvm_ffi": "apache_tvm_ffi-",
+    "deep_gemm": "deep_gemm-",
+    "torch": "torch-",
+}
+
+
+def _meta_package_name(package_name: str) -> str:
+    return _META_PACKAGE_NAMES.get(package_name, package_name)
+
+
+def _add_runfiles_site_packages_to_sys_path(runfiles_dir: str) -> list[str]:
+    """Add all pip_*/site-packages under runfiles to sys.path. Return those paths."""
+    site_paths = []
+    if not runfiles_dir or not os.path.isdir(runfiles_dir):
+        return site_paths
+    if runfiles_dir not in sys.path:
+        sys.path.insert(0, runfiles_dir)
+    try:
+        entries = os.listdir(runfiles_dir)
+    except OSError:
+        return site_paths
+    for item in entries:
+        if not item.startswith("pip_"):
+            continue
+        pip_path = os.path.join(runfiles_dir, item, "site-packages")
+        if os.path.isdir(pip_path):
+            site_paths.append(pip_path)
+            if pip_path not in sys.path:
+                sys.path.insert(0, pip_path)
+    return site_paths
+
+
+def _version_from_package_path(package_name: str, package_path: Path) -> str | None:
+    meta_name = _meta_package_name(package_name)
+    # Prefer adjacent dist-info / METADATA near site-packages
+    site_packages = package_path.parent
+    try:
+        dist = importlib.metadata.distribution(meta_name)
+        return dist.version
+    except Exception:
+        pass
+    for child in site_packages.iterdir() if site_packages.is_dir() else []:
+        if child.name.startswith(
+            meta_name.replace("-", "_") + "-"
+        ) and child.name.endswith(".dist-info"):
+            meta = child / "METADATA"
+            if meta.exists():
+                for line in meta.read_text(errors="ignore").splitlines():
+                    if line.startswith("Version:"):
+                        return line.split(":", 1)[1].strip()
+        if child.name.startswith(meta_name + "-") and child.name.endswith(".dist-info"):
+            meta = child / "METADATA"
+            if meta.exists():
+                for line in meta.read_text(errors="ignore").splitlines():
+                    if line.startswith("Version:"):
+                        return line.split(":", 1)[1].strip()
+    build_meta = package_path / "_build_meta.py"
+    if build_meta.exists():
+        for line in build_meta.read_text(errors="ignore").splitlines():
+            if line.startswith("__version__"):
+                # __version__ = "0.6.9"
+                parts = line.split("=", 1)
+                if len(parts) == 2:
+                    return parts[1].strip().strip("\"'")
+    return None
+
+
+def _find_package_dir_in_site_packages(
+    site_packages: str, package_name: str
+) -> str | None:
+    """Find importable package dir, including broken .data/purelib wheel extracts."""
+    sp = Path(site_packages)
+    direct = sp / package_name
+    if (direct / "__init__.py").exists():
+        return str(direct)
+    # rules_python / raw unzip may leave Root-Is-Purelib:false layout intact
+    try:
+        for child in sp.iterdir():
+            if child.name.endswith(".data") and child.is_dir():
+                purelib = child / "purelib" / package_name
+                if (purelib / "__init__.py").exists():
+                    return str(purelib)
+    except OSError:
+        pass
+    return None
+
+
+def _find_package_via_filesystem(package_name: str, runfiles_dir: str | None) -> tuple:
+    """Locate package without importing (handles purelib / incomplete extracts)."""
+    if not runfiles_dir or not os.path.isdir(runfiles_dir):
+        return None, None
+    try:
+        entries = os.listdir(runfiles_dir)
+    except OSError:
+        return None, None
+
+    pip_dirs = [e for e in entries if e.startswith("pip_")]
+    logging.info(
+        f"[Package Copy] Scanning {len(pip_dirs)} pip_* runfiles dirs for {package_name}"
+    )
+    for item in pip_dirs:
+        site_packages = os.path.join(runfiles_dir, item, "site-packages")
+        if not os.path.isdir(site_packages):
+            continue
+        pkg_dir = _find_package_dir_in_site_packages(site_packages, package_name)
+        if pkg_dir:
+            version = (
+                _version_from_package_path(package_name, Path(pkg_dir)) or "unknown"
+            )
+            logging.info(
+                f"[Package Copy] Filesystem found {package_name} under {item}: {pkg_dir}"
+            )
+            return version, pkg_dir
+    return None, None
+
+
+def _iter_candidate_wheel_paths(package_name: str, runfiles_dir: str | None):
+    """Yield likely wheel paths without walking huge trees."""
+    hint = _WHEEL_NAME_HINTS.get(package_name)
+    if not hint:
+        return
+
+    def _list_whls(directory: str):
+        try:
+            for fn in os.listdir(directory):
+                if fn.endswith(".whl") and hint in fn:
+                    yield os.path.join(directory, fn)
+        except OSError:
+            return
+
+    # CI fetch logs show wheels saved into the action cwd
+    yield from _list_whls(os.getcwd())
+
+    if runfiles_dir and os.path.isdir(runfiles_dir):
+        yield from _list_whls(runfiles_dir)
+        try:
+            for item in os.listdir(runfiles_dir):
+                if not item.startswith("pip_"):
+                    continue
+                base = os.path.join(runfiles_dir, item)
+                yield from _list_whls(base)
+                # rules_python sometimes keeps the original wheel next to site-packages
+                yield from _list_whls(os.path.join(base, "site-packages"))
+        except OSError:
+            pass
+
+    # pip http cache: ~/.cache/pip/http*/*/flashinfer_jit_cache-*.whl (shallow)
+    pip_cache = Path.home() / ".cache" / "pip"
+    if pip_cache.is_dir():
+        try:
+            for dirpath, dirnames, filenames in os.walk(pip_cache):
+                for fn in filenames:
+                    if fn.endswith(".whl") and hint in fn:
+                        yield os.path.join(dirpath, fn)
+                rel = os.path.relpath(dirpath, pip_cache)
+                if rel.count(os.sep) >= 5:
+                    dirnames.clear()
+        except OSError:
+            pass
+
+
+def _extract_wheel_package(wheel_path: str, package_name: str) -> tuple:
+    """Extract package dir (+ version) from a wheel, handling .data/purelib."""
+    try:
+        with zipfile.ZipFile(wheel_path) as zf:
+            names = zf.namelist()
+            version = "unknown"
+            for n in names:
+                if n.endswith(".dist-info/METADATA"):
+                    for line in zf.read(n).decode(errors="ignore").splitlines():
+                        if line.startswith("Version:"):
+                            version = line.split(":", 1)[1].strip()
+                            break
+                    break
+
+            # Preferred: purelib layout
+            purelib_prefix = None
+            for n in names:
+                marker = f".data/purelib/{package_name}/"
+                if marker in n:
+                    purelib_prefix = n[: n.index(marker) + len(marker)]
+                    break
+
+            tmp = tempfile.mkdtemp(prefix=f"{package_name}_whl_")
+            if purelib_prefix:
+                for n in names:
+                    if n.startswith(purelib_prefix) and not n.endswith("/"):
+                        dest = Path(tmp) / package_name / n[len(purelib_prefix) :]
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        dest.write_bytes(zf.read(n))
+                pkg_dir = Path(tmp) / package_name
+            else:
+                prefix = package_name + "/"
+                for n in names:
+                    if n.startswith(prefix) and not n.endswith("/"):
+                        dest = Path(tmp) / n
+                        dest.parent.mkdir(parents=True, exist_ok=True)
+                        dest.write_bytes(zf.read(n))
+                pkg_dir = Path(tmp) / package_name
+
+            if not (pkg_dir / "__init__.py").exists():
+                shutil.rmtree(tmp, ignore_errors=True)
+                return None, None
+            logging.info(
+                f"[Package Copy] Extracted {package_name} v{version} from wheel {wheel_path}"
+            )
+            return version, str(pkg_dir)
+    except Exception as e:
+        logging.info(f"[Package Copy] Wheel extract failed for {wheel_path}: {e}")
+        return None, None
+
+
+def _find_package_via_wheel(package_name: str, runfiles_dir: str | None) -> tuple:
+    for wheel_path in _iter_candidate_wheel_paths(package_name, runfiles_dir):
+        version, pkg_dir = _extract_wheel_package(wheel_path, package_name)
+        if version and pkg_dir:
+            return version, pkg_dir
+    return None, None
+
 
 def get_package_info(package_name):
     """Get package version and installation path"""
+    import importlib
+
+    runfiles_dir = os.environ.get("RUNFILES_DIR") or os.environ.get("TEST_SRCDIR")
+    meta_package_name = _meta_package_name(package_name)
+    _add_runfiles_site_packages_to_sys_path(runfiles_dir)
+
+    # 1) Normal import from runfiles / sys.path
     try:
-        # Try to import the package first to get its location
-        import importlib
-
-        runfiles_dir = os.environ.get("RUNFILES_DIR") or os.environ.get("TEST_SRCDIR")
-        meta_package_name = package_name
-        if package_name == "tvm_ffi":
-            meta_package_name = "apache-tvm-ffi"
-        elif package_name == "flashinfer":
-            meta_package_name = "flashinfer-python"
-        elif package_name == "flashinfer_jit_cache":
-            meta_package_name = "flashinfer-jit-cache"
-
-        if runfiles_dir and os.path.exists(runfiles_dir):
-            if runfiles_dir not in sys.path:
-                sys.path.insert(0, runfiles_dir)
-
-            for item in os.listdir(runfiles_dir):
-                if item.startswith("pip_"):
-                    pip_path = os.path.join(runfiles_dir, item, "site-packages")
-                    if os.path.exists(pip_path) and pip_path not in sys.path:
-                        sys.path.insert(0, pip_path)
-
         module = importlib.import_module(package_name)
         if hasattr(module, "__file__") and module.__file__:
             package_path = Path(module.__file__).parent
-            # Get version from metadata
             try:
                 dist = importlib.metadata.distribution(meta_package_name)
                 version = dist.version
                 return version, str(package_path)
-            except:
-                # If no metadata, use __version__ attribute
+            except Exception:
                 if hasattr(module, "__version__"):
                     return module.__version__, str(package_path)
-        return None, None
+                version = _version_from_package_path(package_name, package_path)
+                if version:
+                    return version, str(package_path)
     except Exception as e:
-        logging.info(f"[Package Copy] Failed to get info for {package_name}: {e}")
-        return None, None
+        logging.info(f"[Package Copy] Import failed for {package_name}: {e}")
+
+    # 2) Filesystem scan (incl. .data/purelib leftovers)
+    version, path = _find_package_via_filesystem(package_name, runfiles_dir)
+    if version and path:
+        return version, path
+
+    # 3) Extract from a wheel already fetched by bazel/pip
+    version, path = _find_package_via_wheel(package_name, runfiles_dir)
+    if version and path:
+        return version, path
+
+    logging.info(f"[Package Copy] Failed to get info for {package_name}")
+    return None, None
 
 
 def copy_package_with_lock(package_name, cache_dir):
@@ -95,7 +325,7 @@ def copy_package_with_lock(package_name, cache_dir):
         return str(target_site_packages)
 
     # Use file lock to prevent concurrent copies
-    with FileLock(str(lock_file), timeout=300):
+    with FileLock(str(lock_file), timeout=600):
         # Double check after acquiring lock
         if completion_marker.exists() and target_package_path.exists():
             logging.info(
@@ -221,13 +451,19 @@ def setup_jit_cache(cache_dir=None, packages=None):
         # flashinfer_jit_cache must be copied too: AOT .so live there. If only
         # flashinfer is prepended via Package Copy and jit_cache is missing from
         # the test PYTHONPATH, flashinfer falls back to JIT and needs ninja.
+        # flashinfer_cubin provides cubins + headers (e.g. flashInferMetaInfo.h)
+        # required if any JIT fallback still happens for fmha_gen.
         packages = [
             "flashinfer",
             "flashinfer_jit_cache",
+            "flashinfer_cubin",
             "torch",
             "deep_gemm",
             "tvm_ffi",
         ]
+
+    # Avoid flashinfer vs jit-cache local-version mismatches (0.6.9 vs 0.6.9+git)
+    os.environ.setdefault("FLASHINFER_DISABLE_VERSION_CHECK", "1")
 
     runfiles_dir = os.environ.get("RUNFILES_DIR") or os.environ.get("TEST_SRCDIR")
 

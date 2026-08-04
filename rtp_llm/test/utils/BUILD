@@ -27,7 +27,23 @@ py_library(
 
 py_binary(
     name = "gpu_lock",
-    deps = [":torch"],
+    deps = [
+        ":torch",
+        # Ensure AOT cache + cubin are present in runfiles for Package Copy /
+        # flashinfer import on SM100 (otherwise JIT fmha_gen needs ninja/nvcc).
+    ] + select({
+        "@//:using_cuda12_9_x86": [
+            "//rtp_llm:flashinfer-python",
+            "//rtp_llm:flashinfer-jit-cache",
+            "//rtp_llm:flashinfer-cubin",
+        ],
+        "@//:using_cuda12_arm": [
+            "//rtp_llm:flashinfer-python",
+            "//rtp_llm:flashinfer-jit-cache",
+            "//rtp_llm:flashinfer-cubin",
+        ],
+        "//conditions:default": [],
+    }),
     main = "device_resource.py",
     srcs = [
         "device_resource.py",

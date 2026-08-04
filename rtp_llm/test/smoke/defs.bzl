@@ -166,6 +166,16 @@ def smoke_test(name, task_info, tags=[], envs=[], gpu_type=[], data=[], smoke_ar
             "//rtp_llm/test/utils:device_resource",
             "//rtp_llm/test/utils:test_util",
         ] + extra_deps + select({
+            # SM100 / cuda12.9 need AOT+cubin in smoke runfiles; models' select
+            # alone has not been enough for Package Copy to find jit_cache.
+            "@//:using_cuda12_9_x86": [
+                "//rtp_llm:flashinfer-jit-cache",
+                "//rtp_llm:flashinfer-cubin",
+            ],
+            "@//:using_cuda12_arm": [
+                "//rtp_llm:flashinfer-jit-cache",
+                "//rtp_llm:flashinfer-cubin",
+            ],
             "//conditions:default": [],
         }),
         data = data + [
