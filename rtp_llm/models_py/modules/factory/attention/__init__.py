@@ -86,10 +86,8 @@ else:
             ]
         )
         DECODE_MHA_IMPS.extend([FlashInferTRTLLMDecodeImpl])
-        # XQAImpl (TRT GMMA) before XQADecodeImpl (FlashInfer HMMA): different
-        # accumulation paths produce <1 ULP divergence that flips tokens in long
-        # generations.  Existing golden data was generated with XQAImpl, so keep
-        # it higher-priority to avoid unnecessary golden refreshes.
+        # Keep the static SM90 implementation as the fixed-priority default;
+        # dynamic selection may still choose the FlashInfer XQA implementation.
         DECODE_MHA_IMPS.append(XQAImpl)
         _xqa_decode_impl = get_xqa_impl()
         if _xqa_decode_impl is not XQAImpl:

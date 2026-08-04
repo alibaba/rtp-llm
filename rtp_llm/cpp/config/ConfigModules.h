@@ -246,7 +246,12 @@ struct HWKernelConfig {
     std::vector<int> decode_capture_batch_sizes;
     bool             disable_dpc_random     = false;
     bool             rocm_disable_custom_ag = true;
-    std::string      to_string() const;
+    // Dynamic decode attention backend selection: when enabled, the engine
+    // benchmarks eligible decode backends per capture bs (real capture path) and
+    // bakes the per-bs winner into the graph instead of fixed-priority first-match.
+    // Off by default; also gated on enable_cuda_graph.
+    bool        enable_dynamic_decode_backend = false;
+    std::string to_string() const;
 };
 
 struct DeviceResourceConfig {

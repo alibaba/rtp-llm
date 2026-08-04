@@ -9,6 +9,7 @@
 #include "rtp_llm/cpp/engine_base/schedulers/BatchDecodeScheduler.h"
 #include "rtp_llm/cpp/cache/CacheConfigCreator.h"
 #include "rtp_llm/cpp/engine_base/system_prompt/SystemPromptConstructor.h"
+#include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/utils/Logger.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/ProfilingScope.h"
@@ -66,6 +67,14 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
                    params.parallelism_config.dp_rank * params.parallelism_config.tp_size
                        + params.parallelism_config.tp_rank) {
     RTP_LLM_LOG_INFO(__PRETTY_FUNCTION__);
+    if (parallelism_config.world_rank == 0 && params.hw_kernel_config.enable_dynamic_decode_backend
+        && !params.hw_kernel_config.enable_cuda_graph && params.sp_config.type == SP_TYPE_NONE) {
+        RTP_LLM_LOG_WARNING(
+            "dynamic_decode_fallback_static reason=cuda_graph_disabled enable_dynamic_decode_backend=%d "
+            "enable_cuda_graph=%d policy=fixed-priority",
+            int(params.hw_kernel_config.enable_dynamic_decode_backend),
+            int(params.hw_kernel_config.enable_cuda_graph));
+    }
 #if !USING_CUDA
     // On ROCm, this constructor runs on a gRPC handler thread that defaults to
     // GPU 0. Set the correct device so all GPU allocations (KV cache, etc.) go
@@ -108,6 +117,11 @@ NormalEngine::NormalEngine(const EngineInitParams&                       params,
     }
 
     RTP_LLM_LOG_INFO("create normal executor done");
+
+    if (dynamic_decode_detail::shouldDeferCapture(
+            /*warm_up=*/false, params.hw_kernel_config, params.sp_config.type)) {
+        executor_->triggerInitCapture();
+    }
 
     // 释放模型加载过程中使用的临时host内存
     // 此时checkpoint已加载完成，可以将glibc缓存的内存归还给操作系统

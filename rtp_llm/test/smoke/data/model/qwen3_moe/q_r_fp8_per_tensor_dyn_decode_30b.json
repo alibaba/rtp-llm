@@ -1,0 +1,21 @@
+{
+    "model_type": "qwen_3_moe",
+    "model_path": "/mnt/nas1/hf/Qwen3-30B-A3B-Fp8-pt-hf-dynamic",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "$prompt:s3",
+                "generate_config": {
+                    "max_new_tokens": 32,
+                    "temperature": 0.0,
+                    "top_p": 0,
+                    "top_k": 1
+                }
+            },
+            "result": {
+                "response": "\n\nI'm trying to run this code, but I get the error: NameError: name 'screen\\_manager' is not defined\n\nI think the issue",
+                "finished": true
+            }
+        }
+    ]
+}

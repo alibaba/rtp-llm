@@ -4,6 +4,7 @@
 
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/testing/TestBase.h"
+#include "rtp_llm/cpp/models/PyWrappedModel.h"
 #include "rtp_llm/cpp/models/models_weight/W.h"
 #include "rtp_llm/cpp/normal_engine/NormalEngine.h"
 #include "rtp_llm/cpp/engine_base/schedulers/FIFOScheduler.h"
@@ -12,6 +13,7 @@
 #include "gmock/gmock-function-mocker.h"
 #include "gtest/gtest.h"
 #include <memory>
+#include <vector>
 
 using namespace std;
 namespace W = rtp_llm::W;
@@ -21,6 +23,65 @@ namespace rtp_llm {
 class NormalEngineTest: public DeviceTestBase {
 public:
 };
+
+TEST_F(NormalEngineTest, testDynamicDecodeBackendRoleMatrix) {
+    HWKernelConfig hw_kernel_config;
+    hw_kernel_config.enable_dynamic_decode_backend = true;
+
+    EXPECT_FALSE(
+        dynamic_decode_detail::enabledForGraph(hw_kernel_config, /*is_prefill_cuda_graph_mode=*/false, SP_TYPE_NONE));
+    EXPECT_FALSE(dynamic_decode_detail::shouldDeferCapture(
+        /*warm_up=*/false, hw_kernel_config, SP_TYPE_NONE));
+
+    hw_kernel_config.enable_cuda_graph = true;
+    EXPECT_TRUE(
+        dynamic_decode_detail::enabledForGraph(hw_kernel_config, /*is_prefill_cuda_graph_mode=*/false, SP_TYPE_NONE));
+    EXPECT_TRUE(dynamic_decode_detail::shouldDeferCapture(
+        /*warm_up=*/false, hw_kernel_config, SP_TYPE_NONE));
+    EXPECT_FALSE(dynamic_decode_detail::shouldDeferCapture(
+        /*warm_up=*/true, hw_kernel_config, SP_TYPE_NONE));
+    // Target verify decode.
+    EXPECT_FALSE(
+        dynamic_decode_detail::enabledForGraph(hw_kernel_config, /*is_prefill_cuda_graph_mode=*/false, SP_TYPE_MTP));
+    // Draft decode.
+    EXPECT_FALSE(
+        dynamic_decode_detail::enabledForGraph(hw_kernel_config, /*is_prefill_cuda_graph_mode=*/false, SP_TYPE_EAGLE));
+    // Draft prefill.
+    EXPECT_FALSE(
+        dynamic_decode_detail::enabledForGraph(hw_kernel_config, /*is_prefill_cuda_graph_mode=*/true, SP_TYPE_MTP));
+
+    hw_kernel_config.enable_dynamic_decode_backend = false;
+    EXPECT_FALSE(
+        dynamic_decode_detail::enabledForGraph(hw_kernel_config, /*is_prefill_cuda_graph_mode=*/false, SP_TYPE_NONE));
+}
+
+TEST_F(NormalEngineTest, testDynamicDecodeCaptureTriggerLifecycle) {
+    struct TestCase {
+        const char*     name;
+        bool            enable_cuda_graph;
+        bool            enable_dynamic_decode_backend;
+        SpeculativeType sp_type;
+        size_t          expected_trigger_count;
+    };
+    const std::vector<TestCase> cases = {
+        {"default", false, false, SP_TYPE_NONE, 0},
+        {"dynamic_without_graph", false, true, SP_TYPE_NONE, 0},
+        {"ordinary_decode", true, true, SP_TYPE_NONE, 1},
+        {"speculative_decode", true, true, SP_TYPE_MTP, 0},
+    };
+
+    for (const auto& test_case : cases) {
+        SCOPED_TRACE(test_case.name);
+        CustomConfig config;
+        config.enable_cuda_graph             = test_case.enable_cuda_graph;
+        config.enable_dynamic_decode_backend = test_case.enable_dynamic_decode_backend;
+        config.sp_type                       = test_case.sp_type;
+        auto lifecycle                       = std::make_shared<MockModelLifecycle>();
+        auto engine                          = createMockEngine(config, lifecycle);
+
+        EXPECT_EQ(lifecycle->trigger_init_capture_count, test_case.expected_trigger_count);
+    }
+}
 
 TEST_F(NormalEngineTest, testFp8KVCache) {
     CustomConfig config;

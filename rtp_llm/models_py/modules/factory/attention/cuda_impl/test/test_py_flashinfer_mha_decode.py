@@ -1,6 +1,5 @@
 import logging
 import math
-import sys
 import unittest
 from typing import List
 
@@ -294,12 +293,12 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
     Verifies the critical invariants that the C++ CUDA graph runner depends on:
     1. prepare() with is_cuda_graph=True sets _fixed_batch_size and wires up
        the decode_wrapper's internal buffers for graph capture.
-    2. prepare_for_cuda_graph_replay() refreshes both page tables and, only
-       for FlashInfer fa2, cached plan metadata without reallocating buffers.
+    2. prepare_for_cuda_graph_replay() refreshes the page tables AND calls
+       plan() to update workspace scheduling metadata for ALL decode paths
+       (both FA2 tensor-core and non-tensor-core), without reallocating buffers.
 
-    Full forward correctness under CUDA graph capture/replay cannot be tested
-    at the Python UT level — that path is exercised by smoke tests with real
-    model inference via cuda_graph_runner.cc.
+    Real CUDA graph capture/replay is compared against eager execution for both
+    decode paths in the Bazel test process.
     """
 
     def _create_cuda_graph_inputs(
@@ -333,6 +332,50 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         attn_inputs.dtype = get_typemeta(torch.zeros([1], dtype=dtype))
         return attn_inputs
 
+    def _assert_cuda_graph_plan_call(self, plan_calls, fmha_params):
+        """Verify replay planning uses the CUDA Graph parameter mirrors."""
+        self.assertEqual(len(plan_calls), 1)
+        plan_args, plan_kwargs = plan_calls[0]
+
+        self.assertEqual(
+            plan_args[0].data_ptr(), fmha_params.decode_page_indptr_h.data_ptr()
+        )
+        self.assertEqual(plan_args[1].data_ptr(), fmha_params.page_indice_d.data_ptr())
+        self.assertEqual(
+            plan_args[2].data_ptr(),
+            fmha_params.paged_kv_last_page_len_h.data_ptr(),
+        )
+        self.assertFalse(plan_args[0].is_cuda, "indptr must use the host mirror")
+        self.assertTrue(plan_args[1].is_cuda, "indices must use the device mirror")
+        self.assertFalse(
+            plan_args[2].is_cuda,
+            "last_page_len must use the host mirror",
+        )
+        self.assertTrue(plan_kwargs.get("non_blocking", False))
+        self.assertNotIn("disable_split_kv", plan_kwargs)
+
+    @staticmethod
+    def _cuda_graph_plan_layout(attn_op):
+        """Return the fixed buffer layout consumed by the captured graph."""
+        buffer_names = [
+            "_paged_kv_indptr_buf",
+            "_paged_kv_indices_buf",
+            "_paged_kv_last_page_len_buf",
+            "_qo_indptr_buf",
+        ]
+        buffer_ptrs = {
+            name: getattr(attn_op.decode_wrapper, name).data_ptr()
+            for name in buffer_names
+            if hasattr(attn_op.decode_wrapper, name)
+        }
+        # FlashInfer passes _plan_info by value to run() during capture. Runtime
+        # schedule data may change in-place, but these offsets and launch fields
+        # must remain identical for the captured graph to keep using that data.
+        return {
+            "plan_info": tuple(attn_op.decode_wrapper._plan_info),
+            "buffer_ptrs": buffer_ptrs,
+        }
+
     def test_capture_sets_fixed_batch_size(self):
         """prepare() with is_cuda_graph=True must set _fixed_batch_size."""
         config = self._create_config()
@@ -357,7 +400,7 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         logging.info("_fixed_batch_size correctly set after prepare()")
 
     def test_replay_refreshes_plan_metadata(self):
-        """prepare_for_cuda_graph_replay() must refresh FlashInfer fa2 plan metadata."""
+        """Tensor-core replay refreshes scheduling with graph-safe mirrors."""
         config = self._create_config()
         capture_bs = 8
         capture_seq_lens = [64, 128, 256, 512, 64, 128, 256, 512]
@@ -375,6 +418,7 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         attn_op.prepare(capture_inputs)
 
         self.assertEqual(attn_op.decode_wrapper._fixed_batch_size, capture_bs)
+        capture_layout = self._cuda_graph_plan_layout(attn_op)
 
         original_plan = attn_op.decode_wrapper.plan
         plan_calls = []
@@ -393,16 +437,13 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         )
         attn_op.prepare_for_cuda_graph_replay(run_inputs)
 
-        self.assertEqual(len(plan_calls), 1)
-        plan_args, plan_kwargs = plan_calls[0]
-        self.assertFalse(plan_args[0].is_cuda)
-        self.assertFalse(plan_args[1].is_cuda)
-        self.assertFalse(plan_args[2].is_cuda)
-        self.assertTrue(plan_kwargs["non_blocking"])
+        self._assert_cuda_graph_plan_call(plan_calls, fmha_params)
 
-        # _fixed_batch_size must stay at the captured graph size.
+        # Planning may update workspace contents, but not the captured layout.
         self.assertEqual(attn_op.decode_wrapper._fixed_batch_size, capture_bs)
+        self.assertEqual(self._cuda_graph_plan_layout(attn_op), capture_layout)
 
+        # Device buffers should be updated by fill_params (verify they exist).
         page_indptr = fmha_params.decode_page_indptr_h
         self.assertIsNotNone(page_indptr)
         self.assertGreaterEqual(len(page_indptr), capture_bs + 1)
@@ -411,8 +452,8 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             f"page_indptr={page_indptr.tolist()}"
         )
 
-    def test_non_fa2_replay_does_not_replan(self):
-        """Non-fa2 decode keeps the original replay contract: fill params only."""
+    def test_non_fa2_replay_also_replans(self):
+        """Non-tensor-core replay refreshes scheduling with graph-safe mirrors."""
         config = self._create_config(head_num=32, head_num_kv=32)
         capture_bs = 4
         capture_seq_lens = [64, 128, 256, 512]
@@ -444,11 +485,15 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             fmha_params.paged_kv_last_page_len_d.data_ptr(),
         )
         self.assertFalse(hasattr(attn_op.decode_wrapper, "_qo_indptr_buf"))
+        capture_layout = self._cuda_graph_plan_layout(attn_op)
 
         plan_calls = []
 
+        original_plan = attn_op.decode_wrapper.plan
+
         def counted_plan(*args, **kwargs):
             plan_calls.append((args, kwargs))
+            return original_plan(*args, **kwargs)
 
         attn_op.decode_wrapper.plan = counted_plan
 
@@ -460,7 +505,9 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
         )
         attn_op.prepare_for_cuda_graph_replay(run_inputs)
 
-        self.assertEqual(len(plan_calls), 0)
+        self._assert_cuda_graph_plan_call(plan_calls, fmha_params)
+        self.assertEqual(attn_op.decode_wrapper._fixed_batch_size, capture_bs)
+        self.assertEqual(self._cuda_graph_plan_layout(attn_op), capture_layout)
 
     def test_replay_updates_page_tables(self):
         """Page table buffers must reflect the replay inputs, not capture inputs."""
@@ -517,6 +564,108 @@ class TestPyFlashinferDecodeCudaGraph(BaseAttentionTest):
             f"Page table update OK: indptr={expected_indptr}, "
             f"last_page_len={expected_last_page_lens}"
         )
+
+    # (head_num_kv, use_tensor_core, label) covers both decode graph paths:
+    #   - kv=8: ratio 4, tensor-core path
+    #   - kv=16: ratio 2, non-tensor-core path
+    _CUDA_GRAPH_CONFIGS = [(8, True, "fa2"), (16, False, "non_fa2")]
+
+    def _run_cuda_graph_case(self, head_num_kv: int, expect_tc: bool, label: str):
+        """Compare CUDA Graph replay with eager execution in this test process."""
+        config = self._create_config(
+            head_num=32,
+            head_num_kv=head_num_kv,
+            size_per_head=128,
+            seq_size_per_block=32,
+        )
+        batch_size = 4
+        capture_seq_lens = [128, 256, 192, 224]
+        replay_seq_lens = [64, 128, 96, 160]
+        local_head_num = config.head_num // config.tp_size
+        local_kv_head_num = config.head_num_kv // config.tp_size
+
+        capture_inputs = self._create_cuda_graph_inputs(
+            batch_size,
+            capture_seq_lens,
+            config.seq_size_per_block,
+        )
+        attn_op = PyFlashinferDecodeAttnOp(config.attn_configs, capture_inputs)
+        self.assertIs(attn_op.use_tensor_core, expect_tc)
+        fmha_params = rtp_llm_ops.FlashInferMlaAttnParams()
+        attn_op.set_params(fmha_params)
+        attn_op.prepare(capture_inputs)
+        capture_layout = self._cuda_graph_plan_layout(attn_op)
+
+        total_blocks = self._calculate_total_blocks(
+            capture_seq_lens, config.seq_size_per_block
+        )
+        kv_cache, _, _ = self._create_kv_cache(
+            total_blocks,
+            config.seq_size_per_block,
+            local_kv_head_num,
+            config.size_per_head,
+        )
+        q = self._create_query_tensor(batch_size, local_head_num, config.size_per_head)
+
+        torch.cuda.synchronize()
+        stream = torch.cuda.Stream()
+        with torch.cuda.stream(stream):
+            attn_op.forward(q, kv_cache, fmha_params)
+        stream.synchronize()
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph, stream=stream):
+            graph_output = attn_op.forward(q, kv_cache, fmha_params)
+        stream.synchronize()
+
+        replay_inputs = self._create_cuda_graph_inputs(
+            batch_size,
+            replay_seq_lens,
+            config.seq_size_per_block,
+        )
+        with torch.cuda.stream(stream):
+            attn_op.prepare_for_cuda_graph_replay(replay_inputs)
+            replay_layout = self._cuda_graph_plan_layout(attn_op)
+            graph.replay()
+        stream.synchronize()
+
+        self.assertEqual(replay_layout, capture_layout)
+        self.assertEqual(
+            graph_output.shape,
+            (batch_size, local_head_num, config.size_per_head),
+        )
+        replay_output = graph_output.clone()
+
+        eager_inputs = self._create_cuda_graph_inputs(
+            batch_size,
+            replay_seq_lens,
+            config.seq_size_per_block,
+        )
+        eager_inputs.is_cuda_graph = False
+        eager_op = PyFlashinferDecodeAttnOp(config.attn_configs, eager_inputs)
+        eager_params = rtp_llm_ops.FlashInferMlaAttnParams()
+        eager_op.set_params(eager_params)
+        eager_op.prepare(eager_inputs)
+        eager_output = eager_op.forward(q, kv_cache, eager_params)
+
+        torch.testing.assert_close(
+            replay_output,
+            eager_output,
+            rtol=1e-2,
+            atol=1e-2,
+            msg=lambda msg: f"[{label}] CUDA Graph replay differs from eager: {msg}",
+        )
+
+    def test_cuda_graph_capture_replay_matches_eager(self):
+        """End-to-end CUDA graph replay matches eager execution.
+
+        Covers both decode CUDA Graph paths in _CUDA_GRAPH_CONFIGS:
+        - FA2 tensor-core path (GQA 4:1, use_tensor_core=True)
+        - non-FA2 path (GQA 2:1, use_tensor_core=False)
+        """
+        for head_num_kv, expect_tc, label in self._CUDA_GRAPH_CONFIGS:
+            with self.subTest(path=label):
+                self._run_cuda_graph_case(head_num_kv, expect_tc, label)
 
 
 if __name__ == "__main__":
