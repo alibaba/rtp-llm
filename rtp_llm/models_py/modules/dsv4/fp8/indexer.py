@@ -72,19 +72,19 @@ def _flat_1d(t: torch.Tensor) -> torch.Tensor:
     return t.reshape(-1).contiguous()
 
 
-# Persistent radix-select TopK — vendored CUDA kernel binding. Same gate
-# as the BF16 class so a single env knob disables both paths.
-_PERSISTENT_TOPK_OK = hasattr(rtp_llm_ops, "dsv4_persistent_topk")
+# Exact SGLang radix-select TopK used by the shared DeepSeek V4 Flash/Pro FP8
+# indexer decode and target-verify path.
+_TOPK_V3_OK = hasattr(rtp_llm_ops, "topk_v3")
 _FAST_PREFILL_TOPK_OK = hasattr(rtp_llm_ops, "fast_topk_v2_variable")
-_PERSISTENT_TOPK_WORKSPACE_SIZE = 1024 * 1024  # 1 MB
+_TOPK_V3_WORKSPACE_SIZE = 1024 * 1024  # 1 MB
 _FAST_PREFILL_TOPK_MAX_INPUT_TOKENS = 12 * 1024
-_persistent_topk_workspace_cache: Dict[torch.device, torch.Tensor] = {}
+_topk_v3_workspace_cache: Dict[torch.device, torch.Tensor] = {}
 
 
-def _persistent_topk_enabled() -> bool:
-    if not _PERSISTENT_TOPK_OK:
+def _topk_v3_enabled() -> bool:
+    if not _TOPK_V3_OK:
         return False
-    return os.environ.get("DSV4_PERSISTENT_TOPK", "1") != "0"
+    return os.environ.get("DSV4_TOPK_V3", "1") != "0"
 
 
 def _fp8_prefill_fast_topk_enabled() -> bool:
@@ -197,13 +197,33 @@ def _fp8_prefill_score_chunk_rows() -> int:
 
 
 def _get_topk_workspace(device: torch.device) -> torch.Tensor:
-    ws = _persistent_topk_workspace_cache.get(device)
+    ws = _topk_v3_workspace_cache.get(device)
     if ws is None:
         ws = torch.empty(
-            _PERSISTENT_TOPK_WORKSPACE_SIZE, dtype=torch.uint8, device=device
+            _TOPK_V3_WORKSPACE_SIZE, dtype=torch.uint8, device=device
         )
-        _persistent_topk_workspace_cache[device] = ws
+        _topk_v3_workspace_cache[device] = ws
     return ws
+
+
+def _run_topk_v3(
+    logits: torch.Tensor,
+    lengths: torch.Tensor,
+    output: torch.Tensor,
+    k: int,
+    max_seq_len: int,
+) -> bool:
+    if k not in (512, 1024, 2048) or not _topk_v3_enabled():
+        return False
+    rtp_llm_ops.topk_v3(
+        logits,
+        lengths,
+        output,
+        _get_topk_workspace(logits.device),
+        k,
+        max_seq_len,
+    )
+    return True
 
 
 class _IndexerFP8PrefillMeta(NamedTuple):
@@ -653,21 +673,15 @@ class IndexerFP8(PoolBackedModule):
             )  # [B*q_len, T_max] fp32
             score = logits.view(bsz, q_len, T_max)
 
-            # TopK (with optional persistent radix-select)
+            # Flash and Pro share this FP8 indexer. Decode and target verify
+            # both flatten [B, q_len, T] into rows consumed by topk_v3.
             K_eff = min(K, T_max)
             score_2d = score.view(bsz * q_len, T_max)
             lengths_i32 = compressed_len.view(bsz * q_len)
             out_topk_2d = out_topk_buffer.view(bsz * q_len, K)
-            if K_eff > 0 and K in (512, 1024, 2048) and _persistent_topk_enabled():
-                rtp_llm_ops.dsv4_persistent_topk(
-                    score_2d,
-                    lengths_i32,
-                    out_topk_2d,
-                    _get_topk_workspace(score.device),
-                    K,
-                    T_max,
-                )
-            else:
+            if K_eff <= 0 or not _run_topk_v3(
+                score_2d, lengths_i32, out_topk_2d, K, T_max
+            ):
                 out_topk_buffer.fill_(-1)
                 if K_eff > 0:
                     t_range = torch.arange(T_max, device=score.device).view(1, T_max)
