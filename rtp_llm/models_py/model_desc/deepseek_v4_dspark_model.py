@@ -37,25 +37,20 @@ from rtp_llm.config.model_config import ModelConfig
 from rtp_llm.model_loader.model_weight_info import ModelWeights
 from rtp_llm.models_py.model_desc.deepseek_v4_model import DeepSeekV4Model
 from rtp_llm.models_py.modules import RMSNorm
-from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import (
-    fused_rmsnorm_rope,
-)
+from rtp_llm.models_py.modules.dsv4._fused_rmsnorm_rope_triton import fused_rmsnorm_rope
 from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
 from rtp_llm.models_py.modules.dsv4.fp8._kv_cache_utils import (
     require_pool_tokens_per_block,
 )
-from rtp_llm.models_py.modules.dsv4.fp8.decode.compute_qkv import (
-    decode_compute_qkv,
+from rtp_llm.models_py.modules.dsv4.fp8._swa_ops_triton import (
+    compute_swa_slot_mapping_from_positions,
 )
+from rtp_llm.models_py.modules.dsv4.fp8.decode.compute_qkv import decode_compute_qkv
 from rtp_llm.models_py.modules.dsv4.fp8.decode.decode_attn_metadata import (
     get_or_build_sched_meta,
 )
-from rtp_llm.models_py.modules.dsv4.fp8.decode.output_proj import (
-    decode_output_proj,
-)
-from rtp_llm.models_py.modules.dsv4.fp8.decode.write_swa import (
-    decode_write_swa_fp8,
-)
+from rtp_llm.models_py.modules.dsv4.fp8.decode.output_proj import decode_output_proj
+from rtp_llm.models_py.modules.dsv4.fp8.decode.write_swa import decode_write_swa_fp8
 from rtp_llm.models_py.modules.dsv4.utils import _v4_fp8_linear
 from rtp_llm.models_py.modules.factory.attention.common import (
     create_write_cache_store_impl,
@@ -109,13 +104,10 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
         markov_rank = getattr(model_config, "dspark_markov_rank", None)
         if noise_token_id is None or int(noise_token_id) < 0:
             raise ValueError(
-                "DeepSeekV4DSparkModel requires a non-negative "
-                "dspark_noise_token_id"
+                "DeepSeekV4DSparkModel requires a non-negative " "dspark_noise_token_id"
             )
         if not target_layer_ids:
-            raise ValueError(
-                "DeepSeekV4DSparkModel requires dspark_target_layer_ids"
-            )
+            raise ValueError("DeepSeekV4DSparkModel requires dspark_target_layer_ids")
         if not markov_rank or int(markov_rank) <= 0:
             raise ValueError(
                 "DeepSeekV4DSparkModel requires a positive dspark_markov_rank"
@@ -143,8 +135,8 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
         if int(self._v4_args.window_size) <= 0:
             raise ValueError("DeepSeek-V4 DSpark requires a sliding window")
 
-        self._dspark_aux_dim = (
-            len(self._dspark_target_layer_ids) * int(self._v4_args.dim)
+        self._dspark_aux_dim = len(self._dspark_target_layer_ids) * int(
+            self._v4_args.dim
         )
         # Model-level weights are attached by ``_load_extra_weights`` after
         # the inherited V4Transformer has consumed the per-layer dictionaries.
@@ -209,8 +201,7 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
             self._dspark_markov_rank,
         ):
             raise ValueError(
-                "unexpected DSpark markov_w1 shape: "
-                f"{tuple(self.markov_w1.shape)}"
+                "unexpected DSpark markov_w1 shape: " f"{tuple(self.markov_w1.shape)}"
             )
         if tuple(self.markov_w2.shape) != tuple(self.markov_w1.shape):
             raise ValueError(
@@ -228,9 +219,7 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
             return None
         return value if value.numel() > 0 else None
 
-    def _swa_block_table(
-        self, attention_inputs: Any, batch_size: int
-    ) -> torch.Tensor:
+    def _swa_block_table(self, attention_inputs: Any, batch_size: int) -> torch.Tensor:
         by_group = getattr(
             attention_inputs, "kv_cache_kernel_block_id_device_by_group", None
         )
@@ -289,9 +278,7 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
         safe_pos = positions.clamp_min(0)
         block_in_request = safe_pos // tokens_per_block
         invalid = invalid | (block_in_request >= int(block_table.shape[1]))
-        safe_block = block_in_request.clamp(
-            0, max(int(block_table.shape[1]) - 1, 0)
-        )
+        safe_block = block_in_request.clamp(0, max(int(block_table.shape[1]) - 1, 0))
 
         block_ids = block_table.to(torch.long)[safe_req, safe_block]
         invalid = invalid | (block_ids <= 0)
@@ -331,9 +318,7 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
         local_offset = rows - starts[safe_req]
         positions = prefix_lengths[safe_req] - lengths[safe_req] + local_offset
         req = torch.where(valid, req, torch.full_like(req, -1))
-        positions = torch.where(
-            valid, positions, torch.full_like(positions, -1)
-        )
+        positions = torch.where(valid, positions, torch.full_like(positions, -1))
         return req.to(torch.int32), positions.to(torch.int32)
 
     def _project_target_features(
@@ -352,9 +337,7 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
         """
         assert self.main_norm is not None and self.main_proj is not None
         hidden = self._optional_tensor(getattr(inputs, "input_hiddens", None))
-        lengths = self._optional_tensor(
-            getattr(inputs, "dspark_ctx_lengths", None)
-        )
+        lengths = self._optional_tensor(getattr(inputs, "dspark_ctx_lengths", None))
         if batch_size == 0:
             return (
                 torch.empty(
@@ -447,9 +430,7 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
                 prefix_lengths.to(torch.long).view(batch_size, 1)
                 + columns
                 - committed.view(batch_size, 1),
-                torch.full(
-                    (batch_size, topk), -1, dtype=torch.long, device=device
-                ),
+                torch.full((batch_size, topk), -1, dtype=torch.long, device=device),
             ),
         )
         local_positions = torch.where(
@@ -527,14 +508,14 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
                 )
 
             # Insert newly committed target features through this layer's own
-            # wkv/kv_norm/RoPE pipeline.  Hole rows carry a -1 slot and are
-            # ignored by the FP8 writer.
+            # wkv/kv_norm/RoPE pipeline. Hole rows and superseded SWA ring
+            # generations carry a -1 slot and are ignored by the FP8 writer.
             context_rows = int(main_x.shape[0])
             if context_rows > 0:
                 safe_context_pos = context_positions.to(torch.long).clamp_min(0)
-                context_freqs = (
-                    attn.freqs_cis.index_select(0, safe_context_pos).contiguous()
-                )
+                context_freqs = attn.freqs_cis.index_select(
+                    0, safe_context_pos
+                ).contiguous()
                 context_kv = fused_rmsnorm_rope(
                     attn._lin(attn.wkv, main_x).contiguous(),
                     attn.kv_norm,
@@ -542,12 +523,17 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
                     int(attn.rope_head_dim),
                     eps=float(attn.eps),
                 )
-                context_slots = self._global_pool_slots(
-                    block_table,
-                    context_req_ids,
-                    context_positions,
-                    entries_per_block,
-                    tokens_per_block,
+                context_slots = compute_swa_slot_mapping_from_positions(
+                    block_table=block_table[:batch_size]
+                    .to(device=x.device, dtype=torch.int32)
+                    .contiguous(),
+                    req_id_per_token=context_req_ids,
+                    positions=context_positions,
+                    seq_lens=prefix_lengths,
+                    num_tokens=context_rows,
+                    pool_entries_per_block=entries_per_block,
+                    tokens_per_block_for_block_table=tokens_per_block,
+                    ring_entries=entries_per_block,
                 )
                 decode_write_swa_fp8(
                     kv=context_kv,
@@ -588,9 +574,7 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
                 tokens_per_block,
             )
             topk = int(global_indices.shape[-1])
-            global_indices = global_indices.view(
-                batch_size, gamma, topk
-            ).contiguous()
+            global_indices = global_indices.view(batch_size, gamma, topk).contiguous()
 
             sched_meta = get_or_build_sched_meta(
                 graph_metadata,
@@ -608,9 +592,7 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
                 sched_meta=sched_meta,
                 topk_length=topk_length,
             )
-            return decode_output_proj(
-                attn, output, qkv.freqs_cis, batch_size, gamma
-            )
+            return decode_output_proj(attn, output, qkv.freqs_cis, batch_size, gamma)
         finally:
             attn._kv_cache = previous_cache
             attn._block_tables_by_type = previous_tables
@@ -652,9 +634,7 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
                 tokens_per_block,
                 graph_metadata,
             )
-            hidden = layer.attn_hc.post(
-                attention_output, residual, post, comb
-            )
+            hidden = layer.attn_hc.post(attention_output, residual, post, comb)
 
             residual = hidden
             x_pre, post, comb = layer.ffn_hc.pre(hidden)
@@ -705,9 +685,7 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
         batch_size, gamma = int(hidden.shape[0]), int(hidden.shape[1])
         dim = int(self._v4_args.dim)
 
-        head_hidden = self.v4._hc_head_reduce(hidden).reshape(
-            batch_size * gamma, dim
-        )
+        head_hidden = self.v4._hc_head_reduce(hidden).reshape(batch_size * gamma, dim)
         # PyModelOutputs.hidden_states convention is post-final-norm and
         # pre-lm-head.  Reuse it for the base DSpark logits and for the
         # framework's (unused) regular logits output.
@@ -736,9 +714,7 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
         return outputs
 
     @torch.inference_mode()
-    def forward(
-        self, inputs: PyModelInputs, fmha_impl: Any = None
-    ) -> PyModelOutputs:
+    def forward(self, inputs: PyModelInputs, fmha_impl: Any = None) -> PyModelOutputs:
         if self.v4 is None:
             raise RuntimeError("DeepSeekV4DSparkModel is not initialized")
         device = self.v4.embed.weight.device
@@ -757,9 +733,7 @@ class DeepSeekV4DSparkModel(DeepSeekV4Model):
             return self._empty_outputs(batch_size, device)
 
         if not bool(self.fp8_kv_cache):
-            raise RuntimeError(
-                "DeepSeekV4DSparkModel currently requires FP8 KV cache"
-            )
+            raise RuntimeError("DeepSeekV4DSparkModel currently requires FP8 KV cache")
 
         attention_inputs = inputs.attention_inputs
         input_lengths = self._optional_tensor(

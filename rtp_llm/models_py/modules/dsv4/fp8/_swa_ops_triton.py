@@ -206,9 +206,7 @@ def compute_window_topk_and_length_varlen(
 
     device = position_ids.device
     num_tokens = int(position_ids.numel())
-    topk_idxs = torch.empty(
-        (num_tokens, window_size), dtype=torch.int32, device=device
-    )
+    topk_idxs = torch.empty((num_tokens, window_size), dtype=torch.int32, device=device)
     topk_length = torch.empty(num_tokens, dtype=torch.int32, device=device)
     if num_tokens == 0:
         return topk_idxs, topk_length
@@ -237,9 +235,13 @@ def compute_window_topk_and_length_varlen(
     if cu_seqlens.dtype != torch.int32:
         cu_seqlens = cu_seqlens.to(device=device, dtype=torch.int32).contiguous()
     if prefix_lengths.dtype != torch.int32:
-        prefix_lengths = prefix_lengths.to(device=device, dtype=torch.int32).contiguous()
+        prefix_lengths = prefix_lengths.to(
+            device=device, dtype=torch.int32
+        ).contiguous()
     if req_id_per_token.dtype != torch.int32:
-        req_id_per_token = req_id_per_token.to(device=device, dtype=torch.int32).contiguous()
+        req_id_per_token = req_id_per_token.to(
+            device=device, dtype=torch.int32
+        ).contiguous()
     if not cu_seqlens.is_contiguous():
         cu_seqlens = cu_seqlens.contiguous()
     if not position_ids.is_contiguous():
@@ -397,6 +399,128 @@ def compute_swa_slot_mapping(
         seq_lens,
         num_reqs,
         max_blocks_per_seq=max_blocks_per_seq,
+        pool_entries_per_block=pool_entries_per_block,
+        tokens_per_block_for_block_table=tokens_per_block_for_block_table,
+        ring_entries=ring_entries,
+        BLOCK_M=BLOCK_M,
+    )
+    return slot_mapping
+
+
+@triton.jit(do_not_specialize=["num_tokens", "num_reqs", "max_blocks_per_seq"])
+def _compute_swa_slot_mapping_from_positions_kernel(
+    slot_mapping_ptr,  # [num_tokens] int64
+    block_table_ptr,  # [num_reqs, max_blocks_per_seq] int32
+    req_id_per_token_ptr,  # [num_tokens] int32; -1 means padding/hole
+    positions_ptr,  # [num_tokens] int32; absolute token positions
+    seq_lens_ptr,  # [num_reqs] int32; committed request ends (exclusive)
+    num_tokens,
+    num_reqs,
+    max_blocks_per_seq,
+    pool_entries_per_block: tl.constexpr,
+    tokens_per_block_for_block_table: tl.constexpr,
+    ring_entries: tl.constexpr,
+    BLOCK_M: tl.constexpr,
+):
+    """Map independent token positions to the final writable SWA ring tails."""
+    offsets = tl.program_id(0) * BLOCK_M + tl.arange(0, BLOCK_M)
+    in_token_range = offsets < num_tokens
+
+    req_id = tl.load(req_id_per_token_ptr + offsets, mask=in_token_range, other=-1).to(
+        tl.int64
+    )
+    position = tl.load(positions_ptr + offsets, mask=in_token_range, other=-1).to(
+        tl.int64
+    )
+    valid_req = in_token_range & (req_id >= 0) & (req_id < num_reqs)
+    safe_req_id = tl.where(valid_req, req_id, 0)
+    seq_len = tl.load(seq_lens_ptr + safe_req_id, mask=valid_req, other=0).to(tl.int64)
+    valid_position = valid_req & (position >= 0) & (position < seq_len)
+
+    block_in_seq = position // tokens_per_block_for_block_table
+    in_capacity = (
+        valid_position & (block_in_seq >= 0) & (block_in_seq < max_blocks_per_seq)
+    )
+    safe_block_in_seq = tl.where(in_capacity, block_in_seq, 0)
+    block_table_offset = safe_req_id * max_blocks_per_seq + safe_block_in_seq
+    block_id = tl.load(
+        block_table_ptr + block_table_offset, mask=in_capacity, other=-1
+    ).to(tl.int64)
+
+    block_end = (block_in_seq + 1) * tokens_per_block_for_block_table
+    effective_end = tl.minimum(block_end, seq_len)
+    tail_write = (position + ring_entries) >= effective_end
+    valid = in_capacity & (block_id > 0) & tail_write
+    slot = tl.where(
+        valid,
+        block_id * pool_entries_per_block + (position % ring_entries),
+        tl.full((BLOCK_M,), -1, dtype=tl.int64),
+    )
+    tl.store(slot_mapping_ptr + offsets, slot, mask=in_token_range)
+
+
+def compute_swa_slot_mapping_from_positions(
+    block_table: torch.Tensor,  # [num_reqs, max_blocks_per_seq] int32
+    req_id_per_token: torch.Tensor,  # [num_tokens] int32; -1 means padding/hole
+    positions: torch.Tensor,  # [num_tokens] int32; absolute token positions
+    seq_lens: torch.Tensor,  # [num_reqs] int32; committed request ends
+    num_tokens: int,
+    pool_entries_per_block: int,
+    tokens_per_block_for_block_table: int,
+    ring_entries: int,
+) -> torch.Tensor:
+    """Build SWA write slots directly from each token's request and position.
+
+    A token is writable only when it belongs to the final ``ring_entries``
+    positions before either its physical block boundary or its request's
+    committed end. Invalid request ids, invalid positions, unallocated blocks,
+    and older generations of the same ring slot map to ``-1``.
+    """
+    assert block_table.ndim == 2
+    assert seq_lens.ndim == 1
+    assert block_table.dtype == torch.int32
+    assert req_id_per_token.dtype == torch.int32
+    assert positions.dtype == torch.int32
+    assert seq_lens.dtype == torch.int32
+    assert block_table.shape[0] == seq_lens.numel()
+    assert 0 <= num_tokens <= min(req_id_per_token.numel(), positions.numel())
+    assert (
+        block_table.device
+        == req_id_per_token.device
+        == positions.device
+        == seq_lens.device
+    )
+
+    block_table = block_table.contiguous()
+    req_id_per_token = req_id_per_token.reshape(-1).contiguous()
+    positions = positions.reshape(-1).contiguous()
+    seq_lens = seq_lens.contiguous()
+
+    pool_entries_per_block = int(pool_entries_per_block)
+    tokens_per_block_for_block_table = int(tokens_per_block_for_block_table)
+    ring_entries = int(ring_entries)
+    assert pool_entries_per_block >= 1
+    assert tokens_per_block_for_block_table >= 1
+    assert ring_entries >= 1
+    assert ring_entries <= pool_entries_per_block
+
+    slot_mapping = torch.empty(num_tokens, dtype=torch.long, device=block_table.device)
+    if num_tokens == 0:
+        return slot_mapping
+
+    num_reqs = int(seq_lens.numel())
+    max_blocks_per_seq = int(block_table.shape[1])
+    BLOCK_M = 256
+    grid = ((num_tokens + BLOCK_M - 1) // BLOCK_M,)
+    _compute_swa_slot_mapping_from_positions_kernel[grid](
+        slot_mapping,
+        block_table,
+        req_id_per_token,
+        positions,
+        seq_lens,
+        num_tokens,
+        num_reqs,
+        max_blocks_per_seq,
         pool_entries_per_block=pool_entries_per_block,
         tokens_per_block_for_block_table=tokens_per_block_for_block_table,
         ring_entries=ring_entries,
@@ -667,8 +791,14 @@ def compute_swa_slot_in_flat_from_cu(
             right=True,
         ).clamp(max=prefix.numel() - 1)
         p = torch.clamp_max(prefix, int(window_size) - 1)
-        local_pos = torch.arange(num_tokens, device=device, dtype=torch.long) - cu.gather(0, req)
-        out.copy_((req * int(M) + int(base_offset) + p.gather(0, req) + local_pos).contiguous())
+        local_pos = torch.arange(
+            num_tokens, device=device, dtype=torch.long
+        ) - cu.gather(0, req)
+        out.copy_(
+            (
+                req * int(M) + int(base_offset) + p.gather(0, req) + local_pos
+            ).contiguous()
+        )
         return out
 
     if not cu_seqlens.is_contiguous():
@@ -677,7 +807,9 @@ def compute_swa_slot_in_flat_from_cu(
         prefix_lengths = prefix_lengths.contiguous()
     num_reqs = int(prefix_lengths.numel())
     if num_reqs > 1024:
-        raise ValueError(f"num_reqs={num_reqs} exceeds compute_swa_slot_in_flat_from_cu limit")
+        raise ValueError(
+            f"num_reqs={num_reqs} exceeds compute_swa_slot_in_flat_from_cu limit"
+        )
     block_b = max(1, triton.next_power_of_2(num_reqs))
     block_m = 256
     _compute_swa_slot_in_flat_from_cu_kernel[(triton.cdiv(num_tokens, block_m),)](
