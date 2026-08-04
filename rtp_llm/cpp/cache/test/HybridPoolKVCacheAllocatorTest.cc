@@ -610,7 +610,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksAreDistributedAcrossGroupsFo
     batch_res->setBatchCacheKeys(0, CacheKeysType{100});
     auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
     MallocInfo malloc_info{batch_res, token_ids};
-    malloc_info.enable_device_cache = false;
+    malloc_info.enable_cache_lookup = false;
     malloc_info.reuse_cache         = false;
     auto result                     = allocator->malloc(malloc_info);
     EXPECT_TRUE(result.success);
@@ -629,7 +629,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksRejectsWhenGroupCannotMeetIt
     batch_res->setBatchCacheKeys(0, CacheKeysType{100});
     auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
     MallocInfo malloc_info{batch_res, token_ids};
-    malloc_info.enable_device_cache = false;
+    malloc_info.enable_cache_lookup = false;
     malloc_info.reuse_cache         = false;
     malloc_info.verbose             = false;
     auto result                     = allocator->malloc(malloc_info);
@@ -710,7 +710,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, ReserveBlocksUseCPShardedFullGroupNeed) {
     allocator->setCPSlotMapper(std::make_shared<CPSlotMapper>(/*cp_rank=*/0, /*cp_size=*/2, /*block_size=*/4));
 
     MallocInfo malloc_info{batch_res, token_ids};
-    malloc_info.enable_device_cache = false;
+    malloc_info.enable_cache_lookup = false;
     malloc_info.reuse_cache         = false;
 
     auto result = allocator->malloc(malloc_info);
@@ -745,7 +745,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackFreesPartiallyAllocated
     batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102});
     auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/9, /*seq_size_per_block=*/4);
     MallocInfo malloc_info{batch_res, token_ids};
-    malloc_info.enable_device_cache = false;
+    malloc_info.enable_cache_lookup = false;
     malloc_info.reuse_cache         = false;
     malloc_info.verbose             = false;
 
@@ -782,7 +782,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesDeviceReuseRefe
     batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102});
     auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/8, /*seq_size_per_block=*/4);
     MallocInfo malloc_info{batch_res, token_ids};
-    malloc_info.enable_device_cache = true;
+    malloc_info.enable_cache_lookup = true;
     malloc_info.reuse_cache         = true;
     malloc_info.verbose             = false;
 
@@ -807,7 +807,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
 
     auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
     MallocInfo init_info{batch_res, token_ids};
-    init_info.enable_device_cache = false;
+    init_info.enable_cache_lookup = false;
     init_info.reuse_cache         = false;
     ASSERT_TRUE(allocator->malloc(init_info).success);
 
@@ -821,7 +821,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     // free blocks and no cache to evict, so FULL allocation fails.
     token_ids->setSeqLength(9);
     MallocInfo incr_info{batch_res, token_ids};
-    incr_info.enable_device_cache = false;
+    incr_info.enable_cache_lookup = false;
     incr_info.reuse_cache         = false;
     auto incr_result              = allocator->malloc(incr_info);
     EXPECT_FALSE(incr_result.success);
@@ -845,7 +845,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocRollbackRestoresLinearBackfille
 
     auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/8, /*seq_size_per_block=*/4);
     MallocInfo init_info{batch_res, token_ids};
-    init_info.enable_device_cache = false;
+    init_info.enable_cache_lookup = false;
     init_info.reuse_cache         = false;
     ASSERT_TRUE(allocator->malloc(init_info).success);
     ASSERT_EQ(batch_res->blocksNum(0, /*group_id=*/0), 2u);
@@ -863,7 +863,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, IncrMallocRollbackRestoresLinearBackfille
     // restore both the historical NULL resource and the original logical length.
     token_ids->setSeqLength(9);
     MallocInfo incr_info{batch_res, token_ids};
-    incr_info.enable_device_cache = false;
+    incr_info.enable_cache_lookup = false;
     incr_info.reuse_cache         = false;
     EXPECT_FALSE(allocator->malloc(incr_info).success);
 
@@ -888,7 +888,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, MallocAndFreeCycleAcrossPerGroupPools) {
     batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102});
     auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
     MallocInfo malloc_info{batch_res, token_ids};
-    malloc_info.enable_device_cache = false;
+    malloc_info.enable_cache_lookup = false;
     malloc_info.reuse_cache         = false;
     auto result                     = allocator->malloc(malloc_info);
     ASSERT_TRUE(result.success);
@@ -951,7 +951,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4HCAStateReuseEnabledAllocatesTailOnly
         /*batch_size=*/1, /*seq_length=*/10 * static_cast<int>(config.seq_size_per_block), config.seq_size_per_block);
 
     MallocInfo malloc_info{batch_res, token_ids};
-    malloc_info.enable_device_cache = false;
+    malloc_info.enable_cache_lookup = false;
     malloc_info.reuse_cache         = true;
     auto result                     = allocator->malloc(malloc_info);
     ASSERT_TRUE(result.success);
@@ -1222,7 +1222,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedInsertThenReuseSamePrefix) {
 
     MallocInfo seed_malloc{seed_res, seed_tokens};
     seed_malloc.reuse_cache         = true;
-    seed_malloc.enable_device_cache = false;
+    seed_malloc.enable_cache_lookup = false;
     allocator->setCPSlotMapper(cp_mapper);
     ASSERT_TRUE(allocator->malloc(seed_malloc).success);
 
@@ -1239,7 +1239,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedInsertThenReuseSamePrefix) {
 
     MallocInfo hit_malloc{hit_res, hit_tokens};
     hit_malloc.reuse_cache         = true;
-    hit_malloc.enable_device_cache = true;
+    hit_malloc.enable_cache_lookup = true;
     allocator->setCPSlotMapper(cp_mapper);
     auto result = allocator->malloc(hit_malloc);
 
@@ -1272,7 +1272,7 @@ TEST_F(HybridPoolKVCacheAllocatorTest, DSV4CPShardedEvictionCascadesFromFullToLo
 
     MallocInfo seed_malloc{seed_res, seed_tokens};
     seed_malloc.reuse_cache         = true;
-    seed_malloc.enable_device_cache = false;
+    seed_malloc.enable_cache_lookup = false;
     ASSERT_TRUE(allocator->malloc(seed_malloc).success);
 
     InsertInfo insert_info{seed_res, seed_tokens, /*is_resident=*/false};

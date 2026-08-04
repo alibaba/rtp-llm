@@ -80,9 +80,7 @@ HybridKVCacheAllocator::HybridKVCacheAllocator(const CacheConfig&               
     KVCacheAllocator(config, allocation_type, metrics_reporter, reserve_block_ratio) {}
 
 std::vector<BlockRefTransition>
-HybridKVCacheAllocator::freeBlocksInGroup(int                     group_id,
-                                          const BlockIndicesType& blocks,
-                                          BlockRefType            ref_type) {
+HybridKVCacheAllocator::freeBlocksInGroup(int group_id, const BlockIndicesType& blocks, BlockRefType ref_type) {
     return kv_cache_groups_[static_cast<size_t>(group_id)]->release(blocks, ref_type);
 }
 
@@ -111,7 +109,6 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
         block_tree_cache_->releaseMatchedResources(match_result.matched_device_resources);
         return 0;
     }
-
     for (int group_id : full_group_ids_) {
         if (skipReuseCacheGroup(group_id)) {
             continue;
@@ -194,12 +191,12 @@ int HybridKVCacheAllocator::reuseCache(const CacheKeysType&                 cach
 }
 
 MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& malloc_info) {
-    auto&       kv_resource    = malloc_info.batch_kv_cache_resource;
-    const int   batch_size     = kv_resource->batchSize();
-    const int   seq_len        = malloc_info.complete_token_ids->seqLength();
-    const int   common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), seq_len);
-    const auto& cp_mapper      = cp_slot_mapper_;
-    const int   cp_scale       = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
+    auto&                 kv_resource    = malloc_info.batch_kv_cache_resource;
+    const int             batch_size     = kv_resource->batchSize();
+    const int             seq_len        = malloc_info.complete_token_ids->seqLength();
+    const int             common_seq_len = std::min(malloc_info.complete_token_ids->commonSeqLength(), seq_len);
+    const auto&           cp_mapper      = cp_slot_mapper_;
+    const int             cp_scale       = (cp_mapper && cp_mapper->isSharded()) ? cp_mapper->cpSize() : 1;
     const KVCacheGroupPtr reuse_group =
         full_group_ids_.empty() ? KVCacheGroupPtr{} : kv_cache_groups_[static_cast<size_t>(full_group_ids_.front())];
     const int reuse_unit_tokens =
@@ -221,7 +218,7 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
         return {false, 0};
     };
 
-    if (malloc_info.enable_device_cache) {
+    if (malloc_info.enable_cache_lookup) {
         CacheKeysType cp_keys   = cpCanonicalCacheKeys(cp_mapper, cache_keys);
         const bool    cp_active = cp_mapper && cp_mapper->isSharded();
         CacheKeysType match_keys(cp_keys.begin(),
@@ -252,11 +249,11 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
                 return rollback({});
             }
             for (const size_t raw_group_id : *group_ids) {
-                const int            group_id = static_cast<int>(raw_group_id);
+                const int group_id = static_cast<int>(raw_group_id);
                 if (group_id >= kv_resource->groupNums() || skipReuseCacheGroup(group_id)) {
                     return rollback({});
                 }
-                const CacheGroupType type     = config_.typeForGroup(static_cast<size_t>(group_id));
+                const CacheGroupType type = config_.typeForGroup(static_cast<size_t>(group_id));
                 const size_t         target_position =
                     type == CacheGroupType::LINEAR
                             || (type == CacheGroupType::SWA && !cpCompactSwaGroup(group_id, cp_mapper)) ?
@@ -334,7 +331,7 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
                 if (group_id >= kv_resource->groupNums()) {
                     return rollback(original_sizes);
                 }
-                const CacheGroupType type     = config_.typeForGroup(static_cast<size_t>(group_id));
+                const CacheGroupType type = config_.typeForGroup(static_cast<size_t>(group_id));
                 const size_t         position =
                     type == CacheGroupType::LINEAR
                             || (type == CacheGroupType::SWA && !cpCompactSwaGroup(group_id, cp_mapper)) ?
@@ -376,11 +373,11 @@ MallocResult HybridKVCacheAllocator::initMallocForCommonLen(const MallocInfo& ma
 }
 
 MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
-    auto&       kv_resource  = malloc_info.batch_kv_cache_resource;
-    const auto& cp_mapper    = cp_slot_mapper_;
-    const int   batch_size   = kv_resource->batchSize();
-    const int   raw_seq_len  = malloc_info.incrSeqLen();
-    const int   reserve_step = malloc_info.complete_token_ids->getReserveStep();
+    auto&             kv_resource  = malloc_info.batch_kv_cache_resource;
+    const auto&       cp_mapper    = cp_slot_mapper_;
+    const int         batch_size   = kv_resource->batchSize();
+    const int         raw_seq_len  = malloc_info.incrSeqLen();
+    const int         reserve_step = malloc_info.complete_token_ids->getReserveStep();
     BlockReleaseBatch releases;
 
     std::vector<std::vector<size_t>>              original_sizes(static_cast<size_t>(batch_size));
@@ -420,10 +417,9 @@ MallocResult HybridKVCacheAllocator::incrMalloc(const MallocInfo& malloc_info) {
         }
         for (int b = 0; b < batch_size; ++b) {
             for (int group_id = 0; group_id < kv_resource->groupNums(); ++group_id) {
-                releases.append(
-                    static_cast<size_t>(group_id),
-                    kv_cache_groups_[static_cast<size_t>(group_id)]->releaseSkippedBlocks(
-                        kv_resource->mutableBlockIds(b, group_id), malloc_info.reuse_cache, reserve_step));
+                releases.append(static_cast<size_t>(group_id),
+                                kv_cache_groups_[static_cast<size_t>(group_id)]->releaseSkippedBlocks(
+                                    kv_resource->mutableBlockIds(b, group_id), malloc_info.reuse_cache, reserve_step));
             }
         }
         submitBlockReleases(releases);
@@ -475,10 +471,9 @@ void HybridKVCacheAllocator::free(const FreeInfo& free_info) {
     BlockReleaseBatch releases;
     for (int batch_id = 0; batch_id < kv_cache_resource->batchSize(); ++batch_id) {
         for (int group_id = 0; group_id < kv_cache_resource->groupNums(); ++group_id) {
-            releases.append(
-                static_cast<size_t>(group_id),
-                kv_cache_groups_[static_cast<size_t>(group_id)]->release(
-                    kv_cache_resource->blocks(batch_id, group_id), BlockRefType::REQUEST));
+            releases.append(static_cast<size_t>(group_id),
+                            kv_cache_groups_[static_cast<size_t>(group_id)]->release(
+                                kv_cache_resource->blocks(batch_id, group_id), BlockRefType::REQUEST));
         }
     }
     kv_cache_resource->clearBlocks();
@@ -582,7 +577,7 @@ void HybridKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) {
         }
         insert_keys.resize(publish_prefix);
         resources.resize(publish_prefix);
-        block_tree_cache_->insert(insert_keys, resources);
+        block_tree_cache_->insert(insert_keys, resources, insert_info.target_tier);
     }
 }
 
@@ -846,8 +841,8 @@ bool HybridKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  batch
                     const int  old_block       = block_ids.popBack();
                     const bool old_block_valid = !isNullBlockIdx(old_block) && old_block > 0;
                     if (old_block_valid) {
-                        (void)kv_cache_groups_[static_cast<size_t>(group_id)]->release(
-                            {old_block}, BlockRefType::REQUEST);
+                        (void)kv_cache_groups_[static_cast<size_t>(group_id)]->release({old_block},
+                                                                                       BlockRefType::REQUEST);
                     }
 
                     auto&      reserved     = replacement_blocks[static_cast<size_t>(group_id)];
@@ -925,8 +920,7 @@ void HybridKVCacheAllocator::rollbackInitMalloc(BatchKVCacheResource&           
             && !referenced_blocks[static_cast<size_t>(group_id)].empty()) {
             releases.append(
                 static_cast<size_t>(group_id),
-                freeBlocksInGroup(
-                    group_id, referenced_blocks[static_cast<size_t>(group_id)], BlockRefType::REQUEST));
+                freeBlocksInGroup(group_id, referenced_blocks[static_cast<size_t>(group_id)], BlockRefType::REQUEST));
         }
         block_ids.resize(0);
     }

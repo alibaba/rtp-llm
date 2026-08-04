@@ -393,7 +393,7 @@ insertOneKeyThroughAllocator(const CacheConfig& config, const KVCacheAllocatorPt
     return blocks;
 }
 
-void releaseInsertedRequestBlocks(const KVCacheAllocatorPtr&      allocator,
+void releaseInsertedRequestBlocks(const KVCacheAllocatorPtr&       allocator,
                                   const std::vector<BlockIdxType>& blocks,
                                   BlockReleaseBatch&               releases) {
     const auto groups = allocator->cacheGroups();
@@ -529,10 +529,9 @@ TEST_F(BlockTreeCacheFactoryTest, PerRankBlockTransferEnginePreservesNonContiguo
     const auto    config    = makeHybridConfig(/*independent_pools=*/true);
     auto          allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_memory_cache        = true;
-    kv_cache_config.enable_tiered_memory_cache = true;
-    kv_cache_config.memory_cache_size_mb       = 1;
-    auto cache                                 = createBlockTreeCache(config, kv_cache_config, allocator);
+    kv_cache_config.enable_memory_cache  = true;
+    kv_cache_config.memory_cache_size_mb = 1;
+    auto cache                           = createBlockTreeCache(config, kv_cache_config, allocator);
     ASSERT_NE(cache, nullptr);
 
     const auto target_groups = allocator->cacheGroups();
@@ -793,7 +792,6 @@ TEST_F(BlockTreeCacheFactoryTest, SharedPhysicalBackingWatermarkCountsPrimaryAnd
 
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_memory_cache          = true;
-    kv_cache_config.enable_tiered_memory_cache   = true;
     kv_cache_config.memory_cache_size_mb         = 1;
     kv_cache_config.device_cache_min_free_blocks = 4;
     auto cache                                   = createBlockTreeCache(config, kv_cache_config, allocator);
@@ -856,7 +854,6 @@ TEST_F(BlockTreeCacheFactoryTest, FailedWatermarkPlanStopsThisPassAndRecomputesO
 
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_memory_cache          = true;
-    kv_cache_config.enable_tiered_memory_cache   = true;
     kv_cache_config.memory_cache_size_mb         = 1;
     kv_cache_config.device_cache_min_free_blocks = 7;
     auto cache                                   = createBlockTreeCache(config, kv_cache_config, allocator);
@@ -921,10 +918,9 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
     const auto    config    = makeIncompatibleFullGroupsConfig();
     auto          allocator = initAllocator<HybridPoolKVCacheAllocator>(config);
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_memory_cache        = true;
-    kv_cache_config.enable_tiered_memory_cache = true;
-    kv_cache_config.memory_cache_size_mb       = 1;
-    auto cache                                 = createBlockTreeCache(config, kv_cache_config, allocator);
+    kv_cache_config.enable_memory_cache  = true;
+    kv_cache_config.memory_cache_size_mb = 1;
+    auto cache                           = createBlockTreeCache(config, kv_cache_config, allocator);
     ASSERT_NE(cache, nullptr);
     allocator->attachBlockTreeCache(cache);
 
@@ -971,7 +967,7 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
     GroupSetResource incoming_b;
     incoming_b.device_blocks = {original_blocks[1]};
     const std::vector<std::vector<GroupSetResource>> refill_resources{{incoming_a, incoming_b}};
-    cache->insert(CacheKeysType{703}, refill_resources);
+    cache->insert(CacheKeysType{703}, refill_resources, Tier::DEVICE);
 
     const auto after_refill = cache->getKeySnapshot(/*limit=*/16);
     EXPECT_EQ(after_refill.version, before_refill.version + 1);
@@ -993,7 +989,7 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
 
     const size_t a_ref_before_duplicate = group_set_a->devicePools()[0]->refCount(refill_a->front());
     const auto   before_duplicate       = cache->getKeySnapshot(/*limit=*/16);
-    cache->insert(CacheKeysType{703}, refill_resources);
+    cache->insert(CacheKeysType{703}, refill_resources, Tier::DEVICE);
     const auto after_duplicate = cache->getKeySnapshot(/*limit=*/16);
     EXPECT_EQ(after_duplicate.version, before_duplicate.version);
     EXPECT_EQ(group_set_a->devicePools()[0]->refCount(refill_a->front()), a_ref_before_duplicate);
@@ -1007,7 +1003,7 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
     GroupSetResource nonempty_incoming_a;
     nonempty_incoming_a.device_blocks = {nonempty_replacement->front()};
     const auto before_nonempty        = cache->getKeySnapshot(/*limit=*/16);
-    cache->insert(CacheKeysType{703}, {{nonempty_incoming_a, incoming_b}});
+    cache->insert(CacheKeysType{703}, {{nonempty_incoming_a, incoming_b}}, Tier::DEVICE);
     EXPECT_EQ(cache->getKeySnapshot(/*limit=*/16).version, before_nonempty.version);
     EXPECT_EQ(node->group_set_resources[0].device_blocks, (BlockIndicesType{refill_a->front()}));
     EXPECT_EQ(group_set_a->devicePools()[0]->refCount(refill_a->front()), a_ref_before_duplicate);
@@ -1027,7 +1023,7 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
     GroupSetResource blocked_incoming_a;
     blocked_incoming_a.device_blocks = {host_replacement->front()};
     const auto before_host           = cache->getKeySnapshot(/*limit=*/16);
-    cache->insert(CacheKeysType{703}, {{blocked_incoming_a, incoming_b}});
+    cache->insert(CacheKeysType{703}, {{blocked_incoming_a, incoming_b}}, Tier::DEVICE);
     EXPECT_EQ(cache->getKeySnapshot(/*limit=*/16).version, before_host.version);
     EXPECT_EQ(node->group_set_resources[0].host_block, host_a);
     EXPECT_FALSE(node->group_set_resources[0].hasTier(Tier::DEVICE));
@@ -1039,7 +1035,7 @@ TEST_F(BlockTreeCacheFactoryTest, ReinsertRefillsOnlyEmptyIdleGroupSetResource) 
         SCOPED_TRACE(state == GroupSetTransferState::DEMOTING ? "demoting" : "loading");
         node->group_set_resources[0].transfer_state = state;
         const auto before_in_flight                 = cache->getKeySnapshot(/*limit=*/16);
-        cache->insert(CacheKeysType{703}, {{blocked_incoming_a, incoming_b}});
+        cache->insert(CacheKeysType{703}, {{blocked_incoming_a, incoming_b}}, Tier::DEVICE);
         EXPECT_EQ(cache->getKeySnapshot(/*limit=*/16).version, before_in_flight.version);
         EXPECT_TRUE(node->group_set_resources[0].is_empty());
         EXPECT_EQ(node->group_set_resources[0].transfer_state, state);
@@ -1074,7 +1070,7 @@ TEST_F(BlockTreeCacheFactoryTest, InsertRejectsWrongShapeAndFailsFastOnInvalidGr
     auto expect_rejected_without_mutation = [&](CacheKeyType                               key,
                                                 std::vector<std::vector<GroupSetResource>> resources) {
         const auto before = cache->getKeySnapshot(/*limit=*/32);
-        cache->insert(CacheKeysType{key}, resources);
+        cache->insert(CacheKeysType{key}, resources, Tier::DEVICE);
         const auto after = cache->getKeySnapshot(/*limit=*/32);
         EXPECT_EQ(after.version, before.version);
         EXPECT_EQ(after.keys, before.keys);
@@ -1091,7 +1087,7 @@ TEST_F(BlockTreeCacheFactoryTest, InsertRejectsWrongShapeAndFailsFastOnInvalidGr
         const auto before          = cache->getKeySnapshot(/*limit=*/32);
         const auto first_refcount  = groups[0]->blockPool()->refCount(first->front());
         const auto second_refcount = groups[1]->blockPool()->refCount(second->front());
-        EXPECT_ANY_THROW(cache->insert(CacheKeysType{key}, resources));
+        EXPECT_ANY_THROW(cache->insert(CacheKeysType{key}, resources, Tier::DEVICE));
         const auto after = cache->getKeySnapshot(/*limit=*/32);
         EXPECT_EQ(after.version, before.version);
         EXPECT_EQ(after.keys, before.keys);
@@ -1171,9 +1167,8 @@ TEST_F(BlockTreeCacheFactoryTest, CreatesDiskCacheWithoutMemoryCache) {
     auto                                     allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
     block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_l3_only");
     KVCacheConfig                            kv_cache_config;
-    kv_cache_config.enable_tiered_memory_cache    = true;
     kv_cache_config.enable_memory_cache           = false;
-    kv_cache_config.enable_memory_cache_disk      = true;
+    kv_cache_config.enable_disk_cache             = true;
     kv_cache_config.memory_cache_disk_size_mb     = 1;
     kv_cache_config.memory_cache_disk_paths       = disk_dir.path;
     kv_cache_config.memory_cache_disk_buffered_io = true;
@@ -1196,11 +1191,10 @@ TEST_F(BlockTreeCacheFactoryTest, DiskStagingBlockCountPropagatesAndValidates) {
 
     const auto makeDiskKvCacheConfig = [](const std::string& disk_path) {
         KVCacheConfig kv_cache_config;
-        kv_cache_config.enable_tiered_memory_cache = true;
-        kv_cache_config.enable_memory_cache        = false;
-        kv_cache_config.enable_memory_cache_disk   = true;
-        kv_cache_config.memory_cache_disk_size_mb  = 1;
-        kv_cache_config.memory_cache_disk_paths    = disk_path;
+        kv_cache_config.enable_memory_cache       = false;
+        kv_cache_config.enable_disk_cache         = true;
+        kv_cache_config.memory_cache_disk_size_mb = 1;
+        kv_cache_config.memory_cache_disk_paths   = disk_path;
         return kv_cache_config;
     };
 
@@ -1233,15 +1227,87 @@ TEST_F(BlockTreeCacheFactoryTest, DiskStagingBlockCountPropagatesAndValidates) {
     }
 }
 
-TEST_F(BlockTreeCacheFactoryTest, RejectsTieredWithoutHostOrDiskBeforePublication) {
+TEST_F(BlockTreeCacheFactoryTest, DerivesEachLocalTierFromItsOwnSwitch) {
+    const auto config = makeSingleConfig();
+
+    for (const bool device_on : {false, true}) {
+        for (const bool host_on : {false, true}) {
+            for (const bool disk_on : {false, true}) {
+                SCOPED_TRACE("L1=" + std::to_string(device_on) + " L2=" + std::to_string(host_on)
+                             + " L3=" + std::to_string(disk_on));
+                auto                                     allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+                block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_tier_matrix");
+                KVCacheConfig                            kv_cache_config;
+                kv_cache_config.enable_device_cache = device_on;
+                kv_cache_config.enable_memory_cache = host_on;
+                kv_cache_config.enable_disk_cache   = disk_on;
+                if (host_on) {
+                    kv_cache_config.memory_cache_size_mb = 1;
+                }
+                if (disk_on) {
+                    kv_cache_config.memory_cache_disk_size_mb     = 1;
+                    kv_cache_config.memory_cache_disk_paths       = disk_dir.path;
+                    kv_cache_config.memory_cache_disk_buffered_io = true;
+                }
+
+                auto cache = createBlockTreeCache(config, kv_cache_config, allocator, ParallelismConfig{});
+                ASSERT_NE(cache, nullptr);
+                EXPECT_EQ(cache->isDeviceCacheEnabled(), device_on);
+                EXPECT_EQ(cache->isMemoryCacheEnabled(), host_on);
+                EXPECT_EQ(cache->isDiskCacheEnabled(), disk_on);
+                ASSERT_FALSE(cache->groupSets().empty());
+                for (const auto& group_set : cache->groupSets()) {
+                    ASSERT_NE(group_set, nullptr);
+                    EXPECT_EQ(group_set->hostPool() != nullptr, host_on);
+                    EXPECT_EQ(group_set->diskPool() != nullptr, disk_on);
+                }
+            }
+        }
+    }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, RejectsTierEnabledWithoutItsOwnCapacity) {
+    const auto config = makeSingleConfig();
+
+    {
+        auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        KVCacheConfig kv_cache_config;
+        kv_cache_config.enable_memory_cache  = true;
+        kv_cache_config.memory_cache_size_mb = 0;
+        expectFactoryRejects(config, allocator, kv_cache_config);
+    }
+
+    {
+        auto                                     allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_l3_no_capacity");
+        KVCacheConfig                            kv_cache_config;
+        kv_cache_config.enable_disk_cache         = true;
+        kv_cache_config.memory_cache_disk_size_mb = 0;
+        kv_cache_config.memory_cache_disk_paths   = disk_dir.path;
+        expectFactoryRejects(config, allocator, kv_cache_config);
+    }
+
+    {
+        auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
+        KVCacheConfig kv_cache_config;
+        kv_cache_config.enable_disk_cache         = true;
+        kv_cache_config.memory_cache_disk_size_mb = 1;
+        kv_cache_config.memory_cache_disk_paths   = "";
+        expectFactoryRejects(config, allocator, kv_cache_config);
+    }
+}
+
+TEST_F(BlockTreeCacheFactoryTest, IgnoresDeprecatedTierFlags) {
     const auto    config    = makeSingleConfig();
     auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_tiered_memory_cache = true;
-    kv_cache_config.enable_memory_cache        = false;
-    kv_cache_config.enable_memory_cache_disk   = false;
+    kv_cache_config.enable_memory_cache_disk   = true;
 
-    expectFactoryRejects(config, allocator, kv_cache_config);
+    auto cache = createBlockTreeCache(config, kv_cache_config, allocator);
+    ASSERT_NE(cache, nullptr);
+    EXPECT_FALSE(cache->isMemoryCacheEnabled());
+    EXPECT_FALSE(cache->isDiskCacheEnabled());
 }
 
 TEST_F(BlockTreeCacheFactoryTest, AppliesDefaultTierWatermarks) {
@@ -1257,17 +1323,15 @@ TEST_F(BlockTreeCacheFactoryTest, AppliesDefaultTierWatermarks) {
         EXPECT_DOUBLE_EQ(cache->config().watermark_disk.ratio, 0.0);
     }
 
-    // Host enabled without disk: HOST is the terminal tier, no demotion watermark.
     {
         auto          allocator = initAllocator<SingleTypeKVCacheAllocator>(config);
         KVCacheConfig kv_cache_config;
-        kv_cache_config.enable_memory_cache        = true;
-        kv_cache_config.enable_tiered_memory_cache = true;
-        kv_cache_config.memory_cache_size_mb       = 1;
-        auto cache                                 = createBlockTreeCache(config, kv_cache_config, allocator);
+        kv_cache_config.enable_memory_cache  = true;
+        kv_cache_config.memory_cache_size_mb = 1;
+        auto cache                           = createBlockTreeCache(config, kv_cache_config, allocator);
         ASSERT_NE(cache, nullptr);
         EXPECT_DOUBLE_EQ(cache->config().watermark_device.ratio, 0.9);
-        EXPECT_DOUBLE_EQ(cache->config().watermark_host.ratio, 0.0);
+        EXPECT_DOUBLE_EQ(cache->config().watermark_host.ratio, 0.9);
         EXPECT_DOUBLE_EQ(cache->config().watermark_disk.ratio, 0.0);
     }
 
@@ -1277,9 +1341,8 @@ TEST_F(BlockTreeCacheFactoryTest, AppliesDefaultTierWatermarks) {
         block_transfer_engine_test::TempDirGuard disk_dir("block_tree_cache_factory_watermark_defaults");
         KVCacheConfig                            kv_cache_config;
         kv_cache_config.enable_memory_cache           = true;
-        kv_cache_config.enable_tiered_memory_cache    = true;
         kv_cache_config.memory_cache_size_mb          = 1;
-        kv_cache_config.enable_memory_cache_disk      = true;
+        kv_cache_config.enable_disk_cache             = true;
         kv_cache_config.memory_cache_disk_size_mb     = 1;
         kv_cache_config.memory_cache_disk_paths       = disk_dir.path;
         kv_cache_config.memory_cache_disk_buffered_io = true;
@@ -1333,9 +1396,8 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
     KVCacheConfig                            kv_cache_config;
     kv_cache_config.enable_device_cache           = true;
     kv_cache_config.enable_memory_cache           = true;
-    kv_cache_config.enable_tiered_memory_cache    = true;
     kv_cache_config.memory_cache_size_mb          = 1;
-    kv_cache_config.enable_memory_cache_disk      = true;
+    kv_cache_config.enable_disk_cache             = true;
     kv_cache_config.memory_cache_disk_size_mb     = 1;
     kv_cache_config.memory_cache_disk_paths       = disk_dir.path;
     kv_cache_config.memory_cache_disk_buffered_io = true;
@@ -1362,7 +1424,8 @@ TEST_F(BlockTreeCacheFactoryTest, Factory_CreatesExecutableFullSWAConfig) {
         EXPECT_EQ(group->hostPool()->payloadBytes(), group->payloadBytes());
         EXPECT_EQ(group->diskPool()->payloadBytes(), group->payloadBytes());
 
-        block_tree_cache_test::MultiNodeBlocks device_blocks = block_tree_cache_test::allocateDeviceBlocksForTest(*group, 1, BlockRefType::REQUEST);
+        block_tree_cache_test::MultiNodeBlocks device_blocks =
+            block_tree_cache_test::allocateDeviceBlocksForTest(*group, 1, BlockRefType::REQUEST);
         ASSERT_EQ(device_blocks.size(), 1u);
         ASSERT_EQ(device_blocks[0].size(), group->devicePools().size());
         const BlockIdxType host_block = group->allocateSingleBlock(Tier::HOST, BlockRefType::REQUEST);

@@ -31,6 +31,14 @@ struct BlockTreePoolMetricsSnapshot {
     size_t      eviction_ref_count{0};
 };
 
+enum class CacheTransferOperation : uint8_t {
+    LOAD,
+    EVICT,
+    STORE,
+};
+
+const char* cacheTransferOperationName(CacheTransferOperation operation);
+
 struct BlockTreeEvictableMetricsSnapshot {
     Tier           tier{Tier::DEVICE};
     CacheGroupType group_type{CacheGroupType::FULL};
@@ -50,18 +58,27 @@ public:
                                 const BlockTreeEvictor::CopyResultSet& results,
                                 const std::vector<GroupSetPtr>&        group_sets) const;
 
-    int64_t reportTransferStarted(Tier source_tier, Tier target_tier);
-    void
-    reportTransferFinished(Tier source_tier, Tier target_tier, size_t block_count, int64_t begin_time_us, bool success);
+    int64_t reportTransferStarted(CacheTransferOperation operation, Tier source_tier, Tier target_tier);
+    void    reportTransferFinished(CacheTransferOperation operation,
+                                   Tier                   source_tier,
+                                   Tier                   target_tier,
+                                   size_t                 block_count,
+                                   int64_t                begin_time_us,
+                                   bool                   success);
+    void    reportStorePublish(Tier target_tier, size_t accepted_blocks, size_t duplicate_blocks) const;
 
 private:
+    static constexpr size_t kOperationCount = 3;
+    static constexpr size_t kDirectionCount = 5;
+
     static int transferDirectionIndex(Tier source_tier, Tier target_tier);
     void       reportEvictionTransfer(const TransferDescriptor&       desc,
-                                  const std::vector<GroupSetPtr>& group_sets,
-                                  int64_t                         finish_time_us) const;
+                                      const std::vector<GroupSetPtr>& group_sets,
+                                      int64_t                         finish_time_us) const;
+    void       reportStoreBlocks(Tier target_tier, const char* outcome, size_t block_count) const;
 
-    std::shared_ptr<kmonitor::MetricsReporter> metrics_reporter_;
-    std::array<std::atomic<int64_t>, 4>        transfer_in_flight_{};
+    std::shared_ptr<kmonitor::MetricsReporter>                                     metrics_reporter_;
+    std::array<std::array<std::atomic<int64_t>, kDirectionCount>, kOperationCount> transfer_in_flight_{};
 };
 
 }  // namespace rtp_llm

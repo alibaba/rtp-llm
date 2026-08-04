@@ -414,6 +414,7 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("test_block_num", &KVCacheConfig::test_block_num)
         .def_readwrite("use_block_cache", &KVCacheConfig::use_block_cache)
         .def_readwrite("enable_memory_cache", &KVCacheConfig::enable_memory_cache)
+        .def_readwrite("enable_disk_cache", &KVCacheConfig::enable_disk_cache)
         .def_readwrite("enable_memory_cache_sm_copy", &KVCacheConfig::enable_memory_cache_sm_copy)
         .def_readwrite("write_cache_sync", &KVCacheConfig::write_cache_sync)
         .def_readwrite("enable_tiered_memory_cache", &KVCacheConfig::enable_tiered_memory_cache)
@@ -505,10 +506,11 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.prefix_tree_memory_state_swa_pool_ratio,
                                       self.enable_independent_group_eviction,
                                       self.load_cache_retry_times,
-                                      self.memory_cache_disk_staging_block_count);
+                                      self.memory_cache_disk_staging_block_count,
+                                      self.enable_disk_cache);
             },
             [](py::tuple t) {
-                if (t.size() != 43 && t.size() != 54 && t.size() != 55)
+                if (t.size() != 43 && t.size() != 54 && t.size() != 55 && t.size() != 56)
                     throw std::runtime_error("Invalid state!");
                 KVCacheConfig c;
                 try {
@@ -570,6 +572,9 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     }
                     if (t.size() >= 55) {
                         c.memory_cache_disk_staging_block_count = t[54].cast<int64_t>();
+                    }
+                    if (t.size() >= 56) {
+                        c.enable_disk_cache = t[55].cast<bool>();
                     }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("KVCacheConfig unpickle error: ") + e.what());

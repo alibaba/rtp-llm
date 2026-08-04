@@ -115,7 +115,7 @@ BlockTreeSeedResult seedCompleteBlockTreePath(const std::shared_ptr<BlockTreeCac
         }
     }
 
-    cache->insert(keys, slots);
+    cache->insert(keys, slots, Tier::DEVICE);
     BlockReleaseBatch releases;
     for (const auto& [group_id, pool, blocks] : request_holds) {
         releases.append(group_id, pool->decRefWithResult(blocks, BlockRefType::REQUEST));

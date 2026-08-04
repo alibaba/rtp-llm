@@ -315,7 +315,7 @@ TEST_F(KVCacheManagerTest, WarmupConfigSmoke) {
                                            /*seq_size_per_block=*/2);
     MallocInfo malloc_info{resource, tokens};
     malloc_info.reuse_cache         = false;
-    malloc_info.enable_device_cache = false;
+    malloc_info.enable_cache_lookup = false;
     ASSERT_TRUE(cache_manager->malloc(malloc_info).success);
     ASSERT_EQ(resource->blocksNum(/*batch_id=*/0, /*group_id=*/0), 1);
     EXPECT_EQ(resource->blocks(0, 0).front(), 1);
@@ -422,10 +422,9 @@ TEST_F(KVCacheManagerTest, FactoryFailureDoesNotPublishOrInjectBlockTreeCache) {
     auto cache_config = makeSimpleMhaCacheConfig(
         /*layer_num=*/2, /*block_num=*/6, /*tokens_per_block=*/2, rtp_llm::DataType::TYPE_BF16);
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_tiered_memory_cache = true;
-    kv_cache_config.enable_memory_cache        = true;
-    kv_cache_config.memory_cache_size_mb       = 0;
-    auto cache_manager                         = std::make_shared<KVCacheManager>(cache_config,
+    kv_cache_config.enable_memory_cache  = true;
+    kv_cache_config.memory_cache_size_mb = 0;
+    auto cache_manager                   = std::make_shared<KVCacheManager>(cache_config,
                                                           /*warmup=*/false,
                                                           /*metrics_reporter=*/nullptr,
                                                           kv_cache_config);
@@ -644,7 +643,7 @@ TEST_F(KVCacheManagerTest, DSV4MallocIncrFreeExposesSevenTypedRegions) {
 
     MallocInfo malloc_info{resource, tokens};
     malloc_info.reuse_cache         = false;
-    malloc_info.enable_device_cache = false;
+    malloc_info.enable_cache_lookup = false;
     auto malloc_result              = manager->malloc(malloc_info);
     ASSERT_TRUE(malloc_result.success);
     ASSERT_EQ(resource->groupNums(), kDsv4PoolNum);
@@ -664,7 +663,7 @@ TEST_F(KVCacheManagerTest, DSV4MallocIncrFreeExposesSevenTypedRegions) {
     tokens->setSeqLength(4 * spb);
     MallocInfo incr_info{resource, tokens};
     incr_info.reuse_cache         = false;
-    incr_info.enable_device_cache = false;
+    incr_info.enable_cache_lookup = false;
     auto incr_result              = manager->malloc(incr_info);
     ASSERT_TRUE(incr_result.success);
 
@@ -714,7 +713,7 @@ TEST_F(KVCacheManagerTest, DSV4LayerRegionBlockTablesMatchInferenceAccessPattern
 
     MallocInfo malloc_info{resource, tokens};
     malloc_info.reuse_cache         = false;
-    malloc_info.enable_device_cache = false;
+    malloc_info.enable_cache_lookup = false;
     ASSERT_TRUE(manager->malloc(malloc_info).success);
 
     auto expectTagGroup = [&](int layer_id, const std::string& tag, int expected_gid) {
@@ -768,7 +767,7 @@ TEST_F(KVCacheManagerTest, DSV4BlockCopyPreservesTypedRegionBytes) {
 
     MallocInfo malloc_info{resource, tokens};
     malloc_info.reuse_cache         = false;
-    malloc_info.enable_device_cache = false;
+    malloc_info.enable_cache_lookup = false;
     ASSERT_TRUE(manager->malloc(malloc_info).success);
 
     const int src_block         = 1;
@@ -850,7 +849,7 @@ TEST_F(KVCacheManagerTest, DSV4InsertIntoDeviceBlockCacheThenReuseSamePrefix) {
 
     MallocInfo first_malloc{first_resource, first_tokens};
     first_malloc.reuse_cache         = true;
-    first_malloc.enable_device_cache = false;
+    first_malloc.enable_cache_lookup = false;
     ASSERT_TRUE(manager->malloc(first_malloc).success);
 
     std::vector<BlockIndicesType> first_blocks;
@@ -870,7 +869,7 @@ TEST_F(KVCacheManagerTest, DSV4InsertIntoDeviceBlockCacheThenReuseSamePrefix) {
 
     MallocInfo second_malloc{second_resource, second_tokens};
     second_malloc.reuse_cache         = true;
-    second_malloc.enable_device_cache = true;
+    second_malloc.enable_cache_lookup = true;
     auto reuse_result                 = manager->malloc(second_malloc);
     ASSERT_TRUE(reuse_result.success);
     EXPECT_GE(reuse_result.reuse_len, spb);
@@ -904,7 +903,7 @@ TEST_F(KVCacheManagerTest, DSV4InitReuseKeepsSWAPrefixTailBlock) {
 
     MallocInfo first_malloc{first_resource, first_tokens};
     first_malloc.reuse_cache         = false;
-    first_malloc.enable_device_cache = false;
+    first_malloc.enable_cache_lookup = false;
     ASSERT_TRUE(manager->malloc(first_malloc).success);
 
     std::vector<BlockIdxType> first_swa_tail_blocks(static_cast<size_t>(kDsv4PoolNum), NULL_BLOCK_IDX);
@@ -925,7 +924,7 @@ TEST_F(KVCacheManagerTest, DSV4InitReuseKeepsSWAPrefixTailBlock) {
 
     MallocInfo second_malloc{second_resource, second_tokens};
     second_malloc.reuse_cache                  = true;
-    second_malloc.enable_device_cache          = true;
+    second_malloc.enable_cache_lookup          = true;
     second_malloc.enable_remove_skipped_blocks = false;
     auto reuse_result                          = manager->malloc(second_malloc);
     ASSERT_TRUE(reuse_result.success);
@@ -962,7 +961,6 @@ TEST_F(KVCacheManagerTest, Init_Throws_WhenMemoryCacheEnabledButSizeMissing) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_memory_cache          = true;
-    kv_cache_config.enable_tiered_memory_cache   = true;
     kv_cache_config.reuse_cache                  = true;
     kv_cache_config.memory_cache_size_mb         = 0;
     kv_cache_config.memory_cache_sync_timeout_ms = 1;
@@ -975,7 +973,6 @@ TEST_F(KVCacheManagerTest, Init_Throws_WhenMemoryCacheEnabledButSyncTimeoutInval
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
     kv_cache_config.enable_memory_cache          = true;
-    kv_cache_config.enable_tiered_memory_cache   = true;
     kv_cache_config.reuse_cache                  = true;
     kv_cache_config.memory_cache_size_mb         = 10;
     kv_cache_config.memory_cache_sync_timeout_ms = 0;  // mock coordinator init failed
@@ -987,10 +984,9 @@ TEST_F(KVCacheManagerTest, Init_Throws_WhenMemoryCacheEnabledButSyncTimeoutInval
 TEST_F(KVCacheManagerTest, TieredMemoryCacheIsOwnedOnlyByBlockTreeCache) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_memory_cache        = true;
-    kv_cache_config.enable_tiered_memory_cache = true;
-    kv_cache_config.reuse_cache                = true;
-    kv_cache_config.memory_cache_size_mb       = 1;
+    kv_cache_config.enable_memory_cache  = true;
+    kv_cache_config.reuse_cache          = true;
+    kv_cache_config.memory_cache_size_mb = 1;
 
     auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     ASSERT_TRUE(manager->init());
@@ -1023,9 +1019,8 @@ static void appendValidGroupedTransfer(const std::shared_ptr<KVCacheManager>& ma
 TEST_F(KVCacheManagerTest, ExecuteFunctionRoutesAllGroupedMemoryItemsOnlyToTieredBlockTree) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig kv_cache_config;
-    kv_cache_config.enable_memory_cache        = true;
-    kv_cache_config.enable_tiered_memory_cache = true;
-    kv_cache_config.memory_cache_size_mb       = 1;
+    kv_cache_config.enable_memory_cache  = true;
+    kv_cache_config.memory_cache_size_mb = 1;
     auto manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, kv_cache_config);
     ASSERT_TRUE(manager->init());
 
@@ -1040,10 +1035,9 @@ TEST_F(KVCacheManagerTest, ExecuteFunctionRoutesAllGroupedMemoryItemsOnlyToTiere
 TEST_F(KVCacheManagerTest, ExecuteFunctionRejectsMixedPartialUnavailableAndOutOfRangeGroupedItems) {
     auto          cache_config = makeSimpleMhaCacheConfig(1, 4, 2, rtp_llm::DataType::TYPE_INT8);
     KVCacheConfig tiered_config;
-    tiered_config.enable_memory_cache        = true;
-    tiered_config.enable_tiered_memory_cache = true;
-    tiered_config.memory_cache_size_mb       = 1;
-    auto tiered_manager = std::make_shared<KVCacheManager>(cache_config, false, nullptr, tiered_config);
+    tiered_config.enable_memory_cache  = true;
+    tiered_config.memory_cache_size_mb = 1;
+    auto tiered_manager                = std::make_shared<KVCacheManager>(cache_config, false, nullptr, tiered_config);
     ASSERT_TRUE(tiered_manager->init());
 
     {
@@ -1106,13 +1100,12 @@ TEST_F(KVCacheManagerTest, MultiRankZeroUsesDedicatedBroadcastManager) {
     KVCacheConfig     kv_cache_config;
     ParallelismConfig parallelism_config;
     RuntimeConfig     runtime_config;
-    kv_cache_config.enable_memory_cache        = true;
-    kv_cache_config.enable_tiered_memory_cache = true;
-    kv_cache_config.memory_cache_size_mb       = 1;
-    parallelism_config.tp_size                 = 2;
-    parallelism_config.tp_rank                 = 0;
-    parallelism_config.world_size              = 2;
-    runtime_config.worker_grpc_addrs           = {"127.0.0.1:12345", "127.0.0.1:12346"};
+    kv_cache_config.enable_memory_cache  = true;
+    kv_cache_config.memory_cache_size_mb = 1;
+    parallelism_config.tp_size           = 2;
+    parallelism_config.tp_rank           = 0;
+    parallelism_config.world_size        = 2;
+    runtime_config.worker_grpc_addrs     = {"127.0.0.1:12345", "127.0.0.1:12346"};
 
     auto manager = std::make_shared<KVCacheManager>(
         cache_config, /*warmup=*/true, nullptr, kv_cache_config, parallelism_config, runtime_config);
@@ -1132,14 +1125,13 @@ TEST_F(KVCacheManagerTest, NonZeroMultiRankHasNoLocalBroadcastManager) {
     KVCacheConfig     kv_cache_config;
     ParallelismConfig parallelism_config;
     RuntimeConfig     runtime_config;
-    kv_cache_config.enable_memory_cache        = true;
-    kv_cache_config.enable_tiered_memory_cache = true;
-    kv_cache_config.memory_cache_size_mb       = 1;
-    parallelism_config.tp_size                 = 2;
-    parallelism_config.tp_rank                 = 1;
-    parallelism_config.world_size              = 2;
-    parallelism_config.world_rank              = 1;
-    runtime_config.worker_grpc_addrs           = {"127.0.0.1:12345", "127.0.0.1:12346"};
+    kv_cache_config.enable_memory_cache  = true;
+    kv_cache_config.memory_cache_size_mb = 1;
+    parallelism_config.tp_size           = 2;
+    parallelism_config.tp_rank           = 1;
+    parallelism_config.world_size        = 2;
+    parallelism_config.world_rank        = 1;
+    runtime_config.worker_grpc_addrs     = {"127.0.0.1:12345", "127.0.0.1:12346"};
 
     auto manager = std::make_shared<KVCacheManager>(
         cache_config, /*warmup=*/true, nullptr, kv_cache_config, parallelism_config, runtime_config);
@@ -1180,7 +1172,7 @@ TEST_F(KVCacheManagerTest, GetKVCacheInfoUsesAuthoritativeBlockTreeSnapshot) {
     auto       tokens   = makeDSV4CompleteTokenIds(/*initial_seq_len=*/4, /*max_seq_len=*/4, /*seq_size_per_block=*/2);
     MallocInfo malloc_info{resource, tokens};
     malloc_info.reuse_cache         = true;
-    malloc_info.enable_device_cache = false;
+    malloc_info.enable_cache_lookup = false;
     ASSERT_TRUE(kv_cache_manager->malloc(malloc_info).success);
     kv_cache_manager->insertIntoCache(InsertInfo{resource, tokens, /*is_resident=*/false});
 
@@ -1344,7 +1336,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionTriggeredWhenPoolExhaustedByCache) {
     auto       tokens_a = makeTokens(/*offset=*/0);
     MallocInfo malloc_a{res_a, tokens_a};
     malloc_a.reuse_cache         = true;
-    malloc_a.enable_device_cache = false;
+    malloc_a.enable_cache_lookup = false;
     ASSERT_TRUE(manager->malloc(malloc_a).success);
 
     InsertInfo insert_a{res_a, tokens_a, /*is_resident=*/false};
@@ -1360,7 +1352,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionTriggeredWhenPoolExhaustedByCache) {
     auto       tokens_b = makeTokens(/*offset=*/10000);
     MallocInfo malloc_b{res_b, tokens_b};
     malloc_b.reuse_cache         = true;
-    malloc_b.enable_device_cache = false;
+    malloc_b.enable_cache_lookup = false;
     ASSERT_TRUE(manager->malloc(malloc_b).success);
 
     InsertInfo insert_b{res_b, tokens_b, /*is_resident=*/false};
@@ -1376,7 +1368,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionTriggeredWhenPoolExhaustedByCache) {
     auto       tokens_c = makeTokens(/*offset=*/20000);
     MallocInfo malloc_c{res_c, tokens_c};
     malloc_c.reuse_cache         = true;
-    malloc_c.enable_device_cache = false;
+    malloc_c.enable_cache_lookup = false;
     ASSERT_TRUE(manager->malloc(malloc_c).success);
 
     InsertInfo insert_c{res_c, tokens_c, /*is_resident=*/false};
@@ -1392,7 +1384,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionTriggeredWhenPoolExhaustedByCache) {
     auto       tokens_d = makeTokens(/*offset=*/30000);
     MallocInfo malloc_d{res_d, tokens_d};
     malloc_d.reuse_cache         = true;
-    malloc_d.enable_device_cache = false;
+    malloc_d.enable_cache_lookup = false;
 
     // This allocation MUST succeed — FULL groups trigger ensureFreeBlocks → evict from cache.
     auto result_d = manager->malloc(malloc_d);
@@ -1462,7 +1454,7 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
     auto       seed_tokens = makeTokens(2 * spb);
     MallocInfo seed_malloc{seed_res, seed_tokens};
     seed_malloc.reuse_cache         = false;
-    seed_malloc.enable_device_cache = false;
+    seed_malloc.enable_cache_lookup = false;
     ASSERT_TRUE(manager->malloc(seed_malloc).success);
 
     for (int gid : dsv4FixedTailGroupIds(manager_config)) {
@@ -1480,7 +1472,7 @@ TEST_F(KVCacheManagerTest, DSV4MaxConcurrencyOneReuseOneBlockAndAllocTwoTailBloc
     auto       reuse_tokens = makeTokens(3 * spb);
     MallocInfo reuse_malloc{reuse_res, reuse_tokens};
     reuse_malloc.reuse_cache         = true;
-    reuse_malloc.enable_device_cache = true;
+    reuse_malloc.enable_cache_lookup = true;
     auto reuse_result                = manager->malloc(reuse_malloc);
     ASSERT_TRUE(reuse_result.success);
     EXPECT_EQ(reuse_result.reuse_len, 2 * spb);
@@ -1545,7 +1537,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     auto       tokens_a = makeTokens(/*offset=*/0);
     MallocInfo malloc_a{res_a, tokens_a};
     malloc_a.reuse_cache         = true;
-    malloc_a.enable_device_cache = false;
+    malloc_a.enable_cache_lookup = false;
     ASSERT_TRUE(manager->malloc(malloc_a).success);
     InsertInfo insert_a{res_a, tokens_a, /*is_resident=*/false};
     manager->insertIntoCache(insert_a);
@@ -1580,7 +1572,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     auto       tokens_b = makeTokens(/*offset=*/10000);
     MallocInfo malloc_b{res_b, tokens_b};
     malloc_b.reuse_cache         = true;
-    malloc_b.enable_device_cache = false;
+    malloc_b.enable_cache_lookup = false;
     ASSERT_TRUE(manager->malloc(malloc_b).success);
     InsertInfo insert_b{res_b, tokens_b, /*is_resident=*/false};
     manager->insertIntoCache(insert_b);
@@ -1640,7 +1632,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     auto       tokens_c = makeTokens(/*offset=*/20000);
     MallocInfo malloc_c{res_c, tokens_c};
     malloc_c.reuse_cache         = true;
-    malloc_c.enable_device_cache = false;
+    malloc_c.enable_cache_lookup = false;
 
     // FULL needs 3 and still has ample capacity → no FULL eviction.
     // Each reusable SWA pool has fewer than 2 free blocks (see the <2 assertion
@@ -1727,7 +1719,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     tokens_c->setSeqLength(4 * spb);
     MallocInfo incr1{res_c, tokens_c};
     incr1.reuse_cache         = false;
-    incr1.enable_device_cache = false;
+    incr1.enable_cache_lookup = false;
     ASSERT_TRUE(manager->malloc(incr1).success) << "First incr must succeed via eviction";
 
     for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
@@ -1744,7 +1736,7 @@ TEST_F(KVCacheManagerTest, DSV4EvictionOnSWAGroupsDuringInferenceWithDecodeConti
     tokens_c->setSeqLength(5 * spb);
     MallocInfo incr2{res_c, tokens_c};
     incr2.reuse_cache         = false;
-    incr2.enable_device_cache = false;
+    incr2.enable_cache_lookup = false;
     ASSERT_TRUE(manager->malloc(incr2).success) << "Second incr must succeed (removeSkipped frees block)";
 
     for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
@@ -1782,7 +1774,7 @@ TEST_F(KVCacheManagerTest, DSV4InitThenIncrWithRemoveSkippedBlocksFullLifecycle)
 
     MallocInfo init_info{resource, tokens};
     init_info.reuse_cache         = false;
-    init_info.enable_device_cache = false;
+    init_info.enable_cache_lookup = false;
     auto init_result              = manager->malloc(init_info);
     ASSERT_TRUE(init_result.success);
     ASSERT_EQ(resource->groupNums(), kDsv4PoolNum);
@@ -1814,7 +1806,7 @@ TEST_F(KVCacheManagerTest, DSV4InitThenIncrWithRemoveSkippedBlocksFullLifecycle)
     tokens->setSeqLength(5 * spb);
     MallocInfo incr1_info{resource, tokens};
     incr1_info.reuse_cache         = false;
-    incr1_info.enable_device_cache = false;
+    incr1_info.enable_cache_lookup = false;
     ASSERT_TRUE(manager->malloc(incr1_info).success);
 
     for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
@@ -1860,7 +1852,7 @@ TEST_F(KVCacheManagerTest, DSV4InitThenIncrWithRemoveSkippedBlocksFullLifecycle)
     tokens->setSeqLength(6 * spb);
     MallocInfo incr2_info{resource, tokens};
     incr2_info.reuse_cache         = false;
-    incr2_info.enable_device_cache = false;
+    incr2_info.enable_cache_lookup = false;
     ASSERT_TRUE(manager->malloc(incr2_info).success);
 
     for (int gid = 0; gid < kDsv4PoolNum; ++gid) {
@@ -1901,7 +1893,7 @@ TEST_F(KVCacheManagerTest, DSV4InitThenIncrWithRemoveSkippedBlocksFullLifecycle)
     tokens->setSeqLength(7 * spb);
     MallocInfo incr3_info{resource, tokens};
     incr3_info.reuse_cache         = false;
-    incr3_info.enable_device_cache = false;
+    incr3_info.enable_cache_lookup = false;
     ASSERT_TRUE(manager->malloc(incr3_info).success);
 
     for (int gid = 0; gid < kDsv4PoolNum; ++gid) {

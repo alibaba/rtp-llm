@@ -1,6 +1,8 @@
 #pragma once
 
+#include <atomic>
 #include <cstddef>
+#include <condition_variable>
 #include <deque>
 #include <memory>
 #include <mutex>
@@ -56,22 +58,59 @@ using MultiNodeBlocks = std::vector<std::vector<BlockIdxType>>;
 
 BlockIdxType    poolMalloc(IBlockPool& pool);
 MultiNodeBlocks allocateDeviceBlocksForTest(GroupSet& group_set, size_t count, BlockRefType ref_type);
-void referenceDeviceBlocksForTest(GroupSet& group_set, const MultiNodeBlocks& blocks, BlockRefType ref_type);
+void            referenceDeviceBlocksForTest(GroupSet& group_set, const MultiNodeBlocks& blocks, BlockRefType ref_type);
 void unreferenceDeviceBlocksForTest(GroupSet& group_set, const MultiNodeBlocks& blocks, BlockRefType ref_type);
-MultiNodeResource makeMultiNodeResourceForTest(size_t                       group_set_id,
-                                               Tier                         tier,
+MultiNodeResource makeMultiNodeResourceForTest(size_t                        group_set_id,
+                                               Tier                          tier,
                                                const std::vector<TreeNode*>& nodes,
-                                               const MultiNodeBlocks&       blocks);
+                                               const MultiNodeBlocks&        blocks);
 
-size_t unreferencedBlocksNum(const IBlockPool& pool);
-size_t treeCachedBlocksNum(const IBlockPool& pool);
+size_t             unreferencedBlocksNum(const IBlockPool& pool);
+size_t             treeCachedBlocksNum(const IBlockPool& pool);
 DeviceBlockPoolPtr makeStructuralDevicePool(size_t group_set_id);
-void releaseDeviceBlocksAndNotify(BlockTreeCache&          cache,
-                                  const DeviceBlockPoolPtr& pool,
-                                  const BlockIdList&        blocks,
-                                  BlockRefType              ref_type);
+void               releaseDeviceBlocksAndNotify(BlockTreeCache&           cache,
+                                                const DeviceBlockPoolPtr& pool,
+                                                const BlockIdList&        blocks,
+                                                BlockRefType              ref_type);
 
 void prepareGroupSetsForTest(std::vector<GroupSetPtr>& group_sets);
+
+class CallbackBarrier {
+public:
+    void enterAndWait();
+    void waitUntilEntered(size_t expected_count = 1);
+    void release();
+
+private:
+    std::mutex              mutex_;
+    std::condition_variable cv_;
+    size_t                  entered_count_{0};
+    bool                    released_{false};
+};
+
+enum class TransferCopyAction {
+    Succeed,
+    Fail,
+    Throw
+};
+
+const char* transferCopyActionName(TransferCopyAction action);
+
+class ControlledPerRankBlockTransferEngine final: public PerRankBlockTransferEngine {
+public:
+    ControlledPerRankBlockTransferEngine(const std::vector<GroupSetPtr>&  groups,
+                                         TransferCopyAction               action,
+                                         std::shared_ptr<CallbackBarrier> barrier = nullptr);
+
+    std::shared_ptr<AsyncContext> submit(const TransferDescriptor& descriptor) override;
+
+    size_t submitCount() const;
+
+private:
+    const TransferCopyAction         action_;
+    std::shared_ptr<CallbackBarrier> barrier_;
+    std::atomic<size_t>              submit_count_{0};
+};
 
 std::unique_ptr<BlockTreeCache>
 makeBlockTreeCacheForTest(std::vector<GroupSetPtr>          group_sets,
@@ -82,6 +121,10 @@ makeBlockTreeCacheForTest(std::vector<GroupSetPtr>          group_sets,
 bool insertGroupSetResources(BlockTreeCache&                                   cache,
                              const CacheKeysType&                              cache_keys,
                              const std::vector<std::vector<GroupSetResource>>& resources);
+
+// Accepted resources keep the tree hold after temporary seed holds are released.
+void releaseLowerTierSeedRefs(const std::vector<GroupSetPtr>&                   group_sets,
+                              const std::vector<std::vector<GroupSetResource>>& resources);
 
 class BlockTreeCacheTestPeer {
 public:
@@ -106,6 +149,7 @@ public:
     static void setPerRankBlockTransferEngineForTest(BlockTreeCache&               cache,
                                                      PerRankBlockTransferEnginePtr per_rank_transfer_engine);
     static void runMaintenanceForTest(BlockTreeCache& cache);
+    static void beginStoreShutdownForTest(BlockTreeCache& cache);
     static bool demoteOneForGroupSetForTest(BlockTreeCache&     cache,
                                             size_t              group_set_id,
                                             Tier                tier,
@@ -175,7 +219,7 @@ public:
     std::vector<std::shared_ptr<HostBlockPool>>          host_pools;
     std::vector<std::shared_ptr<BlockTreeDiskBlockPool>> disk_pools;
     std::shared_ptr<const CacheTopology>                 topology;
-    std::vector<MultiNodeBlocks>                          request_blocks;
+    std::vector<MultiNodeBlocks>                         request_blocks;
     std::shared_ptr<ScriptedPerRankBlockTransferEngine>  scripted_per_rank_transfer_engine;
     std::unique_ptr<BlockTreeCache>                      cache;
 

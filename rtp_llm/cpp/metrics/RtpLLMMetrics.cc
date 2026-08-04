@@ -18,6 +18,7 @@ AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheOperationMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCachePoolMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheTransferMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheEvictionMetrics);
+AUTIL_LOG_SETUP(rtp_llm, RtpLLMTierStoreMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMCacheReuseMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMDeviceCacheReuseMetrics);
 AUTIL_LOG_SETUP(rtp_llm, RtpLLMExecutorMetrics);
@@ -409,7 +410,8 @@ bool RtpLLMCacheTransferMetrics::init(kmonitor::MetricsGroupManager* manager) {
 
 void RtpLLMCacheTransferMetrics::report(const kmonitor::MetricsTags*         tags,
                                         RtpLLMCacheTransferMetricsCollector* collector) {
-    kmonitor::MetricsTags transfer_tags("source_tier", collector->source_tier);
+    kmonitor::MetricsTags transfer_tags("operation", collector->operation);
+    transfer_tags.AddTag("source_tier", collector->source_tier);
     transfer_tags.AddTag("target_tier", collector->target_tier);
     if (collector->transfer_completed) {
         transfer_qps_metric->Report(&transfer_tags, 1);
@@ -445,6 +447,17 @@ void RtpLLMCacheEvictionMetrics::report(const kmonitor::MetricsTags*         tag
             evicted_block_lifetime_ms_metric->Report(&eviction_tags, collector->lifetime_ms);
         }
     }
+}
+
+bool RtpLLMTierStoreMetrics::init(kmonitor::MetricsGroupManager* manager) {
+    REGISTER_QPS_MUTABLE_METRIC(store_publish_block_qps_metric, "rtp_llm_kv_cache_store_publish_block_qps");
+    return true;
+}
+
+void RtpLLMTierStoreMetrics::report(const kmonitor::MetricsTags* tags, RtpLLMTierStoreMetricsCollector* collector) {
+    kmonitor::MetricsTags tier_tags("target_tier", collector->target_tier);
+    tier_tags.AddTag("outcome", collector->outcome);
+    store_publish_block_qps_metric->Report(&tier_tags, collector->block_count);
 }
 
 bool RtpLLMRemoteCacheMatchMetrics::init(kmonitor::MetricsGroupManager* manager) {

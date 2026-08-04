@@ -20,8 +20,10 @@ struct ReusableGroupLocation {
 using ReusableGroupLocations = std::unordered_map<size_t, ReusableGroupLocation>;
 
 struct BlockTreeInsertResult {
-    std::vector<TreeNode*> inserted_nodes;
+    std::vector<TreeNode*>                                 inserted_nodes;
     std::vector<std::pair<TreeNode*, std::vector<size_t>>> adopted_nodes;
+    // Number of logical GroupSetResources the tree took BLOCK_CACHE ownership of.
+    size_t accepted_resource_count{0};
 };
 
 class BlockTree {
@@ -46,7 +48,7 @@ public:
         return group_sets_;
     }
     const ReusableGroupLocation* reusableGroupLocation(size_t group_id) const;
-    size_t reusableGroupCount() const {
+    size_t                       reusableGroupCount() const {
         return reusable_group_locations_.size();
     }
     const std::vector<std::unique_ptr<TreeNode>>& nodes() const {

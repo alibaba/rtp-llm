@@ -97,12 +97,11 @@ private:
 
 KVCacheConfig makeSingleTypeTieredConfig(Tier source_tier, const std::string& disk_path) {
     KVCacheConfig config;
-    config.enable_memory_cache        = true;
-    config.enable_tiered_memory_cache = true;
-    config.memory_cache_size_mb       = 1;
-    config.enable_memory_cache_disk   = source_tier == Tier::DISK;
-    config.memory_cache_disk_size_mb  = source_tier == Tier::DISK ? 1 : 0;
-    config.memory_cache_disk_paths    = disk_path;
+    config.enable_memory_cache       = true;
+    config.memory_cache_size_mb      = 1;
+    config.enable_disk_cache         = source_tier == Tier::DISK;
+    config.memory_cache_disk_size_mb = source_tier == Tier::DISK ? 1 : 0;
+    config.memory_cache_disk_paths   = disk_path;
     return config;
 }
 
@@ -404,7 +403,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseRefere
 
         auto       token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/20, /*seq_size_per_block=*/4);
         MallocInfo malloc_info{batch_resource, token_ids};
-        malloc_info.enable_device_cache = true;
+        malloc_info.enable_cache_lookup = true;
 
         auto result = allocator_->malloc(malloc_info);
         EXPECT_TRUE(result.success);
@@ -424,7 +423,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, ReserveBlocksCheckHappensAfterReuseRefere
 
         auto       token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/32, /*seq_size_per_block=*/4);
         MallocInfo malloc_info{batch_resource, token_ids};
-        malloc_info.enable_device_cache = false;
+        malloc_info.enable_cache_lookup = false;
 
         auto result = allocator_->malloc(malloc_info);
         EXPECT_FALSE(result.success);
@@ -573,7 +572,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, OrdinaryAllocationEvictsOnlyAfterTreeEntr
     seed->setBatchCacheKeys(0, CacheKeysType{100});
     auto       seed_tokens = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
     MallocInfo seed_malloc{seed, seed_tokens};
-    seed_malloc.enable_device_cache = false;
+    seed_malloc.enable_cache_lookup = false;
     ASSERT_TRUE(allocator_->malloc(seed_malloc).success);
     ASSERT_EQ(seed->blocksNum(0, 0), 1);
     const BlockIdxType seed_block = seed->blocks(0, 0).front();
@@ -587,7 +586,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, OrdinaryAllocationEvictsOnlyAfterTreeEntr
     pressure->setBatchCacheKeys(0, CacheKeysType{200, 201, 202});
     auto       pressure_tokens = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
     MallocInfo pressure_malloc{pressure, pressure_tokens};
-    pressure_malloc.enable_device_cache = false;
+    pressure_malloc.enable_cache_lookup = false;
     EXPECT_FALSE(allocator_->malloc(pressure_malloc).success);
     EXPECT_TRUE(device_pool->isAllocated(seed_block));
     EXPECT_EQ(pressure->curBlocksNum(), 0);
@@ -630,7 +629,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InsertIntoCachePublishesOnlyBatchZero) {
 
     auto batch_one_match = allocator_->blockTreeCacheOwner()->match(CacheKeysType{200});
     EXPECT_EQ(batch_one_match.matched_device_blocks, 0u);
-    EXPECT_TRUE(allocator_->blockTreeCacheOwner()->matchedBlocksForGroup(0, batch_one_match.matched_device_resources).empty());
+    EXPECT_TRUE(
+        allocator_->blockTreeCacheOwner()->matchedBlocksForGroup(0, batch_one_match.matched_device_resources).empty());
     allocator_->blockTreeCacheOwner()->releaseMatchedResources(batch_one_match.matched_device_resources);
 
     block_pool->decRef(blocks, BlockRefType::REQUEST);
@@ -889,7 +889,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, PrefixReuseDisabledSkipsMatchAndInsert) {
     auto hit_tokens = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/20, /*seq_size_per_block=*/4);
 
     MallocInfo hit_malloc_info{hit_resource, hit_tokens};
-    hit_malloc_info.enable_device_cache = true;
+    hit_malloc_info.enable_cache_lookup = true;
     auto hit_result                     = allocator_->malloc(hit_malloc_info);
     ASSERT_TRUE(hit_result.success);
     EXPECT_EQ(hit_result.reuse_len, 0);
@@ -1599,7 +1599,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenInitMallocForCommon
     ASSERT_EQ(free_before_fail, 1u);
 
     MallocInfo malloc_info{batch_resource, token_ids};
-    malloc_info.enable_device_cache = true;
+    malloc_info.enable_cache_lookup = true;
     auto result                     = allocator_->malloc(malloc_info);
     EXPECT_FALSE(result.success);
 
@@ -1672,7 +1672,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, InitMallocRollbackWhenIncrMallocFails) {
     auto complete_token_ids = createCompleteTokenIds(/*batch_size=*/3, /*seq_length=*/17, /*seq_size_per_block=*/8);
 
     MallocInfo malloc_info{batch_resource, complete_token_ids};
-    malloc_info.enable_device_cache = false;
+    malloc_info.enable_cache_lookup = false;
     auto result                     = allocator_->malloc(malloc_info);
     EXPECT_FALSE(result.success);
 
@@ -1872,8 +1872,8 @@ TEST_F(SingleTypeKVCacheAllocatorTest, UpdateKVBlockReleasesSharedBlocksFromEach
     }
 
     std::vector<TaggedBlockIdPair> block_update_mapping;
-    ASSERT_TRUE(allocator_->updateKVBlock(
-        resource, /*block_src_batch=*/{0}, /*copy_last_block=*/false, block_update_mapping));
+    ASSERT_TRUE(
+        allocator_->updateKVBlock(resource, /*block_src_batch=*/{0}, /*copy_last_block=*/false, block_update_mapping));
 
     ASSERT_EQ(resource->batchSize(), 1);
     EXPECT_EQ(resource->blocks(0, 0), *shared_blocks);

@@ -11,7 +11,8 @@ std::vector<GroupSetPtr> makeGroupSets(size_t count) {
     std::vector<GroupSetPtr> group_sets;
     group_sets.reserve(count);
     for (size_t i = 0; i < count; ++i) {
-        group_sets.push_back(std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr));
+        group_sets.push_back(std::make_shared<FullGroupSet>(
+            std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr));
     }
     block_tree_cache_test::prepareGroupSetsForTest(group_sets);
     return group_sets;
@@ -30,8 +31,7 @@ std::vector<std::vector<GroupSetResource>> make2DResources(int group_count, int 
 
 // Helper: create 2D resources with one empty GroupSetResource per node.
 std::vector<std::vector<GroupSetResource>> makeEmpty2DResources(int path_len) {
-    return std::vector<std::vector<GroupSetResource>>(static_cast<size_t>(path_len),
-                                                       std::vector<GroupSetResource>(1));
+    return std::vector<std::vector<GroupSetResource>>(static_cast<size_t>(path_len), std::vector<GroupSetResource>(1));
 }
 
 TreeNode* insertAndGetNode(BlockTree&                                        tree,
@@ -48,10 +48,9 @@ TEST(BlockTreeTest, EmptyTreeFindReturnsEmpty) {
 }
 
 TEST(BlockTreeTest, OwnsReusableGroupLocations) {
-    auto topology = block_transfer_engine_test::makeTestTopology(
-        {block_transfer_engine_test::makeTestGroupBase(),
-         block_transfer_engine_test::makeTestGroupBase(),
-         block_transfer_engine_test::makeTestGroupBase()});
+    auto topology = block_transfer_engine_test::makeTestTopology({block_transfer_engine_test::makeTestGroupBase(),
+                                                                  block_transfer_engine_test::makeTestGroupBase(),
+                                                                  block_transfer_engine_test::makeTestGroupBase()});
     std::vector<GroupSetPtr> group_sets{
         block_transfer_engine_test::makeTestGroupSet(0, topology, {0, 2}, {}),
         block_transfer_engine_test::makeTestGroupSet(1, topology, {1}, {}),
@@ -80,7 +79,7 @@ TEST(BlockTreeTest, OwnsReusableGroupLocations) {
 }
 
 TEST(BlockTreeTest, InsertSinglePath) {
-    BlockTree tree(makeGroupSets(1));
+    BlockTree     tree(makeGroupSets(1));
     CacheKeysType keys      = {100, 200, 300};
     auto          resources = make2DResources(1, 3, 42);
 
@@ -88,7 +87,7 @@ TEST(BlockTreeTest, InsertSinglePath) {
     ASSERT_NE(leaf, nullptr);
     EXPECT_EQ(leaf->cache_key, 300);
     EXPECT_EQ(leaf->group_set_resources[0].device_blocks[0], 44);  // start_block + 2
-    EXPECT_EQ(tree.nodes().size(), 3u);                               // 3 nodes created (not counting root)
+    EXPECT_EQ(tree.nodes().size(), 3u);                            // 3 nodes created (not counting root)
 
     // Verify tree structure and per-node resources
     auto* root = tree.root();
@@ -182,7 +181,7 @@ TEST(BlockTreeTest, FindEmptyKeys) {
 
 TEST(BlockTreeTest, RemoveLeafNode) {
     BlockTree tree(makeGroupSets(1));
-    auto resources = make2DResources(1, 3, 42);
+    auto      resources = make2DResources(1, 3, 42);
     resources.back()[0].device_blocks.clear();
     tree.insertNode({100, 200, 300}, resources);
     EXPECT_EQ(tree.nodes().size(), 3u);
@@ -199,9 +198,9 @@ TEST(BlockTreeTest, RemoveLeafNode) {
 }
 
 TEST(BlockTreeTest, IsRemovableRequiresLeafWithRemovableGroupResources) {
-    BlockTree tree(makeGroupSets(2));
+    BlockTree                                  tree(makeGroupSets(2));
     std::vector<std::vector<GroupSetResource>> resources(2, std::vector<GroupSetResource>(2));
-    TreeNode* leaf = insertAndGetNode(tree, {100, 200}, resources);
+    TreeNode*                                  leaf = insertAndGetNode(tree, {100, 200}, resources);
     ASSERT_NE(leaf, nullptr);
 
     EXPECT_FALSE(tree.isRemovable(leaf->parent));
@@ -270,10 +269,11 @@ TEST(BlockTreeTest, RepeatedInsertDoesNotDuplicate) {
 }
 
 TEST(BlockTreeTest, InsertEmptyKeys) {
-    BlockTree tree(makeGroupSets(1));
+    BlockTree                   tree(makeGroupSets(1));
     const BlockTreeInsertResult result = tree.insertNode({}, {});
     EXPECT_TRUE(result.inserted_nodes.empty());
     EXPECT_TRUE(result.adopted_nodes.empty());
+    EXPECT_EQ(result.accepted_resource_count, 0u);
     EXPECT_EQ(tree.nodes().size(), 0u);
 }
 
@@ -314,7 +314,7 @@ TEST(BlockTreeTest, InsertDoesNotOverwriteExistingNodeResources) {
 }
 
 TEST(BlockTreeTest, InsertFillsOnlyCompleteEmptyIdleGroupsOnExistingNode) {
-    BlockTree tree(makeGroupSets(2));
+    BlockTree                                  tree(makeGroupSets(2));
     std::vector<std::vector<GroupSetResource>> original(1, std::vector<GroupSetResource>(2));
     original[0][0].device_blocks = {10};
     original[0][1].device_blocks = {NULL_BLOCK_IDX};
@@ -330,29 +330,31 @@ TEST(BlockTreeTest, InsertFillsOnlyCompleteEmptyIdleGroupsOnExistingNode) {
     ASSERT_EQ(result.adopted_nodes.size(), 1u);
     EXPECT_EQ(result.adopted_nodes[0].first, node);
     EXPECT_EQ(result.adopted_nodes[0].second, (std::vector<size_t>{1}));
+    EXPECT_EQ(result.accepted_resource_count, 1u);
     EXPECT_EQ(node->group_set_resources[0].device_blocks, (BlockIndicesType{10}));
     EXPECT_EQ(node->group_set_resources[1].device_blocks, (BlockIndicesType{30}));
 }
 
 TEST(BlockTreeTest, InsertAggregatesAdoptedGroupSetsPerNode) {
-    BlockTree tree(makeGroupSets(2));
+    BlockTree                                  tree(makeGroupSets(2));
     std::vector<std::vector<GroupSetResource>> original(1, std::vector<GroupSetResource>(2));
     original[0][0].device_blocks = {NULL_BLOCK_IDX};
     original[0][1].device_blocks = {NULL_BLOCK_IDX};
     TreeNode* node               = insertAndGetNode(tree, {100}, original);
 
     std::vector<std::vector<GroupSetResource>> replacement(1, std::vector<GroupSetResource>(2));
-    replacement[0][0].device_blocks = {20};
-    replacement[0][1].device_blocks = {30};
+    replacement[0][0].device_blocks    = {20};
+    replacement[0][1].device_blocks    = {30};
     const BlockTreeInsertResult result = tree.insertNode({100}, replacement);
 
     ASSERT_EQ(result.adopted_nodes.size(), 1u);
     EXPECT_EQ(result.adopted_nodes[0].first, node);
     EXPECT_EQ(result.adopted_nodes[0].second, (std::vector<size_t>{0, 1}));
+    EXPECT_EQ(result.accepted_resource_count, 2u);
 }
 
 TEST(BlockTreeTest, InsertSkipsBusyEmptyGroupOnExistingNode) {
-    BlockTree tree(makeGroupSets(1));
+    BlockTree                                  tree(makeGroupSets(1));
     std::vector<std::vector<GroupSetResource>> original(1, std::vector<GroupSetResource>(1));
     original[0][0].device_blocks = {NULL_BLOCK_IDX};
     TreeNode* node               = insertAndGetNode(tree, {100}, original);
@@ -361,12 +363,13 @@ TEST(BlockTreeTest, InsertSkipsBusyEmptyGroupOnExistingNode) {
 
     const BlockTreeInsertResult result = tree.insertNode({100}, make2DResources(1, 1, 20));
     EXPECT_TRUE(result.adopted_nodes.empty());
+    EXPECT_EQ(result.accepted_resource_count, 0u);
     EXPECT_EQ(node->group_set_resources[0].device_blocks, (BlockIndicesType{NULL_BLOCK_IDX}));
     EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::DEMOTING);
 }
 
 TEST(BlockTreeTest, InsertSkipsBusyGroupButFillsOtherIdleGroupAndAddsSuffix) {
-    BlockTree tree(makeGroupSets(2));
+    BlockTree                                  tree(makeGroupSets(2));
     std::vector<std::vector<GroupSetResource>> original(1, std::vector<GroupSetResource>(2));
     original[0][0].device_blocks = {NULL_BLOCK_IDX};
     original[0][1].device_blocks = {NULL_BLOCK_IDX};
@@ -385,6 +388,7 @@ TEST(BlockTreeTest, InsertSkipsBusyGroupButFillsOtherIdleGroupAndAddsSuffix) {
     EXPECT_EQ(result.adopted_nodes[0].second, (std::vector<size_t>{1}));
     ASSERT_EQ(result.inserted_nodes.size(), 1u);
     EXPECT_EQ(result.inserted_nodes[0]->cache_key, 200);
+    EXPECT_EQ(result.accepted_resource_count, 3u);
     EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::LOADING);
     EXPECT_EQ(node->group_set_resources[0].device_blocks, (BlockIndicesType{NULL_BLOCK_IDX}));
     EXPECT_EQ(node->group_set_resources[1].device_blocks, (BlockIndicesType{30}));

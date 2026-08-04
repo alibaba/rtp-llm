@@ -5,20 +5,10 @@
 #include <cstdint>
 #include <vector>
 
+#include "rtp_llm/cpp/cache/CacheTier.h"
 #include "rtp_llm/cpp/cache/KVCacheResource.h"
 
 namespace rtp_llm {
-
-// Storage tier enumeration for multi-tier cache management.
-enum class Tier : int8_t {
-    DEVICE = 0,  // L1: GPU
-    HOST   = 1,  // L2: CPU memory
-    DISK   = 2,  // L3: Local disk
-    REMOTE = 3,  // L4: Remote storage
-    NONE   = 4,  // No tier (direct release)
-};
-
-const char* tierName(Tier tier);
 
 // Sorting metadata for a candidate node. A single copy per GroupSetResource follows the
 // data to its current serving tier (steady-state single-tier-service invariant).
@@ -90,7 +80,7 @@ struct GroupSetResource {
     void                      evictFromTier(Tier tier);
     std::vector<BlockIdxType> getBlocks(Tier tier) const;
     void                      setBlocks(Tier tier, const std::vector<BlockIdxType>& blocks);
-    Tier getTopTier() const {
+    Tier                      getTopTier() const {
         if (hasTier(Tier::DEVICE)) {
             return Tier::DEVICE;
         }

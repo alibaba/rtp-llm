@@ -67,7 +67,7 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
         init_result.async_context = std::move(pending_async_context);
     }
 
-    if (metrics_reporter_ && malloc_info.enable_device_cache) {
+    if (metrics_reporter_ && malloc_info.enable_cache_lookup) {
         int64_t device_input_length = 0;
         if (malloc_info.batch_kv_cache_resource) {
             const auto&  cache_keys      = malloc_info.batch_kv_cache_resource->cacheKeys(0);
@@ -76,10 +76,12 @@ MallocResult KVCacheAllocator::initMalloc(const MallocInfo& malloc_info) {
         }
 
         if (device_input_length > 0) {
+            const int device_reuse_len =
+                std::max(0, init_result.reuse_len - init_result.memory_reuse_len - init_result.disk_reuse_len);
             RtpLLMDeviceCacheReuseMetricsCollector collector;
             collector.match_cost_time_us    = init_result.match_cost_time_us;
             collector.device_input_length   = device_input_length;
-            collector.device_reuse_length   = init_result.reuse_len;
+            collector.device_reuse_length   = device_reuse_len;
             collector.device_cache_hit_rate = static_cast<float>(static_cast<int64_t>(collector.device_reuse_length)
                                                                  * 100 / collector.device_input_length);
             kmonitor::MetricsTags tags;

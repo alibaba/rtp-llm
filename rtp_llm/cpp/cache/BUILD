@@ -128,6 +128,7 @@ cc_library(
     ],
     hdrs = [
         "CacheConfig.h",
+        "CacheTier.h",
         "Types.h",
         "WarmUpResult.h",
     ],

@@ -32,19 +32,19 @@ bool isCanonicalEvictionTarget(Tier source_tier, Tier target_tier) {
 
 }  // namespace
 
-EvictionTaskRunner::EvictionTaskRunner(ExecuteTransferFn              execute_transfer,
+EvictionTaskRunner::EvictionTaskRunner(ExecuteTransferFn               execute_transfer,
                                        const std::vector<GroupSetPtr>& group_sets,
-                                       const BlockTransferDispatcher* transfer_dispatcher,
-                                       BlockTreeTaskPool*             task_pool,
-                                       BlockTreeCacheMetricsReporter& metrics_reporter,
-                                       std::mutex&                    mutex,
-                                       int                            memory_timeout_ms,
-                                       int                            disk_timeout_ms,
-                                       IsTierEnabledFn                is_tier_enabled,
-                                       CreditsFn                      reserve_credits,
-                                       CreditsFn                      settle_credits,
-                                       SettledFn                      settled,
-                                       RemoteWriteFn                  remote_write):
+                                       const BlockTransferDispatcher*  transfer_dispatcher,
+                                       BlockTreeTaskPool*              task_pool,
+                                       BlockTreeCacheMetricsReporter&  metrics_reporter,
+                                       std::mutex&                     mutex,
+                                       int                             memory_timeout_ms,
+                                       int                             disk_timeout_ms,
+                                       IsTierEnabledFn                 is_tier_enabled,
+                                       CreditsFn                       reserve_credits,
+                                       CreditsFn                       settle_credits,
+                                       SettledFn                       settled,
+                                       RemoteWriteFn                   remote_write):
     execute_transfer_(std::move(execute_transfer)),
     group_sets_(group_sets),
     transfer_dispatcher_(transfer_dispatcher),
@@ -149,10 +149,11 @@ EvictionTaskRunner::collectReleaseCredits(const BlockTreeEvictor::EvictionPlan& 
 void EvictionTaskRunner::runTask(BlockTreeEvictor&                         evictor,
                                  const BlockTreeEvictor::EvictionPlan&     plan,
                                  const std::vector<EvictionReleaseCredit>& release_credits) {
-    const Tier    source_tier            = plan.primary_desc.source_tier;
-    const Tier    target_tier            = plan.primary_desc.target_tier;
-    const size_t  transfer_block_count   = plan.cascade_descs.size() + 1;
-    const int64_t transfer_begin_time_us = metrics_reporter_->reportTransferStarted(source_tier, target_tier);
+    const Tier    source_tier          = plan.primary_desc.source_tier;
+    const Tier    target_tier          = plan.primary_desc.target_tier;
+    const size_t  transfer_block_count = plan.cascade_descs.size() + 1;
+    const int64_t transfer_begin_time_us =
+        metrics_reporter_->reportTransferStarted(CacheTransferOperation::EVICT, source_tier, target_tier);
     BlockTreeEvictor::CopyResultSet copy_results;
     copy_results.primary_success = false;
     copy_results.cascade_success.assign(plan.cascade_descs.size(), false);
@@ -170,8 +171,12 @@ void EvictionTaskRunner::runTask(BlockTreeEvictor&                         evict
                                       && std::all_of(copy_results.cascade_success.begin(),
                                                      copy_results.cascade_success.end(),
                                                      [](bool success) { return success; });
-        metrics_reporter_->reportTransferFinished(
-            source_tier, target_tier, transfer_block_count, transfer_begin_time_us, transfer_success);
+        metrics_reporter_->reportTransferFinished(CacheTransferOperation::EVICT,
+                                                  source_tier,
+                                                  target_tier,
+                                                  transfer_block_count,
+                                                  transfer_begin_time_us,
+                                                  transfer_success);
 
         bool credit_settlement_attempted = false;
         auto credit_settlement_action    = [this, &release_credits, &credit_settlement_attempted]() noexcept {

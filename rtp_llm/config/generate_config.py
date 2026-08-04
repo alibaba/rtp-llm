@@ -214,6 +214,8 @@ class GenerateConfig(BaseModel):
 
     enable_memory_cache: bool = True
 
+    enable_disk_cache: bool = True
+
     enable_remote_cache: bool = True
     # 是否强制相同 request_id 的 stream 在一批中调度
     force_batch: bool = False

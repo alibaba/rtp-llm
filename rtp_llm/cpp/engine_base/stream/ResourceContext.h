@@ -20,11 +20,11 @@ struct ResourceContext {
     bool     decode_entrance{false};  // PD反转模式：Decode侧作为请求入口
 
     bool    reuse_cache{false};
-    bool    enable_memory_cache{false};
-    bool    enable_remote_cache{false};
     bool    enable_device_cache{true};
+    bool    enable_memory_cache{false};
+    bool    enable_disk_cache{false};
+    bool    enable_remote_cache{false};
     bool    write_cache_sync{false};
-    bool    enable_tiered_memory_cache{false};
     int64_t device_cache_min_free_blocks{0};
 
     void initCacheConfig(const KVCacheConfig&       kv_cache_config,

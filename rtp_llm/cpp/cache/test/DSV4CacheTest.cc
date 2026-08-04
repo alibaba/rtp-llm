@@ -2112,7 +2112,7 @@ TEST_F(DSV4AllocatorTest, CpPageRrFixedAndSwaAllocateOneBlockPerVirtualBlock) {
     cti->init(gi);
 
     MallocInfo info{batch_res, cti};
-    info.enable_device_cache = false;
+    info.enable_cache_lookup = false;
     info.reuse_cache         = false;
 
     auto result = allocator->malloc(info);
@@ -2505,7 +2505,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReusePagedGroupsOnly) {
     complete_token_ids->init(generate_input);
 
     MallocInfo info{batch_res, complete_token_ids};
-    info.enable_device_cache = true;
+    info.enable_cache_lookup = true;
     info.reuse_cache         = true;
     auto result              = allocator->malloc(info);
     ASSERT_TRUE(result.success);
@@ -2568,7 +2568,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseRequiresSWATailHit) {
     complete_token_ids->init(generate_input);
 
     MallocInfo info{batch_res, complete_token_ids};
-    info.enable_device_cache = true;
+    info.enable_cache_lookup = true;
     info.reuse_cache         = true;
     auto result              = allocator->malloc(info);
     ASSERT_TRUE(result.success);
@@ -2601,7 +2601,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseDoesNotRequireHCAStateHit) {
     cti->init(gi);
 
     MallocInfo info{batch_res, cti};
-    info.enable_device_cache = true;
+    info.enable_cache_lookup = true;
     info.reuse_cache         = true;
     auto result              = allocator->malloc(info);
     ASSERT_TRUE(result.success);
@@ -2648,7 +2648,7 @@ TEST_F(DSV4AllocatorTest, PrefixCacheReuseAcceptsSingleLatestSWATailHit) {
     cti->init(gi);
 
     MallocInfo info{batch_res, cti};
-    info.enable_device_cache = true;
+    info.enable_cache_lookup = true;
     info.reuse_cache         = true;
     auto result              = allocator->malloc(info);
     ASSERT_TRUE(result.success);
@@ -2683,7 +2683,7 @@ TEST_F(DSV4AllocatorTest, FlashPrefixCacheReusePagedGroupsOnly) {
     complete_token_ids->init(generate_input);
 
     MallocInfo info{batch_res, complete_token_ids};
-    info.enable_device_cache = true;
+    info.enable_cache_lookup = true;
     info.reuse_cache         = true;
     auto result              = allocator->malloc(info);
     ASSERT_TRUE(result.success);
@@ -2728,7 +2728,7 @@ TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksAreDistributedAcrossGroups) {
     cti->init(gi);
 
     MallocInfo info{batch_res, cti};
-    info.enable_device_cache = false;
+    info.enable_cache_lookup = false;
     info.reuse_cache         = false;
     info.verbose             = true;
     auto result              = allocator->malloc(info);
@@ -2769,7 +2769,7 @@ TEST_F(DSV4AllocatorTest, HybridPoolReserveBlocksDoNotReduceExplicitHcaStateCapa
     cti->init(gi);
 
     MallocInfo info{batch_res, cti};
-    info.enable_device_cache = false;
+    info.enable_cache_lookup = false;
     info.reuse_cache         = false;
     info.verbose             = true;
     auto result              = allocator->malloc(info);
@@ -2807,7 +2807,7 @@ TEST_F(DSV4AllocatorTest, SWAPrefixCacheRestoresTailReuse) {
     cti->init(gi);
 
     MallocInfo info{batch_res, cti};
-    info.enable_device_cache = true;
+    info.enable_cache_lookup = true;
     info.reuse_cache         = true;
     auto result              = allocator->malloc(info);
     ASSERT_TRUE(result.success);
@@ -2846,7 +2846,7 @@ TEST_F(DSV4AllocatorTest, IncrMallocDecodeGrowsBlocks) {
     cti->init(gi);
 
     MallocInfo init_info{batch_res, cti};
-    init_info.enable_device_cache = false;
+    init_info.enable_cache_lookup = false;
     auto init_result              = allocator->malloc(init_info);
     ASSERT_TRUE(init_result.success);
 
@@ -2860,7 +2860,7 @@ TEST_F(DSV4AllocatorTest, IncrMallocDecodeGrowsBlocks) {
     // incrMalloc: grow to 2 blocks
     cti->setSeqLength(2 * spb);
     MallocInfo incr_info{batch_res, cti};
-    incr_info.enable_device_cache = false;
+    incr_info.enable_cache_lookup = false;
     auto incr_result              = allocator->malloc(incr_info);
     ASSERT_TRUE(incr_result.success);
 
@@ -2903,7 +2903,7 @@ TEST_F(DSV4AllocatorTest, FreeReturnsBlocksToPool) {
     cti->init(gi);
 
     MallocInfo info{batch_res, cti};
-    info.enable_device_cache = false;
+    info.enable_cache_lookup = false;
     auto result              = allocator->malloc(info);
     ASSERT_TRUE(result.success);
 
@@ -2924,7 +2924,7 @@ TEST_F(DSV4AllocatorTest, FreeReturnsBlocksToPool) {
     batch_res2->setBatchCacheKeys(0, CacheKeysType{1100, 1101});
 
     MallocInfo info2{batch_res2, cti};
-    info2.enable_device_cache = false;
+    info2.enable_cache_lookup = false;
     auto result2              = allocator->malloc(info2);
     ASSERT_TRUE(result2.success);
 
@@ -2956,7 +2956,7 @@ TEST_F(DSV4AllocatorTest, FlashIncrMallocDecode) {
     cti->init(gi);
 
     MallocInfo init_info{batch_res, cti};
-    init_info.enable_device_cache = false;
+    init_info.enable_cache_lookup = false;
     ASSERT_TRUE(allocator->malloc(init_info).success);
 
     for (int gid = 0; gid < 7; gid++) {
@@ -2966,7 +2966,7 @@ TEST_F(DSV4AllocatorTest, FlashIncrMallocDecode) {
     // Grow to 3 blocks
     cti->setSeqLength(3 * spb);
     MallocInfo incr_info{batch_res, cti};
-    incr_info.enable_device_cache = false;
+    incr_info.enable_cache_lookup = false;
     ASSERT_TRUE(allocator->malloc(incr_info).success);
 
     for (int gid = 0; gid < 7; gid++) {

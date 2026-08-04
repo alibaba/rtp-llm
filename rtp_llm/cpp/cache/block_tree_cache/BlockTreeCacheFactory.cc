@@ -60,20 +60,20 @@ int slidingWindowSize(const GroupBase& group, size_t group_id) {
     return group.policy.sliding_window_size;
 }
 
-GroupSetPtr createGroupSet(const GroupBase&                   group,
-                           size_t                             group_id,
-                           std::vector<DeviceBlockPoolPtr>    device_pools,
-                           std::shared_ptr<HostBlockPool>     host_pool,
-                           BlockTreeDiskBlockPoolPtr          disk_pool) {
+GroupSetPtr createGroupSet(const GroupBase&                group,
+                           size_t                          group_id,
+                           std::vector<DeviceBlockPoolPtr> device_pools,
+                           std::shared_ptr<HostBlockPool>  host_pool,
+                           BlockTreeDiskBlockPoolPtr       disk_pool) {
     GroupSetPtr result;
     switch (group.policy.group_type) {
         case CacheGroupType::FULL:
-            result = std::make_shared<FullGroupSet>(
-                std::move(device_pools), std::move(host_pool), std::move(disk_pool));
+            result =
+                std::make_shared<FullGroupSet>(std::move(device_pools), std::move(host_pool), std::move(disk_pool));
             break;
         case CacheGroupType::LINEAR:
-            result = std::make_shared<LinearGroupSet>(
-                std::move(device_pools), std::move(host_pool), std::move(disk_pool));
+            result =
+                std::make_shared<LinearGroupSet>(std::move(device_pools), std::move(host_pool), std::move(disk_pool));
             break;
         case CacheGroupType::SWA: {
             const auto seq_size = group.seq_size_per_block;
@@ -257,7 +257,6 @@ size_t computeGroupSetPayloadBytes(const CacheConfig& cache_config, const std::v
     return payload_bytes;
 }
 
-
 }  // namespace
 
 bool shouldPinHostBlockPool() {
@@ -323,13 +322,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
         group_pools[static_cast<size_t>(group_id)] = std::move(pool);
     }
 
-    const bool tiered       = kv_cache_config.enable_tiered_memory_cache;
-    const bool host_enabled = tiered && kv_cache_config.enable_memory_cache;
-    const bool disk_enabled = tiered && kv_cache_config.enable_memory_cache_disk;
-    if (tiered && !host_enabled && !disk_enabled) {
-        RTP_LLM_LOG_ERROR("createBlockTreeCache: tiered memory requires host or disk cache");
-        return nullptr;
-    }
+    const bool host_enabled = kv_cache_config.enable_memory_cache;
+    const bool disk_enabled = kv_cache_config.enable_disk_cache;
     if (host_enabled && kv_cache_config.memory_cache_size_mb <= 0) {
         RTP_LLM_LOG_ERROR("createBlockTreeCache: host cache size must be positive");
         return nullptr;
@@ -378,9 +372,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
             return nullptr;
         }
         for (size_t group_set_id = 0; group_set_id < plan.members.size(); ++group_set_id) {
-            host_pools[group_set_id] = createHostPool("block_tree_host_g" + std::to_string(group_set_id),
-                                                      group_set_payload_bytes[group_set_id],
-                                                      usable);
+            host_pools[group_set_id] = createHostPool(
+                "block_tree_host_g" + std::to_string(group_set_id), group_set_payload_bytes[group_set_id], usable);
             if (!host_pools[group_set_id]) {
                 return nullptr;
             }
@@ -425,8 +418,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
             device_pools.push_back(group_pools[static_cast<size_t>(group_id)]);
             group_ids.push_back(static_cast<size_t>(group_id));
         }
-        const auto& first = cache_config.topology().groupById(group_ids.front());
-        auto group_set    = createGroupSet(first,
+        const auto& first     = cache_config.topology().groupById(group_ids.front());
+        auto        group_set = createGroupSet(first,
                                         group_ids.front(),
                                         std::move(device_pools),
                                         std::move(host_pools[group_set_id]),
@@ -449,8 +442,10 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     if (config.enable_device_cache) {
         config.watermark_device = {kDefaultDeviceWatermarkRatio, 0};
     }
-    if (disk_enabled) {
+    if (host_enabled) {
         config.watermark_host = {kDefaultHostWatermarkRatio, 0};
+    }
+    if (disk_enabled) {
         config.watermark_disk = {kDefaultDiskWatermarkRatio, 0};
     }
     config.memory_cache_size_mb          = kv_cache_config.memory_cache_size_mb;
@@ -482,8 +477,8 @@ BlockTreeCachePtr createBlockTreeCache(const CacheConfig&                cache_c
     }
     auto transfer_dispatcher =
         std::make_unique<BlockTransferDispatcher>(std::move(per_rank_engine), std::move(multi_rank_engine));
-    auto task_pool = std::make_unique<BlockTreeTaskPool>(
-        static_cast<size_t>(config.eviction_thread_pool_size), 1000, "BlockTreeEvictionPool");
+    auto task_pool =
+        std::make_unique<BlockTreeTaskPool>(static_cast<size_t>(config.task_pool_size), 1000, "BlockTreeCacheTaskPool");
 
     auto tree = std::make_unique<BlockTree>(std::move(group_sets));
 

@@ -79,8 +79,8 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
     }
     const auto& cache_keys = kv_resource->cacheKeys(0);
 
-    int64_t                           match_cost_time_us      = 0;
-    size_t                            reuse_blocks            = 0;
+    int64_t                           match_cost_time_us = 0;
+    size_t                            reuse_blocks       = 0;
     std::shared_ptr<LoadAsyncContext> load_context;
     std::vector<MultiNodeResource>    matched_resources;
     bool                              matched_blocks_released = false;
@@ -101,8 +101,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         }
         if (!valid_blocks.empty()) {
             BlockReleaseBatch releases;
-            releases.append(/*group_id=*/0,
-                            full_kv_cache_group_->release(valid_blocks, BlockRefType::REQUEST));
+            releases.append(/*group_id=*/0, full_kv_cache_group_->release(valid_blocks, BlockRefType::REQUEST));
             submitBlockReleases(releases);
         }
         block_ids_0.resize(0);
@@ -110,7 +109,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         return {false, 0};
     };
 
-    if (malloc_info.enable_device_cache && full_kv_cache_group_->prefixReuseEnabled()) {
+    if (malloc_info.enable_cache_lookup && full_kv_cache_group_->prefixReuseEnabled()) {
         CacheKeysType local_keys = cp_slot_mapper_ && cp_slot_mapper_->isSharded() ?
                                        cp_slot_mapper_->localCacheKeys(config_, 0, cache_keys) :
                                        cache_keys;
@@ -226,8 +225,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
             }
             const BlockIdxType target = block_ids_0.blocks()[path_index];
             if (load_context->joinedLoads()[desc_index]) {
-                const std::vector<BlockIdxType>& joined_targets =
-                    load_context->loadDescs()[desc_index].target_blocks;
+                const std::vector<BlockIdxType>& joined_targets = load_context->loadDescs()[desc_index].target_blocks;
                 if (joined_targets.size() != 1 || target != joined_targets.front()) {
                     return rollback();
                 }
@@ -314,8 +312,7 @@ void SingleTypeKVCacheAllocator::free(const FreeInfo& free_info) {
     BlockReleaseBatch releases;
     auto              all_blocks = kv_cache_resource->getAllBatchBlocks(0);
     for (const auto& blocks : all_blocks) {
-        releases.append(/*group_id=*/0,
-                        full_kv_cache_group_->release(blocks, BlockRefType::REQUEST));
+        releases.append(/*group_id=*/0, full_kv_cache_group_->release(blocks, BlockRefType::REQUEST));
     }
     kv_cache_resource->clearBlocks();
     submitBlockReleases(releases);
@@ -361,7 +358,7 @@ void SingleTypeKVCacheAllocator::insertIntoCache(const InsertInfo& insert_info) 
             has_valid                    = true;
         }
         if (has_valid) {
-            block_tree_cache_->insert(insert_keys, slots);
+            block_tree_cache_->insert(insert_keys, slots, insert_info.target_tier);
         }
     }
 }
@@ -479,7 +476,7 @@ void SingleTypeKVCacheAllocator::decrKVCacheRef(const KVCacheResource& kvcache_r
     }
     if (!blocks_to_free.empty()) {
         const BlockRefType ref_type = is_connector ? BlockRefType::CONNECTOR : BlockRefType::REQUEST;
-        BlockReleaseBatch releases;
+        BlockReleaseBatch  releases;
         releases.append(/*group_id=*/0, full_kv_cache_group_->release(blocks_to_free, ref_type));
         submitBlockReleases(releases);
     }
@@ -515,9 +512,9 @@ bool SingleTypeKVCacheAllocator::updateKVBlock(const BatchKVCacheResourcePtr&  k
     for (int old_batch_idx = 0; old_batch_idx < old_batch_size; ++old_batch_idx) {
         const int fork_count = batch_fork_count[old_batch_idx];
         if (fork_count == 0) {
-            releases.append(/*group_id=*/0,
-                            full_kv_cache_group_->release(
-                                kv_cache_resource->blocks(old_batch_idx, 0), BlockRefType::REQUEST));
+            releases.append(
+                /*group_id=*/0,
+                full_kv_cache_group_->release(kv_cache_resource->blocks(old_batch_idx, 0), BlockRefType::REQUEST));
         } else if (fork_count > 1 && copy_last_block) {
             new_blocks_num += static_cast<uint32_t>(fork_count - 1);
         }

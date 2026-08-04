@@ -314,6 +314,67 @@ TEST_F(StreamCacheResourceTest, testStreamCacheResourceReuseCacheMethod) {
     ASSERT_FALSE(resource.reuseCache());
 }
 
+TEST_F(StreamCacheResourceTest, testCacheLookupIgnoresPerRequestTierSwitches) {
+    prepareResource(true);
+    auto& resource   = stream_->streamCacheResource();
+    auto& request    = *stream_->generate_input_->generate_config;
+    auto& deployment = resource.resource_context_;
+
+    request.reuse_cache         = true;
+    request.enable_device_cache = false;
+    request.enable_memory_cache = false;
+    request.enable_disk_cache   = false;
+
+    for (const bool device_on : {false, true}) {
+        for (const bool host_on : {false, true}) {
+            for (const bool disk_on : {false, true}) {
+                SCOPED_TRACE("L1=" + std::to_string(device_on) + " L2=" + std::to_string(host_on)
+                             + " L3=" + std::to_string(disk_on));
+                deployment.enable_device_cache = device_on;
+                deployment.enable_memory_cache = host_on;
+                deployment.enable_disk_cache   = disk_on;
+                EXPECT_EQ(resource.enableCacheLookup(), device_on || host_on || disk_on);
+            }
+        }
+    }
+
+    deployment.enable_device_cache = true;
+    request.reuse_cache            = false;
+    EXPECT_FALSE(resource.enableCacheLookup());
+}
+
+TEST_F(StreamCacheResourceTest, testStoreTargetPicksHighestMutuallyPermittedTier) {
+    prepareResource(true);
+    auto& resource   = stream_->streamCacheResource();
+    auto& request    = *stream_->generate_input_->generate_config;
+    auto& deployment = resource.resource_context_;
+
+    request.reuse_cache            = true;
+    request.enable_device_cache    = true;
+    request.enable_memory_cache    = true;
+    request.enable_disk_cache      = true;
+    deployment.enable_device_cache = true;
+    deployment.enable_memory_cache = true;
+    deployment.enable_disk_cache   = true;
+    EXPECT_EQ(resource.storeTarget(), Tier::DEVICE);
+
+    request.enable_device_cache = false;
+    EXPECT_EQ(resource.storeTarget(), Tier::HOST);
+
+    deployment.enable_memory_cache = false;
+    EXPECT_EQ(resource.storeTarget(), Tier::DISK);
+
+    request.enable_disk_cache = false;
+    EXPECT_EQ(resource.storeTarget(), Tier::NONE);
+
+    request.enable_disk_cache      = true;
+    deployment.enable_memory_cache = false;
+    EXPECT_EQ(resource.storeTarget(), Tier::DISK);
+
+    request.reuse_cache = false;
+    EXPECT_EQ(resource.storeTarget(), Tier::NONE);
+}
+
 TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyForFirstMalloc) {
     auto cache_config                                     = test::makeSimpleHybridMhaCacheConfig(/*layer_num=*/4,
                                                              /*block_num=*/9,
@@ -337,7 +398,7 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
     EXPECT_CALL(*allocator, initMallocForCommonLen(testing::_))
         .WillOnce(testing::Invoke([&](const MallocInfo& info) -> MallocResult {
             EXPECT_FALSE(info.reuse_cache);
-            EXPECT_FALSE(info.enable_device_cache);
+            EXPECT_FALSE(info.enable_cache_lookup);
             return {true, 0};
         }));
 
@@ -345,7 +406,7 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
         .WillOnce(testing::Invoke([&](const MallocInfo& info) -> MallocResult {
             // initKVBlock should force-disable cache reuse on the first malloc for decode hybrid.
             EXPECT_FALSE(info.reuse_cache);
-            EXPECT_FALSE(info.enable_device_cache);
+            EXPECT_FALSE(info.enable_cache_lookup);
             // Simulate a successful allocation so subsequent calls go through incrMalloc path.
             for (int b = 0; b < info.batch_kv_cache_resource->batchSize(); ++b) {
                 auto& block_ids = info.batch_kv_cache_resource->mutableBlockIds(b, /*group_id=*/0);
@@ -354,8 +415,8 @@ TEST_F(StreamCacheResourceTest, testDecodeInitKVBlock_DisablesDeviceCacheOnlyFor
             return {true, 0};
         }))
         .WillOnce(testing::Invoke([&](const MallocInfo& info) -> MallocResult {
-            // incrKVBlock should respect runtime config: reuseCache() && enableDeviceCache().
-            EXPECT_TRUE(info.enable_device_cache);
+            // incrKVBlock uses the runtime lookup policy.
+            EXPECT_TRUE(info.enable_cache_lookup);
             return {true, 0};
         }));
 

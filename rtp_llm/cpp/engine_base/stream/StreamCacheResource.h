@@ -117,7 +117,9 @@ public:
     bool enableMemoryCache() const;
     bool enableRemoteCache() const;
     bool enableDeviceCache() const;
-    bool enableTieredMemoryCache() const;
+    bool enableDiskCache() const;
+    bool enableCacheLookup() const;
+    Tier storeTarget() const;
 
     void holdKVCacheForPDSep();
     void releaseKVCacheForPDSep();

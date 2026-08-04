@@ -317,7 +317,19 @@ std::shared_ptr<GenerateStream> NormalEngine::createMinFakeStream(int32_t max_ne
     return stream;
 }
 
+void NormalEngine::normalizeSystemPromptCacheConfig() {
+    if (kv_cache_config.multi_task_prompt_tokens.empty()) {
+        return;
+    }
+    if (!kv_cache_config.reuse_cache || !kv_cache_config.enable_device_cache) {
+        RTP_LLM_LOG_INFO("system prompt enabled; forcing reuse_cache and enable_device_cache on");
+    }
+    kv_cache_config.reuse_cache         = true;
+    kv_cache_config.enable_device_cache = true;
+}
+
 void NormalEngine::initCacheManager(std::optional<WarmUpResult> warm_up_result) {
+    normalizeSystemPromptCacheConfig();
     if (kv_cache_config.device_cache_min_free_blocks <= 0) {
         int64_t max_prefill_tokens =
             runtime_config.fifo_scheduler_config.max_context_batch_size * model_config_.max_seq_len;
@@ -376,7 +388,6 @@ absl::Status NormalEngine::initSystemPrompt() {
     resource_context_.initCacheConfig(kv_cache_config, runtime_config.fifo_scheduler_config, model_config_.max_seq_len);
 
     if (!kv_cache_config.multi_task_prompt_tokens.empty()) {
-        resource_context_.reuse_cache = true;
         CHECK_AND_RETURN_REF(
             system_prompt_param,
             SystemPromptConstructor::construct(

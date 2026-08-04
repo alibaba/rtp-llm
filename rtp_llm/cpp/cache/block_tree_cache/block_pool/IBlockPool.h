@@ -27,6 +27,8 @@ enum class BlockRefType : uint8_t {
     CONNECTOR,
     BLOCK_CACHE,
     EVICTION,
+    // Pins source and target blocks during an asynchronous lower-tier copy.
+    STORE,
     COUNT,
 };
 
@@ -74,10 +76,10 @@ public:
     // Release one holder: decrement one reference and, only when the refcount reaches 0,
     // return the block's capacity to the free list. Category releases must use this rather
     // than free() directly. Requires refcount > 0.
-    void     decRef(BlockIdxType block, BlockRefType ref_type);
-    void     decRef(const BlockIdList& blocks, BlockRefType ref_type);
+    void                            decRef(BlockIdxType block, BlockRefType ref_type);
+    void                            decRef(const BlockIdList& blocks, BlockRefType ref_type);
     std::vector<BlockRefTransition> decRefWithResult(const BlockIdList& blocks, BlockRefType ref_type);
-    uint32_t refCount(BlockIdxType block) const;
+    uint32_t                        refCount(BlockIdxType block) const;
     // used only for metrics report
     size_t totalRefCount(BlockRefType ref_type) const;
 

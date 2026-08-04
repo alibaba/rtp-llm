@@ -4,22 +4,6 @@
 
 namespace rtp_llm {
 
-const char* tierName(Tier tier) {
-    switch (tier) {
-        case Tier::DEVICE:
-            return "DEVICE";
-        case Tier::HOST:
-            return "HOST";
-        case Tier::DISK:
-            return "DISK";
-        case Tier::REMOTE:
-            return "REMOTE";
-        case Tier::NONE:
-            return "NONE";
-    }
-    return "UNKNOWN";
-}
-
 void GroupSetResource::evictFromTier(Tier tier) {
     switch (tier) {
         case Tier::DEVICE:

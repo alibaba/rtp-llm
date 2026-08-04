@@ -34,12 +34,11 @@ public:
 class FullEvictionTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        auto                       full = std::make_shared<CountingFullGroupSet>(
+        auto full = std::make_shared<CountingFullGroupSet>(
             std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
         counting_full_                  = full.get();
         std::vector<GroupSetPtr> groups = {full};
-        cache_                          = makeBlockTreeCacheForTest(
-            std::move(groups), BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+        cache_ = makeBlockTreeCacheForTest(std::move(groups), BlockTreeCacheConfig{.task_pool_size = 2});
     }
 
     // Insert a path with given device block for group 0.
@@ -48,7 +47,7 @@ protected:
         for (size_t i = 0; i < keys.size(); ++i) {
             resources[i][0].device_blocks = {static_cast<BlockIdxType>(dev_block + i)};
         }
-        cache_->insert(keys, resources);
+        cache_->insert(keys, resources, Tier::DEVICE);
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -117,8 +116,7 @@ TEST_F(FullEvictionTest, ExtendingExistingLeafRefreshesDirectParent) {
 
     EXPECT_EQ(after[3]->group_set_resources[0].candidate_meta.last_access_seq,
               direct_parent_meta_before.last_access_seq);
-    EXPECT_EQ(after[3]->group_set_resources[0].candidate_meta.admission_seq,
-              direct_parent_meta_before.admission_seq);
+    EXPECT_EQ(after[3]->group_set_resources[0].candidate_meta.admission_seq, direct_parent_meta_before.admission_seq);
     EXPECT_EQ(after[3]->group_set_resources[0].candidate_meta.hit_count, direct_parent_meta_before.hit_count);
     for (size_t index = 0; index < ancestor_meta_before.size(); ++index) {
         const CandidateMeta& after_meta = after[index]->group_set_resources[0].candidate_meta;

@@ -17,6 +17,7 @@
 #include "rtp_llm/cpp/cache/test/BlockPoolTestHelper.h"
 #include "rtp_llm/cpp/cache/test/BlockTreeCacheAllocatorTestHelper.h"
 #include "rtp_llm/cpp/cache/test/CacheConfigTestUtils.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/test/BlockTreeCacheTestUtils.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/PerRankBlockTransferEngine.h"
 #include "rtp_llm/cpp/config/ModelConfig.h"
@@ -611,7 +612,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, GetNeedBlocksUsesGroupGetNeedBlocksAndReu
     {
         auto       batch_res = makeBatchResource(/*batch_size=*/2, config, CacheKeysType{100, 101, 102, 103});
         MallocInfo info{batch_res, token_ids};
-        info.enable_device_cache = false;
+        info.enable_cache_lookup = false;
         info.reuse_cache         = false;
         // common_total = full(3) + linear(1) = 4
         // extra_total  = full(1) + linear(reserve_step-1=1) = 2
@@ -623,7 +624,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, GetNeedBlocksUsesGroupGetNeedBlocksAndReu
     {
         auto       batch_res = makeBatchResource(/*batch_size=*/2, config, CacheKeysType{100, 101, 102, 103});
         MallocInfo info{batch_res, token_ids};
-        info.enable_device_cache = true;
+        info.enable_cache_lookup = true;
         info.reuse_cache         = true;
         // full: common=3 extra=1
         // linear: common=count(0,3]=2, extra=reserve_step-1(=1)
@@ -662,13 +663,13 @@ TEST_F(HybridTypeKVCacheAllocatorTest, TieredJoinedLoadMapsTargetsAcrossFullAndL
             slots[path_index][group_set->groupSetId()].host_block = source_block;
         }
     }
-    cache->insert(cached_keys, slots);
+    ASSERT_TRUE(block_tree_cache_test::insertGroupSetResources(*cache, cached_keys, slots));
 
     const CacheKeysType request_keys{100, 101, 102};
     auto                first_resource = makeBatchResource(/*batch_size=*/1, config, request_keys);
     auto       first_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/9, /*seq_size_per_block=*/4);
     MallocInfo first_info{first_resource, first_tokens};
-    first_info.enable_device_cache = true;
+    first_info.enable_cache_lookup = true;
     first_info.reuse_cache         = true;
     MallocResult first_result      = allocator->malloc(first_info);
     ASSERT_TRUE(first_result.success);
@@ -685,7 +686,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, TieredJoinedLoadMapsTargetsAcrossFullAndL
     auto       second_resource = makeBatchResource(/*batch_size=*/1, config, request_keys);
     auto       second_tokens   = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/9, /*seq_size_per_block=*/4);
     MallocInfo second_info{second_resource, second_tokens};
-    second_info.enable_device_cache = true;
+    second_info.enable_cache_lookup = true;
     second_info.reuse_cache         = true;
     MallocResult second_result      = allocator->malloc(second_info);
     ASSERT_TRUE(second_result.success);
@@ -816,8 +817,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly
     allocator->insertIntoCache(InsertInfo{seed_resource, nullptr, /*is_resident=*/false});
     BlockReleaseBatch releases;
     for (size_t group_id = 0; group_id < cache_groups.size(); ++group_id) {
-        releases.append(
-            group_id, cache_groups[group_id]->release(seeded_blocks[group_id], BlockRefType::REQUEST));
+        releases.append(group_id, cache_groups[group_id]->release(seeded_blocks[group_id], BlockRefType::REQUEST));
     }
     const std::vector<BlockReleaseReceipt> receipts = releases.finish();
     if (!receipts.empty()) {
@@ -850,7 +850,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, JointReuseUsesFullPrefixAndLinearTailOnly
     auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
 
     MallocInfo info{batch_res, token_ids};
-    info.enable_device_cache = true;
+    info.enable_cache_lookup = true;
     auto result              = allocator->malloc(info);
     ASSERT_TRUE(result.success);
 
@@ -880,7 +880,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DisableReuseKeepsOnlyLinearTailOnInitMall
     auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
 
     MallocInfo info{batch_res, token_ids};
-    info.enable_device_cache = false;
+    info.enable_cache_lookup = false;
     info.reuse_cache         = false;
     auto result              = allocator->malloc(info);
     ASSERT_TRUE(result.success);
@@ -920,7 +920,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DisableDeviceCacheSkipsReuseMatchAndAlloc
         makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);  // 3 resources
 
     MallocInfo info{batch_res, token_ids};
-    info.enable_device_cache = false;
+    info.enable_cache_lookup = false;
     info.reuse_cache         = false;
     auto result              = allocator->malloc(info);
     ASSERT_TRUE(result.success);
@@ -1183,7 +1183,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheInsertsOnlyFullBlocks) {
     auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/10, /*seq_size_per_block=*/4);
 
     MallocInfo malloc_info{batch_res, token_ids};
-    malloc_info.enable_device_cache = false;
+    malloc_info.enable_cache_lookup = false;
     malloc_info.reuse_cache         = false;
     auto malloc_result              = allocator->malloc(malloc_info);
     ASSERT_TRUE(malloc_result.success);
@@ -1195,10 +1195,12 @@ TEST_F(HybridTypeKVCacheAllocatorTest, InsertIntoCacheInsertsOnlyFullBlocks) {
 
     auto match = allocator->blockTreeCacheOwner()->match(CacheKeysType{100, 101, 102});
     EXPECT_EQ(match.matched_device_blocks, 3u);
-    EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(full_group_id, match.matched_device_resources).size(),
-              3u);
-    EXPECT_EQ(allocator->blockTreeCacheOwner()->matchedBlocksForGroup(linear_group_id, match.matched_device_resources).size(),
-              1u);
+    EXPECT_EQ(
+        allocator->blockTreeCacheOwner()->matchedBlocksForGroup(full_group_id, match.matched_device_resources).size(),
+        3u);
+    EXPECT_EQ(
+        allocator->blockTreeCacheOwner()->matchedBlocksForGroup(linear_group_id, match.matched_device_resources).size(),
+        1u);
     allocator->blockTreeCacheOwner()->releaseMatchedResources(match.matched_device_resources);
 }
 
@@ -1214,23 +1216,24 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DefaultHybridLinearPrefixReuseSupportsIns
     auto seed_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
 
     MallocInfo seed_malloc{seed_res, seed_tokens};
-    seed_malloc.enable_device_cache = false;
+    seed_malloc.enable_cache_lookup = false;
     seed_malloc.reuse_cache         = false;
     ASSERT_TRUE(allocator->malloc(seed_malloc).success);
 
     allocator->insertIntoCache(InsertInfo{seed_res, seed_tokens, /*is_resident=*/false});
     auto seed_match = allocator->blockTreeCacheOwner()->match(CacheKeysType{100, 101, 102});
     EXPECT_EQ(seed_match.matched_device_blocks, 3u);
-    EXPECT_EQ(
-        allocator->blockTreeCacheOwner()->matchedBlocksForGroup(/*group_id=*/0, seed_match.matched_device_resources).size(),
-        1u);
+    EXPECT_EQ(allocator->blockTreeCacheOwner()
+                  ->matchedBlocksForGroup(/*group_id=*/0, seed_match.matched_device_resources)
+                  .size(),
+              1u);
     allocator->blockTreeCacheOwner()->releaseMatchedResources(seed_match.matched_device_resources);
 
     auto hit_res    = makeBatchResource(/*batch_size=*/1, config, CacheKeysType{100, 101, 102, 103});
     auto hit_tokens = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/12, /*seq_size_per_block=*/4);
 
     MallocInfo hit_malloc{hit_res, hit_tokens};
-    hit_malloc.enable_device_cache = true;
+    hit_malloc.enable_cache_lookup = true;
     hit_malloc.reuse_cache         = true;
     auto result                    = allocator->malloc(hit_malloc);
     ASSERT_TRUE(result.success);
@@ -1284,7 +1287,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     // Initial small allocation: seq_len=4 => 1 resource per group.
     auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/4, /*seq_size_per_block=*/4);
     MallocInfo init_info{batch_res, token_ids};
-    init_info.enable_device_cache = false;
+    init_info.enable_cache_lookup = false;
     auto init_result              = allocator->malloc(init_info);
     ASSERT_TRUE(init_result.success);
     ASSERT_EQ(batch_res->blocksNum(0, /*group_id=*/0), 1);
@@ -1304,8 +1307,8 @@ TEST_F(HybridTypeKVCacheAllocatorTest, IncrMallocRollbackFreesPartiallyAllocated
     // Incr to seq_len=9 => 3 resources per group. Linear allocates 2 blocks and Full then needs 2 more.
     token_ids->setSeqLength(9);
     MallocInfo incr_info{batch_res, token_ids};
-    incr_info.enable_device_cache = false;
-    auto incr_result = allocator->malloc(incr_info);
+    incr_info.enable_cache_lookup = false;
+    auto incr_result              = allocator->malloc(incr_info);
     EXPECT_FALSE(incr_result.success);
 
     // Rollback should restore original sizes and keep original blocks.
@@ -1347,7 +1350,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, PrefillInitSkipsSparseCleanupAndPreserves
     auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/20, /*seq_size_per_block=*/4);
 
     MallocInfo info{batch_res, token_ids};
-    info.enable_device_cache          = true;
+    info.enable_cache_lookup          = true;
     info.reuse_cache                  = true;
     info.enable_remove_skipped_blocks = false;  // prefill init path
     auto result                       = allocator->malloc(info);
@@ -1394,7 +1397,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, DecodeIncrMallocAppliesSparseCleanupOnLin
     auto token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/24, /*seq_size_per_block=*/4);
 
     MallocInfo info{batch_res, token_ids};
-    info.enable_device_cache          = false;
+    info.enable_cache_lookup          = false;
     info.reuse_cache                  = true;
     info.enable_remove_skipped_blocks = true;  // decode path
     auto result                       = allocator->malloc(info);
@@ -1601,7 +1604,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, FreshUnalignedMultiSequencePeakMatchesExa
         auto token_ids = makeCompleteTokenIds(
             /*batch_size=*/2, /*seq_length=*/5, /*seq_size_per_block=*/config.seq_size_per_block);
         MallocInfo info{resource, token_ids};
-        info.enable_device_cache          = false;
+        info.enable_cache_lookup          = false;
         info.reuse_cache                  = reuse_cache;
         info.enable_remove_skipped_blocks = false;
         ASSERT_TRUE(allocator->malloc(info).success);
@@ -1624,7 +1627,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, EstimatedPeakCoversDecodeMallocAndSparseC
                                           /*seq_size_per_block=*/config.seq_size_per_block);
 
     MallocInfo info{batch_res, token_ids};
-    info.enable_device_cache          = false;
+    info.enable_cache_lookup          = false;
     info.reuse_cache                  = true;
     info.enable_remove_skipped_blocks = false;
     ASSERT_TRUE(allocator->malloc(info).success);
@@ -1674,7 +1677,7 @@ TEST_F(HybridTypeKVCacheAllocatorTest, FreshReusePeakCoversThreeBoundaryDecodeAt
               9);
 
     MallocInfo info{batch_res, token_ids};
-    info.enable_device_cache          = false;
+    info.enable_cache_lookup          = false;
     info.reuse_cache                  = true;
     info.enable_remove_skipped_blocks = false;
     ASSERT_TRUE(allocator->malloc(info).success);

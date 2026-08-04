@@ -335,7 +335,7 @@ inline KVCacheConfig makeTierConfig(TierLayout layout, const std::string& disk_p
     config.enable_tiered_memory_cache            = true;
     config.memory_cache_size_mb                  = lower_cache_size_mb;
     config.memory_cache_sync_timeout_ms          = 5000;
-    config.enable_memory_cache_disk              = layout == TierLayout::HOST_DISK;
+    config.enable_disk_cache                     = layout == TierLayout::HOST_DISK;
     config.memory_cache_disk_paths               = layout == TierLayout::HOST_DISK ? disk_path : "";
     config.memory_cache_disk_size_mb             = layout == TierLayout::HOST_DISK ? lower_cache_size_mb : 0;
     config.memory_cache_disk_buffered_io         = true;
@@ -1105,7 +1105,7 @@ inline std::optional<SeededPrefix> seedDevicePrefix(const std::shared_ptr<KVCach
 
     MallocInfo malloc_info{seed.resource, seed.token_ids};
     malloc_info.reuse_cache         = true;
-    malloc_info.enable_device_cache = false;
+    malloc_info.enable_cache_lookup = false;
     const auto result               = manager->malloc(malloc_info);
     if (!result.success) {
         return std::nullopt;
@@ -1143,7 +1143,7 @@ inline std::optional<SeededPrefix> seedCpCanonicalDevicePrefix(const std::shared
 
     MallocInfo malloc_info{seed.resource, seed.token_ids};
     malloc_info.reuse_cache         = true;
-    malloc_info.enable_device_cache = false;
+    malloc_info.enable_cache_lookup = false;
     const auto result               = manager->malloc(malloc_info);
     if (!result.success) {
         return std::nullopt;
@@ -1585,7 +1585,7 @@ protected:
             makeTokenIds(/*offset=*/0, 2 * seq_size_per_block, 2 * seq_size_per_block, seq_size_per_block);
         MallocInfo failed_info{failed_resource, failed_token_ids};
         failed_info.reuse_cache         = true;
-        failed_info.enable_device_cache = true;
+        failed_info.enable_cache_lookup = true;
         const auto failed_result        = manager_->malloc(failed_info);
         ASSERT_TRUE(failed_result.success);
         EXPECT_EQ(failed_result.reuse_len, seq_size_per_block);
@@ -1689,7 +1689,7 @@ protected:
             makeTokenIds(/*offset=*/0, 2 * seq_size_per_block, 2 * seq_size_per_block, seq_size_per_block);
         MallocInfo retry_info{retry_resource, retry_token_ids};
         retry_info.reuse_cache         = true;
-        retry_info.enable_device_cache = true;
+        retry_info.enable_cache_lookup = true;
         const auto retry_result        = manager_->malloc(retry_info);
         ASSERT_TRUE(retry_result.success);
         EXPECT_EQ(retry_result.reuse_len, seq_size_per_block);
@@ -1817,7 +1817,7 @@ protected:
             /*offset=*/0, 2 * seq_size_per_block, 2 * seq_size_per_block, seq_size_per_block);
         MallocInfo first_info{first_resource, first_tokens};
         first_info.reuse_cache           = true;
-        first_info.enable_device_cache   = true;
+        first_info.enable_cache_lookup   = true;
         const size_t submits_before_load = engine->submitCount();
         const auto   first_result        = manager_->malloc(first_info);
         ASSERT_TRUE(first_result.success);
@@ -1873,7 +1873,7 @@ protected:
             makeTokenIds(/*offset=*/0, 2 * seq_size_per_block, 2 * seq_size_per_block, seq_size_per_block);
         MallocInfo second_info{second_resource, second_tokens};
         second_info.reuse_cache         = true;
-        second_info.enable_device_cache = true;
+        second_info.enable_cache_lookup = true;
         const auto second_result        = manager_->malloc(second_info);
         ASSERT_TRUE(second_result.success);
         EXPECT_EQ(second_result.reuse_len, seq_size_per_block);
@@ -1995,7 +1995,7 @@ protected:
                 makeTokenIds(/*offset=*/0, 2 * seq_size_per_block, 2 * seq_size_per_block, seq_size_per_block);
             MallocInfo retry_info{retry_resource, retry_tokens};
             retry_info.reuse_cache         = true;
-            retry_info.enable_device_cache = true;
+            retry_info.enable_cache_lookup = true;
             const auto retry_result        = manager_->malloc(retry_info);
             ASSERT_TRUE(retry_result.success);
             EXPECT_EQ(retry_result.reuse_len, seq_size_per_block);

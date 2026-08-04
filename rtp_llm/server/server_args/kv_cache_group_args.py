@@ -127,6 +127,15 @@ def init_kv_cache_group_args(parser, kv_cache_config):
         help="内存 KVCache 开关. 当开启时, 需要显示通过 MEMORY_CACHE_SIZE_MB 设置内存大小",
     )
     kv_cache_group.add_argument(
+        "--enable_disk_cache",
+        env_name="ENABLE_DISK_CACHE",
+        bind_to=(kv_cache_config, "enable_disk_cache"),
+        type=str2bool,
+        default=False,
+        help="磁盘 KVCache (L3) 开关。开启时必须配置 MEMORY_CACHE_DISK_SIZE_MB 和 "
+        "MEMORY_CACHE_DISK_PATHS。",
+    )
+    kv_cache_group.add_argument(
         "--enable_memory_cache_sm_copy",
         env_name="ENABLE_MEMORY_CACHE_SM_COPY",
         bind_to=(kv_cache_config, "enable_memory_cache_sm_copy"),

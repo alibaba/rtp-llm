@@ -13,6 +13,7 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/group_set/GroupSet.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/load/BlockTreeLoader.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/StorageBackend.h"
+#include "rtp_llm/cpp/cache/block_tree_cache/store/BlockTreeStorer.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/TransferTypes.h"
 
 namespace rtp_llm {
@@ -61,8 +62,8 @@ struct BlockTreeCacheConfig {
     EvictionPolicy host_eviction_policy{EvictionPolicy::LRU};
     EvictionPolicy disk_eviction_policy{EvictionPolicy::FIFO};
 
-    // ---- Eviction thread pool ----
-    int eviction_thread_pool_size{2};
+    // ---- Shared Store/Load/Evict task pool ----
+    int task_pool_size{4};
 
     // ---- Cross-rank transfer timeout ----
     int memory_cache_sync_timeout_ms{10000};
@@ -131,7 +132,8 @@ public:
 
     BlockTreeMatchResult match(const CacheKeysType& cache_keys);
     void                 insert(const CacheKeysType&                              cache_keys,
-                                const std::vector<std::vector<GroupSetResource>>& resources);
+                                const std::vector<std::vector<GroupSetResource>>& resources,
+                                Tier                                              target_tier);
     // Directly reclaim up to num_blocks device blocks belonging to one group set
     // (target_tier = NONE, content dropped). Returns the number actually freed.
     int evictForGroup(size_t group_id, size_t num_blocks);
@@ -207,11 +209,13 @@ public:
 
 private:
     void checkWatermark();
+    // Caller holds mutex_.
+    void onWorkflowSettledLocked(bool tree_data_mutated, bool check_watermark);
     void reserveInFlightDeviceReleaseCreditsLocked(const std::vector<EvictionReleaseCredit>& release_credits);
     void settleInFlightDeviceReleaseCreditsLocked(const std::vector<EvictionReleaseCredit>& release_credits) noexcept;
 
-    BlockTreeCacheConfig       config_;
-    std::unique_ptr<BlockTree> tree_;
+    BlockTreeCacheConfig                     config_;
+    std::unique_ptr<BlockTree>               tree_;
     std::shared_ptr<StorageBackend>          storage_backend_;
     std::unique_ptr<BlockTransferDispatcher> transfer_dispatcher_;
     std::unique_ptr<BlockTreeTaskPool>       task_pool_;
@@ -224,6 +228,7 @@ private:
     std::unordered_map<DeviceBlockPoolPtr, size_t> in_flight_device_release_credits_;
     int64_t                                        mutation_version_{0};
     BlockTreeLoader                                loader_;
+    BlockTreeStorer                                storer_;
 };
 
 using BlockTreeCachePtr = std::shared_ptr<BlockTreeCache>;

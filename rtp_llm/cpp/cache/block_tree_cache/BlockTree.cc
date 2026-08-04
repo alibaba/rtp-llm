@@ -48,22 +48,19 @@ void BlockTree::releaseNode(TreeNode* node) {
         GroupSetResource&  resource  = node->group_set_resources[group_set_id];
         if (resource.hasTier(Tier::DEVICE)) {
             const std::vector<BlockIdxType> device_blocks = resource.device_blocks;
-            const MultiNodeResource         device_resource{
-                group_set_id, Tier::DEVICE, {{node, device_blocks}}};
+            const MultiNodeResource         device_resource{group_set_id, Tier::DEVICE, {{node, device_blocks}}};
             group_set->unmapDeviceBlocksFromTreeNode(device_resource);
             resource.evictFromTier(Tier::DEVICE);
             group_set->unreferenceBlocks(device_resource, BlockRefType::BLOCK_CACHE);
         }
         if (resource.hasTier(Tier::HOST)) {
-            group_set->unreferenceBlocks(
-                MultiNodeResource{group_set_id, Tier::HOST, {{node, {resource.host_block}}}},
-                BlockRefType::BLOCK_CACHE);
+            group_set->unreferenceBlocks(MultiNodeResource{group_set_id, Tier::HOST, {{node, {resource.host_block}}}},
+                                         BlockRefType::BLOCK_CACHE);
             resource.host_block = NULL_BLOCK_IDX;
         }
         if (resource.hasTier(Tier::DISK)) {
-            group_set->unreferenceBlocks(
-                MultiNodeResource{group_set_id, Tier::DISK, {{node, {resource.disk_slot}}}},
-                BlockRefType::BLOCK_CACHE);
+            group_set->unreferenceBlocks(MultiNodeResource{group_set_id, Tier::DISK, {{node, {resource.disk_slot}}}},
+                                         BlockRefType::BLOCK_CACHE);
             resource.disk_slot = NULL_BLOCK_IDX;
         }
         resource.transfer_state = GroupSetTransferState::IDLE;
@@ -139,8 +136,7 @@ BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                
             RTP_LLM_CHECK_WITH_INFO(resource.isValidSteadyState()
                                         && (!resource.hasTier(Tier::DEVICE)
                                             || (resource.hasCompleteDeviceValue()
-                                                && resource.device_blocks.size()
-                                                       == group_set->devicePools().size())),
+                                                && resource.device_blocks.size() == group_set->devicePools().size())),
                                     "BlockTree insert requires an IDLE steady resource and complete DEVICE value: "
                                     "key=%ld group_set_id=%zu state=%d tiers=%zu expected_width=%zu actual_width=%zu",
                                     cache_keys[i],
@@ -154,48 +150,53 @@ BlockTreeInsertResult BlockTree::insertNode(const CacheKeysType&                
 
     TreeNode* current = root_.get();
 
+    // All published tiers take BLOCK_CACHE refs; only Device blocks enter the reverse index.
+    auto publishTier = [this](TreeNode* node, size_t group_set_id, const GroupSetResource& resource, Tier tier) {
+        const MultiNodeResource published{group_set_id, tier, {{node, resource.getBlocks(tier)}}};
+        if (tier == Tier::DEVICE) {
+            group_sets_[group_set_id]->mapDeviceBlocksToTreeNode(published);
+        }
+        group_sets_[group_set_id]->referenceBlocks(published, BlockRefType::BLOCK_CACHE);
+    };
+
     for (size_t i = 0; i < cache_keys.size(); ++i) {
         CacheKeyType key = cache_keys[i];
         auto         it  = current->children.find(key);
         if (it != current->children.end()) {
-            current = it->second;
-            const auto& incoming_resources = resources[i];
+            current                                = it->second;
+            const auto&         incoming_resources = resources[i];
             std::vector<size_t> adopted_group_set_ids;
             for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
-                GroupSetResource&       existing     = current->group_set_resources[group_set_id];
-                const GroupSetResource& incoming     = incoming_resources[group_set_id];
+                GroupSetResource&       existing      = current->group_set_resources[group_set_id];
+                const GroupSetResource& incoming      = incoming_resources[group_set_id];
+                const Tier              incoming_tier = incoming.getTopTier();
                 if (!existing.is_empty() || existing.transfer_state != GroupSetTransferState::IDLE
-                    || !incoming.hasTier(Tier::DEVICE)) {
+                    || incoming_tier == Tier::NONE) {
                     continue;
                 }
-                existing.setBlocks(Tier::DEVICE, incoming.device_blocks);
+                existing.setBlocks(incoming_tier, incoming.getBlocks(incoming_tier));
                 existing.transfer_state = GroupSetTransferState::IDLE;
                 existing.candidate_meta = {};
-                if (existing.hasCompleteDeviceValue()) {
-                    const MultiNodeResource device_resource{
-                        group_set_id, Tier::DEVICE, {{current, existing.device_blocks}}};
-                    group_sets_[group_set_id]->mapDeviceBlocksToTreeNode(device_resource);
-                    group_sets_[group_set_id]->referenceBlocks(device_resource, BlockRefType::BLOCK_CACHE);
-                }
+                publishTier(current, group_set_id, existing, incoming_tier);
+                ++result.accepted_resource_count;
                 adopted_group_set_ids.push_back(group_set_id);
             }
             if (!adopted_group_set_ids.empty()) {
                 result.adopted_nodes.emplace_back(current, std::move(adopted_group_set_ids));
             }
         } else {
-            TreeNode* child        = createNode(key, current);
-            current->children[key] = child;
-            current                = child;
+            TreeNode* child              = createNode(key, current);
+            current->children[key]       = child;
+            current                      = child;
             current->group_set_resources = resources[i];
             for (size_t group_set_id = 0; group_set_id < group_sets_.size(); ++group_set_id) {
-                const GroupSetPtr& group_set = group_sets_[group_set_id];
-                GroupSetResource&  resource  = current->group_set_resources[group_set_id];
-                if (resource.hasCompleteDeviceValue()) {
-                    const MultiNodeResource device_resource{
-                        group_set_id, Tier::DEVICE, {{current, resource.device_blocks}}};
-                    group_set->mapDeviceBlocksToTreeNode(device_resource);
-                    group_set->referenceBlocks(device_resource, BlockRefType::BLOCK_CACHE);
+                const GroupSetResource& resource = current->group_set_resources[group_set_id];
+                const Tier              tier     = resource.getTopTier();
+                if (tier == Tier::NONE) {
+                    continue;
                 }
+                publishTier(current, group_set_id, resource, tier);
+                ++result.accepted_resource_count;
             }
             result.inserted_nodes.push_back(current);
         }

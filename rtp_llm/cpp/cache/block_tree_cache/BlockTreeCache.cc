@@ -44,36 +44,36 @@ BlockTreeCache::BlockTreeCache(std::unique_ptr<BlockTree>               tree,
             settleInFlightDeviceReleaseCreditsLocked(credits);
         },
         [this](bool tree_data_mutated, bool check_watermark) {
-            if (tree_data_mutated) {
-                ++mutation_version_;
-            }
-            if (check_watermark) {
-                checkWatermark();
-            }
+            onWorkflowSettledLocked(tree_data_mutated, check_watermark);
         },
         [this](CacheKeyType cache_key, size_t group_set_id) {
             if (config_.enable_remote_cache) {
                 evictor_.writeRemoteThrough(storage_backend_, cache_key, group_set_id);
             }
         }),
-    loader_(
-        tree_.get(),
-        evictor_,
-        transfer_dispatcher_.get(),
-        task_pool_.get(),
-        metrics_reporter_,
-        mutex_,
-        config_.memory_cache_disk_sync_timeout_ms,
-        config_.memory_cache_sync_timeout_ms,
-        config_.enable_device_cache,
-        [this](bool tree_data_mutated, bool check_watermark) {
-            if (tree_data_mutated) {
-                ++mutation_version_;
-            }
-            if (check_watermark) {
-                checkWatermark();
-            }
-        }) {}
+    loader_(tree_.get(),
+            evictor_,
+            transfer_dispatcher_.get(),
+            task_pool_.get(),
+            metrics_reporter_,
+            mutex_,
+            config_.memory_cache_disk_sync_timeout_ms,
+            config_.memory_cache_sync_timeout_ms,
+            config_.enable_device_cache,
+            [this](bool tree_data_mutated, bool check_watermark) {
+                onWorkflowSettledLocked(tree_data_mutated, check_watermark);
+            }),
+    storer_(tree_.get(),
+            evictor_,
+            transfer_dispatcher_.get(),
+            task_pool_.get(),
+            metrics_reporter_,
+            mutex_,
+            config_.memory_cache_sync_timeout_ms,
+            config_.memory_cache_disk_sync_timeout_ms,
+            [this](bool tree_data_mutated, bool check_watermark) {
+                onWorkflowSettledLocked(tree_data_mutated, check_watermark);
+            }) {}
 
 bool BlockTreeCache::init() {
     if (initialized_) {
@@ -82,7 +82,7 @@ bool BlockTreeCache::init() {
     }
     evictor_.init(config_.device_eviction_policy, config_.host_eviction_policy, config_.disk_eviction_policy);
     if (!task_pool_->start()) {
-        RTP_LLM_LOG_ERROR("failed to start task pool, size=%d", config_.eviction_thread_pool_size);
+        RTP_LLM_LOG_ERROR("failed to start task pool, size=%d", config_.task_pool_size);
         return false;
     }
     RTP_LLM_LOG_INFO("initialized with %zu group sets, %zu reusable topology groups, "
@@ -90,7 +90,7 @@ bool BlockTreeCache::init() {
                      "device=%s, host=%s, disk=%s, remote=%s",
                      tree_->groupSets().size(),
                      tree_->reusableGroupCount(),
-                     config_.eviction_thread_pool_size,
+                     config_.task_pool_size,
                      storage_backend_ ? "enabled" : "null",
                      config_.enable_device_cache ? "on" : "off",
                      config_.enable_memory_cache ? "on" : "off",
@@ -110,12 +110,12 @@ bool BlockTreeCache::init() {
 BlockTreeCache::~BlockTreeCache() {
     RTP_LLM_LOG_INFO("destroying, closing load tickets...");
     loader_.shutdown();
-    if (!initialized_) {
-        RTP_LLM_LOG_INFO("destroyed");
-        return;
+    RTP_LLM_LOG_INFO("load tickets closed, stopping store admission and draining cache tasks...");
+    {
+        std::lock_guard<std::mutex> lock(mutex_);
+        storer_.stopAdmissionLocked();
     }
-    RTP_LLM_LOG_INFO("load tickets closed, waiting for pending tasks...");
-    waitForPendingTasks();
+    task_pool_->waitForIdle();
     {
         std::lock_guard<std::mutex> lock(mutex_);
         RTP_LLM_CHECK_WITH_INFO(
@@ -137,19 +137,10 @@ BlockTreeMatchResult BlockTreeCache::match(const CacheKeysType& cache_keys) {
 }
 
 void BlockTreeCache::insert(const CacheKeysType&                              cache_keys,
-                            const std::vector<std::vector<GroupSetResource>>& resources) {
+                            const std::vector<std::vector<GroupSetResource>>& resources,
+                            Tier                                              target_tier) {
     std::lock_guard<std::mutex> lock(mutex_);
-
-    BlockTreeInsertResult insert_result = tree_->insertNode(cache_keys, resources);
-
-    if (insert_result.inserted_nodes.empty() && insert_result.adopted_nodes.empty()) {
-        return;
-    }
-
-    // Stamp and refresh only newly created nodes and exact adopted GroupSet resources.
-    evictor_.onInsertCommitted(insert_result);
-    ++mutation_version_;
-    checkWatermark();
+    storer_.storeLocked(cache_keys, resources, target_tier);
 }
 
 int BlockTreeCache::evictForGroup(size_t group_id, size_t num_blocks) {
@@ -331,6 +322,16 @@ void BlockTreeCache::settleInFlightDeviceReleaseCreditsLocked(
         }
     }
 }
+
+void BlockTreeCache::onWorkflowSettledLocked(bool tree_data_mutated, bool check_watermark) {
+    if (tree_data_mutated) {
+        ++mutation_version_;
+    }
+    if (check_watermark) {
+        checkWatermark();
+    }
+}
+
 void BlockTreeCache::checkWatermark() {
     if (config_.enable_device_cache && config_.device_min_free_blocks > 0) {
         struct PoolDeficit {

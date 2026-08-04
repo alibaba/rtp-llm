@@ -512,6 +512,10 @@ public:
         return generate_input_->generate_config->enable_memory_cache;
     }
 
+    bool enableDiskCache() const {
+        return generate_input_->generate_config->enable_disk_cache;
+    }
+
     bool enableRemoteCache() const {
         return generate_input_->generate_config->enable_remote_cache;
     }

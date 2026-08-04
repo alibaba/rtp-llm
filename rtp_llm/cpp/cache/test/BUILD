@@ -281,6 +281,7 @@ cc_test(
         ":block_pool_test_helper",
         ":block_tree_cache_allocator_test_helper",
         "//rtp_llm/cpp/cache/block_tree_cache",
+        "//rtp_llm/cpp/cache/block_tree_cache/test:block_tree_cache_test_utils",
     ],
     env = {},
     exec_properties = {'gpu':'H20'},

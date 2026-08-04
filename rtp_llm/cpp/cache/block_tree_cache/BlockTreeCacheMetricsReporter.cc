@@ -19,6 +19,10 @@ constexpr std::array<Tier, 3>           kMetricTiers      = {Tier::DEVICE, Tier:
 constexpr std::array<CacheGroupType, 3> kMetricGroupTypes = {
     CacheGroupType::FULL, CacheGroupType::SWA, CacheGroupType::LINEAR};
 
+size_t transferOperationIndex(CacheTransferOperation operation) {
+    return static_cast<size_t>(operation);
+}
+
 int metricGroupTypeIndex(CacheGroupType group_type) {
     if (group_type == CacheGroupType::FULL) {
         return 0;
@@ -190,8 +194,8 @@ void BlockTreeCacheMetricsReporter::reportEvictionFinished(const BlockTreeEvicto
 }
 
 void BlockTreeCacheMetricsReporter::reportEvictionTransfer(const TransferDescriptor&       desc,
-                                                       const std::vector<GroupSetPtr>& group_sets,
-                                                       int64_t                         finish_time_us) const {
+                                                           const std::vector<GroupSetPtr>& group_sets,
+                                                           int64_t                         finish_time_us) const {
     const size_t group_set_id = desc.group_set_id;
     if (group_set_id >= group_sets.size()) {
         return;
@@ -226,10 +230,15 @@ int BlockTreeCacheMetricsReporter::transferDirectionIndex(Tier source_tier, Tier
     if (source_tier == Tier::DISK && target_tier == Tier::DEVICE) {
         return 3;
     }
+    if (source_tier == Tier::DEVICE && target_tier == Tier::DISK) {
+        return 4;
+    }
     return -1;
 }
 
-int64_t BlockTreeCacheMetricsReporter::reportTransferStarted(Tier source_tier, Tier target_tier) {
+int64_t BlockTreeCacheMetricsReporter::reportTransferStarted(CacheTransferOperation operation,
+                                                             Tier                   source_tier,
+                                                             Tier                   target_tier) {
     if (metrics_reporter_ == nullptr) {
         return 0;
     }
@@ -237,24 +246,33 @@ int64_t BlockTreeCacheMetricsReporter::reportTransferStarted(Tier source_tier, T
     if (direction_index < 0) {
         return 0;
     }
-    const int64_t begin_time_us = currentTimeUs();
-    const int64_t in_flight     = transfer_in_flight_[static_cast<size_t>(direction_index)].fetch_add(1) + 1;
+    const int64_t begin_time_us   = currentTimeUs();
+    const size_t  operation_index = transferOperationIndex(operation);
+    const size_t  direction       = static_cast<size_t>(direction_index);
+    const int64_t in_flight       = transfer_in_flight_[operation_index][direction].fetch_add(1) + 1;
+
     RtpLLMCacheTransferMetricsCollector collector;
+    collector.operation          = cacheTransferOperationName(operation);
     collector.source_tier        = tierName(source_tier);
     collector.target_tier        = tierName(target_tier);
     collector.in_flight          = in_flight;
     collector.transfer_completed = false;
+
     try {
         metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(nullptr, &collector);
     } catch (...) {
-        transfer_in_flight_[static_cast<size_t>(direction_index)].fetch_sub(1);
+        transfer_in_flight_[operation_index][direction].fetch_sub(1);
         throw;
     }
     return begin_time_us;
 }
 
-void BlockTreeCacheMetricsReporter::reportTransferFinished(
-    Tier source_tier, Tier target_tier, size_t block_count, int64_t begin_time_us, bool success) {
+void BlockTreeCacheMetricsReporter::reportTransferFinished(CacheTransferOperation operation,
+                                                           Tier                   source_tier,
+                                                           Tier                   target_tier,
+                                                           size_t                 block_count,
+                                                           int64_t                begin_time_us,
+                                                           bool                   success) {
     if (metrics_reporter_ == nullptr) {
         return;
     }
@@ -262,8 +280,12 @@ void BlockTreeCacheMetricsReporter::reportTransferFinished(
     if (direction_index < 0) {
         return;
     }
-    const int64_t in_flight = transfer_in_flight_[static_cast<size_t>(direction_index)].fetch_sub(1) - 1;
+    const size_t  operation_index = transferOperationIndex(operation);
+    const int64_t in_flight =
+        transfer_in_flight_[operation_index][static_cast<size_t>(direction_index)].fetch_sub(1) - 1;
+
     RtpLLMCacheTransferMetricsCollector collector;
+    collector.operation   = cacheTransferOperationName(operation);
     collector.source_tier = tierName(source_tier);
     collector.target_tier = tierName(target_tier);
     collector.block_count = static_cast<int64_t>(block_count);
@@ -271,6 +293,36 @@ void BlockTreeCacheMetricsReporter::reportTransferFinished(
     collector.in_flight   = in_flight;
     collector.success     = success;
     metrics_reporter_->report<RtpLLMCacheTransferMetrics, RtpLLMCacheTransferMetricsCollector>(nullptr, &collector);
+}
+
+const char* cacheTransferOperationName(CacheTransferOperation operation) {
+    switch (operation) {
+        case CacheTransferOperation::LOAD:
+            return "load";
+        case CacheTransferOperation::EVICT:
+            return "evict";
+        case CacheTransferOperation::STORE:
+            return "store";
+    }
+    return "unknown";
+}
+
+void BlockTreeCacheMetricsReporter::reportStorePublish(Tier   target_tier,
+                                                       size_t accepted_blocks,
+                                                       size_t duplicate_blocks) const {
+    reportStoreBlocks(target_tier, "accepted", accepted_blocks);
+    reportStoreBlocks(target_tier, "duplicate", duplicate_blocks);
+}
+
+void BlockTreeCacheMetricsReporter::reportStoreBlocks(Tier target_tier, const char* outcome, size_t block_count) const {
+    if (metrics_reporter_ == nullptr || block_count == 0) {
+        return;
+    }
+    RtpLLMTierStoreMetricsCollector collector;
+    collector.target_tier = tierName(target_tier);
+    collector.outcome     = outcome;
+    collector.block_count = static_cast<int64_t>(block_count);
+    metrics_reporter_->report<RtpLLMTierStoreMetrics, RtpLLMTierStoreMetricsCollector>(nullptr, &collector);
 }
 
 }  // namespace rtp_llm

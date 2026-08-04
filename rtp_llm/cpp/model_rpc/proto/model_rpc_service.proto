@@ -130,6 +130,8 @@ message GenerateConfigPB {
     int32 prompt_logits_start = 65;
     int32 prompt_logits_end = 66;
     bool return_target_logprob = 67;
+    // 请求级 L3 写入开关；RPC 缺失时为 false。
+    bool enable_disk_cache = 68;
 }
 
 message MMPreprocessConfigPB {

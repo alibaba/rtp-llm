@@ -69,18 +69,28 @@ class GenerateConfigTest(TestCase):
 
         config = KVCacheConfig()
         config.memory_cache_disk_staging_block_count = 8
+        config.enable_disk_cache = False
 
         state = config.__getstate__()
-        self.assertEqual(len(state), 55)
+        self.assertEqual(len(state), 56)
 
         restored = pickle.loads(pickle.dumps(config))
         self.assertEqual(restored.memory_cache_disk_staging_block_count, 8)
+        self.assertFalse(restored.enable_disk_cache)
 
-        # Legacy 43/54-element states must unpickle with the staging default.
-        for legacy_size in (43, 54):
+        config.enable_disk_cache = True
+        restored_enabled = pickle.loads(pickle.dumps(config))
+        self.assertTrue(restored_enabled.enable_disk_cache)
+
+        # Legacy 43/54/55-element states must keep the new switch disabled.
+        for legacy_size in (43, 54, 55):
             legacy = KVCacheConfig.__new__(KVCacheConfig)
             legacy.__setstate__(tuple(state)[:legacy_size])
-            self.assertEqual(legacy.memory_cache_disk_staging_block_count, 4)
+            self.assertFalse(legacy.enable_disk_cache)
+            if legacy_size < 55:
+                self.assertEqual(legacy.memory_cache_disk_staging_block_count, 4)
+            else:
+                self.assertEqual(legacy.memory_cache_disk_staging_block_count, 8)
 
     def test_engine_config_propagates_role_to_parallelism_config(self):
         py_env_configs = PyEnvConfigs()

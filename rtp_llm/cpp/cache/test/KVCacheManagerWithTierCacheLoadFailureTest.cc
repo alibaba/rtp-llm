@@ -177,7 +177,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerHitOuterIncrFailureAbortsBefore
 
     MallocInfo failed_info{failed_resource, failed_token_ids};
     failed_info.reuse_cache         = true;
-    failed_info.enable_device_cache = true;
+    failed_info.enable_cache_lookup = true;
     const auto failed_result        = manager_->malloc(failed_info);
     allocator_groups[0]->setEvictCallback([cache](size_t need_blocks) {
         const int reclaimed = cache->evictForGroup(/*group_id=*/0, need_blocks);

@@ -33,7 +33,8 @@ std::string IBlockPool::debugString() const {
         << ", request_refs=" << metric_total_ref_counts_[refTypeIndex(BlockRefType::REQUEST)]
         << ", connector_refs=" << metric_total_ref_counts_[refTypeIndex(BlockRefType::CONNECTOR)]
         << ", block_cache_refs=" << metric_total_ref_counts_[refTypeIndex(BlockRefType::BLOCK_CACHE)]
-        << ", eviction_refs=" << metric_total_ref_counts_[refTypeIndex(BlockRefType::EVICTION)] << "}";
+        << ", eviction_refs=" << metric_total_ref_counts_[refTypeIndex(BlockRefType::EVICTION)]
+        << ", store_refs=" << metric_total_ref_counts_[refTypeIndex(BlockRefType::STORE)] << "}";
     return oss.str();
 }
 

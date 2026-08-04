@@ -1,24 +1,21 @@
 #include "rtp_llm/cpp/cache/block_tree_cache/load/LoadTaskRunner.h"
 
-#include <exception>
-#include <functional>
 #include <utility>
 
 #include "rtp_llm/cpp/cache/block_tree_cache/BlockTreeCacheMetricsReporter.h"
 #include "rtp_llm/cpp/cache/block_tree_cache/transfer/BlockTransferDispatcher.h"
-#include "rtp_llm/cpp/utils/Logger.h"
 
 namespace rtp_llm {
 
-LoadTaskRunner::TaskPtr LoadTaskRunner::createTask(const std::vector<TransferDescriptor>& load_descs,
-                                                   const std::vector<bool>&                  joined_load,
-                                                   const std::vector<GroupSetPtr>&           group_sets,
-                                                   const std::shared_ptr<LoadAsyncContext>&  context) {
+LoadTaskRunner::TaskPtr LoadTaskRunner::createTask(const std::vector<TransferDescriptor>&   load_descs,
+                                                   const std::vector<bool>&                 joined_load,
+                                                   const std::vector<GroupSetPtr>&          group_sets,
+                                                   const std::shared_ptr<LoadAsyncContext>& context) {
     std::vector<TransferDescriptor> task_load_descs;
-    std::vector<GroupSetPtr> task_desc_group_sets;
+    std::vector<GroupSetPtr>        task_desc_group_sets;
     for (size_t desc_index = 0; desc_index < load_descs.size(); ++desc_index) {
-        const TransferDescriptor& desc = load_descs[desc_index];
-        const GroupSetPtr& group_set = group_sets[desc.group_set_id];
+        const TransferDescriptor& desc      = load_descs[desc_index];
+        const GroupSetPtr&        group_set = group_sets[desc.group_set_id];
         if (joined_load[desc_index]) {
             continue;
         }
@@ -30,7 +27,7 @@ LoadTaskRunner::TaskPtr LoadTaskRunner::createTask(const std::vector<TransferDes
     }
 
     TaskPtr task          = std::make_shared<Task>();
-    task->load_descs           = std::move(task_load_descs);
+    task->load_descs      = std::move(task_load_descs);
     task->desc_group_sets = std::move(task_desc_group_sets);
     task->target_installed.assign(task->load_descs.size(), false);
     task->context = context;
@@ -38,8 +35,8 @@ LoadTaskRunner::TaskPtr LoadTaskRunner::createTask(const std::vector<TransferDes
 }
 
 bool LoadTaskRunner::prepareTransferDescriptor(Task& task, size_t desc_index) {
-    const TransferDescriptor& desc = task.load_descs[desc_index];
-    const GroupSetPtr& group_set = task.desc_group_sets[desc_index];
+    const TransferDescriptor& desc      = task.load_descs[desc_index];
+    const GroupSetPtr&        group_set = task.desc_group_sets[desc_index];
     if (desc.source_tier == Tier::DEVICE) {
         return true;
     }
@@ -77,31 +74,41 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
         }
     }
 
-    int64_t                         host_transfer_begin_time_us = 0;
-    int64_t                         disk_transfer_begin_time_us = 0;
-    bool                            host_transfer_started       = false;
-    bool                            disk_transfer_started       = false;
-    const std::function<void(bool)> finish_metrics              = [&](bool success) {
+    int64_t    host_transfer_begin_time_us = 0;
+    int64_t    disk_transfer_begin_time_us = 0;
+    bool       host_transfer_started       = false;
+    bool       disk_transfer_started       = false;
+    const auto finish_metrics              = [&](bool success) {
         if (host_transfer_started) {
             host_transfer_started = false;
-            metrics_reporter.reportTransferFinished(
-                Tier::HOST, Tier::DEVICE, host_transfer_blocks, host_transfer_begin_time_us, success);
+            metrics_reporter.reportTransferFinished(CacheTransferOperation::LOAD,
+                                                    Tier::HOST,
+                                                    Tier::DEVICE,
+                                                    host_transfer_blocks,
+                                                    host_transfer_begin_time_us,
+                                                    success);
         }
         if (disk_transfer_started) {
             disk_transfer_started = false;
-            metrics_reporter.reportTransferFinished(
-                Tier::DISK, Tier::DEVICE, disk_transfer_blocks, disk_transfer_begin_time_us, success);
+            metrics_reporter.reportTransferFinished(CacheTransferOperation::LOAD,
+                                                    Tier::DISK,
+                                                    Tier::DEVICE,
+                                                    disk_transfer_blocks,
+                                                    disk_transfer_begin_time_us,
+                                                    success);
         }
     };
 
     try {
         if (host_transfer_blocks > 0) {
-            host_transfer_begin_time_us = metrics_reporter.reportTransferStarted(Tier::HOST, Tier::DEVICE);
-            host_transfer_started       = true;
+            host_transfer_begin_time_us =
+                metrics_reporter.reportTransferStarted(CacheTransferOperation::LOAD, Tier::HOST, Tier::DEVICE);
+            host_transfer_started = true;
         }
         if (disk_transfer_blocks > 0) {
-            disk_transfer_begin_time_us = metrics_reporter.reportTransferStarted(Tier::DISK, Tier::DEVICE);
-            disk_transfer_started       = true;
+            disk_transfer_begin_time_us =
+                metrics_reporter.reportTransferStarted(CacheTransferOperation::LOAD, Tier::DISK, Tier::DEVICE);
+            disk_transfer_started = true;
         }
 
         bool copy_success = prepared;
@@ -114,13 +121,7 @@ bool LoadTaskRunner::runTransfer(Task&                          task,
         finish_metrics(copy_success);
         return copy_success;
     } catch (...) {
-        try {
-            finish_metrics(false);
-        } catch (const std::exception& error) {
-            RTP_LLM_LOG_ERROR("failed to finalize load metrics: %s", error.what());
-        } catch (...) {
-            RTP_LLM_LOG_ERROR("failed to finalize load metrics with unknown exception");
-        }
+        finish_metrics(false);
         throw;
     }
 }
@@ -131,14 +132,14 @@ void LoadTaskRunner::releaseTaskResources(const Task& task) {
 
 void LoadTaskRunner::releaseUninstalledTargetHolders(const Task& task) {
     for (size_t desc_index = 0; desc_index < task.load_descs.size(); ++desc_index) {
-        const TransferDescriptor& desc = task.load_descs[desc_index];
-        const GroupSetPtr& group_set = task.desc_group_sets[desc_index];
+        const TransferDescriptor& desc      = task.load_descs[desc_index];
+        const GroupSetPtr&        group_set = task.desc_group_sets[desc_index];
         if (desc.source_tier == Tier::DEVICE || task.target_installed[desc_index]) {
             continue;
         }
         group_set->unreferenceBlocks(
             MultiNodeResource{desc.group_set_id, Tier::DEVICE, {{desc.node, desc.target_blocks}}},
-                                     BlockRefType::REQUEST);
+            BlockRefType::REQUEST);
     }
 }
 

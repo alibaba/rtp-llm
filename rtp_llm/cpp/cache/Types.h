@@ -8,6 +8,7 @@
 
 #include "rtp_llm/cpp/cache/BlockInfo.h"
 #include "rtp_llm/cpp/cache/CacheGroupType.h"
+#include "rtp_llm/cpp/cache/CacheTier.h"
 #include "rtp_llm/models_py/bindings/core/Types.h"
 #include "rtp_llm/cpp/cache/BatchKVCacheResource.h"
 
@@ -68,7 +69,7 @@ struct MallocInfo {
     int64_t                 request_id          = 0;
     bool                    verbose             = true;  // for failed log
     bool                    reuse_cache         = true;
-    bool                    enable_device_cache = true;
+    bool                    enable_cache_lookup = true;
     // Sparse tail-group cleanup is only valid for incremental allocation.
     // Prefill init keeps reused prefix slots intact because model-path kernels
     // still read them by prefix_length.
@@ -102,6 +103,7 @@ struct InsertInfo {
     BatchKVCacheResourcePtr batch_kv_cache_resource;
     CompleteTokenIdsPtr     complete_token_ids;
     bool                    is_resident;
+    Tier                    target_tier{Tier::DEVICE};
 };
 
 }  // namespace rtp_llm

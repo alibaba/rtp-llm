@@ -27,7 +27,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DevicePrefixHitKeepsLowerTiersUntouc
                                   static_cast<int>(cache_config_.seq_size_per_block));
     MallocInfo malloc_info{resource, token_ids};
     malloc_info.reuse_cache         = true;
-    malloc_info.enable_device_cache = true;
+    malloc_info.enable_cache_lookup = true;
     const auto result               = manager_->malloc(malloc_info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(result.reuse_len, 2 * static_cast<int>(cache_config_.seq_size_per_block));
@@ -108,7 +108,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4AllocatorPressureUsesDirectDropNotDe
         makeTokenIds(/*offset=*/30000, seq_len, seq_len, static_cast<int>(cache_config_.seq_size_per_block));
     MallocInfo malloc_info{resource, token_ids};
     malloc_info.reuse_cache         = true;
-    malloc_info.enable_device_cache = false;
+    malloc_info.enable_cache_lookup = false;
     const auto result               = manager_->malloc(malloc_info);
     ASSERT_TRUE(result.success);
     ASSERT_EQ(result.async_context, nullptr);
@@ -214,7 +214,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4ReuseCacheFalsePressureDoesNotDistur
         makeTokenIds(/*offset=*/0, 4 * seq_size_per_block, 4 * seq_size_per_block, seq_size_per_block);
     MallocInfo first_info{first_resource, first_token_ids};
     first_info.reuse_cache                = true;
-    first_info.enable_device_cache        = true;
+    first_info.enable_cache_lookup        = true;
     const size_t first_load_submits_begin = pausable_engine->submitCount();
     const auto   first_result             = manager_->malloc(first_info);
     ASSERT_TRUE(first_result.success);
@@ -256,7 +256,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4ReuseCacheFalsePressureDoesNotDistur
     auto second_token_ids = makeTokenIds(/*offset=*/10000, seq_size_per_block, seq_size_per_block, seq_size_per_block);
     MallocInfo second_info{second_resource, second_token_ids};
     second_info.reuse_cache         = false;
-    second_info.enable_device_cache = true;
+    second_info.enable_cache_lookup = true;
     const auto second_result        = manager_->malloc(second_info);
     EXPECT_FALSE(second_result.success);
     EXPECT_EQ(second_result.async_context, nullptr);
@@ -328,7 +328,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4ReuseCacheFalseStillMatchesResidentP
                                cache_config_.seq_size_per_block);
     MallocInfo info{resource, tokens};
     info.reuse_cache         = false;
-    info.enable_device_cache = true;
+    info.enable_cache_lookup = true;
     const auto result        = manager_->malloc(info);
     ASSERT_TRUE(result.success);
     // reuse_cache controls how the per-group allocator preserves and extends
@@ -359,7 +359,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DuplicateInsertIsIdempotent) {
                                cache_config_.seq_size_per_block);
     MallocInfo info{resource, tokens};
     info.reuse_cache         = true;
-    info.enable_device_cache = true;
+    info.enable_cache_lookup = true;
     auto result              = manager_->malloc(info);
     ASSERT_TRUE(result.success);
     ASSERT_EQ(result.async_context, nullptr);
@@ -421,7 +421,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LowerTierMatchPublishesAsyncContext)
                                cache_config_.seq_size_per_block);
     MallocInfo   info{resource, tokens};
     info.reuse_cache         = true;
-    info.enable_device_cache = true;
+    info.enable_cache_lookup = true;
     auto result              = manager_->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
@@ -494,7 +494,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4BatchCommonLowerHitSharesOneLoadedTa
         /*offset=*/0, batch_size, /*common_seq_len=*/block_size, /*seq_len=*/2 * block_size, block_size);
     MallocInfo info{resource, tokens};
     info.reuse_cache         = true;
-    info.enable_device_cache = true;
+    info.enable_cache_lookup = true;
     const auto result        = manager_->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(result.reuse_len, block_size);

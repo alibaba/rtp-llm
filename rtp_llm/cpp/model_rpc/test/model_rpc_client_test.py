@@ -87,9 +87,9 @@ class FakeModelRpcClient(ModelRpcClient):
     def __init__(self):
         # Call parent __init__ with minimal required parameters
         super().__init__(
-            [],     # addresses: empty list for fake client
-            {},     # client_config: empty dict for fake client
-            0,      # max_rpc_timeout_ms
+            [],  # addresses: empty list for fake client
+            {},  # client_config: empty dict for fake client
+            0,  # max_rpc_timeout_ms
             False,  # decode_entrance
         )
         self.stub = FakeStub()
@@ -140,6 +140,23 @@ class ModelRpcClientTest(TestCase):
         self.assertEqual(res[1].aux_info.output_len, 2)
 
         self.assertEqual(res[2].finished, True)
+
+    def test_enable_disk_cache_serialization(self):
+        self.assertTrue(GenerateConfig(using_hf_sampling=False).enable_disk_cache)
+
+        for enabled in (False, True):
+            generate_config = GenerateConfig(
+                using_hf_sampling=False, enable_disk_cache=enabled
+            )
+            input = GenerateInput(
+                token_ids=torch.tensor([1]),
+                generate_config=generate_config,
+                request_id=0,
+                mm_inputs=[],
+            )
+
+            generate_config_pb = trans_input(input).generate_config
+            self.assertEqual(generate_config_pb.enable_disk_cache, enabled)
 
     def test_generate_stream_with_logits_index(self):
         client = FakeModelRpcClient()

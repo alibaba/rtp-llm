@@ -110,11 +110,13 @@ int StreamCacheResource::tryReleaseKVBlock(size_t nums) {
 
     if (total_blocks > 0) {
         if (reuseCache() && !stream_->hasError() && stream_->getStatus() == StreamState::FINISHED) {
-            RTP_LLM_LOG_DEBUG(
-                "tryReleaseKVBlock: stream=%ld, storing cache, curBlocksNum=%d", stream_->streamId(), total_blocks);
-            // save cache to gpu
-            if (enableDeviceCache()) {
-                InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false};
+            const Tier target_tier = storeTarget();
+            RTP_LLM_LOG_DEBUG("tryReleaseKVBlock: stream=%ld, storing cache, curBlocksNum=%d, target_tier=%s",
+                              stream_->streamId(),
+                              total_blocks,
+                              tierName(target_tier));
+            if (target_tier != Tier::NONE) {
+                InsertInfo insert_info{batch_kv_cache_resource_, stream_->completeTokenIdsPtr(), false, target_tier};
                 resource_context_.cache_manager->insertIntoCache(insert_info);
             }
         } else {
@@ -172,10 +174,10 @@ absl::Status StreamCacheResource::initKVBlock() {
 
     if (disable_first_malloc_reuse && is_decode_role && is_first_malloc) {
         malloc_info.reuse_cache         = false;
-        malloc_info.enable_device_cache = false;
+        malloc_info.enable_cache_lookup = false;
     } else {
         malloc_info.reuse_cache         = reuseCache();
-        malloc_info.enable_device_cache = reuseCache() && enableDeviceCache();
+        malloc_info.enable_cache_lookup = enableCacheLookup();
     }
     malloc_info.enable_remove_skipped_blocks = false;
 
@@ -229,7 +231,7 @@ absl::Status StreamCacheResource::incrKVBlock() {
     malloc_info.request_id                   = stream_->streamId();
     malloc_info.verbose                      = malloc_failed_times_ >= 10 ? malloc_failed_times_ % 100 == 0 : true;
     malloc_info.reuse_cache                  = reuseCache();
-    malloc_info.enable_device_cache          = reuseCache() && enableDeviceCache();
+    malloc_info.enable_cache_lookup          = enableCacheLookup();
     malloc_info.enable_remove_skipped_blocks = true;
 
     auto result = resource_context_.cache_manager->malloc(malloc_info);
@@ -347,8 +349,30 @@ bool StreamCacheResource::enableDeviceCache() const {
     return resource_context_.enable_device_cache && stream_->enableDeviceCache();
 }
 
-bool StreamCacheResource::enableTieredMemoryCache() const {
-    return resource_context_.enable_tiered_memory_cache && enableMemoryCache() && enableDeviceCache();
+bool StreamCacheResource::enableDiskCache() const {
+    return resource_context_.enable_disk_cache && stream_->enableDiskCache();
+}
+
+bool StreamCacheResource::enableCacheLookup() const {
+    const bool any_global_tier = resource_context_.enable_device_cache || resource_context_.enable_memory_cache
+                                 || resource_context_.enable_disk_cache;
+    return reuseCache() && any_global_tier;
+}
+
+Tier StreamCacheResource::storeTarget() const {
+    if (!reuseCache()) {
+        return Tier::NONE;
+    }
+    if (enableDeviceCache()) {
+        return Tier::DEVICE;
+    }
+    if (enableMemoryCache()) {
+        return Tier::HOST;
+    }
+    if (enableDiskCache()) {
+        return Tier::DISK;
+    }
+    return Tier::NONE;
 }
 
 void StreamCacheResource::swapLinearBlocks(int32_t batch_id, size_t rhs, size_t lhs) {

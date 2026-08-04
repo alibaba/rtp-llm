@@ -174,7 +174,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
         makeTokenIds(/*offset=*/0, 2 * seq_size_per_block, 2 * seq_size_per_block, seq_size_per_block);
     MallocInfo load_info{load_resource, load_token_ids};
     load_info.reuse_cache         = true;
-    load_info.enable_device_cache = true;
+    load_info.enable_cache_lookup = true;
     const auto load_result        = manager_->malloc(load_info);
     ASSERT_TRUE(load_result.success);
     EXPECT_EQ(load_result.reuse_len, 2 * seq_size_per_block);
@@ -259,7 +259,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4CpCanonicalFullAndSwaRoundTripThroug
     auto hit_token_ids = makeTokenIds(/*offset=*/0, 2 * seq_size_per_block, 2 * seq_size_per_block, seq_size_per_block);
     MallocInfo hit_info{hit_resource, hit_token_ids};
     hit_info.reuse_cache         = true;
-    hit_info.enable_device_cache = true;
+    hit_info.enable_cache_lookup = true;
     const auto hit_result        = manager_->malloc(hit_info);
     ASSERT_TRUE(hit_result.success);
     EXPECT_EQ(hit_result.reuse_len, 2 * seq_size_per_block);
@@ -300,7 +300,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
                                      cache_config_.seq_size_per_block);
     MallocInfo guard_info{guard, guard_tokens};
     guard_info.reuse_cache         = true;
-    guard_info.enable_device_cache = true;
+    guard_info.enable_cache_lookup = true;
     auto guard_result              = manager_->malloc(guard_info);
     ASSERT_TRUE(guard_result.success);
     ASSERT_EQ(guard_result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
@@ -344,7 +344,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
                                      cache_config_.seq_size_per_block);
     MallocInfo touch_info{touch_resource, touch_tokens};
     touch_info.reuse_cache         = true;
-    touch_info.enable_device_cache = true;
+    touch_info.enable_cache_lookup = true;
     const auto touch_result        = manager_->malloc(touch_info);
     ASSERT_TRUE(touch_result.success);
     EXPECT_EQ(touch_result.reuse_len, 2 * static_cast<int>(cache_config_.seq_size_per_block));
@@ -369,7 +369,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
                                     cache_config_.seq_size_per_block);
     MallocInfo heat_info{heat_resource, heat_tokens};
     heat_info.reuse_cache         = true;
-    heat_info.enable_device_cache = true;
+    heat_info.enable_cache_lookup = true;
     const auto heat_result        = manager_->malloc(heat_info);
     ASSERT_TRUE(heat_result.success);
     EXPECT_EQ(heat_result.reuse_len, 2 * static_cast<int>(cache_config_.seq_size_per_block));
@@ -443,7 +443,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4MixedDeviceHostDiskSegmentsLoadBack)
                                     cache_config_.seq_size_per_block);
     MallocInfo            load_info{load_resource, load_tokens};
     load_info.reuse_cache         = true;
-    load_info.enable_device_cache = true;
+    load_info.enable_cache_lookup = true;
     const auto load_result        = manager_->malloc(load_info);
     ASSERT_TRUE(load_result.success);
     EXPECT_EQ(load_result.reuse_len, 3 * static_cast<int>(cache_config_.seq_size_per_block));
@@ -651,7 +651,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4LongDiskRoundTripExceedsStagingCapac
         makeTokenIds(/*offset=*/0, (logical_blocks + 1) * block_size, (logical_blocks + 1) * block_size, block_size);
     MallocInfo info{resource, tokens};
     info.reuse_cache         = true;
-    info.enable_device_cache = true;
+    info.enable_cache_lookup = true;
     const auto result        = manager_->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(result.reuse_len, logical_blocks * block_size);

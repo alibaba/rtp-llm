@@ -34,7 +34,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
             /*offset=*/0, logical_blocks * seq_size_per_block, logical_blocks * seq_size_per_block, seq_size_per_block);
         MallocInfo malloc_info{hold.resource, hold.token_ids};
         malloc_info.reuse_cache         = true;
-        malloc_info.enable_device_cache = true;
+        malloc_info.enable_cache_lookup = true;
         const auto result               = manager_->malloc(malloc_info);
         ASSERT_TRUE(result.success);
         EXPECT_EQ(result.reuse_len, (logical_blocks - 1) * seq_size_per_block);
@@ -162,7 +162,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
         makeTokenIds(/*offset=*/0, 4 * seq_size_per_block, 4 * seq_size_per_block, seq_size_per_block);
     MallocInfo load_info{load_resource, load_token_ids};
     load_info.reuse_cache         = true;
-    load_info.enable_device_cache = true;
+    load_info.enable_cache_lookup = true;
     const auto load_result        = manager_->malloc(load_info);
     ASSERT_TRUE(load_result.success);
     EXPECT_EQ(load_result.reuse_len, 3 * seq_size_per_block);
@@ -261,7 +261,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceWatermarkDemotesToHostAndLoads
     auto hit_token_ids = makeTokenIds(/*offset=*/0, 4 * seq_size_per_block, 4 * seq_size_per_block, seq_size_per_block);
     MallocInfo hit_info{hit_resource, hit_token_ids};
     hit_info.reuse_cache         = true;
-    hit_info.enable_device_cache = true;
+    hit_info.enable_cache_lookup = true;
     const auto hit_result        = manager_->malloc(hit_info);
     ASSERT_TRUE(hit_result.success);
     EXPECT_EQ(hit_result.reuse_len, 3 * seq_size_per_block);
@@ -451,7 +451,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
         makeTokenIds(/*offset=*/0, 2 * seq_size_per_block, 2 * seq_size_per_block, seq_size_per_block);
     MallocInfo load_info{load_resource, load_token_ids};
     load_info.reuse_cache         = true;
-    load_info.enable_device_cache = true;
+    load_info.enable_cache_lookup = true;
     const auto load_result        = manager_->malloc(load_info);
     ASSERT_TRUE(load_result.success);
     EXPECT_EQ(load_result.reuse_len, seq_size_per_block);
@@ -537,7 +537,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DeviceAndHostWatermarksDemoteToDiskA
     auto hit_token_ids = makeTokenIds(/*offset=*/0, 2 * seq_size_per_block, 2 * seq_size_per_block, seq_size_per_block);
     MallocInfo hit_info{hit_resource, hit_token_ids};
     hit_info.reuse_cache         = true;
-    hit_info.enable_device_cache = true;
+    hit_info.enable_cache_lookup = true;
     const auto hit_result        = manager_->malloc(hit_info);
     ASSERT_TRUE(hit_result.success);
     EXPECT_EQ(hit_result.reuse_len, seq_size_per_block);
@@ -626,7 +626,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
                                    static_cast<int>(cache_config_.seq_size_per_block));
     MallocInfo hit_info{hit_resource, hit_tokens};
     hit_info.reuse_cache            = true;
-    hit_info.enable_device_cache    = true;
+    hit_info.enable_cache_lookup    = true;
     const size_t submits_before_hit = recording_engine->submitCount();
     const auto   hit_result         = manager_->malloc(hit_info);
     ASSERT_TRUE(hit_result.success);
@@ -728,7 +728,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
             static_cast<int>(cache_config_.seq_size_per_block));
         MallocInfo host_hit_info{host_hit_resource, host_hit_tokens};
         host_hit_info.reuse_cache         = true;
-        host_hit_info.enable_device_cache = true;
+        host_hit_info.enable_cache_lookup = true;
         const auto host_hit_result        = manager_->malloc(host_hit_info);
         ASSERT_TRUE(host_hit_result.success);
         EXPECT_EQ(host_hit_result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));
@@ -813,7 +813,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4HostToDiskWatermarkFailureKeepsHostS
                                     static_cast<int>(cache_config_.seq_size_per_block));
     MallocInfo load_info{load_resource, load_tokens};
     load_info.reuse_cache         = true;
-    load_info.enable_device_cache = true;
+    load_info.enable_cache_lookup = true;
     const auto load_result        = manager_->malloc(load_info);
     ASSERT_TRUE(load_result.success);
     ASSERT_NE(load_result.async_context, nullptr);
@@ -864,8 +864,9 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
     cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
     ASSERT_TRUE(
         engine->waitUntilEnteredFor(std::chrono::duration_cast<std::chrono::milliseconds>(kTransferWaitTimeout)));
-    const auto submits  = engine->submitCount();
-    auto       demoting = snapshotPathResources(*cache, seed.cache_keys);
+    const int pending_tasks = BlockTreeCacheTestPeer::pendingTasksForTest(*cache);
+    ASSERT_GT(pending_tasks, 0);
+    auto demoting = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(demoting.has_value());
     ASSERT_EQ(demoting->size(), 1u);
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
@@ -888,7 +889,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
                                cache_config_.seq_size_per_block);
     MallocInfo info{resource, tokens};
     info.reuse_cache         = true;
-    info.enable_device_cache = true;
+    info.enable_cache_lookup = true;
     auto result              = manager_->malloc(info);
     ASSERT_TRUE(result.success);
     EXPECT_EQ(result.async_context, nullptr);
@@ -897,7 +898,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
     EXPECT_EQ(result.reuse_len, 0);
     EXPECT_EQ(result.memory_reuse_len, 0);
     EXPECT_EQ(result.disk_reuse_len, 0);
-    EXPECT_EQ(engine->submitCount(), submits);
+    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), pending_tasks);
     auto still_demoting = snapshotPathResources(*cache, seed.cache_keys);
     ASSERT_TRUE(still_demoting.has_value());
     for (size_t group_set_id = 0; group_set_id < cache->groupSets().size(); ++group_set_id) {
@@ -911,7 +912,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
     cache->setTierWatermark(Tier::DEVICE, *ratio, 0);
     BlockTreeCacheTestPeer::runMaintenanceForTest(*cache);
     cache->setTierWatermark(Tier::DEVICE, 0.0, 0);
-    EXPECT_EQ(engine->submitCount(), submits);
+    EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), pending_tasks);
     engine->release();
     cache->waitForPendingTasks();
     EXPECT_EQ(BlockTreeCacheTestPeer::pendingTasksForTest(*cache), 0);
@@ -935,7 +936,7 @@ TEST_P(KVCacheManagerWithTierCacheTest, DSV4DemotingDeviceHitIsNotReselected) {
                                     cache_config_.seq_size_per_block);
     MallocInfo load_info{load_resource, load_tokens};
     load_info.reuse_cache         = true;
-    load_info.enable_device_cache = true;
+    load_info.enable_cache_lookup = true;
     const auto load_result        = manager_->malloc(load_info);
     ASSERT_TRUE(load_result.success);
     EXPECT_EQ(load_result.reuse_len, static_cast<int>(cache_config_.seq_size_per_block));

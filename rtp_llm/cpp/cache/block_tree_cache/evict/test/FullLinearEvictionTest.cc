@@ -14,11 +14,12 @@ using block_tree_cache_test::makeBlockTreeCacheForTest;
 class FullLinearEvictionTest: public ::testing::Test {
 protected:
     void SetUp() override {
-        auto                       full   = std::make_shared<FullGroupSet>(std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
-        auto                       linear = std::make_shared<LinearGroupSet>(std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
-        std::vector<GroupSetPtr>   groups = {full, linear};
-        cache_                            = makeBlockTreeCacheForTest(
-            std::move(groups), BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+        auto full = std::make_shared<FullGroupSet>(
+            std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+        auto linear = std::make_shared<LinearGroupSet>(
+            std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+        std::vector<GroupSetPtr> groups = {full, linear};
+        cache_ = makeBlockTreeCacheForTest(std::move(groups), BlockTreeCacheConfig{.task_pool_size = 2});
     }
 
     void insertPath(const CacheKeysType& keys, BlockIdxType full_block, BlockIdxType linear_block) {
@@ -27,7 +28,7 @@ protected:
             resources[i][0].device_blocks = {static_cast<BlockIdxType>(full_block + i)};
             resources[i][1].device_blocks = {static_cast<BlockIdxType>(linear_block + i)};
         }
-        cache_->insert(keys, resources);
+        cache_->insert(keys, resources, Tier::DEVICE);
     }
 
     std::unique_ptr<BlockTreeCache> cache_;
@@ -68,16 +69,17 @@ TEST_F(FullLinearEvictionTest, FullReclaimCascadesToLinear) {
 //   Reclaiming [300] deletes the leaf and prunes both empty ancestors.
 // ---------------------------------------------------------------------------
 TEST_F(FullLinearEvictionTest, LinearOnlySequentialDrain) {
-    auto                            linear    = std::make_shared<LinearGroupSet>(std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
-    std::vector<GroupSetPtr>        groups    = {linear};
-    std::unique_ptr<BlockTreeCache> lin_cache = makeBlockTreeCacheForTest(
-        std::move(groups), BlockTreeCacheConfig{.eviction_thread_pool_size = 2});
+    auto linear = std::make_shared<LinearGroupSet>(
+        std::vector<DeviceBlockPoolPtr>{block_tree_cache_test::makeStructuralDevicePool(0)}, nullptr, nullptr);
+    std::vector<GroupSetPtr>        groups = {linear};
+    std::unique_ptr<BlockTreeCache> lin_cache =
+        makeBlockTreeCacheForTest(std::move(groups), BlockTreeCacheConfig{.task_pool_size = 2});
 
     std::vector<std::vector<GroupSetResource>> resources(3, std::vector<GroupSetResource>(1));
     resources[0][0].device_blocks = {30};
     resources[1][0].device_blocks = {31};
     resources[2][0].device_blocks = {32};
-    lin_cache->insert({100, 200, 300}, resources);
+    lin_cache->insert({100, 200, 300}, resources, Tier::DEVICE);
 
     EXPECT_EQ(lin_cache->getStats().device_heap_total_size, 3u);
 
