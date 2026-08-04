@@ -71,6 +71,12 @@ class ServerArgsSetTest(TestCase):
             py_env_configs.server_config.dash_sc_grpc_pre_stop_drain_seconds, 9.0
         )
 
+        # Verify target-verify backend defaults.
+        self.assertTrue(
+            py_env_configs.fmha_config.enable_flashinfer_fa2_target_verify
+        )
+        self.assertTrue(py_env_configs.fmha_config.enable_fa4_target_verify)
+
         # Verify runtime_config (warm_up is now in RuntimeConfig)
         self.assertEqual(py_env_configs.runtime_config.warm_up, True)  # bool in C++
         # Note: max_seq_len is in ModelConfig, not RuntimeConfig or EngineConfig
@@ -107,6 +113,10 @@ class ServerArgsSetTest(TestCase):
             "--enable_flashinfer_trt_fmha_v2",
             "false",
             "--enable_paged_flashinfer_trt_fmha_v2",
+            "false",
+            "--enable_flashinfer_fa2_target_verify",
+            "false",
+            "--enable_fa4_target_verify",
             "false",
             "--disable_flashinfer_native",
             "true",
@@ -154,6 +164,10 @@ class ServerArgsSetTest(TestCase):
         self.assertFalse(py_env_configs.fmha_config.enable_flashinfer_trtllm_gen)
         self.assertFalse(py_env_configs.fmha_config.enable_flashinfer_trt_fmha_v2)
         self.assertFalse(py_env_configs.fmha_config.enable_paged_flashinfer_trt_fmha_v2)
+        self.assertFalse(
+            py_env_configs.fmha_config.enable_flashinfer_fa2_target_verify
+        )
+        self.assertFalse(py_env_configs.fmha_config.enable_fa4_target_verify)
         self.assertTrue(py_env_configs.fmha_config.disable_flashinfer_native)
 
     def test_cmd_args_override_env_vars(self):

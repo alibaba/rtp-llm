@@ -1,11 +1,14 @@
 import logging
 import math
+import os
+import sys
 from functools import lru_cache
 from importlib.metadata import PackageNotFoundError, version
 from typing import NamedTuple, Optional
 
 import torch
-from packaging.version import Version
+from packaging.specifiers import SpecifierSet
+from packaging.version import InvalidVersion, Version
 
 from rtp_llm.models_py.modules.factory.attention import common
 from rtp_llm.models_py.modules.factory.attention.fmha_impl_base import FMHAImplBase
@@ -23,12 +26,13 @@ _FA4_NUM_THREADS = 256
 _FA4_MAX_SPLITS = 128
 logger = logging.getLogger(__name__)
 
-_FA4_MIN_DEPENDENCIES = {
-    "nvidia-cutlass-dsl": "4.5.3",
-    "apache-tvm-ffi": "0.1.12",
-    "quack-kernels": "0.5.0",
-    "torch-c-dlpack-ext": "0.1.5",
+_FA4_DEPENDENCY_SPECS = {
+    "nvidia-cutlass-dsl": SpecifierSet(">=4.5.3,<4.6"),
+    "apache-tvm-ffi": SpecifierSet(">=0.1.12,<0.2"),
+    "quack-kernels": SpecifierSet(">=0.5.0,<0.6"),
+    "torch-c-dlpack-ext": SpecifierSet(">=0.1.5,<0.2"),
 }
+_FA4_LOG_LEVEL_NAMES = {"off": 0, "host": 1, "kernel": 2, "max": 3}
 
 
 def _ceil_div(value: int, divisor: int) -> int:
@@ -72,23 +76,92 @@ def get_fa4_target_verify_num_splits(
 
 
 def _check_fa4_dependencies() -> None:
-    for package_name, minimum in _FA4_MIN_DEPENDENCIES.items():
+    for package_name, specifier in _FA4_DEPENDENCY_SPECS.items():
         try:
             installed = version(package_name)
         except PackageNotFoundError as error:
             raise RuntimeError(
-                f"FA4 target verify requires {package_name}>={minimum}"
+                f"FA4 target verify requires {package_name}{specifier}"
             ) from error
-        if Version(installed) < Version(minimum):
+        try:
+            installed_version = Version(installed)
+        except InvalidVersion as error:
             raise RuntimeError(
-                f"FA4 target verify requires {package_name}>={minimum}, got {installed}"
+                f"FA4 target verify found invalid {package_name} version {installed!r}"
+            ) from error
+        if installed_version not in specifier:
+            raise RuntimeError(
+                f"FA4 target verify requires {package_name}{specifier}, got {installed}"
             )
+
+
+def _get_fa4_log_level() -> int:
+    raw_level = os.environ.get("FA_LOG_LEVEL", "0")
+    normalized_level = raw_level.strip().lower()
+    if normalized_level in _FA4_LOG_LEVEL_NAMES:
+        return _FA4_LOG_LEVEL_NAMES[normalized_level]
+    try:
+        level = int(normalized_level)
+    except ValueError:
+        logger.warning(
+            "invalid FA_LOG_LEVEL=%r; disabling FA4 host and kernel logging",
+            raw_level,
+        )
+        return 0
+    if not 0 <= level <= 3:
+        clamped_level = max(0, min(level, 3))
+        logger.warning(
+            "FA_LOG_LEVEL=%r is outside [0, 3]; using %d",
+            raw_level,
+            clamped_level,
+        )
+        return clamped_level
+    return level
+
+
+def _configure_fa4_logging(fa_logging) -> None:
+    """Route vendored host logs through RTP-LLM's logging configuration."""
+    configured_level = _get_fa4_log_level()
+    fa_logging.set_fa_log_level(configured_level)
+    default_handler = getattr(fa_logging, "_default_handler", None)
+    vendor_logger = getattr(fa_logging, "_logger", None)
+    if default_handler is not None and vendor_logger is not None:
+        vendor_logger.removeHandler(default_handler)
+        fa_logging._default_handler = None
+    if vendor_logger is not None:
+        vendor_logger.propagate = True
+
+        get_log_level = getattr(
+            fa_logging,
+            "get_fa_log_level",
+            lambda: configured_level,
+        )
+
+        def rtp_fa_log(level: int, message: str) -> None:
+            if get_log_level() >= level:
+                log_method = vendor_logger.info if level <= 1 else vendor_logger.debug
+                log_method(message)
+
+        # Interface modules import fa_log during initialization, so install the
+        # host-integrated implementation before importing the FA4 interface.
+        fa_logging.fa_log = rtp_fa_log
+        module_name = getattr(fa_logging, "__name__", "")
+        if "." in module_name:
+            package_prefix = module_name.rsplit(".", 1)[0] + "."
+            for loaded_name, module in tuple(sys.modules.items()):
+                if loaded_name.startswith(package_prefix) and hasattr(
+                    module, "fa_log"
+                ):
+                    module.fa_log = rtp_fa_log
 
 
 @lru_cache(maxsize=1)
 def _load_fa4_forward():
     _check_fa4_dependencies()
     try:
+        from rtp_llm.third_party.vllm_flash_attention.cute import fa_logging
+
+        _configure_fa4_logging(fa_logging)
         from rtp_llm.third_party.vllm_flash_attention.cute.interface import (
             _flash_attn_fwd,
         )
@@ -96,6 +169,7 @@ def _load_fa4_forward():
         raise RuntimeError(
             f"failed to load vendored FA4 CuTe backend: {error}"
         ) from error
+    logger.info("loaded vendored FA4 CuTe target-verify backend")
     return _flash_attn_fwd
 
 
@@ -104,7 +178,7 @@ def _fa4_is_available() -> bool:
     try:
         _load_fa4_forward()
     except Exception as error:
-        logger.warning("FA4 target verify is unavailable; falling back: %s", error)
+        logger.error("FA4 target verify is unavailable; falling back: %s", error)
         return False
     return True
 
@@ -123,9 +197,7 @@ class FlashAttn4TargetVerifyParams(NamedTuple):
 class FlashAttn4TargetVerifyOp:
     """Shape-specialized SM90 FA4 paged attention for target verification."""
 
-    def __init__(
-        self, attn_configs: AttentionConfigs, attn_inputs: PyAttentionInputs
-    ) -> None:
+    def __init__(self, attn_configs: AttentionConfigs) -> None:
         self.attn_configs = attn_configs
         self.head_dim = attn_configs.size_per_head
         self.head_num = attn_configs.head_num
@@ -156,7 +228,8 @@ class FlashAttn4TargetVerifyOp:
             is_sm90()
             and attn_inputs.is_target_verify
             and attn_inputs.is_prefill
-            and getattr(attn_inputs, "is_cuda_graph", False)
+            and attn_configs.need_rope_kv_cache
+            and attn_inputs.is_cuda_graph
             and attn_configs.dtype == torch.bfloat16
             and attn_configs.kv_cache_dtype == KvCacheDataType.BASE
             and attn_configs.size_per_head == 256
@@ -322,7 +395,7 @@ class FlashAttn4TargetVerifyImpl(FMHAImplBase):
         attn_inputs: PyAttentionInputs,
         parallelism_config: Optional[ParallelismConfig] = None,
     ) -> None:
-        self.fmha_impl = FlashAttn4TargetVerifyOp(attn_configs, attn_inputs)
+        self.fmha_impl = FlashAttn4TargetVerifyOp(attn_configs)
         self.rope_kvcache_impl = FusedRopeKVCachePrefillOpQOut(attn_configs)
         self.attn_inputs = attn_inputs
         self.fmha_params = self.fmha_impl.prepare(attn_inputs)

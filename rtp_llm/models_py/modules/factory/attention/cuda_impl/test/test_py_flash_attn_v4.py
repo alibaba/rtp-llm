@@ -1,3 +1,5 @@
+import logging
+import os
 import types
 import unittest
 from unittest import mock
@@ -28,6 +30,7 @@ def _make_config(**overrides):
         size_per_head=256,
         kernel_tokens_per_block=64,
         is_causal=True,
+        need_rope_kv_cache=True,
         head_num=12,
         kv_head_num=2,
     )
@@ -122,6 +125,11 @@ class TestFlashAttn4TargetVerify(unittest.TestCase):
             )
             self.assertFalse(
                 FlashAttn4TargetVerifyOp.support(
+                    _make_config(need_rope_kv_cache=False), _make_inputs()
+                )
+            )
+            self.assertFalse(
+                FlashAttn4TargetVerifyOp.support(
                     _make_config(),
                     _make_inputs(input_lengths=torch.tensor([5, 4], dtype=torch.int32)),
                 )
@@ -135,13 +143,98 @@ class TestFlashAttn4TargetVerify(unittest.TestCase):
                 FlashAttn4TargetVerifyOp.support(_make_config(), _make_inputs())
             )
 
-    def test_open_source_paged_flag_controls_backend(self):
+    def test_dependency_check_rejects_version_above_supported_range(self):
+        installed_versions = {
+            "nvidia-cutlass-dsl": "4.6.0",
+            "apache-tvm-ffi": "0.1.13",
+            "quack-kernels": "0.5.0",
+            "torch-c-dlpack-ext": "0.1.5",
+        }
+        with mock.patch.object(
+            py_flash_attn_v4,
+            "version",
+            side_effect=installed_versions.__getitem__,
+        ):
+            with self.assertRaisesRegex(RuntimeError, "nvidia-cutlass-dsl"):
+                py_flash_attn_v4._check_fa4_dependencies()
+
+    def test_invalid_log_level_is_reported_and_vendor_handler_is_removed(self):
+        default_handler = logging.StreamHandler()
+        vendor_logger = mock.Mock()
+        fa_logging = types.SimpleNamespace(
+            set_fa_log_level=mock.Mock(),
+            _default_handler=default_handler,
+            _logger=vendor_logger,
+        )
+        with mock.patch.dict(os.environ, {"FA_LOG_LEVEL": "verbose"}), self.assertLogs(
+            py_flash_attn_v4.logger, level="WARNING"
+        ) as captured:
+            py_flash_attn_v4._configure_fa4_logging(fa_logging)
+
+        fa_logging.set_fa_log_level.assert_called_once_with(0)
+        vendor_logger.removeHandler.assert_called_once_with(default_handler)
+        self.assertIsNone(fa_logging._default_handler)
+        self.assertTrue(vendor_logger.propagate)
+        self.assertIn("invalid FA_LOG_LEVEL", captured.output[0])
+
+    def test_vendor_host_log_levels_map_to_rtp_logging_levels(self):
+        vendor_logger = mock.Mock()
+        fa_logging = types.SimpleNamespace(
+            set_fa_log_level=mock.Mock(),
+            get_fa_log_level=mock.Mock(return_value=3),
+            _default_handler=None,
+            _logger=vendor_logger,
+        )
+        with mock.patch.dict(os.environ, {"FA_LOG_LEVEL": "max"}):
+            py_flash_attn_v4._configure_fa4_logging(fa_logging)
+
+        fa_logging.fa_log(1, "host summary")
+        fa_logging.fa_log(2, "kernel detail")
+        fa_logging.fa_log(3, "maximum detail")
+        vendor_logger.info.assert_called_once_with("host summary")
+        vendor_logger.debug.assert_has_calls(
+            [mock.call("kernel detail"), mock.call("maximum detail")]
+        )
+
+    def test_fallback_logs_loader_failure(self):
+        py_flash_attn_v4._fa4_is_available.cache_clear()
+        try:
+            with mock.patch.object(
+                py_flash_attn_v4,
+                "_load_fa4_forward",
+                side_effect=RuntimeError("missing FA4 dependency"),
+            ), self.assertLogs(py_flash_attn_v4.logger, level="ERROR") as captured:
+                self.assertFalse(py_flash_attn_v4._fa4_is_available())
+            self.assertIn("missing FA4 dependency", captured.output[0])
+        finally:
+            py_flash_attn_v4._fa4_is_available.cache_clear()
+
+    def test_rollback_flags_control_backend(self):
         config = types.SimpleNamespace(
             enable_paged_open_source_fmha=True,
+            enable_fa4_target_verify=True,
+            enable_flashinfer_fa2_target_verify=True,
+            disable_flashinfer_native=False,
         )
         self.assertFalse(_is_fmha_impl_disabled("FlashAttn4TargetVerifyImpl", config))
+        config.enable_fa4_target_verify = False
+        self.assertTrue(_is_fmha_impl_disabled("FlashAttn4TargetVerifyImpl", config))
+        config.enable_fa4_target_verify = True
         config.enable_paged_open_source_fmha = False
         self.assertTrue(_is_fmha_impl_disabled("FlashAttn4TargetVerifyImpl", config))
+
+        for implementation_name in (
+            "PyFlashinferFa2TargetVerifyImpl",
+            "PyFlashinferMropeTargetVerifyImpl",
+        ):
+            config.enable_flashinfer_fa2_target_verify = True
+            config.disable_flashinfer_native = False
+            self.assertFalse(_is_fmha_impl_disabled(implementation_name, config))
+            config.enable_flashinfer_fa2_target_verify = False
+            self.assertTrue(_is_fmha_impl_disabled(implementation_name, config))
+            config.enable_flashinfer_fa2_target_verify = True
+            config.disable_flashinfer_native = True
+            self.assertTrue(_is_fmha_impl_disabled(implementation_name, config))
 
     def test_backend_precedes_flashinfer_fa2_fallbacks(self):
         from rtp_llm.models_py.modules.factory.attention import PREFILL_MHA_IMPS
@@ -151,7 +244,8 @@ class TestFlashAttn4TargetVerify(unittest.TestCase):
         ]
         fa4_index = implementation_names.index("FlashAttn4TargetVerifyImpl")
         self.assertLess(
-            fa4_index, implementation_names.index("PyFlashinferPagedPrefillImpl")
+            fa4_index,
+            implementation_names.index("PyFlashinferFa2TargetVerifyImpl"),
         )
         self.assertLess(
             fa4_index,
@@ -225,8 +319,15 @@ class TestFlashAttn4CudaGraph(unittest.TestCase):
     def setUpClass(cls):
         if not torch.cuda.is_available() or torch.cuda.get_device_capability()[0] != 9:
             raise unittest.SkipTest("FA4 target-verify integration test requires SM9x")
-        if not py_flash_attn_v4._fa4_is_available():
-            raise unittest.SkipTest("FA4 target-verify dependencies are unavailable")
+        try:
+            cls.fa4_forward = py_flash_attn_v4._load_fa4_forward()
+        except Exception as error:
+            raise AssertionError(
+                "FA4 dependencies and backend must load on an SM9x test worker"
+            ) from error
+
+    def test_loader_smoke(self):
+        self.assertTrue(callable(self.fa4_forward))
 
     @staticmethod
     def _reference(
@@ -294,7 +395,7 @@ class TestFlashAttn4CudaGraph(unittest.TestCase):
                     device=device,
                 ),
             )
-            params = FlashAttn4TargetVerifyOp(config, inputs).prepare(inputs)
+            params = FlashAttn4TargetVerifyOp(config).prepare(inputs)
             expected = get_fa4_target_verify_num_splits(
                 sm_count=sm_count,
                 batch_size=batch_size,
@@ -334,7 +435,7 @@ class TestFlashAttn4CudaGraph(unittest.TestCase):
             kv_cache_kernel_block_id_device=page_table,
         )
         config = _make_config(softmax_extra_scale=1.0, q_scaling=1.0)
-        op = FlashAttn4TargetVerifyOp(config, inputs)
+        op = FlashAttn4TargetVerifyOp(config)
         params = op.prepare(inputs)
         op.compile_probe(params)
         kv_cache = types.SimpleNamespace(kv_cache_base=combined_cache)

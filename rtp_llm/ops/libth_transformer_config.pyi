@@ -409,6 +409,8 @@ class FIFOSchedulerConfig:
 class FMHAConfig:
     absorb_opt_len: int
     disable_flashinfer_native: bool
+    enable_fa4_target_verify: bool
+    enable_flashinfer_fa2_target_verify: bool
     enable_flashinfer_trtllm_gen: bool
     enable_flashinfer_trt_fmha_v2: bool
     enable_fmha: bool

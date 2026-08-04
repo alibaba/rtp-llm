@@ -39,6 +39,22 @@ def init_fmha_group_args(parser, fmha_config):
         help="控制是否启用FlashInfer TRT-LLM FMHA v2 Paged Prefill。支持SM90和SM12x。可选值: True (启用), False (禁用)。",
     )
     fmha_group.add_argument(
+        "--enable_flashinfer_fa2_target_verify",
+        env_name="ENABLE_FLASHINFER_FA2_TARGET_VERIFY",
+        bind_to=(fmha_config, "enable_flashinfer_fa2_target_verify"),
+        type=str2bool,
+        default=True,
+        help="控制是否启用SM90 target verify的FlashInfer FA2后端。",
+    )
+    fmha_group.add_argument(
+        "--enable_fa4_target_verify",
+        env_name="ENABLE_FA4_TARGET_VERIFY",
+        bind_to=(fmha_config, "enable_fa4_target_verify"),
+        type=str2bool,
+        default=True,
+        help="控制是否启用SM90 target verify的FA4后端。",
+    )
+    fmha_group.add_argument(
         "--enable_open_source_fmha",
         env_name="ENABLE_OPENSOURCE_FMHA",
         bind_to=(fmha_config, "enable_open_source_fmha"),

@@ -89,6 +89,8 @@ std::string FMHAConfig::to_string() const {
         << "enable_flashinfer_trtllm_gen: " << enable_flashinfer_trtllm_gen << "\n"
         << "enable_flashinfer_trt_fmha_v2: " << enable_flashinfer_trt_fmha_v2 << "\n"
         << "enable_paged_flashinfer_trt_fmha_v2: " << enable_paged_flashinfer_trt_fmha_v2 << "\n"
+        << "enable_flashinfer_fa2_target_verify: " << enable_flashinfer_fa2_target_verify << "\n"
+        << "enable_fa4_target_verify: " << enable_fa4_target_verify << "\n"
         << "enable_open_source_fmha: " << enable_open_source_fmha << "\n"
         << "enable_paged_open_source_fmha: " << enable_paged_open_source_fmha << "\n"
         << "disable_flashinfer_native: " << disable_flashinfer_native << "\n"

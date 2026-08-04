@@ -338,8 +338,13 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
 
     # ========== Test Cases: Chunked Prefill (Prefix Caching) ==========
 
-    def test_chunked_prefill_single_batch(self):
-        """Test chunked prefill with single batch (mimics your real scenario)
+    def _test_chunked_prefill_single_batch(
+        self,
+        backend: str,
+        expected_backend: str,
+        is_target_verify: bool,
+    ):
+        """Test chunked prefill with a single batch against a reference.
 
         Scenario:
         - Existing KV cache: 4884 tokens
@@ -372,11 +377,15 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
         attn_inputs = self._create_chunked_prefill_attention_inputs(
             batch_size, prefix_lengths, input_lengths, config.seq_size_per_block
         )
-        attn_inputs.is_target_verify = True
+        attn_inputs.is_target_verify = is_target_verify
 
         # Create PyFlashinferPrefillPagedAttnOp instance
-        attn_op = PyFlashinferPrefillPagedAttnOp(config.attn_configs, attn_inputs)
-        self.assertEqual(attn_op.backend, "fa2")
+        attn_op = PyFlashinferPrefillPagedAttnOp(
+            config.attn_configs,
+            attn_inputs,
+            backend=backend,
+        )
+        self.assertEqual(attn_op.backend, expected_backend)
 
         # Check support
         if not attn_op.support(attn_inputs):
@@ -520,6 +529,22 @@ class TestPyFlashinferPrefillPagedAttnOp(BaseAttentionTest):
             print(f"    Ref output: {ref_output.view(-1)[max_diff_idx].item():.6f}")
 
             raise
+
+    def test_chunked_prefill_single_batch(self):
+        """Keep the default auto/FA3 prefix-prefill reference coverage."""
+        self._test_chunked_prefill_single_batch(
+            backend="auto",
+            expected_backend="fa3",
+            is_target_verify=False,
+        )
+
+    def test_target_verify_fa2_chunked_prefill_single_batch(self):
+        """Cover the explicit FA2 target-verify path without replacing FA3."""
+        self._test_chunked_prefill_single_batch(
+            backend="fa2",
+            expected_backend="fa2",
+            is_target_verify=True,
+        )
 
     def test_multi_batch_small_lengths(self):
         """Test multiple sequences with small lengths"""

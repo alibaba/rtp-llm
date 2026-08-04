@@ -59,6 +59,7 @@ else:
         )
         from rtp_llm.models_py.modules.factory.attention.cuda_impl.py_flashinfer_mha import (
             PyFlashinferDecodeImpl,
+            PyFlashinferFa2TargetVerifyImpl,
             PyFlashinferMropeTargetVerifyImpl,
             PyFlashinferPagedPrefillImpl,
             PyFlashinferPrefillImpl,
@@ -84,10 +85,13 @@ else:
                 FlashInferTRTLLMSpecDecodeImpl,
                 FlashInferTRTLLMPrefillImpl,
                 FlashInferTRTLLMFMHAv2PrefillImpl,
+                # Target-verify specializations precede generic FlashInfer/TRT
+                # paths; each has an independent rollback gate in FMHAConfig.
                 FlashAttn4TargetVerifyImpl,
+                PyFlashinferFa2TargetVerifyImpl,
+                PyFlashinferMropeTargetVerifyImpl,
                 PyFlashinferPrefillImpl,
                 PyFlashinferPagedPrefillImpl,
-                PyFlashinferMropeTargetVerifyImpl,
                 FlashInferTRTLLMFMHAv2PagedPrefillImpl,
             ]
         )

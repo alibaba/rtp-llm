@@ -129,6 +129,8 @@ struct FMHAConfig {
     bool enable_flashinfer_trtllm_gen        = true;
     bool enable_flashinfer_trt_fmha_v2       = true;
     bool enable_paged_flashinfer_trt_fmha_v2 = true;
+    bool enable_flashinfer_fa2_target_verify = true;
+    bool enable_fa4_target_verify            = true;
     bool enable_open_source_fmha             = true;
     bool enable_paged_open_source_fmha       = true;
     bool disable_flashinfer_native           = false;

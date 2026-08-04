@@ -152,8 +152,15 @@ py_library(
 
 py_library(
     name = "fa4_cute",
-    srcs = glob([
+    srcs = [
+        "third_party/__init__.py",
+    ] + glob([
         "third_party/vllm_flash_attention/**/*.py",
+    ], exclude = [
+        "third_party/vllm_flash_attention/cute/bench_utils.py",
+        "third_party/vllm_flash_attention/cute/benchmark.py",
+        "third_party/vllm_flash_attention/cute/benchmark_flash_attention_fp8.py",
+        "third_party/vllm_flash_attention/cute/sm90_config_search.py",
     ]),
     data = [
         "third_party/vllm_flash_attention/AUTHORS",

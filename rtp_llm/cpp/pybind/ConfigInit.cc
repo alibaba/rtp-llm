@@ -401,6 +401,8 @@ PYBIND11_MODULE(libth_transformer_config, m) {
         .def_readwrite("enable_flashinfer_trtllm_gen", &FMHAConfig::enable_flashinfer_trtllm_gen)
         .def_readwrite("enable_flashinfer_trt_fmha_v2", &FMHAConfig::enable_flashinfer_trt_fmha_v2)
         .def_readwrite("enable_paged_flashinfer_trt_fmha_v2", &FMHAConfig::enable_paged_flashinfer_trt_fmha_v2)
+        .def_readwrite("enable_flashinfer_fa2_target_verify", &FMHAConfig::enable_flashinfer_fa2_target_verify)
+        .def_readwrite("enable_fa4_target_verify", &FMHAConfig::enable_fa4_target_verify)
         .def_readwrite("enable_open_source_fmha", &FMHAConfig::enable_open_source_fmha)
         .def_readwrite("enable_paged_open_source_fmha", &FMHAConfig::enable_paged_open_source_fmha)
         .def_readwrite("disable_flashinfer_native", &FMHAConfig::disable_flashinfer_native)
@@ -423,10 +425,12 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                                       self.use_asm_pa,
                                       self.use_triton_pa,
                                       self.absorb_opt_len,
-                                      self.enable_flashinfer_trtllm_gen);
+                                      self.enable_flashinfer_trtllm_gen,
+                                      self.enable_flashinfer_fa2_target_verify,
+                                      self.enable_fa4_target_verify);
             },
             [](py::tuple t) {
-                if (t.size() != 12)
+                if (t.size() != 12 && t.size() != 14)
                     throw std::runtime_error("Invalid state!");
                 FMHAConfig c;
                 try {
@@ -442,6 +446,10 @@ PYBIND11_MODULE(libth_transformer_config, m) {
                     c.use_triton_pa                       = t[9].cast<bool>();
                     c.absorb_opt_len                      = t[10].cast<int64_t>();
                     c.enable_flashinfer_trtllm_gen        = t[11].cast<bool>();
+                    if (t.size() == 14) {
+                        c.enable_flashinfer_fa2_target_verify = t[12].cast<bool>();
+                        c.enable_fa4_target_verify            = t[13].cast<bool>();
+                    }
                 } catch (const std::exception& e) {
                     throw std::runtime_error(std::string("FMHAConfig unpickle error: ") + e.what());
                 }

@@ -2,9 +2,9 @@
 auto_gptq
 autoawq
 apache-tvm-ffi>=0.1.12,<0.2
-nvidia-cutlass-dsl==4.5.3
-quack-kernels==0.5.0
-torch-c-dlpack-ext>=0.1.5
+nvidia-cutlass-dsl>=4.5.3,<4.6
+quack-kernels>=0.5,<0.6
+torch-c-dlpack-ext>=0.1.5,<0.2
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fast_safetensors-0.7.3%2Btorch2.1.2.cu121-cp310-cp310-linux_x86_64.whl
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/fastsafetensors-0.1.19rc5%2Bali-cp310-cp310-linux_x86_64.whl
 https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/rtp_llm/cu129/tensorrt_cu12_libs-10.3.0-py2.py3-none-manylinux_2_17_x86_64.whl

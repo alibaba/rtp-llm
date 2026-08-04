@@ -17,6 +17,13 @@ from rtp_llm.models_py.modules.factory.attention.cuda_impl.test.base_attention_t
     BaseAttentionTest,
     compare_tensors,
 )
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.trt import (
+    TRTLLMFMHAv2PagedPrefillOp,
+)
+from rtp_llm.models_py.modules.factory.attention.cuda_impl.utils import (
+    is_cuda_12_9_or_later,
+)
+from rtp_llm.ops import KvCacheDataType, RopeStyle
 from rtp_llm.ops.compute_ops import (
     LayerKVCache,
     PyAttentionInputs,
@@ -60,12 +67,21 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
         for il in input_lengths:
             cu.append(cu[-1] + il)
 
-        inp.cu_seqlens_device = torch.tensor(
-            cu, dtype=torch.int32, device="cuda"
-        )
-        inp.cu_kv_seqlens_device = torch.tensor(
-            cu, dtype=torch.int32, device="cuda"
-        )
+        if with_copy_params:
+            # The production graph replay path copies these changing values H2D.
+            inp.cu_seqlens_device = torch.tensor(
+                cu, dtype=torch.int32
+            ).pin_memory()
+            inp.cu_kv_seqlens_device = torch.tensor(
+                cu, dtype=torch.int32
+            ).pin_memory()
+        else:
+            inp.cu_seqlens_device = torch.tensor(
+                cu, dtype=torch.int32, device="cuda"
+            )
+            inp.cu_kv_seqlens_device = torch.tensor(
+                cu, dtype=torch.int32, device="cuda"
+            )
 
         max_blocks = max(math.ceil(s / PAGE_SIZE) for s in seq_lengths)
         block_ids = torch.zeros(batch_size, max_blocks, dtype=torch.int32)
@@ -173,7 +189,12 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
             prefix_lengths,
             is_target_verify=is_target_verify,
         )
-        normal_op = PyFlashinferPrefillPagedAttnOp(config.attn_configs, normal_inp)
+        backend = "fa2" if is_target_verify else "auto"
+        normal_op = PyFlashinferPrefillPagedAttnOp(
+            config.attn_configs,
+            normal_inp,
+            backend=backend,
+        )
         if is_target_verify:
             self.assertEqual(normal_op.backend, "fa2")
         normal_op.prepare(normal_inp)
@@ -189,7 +210,13 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
             max_seq_len,
             is_target_verify,
         )
-        cg_op = PyFlashinferPrefillPagedAttnOp(config.attn_configs, cg_init)
+        self.assertFalse(cg_init.cu_seqlens_device.is_cuda)
+        self.assertTrue(cg_init.cu_seqlens_device.is_pinned())
+        cg_op = PyFlashinferPrefillPagedAttnOp(
+            config.attn_configs,
+            cg_init,
+            backend=backend,
+        )
         if is_target_verify:
             self.assertEqual(cg_op.backend, "fa2")
         cg_op.prepare(cg_init)
@@ -200,8 +227,27 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
             max_seq_len,
             is_target_verify,
         )
+        self.assertFalse(cg_replay.cu_seqlens_device.is_cuda)
+        self.assertTrue(cg_replay.cu_seqlens_device.is_pinned())
         cg_op.prepare(cg_replay, forbid_realloc=True)
-        cg_out = cg_op.forward(q, kv_cache)
+
+        # Warm up allocations/JIT on a side stream before capture. Capture uses
+        # different query values so the comparison below requires graph replay.
+        static_q = torch.zeros_like(q)
+        warmup_stream = torch.cuda.Stream()
+        warmup_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(warmup_stream):
+            cg_op.forward(static_q, kv_cache)
+        torch.cuda.current_stream().wait_stream(warmup_stream)
+
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph):
+            cg_out = cg_op.forward(static_q, kv_cache)
+
+        static_q.copy_(q)
+        cg_op.prepare(cg_replay, forbid_realloc=True)
+        graph.replay()
+        torch.cuda.synchronize()
 
         compare_tensors(
             normal_out,
@@ -209,6 +255,96 @@ class TestPrefillPagedCudaGraph(BaseAttentionTest):
             rtol=1e-3,
             atol=1e-3,
             name=f"input={input_lengths}, prefix={prefix_lengths}",
+        )
+
+    def test_mrope_target_verify_fa2_matches_trtllm_fmha_v2(self):
+        """Compare the post-MRoPE FMHA backend boundary for Qwen2-VL D128."""
+        if not is_cuda_12_9_or_later():
+            self.skipTest("TRTLLM FMHA v2 requires CUDA 12.9 or later")
+
+        input_lengths = [5]
+        prefix_lengths = [1024]
+        head_num = 8
+        head_num_kv = 1
+        head_dim = 128
+
+        config = self._create_config(
+            head_num=head_num,
+            head_num_kv=head_num_kv,
+            size_per_head=head_dim,
+            seq_size_per_block=PAGE_SIZE,
+            data_type="bf16",
+        )
+        config.attn_configs.rope_config.style = RopeStyle.Mrope
+        config.attn_configs.need_rope_kv_cache = True
+        config.attn_configs.kv_cache_dtype = KvCacheDataType.BASE
+        config.attn_configs.is_causal = True
+
+        attn_inputs = self._make_inputs(
+            input_lengths,
+            prefix_lengths,
+            is_target_verify=True,
+        )
+        total_kv = prefix_lengths[0] + input_lengths[0]
+        attn_inputs.cu_kv_seqlens_device = torch.tensor(
+            [0, total_kv],
+            dtype=torch.int32,
+            device=self.device,
+        )
+        attn_inputs.kv_cache_kernel_block_id_device = (
+            attn_inputs.kv_cache_kernel_block_id.to(self.device)
+        )
+
+        # These tensors represent the output of the shared fused MRoPE/KV-cache
+        # stage, so this A/B isolates only the target-verify FMHA backend.
+        q = torch.randn(
+            input_lengths[0],
+            head_num,
+            head_dim,
+            dtype=torch.bfloat16,
+            device=self.device,
+        )
+        k = torch.randn(
+            total_kv,
+            head_num_kv,
+            head_dim,
+            dtype=torch.bfloat16,
+            device=self.device,
+        )
+        v = torch.randn_like(k)
+        kv_cache = self._make_paged_kv_cache(
+            k,
+            v,
+            [total_kv],
+            head_num_kv,
+            head_dim,
+        )
+
+        flashinfer_op = PyFlashinferPrefillPagedAttnOp(
+            config.attn_configs,
+            attn_inputs,
+            backend="fa2",
+        )
+        flashinfer_op.prepare(attn_inputs)
+        flashinfer_output = flashinfer_op.forward(q, kv_cache)
+
+        self.assertTrue(
+            TRTLLMFMHAv2PagedPrefillOp.support(
+                config.attn_configs,
+                attn_inputs,
+            )
+        )
+        trtllm_op = TRTLLMFMHAv2PagedPrefillOp(config.attn_configs)
+        trtllm_params = trtllm_op.prepare(attn_inputs)
+        trtllm_output = trtllm_op.forward(q, kv_cache, trtllm_params).view_as(
+            flashinfer_output
+        )
+
+        torch.testing.assert_close(
+            flashinfer_output,
+            trtllm_output,
+            rtol=2e-2,
+            atol=2e-2,
         )
 
     # === Single batch ===
