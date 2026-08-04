@@ -23,11 +23,12 @@ public:
                      CacheGroupPolicy                    policy = defaultCacheGroupPolicy(CacheGroupType::FULL)):
         KVCacheGroup(layer_ids, kvcache_spec, block_pool, group_id, policy, metrics_reporter) {}
 
-    bool        malloc(BlockIds&            block_indices,
-                       int                  seq_len,
-                       bool                 enable_reuse_cache   = false,
-                       int                  reserve_step         = 0,
-                       std::vector<size_t>* backfilled_positions = nullptr) override;
+    bool        malloc(BlockIds&                  block_indices,
+                       int                        seq_len,
+                       bool                       enable_reuse_cache   = false,
+                       int                        reserve_step         = 0,
+                       std::vector<size_t>*       backfilled_positions = nullptr,
+                       const RequiredPositions&  required_positions = {}) override;
     MatchResult matchPrefix(const CacheKeysType& cache_keys) const override;
     void
     insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident) override;

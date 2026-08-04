@@ -130,7 +130,7 @@ protected:
     std::shared_ptr<LoadContextCoordinator> coordinator_;
 };
 
-TEST_F(LoadAsyncContextTest, InitializesJoinedTargetBlocks) {
+TEST_F(LoadAsyncContextTest, SetsTargetBlocks) {
     TransferDescriptor first;
     first.group_set_id  = 3;
     first.path_index    = 5;
@@ -146,16 +146,15 @@ TEST_F(LoadAsyncContextTest, InitializesJoinedTargetBlocks) {
     const std::shared_ptr<LoadAsyncContext> context = createRegisteredContext({first, joined}, {false, true}, 7);
     ASSERT_NE(context, nullptr);
 
-    context->initializeJoinedTargetBlocks(1, {21});
+    context->setTargetBlocks(1, {21});
     EXPECT_EQ(context->load_descs_.size(), 2u);
     EXPECT_FALSE(context->joined_load_[0]);
     EXPECT_TRUE(context->joined_load_[1]);
     EXPECT_EQ(context->load_descs_[0].group_set_id, 3u);
     EXPECT_EQ(context->load_descs_[1].path_index, 6u);
     EXPECT_EQ(context->load_descs_[1].target_blocks, (std::vector<BlockIdxType>{21}));
-    EXPECT_TRUE(context->bindTargetDeviceBlocks(0, {20}));
+    context->setTargetBlocks(0, {20});
     EXPECT_EQ(context->load_descs_[0].target_blocks, (std::vector<BlockIdxType>{20}));
-    EXPECT_FALSE(context->bindTargetDeviceBlocks(1, {22}));
     context->abort();
     EXPECT_EQ(abort_count_, 1u);
 }
@@ -181,20 +180,6 @@ TEST_F(LoadAsyncContextTest, CountsStrongestTierOncePerPath) {
     EXPECT_EQ(context->matchedBlocks(Tier::HOST), 1u);
     EXPECT_EQ(context->matchedBlocks(Tier::DISK), 1u);
     EXPECT_EQ(context->matchedBlocks(Tier::NONE), 0u);
-    context->abort();
-}
-
-TEST_F(LoadAsyncContextTest, ResidentTargetMustPreserveSourceIdentity) {
-    TransferDescriptor resident;
-    resident.source_tier   = Tier::DEVICE;
-    resident.source_blocks = {31, 32};
-
-    const std::shared_ptr<LoadAsyncContext> context = createRegisteredContext({resident}, {false}, 1);
-    ASSERT_NE(context, nullptr);
-
-    EXPECT_FALSE(context->bindTargetDeviceBlocks(0, {41, 42}));
-    EXPECT_TRUE(context->load_descs_[0].target_blocks.empty());
-    EXPECT_TRUE(context->bindTargetDeviceBlocks(0, {31, 32}));
     context->abort();
 }
 

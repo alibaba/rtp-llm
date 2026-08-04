@@ -1643,9 +1643,9 @@ TEST_F(BlockTreeCacheTest, LoadPreparedPrefixFailureRollsBackAllSourceAndTargetH
     second_device_pool->incRef(second_request_targets, BlockRefType::REQUEST);
     const BlockIdxType first_target  = first_request_targets.front();
     const BlockIdxType second_target = second_request_targets.front();
-    ASSERT_TRUE(load_context->bindTargetDeviceBlocks(0, {first_target}));
-    ASSERT_TRUE(load_context->bindTargetDeviceBlocks(1, {first_target}));
-    ASSERT_TRUE(load_context->bindTargetDeviceBlocks(2, {second_target}));
+    load_context->setTargetBlocks(0, {first_target});
+    load_context->setTargetBlocks(1, {first_target});
+    load_context->setTargetBlocks(2, {second_target});
 
     const size_t first_refs_before  = first_device_pool->refCount(first_target);
     const size_t second_refs_before = second_device_pool->refCount(second_target);
@@ -1727,7 +1727,7 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackCoreHoldersAndRetainsReque
     device_pool->incRef(request_targets, BlockRefType::REQUEST);
     const BlockIdxType request_target = request_targets.front();
     EXPECT_EQ(device_pool->refCount(request_target), 1u);
-    ASSERT_TRUE(load_context->bindTargetDeviceBlocks(0, {request_target}));
+    load_context->setTargetBlocks(0, {request_target});
     ASSERT_EQ(device_pool->refCount(request_target), 1u);
 
     BlockTreeCacheTestPeer::ScopedQueueRejectionGuard rejection_guard(*cache);
@@ -1816,8 +1816,8 @@ TEST_F(BlockTreeCacheTest, LoadQueueRejectionRollsBackMixedDeviceAndHostDescript
     ASSERT_NE(request_target, NULL_BLOCK_IDX);
     target_device_pool->incRef(request_target, BlockRefType::REQUEST);
     ASSERT_EQ(target_device_pool->refCount(request_target), 1u);
-    ASSERT_TRUE(load_context->bindTargetDeviceBlocks(0, {resident_block}));
-    ASSERT_TRUE(load_context->bindTargetDeviceBlocks(1, {request_target}));
+    load_context->setTargetBlocks(0, {resident_block});
+    load_context->setTargetBlocks(1, {request_target});
 
     BlockTreeCacheTestPeer::ScopedQueueRejectionGuard rejection_guard(*cache);
     ASSERT_TRUE(rejection_guard.armed());
@@ -1884,7 +1884,7 @@ TEST_F(BlockTreeCacheTest, LoadContextCommitTriggersLoad) {
     const BlockIdxType request_target = request_targets.front();
     EXPECT_EQ(device_pool->refCount(request_target), 1u);
     ASSERT_EQ(load_context->loadDescs().size(), 1u);
-    ASSERT_TRUE(load_context->bindTargetDeviceBlocks(0, {request_target}));
+    load_context->setTargetBlocks(0, {request_target});
 
     EXPECT_TRUE(load_context->commit());
 
@@ -1920,7 +1920,7 @@ TEST_F(BlockTreeCacheTest, MalformedLoadTargetFailsBeforeStateMutationAndAllowsR
     ASSERT_EQ(malformed_targets.size(), 1u);
     device_pools[0]->incRef(malformed_targets, BlockRefType::REQUEST);
     const size_t malformed_target_ref_count = device_pools[0]->refCount(malformed_targets.front());
-    ASSERT_TRUE(malformed_context->bindTargetDeviceBlocks(0, malformed_targets));
+    malformed_context->setTargetBlocks(0, malformed_targets);
     EXPECT_FALSE(malformed_context->commit());
     EXPECT_EQ(node->group_set_resources[0].transfer_state, GroupSetTransferState::IDLE);
     EXPECT_EQ(node->group_set_resources[0].host_block, source_block);
@@ -1939,7 +1939,7 @@ TEST_F(BlockTreeCacheTest, MalformedLoadTargetFailsBeforeStateMutationAndAllowsR
         device_pool->incRef(target, BlockRefType::REQUEST);
         request_targets.push_back(target);
     }
-    ASSERT_TRUE(retry_context->bindTargetDeviceBlocks(0, request_targets));
+    retry_context->setTargetBlocks(0, request_targets);
 
     ASSERT_TRUE(retry_context->commit());
     retry_context->waitDone();

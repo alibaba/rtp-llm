@@ -1,7 +1,5 @@
 #include "rtp_llm/cpp/cache/KVCacheGroup.h"
 
-#include <algorithm>
-#include <limits>
 #include "rtp_llm/cpp/metrics/RtpLLMMetrics.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include "rtp_llm/cpp/utils/Logger.h"
@@ -91,42 +89,6 @@ void KVCacheGroup::insertIntoCache(const CacheKeysType&    cache_keys,
     (void)cache_keys;
     (void)block_indices;
     (void)is_resident;
-}
-
-bool KVCacheGroup::materializePositions(BlockIds& block_ids, const std::vector<size_t>& positions) {
-    std::vector<size_t> missing_positions;
-    missing_positions.reserve(positions.size());
-    for (const size_t position : positions) {
-        if (position >= block_ids.blocksNum()) {
-            RTP_LLM_LOG_WARNING("load target position out of range: tag=%s position=%zu blocks=%zu",
-                                tag().c_str(),
-                                position,
-                                block_ids.blocksNum());
-            return false;
-        }
-        if (isNullBlockIdx(block_ids.blocks()[position])
-            && std::find(missing_positions.begin(), missing_positions.end(), position) == missing_positions.end()) {
-            missing_positions.push_back(position);
-        }
-    }
-    if (missing_positions.empty()) {
-        return true;
-    }
-    if (missing_positions.size() > static_cast<size_t>(std::numeric_limits<int>::max())) {
-        return false;
-    }
-    if (!ensureFreeBlocks(static_cast<int>(missing_positions.size()))) {
-        return false;
-    }
-    auto allocated = block_pool_->malloc(missing_positions.size());
-    if (!allocated.has_value() || allocated->size() != missing_positions.size()) {
-        return false;
-    }
-    addBlockRefs(*allocated, BlockRefType::REQUEST);
-    for (size_t i = 0; i < missing_positions.size(); ++i) {
-        block_ids.setAt(missing_positions[i], (*allocated)[i]);
-    }
-    return true;
 }
 
 size_t KVCacheGroup::freeBlocksNum() const {

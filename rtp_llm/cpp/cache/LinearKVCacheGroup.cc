@@ -191,11 +191,12 @@ MatchResult LinearKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
     return {};
 }
 
-bool LinearKVCacheGroup::malloc(BlockIds&            block_ids,
-                                int                  seq_len,
-                                bool                 enable_reuse_cache,
-                                int                  reserve_step,
-                                std::vector<size_t>* backfilled_positions) {
+bool LinearKVCacheGroup::malloc(BlockIds&                  block_ids,
+                                int                        seq_len,
+                                bool                       enable_reuse_cache,
+                                int                        reserve_step,
+                                std::vector<size_t>*       backfilled_positions,
+                                const RequiredPositions&        required_positions) {
     if (backfilled_positions != nullptr) {
         backfilled_positions->clear();
     }
@@ -204,7 +205,8 @@ bool LinearKVCacheGroup::malloc(BlockIds&            block_ids,
     const int new_blocks_len     = std::max(total_slots - current_blocks_len, 0);
 
     auto should_materialize = [&](int pos) {
-        return shouldMaterializeBlock(pos, seq_len, reserve_step, enable_reuse_cache);
+        return shouldMaterializeBlock(pos, seq_len, reserve_step, enable_reuse_cache)
+               || required_positions.find(static_cast<size_t>(pos)) != required_positions.end();
     };
 
     std::vector<size_t> positions_to_backfill;

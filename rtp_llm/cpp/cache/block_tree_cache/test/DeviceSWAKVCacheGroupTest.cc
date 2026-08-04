@@ -396,18 +396,25 @@ TEST_F(DeviceSWAKVCacheGroupTest, Malloc_WithStep_ReserveAllocated) {
     EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 3);
 }
 
-TEST_F(DeviceSWAKVCacheGroupTest, MaterializePositionsOnlyBackfillsTicketSlots) {
+TEST_F(DeviceSWAKVCacheGroupTest, MallocRequiredPositionsBackfillsPolicySkippedSlot) {
     auto group = makeGroupWithStep(4, 2);
 
     BlockIds block_ids(1);
     block_ids.assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
-    ASSERT_TRUE(group.materializePositions(block_ids, {1, 2, 3}));
+    std::vector<size_t> backfilled_positions;
+    ASSERT_TRUE(group.malloc(block_ids,
+                             /*seq_len=*/16,
+                             /*enable_reuse_cache=*/false,
+                             /*reserve_step=*/0,
+                             &backfilled_positions,
+                             /*required_positions=*/{1, 2, 3}));
 
     ASSERT_EQ(block_ids.blocksNum(), 4u);
     EXPECT_TRUE(isNullBlockIdx(block_ids.blocks()[0]));
     EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[1]));
     EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[2]));
     EXPECT_FALSE(isNullBlockIdx(block_ids.blocks()[3]));
+    EXPECT_EQ(backfilled_positions, (std::vector<size_t>{1, 2, 3}));
     EXPECT_EQ(block_pool_->freeBlocksNum(), total_blocks_ - 3);
 
     group.free(block_ids.blocks());

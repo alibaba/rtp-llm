@@ -43,11 +43,12 @@ NeedBlocksInfo FullKVCacheGroup::getNeedBlocks(
     return info;
 }
 
-bool FullKVCacheGroup::malloc(BlockIds&            block_ids,
-                              int                  seq_len,
-                              bool                 enable_reuse_cache,
-                              int                  reserve_step,
-                              std::vector<size_t>* backfilled_positions) {
+bool FullKVCacheGroup::malloc(BlockIds&                  block_ids,
+                              int                        seq_len,
+                              bool                       enable_reuse_cache,
+                              int                        reserve_step,
+                              std::vector<size_t>*       backfilled_positions,
+                              const RequiredPositions&        /*required_positions*/) {
     if (backfilled_positions != nullptr) {
         backfilled_positions->clear();
     }

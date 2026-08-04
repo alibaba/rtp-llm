@@ -62,13 +62,15 @@ protected:
                                           const std::shared_ptr<CPSlotMapper>& cp_mapper,
                                           std::shared_ptr<LoadAsyncContext>&   load_context,
                                           std::vector<BlockIndicesType>&       referenced_blocks);
-    const std::vector<size_t>* groupIdsForGroupSet(size_t group_set_id) const;
 
     std::vector<BlockRefTransition>
     freeBlocksInGroup(int group_id, const BlockIndicesType& blocks, BlockRefType ref_type);
     virtual bool hasAvailableBlocksForReserve(const MallocInfo& malloc_info, size_t reserve_blocks) const;
-    bool         skipReuseCacheGroup(int group_id) const;
-    bool         cpCompactSwaGroup(int group_id, const std::shared_ptr<CPSlotMapper>& mapper) const;
+    size_t       loadTargetPosition(size_t                               path_index,
+                                    size_t                               group_id,
+                                    const std::shared_ptr<CPSlotMapper>& mapper,
+                                    int                                  cp_scale) const;
+    bool         cpCompactSwaGroup(size_t group_id, const std::shared_ptr<CPSlotMapper>& mapper) const;
     void         rollbackBlockIdsToSize(int group_id, BlockIds& block_ids, size_t original_size);
     void         rollbackInitMalloc(BatchKVCacheResource&                kv_resource,
                                     const std::vector<BlockIndicesType>& referenced_blocks,

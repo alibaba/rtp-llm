@@ -71,20 +71,8 @@ size_t LoadAsyncContext::matchedBlocks(Tier tier) const {
     return matched_blocks_by_tier_[static_cast<size_t>(tier)];
 }
 
-void LoadAsyncContext::initializeJoinedTargetBlocks(size_t desc_index, std::vector<BlockIdxType> target_blocks) {
+void LoadAsyncContext::setTargetBlocks(size_t desc_index, std::vector<BlockIdxType> target_blocks) {
     load_descs_[desc_index].target_blocks = std::move(target_blocks);
-}
-
-bool LoadAsyncContext::bindTargetDeviceBlocks(size_t desc_index, std::vector<BlockIdxType> target_device_blocks) {
-    if (desc_index >= load_descs_.size() || joined_load_.at(desc_index)) {
-        return false;
-    }
-    TransferDescriptor& desc = load_descs_[desc_index];
-    if (desc.source_tier == Tier::DEVICE && desc.source_blocks != target_device_blocks) {
-        return false;
-    }
-    desc.target_blocks = std::move(target_device_blocks);
-    return true;
 }
 
 const std::vector<TransferDescriptor>& LoadAsyncContext::loadDescs() const {

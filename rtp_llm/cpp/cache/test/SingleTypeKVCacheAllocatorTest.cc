@@ -678,7 +678,7 @@ TEST_F(SingleTypeKVCacheAllocatorTest, CPInsertAndAllocatorMatchShareLastRankCan
     block_pool->decRef(seed_blocks, BlockRefType::REQUEST);
 }
 
-TEST_F(SingleTypeKVCacheAllocatorTest, EarlyCommonMallocFailureAbortsContextBeforeRequestTargetFree) {
+TEST_F(SingleTypeKVCacheAllocatorTest, MergedCommonMallocFailureAbortsContextWithoutAllocatingRequestTargets) {
     for (const Tier source_tier : {Tier::HOST, Tier::DISK}) {
         SCOPED_TRACE(source_tier == Tier::HOST ? "host" : "disk");
         ScopedSingleTypeDiskDirectory disk_directory;
@@ -707,10 +707,10 @@ TEST_F(SingleTypeKVCacheAllocatorTest, EarlyCommonMallocFailureAbortsContextBefo
             const std::vector<TransferDescriptor>& load_descs = context.loadDescs();
             events.push_back("context_abort_begin");
             EXPECT_FALSE(load_descs.empty());
-            EXPECT_LT(allocator_->freeBlocksNum(), free_before);
+            EXPECT_EQ(allocator_->freeBlocksNum(), free_before);
             original_abort(context);
             free_blocks_during_abort = allocator_->freeBlocksNum();
-            EXPECT_LT(free_blocks_during_abort, free_before);
+            EXPECT_EQ(free_blocks_during_abort, free_before);
             const size_t source_ref_after_abort = source_tier == Tier::HOST ?
                                                       group->hostPool()->refCount(source_block) :
                                                       group->diskPool()->refCount(source_block);
@@ -722,17 +722,12 @@ TEST_F(SingleTypeKVCacheAllocatorTest, EarlyCommonMallocFailureAbortsContextBefo
         resource->setBatchCacheKeys(0, CacheKeysType{100, 200, 300});
         auto       token_ids = createCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/9, /*seq_size_per_block=*/4);
         const auto result    = allocator_->malloc(MallocInfo{resource, token_ids});
-        if (allocator_->freeBlocksNum() == free_before) {
-            events.push_back("request_targets_freed");
-        }
 
         EXPECT_FALSE(result.success);
         EXPECT_EQ(result.async_context, nullptr);
         EXPECT_EQ(abort_count, 1u);
-        EXPECT_LT(free_blocks_during_abort, free_before);
-        EXPECT_EQ(
-            events,
-            (std::vector<std::string>{"context_abort_begin", "source_protection_released", "request_targets_freed"}));
+        EXPECT_EQ(free_blocks_during_abort, free_before);
+        EXPECT_EQ(events, (std::vector<std::string>{"context_abort_begin", "source_protection_released"}));
         EXPECT_EQ(resource->curBlocksNum(), 0);
         EXPECT_EQ(allocator_->freeBlocksNum(), free_before);
         const auto snapshot_after = cache->getKeySnapshot(/*limit=*/16);

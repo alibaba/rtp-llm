@@ -171,7 +171,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
         release_matched_blocks();
     }
 
-    std::vector<size_t> materialize_positions;
+    RequiredPositions materialize_positions;
     if (load_context && !load_context->empty()) {
         for (size_t desc_index = 0; desc_index < load_context->loadDescs().size(); ++desc_index) {
             if (load_context->loadDescs()[desc_index].source_tier == Tier::DEVICE) {
@@ -181,15 +181,11 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
                 continue;
             }
             const size_t path_index = load_context->loadDescs()[desc_index].path_index;
-            if (std::find(materialize_positions.begin(), materialize_positions.end(), path_index)
-                == materialize_positions.end()) {
-                materialize_positions.push_back(path_index);
-            }
+            materialize_positions.insert(path_index);
         }
         for (size_t position = 0; position < reuse_blocks; ++position) {
             if (isNullBlockIdx(block_ids_0.blocks()[position])
-                && std::find(materialize_positions.begin(), materialize_positions.end(), position)
-                       == materialize_positions.end()) {
+                && materialize_positions.find(position) == materialize_positions.end()) {
                 return rollback();
             }
         }
@@ -210,10 +206,8 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
             return rollback();
         }
     }
-    if (!full_kv_cache_group_->materializePositions(block_ids_0, materialize_positions)) {
-        return rollback();
-    }
-    if (!full_kv_cache_group_->malloc(block_ids_0, common_seq_len)) {
+    if (!full_kv_cache_group_->malloc(
+            block_ids_0, common_seq_len, false, 0, nullptr, materialize_positions)) {
         return rollback();
     }
 
@@ -231,9 +225,7 @@ MallocResult SingleTypeKVCacheAllocator::initMallocForCommonLen(const MallocInfo
                 }
                 continue;
             }
-            if (!load_context->bindTargetDeviceBlocks(desc_index, {target})) {
-                return rollback();
-            }
+            load_context->setTargetBlocks(desc_index, {target});
         }
     }
 

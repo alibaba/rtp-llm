@@ -604,7 +604,7 @@ TEST_F(BlockTreeCacheIntegrationTest, CacheShutdownWaitsForCommittedLoadSettleme
         device_pool->incRef(request_targets, BlockRefType::REQUEST);
         const BlockIdxType target_block = request_targets.front();
         EXPECT_EQ(device_pool->refCount(target_block), 1u);
-        ASSERT_TRUE(context->bindTargetDeviceBlocks(0, {target_block}));
+        context->setTargetBlocks(0, {target_block});
 
         ASSERT_TRUE(context->commit());
         pausable_per_rank_transfer_engine->waitUntilEntered();
@@ -1331,7 +1331,7 @@ TEST_P(BlockTreeCacheLowerTierTest, TransferExceptionSettlesContextAndReleasesAl
             desc_targets.push_back(block);
             request_targets.emplace_back(pool, block);
         }
-        ASSERT_TRUE(context->bindTargetDeviceBlocks(desc_index, std::move(desc_targets)));
+        context->setTargetBlocks(desc_index, std::move(desc_targets));
     }
 
     ASSERT_TRUE(context->commit());

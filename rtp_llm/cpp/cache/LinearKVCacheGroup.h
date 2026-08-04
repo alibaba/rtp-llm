@@ -30,11 +30,12 @@ public:
         linear_step_(linear_step) {}
 
     MatchResult matchSingleKey(CacheKeyType cache_key) const override;
-    bool        malloc(BlockIds&            block_ids,
-                       int                  seq_len,
-                       bool                 enable_reuse_cache   = false,
-                       int                  reserve_step         = 0,
-                       std::vector<size_t>* backfilled_positions = nullptr) override;
+    bool        malloc(BlockIds&                  block_ids,
+                       int                        seq_len,
+                       bool                       enable_reuse_cache   = false,
+                       int                        reserve_step         = 0,
+                       std::vector<size_t>*       backfilled_positions = nullptr,
+                       const RequiredPositions&  required_positions = {}) override;
 
     std::vector<BlockRefTransition>
     releaseSkippedBlocks(BlockIds& block_ids, bool enable_reuse_cache = false, int reserve_step = 0) override;

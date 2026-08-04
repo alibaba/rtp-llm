@@ -131,11 +131,12 @@ MatchResult SWAKVCacheGroup::matchSingleKey(CacheKeyType cache_key) const {
     return {};
 }
 
-bool SWAKVCacheGroup::malloc(BlockIds&            block_ids,
-                             int                  seq_len,
-                             bool                 enable_reuse_cache,
-                             int                  reserve_step,
-                             std::vector<size_t>* backfilled_positions) {
+bool SWAKVCacheGroup::malloc(BlockIds&                 block_ids,
+                             int                       seq_len,
+                             bool                      enable_reuse_cache,
+                             int                       reserve_step,
+                             std::vector<size_t>*      backfilled_positions,
+                             const RequiredPositions& required_positions) {
     if (backfilled_positions != nullptr) {
         backfilled_positions->clear();
     }
@@ -146,14 +147,33 @@ bool SWAKVCacheGroup::malloc(BlockIds&            block_ids,
     const int  seq_slots               = needBlocksNum(seq_len, 0, 0);
     const int  new_blocks_len          = needBlocksNum(seq_len, current_blocks_len, reserve_step);
 
-    if (new_blocks_len == 0) {
+    if (required_positions.empty() && new_blocks_len == 0) {
         checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::malloc");
         return true;
     }
 
-    int need_alloc_blocks = 0;
+    auto is_required = [&](int pos) {
+        return required_positions.find(static_cast<size_t>(pos)) != required_positions.end();
+    };
+    auto should_allocate = [&](int pos) {
+        return shouldAllocateBlock(
+                   pos, seq_slots, reserve_step, step, effective_reuse_enabled, active_tail_blocks)
+               || is_required(pos);
+    };
+
+    std::vector<size_t> positions_to_backfill;
+    if (!required_positions.empty()) {
+        const auto& existing_blocks = block_ids.blocks();
+        for (int i = 0; i < current_blocks_len; ++i) {
+            if (is_required(i) && isNullBlockIdx(existing_blocks[static_cast<size_t>(i)])) {
+                positions_to_backfill.push_back(static_cast<size_t>(i));
+            }
+        }
+    }
+
+    int need_alloc_blocks = static_cast<int>(positions_to_backfill.size());
     for (int i = current_blocks_len; i < current_blocks_len + new_blocks_len; i++) {
-        if (shouldAllocateBlock(i, seq_slots, reserve_step, step, effective_reuse_enabled, active_tail_blocks)) {
+        if (should_allocate(i)) {
             need_alloc_blocks++;
         }
     }
@@ -173,29 +193,30 @@ bool SWAKVCacheGroup::malloc(BlockIds&            block_ids,
     BlockIndicesType allocated_blocks;
     if (need_alloc_blocks > 0) {
         auto allocated = block_pool_->malloc(static_cast<size_t>(need_alloc_blocks));
-        if (!allocated.has_value() || allocated->size() != static_cast<size_t>(need_alloc_blocks)) {
+        if (!allocated.has_value()) {
             return false;
         }
         allocated_blocks = std::move(*allocated);
         addBlockRefs(allocated_blocks, BlockRefType::REQUEST);
     }
 
+    size_t allocated_idx = 0;
+    for (size_t pos : positions_to_backfill) {
+        block_ids.setAt(pos, allocated_blocks[allocated_idx++]);
+    }
+    if (backfilled_positions != nullptr) {
+        *backfilled_positions = positions_to_backfill;
+    }
+
     BlockIndicesType new_ids;
     new_ids.reserve(static_cast<size_t>(new_blocks_len));
-    size_t allocated_idx = 0;
     for (int i = current_blocks_len; i < current_blocks_len + new_blocks_len; i++) {
-        const bool should_alloc =
-            shouldAllocateBlock(i, seq_slots, reserve_step, step, effective_reuse_enabled, active_tail_blocks);
-        if (should_alloc) {
+        if (should_allocate(i)) {
             new_ids.push_back(allocated_blocks[allocated_idx++]);
         } else {
             new_ids.push_back(NULL_BLOCK_IDX);
         }
     }
-    RTP_LLM_CHECK_WITH_INFO(allocated_idx == allocated_blocks.size(),
-                            "swa kv allocation accounting mismatch, used=%zu allocated=%zu",
-                            allocated_idx,
-                            allocated_blocks.size());
     block_ids.add(new_ids);
     checkSWATailBlockIds(block_ids, "SWAKVCacheGroup::malloc");
     return true;

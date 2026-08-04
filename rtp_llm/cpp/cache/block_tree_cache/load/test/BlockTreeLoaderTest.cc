@@ -51,7 +51,7 @@ TEST(BlockTreeLoaderTest, HostLoadInstallsAllocatorBoundDeviceTargets) {
             targets.push_back(blocks.front());
             request_targets.emplace_back(pool, blocks.front());
         }
-        ASSERT_TRUE(load_context->bindTargetDeviceBlocks(desc_index, std::move(targets)));
+        load_context->setTargetBlocks(desc_index, std::move(targets));
     }
 
     ASSERT_TRUE(load_context->commit());

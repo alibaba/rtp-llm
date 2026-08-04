@@ -758,6 +758,60 @@ TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackFreesPartiallyAllocated
     expectPoolCountersEq(allocator, counters_before);
 }
 
+TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesLowerTierBackfillsAndAppendedBlocks) {
+    auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/4, /*full_block_num=*/3);
+    auto allocator = makeAllocator(config);
+
+    KVCacheConfig tiered_config;
+    tiered_config.enable_memory_cache        = true;
+    tiered_config.enable_tiered_memory_cache = true;
+    tiered_config.memory_cache_size_mb       = 1;
+    allocator->setBlockTreeCacheConfigForTest(std::move(tiered_config));
+    ASSERT_TRUE(allocator->init());
+
+    const auto& cache = allocator->blockTreeCacheOwner();
+    ASSERT_NE(cache, nullptr);
+
+    const CacheKeysType                        cached_keys{100, 101};
+    std::vector<std::vector<GroupSetResource>> slots(cached_keys.size(),
+                                                     std::vector<GroupSetResource>(cache->groupSets().size()));
+    std::vector<std::pair<GroupSetPtr, BlockIdxType>> host_sources;
+    for (const GroupSetPtr& group_set : cache->groupSets()) {
+        ASSERT_NE(group_set->hostPool(), nullptr);
+        for (size_t path_index = 0; path_index < cached_keys.size(); ++path_index) {
+            const BlockIdxType source_block = group_set->allocateSingleBlock(Tier::HOST, BlockRefType::BLOCK_CACHE);
+            ASSERT_FALSE(isNullBlockIdx(source_block));
+            slots[path_index][group_set->groupSetId()].host_block = source_block;
+            host_sources.emplace_back(group_set, source_block);
+        }
+    }
+    cache->insert(cached_keys, slots, Tier::HOST);
+
+    const auto counters_before = snapshotPoolCounters(allocator);
+    for (const auto& [group_set, source_block] : host_sources) {
+        EXPECT_EQ(group_set->hostPool()->refCount(source_block), 1u);
+    }
+
+    auto batch_res = makeBatchResource(/*batch_size=*/1, config);
+    batch_res->setBatchCacheKeys(0, CacheKeysType{100, 101, 102});
+    auto       token_ids = makeCompleteTokenIds(/*batch_size=*/1, /*seq_length=*/9, /*seq_size_per_block=*/4);
+    MallocInfo malloc_info{batch_res, token_ids};
+    malloc_info.enable_cache_lookup = true;
+    malloc_info.reuse_cache         = true;
+    malloc_info.verbose             = false;
+
+    const auto result = allocator->malloc(malloc_info);
+    EXPECT_FALSE(result.success);
+    EXPECT_EQ(result.async_context, nullptr);
+    EXPECT_EQ(batch_res->curBlocksNum(), 0u);
+    EXPECT_EQ(batch_res->blocksNum(0, /*group_id=*/0), 0u);
+    EXPECT_EQ(batch_res->blocksNum(0, /*group_id=*/1), 0u);
+    expectPoolCountersEq(allocator, counters_before);
+    for (const auto& [group_set, source_block] : host_sources) {
+        EXPECT_EQ(group_set->hostPool()->refCount(source_block), 1u);
+    }
+}
+
 TEST_F(HybridPoolKVCacheAllocatorTest, InitMallocRollbackReleasesDeviceReuseReferencesOnReserveReject) {
     auto config    = makeTinyMultiPoolHybridConfig(/*linear_block_num=*/4, /*full_block_num=*/4);
     auto allocator = makeAllocator(config);

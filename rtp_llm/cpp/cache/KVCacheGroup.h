@@ -5,6 +5,7 @@
 #include <vector>
 #include <cstdint>
 #include <unordered_map>
+#include <unordered_set>
 #include <utility>
 
 #include <torch/torch.h>
@@ -19,6 +20,8 @@
 namespace rtp_llm {
 
 class KVCacheAllocator;
+
+using RequiredPositions = std::unordered_set<size_t>;
 
 struct NeedBlocksInfo {
     int common_blocks = 0;  // shared blocks across batches
@@ -51,17 +54,17 @@ public:
     virtual ~KVCacheGroup() = default;
 
     bool                init();
-    virtual bool        malloc(BlockIds&            block_ids,
-                               int                  seq_len,
-                               bool                 enable_reuse_cache   = false,
-                               int                  reserve_step         = 0,
-                               std::vector<size_t>* backfilled_positions = nullptr) = 0;
+    virtual bool        malloc(BlockIds&                  block_ids,
+                               int                        seq_len,
+                               bool                       enable_reuse_cache   = false,
+                               int                        reserve_step         = 0,
+                               std::vector<size_t>*       backfilled_positions = nullptr,
+                               const RequiredPositions&  required_positions = {}) = 0;
     virtual MatchResult match(const CacheKeysType& cache_keys);
     virtual MatchResult matchPrefix(const CacheKeysType& cache_keys) const;
     virtual MatchResult matchSingleKey(CacheKeyType cache_key) const;
     virtual void
          insertIntoCache(const CacheKeysType& cache_keys, const BlockIndicesType& block_indices, bool is_resident);
-    bool materializePositions(BlockIds& block_ids, const std::vector<size_t>& positions);
     virtual std::vector<BlockRefTransition>
     release(const BlockIndicesType& block_indices, BlockRefType ref_type = BlockRefType::REQUEST) = 0;
     virtual void free(const BlockIndicesType& block_indices)                                      = 0;

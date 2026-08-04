@@ -291,7 +291,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadCommitsDeviceResource)
     std::shared_ptr<LoadAsyncContext> context = std::dynamic_pointer_cast<LoadAsyncContext>(match.async_context);
     ASSERT_NE(context, nullptr);
     ASSERT_EQ(context->loadDescs().size(), 1u);
-    ASSERT_TRUE(context->bindTargetDeviceBlocks(0, {device_block}));
+    context->setTargetBlocks(0, {device_block});
     ASSERT_TRUE(context->commit());
     context->waitDone();
     ASSERT_TRUE(context->success());
@@ -355,7 +355,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastHostLoadFailureKeepsSourceReso
     std::shared_ptr<LoadAsyncContext> context = std::dynamic_pointer_cast<LoadAsyncContext>(match.async_context);
     ASSERT_NE(context, nullptr);
     ASSERT_EQ(context->loadDescs().size(), 1u);
-    ASSERT_TRUE(context->bindTargetDeviceBlocks(0, {device_block}));
+    context->setTargetBlocks(0, {device_block});
     ASSERT_TRUE(context->commit());
     context->waitDone();
     ASSERT_FALSE(context->success());
@@ -489,7 +489,7 @@ TEST_F(MultiRankBlockTransferEngineTest, BroadcastDiskLoadUsesSingleDirectStage)
     std::shared_ptr<LoadAsyncContext> context = std::dynamic_pointer_cast<LoadAsyncContext>(match.async_context);
     ASSERT_NE(context, nullptr);
     ASSERT_EQ(context->loadDescs().size(), 1u);
-    ASSERT_TRUE(context->bindTargetDeviceBlocks(0, {device_block}));
+    context->setTargetBlocks(0, {device_block});
     ASSERT_TRUE(context->commit());
     context->waitDone();
     ASSERT_TRUE(context->success());

@@ -40,8 +40,7 @@ public:
     size_t   matchedBlocks() const;
     size_t   matchedBlocks(Tier tier) const;
 
-    bool bindTargetDeviceBlocks(size_t desc_index, std::vector<BlockIdxType> target_device_blocks);
-    void initializeJoinedTargetBlocks(size_t desc_index, std::vector<BlockIdxType> target_blocks);
+    void setTargetBlocks(size_t desc_index, std::vector<BlockIdxType> target_blocks);
 
     const std::vector<TransferDescriptor>& loadDescs() const;
     const std::vector<bool>& joinedLoads() const;

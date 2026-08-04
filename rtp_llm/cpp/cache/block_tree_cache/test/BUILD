@@ -167,20 +167,6 @@ cc_test(
 )
 
 cc_test(
-    name = "full_kv_cache_group_materialize_positions_test",
-    srcs = [
-        "FullKVCacheGroupMaterializePositionsTest.cc",
-    ],
-    data = [],
-    copts = test_copts,
-    deps = [
-        "//rtp_llm/cpp/cache/test:block_pool_test_helper",
-    ],
-    env = {},
-    exec_properties = {'gpu':'H20'},
-)
-
-cc_test(
     name = "device_swa_kv_cache_group_malloc_range_test",
     srcs = [
         "DeviceSWAKVCacheGroupMallocRangeTest.cc",

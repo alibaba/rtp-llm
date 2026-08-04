@@ -117,6 +117,35 @@ TEST_F(DeviceLinearKVCacheGroupTest, MallocAllocatesLastTwoTailBlocksWhenReuseDi
     EXPECT_EQ(block_pool->freeBlocksNum(), 8u);
 }
 
+TEST_F(DeviceLinearKVCacheGroupTest, MallocRequiredPositionsBackfillsPolicySkippedSlot) {
+    auto block_pool = createDeviceBlockPool();
+    ASSERT_TRUE(block_pool->init());
+
+    auto                     spec = makeLinearSpec(/*seq_size_per_block=*/4);
+    DeviceLinearKVCacheGroup group(/*layer_ids=*/{}, spec, block_pool, /*group_id=*/0, /*linear_step=*/2);
+    ASSERT_TRUE(group.init());
+
+    BlockIds blocks;
+    blocks.assign({NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX, NULL_BLOCK_IDX});
+    std::vector<size_t> backfilled_positions;
+    ASSERT_TRUE(group.malloc(blocks,
+                             /*seq_len=*/16,
+                             /*enable_reuse_cache=*/false,
+                             /*reserve_step=*/0,
+                             &backfilled_positions,
+                             /*required_positions=*/{1}));
+
+    ASSERT_EQ(blocks.blocksNum(), 4u);
+    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[0]));
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[1]));
+    EXPECT_TRUE(isNullBlockIdx(blocks.blocks()[2]));
+    EXPECT_FALSE(isNullBlockIdx(blocks.blocks()[3]));
+    EXPECT_EQ(backfilled_positions, (std::vector<size_t>{1, 3}));
+    EXPECT_EQ(block_pool->freeBlocksNum(), 7u);
+
+    group.free(blocks.blocks());
+}
+
 TEST_F(DeviceLinearKVCacheGroupTest, MallocAllocatesReserveTailBlocksWhenReuseDisabled) {
     auto block_pool = createDeviceBlockPool();
     ASSERT_TRUE(block_pool->init());
