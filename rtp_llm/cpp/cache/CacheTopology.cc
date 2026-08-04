@@ -7,6 +7,23 @@
 
 namespace rtp_llm {
 
+size_t storedKernelBlocksPerKvBlock(const GroupBase& group) {
+    RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "cache group tag=%s has null spec", group.tag.c_str());
+    if (group.policy.group_type != CacheGroupType::FULL) {
+        return 1;
+    }
+
+    const size_t physical_seq_size = group.spec->seq_size_per_block;
+    const size_t kernel_seq_size   = group.spec->kernel_seq_size_per_block;
+    RTP_LLM_CHECK_WITH_INFO(kernel_seq_size > 0 && physical_seq_size >= kernel_seq_size
+                                && physical_seq_size % kernel_seq_size == 0,
+                            "invalid block subdivision for tag=%s: physical=%zu kernel=%zu",
+                            group.tag.c_str(),
+                            physical_seq_size,
+                            kernel_seq_size);
+    return physical_seq_size / kernel_seq_size;
+}
+
 std::shared_ptr<const CacheTopology> CacheTopology::create(std::vector<GroupBase> groups,
                                                            std::vector<LayerBase> layers) {
     return std::shared_ptr<const CacheTopology>(new CacheTopology(std::move(groups), std::move(layers)));
@@ -35,15 +52,10 @@ void CacheTopology::validateAndBuildIndex() {
                                 "CacheTopology has duplicate tag=%s",
                                 group.tag.c_str());
         RTP_LLM_CHECK_WITH_INFO(
-            group.seq_size_per_block > 0, "CacheTopology tag=%s has zero seq_size_per_block", group.tag.c_str());
-        RTP_LLM_CHECK_WITH_INFO(group.kernel_seq_size_per_block > 0,
+            group.spec->seq_size_per_block > 0, "CacheTopology tag=%s has zero seq_size_per_block", group.tag.c_str());
+        RTP_LLM_CHECK_WITH_INFO(group.spec->kernel_seq_size_per_block > 0,
                                 "CacheTopology tag=%s has zero kernel_seq_size_per_block",
                                 group.tag.c_str());
-        RTP_LLM_CHECK_WITH_INFO(group.seq_size_per_block % group.kernel_seq_size_per_block == 0,
-                                "CacheTopology tag=%s seq_size_per_block=%zu is not divisible by kernel size=%zu",
-                                group.tag.c_str(),
-                                group.seq_size_per_block,
-                                group.kernel_seq_size_per_block);
 
         for (int layer_id : group.layer_ids) {
             RTP_LLM_CHECK_WITH_INFO(layer_id >= 0 && static_cast<size_t>(layer_id) < layers_.size(),

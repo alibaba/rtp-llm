@@ -22,6 +22,33 @@ class NormalEngineTest: public DeviceTestBase {
 public:
 };
 
+TEST_F(NormalEngineTest, nullCacheManagerUsesFinalModelKernelTokensPerBlock) {
+    auto verify_geometry = [](size_t kernel_tokens_per_block, size_t expected_kernel_tokens_per_block) {
+        CustomConfig     config;
+        ModelConfig      model_config;
+        RuntimeConfig    runtime_config;
+        KVCacheConfig    kv_cache_config;
+        EngineInitParams params = createEngineInitParams(config, model_config, runtime_config, kv_cache_config);
+        constexpr size_t tokens_per_block = 128;
+        std::pair<size_t, size_t> captured_geometry{0, 0};
+
+        params.model_config_.attn_config.tokens_per_block        = tokens_per_block;
+        params.model_config_.attn_config.kernel_tokens_per_block = kernel_tokens_per_block;
+        NormalExecutor::test_model_factory = [&captured_geometry](const GptModelInitParams& model_params) {
+            captured_geometry = {model_params.tokens_per_block, model_params.kernel_tokens_per_block};
+            return std::make_unique<MockModel>(100);
+        };
+        { NormalExecutor executor(params, nullptr, true); }
+        NormalExecutor::test_model_factory = nullptr;
+
+        EXPECT_EQ(captured_geometry.first, tokens_per_block);
+        EXPECT_EQ(captured_geometry.second, expected_kernel_tokens_per_block);
+    };
+
+    verify_geometry(32, 32);
+    verify_geometry(0, 128);
+}
+
 TEST_F(NormalEngineTest, testFp8KVCache) {
     CustomConfig config;
     config.kv_cache_data_type = DataType::TYPE_FP8_E4M3;

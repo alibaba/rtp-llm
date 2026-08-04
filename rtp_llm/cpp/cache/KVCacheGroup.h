@@ -113,14 +113,12 @@ protected:
     static GroupBase
     makeLegacyCacheGroup(const LayerIdsType& layer_ids, KVCacheSpecPtr spec, const CacheGroupPolicy& policy) {
         GroupBase group;
-        group.tag                       = spec == nullptr ? std::string{} : spec->tag;
-        group.spec                      = std::move(spec);
-        group.policy                    = policy;
-        group.layer_ids                 = layer_ids;
-        group.seq_size_per_block        = group.spec == nullptr ? 1 : group.spec->seq_size_per_block;
-        group.kernel_seq_size_per_block = group.seq_size_per_block;
-        group.kv_block_stride_bytes     = group.spec == nullptr ? 0 : group.spec->block_size_bytes();
-        group.kv_scale_stride_bytes     = group.spec == nullptr ? 0 : group.spec->scale_block_size_bytes();
+        group.tag                   = spec == nullptr ? std::string{} : spec->tag;
+        group.spec                  = std::move(spec);
+        group.policy                = policy;
+        group.layer_ids             = layer_ids;
+        group.kv_block_stride_bytes = group.spec == nullptr ? 0 : group.spec->block_size_bytes();
+        group.kv_scale_stride_bytes = group.spec == nullptr ? 0 : group.spec->scale_block_size_bytes();
         return group;
     }
 

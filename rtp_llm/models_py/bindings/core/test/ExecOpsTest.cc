@@ -168,14 +168,12 @@ static CacheConfig makeCacheConfig(size_t             tokens_per_block,
     config.use_opaque_kv_cache_store   = opaque_store;
 
     GroupBase target_group;
-    target_group.tag                       = tag;
-    target_group.spec                      = makeTestSpec(tag, tokens_per_block, mla_cache);
-    target_group.policy                    = policy;
-    target_group.block_num                 = static_cast<uint32_t>(block_num);
-    target_group.seq_size_per_block        = tokens_per_block;
-    target_group.kernel_seq_size_per_block = tokens_per_block;
-    target_group.kv_block_stride_bytes     = transfer_kv_bytes == 0 ? physical_kv_stride : transfer_kv_bytes;
-    target_group.kv_scale_stride_bytes     = transfer_scale_bytes == 0 ? physical_scale_stride : transfer_scale_bytes;
+    target_group.tag                   = tag;
+    target_group.spec                  = makeTestSpec(tag, tokens_per_block, mla_cache);
+    target_group.policy                = policy;
+    target_group.block_num             = static_cast<uint32_t>(block_num);
+    target_group.kv_block_stride_bytes = transfer_kv_bytes == 0 ? physical_kv_stride : transfer_kv_bytes;
+    target_group.kv_scale_stride_bytes = transfer_scale_bytes == 0 ? physical_scale_stride : transfer_scale_bytes;
 
     std::vector<LayerBase> layers(static_cast<size_t>(layer_id + 1));
     for (size_t i = 0; i < layers.size(); ++i) {
@@ -185,14 +183,12 @@ static CacheConfig makeCacheConfig(size_t             tokens_per_block,
     std::vector<GroupBase> groups;
     if (add_dummy_group) {
         GroupBase dummy_group;
-        dummy_group.tag                       = tag == "full" ? "linear" : "full";
-        dummy_group.spec                      = makeTestSpec(dummy_group.tag, tokens_per_block, false);
-        dummy_group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-        dummy_group.block_num                 = static_cast<uint32_t>(block_num);
-        dummy_group.seq_size_per_block        = tokens_per_block;
-        dummy_group.kernel_seq_size_per_block = tokens_per_block;
-        dummy_group.kv_block_stride_bytes     = physical_kv_stride;
-        dummy_group.kv_scale_stride_bytes     = physical_scale_stride;
+        dummy_group.tag                   = tag == "full" ? "linear" : "full";
+        dummy_group.spec                  = makeTestSpec(dummy_group.tag, tokens_per_block, false);
+        dummy_group.policy                = defaultCacheGroupPolicy(CacheGroupType::FULL);
+        dummy_group.block_num             = static_cast<uint32_t>(block_num);
+        dummy_group.kv_block_stride_bytes = physical_kv_stride;
+        dummy_group.kv_scale_stride_bytes = physical_scale_stride;
         for (int i = 0; i < layer_id; ++i) {
             dummy_group.layer_ids.push_back(i);
             layers[static_cast<size_t>(i)].group_tags = {dummy_group.tag};
@@ -918,14 +914,12 @@ TEST_F(ExecOpsTest, testWriteCacheStoreSameLayerRoutesByTag) {
 
     auto make_group = [](const std::string& tag, CacheGroupType type) {
         GroupBase group;
-        group.tag                       = tag;
-        group.spec                      = makeTestSpec(tag, tokens_per_block, false);
-        group.policy                    = defaultCacheGroupPolicy(type);
-        group.layer_ids                 = {0};
-        group.block_num                 = block_num;
-        group.seq_size_per_block        = tokens_per_block;
-        group.kernel_seq_size_per_block = tokens_per_block;
-        group.kv_block_stride_bytes     = block_stride;
+        group.tag                   = tag;
+        group.spec                  = makeTestSpec(tag, tokens_per_block, false);
+        group.policy                = defaultCacheGroupPolicy(type);
+        group.layer_ids             = {0};
+        group.block_num             = block_num;
+        group.kv_block_stride_bytes = block_stride;
         return group;
     };
     config.setTopology({make_group("linear", CacheGroupType::LINEAR), make_group("full", CacheGroupType::FULL)},

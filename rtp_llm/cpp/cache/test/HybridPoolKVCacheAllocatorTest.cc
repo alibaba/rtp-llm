@@ -42,14 +42,13 @@ static CacheConfig makeTinyMultiPoolHybridConfig(uint32_t       linear_block_num
                                                  uint32_t       full_block_num   = 8,
                                                  CacheGroupType second_type      = CacheGroupType::FULL) {
     CacheConfig config;
-    config.dtype                     = rtp_llm::DataType::TYPE_FP16;
-    config.layer_num                 = 4;
-    config.layer_all_num             = 4;
-    config.block_num                 = std::max(linear_block_num, full_block_num);
-    config.seq_size_per_block        = 4;
-    config.kernel_seq_size_per_block = 4;
-    config.linear_step               = 2;
-    config.group_layer_num           = 2;
+    config.dtype              = rtp_llm::DataType::TYPE_FP16;
+    config.layer_num          = 4;
+    config.layer_all_num      = 4;
+    config.block_num          = std::max(linear_block_num, full_block_num);
+    config.seq_size_per_block = 4;
+    config.linear_step        = 2;
+    config.group_layer_num    = 2;
 
     auto linear_spec = makeResolvedLinearSpec(config.dtype,
                                               1,

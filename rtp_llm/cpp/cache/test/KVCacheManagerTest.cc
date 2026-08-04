@@ -252,8 +252,10 @@ makeProductionDSV4Config(uint32_t full_block_num, uint32_t max_concurrency, uint
     ParallelismConfig pc;
     RuntimeConfig     runtime_config;
     KVCacheConfig     kv_cache_config;
-    kv_cache_config.test_block_num = full_block_num;
-    auto mc                        = makeDSV4ManagerFlashModelConfig();
+    auto              mc                      = makeDSV4ManagerFlashModelConfig();
+    kv_cache_config.seq_size_per_block        = static_cast<int>(mc.attn_config.tokens_per_block);
+    kv_cache_config.kernel_seq_size_per_block = static_cast<int>(mc.attn_config.kernel_tokens_per_block);
+    kv_cache_config.test_block_num            = full_block_num;
     setDsv4ExplicitPoolBlocks(mc, "hca_state", hca_state_pool_blocks);
     runtime_config.max_generate_batch_size                      = max_concurrency;
     runtime_config.fifo_scheduler_config.max_context_batch_size = max_concurrency;

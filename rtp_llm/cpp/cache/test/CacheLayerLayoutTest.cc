@@ -14,17 +14,14 @@ namespace rtp_llm {
 namespace {
 
 GroupBase makeLayoutGroup(std::string tag, std::vector<int> layer_ids) {
-    auto spec                = std::make_shared<MHAKVCacheSpec>();
-    spec->tag                = tag;
-    spec->seq_size_per_block = 512;
+    auto spec = std::make_shared<MHAKVCacheSpec>(512, 128);
+    spec->tag = tag;
 
     GroupBase group;
-    group.tag                       = std::move(tag);
-    group.spec                      = std::move(spec);
-    group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-    group.layer_ids                 = std::move(layer_ids);
-    group.seq_size_per_block        = 512;
-    group.kernel_seq_size_per_block = 128;
+    group.tag       = std::move(tag);
+    group.spec      = std::move(spec);
+    group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+    group.layer_ids = std::move(layer_ids);
     return group;
 }
 

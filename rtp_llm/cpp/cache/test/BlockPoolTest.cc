@@ -40,22 +40,25 @@ namespace {
 
 static rtp_llm::ModelConfig makeTestModelConfig(uint32_t num_layers) {
     rtp_llm::ModelConfig m;
-    m.num_layers                   = static_cast<int>(num_layers);
-    m.max_seq_len                  = 128;
-    m.hidden_size                  = 1;
-    m.vocab_size                   = 1;
-    m.data_type                    = rtp_llm::DataType::TYPE_FP16;
-    m.attn_config.use_mla          = false;
-    m.attn_config.tokens_per_block = 4;
-    m.attn_config.kv_head_num      = 2;
-    m.attn_config.size_per_head    = 1;
-    m.attn_config.kv_cache_dtype   = KvCacheDataType::FP8;  // enable quantized kv cache
-    m.attn_config.kv_lora_rank     = 0;
-    m.attn_config.rope_head_dim    = 0;
-    m.attn_config.head_num         = 2;
+    m.num_layers                          = static_cast<int>(num_layers);
+    m.max_seq_len                         = 128;
+    m.hidden_size                         = 1;
+    m.vocab_size                          = 1;
+    m.data_type                           = rtp_llm::DataType::TYPE_FP16;
+    m.attn_config.use_mla                 = false;
+    m.attn_config.tokens_per_block        = 4;
+    m.attn_config.kernel_tokens_per_block = 4;
+    m.attn_config.kv_head_num             = 2;
+    m.attn_config.size_per_head           = 1;
+    m.attn_config.kv_cache_dtype          = KvCacheDataType::FP8;  // enable quantized kv cache
+    m.attn_config.kv_lora_rank            = 0;
+    m.attn_config.rope_head_dim           = 0;
+    m.attn_config.head_num                = 2;
     m.kv_cache_spec_descs.resize(num_layers);
     for (auto& descs : m.kv_cache_spec_descs) {
-        descs.push_back(KVCacheSpecDesc{"full", KVCacheSpecType::MultiHeadAttention});
+        KVCacheSpecDesc desc{"full", KVCacheSpecType::MultiHeadAttention};
+        desc.kernel_seq_size_per_block = static_cast<uint32_t>(m.attn_config.kernel_tokens_per_block);
+        descs.push_back(desc);
     }
     return m;
 }
@@ -71,7 +74,9 @@ makeMtpCacheConfigByCreateSpConfig(uint32_t main_layers, int mtp_module_num, uin
     rtp_llm::RuntimeConfig runtime_config;
 
     rtp_llm::KVCacheConfig kv_cache_config;
-    kv_cache_config.test_block_num = static_cast<int>(block_num);
+    kv_cache_config.seq_size_per_block        = 4;
+    kv_cache_config.kernel_seq_size_per_block = 4;
+    kv_cache_config.test_block_num            = static_cast<int>(block_num);
 
     rtp_llm::SpeculativeExecutionConfig sp_config;
     sp_config.type              = SP_TYPE_MTP;

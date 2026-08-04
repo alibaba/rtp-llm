@@ -15,6 +15,8 @@
 namespace rtp_llm {
 
 struct TestKVCacheSpec: public KVCacheSpec {
+    using KVCacheSpec::KVCacheSpec;
+
     DataType dtype             = DataType::TYPE_INVALID;
     size_t   k_block_bytes     = 0;
     size_t   v_block_bytes     = 0;
@@ -84,15 +86,14 @@ inline KVCacheSpecPtr createTestKvCacheSpec(uint32_t          layer_num,
                             v_block_stride_bytes,
                             type_sz);
 
-    auto spec                = std::make_shared<TestKVCacheSpec>();
-    spec->tag                = "default";
-    spec->type               = k_block_stride_bytes == v_block_stride_bytes ? KVCacheSpecType::MultiHeadAttention :
-                                                                              KVCacheSpecType::MultiHeadLatentAttention;
-    spec->seq_size_per_block = seq_size_per_block;
-    spec->dtype              = dtype;
-    spec->k_block_bytes      = k_block_stride_bytes;
-    spec->v_block_bytes      = v_block_stride_bytes;
-    spec->local_kv_head_num  = local_head_num_kv;
+    auto spec               = std::make_shared<TestKVCacheSpec>(seq_size_per_block, seq_size_per_block);
+    spec->tag               = "default";
+    spec->type              = k_block_stride_bytes == v_block_stride_bytes ? KVCacheSpecType::MultiHeadAttention :
+                                                                             KVCacheSpecType::MultiHeadLatentAttention;
+    spec->dtype             = dtype;
+    spec->k_block_bytes     = k_block_stride_bytes;
+    spec->v_block_bytes     = v_block_stride_bytes;
+    spec->local_kv_head_num = local_head_num_kv;
     return spec;
 }
 

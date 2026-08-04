@@ -29,9 +29,13 @@ static torch::Tensor hostIntBuffer(std::vector<int32_t> data) {
     return torch::tensor(data, torch::kInt32);
 }
 
-static void initFullCacheConfig(CacheConfig& cache_config, int layer_num) {
-    auto spec = std::make_shared<MHAKVCacheSpec>();
-    spec->tag = "default";
+static void initFullCacheConfig(CacheConfig& cache_config,
+                                int          layer_num,
+                                uint32_t     seq_size_per_block        = 1,
+                                uint32_t     kernel_seq_size_per_block = 1) {
+    auto spec                       = std::make_shared<MHAKVCacheSpec>(seq_size_per_block, kernel_seq_size_per_block);
+    spec->tag                       = "default";
+    cache_config.seq_size_per_block = seq_size_per_block;
     std::vector<int> layer_ids(static_cast<size_t>(layer_num));
     std::iota(layer_ids.begin(), layer_ids.end(), 0);
     cache_config.layer_num     = static_cast<uint32_t>(layer_num);
@@ -160,6 +164,54 @@ private:
     bool    async_device_state_;
     int64_t accepted_token_len_ = 0;
 };
+
+TEST_F(NormalBatchStreamProcessorTest, testKernelGeometryUsesKernelAddressedFullGroup) {
+    ResourceContext resource_context;
+    ModelConfig     model_config;
+    model_config.max_seq_len      = 2048;
+    model_config.vocab_size       = 2048;
+    model_config.input_vocab_size = 2048;
+    model_config.num_layers       = 1;
+
+    PDSepConfig                 pd_sep_config;
+    ProfilingDebugLoggingConfig profiling_debug_logging_config;
+    CacheConfig                 cache_config;
+    initFullCacheConfig(cache_config,
+                        model_config.num_layers,
+                        /*seq_size_per_block=*/8,
+                        /*kernel_seq_size_per_block=*/2);
+    RuntimeConfig runtime_config;
+
+    NormalBatchStreamProcessor processor(
+        model_config, pd_sep_config, profiling_debug_logging_config, cache_config, false);
+    EXPECT_EQ(processor.model_input_gatherer_config_.seq_size_per_block, 8u);
+    EXPECT_EQ(processor.model_input_gatherer_config_.kernel_seq_size_per_block, 2u);
+    EXPECT_EQ(processor.model_input_gatherer_config_.kernel_blocks_per_kv_block, 4u);
+
+    auto query             = make_shared<GenerateInput>();
+    query->input_ids       = hostIntBuffer({1, 2});
+    query->generate_config = make_shared<GenerateConfig>();
+    GenerateStreamPtr stream =
+        make_shared<NormalGenerateStream>(query, model_config, runtime_config, resource_context, nullptr);
+    query->input_ids = hostIntBuffer({1});
+
+    BatchKVCacheResource resource;
+    resource.resetBatchSize(1);
+    resource.initGroups(cache_config.topologyPtr());
+    resource.setBatchBlocks(0, 0, {5, 7});
+    stream->setKVCache(resource);
+    stream->setIsContextStream(false);
+    stream->generate_status_->status = StreamState::RUNNING;
+
+    TensorHolder holder;
+    auto         model_input = processor.gatherModelInput(StreamGroups({stream}), holder);
+    ASSERT_TRUE(model_input.ok());
+    EXPECT_EQ(model_input->seq_size_per_block, 8u);
+    EXPECT_EQ(model_input->kernel_seq_size_per_block, 2u);
+    EXPECT_EQ(toVec<int32_t>(model_input->kv_cache_block_id), (std::vector<int32_t>{5, 7}));
+    EXPECT_EQ(toVec<int32_t>(model_input->kv_cache_kernel_block_id),
+              (std::vector<int32_t>{20, 21, 22, 23, 28, 29, 30, 31}));
+}
 
 TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
     ResourceContext resource_context;

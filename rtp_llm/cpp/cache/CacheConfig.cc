@@ -49,7 +49,8 @@ std::string targetGroupSummary(const CacheConfig& target_config) {
         } else {
             os << ", spec=null";
         }
-        os << ", seq_size_per_block=" << group.seq_size_per_block
+        os << ", seq_size_per_block=" << target_config.seqSizePerBlockForGroup(target_gid)
+           << ", kernel_seq_size_per_block=" << target_config.kernelSeqSizePerBlockForGroup(target_gid)
            << ", kv_block_stride_bytes=" << group.kv_block_stride_bytes
            << ", kv_scale_stride_bytes=" << group.kv_scale_stride_bytes
            << ", policy=" << cacheGroupPolicySummary(group.policy) << '}';
@@ -81,13 +82,13 @@ std::optional<size_t> resolveDefaultMTPGroupAlias(const CacheConfig& target_conf
         // The aliased draft layer uses its own MTP memory layout. Group-tag APIs still expose it as the target
         // group, however, so both logical block granularity and physical block shape must remain compatible.
         if (CacheConfig::samePolicy(target_group.policy, source_group.policy) && target_group.spec != nullptr
-            && target_group.spec->type == source_group.spec->type
-            && target_group.spec->memoryLayoutDType() == source_group.spec->memoryLayoutDType()
-            && target_group.spec->block_size_bytes() == source_group.spec->block_size_bytes()
-            && target_group.spec->scale_block_size_bytes() == source_group.spec->scale_block_size_bytes()
-            && target_group.seq_size_per_block == source_group.seq_size_per_block
+            && target_group.spec->layoutFingerprint() == source_group.spec->layoutFingerprint()
+            && target_config.seqSizePerBlockForGroup(target_gid) == propose_config.seqSizePerBlockForGroup(0)
+            && target_config.kernelSeqSizePerBlockForGroup(target_gid)
+                   == propose_config.kernelSeqSizePerBlockForGroup(0)
             && target_group.kv_block_stride_bytes == source_group.kv_block_stride_bytes
-            && target_group.kv_scale_stride_bytes == source_group.kv_scale_stride_bytes) {
+            && target_group.kv_scale_stride_bytes == source_group.kv_scale_stride_bytes
+            && target_group.uses_sparse_indexer_scale_layout == source_group.uses_sparse_indexer_scale_layout) {
             candidates.push_back(target_gid);
         }
     }
@@ -102,7 +103,7 @@ std::optional<size_t> resolveDefaultMTPGroupAlias(const CacheConfig& target_conf
                      "source_policy=%s target_groups=%s",
                      static_cast<int>(source_group.spec->type),
                      static_cast<int>(source_group.spec->memoryLayoutDType()),
-                     source_group.seq_size_per_block,
+                     propose_config.seqSizePerBlockForGroup(0),
                      source_group.spec->block_size_bytes(),
                      source_group.spec->scale_block_size_bytes(),
                      source_group.kv_block_stride_bytes,
@@ -131,15 +132,55 @@ bool CacheConfig::samePolicy(const CacheGroupPolicy& lhs, const CacheGroupPolicy
            && lhs.cp_mapping == rhs.cp_mapping && lhs.cp_slice == rhs.cp_slice;
 }
 
+std::optional<size_t> CacheConfig::kernelAddressedFullGroupId() const {
+    std::optional<size_t> attention_selected;
+    std::optional<size_t> opaque_selected;
+    std::optional<size_t> any_selected;
+    for (size_t gid = 0; gid < static_cast<size_t>(groupNums()); ++gid) {
+        const auto& spec = specForGroup(gid);
+        const bool  kernel_addressed =
+            typeForGroup(gid) == CacheGroupType::FULL && spec
+            && (spec->type == KVCacheSpecType::MultiHeadAttention
+                || spec->type == KVCacheSpecType::MultiHeadLatentAttention || spec->type == KVCacheSpecType::OpaqueKV);
+        if (!kernel_addressed) {
+            continue;
+        }
+        if (!any_selected.has_value()) {
+            any_selected = gid;
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(kernelSeqSizePerBlockForGroup(gid)
+                                        == kernelSeqSizePerBlockForGroup(*any_selected),
+                                    "kernel-addressed cache groups must use one kernel block size");
+        }
+        // Attention groups define the dtype and kernel geometry exposed to the
+        // model, so prefer them over opaque regions regardless of topology order.
+        auto& selected = spec->type == KVCacheSpecType::OpaqueKV ? opaque_selected : attention_selected;
+        if (!selected.has_value()) {
+            selected = gid;
+            continue;
+        }
+        RTP_LLM_CHECK_WITH_INFO(spec->memoryLayoutDType() == specForGroup(*selected)->memoryLayoutDType(),
+                                "kernel-addressed cache groups must use one dtype, tag=%s dtype=%d vs tag=%s dtype=%d",
+                                tagForGroup(gid).c_str(),
+                                static_cast<int>(spec->memoryLayoutDType()),
+                                tagForGroup(*selected).c_str(),
+                                static_cast<int>(specForGroup(*selected)->memoryLayoutDType()));
+    }
+    return attention_selected.has_value() ? attention_selected : opaque_selected;
+}
+
 void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<LayerBase> new_layers) {
     RTP_LLM_CHECK_WITH_INFO(!new_groups.empty(), "CacheConfig::setTopology requires at least one cache group");
     RTP_LLM_CHECK_WITH_INFO(!new_layers.empty(), "CacheConfig::setTopology requires at least one cache layer");
+    RTP_LLM_CHECK_WITH_INFO(seq_size_per_block > 0,
+                            "CacheConfig::setTopology requires positive global seq_size_per_block");
     const auto expected_layers = layer_all_num > 0 ? layer_all_num : layer_num;
     RTP_LLM_CHECK_WITH_INFO(expected_layers == 0 || new_layers.size() == static_cast<size_t>(expected_layers),
                             "CacheConfig::setTopology layer count %zu != expected %u",
                             new_layers.size(),
                             expected_layers);
 
+    std::optional<size_t> full_kernel_seq_size;
     for (size_t gid = 0; gid < new_groups.size(); ++gid) {
         auto& group = new_groups[gid];
         RTP_LLM_CHECK_WITH_INFO(group.spec != nullptr, "CacheConfig::setTopology got null spec at group %zu", gid);
@@ -162,21 +203,79 @@ void CacheConfig::setTopology(std::vector<GroupBase> new_groups, std::vector<Lay
         if (group.block_num == 0) {
             group.block_num = block_num;
         }
-        if (group.seq_size_per_block == 0) {
-            group.seq_size_per_block = group.spec->seq_size_per_block > 0 ? group.spec->seq_size_per_block :
-                                                                            std::max<size_t>(1, seq_size_per_block);
+        const auto physical_seq_size = group.spec->seq_size_per_block;
+        const auto kernel_seq_size   = group.spec->kernel_seq_size_per_block;
+        RTP_LLM_CHECK_WITH_INFO(physical_seq_size % seq_size_per_block == 0,
+                                "invalid physical span for group %zu tag=%s: physical=%zu global=%zu",
+                                gid,
+                                group.tag.c_str(),
+                                physical_seq_size,
+                                seq_size_per_block);
+        RTP_LLM_CHECK_WITH_INFO(kernel_seq_size > 0 && physical_seq_size >= kernel_seq_size
+                                    && physical_seq_size % kernel_seq_size == 0,
+                                "invalid block subdivision for group %zu tag=%s: physical=%zu kernel=%zu",
+                                gid,
+                                group.tag.c_str(),
+                                physical_seq_size,
+                                kernel_seq_size);
+        if (group.policy.group_type == CacheGroupType::FULL) {
+            if (!full_kernel_seq_size.has_value()) {
+                full_kernel_seq_size = kernel_seq_size;
+            } else {
+                RTP_LLM_CHECK_WITH_INFO(*full_kernel_seq_size == kernel_seq_size,
+                                        "FULL cache groups must use one kernel block size: expected=%zu "
+                                        "group=%zu tag=%s actual=%zu",
+                                        *full_kernel_seq_size,
+                                        gid,
+                                        group.tag.c_str(),
+                                        kernel_seq_size);
+            }
         }
-        if (group.kernel_seq_size_per_block == 0) {
-            group.kernel_seq_size_per_block =
-                group.policy.group_type == CacheGroupType::FULL && kernel_seq_size_per_block > 0 ?
-                    std::min(kernel_seq_size_per_block, group.seq_size_per_block) :
-                    group.seq_size_per_block;
-        }
+        const auto expected_kv_stride    = group.spec->block_size_bytes();
+        const auto expected_scale_stride = group.spec->scale_block_size_bytes();
         if (group.kv_block_stride_bytes == 0) {
-            group.kv_block_stride_bytes = group.spec->block_size_bytes();
+            group.kv_block_stride_bytes = expected_kv_stride;
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(group.kv_block_stride_bytes >= expected_kv_stride,
+                                    "cache group %zu tag=%s kv stride %zu is smaller than spec bytes %zu",
+                                    gid,
+                                    group.tag.c_str(),
+                                    group.kv_block_stride_bytes,
+                                    expected_kv_stride);
         }
         if (group.kv_scale_stride_bytes == 0) {
-            group.kv_scale_stride_bytes = group.spec->scale_block_size_bytes();
+            group.kv_scale_stride_bytes = expected_scale_stride;
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(group.kv_scale_stride_bytes >= expected_scale_stride,
+                                    "cache group %zu tag=%s scale stride %zu is smaller than spec bytes %zu",
+                                    gid,
+                                    group.tag.c_str(),
+                                    group.kv_scale_stride_bytes,
+                                    expected_scale_stride);
+        }
+        if (group.spec->type == KVCacheSpecType::MultiHeadAttention) {
+            RTP_LLM_CHECK_WITH_INFO(!group.uses_sparse_indexer_scale_layout || is_sparse,
+                                    "MHA cache group %zu tag=%s declares sparse indexer scale layout on a "
+                                    "non-sparse cache",
+                                    gid,
+                                    group.tag.c_str());
+            RTP_LLM_CHECK_WITH_INFO(group.kv_block_stride_bytes == expected_kv_stride
+                                        && (group.uses_sparse_indexer_scale_layout ?
+                                                group.kv_scale_stride_bytes >= expected_scale_stride :
+                                                group.kv_scale_stride_bytes == expected_scale_stride),
+                                    "MHA cache group %zu tag=%s does not support padded rows: "
+                                    "kv=%zu/%zu scale=%zu/%zu",
+                                    gid,
+                                    group.tag.c_str(),
+                                    group.kv_block_stride_bytes,
+                                    expected_kv_stride,
+                                    group.kv_scale_stride_bytes,
+                                    expected_scale_stride);
+        } else {
+            RTP_LLM_CHECK_WITH_INFO(!group.uses_sparse_indexer_scale_layout,
+                                    "non-MHA cache group %zu tag=%s cannot use sparse indexer scale layout",
+                                    gid,
+                                    group.tag.c_str());
         }
     }
 
@@ -190,8 +289,7 @@ void CacheConfig::setGroupPolicies(const std::vector<CacheGroupPolicy>& policies
                             topology().groups().size());
     auto groups = topology().groups();
     for (size_t gid = 0; gid < policies.size(); ++gid) {
-        groups[gid].policy                    = policies[gid];
-        groups[gid].kernel_seq_size_per_block = 0;
+        groups[gid].policy = policies[gid];
     }
     setTopology(std::move(groups), topology().layers());
 }
@@ -227,6 +325,10 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
     RTP_LLM_CHECK_WITH_INFO(groupNums() > 0, "CacheConfig::mergeMTPModule requires destination topology");
     RTP_LLM_CHECK_WITH_INFO(propose_config.groupNums() > 0, "CacheConfig::mergeMTPModule requires propose topology");
     RTP_LLM_CHECK_WITH_INFO(module_index >= 0, "CacheConfig::mergeMTPModule invalid module_index=%d", module_index);
+    RTP_LLM_CHECK_WITH_INFO(seq_size_per_block == propose_config.seq_size_per_block,
+                            "CacheConfig::mergeMTPModule global seq_size_per_block mismatch: main=%zu propose=%zu",
+                            seq_size_per_block,
+                            propose_config.seq_size_per_block);
 
     auto sub_cfg           = std::make_shared<CacheConfig>(propose_config);
     sub_cfg->block_num     = block_num;
@@ -276,6 +378,18 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
         const auto& source_group      = source_config->topology().groupById(source_gid);
 
         if (has_propose_group) {
+            const auto& target_group = target_groups[target_gid];
+            RTP_LLM_CHECK_WITH_INFO(
+                target_group.spec->layoutFingerprint() == source_group.spec->layoutFingerprint()
+                    && samePolicy(target_group.policy, source_group.policy)
+                    && seqSizePerBlockForGroup(target_gid) == source_config->seqSizePerBlockForGroup(source_gid)
+                    && kernelSeqSizePerBlockForGroup(target_gid)
+                           == source_config->kernelSeqSizePerBlockForGroup(source_gid)
+                    && target_group.kv_block_stride_bytes == source_group.kv_block_stride_bytes
+                    && target_group.kv_scale_stride_bytes == source_group.kv_scale_stride_bytes
+                    && target_group.uses_sparse_indexer_scale_layout == source_group.uses_sparse_indexer_scale_layout,
+                "CacheConfig::mergeMTPModule incompatible group tag=%s",
+                tag.c_str());
             RTP_LLM_CHECK_WITH_INFO(
                 source_group.layer_ids.size() == static_cast<size_t>(mtp_layer_num),
                 "CacheConfig::mergeMTPModule source_tag=%s target_tag=%s must cover every module layer, "
@@ -322,7 +436,7 @@ CacheConfig::mergeMTPModule(const CacheConfig& propose_config, int module_index,
                              module_index,
                              static_cast<int>(source_group.spec->type),
                              static_cast<int>(source_group.spec->memoryLayoutDType()),
-                             source_group.seq_size_per_block,
+                             source_config->seqSizePerBlockForGroup(source_gid),
                              source_group.kv_block_stride_bytes,
                              source_group.kv_scale_stride_bytes);
             auto aliased_spec = source_group.spec->clone();
@@ -524,7 +638,6 @@ std::string CacheConfig::debugString(size_t indent) const {
     os << indent1 << "# Block Configuration:\n";
     OUTPUT_FIELD(block_num);
     OUTPUT_FIELD(seq_size_per_block);
-    OUTPUT_FIELD(kernel_seq_size_per_block);
     os << "\n";
 
     os << indent1 << "# Block Sizing Information:\n";
@@ -570,6 +683,9 @@ std::string CacheConfig::debugString(size_t indent) const {
         }
 
         os << indent1 << "groups[" << i << "] {\n";
+        os << indent1 << "  seq_size_per_block=" << seqSizePerBlockForGroup(i) << "\n";
+        os << indent1 << "  kernel_seq_size_per_block=" << kernelSeqSizePerBlockForGroup(i) << "\n";
+        os << indent1 << "  kernel_blocks_per_kv_block=" << kernelBlocksPerKvBlockForGroup(i) << "\n";
         os << spec->debugString(indent + 2);
         os << indent1 << "}\n";
     }

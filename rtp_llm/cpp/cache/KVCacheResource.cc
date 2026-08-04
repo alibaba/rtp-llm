@@ -19,10 +19,7 @@ void KVCacheResource::initGroups(std::shared_ptr<const CacheTopology> topology) 
         const auto& group = groups[group_id];
         tag_to_group_id_.emplace(group.tag, static_cast<int>(group_id));
 
-        const size_t blocks_per_kv_block = group.seq_size_per_block / group.kernel_seq_size_per_block;
-        const size_t stored_blocks_per_kv_block =
-            group.policy.group_type == CacheGroupType::FULL ? std::max<size_t>(1, blocks_per_kv_block) : 1;
-        group_block_ids.push_back(std::make_shared<BlockIds>(stored_blocks_per_kv_block));
+        group_block_ids.push_back(std::make_shared<BlockIds>(storedKernelBlocksPerKvBlock(group)));
     }
 
     const auto& layers = topology->layers();

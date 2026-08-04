@@ -28,12 +28,10 @@ std::shared_ptr<const CacheTopology> warmupCacheTopology() {
         spec->tag                      = kWarmupCacheTag;
 
         GroupBase group;
-        group.tag                       = kWarmupCacheTag;
-        group.spec                      = std::move(spec);
-        group.policy                    = defaultCacheGroupPolicy(CacheGroupType::FULL);
-        group.layer_ids                 = {0};
-        group.seq_size_per_block        = 1;
-        group.kernel_seq_size_per_block = 1;
+        group.tag       = kWarmupCacheTag;
+        group.spec      = std::move(spec);
+        group.policy    = defaultCacheGroupPolicy(CacheGroupType::FULL);
+        group.layer_ids = {0};
 
         return CacheTopology::create({std::move(group)}, {{0, {kWarmupCacheTag}}});
     }();

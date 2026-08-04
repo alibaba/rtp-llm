@@ -1,7 +1,15 @@
 import pickle
+from types import SimpleNamespace
 from unittest import TestCase, main
+from unittest.mock import patch
 
-from rtp_llm.config.model_config import ModelConfig
+import rtp_llm.config.model_config as model_config_module
+from rtp_llm.config.model_config import (
+    ModelConfig,
+    build_model_config,
+    resolve_kv_cache_kernel_seq_size_per_block,
+)
+from rtp_llm.models.base_model import BaseModel
 from rtp_llm.models.deepseek_v2 import DeepSeekV3Mtp
 from rtp_llm.models.hybrid_kv_cache import calculate_hybrid_group_layer_num
 from rtp_llm.models.kimi_linear.kimi_linear import KimiLinear
@@ -12,9 +20,15 @@ from rtp_llm.models.qwen3_vl import QWen3_VL
 from rtp_llm.models.qwen_v2 import QwenV2MTP
 from rtp_llm.ops import (
     CacheCapacityPolicyDesc,
+    CacheCpPolicyDesc,
+    CpBlockMappingMode,
+    CpBlockSliceMode,
+    CpPrefillSliceLayout,
+    DataType,
     HybridAttentionType,
     KVCacheSpecDesc,
     KVCacheSpecType,
+    TaskType,
 )
 
 
@@ -22,6 +36,8 @@ class HybridKVCacheSpecTest(TestCase):
     def _build_model_config(self, layer_types):
         config = ModelConfig()
         config.num_layers = len(layer_types)
+        config.attn_config.tokens_per_block = 64
+        config.attn_config.kernel_tokens_per_block = 64
         config.hybrid_attention_config.enable_hybrid_attention = True
         config.hybrid_attention_config.hybrid_attention_types = layer_types
         return config
@@ -363,6 +379,115 @@ class HybridKVCacheSpecTest(TestCase):
         KimiLinear._post_build_model_config(config)
 
         self.assertEqual(config.kv_cache_spec_descs[0][0].tag, "sentinel")
+
+    def test_descriptor_kernel_resolver_uses_only_effective_non_default_k(self):
+        config = ModelConfig()
+        config.attn_config.tokens_per_block = 128
+        for kernel_tokens_per_block, expected in ((0, None), (128, None), (32, 32)):
+            with self.subTest(kernel_tokens_per_block=kernel_tokens_per_block):
+                config.attn_config.kernel_tokens_per_block = kernel_tokens_per_block
+                self.assertEqual(
+                    resolve_kv_cache_kernel_seq_size_per_block(config), expected
+                )
+
+    def test_build_model_config_resolves_kernel_block_precedence(self):
+        def resolved_kernel(model_kernel: int, runtime_kernel: int) -> int:
+            config = SimpleNamespace(
+                attn_config=SimpleNamespace(
+                    tokens_per_block=0,
+                    kernel_tokens_per_block=model_kernel,
+                    size_per_head=1,
+                    head_num=1,
+                ),
+                linear_attention_config=SimpleNamespace(),
+                max_seq_len=1,
+                hidden_size=1,
+                data_type=DataType.TYPE_FP16,
+                init_precision_config=lambda **_: None,
+                apply_override_args=lambda _: None,
+            )
+            model_args = SimpleNamespace(
+                ckpt_path="",
+                tokenizer_path="",
+                model_type="test",
+                phy2log_path="",
+                mla_ops_type="",
+                max_seq_len=0,
+                task_type="",
+                act_type="fp16",
+                enable_fp32_lm_head=None,
+                json_model_override_args="",
+            )
+            kv_cache_config = SimpleNamespace(
+                seq_size_per_block=128,
+                kernel_seq_size_per_block=runtime_kernel,
+                ssm_state_dtype="fp32",
+            )
+            profiling_config = SimpleNamespace(hack_layer_num=0)
+            with patch.object(
+                model_config_module,
+                "get_task_type_from_ckpt_path",
+                return_value=TaskType.LANGUAGE_MODEL,
+            ):
+                build_model_config(
+                    config, model_args, kv_cache_config, profiling_config
+                )
+            return config.attn_config.kernel_tokens_per_block
+
+        self.assertEqual(resolved_kernel(model_kernel=32, runtime_kernel=16), 16)
+        self.assertEqual(resolved_kernel(model_kernel=32, runtime_kernel=0), 32)
+        self.assertEqual(resolved_kernel(model_kernel=0, runtime_kernel=0), 128)
+
+    def test_full_descriptor_producers_own_optional_kernel_geometry(self):
+        producers = (
+            ("base", BaseModel, [HybridAttentionType.NONE]),
+            (
+                "qwen_hybrid",
+                Qwen3Next,
+                [HybridAttentionType.LINEAR, HybridAttentionType.NONE],
+            ),
+            (
+                "kimi_hybrid",
+                KimiLinear,
+                [HybridAttentionType.LINEAR, HybridAttentionType.NONE],
+            ),
+            ("qwen_mtp", QwenV2MTP, [HybridAttentionType.NONE]),
+            ("deepseek_mtp", DeepSeekV3Mtp, [HybridAttentionType.NONE]),
+            ("qwen3_mtp", Qwen3NextMTP, [HybridAttentionType.NONE]),
+        )
+        for name, model_cls, layer_types in producers:
+            for kernel_tokens_per_block, expected in ((64, None), (16, 16)):
+                with self.subTest(name=name, kernel=kernel_tokens_per_block):
+                    config = self._build_model_config(layer_types)
+                    config.attn_config.kernel_tokens_per_block = kernel_tokens_per_block
+                    model_cls._post_build_model_config(config)
+                    for layer_descs in config.kv_cache_spec_descs:
+                        for desc in layer_descs:
+                            if desc.cache_type == KVCacheSpecType.LINEAR:
+                                self.assertIsNone(desc.kernel_seq_size_per_block)
+                            else:
+                                self.assertEqual(
+                                    desc.kernel_seq_size_per_block, expected
+                                )
+
+    def test_cache_cp_policy_pickle_uses_strict_four_field_state(self):
+        policy = CacheCpPolicyDesc()
+        policy.mapping = CpBlockMappingMode.BLOCK_ROUND_ROBIN
+        policy.slice = CpBlockSliceMode.EQUAL_BYTES
+        policy.align_payload = True
+        policy.prefill_slice_layout = CpPrefillSliceLayout.BLOCK_STRIDE
+        restored = pickle.loads(pickle.dumps(policy))
+        self.assertEqual(restored.mapping, policy.mapping)
+        self.assertEqual(restored.slice, policy.slice)
+        self.assertEqual(restored.align_payload, policy.align_payload)
+        self.assertEqual(restored.prefill_slice_layout, policy.prefill_slice_layout)
+        self.assertFalse(hasattr(restored, "scale_seq_size"))
+
+        four_field_state = pickle.dumps(CacheCpPolicyDesc(), protocol=2)
+        self.assertIn(b"(NNNNt", four_field_state)
+        legacy_five_field_state = four_field_state.replace(b"(NNNNt", b"(NNNNNt", 1)
+        with self.assertRaisesRegex(RuntimeError, "Invalid CacheCpPolicyDesc state"):
+            pickle.loads(legacy_five_field_state)
 
     def test_cache_capacity_policy_pickle_drops_legacy_budget_field(self):
         policy = CacheCapacityPolicyDesc()

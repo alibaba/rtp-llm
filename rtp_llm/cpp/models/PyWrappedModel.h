@@ -90,7 +90,7 @@ private:
     std::shared_ptr<KVCacheManager>                 cache_manager_;  // For cache_store access
     torch::Tensor                                   residual_scale_fp32_;
     torch::Tensor                                   residual_scale_;
-    TensorHolder                               buffer_holder_;
+    TensorHolder                                    buffer_holder_;
 
     GraphBase* graph_runner_{nullptr};
     py::object py_model_;
@@ -111,10 +111,10 @@ private:
     static constexpr int kPinnedCheckForwardCount = 3;
     int                  pinned_check_remaining_{kPinnedCheckForwardCount};
 
-    std::atomic<bool>                prepared_attention_inputs_{false};
-    torch_ext::PyAttentionInputs     attention_inputs_;
-    torch_ext::AttentionInputsByTag  attention_inputs_by_tag_;
-    CudaGraphState                   graph_state_;
+    std::atomic<bool>               prepared_attention_inputs_{false};
+    torch_ext::PyAttentionInputs    attention_inputs_;
+    torch_ext::AttentionInputsByTag attention_inputs_by_tag_;
+    CudaGraphState                  graph_state_;
 };
 
 // NOTE(wangyin): constructor can not be compiled correctly when placed in cc file.
@@ -240,6 +240,19 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
         graph_params.is_target_verify = use_spec_decoding || is_target_verify_decode;
         if (params.sp_config.type != SP_TYPE_NONE) {
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
+        }
+        if (params.kv_cache_layer_layout.has_value()) {
+            for (const auto& group : params.kv_cache_layer_layout->topology().groups()) {
+                const auto physical_tokens_per_block = group.spec->seq_size_per_block;
+                const auto kernel_tokens_per_block   = group.spec->kernel_seq_size_per_block;
+                graph_params.kv_cache_block_table_capacities.emplace(
+                    group.tag,
+                    CacheBlockTableCapacity::fromBlockSizes(static_cast<int64_t>(params.max_seq_len),
+                                                            static_cast<int64_t>(physical_tokens_per_block),
+                                                            static_cast<int64_t>(kernel_tokens_per_block),
+                                                            static_cast<int64_t>(graph_params.sp_steps),
+                                                            group.tag));
+            }
         }
 
         graph_runner_ = new CudaGraphRunner(graph_params, py_instance);

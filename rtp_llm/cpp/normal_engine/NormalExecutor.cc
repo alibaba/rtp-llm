@@ -119,9 +119,12 @@ NormalExecutor::NormalExecutor(const EngineInitParams&                params,
 
     const size_t runtime_tokens_per_block        = cache_manager ? cache_manager->cacheConfig().seq_size_per_block :
                                                                    params.model_config_.attn_config.tokens_per_block;
-    const size_t runtime_kernel_tokens_per_block = cache_manager ?
-                                                       cache_manager->cacheConfig().kernel_seq_size_per_block :
-                                                       params.model_config_.attn_config.kernel_tokens_per_block;
+    size_t       runtime_kernel_tokens_per_block = params.model_config_.attn_config.kernel_tokens_per_block > 0 ?
+                                                       params.model_config_.attn_config.kernel_tokens_per_block :
+                                                       runtime_tokens_per_block;
+    if (cache_manager) {
+        runtime_kernel_tokens_per_block = cache_manager->cacheConfig().kernelSeqSizePerBlockForModel();
+    }
 
     GptModelInitParams model_init_params(
         {params.gpt_weights,

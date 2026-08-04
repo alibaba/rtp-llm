@@ -28,14 +28,13 @@ namespace {
 // Two-group hybrid: gid=0 linear (won't be exercised here), gid=1 full (the CP-shard target).
 CacheConfig makeCPHybridConfig() {
     CacheConfig config;
-    config.dtype                     = rtp_llm::DataType::TYPE_FP16;
-    config.layer_num                 = 4;
-    config.layer_all_num             = 4;
-    config.block_num                 = 32;  // headroom for cp_size=2 expansion
-    config.seq_size_per_block        = 4;
-    config.kernel_seq_size_per_block = 2;
-    config.linear_step               = 2;
-    config.group_layer_num           = 2;
+    config.dtype              = rtp_llm::DataType::TYPE_FP16;
+    config.layer_num          = 4;
+    config.layer_all_num      = 4;
+    config.block_num          = 32;  // headroom for cp_size=2 expansion
+    config.seq_size_per_block = 4;
+    config.linear_step        = 2;
+    config.group_layer_num    = 2;
 
     auto linear_spec = makeResolvedLinearSpec(config.dtype,
                                               1,

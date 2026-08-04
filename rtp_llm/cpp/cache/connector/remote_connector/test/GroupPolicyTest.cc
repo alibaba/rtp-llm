@@ -31,21 +31,23 @@ namespace {
 
 KVCacheSpecPtr makeFakeSpec(const std::string& tag) {
     AttentionConfigs attn_config;
-    attn_config.kv_head_num      = 1;
-    attn_config.size_per_head    = 1;
-    attn_config.tokens_per_block = 1;
+    attn_config.kv_head_num             = 1;
+    attn_config.size_per_head           = 1;
+    attn_config.tokens_per_block        = 1;
+    attn_config.kernel_tokens_per_block = 1;
     ParallelismConfig parallelism_config;
     parallelism_config.tp_size = 1;
     KVCacheSpecDesc desc;
-    desc.tag        = tag;
-    desc.cache_type = KVCacheSpecType::MultiHeadAttention;
-    desc.dtype      = DataType::TYPE_FP16;
+    desc.tag                       = tag;
+    desc.cache_type                = KVCacheSpecType::MultiHeadAttention;
+    desc.dtype                     = DataType::TYPE_FP16;
+    desc.kernel_seq_size_per_block = 1;
     SpecBuildContext ctx;
     ctx.dtype              = DataType::TYPE_FP16;
     ctx.seq_size_per_block = 1;
     ctx.attn_config        = &attn_config;
     ctx.parallelism_config = &parallelism_config;
-    return SpecBuilder::build(desc, ctx);
+    return SpecBuilder::build(desc, ctx).first;
 }
 
 }  // namespace

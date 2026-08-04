@@ -594,10 +594,8 @@ TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenBlockSizeBytesZero) {
 }
 
 TEST_F(KVCacheMemoryConnectorTest, init_ReturnFalse_WhenPoolTooSmallForBlockSize) {
-    auto cfg = cache_config_;
-    // Make sure pool_size_mb * 1MB / total_stride_bytes == 0 -> createBlockPool() should fail with CHECK.
-    setGroupBlockBytes(cfg, 1024 * 1024);
-    cfg.layer_to_block_stride_bytes.assign(cfg.layer_all_num, 1024 * 1024);
+    // Use a valid physical MHA row larger than the pool; padded MHA rows are intentionally rejected.
+    auto cfg = createMockCacheConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/512);
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 1;     // 1MB
@@ -642,11 +640,8 @@ TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenBlockSizeBytesZero) {
 }
 
 TEST_F(KVCacheMemoryConnectorTest, initBlockPool_Throw_WhenCreateBlockPoolFails) {
-    auto cfg = cache_config_;
-    // Force createBlockPool() to compute block_num=0:
-    // block_num = pool_size_mb * 1MB / total_stride_bytes.
-    setGroupBlockBytes(cfg, 1024 * 1024);
-    cfg.layer_to_block_stride_bytes.assign(cfg.layer_all_num, 1024 * 1024);
+    // Force block_num=0 with a valid physical MHA row larger than the memory pool.
+    auto cfg = createMockCacheConfig(/*layer_num=*/4, /*block_num=*/10, /*seq_size_per_block=*/512);
 
     auto kv_cfg                         = kv_cache_config_;
     kv_cfg.memory_cache_size_mb         = 1;     // 1MB
@@ -1745,18 +1740,20 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_H2D_SplitKvScale_NoBlock
     constexpr size_t kScaleBytesPerTok = 132;
 
     AttentionConfigs attn_config;
-    attn_config.kv_lora_rank     = 512;
-    attn_config.rope_head_dim    = 64;
-    attn_config.tokens_per_block = kSeqPerBlock;
+    attn_config.kv_lora_rank            = 512;
+    attn_config.rope_head_dim           = 64;
+    attn_config.tokens_per_block        = kSeqPerBlock;
+    attn_config.kernel_tokens_per_block = kSeqPerBlock;
     KVCacheSpecDesc desc;
-    desc.tag        = "default";
-    desc.cache_type = rtp_llm::KVCacheSpecType::MultiHeadLatentAttention;
-    desc.dtype      = rtp_llm::DataType::TYPE_FP8_E4M3;
+    desc.tag                       = "default";
+    desc.cache_type                = rtp_llm::KVCacheSpecType::MultiHeadLatentAttention;
+    desc.dtype                     = rtp_llm::DataType::TYPE_FP8_E4M3;
+    desc.kernel_seq_size_per_block = kSeqPerBlock;
     SpecBuildContext ctx;
     ctx.dtype              = rtp_llm::DataType::TYPE_FP8_E4M3;
     ctx.seq_size_per_block = kSeqPerBlock;
     ctx.attn_config        = &attn_config;
-    auto mla_spec          = SpecBuilder::build(desc, ctx);
+    auto mla_spec          = SpecBuilder::build(desc, ctx).first;
 
     cache_config_.layer_num             = static_cast<uint32_t>(kLayerNum);
     cache_config_.layer_all_num         = static_cast<uint32_t>(kLayerNum);
@@ -1880,6 +1877,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_ReturnTrue_D2H_SingleLayer) {
 
     // 给gpu_buf填充数据
     setBlockInfosContent(gpu_bufs, 'a');
+    check_cuda_value(cudaDeviceSynchronize());
 
     // 为确保索引有效，仍然预先创建并分配一个块
     auto pool = ensureBlockPool(total);
@@ -1961,6 +1959,7 @@ TEST_F(KVCacheMemoryConnectorTest, copyCache_D2H_MultiLayer_ValidatesByteOffsets
         ASSERT_GT(sumBlockInfosBytes(gpu_bufs), 0u);
         setBlockInfosContent(gpu_bufs, static_cast<char>('k' + lb.layer_id));
     }
+    check_cuda_value(cudaDeviceSynchronize());
 
     // Allocate one memory block for the merged layout (one cache-key across all layers).
     size_t total_bytes = 0;

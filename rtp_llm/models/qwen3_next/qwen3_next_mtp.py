@@ -1,6 +1,9 @@
 from typing import Any, Dict, List, Optional
 
-from rtp_llm.config.model_config import ModelConfig
+from rtp_llm.config.model_config import (
+    ModelConfig,
+    resolve_kv_cache_kernel_seq_size_per_block,
+)
 from rtp_llm.model_factory_register import register_model
 from rtp_llm.model_loader.model_weight_info import ModelWeightInfo
 from rtp_llm.model_loader.weight_module import AtomicWeight, WeightModule
@@ -112,6 +115,9 @@ class Qwen3NextMTPMixin:
         model_config.kv_cache_spec_descs = build_hybrid_kv_cache_spec_descs(
             [HybridAttentionType.NONE],
             KVCacheSpecType.MHA,
+            kernel_seq_size_per_block=resolve_kv_cache_kernel_seq_size_per_block(
+                model_config
+            ),
         )
 
     def _create_python_model(self) -> Optional[Any]:

@@ -67,8 +67,8 @@ public:
             MemoryLayoutConfig mtp_layout =
                 createMemoryLayoutConfig(false,
                                          mtp_layer_num,
-                                         mtp_spec->block_size_bytes(),
-                                         mtp_spec->scale_block_size_bytes(),
+                                         mtp_sub_config->kvBlockStrideBytesForGroup(real_mtp_gid),
+                                         mtp_sub_config->kvScaleStrideBytesForGroup(real_mtp_gid),
                                          mtp_spec,
                                          cache_config,
                                          mtp_sub_config->localKvHeadNumForGroup(real_mtp_gid),

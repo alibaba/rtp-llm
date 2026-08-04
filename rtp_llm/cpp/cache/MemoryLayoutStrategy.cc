@@ -195,6 +195,12 @@ MemoryLayoutStrategy::convertIndexToBuffer(int layer_id, int block_id, int parti
         return createBasicBlockInfo(layer_id, block_id);
     }
 
+    RTP_LLM_CHECK_WITH_INFO(partition_count <= 1 || config_.kernel_blocks_per_kv_block == 1,
+                            "asymmetric TP partitioning is unsupported for subdivided non-MLA cache blocks: "
+                            "partition_count=%d kernel_blocks_per_kv_block=%zu",
+                            partition_count,
+                            config_.kernel_blocks_per_kv_block);
+
     // TODO(xinfei.sxf) deal with linear attention
 
     // For non-MLA models with partitioning
@@ -245,8 +251,8 @@ std::vector<BlockInfo> MemoryLayoutStrategy::createPartitionedBlockInfo(int laye
     const int heads = static_cast<int>(config_.local_head_num_kv);
 
     auto kv_parts = splitKVPartitionBytes(static_cast<size_t>(config_.kv_block_stride_bytes),
-                                          static_cast<size_t>(config_.kv_block_stride_bytes / 2),
-                                          static_cast<size_t>(config_.kv_block_stride_bytes / 2),
+                                          static_cast<size_t>(config_.k_block_stride_bytes),
+                                          static_cast<size_t>(config_.v_block_stride_bytes),
                                           heads,
                                           partition_count,
                                           partition_id,
@@ -258,8 +264,8 @@ std::vector<BlockInfo> MemoryLayoutStrategy::createPartitionedBlockInfo(int laye
         auto& layer_scale_tensor = layer_kv_scale_tensors_[layer_id];
         void* scale_addr         = getBlockPtr(layer_scale_tensor, block_id);
         auto  sc_parts           = splitKVPartitionBytes(static_cast<size_t>(config_.kv_scale_stride_bytes),
-                                              static_cast<size_t>(config_.kv_scale_stride_bytes / 2),
-                                              static_cast<size_t>(config_.kv_scale_stride_bytes / 2),
+                                              static_cast<size_t>(config_.k_scale_stride_bytes),
+                                              static_cast<size_t>(config_.v_scale_stride_bytes),
                                               heads,
                                               partition_count,
                                               partition_id,
