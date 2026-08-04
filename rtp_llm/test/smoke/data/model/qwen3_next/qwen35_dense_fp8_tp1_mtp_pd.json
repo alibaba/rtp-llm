@@ -1,0 +1,106 @@
+{
+    "model_type": "qwen35_dense",
+    "model_path": "/ckpt/qwen35/Qwen3.5-27B",
+    "query_result": [
+        {
+            "query": {
+                "prompt": "$prompt:s2",
+                "generate_config": {
+                    "max_new_tokens": 8,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "temperature": 0,
+                    "random_seed": 42,
+                    "aux_info": true,
+                    "can_use_pd_separation": true,
+                    "reuse_cache": false
+                }
+            },
+            "result": {
+                "response": "\n\n<think>\n\n</think>\n\n围绕“英语",
+                "finished": true,
+                "aux_info": {
+                    "input_len": 8,
+                    "reuse_len": 0,
+                    "output_len": 8,
+                    "iter_count": 3
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:s1",
+                "generate_config": {
+                    "max_new_tokens": 20,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "temperature": 0,
+                    "random_seed": 42,
+                    "aux_info": true,
+                    "can_use_pd_separation": true,
+                    "reuse_cache": false
+                }
+            },
+            "result": {
+                "response": "\n\nThe CAP Theorem, also known as Brewer's Theorem, is a fundamental concept in distributed",
+                "finished": true,
+                "aux_info": {
+                    "input_len": 6,
+                    "reuse_len": 0,
+                    "output_len": 20,
+                    "iter_count": 8
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:x2",
+                "generate_config": {
+                    "max_new_tokens": 20,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "temperature": 0,
+                    "random_seed": 42,
+                    "aux_info": true,
+                    "can_use_pd_separation": true,
+                    "reuse_cache": true
+                }
+            },
+            "result": {
+                "response": "\r\n\r\n——基本形成现代工业强市格局。工业增加值年均增长12%以上，到2",
+                "finished": true,
+                "aux_info": {
+                    "input_len": 3612,
+                    "reuse_len": 0,
+                    "output_len": 20,
+                    "iter_count": 8
+                }
+            }
+        },
+        {
+            "query": {
+                "prompt": "$prompt:x2",
+                "generate_config": {
+                    "max_new_tokens": 20,
+                    "top_k": 1,
+                    "top_p": 0,
+                    "temperature": 0,
+                    "random_seed": 42,
+                    "aux_info": true,
+                    "can_use_pd_separation": true,
+                    "reuse_cache": true
+                }
+            },
+            "result": {
+                "response": "\r\n\r\n——基本形成现代工业强市格局。工业增加值年均增长12%以上，到2",
+                "finished": true,
+                "aux_info": {
+                    "input_len": 3612,
+                    "reuse_len": 3072,
+                    "output_len": 20,
+                    "iter_count": 8
+                }
+            }
+        }
+    ]
+}

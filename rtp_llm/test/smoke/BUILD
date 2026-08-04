@@ -75,6 +75,7 @@ test_suite(
         ":smoke_rocm_dense",
         ":smoke_rocm_moe",
         ":smoke_rocm_qwen35_mrope_cg",
+        ":smoke_rocm_qwen35_mtp",
         ":smoke_rocm_eagle",
         ":smoke_rocm_pd",
         ":smoke_rocm_embedding",
