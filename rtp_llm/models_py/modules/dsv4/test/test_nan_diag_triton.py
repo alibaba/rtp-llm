@@ -31,6 +31,13 @@ class NanDiagTritonTest(unittest.TestCase):
         scale_data = block_base + block_size * 576 + pos * 8
         return token_data, token_data + 448, scale_data
 
+    @staticmethod
+    def _indexer_slot_offsets(cache: torch.Tensor, slot: int) -> tuple[int, int]:
+        block_size = int(cache.shape[1])
+        block, pos = divmod(slot, block_size)
+        block_base = block * int(cache.stride(0))
+        return block_base + pos * 128, block_base + block_size * 128 + pos * 4
+
     def test_detector_is_read_only(self) -> None:
         x = torch.randn((2, 513), dtype=torch.float32, device="cuda")
         x[0, 7] = float("nan")
@@ -155,6 +162,38 @@ class NanDiagTritonTest(unittest.TestCase):
             )
             torch.cuda.synchronize()
             self.assertEqual(int(report_count[state_index].item()), before_count + 2)
+
+    def test_activation_event_maps_exact_request_query_and_subrow(self) -> None:
+        batch_size, q_len, heads, cols = 3, 2, 4, 11
+        x = torch.zeros(
+            (batch_size * q_len * heads, cols),
+            dtype=torch.float32,
+            device="cuda",
+        )
+        bad_row = 2 * q_len * heads + 1 * heads + 3
+        x[bad_row, 5] = float("nan")
+        batch_id = torch.tensor([991501], dtype=torch.int64, device="cuda")
+
+        with patch.object(nan_diag, "ENABLED", True):
+            nan_diag.set_batch_context(batch_id)
+            nan_diag.report_nonfinite(
+                x,
+                source_id=nan_diag.SOURCE_ATTENTION_OUTPUT,
+                layer_id=17,
+                batch_size=batch_size,
+                q_len=q_len,
+            )
+            torch.cuda.synchronize()
+
+            counters, records = nan_diag._ensure_event_state(x.device)
+            self.assertEqual(int(counters[0].item()), 1)
+            record = records[0].cpu().tolist()
+            self.assertEqual(record[8], 2)  # request_index
+            self.assertEqual(record[9], 1)  # query_index
+            self.assertEqual(record[10], bad_row)
+            self.assertEqual(record[11], 5)
+            self.assertEqual(record[12], 3)  # attention head / subrow
+            self.assertEqual(record[15], q_len)
 
     def test_unmapped_batch_zero_is_recorded_reliably(self) -> None:
         x = torch.full((4, 1024), float("nan"), dtype=torch.float32, device="cuda")
@@ -318,6 +357,7 @@ class NanDiagTritonTest(unittest.TestCase):
                 indices,
                 source_id=source_id,
                 layer_id=layer_id,
+                kv_kind=nan_diag.KV_KIND_HCA,
                 topk_length=topk_length,
             )
             torch.cuda.synchronize()
@@ -356,6 +396,7 @@ class NanDiagTritonTest(unittest.TestCase):
                     indices,
                     source_id=source_id,
                     layer_id=layer_id,
+                    kv_kind=nan_diag.KV_KIND_HCA,
                     topk_length=topk_length,
                 )
 
@@ -377,6 +418,152 @@ class NanDiagTritonTest(unittest.TestCase):
             self.assertEqual(event_records[0, 0].item(), 994003)
             self.assertEqual(event_records[0, 1].item(), source_id)
             self.assertEqual(event_records[0, 7].item(), 1)
+            self.assertEqual(event_records[0, 12].item(), nan_diag.KV_KIND_HCA)
+
+    def test_packed_cache_event_maps_exact_request_query_topk_and_block(self) -> None:
+        cache = torch.zeros((3, 4, 584), dtype=torch.uint8, device="cuda")
+        indices = torch.tensor(
+            [
+                [[0, 1, 2], [3, 4, 6]],
+                [[7, 8, 5], [9, 10, 11]],
+            ],
+            dtype=torch.int64,
+            device="cuda",
+        )
+        batch_id = torch.tensor([994501], dtype=torch.int64, device="cuda")
+        token_data, _, _ = self._packed_slot_offsets(cache, 5)
+
+        with patch.object(nan_diag, "ENABLED", True), patch.object(
+            nan_diag, "TEST_KV_CORRUPT", None
+        ):
+            nan_diag.set_batch_context(batch_id)
+            # Compile the int64-index variant before graph capture.
+            nan_diag.report_packed_fp8_kv_cache(
+                cache,
+                indices,
+                source_id=nan_diag.SOURCE_COMPRESSED_KV_CACHE_READ,
+                layer_id=46,
+                kv_kind=nan_diag.KV_KIND_CSA,
+            )
+            torch.cuda.synchronize()
+
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                nan_diag.set_batch_context(batch_id)
+                nan_diag.report_packed_fp8_kv_cache(
+                    cache,
+                    indices,
+                    source_id=nan_diag.SOURCE_COMPRESSED_KV_CACHE_READ,
+                    layer_id=46,
+                    kv_kind=nan_diag.KV_KIND_CSA,
+                )
+
+            batch_id.fill_(994502)
+            cache.view(-1)[token_data] = 0x7F
+            graph.replay()
+            torch.cuda.synchronize()
+
+            counters, records = nan_diag._ensure_event_state(cache.device)
+            self.assertEqual(int(counters[0].item()), 1)
+            record = records[0].cpu().tolist()
+            self.assertEqual(record[8], 1)
+            self.assertEqual(record[9], 0)
+            self.assertEqual(record[10], 2)
+            self.assertEqual(record[11], 2)
+            self.assertEqual(record[12], nan_diag.KV_KIND_CSA)
+            self.assertEqual(record[13], 1)
+            self.assertEqual(record[14], 1)
+            self.assertEqual(record[15], 2)
+
+    def test_indexer_post_write_maps_exact_request_query_and_slot(self) -> None:
+        cache = torch.zeros((3, 4, 132), dtype=torch.uint8, device="cuda")
+        slots = torch.tensor(
+            [[[-1], [2]], [[6], [9]]], dtype=torch.int64, device="cuda"
+        )
+        batch_id = torch.tensor([995001], dtype=torch.int64, device="cuda")
+        fp8_offset, _ = self._indexer_slot_offsets(cache, 6)
+
+        with patch.object(nan_diag, "ENABLED", True), patch.object(
+            nan_diag, "TEST_KV_CORRUPT", None
+        ):
+            nan_diag.set_batch_context(batch_id)
+            cache.view(-1)[fp8_offset] = 0x7F
+            before = cache.clone()
+            nan_diag.report_packed_fp8_indexer_slots(
+                cache,
+                slots,
+                source_id=nan_diag.SOURCE_INDEXER_KV_CACHE_WRITE,
+                layer_id=47,
+            )
+            torch.cuda.synchronize()
+
+            counters, records = nan_diag._ensure_event_state(cache.device)
+            self.assertEqual(int(counters[0].item()), 1)
+            record = records[0].cpu().tolist()
+            self.assertEqual(record[8], 1)
+            self.assertEqual(record[9], 0)
+            self.assertEqual(record[10], 2)
+            self.assertEqual(record[11], 0)
+            self.assertEqual(record[12], nan_diag.KV_KIND_INDEXER)
+            self.assertEqual(record[13], 1)
+            self.assertEqual(record[14], 2)
+            self.assertEqual(record[15], 2)
+            torch.testing.assert_close(cache, before)
+
+    def test_indexer_paged_read_maps_request_query_cache_position_under_graph(
+        self,
+    ) -> None:
+        cache = torch.zeros((4, 4, 132), dtype=torch.uint8, device="cuda")
+        block_table = torch.tensor([[0, 1], [2, 3]], dtype=torch.int32, device="cuda")
+        lengths = torch.tensor([[0, 0], [6, 0]], dtype=torch.int32, device="cuda")
+        batch_id = torch.tensor([995501], dtype=torch.int64, device="cuda")
+        # request=1, logical cache position=5 -> physical block=3, offset=1.
+        fp8_offset, _ = self._indexer_slot_offsets(cache, 13)
+        source_id = nan_diag.SOURCE_INDEXER_KV_CACHE_READ
+        layer_id = 48
+
+        with patch.object(nan_diag, "ENABLED", True), patch.object(
+            nan_diag, "TEST_KV_CORRUPT", None
+        ):
+            nan_diag.set_batch_context(batch_id)
+            nan_diag.report_paged_fp8_indexer_cache(
+                cache,
+                block_table,
+                lengths,
+                source_id=source_id,
+                layer_id=layer_id,
+                max_ctx_len=8,
+            )
+            torch.cuda.synchronize()
+
+            graph = torch.cuda.CUDAGraph()
+            with torch.cuda.graph(graph):
+                nan_diag.set_batch_context(batch_id)
+                nan_diag.report_paged_fp8_indexer_cache(
+                    cache,
+                    block_table,
+                    lengths,
+                    source_id=source_id,
+                    layer_id=layer_id,
+                    max_ctx_len=8,
+                )
+
+            cache.view(-1)[fp8_offset] = 0xFF
+            batch_id.fill_(995502)
+            graph.replay()
+            torch.cuda.synchronize()
+
+            counters, records = nan_diag._ensure_event_state(cache.device)
+            self.assertEqual(int(counters[0].item()), 1)
+            record = records[0].cpu().tolist()
+            self.assertEqual(record[8], 1)
+            self.assertEqual(record[9], 0)
+            self.assertEqual(record[10], 2)
+            self.assertEqual(record[11], 5)
+            self.assertEqual(record[12], nan_diag.KV_KIND_INDEXER)
+            self.assertEqual(record[13], 3)
+            self.assertEqual(record[14], 1)
+            self.assertEqual(record[15], 2)
 
 
 if __name__ == "__main__":

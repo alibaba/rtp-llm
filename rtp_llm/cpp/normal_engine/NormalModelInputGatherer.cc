@@ -351,6 +351,10 @@ absl::Status NormalModelInputGatherer::processDecodeStreams(GptModelInputs&     
                 trace_id = "rtp-request-" + std::to_string(stream->streamId());
             }
             model_input.trace_ids.push_back(std::move(trace_id));
+            model_input.nan_diag_prompt_lengths.push_back(static_cast<int64_t>(stream->inputLength()));
+            model_input.nan_diag_decode_steps.push_back(std::max<int64_t>(
+                static_cast<int64_t>(stream->seqLength()) - static_cast<int64_t>(stream->inputLength()), 0));
+            model_input.nan_diag_stream_ids.push_back(static_cast<int64_t>(stream->streamId()));
             if (use_normal_device_state) {
                 const auto&             state = stream->getNormalAsyncDeviceState();
                 static std::atomic<int> debug_log_budget{200};
@@ -433,6 +437,9 @@ absl::Status NormalModelInputGatherer::processContextStreams(GptModelInputs&    
                 trace_id = "rtp-request-" + std::to_string(stream->streamId());
             }
             model_input.trace_ids.push_back(std::move(trace_id));
+            model_input.nan_diag_prompt_lengths.push_back(static_cast<int64_t>(stream->inputLength()));
+            model_input.nan_diag_decode_steps.push_back(0);
+            model_input.nan_diag_stream_ids.push_back(static_cast<int64_t>(stream->streamId()));
             auto input_tokens = stream->currentExecuteTokens(i);
             auto input_masks  = stream->textTokensMask();
             memcpy(ctx.merged_tokens + ctx.token_idx, input_tokens.data(), input_tokens.size() * sizeof(int));

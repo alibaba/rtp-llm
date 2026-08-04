@@ -6,10 +6,10 @@
 #include "rtp_llm/cpp/model_utils/AttentionConfig.h"
 #include <atomic>
 #include <cerrno>
+#include <chrono>
 #include <cstdint>
 #include <stdexcept>
 #include <vector>
-#include <algorithm>
 #include "rtp_llm/cpp/pybind/PyUtils.h"
 #include "rtp_llm/cpp/utils/AssertUtils.h"
 #include <algorithm>
@@ -101,7 +101,107 @@ std::vector<std::string> traceIdsForNanLog(const GptModelInputs& inputs) {
     return trace_ids;
 }
 
-void drainDsv4NanDiagnostics(const torch_ext::PyModelOutputs& outputs, const GptModelInputs& inputs) {
+std::string dsv4NanPass(const GptModelInputs& inputs) {
+    if (inputs.warmup) {
+        return "warmup";
+    }
+    if (inputs.is_target_verify) {
+        return "target_verify";
+    }
+    if (inputs.decode_entrance) {
+        return "decode_entrance";
+    }
+    if (inputs.sequence_lengths.defined() && inputs.sequence_lengths.numel() > 0) {
+        return "decode";
+    }
+    return "prefill";
+}
+
+const char* dsv4NanSourceName(int64_t source) {
+    switch (source) {
+        case 1:
+            return "moe_input";
+        case 2:
+            return "router_scores";
+        case 3:
+            return "router_bias";
+        case 4:
+            return "cp_attention_lse";
+        case 5:
+            return "final_hidden";
+        case 6:
+            return "attention_query";
+        case 7:
+            return "kv_write_input";
+        case 8:
+            return "swa_kv_read_pre_attention";
+        case 9:
+            return "compressed_kv_read_pre_attention";
+        case 10:
+            return "attention_output";
+        case 11:
+            return "swa_kv_post_write";
+        case 12:
+            return "compressed_kv_post_write";
+        case 13:
+            return "indexer_kv_post_write";
+        case 14:
+            return "indexer_kv_read_pre_score";
+        case 15:
+            return "indexer_score_pre_topk";
+        case 16:
+            return "indexer_query_pre_quant";
+        case 17:
+            return "indexer_weights_pre_fold";
+        case 18:
+            return "indexer_query_post_quant";
+        case 19:
+            return "indexer_weights_post_fold";
+        default:
+            return "unknown";
+    }
+}
+
+const char* dsv4NanKvKindName(int64_t kind) {
+    switch (kind) {
+        case 1:
+            return "swa";
+        case 2:
+            return "csa";
+        case 3:
+            return "hca";
+        case 4:
+            return "indexer";
+        default:
+            return "unknown";
+    }
+}
+
+std::string hostnameForNanLog() {
+    char hostname[256] = {};
+    if (::gethostname(hostname, sizeof(hostname) - 1) != 0) {
+        return "unknown";
+    }
+    return sanitizeTraceIdForLog(hostname);
+}
+
+std::vector<int64_t> tensorIntValuesForNanLog(const torch::Tensor& tensor) {
+    if (!tensor.defined() || tensor.numel() == 0) {
+        return {};
+    }
+    auto cpu         = tensor.device().is_cuda() ? tensor.to(torch::kCPU) : tensor;
+    cpu              = cpu.reshape({-1}).to(torch::kInt64).contiguous();
+    const auto* data = cpu.data_ptr<int64_t>();
+    return std::vector<int64_t>(data, data + cpu.numel());
+}
+
+int64_t valueAtOr(const std::vector<int64_t>& values, int64_t index, int64_t fallback = -1) {
+    return index >= 0 && index < static_cast<int64_t>(values.size()) ? values[static_cast<size_t>(index)] : fallback;
+}
+
+void drainDsv4NanDiagnostics(const torch_ext::PyModelOutputs& outputs,
+                             const GptModelInputs&            inputs,
+                             int64_t                          world_rank) {
     if (!dsv4NanDiagEnabled()) {
         return;
     }
@@ -117,8 +217,8 @@ void drainDsv4NanDiagnostics(const torch_ext::PyModelOutputs& outputs, const Gpt
         }
         RTP_LLM_CHECK_WITH_INFO(counters.scalar_type() == torch::kInt64 && counters.numel() >= 3,
                                 "DSV4 NaN counters must be int64[>=3]");
-        RTP_LLM_CHECK_WITH_INFO(events.scalar_type() == torch::kInt64 && events.dim() == 2 && events.size(1) >= 8,
-                                "DSV4 NaN events must be int64[capacity,>=8]");
+        RTP_LLM_CHECK_WITH_INFO(events.scalar_type() == torch::kInt64 && events.dim() == 2 && events.size(1) >= 16,
+                                "DSV4 NaN events must be int64[capacity,>=16]");
 
         // Blocking D2H is deliberate in diagnostic mode: it orders the drain
         // after CUDA-graph detector kernels and makes stderr persistence the
@@ -133,43 +233,107 @@ void drainDsv4NanDiagnostics(const torch_ext::PyModelOutputs& outputs, const Gpt
             return;
         }
 
-        const auto  trace_ids = traceIdsForNanLog(inputs);
-        const char* phase     = inputs.sequence_lengths.numel() > 0 ? "decode" : "prefill";
+        const auto trace_ids        = traceIdsForNanLog(inputs);
+        const auto pass             = dsv4NanPass(inputs);
+        const auto input_lengths    = tensorIntValuesForNanLog(inputs.input_lengths);
+        const auto sequence_lengths = tensorIntValuesForNanLog(inputs.sequence_lengths);
+        const auto prefix_lengths   = tensorIntValuesForNanLog(inputs.prefix_lengths);
+        const auto combo_tokens     = tensorIntValuesForNanLog(inputs.combo_tokens);
+        const auto observed_time_us =
+            std::chrono::duration_cast<std::chrono::microseconds>(std::chrono::system_clock::now().time_since_epoch())
+                .count();
+        const std::string hostname = hostnameForNanLog();
         if (count > 0) {
             auto          events_cpu = events.narrow(0, 0, count).to(torch::kCPU).contiguous();
             const auto*   data       = events_cpu.data_ptr<int64_t>();
             const int64_t stride     = events_cpu.size(1);
             for (int64_t row = 0; row < count; ++row) {
-                const auto*        record   = data + row * stride;
-                const int64_t      batch_id = record[0];
-                const int64_t      source   = record[1];
+                const auto*   record        = data + row * stride;
+                const int64_t batch_id      = record[0];
+                const int64_t source        = record[1];
+                const int64_t request_index = record[8];
+                const bool    request_mapped =
+                    batch_id != 0 && request_index >= 0 && request_index < static_cast<int64_t>(trace_ids.size());
+                const int64_t query_index        = record[9];
+                const int64_t model_input_length = valueAtOr(input_lengths, request_index);
+                const int64_t sequence_length    = valueAtOr(sequence_lengths, request_index);
+                const int64_t prefix_length      = valueAtOr(prefix_lengths, request_index);
+                const int64_t prompt_length      = valueAtOr(inputs.nan_diag_prompt_lengths, request_index);
+                const int64_t base_decode_step   = valueAtOr(inputs.nan_diag_decode_steps, request_index);
+                const int64_t stream_id          = valueAtOr(inputs.nan_diag_stream_ids, request_index);
+                const bool    decode_like = pass == "decode" || pass == "decode_entrance" || pass == "target_verify";
+                const int64_t decode_step =
+                    decode_like && base_decode_step >= 0 && query_index >= 0 ? base_decode_step + query_index : -1;
+                const int64_t token_position =
+                    decode_like && prompt_length >= 0 && decode_step >= 0 ?
+                        prompt_length + decode_step :
+                        (prefix_length >= 0 && query_index >= 0 ? prefix_length + query_index : -1);
+                const int64_t      q_len       = record[15];
+                const int64_t      token_index = decode_like && request_index >= 0 && query_index >= 0 && q_len > 0 ?
+                                                     request_index * q_len + query_index :
+                                                     (trace_ids.size() == 1 && query_index >= 0 ? query_index : -1);
+                const int64_t      token_id    = valueAtOr(combo_tokens, token_index);
                 std::ostringstream line;
-                line << "[DSV4_NAN_RELIABLE] batch=" << batch_id << " phase=" << phase << " source=" << source
-                     << " layer=" << record[2];
-                if (source == 8 || source == 9) {
+                line << "[DSV4_NAN_RELIABLE] observed_time_us=" << observed_time_us << " host=" << hostname
+                     << " pid=" << ::getpid() << " rank=" << world_rank << " batch=" << batch_id << " pass=" << pass
+                     << " event_index=" << row << " event_count=" << count << " source=" << source
+                     << " source_name=" << dsv4NanSourceName(source) << " layer=" << record[2];
+                if (source == 8 || source == 9 || source == 11 || source == 12 || source == 13 || source == 14) {
                     line << " first_byte=" << record[3] << " n_fp8=" << record[4] << " n_rope=" << record[5]
-                         << " n_scale=" << record[6] << " slot=" << record[7];
+                         << " n_scale=" << record[6] << " kv_kind=" << dsv4NanKvKindName(record[12])
+                         << " slot=" << record[7] << " cache_block=" << record[13]
+                         << " cache_block_offset=" << record[14];
+                    if (source == 14) {
+                        line << " cache_position=" << record[11];
+                    } else {
+                        line << " topk_index=" << record[11];
+                    }
                 } else {
-                    line << " first_offset=" << record[3] << " n_nan=" << record[4] << " n_inf=" << record[5];
+                    line << " first_col=" << record[3] << " n_nan=" << record[4] << " n_inf=" << record[5]
+                         << " tensor_row=" << record[10] << " tensor_col=" << record[11] << " subrow=" << record[12];
                 }
+                line << " request_index=" << request_index << " query_index=" << query_index << " q_len=" << q_len
+                     << " prompt_length=" << prompt_length << " model_input_length=" << model_input_length
+                     << " sequence_length=" << sequence_length << " prefix_length=" << prefix_length
+                     << " token_index=" << token_index << " token_id=" << token_id
+                     << " token_position=" << token_position << " decode_step_base=" << base_decode_step
+                     << " decode_step=" << decode_step << " stream_id=" << stream_id;
                 const std::string event_prefix = line.str();
-                for (size_t trace_index = 0; trace_index < trace_ids.size(); ++trace_index) {
-                    std::ostringstream trace_line;
-                    trace_line << event_prefix << " trace_status=" << (batch_id == 0 ? "unmapped" : "mapped")
-                               << " trace_scope=" << (trace_ids.size() == 1 ? "request" : "batch_candidate")
-                               << " trace_index=" << trace_index << " trace_id=\"" << trace_ids[trace_index] << "\"";
-                    writeDsv4NanStderrLine(trace_line.str());
+                if (request_mapped) {
+                    writeDsv4NanStderrLine(event_prefix + " trace_status=mapped trace_scope=request trace_id=\""
+                                           + trace_ids[static_cast<size_t>(request_index)] + "\"");
+                } else if (batch_id != 0 && source == 3) {
+                    // Router bias is model-global rather than request-shaped.
+                    // Every request in this batch is affected, so enumerate the
+                    // exact trace set as batch_all instead of choosing a false
+                    // winner or reporting ambiguous candidates.
+                    for (size_t trace_index = 0; trace_index < trace_ids.size(); ++trace_index) {
+                        std::ostringstream global_line;
+                        global_line << event_prefix << " affected_request_index=" << trace_index
+                                    << " affected_stream_id=" << valueAtOr(inputs.nan_diag_stream_ids, trace_index)
+                                    << " trace_status=mapped trace_scope=batch_all trace_id=\""
+                                    << trace_ids[trace_index] << "\"";
+                        writeDsv4NanStderrLine(global_line.str());
+                    }
+                } else {
+                    writeDsv4NanStderrLine(event_prefix
+                                           + " trace_status=unresolved trace_scope=none trace_id=\"unresolved\"");
+                }
+                if (!request_mapped && batch_id != 0 && source != 3) {
+                    std::ostringstream failure;
+                    failure << "[DSV4_NAN_DIAG_FAILURE] NaN event has no unique request mapping; batch=" << batch_id
+                            << " pass=" << pass << " source=" << source << " layer=" << record[2]
+                            << " request_index=" << record[8] << " trace_count=" << trace_ids.size();
+                    writeDsv4NanStderrLine(failure.str());
                 }
             }
         }
         if (dropped > 0 || attempted > capacity) {
-            for (size_t trace_index = 0; trace_index < trace_ids.size(); ++trace_index) {
-                std::ostringstream line;
-                line << "[DSV4_NAN_RELIABLE_OVERFLOW] attempted=" << attempted << " capacity=" << capacity
-                     << " dropped=" << std::max<int64_t>(dropped, attempted - capacity) << " phase=" << phase
-                     << " trace_index=" << trace_index << " trace_id=\"" << trace_ids[trace_index] << "\"";
-                writeDsv4NanStderrLine(line.str());
-            }
+            std::ostringstream line;
+            line << "[DSV4_NAN_RELIABLE_OVERFLOW] attempted=" << attempted << " capacity=" << capacity
+                 << " dropped=" << std::max<int64_t>(dropped, attempted - capacity) << " pass=" << pass
+                 << " trace_count=" << trace_ids.size();
+            writeDsv4NanStderrLine(line.str());
         }
     } catch (const std::exception& error) {
         for (const auto& trace_id : traceIdsForNanLog(inputs)) {
@@ -359,12 +523,17 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.input_lengths    = input_lengths;
 
     if (dsv4NanDiagEnabled()) {
-        const bool has_complete_trace_ids = !inputs.trace_ids.empty()
+        const size_t request_count =
+            inputs.input_lengths.defined() ? static_cast<size_t>(inputs.input_lengths.numel()) : 0;
+        const bool has_complete_trace_ids = request_count > 0 && inputs.trace_ids.size() == request_count
                                             && std::all_of(inputs.trace_ids.begin(),
                                                            inputs.trace_ids.end(),
                                                            [](const std::string& id) { return !id.empty(); });
+        const bool has_complete_step_metadata = inputs.nan_diag_prompt_lengths.size() == request_count
+                                                && inputs.nan_diag_decode_steps.size() == request_count
+                                                && inputs.nan_diag_stream_ids.size() == request_count;
         const bool real_request_batch = !inputs.warmup && !inputs.is_fake_stream;
-        const bool traceable_batch    = real_request_batch && has_complete_trace_ids;
+        const bool traceable_batch    = real_request_batch && has_complete_trace_ids && has_complete_step_metadata;
 
         // Batch zero is intentionally reserved for untracked startup work and
         // CUDA graph capture. Those events remain visible as unmapped, while
@@ -383,17 +552,14 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
         py_attn_inputs.nan_diag_batch_id =
             batch_id_host.to(torch::TensorOptions(torch::kInt64).device(torch::kCUDA), /*non_blocking=*/true);
 
-        if (traceable_batch) {
-            const char* phase = inputs.sequence_lengths.numel() > 0 ? "decode" : "prefill";
-            for (size_t i = 0; i < inputs.trace_ids.size(); ++i) {
-                std::ostringstream trace_map;
-                trace_map << "[DSV4_NAN_TRACE] batch=" << batch_id << " phase=" << phase << " trace_index=" << i
-                          << " trace_id=\"" << sanitizeTraceIdForLog(inputs.trace_ids[i]) << "\"";
-                writeDsv4NanStderrLine(trace_map.str());
-            }
-        } else if (real_request_batch) {
-            writeDsv4NanStderrLine(
-                "[DSV4_NAN_DIAG_FAILURE] real model batch has no complete trace-id mapping; batch=0");
+        if (!traceable_batch && real_request_batch) {
+            std::ostringstream failure;
+            failure << "[DSV4_NAN_DIAG_FAILURE] real model batch has incomplete request diagnostics; batch=0"
+                    << " request_count=" << request_count << " trace_count=" << inputs.trace_ids.size()
+                    << " prompt_length_count=" << inputs.nan_diag_prompt_lengths.size()
+                    << " decode_step_count=" << inputs.nan_diag_decode_steps.size()
+                    << " stream_id_count=" << inputs.nan_diag_stream_ids.size();
+            writeDsv4NanStderrLine(failure.str());
         }
     }
 
@@ -733,7 +899,13 @@ GptModelOutputs PyWrappedModel::forwardMicroBatched(const GptModelInputs& inputs
                             input_list.size());
 
     for (size_t i = 0; i < py_model_outputs.size(); ++i) {
-        drainDsv4NanDiagnostics(py_model_outputs[i], split_inputs[i]);
+        // When layer micro-batching is disabled, the second CUDA-graph padding
+        // entry intentionally reuses split_inputs[0].  Drain with that same
+        // effective input, otherwise a real device event would be joined
+        // against the empty fake entry and lose its trace/request metadata.
+        const auto& diagnostic_inputs =
+            split_inputs[i].kv_cache_kernel_block_id.defined() ? split_inputs[i] : split_inputs[0];
+        drainDsv4NanDiagnostics(py_model_outputs[i], diagnostic_inputs, world_rank_);
     }
 
     if (!inputs.warmup && inputs.pd_separation) {
@@ -959,7 +1131,7 @@ GptModelOutputs PyWrappedModel::forward(const GptModelInputs& inputs) {
             hidden_states         = py_model_outputs.hidden_states.clone();
         }
 
-        drainDsv4NanDiagnostics(py_model_outputs, inputs);
+        drainDsv4NanDiagnostics(py_model_outputs, inputs, world_rank_);
 
         if (!inputs.warmup && inputs.pd_separation) {
             cache_store_async_writer_->waitAllDone();
@@ -1307,6 +1479,34 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                                          inputs.input_lengths.cpu().pin_memory() :
                                          inputs.input_lengths;
     const auto* input_lengths_ptr  = input_lengths_host.defined() ? input_lengths_host.data_ptr<int32_t>() : nullptr;
+    auto        slice_nan_request_metadata = [&inputs](GptModelInputs& output, size_t start, size_t count) {
+        auto slice_strings = [start, count](const std::vector<std::string>& source) {
+            if (source.empty()) {
+                return std::vector<std::string>{};
+            }
+            RTP_LLM_CHECK_WITH_INFO(start + count <= source.size(),
+                                    "NaN trace metadata slice out of bounds: start=%zu count=%zu size=%zu",
+                                    start,
+                                    count,
+                                    source.size());
+            return std::vector<std::string>(source.begin() + start, source.begin() + start + count);
+        };
+        auto slice_ints = [start, count](const std::vector<int64_t>& source) {
+            if (source.empty()) {
+                return std::vector<int64_t>{};
+            }
+            RTP_LLM_CHECK_WITH_INFO(start + count <= source.size(),
+                                    "NaN integer metadata slice out of bounds: start=%zu count=%zu size=%zu",
+                                    start,
+                                    count,
+                                    source.size());
+            return std::vector<int64_t>(source.begin() + start, source.begin() + start + count);
+        };
+        output.trace_ids               = slice_strings(inputs.trace_ids);
+        output.nan_diag_prompt_lengths = slice_ints(inputs.nan_diag_prompt_lengths);
+        output.nan_diag_decode_steps   = slice_ints(inputs.nan_diag_decode_steps);
+        output.nan_diag_stream_ids     = slice_ints(inputs.nan_diag_stream_ids);
+    };
 
     if (!micro_batch_plan.enable) {
         RTP_LLM_LOG_DEBUG("micro batch disable when enable is false, use fake");
@@ -1329,6 +1529,7 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
             if (d_micro_batch_size && p_micro_batch_size) {
                 GptModelInputs micro_model_inputs = inputs;
                 size_t         total_batch_size   = d_micro_batch_size + p_micro_batch_size;
+                slice_nan_request_metadata(micro_model_inputs, sliced_batch_idx, total_batch_size);
                 RTP_LLM_LOG_DEBUG("d and p slice from %ld %ld %ld %ld",
                                   sliced_token_idx,
                                   sliced_batch_idx,
@@ -1384,6 +1585,7 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                     decode_batch_idx);
             } else if (d_micro_batch_size) {
                 GptModelInputs micro_model_inputs = inputs;
+                slice_nan_request_metadata(micro_model_inputs, sliced_batch_idx, d_micro_batch_size);
                 RTP_LLM_LOG_DEBUG("d slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, decode_batch_idx);
                 micro_model_inputs.combo_tokens  = inputs.combo_tokens.narrow(0, sliced_token_idx, d_micro_batch_size);
                 micro_model_inputs.input_lengths = inputs.input_lengths.narrow(0, sliced_batch_idx, d_micro_batch_size);
@@ -1416,6 +1618,7 @@ PyWrappedModel::splitInputsIntoMicroBatches(const GptModelInputs& inputs, const 
                                   sliced_token_idx);
             } else {
                 GptModelInputs micro_model_inputs = inputs;
+                slice_nan_request_metadata(micro_model_inputs, sliced_batch_idx, p_micro_batch_size);
                 RTP_LLM_LOG_DEBUG("p slice from %ld %ld %ld", sliced_token_idx, sliced_batch_idx, prefill_batch_idx);
                 micro_model_inputs.input_lengths = inputs.input_lengths.narrow(0, sliced_batch_idx, p_micro_batch_size);
                 micro_model_inputs.kv_cache_block_id =

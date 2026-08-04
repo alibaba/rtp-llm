@@ -335,7 +335,7 @@ def forward_layers(
         _nan_diag.report_nonfinite(
             h,
             source_id=_nan_diag.SOURCE_FINAL_HIDDEN,
-            layer_id=0,
+            layer_id=-1,
         )
     h = h.view(bsz, q_len, dim_)
     if _rt_on:
@@ -442,6 +442,12 @@ def forward_decode(
 
     B = meta.batch_size
     q_len = meta.q_len_per_req
+    if _nan_diag.ENABLED:
+        _nan_diag.set_request_layout(
+            input_ids.device,
+            batch_size=int(B),
+            q_len=int(q_len),
+        )
     _rt_on = _rt.ENABLED
     if _rt_on:
         _rt.begin(seqlen=int(input_ids.numel()))

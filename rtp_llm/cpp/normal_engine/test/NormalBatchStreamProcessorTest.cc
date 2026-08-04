@@ -153,11 +153,27 @@ TEST_F(NormalBatchStreamProcessorTest, testSimpleAssemble) {
         vector<int> sequence_lengths  = {1, 2};
         vector<int> prefix_lengths    = {0, 1};
         vector<int> kv_cache_block_id = {1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 0, 0, 11, 12, 13, 14};
+        // query1/query2 input_ids are narrowed after stream construction above,
+        // while their CompleteTokenIds retain the original sequence lengths.
+        // This also exercises non-zero decode-step diagnostics.
+        vector<int64_t> prompt_lengths = {1, 2, 3, 4};
+        vector<int64_t> decode_steps   = {1, 1, 0, 0};
+        vector<int64_t> stream_ids     = {static_cast<int64_t>(stream1->streamId()),
+                                          static_cast<int64_t>(stream2->streamId()),
+                                          static_cast<int64_t>(stream3->streamId()),
+                                          static_cast<int64_t>(stream4->streamId())};
         EXPECT_EQ(combo_tokens, toVec<int>(model_input.combo_tokens));
         EXPECT_EQ(input_lengths, toVec<int>(model_input.input_lengths));
         EXPECT_EQ(sequence_lengths, toVec<int>(model_input.sequence_lengths));
         EXPECT_EQ(prefix_lengths, toVec<int>(model_input.prefix_lengths));
         EXPECT_EQ(kv_cache_block_id, toVec<int>(model_input.kv_cache_block_id));
+        EXPECT_EQ(prompt_lengths, model_input.nan_diag_prompt_lengths);
+        EXPECT_EQ(decode_steps, model_input.nan_diag_decode_steps);
+        EXPECT_EQ(stream_ids, model_input.nan_diag_stream_ids);
+        ASSERT_EQ(model_input.trace_ids.size(), 4);
+        for (const auto& trace_id : model_input.trace_ids) {
+            EXPECT_FALSE(trace_id.empty());
+        }
     }
     {
         MMModelConfig mm_model_config;

@@ -99,6 +99,13 @@ struct GptModelInputs {
 
     // not sync to other tp rank
     std::vector<std::string> trace_ids;
+    // Diagnostic-only host metadata in the same request order as trace_ids.
+    // These survive speculative target-verify rewrites where input_lengths is
+    // repurposed as q_len, so a NaN can still report the original prompt
+    // length and the decode iteration at which this forward started.
+    std::vector<int64_t> nan_diag_prompt_lengths;
+    std::vector<int64_t> nan_diag_decode_steps;
+    std::vector<int64_t> nan_diag_stream_ids;
 
 public:
     std::string debugString(bool force = false) const;

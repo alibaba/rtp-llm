@@ -189,6 +189,7 @@ class Gate(nn.Module):
                 self.bias,
                 source_id=_nan_diag.SOURCE_ROUTER_BIAS,
                 layer_id=self.layer_id,
+                map_to_request=False,
             )
 
     def forward(

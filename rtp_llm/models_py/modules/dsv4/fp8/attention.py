@@ -1042,6 +1042,7 @@ class AttentionFP8(nn.Module):
                     compress_ratio=compress_ratio,
                     max_batch_size=max_batch_size,
                     max_seq_len=max_seq_len,
+                    layer_id=layer_id,
                     norm_eps=norm_eps,
                     layer_weights=layer_weights,
                 )
@@ -2152,6 +2153,46 @@ class AttentionFP8(nn.Module):
             q_len=q_len,
             head_dim=self.head_dim,
         )
+        if (
+            _nan_diag.ENABLED
+            and swa_pool_3d is not None
+            and slot_mapping is not None
+            and slot_mapping.numel() >= bsz * q_len
+        ):
+            _nan_diag.report_packed_fp8_kv_cache(
+                swa_pool_3d,
+                slot_mapping[: bsz * q_len].view(bsz, q_len, 1).contiguous(),
+                source_id=_nan_diag.SOURCE_SWA_KV_CACHE_WRITE,
+                layer_id=self.layer_id,
+                kv_kind=_nan_diag.KV_KIND_SWA,
+            )
+
+    def _report_decode_compressed_kv_write(
+        self,
+        attn_type: int,
+        meta: CompressorMeta,
+        bsz: int,
+        q_len: int,
+    ) -> None:
+        """Validate the exact packed entries written by a decode compressor."""
+        if not _nan_diag.ENABLED:
+            return
+        pool_3d = self._pool_view_3d_fp8(attn_type)
+        slots = meta.kv_slots
+        total = bsz * q_len
+        if pool_3d is None or slots is None or slots.numel() < total:
+            return
+        from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV
+
+        _nan_diag.report_packed_fp8_kv_cache(
+            pool_3d,
+            slots[:total].view(bsz, q_len, 1).contiguous(),
+            source_id=_nan_diag.SOURCE_COMPRESSED_KV_CACHE_WRITE,
+            layer_id=self.layer_id,
+            kv_kind=(
+                _nan_diag.KV_KIND_CSA if attn_type == CSA_KV else _nan_diag.KV_KIND_HCA
+            ),
+        )
 
     def _decode_compressor_meta_from_metadata(
         self,
@@ -2268,6 +2309,7 @@ class AttentionFP8(nn.Module):
                 swa_topk_3d,
                 source_id=_nan_diag.SOURCE_SWA_KV_CACHE_READ,
                 layer_id=self.layer_id,
+                kv_kind=_nan_diag.KV_KIND_SWA,
                 topk_length=swa_topk_length,
             )
         return attn_fp8_swa_paged(
@@ -2335,6 +2377,12 @@ class AttentionFP8(nn.Module):
             meta=csa_compressor_meta,
             position_ids=position_ids,
         )
+        self._report_decode_compressed_kv_write(
+            CSA_KV,
+            csa_compressor_meta,
+            bsz,
+            q_len,
+        )
         # CSA cmp_local_raw = indexer's raw indices (the +win offset is
         # added later inside the epilogue's translate path).
         cmp_local_raw = attn_metadata.topk_buffer_compressed[:bsz]
@@ -2378,6 +2426,12 @@ class AttentionFP8(nn.Module):
             meta=hca_compressor_meta,
             position_ids=position_ids,
         )
+        self._report_decode_compressed_kv_write(
+            HCA_KV,
+            hca_compressor_meta,
+            bsz,
+            q_len,
+        )
         win = self.window_size
         tt_h = attn_metadata.topk_total_by_ratio.get(int(self.compress_ratio))
         assert tt_h is not None, (
@@ -2407,7 +2461,7 @@ class AttentionFP8(nn.Module):
         for both SWA and compressed pools, then one dual-pool FlashMLA
         call (``extra_k_cache`` + ``extra_indices_in_kvcache`` merges
         softmax in-kernel; mirrors vLLM ``deepseek_v4_attention.py:849-865``)."""
-        from rtp_llm.models_py.modules.dsv4.attn_type import SWA_KV
+        from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, SWA_KV
         from rtp_llm.models_py.modules.dsv4.fp8.decode.attention_kernels import (
             attn_fp8_dual_paged,
         )
@@ -2499,6 +2553,7 @@ class AttentionFP8(nn.Module):
                 swa_topk_3d,
                 source_id=_nan_diag.SOURCE_SWA_KV_CACHE_READ,
                 layer_id=self.layer_id,
+                kv_kind=_nan_diag.KV_KIND_SWA,
                 topk_length=swa_topk_length,
             )
             _nan_diag.report_packed_fp8_kv_cache(
@@ -2506,6 +2561,11 @@ class AttentionFP8(nn.Module):
                 cmp_topk_3d,
                 source_id=_nan_diag.SOURCE_COMPRESSED_KV_CACHE_READ,
                 layer_id=self.layer_id,
+                kv_kind=(
+                    _nan_diag.KV_KIND_CSA
+                    if cmp_attn_type == CSA_KV
+                    else _nan_diag.KV_KIND_HCA
+                ),
                 topk_length=extra_topk_length,
             )
         return attn_fp8_dual_paged(
@@ -3099,6 +3159,25 @@ class AttentionFP8(nn.Module):
             with record_function_range("dsv4.fp8.attn.compressed.compressor"):
                 self.compressor(
                     x, common.sp_int, meta=compressor_meta, workspace=common.workspace
+                )
+
+        if _nan_diag.ENABLED and common.batch_size == 1 and compressor_meta is not None:
+            from rtp_llm.models_py.modules.dsv4.attn_type import CSA_KV, HCA_KV
+
+            cmp_attn_type = CSA_KV if self.compress_ratio == 4 else HCA_KV
+            cmp_pool_3d = self._pool_view_3d_fp8(cmp_attn_type)
+            slots = compressor_meta.kv_slots
+            if cmp_pool_3d is not None and slots is not None and slots.numel() > 0:
+                _nan_diag.report_packed_fp8_kv_cache(
+                    cmp_pool_3d,
+                    slots.reshape(1, -1, 1).contiguous(),
+                    source_id=_nan_diag.SOURCE_COMPRESSED_KV_CACHE_WRITE,
+                    layer_id=self.layer_id,
+                    kv_kind=(
+                        _nan_diag.KV_KIND_CSA
+                        if cmp_attn_type == CSA_KV
+                        else _nan_diag.KV_KIND_HCA
+                    ),
                 )
 
         # Materialize the deferred dense Q now that the compressor(s) have
@@ -3906,7 +3985,10 @@ class AttentionFP8(nn.Module):
             # would otherwise be converted to zero by merge/sink handling before
             # the next MoE boundary can observe them.
             _nan_diag.report_nonfinite(
-                gathered_lse,
+                # gathered_lse is [cp, token, head]. Put token first so the
+                # generic [request, query, subrow] mapper does not attribute a
+                # bad CP shard to the wrong query.
+                gathered_lse.permute(1, 0, 2).contiguous(),
                 source_id=_nan_diag.SOURCE_CP_ATTENTION_LSE,
                 layer_id=self.layer_id,
                 include_neg_inf=False,
@@ -5314,6 +5396,19 @@ class AttentionFP8(nn.Module):
                 )
             else:
                 _ins.quantize_and_insert_k_cache(k_bf16, packed_3d, meta.slot_mapping)
+        if (
+            _nan_diag.ENABLED
+            and common.batch_size == 1
+            and packed_3d is not None
+            and meta.slot_mapping.numel() > 0
+        ):
+            _nan_diag.report_packed_fp8_kv_cache(
+                packed_3d,
+                meta.slot_mapping.reshape(1, -1, 1).contiguous(),
+                source_id=_nan_diag.SOURCE_SWA_KV_CACHE_WRITE,
+                layer_id=self.layer_id,
+                kv_kind=_nan_diag.KV_KIND_SWA,
+            )
 
     def _attn_fp8_swa_via_kv_full(
         self,

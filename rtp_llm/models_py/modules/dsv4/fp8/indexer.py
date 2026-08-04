@@ -28,6 +28,7 @@ import torch
 import torch.nn as nn
 import torch.nn.functional as F
 
+from rtp_llm.models_py.modules.dsv4 import _nan_diag_triton as _nan_diag
 from rtp_llm.models_py.modules.dsv4._profiler import record_function_range
 from rtp_llm.models_py.modules.dsv4.chunk_env import dsv4_chunk_tokens_from_env
 from rtp_llm.models_py.modules.dsv4.cp import (
@@ -285,6 +286,7 @@ class IndexerFP8(PoolBackedModule):
         compress_ratio: int,
         max_batch_size: int,
         max_seq_len: int,
+        layer_id: int = -1,
         norm_eps: float = 1e-6,
         layer_weights: Optional[Dict[str, torch.Tensor]] = None,
     ):
@@ -314,6 +316,7 @@ class IndexerFP8(PoolBackedModule):
         self.q_lora_rank = q_lora_rank
         self.softmax_scale = self.head_dim**-0.5
         self.compress_ratio = compress_ratio
+        self.layer_id = int(layer_id)
 
         from rtp_llm.models_py.modules.dsv4.fp8.attention import _v4_fp8_linear
         from rtp_llm.utils.model_weight import W
@@ -567,6 +570,64 @@ class IndexerFP8(PoolBackedModule):
             rope_only_inplace(rope_view, freqs_cis)
         return q
 
+    def _report_indexer_inputs(
+        self,
+        q: Optional[torch.Tensor] = None,
+        weights: Optional[torch.Tensor] = None,
+        q_fp8: Optional[torch.Tensor] = None,
+        w_fold: Optional[torch.Tensor] = None,
+    ) -> None:
+        if not _nan_diag.ENABLED:
+            return
+        if q is not None:
+            _nan_diag.report_nonfinite(
+                q,
+                source_id=_nan_diag.SOURCE_INDEXER_QUERY,
+                layer_id=self.layer_id,
+            )
+        if weights is not None:
+            _nan_diag.report_nonfinite(
+                weights,
+                source_id=_nan_diag.SOURCE_INDEXER_WEIGHTS,
+                layer_id=self.layer_id,
+            )
+        if q_fp8 is not None:
+            _nan_diag.report_nonfinite(
+                q_fp8,
+                source_id=_nan_diag.SOURCE_INDEXER_QUERY_FP8,
+                layer_id=self.layer_id,
+            )
+        if w_fold is not None:
+            _nan_diag.report_nonfinite(
+                w_fold,
+                source_id=_nan_diag.SOURCE_INDEXER_WEIGHTS_FOLDED,
+                layer_id=self.layer_id,
+            )
+
+    def _report_indexer_k_post_write(
+        self,
+        meta: Optional[CompressorMeta],
+        *,
+        batch_size: int,
+        q_len: int,
+    ) -> None:
+        total = batch_size * q_len
+        if (
+            not _nan_diag.ENABLED
+            or meta is None
+            or self._kv_pool_view is None
+            or self._kv_pool_view.dim() != 3
+            or meta.kv_slots.numel() < total
+            or total <= 0
+        ):
+            return
+        _nan_diag.report_packed_fp8_indexer_slots(
+            self._kv_pool_view,
+            meta.kv_slots[:total].view(batch_size, q_len, 1).contiguous(),
+            source_id=_nan_diag.SOURCE_INDEXER_KV_CACHE_WRITE,
+            layer_id=self.layer_id,
+        )
+
     # --------------------------------------------------------------
     # Decode (vectorized over B)
     # --------------------------------------------------------------
@@ -594,6 +655,11 @@ class IndexerFP8(PoolBackedModule):
                 meta=compressor_meta,
                 position_ids=position_ids,
             )
+            self._report_indexer_k_post_write(
+                compressor_meta,
+                batch_size=bsz,
+                q_len=q_len,
+            )
 
             if position_ids is None:
                 freqs = self.freqs_cis[start_pos.long()]
@@ -614,6 +680,7 @@ class IndexerFP8(PoolBackedModule):
                 )
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj at __init__.
             weights = F.linear(x, self.weights_proj)
+            self._report_indexer_inputs(q, weights)
 
             # Always use DeepGEMM (FP8 path). Decode uses a static score
             # width from the cache/block-table upper bound; replay updates
@@ -631,8 +698,18 @@ class IndexerFP8(PoolBackedModule):
                 freqs,
                 self.rope_head_dim,
             )
+            self._report_indexer_inputs(q_fp8=q_fp8, w_fold=w_fold)
             ctx_lens_2d = compressed_len.view(bsz, q_len)
             bt_i32 = self._kv_block_table[:bsz].to(torch.int32).contiguous()
+            if _nan_diag.ENABLED and self._kv_pool_view.dim() == 3:
+                _nan_diag.report_paged_fp8_indexer_cache(
+                    self._kv_pool_view,
+                    bt_i32,
+                    ctx_lens_2d,
+                    source_id=_nan_diag.SOURCE_INDEXER_KV_CACHE_READ,
+                    layer_id=self.layer_id,
+                    max_ctx_len=T_max,
+                )
             # ``_kv_pool_view`` is 3D ``[num_blocks, eb, 132]`` from production
             # (set by ``Attention._set_compressor_pool_context``); standalone
             # tests still pass flat 2D. Flatten to ``[total_slots, 132]``
@@ -651,6 +728,12 @@ class IndexerFP8(PoolBackedModule):
                 block_size=self._kv_eb,
                 max_ctx_len=T_max,
             )  # [B*q_len, T_max] fp32
+            if _nan_diag.ENABLED:
+                _nan_diag.report_nonfinite(
+                    logits,
+                    source_id=_nan_diag.SOURCE_INDEXER_SCORE,
+                    layer_id=self.layer_id,
+                )
             score = logits.view(bsz, q_len, T_max)
 
             # TopK (with optional persistent radix-select)
@@ -1078,9 +1161,19 @@ class IndexerFP8(PoolBackedModule):
                 self.compressor(
                     x, sp, meta=attention_inputs.compressor_meta, workspace=workspace
                 )
+            if (
+                attention_inputs.bsz == 1
+                and attention_inputs.compressor_meta is not None
+            ):
+                self._report_indexer_k_post_write(
+                    attention_inputs.compressor_meta,
+                    batch_size=1,
+                    q_len=int(attention_inputs.compressor_meta.kv_slots.numel()),
+                )
             # ``softmax_scale * n_heads^-0.5`` is pre-folded into weights_proj at __init__.
             with record_function_range("dsv4.fp8.indexer.prefill.weights_proj"):
                 weights = F.linear(x, self.weights_proj)
+            self._report_indexer_inputs(q, weights)
 
             q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
             w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
@@ -1091,6 +1184,7 @@ class IndexerFP8(PoolBackedModule):
                     attention_inputs.freqs_cis_slice,
                     self.rope_head_dim,
                 )
+            self._report_indexer_inputs(q_fp8=q_fp8, w_fold=w_fold)
 
             assert (
                 has_fp8_mqa_logits()
@@ -1158,6 +1252,14 @@ class IndexerFP8(PoolBackedModule):
                         attention_inputs.ke[row_start:row_end],
                         clean_logits=False,
                     )  # [chunk_rows, T] fp32
+                if _nan_diag.ENABLED:
+                    _nan_diag.report_nonfinite(
+                        logits,
+                        source_id=_nan_diag.SOURCE_INDEXER_SCORE,
+                        layer_id=self.layer_id,
+                        row_offset=row_start,
+                        layout_rows=M,
+                    )
 
                 with record_function_range("dsv4.fp8.indexer.prefill.topk"):
                     _run_prefill_topk(
@@ -1293,8 +1395,18 @@ class IndexerFP8(PoolBackedModule):
                 )
             with record_function_range("dsv4.fp8.indexer.prefill.nested_compressor"):
                 self.compressor.finish_prefill(nested_pending)
+            if (
+                attention_inputs.bsz == 1
+                and attention_inputs.compressor_meta is not None
+            ):
+                self._report_indexer_k_post_write(
+                    attention_inputs.compressor_meta,
+                    batch_size=1,
+                    q_len=int(attention_inputs.compressor_meta.kv_slots.numel()),
+                )
             with record_function_range("dsv4.fp8.indexer.prefill.weights_proj"):
                 weights = F.linear(x, self.weights_proj)
+            self._report_indexer_inputs(q, weights)
 
             q_for_quant = q if q.dim() == 4 else q.unsqueeze(0)
             w_for_quant = weights if weights.dim() == 3 else weights.unsqueeze(0)
@@ -1305,6 +1417,7 @@ class IndexerFP8(PoolBackedModule):
                     attention_inputs.freqs_cis_slice,
                     self.rope_head_dim,
                 )
+            self._report_indexer_inputs(q_fp8=q_fp8, w_fold=w_fold)
 
             assert (
                 has_fp8_mqa_logits()
@@ -1364,6 +1477,14 @@ class IndexerFP8(PoolBackedModule):
                         attention_inputs.ks[row_start:row_end],
                         attention_inputs.ke[row_start:row_end],
                         clean_logits=False,
+                    )
+                if _nan_diag.ENABLED:
+                    _nan_diag.report_nonfinite(
+                        logits,
+                        source_id=_nan_diag.SOURCE_INDEXER_SCORE,
+                        layer_id=self.layer_id,
+                        row_offset=row_start,
+                        layout_rows=M,
                     )
 
                 with record_function_range("dsv4.fp8.indexer.prefill.topk"):

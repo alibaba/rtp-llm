@@ -105,6 +105,7 @@ private:
     // Member variables (formerly inherited from GptModel)
     const rtp_llm::ExecProperties            device_props_;
     const rtp_llm::MlaOpsType                mla_ops_type_;
+    const int64_t                            world_rank_;
     const size_t                             layer_num_;
     const GptModelDescription                description_;
     std::optional<rtp_llm::CacheLayerLayout> kv_cache_layer_layout_;
@@ -147,6 +148,7 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams&          params,
                                       std::shared_ptr<ModelInputsLogger> model_inputs_logger):
     device_props_(buildExecProperties(params.parallelism_config, params.device_resource_config)),
     mla_ops_type_(params.mla_ops_type),
+    world_rank_(params.parallelism_config.world_rank),
     layer_num_(params.weights.layers.size()),
     description_(params.description),
     cache_manager_(params.cache_manager),

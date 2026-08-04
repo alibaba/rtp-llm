@@ -587,7 +587,7 @@ def forward_layers(
         _nan_diag.report_nonfinite(
             h,
             source_id=_nan_diag.SOURCE_FINAL_HIDDEN,
-            layer_id=0,
+            layer_id=-1,
         )
     if _rt_on:
         _rt.record("prefill_final_norm", h)
@@ -701,6 +701,18 @@ def forward_prefill(
     set_cp_info(v4, parallelism_config, attn, is_prefill=True)
 
     input_ids: torch.Tensor = inputs.input_ids  # [T_total] flat 1D
+    if _nan_diag.ENABLED and int(attn.input_lengths.numel()) == 1:
+        # The production FIFO scheduler admits one context request at a time.
+        # Treat its packed token axis as q_len so generic activation events
+        # retain an exact trace/query mapping just like decode.  Batched varlen
+        # prefill deliberately leaves the mapping unset until it has a
+        # token-to-request map; emitting a false attribution is worse than an
+        # explicit unresolved diagnostic.
+        _nan_diag.set_request_layout(
+            input_ids.device,
+            batch_size=1,
+            q_len=int(input_ids.numel()),
+        )
 
     # Framework already populates these — don't recompute.
     #  * ``attn.cu_seqlens``   : [B+1]     per-request cumulative prefix sum

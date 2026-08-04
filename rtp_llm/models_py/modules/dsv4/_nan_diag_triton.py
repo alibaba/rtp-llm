@@ -4,11 +4,12 @@ Set ``DSV4_NAN_DIAG=1`` before starting the server to add read-only detector
 kernels to important DSV4 numerical boundaries. A detector prints at most one
 structured event per ``(batch, source, layer)`` even when an entire tensor is
 non-finite. Unmapped startup and CUDA-graph-capture batches use batch id zero
-and are emitted with ``trace_status=unmapped`` by the host-side reliable drain.
+and are emitted with ``trace_status=unresolved`` by the host-side reliable drain.
 Triton includes the winning ``pid (row, tile, 0)`` in its auxiliary line.
-The first printed integer is the model batch id, which joins to the host-side
-``[DSV4_NAN_TRACE]`` line containing trace ids. The second integer is this
-event payload for the first reported 256-element tile:
+The first printed integer is the model batch id. The host-side reliable event
+drain emits the exact request trace id and request/query coordinates. The
+second integer is this auxiliary payload for the first reported 256-element
+tile:
 
     source * 10^12 + layer(3) | first-column-in-tile(3) | n_nan(3) | n_inf(3)
 
@@ -26,6 +27,15 @@ Source ids:
     8 = packed SWA KV cache read
     9 = packed compressed KV cache read
    10 = attention output
+   11 = packed SWA KV cache immediately after a local write
+   12 = packed compressed KV cache immediately after a local write
+   13 = packed indexer KV cache immediately after a local write
+   14 = packed indexer KV cache immediately before score computation
+   15 = indexer score output before top-k selection
+   16 = indexer query before FP8 quantization
+   17 = indexer projected weights before FP8 folding
+   18 = indexer query after FP8 quantization
+   19 = indexer projected weights after FP8 folding
 
 For an end-to-end service test only, a guarded injector is available. Both
 variables are required, otherwise startup fails instead of silently changing
@@ -113,10 +123,26 @@ SOURCE_KV_WRITE_INPUT = 7
 SOURCE_SWA_KV_CACHE_READ = 8
 SOURCE_COMPRESSED_KV_CACHE_READ = 9
 SOURCE_ATTENTION_OUTPUT = 10
+SOURCE_SWA_KV_CACHE_WRITE = 11
+SOURCE_COMPRESSED_KV_CACHE_WRITE = 12
+SOURCE_INDEXER_KV_CACHE_WRITE = 13
+SOURCE_INDEXER_KV_CACHE_READ = 14
+SOURCE_INDEXER_SCORE = 15
+SOURCE_INDEXER_QUERY = 16
+SOURCE_INDEXER_WEIGHTS = 17
+SOURCE_INDEXER_QUERY_FP8 = 18
+SOURCE_INDEXER_WEIGHTS_FOLDED = 19
+
+KV_KIND_UNKNOWN = 0
+KV_KIND_SWA = 1
+KV_KIND_CSA = 2
+KV_KIND_HCA = 3
+KV_KIND_INDEXER = 4
 
 _KV_CORRUPT_POOL_TO_SOURCE = {
     "swa": SOURCE_SWA_KV_CACHE_READ,
     "compressed": SOURCE_COMPRESSED_KV_CACHE_READ,
+    "indexer": SOURCE_INDEXER_KV_CACHE_READ,
 }
 _KV_CORRUPT_KIND = {"fp8": 1, "rope": 2, "scale": 3}
 
@@ -146,10 +172,11 @@ def _parse_test_kv_corrupt_spec(spec: str) -> tuple[int, int, int] | None:
         layer < 0
         or pool not in _KV_CORRUPT_POOL_TO_SOURCE
         or kind not in _KV_CORRUPT_KIND
+        or (pool == "indexer" and kind == "rope")
     ):
         raise ValueError(
             "DSV4_NAN_DIAG_TEST_CORRUPT_KV_CACHE expects a non-negative layer, "
-            "pool swa|compressed, and kind fp8|rope|scale; got "
+            "pool swa|compressed|indexer, and kind fp8|rope|scale; got "
             f"{spec!r}"
         )
     return layer, _KV_CORRUPT_POOL_TO_SOURCE[pool], _KV_CORRUPT_KIND[kind]
@@ -160,8 +187,8 @@ TEST_KV_CORRUPT = _parse_test_kv_corrupt_spec(_TEST_KV_CORRUPT_SPEC)
 _BLOCK_N = 256
 _DEFAULT_PRINTF_FIFO_MB = 64
 _DEFAULT_EVENT_CAPACITY = 4096
-_EVENT_FIELDS = 8
-_MAX_SOURCE_ID = 15
+_EVENT_FIELDS = 16
+_MAX_SOURCE_ID = 19
 _MAX_LAYER_ID = 999
 _STATE_LAYERS = _MAX_LAYER_ID + 2  # layer -1 (unscoped) plus layers 0..999
 _PREWARMED_DEVICES: set[str] = set()
@@ -170,6 +197,10 @@ _LAST_REPORTED_BATCH_BY_DEVICE: dict[str, torch.Tensor] = {}
 _REPORT_COUNT_BY_DEVICE: dict[str, torch.Tensor] = {}
 _EVENT_COUNTERS_BY_DEVICE: dict[str, torch.Tensor] = {}
 _EVENT_RECORDS_BY_DEVICE: dict[str, torch.Tensor] = {}
+# Uniform request layout for decode / target-verify.  The Python forward sets
+# this once before the first layer.  It is process-local metadata only: all
+# event coordinates themselves are still written by graph-captured kernels.
+_REQUEST_LAYOUT_BY_DEVICE: dict[str, tuple[int, int]] = {}
 
 
 if triton is not None:
@@ -200,6 +231,9 @@ if triton is not None:
             "state_index",
             "include_neg_inf",
             "event_capacity",
+            "rows_per_request",
+            "rows_per_query",
+            "row_offset",
         ]
     )
     def _report_nonfinite_tiles_kernel(
@@ -218,6 +252,9 @@ if triton is not None:
         state_index,
         include_neg_inf,
         event_capacity,
+        rows_per_request,
+        rows_per_query,
+        row_offset,
         BLOCK_N: tl.constexpr,
     ):
         row = tl.program_id(0).to(tl.int64)
@@ -266,20 +303,52 @@ if triton is not None:
             )
             if previous_batch != dedupe_id:
                 tl.atomic_add(report_count_ptr + state_index, 1)
-                first_offset = first_col - col_start
+                safe_rows_per_request = tl.maximum(rows_per_request, 1)
+                safe_rows_per_query = tl.maximum(rows_per_query, 1)
+                event_row = row + row_offset
+                request_index = tl.where(
+                    rows_per_request > 0,
+                    event_row // safe_rows_per_request,
+                    -1,
+                )
+                row_in_request = event_row % safe_rows_per_request
+                query_index = tl.where(
+                    (rows_per_request > 0) & (rows_per_query > 0),
+                    row_in_request // safe_rows_per_query,
+                    -1,
+                )
+                subrow = tl.where(
+                    (rows_per_request > 0) & (rows_per_query > 0),
+                    row_in_request % safe_rows_per_query,
+                    -1,
+                )
+                q_len = tl.where(
+                    (rows_per_request > 0) & (rows_per_query > 0),
+                    rows_per_request // safe_rows_per_query,
+                    -1,
+                )
                 event_index = tl.atomic_add(event_counters_ptr, 1)
                 if event_index < event_capacity:
-                    record = event_records_ptr + event_index * 8
+                    record = event_records_ptr + event_index * 16
                     tl.store(record + 0, batch_id)
                     tl.store(record + 1, source_id.to(tl.int64))
                     tl.store(record + 2, layer_id.to(tl.int64))
-                    tl.store(record + 3, first_offset.to(tl.int64))
+                    tl.store(record + 3, first_col.to(tl.int64))
                     tl.store(record + 4, n_nan.to(tl.int64))
                     tl.store(record + 5, n_inf.to(tl.int64))
                     tl.store(record + 6, -1)
-                    tl.store(record + 7, 0)
+                    tl.store(record + 7, -1)
+                    tl.store(record + 8, request_index.to(tl.int64))
+                    tl.store(record + 9, query_index.to(tl.int64))
+                    tl.store(record + 10, event_row.to(tl.int64))
+                    tl.store(record + 11, first_col.to(tl.int64))
+                    tl.store(record + 12, subrow.to(tl.int64))
+                    tl.store(record + 13, -1)
+                    tl.store(record + 14, -1)
+                    tl.store(record + 15, q_len.to(tl.int64))
                 else:
                     tl.atomic_add(event_counters_ptr + 1, 1)
+                first_offset = first_col - col_start
                 event = (
                     source_id.to(tl.int64) * 1_000_000_000_000
                     + layer_id.to(tl.int64) * 1_000_000_000
@@ -304,6 +373,7 @@ if triton is not None:
             "block_stride",
             "source_id",
             "layer_id",
+            "kv_kind",
             "state_index",
             "event_capacity",
         ]
@@ -325,6 +395,7 @@ if triton is not None:
         block_stride,
         source_id,
         layer_id,
+        kv_kind,
         state_index,
         event_capacity,
         HAS_LENGTHS: tl.constexpr,
@@ -448,7 +519,7 @@ if triton is not None:
                 tl.atomic_add(report_count_ptr + state_index, 1)
                 event_index = tl.atomic_add(event_counters_ptr, 1)
                 if event_index < event_capacity:
-                    record = event_records_ptr + event_index * 8
+                    record = event_records_ptr + event_index * 16
                     tl.store(record + 0, batch_id)
                     tl.store(record + 1, source_id.to(tl.int64))
                     tl.store(record + 2, layer_id.to(tl.int64))
@@ -457,6 +528,14 @@ if triton is not None:
                     tl.store(record + 5, n_rope.to(tl.int64))
                     tl.store(record + 6, n_scale.to(tl.int64))
                     tl.store(record + 7, slot)
+                    tl.store(record + 8, row // q_len)
+                    tl.store(record + 9, row % q_len)
+                    tl.store(record + 10, row)
+                    tl.store(record + 11, col)
+                    tl.store(record + 12, kv_kind.to(tl.int64))
+                    tl.store(record + 13, block)
+                    tl.store(record + 14, pos)
+                    tl.store(record + 15, q_len)
                 else:
                     tl.atomic_add(event_counters_ptr + 1, 1)
                 event = (
@@ -487,6 +566,151 @@ if triton is not None:
                     "[DSV4_KV_NAN] source_layer,n_fp8_n_rope_scale:",
                     detail,
                     n_rope.to(tl.int64) * 1_000 + n_scale.to(tl.int64),
+                )
+
+    @triton.jit(
+        do_not_specialize=[
+            "rows",
+            "width",
+            "q_len",
+            "num_cache_blocks",
+            "cache_block_size",
+            "block_stride",
+            "map_stride",
+            "source_id",
+            "layer_id",
+            "state_index",
+            "event_capacity",
+        ]
+    )
+    def _report_packed_fp8_indexer_cache_kernel(
+        cache_ptr,
+        map_ptr,
+        lengths_ptr,
+        batch_id_ptr,
+        last_reported_batch_ptr,
+        report_count_ptr,
+        event_counters_ptr,
+        event_records_ptr,
+        rows,
+        width,
+        q_len,
+        num_cache_blocks,
+        cache_block_size,
+        block_stride,
+        map_stride,
+        source_id,
+        layer_id,
+        state_index,
+        event_capacity,
+        EXPLICIT_SLOTS: tl.constexpr,
+        CORRUPT_KIND: tl.constexpr,
+        BLOCK_N: tl.constexpr,
+    ):
+        """Scan the 132-byte indexer K layout consumed by DeepGEMM."""
+        linear = tl.program_id(0).to(tl.int64)
+        row = linear // width
+        col = linear % width
+        request_index = row // q_len
+        query_index = row % q_len
+        if EXPLICIT_SLOTS:
+            slot = tl.load(map_ptr + linear).to(tl.int64)
+            valid_position = True
+        else:
+            valid_length = tl.load(lengths_ptr + row).to(tl.int64)
+            logical_block = col // cache_block_size
+            physical_block = tl.load(
+                map_ptr + request_index * map_stride + logical_block,
+                mask=(row < rows) & (col < valid_length),
+                other=-1,
+            ).to(tl.int64)
+            slot = physical_block * cache_block_size + col % cache_block_size
+            valid_position = col < valid_length
+
+        block = slot // cache_block_size
+        pos = slot % cache_block_size
+        valid_slot = (
+            (row < rows)
+            & valid_position
+            & (slot >= 0)
+            & (block >= 0)
+            & (block < num_cache_blocks)
+        )
+        block_ptr = cache_ptr + block * block_stride
+        k_ptr = block_ptr + pos * 128
+        scale_ptr = (block_ptr + cache_block_size * 128 + pos * 4).to(
+            tl.pointer_type(tl.float32)
+        )
+
+        if CORRUPT_KIND == 1:
+            tl.store(k_ptr, 0x7F, mask=valid_slot)
+        elif CORRUPT_KIND == 3:
+            tl.store(scale_ptr, float("nan"), mask=valid_slot)
+
+        lanes = tl.arange(0, BLOCK_N)
+        fp8_byte = tl.load(
+            k_ptr + lanes,
+            mask=valid_slot & (lanes < 128),
+            other=0,
+        )
+        bad_fp8 = valid_slot & (lanes < 128) & ((fp8_byte == 0x7F) | (fp8_byte == 0xFF))
+        scale = tl.load(scale_ptr, mask=valid_slot, other=0.0)
+        bad_scale_scalar = valid_slot & (
+            (scale != scale) | (scale == float("inf")) | (scale == -float("inf"))
+        )
+        n_fp8 = tl.sum(bad_fp8.to(tl.int32), axis=0)
+        n_scale = bad_scale_scalar.to(tl.int32)
+        n_bad = n_fp8 + n_scale
+        first_bad_byte = tl.min(
+            tl.where(bad_fp8, lanes, tl.where(bad_scale_scalar, 128, 132)),
+            axis=0,
+        )
+
+        thread_idx = tl.inline_asm_elementwise(
+            asm="mov.u32 $0, %tid.x;",
+            constraints="=r",
+            args=[],
+            dtype=tl.int32,
+            is_pure=True,
+            pack=1,
+        )
+        if (n_bad > 0) & (thread_idx == 0):
+            batch_id = tl.load(batch_id_ptr).to(tl.int64)
+            epoch = tl.load(event_counters_ptr + 2).to(tl.int64)
+            dedupe_id = tl.where(batch_id != 0, batch_id, -epoch)
+            previous_batch = tl.atomic_xchg(
+                last_reported_batch_ptr + state_index,
+                dedupe_id,
+            )
+            if previous_batch != dedupe_id:
+                tl.atomic_add(report_count_ptr + state_index, 1)
+                event_index = tl.atomic_add(event_counters_ptr, 1)
+                if event_index < event_capacity:
+                    record = event_records_ptr + event_index * 16
+                    tl.store(record + 0, batch_id)
+                    tl.store(record + 1, source_id.to(tl.int64))
+                    tl.store(record + 2, layer_id.to(tl.int64))
+                    tl.store(record + 3, first_bad_byte.to(tl.int64))
+                    tl.store(record + 4, n_fp8.to(tl.int64))
+                    tl.store(record + 5, 0)
+                    tl.store(record + 6, n_scale.to(tl.int64))
+                    tl.store(record + 7, slot)
+                    tl.store(record + 8, request_index.to(tl.int64))
+                    tl.store(record + 9, query_index.to(tl.int64))
+                    tl.store(record + 10, row.to(tl.int64))
+                    tl.store(record + 11, col.to(tl.int64))
+                    tl.store(record + 12, 4)
+                    tl.store(record + 13, block)
+                    tl.store(record + 14, pos)
+                    tl.store(record + 15, q_len)
+                else:
+                    tl.atomic_add(event_counters_ptr + 1, 1)
+                tl.device_print(
+                    "[DSV4_INDEXER_KV_NAN] batch,source,layer,slot:",
+                    batch_id,
+                    source_id.to(tl.int64),
+                    layer_id.to(tl.int64),
+                    slot,
                 )
 
     @triton.jit
@@ -612,9 +836,37 @@ def set_batch_context(batch_id: torch.Tensor | None) -> None:
         )
     device_key = str(_normalized_device(batch_id.device))
     _BATCH_ID_TENSORS[device_key] = batch_id
+    # The next forward must publish its own request layout before generic
+    # activation checks.  This prevents a decode graph's [B, q_len] geometry
+    # from being reused accidentally by a later prefill forward.
+    _REQUEST_LAYOUT_BY_DEVICE.pop(device_key, None)
     # This launch is captured as the first diagnostics graph node, so every
     # replay gets a fresh event buffer without a host-side reset or allocation.
     _reset_event_state(batch_id.device)
+
+
+def set_request_layout(
+    device: str | torch.device,
+    *,
+    batch_size: int,
+    q_len: int,
+) -> None:
+    """Set the uniform ``[B, q_len, ...]`` layout for this decode forward.
+
+    This lets generic activation detectors turn their flattened Triton row
+    back into an exact request and query position.  Packed KV detectors do not
+    depend on this state because their ``indices`` tensor already has the
+    explicit ``[B, q_len, topk]`` layout.
+    """
+    if not ENABLED:
+        return
+    if batch_size <= 0 or q_len <= 0:
+        raise ValueError(
+            "DSV4 NaN request layout requires positive batch_size and q_len, "
+            f"got batch_size={batch_size} q_len={q_len}"
+        )
+    device_key = str(_normalized_device(device))
+    _REQUEST_LAYOUT_BY_DEVICE[device_key] = (int(batch_size), int(q_len))
 
 
 def attach_event_buffers(outputs):
@@ -636,6 +888,11 @@ def report_nonfinite(
     source_id: int,
     layer_id: int,
     include_neg_inf: bool = True,
+    batch_size: int | None = None,
+    q_len: int | None = None,
+    map_to_request: bool = True,
+    row_offset: int = 0,
+    layout_rows: int | None = None,
 ) -> None:
     """Report non-finite values without modifying or synchronizing ``tensor``."""
     if not ENABLED or tensor.numel() == 0:
@@ -665,6 +922,40 @@ def report_nonfinite(
 
     device = _normalized_device(tensor.device)
     device_key = str(device)
+    layout = _REQUEST_LAYOUT_BY_DEVICE.get(device_key) if map_to_request else None
+    if map_to_request:
+        if batch_size is None and layout is not None:
+            batch_size = layout[0]
+        if q_len is None and layout is not None:
+            q_len = layout[1]
+    if row_offset < 0:
+        raise ValueError(
+            f"NaN diagnostic row_offset must be non-negative, got {row_offset}"
+        )
+    rows_per_request = 0
+    rows_per_query = 0
+    if batch_size is not None and q_len is not None:
+        mapping_rows = rows if layout_rows is None else int(layout_rows)
+        if (
+            batch_size <= 0
+            or q_len <= 0
+            or mapping_rows % batch_size != 0
+            or row_offset + rows > mapping_rows
+        ):
+            raise ValueError(
+                "NaN diagnostic tensor rows do not match request layout: "
+                f"rows={rows} layout_rows={mapping_rows} row_offset={row_offset} "
+                f"batch_size={batch_size} q_len={q_len} "
+                f"shape={tuple(tensor.shape)}"
+            )
+        rows_per_request = mapping_rows // batch_size
+        if rows_per_request % q_len != 0:
+            raise ValueError(
+                "NaN diagnostic rows per request are not divisible by q_len: "
+                f"rows_per_request={rows_per_request} q_len={q_len} "
+                f"shape={tuple(tensor.shape)}"
+            )
+        rows_per_query = rows_per_request // q_len
     batch_id_tensor = _BATCH_ID_TENSORS.get(device_key)
     if batch_id_tensor is None:
         # Standalone diagnostic callers have no service trace map. Batch 0 is
@@ -695,6 +986,9 @@ def report_nonfinite(
         state_index,
         int(include_neg_inf),
         int(event_records.shape[0]),
+        int(rows_per_request),
+        int(rows_per_query),
+        int(row_offset),
         BLOCK_N=_BLOCK_N,
         num_warps=4,
         num_stages=1,
@@ -707,6 +1001,7 @@ def report_packed_fp8_kv_cache(
     *,
     source_id: int,
     layer_id: int,
+    kv_kind: int = KV_KIND_UNKNOWN,
     topk_length: torch.Tensor | None = None,
 ) -> None:
     """Report NaN encodings in the packed FP8 slots read by attention.
@@ -720,6 +1015,8 @@ def report_packed_fp8_kv_cache(
         return
     if triton is None:
         raise RuntimeError("DSV4_NAN_DIAG=1 requires Triton")
+    if kv_kind not in (KV_KIND_UNKNOWN, KV_KIND_SWA, KV_KIND_CSA, KV_KIND_HCA):
+        raise ValueError(f"invalid packed DSV4 KV kind: {kv_kind}")
     if (
         not cache.is_cuda
         or cache.dtype != torch.uint8
@@ -734,13 +1031,13 @@ def report_packed_fp8_kv_cache(
         )
     if (
         not indices.is_cuda
-        or indices.dtype != torch.int32
+        or indices.dtype not in (torch.int32, torch.int64)
         or indices.dim() != 3
         or not indices.is_contiguous()
         or indices.device != cache.device
     ):
         raise ValueError(
-            "packed DSV4 KV diagnostic requires contiguous CUDA int32 "
+            "packed DSV4 KV diagnostic requires contiguous CUDA int32/int64 "
             f"indices [B, q_len, K] on {cache.device}, got "
             f"shape={tuple(indices.shape)} dtype={indices.dtype} "
             f"device={indices.device} contiguous={indices.is_contiguous()}"
@@ -809,6 +1106,7 @@ def report_packed_fp8_kv_cache(
         int(cache.stride(0)),
         int(source_id),
         int(layer_id),
+        int(kv_kind),
         state_index,
         int(event_records.shape[0]),
         HAS_LENGTHS=topk_length is not None,
@@ -817,6 +1115,187 @@ def report_packed_fp8_kv_cache(
         BLOCK_N=512,
         num_warps=4,
         num_stages=1,
+    )
+
+
+def _launch_packed_fp8_indexer_cache_report(
+    cache: torch.Tensor,
+    mapping: torch.Tensor,
+    lengths: torch.Tensor,
+    *,
+    rows: int,
+    width: int,
+    q_len: int,
+    map_stride: int,
+    source_id: int,
+    layer_id: int,
+    explicit_slots: bool,
+) -> None:
+    device = _normalized_device(cache.device)
+    device_key = str(device)
+    batch_id_tensor = _BATCH_ID_TENSORS.get(device_key)
+    if batch_id_tensor is None:
+        if torch.cuda.is_current_stream_capturing():
+            raise RuntimeError(
+                "DSV4 NaN diagnostic batch context must be allocated before CUDA "
+                "graph capture; call prewarm(device) first"
+            )
+        batch_id_tensor = torch.zeros((1,), dtype=torch.int64, device=device)
+        _BATCH_ID_TENSORS[device_key] = batch_id_tensor
+    state_index = _report_state_index(int(source_id), int(layer_id))
+    last_reported_batch, report_count = _ensure_report_state(device)
+    event_counters, event_records = _ensure_event_state(device)
+    corrupt_kind = 0
+    if TEST_KV_CORRUPT is not None:
+        corrupt_layer, corrupt_source, requested_kind = TEST_KV_CORRUPT
+        if corrupt_layer == int(layer_id) and corrupt_source == int(source_id):
+            corrupt_kind = requested_kind
+    _report_packed_fp8_indexer_cache_kernel[(rows * width,)](
+        cache,
+        mapping,
+        lengths,
+        batch_id_tensor,
+        last_reported_batch,
+        report_count,
+        event_counters,
+        event_records,
+        rows,
+        width,
+        q_len,
+        int(cache.shape[0]),
+        int(cache.shape[1]),
+        int(cache.stride(0)),
+        map_stride,
+        int(source_id),
+        int(layer_id),
+        state_index,
+        int(event_records.shape[0]),
+        EXPLICIT_SLOTS=explicit_slots,
+        CORRUPT_KIND=corrupt_kind,
+        BLOCK_N=128,
+        num_warps=4,
+        num_stages=1,
+    )
+
+
+def _validate_indexer_cache(cache: torch.Tensor) -> None:
+    if (
+        not cache.is_cuda
+        or cache.dtype != torch.uint8
+        or cache.dim() != 3
+        or cache.shape[-1] != 132
+        or cache.stride(-1) != 1
+    ):
+        raise ValueError(
+            "packed DSV4 indexer KV diagnostic requires CUDA uint8 "
+            f"[num_blocks, block_size, 132], got shape={tuple(cache.shape)} "
+            f"dtype={cache.dtype} device={cache.device} stride={cache.stride()}"
+        )
+
+
+def report_packed_fp8_indexer_slots(
+    cache: torch.Tensor,
+    slots: torch.Tensor,
+    *,
+    source_id: int,
+    layer_id: int,
+) -> None:
+    """Scan exact indexer-K slots, normally immediately after a local write."""
+    if not ENABLED or cache.numel() == 0 or slots.numel() == 0:
+        return
+    if triton is None:
+        raise RuntimeError("DSV4_NAN_DIAG=1 requires Triton")
+    _validate_indexer_cache(cache)
+    if (
+        not slots.is_cuda
+        or slots.dtype not in (torch.int32, torch.int64)
+        or slots.dim() != 3
+        or not slots.is_contiguous()
+        or slots.device != cache.device
+    ):
+        raise ValueError(
+            "packed DSV4 indexer KV diagnostic requires contiguous CUDA "
+            f"int32/int64 slots [B, q_len, K], got shape={tuple(slots.shape)} "
+            f"dtype={slots.dtype} device={slots.device}"
+        )
+    width = int(slots.shape[-1])
+    if width == 0:
+        return
+    rows = int(slots.numel() // width)
+    q_len = int(slots.shape[-2])
+    _launch_packed_fp8_indexer_cache_report(
+        cache,
+        slots,
+        slots,
+        rows=rows,
+        width=width,
+        q_len=q_len,
+        map_stride=0,
+        source_id=source_id,
+        layer_id=layer_id,
+        explicit_slots=True,
+    )
+
+
+def report_paged_fp8_indexer_cache(
+    cache: torch.Tensor,
+    block_table: torch.Tensor,
+    lengths: torch.Tensor,
+    *,
+    source_id: int,
+    layer_id: int,
+    max_ctx_len: int,
+) -> None:
+    """Scan every indexer-K entry a paged score operation will consume."""
+    if not ENABLED or cache.numel() == 0 or max_ctx_len <= 0:
+        return
+    if triton is None:
+        raise RuntimeError("DSV4_NAN_DIAG=1 requires Triton")
+    _validate_indexer_cache(cache)
+    if (
+        not block_table.is_cuda
+        or block_table.dtype != torch.int32
+        or block_table.dim() != 2
+        or not block_table.is_contiguous()
+        or block_table.device != cache.device
+    ):
+        raise ValueError(
+            "paged DSV4 indexer diagnostic requires contiguous CUDA int32 "
+            f"block_table [B, N], got shape={tuple(block_table.shape)} "
+            f"dtype={block_table.dtype} device={block_table.device}"
+        )
+    if (
+        not lengths.is_cuda
+        or lengths.dtype != torch.int32
+        or lengths.dim() != 2
+        or not lengths.is_contiguous()
+        or lengths.device != cache.device
+        or lengths.shape[0] != block_table.shape[0]
+    ):
+        raise ValueError(
+            "paged DSV4 indexer diagnostic requires contiguous CUDA int32 "
+            f"lengths [B, q_len], got shape={tuple(lengths.shape)} "
+            f"dtype={lengths.dtype} device={lengths.device}"
+        )
+    q_len = int(lengths.shape[1])
+    rows = int(lengths.numel())
+    width = min(
+        int(max_ctx_len),
+        int(block_table.shape[1]) * int(cache.shape[1]),
+    )
+    if q_len == 0 or rows == 0 or width == 0:
+        return
+    _launch_packed_fp8_indexer_cache_report(
+        cache,
+        block_table,
+        lengths,
+        rows=rows,
+        width=width,
+        q_len=q_len,
+        map_stride=int(block_table.stride(0)),
+        source_id=source_id,
+        layer_id=layer_id,
+        explicit_slots=False,
     )
 
 
@@ -900,7 +1379,7 @@ def prewarm(device: str | torch.device) -> None:
 
     event_capacity = _configured_event_capacity()
     logging.warning(
-        "[DSV4 NaN diag] enabled on %s with reliable_event_capacity=%d "
+        "[DSV4_NAN_DIAG_READY] enabled on %s with reliable_event_capacity=%d "
         "and auxiliary_printf_fifo=%s; events are rate-limited per "
         "batch/source/layer; reliable host logs use prefix "
         "[DSV4_NAN_RELIABLE], while auxiliary device logs use prefixes "
@@ -908,7 +1387,10 @@ def prewarm(device: str | torch.device) -> None:
         "source_id: 1=moe_input, 2=router_scores, 3=router_bias, "
         "4=cp_attention_lse, 5=final_hidden, 6=attention_query, "
         "7=kv_write_input, 8=swa_kv_cache_read, "
-        "9=compressed_kv_cache_read, 10=attention_output",
+        "9=compressed_kv_cache_read, 10=attention_output, "
+        "11=swa_kv_cache_post_write, 12=compressed_kv_cache_post_write, "
+        "13=indexer_kv_cache_post_write, 14=indexer_kv_cache_read, "
+        "15=indexer_score, 16-19=indexer_inputs",
         device,
         event_capacity,
         f"{fifo_mb} MiB" if fifo_configured else "runtime-default",
@@ -943,12 +1425,14 @@ def prewarm(device: str | torch.device) -> None:
         index_probe,
         source_id=SOURCE_SWA_KV_CACHE_READ,
         layer_id=-1,
+        kv_kind=KV_KIND_SWA,
     )
     report_packed_fp8_kv_cache(
         packed_probe,
         index_probe,
         source_id=SOURCE_COMPRESSED_KV_CACHE_READ,
         layer_id=-1,
+        kv_kind=KV_KIND_CSA,
         topk_length=length_probe,
     )
     if TEST_INJECT is not None:
