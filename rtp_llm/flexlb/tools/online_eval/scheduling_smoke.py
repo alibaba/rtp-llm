@@ -479,11 +479,43 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
         """S6: Under identical conditions, all requests route to same worker.
 
         COST_BASED_PREFILL uses deterministic minimum-score selection.
-        With identical performance and no cache hits, all requests should
-        route to the same prefill worker.
+        With identical performance and no cache hits, both workers have
+        the exact same score.  Even with ``SCORE_TIE_RANDOM_ENABLED=false``
+        (set in run_matrix_smoke.sh), the strategy still applies reservoir
+        sampling among workers whose scores are *exactly* equal, so the
+        routing is non-deterministic.
+
+        To guarantee a single deterministic winner, we inject a small
+        queue depth on prefill-1 so the hotspot filter excludes it,
+        leaving prefill-0 as the sole candidate — the same pattern used
+        by S1 (``_set_queue_depth``) and S4 (``_set_queue_depth``).
+        With only one survivor, reservoir sampling is deterministic.
         """
         start = time.monotonic()
+        injected_engine: str | None = None
         try:
+            snap = await self._snapshot_by_name()
+            prefill_names = sorted(
+                name for name, e in snap.items() if e.get("role") == "prefill"
+            )
+            if len(prefill_names) < 2:
+                return ScenarioResult(
+                    "S6: cost_based_determinism",
+                    False,
+                    "need >=2 prefill workers",
+                    time.monotonic() - start,
+                )
+
+            # Inject a small queue depth on prefill-1 to trigger the
+            # hotspot filter (pendingCount > avgPending * 1.5).  With 2
+            # workers, queue_depth=500 → avg=250, threshold=375 →
+            # prefill-1 (500) filtered out, leaving prefill-0 as the
+            # sole candidate.
+            slow = prefill_names[1]
+            await self._set_queue_depth(slow, 500)
+            injected_engine = slow
+            await asyncio.sleep(1.0)
+
             addrs: list[str] = []
             for _ in range(5):
                 rid = self._next_request_id()
@@ -516,7 +548,8 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
             detail = (
                 f"workers={num_workers}, "
                 f"dist={json.dumps(dict(dist), sort_keys=True)}, "
-                f"accepted={json.dumps(accepted, sort_keys=True)}"
+                f"accepted={json.dumps(accepted, sort_keys=True)}, "
+                f"filtered={slow}(queue_depth=500)"
             )
             return ScenarioResult(
                 "S6: cost_based_determinism",
@@ -531,6 +564,13 @@ class SchedulingSmokeTest(FlexLBSmokeBase):
                 f"exception: {exc!r}",
                 time.monotonic() - start,
             )
+        finally:
+            if injected_engine:
+                try:
+                    await self._set_queue_depth(injected_engine, 0)
+                    await asyncio.sleep(1.0)
+                except Exception:
+                    pass
 
     # -- S7: cas_fairness (direct/queue-only) ------------------------------
 

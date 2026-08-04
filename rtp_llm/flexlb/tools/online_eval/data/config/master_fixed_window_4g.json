@@ -72,10 +72,6 @@
           "COST_BASED_DECODE"
         ],
         [
-          "FLEXLB_BATCH_ALGORITHM",
-          "fixed_window"
-        ],
-        [
           "FLEXLB_BATCH_DISPATCH_POOL_SIZE",
           "500"
         ],
@@ -130,10 +126,6 @@
         [
           "COST_SLO_MS",
           "1000"
-        ],
-        [
-          "FLEXLB_BATCH_MIN_SIZE",
-          "8"
         ],
         [
           "SYNC_REQUEST_TIMEOUT_MS",

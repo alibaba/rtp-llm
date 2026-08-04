@@ -210,7 +210,6 @@ def analyze(run_dir: Path, master_config: Path | None) -> dict:
         "run_dir": str(run_dir),
         "flexlb_logs": [str(path) for path in log_paths],
         "config": {
-            "algorithm": process_env.get("FLEXLB_BATCH_ALGORITHM"),
             "predict_threshold_ms": first_decision.get("threshold_ms", 0),
             "fixed_wait_ms": first_decision.get("fixed_wait_ms", 0),
             "batch_size_max": first_decision.get("batch_size_max", 0),

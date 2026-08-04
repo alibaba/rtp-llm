@@ -47,7 +47,6 @@ DEFAULT_FLEXLB_CONFIG = json.dumps(
         "cacheHitTraceLogEnabled": False,
         "cacheHitWindowWriteEnabled": True,
         "decodeConcurrencyLimit": 132,
-        "flexlbBatchAlgorithm": "fixed_window",
         "flexlbBatchFixedWaitMs": 220,
         "flexlbBatchPredictThresholdMs": 550,
         "flexlbBatchSizeMax": 32,
@@ -57,7 +56,6 @@ DEFAULT_FLEXLB_CONFIG = json.dumps(
         "defaultScheduleMode": "BATCH",
         "flexlbBatchFixedMaxInflightBatches": 2,
         "costSloMs": 1000,
-        "flexlbBatchMinSize": 8,
         "prefillLbTimeoutMs": 5000,
     }
 )

@@ -56,7 +56,6 @@ class AnalyzeSloBatchTest(unittest.TestCase):
                         "zone_process_setting": {
                             "process_info": {
                                 "envs": [
-                                    ["FLEXLB_BATCH_ALGORITHM", "fixed_window"],
                                     ["COST_SLO_MS", "1000"],
                                 ]
                             }
