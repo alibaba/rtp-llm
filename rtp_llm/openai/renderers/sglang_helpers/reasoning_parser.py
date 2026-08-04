@@ -246,6 +246,21 @@ def strip_mm_think_tags(text: str) -> str:
     return text
 
 
+def _trailing_marker_prefix_len(text: str) -> int:
+    """Length of the trailing run that could still grow into a think marker.
+
+    A lone `<` counts: chunk boundaries fall wherever the token stream puts them, so
+    a marker really can start at the very end of a chunk. This mirrors what the base
+    class already does with its own buffer, and carries the same caveat — a response
+    whose final character is `<` has it held back.
+    """
+    longest = max(len(token) for token in _MM_THINK_TOKENS) - 1
+    for n in range(min(len(text), longest), 0, -1):
+        if any(token.startswith(text[-n:]) for token in _MM_THINK_TOKENS):
+            return n
+    return 0
+
+
 class MiniMaxM3ReasoningDetector(BaseReasoningFormatDetector):
     """
     Detector for MiniMax-M3 models.
@@ -271,6 +286,7 @@ class MiniMaxM3ReasoningDetector(BaseReasoningFormatDetector):
             force_reasoning=True,
             stream_reasoning=stream_reasoning,
         )
+        self._marker_carry = ""
 
     def detect_and_parse(self, text: str) -> StreamingParseResult:
         result = super().detect_and_parse(normalize_mm_think_tags(text))
@@ -284,8 +300,35 @@ class MiniMaxM3ReasoningDetector(BaseReasoningFormatDetector):
         combined = normalize_mm_think_tags(self._buffer + new_text)
         self._buffer = ""
         result = super().parse_streaming_increment(combined)
-        result.normal_text = strip_mm_think_tags(result.normal_text)
+        result.normal_text = self._drop_markers(result.normal_text)
         return result
+
+    def _drop_markers(self, text: str) -> str:
+        """Strip markers, carrying a trailing partial marker to the next chunk.
+
+        The base class only keeps buffering while the *whole* buffer is a prefix of a
+        marker, so a chunk ending in `answer</` fails that test and the marker gets
+        emitted piecemeal — no single chunk ever contains a complete marker to strip.
+        Multi-token steps (MTP) hit this routinely because one delta carries both text
+        and the marker's opening.
+        """
+        if not text and not self._marker_carry:
+            return text
+        combined = strip_mm_think_tags(
+            normalize_mm_think_tags(self._marker_carry + text)
+        )
+        keep = _trailing_marker_prefix_len(combined)
+        self._marker_carry = combined[len(combined) - keep :] if keep else ""
+        return combined[: len(combined) - keep]
+
+    def flush_markers(self) -> str:
+        """Release a held-back partial marker once no more tokens are coming.
+
+        Without this, a reply whose last characters look like the start of a marker
+        (`...<`, `...</`) would have them silently dropped.
+        """
+        carry, self._marker_carry = self._marker_carry, ""
+        return carry
 
 
 class ReasoningParser:
@@ -340,3 +383,11 @@ class ReasoningParser:
         """Streaming call: incremental parsing"""
         ret = self.detector.parse_streaming_increment(chunk_text)
         return ret.reasoning_text, ret.normal_text
+
+    def flush_markers(self) -> str:
+        """Release any text a detector held back pending more tokens.
+
+        Only detectors that buffer beyond the base class implement this.
+        """
+        flush = getattr(self.detector, "flush_markers", None)
+        return flush() if flush else ""
