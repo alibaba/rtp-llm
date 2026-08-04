@@ -3,6 +3,7 @@
 # kernels still registered by RTP-LLM. Keep shared target names aligned with
 # flashinfer.BUILD so arch_select can switch repositories transparently.
 load("@//:def.bzl", "cuda_copts")
+load("@//3rdparty/flashinfer:def.bzl", "flashinfer_dispatch_genrule")
 load("@arch_config//:arch_select.bzl", "torch_deps")
 
 common_copts = [
@@ -52,17 +53,9 @@ py_library(
     deps = [":aot_build_utils"],
 )
 
-genrule(
-    name = "generate_dispatch",
-    outs = ["dispatch.inc"],
-    # This interpreter path and dispatch command intentionally mirror the
-    # generate_dispatch rule in flashinfer.BUILD for the current CUDA images.
-    # Change both rules together until a shared Python-toolchain macro replaces
-    # the duplicated genrules.
-    cmd = "loc=$(locations @flashinfer_cpp_cu13//:dispatch_generate_py); loc=$${loc%/*}; loc=$${loc%/*}; PYTHONPATH=$$loc /opt/conda310/bin/python -m aot_build_utils.generate_dispatch_inc --use_fp16_qk_reductions false --mask_modes 1 --path $(RULEDIR)/dispatch.inc --head_dims_sm90 64,64 128,128 --head_dims 64 128 256 --pos_encoding_modes 0",
-    tags = ["local"],
-    tools = [":dispatch_generate_py"],
-)
+# Shares dispatch.inc generation with flashinfer.BUILD via the def.bzl macro,
+# so the interpreter path and generate args are enforced identical by code.
+flashinfer_dispatch_genrule("flashinfer_cpp_cu13")
 
 # C++ FlashInfer attention was replaced by the Python backend in 5312895a25.
 # Keep only the utility kernels still registered by the CUDA bindings.

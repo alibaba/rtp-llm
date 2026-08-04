@@ -1,4 +1,5 @@
 -r requirements_base.txt
+-c requirements_cuda13_constraints.txt
 
 # CUDA 13 / aarch64 (GB200 / GB300) dep set. Keep the TVM FFI and Cutlass DSL
 # pins synchronized with CUDA13_EXPECTED_DEPENDENCY_VERSIONS in

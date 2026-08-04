@@ -1,8 +1,14 @@
 package(default_visibility = ["//visibility:public"])
 load("@rules_python//python:packaging.bzl", "py_package")
 load("@rules_python//python:pip.bzl", "compile_pip_requirements")
-load(":pip.bzl", "PIP_EXTRA_ARGS")
-exports_files(["requirements_base.txt"])
+load(":pip.bzl", "CUDA13_PIP_EXTRA_ARGS", "PIP_EXTRA_ARGS")
+exports_files([
+    "requirements_base.txt",
+    "requirements_cuda13_constraints.txt",
+    # Consumed as data by //bazel:cuda13_wheel_consistency_test.
+    "requirements_torch_gpu_cuda13.txt",
+    "requirements_cuda13_arm.txt",
+])
 
 py_package(
     name = "extension_package",
@@ -39,7 +45,7 @@ compile_pip_requirements(
     name = "requirements_torch_cpu",
     src = "requirements_torch_cpu.txt",
     extra_args = PIP_EXTRA_ARGS,
-    extra_data = ["//:requirements_base.txt"],
+    extra_data = ["@rtp_deps//:requirements_base.txt"],
     requirements_txt = "requirements_lock_torch_cpu.txt",
     tags = ["manual"],
 )
@@ -48,7 +54,7 @@ compile_pip_requirements(
     name = "requirements_torch_gpu_cuda12",
     src = "requirements_torch_gpu_cuda12.txt",
     extra_args = PIP_EXTRA_ARGS,
-    extra_data = ["//:requirements_base.txt"],
+    extra_data = ["@rtp_deps//:requirements_base.txt"],
     requirements_txt = "requirements_lock_torch_gpu_cuda12.txt",
     tags = ["manual"],
 )
@@ -57,7 +63,7 @@ compile_pip_requirements(
     name = "requirements_torch_gpu_cuda12_9",
     src = "requirements_torch_gpu_cuda12_9.txt",
     extra_args = PIP_EXTRA_ARGS,
-    extra_data = ["//:requirements_base.txt"],
+    extra_data = ["@rtp_deps//:requirements_base.txt"],
     requirements_txt = "requirements_lock_torch_gpu_cuda12_9.txt",
     tags = ["manual"],
 )
@@ -65,17 +71,21 @@ compile_pip_requirements(
 compile_pip_requirements(
     name = "requirements_torch_gpu_cuda13",
     src = "requirements_torch_gpu_cuda13.txt",
-    extra_args = PIP_EXTRA_ARGS,
-    extra_data = ["//:requirements_base.txt"],
+    extra_args = CUDA13_PIP_EXTRA_ARGS,
+    extra_data = [
+        "@rtp_deps//:requirements_base.txt",
+        "@rtp_deps//:requirements_cuda13_constraints.txt",
+    ],
     requirements_txt = "requirements_lock_torch_gpu_cuda13.txt",
     tags = ["manual"],
+    timeout = "eternal",
 )
 
 compile_pip_requirements(
     name = "requirements_cuda12_arm",
     src = "requirements_cuda12_arm.txt",
     extra_args = PIP_EXTRA_ARGS,
-    extra_data = ["//:requirements_base.txt"],
+    extra_data = ["@rtp_deps//:requirements_base.txt"],
     requirements_txt = "requirements_lock_cuda12_arm.txt",
     tags = ["manual"],
 )
@@ -83,17 +93,21 @@ compile_pip_requirements(
 compile_pip_requirements(
     name = "requirements_cuda13_arm",
     src = "requirements_cuda13_arm.txt",
-    extra_args = PIP_EXTRA_ARGS,
-    extra_data = ["//:requirements_base.txt"],
+    extra_args = CUDA13_PIP_EXTRA_ARGS,
+    extra_data = [
+        "@rtp_deps//:requirements_base.txt",
+        "@rtp_deps//:requirements_cuda13_constraints.txt",
+    ],
     requirements_txt = "requirements_lock_cuda13_arm.txt",
     tags = ["manual"],
+    timeout = "eternal",
 )
 
 compile_pip_requirements(
     name = "requirements_rocm",
     src = "requirements_rocm.txt",
     extra_args = PIP_EXTRA_ARGS,
-    extra_data = ["//:requirements_base.txt"],
+    extra_data = ["@rtp_deps//:requirements_base.txt"],
     requirements_txt = "requirements_lock_rocm.txt",
     tags = ["manual"],
 )

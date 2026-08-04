@@ -1553,48 +1553,10 @@ void standalone_stable_radix_11bits(void* buf, size_t& buf_size, T const* in, in
 
 ///////////////
 
-#if USING_ROCM
-#include "efficient_topk/warp_topk.hpp"
-
-template <typename T>
-size_t rocm_efficient_topk_workspace_size(int batch_size, SizeType32 len, SizeType32 k, bool is_largest) {
-    size_t buf_size = 0;
-    if (is_largest) {
-        HipKernels::WarpSortTopk<true, T, SizeType32>(
-            nullptr, buf_size, static_cast<T const*>(nullptr),
-            batch_size, len, k, static_cast<T*>(nullptr), static_cast<SizeType32*>(nullptr), 0);
-    } else {
-        HipKernels::WarpSortTopk<false, T, SizeType32>(
-            nullptr, buf_size, static_cast<T const*>(nullptr),
-            batch_size, len, k, static_cast<T*>(nullptr), static_cast<SizeType32*>(nullptr), 0);
-    }
-    return buf_size;
-}
-
-template <typename T>
-void rocm_efficient_topk(SizeType32 batchSize, SizeType32 inputLength, SizeType32 k, bool is_largest,
-    T const* in, T* out_val, SizeType32* out_idx, void* workspace, hipStream_t stream) {
-    size_t buf_size = 0;
-    if (is_largest) {
-        HipKernels::WarpSortTopk<true, T, SizeType32>(
-            workspace, buf_size, in, batchSize, inputLength, k, out_val, out_idx, stream);
-    } else {
-        HipKernels::WarpSortTopk<false, T, SizeType32>(
-            workspace, buf_size, in, batchSize, inputLength, k, out_val, out_idx, stream);
-    }
-}
-#endif // USING_ROCM
-
 template <typename T>
 size_t invokeComputeTopkLastDimWorkspaceSize(
     SizeType32 batchSize, SizeType32 inputLength, SizeType32 k, bool is_largest)
 {
-#if USING_ROCM
-    size_t efficient_buf_size = 0;
-    if (k <= 512) {
-        efficient_buf_size = rocm_efficient_topk_workspace_size<T>(batchSize, inputLength, k, is_largest);
-    }
-#endif
     size_t buf_size = 0;
     void* workspace = nullptr;
     T const* in = nullptr;
@@ -1602,11 +1564,7 @@ size_t invokeComputeTopkLastDimWorkspaceSize(
     SizeType32* out_idx = nullptr;
     standalone_stable_radix_11bits<T, SizeType32, true>(
         workspace, buf_size, in, batchSize, inputLength, k, out_val, out_idx, is_largest, 0);
-#if USING_ROCM
-    return std::max(buf_size, efficient_buf_size);
-#else
     return buf_size;
-#endif
 }
 
 #define INSTANTIATE_COMPUTE_TOPK_LastDim_WORKSPACE_SIZE_DATA_TYPE(T)                                                   \
@@ -1634,14 +1592,8 @@ void invokeTopkLastDim(SizeType32 batchSize, SizeType32 inputLength, SizeType32 
     T* out_val_ = reinterpret_cast<T*>(out_val);
     SizeType32* out_idx_ = reinterpret_cast<SizeType32*>(out_idx);
 #if USING_ROCM
-    // Correctness-first design: WarpSort does not implement mask semantics, so
-    // masked beam-search calls use stable radix while unmasked calls retain the
-    // faster WarpSort. Keep beam_search_op_test in the ROCm lane and record a
-    // latency baseline before adding specialized masked WarpSort support.
-    if (k <= 512 && !mask_val.has_value()) {
-        rocm_efficient_topk<T>(batchSize, inputLength, k, is_largest, in, out_val_, out_idx_, workspace, stream);
-        return;
-    }
+    // ROCm beam search always supplies mask_val, which WarpSort does not support.
+    // Keep execution and workspace sizing on the stable radix implementation.
 #endif
     size_t buf_size = 0;
     standalone_stable_radix_11bits<T, SizeType32, true>(

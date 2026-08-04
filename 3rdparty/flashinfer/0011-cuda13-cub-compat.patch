@@ -9,8 +9,11 @@ stateless functors on CUDA >= 13 so the BlockReduce call sites in
 sampling.cuh compile unchanged on both toolchains.
 
 The external FlashInfer repository cannot include //3rdparty/cub_compat.h.
-Keep these Max / Min definitions structurally equivalent to that first-party
-compatibility header.
+Keep the Max / Min structs added below structurally equivalent to the
+`namespace cub { struct Max/Min ... }` block in //3rdparty/cub_compat.h (see
+its `#if __CUDACC_VER_MAJOR__ >= 13` section, currently lines 37-48). That
+header additionally defines cub::Sum and iterator aliases that this narrow
+patch intentionally does NOT carry.
 
 Not a local invention — this mirrors upstream flashinfer's own fix (the
 `#if CUDA_VERSION >= 12090 → cuda::maximum<>` guard first seen in commit

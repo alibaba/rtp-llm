@@ -14,8 +14,12 @@
 //   rtp_llm/models_py/bindings/common/kernels/moe/moe_routing_kernels.cu
 //   3rdparty/trt_beam_search/topkLastDim.cu
 // FlashInfer is patched in its external repository and cannot include this
-// header; keep its cub::Max / cub::Min definitions structurally equivalent to
-// 3rdparty/flashinfer/0011-cuda13-cub-compat.patch.
+// header. Only the cub::Max / cub::Min structs below are duplicated there; keep
+// them structurally equivalent to the `namespace cub { struct Max/Min ... }`
+// block that 3rdparty/flashinfer/0011-cuda13-cub-compat.patch injects into
+// include/flashinfer/sampling.cuh (see that patch's hunk, currently lines
+// 40-52). cub::Sum and the iterator aliases below are first-party-only and have
+// no counterpart in that patch.
 
 #ifndef RTP_LLM_3RDPARTY_CUB_COMPAT_H_
 #define RTP_LLM_3RDPARTY_CUB_COMPAT_H_
@@ -28,8 +32,8 @@
 namespace cub {
 
 // These functors are semantically equivalent to cuda::maximum<> /
-// cuda::minimum<> / cuda::std::plus<>. Keep the handwritten definitions
-// structurally aligned with the FlashInfer patch referenced above.
+// cuda::minimum<> / cuda::std::plus<>. Max/Min must stay structurally aligned
+// with the FlashInfer patch referenced above (Sum is first-party-only).
 struct Max {
     template <typename T>
     __host__ __device__ __forceinline__ T operator()(const T& a, const T& b) const {

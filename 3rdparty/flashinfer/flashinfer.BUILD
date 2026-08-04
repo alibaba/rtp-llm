@@ -5,7 +5,7 @@
 load("@//:def.bzl", "copts", "cuda_copts")
 load("@local_config_cuda//cuda:build_defs.bzl", "cuda_default_copts_without_arch", "if_cuda")
 load("@arch_config//:arch_select.bzl", "torch_deps")
-load("@//3rdparty/flashinfer:def.bzl", "sub_lib")
+load("@//3rdparty/flashinfer:def.bzl", "sub_lib", "flashinfer_dispatch_genrule")
 
 common_copts = [
     '-DFLASHINFER_ENABLE_BF16',
@@ -73,15 +73,9 @@ py_library(
     deps = [":aot_build_utils"],
 )
 
-genrule(
-    name = "generate_dispatch",
-    tools = [":dispatch_generate_py"],
-    cmd = "loc=$(locations @flashinfer_cpp//:dispatch_generate_py); loc=$${loc%/*};loc=$${loc%/*}; PYTHONPATH=$$loc /opt/conda310/bin/python -m aot_build_utils.generate_dispatch_inc --use_fp16_qk_reductions false --mask_modes 1 --path $(RULEDIR)/dispatch.inc --head_dims_sm90 64,64 128,128 --head_dims 64 128 256 --pos_encoding_modes 0",
-    outs =[
-        "dispatch.inc",
-    ],
-    tags=["local"],
-)
+# dispatch.inc generation is shared with flashinfer_cu13.BUILD via the macro so
+# the interpreter path and generate args cannot drift between the two variants.
+flashinfer_dispatch_genrule("flashinfer_cpp")
 
 genrule(
     name = "generated_sm90",

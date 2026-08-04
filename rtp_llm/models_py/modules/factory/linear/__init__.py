@@ -23,5 +23,5 @@ try:
         import rtp_llm.models_py.modules.factory.linear.impl.rocm  # noqa: F401
     else:
         import rtp_llm.models_py.modules.factory.linear.impl.cuda  # noqa: F401
-except Exception as e:
-    logging.warning(f"Failed to import Linear implementation: {e}")
+except Exception:
+    logging.exception("Failed to import Linear implementation")

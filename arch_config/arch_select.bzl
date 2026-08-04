@@ -94,6 +94,18 @@ def requirement(names):
             if is_arm_unavailable or normalized_name in CUDA13_UNAVAILABLE_REQUIREMENTS
             else [requirement_cuda13_arm(name)]
         )
+        # cuda12 x86 (cuda_pre_12_9) and cuda12_9 x86 have no per-platform
+        # "unavailable" table on purpose: they are the baseline GPU platforms
+        # where every _GPU_ONLY_REQUIREMENTS wheel is qualified and present in
+        # the lock. Per-platform unavailability is expressed only for the
+        # constrained newer platforms (cuda12_arm via
+        # _CUDA12_ARM_UNAVAILABLE_REQUIREMENTS, cuda13 via
+        # CUDA13_UNAVAILABLE_REQUIREMENTS). Consequently a package genuinely
+        # missing from a cuda12 x86 lock fails loudly at analysis ("no such
+        # target"), NOT as a silent runtime ImportError; only rocm-only packages
+        # intentionally degrade to empty deps here, as on every non-rocm branch.
+        # If a wheel ever becomes unavailable specifically on cuda12 x86, add a
+        # table here mirroring the ones above rather than relying on that gap.
         cuda12_x86_deps = [] if is_rocm_only else [requirement_gpu_cuda12(name)]
         cuda12_9_x86_deps = [] if is_rocm_only else [requirement_gpu_cuda12_9(name)]
         generic_deps = (
@@ -162,6 +174,15 @@ def whl_deps():
     # inputs or their hashed locks. Keep overlapping CUDA 13 URLs synchronized
     # with requirements_torch_gpu_cuda13.txt, requirements_cuda13_arm.txt, and
     # their locks until a generated manifest can serve both representations.
+    # bazel/check_cuda13_wheel_consistency.py enforces this for every package
+    # that appears in both this table and the source requirements.
+    #
+    # nvidia-cutlass-dsl / apache-tvm-ffi / triton are deliberately NOT listed
+    # here: they are pip resolver pins, not ABI-bound wheels shipped in the
+    # wheel metadata. Their installed version is constrained by the source
+    # requirements pin + hashed lock, and asserted at runtime by
+    # //rtp_llm/models_py/standalone/test:cuda13_dependency_import_test against
+    # CUDA13_EXPECTED_DEPENDENCY_VERSIONS in bazel/cuda13_packages.bzl.
     return select({
         "@rtp_llm//:using_cuda13_x86": [
             "torch@https://rtp-maga.oss-cn-zhangjiakou.aliyuncs.com/miji/0430/torch-2.11.0%2Bcu130-cp310-cp310-manylinux_2_28_x86_64.whl",
@@ -188,7 +209,7 @@ def whl_deps():
             "tilelang@https://rtp-opensource.oss-cn-hangzhou.aliyuncs.com/package/cuda13/wheels/aarch64/tilelang/tilelang-0.1.9%2Bcuda.git441c3b06-cp38-abi3-linux_aarch64.whl",
         ],
         "@rtp_llm//:cuda_pre_12_9": ["torch==2.6.0+cu126"],
-        "@rtp_llm//:using_cuda12_9_x86": ["torch==2.6.0+cu126"],
+        "@rtp_llm//:using_cuda12_9_x86": ["torch==2.8.0+cu129"],
         "@rtp_llm//:using_cuda12_arm": [
             "torch@https://download.pytorch.org/whl/cu129/torch-2.9.0%2Bcu129-cp310-cp310-manylinux_2_28_aarch64.whl",
             "torchvision@https://download.pytorch.org/whl/cu128/torchvision-0.24.0-cp310-cp310-manylinux_2_28_aarch64.whl",

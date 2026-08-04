@@ -13,6 +13,26 @@ CUDA13_UNAVAILABLE_REQUIREMENTS = {
     "flashinfer-jit-cache": "flashinfer-jit-cache",
 }
 
+# Per-architecture qualification matrix (CUDA 13). x86 and ARM intentionally
+# pin different dependency revisions; the authoritative values live in the
+# CUDA13_EXPECTED_DEPENDENCY_VERSIONS table below (cutlass-dsl / tvm-ffi) and in
+# whl_deps() / requirements_*cuda13*.txt (wheel URLs & SHAs). This block records
+# WHY they diverge, not the values, so it does not become yet another copy:
+#
+#   nvidia-cutlass-dsl / apache-tvm-ffi : pinned per-arch until x86 and ARM are
+#       qualified on a common release.
+#   flash-mla / rtp-kernel wheels       : built from separately validated,
+#       per-architecture platform revisions.
+#
+# Consequence: do NOT assume "x86 passed" implies "ARM passed" or vice versa.
+# In particular the CuteDSL FP4 numerical regression runs only on the ARM SM100
+# pool today (see rtp_llm/models_py/modules/factory/fused_moe/impl/cuda/
+# executors/test/BUILD), so x86 has no equivalent numerical coverage until an
+# x86 SM100 pool + qualified wheels exist.
+#
+# TODO(<owner>): attach the tracking issue for converging x86/ARM onto one
+# revision set and record the target convergence milestone here.
+
 # Runtime dependency smoke tests consume these values. Keep them synchronized
 # with the corresponding pins in the CUDA 13 source requirements files.
 CUDA13_EXPECTED_DEPENDENCY_VERSIONS = {

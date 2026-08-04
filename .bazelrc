@@ -168,16 +168,17 @@ build:cuda13 --copt=-Wno-error=missing-field-initializers
 build:cuda13 --host_copt=-Wno-missing-field-initializers
 
 # CUDA 13 remote KV cache is intentionally opt-in on x86 and unsupported on
-# CUDA ARM. Until a dedicated CI lane exists, the command below is the explicit
-# build-level validation contract for the CUDA 13 RPM branch:
-#   bazel build //rtp_llm/cpp/cache/connector/remote_connector \
+# CUDA ARM. The build-gpu_cuda13_remote_kv job in .aoneci/main.yaml enforces
+# the x86 RPM branch by compiling the connector + client .so copy under this
+# config (build-only, no GPU). To reproduce that check locally:
+#   bazel build //rtp_llm/cpp/cache/connector:connector \
+#   //rtp_llm/libs:copy_remote_kv_cache_manager_client_libs \
 #   --config=cuda13_remote_kv
 build:cuda13_remote_kv --config=cuda13
 build:cuda13_remote_kv --define=use_remote_kv_cache=true
 
 test:cuda13_arm --test_env=LD_PRELOAD=/usr/lib64/librt.so.1
 test:cuda13_arm --test_env=PYTHONNOUSERSITE=1
-test:cuda13_arm --test_env=FLASHINFER_DISABLE_VERSION_CHECK=1
 test:cuda13_arm --test_env=DG_JIT_CPP_STANDARD=20
 test:cuda13_arm --test_env=DG_JIT_CACHE_DIR=/home/admin/.cache/deep_gemm-cu13-2.5.0
 test:cuda13_arm --test_env=CC=/opt/rh/gcc-toolset-12/root/usr/bin/gcc

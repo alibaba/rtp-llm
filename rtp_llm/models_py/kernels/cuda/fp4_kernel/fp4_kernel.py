@@ -13,6 +13,20 @@ if is_cuda() and get_sm()[0] >= 10:
 else:
     logging.info("skip import fp4 kernel from rtp_llm_ops for non cuda platform")
 
+    def _fp4_ops_unavailable(*args, **kwargs):
+        # SM<10 (or non-CUDA) skips importing the FP4 compute ops above. Bind the
+        # names to a raising stub so a called wrapper fails with an actionable
+        # RuntimeError instead of a leaky NameError, matching the ENABLE_FP4
+        # failure semantics used in this package's __init__.
+        raise RuntimeError(
+            "FP4 compute ops are unavailable: cutlass_scaled_fp4_mm / "
+            "scaled_fp4_quant require a CUDA device with SM>=10 (Blackwell). "
+            "This build/device did not import them (non-CUDA platform or SM<10)."
+        )
+
+    cutlass_scaled_fp4_mm = _fp4_ops_unavailable
+    scaled_fp4_quant = _fp4_ops_unavailable
+
 logger = logging.getLogger(__name__)
 
 def cutlass_scaled_fp4_mm_wrapper(

@@ -1,0 +1,3 @@
+# Keep architecture-neutral CUDA 13 dependencies on one tested API surface.
+# Architecture-specific runtime packages stay pinned in each platform input.
+openai==2.4.0

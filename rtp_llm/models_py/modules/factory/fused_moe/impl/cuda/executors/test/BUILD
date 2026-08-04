@@ -1,3 +1,15 @@
+# SM100_ARM executor tests run only on the ARM SM100 pools (ut-gb200 /
+# ut-gb200-cu13). This makes that a structural, analysis-time guardrail rather
+# than relying solely on each CI lane carrying a -SM100_ARM tag filter: any
+# non-ARM config cannot build these targets, so an accidental/mis-scheduled
+# lane fails fast instead of running them against the wrong (or no) GPU pool.
+# The GPU pool value itself still comes from the root .bazelrc (single source);
+# this only gates buildability, it does not duplicate the pool or its tag.
+_SM100_ARM_ONLY = select({
+    "@//:using_cuda_arm": [],
+    "//conditions:default": ["@platforms//:incompatible"],
+})
+
 py_library(
     name = "fused_moe_executor_test_util",
     srcs = ["fused_moe_executor_test_util.py"],
@@ -43,6 +55,7 @@ py_test (
     },
     tags = ["SM100_ARM"],
     exec_properties = {'gpu_count':'1'},
+    target_compatible_with = _SM100_ARM_ONLY,
 )
 
 py_test (
@@ -74,6 +87,7 @@ py_test (
     },
     tags = ["SM100_ARM"],
     exec_properties = {'gpu_count':'1'},
+    target_compatible_with = _SM100_ARM_ONLY,
 )
 
 py_test (
@@ -91,6 +105,25 @@ py_test (
     },
     tags = ["SM100_ARM"],
     exec_properties = {'gpu_count':'1'},
+    target_compatible_with = _SM100_ARM_ONLY,
+)
+
+# x86 CUDA 13 hardware-free counterpart to the ARM-only CuteDSL FP4 numerical
+# regression: verifies the FP4 import/export path resolves cleanly on x86
+# (real impl or _fp4_unavailable stub) without needing an SM100 device.
+py_test(
+    name = "cutedsl_fp4_x86_import_test",
+    srcs = ["cutedsl_fp4_x86_import_test.py"],
+    deps = [
+        "//rtp_llm/models_py:kernels",
+        "//rtp_llm/models_py:modules",
+        "//rtp_llm:config",
+        "//rtp_llm:testlib",
+    ],
+    target_compatible_with = select({
+        "@//:using_cuda13_x86": [],
+        "//conditions:default": ["@platforms//:incompatible"],
+    }),
 )
 
 py_test (
@@ -105,8 +138,8 @@ py_test (
     ],
     env = {
         "GPU_COUNT": "1",
-        "FLASHINFER_DISABLE_VERSION_CHECK": "1",
     },
     tags = ["SM100_ARM"],
     exec_properties = {'gpu_count':'1'},
+    target_compatible_with = _SM100_ARM_ONLY,
 )
