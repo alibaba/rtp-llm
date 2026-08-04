@@ -2,7 +2,9 @@ import unittest
 from types import SimpleNamespace
 
 import torch
+import torch.nn as nn
 import torch.nn.functional as F
+import torchvision
 
 from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl import (
     minimax_m3_vl_rope as rope_module,
@@ -13,6 +15,8 @@ from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl import (
 from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.minimax_m3_vl_mixin import (
     MiniMaxM3VLDeployWeightInfo,
     MiniMaxM3VLImageEmbedding,
+    _MiniMaxM3VLPreprocessBuffers,
+    _MiniMaxM3VLVisionGraphCache,
 )
 from rtp_llm.multimodal.multimodal_mixins.minimax_m3_vl.minimax_m3_vl_vit import (
     CLIPAttention,
@@ -70,6 +74,115 @@ class MiniMaxM3VLWorkEstimateTest(unittest.TestCase):
         self.assertEqual(budget.max_attention_segment, 4 * 2304)
         self.assertEqual(budget.attention_work, 32 * (2304**2))
         self.assertIsNone(self.embedding.get_batch_work_budget(1 << 30))
+
+
+class MiniMaxM3VLGpuFoldTest(unittest.TestCase):
+    class _FakeVisual(nn.Module):
+        def __init__(self):
+            super().__init__()
+            self.anchor = nn.Parameter(
+                torch.empty(0, dtype=torch.bfloat16), requires_grad=False
+            )
+            self.dtype = torch.bfloat16
+
+    def setUp(self):
+        self.embedding = object.__new__(MiniMaxM3VLImageEmbedding)
+        self.embedding.mm_processor = SimpleNamespace(
+            patch_size=2,
+            image_mean=(0.25, 0.5, 0.75),
+            image_std=(0.5, 0.25, 0.125),
+            rescale_factor=1.0 / 255.0,
+        )
+        self.embedding.temporal_patch_size = 2
+        self.embedding.merge_size = 2
+        self.embedding.visual = self._FakeVisual()
+        self.embedding._preprocess_buffers = _MiniMaxM3VLPreprocessBuffers(
+            self.embedding.mm_processor.image_mean,
+            self.embedding.mm_processor.image_std,
+        )
+
+    def _reference_fold(self, frames_nchw, target_hw):
+        p = self.embedding.mm_processor
+        frames = frames_nchw.float()
+        frames = torchvision.transforms.functional.resize(
+            frames,
+            list(target_hw),
+            interpolation=torchvision.transforms.InterpolationMode.BICUBIC,
+        )
+        video = frames.unsqueeze(0) * p.rescale_factor
+        mean = torch.tensor(p.image_mean).view(1, 1, 3, 1, 1)
+        std = torch.tensor(p.image_std).view(1, 1, 3, 1, 1)
+        video = (video - mean) / std
+
+        temporal_patch_size = self.embedding.temporal_patch_size
+        pad_n = (
+            temporal_patch_size - video.shape[1] % temporal_patch_size
+        ) % temporal_patch_size
+        if pad_n:
+            video = torch.cat([video, video[:, -1:].repeat(1, pad_n, 1, 1, 1)], dim=1)
+
+        batch, frames, channel, height, width = video.shape
+        patch_size = p.patch_size
+        merge_size = self.embedding.merge_size
+        grid_t = frames // temporal_patch_size
+        grid_h = height // patch_size
+        grid_w = width // patch_size
+        patches = video.view(
+            batch,
+            grid_t,
+            temporal_patch_size,
+            channel,
+            grid_h // merge_size,
+            merge_size,
+            patch_size,
+            grid_w // merge_size,
+            merge_size,
+            patch_size,
+        )
+        patches = patches.permute(0, 1, 4, 7, 5, 8, 3, 2, 6, 9)
+        return patches.reshape(
+            grid_t * grid_h * grid_w,
+            channel * temporal_patch_size * patch_size * patch_size,
+        ).to(torch.bfloat16)
+
+    def test_fold_matches_previous_layout_and_reuses_device_constants(self):
+        torch.manual_seed(20260803)
+        raw = torch.randint(0, 256, (1, 3, 5, 7), dtype=torch.uint8)
+        expected = self._reference_fold(raw, (8, 8))
+        mean_ptr = self.embedding._preprocess_buffers.image_mean.data_ptr()
+        std_ptr = self.embedding._preprocess_buffers.image_std.data_ptr()
+
+        actual, grid_thw = self.embedding._gpu_fold(raw, (8, 8))
+
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        torch.testing.assert_close(
+            grid_thw, torch.tensor([[1, 4, 4]], dtype=torch.long)
+        )
+        self.assertEqual(
+            self.embedding._preprocess_buffers.image_mean.data_ptr(), mean_ptr
+        )
+        self.assertEqual(
+            self.embedding._preprocess_buffers.image_std.data_ptr(), std_ptr
+        )
+
+    def test_fold_writes_directly_into_packed_destination_slice(self):
+        raw = torch.arange(3 * 4 * 4, dtype=torch.uint8).reshape(1, 3, 4, 4)
+        expected = self._reference_fold(raw, (4, 4))
+        destination = torch.full(
+            (expected.shape[0] + 4, expected.shape[1]),
+            torch.nan,
+            dtype=torch.bfloat16,
+        )
+
+        actual, _ = self.embedding._gpu_fold(
+            raw,
+            (4, 4),
+            pixel_values_out=destination[: expected.shape[0]],
+        )
+
+        self.assertEqual(actual.data_ptr(), destination.data_ptr())
+        torch.testing.assert_close(actual, expected, rtol=0, atol=0)
+        self.assertTrue(torch.isnan(destination[expected.shape[0] :]).all().item())
 
 
 class MiniMaxM3VLVisionAttentionTest(unittest.TestCase):
@@ -271,6 +384,121 @@ class MiniMaxM3VLVisionAttentionTest(unittest.TestCase):
         self.assertEqual(actual.shape, (sequence_length, config.hidden_size))
         self.assertTrue(torch.isfinite(actual).all().item())
         self.assertEqual(attention.last_backend, attention_context.backend)
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_cuda_graph_replays_packed_vision_model(self):
+        config = VisionConfig(
+            hidden_size=160,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=320,
+            patch_size=14,
+        )
+        model = MiniMaxM3VLVisionModel(config).cuda().to(torch.bfloat16).eval()
+        patch_dim = 3 * 2 * config.patch_size * config.patch_size
+        grid_thw = torch.tensor([[1, 2, 2]], dtype=torch.long)
+        sample = torch.randn(4, patch_dim, device="cuda", dtype=torch.bfloat16)
+        backend = vit_module._select_attention_backend(sample)
+        if backend not in ("fa4", "flash_attn"):
+            self.skipTest(f"vision backend {backend} is not graph-enabled")
+
+        capture_stream = torch.cuda.Stream()
+        capture_stream.wait_stream(torch.cuda.current_stream())
+        with torch.cuda.stream(capture_stream), torch.inference_mode():
+            for _ in range(3):
+                model(sample, grid_thw)
+        torch.cuda.current_stream().wait_stream(capture_stream)
+        torch.cuda.synchronize()
+
+        static_input = sample.clone()
+        graph = torch.cuda.CUDAGraph()
+        with torch.cuda.graph(graph), torch.inference_mode():
+            static_output = model(static_input, grid_thw)
+
+        replay_input = torch.randn_like(sample)
+        expected = model(replay_input, grid_thw)
+        static_input.copy_(replay_input)
+        graph.replay()
+
+        torch.testing.assert_close(
+            static_output,
+            expected,
+            rtol=2e-2,
+            atol=2e-2,
+        )
+
+    @unittest.skipUnless(torch.cuda.is_available(), "CUDA is required")
+    def test_cuda_graph_cache_captures_second_shape_and_replays(self):
+        config = VisionConfig(
+            hidden_size=160,
+            num_hidden_layers=1,
+            num_attention_heads=2,
+            intermediate_size=320,
+            patch_size=14,
+        )
+        model = MiniMaxM3VLVisionModel(config).cuda().to(torch.bfloat16).eval()
+        patch_dim = 3 * 2 * config.patch_size * config.patch_size
+        grid_thw = torch.tensor([[1, 2, 2]], dtype=torch.long)
+        sample = torch.randn(4, patch_dim, device="cuda", dtype=torch.bfloat16)
+        backend = vit_module._select_attention_backend(sample)
+        if backend not in ("fa4", "flash_attn", "flashinfer"):
+            self.skipTest(f"vision backend {backend} is not graph-enabled")
+
+        graph_context = model.prepare_cuda_graph_attention_context(
+            grid_thw,
+            sample.device,
+            sample.dtype,
+        )
+        graph_context_output = model(
+            sample,
+            grid_thw,
+            attention_context=graph_context,
+        )
+        eager_output = model(sample, grid_thw)
+        torch.testing.assert_close(
+            graph_context_output,
+            eager_output,
+            rtol=2e-2,
+            atol=2e-2,
+        )
+
+        cache = _MiniMaxM3VLVisionGraphCache(model, max_entries=2, capture_after=2)
+        inputs = [sample, torch.randn_like(sample), torch.randn_like(sample)]
+        for index, graph_input in enumerate(inputs):
+            with self.subTest(index=index):
+                expected = model(graph_input, grid_thw)
+                actual = cache.run(graph_input, grid_thw)
+                torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+
+        self.assertEqual(
+            cache.stats(),
+            {"hit": 1, "miss": 2, "capture": 1, "fallback": 0},
+        )
+
+        stream_inputs = [torch.randn_like(sample), torch.randn_like(sample)]
+        stream_expected = [model(value, grid_thw) for value in stream_inputs]
+        streams = [torch.cuda.Stream(), torch.cuda.Stream()]
+        stream_actual = []
+        for stream, value in zip(streams, stream_inputs):
+            with torch.cuda.stream(stream):
+                stream_actual.append(cache.run(value, grid_thw))
+        torch.cuda.synchronize()
+        for actual, expected in zip(stream_actual, stream_expected):
+            torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+        self.assertEqual(
+            cache.stats(),
+            {"hit": 3, "miss": 2, "capture": 1, "fallback": 0},
+        )
+
+        packed_grid_thw = torch.tensor([[1, 2, 2], [1, 2, 2]], dtype=torch.long)
+        packed_input = torch.randn(8, patch_dim, device="cuda", dtype=torch.bfloat16)
+        expected = model(packed_input, packed_grid_thw)
+        actual = cache.run(packed_input, packed_grid_thw)
+        torch.testing.assert_close(actual, expected, rtol=2e-2, atol=2e-2)
+        self.assertEqual(
+            cache.stats(),
+            {"hit": 3, "miss": 2, "capture": 1, "fallback": 0},
+        )
 
     def test_segments_do_not_attend_to_each_other(self):
         attention = CLIPAttention(self.config)

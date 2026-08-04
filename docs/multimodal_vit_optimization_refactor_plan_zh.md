@@ -902,6 +902,55 @@ CUDA 路径实现在
 该阶段应在 attention 和 scheduler 优化之后进行。直接捕获当前逐 segment
 实现会保留不必要的 launch 和 synchronize，并增加后续重构难度。
 
+#### Stage 6 实现结果：2026-08-04
+
+当前完成的是保守的第一版，默认启用，但只捕获已验证有收益且不会改变 packed
+attention 隔离语义的 workload：
+
+- mean/std 改为 FP32 registered buffer，首次使用时随 ViT 移到目标 device，
+  后续请求复用；
+- `batched_embedding` 根据 `estimate_work` 一次性分配精确大小的 packed BF16
+  pixel buffer，resize/normalize/fold 直接写入对应 slice，移除逐媒体 BF16
+  临时 tensor 和最终 `torch.cat`；
+- CUDA Graph cache 使用完整 grid、shape、dtype 和 device 作为 identity，第二次
+  出现时 capture，最多保留 4 个 entry；支持 FA4、FlashAttention 和 FlashInfer；
+- FlashInfer 的 graph wrapper、indptr 和 plan 在 capture 外准备，capture 失败或
+  backend 不支持时自动走 eager；
+- graph 只用于单 segment、patch 数不超过 4096 的输入。动态 packed batch 的
+  segment 数量会变化，且实测 graph I/O copy 抵消 launch 收益，因此继续走
+  eager；在有严格 segment-isolation 证明之前不做跨 grid padding；
+- 新增 hit、miss、capture、fallback 和 padding ratio 指标；当前为 exact-grid，
+  padding ratio 恒为 0；benchmark 可用 `--enable-cuda-graph` /
+  `--no-enable-cuda-graph` 做同版本 A/B，并记录每个测试点的 graph 统计。
+
+正确性覆盖包括：新旧 fold layout 等价、直接写 packed slice、mean/std buffer
+复用、graph-safe attention context 与 eager 等价、第二次 capture/后续 replay、
+跨 CUDA stream replay 不串结果，以及多 segment packed batch 保持 eager。
+CUDA13/SM10x 下完整 `minimax_m3_vl_vit_test` 通过，耗时 54.1 秒。
+
+最终对比每个测试点执行 5 轮，选择 RPS 中位数所在的完整轮次，所有入选轮次
+均为 `external_busy_samples=0`。GPU Util 使用采样平均值，显存使用 PyTorch
+peak allocated，避免其他驻留任务影响 NVML 总显存：
+
+| 图片 | 并发 | Stage 2 P50 | Stage 6 P50 | Stage 2 RPS | Stage 6 RPS | GPU Util S2 -> S6 | 峰值 MiB S2 -> S6 | graph 行为 |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| 448x448 | 1 | 18.11 ms | 14.67 ms | 48.70 | 65.26 | 23.5% -> 27.3% | 2019 -> 2003 | 精确 shape 稳定命中 |
+| 448x448 | 32 | 89.71 ms | 87.90 ms | 344.75 | 353.12 | 77.2% -> 78.7% | 3986 -> 3835 | packed eager，单条尾批命中 |
+| 448x448 | 64 | 161.32 ms | 158.93 ms | 380.66 | 391.45 | 82.6% -> 84.9% | 6650 -> 6208 | packed eager，单条尾批命中 |
+| 1080p | 1 | 19.47 ms | 16.73 ms | 46.81 | 57.88 | 35.9% -> 33.0% | 2246 -> 2257 | 精确 shape 稳定命中 |
+| 1080p | 32 | 206.00 ms | 174.50 ms | 148.66 | 179.17 | 81.7% -> 78.7% | 6337 -> 6010 | packed eager |
+| 1080p | 64 | 400.06 ms | 328.59 ms | 152.39 | 187.79 | 80.7% -> 82.6% | 10501 -> 10367 | packed eager |
+| 2K | 1 | 19.71 ms | 17.18 ms | 43.42 | 56.89 | 34.0% -> 33.4% | 2244 -> 2301 | 精确 shape 稳定命中 |
+| 2K | 32 | 224.98 ms | 186.63 ms | 129.58 | 166.53 | 68.9% -> 74.4% | 6318 -> 5983 | packed eager |
+| 2K | 64 | 415.95 ms | 350.35 ms | 144.87 | 175.88 | 77.6% -> 77.0% | 10596 -> 9914 | packed eager |
+
+结论：精确 shape 单图片 graph 的吞吐提升 23.66%-34.01%，P50 降低
+12.85%-18.98%；1080p/2K packed batch 通过直接写入整块 BF16 buffer，吞吐
+提升 20.52%-28.51%，P50 降低 15.29%-17.87%，并降低并发 32/64 的峰值
+显存。448x448 packed 路径已经接近算力瓶颈，吞吐提升 2.43%-2.83%。自动
+token-budget padding 暂不实现，因为仅按总 token padding 会改变不同媒体
+segment 的 attention 边界，存在串图风险。
+
 ## 8. 多 GPU 与多 worker 策略
 
 必须区分两类并行：

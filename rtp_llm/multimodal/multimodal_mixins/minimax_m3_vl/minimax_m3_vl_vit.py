@@ -134,6 +134,7 @@ class PackedAttentionContext:
     backend: str
     flashinfer_wrapper: Optional[Any] = None
     fallback_reason: Optional[str] = None
+    cu_seqlens: Optional[torch.Tensor] = None
 
 
 # ---------------------------------------------------------------------------
@@ -683,23 +684,21 @@ class MiniMaxM3VLVisionModel(nn.Module):
             )
 
         try:
-            if (
-                self._flashinfer_workspace is None
-                or self._flashinfer_workspace.device != hidden_states.device
-                or self._flashinfer_wrapper is None
+            if self._flashinfer_workspace is None or (
+                self._flashinfer_workspace.device != hidden_states.device
             ):
-                flashinfer_workspace = torch.empty(
+                self._flashinfer_workspace = torch.empty(
                     128 * 1024 * 1024,
                     dtype=torch.uint8,
                     device=hidden_states.device,
                 )
-                flashinfer_wrapper = _FLASHINFER_RAGGED_WRAPPER(
-                    flashinfer_workspace,
+                self._flashinfer_wrapper = None
+            if self._flashinfer_wrapper is None:
+                self._flashinfer_wrapper = _FLASHINFER_RAGGED_WRAPPER(
+                    self._flashinfer_workspace,
                     kv_layout="NHD",
                     backend="cute-dsl",
                 )
-                self._flashinfer_workspace = flashinfer_workspace
-                self._flashinfer_wrapper = flashinfer_wrapper
 
             assert self._flashinfer_wrapper is not None
             head_dim = self.config.hidden_size // self.config.num_attention_heads
@@ -741,12 +740,73 @@ class MiniMaxM3VLVisionModel(nn.Module):
                 ),
             )
 
+    def prepare_cuda_graph_attention_context(
+        self,
+        grid_thw: torch.Tensor,
+        device: torch.device,
+        dtype: torch.dtype,
+    ) -> PackedAttentionContext:
+        """Plan a fixed-grid attention context outside CUDA Graph capture."""
+        if isinstance(grid_thw, torch.Tensor):
+            grid_thw_list = grid_thw.tolist()
+        else:
+            grid_thw_list = [list(grid) for grid in grid_thw]
+        grid_thw_list = self._apply_max_frames_limit(grid_thw_list)
+        cu_seqlens, _, _ = self._compute_attention_metadata(grid_thw_list, device)
+        backend = _select_attention_backend(torch.empty((), device=device, dtype=dtype))
+        if backend != "flashinfer":
+            return PackedAttentionContext(backend=backend)
+        if _FLASHINFER_RAGGED_WRAPPER is None:
+            raise RuntimeError("FlashInfer graph context requested but unavailable")
+
+        if self._flashinfer_workspace is None or (
+            self._flashinfer_workspace.device != device
+        ):
+            self._flashinfer_workspace = torch.empty(
+                128 * 1024 * 1024,
+                dtype=torch.uint8,
+                device=device,
+            )
+            self._flashinfer_wrapper = None
+
+        qo_indptr_buf = torch.empty_like(cu_seqlens)
+        kv_indptr_buf = torch.empty_like(cu_seqlens)
+        wrapper = _FLASHINFER_RAGGED_WRAPPER(
+            self._flashinfer_workspace,
+            kv_layout="NHD",
+            use_cuda_graph=True,
+            qo_indptr_buf=qo_indptr_buf,
+            kv_indptr_buf=kv_indptr_buf,
+            backend="cute-dsl",
+        )
+        head_dim = self.config.hidden_size // self.config.num_attention_heads
+        wrapper.plan(
+            cu_seqlens,
+            cu_seqlens,
+            self.config.num_attention_heads,
+            self.config.num_attention_heads,
+            head_dim,
+            head_dim,
+            causal=False,
+            sm_scale=head_dim**-0.5,
+            q_data_type=dtype,
+            kv_data_type=dtype,
+            o_data_type=dtype,
+            disable_split_kv=True,
+        )
+        return PackedAttentionContext(
+            backend="flashinfer",
+            flashinfer_wrapper=wrapper,
+            cu_seqlens=cu_seqlens,
+        )
+
     # ------------------------------------------------------------------ forward
 
     def forward(
         self,
         pixel_values: torch.Tensor,
         grid_thw: torch.Tensor,
+        attention_context: Optional[PackedAttentionContext] = None,
     ) -> torch.Tensor:
         if pixel_values is None:
             raise ValueError("You have to specify pixel_values")
@@ -762,9 +822,18 @@ class MiniMaxM3VLVisionModel(nn.Module):
             grid_thw_list = [list(g) for g in grid_thw]
         grid_thw_list = self._apply_max_frames_limit(grid_thw_list)
 
-        cu_seqlens, max_seqlen, segment_offsets = self._compute_attention_metadata(
-            grid_thw_list, hidden_states.device
-        )
+        if attention_context is not None and attention_context.cu_seqlens is not None:
+            segment_lengths = [t * h * w for t, h, w in grid_thw_list]
+            segment_offsets_list = [0]
+            for length in segment_lengths:
+                segment_offsets_list.append(segment_offsets_list[-1] + length)
+            cu_seqlens = attention_context.cu_seqlens
+            max_seqlen = max(segment_lengths, default=0)
+            segment_offsets = tuple(segment_offsets_list)
+        else:
+            cu_seqlens, max_seqlen, segment_offsets = self._compute_attention_metadata(
+                grid_thw_list, hidden_states.device
+            )
         if segment_offsets[-1] != hidden_states.shape[0]:
             raise ValueError(
                 "grid_thw token count does not match pixel_values: "
@@ -773,7 +842,10 @@ class MiniMaxM3VLVisionModel(nn.Module):
         rotary_freqs = self._get_rope_embed_3d(grid_thw_list, self.spatial_merge_size)
         assert rotary_freqs.device == hidden_states.device
         position_embeddings = self._prepare_cos_sin(rotary_freqs)
-        attention_context = self._prepare_attention_context(hidden_states, cu_seqlens)
+        if attention_context is None:
+            attention_context = self._prepare_attention_context(
+                hidden_states, cu_seqlens
+            )
 
         hidden_states = self.encoder(
             hidden_states,
@@ -958,9 +1030,12 @@ class MiniMaxM3VLVisionTower(nn.Module):
         self,
         pixel_values: torch.Tensor,
         grid_thw: torch.Tensor,
+        attention_context: Optional[PackedAttentionContext] = None,
     ) -> torch.Tensor:
         hidden_states = self.vision_tower.vision_model(
-            pixel_values=pixel_values, grid_thw=grid_thw
+            pixel_values=pixel_values,
+            grid_thw=grid_thw,
+            attention_context=attention_context,
         )
         if hidden_states.dim() == 3:
             hidden_states = hidden_states.squeeze(0)

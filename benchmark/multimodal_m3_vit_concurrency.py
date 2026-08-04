@@ -70,6 +70,10 @@ class BenchmarkResult:
     peak_nvml_delta_mib: float
     average_batch_images: float
     maximum_batch_images: int
+    cuda_graph_hits: int
+    cuda_graph_misses: int
+    cuda_graph_captures: int
+    cuda_graph_fallbacks: int
     external_busy_samples: int
 
 
@@ -184,6 +188,11 @@ def parse_args() -> argparse.Namespace:
     )
     parser.add_argument(
         "--validate-mixed-batch",
+        action=argparse.BooleanOptionalAction,
+        default=True,
+    )
+    parser.add_argument(
+        "--enable-cuda-graph",
         action=argparse.BooleanOptionalAction,
         default=True,
     )
@@ -508,6 +517,8 @@ def run_point(
         torch.cuda.synchronize()
         del warmup_outputs
 
+    graph_stats_before = mm.vision_graph_stats()
+
     batch_sizes: List[int] = []
     batch_lock = threading.Lock()
     original_batched_embedding = mm.batched_embedding
@@ -596,6 +607,11 @@ def run_point(
     peak_allocated = torch.cuda.max_memory_allocated()
     request_rate = len(latencies) / wall_seconds
     utilization = monitor.utilization or [0.0]
+    graph_stats_after = mm.vision_graph_stats()
+    graph_stats = {
+        key: graph_stats_after[key] - graph_stats_before[key]
+        for key in graph_stats_after
+    }
 
     return BenchmarkResult(
         image=image_case.name,
@@ -624,6 +640,10 @@ def run_point(
         peak_nvml_delta_mib=max(0.0, peak_nvml - baseline_nvml),
         average_batch_images=float(np.mean(batch_sizes)),
         maximum_batch_images=max(batch_sizes),
+        cuda_graph_hits=graph_stats["hit"],
+        cuda_graph_misses=graph_stats["miss"],
+        cuda_graph_captures=graph_stats["capture"],
+        cuda_graph_fallbacks=graph_stats["fallback"],
         external_busy_samples=monitor.external_busy_samples,
     )
 
@@ -777,6 +797,8 @@ def main() -> None:
 
     print(f"loading M3VL from {args.checkpoint}", flush=True)
     mm = build_model(args.checkpoint, args.load_checkpoint_weights)
+    cuda_graph_enabled = args.enable_cuda_graph
+    mm.set_vision_cuda_graph_enabled(cuda_graph_enabled)
 
     # Import only after the model/native extension has initialized.
     from rtp_llm.metrics import kmonitor
@@ -816,6 +838,7 @@ def main() -> None:
         "max_repeat_attempts": args.max_repeat_attempts,
         "allow_busy_gpu": args.allow_busy_gpu,
         "validate_mixed_batch": args.validate_mixed_batch,
+        "cuda_graph_enabled": cuda_graph_enabled,
         "image_cases": [asdict(case) for case in image_cases],
     }
 
@@ -887,7 +910,11 @@ def main() -> None:
                     f"gpu={result.gpu_util_avg:>5.1f}% "
                     f"mem_delta={result.peak_allocated_delta_mib:>7.0f}MiB "
                     f"batch={result.average_batch_images:.1f}/"
-                    f"{result.maximum_batch_images}",
+                    f"{result.maximum_batch_images} "
+                    f"graph={result.cuda_graph_hits}/"
+                    f"{result.cuda_graph_misses}/"
+                    f"{result.cuda_graph_captures}/"
+                    f"{result.cuda_graph_fallbacks}",
                     flush=True,
                 )
             # Preserve a coherent observed run rather than mixing percentiles

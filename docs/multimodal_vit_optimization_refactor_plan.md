@@ -995,6 +995,59 @@ This stage should follow the attention and scheduler work. Capturing the current
 per-segment implementation would preserve avoidable launch and synchronization
 overhead and make later refactoring harder.
 
+#### Stage 6 implementation result: 2026-08-04
+
+The first implementation is deliberately conservative. It is enabled by
+default, but captures only workloads that showed a benefit without changing
+packed-attention isolation semantics:
+
+- mean/std are registered FP32 device buffers reused across requests;
+- `batched_embedding` allocates one exact-size packed BF16 pixel buffer from
+  `estimate_work`, and resize/normalize/fold writes directly into its slices;
+- the bounded CUDA Graph cache keys on the complete grid, shape, dtype, and
+  device, captures the second occurrence, keeps at most four entries, and
+  supports FA4, FlashAttention, and FlashInfer;
+- FlashInfer graph wrappers, indptr buffers, and plans are prepared outside
+  capture; unsupported backends and capture failures fall back to eager;
+- graph execution is limited to one segment and at most 4096 input patches.
+  Dynamic packed batches remain eager because profiling showed graph I/O copies
+  offsetting launch savings, and padding across grids cannot yet preserve media
+  segment isolation safely;
+- hit, miss, capture, fallback, and padding-ratio metrics were added. Exact-grid
+  entries have a padding ratio of zero. The benchmark supports
+  `--enable-cuda-graph` and `--no-enable-cuda-graph` and records graph counters
+  per point.
+
+Correctness coverage includes old/new fold-layout equivalence, direct packed
+slice writes, normalization-buffer reuse, graph-safe attention context versus
+eager, cross-stream replay isolation, and the packed-batch eager guard. The
+complete CUDA13 / SM10x `minimax_m3_vl_vit_test` passed in 54.1 seconds.
+
+The final comparison uses five repetitions per point and selects the coherent
+median-RPS repetition. All selected repetitions report
+`external_busy_samples=0`. GPU utilization is the sampled average and memory is
+PyTorch peak allocated memory, which excludes unrelated resident allocations:
+
+| Image | C | Stage 2 P50 | Stage 6 P50 | Stage 2 RPS | Stage 6 RPS | GPU util S2 -> S6 | Peak MiB S2 -> S6 | Graph behavior |
+|---|---:|---:|---:|---:|---:|---:|---:|---|
+| 448x448 | 1 | 18.11 ms | 14.67 ms | 48.70 | 65.26 | 23.5% -> 27.3% | 2019 -> 2003 | exact-shape hits |
+| 448x448 | 32 | 89.71 ms | 87.90 ms | 344.75 | 353.12 | 77.2% -> 78.7% | 3986 -> 3835 | packed eager; single-item tails hit |
+| 448x448 | 64 | 161.32 ms | 158.93 ms | 380.66 | 391.45 | 82.6% -> 84.9% | 6650 -> 6208 | packed eager; single-item tails hit |
+| 1080p | 1 | 19.47 ms | 16.73 ms | 46.81 | 57.88 | 35.9% -> 33.0% | 2246 -> 2257 | exact-shape hits |
+| 1080p | 32 | 206.00 ms | 174.50 ms | 148.66 | 179.17 | 81.7% -> 78.7% | 6337 -> 6010 | packed eager |
+| 1080p | 64 | 400.06 ms | 328.59 ms | 152.39 | 187.79 | 80.7% -> 82.6% | 10501 -> 10367 | packed eager |
+| 2K | 1 | 19.71 ms | 17.18 ms | 43.42 | 56.89 | 34.0% -> 33.4% | 2244 -> 2301 | exact-shape hits |
+| 2K | 32 | 224.98 ms | 186.63 ms | 129.58 | 166.53 | 68.9% -> 74.4% | 6318 -> 5983 | packed eager |
+| 2K | 64 | 415.95 ms | 350.35 ms | 144.87 | 175.88 | 77.6% -> 77.0% | 10596 -> 9914 | packed eager |
+
+Exact-shape single-image graphs improve throughput by 23.66%-34.01% and reduce
+P50 by 12.85%-18.98%. For 1080p and 2K packed batches, direct writes into one
+BF16 destination improve throughput by 20.52%-28.51%, reduce P50 by
+15.29%-17.87%, and reduce peak memory at concurrency 32/64. The 448x448 packed
+path is already compute-bound and improves by 2.43%-2.83%. Automatic token-
+budget padding remains deferred: padding only by total token count would change
+per-media attention boundaries and could mix image features.
+
 ## 8. Multi-GPU and Multi-Worker Strategy
 
 Two forms of parallelism must remain distinct:
