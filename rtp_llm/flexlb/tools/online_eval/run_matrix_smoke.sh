@@ -248,6 +248,10 @@ set_group_config() {
       exit 1
       ;;
   esac
+  # Export so Python smoke subprocesses (run_test_suite → python3) inherit
+  # the correct mode. Without this, os.environ.get() falls back to "BATCH"
+  # for all groups, causing false-positive failures in direct/queue suites.
+  export DEFAULT_SCHEDULE_MODE
 }
 
 start_master() {
