@@ -285,6 +285,7 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     py_attn_inputs.dtype            = dataTypeToTorchType(description_.data_type);
     py_attn_inputs.is_prefill       = !decode_batch_size;
     py_attn_inputs.is_target_verify = inputs.is_target_verify;
+    py_attn_inputs.is_draft_extend  = inputs.is_draft_extend;
     RTP_LLM_CHECK_WITH_INFO(
         context_batch_size + decode_batch_size == batch_size,
         "batch size check failed context_batch_size[%ld] decode_batch_size[%ld] total_batch_size[%ld]",
@@ -339,9 +340,10 @@ torch_ext::PyAttentionInputs PyWrappedModel::buildPyAttentionInputs(const GptMod
     // In qwen3-next target verify mode, sequence_lengths_plus_1_d uses prefix_lengths
     {
         RTP_LLM_PROFILE_SCOPE("py_model.buildPyAttentionInputs(sequence_lengths_plus_1)");
-        if (py_attn_inputs.is_target_verify && inputs.sequence_lengths_plus_1.defined()) {
+        const bool is_multi_token_decode = py_attn_inputs.is_target_verify || py_attn_inputs.is_draft_extend;
+        if (is_multi_token_decode && inputs.sequence_lengths_plus_1.defined()) {
             py_attn_inputs.sequence_lengths_plus_1_d = to_device_i32(inputs.sequence_lengths_plus_1);
-        } else if (py_attn_inputs.is_target_verify) {
+        } else if (is_multi_token_decode) {
             py_attn_inputs.sequence_lengths_plus_1_d = length_plus_one_device(prefix_lengths_src);
         } else {
             py_attn_inputs.sequence_lengths_plus_1_d = length_plus_one_device(sequence_lengths_src);
@@ -423,8 +425,12 @@ void PyWrappedModel::setupKVCacheForAttentionInputs(torch_ext::PyAttentionInputs
     // where the forward actually replays a graph:
     //   - decode cudagraph: !is_prefill (uses graph)
     //   - prefill cudagraph: is_prefill_cuda_graph_mode_ (uses graph)
-    // target-verify is prefill-shaped but does use cudagraph (graph runner's
-    // is_target_verify_=true accepts it); detect via inputs.is_target_verify.
+    // Target verify is prefill-shaped but the target model's decode runner has
+    // an explicit replay mode for it. Draft extend is different: only the
+    // separate sp_prefill_draft_model_ can replay it, and that model is already
+    // identified by is_prefill_cuda_graph_mode_. When the separate model is
+    // disabled, draft_model_'s decode runner rejects the prefill-shaped input
+    // and falls back to eager SparseMLA, which still requires the host table.
     const bool input_is_prefill = inputs.input_lengths.defined() && inputs.input_lengths.size(0) > 0
                                   && (!inputs.sequence_lengths.defined() || inputs.sequence_lengths.size(0) == 0);
     const bool forward_uses_cuda_graph =

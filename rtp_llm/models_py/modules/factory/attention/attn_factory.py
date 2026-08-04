@@ -42,14 +42,18 @@ def get_mla_impl(
     # baseline (DSA decode) uses sparse MLA — different attention algorithms over
     # the same KV cache → divergent main-model predictions and wrong response.
     is_target_verify = bool(getattr(attn_inputs, "is_target_verify", False))
+    is_draft_extend = bool(getattr(attn_inputs, "is_draft_extend", False))
+    # Only sparse/DSA draft extend uses paged multi-token decode. Dense MLA
+    # draft extend remains a prefill-shaped input and keeps the prefill impl.
+    use_decode_mla = is_target_verify or (is_draft_extend and attn_configs.is_sparse)
 
     mla_impls = (
         PREFILL_MLA_IMPS
-        if (attn_inputs.is_prefill and not is_target_verify)
+        if (attn_inputs.is_prefill and not use_decode_mla)
         else DECODE_MLA_IMPS
     )
     allow_cuda_graph_prefill_absorb = False
-    if is_cuda_graph and attn_inputs.is_prefill and not is_target_verify:
+    if is_cuda_graph and attn_inputs.is_prefill and not use_decode_mla:
         try:
             input_lengths = attn_inputs.input_lengths
             prefix_lengths = attn_inputs.prefix_lengths
@@ -76,7 +80,7 @@ def get_mla_impl(
         cos_sin_cache = weight.get_global_weight(W.rope_cos_sin_cache)
         use_fast_path = (
             attn_inputs.is_prefill
-            and not is_target_verify
+            and not use_decode_mla
             and attn_inputs.cu_kv_seqlens.max().item() <= attn_configs.indexer_topk
             and not (
                 parallelism_config and parallelism_config.prefill_cp_config.is_enabled()
@@ -118,7 +122,8 @@ def get_mla_impl(
             return instance
     logging.error(
         f"can not find mla type: is_prefill={attn_inputs.is_prefill}, "
-        f"is_target_verify={is_target_verify}, is_sparse={attn_configs.is_sparse}, "
+        f"is_target_verify={is_target_verify}, is_draft_extend={is_draft_extend}, "
+        f"is_sparse={attn_configs.is_sparse}, "
         f"use_mla={attn_configs.use_mla}, kv_cache_dtype={attn_configs.kv_cache_dtype}, "
         f"is_cuda_graph={is_cuda_graph}, indexer_topk={attn_configs.indexer_topk}, "
         f"impls={[i.__name__ for i in mla_impls]}, "

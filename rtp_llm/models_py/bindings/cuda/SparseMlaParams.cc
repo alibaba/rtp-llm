@@ -459,8 +459,8 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs,
         if (forbid_realloc && batch_indice_h.defined()) {
             graph_token_capacity = std::max<int64_t>(graph_token_capacity, batch_indice_h.size(0));
         }
-        if (attn_inputs.is_target_verify && total_tokens > 0) {
-            target_verify_total_tokens_ = static_cast<int>(total_tokens);
+        if ((attn_inputs.is_target_verify || attn_inputs.is_draft_extend) && total_tokens > 0) {
+            multi_token_decode_total_tokens_ = static_cast<int>(total_tokens);
         }
         if (total_tokens > 0 && batch_size > 0) {
             prefill_tokens_per_batch_ = static_cast<int>(total_tokens) / batch_size;
@@ -530,10 +530,10 @@ void SparseMlaParams::fillParams(torch_ext::PyAttentionInputs attn_inputs,
     }
 }
 
-void SparseMlaParams::fillTargetVerifyCudaGraphParams(torch::Tensor input_lengths_d,
-                                                      torch::Tensor prefix_lengths_d,
-                                                      torch::Tensor kv_cache_block_id_device,
-                                                      int           seq_size_per_block) {
+void SparseMlaParams::fillMultiTokenDecodeCudaGraphParams(torch::Tensor input_lengths_d,
+                                                          torch::Tensor prefix_lengths_d,
+                                                          torch::Tensor kv_cache_block_id_device,
+                                                          int           seq_size_per_block) {
     RTP_LLM_CHECK_WITH_INFO(input_lengths_d.defined() && input_lengths_d.is_cuda(), "expects CUDA input_lengths");
     RTP_LLM_CHECK_WITH_INFO(prefix_lengths_d.defined() && prefix_lengths_d.is_cuda(), "expects CUDA prefix_lengths");
     RTP_LLM_CHECK_WITH_INFO(kv_cache_block_id_device.defined() && kv_cache_block_id_device.is_cuda(),
@@ -576,13 +576,13 @@ void SparseMlaParams::fillTargetVerifyCudaGraphParams(torch::Tensor input_length
                                              cap_tokens,
                                              stream);
 
-    int total_tokens = target_verify_total_tokens_;
+    int total_tokens = multi_token_decode_total_tokens_;
     if (total_tokens <= 0 && prefill_tokens_per_batch_ > 0) {
         total_tokens = batch_size * prefill_tokens_per_batch_;
     }
     RTP_LLM_CHECK_WITH_INFO(
         total_tokens > 0,
-        "total_tokens must be derivable from target_verify_total_tokens_ or prefill_tokens_per_batch_");
+        "total_tokens must be derivable from multi_token_decode_total_tokens_ or prefill_tokens_per_batch_");
     const int page_capacity = batch_size * max_blocks_per_batch;
 
     auto set_shape = [](torch::Tensor& t, std::vector<int64_t> s) {
@@ -668,6 +668,20 @@ void registerPySparseMlaParams(pybind11::module& m) {
             pybind11::arg("seq_size_per_block"),
             pybind11::arg("forbid_realloc") = false)
         .def(
+            "fill_multi_token_decode_cuda_graph_params",
+            [](rtp_llm::SparseMlaParams& self,
+               torch::Tensor             input_lengths_d,
+               torch::Tensor             prefix_lengths_d,
+               torch::Tensor             kv_cache_block_id_device,
+               int                       seq_size_per_block) {
+                self.fillMultiTokenDecodeCudaGraphParams(
+                    input_lengths_d, prefix_lengths_d, kv_cache_block_id_device, seq_size_per_block);
+            },
+            pybind11::arg("input_lengths"),
+            pybind11::arg("prefix_lengths"),
+            pybind11::arg("kv_cache_block_id_device"),
+            pybind11::arg("seq_size_per_block"))
+        .def(
             "fill_target_verify_cuda_graph_params",
             [](rtp_llm::SparseMlaParams& self,
                torch::Tensor             input_lengths_d,
@@ -697,7 +711,8 @@ void registerPySparseMlaParams(pybind11::module& m) {
         .def_readonly("topk_indices_offset", &SparseMlaParams::topk_indices_offset)
         .def_readonly("ks", &SparseMlaParams::ks)
         .def_readonly("ke", &SparseMlaParams::ke)
-        .def_readonly("target_verify_total_tokens", &SparseMlaParams::target_verify_total_tokens_)
+        .def_readonly("multi_token_decode_total_tokens", &SparseMlaParams::multi_token_decode_total_tokens_)
+        .def_readonly("target_verify_total_tokens", &SparseMlaParams::multi_token_decode_total_tokens_)
         .def_readonly("prefill_tokens_per_batch", &SparseMlaParams::prefill_tokens_per_batch_)
         .def_readonly("prefill_total_kv_tokens", &SparseMlaParams::prefill_total_kv_tokens)
         .def_readwrite("schedule_metadata", &SparseMlaParams::schedule_metadata)

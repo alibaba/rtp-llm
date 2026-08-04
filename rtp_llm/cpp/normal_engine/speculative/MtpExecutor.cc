@@ -2196,6 +2196,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
     // propagates them. Preparing before this point can leave the CUDA graph
     // attention/KV buffers stale while forward() uses the post-rejection token
     // and hidden tensors.
+    model_input.is_draft_extend = true;
     launchDraftPrefillPrepareAsync(model_input);
 
     {
@@ -2205,6 +2206,7 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
             draft_prefill_prepare_runner_.sync(cuda_graph::graphGetCurrentStream());
         }
         if (shouldSkipFakeStreamForStop(model_input, "draft prefill forward")) {
+            model_input.is_draft_extend = false;
             releaseAllModelBuffers();
             return absl::OkStatus();
         }
@@ -2225,9 +2227,11 @@ absl::Status MtpExecutor::decodeStep(const std::list<GenerateStreamPtr>& streams
 
         int64_t start_time_us = autil::TimeUtility::currentTimeInMicroSeconds();
         try {
-            draft_prefill_model_output = runDraftPrefillForward(model_input);
+            draft_prefill_model_output  = runDraftPrefillForward(model_input);
+            model_input.is_draft_extend = false;
         } catch (...) {
-            auto forward_exception = std::current_exception();
+            model_input.is_draft_extend = false;
+            auto forward_exception      = std::current_exception();
             try {
                 finishEarlyMtpTargetLogprobsFinalize(early_target_logprobs_finalize_state, target_logprobs);
             } catch (const std::exception& e) {

@@ -326,9 +326,10 @@ class Indexer(nn.Module):
         attention_inputs: Any,
         cp_params: Optional[Any],
     ) -> torch.Tensor:
-        if not attention_inputs.is_prefill or bool(
+        is_multi_token_decode = bool(
             getattr(attention_inputs, "is_target_verify", False)
-        ):
+        ) or bool(getattr(attention_inputs, "is_draft_extend", False))
+        if not attention_inputs.is_prefill or is_multi_token_decode:
             return self.indexer_op._get_topk_paged(
                 q_fp8, weights, kv_cache, fmha_params, attention_inputs
             )

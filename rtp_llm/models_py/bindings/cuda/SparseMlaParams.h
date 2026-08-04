@@ -64,13 +64,21 @@ private:
     void refreshCpBuffer(int kv_restore_count, int total_ids_count, int batch_size);
 
 public:
-    int  target_verify_total_tokens_ = 0;
-    int  prefill_tokens_per_batch_   = 0;
+    int  multi_token_decode_total_tokens_ = 0;
+    int  prefill_tokens_per_batch_        = 0;
     void fillParams(torch_ext::PyAttentionInputs attn_inputs, int seq_size_per_block, bool forbid_realloc = false);
+    void fillMultiTokenDecodeCudaGraphParams(torch::Tensor input_lengths_d,
+                                             torch::Tensor prefix_lengths_d,
+                                             torch::Tensor kv_cache_block_id_device,
+                                             int           seq_size_per_block);
+    // Compatibility alias for existing target-verify callers/tests.
     void fillTargetVerifyCudaGraphParams(torch::Tensor input_lengths_d,
                                          torch::Tensor prefix_lengths_d,
                                          torch::Tensor kv_cache_block_id_device,
-                                         int           seq_size_per_block);
+                                         int           seq_size_per_block) {
+        fillMultiTokenDecodeCudaGraphParams(
+            input_lengths_d, prefix_lengths_d, kv_cache_block_id_device, seq_size_per_block);
+    }
     // Decode CUDA graph fast path for SparseMla (draft model). Delegates the
     // base-class metadata to fillDecodeCudaGraphParams and matches the decode
     // branch of fillParams (empty ks/ke/topk_indices_offset; expanded_seq_lens

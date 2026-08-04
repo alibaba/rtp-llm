@@ -72,6 +72,12 @@ def _as_uint8(kv: torch.Tensor) -> torch.Tensor:
     return kv.view(torch.uint8) if kv.dtype != torch.uint8 else kv
 
 
+def _is_multi_token_decode(attn_inputs: PyAttentionInputs) -> bool:
+    return bool(getattr(attn_inputs, "is_target_verify", False)) or bool(
+        getattr(attn_inputs, "is_draft_extend", False)
+    )
+
+
 # ---------------------------------------------------------------------------
 # BF16 sparse MLA operator
 # ---------------------------------------------------------------------------
@@ -265,6 +271,7 @@ class SparseMlaFp8Op(SparseMlaOp):
             os.environ.get("USE_GATHER_PATH", "0") == "1"
             and attn_inputs is not None
             and getattr(attn_inputs, "is_prefill", False)
+            and not _is_multi_token_decode(attn_inputs)
             and not self.use_cuda_graph
         )
         self._gather = self._build_gather_workspace() if gather_enabled else None
@@ -497,7 +504,7 @@ class SparseMlaImpl(MlaImplBase):
         place instead of replacing the tensor object.
         """
         if not (
-            bool(getattr(attn_inputs, "is_target_verify", False))
+            _is_multi_token_decode(attn_inputs)
             or not bool(getattr(attn_inputs, "is_prefill", False))
         ):
             return
@@ -508,7 +515,7 @@ class SparseMlaImpl(MlaImplBase):
         if not hasattr(deep_gemm, "get_paged_mqa_logits_metadata"):
             return
 
-        if bool(getattr(attn_inputs, "is_target_verify", False)):
+        if _is_multi_token_decode(attn_inputs):
             lengths = self.fmha_params.expanded_seq_lens
         else:
             lengths = self.fmha_params.kvlen_d
@@ -585,15 +592,15 @@ class SparseMlaImpl(MlaImplBase):
 
     def prepare_cuda_graph(self, attn_inputs: PyAttentionInputs) -> None:
         if (
-            getattr(attn_inputs, "is_target_verify", False)
+            _is_multi_token_decode(attn_inputs)
             and isinstance(self.fmha_impl, SparseMlaFp8Op)
             and attn_inputs.kv_cache_kernel_block_id_device is not None
-            and self.fmha_params.target_verify_total_tokens > 0
+            and self.fmha_params.multi_token_decode_total_tokens > 0
         ):
             block_table = getattr(attn_inputs, "kv_cache_kernel_block_id_device", None)
             if not isinstance(block_table, torch.Tensor) or block_table.numel() == 0:
                 block_table = attn_inputs.kv_cache_block_id_device
-            self.fmha_params.fill_target_verify_cuda_graph_params(
+            self.fmha_params.fill_multi_token_decode_cuda_graph_params(
                 attn_inputs.input_lengths,
                 attn_inputs.prefix_lengths,
                 block_table,
@@ -625,7 +632,7 @@ class SparseMlaImpl(MlaImplBase):
             return
         if (
             getattr(attn_inputs, "is_prefill", False)
-            and not getattr(attn_inputs, "is_target_verify", False)
+            and not _is_multi_token_decode(attn_inputs)
             and isinstance(self.fmha_impl, SparseMlaFp8Op)
             and attn_inputs.kv_cache_kernel_block_id_device is not None
             and self.fmha_params.prefill_tokens_per_batch > 0

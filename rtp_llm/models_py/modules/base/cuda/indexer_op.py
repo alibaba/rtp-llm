@@ -653,6 +653,8 @@ class IndexerOp(nn.Module):
         """
         weights = weights.view(-1, self.index_n_heads)
         is_target_verify = bool(getattr(attention_inputs, "is_target_verify", False))
+        is_draft_extend = bool(getattr(attention_inputs, "is_draft_extend", False))
+        is_multi_token_decode = is_target_verify or is_draft_extend
 
         num_heads_kv = 1
         head_dim_with_sf = self._head_dim_with_sf()
@@ -666,18 +668,18 @@ class IndexerOp(nn.Module):
         cu_seqlens_q = attention_inputs.decode_cu_seqlens_d
         lengths = fmha_params.expanded_seq_lens
 
-        if is_target_verify:
-            # Target verify has multiple query tokens per request. Treat it as
-            # flattened decode: each verify token gets its own context length and
-            # the same block-table row as its parent request. This matches the
-            # paged DSA path used by SGLang/vLLM and avoids the ragged
-            # fp8_mqa_logits path under CUDA graph replay.
+        if is_multi_token_decode:
+            # Target verify and draft extend have multiple query tokens per
+            # request. Treat either phase as flattened decode: each token gets
+            # its own context length and the same block-table row as its parent
+            # request. This matches the paged DSA path used by SGLang/vLLM and
+            # avoids the ragged fp8_mqa_logits path under CUDA graph replay.
             num_tokens = q_fp8.shape[0]
             batch_size = block_table.shape[0]
             assert batch_size > 0
             assert (
                 num_tokens % batch_size == 0
-            ), f"target verify tokens {num_tokens} not divisible by batch {batch_size}"
+            ), f"multi-token decode rows {num_tokens} not divisible by batch {batch_size}"
             tokens_per_batch = num_tokens // batch_size
             block_table = block_table.repeat_interleave(
                 tokens_per_batch, dim=0, output_size=num_tokens
@@ -758,8 +760,11 @@ class IndexerOp(nn.Module):
         Returns:
             TopK indices tensor
         """
-        assert not bool(getattr(attention_inputs, "is_target_verify", False)), (
-            "target verify must use paged DSA topk; ragged fp8_mqa_logits is "
+        assert not (
+            bool(getattr(attention_inputs, "is_target_verify", False))
+            or bool(getattr(attention_inputs, "is_draft_extend", False))
+        ), (
+            "multi-token decode must use paged DSA topk; ragged fp8_mqa_logits is "
             "not CUDA-graph safe"
         )
 

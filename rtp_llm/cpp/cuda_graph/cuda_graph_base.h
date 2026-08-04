@@ -22,6 +22,7 @@ struct GraphParams {
     bool                 enable_cuda_graph_debug_mode = false;
     bool                 is_prefill_cuda_graph_mode   = false;
     bool                 is_target_verify             = false;
+    bool                 is_draft_extend              = false;
     int                  max_seq_len                  = 0;
     int                  tokens_per_block             = 0;  // physical kv block size
     int                  kernel_tokens_per_block      = 0;  // must be explicitly configured
@@ -38,7 +39,7 @@ struct GraphParams {
     // CudaGraphRunner allocates input_hiddens with hidden_size * hc_mult so
     // the DSv4 MTP draft graph captures with the [T, hc*dim] residual shape
     // produced by the target's getMtpTargetHiddenStates accessor.
-    int64_t              hc_mult            = 1;
+    int64_t hc_mult = 1;
 };
 
 class GraphBase {

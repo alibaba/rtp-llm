@@ -874,6 +874,7 @@ int CudaGraphRunner::getCurrentRealGraphBs(const CudaGraphState& state) const {
 void CudaGraphRunner::initCaptureAttentionInputs(PyModelInputs& inputs, int max_bs, int num_tokens_per_bs) {
     c10::DeviceGuard graph_device_guard(cuda_graph::graphDevice(device_index_));
     inputs.attention_inputs.is_target_verify = is_target_verify_;
+    inputs.attention_inputs.is_draft_extend  = is_draft_extend_;
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
 
     // input_ids [tokens_nums] = [batch_size * num_tokens_per_bs]
@@ -1241,6 +1242,7 @@ void CudaGraphRunner::prepareCaptureInputs(PyModelInputs& inputs, int batch_size
     // Common slice operations for input_ids and padding_offset
     inputs.attention_inputs.is_prefill       = is_prefill_cuda_graph_mode_ || num_tokens_per_bs_ > 1;
     inputs.attention_inputs.is_target_verify = is_target_verify_;
+    inputs.attention_inputs.is_draft_extend  = is_draft_extend_;
     // Draft prefill cudagraph has two shapes:
     // * DSv4 MTP (hc_mult_ > 1) consumes pre-HC hidden as [B*q_len, hc*dim]
     //   and routes through decode-style hidden preparation, so capture keeps

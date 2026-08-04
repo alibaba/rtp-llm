@@ -351,6 +351,8 @@ inline PyWrappedModel::PyWrappedModel(const GptModelInitParams& params,
                                              && params.sp_config.gen_num_per_cycle > 0 && !params.model_id
                                              && !is_prefill_cuda_graph_mode;
         graph_params.is_target_verify = use_spec_decoding || is_target_verify_decode;
+        graph_params.is_draft_extend  = params.sp_config.type != SP_TYPE_NONE && params.sp_config.gen_num_per_cycle > 0
+                                       && params.model_id && is_prefill_cuda_graph_mode;
         if (params.sp_config.type != SP_TYPE_NONE) {
             graph_params.sp_steps = params.sp_config.gen_num_per_cycle;
         }

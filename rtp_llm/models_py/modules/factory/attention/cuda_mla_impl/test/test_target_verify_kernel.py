@@ -74,6 +74,12 @@ class TestSparseMlaTargetVerifyParams(TestCase):
         attn_inputs.kv_cache_kernel_block_id_host = self.block_table.cpu().contiguous()
         return attn_inputs
 
+    def _build_draft_extend_inputs(self):
+        attn_inputs = self._build_target_verify_inputs()
+        attn_inputs.is_target_verify = False
+        attn_inputs.is_draft_extend = True
+        return attn_inputs
+
     def _build_decode_inputs(self):
         attn_inputs = PyAttentionInputs()
         attn_inputs.is_prefill = False
@@ -210,6 +216,25 @@ class TestSparseMlaTargetVerifyParams(TestCase):
         torch.cuda.synchronize()
         self.assertEqual(test_params.target_verify_total_tokens, self.total_tokens)
         test_params.fill_target_verify_cuda_graph_params(
+            self.input_lengths,
+            self.prefix_lengths,
+            self.block_table,
+            self.seq_size_per_block,
+        )
+        torch.cuda.synchronize()
+        self._assert_match(test_params, ref)
+
+    def test_draft_extend_uses_same_multi_token_metadata(self):
+        """Draft extend is prefill-shaped but must use the same flattened
+        paged metadata as target verify."""
+        ref = self._build_reference()
+        test_params = rtp_llm_ops.SparseMlaParams()
+        test_params.fill_params(
+            self._build_draft_extend_inputs(), self.seq_size_per_block, False
+        )
+        torch.cuda.synchronize()
+        self.assertEqual(test_params.multi_token_decode_total_tokens, self.total_tokens)
+        test_params.fill_multi_token_decode_cuda_graph_params(
             self.input_lengths,
             self.prefix_lengths,
             self.block_table,
