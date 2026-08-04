@@ -23,7 +23,6 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicLong;
 
 import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
 
@@ -209,6 +208,10 @@ public class GrpcWorkerStatusRunner implements Runnable {
     }
 
     private void handleTaskStateUpdateResult(TaskStateUpdateResult updateResult) {
+        for (long latencyMs : updateResult.waitingTaskConfirmationLatenciesMs()) {
+            engineHealthReporter.reportMasterDecisionToWaitingConfirmationLatency(
+                    modelName, ip, roleType.getCode(), group, latencyMs);
+        }
         for (CacheHitFeedback feedback : updateResult.cacheHitFeedbacks()) {
             cacheAwareService.buildCacheHitComparison(feedback)
                     .thenAccept(this::reportCacheHitComparison)

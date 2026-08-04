@@ -143,4 +143,46 @@ class GrpcWorkerStatusCheckRunnerTest {
                     && unifiedComparison.equals(arguments[1]);
         }));
     }
+
+    @Test
+    void shouldReportWaitingConfirmationLatency_whenTaskFirstAppearsInWaitingQueue() {
+        String requestId = "request-1";
+        WorkerHost host = new WorkerHost(
+                "127.0.0.1", 8080, 8081, 8085, 18002, "test-site", "test-group", "deployment-a");
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setIp("127.0.0.1");
+
+        TaskInfo localTask = new TaskInfo();
+        localTask.setRequestId(requestId);
+        workerStatus.putLocalTask(requestId, localTask);
+        localTask.setLastActiveTimeUs(System.nanoTime() / 1000 - 5_000);
+
+        EngineRpcService.TaskInfoPB waitingTask = EngineRpcService.TaskInfoPB.newBuilder()
+                .setRequestId(requestId)
+                .setIsWaiting(true)
+                .build();
+        EngineRpcService.WorkerStatusPB workerStatusPB = EngineRpcService.WorkerStatusPB.newBuilder()
+                .setRole(RoleType.PREFILL.getCode())
+                .setStatusVersion(100)
+                .setAlive(true)
+                .addRunningTaskInfo(waitingTask)
+                .build();
+        when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(workerStatusPB);
+
+        new GrpcWorkerStatusRunner(
+                "test-model", host, RoleType.PREFILL, workerStatus, engineHealthReporter,
+                engineGrpcService, 20, cacheAwareService).run();
+
+        assertTrue(Mockito.mockingDetails(engineHealthReporter).getInvocations().stream().anyMatch(invocation -> {
+            Object[] arguments = invocation.getArguments();
+            return invocation.getMethod().getName().equals("reportMasterDecisionToWaitingConfirmationLatency")
+                    && arguments.length == 5
+                    && "test-model".equals(arguments[0])
+                    && "127.0.0.1".equals(arguments[1])
+                    && RoleType.PREFILL.getCode().equals(arguments[2])
+                    && "test-group".equals(arguments[3])
+                    && (long) arguments[4] >= 5;
+        }));
+    }
 }

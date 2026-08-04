@@ -120,6 +120,7 @@ public class WorkerStatus {
                                                   Map<String, TaskInfo> finishedTaskInfo) {
 
         List<CacheHitFeedback> cacheHitFeedbacks = new ArrayList<>();
+        List<Long> waitingTaskConfirmationLatenciesMs = new ArrayList<>();
         Iterator<Map.Entry<String, TaskInfo>> iterator = localTaskMap.entrySet().iterator();
         while (iterator.hasNext()) {
             Map.Entry<String, TaskInfo> entry = iterator.next();
@@ -170,9 +171,13 @@ public class WorkerStatus {
 
             TaskInfo waitingTask = waitingTaskInfo != null ? waitingTaskInfo.get(requestId) : null;
             if (waitingTask != null) {
-                localTask.setLastActiveTimeUs(System.nanoTime() / 1000);
-
-                if (localTask.getTaskState() == TaskStateEnum.IN_TRANSIT) {
+                boolean firstWaitingConfirmation = localTask.getTaskState() == TaskStateEnum.IN_TRANSIT;
+                long confirmationTimeUs = System.nanoTime() / 1000;
+                long masterDecisionToWaitingConfirmMs = firstWaitingConfirmation
+                        ? Math.max(0, confirmationTimeUs - localTask.getLastActiveTimeUs()) / 1000
+                        : 0;
+                localTask.setLastActiveTimeUs(confirmationTimeUs);
+                if (firstWaitingConfirmation) {
                     localTask.updateTaskState(TaskStateEnum.CONFIRMED);
                     Logger.debug("Task {} first confirmed by worker (waiting)", requestId);
                 }
@@ -181,6 +186,9 @@ public class WorkerStatus {
                 updateCacheHitFromEngine(localTask, waitingTask, "waiting", cacheHitFeedbacks);
                 localTask.setWaitingTime(waitingTask.getWaitingTime());
                 localTask.setDpRank(waitingTask.getDpRank());
+                if (firstWaitingConfirmation) {
+                    waitingTaskConfirmationLatenciesMs.add(masterDecisionToWaitingConfirmMs);
+                }
 
                 continue;
             }
@@ -190,7 +198,7 @@ public class WorkerStatus {
                 logger.warn("Task {} marked as LOST - not in waiting, running or finished list", requestId);
             }
         }
-        return TaskStateUpdateResult.fromCacheHitFeedbacks(cacheHitFeedbacks);
+        return TaskStateUpdateResult.from(cacheHitFeedbacks, waitingTaskConfirmationLatenciesMs);
     }
 
     private void updateTaskInputLength(TaskInfo localTask, TaskInfo engineTask) {

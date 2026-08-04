@@ -9,6 +9,7 @@ import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
+import org.flexlb.metric.FlexStatisticsType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
 import org.junit.jupiter.api.BeforeEach;
@@ -61,6 +62,28 @@ class EngineHealthReporterTest {
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         verify(monitor).register("app.cache.hit.comparison.local.standby.predicted.ratio",
                 FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
+    }
+
+    @Test
+    void shouldRegisterMasterDecisionToWaitingConfirmationMetric() {
+        reporter.init();
+
+        verify(monitor).register("app.engine.worker.status.master.decision.to.waiting.confirm.ms",
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+    }
+
+    @Test
+    void shouldReportMasterDecisionToWaitingConfirmationLatency() {
+        reporter.reportMasterDecisionToWaitingConfirmationLatency(
+                "test-model", "10.0.0.1", "PREFILL", "test-group", 53);
+
+        FlexMetricTags expectedTags = FlexMetricTags.of(
+                "model", "test-model",
+                "engineIp", "10.0.0.1",
+                "role", "PREFILL",
+                "group", "test-group");
+        verify(monitor).report("app.engine.worker.status.master.decision.to.waiting.confirm.ms",
+                expectedTags, 53.0);
     }
 
     @Test

@@ -74,6 +74,7 @@ import static org.flexlb.constant.MetricConstant.ENGINE_STATUS_VISITOR_SUCCESS_Q
 import static org.flexlb.constant.MetricConstant.ENGINE_WAITING_TASK_INFO_SIZE;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_INFO_STEP_LATENCY_VAR;
+import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_STATUS_MASTER_DECISION_TO_WAITING_CONFIRM_MS;
 import static org.flexlb.constant.MetricConstant.ENGINE_WORKER_NUMBER;
 import static org.flexlb.constant.MetricConstant.FORWARD_TO_MASTER_RESULT;
 import static org.flexlb.constant.MetricConstant.REQUEST_ARRIVAL_DELAY_MS;
@@ -143,6 +144,8 @@ public class EngineHealthReporter {
 
         this.monitor.register(ENGINE_WORKER_INFO_STEP_LATENCY_VAR, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
         this.monitor.register(ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR, FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
+        this.monitor.register(ENGINE_WORKER_STATUS_MASTER_DECISION_TO_WAITING_CONFIRM_MS,
+                FlexMetricType.GAUGE, FlexStatisticsType.SUMMARY);
         this.monitor.register(CACHE_STATUS_CHECK_VISITOR_RT, FlexMetricType.GAUGE);
         this.monitor.register(CACHE_STATUS_CHECK_VISITOR_SUCCESS_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         this.monitor.register(CACHE_STATUS_CHECK_SUCCESS_PERIOD, FlexMetricType.GAUGE);
@@ -169,6 +172,19 @@ public class EngineHealthReporter {
         monitor.report(ENGINE_WORKER_INFO_STEP_LATENCY_VAR, metricTags, result);
         monitor.report(ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR, metricTags, result2);
         logger.debug("Latency metric - model: {}, role: {}, stepLatency: {}, queryLen: {}", modelName, role, result, result2);
+    }
+
+    public void reportMasterDecisionToWaitingConfirmationLatency(String modelName,
+                                                                  String engineIp,
+                                                                  String role,
+                                                                  String group,
+                                                                  long latencyMs) {
+        FlexMetricTags metricTags = FlexMetricTags.of(
+                "model", modelName,
+                "engineIp", engineIp,
+                "role", role,
+                "group", group);
+        monitor.report(ENGINE_WORKER_STATUS_MASTER_DECISION_TO_WAITING_CONFIRM_MS, metricTags, latencyMs);
     }
 
     @Scheduled(fixedRate = 2000)

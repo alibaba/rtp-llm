@@ -360,6 +360,7 @@ class WorkerStatusTest {
             localTask.setInputLength(200);
             localTask.setPrefixLength(0);
             workerStatus.putLocalTask(REQUEST_ID, localTask);
+            localTask.setLastActiveTimeUs(System.nanoTime() / 1000 - 5_000);
 
             TaskInfo waitingTask = new TaskInfo();
             waitingTask.setRequestId(REQUEST_ID);
@@ -371,7 +372,8 @@ class WorkerStatusTest {
             Map<String, TaskInfo> waitingTaskInfo = new HashMap<>();
             waitingTaskInfo.put(String.valueOf(REQUEST_ID), waitingTask);
 
-            workerStatus.updateTaskStates(waitingTaskInfo, new HashMap<>(), new HashMap<>());
+            var updateResult = workerStatus.updateTaskStates(
+                    waitingTaskInfo, new HashMap<>(), new HashMap<>());
 
             TaskInfo updated = workerStatus.getLocalTaskMap().get(REQUEST_ID);
             assertNotNull(updated, "Task should remain in local map");
@@ -380,6 +382,12 @@ class WorkerStatusTest {
             assertEquals(200, updated.getInputLength());
             assertEquals(100, updated.getWaitingTime());
             assertEquals(1, updated.getDpRank());
+            assertEquals(1, updateResult.waitingTaskConfirmationLatenciesMs().size());
+            assertTrue(updateResult.waitingTaskConfirmationLatenciesMs().getFirst() >= 5);
+
+            var repeatedUpdateResult = workerStatus.updateTaskStates(
+                    waitingTaskInfo, new HashMap<>(), new HashMap<>());
+            assertTrue(repeatedUpdateResult.waitingTaskConfirmationLatenciesMs().isEmpty());
         }
 
         @Test

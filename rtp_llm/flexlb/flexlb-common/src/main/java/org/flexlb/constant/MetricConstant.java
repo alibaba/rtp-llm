@@ -102,6 +102,12 @@ public class MetricConstant {
 
     public static final String ENGINE_WORKER_INFO_RUNNING_QUERY_LEN_VAR = "app.engine.worker.info.running.query.len.var";
 
+    /**
+     * Elapsed time from the master recording a local task to the first worker waiting confirmation.
+     */
+    public static final String ENGINE_WORKER_STATUS_MASTER_DECISION_TO_WAITING_CONFIRM_MS =
+            "app.engine.worker.status.master.decision.to.waiting.confirm.ms";
+
     /* ------------------------ Cache Health Monitoring -------------------------- */
 
     /**
