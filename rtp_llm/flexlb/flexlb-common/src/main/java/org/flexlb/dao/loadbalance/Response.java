@@ -1,8 +1,11 @@
 package org.flexlb.dao.loadbalance;
 
+import com.fasterxml.jackson.annotation.JsonIgnore;
 import com.fasterxml.jackson.annotation.JsonIgnoreProperties;
 import com.fasterxml.jackson.annotation.JsonProperty;
 import lombok.Data;
+import lombok.EqualsAndHashCode;
+import lombok.ToString;
 
 import java.util.List;
 
@@ -27,6 +30,11 @@ public class Response {
 
     @JsonProperty("queue_length")
     private Integer queueLength;
+
+    @JsonIgnore
+    @EqualsAndHashCode.Exclude
+    @ToString.Exclude
+    private Runnable rollbackAction;
 
     public static Response error(StrategyErrorType strategyErrorType) {
         Response result = new Response();

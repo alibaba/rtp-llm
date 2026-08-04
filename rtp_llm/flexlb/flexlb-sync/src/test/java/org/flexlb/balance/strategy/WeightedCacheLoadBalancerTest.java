@@ -22,6 +22,7 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+import reactor.core.publisher.Mono;
 
 import java.util.HashMap;
 import java.util.List;
@@ -38,7 +39,7 @@ class WeightedCacheLoadBalancerTest {
         configService = new ConfigService();
         cacheAwareService = Mockito.mock(CacheAwareService.class);
         Mockito.when(cacheAwareService.findMatchingEngines(Mockito.any(CacheMatchQuery.class)))
-                .thenReturn(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
+                .thenReturn(Mono.just(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC)));
     }
 
     @org.junit.jupiter.api.AfterEach
@@ -73,7 +74,7 @@ class WeightedCacheLoadBalancerTest {
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
-        ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null);
+        ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null).block();
 
         Assertions.assertFalse(status.isSuccess());
         Assertions.assertNotNull(status.getMessage());
@@ -110,7 +111,7 @@ class WeightedCacheLoadBalancerTest {
         balanceContext.setRequest(req);
         balanceContext.setConfig(configService.loadBalanceConfig());
 
-        ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null);
+        ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null).block();
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertNotNull(status.getServerIp());
@@ -153,7 +154,7 @@ class WeightedCacheLoadBalancerTest {
         balanceContext.setRequest(req);
         balanceContext.setConfig(configService.loadBalanceConfig());
 
-        ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null);
+        ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null).block();
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertNotNull(status.getServerIp());
@@ -186,7 +187,7 @@ class WeightedCacheLoadBalancerTest {
         balanceContext.setRequest(req);
         balanceContext.setConfig(configService.loadBalanceConfig());
 
-        ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, "group-a");
+        ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, "group-a").block();
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertEquals("127.0.0.1", status.getServerIp());
@@ -203,7 +204,8 @@ class WeightedCacheLoadBalancerTest {
                 .put("127.0.0.1:8080", worker);
 
         Mockito.when(cacheAwareService.findMatchingEngines(Mockito.any(CacheMatchQuery.class)))
-                .thenReturn(new CacheMatchResult(Map.of("127.0.0.1:8080", 4), CacheMatchSource.KVCM, 321, 256));
+                .thenReturn(Mono.just(new CacheMatchResult(
+                        Map.of("127.0.0.1:8080", 4), CacheMatchSource.KVCM, 321, 256)));
 
         ResourceMeasureFactory resourceMeasureFactory = Mockito.mock(ResourceMeasureFactory.class);
         DecodeResourceMeasure decodeResourceMeasure = Mockito.mock(DecodeResourceMeasure.class);
@@ -221,7 +223,7 @@ class WeightedCacheLoadBalancerTest {
         context.setRequest(request);
         context.setConfig(configService.loadBalanceConfig());
 
-        ServerStatus status = loadBalancer.select(context, RoleType.DECODE, null);
+        ServerStatus status = loadBalancer.select(context, RoleType.DECODE, null).block();
 
         Assertions.assertTrue(status.isSuccess());
         Assertions.assertEquals("KVCM", context.getCacheMatchSource());
@@ -273,7 +275,7 @@ class WeightedCacheLoadBalancerTest {
         for (int i = 0; i < totalRuns; i++) {
             String requestId = "request-" + (1000L + i);
             balanceContext.getRequest().setRequestId(requestId);
-            ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null);
+            ServerStatus status = weightedCacheLoadBalancer.select(balanceContext, RoleType.DECODE, null).block();
 
             if (status.isSuccess()) {
                 String selectedIp = status.getServerIp();

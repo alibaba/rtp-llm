@@ -1,12 +1,12 @@
 package org.flexlb.sync.synchronizer;
 
 import io.micrometer.core.instrument.util.NamedThreadFactory;
-import org.flexlb.config.ModelMetaConfig;
+import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
+import org.flexlb.config.ModelMetaConfig;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
-import org.flexlb.util.JsonUtils;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 
@@ -50,31 +50,29 @@ public abstract class AbstractEngineStatusSynchronizer {
     public AbstractEngineStatusSynchronizer(WorkerAddressService workerAddressService,
                                             EngineHealthReporter engineHealthReporter,
                                             EngineWorkerStatus engineWorkerStatus,
-                                            ModelMetaConfig modelMetaConfig) {
+                                            ModelMetaConfig modelMetaConfig,
+                                            ConfigService configService) {
         this.workerAddressService = workerAddressService;
         this.engineHealthReporter = engineHealthReporter;
         this.engineWorkerStatus = engineWorkerStatus;
         this.modelMetaConfig = modelMetaConfig;
-        int corePoolSize = 500;
-        int maximumPoolSize = 1000;
+        this.flexlbConfig = configService.loadBalanceConfig();
+        int engineSyncThreads = positive("engineSyncExecutorThreads", flexlbConfig.getEngineSyncExecutorThreads());
+        int engineSyncQueueCapacity = positive("engineSyncExecutorQueueCapacity",
+                flexlbConfig.getEngineSyncExecutorQueueCapacity());
+        int statusCheckThreads = positive("statusCheckExecutorThreads", flexlbConfig.getStatusCheckExecutorThreads());
+        int statusCheckQueueCapacity = positive("statusCheckExecutorQueueCapacity",
+                flexlbConfig.getStatusCheckExecutorQueueCapacity());
 
-        engineSyncExecutor = new ThreadPoolExecutor(corePoolSize, maximumPoolSize, 60L, TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(15000), new NamedThreadFactory("engine-sync-executor"),
+        engineSyncExecutor = new RejectionCountingThreadPoolExecutor(
+                engineSyncThreads, engineSyncThreads, 0L, TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<>(engineSyncQueueCapacity), new NamedThreadFactory("engine-sync-executor"),
                 new ThreadPoolExecutor.AbortPolicy());
 
-        statusCheckExecutor = new ThreadPoolExecutor(corePoolSize, maximumPoolSize, 60L, TimeUnit.SECONDS,
-                new LinkedBlockingQueue<>(15000), new NamedThreadFactory("status-checker-executor"),
+        statusCheckExecutor = new RejectionCountingThreadPoolExecutor(
+                statusCheckThreads, statusCheckThreads, 0L, TimeUnit.MILLISECONDS,
+                new LinkedBlockingQueue<>(statusCheckQueueCapacity), new NamedThreadFactory("status-checker-executor"),
                 new ThreadPoolExecutor.AbortPolicy());
-
-        String masterConfigStr = System.getenv("FLEXLB_CONFIG");
-        logger.warn("FLEXLB_CONFIG = {}", masterConfigStr);
-        FlexlbConfig masterConfig;
-        if (masterConfigStr != null) {
-            masterConfig = JsonUtils.toObject(masterConfigStr, FlexlbConfig.class);
-        } else {
-            masterConfig = new FlexlbConfig();
-        }
-        this.flexlbConfig = masterConfig;
     }
 
     protected abstract void syncEngineStatus();
@@ -84,5 +82,12 @@ public abstract class AbstractEngineStatusSynchronizer {
         Optional.ofNullable(scheduler).ifPresent(s -> scheduler.shutdown());
         Optional.ofNullable(engineSyncExecutor).ifPresent(s -> engineSyncExecutor.shutdown());
         Optional.ofNullable(statusCheckExecutor).ifPresent(s -> statusCheckExecutor.shutdown());
+    }
+
+    private int positive(String name, int value) {
+        if (value <= 0) {
+            throw new IllegalArgumentException(name + " must be positive");
+        }
+        return value;
     }
 }

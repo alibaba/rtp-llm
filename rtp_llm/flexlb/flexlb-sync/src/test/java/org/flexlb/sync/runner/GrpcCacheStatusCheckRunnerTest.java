@@ -1,9 +1,11 @@
 package org.flexlb.sync.runner;
 
+import org.flexlb.cache.domain.WorkerCacheUpdateResult;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
 import org.junit.jupiter.api.Test;
@@ -11,6 +13,7 @@ import org.mockito.Mockito;
 
 import java.util.concurrent.atomic.LongAdder;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -44,7 +47,10 @@ class GrpcCacheStatusCheckRunnerTest {
                 .setTotalKvCache(2000)
                 .setBlockSize(128)
                 .build();
-        when(engineGrpcService.getCacheStatus(anyString(), anyInt(), any(WorkerStatus.class), anyLong(), anyLong(), eq(RoleType.PREFILL))).thenReturn(cacheStatusPB);
+        when(engineGrpcService.getCacheStatus(anyString(), anyInt(), any(WorkerStatus.class), anyLong(), anyLong(), eq(RoleType.PREFILL)))
+                .thenReturn(cacheStatusPB);
+        when(cacheAwareService.updateFromWorkerStatus(any(WorkerStatus.class)))
+                .thenReturn(WorkerCacheUpdateResult.builder().success(true).build());
 
         // Act
         GrpcCacheStatusCheckRunner runner = new GrpcCacheStatusCheckRunner(
@@ -53,14 +59,39 @@ class GrpcCacheStatusCheckRunnerTest {
                 20, new LongAdder(), 50L);
         runner.run();
 
-        // Give some time for async execution
-        try {
-            Thread.sleep(100);
-        } catch (InterruptedException e) {
-            Thread.currentThread().interrupt();
-        }
-
         // Assert
         verify(engineGrpcService).getCacheStatus(eq("127.0.0.1"), eq(8081), any(WorkerStatus.class), eq(-1L), eq(20L), eq(RoleType.PREFILL));
+    }
+
+    @Test
+    void reportsSynchronousCacheFailureAndClearsInProgressFlag() {
+        WorkerStatus workerStatus = workerStatus();
+        workerStatus.getCacheCheckInProgress().set(true);
+        when(engineGrpcService.getCacheStatus(anyString(), anyInt(), any(WorkerStatus.class), anyLong(), anyLong(),
+                eq(RoleType.PREFILL))).thenThrow(new IllegalStateException("connection rejected"));
+
+        new GrpcCacheStatusCheckRunner(
+                "test-model", "127.0.0.1:8080", "test-site", RoleType.PREFILL, workerStatus,
+                engineHealthReporter, engineGrpcService, cacheAwareService, 20, new LongAdder(), 50L).run();
+
+        assertFalse(workerStatus.getCacheCheckInProgress().get());
+        verify(engineHealthReporter).reportCacheStatusCheckerFail(
+                "test-model", "127.0.0.1:8080", BalanceStatusEnum.CACHE_SERVICE_UNAVAILABLE);
+    }
+
+    private WorkerStatus workerStatus() {
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.setIp("127.0.0.1");
+        workerStatus.setPort(8080);
+        return workerStatus;
+    }
+
+    private EngineRpcService.CacheStatusPB cacheStatusResponse() {
+        return EngineRpcService.CacheStatusPB.newBuilder()
+                .setVersion(1)
+                .setAvailableKvCache(1000)
+                .setTotalKvCache(2000)
+                .setBlockSize(128)
+                .build();
     }
 }

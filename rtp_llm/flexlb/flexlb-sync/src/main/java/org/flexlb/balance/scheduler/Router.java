@@ -2,6 +2,7 @@ package org.flexlb.balance.scheduler;
 
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
+import reactor.core.publisher.Mono;
 
 /**
  * Router interface - responsible for selecting appropriate worker nodes based on load balancing context.
@@ -17,11 +18,20 @@ import org.flexlb.dao.loadbalance.Response;
 public interface Router {
 
     /**
-     * Route requests based on load balancing strategy and select appropriate worker nodes.
+     * Routes a request according to the configured load-balancing strategies.
      *
-     * @param balanceContext Load balancing context containing request information and available worker list
-     * @return Response containing selected worker node information
+     * @param balanceContext load-balancing context containing request information and available workers
+     * @return a publisher that emits the selected workers or a routing error response
      */
-    Response route(BalanceContext balanceContext);
+    Mono<Response> route(BalanceContext balanceContext);
+
+    /**
+     * Releases worker reservations represented by a route response that can no longer be used.
+     *
+     * @param balanceContext load-balancing context for the route
+     * @param response successful response whose selected workers must be released
+     */
+    default void rollBack(BalanceContext balanceContext, Response response) {
+    }
 
 }

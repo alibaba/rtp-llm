@@ -7,6 +7,7 @@ import lombok.Data;
 import org.apache.commons.collections4.CollectionUtils;
 import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
+import org.flexlb.concurrent.RejectedTaskCountProvider;
 import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.ServerStatus;
@@ -380,6 +381,14 @@ public class EngineHealthReporter {
         monitor.report(metricName, FlexMetricTags.of(metricMap), engineSyncExecutor.getCorePoolSize());
         metricMap.put("type", "currentThreadSizeInPool");
         monitor.report(metricName, FlexMetricTags.of(metricMap), engineSyncExecutor.getPoolSize());
+        metricMap.put("type", "maximumPoolSize");
+        monitor.report(metricName, FlexMetricTags.of(metricMap), engineSyncExecutor.getMaximumPoolSize());
+        metricMap.put("type", "largestPoolSize");
+        monitor.report(metricName, FlexMetricTags.of(metricMap), engineSyncExecutor.getLargestPoolSize());
+        if (engineSyncExecutor instanceof RejectedTaskCountProvider rejectedTaskCountProvider) {
+            metricMap.put("type", "rejectedTaskTotal");
+            monitor.report(metricName, FlexMetricTags.of(metricMap), rejectedTaskCountProvider.getRejectedTaskCount());
+        }
     }
 
     private void reportEventLoopGroup(String eventLoopGroupName, EventLoopGroup eventLoopGroup) {

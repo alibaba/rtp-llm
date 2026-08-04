@@ -22,6 +22,7 @@ import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
+import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -59,63 +60,62 @@ public class WeightedCacheLoadBalancer implements LoadBalancer {
     }
 
     @Override
-    public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
-        Request request = balanceContext.getRequest();
-        long seqLen = request.getSeqLen();
-        Map<String/*ip*/, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
-        if (MapUtils.isEmpty(workerStatusMap)) {
-            Logger.warn("select ROLE: {} failed, workerStatusMap is empty", roleType.getCode());
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
-        }
-        FlexlbConfig config = balanceContext.getConfig();
-        ResourceMeasureIndicatorEnum indicator = config.getResourceMeasureIndicator(roleType);
-        ResourceMeasure resourceMeasure = resourceMeasureFactory.getMeasure(indicator);
-        if (resourceMeasure == null) {
-            Logger.warn("No ResourceMeasure registered for indicator: {}, roleType: {}", indicator, roleType);
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
-        }
-        List<WorkerStatus> workerStatusList = new ArrayList<>(workerStatusMap.values()).stream()
-                .filter(WorkerStatus::isAlive)
-                .filter(resourceMeasure::isResourceAvailable)
-                .toList();
-        if (CollectionUtils.isEmpty(workerStatusList)) {
-            Logger.warn("select ROLE: {} failed, workerStatusList is empty", roleType.getCode());
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
-        }
+    public Mono<ServerStatus> select(BalanceContext balanceContext, RoleType roleType, String group) {
+        return Mono.defer(() -> {
+            Request request = balanceContext.getRequest();
+            long seqLen = request.getSeqLen();
+            Map<String/*ip*/, WorkerStatus> workerStatusMap = engineWorkerStatus.selectModelWorkerStatus(roleType, group);
+            if (MapUtils.isEmpty(workerStatusMap)) {
+                Logger.warn("select ROLE: {} failed, workerStatusMap is empty", roleType.getCode());
+                return Mono.just(ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER));
+            }
+            FlexlbConfig config = balanceContext.getConfig();
+            ResourceMeasureIndicatorEnum indicator = config.getResourceMeasureIndicator(roleType);
+            ResourceMeasure resourceMeasure = resourceMeasureFactory.getMeasure(indicator);
+            if (resourceMeasure == null) {
+                Logger.warn("No ResourceMeasure registered for indicator: {}, roleType: {}", indicator, roleType);
+                return Mono.just(ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER));
+            }
+            List<WorkerStatus> workerStatusList = new ArrayList<>(workerStatusMap.values()).stream()
+                    .filter(WorkerStatus::isAlive)
+                    .filter(resourceMeasure::isResourceAvailable)
+                    .toList();
+            if (CollectionUtils.isEmpty(workerStatusList)) {
+                Logger.warn("select ROLE: {} failed, workerStatusList is empty", roleType.getCode());
+                return Mono.just(ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER));
+            }
 
-        // Implement weighted random selection algorithm
-        WorkerStatus selectedWorker = weightedRandomSelection(workerStatusList);
+            WorkerStatus selectedWorker = weightedRandomSelection(workerStatusList);
+            if (selectedWorker == null) {
+                Logger.warn("Failed to select worker, no suitable worker available");
+                return Mono.just(ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER));
+            }
 
-        if (selectedWorker != null) {
-            CacheMatchResult cacheMatchResult = cacheAwareService.findMatchingEngines(
-                    new CacheMatchQuery(
+            return cacheAwareService.findMatchingEngines(new CacheMatchQuery(
                             balanceContext.getRequestId(),
                             request.getBlockCacheKeys(),
                             request.getBlockSize(),
                             request.getLocalStandbyBlockCacheKeys(),
                             request.getLocalStandbyBlockSize(),
                             roleType,
-                            group));
-            long prefixLength = calcPrefixMatchLength(selectedWorker, cacheMatchResult);
-            balanceContext.recordCacheMatch(
-                    cacheMatchResult.source().name(),
-                    cacheMatchResult.queryTimeUs(),
-                    roleType,
-                    selectedWorker.getIp(),
-                    prefixLength);
-            // Update local task state
-            return buildServerStatus(
-                    selectedWorker,
-                    seqLen,
-                    prefixLength,
-                    roleType,
-                    balanceContext.getRequestId(),
-                    cacheMatchResult.source().name());
-        }
-
-        // Return failure if no suitable worker found
-        Logger.warn("Failed to select worker, no suitable worker available");
-        return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+                            group))
+                    .map(cacheMatchResult -> {
+                        long prefixLength = calcPrefixMatchLength(selectedWorker, cacheMatchResult);
+                        balanceContext.recordCacheMatch(
+                                cacheMatchResult.source().name(),
+                                cacheMatchResult.queryTimeUs(),
+                                roleType,
+                                selectedWorker.getIp(),
+                                prefixLength);
+                        return buildServerStatus(
+                                selectedWorker,
+                                seqLen,
+                                prefixLength,
+                                roleType,
+                                balanceContext.getRequestId(),
+                                cacheMatchResult.source().name());
+                    });
+        });
     }
 
     /**

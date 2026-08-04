@@ -1,5 +1,6 @@
 package org.flexlb.service.monitor;
 
+import io.micrometer.core.instrument.util.NamedThreadFactory;
 import io.netty.channel.EventLoopGroup;
 import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
@@ -7,25 +8,34 @@ import org.flexlb.constant.ZkMasterEvent;
 import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.engine.grpc.client.EngineGrpcClient;
+import org.flexlb.engine.grpc.config.GrpcCallbackThreadPoolExecutor;
 import org.flexlb.enums.FlexMetricType;
 import org.flexlb.enums.FlexPriorityType;
 import org.flexlb.metric.FlexMetricTags;
 import org.flexlb.metric.FlexMonitor;
+import org.flexlb.sync.synchronizer.RejectionCountingThreadPoolExecutor;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import reactor.netty.resources.LoopResources;
 
 import java.util.Map;
+import java.util.concurrent.ArrayBlockingQueue;
+import java.util.concurrent.CountDownLatch;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.ThreadPoolExecutor;
+import java.util.concurrent.TimeUnit;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertThrows;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.anyDouble;
+import static org.mockito.ArgumentMatchers.doubleThat;
+import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.mock;
 import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
-import static org.mockito.ArgumentMatchers.doubleThat;
-import static org.mockito.ArgumentMatchers.eq;
 
 class EngineHealthReporterTest {
 
@@ -74,6 +84,78 @@ class EngineHealthReporterTest {
                 eq("app.engine.zk.master.event"),
                 eq(FlexMetricTags.of("event", ZkMasterEvent.MASTER_TAKE_LEADERSHIP.name())),
                 doubleThat(value -> value >= beforeReport && value <= afterReport));
+    }
+
+    @Test
+    void shouldReportGrpcExecutorCapacityAndRejectedTaskCount() throws InterruptedException {
+        GrpcCallbackThreadPoolExecutor callbackExecutor = new GrpcCallbackThreadPoolExecutor(
+                1, 1, 1, TimeUnit.MINUTES, new ArrayBlockingQueue<>(1),
+                new NamedThreadFactory("grpc-callback-test"));
+        CountDownLatch taskStarted = new CountDownLatch(1);
+        CountDownLatch releaseTask = new CountDownLatch(1);
+        try {
+            callbackExecutor.execute(() -> {
+                taskStarted.countDown();
+                try {
+                    releaseTask.await();
+                } catch (InterruptedException interruptedException) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            assertTrue(taskStarted.await(1, TimeUnit.SECONDS));
+            callbackExecutor.execute(() -> { });
+            assertThrows(RejectedExecutionException.class, () -> callbackExecutor.execute(() -> { }));
+
+            reporter.reportThreadPoolInfo("app.engine.balancing.thread.pool.info", "gRpcExecutor", callbackExecutor);
+
+            verify(monitor).report(
+                    "app.engine.balancing.thread.pool.info",
+                    FlexMetricTags.of("threadPool", "gRpcExecutor", "type", "maximumPoolSize"),
+                    1.0);
+            verify(monitor).report(
+                    "app.engine.balancing.thread.pool.info",
+                    FlexMetricTags.of("threadPool", "gRpcExecutor", "type", "largestPoolSize"),
+                    1.0);
+            verify(monitor).report(
+                    "app.engine.balancing.thread.pool.info",
+                    FlexMetricTags.of("threadPool", "gRpcExecutor", "type", "rejectedTaskTotal"),
+                    1.0);
+        } finally {
+            releaseTask.countDown();
+            callbackExecutor.shutdownNow();
+        }
+    }
+
+    @Test
+    void shouldReportSynchronizationExecutorRejectedTaskCount() throws InterruptedException {
+        RejectionCountingThreadPoolExecutor executor = new RejectionCountingThreadPoolExecutor(
+                1, 1, 1, TimeUnit.MINUTES, new ArrayBlockingQueue<>(1),
+                new NamedThreadFactory("engine-sync-test"), new ThreadPoolExecutor.AbortPolicy());
+        CountDownLatch taskStarted = new CountDownLatch(1);
+        CountDownLatch releaseTask = new CountDownLatch(1);
+        try {
+            executor.execute(() -> {
+                taskStarted.countDown();
+                try {
+                    releaseTask.await();
+                } catch (InterruptedException interruptedException) {
+                    Thread.currentThread().interrupt();
+                }
+            });
+            assertTrue(taskStarted.await(1, TimeUnit.SECONDS));
+            executor.execute(() -> { });
+            assertThrows(RejectedExecutionException.class, () -> executor.execute(() -> { }));
+
+            reporter.reportThreadPoolInfo("app.engine.balancing.thread.pool.info", "engineSyncExecutor", executor);
+
+            verify(monitor).report(
+                    "app.engine.balancing.thread.pool.info",
+                    FlexMetricTags.of("threadPool", "engineSyncExecutor", "type", "rejectedTaskTotal"),
+                    1.0);
+        } finally {
+            releaseTask.countDown();
+            executor.shutdownNow();
+        }
     }
 
     @Test

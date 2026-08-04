@@ -24,6 +24,7 @@ import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 import org.slf4j.LoggerFactory;
+import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
 import java.util.HashMap;
@@ -96,7 +97,8 @@ class ShortestTTFTStrategyTest {
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
         Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
         Mockito.when(cacheAwareService.findMatchingEngines(Mockito.any(CacheMatchQuery.class)))
-                .thenReturn(new CacheMatchResult(Map.of("127.0.0.2:8080", 3), CacheMatchSource.KVCM, 123, 256));
+                .thenReturn(Mono.just(new CacheMatchResult(
+                        Map.of("127.0.0.2:8080", 3), CacheMatchSource.KVCM, 123, 256)));
 
         ShortestTTFTStrategy staticCacheLoadBalancer =
                 new ShortestTTFTStrategy(engineWorkerStatus, engineHealthReporter, cacheAwareService, resourceMeasureFactory);
@@ -104,7 +106,7 @@ class ShortestTTFTStrategyTest {
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setConfig(new FlexlbConfig());
         balanceContext.setRequest(req);
-        ServerStatus result = staticCacheLoadBalancer.select(balanceContext, RoleType.PREFILL, null);
+        ServerStatus result = staticCacheLoadBalancer.select(balanceContext, RoleType.PREFILL, null).block();
         if (!result.isSuccess()) {
             System.out.println("Result not successful - code: " + result.getCode() + ", message: " + result.getMessage());
         }
@@ -151,7 +153,7 @@ class ShortestTTFTStrategyTest {
         BalanceContext infoContext = new BalanceContext();
         infoContext.setConfig(new FlexlbConfig());
         infoContext.setRequest(req);
-        staticCacheLoadBalancer.select(infoContext, RoleType.PREFILL, null);
+        staticCacheLoadBalancer.select(infoContext, RoleType.PREFILL, null).block();
         Assertions.assertTrue(infoContext.getShortestTtftDecisionByRole().isEmpty());
     }
 
@@ -262,11 +264,11 @@ class ShortestTTFTStrategyTest {
         Mockito.when(resourceMeasureFactory.getMeasure(Mockito.any())).thenReturn(resourceMeasure);
         Mockito.when(resourceMeasure.isResourceAvailable(Mockito.any())).thenReturn(true);
         Mockito.when(cacheAwareService.findMatchingEngines(Mockito.any(CacheMatchQuery.class)))
-                .thenReturn(new CacheMatchResult(
+                .thenReturn(Mono.just(new CacheMatchResult(
                         cacheMatches,
                         CacheMatchSource.KVCM,
                         123,
-                        workers.getFirst().getCacheStatus().getBlockSize()));
+                        workers.getFirst().getCacheStatus().getBlockSize())));
 
         ShortestTTFTStrategy strategy = new ShortestTTFTStrategy(
                 new EngineWorkerStatus(new ModelMetaConfig()),
@@ -277,7 +279,7 @@ class ShortestTTFTStrategyTest {
         balanceContext.setConfig(config);
         balanceContext.setRequest(request);
         return new SelectionResult(
-                strategy.select(balanceContext, RoleType.PREFILL, null), balanceContext);
+                strategy.select(balanceContext, RoleType.PREFILL, null).block(), balanceContext);
     }
 
     private WorkerStatus createWorkerStatus(String ip, long runningQueueTime, long blockSize) {

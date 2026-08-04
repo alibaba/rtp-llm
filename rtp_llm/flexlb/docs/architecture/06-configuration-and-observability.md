@@ -34,6 +34,10 @@
 | `maxPrefillQueueSize` | 20 | Prefill 水位满格队列长度 |
 | `decodeFullSpeedThreshold` / `decodeStopThreshold` | 40 / 80 | Decode 水位线性区间（%） |
 | `nettySelectThreadMultiplier` / `nettyWorkerThreadMultiplier` | 1 / 2 | Netty 线程倍数 |
+| `grpcClientEventLoopThreads` | CPU×4 | gRPC client channel 共享 Netty EventLoop 线程数 |
+| `grpcClientCallbackExecutorThreads` / `grpcClientCallbackExecutorMaxThreads` | CPU×4 / CPU×8 | gRPC client callback executor 的 core/max 线程数 |
+| `engineSyncExecutorThreads` / `engineSyncExecutorQueueCapacity` | CPU×4 / CPU×32 | engine 状态同步任务线程数与有界队列容量 |
+| `statusCheckExecutorThreads` / `statusCheckExecutorQueueCapacity` | CPU×4 / CPU×32 | worker status/cache check 任务线程数与有界队列容量 |
 
 ### MODEL_SERVICE_CONFIG
 
@@ -105,12 +109,14 @@ zookeeperConfig{zkHost, zkTimeoutMs}}`；另需 env `HIPPO_ROLE`。见
 - 指标名集中在 `MetricConstant`（flexlb-common），主要族：
   - `app.engine.health.*` / `app.engine.worker.*`：同步成功周期、worker 数、并发、RT/QPS、
     队列时间、任务表大小；
-  - `app.routing.*`：队列长度/入队/超时/拒绝/取消 QPS、排队等待、路由执行耗时、
+  - `app.routing.*`：队列长度/入队/超时/拒绝/队列取消 QPS、跨直连与排队的请求取消 QPS、
+    按低基数 `reason` 聚合的回滚次数与纳入回滚的已选 worker 数、排队等待、路由执行耗时、
     成功/失败（tag `code`）/重试 QPS（`RoutingQueueReporter`，全 PRECISE）；
   - `app.cache.*`：两级索引规模、命中数/率、预测 vs 实际对比（`hit.comparison.*`）、
     Local Standby 容量/拒绝/映射数、`cache.match.active.source`、`standby.fallback.qps`、
     `kvcm.query.retry.qps`、diff 大小、find/update RT；
   - `app.block.hash.*` / `app.local.standby.hash.*`：hash 排队/执行耗时、线程池状态；
+  - `app.grpc.*`：channel pool、按 client/service 聚合的 in-flight RPC、callback executor 拒绝总数；
   - `app.worker.permit.capacity`（1s）、`graceful.lifecycle.event`、
     `app.forward.to.master.result`、`app.engine.zk.master.*`。
 - 上报器：`EngineHealthReporter`（~40 个指标，2s 周期性 worker 计数/线程池）、

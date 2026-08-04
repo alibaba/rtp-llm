@@ -1,8 +1,8 @@
 package org.flexlb.sync.runner;
 
 import org.flexlb.cache.match.CacheAwareService;
-import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.service.address.WorkerAddressService;
 import org.flexlb.service.grpc.EngineGrpcService;
@@ -16,12 +16,14 @@ import org.mockito.junit.jupiter.MockitoExtension;
 import java.util.Map;
 import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
 import java.util.concurrent.atomic.LongAdder;
 
+import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.mockito.Mockito.any;
 import static org.mockito.Mockito.never;
-import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.times;
+import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
 @ExtendWith(MockitoExtension.class)
@@ -136,5 +138,19 @@ class EngineSyncRunnerTest {
         kvcmRunner.run();
 
         verify(statusCheckExecutor, times(1)).submit(any(Runnable.class));
+    }
+
+    @Test
+    void should_reset_in_progress_flags_when_status_executor_rejects_tasks() {
+        WorkerHost host = WorkerHost.of("127.0.0.1", 8080);
+        when(workerAddressService.getEngineWorkerList(modelName, roleType)).thenReturn(java.util.List.of(host));
+        when(statusCheckExecutor.submit(any(Runnable.class))).thenThrow(new RejectedExecutionException("queue full"));
+
+        engineSyncRunner.run();
+
+        WorkerStatus workerStatus = workerStatusMap.get(host.getIpPort());
+        assertFalse(workerStatus.getStatusCheckInProgress().get());
+        assertFalse(workerStatus.getCacheCheckInProgress().get());
+        verify(statusCheckExecutor, times(2)).submit(any(Runnable.class));
     }
 }

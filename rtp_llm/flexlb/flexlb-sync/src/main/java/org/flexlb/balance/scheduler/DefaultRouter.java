@@ -12,16 +12,22 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.enums.LoadBalanceStrategyEnum;
+import org.flexlb.service.monitor.RoutingQueueReporter;
 import org.flexlb.sync.status.EngineWorkerStatus;
 import org.flexlb.sync.status.ModelWorkerStatus;
 import org.flexlb.util.Logger;
 import org.springframework.context.annotation.DependsOn;
 import org.springframework.stereotype.Component;
+import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
 import java.util.EnumMap;
 import java.util.List;
 import java.util.Map;
+import java.util.Queue;
+import java.util.concurrent.ConcurrentLinkedQueue;
+import java.util.concurrent.atomic.AtomicBoolean;
+import java.util.stream.Collectors;
 
 import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
 
@@ -30,10 +36,17 @@ import static org.flexlb.dao.loadbalance.StrategyErrorType.NO_AVAILABLE_WORKER;
 public class DefaultRouter implements Router {
 
     private final Map<RoleType, LoadBalancer> loadBalancerMap;
+    private final RoutingQueueReporter routingQueueReporter;
 
-    public DefaultRouter(ConfigService configService) {
+    /**
+     * Creates a router with the configured load-balancing strategy for each role type.
+     *
+     * @param configService provides the load-balancing configuration
+     */
+    public DefaultRouter(ConfigService configService, RoutingQueueReporter routingQueueReporter) {
         FlexlbConfig config = configService.loadBalanceConfig();
         this.loadBalancerMap = new EnumMap<>(RoleType.class);
+        this.routingQueueReporter = routingQueueReporter;
 
         for (RoleType roleType : RoleType.values()) {
             LoadBalanceStrategyEnum strategy = config.getStrategyForRoleType(roleType);
@@ -44,42 +57,59 @@ public class DefaultRouter implements Router {
     /**
      * Routes a request to appropriate worker nodes based on model requirements and role types.
      *
-     * <p>This method implements the core routing logic for load balancing across different
-     * worker types (Prefill, Decode, PDFusion, VIT).
+     * <p>Roles are selected sequentially so that each successful worker's group constrains the
+     * next selection. Any failed, cancelled, or errored route rolls back workers selected earlier
+     * in the route.
      *
      * @param balanceContext the context containing request information and model details
-     * @return Response containing selected server statuses or error information
+     * @return a publisher that emits selected server statuses or an error response
      */
     @Override
-    public Response route(BalanceContext balanceContext) {
-        long startTimeInMicros = System.nanoTime() / 1000;
+    public Mono<Response> route(BalanceContext balanceContext) {
+        return Mono.defer(() -> routeOnce(balanceContext));
+    }
+
+    private Mono<Response> routeOnce(BalanceContext balanceContext) {
         // 1. Validate request
         Response validationResponse = validateRequest(balanceContext);
         if (validationResponse != null) {
-            return validationResponse;
+            return Mono.just(validationResponse);
         }
 
         // 2. Get routing configuration
         String requestId = balanceContext.getRequestId();
         ModelWorkerStatus workerStatus = EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS;
         List<RoleType> roleTypeList = workerStatus.getRoleTypeList();
-        if (CollectionUtils.isEmpty(roleTypeList)) {
-            return Response.error(NO_AVAILABLE_WORKER);
+        if (CollectionUtils.isEmpty(roleTypeList) || workerStatus.getWorkerTotalCount() == 0) {
+            return Mono.just(Response.error(NO_AVAILABLE_WORKER));
         }
 
-        // 3. Execute routing decision
-        RoutingResult routingResult = routeByRoleType(balanceContext, roleTypeList);
+        RouteSelectionState selectionState = new RouteSelectionState();
+        return routeNextRole(balanceContext, roleTypeList, 0, null, selectionState)
+                .map(routingResult -> routingResult.success()
+                        ? buildSuccessResponse(
+                        routingResult.serverStatusList(),
+                        () -> rollBackSelectedWorkers(
+                                balanceContext, selectionState, "response_rollback"))
+                        : buildFailureResponse(
+                        rollBackAndReturn(balanceContext, routingResult, selectionState)))
+                .doOnError(error -> rollBackSelectedWorkers(
+                        balanceContext, selectionState, "route_error"))
+                .doOnCancel(() -> rollBackSelectedWorkers(
+                        balanceContext, selectionState, "route_cancelled"));
+    }
 
-        // 4. Build response based on routing result
-        Response response;
-        if (routingResult.success()) {
-            response = buildSuccessResponse(requestId, routingResult.serverStatusList());
-        } else {
-            rollBackRoutingFailure(balanceContext, routingResult);
-            response = buildFailureResponse(requestId, routingResult);
+    @Override
+    public void rollBack(BalanceContext balanceContext, Response response) {
+        if (response == null || !response.isSuccess() || CollectionUtils.isEmpty(response.getServerStatus())) {
+            return;
         }
-
-        return response;
+        Runnable rollbackAction = response.getRollbackAction();
+        if (rollbackAction != null) {
+            rollbackAction.run();
+            return;
+        }
+        rollBackWorkers(balanceContext, response.getServerStatus(), "response_rollback");
     }
 
     /**
@@ -94,43 +124,63 @@ public class DefaultRouter implements Router {
             return Response.error(StrategyErrorType.INVALID_REQUEST);
         }
 
-        if (EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS == null) {
-            Logger.error("targetModelRoleWorkerStatus is null");
-            return Response.error(NO_AVAILABLE_WORKER);
-        }
-
         return null;
     }
 
     /**
-     * Execute routing decision, select optimal server for each role type
+     * Selects the current role and continues with the next role after a successful selection.
      *
-     * @param balanceContext Routing context
-     * @param roleTypeList List of required role types
-     * @return Routing result
+     * @param balanceContext request context shared by every role selection
+     * @param roleTypeList   ordered role types to route
+     * @param roleIndex      index of the role currently being selected
+     * @param group          group selected for the previous role, or {@code null} for the first role
+     * @param selectionState workers selected so far and their rollback state
+     * @return a publisher that emits the aggregate routing result
      */
-    public RoutingResult routeByRoleType(BalanceContext balanceContext, List<RoleType> roleTypeList) {
-        List<ServerStatus> serverStatusList = new ArrayList<>();
-        String group = null;
-
-        for (RoleType roleType : roleTypeList) {
-            LoadBalancer loadBalancer = getLoadBalancer(roleType);
-            ServerStatus serverStatus = loadBalancer.select(balanceContext, roleType, group);
-
-            if (!serverStatus.isSuccess()) {
-                // Selection failed, return failure result
-                Logger.warn("Failed to select {} worker: {}", roleType.getCode(), serverStatus.getMessage());
-                return RoutingResult.failure(serverStatusList, roleType, serverStatus.getMessage());
-            }
-
-            // Record server selection metrics
-            serverStatusList.add(serverStatus);
-
-            // Update group for affinity-based selection of subsequent roles
-            group = serverStatus.getGroup();
+    private Mono<RoutingResult> routeNextRole(BalanceContext balanceContext,
+                                              List<RoleType> roleTypeList,
+                                              int roleIndex,
+                                              String group,
+                                              RouteSelectionState selectionState) {
+        if (selectionState.isRollbackStarted()) {
+            return Mono.empty();
         }
-
-        return RoutingResult.success(serverStatusList);
+        if (roleIndex >= roleTypeList.size()) {
+            return Mono.just(RoutingResult.success(selectionState.snapshot()));
+        }
+        RoleType roleType = roleTypeList.get(roleIndex);
+        LoadBalancer loadBalancer = getLoadBalancer(roleType);
+        return loadBalancer.select(balanceContext, roleType, group)
+                .flatMap(serverStatus -> {
+                    if (!serverStatus.isSuccess()) {
+                        Logger.warn("Failed to select {} worker: {}", roleType.getCode(), serverStatus.getMessage());
+                        return Mono.just(RoutingResult.failure(
+                                selectionState.snapshot(), roleType, serverStatus.getMessage()));
+                    }
+                    SelectionRecordResult recordResult = selectionState.record(serverStatus);
+                    if (recordResult == SelectionRecordResult.NOT_RECORDED) {
+                        rollBackWorkers(
+                                balanceContext,
+                                List.of(serverStatus),
+                                "late_selection_after_rollback");
+                        return Mono.empty();
+                    }
+                    if (recordResult == SelectionRecordResult.ALREADY_ROLLED_BACK) {
+                        return Mono.empty();
+                    }
+                    return routeNextRole(
+                            balanceContext,
+                            roleTypeList,
+                            roleIndex + 1,
+                            serverStatus.getGroup(),
+                            selectionState);
+                })
+                .switchIfEmpty(Mono.defer(() -> selectionState.isRollbackStarted()
+                        ? Mono.empty()
+                        : Mono.just(RoutingResult.failure(
+                        selectionState.snapshot(),
+                        roleType,
+                        NO_AVAILABLE_WORKER.getErrorMsg()))));
     }
 
     /**
@@ -140,34 +190,106 @@ public class DefaultRouter implements Router {
         return loadBalancerMap.get(roleType);
     }
 
-    /**
-     * Rollback handling for routing failure
-     * If partial roles succeeded but subsequent roles failed, rollback local incremental updates for previously selected roles
-     *
-     * @param balanceContext Routing context
-     * @param routingResult Routing result
-     */
-    private void rollBackRoutingFailure(BalanceContext balanceContext, RoutingResult routingResult) {
+    private void rollBackSelectedWorkers(BalanceContext balanceContext,
+                                         RouteSelectionState selectionState,
+                                         String reason) {
+        rollBackWorkers(balanceContext, selectionState.drainForRollback(), reason);
+    }
 
-        List<ServerStatus> partialResults = routingResult.serverStatusList();
-        for (ServerStatus serverStatus : partialResults) {
-            String serverIpPort = serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
-            String requestId = balanceContext.getRequestId();
-
-            RoleType role = serverStatus.getRole();
-            LoadBalancer loadBalancer = getLoadBalancer(role);
-            loadBalancer.rollBack(serverIpPort, requestId);
+    private void rollBackWorkers(BalanceContext balanceContext,
+                                 List<ServerStatus> serverStatuses,
+                                 String reason) {
+        if (CollectionUtils.isEmpty(serverStatuses)) {
+            return;
+        }
+        routingQueueReporter.reportRoutingRollback(reason, serverStatuses.size());
+        Logger.info(String.format(
+                "Routing rollback, requestId=%s, reason=%s, workerCount=%d, workers=%s",
+                balanceContext.getRequestId(),
+                reason,
+                serverStatuses.size(),
+                serverStatuses.stream()
+                        .map(this::workerIdentifier)
+                        .collect(Collectors.joining(","))));
+        for (ServerStatus serverStatus : serverStatuses) {
+            rollBackWorker(balanceContext, serverStatus);
         }
     }
 
-    private Response buildSuccessResponse(String requestId, List<ServerStatus> serverStatusList) {
+    private String workerIdentifier(ServerStatus serverStatus) {
+        return serverStatus.getRole() + "@" + serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
+    }
+
+    private void rollBackWorker(BalanceContext balanceContext, ServerStatus serverStatus) {
+        String serverIpPort = serverStatus.getServerIp() + ":" + serverStatus.getHttpPort();
+        String requestId = balanceContext.getRequestId();
+        LoadBalancer loadBalancer = getLoadBalancer(serverStatus.getRole());
+        loadBalancer.rollBack(serverIpPort, requestId);
+    }
+
+    private RoutingResult rollBackAndReturn(
+            BalanceContext balanceContext,
+            RoutingResult routingResult,
+            RouteSelectionState selectionState) {
+        rollBackSelectedWorkers(balanceContext, selectionState, "route_failure");
+        return routingResult;
+    }
+
+    private enum SelectionRecordResult {
+        RECORDED,
+        NOT_RECORDED,
+        ALREADY_ROLLED_BACK
+    }
+
+    private static class RouteSelectionState {
+
+        private final Queue<ServerStatus> selectedWorkers = new ConcurrentLinkedQueue<>();
+        private final AtomicBoolean rollbackStarted = new AtomicBoolean();
+
+        private SelectionRecordResult record(ServerStatus serverStatus) {
+            if (rollbackStarted.get()) {
+                return SelectionRecordResult.NOT_RECORDED;
+            }
+            selectedWorkers.add(serverStatus);
+            if (!rollbackStarted.get()) {
+                return SelectionRecordResult.RECORDED;
+            }
+            return selectedWorkers.remove(serverStatus)
+                    ? SelectionRecordResult.NOT_RECORDED
+                    : SelectionRecordResult.ALREADY_ROLLED_BACK;
+        }
+
+        private List<ServerStatus> snapshot() {
+            return selectedWorkers.stream()
+                    .toList();
+        }
+
+        private List<ServerStatus> drainForRollback() {
+            if (!rollbackStarted.compareAndSet(false, true)) {
+                return List.of();
+            }
+            List<ServerStatus> workersToRollBack = new ArrayList<>();
+            ServerStatus selectedWorker;
+            while ((selectedWorker = selectedWorkers.poll()) != null) {
+                workersToRollBack.add(selectedWorker);
+            }
+            return workersToRollBack;
+        }
+
+        private boolean isRollbackStarted() {
+            return rollbackStarted.get();
+        }
+    }
+
+    private Response buildSuccessResponse(List<ServerStatus> serverStatusList, Runnable rollbackAction) {
         Response response = new Response();
         response.setSuccess(true);
         response.setServerStatus(serverStatusList);
+        response.setRollbackAction(rollbackAction);
         return response;
     }
 
-    private Response buildFailureResponse(String requestId, RoutingResult routingResult) {
+    private Response buildFailureResponse(RoutingResult routingResult) {
         StrategyErrorType errorType = routingResult.failedRoleType().getErrorType();
         String detailMessage = routingResult.errorMessage();
 

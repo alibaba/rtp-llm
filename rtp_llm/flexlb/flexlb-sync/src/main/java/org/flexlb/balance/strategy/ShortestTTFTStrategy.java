@@ -26,6 +26,7 @@ import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.stereotype.Component;
+import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
 import java.util.Comparator;
@@ -89,24 +90,23 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * Select optimal worker to execute task
      *
      * @param balanceContext Load balancing context
-     * @param roleType Worker role type
-     * @param group Worker group
+     * @param roleType       Worker role type
+     * @param group          Worker group
      * @return Selected server status
      */
     @Override
-    public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
-        try {
-            return doSelect(balanceContext, roleType, group);
-        } catch (Exception e) {
-            Logger.warn("Failed to select worker", e);
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
-        }
+    public Mono<ServerStatus> select(BalanceContext balanceContext, RoleType roleType, String group) {
+        return Mono.defer(() -> doSelect(balanceContext, roleType, group))
+                .onErrorResume(error -> {
+                    Logger.warn("Failed to select worker", error);
+                    return Mono.just(ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER));
+                });
     }
 
     /**
      * Release local cached tasks on the specified worker
      *
-     * @param ipPort Worker IP address
+     * @param ipPort    Worker IP address
      * @param requestId Request ID
      */
     @Override
@@ -125,11 +125,11 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * Core logic for worker selection
      *
      * @param balanceContext Load balancing context
-     * @param roleType Worker role type
-     * @param group Worker group
+     * @param roleType       Worker role type
+     * @param group          Worker group
      * @return Selected server status
      */
-    private ServerStatus doSelect(BalanceContext balanceContext, RoleType roleType, String group) {
+    private Mono<ServerStatus> doSelect(BalanceContext balanceContext, RoleType roleType, String group) {
         String requestId = balanceContext.getRequestId();
         long seqLen = balanceContext.getRequest().getSeqLen();
 
@@ -140,17 +140,33 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         List<WorkerStatus> availableWorkers = getAvailableWorkers(roleType, group, config.getResourceMeasureIndicator(roleType));
         if (CollectionUtils.isEmpty(availableWorkers)) {
             Logger.warn("No available workers for role: {}", roleType.getCode());
-            return ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER);
+            return Mono.just(ServerStatus.code(StrategyErrorType.NO_AVAILABLE_WORKER));
         }
 
-        // Calculate cache match results for each engine
-        CacheMatchResult cacheMatchResult = cacheAwareService.findMatchingEngines(
-                cacheMatchQuery(
+        return cacheAwareService.findMatchingEngines(cacheMatchQuery(
                         balanceContext,
                         balanceContext.getRequest().getBlockSize(),
                         roleType,
-                        group));
+                        group))
+                .map(cacheMatchResult -> selectWithCacheMatch(
+                        availableWorkers,
+                        cacheMatchResult,
+                        balanceContext,
+                        roleType,
+                        group,
+                        requestId,
+                        seqLen,
+                        config));
+    }
 
+    private ServerStatus selectWithCacheMatch(List<WorkerStatus> availableWorkers,
+                                              CacheMatchResult cacheMatchResult,
+                                              BalanceContext balanceContext,
+                                              RoleType roleType,
+                                              String group,
+                                              String requestId,
+                                              long seqLen,
+                                              FlexlbConfig config) {
         List<ScoredWorker> scoredWorkers = scoreWorkers(
                 availableWorkers, cacheMatchResult, seqLen, config.getPrefillCacheHitDiscount());
 
@@ -180,8 +196,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     /**
      * Get available worker list
      *
-     * @param roleType Worker role type
-     * @param group Worker group
+     * @param roleType  Worker role type
+     * @param group     Worker group
      * @param indicator ResourceMeasureIndicatorEnum
      * @return Available worker list
      */
@@ -207,9 +223,9 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     /**
      * Calculate TTFT scores for all active workers
      *
-     * @param workers Worker list
+     * @param workers          Worker list
      * @param cacheMatchResult Cache match result
-     * @param seqLen Sequence length
+     * @param seqLen           Sequence length
      * @return List of scored workers
      */
     private List<ScoredWorker> scoreWorkers(
@@ -240,9 +256,9 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      *
      * @param selectedWorker Selected worker
      * @param balanceContext Load balancing context
-     * @param roleType Worker role type
-     * @param requestId Request ID
-     * @param seqLen Sequence length
+     * @param roleType       Worker role type
+     * @param requestId      Request ID
+     * @param seqLen         Sequence length
      * @return Server status
      */
     private ServerStatus finalizeWorkerSelection(ScoredWorker selectedWorker,
@@ -271,7 +287,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * Log worker selection
      *
      * @param selectedWorker Selected worker
-     * @param roleType Worker role type
+     * @param roleType       Worker role type
      */
     private void logWorkerSelection(ScoredWorker selectedWorker, RoleType roleType) {
         WorkerStatus workerStatus = selectedWorker.worker();
@@ -286,10 +302,10 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     /**
      * Report cache hit metrics
      *
-     * @param roleType Worker role type
-     * @param ip Worker IP address
+     * @param roleType       Worker role type
+     * @param ip             Worker IP address
      * @param hitCacheTokens Number of cached tokens hit
-     * @param seqLen Sequence length
+     * @param seqLen         Sequence length
      */
     private void reportCacheHitMetrics(RoleType roleType, String ip, long hitCacheTokens, long seqLen) {
         double hitRate = seqLen > 0 ? hitCacheTokens / (double) seqLen : 0.0;
@@ -299,8 +315,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     /**
      * Create task information
      *
-     * @param requestId Request ID
-     * @param inputLength Input length
+     * @param requestId    Request ID
+     * @param inputLength  Input length
      * @param prefixLength Prefix length
      * @return Task information
      */
@@ -542,8 +558,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
         int candidateCount = workerCount <= SMALL_CLUSTER_SIZE
                 ? workerCount
                 : Math.max(
-                        MIN_CANDIDATE_COUNT,
-                        (int) Math.ceil(workerCount * CANDIDATE_PERCENTAGE));
+                MIN_CANDIDATE_COUNT,
+                (int) Math.ceil(workerCount * CANDIDATE_PERCENTAGE));
         return sortedWorkers.stream().limit(candidateCount).toList();
     }
 
@@ -576,8 +592,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * Filter workers with similar TTFT
      *
      * @param candidates Candidate worker list
-     * @param minTTFT Minimum TTFT value
-     * @param threshold Threshold
+     * @param minTTFT    Minimum TTFT value
+     * @param threshold  Threshold
      * @return List of workers with similar TTFT
      */
     private List<ScoredWorker> filterSimilarWorkers(List<ScoredWorker> candidates, long minTTFT, double threshold) {
@@ -593,8 +609,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * shortest-TTFT worker reaches the configured number of blocks. Otherwise preserve the
      * shortest-TTFT choice, which selects the shortest queue when cache hits are equal.
      *
-     * @param similarWorkers workers whose TTFT is close to the minimum
-     * @param fallbackCandidates candidates sorted by TTFT
+     * @param similarWorkers         workers whose TTFT is close to the minimum
+     * @param fallbackCandidates     candidates sorted by TTFT
      * @param minimumCacheLeadBlocks minimum cache lead required for cache preference
      * @return selected worker
      */
@@ -662,8 +678,8 @@ public class ShortestTTFTStrategy implements LoadBalancer {
      * Build server status response
      *
      * @param selectedWorker Selected worker
-     * @param roleType Worker role type
-     * @param requestId Request ID
+     * @param roleType       Worker role type
+     * @param requestId      Request ID
      * @return Server status
      */
     private ServerStatus buildServerStatus(ScoredWorker selectedWorker, RoleType roleType, String requestId) {
@@ -690,7 +706,7 @@ public class ShortestTTFTStrategy implements LoadBalancer {
     /**
      * Calculate prefix match length (number of cached tokens hit)
      *
-     * @param workerStatus Worker status
+     * @param workerStatus     Worker status
      * @param cacheMatchResult Cache match result
      * @return Number of tokens hit
      */

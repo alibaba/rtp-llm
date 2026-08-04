@@ -13,6 +13,8 @@ import org.flexlb.dao.loadbalance.ServerStatus;
 import org.flexlb.dao.route.LocalStandbyConfig;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.stereotype.Component;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import javax.annotation.PreDestroy;
 import java.util.List;
@@ -57,9 +59,10 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
     }
 
     @Override
-    public Map<String, Integer> findMatchingEngines(String requestId, List<Long> blockCacheKeys,
-                                                    long blockSize, RoleType roleType, String group) {
-        return cacheManager.findMatchingEngines(blockCacheKeys, roleType, group);
+    public Mono<Map<String, Integer>> findMatchingEngines(String requestId, List<Long> blockCacheKeys,
+                                                           long blockSize, RoleType roleType, String group) {
+        return Mono.fromSupplier(() -> cacheManager.findMatchingEngines(blockCacheKeys, roleType, group))
+                .subscribeOn(Schedulers.fromExecutor(asyncMatchExecutor));
     }
 
     public CompletableFuture<CacheMatchResult> asyncLocalStandbyMatch(CacheMatchQuery query) {
@@ -77,12 +80,8 @@ public class LocalStandbyCacheMatchProvider implements CacheMatchProvider {
                             return CacheMatchResult.failed(CacheMatchSource.LOCAL_STANDBY, queryTimeUs);
                         }
 
-                        Map<String, Integer> matches = findMatchingEngines(
-                                query.requestId(),
-                                hashResult.blockCacheKeys(),
-                                hashResult.blockSize(),
-                                query.roleType(),
-                                query.group());
+                        Map<String, Integer> matches = cacheManager.findMatchingEngines(
+                                hashResult.blockCacheKeys(), query.roleType(), query.group());
                         long queryTimeUs = (System.nanoTime() - startTimeNs) / 1_000;
                         return new CacheMatchResult(
                                 matches,

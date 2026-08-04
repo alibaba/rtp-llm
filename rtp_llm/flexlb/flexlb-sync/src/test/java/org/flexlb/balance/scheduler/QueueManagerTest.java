@@ -12,12 +12,18 @@ import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.extension.ExtendWith;
 import org.mockito.Mock;
 import org.mockito.junit.jupiter.MockitoExtension;
+import reactor.core.publisher.Mono;
+
+import java.time.Duration;
+import java.util.concurrent.CancellationException;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
 import static org.junit.jupiter.api.Assertions.assertNotNull;
 import static org.junit.jupiter.api.Assertions.assertNull;
 import static org.junit.jupiter.api.Assertions.assertTrue;
+import static org.mockito.Mockito.never;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -95,6 +101,36 @@ class QueueManagerTest {
         BalanceContext taken = queueManager.takeRequest(false, 0);
         assertNotNull(taken);
         assertEquals("request-2", taken.getRequestId());
+    }
+
+    @Test
+    void tryRouteAsync_shouldCancelAnInFlightRouteWhenItTimesOut() {
+        BalanceContext ctx = createContext("request-timeout");
+        ctx.getRequest().setGenerateTimeout(10);
+        AtomicBoolean cancellationActionInvoked = new AtomicBoolean();
+        Mono<Response> route = queueManager.tryRouteAsync(ctx);
+        assertEquals(ctx, queueManager.takeRequest(false, 0));
+        ctx.registerCancellationAction(() -> cancellationActionInvoked.set(true));
+
+        Response response = route.block(Duration.ofSeconds(1));
+
+        assertEquals(StrategyErrorType.QUEUE_TIMEOUT.getErrorCode(), response.getCode());
+        assertTrue(ctx.isCancelled());
+        assertTrue(cancellationActionInvoked.get());
+    }
+
+    @Test
+    void tryRouteAsync_shouldRecordQueueCancellationWhenFutureIsCancelled() {
+        BalanceContext ctx = createContext("request-cancelled");
+        Mono<Response> route = queueManager.tryRouteAsync(ctx);
+
+        ctx.getFuture().completeExceptionally(new CancellationException("request cancelled"));
+
+        Response response = route.block(Duration.ofSeconds(1));
+
+        assertEquals(StrategyErrorType.REQUEST_CANCELLED.getErrorCode(), response.getCode());
+        verify(metrics).reportCancelled();
+        verify(metrics, never()).reportRoutingCancelled();
     }
 
     private BalanceContext createContext(String requestId) {

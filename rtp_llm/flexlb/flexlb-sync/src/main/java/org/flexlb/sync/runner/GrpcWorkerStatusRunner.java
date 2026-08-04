@@ -2,15 +2,14 @@ package org.flexlb.sync.runner;
 
 import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.match.CacheAwareService;
-import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.CacheHitFeedback;
+import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.TaskInfo;
 import org.flexlb.dao.master.TaskStateUpdateResult;
 import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.domain.worker.WorkerStatusResponse;
-import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.enums.KvCacheGroupMode;
 import org.flexlb.service.grpc.EngineGrpcService;
@@ -23,7 +22,6 @@ import org.slf4j.LoggerFactory;
 
 import java.util.Map;
 import java.util.Optional;
-import java.util.concurrent.atomic.AtomicLong;
 
 import static org.flexlb.constant.CommonConstants.DEADLINE_EXCEEDED_MESSAGE;
 
@@ -74,7 +72,6 @@ public class GrpcWorkerStatusRunner implements Runnable {
             long startTime = System.nanoTime() / 1000;
 
             long latestFinishedTaskVersion = workerStatus.getLatestFinishedTaskVersion().get();
-
             WorkerStatusResponse response = launchGrpcStatusCheck(ip, workerStatusPort, latestFinishedTaskVersion);
             handleStatusResponse(response, startTime);
         } finally {
@@ -84,8 +81,8 @@ public class GrpcWorkerStatusRunner implements Runnable {
 
     private WorkerStatusResponse launchGrpcStatusCheck(String ip, int grpcPort, long latestFinishedTaskVersion) {
         try {
-            EngineRpcService.WorkerStatusPB workerStatusPB = engineGrpcService.getWorkerStatus(ip, grpcPort, latestFinishedTaskVersion, syncRequestTimeoutMs, roleType);
-            return EngineStatusConverter.convertToWorkerStatusResponse(workerStatusPB);
+            return EngineStatusConverter.convertToWorkerStatusResponse(engineGrpcService.getWorkerStatus(
+                    ip, grpcPort, latestFinishedTaskVersion, syncRequestTimeoutMs, roleType));
         } catch (Throwable throwable) {
             handleException(throwable);
             WorkerStatusResponse errorResponse = new WorkerStatusResponse();

@@ -45,6 +45,15 @@
             <artifactId>grpc-stub</artifactId>
         </dependency>
         <dependency>
+            <groupId>io.projectreactor</groupId>
+            <artifactId>reactor-core</artifactId>
+        </dependency>
+        <dependency>
+            <groupId>com.salesforce.servicelibs</groupId>
+            <artifactId>reactor-grpc-stub</artifactId>
+            <version>${reactive-grpc.version}</version>
+        </dependency>
+        <dependency>
             <groupId>io.grpc</groupId>
             <artifactId>grpc-protobuf</artifactId>
         </dependency>
@@ -122,14 +131,41 @@
                 <version>0.6.1</version>
                 <configuration>
                     <protocArtifact>com.google.protobuf:protoc:${protoc.version}:exe:${os.detected.classifier}</protocArtifact>
-                    <pluginId>grpc-java</pluginId>
-                    <pluginArtifact>io.grpc:protoc-gen-grpc-java:${grpc.version}:exe:${os.detected.classifier}</pluginArtifact>
                     <protoSourceRoot>${project.build.directory}/proto-java</protoSourceRoot>
                 </configuration>
                 <executions>
                     <execution>
+                        <id>compile-protobuf-java</id>
                         <goals>
                             <goal>compile</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>compile-grpc-java</id>
+                        <configuration>
+                            <pluginId>grpc-java</pluginId>
+                            <pluginArtifact>io.grpc:protoc-gen-grpc-java:${grpc.version}:exe:${os.detected.classifier}</pluginArtifact>
+                        </configuration>
+                        <goals>
+                            <goal>compile-custom</goal>
+                        </goals>
+                    </execution>
+                    <execution>
+                        <id>compile-reactor-grpc</id>
+                        <configuration>
+                            <pluginId>reactor-grpc</pluginId>
+                            <pluginExecutable>${project.build.directory}/protoc-plugins/protoc-gen-reactor-grpc</pluginExecutable>
+                            <protocPlugins>
+                                <protocPlugin>
+                                    <id>reactor-grpc</id>
+                                    <groupId>com.salesforce.servicelibs</groupId>
+                                    <artifactId>reactor-grpc</artifactId>
+                                    <version>${reactive-grpc.version}</version>
+                                    <mainClass>com.salesforce.reactorgrpc.ReactorGrpcGenerator</mainClass>
+                                </protocPlugin>
+                            </protocPlugins>
+                        </configuration>
+                        <goals>
                             <goal>compile-custom</goal>
                         </goals>
                     </execution>
@@ -150,6 +186,7 @@
                             <sources>
                                 <source>${project.build.directory}/generated-sources/protobuf/java</source>
                                 <source>${project.build.directory}/generated-sources/protobuf/grpc-java</source>
+                                <source>${project.build.directory}/generated-sources/protobuf/reactor-grpc</source>
                             </sources>
                         </configuration>
                     </execution>

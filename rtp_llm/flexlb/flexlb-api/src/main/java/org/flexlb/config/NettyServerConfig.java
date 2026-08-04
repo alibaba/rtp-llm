@@ -26,6 +26,6 @@ public class NettyServerConfig {
         return httpServer -> httpServer
                 .runOn(loopResources)
                 .option(ChannelOption.SO_REUSEADDR, true)
-                .option(ChannelOption.TCP_NODELAY, true);
+                .childOption(ChannelOption.TCP_NODELAY, true);
     }
 }

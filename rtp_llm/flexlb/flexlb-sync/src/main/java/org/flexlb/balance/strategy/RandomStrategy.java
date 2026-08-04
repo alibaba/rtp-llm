@@ -14,6 +14,7 @@ import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
+import reactor.core.publisher.Mono;
 
 import java.util.ArrayList;
 import java.util.List;
@@ -36,7 +37,11 @@ public class RandomStrategy implements LoadBalancer {
     }
 
     @Override
-    public ServerStatus select(BalanceContext balanceContext, RoleType roleType, String group) {
+    public Mono<ServerStatus> select(BalanceContext balanceContext, RoleType roleType, String group) {
+        return Mono.fromSupplier(() -> selectNow(balanceContext, roleType, group));
+    }
+
+    private ServerStatus selectNow(BalanceContext balanceContext, RoleType roleType, String group) {
         Request request = balanceContext.getRequest();
         logger.debug("Selecting worker for , role: {}, group: {}", roleType, group);
 

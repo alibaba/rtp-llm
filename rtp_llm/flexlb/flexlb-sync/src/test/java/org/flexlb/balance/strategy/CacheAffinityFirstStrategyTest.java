@@ -22,6 +22,7 @@ import org.junit.jupiter.api.Assertions;
 import org.junit.jupiter.api.BeforeEach;
 import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
+import reactor.core.publisher.Mono;
 
 import java.util.HashSet;
 import java.util.List;
@@ -181,7 +182,7 @@ class CacheAffinityFirstStrategyTest {
 
         CacheAwareService cacheAwareService = Mockito.mock(CacheAwareService.class);
         Mockito.when(cacheAwareService.findMatchingEngines(Mockito.any(CacheMatchQuery.class)))
-                .thenReturn(new CacheMatchResult(cacheMatches, CacheMatchSource.KVCM, 123, BLOCK_SIZE));
+                .thenReturn(Mono.just(new CacheMatchResult(cacheMatches, CacheMatchSource.KVCM, 123, BLOCK_SIZE)));
 
         return new CacheAffinityFirstStrategy(
                 new EngineWorkerStatus(new ModelMetaConfig()),
@@ -206,7 +207,7 @@ class CacheAffinityFirstStrategyTest {
         balanceContext.setConfig(config);
         balanceContext.setRequest(request);
         return new SelectionResult(
-                strategy.select(balanceContext, RoleType.PREFILL, null), balanceContext);
+                strategy.select(balanceContext, RoleType.PREFILL, null).block(), balanceContext);
     }
 
     private FlexlbConfig cacheAffinityConfig() {

@@ -66,37 +66,45 @@ public class KvcmLeaderResolver {
                                 .setTraceId(IdUtils.fastUuid())
                                 .build(),
                         config.getRequestTimeoutMs());
-                ErrorCode code = response.getHeader().getStatus().getCode();
-                if (code != ErrorCode.OK || !response.hasLeaderEndpoint()) {
-                    log.warn("KVCM bootstrap target {} did not return a leader, code={}",
-                            bootstrapTarget, code);
-                    continue;
+                if (updateLeader(bootstrapTargets, bootstrapTarget, response)) {
+                    return true;
                 }
-                MetaNodeEndpoint endpoint = response.getLeaderEndpoint();
-                if (StringUtils.isBlank(endpoint.getHost())) {
-                    continue;
-                }
-                int leaderPort = endpoint.getMetaRpcPort();
-                if (leaderPort <= 0) {
-                    log.warn("KVCM bootstrap target {} returned an invalid leader meta RPC port: {}",
-                            bootstrapTarget, leaderPort);
-                    continue;
-                }
-
-                GrpcTarget newLeader = new GrpcTarget(endpoint.getHost(), leaderPort);
-                GrpcTarget previousLeader = leader.get();
-                if (!newLeader.equals(previousLeader)) {
-                    leader.set(newLeader);
-                    log.info("KVCM leader changed from {} to {}", previousLeader, newLeader);
-                }
-                Set<GrpcTarget> activeTargets = new HashSet<>(bootstrapTargets);
-                activeTargets.add(newLeader);
-                metaServiceClient.removeStaleChannels(activeTargets);
-                return true;
-            } catch (Exception e) {
-                log.warn("Failed to query KVCM cluster info from bootstrap target: {}", bootstrapTarget, e);
+            } catch (Exception exception) {
+                log.warn("Failed to query KVCM cluster info from bootstrap target: {}", bootstrapTarget, exception);
             }
         }
         return false;
+    }
+
+    private boolean updateLeader(
+            Set<GrpcTarget> bootstrapTargets,
+            GrpcTarget bootstrapTarget,
+            GetClusterInfoResponse response) {
+        ErrorCode code = response.getHeader().getStatus().getCode();
+        if (code != ErrorCode.OK || !response.hasLeaderEndpoint()) {
+            log.warn("KVCM bootstrap target {} did not return a leader, code={}", bootstrapTarget, code);
+            return false;
+        }
+        MetaNodeEndpoint endpoint = response.getLeaderEndpoint();
+        if (StringUtils.isBlank(endpoint.getHost())) {
+            return false;
+        }
+        int leaderPort = endpoint.getMetaRpcPort();
+        if (leaderPort <= 0) {
+            log.warn("KVCM bootstrap target {} returned an invalid leader meta RPC port: {}",
+                    bootstrapTarget, leaderPort);
+            return false;
+        }
+
+        GrpcTarget newLeader = new GrpcTarget(endpoint.getHost(), leaderPort);
+        GrpcTarget previousLeader = leader.get();
+        if (!newLeader.equals(previousLeader)) {
+            leader.set(newLeader);
+            log.info("KVCM leader changed from {} to {}", previousLeader, newLeader);
+        }
+        Set<GrpcTarget> activeTargets = new HashSet<>(bootstrapTargets);
+        activeTargets.add(newLeader);
+        metaServiceClient.removeStaleChannels(activeTargets);
+        return true;
     }
 }

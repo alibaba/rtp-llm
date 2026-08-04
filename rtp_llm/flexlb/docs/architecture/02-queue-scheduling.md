@@ -63,9 +63,9 @@ FlexLB 支持两种路由模式，由 `FLEXLB_CONFIG.enableQueueing`（默认 **
 
 - `route(ctx)`：注入 `FlexlbConfig` 后按 `enableQueueing` 分流（见上）；两条路径都
   `doOnSuccess(ctx::setResponse)`。
-- `cancel(ctx)`：**按 BalanceContext 引用取消**（不是按 sequenceId）——`ctx.cancel()`
-  置位 AtomicBoolean，并 `future.completeExceptionally(CancellationException)`。触发点是
-  HTTP 层 `.doOnCancel()`（客户端断连，`HttpLoadBalanceServer.processScheduledRequest`）。
+- `cancel(ctx)`：**按 BalanceContext 引用取消**（不是按 sequenceId）——`tryCancel()`
+  原子置位，并在首次取消时回滚已路由结果、完成队列 future。触发点唯一是
+  客户端订阅取消时 `RouteService.route()` 的 `.doOnCancel()`。
 
 ## 队列模式完整生命周期
 
@@ -77,7 +77,7 @@ FlexLB 支持两种路由模式，由 `FLEXLB_CONFIG.enableQueueing`（默认 **
    [01-routing-and-balancing](01-routing-and-balancing.md)），`NO_*_WORKER` 类错误按
    10ms 间隔原地重试。
 5. `future.complete()` → 调用方 Mono 链恢复 → HTTP 响应。
-6. 客户端断连：`.doOnCancel` → `RouteService.cancel(ctx)`；仍在队列则被 `handleCanceled`
+6. 客户端断连：`RouteService.route()` 的 `.doOnCancel` → `RouteService.cancel(ctx)`；仍在队列则被 `handleCanceled`
    移除，已被工作线程取出则在出队检查时丢弃。
 
 ## BalanceContext 队列相关字段

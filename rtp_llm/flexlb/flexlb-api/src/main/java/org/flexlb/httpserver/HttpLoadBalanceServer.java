@@ -126,13 +126,8 @@ public class HttpLoadBalanceServer {
         }
 
         return requestBlockHashService.prepareBlockCacheKeys(ctx)
-                .then(Mono.defer(() -> routeService.route(ctx)))
-                .flatMap(response -> handleRoutingResult(ctx, response))
-                .doOnCancel(() -> {
-                    ctx.setSuccess(false);
-                    ctx.setErrorMessage("REQUEST_CANCELLED");
-                    routeService.cancel(ctx);
-                });
+                .then(Mono.defer(() -> routeService.route(
+                        ctx, response -> handleRoutingResult(ctx, response))));
     }
 
     private Mono<ServerResponse> responseMasterInfo(ServerRequest request) {
@@ -236,8 +231,8 @@ public class HttpLoadBalanceServer {
 
     private Mono<ServerResponse> fallbackToLocalRouting(BalanceContext ctx) {
         return requestBlockHashService.prepareBlockCacheKeys(ctx)
-                .then(Mono.defer(() -> routeService.route(ctx)))
-                .flatMap(response -> handleRoutingResult(ctx, response))
+                .then(Mono.defer(() -> routeService.route(
+                        ctx, response -> handleRoutingResult(ctx, response))))
                 .onErrorResume(e -> {
                     if (e instanceof RejectedExecutionException) {
                         return Mono.error(e);

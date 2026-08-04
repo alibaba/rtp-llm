@@ -6,6 +6,7 @@ import ch.qos.logback.core.read.ListAppender;
 import io.grpc.ConnectivityState;
 import io.grpc.ManagedChannel;
 import io.netty.bootstrap.Bootstrap;
+import org.flexlb.config.ConfigService;
 import org.flexlb.engine.grpc.config.ChannelConfiguration;
 import org.junit.jupiter.api.Test;
 import org.junit.jupiter.api.condition.EnabledOnOs;
@@ -30,7 +31,7 @@ class GrpcChannelFactoryTest {
         bootstrapLogger.addAppender(appender);
 
         try (AnnotationConfigApplicationContext context = new AnnotationConfigApplicationContext(
-                ChannelConfiguration.class, GrpcChannelFactory.class)) {
+                ConfigService.class, ChannelConfiguration.class, GrpcChannelFactory.class)) {
             GrpcChannelFactory factory = context.getBean(GrpcChannelFactory.class);
             ManagedChannel channel = factory.create(new GrpcTarget("127.0.0.1", 1));
             try {

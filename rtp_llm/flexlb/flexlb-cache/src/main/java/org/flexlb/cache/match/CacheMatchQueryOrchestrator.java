@@ -6,7 +6,6 @@ import org.flexlb.cache.domain.CacheMatchQuery;
 import org.flexlb.cache.domain.CacheMatchResult;
 import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.cache.domain.CacheMatchStatus;
-import org.flexlb.cache.domain.LocalStandbyHashResult;
 import org.flexlb.cache.hash.LocalStandbyHashService;
 import org.flexlb.cache.match.kvcm.KvcmCacheMatchProvider;
 import org.flexlb.cache.match.localstandby.LocalStandbyCacheManager;
@@ -17,6 +16,7 @@ import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.config.CacheMatchConfiguration;
 import org.flexlb.dao.kvcm.KvcmHealthSnapshot;
 import org.springframework.stereotype.Component;
+import reactor.core.publisher.Mono;
 
 import java.util.List;
 import java.util.Map;
@@ -63,30 +63,31 @@ public class CacheMatchQueryOrchestrator {
                 effectiveSource());
     }
 
-    public CacheMatchResult findMatchingEngines(CacheMatchQuery query) {
-        long startTimeNs = System.nanoTime();
-        if (!configuration.isKvcmEnabled()) {
-            return queryLocalSync(query, startTimeNs);
-        }
-        CacheMatchSource source = failoverManager.activeSource();
-        if (source == CacheMatchSource.LOCAL_STANDBY) {
-            cacheMetricsReporter.reportStandbyFallback("active_source");
-            return queryLocalStandby(query, startTimeNs);
-        }
-        if (query.blockCacheKeys() == null || query.blockCacheKeys().isEmpty()) {
-            return CacheMatchResult.empty(CacheMatchSource.KVCM);
-        }
+    public Mono<CacheMatchResult> findMatchingEngines(CacheMatchQuery query) {
+        return Mono.defer(() -> {
+            long startTimeNs = System.nanoTime();
+            if (!configuration.isKvcmEnabled()) {
+                return queryLocalSync(query, startTimeNs);
+            }
+            CacheMatchSource source = failoverManager.activeSource();
+            if (source == CacheMatchSource.LOCAL_STANDBY) {
+                cacheMetricsReporter.reportStandbyFallback("active_source");
+                return queryLocalStandby(query, startTimeNs);
+            }
+            if (query.blockCacheKeys() == null || query.blockCacheKeys().isEmpty()) {
+                return Mono.just(CacheMatchResult.empty(CacheMatchSource.KVCM));
+            }
 
-        try {
-            Map<String, Integer> matches = kvcmProvider.findMatchingEngines(
-                    query.requestId(), query.blockCacheKeys(), query.blockSize(), query.roleType(), query.group());
-            comparisonService.trackLocalStandbyPrediction(query);
-            return result(matches, CacheMatchSource.KVCM, startTimeNs, query.blockSize());
-        } catch (RuntimeException e) {
-            log.warn("KVCM cache query failed; requestId={}, action=LOCAL_STANDBY", query.requestId(), e);
-            cacheMetricsReporter.reportStandbyFallback("kvcm_query_failure");
-            return queryLocalStandby(query, startTimeNs);
-        }
+            return kvcmProvider.findMatchingEngines(
+                            query.requestId(), query.blockCacheKeys(), query.blockSize(), query.roleType(), query.group())
+                    .doOnSuccess(ignored -> comparisonService.trackLocalStandbyPrediction(query))
+                    .map(matches -> result(matches, CacheMatchSource.KVCM, startTimeNs, query.blockSize()))
+                    .onErrorResume(error -> {
+                        log.warn("KVCM cache query failed; requestId={}, action=LOCAL_STANDBY", query.requestId(), error);
+                        cacheMetricsReporter.reportStandbyFallback("kvcm_query_failure");
+                        return queryLocalStandby(query, startTimeNs);
+                    });
+        });
     }
 
     public void applyFailoverAction(CacheMatchFailoverAction action) {
@@ -130,28 +131,35 @@ public class CacheMatchQueryOrchestrator {
                 localStandbyCacheManager.maximumEntryCount());
     }
 
-    private CacheMatchResult queryLocalSync(CacheMatchQuery query, long startTimeNs) {
+    private Mono<CacheMatchResult> queryLocalSync(CacheMatchQuery query, long startTimeNs) {
         if (query.blockCacheKeys() == null || query.blockCacheKeys().isEmpty()) {
-            return CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC);
+            return Mono.just(CacheMatchResult.empty(CacheMatchSource.LOCAL_SYNC));
         }
-        Map<String, Integer> matches = localSyncProvider.findMatchingEngines(
-                query.requestId(), query.blockCacheKeys(), query.blockSize(), query.roleType(), query.group());
-        return result(matches, CacheMatchSource.LOCAL_SYNC, startTimeNs, query.blockSize());
+        return localSyncProvider.findMatchingEngines(
+                        query.requestId(), query.blockCacheKeys(), query.blockSize(), query.roleType(), query.group())
+                .map(matches -> result(matches, CacheMatchSource.LOCAL_SYNC, startTimeNs, query.blockSize()));
     }
 
-    private CacheMatchResult queryLocalStandby(CacheMatchQuery query, long startTimeNs) {
+    private Mono<CacheMatchResult> queryLocalStandby(CacheMatchQuery query, long startTimeNs) {
         List<Long> blockCacheKeys = query.localStandbyBlockCacheKeys();
         if (blockCacheKeys != null && blockCacheKeys.isEmpty()) {
-            return CacheMatchResult.empty(CacheMatchSource.LOCAL_STANDBY);
+            return Mono.just(CacheMatchResult.empty(CacheMatchSource.LOCAL_STANDBY));
         }
-        LocalStandbyHashResult hashResult = localStandbyHashService.getHashResult(
-                query.requestId(), query.localStandbyBlockCacheKeys(), query.localStandbyBlockSize()).join();
-        if (hashResult.blockCacheKeys().isEmpty()) {
-            return CacheMatchResult.empty(CacheMatchSource.LOCAL_STANDBY);
-        }
-        Map<String, Integer> matches = localStandbyProvider.findMatchingEngines(
-                query.requestId(), hashResult.blockCacheKeys(), hashResult.blockSize(), query.roleType(), query.group());
-        return result(matches, CacheMatchSource.LOCAL_STANDBY, startTimeNs, hashResult.blockSize());
+        return Mono.fromFuture(localStandbyHashService.getHashResult(
+                        query.requestId(), query.localStandbyBlockCacheKeys(), query.localStandbyBlockSize()))
+                .flatMap(hashResult -> {
+                    if (hashResult.blockCacheKeys().isEmpty()) {
+                        return Mono.just(CacheMatchResult.empty(CacheMatchSource.LOCAL_STANDBY));
+                    }
+                    return localStandbyProvider.findMatchingEngines(
+                                    query.requestId(),
+                                    hashResult.blockCacheKeys(),
+                                    hashResult.blockSize(),
+                                    query.roleType(),
+                                    query.group())
+                            .map(matches -> result(
+                                    matches, CacheMatchSource.LOCAL_STANDBY, startTimeNs, hashResult.blockSize()));
+                });
     }
 
     private CacheMatchResult result(Map<String, Integer> matches, CacheMatchSource source, long startTimeNs, long blockSize) {

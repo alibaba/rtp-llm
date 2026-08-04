@@ -9,6 +9,7 @@ import org.flexlb.dao.master.CacheStatus;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.springframework.stereotype.Component;
+import reactor.core.publisher.Mono;
 
 import java.util.List;
 import java.util.Map;
@@ -35,13 +36,13 @@ public class LocalSyncCacheMatchProvider implements CacheMatchProvider {
     }
 
     @Override
-    public Map<String, Integer> findMatchingEngines(
+    public Mono<Map<String, Integer>> findMatchingEngines(
             String requestId,
             List<Long> blockCacheKeys,
             long blockSize,
             RoleType roleType,
             String group) {
-        return kvCacheManager.findMatchingEngines(blockCacheKeys, roleType, group);
+        return Mono.fromSupplier(() -> kvCacheManager.findMatchingEngines(blockCacheKeys, roleType, group));
     }
 
     public WorkerCacheUpdateResult updateFromWorkerStatus(WorkerStatus workerStatus) {

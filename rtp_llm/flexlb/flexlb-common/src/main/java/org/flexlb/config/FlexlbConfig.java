@@ -171,6 +171,54 @@ public class FlexlbConfig {
      */
     private int nettyWorkerThreadMultiplier = 2;
 
+    // ========== gRPC Client Thread Pool Configuration ==========
+
+    /**
+     * Number of Netty EventLoop threads shared by gRPC client channels.
+     * Defaults to four threads per CPU available to this JVM.
+     */
+    private int grpcClientEventLoopThreads = Math.max(1, availableProcessors() * 4);
+
+    /**
+     * Number of threads that dispatch gRPC client callbacks.
+     * Defaults to four threads per CPU available to this JVM.
+     */
+    private int grpcClientCallbackExecutorThreads = availableProcessors() * 4;
+
+    /**
+     * Maximum burst threads for gRPC client callbacks.
+     * Defaults to eight threads per CPU available to this JVM.
+     */
+    private int grpcClientCallbackExecutorMaxThreads = availableProcessors() * 8;
+
+    /**
+     * Number of threads that submit engine status synchronization work.
+     * Defaults to four threads per CPU available to this JVM.
+     */
+    private int engineSyncExecutorThreads = availableProcessors() * 4;
+
+    /**
+     * Maximum number of engine status synchronization tasks awaiting execution.
+     * Defaults to 32 tasks per CPU available to this JVM.
+     */
+    private int engineSyncExecutorQueueCapacity = availableProcessors() * 32;
+
+    /**
+     * Number of threads that initiate and process engine status checks.
+     * Defaults to four threads per CPU available to this JVM.
+     */
+    private int statusCheckExecutorThreads = availableProcessors() * 4;
+
+    /**
+     * Maximum number of engine status check tasks awaiting execution.
+     * Defaults to 32 tasks per CPU available to this JVM.
+     */
+    private int statusCheckExecutorQueueCapacity = availableProcessors() * 32;
+
+    private static int availableProcessors() {
+        return Runtime.getRuntime().availableProcessors();
+    }
+
     /**
      * Get load balancing strategy for a role type
      * This method handles the logic of selecting the appropriate strategy based on role type and configuration
@@ -180,10 +228,7 @@ public class FlexlbConfig {
      */
     public LoadBalanceStrategyEnum getStrategyForRoleType(RoleType roleType) {
         switch (roleType) {
-            case PDFUSION -> {
-                return this.loadBalanceStrategy != null ? loadBalanceStrategy : SHORTEST_TTFT;
-            }
-            case PREFILL -> {
+            case PDFUSION, PREFILL -> {
                 return this.loadBalanceStrategy != null ? loadBalanceStrategy : SHORTEST_TTFT;
             }
             case DECODE -> {
@@ -207,17 +252,11 @@ public class FlexlbConfig {
      */
     public ResourceMeasureIndicatorEnum getResourceMeasureIndicator(RoleType roleType) {
         switch (roleType) {
-            case PDFUSION -> {
-                return WAIT_TIME;
-            }
-            case PREFILL -> {
+            case PDFUSION, PREFILL, VIT -> {
                 return WAIT_TIME;
             }
             case DECODE -> {
                 return REMAINING_KV_CACHE;
-            }
-            case VIT -> {
-                return WAIT_TIME;
             }
             default -> {
                 return null;

@@ -3,8 +3,8 @@ package org.flexlb.service.grpc;
 import lombok.Getter;
 import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
-import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.engine.grpc.client.EngineGrpcClient;
 import org.slf4j.Logger;
 import org.slf4j.LoggerFactory;
 import org.springframework.stereotype.Component;
@@ -30,7 +30,7 @@ public class EngineGrpcService {
      * @param ip                  worker IP
      * @param grpcPort            worker gRPC port
      * @param finishedTaskVersion finished task version
-     * @return CompletableFuture of WorkerStatusPB
+     * @return WorkerStatusPB response
      */
     public EngineRpcService.WorkerStatusPB getWorkerStatus(String ip, int grpcPort, long finishedTaskVersion, long requestTimeoutMs) {
         if (engineGrpcClient == null) {
@@ -51,7 +51,7 @@ public class EngineGrpcService {
      * @param grpcPort            worker gRPC port
      * @param finishedTaskVersion finished task version
      * @param roleType            role type to determine which service to use
-     * @return CompletableFuture of WorkerStatusPB
+     * @return WorkerStatusPB response
      */
     public EngineRpcService.WorkerStatusPB getWorkerStatus(String ip, int grpcPort, long finishedTaskVersion, long requestTimeoutMs, RoleType roleType) {
         if (engineGrpcClient == null) {
@@ -77,7 +77,7 @@ public class EngineGrpcService {
      * @param grpcPort     worker gRPC port
      * @param workerStatus worker status
      * @param cacheVersion cache version for status check
-     * @return CompletableFuture of CacheStatusPB
+     * @return CacheStatusPB response
      */
     public EngineRpcService.CacheStatusPB getCacheStatus(
             String ip, int grpcPort, WorkerStatus workerStatus, long cacheVersion, long requestTimeoutMs) {
@@ -104,7 +104,7 @@ public class EngineGrpcService {
      * @param workerStatus worker status
      * @param cacheVersion cache version for status check
      * @param roleType     role type to determine which service to use
-     * @return CompletableFuture of CacheStatusPB
+     * @return CacheStatusPB response
      */
     public EngineRpcService.CacheStatusPB getCacheStatus(
         String ip, int grpcPort, WorkerStatus workerStatus, long cacheVersion, long requestTimeoutMs, RoleType roleType) {

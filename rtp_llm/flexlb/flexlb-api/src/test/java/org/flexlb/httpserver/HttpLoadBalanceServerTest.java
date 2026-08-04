@@ -30,6 +30,7 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.LinkedBlockingDeque;
 import java.util.concurrent.RejectedExecutionException;
+import java.util.function.Function;
 
 import static org.junit.jupiter.api.Assertions.assertArrayEquals;
 import static org.junit.jupiter.api.Assertions.assertEquals;
@@ -40,6 +41,7 @@ import static org.mockito.ArgumentMatchers.any;
 import static org.mockito.ArgumentMatchers.eq;
 import static org.mockito.Mockito.inOrder;
 import static org.mockito.Mockito.never;
+import static org.mockito.Mockito.doAnswer;
 import static org.mockito.Mockito.verify;
 import static org.mockito.Mockito.when;
 
@@ -110,7 +112,7 @@ class HttpLoadBalanceServerTest {
         response.setSuccess(true);
         when(requestBlockHashService.prepareBlockCacheKeys(any()))
                 .thenReturn(Mono.empty());
-        when(routeService.route(any())).thenReturn(Mono.just(response));
+        mockRoutingResponse(response);
 
         webTestClient.post()
                 .uri("/rtp_llm/schedule")
@@ -130,7 +132,7 @@ class HttpLoadBalanceServerTest {
         InOrder inOrder = inOrder(requestBlockHashService, routeService);
         inOrder.verify(requestBlockHashService)
                 .prepareBlockCacheKeys(prepareContextCaptor.capture());
-        inOrder.verify(routeService).route(routeContextCaptor.capture());
+        inOrder.verify(routeService).route(routeContextCaptor.capture(), any());
         assertSame(prepareContextCaptor.getValue(), routeContextCaptor.getValue());
         assertEquals(
                 "c68b72ff-982d-944f-9834-bc0e8bf2f43f",
@@ -156,11 +158,7 @@ class HttpLoadBalanceServerTest {
         response.setServerStatus(List.of(selectedWorker));
         when(requestBlockHashService.prepareBlockCacheKeys(any()))
                 .thenReturn(Mono.empty());
-        when(routeService.route(any())).thenAnswer(invocation -> {
-            BalanceContext ctx = invocation.getArgument(0);
-            ctx.setResponse(response);
-            return Mono.just(response);
-        });
+        mockRoutingResponse(response);
 
         webTestClient.post()
                 .uri("/rtp_llm/schedule")
@@ -174,7 +172,7 @@ class HttpLoadBalanceServerTest {
 
         ArgumentCaptor<BalanceContext> contextCaptor =
                 ArgumentCaptor.forClass(BalanceContext.class);
-        verify(routeService).route(contextCaptor.capture());
+        verify(routeService).route(contextCaptor.capture(), any());
         verify(cacheAwareService).updateFromRoutedRequest(
                 contextCaptor.getValue().getRequest(),
                 response.getServerStatus());
@@ -187,11 +185,7 @@ class HttpLoadBalanceServerTest {
         response.setErrorMessage("no worker");
         when(requestBlockHashService.prepareBlockCacheKeys(any()))
                 .thenReturn(Mono.empty());
-        when(routeService.route(any())).thenAnswer(invocation -> {
-            BalanceContext ctx = invocation.getArgument(0);
-            ctx.setResponse(response);
-            return Mono.just(response);
-        });
+        mockRoutingResponse(response);
 
         webTestClient.post()
                 .uri("/rtp_llm/schedule")
@@ -241,7 +235,7 @@ class HttpLoadBalanceServerTest {
                 eq(Response.class));
         assertArrayEquals(new int[]{1, 2, 3, 4}, requestCaptor.getValue().getInputIds());
         assertNull(requestCaptor.getValue().getBlockCacheKeys());
-        verify(routeService, never()).route(any());
+        verify(routeService, never()).route(any(), any());
         verify(requestBlockHashService, never()).prepareBlockCacheKeys(any());
         verify(cacheAwareService, never()).updateFromRoutedRequest(
                 any(Request.class),
@@ -266,7 +260,7 @@ class HttpLoadBalanceServerTest {
                 .jsonPath("$.error_message")
                 .isEqualTo("block_cache_keys and input_ids must not both be empty");
 
-        verify(routeService, never()).route(any());
+        verify(routeService, never()).route(any(), any());
     }
 
     @Test
@@ -281,7 +275,7 @@ class HttpLoadBalanceServerTest {
                 .exchange()
                 .expectStatus().isBadRequest();
 
-        verify(routeService, never()).route(any());
+        verify(routeService, never()).route(any(), any());
     }
 
     @Test
@@ -304,7 +298,16 @@ class HttpLoadBalanceServerTest {
                 .jsonPath("$.code").isEqualTo(8502)
                 .jsonPath("$.error_message").isEqualTo("block hash executor queue is full");
 
-        verify(routeService, never()).route(any());
+        verify(routeService, never()).route(any(), any());
     }
 
+    private void mockRoutingResponse(Response response) {
+        doAnswer(invocation -> {
+            BalanceContext context = invocation.getArgument(0);
+            context.setResponse(response);
+            @SuppressWarnings("unchecked")
+            Function<Response, Mono<Object>> responseHandler = invocation.getArgument(1);
+            return responseHandler.apply(response);
+        }).when(routeService).route(any(), any());
+    }
 }

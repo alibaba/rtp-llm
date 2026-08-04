@@ -113,8 +113,7 @@ if [ -z $SETENV_SETTED ]; then
           SERVICE_OPTS="${SERVICE_OPTS} -Xms10g -Xmx10g"
           maxDirectMemory=1g
         elif [ $memTotal -le 24576 ]; then
-          # The 12c24g ASI pool exposes about 19GiB to the container.
-          SERVICE_OPTS="${SERVICE_OPTS} -Xms12g -Xmx12g"
+          SERVICE_OPTS="${SERVICE_OPTS} -Xms14g -Xmx14g"
           maxDirectMemory=1g
         elif [ $memTotal -le 32768 ]; then
           SERVICE_OPTS="${SERVICE_OPTS} -Xms18g -Xmx18g"

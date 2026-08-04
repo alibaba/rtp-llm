@@ -10,6 +10,9 @@ import io.netty.util.concurrent.DefaultEventExecutorChooserFactory;
 import io.netty.util.concurrent.RejectedExecutionHandlers;
 import io.netty.util.internal.PlatformDependent;
 import lombok.extern.slf4j.Slf4j;
+import org.flexlb.config.ConfigService;
+import org.flexlb.config.FlexlbConfig;
+import org.springframework.beans.factory.annotation.Autowired;
 import org.springframework.context.annotation.Bean;
 import org.springframework.context.annotation.Configuration;
 
@@ -22,12 +25,29 @@ import java.util.concurrent.TimeUnit;
 @Slf4j
 public class ChannelConfiguration {
 
+    private final FlexlbConfig config;
+
+    @Autowired
+    public ChannelConfiguration(ConfigService configService) {
+        this(configService.loadBalanceConfig());
+    }
+
+    ChannelConfiguration(FlexlbConfig config) {
+        // Only for test
+        this.config = config;
+    }
+
     @Bean
     public ThreadPoolExecutor managedChannelThreadPoolExecutor() {
-        return new ThreadPoolExecutor(
-                Runtime.getRuntime().availableProcessors() * 4,
-                Runtime.getRuntime().availableProcessors() * 8,
-                5, TimeUnit.MINUTES,
+        int coreThreads = positive("grpcClientCallbackExecutorThreads", config.getGrpcClientCallbackExecutorThreads());
+        int maxThreads = positive("grpcClientCallbackExecutorMaxThreads", config.getGrpcClientCallbackExecutorMaxThreads());
+        if (maxThreads < coreThreads) {
+            throw new IllegalArgumentException("grpcClientCallbackExecutorMaxThreads must be at least core threads");
+        }
+        return new GrpcCallbackThreadPoolExecutor(
+                coreThreads,
+                maxThreads,
+                60, TimeUnit.SECONDS,
                 new SynchronousQueue<>(),
                 new NamedThreadFactory("engine-grpc-client-executor")
         );
@@ -35,7 +55,7 @@ public class ChannelConfiguration {
 
     @Bean
     public EventLoopGroup managedChannelEventLoopGroup() {
-        int threads = Runtime.getRuntime().availableProcessors() * 8;
+        int threads = positive("grpcClientEventLoopThreads", config.getGrpcClientEventLoopThreads());
         if (Epoll.isAvailable()) {
             return new EpollEventLoopGroup(
                     threads,
@@ -55,5 +75,12 @@ public class ChannelConfiguration {
                 RejectedExecutionHandlers.reject(),
                 PlatformDependent::newMpscQueue
         );
+    }
+
+    private int positive(String name, int value) {
+        if (value <= 0) {
+            throw new IllegalArgumentException(name + " must be positive");
+        }
+        return value;
     }
 }

@@ -10,9 +10,10 @@ import org.flexlb.cache.match.localstandby.LocalStandbyComparisonService;
 import org.flexlb.cache.telemetry.CacheMetricsReporter;
 import org.flexlb.dao.loadbalance.Request;
 import org.flexlb.dao.loadbalance.ServerStatus;
-import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.master.CacheHitFeedback;
+import org.flexlb.dao.master.WorkerStatus;
 import org.springframework.stereotype.Service;
+import reactor.core.publisher.Mono;
 
 import java.util.List;
 import java.util.concurrent.CompletableFuture;
@@ -41,19 +42,21 @@ public class CacheAwareService {
         this.updateOrchestrator = updateOrchestrator;
     }
 
-    public CacheMatchResult findMatchingEngines(CacheMatchQuery query) {
-        long startTime = System.nanoTime();
-        try {
-            CacheMatchResult result = queryOrchestrator.findMatchingEngines(query);
-            cacheMetricsReporter.reportFindMatchingEnginesRT(query.roleType(), startTime / 1_000, "0");
-            return result;
-        } catch (Exception e) {
-            CacheMatchSource source = queryOrchestrator.effectiveSource();
-            long queryTimeUs = (System.nanoTime() - startTime) / 1_000;
-            cacheMetricsReporter.reportFindMatchingEnginesRT(query.roleType(), startTime / 1_000, "1");
-            log.error("Error finding matching engines, requestId={}, role={}", query.requestId(), query.roleType(), e);
-            return CacheMatchResult.failed(source, queryTimeUs);
-        }
+    public Mono<CacheMatchResult> findMatchingEngines(CacheMatchQuery query) {
+        return Mono.defer(() -> {
+            long startTime = System.nanoTime();
+            return queryOrchestrator.findMatchingEngines(query)
+                    .doOnSuccess(ignored -> cacheMetricsReporter.reportFindMatchingEnginesRT(
+                            query.roleType(), startTime / 1_000, "0"))
+                    .onErrorResume(error -> {
+                        CacheMatchSource source = queryOrchestrator.effectiveSource();
+                        long queryTimeUs = (System.nanoTime() - startTime) / 1_000;
+                        cacheMetricsReporter.reportFindMatchingEnginesRT(query.roleType(), startTime / 1_000, "1");
+                        log.error("Error finding matching engines, requestId={}, role={}",
+                                query.requestId(), query.roleType(), error);
+                        return Mono.just(CacheMatchResult.failed(source, queryTimeUs));
+                    });
+        });
     }
 
     public WorkerCacheUpdateResult updateFromWorkerStatus(WorkerStatus workerStatus) {

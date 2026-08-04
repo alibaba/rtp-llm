@@ -5,17 +5,20 @@ import org.flexlb.config.ConfigService;
 import org.flexlb.config.FlexlbConfig;
 import org.flexlb.dao.BalanceContext;
 import org.flexlb.dao.loadbalance.Response;
+import org.flexlb.dao.loadbalance.StrategyErrorType;
 import org.flexlb.service.monitor.RoutingQueueReporter;
 import org.flexlb.util.Logger;
 import org.springframework.stereotype.Component;
+import reactor.core.Disposable;
+import reactor.core.publisher.Mono;
 
 import javax.annotation.PostConstruct;
 import javax.annotation.PreDestroy;
+import java.time.Duration;
+import java.util.concurrent.CancellationException;
 import java.util.concurrent.ExecutorService;
 import java.util.concurrent.Executors;
 import java.util.concurrent.TimeUnit;
-
-import org.flexlb.dao.loadbalance.StrategyErrorType;
 
 /**
  * Request scheduler - manages worker thread pool, consumes request queue, and executes routing.
@@ -92,18 +95,23 @@ public class RequestScheduler {
                     continue;
                 }
 
-                try {
-                    // Step 2: Take request from queue
-                    BalanceContext ctx = queueManager.takeRequest(true, 500);
-                    if (ctx == null) {
-                        continue; // permit released in finally
-                    }
-
-                    // Step 3: Process request
-                    Logger.debug("Worker processing request id: {}", ctx.getRequestId());
-                    processRequest(ctx);
-                } finally {
+                // Step 2: Take request from queue
+                BalanceContext ctx = queueManager.takeRequest(true, 500);
+                if (ctx == null) {
                     dynamicWorkerManager.releasePermit();
+                    continue;
+                }
+
+                // Step 3: Process request. The subscription owns the permit until terminal completion.
+                Logger.debug("Worker processing request id: {}", ctx.getRequestId());
+                Disposable routingSubscription = processRequest(ctx)
+                        .doFinally(ignored -> {
+                            ctx.clearCancellationAction();
+                            dynamicWorkerManager.releasePermit();
+                        })
+                        .subscribe();
+                if (!routingSubscription.isDisposed()) {
+                    ctx.registerCancellationAction(routingSubscription::dispose);
                 }
             } catch (Exception e) {
                 Logger.error("Worker thread encountered error", e);
@@ -113,30 +121,52 @@ public class RequestScheduler {
         Logger.info("Worker thread stopped");
     }
 
-    private void processRequest(BalanceContext ctx) {
-        try {
-            while (!ctx.getFuture().isDone()) {
-                Response response = router.route(ctx);
-                if (response.isSuccess() || !isRetryable(response)) {
-                    completeRouting(ctx, response);
-                    return;
-                }
-                if (!hasRetryBudget(ctx)) {
-                    logRetryLimitReached(ctx);
-                    completeRouting(ctx, response);
-                    return;
-                }
-                recordRoutingRetry(ctx, response);
-                waitBeforeRetry();
+    Mono<Void> processRequest(BalanceContext ctx) {
+        return Mono.defer(() -> {
+            if (ctx.isCancelled()) {
+                completeCancelledRouting(ctx);
+                return Mono.empty();
             }
-        } catch (InterruptedException e) {
-            Logger.warn("Routing retry interrupted for request id:{}, retry count: {}", ctx.getRequestId(), ctx.getRetryCount());
-            Thread.currentThread().interrupt();
-            ctx.getFuture().completeExceptionally(e);
-        } catch (Exception e) {
-            Logger.error("Worker thread failed to route ctx id:{}", ctx.getRequestId(), e);
-            ctx.getFuture().completeExceptionally(e);
+            if (ctx.getFuture().isDone()) {
+                return Mono.empty();
+            }
+            return router.route(ctx)
+                    .switchIfEmpty(Mono.defer(() -> {
+                        if (ctx.isCancelled()) {
+                            completeCancelledRouting(ctx);
+                            return Mono.empty();
+                        }
+                        return Mono.error(new IllegalStateException("Router completed without a response"));
+                    }))
+                    .flatMap(response -> handleRouteResponse(ctx, response))
+                    .onErrorResume(error -> {
+                        Logger.error("Worker thread failed to route ctx id:{}", ctx.getRequestId(), error);
+                        ctx.getFuture().completeExceptionally(error);
+                        return Mono.empty();
+                    });
+        });
+    }
+
+    private Mono<Void> handleRouteResponse(BalanceContext ctx, Response response) {
+        if (ctx.isCancelled()) {
+            router.rollBack(ctx, response);
+            completeCancelledRouting(ctx);
+            return Mono.empty();
         }
+        if (response.isSuccess() || !isRetryable(response)) {
+            completeRouting(ctx, response);
+            return Mono.empty();
+        }
+        if (!hasRetryBudget(ctx)) {
+            logRetryLimitReached(ctx);
+            completeRouting(ctx, response);
+            return Mono.empty();
+        }
+        recordRoutingRetry(ctx, response);
+        if (routingRetryIntervalMs <= 0) {
+            return Mono.delay(Duration.ZERO).then(Mono.defer(() -> processRequest(ctx)));
+        }
+        return Mono.delay(Duration.ofMillis(routingRetryIntervalMs)).then(processRequest(ctx));
     }
 
     /**
@@ -171,13 +201,24 @@ public class RequestScheduler {
      * Completes the request with the final routing response.
      */
     private void completeRouting(BalanceContext ctx, Response response) {
-        ctx.getFuture().complete(response);
-        metrics.reportRoutingSuccessQps(ctx.getRetryCount());
+        if (ctx.isCancelled()) {
+            router.rollBack(ctx, response);
+            completeCancelledRouting(ctx);
+            return;
+        }
+        if (!ctx.getFuture().complete(response)) {
+            return;
+        }
+        if (response.isSuccess()) {
+            metrics.reportRoutingSuccessQps(ctx.getRetryCount());
+        } else {
+            metrics.reportRoutingFailureQps(response.getCode());
+        }
     }
 
-    private void waitBeforeRetry() throws InterruptedException {
-        if (routingRetryIntervalMs > 0) {
-            Thread.sleep(routingRetryIntervalMs);
+    private void completeCancelledRouting(BalanceContext ctx) {
+        if (ctx.getFuture() != null) {
+            ctx.getFuture().completeExceptionally(new CancellationException("Request cancelled before routing completed"));
         }
     }
 

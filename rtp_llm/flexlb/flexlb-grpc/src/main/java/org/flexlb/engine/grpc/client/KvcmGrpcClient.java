@@ -1,7 +1,6 @@
 package org.flexlb.engine.grpc.client;
 
 import io.grpc.StatusRuntimeException;
-import lombok.Setter;
 import lombok.extern.slf4j.Slf4j;
 import org.apache.commons.lang3.StringUtils;
 import org.flexlb.config.CacheMatchConfiguration;
@@ -20,6 +19,8 @@ import org.flexlb.kvcm.grpc.QueryType;
 import org.flexlb.listener.ApplicationWarmupState;
 import org.flexlb.util.IdUtils;
 import org.springframework.stereotype.Component;
+import reactor.core.publisher.Mono;
+import reactor.core.scheduler.Schedulers;
 
 import javax.annotation.PreDestroy;
 import java.util.Collections;
@@ -37,7 +38,12 @@ import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Consumer;
 
 /**
- * High-level KVCM cache matching client.
+ * High-level reactive client for KVCM cache matching.
+ *
+ * <p>When KVCM is enabled, the client refreshes leader and worker metadata on a dedicated
+ * background executor. The request path only reads the resulting cached namespace and query type;
+ * it never performs worker discovery or metadata traversal. The current cached leader is read for
+ * each RPC attempt because it may change between queries or retries.
  */
 @Slf4j
 @Component
@@ -65,9 +71,24 @@ public class KvcmGrpcClient {
     private final AtomicLong lastHeartbeatSuccessTimeMs = new AtomicLong();
     private final AtomicLong lastHeartbeatFailureTimeMs = new AtomicLong();
     private final AtomicReference<String> lastStateChangeReason = new AtomicReference<>(INITIAL_HEALTH_REASON);
-    @Setter
-    private volatile Consumer<KvcmHealthSnapshot> healthSnapshotListener = ignored -> { };
+    private volatile Consumer<KvcmHealthSnapshot> healthSnapshotListener = ignored -> {
+    };
 
+    /**
+     * Creates a KVCM client and starts periodic leader and worker-metadata refreshes when KVCM is
+     * enabled.
+     *
+     * <p>The first refresh is scheduled immediately on the dedicated refresh executor. It is not a
+     * Spring startup barrier, so unavailable KVCM metadata cannot prevent the application from
+     * starting.
+     *
+     * @param configuration cache-matching configuration
+     * @param metaServiceClient low-level KVCM MetaService client
+     * @param leaderResolver resolver for the current KVCM leader
+     * @param workerMetadataResolver cache for worker-derived namespaces and query types
+     * @param applicationWarmupState application warm-up state used for health transitions
+     * @param metricsReporter reporter for KVCM query retry metrics
+     */
     public KvcmGrpcClient(CacheMatchConfiguration configuration,
                           KvcmMetaServiceClient metaServiceClient,
                           KvcmLeaderResolver leaderResolver,
@@ -118,118 +139,161 @@ public class KvcmGrpcClient {
                 workerMetadataResolver.usesConfiguredNamespace() ? "configuration" : "worker-status");
     }
 
-    public Map<String, Integer> findMatchingEngines(String requestId, List<Long> blockCacheKeys, long blockSize,
-                                                    RoleType roleType, String group) {
-        if (!enabled) {
-            log.warn("Skipping KVCM cache query because the KVCM client is disabled, "
-                            + "requestId={}, role={}, group={}",
-                    requestId, roleType, group);
-            return Collections.emptyMap();
-        }
-        if (blockCacheKeys == null || blockCacheKeys.isEmpty()) {
-            log.debug("Skipping KVCM cache query because blockCacheKeys is empty, requestId={}", requestId);
-            return Collections.emptyMap();
-        }
-        if (blockSize <= 0) {
-            log.warn("Skipping KVCM cache query because blockSize is unavailable, "
-                            + "requestId={}, role={}, group={}",
-                    requestId, roleType, group);
-            return Collections.emptyMap();
-        }
-
-        String namespace = workerMetadataResolver.resolveNamespace(roleType, group, blockSize);
-        if (StringUtils.isBlank(namespace)) {
-            requestImmediateRefresh();
-            log.warn("Skipping KVCM cache query because namespace is unavailable, "
-                            + "requestId={}, role={}, group={}",
-                    requestId, roleType, group);
-            return Collections.emptyMap();
-        }
-        QueryType queryType = workerMetadataResolver.resolveQueryType(roleType, group);
-        if (queryType == null) {
-            requestImmediateRefresh();
-            log.warn("Skipping KVCM cache query because query type is unavailable, "
-                    + "requestId={}, role={}, group={}", requestId, roleType, group);
-            return Collections.emptyMap();
-        }
-        return queryWithRetry(requestId, blockCacheKeys, namespace, queryType, roleType, group);
-    }
-
-    private Map<String, Integer> queryWithRetry(String requestId, List<Long> blockCacheKeys, String namespace,
-                                                QueryType queryType, RoleType roleType, String group) {
-        for (int attemptIndex = 0; attemptIndex <= maxQueryRetryCount; attemptIndex++) {
-            try {
-                Map<String, Integer> matches = queryOnce(requestId, blockCacheKeys, namespace, queryType, roleType, group);
-                recordQuerySuccess();
-                return matches;
-            } catch (RuntimeException failure) {
-                if (attemptIndex == maxQueryRetryCount) {
-                    recordQueryFailure();
-                    throw failure;
-                }
-                metricsReporter.reportQueryRetry(attemptIndex + 1);
-                log.debug("KVCM cache query failed; retrying, requestId={}, attempt={}, maxRetryCount={}",
-                        requestId, attemptIndex + 1, maxQueryRetryCount, failure);
+    /**
+     * Finds the KVCM prefix-match block count for each matching engine.
+     *
+     * <p>The returned publisher is cold. On subscription it validates request data, reads cached
+     * worker metadata, then queries the current KVCM leader. Missing cached metadata returns an
+     * empty map and schedules a coalesced background refresh. KVCM status and protocol failures
+     * are propagated as {@link KvcmQueryException} after the configured retries.
+     *
+     * @param requestId request identifier used for tracing and logs
+     * @param blockCacheKeys ordered cache block keys to match
+     * @param blockSize cache block size used to form the KVCM instance identifier
+     * @param roleType role whose engines are being matched
+     * @param group selected worker group, or {@code null} for cross-group routing
+     * @return a cold publisher of engine address to matched prefix-block count
+     */
+    public Mono<Map<String, Integer>> findMatchingEngines(String requestId,
+                                                           List<Long> blockCacheKeys,
+                                                           long blockSize,
+                                                           RoleType roleType,
+                                                           String group) {
+        return Mono.defer(() -> {
+            if (!enabled) {
+                log.warn("Skipping KVCM cache query because the KVCM client is disabled, "
+                                + "requestId={}, role={}, group={}",
+                        requestId, roleType, group);
+                return Mono.just(Collections.emptyMap());
             }
-        }
-        throw new IllegalStateException("KVCM query retry loop completed without a result");
+            if (blockCacheKeys == null || blockCacheKeys.isEmpty()) {
+                log.debug("Skipping KVCM cache query because blockCacheKeys is empty, requestId={}", requestId);
+                return Mono.just(Collections.emptyMap());
+            }
+            if (blockSize <= 0) {
+                log.warn("Skipping KVCM cache query because blockSize is unavailable, "
+                                + "requestId={}, role={}, group={}",
+                        requestId, roleType, group);
+                return Mono.just(Collections.emptyMap());
+            }
+
+            String namespace = workerMetadataResolver.resolveNamespace(roleType, group, blockSize);
+            if (StringUtils.isBlank(namespace)) {
+                requestImmediateRefresh();
+                log.warn("Skipping KVCM cache query because namespace is unavailable, "
+                                + "requestId={}, role={}, group={}",
+                        requestId, roleType, group);
+                return Mono.just(Collections.emptyMap());
+            }
+            QueryType queryType = workerMetadataResolver.resolveQueryType(roleType, group);
+            if (queryType == null) {
+                requestImmediateRefresh();
+                log.warn("Skipping KVCM cache query because query type is unavailable, "
+                        + "requestId={}, role={}, group={}", requestId, roleType, group);
+                return Mono.just(Collections.emptyMap());
+            }
+            return queryWithRetry(requestId, blockCacheKeys, namespace, queryType, roleType, group, 0);
+        });
     }
 
-    private Map<String, Integer> queryOnce(String requestId, List<Long> blockCacheKeys, String namespace, QueryType queryType, RoleType roleType, String group) {
-        GrpcTarget currentLeader = leaderResolver.resolve();
-        if (currentLeader == null) {
-            throw new KvcmQueryException("KVCM leader is unavailable");
-        }
+    private Mono<Map<String, Integer>> queryWithRetry(String requestId,
+                                                      List<Long> blockCacheKeys,
+                                                      String namespace,
+                                                      QueryType queryType,
+                                                      RoleType roleType,
+                                                      String group,
+                                                      int attemptIndex) {
+        return queryOnce(requestId, blockCacheKeys, namespace, queryType, roleType, group)
+                .doOnSuccess(ignored -> recordQuerySuccess())
+                .onErrorResume(failure -> {
+                    if (attemptIndex == maxQueryRetryCount) {
+                        recordQueryFailure();
+                        return Mono.error(failure);
+                    }
+                    metricsReporter.reportQueryRetry(attemptIndex + 1);
+                    log.debug("KVCM cache query failed; retrying, requestId={}, attempt={}, maxRetryCount={}",
+                            requestId, attemptIndex + 1, maxQueryRetryCount, failure);
+                    return queryWithRetry(
+                            requestId, blockCacheKeys, namespace, queryType, roleType, group, attemptIndex + 1);
+                });
+    }
 
-        String traceId = IdUtils.fastUuid();
-        GetHostCacheStateRequest request = GetHostCacheStateRequest.newBuilder()
-                .setTraceId(traceId)
-                // KVCM exposes the cache namespace as instance_id in its protocol.
-                .setInstanceId(namespace)
-                .setQueryType(queryType)
-                .addAllBlockCacheKeys(blockCacheKeys)
-                .build();
+    private Mono<Map<String, Integer>> queryOnce(String requestId,
+                                                 List<Long> blockCacheKeys,
+                                                 String namespace,
+                                                 QueryType queryType,
+                                                 RoleType roleType,
+                                                 String group) {
+        return Mono.defer(() -> {
+            GrpcTarget currentLeader = leaderResolver.resolve();
+            if (currentLeader == null) {
+                return Mono.error(new KvcmQueryException("KVCM leader is unavailable"));
+            }
 
-        try {
+            String traceId = IdUtils.fastUuid();
+            GetHostCacheStateRequest request = GetHostCacheStateRequest.newBuilder()
+                    .setTraceId(traceId)
+                    // KVCM exposes the cache namespace as instance_id in its protocol.
+                    .setInstanceId(namespace)
+                    .setQueryType(queryType)
+                    .addAllBlockCacheKeys(blockCacheKeys)
+                    .build();
             if (log.isDebugEnabled()) {
                 log.debug("KVCM GetHostCacheState request: requestId={}, traceId={}, namespace={}, "
                                 + "leader={}, role={}, group={}, queryType={}, blockCount={}, blockCacheKeys={}",
                         requestId, traceId, namespace, currentLeader, roleType, group, queryType,
                         blockCacheKeys.size(), blockCacheKeys);
             }
-            GetHostCacheStateResponse response = metaServiceClient.getHostCacheState(
-                    currentLeader, request, config.getRequestTimeoutMs());
-            ErrorCode code = response.getHeader().getStatus().getCode();
-            if (code != ErrorCode.OK) {
-                throw new KvcmQueryException(
-                        "KVCM GetHostCacheState failed, code=" + code + ", message="
-                                + response.getHeader().getStatus().getMessage());
-            }
-            Map<String, Integer> matches = toPrefixMatchBlocksByHost(response.getHostsList());
-            if (log.isDebugEnabled()) {
-                log.debug("KVCM GetHostCacheState response: requestId={}, traceId={}, matches={}",
-                        requestId, traceId, matches);
-            }
-            return matches;
-        } catch (StatusRuntimeException e) {
-            throw new KvcmQueryException("KVCM GetHostCacheState gRPC request failed", e);
-        }
+            return metaServiceClient.getHostCacheState(currentLeader, request, config.getRequestTimeoutMs())
+                    .publishOn(Schedulers.parallel())
+                    .flatMap(response -> mapCacheMatches(requestId, traceId, response));
+        }).onErrorMap(StatusRuntimeException.class,
+                error -> new KvcmQueryException("KVCM GetHostCacheState gRPC request failed", error));
     }
 
+    private Mono<Map<String, Integer>> mapCacheMatches(
+            String requestId,
+            String traceId,
+            GetHostCacheStateResponse response) {
+        ErrorCode code = response.getHeader().getStatus().getCode();
+        if (code != ErrorCode.OK) {
+            return Mono.error(new KvcmQueryException(
+                    "KVCM GetHostCacheState failed, code=" + code + ", message="
+                            + response.getHeader().getStatus().getMessage()));
+        }
+        Map<String, Integer> matches = toPrefixMatchBlocksByHost(response.getHostsList());
+        if (log.isDebugEnabled()) {
+            log.debug("KVCM GetHostCacheState response: requestId={}, traceId={}, matches={}",
+                    requestId, traceId, matches);
+        }
+        return Mono.just(matches);
+    }
+
+    /**
+     * Refreshes the leader heartbeat and worker metadata while isolating either refresh failure.
+     *
+     * <p>This method is invoked by the periodic refresh executor and is package-visible for
+     * lifecycle tests.
+     */
     void refreshKvcmServiceStateSafely() {
         try {
             recordHeartbeat(leaderResolver.refresh());
-        } catch (Exception e) {
-            log.warn("Failed to refresh KVCM leader state; keeping the last known value", e);
+        } catch (Exception exception) {
+            log.warn("Failed to refresh KVCM leader state; keeping the last known value", exception);
             recordHeartbeat(false);
         }
         try {
             workerMetadataResolver.refreshNamespacesAndQueryTypes();
-        } catch (Exception e) {
-            log.warn("Failed to refresh KVCM namespaces and query types; keeping the last known values", e);
+        } catch (Exception exception) {
+            log.warn("Failed to refresh KVCM namespaces and query types; keeping the last known values", exception);
         }
     }
 
+    /**
+     * Returns an immutable snapshot of the current KVCM health counters and transition reason.
+     *
+     * @return current KVCM health snapshot
+     */
     public KvcmHealthSnapshot healthSnapshot() {
         return new KvcmHealthSnapshot(
                 healthState.get(),
@@ -239,6 +303,19 @@ public class KvcmGrpcClient {
                 lastHeartbeatSuccessTimeMs.get(),
                 lastHeartbeatFailureTimeMs.get(),
                 lastStateChangeReason.get());
+    }
+
+    /**
+     * Registers the recipient of KVCM health snapshots.
+     *
+     * <p>The listener is invoked on an internal refresh or reactive query-completion thread, so it
+     * must not block. Exceptions thrown by the listener are logged and do not stop future health
+     * refreshes.
+     *
+     * @param healthSnapshotListener listener that receives evaluated health snapshots
+     */
+    public void setHealthSnapshotListener(Consumer<KvcmHealthSnapshot> healthSnapshotListener) {
+        this.healthSnapshotListener = healthSnapshotListener;
     }
 
     private void recordHeartbeat(boolean success) {
@@ -361,6 +438,9 @@ public class KvcmGrpcClient {
         }
     }
 
+    /**
+     * Stops background refreshes and releases KVCM gRPC channels.
+     */
     @PreDestroy
     public void shutdown() {
         if (refreshExecutor != null) {

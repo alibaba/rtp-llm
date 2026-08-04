@@ -19,7 +19,10 @@ import java.util.concurrent.ConcurrentHashMap;
 import java.util.concurrent.ConcurrentMap;
 
 /**
- * Resolves KVCM namespace and query type from one traversal of in-memory worker status.
+ * Caches KVCM namespace and query type derived from in-memory worker status.
+ *
+ * <p>{@link #refreshNamespacesAndQueryTypes()} traverses worker status on the refresh executor.
+ * Request-time lookups only read the cached group and role metadata.
  */
 @Slf4j
 @Component

@@ -80,16 +80,16 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
 
             // Skip prefill cache status check if not in 100ms interval
             if ((RoleType.PREFILL.equals(roleType) || RoleType.PDFUSION.equals(roleType))
-                        && syncCount.longValue() % roundInterval != 0) {
+                    && syncCount.longValue() % roundInterval != 0) {
                 logger.debug("Skip prefill cache status check for {} because not in {}ms interval",
                         ipPort, prefillCacheStatusCheckInterval);
+                workerStatus.getCacheCheckInProgress().set(false);
                 return;
             }
 
             long startTime = System.nanoTime() / 1000;
             long currentCacheVersion = getCurrentCacheVersion();
 
-            // Launch gRPC cache status check
             CacheStatus cacheStatus = launchGrpcCacheStatusCheck(ip, grpcPort, currentCacheVersion);
             handleCacheStatusResponse(cacheStatus, startTime);
         } finally {
@@ -100,16 +100,14 @@ public class GrpcCacheStatusCheckRunner implements Runnable {
     private CacheStatus launchGrpcCacheStatusCheck(String ip, int grpcPort, long cacheVersion) {
         try {
             EngineRpcService.CacheStatusPB cacheStatus = engineGrpcService.getCacheStatus(
-                ip, grpcPort, workerStatus, cacheVersion, requestTimeoutMs, roleType);
+                    ip, grpcPort, workerStatus, cacheVersion, requestTimeoutMs, roleType);
             logger.debug("gRPC Cache Status Response - handled for {}, role:{}, cache_key_size:{}, cache_version:{}, "
                             + "available_kv_cache:{}, total_kv_cache:{}, block_size:{}",
                     ipPort, roleType.name(), cacheStatus.getCacheKeysMap().size(), cacheStatus.getVersion(),
                     cacheStatus.getAvailableKvCache(), cacheStatus.getTotalKvCache(), cacheStatus.getBlockSize());
-
             return EngineStatusConverter.convertToCacheStatus(cacheStatus);
         } catch (Throwable throwable) {
             handleException(throwable);
-            // Return a default CacheStatus with error information
             return CacheStatus.builder()
                     .version(-1)
                     .availableKvCache(0)

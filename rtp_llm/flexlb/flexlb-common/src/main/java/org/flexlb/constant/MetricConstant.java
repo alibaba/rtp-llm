@@ -318,6 +318,16 @@ public class MetricConstant {
      */
     public static final String GRPC_CHANNEL_POOL_SIZE = "app.grpc.channel.pool.size";
 
+    /**
+     * Current outbound gRPC calls, tagged by client and service
+     */
+    public static final String GRPC_CALL_INFLIGHT = "app.grpc.call.inflight";
+
+    /**
+     * Total gRPC callback executor task rejections
+     */
+    public static final String GRPC_CALLBACK_EXECUTOR_REJECTED_TOTAL = "app.grpc.callback.executor.rejected.total";
+
     /* ------------------------ Request Queue Monitoring -------------------------- */
 
     /**
@@ -344,6 +354,21 @@ public class MetricConstant {
      * Cancellation QPS
      */
     public static final String ROUTING_QUEUE_CANCELLED_QPS = "app.routing.queue.cancelled.qps";
+
+    /**
+     * Request cancellation QPS across direct and queued routing.
+     */
+    public static final String ROUTING_CANCEL_QPS = "app.routing.cancel.qps";
+
+    /**
+     * Routing rollback QPS, tagged by rollback reason.
+     */
+    public static final String ROUTING_ROLLBACK_QPS = "app.routing.rollback.qps";
+
+    /**
+     * Workers selected for routing rollback per second, tagged by rollback reason.
+     */
+    public static final String ROUTING_ROLLBACK_WORKER_QPS = "app.routing.rollback.worker.qps";
 
     /**
      * Wait time in milliseconds

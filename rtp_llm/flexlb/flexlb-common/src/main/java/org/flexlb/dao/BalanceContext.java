@@ -14,6 +14,7 @@ import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.AtomicInteger;
+import java.util.concurrent.atomic.AtomicReference;
 
 /**
  * @author zjw
@@ -37,6 +38,8 @@ public class BalanceContext {
     private CompletableFuture<Response> future;
 
     private AtomicBoolean cancelled = new AtomicBoolean(false);
+
+    private final AtomicReference<Runnable> cancellationAction = new AtomicReference<>();
 
     private final AtomicInteger retryCount = new AtomicInteger(0);
 
@@ -86,7 +89,23 @@ public class BalanceContext {
      * Mark request as cancelled
      */
     public void cancel() {
-        cancelled.compareAndSet(false, true);
+        tryCancel();
+    }
+
+    /**
+     * Mark request as cancelled if it has not already been cancelled.
+     *
+     * @return {@code true} when this call changed the cancellation state
+     */
+    public boolean tryCancel() {
+        if (!cancelled.compareAndSet(false, true)) {
+            return false;
+        }
+        Runnable action = cancellationAction.getAndSet(null);
+        if (action != null) {
+            action.run();
+        }
+        return true;
     }
 
     /**
@@ -94,6 +113,21 @@ public class BalanceContext {
      */
     public boolean isCancelled() {
         return cancelled.get();
+    }
+
+    public void registerCancellationAction(Runnable action) {
+        if (cancelled.get()) {
+            action.run();
+            return;
+        }
+        cancellationAction.set(action);
+        if (cancelled.get() && cancellationAction.compareAndSet(action, null)) {
+            action.run();
+        }
+    }
+
+    public void clearCancellationAction() {
+        cancellationAction.set(null);
     }
 
     /**

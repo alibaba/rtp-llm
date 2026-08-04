@@ -16,6 +16,8 @@ import java.util.List;
 import java.util.Map;
 import java.util.Set;
 import java.util.concurrent.ExecutorService;
+import java.util.concurrent.RejectedExecutionException;
+import java.util.concurrent.atomic.AtomicBoolean;
 import java.util.concurrent.atomic.LongAdder;
 import java.util.stream.Collectors;
 
@@ -128,7 +130,7 @@ public class EngineSyncRunner implements Runnable {
                             = new GrpcWorkerStatusRunner(modelName, host, roleType,
                             workerStatus, engineHealthReporter, engineGrpcService,
                             syncRequestTimeoutMs, cacheAwareService);
-                    statusCheckExecutor.submit(grpcWorkerStatusRunner);
+                    submitStatusCheck(workerStatus.getStatusCheckInProgress(), grpcWorkerStatusRunner, workerIpPort, "worker");
                 } else {
                     logger.debug("Skip status check for worker: {}, previous request in progress", workerIpPort);
                 }
@@ -140,7 +142,7 @@ public class EngineSyncRunner implements Runnable {
                                 = new GrpcCacheStatusCheckRunner(modelName, workerIpPort, site, roleType,
                                 workerStatus, engineHealthReporter, engineGrpcService, cacheAwareService,
                                 syncRequestTimeoutMs, syncCount, syncEngineStatusInterval);
-                        statusCheckExecutor.submit(grpcCacheStatusCheckRunner);
+                        submitStatusCheck(workerStatus.getCacheCheckInProgress(), grpcCacheStatusCheckRunner, workerIpPort, "cache");
                     } else {
                         logger.debug("Skip cache check for worker: {}, previous request in progress", workerIpPort);
                     }
@@ -200,5 +202,15 @@ public class EngineSyncRunner implements Runnable {
             logger.info("Created new WorkerStatus for worker: {}", workerIpPort);
         }
         return workerStatus;
+    }
+
+    private void submitStatusCheck(
+            AtomicBoolean checkInProgress, Runnable task, String workerIpPort, String checkType) {
+        try {
+            statusCheckExecutor.submit(task);
+        } catch (RejectedExecutionException exception) {
+            checkInProgress.set(false);
+            logger.debug("{} status check task rejected, worker={}", checkType, workerIpPort);
+        }
     }
 }

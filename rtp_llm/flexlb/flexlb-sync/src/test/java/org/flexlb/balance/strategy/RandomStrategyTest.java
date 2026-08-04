@@ -51,12 +51,11 @@ class RandomStrategyTest {
         // Given: No workers registered for the model
         Request req = new Request();
 
-
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
         // When: Select a worker
-        ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
+        ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, null).block();
 
         // Then: Should return error status
         assertFalse(result.isSuccess());
@@ -71,12 +70,11 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
         // When: Select a worker
-        ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
+        ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, null).block();
 
         // Then: Should return error status
         assertFalse(result.isSuccess());
@@ -95,12 +93,11 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
         // When: Select a worker
-        ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
+        ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, null).block();
 
         // Then: Should return success status with batchId
         assertTrue(result.isSuccess());
@@ -122,14 +119,13 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
         // When: Select a worker multiple times
-        ServerStatus result1 = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
-        ServerStatus result2 = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
-        ServerStatus result3 = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
+        ServerStatus result1 = randomStrategy.select(balanceContext, RoleType.PREFILL, null).block();
+        ServerStatus result2 = randomStrategy.select(balanceContext, RoleType.PREFILL, null).block();
+        ServerStatus result3 = randomStrategy.select(balanceContext, RoleType.PREFILL, null).block();
 
         // Then: All should be successful (random selection is working)
         assertTrue(result1.isSuccess());
@@ -150,13 +146,12 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
         // When: Select workers for different roles
-        ServerStatus prefillResult = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
-        ServerStatus decodeResult = randomStrategy.select(balanceContext, RoleType.DECODE, null);
+        ServerStatus prefillResult = randomStrategy.select(balanceContext, RoleType.PREFILL, null).block();
+        ServerStatus decodeResult = randomStrategy.select(balanceContext, RoleType.DECODE, null).block();
 
         // Then: Both should be successful
         assertTrue(prefillResult.isSuccess());
@@ -174,12 +169,11 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
         // When: Select worker with group parameter
-        ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, "group-a");
+        ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, "group-a").block();
 
         // Then: Should be successful
         assertTrue(result.isSuccess());
@@ -196,12 +190,11 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
         // When: Select worker with different group parameter
-        ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, "group-b");
+        ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, "group-b").block();
 
         // Then: Should return error status
         assertFalse(result.isSuccess());
@@ -235,7 +228,6 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
@@ -245,7 +237,7 @@ class RandomStrategyTest {
 
         for (int i = 0; i < totalRuns; i++) {
             balanceContext.getRequest().setRequestId("request-" + (1000L + i));
-            ServerStatus status = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
+            ServerStatus status = randomStrategy.select(balanceContext, RoleType.PREFILL, null).block();
 
             if (status.isSuccess()) {
                 String selectedIp = status.getServerIp();
@@ -284,7 +276,6 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
@@ -294,7 +285,7 @@ class RandomStrategyTest {
 
         for (int i = 0; i < totalRuns; i++) {
             balanceContext.getRequest().setRequestId("request-" + (1000L + i));
-            ServerStatus status = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
+            ServerStatus status = randomStrategy.select(balanceContext, RoleType.PREFILL, null).block();
 
             if (status.isSuccess()) {
                 String selectedIp = status.getServerIp();
@@ -325,7 +316,7 @@ class RandomStrategyTest {
         balanceContext.setRequest(req);
 
         // When: Select a worker
-        ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
+        ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, null).block();
 
         // Then: All server status fields should be properly set
         assertTrue(result.isSuccess());
@@ -346,12 +337,11 @@ class RandomStrategyTest {
 
         Request req = new Request();
 
-
         BalanceContext balanceContext = new BalanceContext();
         balanceContext.setRequest(req);
 
         // When: Select a worker with null requestId
-        ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, null);
+        ServerStatus result = randomStrategy.select(balanceContext, RoleType.PREFILL, null).block();
 
         // Then: Should still return success (RandomStrategy doesn't require requestId)
         assertTrue(result.isSuccess());

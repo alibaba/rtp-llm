@@ -18,9 +18,11 @@ import java.util.List;
 import java.util.Map;
 import java.util.concurrent.CompletableFuture;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
 import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyList;
 import static org.mockito.ArgumentMatchers.anyString;
 import static org.mockito.Mockito.after;
@@ -120,6 +122,30 @@ class LocalStandbyCacheMatchProviderTest {
             provider.updateFromRoutedRequest(request, List.of(decodeWorker));
             verify(cacheManager, after(200).never())
                     .addRoutedRequestBlocks(anyString(), anyList());
+        } finally {
+            provider.shutdown();
+        }
+    }
+
+    @Test
+    void runsReactiveMatchingOnTheBoundedMatcherExecutor() {
+        LocalStandbyCacheManager cacheManager = mock(LocalStandbyCacheManager.class);
+        LocalStandbyHashService hashService = mock(LocalStandbyHashService.class);
+        LocalStandbyCacheMatchProvider provider = new LocalStandbyCacheMatchProvider(
+                new CacheMatchConfiguration(modelMetaConfig()), cacheManager, hashService);
+        AtomicReference<String> matchingThread = new AtomicReference<>();
+        when(cacheManager.findMatchingEngines(List.of(101L), RoleType.PREFILL, "default"))
+                .thenAnswer(invocation -> {
+                    matchingThread.set(Thread.currentThread().getName());
+                    return Map.of("10.0.0.1:8080", 1);
+                });
+
+        try {
+            Map<String, Integer> matches = provider.findMatchingEngines(
+                    "request-1", List.of(101L), 4096, RoleType.PREFILL, "default").block();
+
+            assertEquals(Map.of("10.0.0.1:8080", 1), matches);
+            assertTrue(matchingThread.get().startsWith("local-standby-cache-matcher"));
         } finally {
             provider.shutdown();
         }

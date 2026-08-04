@@ -29,6 +29,7 @@
         <maven-resources.version>3.3.1</maven-resources.version>
         <spring-boot.version>2.7.18</spring-boot.version>
         <grpc.version>1.65.0</grpc.version>
+        <reactive-grpc.version>1.2.4</reactive-grpc.version>
         <protoc.version>3.25.1</protoc.version>
         <protobuf.version>3.25.1</protobuf.version>
         <curator.version>5.4.0</curator.version>

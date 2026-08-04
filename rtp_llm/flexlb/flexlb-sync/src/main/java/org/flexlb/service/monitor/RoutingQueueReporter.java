@@ -10,6 +10,7 @@ import org.springframework.stereotype.Component;
 
 import javax.annotation.PostConstruct;
 
+import static org.flexlb.constant.MetricConstant.ROUTING_CANCEL_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTING_FAILURE_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_CANCELLED_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_ENTRY_QPS;
@@ -18,6 +19,8 @@ import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_REJECTED_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_TIMEOUT_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTING_QUEUE_WAIT_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_RETRY_QPS;
+import static org.flexlb.constant.MetricConstant.ROUTING_ROLLBACK_QPS;
+import static org.flexlb.constant.MetricConstant.ROUTING_ROLLBACK_WORKER_QPS;
 import static org.flexlb.constant.MetricConstant.ROUTING_ROUTE_EXECUTION_TIME_MS;
 import static org.flexlb.constant.MetricConstant.ROUTING_SUCCESS_QPS;
 
@@ -49,6 +52,9 @@ public class RoutingQueueReporter {
         monitor.register(ROUTING_QUEUE_TIMEOUT_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(ROUTING_QUEUE_REJECTED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(ROUTING_QUEUE_CANCELLED_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(ROUTING_CANCEL_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(ROUTING_ROLLBACK_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
+        monitor.register(ROUTING_ROLLBACK_WORKER_QPS, FlexMetricType.QPS, FlexPriorityType.PRECISE);
         monitor.register(ROUTING_QUEUE_WAIT_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
         monitor.register(ROUTING_ROUTE_EXECUTION_TIME_MS, FlexMetricType.GAUGE, FlexPriorityType.PRECISE);
 
@@ -82,6 +88,25 @@ public class RoutingQueueReporter {
 
     public void reportCancelled() {
         monitor.report(ROUTING_QUEUE_CANCELLED_QPS, tags, 1.0);
+    }
+
+    /**
+     * Reports a request cancellation regardless of whether queueing is enabled.
+     */
+    public void reportRoutingCancelled() {
+        monitor.report(ROUTING_CANCEL_QPS, tags, 1.0);
+    }
+
+    /**
+     * Reports workers selected by one routing rollback.
+     *
+     * @param reason      low-cardinality rollback reason
+     * @param workerCount number of workers selected by the rollback
+     */
+    public void reportRoutingRollback(String reason, int workerCount) {
+        FlexMetricTags rollbackTags = FlexMetricTags.of("reason", reason);
+        monitor.report(ROUTING_ROLLBACK_QPS, rollbackTags, 1.0);
+        monitor.report(ROUTING_ROLLBACK_WORKER_QPS, rollbackTags, workerCount);
     }
 
     /**

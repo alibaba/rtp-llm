@@ -2,6 +2,7 @@ package org.flexlb.cache.match;
 
 import org.flexlb.cache.domain.CacheMatchSource;
 import org.flexlb.dao.route.RoleType;
+import reactor.core.publisher.Mono;
 
 import java.util.List;
 import java.util.Map;
@@ -13,7 +14,7 @@ public interface CacheMatchProvider {
 
     CacheMatchSource source();
 
-    Map<String, Integer> findMatchingEngines(
+    Mono<Map<String, Integer>> findMatchingEngines(
             String requestId,
             List<Long> blockCacheKeys,
             long blockSize,

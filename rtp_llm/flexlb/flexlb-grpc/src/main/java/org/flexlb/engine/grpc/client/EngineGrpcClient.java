@@ -1,21 +1,30 @@
 package org.flexlb.engine.grpc.client;
 
 import com.google.protobuf.MessageLite;
+import io.grpc.CallOptions;
+import io.grpc.Channel;
+import io.grpc.ClientCall;
+import io.grpc.ClientInterceptor;
+import io.grpc.ClientInterceptors;
 import io.grpc.ManagedChannel;
+import io.grpc.MethodDescriptor;
 import io.grpc.StatusRuntimeException;
 import io.netty.channel.EventLoopGroup;
 import org.flexlb.engine.grpc.EngineRpcService;
 import org.flexlb.engine.grpc.MultimodalRpcServiceGrpc;
+import org.flexlb.engine.grpc.ReactorRpcServiceGrpc;
 import org.flexlb.engine.grpc.RpcServiceGrpc;
 import org.flexlb.engine.grpc.core.GrpcChannelFactory;
 import org.flexlb.engine.grpc.core.GrpcChannelPool;
 import org.flexlb.engine.grpc.core.GrpcTarget;
 import org.flexlb.engine.grpc.monitor.GrpcReporter;
+import org.flexlb.engine.grpc.monitor.GrpcRuntimeMetrics;
 import org.flexlb.engine.grpc.nameresolver.EngineAddressResolver;
 import org.flexlb.util.CommonUtils;
 import org.flexlb.util.Logger;
 import org.springframework.scheduling.annotation.Scheduled;
 import org.springframework.stereotype.Component;
+import reactor.core.publisher.Mono;
 
 import javax.annotation.PreDestroy;
 import java.util.HashSet;
@@ -23,6 +32,7 @@ import java.util.List;
 import java.util.Set;
 import java.util.concurrent.Executor;
 import java.util.concurrent.TimeUnit;
+import java.util.concurrent.atomic.AtomicReference;
 import java.util.function.Function;
 
 /**
@@ -34,14 +44,17 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
     private final GrpcChannelFactory channelFactory;
     private final GrpcChannelPool<EngineChannelKey> channelPool;
     private final GrpcReporter grpcReporter;
+    private final GrpcRuntimeMetrics grpcRuntimeMetrics;
 
     public EngineGrpcClient(
             EngineAddressResolver addressResolver,
             GrpcChannelFactory channelFactory,
-            GrpcReporter grpcReporter) {
+            GrpcReporter grpcReporter,
+            GrpcRuntimeMetrics grpcRuntimeMetrics) {
         this.channelFactory = channelFactory;
         this.channelPool = new GrpcChannelPool<>(key -> channelFactory.create(key.target()));
         this.grpcReporter = grpcReporter;
+        this.grpcRuntimeMetrics = grpcRuntimeMetrics;
         addressResolver.subscribe(this);
     }
 
@@ -121,14 +134,93 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
                 .withDeadlineAfter(requestTimeoutMs, TimeUnit.MILLISECONDS);
 
         long startTime = System.nanoTime() / 1000;
-        R response = grpcCall.apply(stubWrapper);
-        long duration = System.nanoTime() / 1000 - startTime;
-        int responseSize = response instanceof MessageLite messageLite
-                ? messageLite.getSerializedSize()
-                : 0;
-        grpcReporter.reportCallMetrics(
-                ip, serviceType.getOperationName(), duration, responseSize, retry);
-        return response;
+        GrpcRuntimeMetrics.GrpcCallHandle callHandle =
+                grpcRuntimeMetrics.recordCallStarted("engine", serviceType.getOperationName(), requestTimeoutMs);
+        try {
+            R response = grpcCall.apply(stubWrapper);
+            long duration = System.nanoTime() / 1000 - startTime;
+            int responseSize = response instanceof MessageLite messageLite
+                    ? messageLite.getSerializedSize()
+                    : 0;
+            grpcReporter.reportCallMetrics(
+                    ip, serviceType.getOperationName(), duration, responseSize, retry);
+            return response;
+        } finally {
+            grpcRuntimeMetrics.recordCallCompleted(callHandle);
+        }
+    }
+
+    private <RequestT, ResponseT extends MessageLite> Mono<ResponseT> executeReactiveGrpcCall(
+            String ip,
+            int port,
+            RequestT request,
+            long requestTimeoutMs,
+            ServiceType serviceType,
+            ReactiveGrpcCall<RequestT, ResponseT> grpcCall) {
+        EngineChannelKey channelKey = new EngineChannelKey(ip, port, serviceType);
+        return Mono.defer(() -> {
+            GrpcChannelPool.PooledChannel pooledChannel = channelPool.getOrCreate(channelKey);
+            return invokeReactiveGrpcCall(
+                            pooledChannel, request, requestTimeoutMs, ip, serviceType, false, grpcCall)
+                    .onErrorResume(StatusRuntimeException.class, error -> {
+                        if (!isConnectionBrokenError(error)) {
+                            return Mono.error(error);
+                        }
+                        pooledChannel.markExpired();
+                        long connectionDuration = pooledChannel.getConnectionDurationUs();
+                        grpcReporter.reportConnectionDuration(
+                                ip, serviceType.getOperationName(), connectionDuration);
+                        Logger.warn("Connection broken for {}:{} {}, duration: {}us, recreating channel and retrying once, msg:{}",
+                                ip, port, serviceType, connectionDuration, error.getMessage());
+                        return invokeReactiveGrpcCall(channelPool.replace(channelKey, pooledChannel), request,
+                                requestTimeoutMs, ip, serviceType, true, grpcCall);
+                    });
+        }).doOnError(error -> Logger.error("Exception during {} gRPC call for {}:{}",
+                serviceType.getOperationName(), ip, port, error));
+    }
+
+    private <RequestT, ResponseT extends MessageLite> Mono<ResponseT> invokeReactiveGrpcCall(
+            GrpcChannelPool.PooledChannel pooledChannel,
+            RequestT request,
+            long requestTimeoutMs,
+            String ip,
+            ServiceType serviceType,
+            boolean retry,
+            ReactiveGrpcCall<RequestT, ResponseT> grpcCall) {
+        return Mono.defer(() -> {
+            pooledChannel.markUsed();
+            long startTime = System.nanoTime() / 1_000;
+            AtomicReference<ClientCall<?, ?>> clientCall = new AtomicReference<>();
+            ClientInterceptor captureCall = new ClientInterceptor() {
+                @Override
+                public <CallRequestT, CallResponseT> ClientCall<CallRequestT, CallResponseT> interceptCall(
+                        MethodDescriptor<CallRequestT, CallResponseT> method,
+                        CallOptions callOptions,
+                        Channel next) {
+                    ClientCall<CallRequestT, CallResponseT> call = next.newCall(method, callOptions);
+                    clientCall.set(call);
+                    return call;
+                }
+            };
+            Channel cancellableChannel = ClientInterceptors.intercept(pooledChannel.getChannel(), captureCall);
+            String service = serviceType.getOperationName();
+            GrpcRuntimeMetrics.GrpcCallHandle callHandle =
+                    grpcRuntimeMetrics.recordCallStarted("engine", service, requestTimeoutMs);
+            return Mono.defer(() -> grpcCall.invoke(cancellableChannel, requestTimeoutMs, request))
+                    .doOnNext(response -> grpcReporter.reportCallMetrics(
+                            ip,
+                            service,
+                            System.nanoTime() / 1_000 - startTime,
+                            response.getSerializedSize(),
+                            retry))
+                    .doOnCancel(() -> {
+                        ClientCall<?, ?> call = clientCall.get();
+                        if (call != null) {
+                            call.cancel("subscriber cancelled", null);
+                        }
+                    })
+                    .doFinally(signalType -> grpcRuntimeMetrics.recordCallCompleted(callHandle));
+        });
     }
 
     private boolean isConnectionBrokenError(StatusRuntimeException e) {
@@ -154,17 +246,21 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
                 ServiceType.WORKER_STATUS);
     }
 
-    public EngineRpcService.KvCacheGroupListPB getKvCacheGroupsMetadata(
+    /**
+     * Queries KV cache group metadata through a cold, cancellable Reactor publisher.
+     *
+     * @return a publisher that applies the supplied deadline when subscribed
+     */
+    public Mono<EngineRpcService.KvCacheGroupListPB> getKvCacheGroupsMetadata(
             String ip,
             int port,
             EngineRpcService.KvCacheGroupsRequestPB request,
             long requestTimeoutMs) {
-        return executeGrpcCall(
-                ip,
-                port,
-                stub -> stub.rpcServiceStub().getKvCacheGroupsMetadata(request),
-                requestTimeoutMs,
-                ServiceType.KV_CACHE_GROUP_METADATA);
+        return executeReactiveGrpcCall(ip, port, request, requestTimeoutMs, ServiceType.KV_CACHE_GROUP_METADATA,
+                (channel, deadlineMs, grpcRequest) ->
+                        ReactorRpcServiceGrpc.newReactorStub(channel)
+                                .withDeadlineAfter(deadlineMs, TimeUnit.MILLISECONDS)
+                                .getKvCacheGroupsMetadata(Mono.just(grpcRequest)));
     }
 
     public EngineRpcService.CacheStatusPB getCacheStatus(
@@ -242,16 +338,21 @@ public class EngineGrpcClient implements EngineAddressResolver.Listener {
         }
     }
 
+    @FunctionalInterface
+    private interface ReactiveGrpcCall<RequestT, ResponseT> {
+
+        Mono<ResponseT> invoke(Channel channel, long requestTimeoutMs, RequestT request);
+    }
+
     private record GrpcStubWrapper(RpcServiceGrpc.RpcServiceBlockingStub rpcServiceStub,
                                    MultimodalRpcServiceGrpc.MultimodalRpcServiceBlockingStub multimodalRpcServiceStub) {
 
         GrpcStubWrapper withDeadlineAfter(long timeout, TimeUnit unit) {
-                return new GrpcStubWrapper(
-                        rpcServiceStub.withDeadlineAfter(timeout, unit),
-                        multimodalRpcServiceStub.withDeadlineAfter(timeout, unit)
-                );
-            }
+            return new GrpcStubWrapper(
+                    rpcServiceStub.withDeadlineAfter(timeout, unit),
+                    multimodalRpcServiceStub.withDeadlineAfter(timeout, unit));
         }
+    }
 
     private enum ServiceType {
         WORKER_STATUS("worker", "GetWorkerStatus"),

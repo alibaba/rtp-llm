@@ -138,6 +138,7 @@ public class QueueManager {
     }
 
     private void handleTimeout(BalanceContext ctx) {
+        ctx.cancel();
         remove(ctx);
         metrics.reportTimeout();
 
@@ -146,6 +147,7 @@ public class QueueManager {
     }
 
     private void handleCanceled(BalanceContext ctx) {
+        ctx.tryCancel();
         remove(ctx);
         metrics.reportCancelled();
 
@@ -154,6 +156,7 @@ public class QueueManager {
     }
 
     private void handleInterruption(BalanceContext ctx) {
+        ctx.cancel();
         remove(ctx);
         Thread.currentThread().interrupt();
         Logger.error("Request interrupted while waiting in queue for id: {}", ctx.getRequestId());
@@ -161,7 +164,7 @@ public class QueueManager {
 
     private void remove(BalanceContext ctx) {
         boolean removed = queue.remove(ctx);
-        if (!removed) {
+        if (!removed && ctx.getDequeueTime() == 0) {
             Logger.error("Failed to remove timeout request from queue:{}", ctx.getRequestId());
         }
     }

@@ -74,14 +74,14 @@ POST /rtp_llm/schedule (HttpLoadBalanceServer, 端口 7001)
 RouteService.route()
     ├─ enableQueueing=true：QueueManager.tryRouteAsync() 入队
     │      → RequestScheduler 工作线程（先过 DynamicWorkerManager 许可门控）出队
-    └─ enableQueueing=false：当前线程同步 DefaultRouter.route()
+    └─ enableQueueing=false：直接组合 DefaultRouter.route() 返回的 `Mono<Response>`
     ↓
 DefaultRouter：按非空角色 map 固定顺序路由 PDFUSION → DECODE → PREFILL → VIT，
                首个成功角色的 worker group 约束后续角色的候选（group 亲和链）
     ↓
 LoadBalancer 策略选 worker（读 EngineWorkerStatus 共享状态 + CacheAwareService 匹配）
     ↓ 选中即 WorkerStatus.putLocalTask()：本地乐观记账（队列时间 / KV token 预扣）
-后阶段失败 → DefaultRouter.rollBackRoutingFailure() 逐个 LoadBalancer.rollBack() 撤销记账
+后阶段失败、异常或取消 → DefaultRouter.rollBackSelectedWorkers() 逐个 LoadBalancer.rollBack() 撤销记账
 ```
 
 ## 核心不变量
@@ -89,8 +89,8 @@ LoadBalancer 策略选 worker（读 EngineWorkerStatus 共享状态 + CacheAware
 - **路由读、同步写**：`EngineWorkerStatus.MODEL_ROLE_WORKER_STATUS`（静态单例，四个角色各一个
   `ConcurrentHashMap<ip:port, WorkerStatus>`）由后台同步线程写、路由线程读；`WorkerStatus`
   内所有计数为 Atomic 字段，原子性是**字段级**而非快照级。
-- **选中即记账，失败必回滚**：策略 `select()` 成功即 `putLocalTask()` 预扣队列时间与 KV
-  token；多阶段路由部分失败必须经 `rollBackRoutingFailure()` → `removeLocalTask()` 撤销。
+- **选中即记账，终止必回滚**：策略 `select()` 成功即 `putLocalTask()` 预扣队列时间与 KV
+  token；多阶段路由部分失败、异常或取消必须经 `rollBackSelectedWorkers()` → `removeLocalTask()` 撤销。
 - **本地预测 + 引擎对账**：`localTaskMap` 记录 IN_TRANSIT 任务；引擎状态返回后
   `updateTaskStates()` 对账（IN_TRANSIT→CONFIRMED→RUNNING→FINISHED / LOST），
   `updateKvCacheTokens()` 回填在途任务的 KV 修正。

@@ -3,11 +3,12 @@ package org.flexlb.sync.runner;
 import org.flexlb.cache.domain.CacheHitComparisonResult;
 import org.flexlb.cache.match.CacheAwareService;
 import org.flexlb.dao.master.CacheHitFeedback;
-import org.flexlb.dao.master.WorkerStatus;
-import org.flexlb.dao.master.WorkerHost;
 import org.flexlb.dao.master.TaskInfo;
+import org.flexlb.dao.master.WorkerHost;
+import org.flexlb.dao.master.WorkerStatus;
 import org.flexlb.dao.route.RoleType;
 import org.flexlb.engine.grpc.EngineRpcService;
+import org.flexlb.enums.BalanceStatusEnum;
 import org.flexlb.enums.KvCacheGroupMode;
 import org.flexlb.service.grpc.EngineGrpcService;
 import org.flexlb.service.monitor.EngineHealthReporter;
@@ -15,8 +16,11 @@ import org.junit.jupiter.api.Test;
 import org.mockito.Mockito;
 
 import java.util.concurrent.CompletableFuture;
+import java.util.concurrent.atomic.AtomicBoolean;
 
 import static org.junit.jupiter.api.Assertions.assertEquals;
+import static org.junit.jupiter.api.Assertions.assertFalse;
+import static org.junit.jupiter.api.Assertions.assertThrows;
 import static org.junit.jupiter.api.Assertions.assertTrue;
 import static org.mockito.ArgumentMatchers.anyInt;
 import static org.mockito.ArgumentMatchers.anyLong;
@@ -31,6 +35,41 @@ class GrpcWorkerStatusCheckRunnerTest {
     private final EngineHealthReporter engineHealthReporter = Mockito.mock(EngineHealthReporter.class);
 
     private final CacheAwareService cacheAwareService = Mockito.mock(CacheAwareService.class);
+
+    @Test
+    void clearsInProgressFlagWhenRunnerSetupFails() {
+        WorkerHost host = new WorkerHost(
+                "127.0.0.1", 8080, 8081, 8085, 18002, "test-site", "test-group", "deployment-a");
+        WorkerStatus workerStatus = Mockito.mock(WorkerStatus.class);
+        AtomicBoolean inProgress = new AtomicBoolean(true);
+        when(workerStatus.getStatusCheckInProgress()).thenReturn(inProgress);
+        when(workerStatus.getLatestFinishedTaskVersion()).thenThrow(new IllegalStateException("setup failed"));
+        GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(
+                "test-model", host, RoleType.PREFILL, workerStatus, engineHealthReporter,
+                engineGrpcService, 20, cacheAwareService);
+
+        assertThrows(IllegalStateException.class, runner::run);
+
+        assertFalse(inProgress.get());
+    }
+
+    @Test
+    void reportsSynchronousStatusFailureAndClearsInProgressFlag() {
+        WorkerHost host = new WorkerHost(
+                "127.0.0.1", 8080, 8081, 8085, 18002, "test-site", "test-group", "deployment-a");
+        WorkerStatus workerStatus = new WorkerStatus();
+        workerStatus.getStatusCheckInProgress().set(true);
+        when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(),
+                org.mockito.ArgumentMatchers.any(RoleType.class))).thenThrow(new IllegalStateException("connection rejected"));
+
+        new GrpcWorkerStatusRunner(
+                "test-model", host, RoleType.PREFILL, workerStatus, engineHealthReporter,
+                engineGrpcService, 20, cacheAwareService).run();
+
+        assertFalse(workerStatus.getStatusCheckInProgress().get());
+        verify(engineHealthReporter).reportStatusCheckerFail(
+                "test-model", BalanceStatusEnum.WORKER_SERVICE_UNAVAILABLE, "127.0.0.1", RoleType.PREFILL);
+    }
 
     @Test
     void should_callGrpcServiceAndVerifyInteraction_when_runnerExecutes() {
@@ -64,7 +103,8 @@ class GrpcWorkerStatusCheckRunnerTest {
                 .setKvCacheGroupMode(EngineRpcService.KvCacheGroupModePB.KV_CACHE_GROUP_MODE_WITH_MAMBA)
                 .build();
 
-        when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(), org.mockito.ArgumentMatchers.any(RoleType.class))).thenReturn(workerStatusPB);
+        when(engineGrpcService.getWorkerStatus(anyString(), anyInt(), anyLong(), anyLong(), org.mockito.ArgumentMatchers.any(RoleType.class)))
+                .thenReturn(workerStatusPB);
 
         // Act
         GrpcWorkerStatusRunner runner = new GrpcWorkerStatusRunner(

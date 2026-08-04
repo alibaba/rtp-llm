@@ -7,7 +7,7 @@ worker 选择契约，两者组合完成多角色多阶段路由。
 
 ## Router / DefaultRouter
 
-`Router` 接口只有一个方法：`Response route(BalanceContext balanceContext)`。
+`Router` 接口只有一个方法：`Mono<Response> route(BalanceContext balanceContext)`。
 
 `DefaultRouter`（`balance/scheduler/DefaultRouter.java`）：
 
@@ -26,13 +26,13 @@ worker 选择契约，两者组合完成多角色多阶段路由。
    worker map 非空的角色。没有请求级角色过滤：所有非空角色都会被路由。
    - 因此 PD 分离部署下实际顺序是 **DECODE 先于 PREFILL**；融合部署只有 PDFUSION；
      有 VIT worker 时 VIT 追加在最后。
-3. **`routeByRoleType()`**：逐角色调用 `loadBalancer.select(ctx, roleType, group)`。
+3. **逐角色路由**：`route()` 内部逐角色调用 `loadBalancer.select(ctx, roleType, group)`。
    `group` 初始为 null；每个角色选中后 `group = serverStatus.getGroup()`——**首个成功角色的
    worker group 约束后续所有角色的候选集**（group 亲和链，如 DECODE 选中的 group 决定
    PREFILL 只能在同 group 中选）。任一角色失败立即返回
    `RoutingResult.failure(已成功列表, 失败角色, 错误信息)`。
 4. **响应**：全部成功 → success 响应（携带 `List<ServerStatus>`）；失败 → 先
-   `rollBackRoutingFailure()` 再构造错误响应，错误码取
+   `rollBackSelectedWorkers()` 再构造错误响应，错误码取
    `failedRoleType.getErrorType().getErrorCode()`。
 
 `RoleType.getErrorType()` 映射：PREFILL→`NO_PREFILL_WORKER`(8402)、DECODE→`NO_DECODE_WORKER`
@@ -50,8 +50,8 @@ worker 选择契约，两者组合完成多角色多阶段路由。
 
 ## 回滚机制
 
-`DefaultRouter.rollBackRoutingFailure()`：对 `RoutingResult` 中已成功的每个 `ServerStatus`，
-以 `serverIp:httpPort` 调用对应策略的 `rollBack(ipPort, requestId)`。
+`DefaultRouter.rollBackSelectedWorkers()`：对失败结果、异常或下游取消信号，幂等地回滚已成功的
+每个 `ServerStatus`；以 `serverIp:httpPort` 调用对应策略的 `rollBack(ipPort, requestId)`。
 
 回滚的实体是**选中时的本地记账**——`WorkerStatus.removeLocalTask(requestId)` 逆转
 `putLocalTask()`：从 `runningQueueTime` 扣回估算 prefill 时间（下限 0）、把
